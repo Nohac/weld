@@ -19,6 +19,10 @@ For Bevy-related work, read the relevant project skill first:
 - [bevy-bsn-ui](.agents/skills/bevy-bsn-ui/SKILL.md) for BSN scenes and reusable
   UI composition.
 
+For compositor-host work, read [smithay](.agents/skills/smithay/SKILL.md) before
+changing protocol dispatch, event-loop integration, backends, rendering,
+Smithay features, vendored source, or local upstream patches.
+
 ## Current technical direction
 
 The initial direction is to let the compositor host own Wayland and event-loop

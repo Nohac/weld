@@ -6,8 +6,8 @@
 - Start with the smallest coherent change. Do not create speculative crates,
   abstractions, protocols, backends, or UI systems merely because `IDEA.md`
   mentions them.
-- Read the relevant skill under `.agents/skills/` before changing Bevy ECS or
-  scene/UI code.
+- Read the relevant skill under `.agents/skills/` before changing Smithay,
+  Bevy ECS, rendering, or scene/UI code.
 
 ## Commits
 

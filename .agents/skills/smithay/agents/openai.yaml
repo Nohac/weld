@@ -1,0 +1,4 @@
+interface:
+  display_name: "Smithay for Weld"
+  short_description: "Build Weld against its pinned Smithay source"
+  default_prompt: "Use $smithay to implement this Weld compositor change against the pinned upstream tree."
