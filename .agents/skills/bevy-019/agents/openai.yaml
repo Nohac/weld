@@ -1,0 +1,4 @@
+interface:
+  display_name: "Bevy 0.19 for Weld"
+  short_description: "Use Bevy 0.19 safely within Weld boundaries"
+  default_prompt: "Use $bevy-019 to implement this Weld change against the correct Bevy APIs."

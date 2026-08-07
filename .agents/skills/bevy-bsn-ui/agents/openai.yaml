@@ -1,0 +1,4 @@
+interface:
+  display_name: "BSN UI for Weld"
+  short_description: "Compose Weld UI scenes with Bevy BSN"
+  default_prompt: "Use $bevy-bsn-ui to design this Weld UI scene with BSN."
