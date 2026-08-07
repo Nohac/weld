@@ -1,1 +1,4 @@
 /target
+tools/remote-debug/.venv/
+tools/remote-debug/**/__pycache__/
+tools/remote-debug/**/*.pyc
