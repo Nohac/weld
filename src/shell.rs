@@ -120,7 +120,9 @@ impl ShellRenderer {
                     ..Default::default()
                 },
                 RenderTarget::TextureView(COMPOSITION_VIEW),
-                CompositingSpace::Srgb,
+                // Bevy UI shaders emit linear RGB. The manual sRGB target performs
+                // the transfer encoding when those values are written.
+                CompositingSpace::Linear,
             ))
             .id();
         app.insert_resource(CompositorCamera(camera));
