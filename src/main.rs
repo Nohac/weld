@@ -2,12 +2,16 @@
 
 mod compositor;
 mod debug;
+mod input;
+mod raw_input;
 mod renderer;
 mod server;
 mod shell;
 
 use std::{
+    collections::VecDeque,
     ffi::OsString,
+    os::fd::{BorrowedFd, OwnedFd},
     path::PathBuf,
     process::{Child, Command},
     sync::Arc,
@@ -20,18 +24,28 @@ use anyhow::{Context, Result, anyhow, bail};
 // fast development path while release binaries remain standalone.
 #[cfg(debug_assertions)]
 use bevy_dylib as _;
+use bevy_winit::converters::{convert_element_state, convert_logical_key};
 use clap::Parser;
+use raw_input::{
+    InputPosition, LinuxButtonCode, LinuxKeycode, RawScrollFrame, RawScrollSource, RawSeatEvent,
+    RawSeatEventKind,
+};
 use renderer::NestedRenderer;
 use server::ServerState;
 use shell::ShellRenderer;
-use smithay::reexports::{calloop::EventLoop as CalloopEventLoop, wayland_server::Display};
+use smithay::reexports::{
+    calloop::{EventLoop as CalloopEventLoop, Interest, Mode, PostAction, generic::Generic},
+    wayland_server::Display,
+};
 use tracing::{info, warn};
 use winit::{
     application::ApplicationHandler,
     dpi::{LogicalSize, PhysicalSize},
-    event::WindowEvent,
-    event_loop::{ActiveEventLoop, ControlFlow, EventLoop},
+    event::{MouseButton, MouseScrollDelta, WindowEvent},
+    event_loop::{ActiveEventLoop, ControlFlow, EventLoop, OwnedDisplayHandle},
     platform::pump_events::{EventLoopExtPumpEvents, PumpStatus},
+    platform::scancode::PhysicalKeyExtScancode,
+    raw_window_handle::{HasDisplayHandle, RawDisplayHandle},
     window::{Window, WindowAttributes, WindowId},
 };
 
@@ -81,10 +95,11 @@ fn main() -> Result<()> {
     {
         bail!("--screenshot requires a non-empty path");
     }
+    let started_at = Instant::now();
     let mut host_event_loop =
         EventLoop::new().context("failed to create the nested host event loop")?;
     host_event_loop.set_control_flow(ControlFlow::Poll);
-    let mut host = NestedHost::default();
+    let mut host = NestedHost::new(started_at);
     let initial_status = host_event_loop.pump_app_events(None, &mut host);
     if matches!(initial_status, PumpStatus::Exit(_)) {
         if arguments.screenshot.is_some() {
@@ -102,6 +117,7 @@ fn main() -> Result<()> {
 
     let initial_size = nonzero_size(window.inner_size());
     let display_handle = host_event_loop.owned_display_handle();
+    let host_wake_fd = host_display_wake_fd(&display_handle)?;
     let mut renderer = NestedRenderer::new(window, display_handle, initial_size)?;
     let mut shell = ShellRenderer::new(
         renderer.instance(),
@@ -116,7 +132,21 @@ fn main() -> Result<()> {
     let mut calloop: CalloopEventLoop<'static, ServerState> =
         CalloopEventLoop::try_new().context("failed to create the Smithay calloop event loop")?;
     let display = Display::<ServerState>::new().context("failed to create the Wayland display")?;
-    let mut server = ServerState::new(&mut calloop, display)?;
+    let mut server = ServerState::new(&mut calloop, display, started_at)?;
+    if let Some(host_wake_fd) = host_wake_fd {
+        // Winit remains the sole reader. The duplicate descriptor only wakes
+        // calloop so the next outer-loop iteration can pump host events.
+        calloop
+            .handle()
+            .insert_source(
+                // Edge mode prevents an unread backend-internal Wayland event
+                // from turning the observer into a busy loop. The ordinary
+                // frame timeout remains a bounded polling fallback.
+                Generic::new(host_wake_fd, Interest::READ, Mode::Edge),
+                |_, _, _| Ok(PostAction::Continue),
+            )
+            .context("failed to register the nested host display wake source")?;
+    }
     let mut child = spawn_requested_client(&server, &arguments.client)?;
     let child_requested = !arguments.client.is_empty();
     let remote_debug_enabled = arguments.remote_debug.is_some();
@@ -141,8 +171,17 @@ fn main() -> Result<()> {
             break;
         }
 
+        let host_work_drained =
+            host_work_drained(!host.input_events.is_empty(), host.pending_size.is_some());
         if std::mem::take(&mut host.redraw_requested) {
             frame_state.request_present();
+        }
+        for event in host.input_events.drain(..) {
+            shell.enqueue_input_event(event);
+            // Keep extraction paired with the main-world input update. A future
+            // input-only schedule may remove this speculative composition after
+            // its rendering-state invariants are proven.
+            frame_state.request_composition();
         }
         if let Some(size) = host.pending_size.take()
             && size.width > 0
@@ -154,7 +193,7 @@ fn main() -> Result<()> {
         }
 
         calloop
-            .dispatch(Some(FRAME_INTERVAL), &mut server)
+            .dispatch(Some(dispatch_timeout(host_work_drained)), &mut server)
             .context("Smithay calloop dispatch failed")?;
         for event in server.take_surface_events() {
             shell.enqueue_surface_event(event);
@@ -168,8 +207,11 @@ fn main() -> Result<()> {
             // Remote debugging remains a full paired Bevy update so extraction cannot miss
             // main-world changes. Ordinary runs advance for host-driven visual changes or an
             // explicit Bevy RequestRedraw from the preceding update.
-            shell.update();
+            shell.update(started_at.elapsed().as_millis() as u32);
             let bevy_requested_redraw = shell.take_redraw_request();
+            for effect in shell.take_input_effects() {
+                server.apply_input_effect(effect);
+            }
             frame_state.composition_rendered();
             if bevy_requested_redraw {
                 frame_state.request_composition();
@@ -249,6 +291,73 @@ fn main() -> Result<()> {
 
     drop(child);
     Ok(())
+}
+
+fn host_display_wake_fd(display: &OwnedDisplayHandle) -> Result<Option<OwnedFd>> {
+    let raw_display = display
+        .display_handle()
+        .context("nested host did not expose a raw display handle")?
+        .as_raw();
+    let raw_fd = match raw_display {
+        RawDisplayHandle::Wayland(handle) => {
+            // SAFETY: Winit owns this live wl_display for at least as long as
+            // `display`. The function only queries its connection descriptor.
+            unsafe {
+                (wayland_sys::client::wayland_client_handle().wl_display_get_fd)(
+                    handle.display.as_ptr().cast(),
+                )
+            }
+        }
+        RawDisplayHandle::Xlib(handle) => {
+            let Some(display) = handle.display else {
+                warn!("Xlib host display has no connection pointer; using timer polling");
+                return Ok(None);
+            };
+            let xlib = x11_dl::xlib::Xlib::open()
+                .map_err(|error| anyhow!("failed to load Xlib for its connection fd: {error}"))?;
+            // Winit's X11 backend retains its own libX11 reference for the
+            // display lifetime, so this temporary lookup handle may drop.
+            // SAFETY: The raw display pointer belongs to Winit and is live for
+            // the duration of this call. XConnectionNumber does not take ownership.
+            unsafe { (xlib.XConnectionNumber)(display.as_ptr().cast()) }
+        }
+        _ => {
+            warn!(
+                ?raw_display,
+                "host display cannot wake calloop; using timer polling"
+            );
+            return Ok(None);
+        }
+    };
+    if raw_fd < 0 {
+        warn!(
+            raw_fd,
+            "host display returned an invalid connection fd; using timer polling"
+        );
+        return Ok(None);
+    }
+    // SAFETY: The descriptor is owned by Winit and valid at this point. It is
+    // borrowed only long enough to duplicate it into an independently owned fd.
+    let borrowed = unsafe { BorrowedFd::borrow_raw(raw_fd) };
+    borrowed
+        .try_clone_to_owned()
+        .map(Some)
+        .context("failed to duplicate the nested host display connection fd")
+}
+
+const fn host_work_drained(input_pending: bool, resize_pending: bool) -> bool {
+    // A minimized 0x0 resize still counts: pending_size is consumed even when
+    // the renderer resize is skipped. RedrawRequested only asks for a present
+    // and deliberately retains the ordinary bounded dispatch timeout.
+    input_pending || resize_pending
+}
+
+const fn dispatch_timeout(host_work_drained: bool) -> Duration {
+    if host_work_drained {
+        Duration::ZERO
+    } else {
+        FRAME_INTERVAL
+    }
 }
 
 #[derive(Debug)]
@@ -341,13 +450,34 @@ fn nonzero_size(size: PhysicalSize<u32>) -> PhysicalSize<u32> {
     PhysicalSize::new(size.width.max(1), size.height.max(1))
 }
 
-#[derive(Default)]
 struct NestedHost {
     window: Option<Arc<Window>>,
     pending_size: Option<PhysicalSize<u32>>,
+    input_events: VecDeque<RawSeatEvent>,
+    pointer_position: Option<InputPosition>,
     redraw_requested: bool,
     creation_error: Option<String>,
     close_requested: bool,
+    started_at: Instant,
+}
+
+impl NestedHost {
+    fn new(started_at: Instant) -> Self {
+        Self {
+            window: None,
+            pending_size: None,
+            input_events: VecDeque::new(),
+            pointer_position: None,
+            redraw_requested: false,
+            creation_error: None,
+            close_requested: false,
+            started_at,
+        }
+    }
+
+    fn event_time(&self) -> u32 {
+        self.started_at.elapsed().as_millis() as u32
+    }
 }
 
 impl ApplicationHandler for NestedHost {
@@ -381,14 +511,180 @@ impl ApplicationHandler for NestedHost {
             }
             WindowEvent::Resized(size) => self.pending_size = Some(size),
             WindowEvent::RedrawRequested => self.redraw_requested = true,
+            WindowEvent::Focused(false) => {
+                self.pointer_position = None;
+                let time = self.event_time();
+                self.input_events
+                    .push_back(RawSeatEvent::new(RawSeatEventKind::HostFocusLost, time));
+            }
+            // Click-to-focus is deliberate in this initial slice: regaining host
+            // focus does not restore the previously focused client automatically.
+            WindowEvent::Focused(true) => {}
+            WindowEvent::CursorMoved { position, .. } => {
+                let position = InputPosition::new(position.x, position.y);
+                self.pointer_position = Some(position);
+                let time = self.event_time();
+                self.input_events.push_back(RawSeatEvent::new(
+                    RawSeatEventKind::PointerMotion { position },
+                    time,
+                ));
+            }
+            WindowEvent::CursorLeft { .. } => {
+                let position = self.pointer_position.take().unwrap_or_default();
+                let time = self.event_time();
+                self.input_events.push_back(RawSeatEvent::new(
+                    RawSeatEventKind::PointerLeft { position },
+                    time,
+                ));
+            }
+            WindowEvent::MouseInput { state, button, .. } => {
+                if let Some(button) = linux_button_code(button) {
+                    let time = self.event_time();
+                    self.input_events.push_back(RawSeatEvent::new(
+                        RawSeatEventKind::PointerButton {
+                            position: self.pointer_position,
+                            button,
+                            state: convert_element_state(state),
+                        },
+                        time,
+                    ));
+                }
+            }
+            WindowEvent::MouseWheel { delta, .. } => {
+                let time = self.event_time();
+                self.input_events.push_back(RawSeatEvent::new(
+                    RawSeatEventKind::PointerAxis {
+                        position: self.pointer_position,
+                        axis: nested_axis(delta),
+                    },
+                    time,
+                ));
+            }
+            WindowEvent::KeyboardInput {
+                event,
+                is_synthetic,
+                ..
+            } if !is_synthetic && !event.repeat => {
+                if let Some(keycode) = event.physical_key.to_scancode() {
+                    let time = self.event_time();
+                    self.input_events.push_back(RawSeatEvent::new(
+                        RawSeatEventKind::Keyboard {
+                            keycode: LinuxKeycode(keycode),
+                            logical_key: Some(convert_logical_key(&event.logical_key)),
+                            state: convert_element_state(event.state),
+                        },
+                        time,
+                    ));
+                }
+            }
             _ => {}
         }
     }
 }
 
+const fn linux_button_code(button: MouseButton) -> Option<LinuxButtonCode> {
+    match button {
+        MouseButton::Left => Some(LinuxButtonCode(0x110)),
+        MouseButton::Right => Some(LinuxButtonCode(0x111)),
+        MouseButton::Middle => Some(LinuxButtonCode(0x112)),
+        MouseButton::Forward => Some(LinuxButtonCode(0x114)),
+        MouseButton::Back => Some(LinuxButtonCode(0x113)),
+        MouseButton::Other(_) => None,
+    }
+}
+
+fn nested_axis(delta: MouseScrollDelta) -> RawScrollFrame {
+    match delta {
+        MouseScrollDelta::LineDelta(horizontal, vertical) => RawScrollFrame {
+            source: RawScrollSource::Wheel,
+            horizontal: -f64::from(horizontal) * 15.0,
+            vertical: -f64::from(vertical) * 15.0,
+            horizontal_v120: Some((-horizontal * 120.0) as i32),
+            vertical_v120: Some((-vertical * 120.0) as i32),
+        },
+        MouseScrollDelta::PixelDelta(delta) => RawScrollFrame {
+            source: RawScrollSource::Continuous,
+            horizontal: -delta.x,
+            vertical: -delta.y,
+            horizontal_v120: None,
+            vertical_v120: None,
+        },
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::FrameState;
+    use super::{
+        FRAME_INTERVAL, FrameState, dispatch_timeout, host_work_drained, linux_button_code,
+        nested_axis,
+    };
+    use crate::raw_input::{LinuxButtonCode, RawScrollFrame, RawScrollSource};
+    use winit::{
+        dpi::PhysicalPosition,
+        event::{MouseButton, MouseScrollDelta},
+    };
+
+    #[test]
+    fn input_or_resize_work_gets_one_nonblocking_smithay_dispatch() {
+        assert_eq!(
+            dispatch_timeout(host_work_drained(true, false)),
+            std::time::Duration::ZERO
+        );
+        assert_eq!(
+            dispatch_timeout(host_work_drained(false, true)),
+            std::time::Duration::ZERO
+        );
+    }
+
+    #[test]
+    fn iterations_without_input_or_resize_keep_the_idle_timeout() {
+        assert_eq!(
+            dispatch_timeout(host_work_drained(false, false)),
+            FRAME_INTERVAL
+        );
+    }
+
+    #[test]
+    fn mouse_buttons_map_to_canonical_linux_codes() {
+        let cases = [
+            (MouseButton::Left, Some(LinuxButtonCode(0x110))),
+            (MouseButton::Right, Some(LinuxButtonCode(0x111))),
+            (MouseButton::Middle, Some(LinuxButtonCode(0x112))),
+            (MouseButton::Back, Some(LinuxButtonCode(0x113))),
+            (MouseButton::Forward, Some(LinuxButtonCode(0x114))),
+            (MouseButton::Other(9), None),
+        ];
+
+        for (button, expected) in cases {
+            assert_eq!(linux_button_code(button), expected);
+        }
+    }
+
+    #[test]
+    fn nested_scroll_converts_to_wayland_axis_direction() {
+        assert_eq!(
+            nested_axis(MouseScrollDelta::LineDelta(2.0, -3.0)),
+            RawScrollFrame {
+                source: RawScrollSource::Wheel,
+                horizontal: -30.0,
+                vertical: 45.0,
+                horizontal_v120: Some(-240),
+                vertical_v120: Some(360),
+            }
+        );
+        assert_eq!(
+            nested_axis(MouseScrollDelta::PixelDelta(PhysicalPosition::new(
+                4.5, -2.5
+            ))),
+            RawScrollFrame {
+                source: RawScrollSource::Continuous,
+                horizontal: -4.5,
+                vertical: 2.5,
+                horizontal_v120: None,
+                vertical_v120: None,
+            }
+        );
+    }
 
     #[test]
     fn initial_frame_requires_composition_and_presentation() {

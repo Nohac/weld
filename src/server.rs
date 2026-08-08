@@ -1,10 +1,17 @@
 //! Minimal Smithay host for the nested SHM rendering experiment.
 
-use std::{ffi::OsString, sync::Arc, time::Instant};
+use std::{collections::HashSet, ffi::OsString, sync::Arc, time::Instant};
 
 use anyhow::{Context, Result, anyhow, bail};
+use bevy::input::ButtonState as BevyButtonState;
 use smithay::{
-    input::{Seat, SeatHandler, SeatState, dnd::DndGrabHandler, pointer::CursorImageStatus},
+    backend::input::{Axis, AxisSource, ButtonState as SmithayButtonState, KeyState, Keycode},
+    input::{
+        Seat, SeatHandler, SeatState,
+        dnd::DndGrabHandler,
+        keyboard::{FilterResult, KeyboardSource},
+        pointer::{AxisFrame, ButtonEvent, CursorImageStatus, MotionEvent},
+    },
     output::{Mode as OutputMode, Output, PhysicalProperties, Scale, Subpixel},
     reexports::{
         calloop::{EventLoop, Interest, Mode, PostAction, generic::Generic},
@@ -15,7 +22,7 @@ use smithay::{
             protocol::{wl_buffer, wl_seat, wl_shm, wl_surface::WlSurface},
         },
     },
-    utils::{Logical, Serial, Size, Transform},
+    utils::{Logical, SERIAL_COUNTER, Serial, Size, Transform},
     wayland::{
         buffer::BufferHandler,
         compositor::{
@@ -38,7 +45,11 @@ use smithay::{
 };
 use tracing::{debug, info, warn};
 
-use crate::compositor::{HostSurfaceEvent, SurfaceEventQueue, SurfaceFrame, SurfaceId};
+use crate::{
+    compositor::{HostSurfaceEvent, SurfaceEventQueue, SurfaceFrame, SurfaceId},
+    input::{SeatInputEffect, SeatInputEffectKind, SurfaceHit},
+    raw_input::{InputPosition, RawScrollFrame, RawScrollSource},
+};
 
 const CLIENT_WIDTH: i32 = 640;
 const CLIENT_HEIGHT: i32 = 480;
@@ -60,17 +71,25 @@ pub struct ServerState {
     _output_manager_state: OutputManagerState,
     seat_state: SeatState<Self>,
     data_device_state: DataDeviceState,
-    _seat: Seat<Self>,
+    seat: Seat<Self>,
     output: Output,
     active_toplevel: Option<ActiveToplevel>,
     pending_surface_events: SurfaceEventQueue,
     presentation_requested: bool,
     next_surface_id: u64,
     started_at: Instant,
+    pointer_position: InputPosition,
+    // This mirrors delivered presses only so host focus loss can synthesize
+    // matching releases; ECS pointer routing remains the policy authority.
+    pressed_pointer_buttons: HashSet<u32>,
 }
 
 impl ServerState {
-    pub fn new(event_loop: &mut EventLoop<'static, Self>, display: Display<Self>) -> Result<Self> {
+    pub fn new(
+        event_loop: &mut EventLoop<'static, Self>,
+        display: Display<Self>,
+        started_at: Instant,
+    ) -> Result<Self> {
         let display_handle = display.handle();
         let compositor_state = CompositorState::new::<Self>(&display_handle);
         let xdg_shell_state = XdgShellState::new::<Self>(&display_handle);
@@ -147,13 +166,15 @@ impl ServerState {
             _output_manager_state: output_manager_state,
             seat_state,
             data_device_state,
-            _seat: seat,
+            seat,
             output,
             active_toplevel: None,
             pending_surface_events: SurfaceEventQueue::default(),
             presentation_requested: false,
             next_surface_id: 1,
-            started_at: Instant::now(),
+            started_at,
+            pointer_position: InputPosition::default(),
+            pressed_pointer_buttons: HashSet::new(),
         })
     }
 
@@ -191,6 +212,235 @@ impl ServerState {
         }
     }
 
+    pub fn apply_input_effect(&mut self, effect: SeatInputEffect) {
+        let SeatInputEffect { event, time } = effect;
+        match event {
+            SeatInputEffectKind::PointerMotion { position, target } => {
+                self.apply_pointer_motion(position, target, time)
+            }
+            SeatInputEffectKind::PointerButton {
+                position,
+                target,
+                button,
+                state,
+            } => self.apply_pointer_button(position, target, button.0, state, time),
+            SeatInputEffectKind::PointerAxis {
+                position,
+                target,
+                axis,
+            } => self.apply_pointer_axis(position, target, axis, time),
+            SeatInputEffectKind::Keyboard { keycode, state } => {
+                let Some(keycode) = keycode.0.checked_add(8) else {
+                    warn!(keycode = keycode.0, "ignored an overflowing keyboard code");
+                    return;
+                };
+                let Some(keyboard) = self.seat.get_keyboard() else {
+                    warn!("ignored keyboard input because the seat has no keyboard");
+                    return;
+                };
+                keyboard.input::<(), _>(
+                    self,
+                    Keycode::new(keycode),
+                    smithay_key_state(state),
+                    SERIAL_COUNTER.next_serial(),
+                    time,
+                    // Future global-shortcut arbitration belongs here. Press and
+                    // release suppression must remain paired when interception is added.
+                    |_, _, _| FilterResult::Forward,
+                );
+            }
+            SeatInputEffectKind::HostFocusLost => self.release_host_input(time),
+        }
+    }
+
+    fn apply_pointer_motion(
+        &mut self,
+        position: InputPosition,
+        target: Option<SurfaceHit>,
+        time: u32,
+    ) {
+        let Some(pointer) = self.seat.get_pointer() else {
+            warn!("ignored pointer motion because the seat has no pointer");
+            return;
+        };
+        self.pointer_position = position;
+        let focus = self.pointer_focus(position, target);
+        pointer.motion(
+            self,
+            focus,
+            &MotionEvent {
+                location: compositor_point(position),
+                serial: SERIAL_COUNTER.next_serial(),
+                time,
+            },
+        );
+        // Pointer protocol events are buffered by v5+ clients until the frame.
+        pointer.frame(self);
+    }
+
+    fn apply_pointer_button(
+        &mut self,
+        position: InputPosition,
+        target: Option<SurfaceHit>,
+        button: u32,
+        state: BevyButtonState,
+        time: u32,
+    ) {
+        let Some(pointer) = self.seat.get_pointer() else {
+            warn!("ignored pointer button because the seat has no pointer");
+            return;
+        };
+        self.pointer_position = position;
+        let serial = SERIAL_COUNTER.next_serial();
+        let focus = self.pointer_focus(position, target);
+        let keyboard_focus = focus.as_ref().map(|(surface, _)| surface.clone());
+        pointer.motion(
+            self,
+            focus,
+            &MotionEvent {
+                location: compositor_point(position),
+                serial,
+                time,
+            },
+        );
+        if state == BevyButtonState::Pressed
+            && !pointer.is_grabbed()
+            && let Some(keyboard) = self.seat.get_keyboard()
+        {
+            keyboard.set_focus(self, keyboard_focus, serial);
+        }
+        match state {
+            BevyButtonState::Pressed => {
+                self.pressed_pointer_buttons.insert(button);
+            }
+            BevyButtonState::Released => {
+                self.pressed_pointer_buttons.remove(&button);
+            }
+        }
+        pointer.button(
+            self,
+            &ButtonEvent {
+                serial,
+                time,
+                button,
+                state: smithay_button_state(state),
+            },
+        );
+        pointer.frame(self);
+    }
+
+    fn apply_pointer_axis(
+        &mut self,
+        position: InputPosition,
+        target: Option<SurfaceHit>,
+        axis: RawScrollFrame,
+        time: u32,
+    ) {
+        let Some(pointer) = self.seat.get_pointer() else {
+            warn!("ignored pointer axis because the seat has no pointer");
+            return;
+        };
+        self.pointer_position = position;
+        let focus = self.pointer_focus(position, target);
+        pointer.motion(
+            self,
+            focus,
+            &MotionEvent {
+                location: compositor_point(position),
+                serial: SERIAL_COUNTER.next_serial(),
+                time,
+            },
+        );
+        if let Some(frame) = smithay_axis_frame(axis, time) {
+            pointer.axis(self, frame);
+        }
+        pointer.frame(self);
+    }
+
+    fn pointer_focus(
+        &self,
+        position: InputPosition,
+        target: Option<SurfaceHit>,
+    ) -> Option<(WlSurface, smithay::utils::Point<f64, Logical>)> {
+        let target = target?;
+        let active = self
+            .active_toplevel
+            .as_ref()
+            .filter(|active| active.id == target.surface && active.surface.alive())?;
+        let origin = InputPosition::new(
+            position.x - target.local_position.x,
+            position.y - target.local_position.y,
+        );
+        Some((
+            active.surface.wl_surface().clone(),
+            compositor_point(origin),
+        ))
+    }
+
+    fn release_host_input(&mut self, time: u32) {
+        let serial = SERIAL_COUNTER.next_serial();
+        if let Some(pointer) = self.seat.get_pointer() {
+            for button in std::mem::take(&mut self.pressed_pointer_buttons) {
+                pointer.button(
+                    self,
+                    &ButtonEvent {
+                        serial,
+                        time,
+                        button,
+                        state: SmithayButtonState::Released,
+                    },
+                );
+            }
+            pointer.motion(
+                self,
+                None,
+                &MotionEvent {
+                    location: compositor_point(self.pointer_position),
+                    serial,
+                    time,
+                },
+            );
+            pointer.frame(self);
+        } else {
+            self.pressed_pointer_buttons.clear();
+            warn!("could not release host pointer state because the seat has no pointer");
+        }
+
+        if let Some(keyboard) = self.seat.get_keyboard() {
+            keyboard.release_source(self, KeyboardSource::MAIN);
+            keyboard.set_focus(self, None, serial);
+        }
+    }
+
+    fn clear_input_focus_for_surface(&mut self, surface: &WlSurface, time: u32) {
+        // SurfaceId values are never reused. If that changes, the Bevy bridge's
+        // cached hit must also be invalidated when this host-side focus is cleared.
+        let serial = SERIAL_COUNTER.next_serial();
+        if let Some(pointer) = self.seat.get_pointer()
+            && pointer.current_focus().as_ref() == Some(surface)
+        {
+            pointer.motion(
+                self,
+                None,
+                &MotionEvent {
+                    location: compositor_point(self.pointer_position),
+                    serial,
+                    time,
+                },
+            );
+            pointer.frame(self);
+        }
+        if let Some(keyboard) = self.seat.get_keyboard()
+            && keyboard.current_focus().as_ref() == Some(surface)
+        {
+            keyboard.set_focus(self, None, serial);
+        }
+    }
+
+    fn event_time(&self) -> u32 {
+        self.started_at.elapsed().as_millis() as u32
+    }
+
     fn handle_root_commit(&mut self, surface: &WlSurface) {
         let Some(surface_id) = self.active_toplevel.as_ref().map(|toplevel| toplevel.id) else {
             return;
@@ -213,6 +463,7 @@ impl ServerState {
                 }
             }
             Some(BufferAssignment::Removed) => {
+                self.clear_input_focus_for_surface(surface, self.event_time());
                 self.pending_surface_events
                     .push(HostSurfaceEvent::Unmapped {
                         surface: surface_id,
@@ -280,6 +531,7 @@ impl XdgShellHandler for ServerState {
 
     fn new_toplevel(&mut self, surface: ToplevelSurface) {
         if let Some(previous) = self.active_toplevel.take() {
+            self.clear_input_focus_for_surface(previous.surface.wl_surface(), self.event_time());
             warn!("replacing the active toplevel; the initial slice displays one client at a time");
             self.pending_surface_events
                 .push(HostSurfaceEvent::Destroyed {
@@ -320,6 +572,7 @@ impl XdgShellHandler for ServerState {
             .as_ref()
             .is_some_and(|active| active.surface.wl_surface() == surface.wl_surface());
         if is_active && let Some(active) = self.active_toplevel.take() {
+            self.clear_input_focus_for_surface(active.surface.wl_surface(), self.event_time());
             self.pending_surface_events
                 .push(HostSurfaceEvent::Destroyed { surface: active.id });
         }
@@ -369,6 +622,56 @@ impl ClientData for ClientState {
     fn disconnected(&self, _client_id: ClientId, reason: DisconnectReason) {
         debug!(?reason, "Wayland client disconnected");
     }
+}
+
+fn compositor_point(position: InputPosition) -> smithay::utils::Point<f64, Logical> {
+    (position.x, position.y).into()
+}
+
+const fn smithay_key_state(state: BevyButtonState) -> KeyState {
+    match state {
+        BevyButtonState::Pressed => KeyState::Pressed,
+        BevyButtonState::Released => KeyState::Released,
+    }
+}
+
+const fn smithay_button_state(state: BevyButtonState) -> SmithayButtonState {
+    match state {
+        BevyButtonState::Pressed => SmithayButtonState::Pressed,
+        BevyButtonState::Released => SmithayButtonState::Released,
+    }
+}
+
+fn smithay_axis_frame(axis: RawScrollFrame, time: u32) -> Option<AxisFrame> {
+    if axis.horizontal == 0.0
+        && axis.vertical == 0.0
+        && axis.horizontal_v120.unwrap_or_default() == 0
+        && axis.vertical_v120.unwrap_or_default() == 0
+    {
+        return None;
+    }
+    let source = match axis.source {
+        RawScrollSource::Wheel => AxisSource::Wheel,
+        RawScrollSource::Continuous => AxisSource::Continuous,
+    };
+    let mut frame = AxisFrame::new(time).source(source);
+    if axis.horizontal != 0.0 {
+        frame = frame.value(Axis::Horizontal, axis.horizontal);
+    }
+    if axis.vertical != 0.0 {
+        frame = frame.value(Axis::Vertical, axis.vertical);
+    }
+    if let Some(v120) = axis.horizontal_v120
+        && v120 != 0
+    {
+        frame = frame.v120(Axis::Horizontal, v120);
+    }
+    if let Some(v120) = axis.vertical_v120
+        && v120 != 0
+    {
+        frame = frame.v120(Axis::Vertical, v120);
+    }
+    Some(frame)
 }
 
 fn copy_shm_buffer(buffer: &wl_buffer::WlBuffer) -> Result<SurfaceFrame> {
@@ -468,7 +771,8 @@ smithay::delegate_dispatch2!(ServerState);
 
 #[cfg(test)]
 mod tests {
-    use super::normalize_bgra_rows;
+    use super::{normalize_bgra_rows, smithay_axis_frame};
+    use crate::raw_input::{RawScrollFrame, RawScrollSource};
     use smithay::reexports::wayland_server::protocol::wl_shm;
 
     #[test]
@@ -501,5 +805,22 @@ mod tests {
     #[test]
     fn rejects_short_rows() {
         assert!(normalize_bgra_rows(&[0; 7], 2, 1, 7, wl_shm::Format::Argb8888).is_err());
+    }
+
+    #[test]
+    fn skips_empty_axis_frames() {
+        assert!(
+            smithay_axis_frame(
+                RawScrollFrame {
+                    source: RawScrollSource::Wheel,
+                    horizontal: 0.0,
+                    vertical: 0.0,
+                    horizontal_v120: Some(0),
+                    vertical_v120: None,
+                },
+                1,
+            )
+            .is_none()
+        );
     }
 }

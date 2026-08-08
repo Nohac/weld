@@ -6,7 +6,8 @@ use anyhow::{Context, Result};
 use bevy::{
     app::{App, PluginGroup},
     camera::{
-        Camera, Camera2d, ClearColorConfig, CompositingSpace, ManualTextureViewHandle, RenderTarget,
+        Camera, Camera2d, ClearColorConfig, CompositingSpace, ManualTextureViewHandle,
+        NormalizedRenderTarget, RenderTarget,
     },
     ecs::message::{MessageCursor, Messages},
     log::LogPlugin,
@@ -36,6 +37,11 @@ use crate::debug::{
     CaptureRequest, DebugProtocolPlugin, complete_capture, configure_remote_debug,
     take_capture_request,
 };
+use crate::input::{
+    InputBridgePlugin, SeatInputEffect, enqueue_raw_input, set_input_update_time,
+    take_input_effects,
+};
+use crate::raw_input::RawSeatEvent;
 
 const COMPOSITION_VIEW: ManualTextureViewHandle = ManualTextureViewHandle(1);
 
@@ -82,7 +88,11 @@ impl ShellRenderer {
                 .set(render_plugin)
                 .disable::<LogPlugin>(),
         )
-        .add_plugins((DebugProtocolPlugin, SurfaceCompositorPlugin));
+        .add_plugins((
+            DebugProtocolPlugin,
+            SurfaceCompositorPlugin,
+            InputBridgePlugin::new(NormalizedRenderTarget::TextureView(COMPOSITION_VIEW)),
+        ));
         if let Some(address) = remote_debug {
             configure_remote_debug(&mut app, address)
                 .context("failed to configure remote debugging")?;
@@ -126,7 +136,8 @@ impl ShellRenderer {
         })
     }
 
-    pub fn update(&mut self) {
+    pub fn update(&mut self, input_time: u32) {
+        set_input_update_time(self.app.world_mut(), input_time);
         self.app.update();
     }
 
@@ -159,6 +170,14 @@ impl ShellRenderer {
 
     pub fn enqueue_surface_event(&mut self, event: HostSurfaceEvent) {
         enqueue_surface_event(self.app.world_mut(), event);
+    }
+
+    pub fn enqueue_input_event(&mut self, event: RawSeatEvent) {
+        enqueue_raw_input(self.app.world_mut(), event);
+    }
+
+    pub fn take_input_effects(&mut self) -> Vec<SeatInputEffect> {
+        take_input_effects(self.app.world_mut())
     }
 
     pub fn has_surface_frame(&self) -> bool {

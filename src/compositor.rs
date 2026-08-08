@@ -10,8 +10,12 @@ use bevy::{
     app::{App, Plugin, PreUpdate},
     asset::{Assets, Handle, RenderAssetUsages},
     color::Color,
-    ecs::{component::Component, entity::Entity, resource::Resource, world::World},
+    ecs::{
+        component::Component, entity::Entity, resource::Resource, schedule::IntoScheduleConfigs,
+        world::World,
+    },
     image::Image,
+    picking::PickingSystems,
     prelude::{ImageNode, px},
     render::render_resource::{Extent3d, TextureDimension, TextureFormat},
     ui::{
@@ -84,7 +88,10 @@ impl Plugin for SurfaceCompositorPlugin {
         app.init_resource::<SurfaceEventQueue>()
             .init_resource::<SurfaceRegistry>()
             // Asset change collection and UI measurement happen later in the frame.
-            .add_systems(PreUpdate, apply_host_surface_events);
+            .add_systems(
+                PreUpdate,
+                apply_host_surface_events.before(PickingSystems::Backend),
+            );
     }
 }
 

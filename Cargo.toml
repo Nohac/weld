@@ -11,9 +11,18 @@ bevy = { version = "0.19.0", default-features = false, features = [
     "scene",
     "std",
     "ui_bevy_render",
+    "ui_picking",
 ] }
 bevy_dylib = "0.19.0"
+# Converter functions only. Do not enable Bevy's `bevy_winit` facade feature or
+# add WinitPlugin: Weld owns the outer event loop.
+bevy_winit = { version = "0.19.0", default-features = false }
 clap = { version = "4.5", features = ["derive"] }
+leafwing-input-manager = { version = "0.21.0", default-features = false, features = [
+    "keyboard",
+    "mouse",
+    "picking",
+] }
 png = "0.18.1"
 pollster = "0.4.0"
 smithay = { path = "vendor/smithay", default-features = false, features = [
@@ -21,6 +30,7 @@ smithay = { path = "vendor/smithay", default-features = false, features = [
 ] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.22", features = ["env-filter"] }
+wayland-sys = { version = "0.31.11", features = ["client", "dlopen"] }
 wgpu = { version = "29.0.3", default-features = false, features = [
     "naga-ir",
     "vulkan",
@@ -32,6 +42,7 @@ winit = { version = "0.30.13", default-features = false, features = [
     "wayland-dlopen",
     "x11",
 ] }
+x11-dl = "2.21.0"
 
 # Keep Weld's code quick to rebuild while giving Bevy, Smithay, wgpu, and other
 # dependencies enough optimization for a usable compositor development build.
