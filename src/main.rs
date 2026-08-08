@@ -22,6 +22,7 @@ use anyhow::{Context, Result, anyhow, bail};
 // Cargo features cannot vary by profile. Referencing Bevy's dynamic-linking
 // shim only when debug assertions are active makes plain `cargo run` use the
 // fast development path while release binaries remain standalone.
+use bevy::math::UVec2;
 #[cfg(debug_assertions)]
 use bevy_dylib as _;
 use bevy_winit::converters::{convert_element_state, convert_logical_key};
@@ -31,7 +32,7 @@ use raw_input::{
     RawSeatEventKind,
 };
 use renderer::NestedRenderer;
-use server::ServerState;
+use server::{NestedOutputMetrics, ServerState};
 use shell::ShellRenderer;
 use smithay::reexports::{
     calloop::{EventLoop as CalloopEventLoop, Interest, Mode, PostAction, generic::Generic},
@@ -40,7 +41,7 @@ use smithay::reexports::{
 use tracing::{info, warn};
 use winit::{
     application::ApplicationHandler,
-    dpi::{LogicalSize, PhysicalSize},
+    dpi::{LogicalSize, PhysicalPosition, PhysicalSize},
     event::{MouseButton, MouseScrollDelta, WindowEvent},
     event_loop::{ActiveEventLoop, ControlFlow, EventLoop, OwnedDisplayHandle},
     platform::pump_events::{EventLoopExtPumpEvents, PumpStatus},
@@ -115,7 +116,20 @@ fn main() -> Result<()> {
         bail!("failed to create the nested window: {error}");
     }
 
-    let initial_size = nonzero_size(window.inner_size());
+    let initial_size = nonzero_size(
+        host.pending_size
+            .take()
+            .unwrap_or_else(|| window.inner_size()),
+    );
+    let initial_scale_factor = host
+        .pending_scale_factor
+        .take()
+        .unwrap_or_else(|| window.scale_factor());
+    let mut output_metrics = NestedOutputMetrics::new(
+        initial_size.width,
+        initial_size.height,
+        initial_scale_factor,
+    )?;
     let display_handle = host_event_loop.owned_display_handle();
     let host_wake_fd = host_display_wake_fd(&display_handle)?;
     let mut renderer = NestedRenderer::new(window, display_handle, initial_size)?;
@@ -124,15 +138,15 @@ fn main() -> Result<()> {
         renderer.adapter(),
         renderer.device(),
         renderer.queue(),
-        initial_size.width,
-        initial_size.height,
+        UVec2::new(initial_size.width, initial_size.height),
+        initial_scale_factor,
         arguments.remote_debug.as_deref(),
     )?;
 
     let mut calloop: CalloopEventLoop<'static, ServerState> =
         CalloopEventLoop::try_new().context("failed to create the Smithay calloop event loop")?;
     let display = Display::<ServerState>::new().context("failed to create the Wayland display")?;
-    let mut server = ServerState::new(&mut calloop, display, started_at)?;
+    let mut server = ServerState::new(&mut calloop, display, started_at, output_metrics)?;
     if let Some(host_wake_fd) = host_wake_fd {
         // Winit remains the sole reader. The duplicate descriptor only wakes
         // calloop so the next outer-loop iteration can pump host events.
@@ -161,6 +175,7 @@ fn main() -> Result<()> {
             host_event_loop.pump_app_events(Some(Duration::ZERO), &mut host),
             PumpStatus::Exit(_)
         ) || host.close_requested;
+        host.refresh_scale_factor();
         if host_exited {
             if pending_capture
                 .as_ref()
@@ -171,8 +186,11 @@ fn main() -> Result<()> {
             break;
         }
 
-        let host_work_drained =
-            host_work_drained(!host.input_events.is_empty(), host.pending_size.is_some());
+        let host_work_drained = host_work_drained(
+            !host.input_events.is_empty(),
+            host.pending_size.is_some(),
+            host.pending_scale_factor.is_some(),
+        );
         if std::mem::take(&mut host.redraw_requested) {
             frame_state.request_present();
         }
@@ -183,12 +201,35 @@ fn main() -> Result<()> {
             // its rendering-state invariants are proven.
             frame_state.request_composition();
         }
-        if let Some(size) = host.pending_size.take()
+        let pending_size = host.pending_size.take();
+        let pending_scale_factor = host.pending_scale_factor.take();
+        let mut metrics_changed = false;
+        let mut physical_size = PhysicalSize::new(
+            output_metrics.physical_width(),
+            output_metrics.physical_height(),
+        );
+        let mut scale_factor = output_metrics.scale_factor();
+        if let Some(size) = pending_size
             && size.width > 0
             && size.height > 0
+            && size != physical_size
         {
+            physical_size = size;
             renderer.resize(size);
             shell.resize(size.width, size.height);
+            metrics_changed = true;
+        }
+        if let Some(pending_scale_factor) = pending_scale_factor
+            && pending_scale_factor != scale_factor
+        {
+            scale_factor = pending_scale_factor;
+            shell.set_scale_factor(scale_factor);
+            metrics_changed = true;
+        }
+        if metrics_changed {
+            output_metrics =
+                NestedOutputMetrics::new(physical_size.width, physical_size.height, scale_factor)?;
+            server.update_output_metrics(output_metrics);
             frame_state.request_composition();
         }
 
@@ -345,11 +386,11 @@ fn host_display_wake_fd(display: &OwnedDisplayHandle) -> Result<Option<OwnedFd>>
         .context("failed to duplicate the nested host display connection fd")
 }
 
-const fn host_work_drained(input_pending: bool, resize_pending: bool) -> bool {
+const fn host_work_drained(input_pending: bool, resize_pending: bool, scale_pending: bool) -> bool {
     // A minimized 0x0 resize still counts: pending_size is consumed even when
     // the renderer resize is skipped. RedrawRequested only asks for a present
     // and deliberately retains the ordinary bounded dispatch timeout.
-    input_pending || resize_pending
+    input_pending || resize_pending || scale_pending
 }
 
 const fn dispatch_timeout(host_work_drained: bool) -> Duration {
@@ -453,8 +494,10 @@ fn nonzero_size(size: PhysicalSize<u32>) -> PhysicalSize<u32> {
 struct NestedHost {
     window: Option<Arc<Window>>,
     pending_size: Option<PhysicalSize<u32>>,
+    pending_scale_factor: Option<f64>,
     input_events: VecDeque<RawSeatEvent>,
     pointer_position: Option<InputPosition>,
+    scale_factor: f64,
     redraw_requested: bool,
     creation_error: Option<String>,
     close_requested: bool,
@@ -466,8 +509,10 @@ impl NestedHost {
         Self {
             window: None,
             pending_size: None,
+            pending_scale_factor: None,
             input_events: VecDeque::new(),
             pointer_position: None,
+            scale_factor: 1.0,
             redraw_requested: false,
             creation_error: None,
             close_requested: false,
@@ -477,6 +522,17 @@ impl NestedHost {
 
     fn event_time(&self) -> u32 {
         self.started_at.elapsed().as_millis() as u32
+    }
+
+    fn refresh_scale_factor(&mut self) {
+        let Some(window) = &self.window else {
+            return;
+        };
+        let scale_factor = window.scale_factor();
+        if scale_factor != self.scale_factor {
+            self.scale_factor = scale_factor;
+            self.pending_scale_factor = Some(scale_factor);
+        }
     }
 }
 
@@ -492,6 +548,8 @@ impl ApplicationHandler for NestedHost {
             Ok(window) => {
                 let window = Arc::new(window);
                 self.pending_size = Some(window.inner_size());
+                self.scale_factor = window.scale_factor();
+                self.pending_scale_factor = Some(self.scale_factor);
                 self.window = Some(window);
             }
             Err(error) => self.creation_error = Some(error.to_string()),
@@ -510,6 +568,10 @@ impl ApplicationHandler for NestedHost {
                 event_loop.exit();
             }
             WindowEvent::Resized(size) => self.pending_size = Some(size),
+            WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
+                self.scale_factor = scale_factor;
+                self.pending_scale_factor = Some(scale_factor);
+            }
             WindowEvent::RedrawRequested => self.redraw_requested = true,
             WindowEvent::Focused(false) => {
                 self.pointer_position = None;
@@ -521,7 +583,7 @@ impl ApplicationHandler for NestedHost {
             // focus does not restore the previously focused client automatically.
             WindowEvent::Focused(true) => {}
             WindowEvent::CursorMoved { position, .. } => {
-                let position = InputPosition::new(position.x, position.y);
+                let position = logical_input_position(position, self.scale_factor);
                 self.pointer_position = Some(position);
                 let time = self.event_time();
                 self.input_events.push_back(RawSeatEvent::new(
@@ -555,7 +617,7 @@ impl ApplicationHandler for NestedHost {
                 self.input_events.push_back(RawSeatEvent::new(
                     RawSeatEventKind::PointerAxis {
                         position: self.pointer_position,
-                        axis: nested_axis(delta),
+                        axis: nested_axis(delta, self.scale_factor),
                     },
                     time,
                 ));
@@ -593,7 +655,7 @@ const fn linux_button_code(button: MouseButton) -> Option<LinuxButtonCode> {
     }
 }
 
-fn nested_axis(delta: MouseScrollDelta) -> RawScrollFrame {
+fn nested_axis(delta: MouseScrollDelta, scale_factor: f64) -> RawScrollFrame {
     match delta {
         MouseScrollDelta::LineDelta(horizontal, vertical) => RawScrollFrame {
             source: RawScrollSource::Wheel,
@@ -604,19 +666,23 @@ fn nested_axis(delta: MouseScrollDelta) -> RawScrollFrame {
         },
         MouseScrollDelta::PixelDelta(delta) => RawScrollFrame {
             source: RawScrollSource::Continuous,
-            horizontal: -delta.x,
-            vertical: -delta.y,
+            horizontal: -delta.x / scale_factor,
+            vertical: -delta.y / scale_factor,
             horizontal_v120: None,
             vertical_v120: None,
         },
     }
 }
 
+fn logical_input_position(position: PhysicalPosition<f64>, scale_factor: f64) -> InputPosition {
+    InputPosition::new(position.x / scale_factor, position.y / scale_factor)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         FRAME_INTERVAL, FrameState, dispatch_timeout, host_work_drained, linux_button_code,
-        nested_axis,
+        logical_input_position, nested_axis,
     };
     use crate::raw_input::{LinuxButtonCode, RawScrollFrame, RawScrollSource};
     use winit::{
@@ -627,11 +693,15 @@ mod tests {
     #[test]
     fn input_or_resize_work_gets_one_nonblocking_smithay_dispatch() {
         assert_eq!(
-            dispatch_timeout(host_work_drained(true, false)),
+            dispatch_timeout(host_work_drained(true, false, false)),
             std::time::Duration::ZERO
         );
         assert_eq!(
-            dispatch_timeout(host_work_drained(false, true)),
+            dispatch_timeout(host_work_drained(false, true, false)),
+            std::time::Duration::ZERO
+        );
+        assert_eq!(
+            dispatch_timeout(host_work_drained(false, false, true)),
             std::time::Duration::ZERO
         );
     }
@@ -639,7 +709,7 @@ mod tests {
     #[test]
     fn iterations_without_input_or_resize_keep_the_idle_timeout() {
         assert_eq!(
-            dispatch_timeout(host_work_drained(false, false)),
+            dispatch_timeout(host_work_drained(false, false, false)),
             FRAME_INTERVAL
         );
     }
@@ -663,7 +733,7 @@ mod tests {
     #[test]
     fn nested_scroll_converts_to_wayland_axis_direction() {
         assert_eq!(
-            nested_axis(MouseScrollDelta::LineDelta(2.0, -3.0)),
+            nested_axis(MouseScrollDelta::LineDelta(2.0, -3.0), 1.25),
             RawScrollFrame {
                 source: RawScrollSource::Wheel,
                 horizontal: -30.0,
@@ -673,16 +743,25 @@ mod tests {
             }
         );
         assert_eq!(
-            nested_axis(MouseScrollDelta::PixelDelta(PhysicalPosition::new(
-                4.5, -2.5
-            ))),
+            nested_axis(
+                MouseScrollDelta::PixelDelta(PhysicalPosition::new(5.0, -2.5)),
+                1.25,
+            ),
             RawScrollFrame {
                 source: RawScrollSource::Continuous,
-                horizontal: -4.5,
-                vertical: 2.5,
+                horizontal: -4.0,
+                vertical: 2.0,
                 horizontal_v120: None,
                 vertical_v120: None,
             }
+        );
+    }
+
+    #[test]
+    fn host_physical_pointer_positions_become_compositor_logical() {
+        assert_eq!(
+            logical_input_position(PhysicalPosition::new(100.0, 50.0), 1.25),
+            crate::raw_input::InputPosition::new(80.0, 40.0)
         );
     }
 

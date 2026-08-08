@@ -27,7 +27,7 @@ use smithay::{
         buffer::BufferHandler,
         compositor::{
             BufferAssignment, CompositorClientState, CompositorHandler, CompositorState,
-            SurfaceAttributes, with_states,
+            SurfaceAttributes, send_surface_state, with_states,
         },
         output::{OutputHandler, OutputManagerState},
         selection::{
@@ -53,8 +53,61 @@ use crate::{
 
 const CLIENT_WIDTH: i32 = 640;
 const CLIENT_HEIGHT: i32 = 480;
-const OUTPUT_WIDTH: i32 = 960;
-const OUTPUT_HEIGHT: i32 = 640;
+
+/// Physical host extent plus the effective logical scale advertised to nested
+/// clients. A future configuration layer can select the scale before creating
+/// this Winit-independent boundary value.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct NestedOutputMetrics {
+    physical_width: i32,
+    physical_height: i32,
+    scale_factor: f64,
+}
+
+impl NestedOutputMetrics {
+    pub(crate) fn new(
+        physical_width: u32,
+        physical_height: u32,
+        scale_factor: f64,
+    ) -> Result<Self> {
+        if physical_width == 0 || physical_height == 0 {
+            bail!("nested output dimensions must be nonzero");
+        }
+        if !scale_factor.is_finite() || scale_factor <= 0.0 {
+            bail!("nested output scale must be finite and positive");
+        }
+        Ok(Self {
+            physical_width: i32::try_from(physical_width)
+                .context("nested output width exceeds i32")?,
+            physical_height: i32::try_from(physical_height)
+                .context("nested output height exceeds i32")?,
+            scale_factor,
+        })
+    }
+
+    fn mode(self) -> OutputMode {
+        OutputMode {
+            size: (self.physical_width, self.physical_height).into(),
+            refresh: 60_000,
+        }
+    }
+
+    fn scale(self) -> Scale {
+        Scale::Fractional(self.scale_factor)
+    }
+
+    pub(crate) const fn scale_factor(self) -> f64 {
+        self.scale_factor
+    }
+
+    pub(crate) const fn physical_width(self) -> u32 {
+        self.physical_width as u32
+    }
+
+    pub(crate) const fn physical_height(self) -> u32 {
+        self.physical_height as u32
+    }
+}
 
 struct ActiveToplevel {
     surface: ToplevelSurface,
@@ -73,6 +126,7 @@ pub struct ServerState {
     data_device_state: DataDeviceState,
     seat: Seat<Self>,
     output: Output,
+    output_metrics: NestedOutputMetrics,
     active_toplevel: Option<ActiveToplevel>,
     pending_surface_events: SurfaceEventQueue,
     presentation_requested: bool,
@@ -89,6 +143,7 @@ impl ServerState {
         event_loop: &mut EventLoop<'static, Self>,
         display: Display<Self>,
         started_at: Instant,
+        output_metrics: NestedOutputMetrics,
     ) -> Result<Self> {
         let display_handle = display.handle();
         let compositor_state = CompositorState::new::<Self>(&display_handle);
@@ -113,15 +168,12 @@ impl ServerState {
                 serial_number: "development".to_owned(),
             },
         );
-        let output_mode = OutputMode {
-            size: (OUTPUT_WIDTH, OUTPUT_HEIGHT).into(),
-            refresh: 60_000,
-        };
+        let output_mode = output_metrics.mode();
         output.create_global::<Self>(&display_handle);
         output.change_current_state(
             Some(output_mode),
             Some(Transform::Normal),
-            Some(Scale::Integer(1)),
+            Some(output_metrics.scale()),
             Some((0, 0).into()),
         );
         output.set_preferred(output_mode);
@@ -168,6 +220,7 @@ impl ServerState {
             data_device_state,
             seat,
             output,
+            output_metrics,
             active_toplevel: None,
             pending_surface_events: SurfaceEventQueue::default(),
             presentation_requested: false,
@@ -176,6 +229,29 @@ impl ServerState {
             pointer_position: InputPosition::default(),
             pressed_pointer_buttons: HashSet::new(),
         })
+    }
+
+    pub(crate) fn update_output_metrics(&mut self, metrics: NestedOutputMetrics) {
+        if self.output_metrics == metrics {
+            return;
+        }
+        install_output_metrics(&self.output, self.output_metrics, metrics);
+        self.output_metrics = metrics;
+        self.send_active_surface_scale();
+    }
+
+    fn send_active_surface_scale(&self) {
+        let Some(surface) = self
+            .active_toplevel
+            .as_ref()
+            .map(|active| active.surface.wl_surface())
+        else {
+            return;
+        };
+        let scale = self.output.current_scale().integer_scale();
+        with_states(surface, |states| {
+            send_surface_state(surface, states, scale, Transform::Normal);
+        });
     }
 
     pub fn take_surface_events(&mut self) -> impl Iterator<Item = HostSurfaceEvent> + '_ {
@@ -445,14 +521,15 @@ impl ServerState {
         let Some(surface_id) = self.active_toplevel.as_ref().map(|toplevel| toplevel.id) else {
             return;
         };
-        let assignment = with_states(surface, |states| {
+        let (assignment, buffer_scale) = with_states(surface, |states| {
             let mut attributes = states.cached_state.get::<SurfaceAttributes>();
-            attributes.current().buffer.take()
+            let current = attributes.current();
+            (current.buffer.take(), current.buffer_scale)
         });
 
         match assignment {
             Some(BufferAssignment::NewBuffer(buffer)) => {
-                let copied = copy_shm_buffer(&buffer);
+                let copied = copy_shm_buffer(&buffer, buffer_scale);
                 buffer.release();
                 match copied {
                     Ok(frame) => self.pending_surface_events.push(HostSurfaceEvent::Frame {
@@ -481,6 +558,22 @@ impl ServerState {
             self.next_surface_id + 1
         };
         id
+    }
+}
+
+fn install_output_metrics(
+    output: &Output,
+    previous: NestedOutputMetrics,
+    next: NestedOutputMetrics,
+) {
+    let previous_mode = previous.mode();
+    let next_mode = next.mode();
+    output.change_current_state(Some(next_mode), None, Some(next.scale()), None);
+    output.set_preferred(next_mode);
+    if previous_mode != next_mode {
+        // Smithay retains every installed mode for future wl_output binds.
+        // Retire the old mode only after current/preferred point at the new one.
+        output.delete_mode(previous_mode);
     }
 }
 
@@ -543,6 +636,10 @@ impl XdgShellHandler for ServerState {
             state.states.set(xdg_toplevel::State::Activated);
         });
         self.output.enter(surface.wl_surface());
+        let scale = self.output.current_scale().integer_scale();
+        with_states(surface.wl_surface(), |states| {
+            send_surface_state(surface.wl_surface(), states, scale, Transform::Normal);
+        });
         surface.send_configure();
         let id = self.allocate_surface_id();
         self.pending_surface_events
@@ -674,13 +771,14 @@ fn smithay_axis_frame(axis: RawScrollFrame, time: u32) -> Option<AxisFrame> {
     Some(frame)
 }
 
-fn copy_shm_buffer(buffer: &wl_buffer::WlBuffer) -> Result<SurfaceFrame> {
+fn copy_shm_buffer(buffer: &wl_buffer::WlBuffer, buffer_scale: i32) -> Result<SurfaceFrame> {
     if !cfg!(target_endian = "little") {
         bail!("the initial BGRA upload path requires a little-endian target");
     }
+    let buffer_scale = checked_buffer_scale(buffer_scale)?;
 
     with_buffer_contents(buffer, |pointer, pool_length, data| {
-        copy_shm_contents(pointer, pool_length, data)
+        copy_shm_contents(pointer, pool_length, data, buffer_scale)
     })
     .context("buffer is not readable Wayland SHM")?
 }
@@ -689,6 +787,7 @@ fn copy_shm_contents(
     pointer: *const u8,
     pool_length: usize,
     data: BufferData,
+    buffer_scale: u32,
 ) -> Result<SurfaceFrame> {
     let width = usize::try_from(data.width).context("negative SHM width")?;
     let height = usize::try_from(data.height).context("negative SHM height")?;
@@ -724,9 +823,17 @@ fn copy_shm_contents(
     Ok(SurfaceFrame {
         width: u32::try_from(width).context("SHM width exceeds u32")?,
         height: u32::try_from(height).context("SHM height exceeds u32")?,
+        buffer_scale,
         bgra_pixels: pixels,
         opaque: data.format == wl_shm::Format::Xrgb8888,
     })
+}
+
+fn checked_buffer_scale(buffer_scale: i32) -> Result<u32> {
+    u32::try_from(buffer_scale)
+        .ok()
+        .filter(|scale| *scale > 0)
+        .ok_or_else(|| anyhow!("invalid client buffer scale {buffer_scale}"))
 }
 
 fn normalize_bgra_rows(
@@ -771,9 +878,73 @@ smithay::delegate_dispatch2!(ServerState);
 
 #[cfg(test)]
 mod tests {
-    use super::{normalize_bgra_rows, smithay_axis_frame};
+    use super::{
+        NestedOutputMetrics, checked_buffer_scale, install_output_metrics, normalize_bgra_rows,
+        smithay_axis_frame,
+    };
     use crate::raw_input::{RawScrollFrame, RawScrollSource};
+    use smithay::output::{Output, PhysicalProperties, Subpixel};
     use smithay::reexports::wayland_server::protocol::wl_shm;
+    use smithay::utils::Transform;
+
+    #[test]
+    fn nested_output_metrics_preserve_physical_mode_and_fractional_scale() {
+        let metrics = NestedOutputMetrics::new(1200, 800, 1.25).expect("valid output metrics");
+        assert_eq!(metrics.mode().size, (1200, 800).into());
+        assert_eq!(metrics.scale().fractional_scale(), 1.25);
+        assert_eq!(metrics.scale().integer_scale(), 2);
+        assert_eq!(metrics.scale_factor(), 1.25);
+    }
+
+    #[test]
+    fn nested_output_metrics_reject_invalid_values() {
+        assert!(NestedOutputMetrics::new(0, 800, 1.25).is_err());
+        assert!(NestedOutputMetrics::new(1200, 800, 0.0).is_err());
+        assert!(NestedOutputMetrics::new(1200, 800, f64::NAN).is_err());
+    }
+
+    #[test]
+    fn replacing_nested_metrics_keeps_one_current_preferred_mode() {
+        let initial = NestedOutputMetrics::new(1200, 800, 1.25).unwrap();
+        let resized = NestedOutputMetrics::new(1300, 900, 1.25).unwrap();
+        let resized_again = NestedOutputMetrics::new(1400, 1000, 1.25).unwrap();
+        let scale_only = NestedOutputMetrics::new(1400, 1000, 1.5).unwrap();
+        let output = Output::new(
+            "test".to_owned(),
+            PhysicalProperties {
+                size: (0, 0).into(),
+                subpixel: Subpixel::Unknown,
+                make: "Weld".to_owned(),
+                model: "Test".to_owned(),
+                serial_number: "test".to_owned(),
+            },
+        );
+        output.change_current_state(
+            Some(initial.mode()),
+            Some(Transform::Normal),
+            Some(initial.scale()),
+            Some((0, 0).into()),
+        );
+        output.set_preferred(initial.mode());
+
+        install_output_metrics(&output, initial, resized);
+        install_output_metrics(&output, resized, resized_again);
+        assert_eq!(output.modes(), [resized_again.mode()]);
+        assert_eq!(output.current_mode(), Some(resized_again.mode()));
+        assert_eq!(output.preferred_mode(), Some(resized_again.mode()));
+
+        install_output_metrics(&output, resized_again, scale_only);
+        assert_eq!(output.modes(), [scale_only.mode()]);
+        assert_eq!(output.current_mode(), Some(scale_only.mode()));
+        assert_eq!(output.preferred_mode(), Some(scale_only.mode()));
+    }
+
+    #[test]
+    fn client_buffer_scale_must_be_positive() {
+        assert_eq!(checked_buffer_scale(2).expect("valid scale"), 2);
+        assert!(checked_buffer_scale(0).is_err());
+        assert!(checked_buffer_scale(-1).is_err());
+    }
 
     #[test]
     fn strips_row_padding() {

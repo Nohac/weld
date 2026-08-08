@@ -20,7 +20,7 @@ use bevy::{
     render::render_resource::{Extent3d, TextureDimension, TextureFormat},
     ui::{
         BorderRadius, BoxShadow, Display, GlobalZIndex, Node, Overflow, PositionType,
-        UiTargetCamera,
+        UiTargetCamera, Val,
     },
 };
 use tracing::warn;
@@ -59,6 +59,9 @@ pub struct SurfaceNode {
 pub(crate) struct SurfaceFrame {
     pub width: u32,
     pub height: u32,
+    /// Integer `wl_surface` buffer scale. The node is sized to the quotient in
+    /// logical pixels while the image retains the full buffer resolution.
+    pub buffer_scale: u32,
     pub bgra_pixels: Vec<u8>,
     pub opaque: bool,
 }
@@ -242,6 +245,7 @@ fn apply_surface_frame(
             ?surface,
             width = frame.width,
             height = frame.height,
+            buffer_scale = frame.buffer_scale,
             "discarded an invalid surface frame"
         );
         return;
@@ -249,6 +253,8 @@ fn apply_surface_frame(
     let Some(entity) = ensure_surface_entity(world, registry, surface) else {
         return;
     };
+    let logical_width = frame.width as f32 / frame.buffer_scale as f32;
+    let logical_height = frame.height as f32 / frame.buffer_scale as f32;
     if !frame.opaque {
         unpremultiply_bgra(&mut frame.bgra_pixels);
     }
@@ -298,6 +304,8 @@ fn apply_surface_frame(
     }
     if let Some(mut node) = entity_mut.get_mut::<Node>() {
         node.display = Display::Flex;
+        node.width = px(logical_width);
+        node.height = px(logical_height);
     }
     if let Some(entry) = registry.0.get_mut(&surface) {
         entry.image = Some(handle);
@@ -320,6 +328,8 @@ fn unmap_surface(world: &mut World, registry: &mut SurfaceRegistry, surface: Sur
         entity.insert(ImageNode::default());
         if let Some(mut node) = entity.get_mut::<Node>() {
             node.display = Display::None;
+            node.width = Val::Auto;
+            node.height = Val::Auto;
         }
     }
 }
@@ -347,7 +357,10 @@ fn validate_frame(frame: &SurfaceFrame) -> bool {
     else {
         return false;
     };
-    frame.width > 0 && frame.height > 0 && frame.bgra_pixels.len() == expected
+    frame.width > 0
+        && frame.height > 0
+        && frame.buffer_scale > 0
+        && frame.bgra_pixels.len() == expected
 }
 
 fn surface_image(extent: Extent3d, pixels: Vec<u8>) -> Image {
@@ -398,6 +411,7 @@ mod tests {
         SurfaceFrame {
             width: 1,
             height: 1,
+            buffer_scale: 1,
             bgra_pixels: pixel.to_vec(),
             opaque: true,
         }
@@ -536,6 +550,7 @@ mod tests {
                 frame: SurfaceFrame {
                     width: 1,
                     height: 1,
+                    buffer_scale: 1,
                     bgra_pixels: vec![25, 50, 75, 128],
                     opaque: false,
                 },
@@ -569,7 +584,64 @@ mod tests {
                 frame: SurfaceFrame {
                     width: 1,
                     height: 1,
+                    buffer_scale: 1,
                     bgra_pixels: vec![0; 3],
+                    opaque: true,
+                },
+            },
+        );
+        app.update();
+
+        let mut query = app.world_mut().query::<&SurfaceNode>();
+        assert_eq!(query.iter(app.world()).count(), 0);
+    }
+
+    #[test]
+    fn sizes_the_node_in_surface_logical_pixels_without_downsampling_the_image() {
+        let (mut app, _) = test_app();
+        let surface = SurfaceId::new(19);
+        enqueue_surface_event(
+            app.world_mut(),
+            HostSurfaceEvent::Frame {
+                surface,
+                frame: SurfaceFrame {
+                    width: 1_280,
+                    height: 960,
+                    buffer_scale: 2,
+                    bgra_pixels: vec![0; 1_280 * 960 * 4],
+                    opaque: true,
+                },
+            },
+        );
+        app.update();
+
+        let mut query = app.world_mut().query::<(&ImageNode, &Node)>();
+        let (image_node, node) = query
+            .single(app.world())
+            .expect("scaled surface should exist");
+        assert_eq!(node.width, px(640.0));
+        assert_eq!(node.height, px(480.0));
+        let image = app
+            .world()
+            .resource::<Assets<Image>>()
+            .get(&image_node.image)
+            .expect("scaled surface image should exist");
+        assert_eq!(image.texture_descriptor.size.width, 1_280);
+        assert_eq!(image.texture_descriptor.size.height, 960);
+    }
+
+    #[test]
+    fn rejects_a_zero_buffer_scale() {
+        let (mut app, _) = test_app();
+        enqueue_surface_event(
+            app.world_mut(),
+            HostSurfaceEvent::Frame {
+                surface: SurfaceId::new(23),
+                frame: SurfaceFrame {
+                    width: 1,
+                    height: 1,
+                    buffer_scale: 0,
+                    bgra_pixels: vec![0; 4],
                     opaque: true,
                 },
             },

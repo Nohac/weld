@@ -39,7 +39,7 @@ use bevy::{
             Location, PointerAction, PointerId, PointerInput, PointerInteraction, PointerLocation,
         },
     },
-    ui::{ComputedNode, Display, Node},
+    ui::{ComputedNode, Display, Node, UiScale},
 };
 use bevy_winit::converters::convert_physical_key_code;
 use leafwing_input_manager::plugin::{CentralInputStorePlugin, InputManagerSystem};
@@ -117,6 +117,7 @@ impl Plugin for InputBridgePlugin {
             app.add_plugins(CentralInputStorePlugin);
         }
         app.insert_resource(InputTarget(self.target.clone()))
+            .init_resource::<UiScale>()
             .init_resource::<RawInputIngress>()
             .init_resource::<PendingSeatInput>()
             .init_resource::<ProjectedPointerState>()
@@ -252,12 +253,14 @@ pub(crate) fn take_input_effects(world: &mut World) -> Vec<SeatInputEffect> {
 
 fn project_raw_input(
     target: Res<InputTarget>,
+    ui_scale: Res<UiScale>,
     mut ingress: ResMut<RawInputIngress>,
     mut pending: ResMut<PendingSeatInput>,
     mut projected_pointer: ResMut<ProjectedPointerState>,
     mut projected_buttons: ResMut<ProjectedMouseButtons>,
     mut messages: ProjectionMessages,
 ) {
+    let ui_scale = ui_scale.0;
     for raw_event in ingress.0.drain(..) {
         pending.0.push_back(raw_event.clone());
         match raw_event.event {
@@ -266,7 +269,10 @@ fn project_raw_input(
                 projected_pointer.0.apply(position);
                 if let Some(previous) = previous {
                     // Nested mode approximates raw device motion with absolute
-                    // cursor deltas. A libinput backend can provide true deltas.
+                    // cursor deltas. Leafwing consumes these compositor-logical
+                    // units, while Bevy picking below needs UiScale-adjusted
+                    // physical units for Weld's scale-1 manual target. A
+                    // libinput backend can provide true device deltas.
                     messages.mouse_motion.write(MouseMotion {
                         delta: position.as_vec2() - previous.as_vec2(),
                     });
@@ -277,6 +283,7 @@ fn project_raw_input(
                     previous.map_or(Vec2::ZERO, |previous| {
                         position.as_vec2() - previous.as_vec2()
                     }),
+                    ui_scale,
                 ));
             }
             RawSeatEventKind::PointerLeft { position } => {
@@ -286,6 +293,7 @@ fn project_raw_input(
                     &target.0,
                     InputPosition::new(-1.0, -1.0),
                     Vec2::ZERO,
+                    ui_scale,
                 ));
             }
             RawSeatEventKind::PointerButton {
@@ -301,7 +309,7 @@ fn project_raw_input(
                 {
                     messages.pointer_input.write(PointerInput::new(
                         PointerId::Mouse,
-                        pointer_location(&target.0, position),
+                        pointer_location(&target.0, position, ui_scale),
                         action,
                     ));
                 }
@@ -337,7 +345,7 @@ fn project_raw_input(
                     });
                     messages.pointer_input.write(PointerInput::new(
                         PointerId::Mouse,
-                        pointer_location(&target.0, position),
+                        pointer_location(&target.0, position, ui_scale),
                         PointerAction::Scroll {
                             unit,
                             x,
@@ -361,13 +369,14 @@ fn project_raw_input(
                 messages.keyboard_focus_lost.write(KeyboardFocusLost);
                 messages.pointer_input.write(PointerInput::new(
                     PointerId::Mouse,
-                    pointer_location(&target.0, projected_pointer.0.last_known_position),
+                    pointer_location(&target.0, projected_pointer.0.last_known_position, ui_scale),
                     PointerAction::Cancel,
                 ));
                 messages.pointer_input.write(pointer_motion(
                     &target.0,
                     InputPosition::new(-1.0, -1.0),
                     Vec2::ZERO,
+                    ui_scale,
                 ));
             }
             RawSeatEventKind::Keyboard {
@@ -397,6 +406,9 @@ fn resolve_input_effects(
     mut effects: ResMut<InputEffects>,
     mut routing: ResMut<PointerRoutingState>,
 ) {
+    // A runtime scale change can leave picking on the previous ComputedNode
+    // layout for this update; Bevy refreshes UI layout later in PostUpdate.
+    // The following update reconciles a stationary pointer to the new hit.
     let geometric_target = pointers
         .iter()
         .find(|(pointer, _, _)| **pointer == PointerId::Mouse)
@@ -409,7 +421,7 @@ fn resolve_input_effects(
                         centered_position: hit.position.map(|position| {
                             InputPosition::new(position.x.into(), position.y.into())
                         }),
-                        size: node.map(|node| node.size()),
+                        size: node.map(logical_pick_size),
                     }
                 }))
             })
@@ -553,19 +565,32 @@ fn pointer_motion(
     target: &NormalizedRenderTarget,
     position: InputPosition,
     delta: Vec2,
+    ui_scale: f32,
 ) -> PointerInput {
     PointerInput::new(
         PointerId::Mouse,
-        pointer_location(target, position),
-        PointerAction::Move { delta },
+        pointer_location(target, position, ui_scale),
+        PointerAction::Move {
+            delta: delta * ui_scale,
+        },
     )
 }
 
-fn pointer_location(target: &NormalizedRenderTarget, position: InputPosition) -> Location {
+fn pointer_location(
+    target: &NormalizedRenderTarget,
+    position: InputPosition,
+    ui_scale: f32,
+) -> Location {
     Location {
         target: target.clone(),
-        position: position.as_vec2(),
+        // Bevy picking converts only the render target scale. Weld's manual
+        // target has scale 1, so UiScale must be applied explicitly here.
+        position: position.as_vec2() * ui_scale,
     }
+}
+
+fn logical_pick_size(node: &ComputedNode) -> Vec2 {
+    node.size() * node.inverse_scale_factor()
 }
 
 fn pointer_button_action(button: LinuxButtonCode, state: ButtonState) -> Option<PointerAction> {
@@ -633,9 +658,10 @@ fn resolve_pick_candidates(
     let size = candidate.size?;
     Some(SurfaceHit {
         surface,
-        // ComputedNode currently matches client coordinates because the initial
-        // SHM path accepts only buffer_scale=1 surfaces. Scaling support must
-        // make this conversion explicitly surface-logical.
+        // `size` is surface-logical because SurfaceCompositorPlugin explicitly
+        // sizes each node to buffer dimensions / wl_surface buffer scale. That
+        // invariant keeps Bevy transforms and clipping composable while the
+        // protocol receives coordinates in the client's logical space.
         local_position: InputPosition::new(
             (position.x + 0.5) * f64::from(size.x),
             (position.y + 0.5) * f64::from(size.y),
@@ -970,6 +996,26 @@ mod tests {
             bottom_right.local_position,
             InputPosition::new(640.0, 480.0)
         );
+    }
+
+    #[test]
+    fn compositor_logical_pointer_positions_are_scaled_for_bevy_picking() {
+        let target = NormalizedRenderTarget::TextureView(ManualTextureViewHandle(1));
+        let location = pointer_location(&target, InputPosition::new(80.0, 40.0), 1.25);
+
+        assert_eq!(location.position, Vec2::new(100.0, 50.0));
+    }
+
+    #[test]
+    fn physical_computed_node_size_becomes_surface_logical_for_hits() {
+        let node = ComputedNode {
+            size: Vec2::new(800.0, 600.0),
+            // Reciprocal of the host scale 1.25 used by this scaling slice.
+            inverse_scale_factor: 0.8,
+            ..Default::default()
+        };
+
+        assert_eq!(logical_pick_size(&node), Vec2::new(640.0, 480.0));
     }
 
     #[test]

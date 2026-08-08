@@ -26,6 +26,7 @@ use bevy::{
         texture::{ManualTextureView, ManualTextureViews},
     },
     scene::{WorldSceneExt, bsn},
+    ui::UiScale,
     window::{ExitCondition, RequestRedraw, WindowPlugin},
 };
 
@@ -59,8 +60,8 @@ impl ShellRenderer {
         adapter: &wgpu::Adapter,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
-        width: u32,
-        height: u32,
+        size: UVec2,
+        scale_factor: f64,
         remote_debug: Option<&str>,
     ) -> Result<Self> {
         let render_creation = RenderCreation::manual(
@@ -92,7 +93,8 @@ impl ShellRenderer {
             DebugProtocolPlugin,
             SurfaceCompositorPlugin,
             InputBridgePlugin::new(NormalizedRenderTarget::TextureView(COMPOSITION_VIEW)),
-        ));
+        ))
+        .insert_resource(UiScale(scale_factor as f32));
         if let Some(address) = remote_debug {
             configure_remote_debug(&mut app, address)
                 .context("failed to configure remote debugging")?;
@@ -101,8 +103,8 @@ impl ShellRenderer {
         app.cleanup();
 
         let (composition_texture, composition_view) =
-            create_composition_target(device, width, height);
-        insert_manual_view(&mut app, composition_view.clone(), width, height);
+            create_composition_target(device, size.x, size.y);
+        insert_manual_view(&mut app, composition_view.clone(), size.x, size.y);
 
         let camera = app
             .world_mut()
@@ -162,6 +164,11 @@ impl ShellRenderer {
         insert_manual_view(&mut self.app, composition_view.clone(), width, height);
         self.composition_texture = composition_texture;
         self.composition_view = composition_view;
+    }
+
+    /// Set the compositor-logical to physical scale used by Bevy UI layout.
+    pub fn set_scale_factor(&mut self, scale_factor: f64) {
+        self.app.world_mut().resource_mut::<UiScale>().0 = scale_factor as f32;
     }
 
     pub fn texture_view(&self) -> &wgpu::TextureView {
