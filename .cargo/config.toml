@@ -1,0 +1,9 @@
+# Bevy is large enough that the system linker dominates many edit-build-run
+# cycles. The shared Rust Nix shell supplies matching Clang and LLD packages.
+[target.x86_64-unknown-linux-gnu]
+linker = "clang"
+rustflags = ["-C", "link-arg=-fuse-ld=lld"]
+
+[target.aarch64-unknown-linux-gnu]
+linker = "clang"
+rustflags = ["-C", "link-arg=-fuse-ld=lld"]

@@ -38,24 +38,16 @@ use smithay::{
 };
 use tracing::{debug, info, warn};
 
+use crate::compositor::{HostSurfaceEvent, SurfaceEventQueue, SurfaceFrame, SurfaceId};
+
 const CLIENT_WIDTH: i32 = 640;
 const CLIENT_HEIGHT: i32 = 480;
 const OUTPUT_WIDTH: i32 = 960;
 const OUTPUT_HEIGHT: i32 = 640;
 
-/// An owned copy of a Wayland SHM commit.
-#[derive(Debug)]
-pub struct ShmFrame {
-    pub width: u32,
-    pub height: u32,
-    pub pixels: Vec<u8>,
-}
-
-/// A render-side update produced by the protocol host.
-#[derive(Debug)]
-pub enum SurfaceUpdate {
-    Frame(ShmFrame),
-    Removed,
+struct ActiveToplevel {
+    surface: ToplevelSurface,
+    id: SurfaceId,
 }
 
 /// Smithay state kept outside Bevy's ECS world.
@@ -70,8 +62,10 @@ pub struct ServerState {
     data_device_state: DataDeviceState,
     _seat: Seat<Self>,
     output: Output,
-    active_toplevel: Option<ToplevelSurface>,
-    pending_surface_update: Option<SurfaceUpdate>,
+    active_toplevel: Option<ActiveToplevel>,
+    pending_surface_events: SurfaceEventQueue,
+    presentation_requested: bool,
+    next_surface_id: u64,
     started_at: Instant,
 }
 
@@ -156,21 +150,34 @@ impl ServerState {
             _seat: seat,
             output,
             active_toplevel: None,
-            pending_surface_update: None,
+            pending_surface_events: SurfaceEventQueue::default(),
+            presentation_requested: false,
+            next_surface_id: 1,
             started_at: Instant::now(),
         })
     }
 
-    pub fn take_surface_update(&mut self) -> Option<SurfaceUpdate> {
-        self.pending_surface_update.take()
+    pub fn take_surface_events(&mut self) -> impl Iterator<Item = HostSurfaceEvent> + '_ {
+        self.pending_surface_events.drain()
+    }
+
+    pub const fn presentation_requested(&self) -> bool {
+        self.presentation_requested
     }
 
     pub fn frame_presented(&mut self) {
-        let Some(toplevel) = self.active_toplevel.as_ref() else {
+        // No protocol dispatch occurs between observing this request and acknowledging a
+        // successful present, so clearing it here cannot discard a newer client commit.
+        self.presentation_requested = false;
+        let Some(toplevel) = self
+            .active_toplevel
+            .as_ref()
+            .filter(|toplevel| toplevel.surface.alive())
+        else {
             return;
         };
         let time = self.started_at.elapsed().as_millis() as u32;
-        with_states(toplevel.wl_surface(), |states| {
+        with_states(toplevel.surface.wl_surface(), |states| {
             let mut attributes = states.cached_state.get::<SurfaceAttributes>();
             for callback in attributes.current().frame_callbacks.drain(..) {
                 callback.done(time);
@@ -185,6 +192,9 @@ impl ServerState {
     }
 
     fn handle_root_commit(&mut self, surface: &WlSurface) {
+        let Some(surface_id) = self.active_toplevel.as_ref().map(|toplevel| toplevel.id) else {
+            return;
+        };
         let assignment = with_states(surface, |states| {
             let mut attributes = states.cached_state.get::<SurfaceAttributes>();
             attributes.current().buffer.take()
@@ -195,15 +205,31 @@ impl ServerState {
                 let copied = copy_shm_buffer(&buffer);
                 buffer.release();
                 match copied {
-                    Ok(frame) => self.pending_surface_update = Some(SurfaceUpdate::Frame(frame)),
+                    Ok(frame) => self.pending_surface_events.push(HostSurfaceEvent::Frame {
+                        surface: surface_id,
+                        frame,
+                    }),
                     Err(error) => warn!(%error, "ignored an unsupported client buffer"),
                 }
             }
             Some(BufferAssignment::Removed) => {
-                self.pending_surface_update = Some(SurfaceUpdate::Removed);
+                self.pending_surface_events
+                    .push(HostSurfaceEvent::Unmapped {
+                        surface: surface_id,
+                    });
             }
             None => {}
         }
+    }
+
+    fn allocate_surface_id(&mut self) -> SurfaceId {
+        let id = SurfaceId::new(self.next_surface_id);
+        self.next_surface_id = if self.next_surface_id == u64::MAX {
+            1
+        } else {
+            self.next_surface_id + 1
+        };
+        id
     }
 }
 
@@ -235,8 +261,11 @@ impl CompositorHandler for ServerState {
         let is_active_root = self
             .active_toplevel
             .as_ref()
-            .is_some_and(|toplevel| toplevel.wl_surface() == surface);
+            .is_some_and(|toplevel| toplevel.surface.wl_surface() == surface);
         if is_active_root {
+            // A callback-only commit still needs a presentation acknowledgement, even when
+            // there is no new buffer for Bevy to compose.
+            self.presentation_requested = true;
             self.handle_root_commit(surface);
         } else {
             debug!(surface = ?surface.id(), "ignoring a non-root surface commit in the initial slice");
@@ -250,8 +279,12 @@ impl XdgShellHandler for ServerState {
     }
 
     fn new_toplevel(&mut self, surface: ToplevelSurface) {
-        if self.active_toplevel.is_some() {
+        if let Some(previous) = self.active_toplevel.take() {
             warn!("replacing the active toplevel; the initial slice displays one client at a time");
+            self.pending_surface_events
+                .push(HostSurfaceEvent::Destroyed {
+                    surface: previous.id,
+                });
         }
         surface.with_pending_state(|state| {
             state.size = Some(Size::<i32, Logical>::from((CLIENT_WIDTH, CLIENT_HEIGHT)));
@@ -259,8 +292,12 @@ impl XdgShellHandler for ServerState {
         });
         self.output.enter(surface.wl_surface());
         surface.send_configure();
-        info!("mapped a nested xdg-toplevel");
-        self.active_toplevel = Some(surface);
+        let id = self.allocate_surface_id();
+        self.pending_surface_events
+            .push(HostSurfaceEvent::Mapped { surface: id });
+        info!(surface_id = id.raw(), "mapped a nested xdg-toplevel");
+        self.active_toplevel = Some(ActiveToplevel { surface, id });
+        self.presentation_requested = true;
     }
 
     fn new_popup(&mut self, _surface: PopupSurface, _positioner: PositionerState) {
@@ -275,6 +312,17 @@ impl XdgShellHandler for ServerState {
         _positioner: PositionerState,
         _token: u32,
     ) {
+    }
+
+    fn toplevel_destroyed(&mut self, surface: ToplevelSurface) {
+        let is_active = self
+            .active_toplevel
+            .as_ref()
+            .is_some_and(|active| active.surface.wl_surface() == surface.wl_surface());
+        if is_active && let Some(active) = self.active_toplevel.take() {
+            self.pending_surface_events
+                .push(HostSurfaceEvent::Destroyed { surface: active.id });
+        }
     }
 }
 
@@ -323,7 +371,7 @@ impl ClientData for ClientState {
     }
 }
 
-fn copy_shm_buffer(buffer: &wl_buffer::WlBuffer) -> Result<ShmFrame> {
+fn copy_shm_buffer(buffer: &wl_buffer::WlBuffer) -> Result<SurfaceFrame> {
     if !cfg!(target_endian = "little") {
         bail!("the initial BGRA upload path requires a little-endian target");
     }
@@ -334,7 +382,11 @@ fn copy_shm_buffer(buffer: &wl_buffer::WlBuffer) -> Result<ShmFrame> {
     .context("buffer is not readable Wayland SHM")?
 }
 
-fn copy_shm_contents(pointer: *const u8, pool_length: usize, data: BufferData) -> Result<ShmFrame> {
+fn copy_shm_contents(
+    pointer: *const u8,
+    pool_length: usize,
+    data: BufferData,
+) -> Result<SurfaceFrame> {
     let width = usize::try_from(data.width).context("negative SHM width")?;
     let height = usize::try_from(data.height).context("negative SHM height")?;
     let stride = usize::try_from(data.stride).context("negative SHM stride")?;
@@ -366,10 +418,11 @@ fn copy_shm_contents(pointer: *const u8, pool_length: usize, data: BufferData) -
     let source = unsafe { std::slice::from_raw_parts(pointer.add(offset), span) };
     let pixels = normalize_bgra_rows(source, width, height, stride, data.format)?;
 
-    Ok(ShmFrame {
+    Ok(SurfaceFrame {
         width: u32::try_from(width).context("SHM width exceeds u32")?,
         height: u32::try_from(height).context("SHM height exceeds u32")?,
-        pixels,
+        bgra_pixels: pixels,
+        opaque: data.format == wl_shm::Format::Xrgb8888,
     })
 }
 

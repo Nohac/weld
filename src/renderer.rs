@@ -1,4 +1,8 @@
-//! Project-owned wgpu composition for the nested validation target.
+//! Project-owned wgpu presentation for the nested validation target.
+//!
+//! Bevy has already composed client surfaces and shell UI before this module
+//! receives a texture. This boundary owns only the host surface, final blit,
+//! presentation, and optional screenshot readback.
 
 use std::{
     fs::File,
@@ -12,8 +16,6 @@ use anyhow::{Context, Result, bail};
 use tracing::warn;
 use winit::event_loop::OwnedDisplayHandle;
 use winit::{dpi::PhysicalSize, window::Window};
-
-use crate::server::{ShmFrame, SurfaceUpdate};
 
 const CAPTURE_GPU_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -33,8 +35,6 @@ pub struct NestedRenderer {
     bind_group_layout: wgpu::BindGroupLayout,
     pipeline: wgpu::RenderPipeline,
     sampler: wgpu::Sampler,
-    client_texture: Option<wgpu::Texture>,
-    client_bind_group: Option<wgpu::BindGroup>,
 }
 
 impl NestedRenderer {
@@ -147,8 +147,6 @@ impl NestedRenderer {
             bind_group_layout,
             pipeline,
             sampler,
-            client_texture: None,
-            client_bind_group: None,
         })
     }
 
@@ -177,23 +175,9 @@ impl NestedRenderer {
         self.surface.configure(&self.device, &self.surface_config);
     }
 
-    pub fn apply_surface_update(&mut self, update: SurfaceUpdate) {
-        match update {
-            SurfaceUpdate::Frame(frame) => self.upload_client_frame(frame),
-            SurfaceUpdate::Removed => {
-                self.client_bind_group = None;
-                self.client_texture = None;
-            }
-        }
-    }
-
-    pub fn has_client_frame(&self) -> bool {
-        self.client_texture.is_some()
-    }
-
     pub fn render(
         &mut self,
-        overlay: &wgpu::TextureView,
+        composition: &wgpu::TextureView,
         capture_path: Option<&Path>,
     ) -> Result<FrameResult> {
         use wgpu::CurrentSurfaceTexture;
@@ -221,7 +205,8 @@ impl NestedRenderer {
         let output_view = surface_texture
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
-        let overlay_bind_group = self.create_bind_group("weld shell overlay bind group", overlay);
+        let composition_bind_group =
+            self.create_bind_group("weld Bevy composition bind group", composition);
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -231,7 +216,7 @@ impl NestedRenderer {
             &mut encoder,
             "weld compositor pass",
             &output_view,
-            &overlay_bind_group,
+            &composition_bind_group,
         );
 
         let capture = capture_path.map(|_| {
@@ -254,7 +239,7 @@ impl NestedRenderer {
                 &mut encoder,
                 "weld screenshot composition pass",
                 &view,
-                &overlay_bind_group,
+                &composition_bind_group,
             );
 
             let unpadded_bytes_per_row = self.surface_config.width * 4;
@@ -316,7 +301,7 @@ impl NestedRenderer {
         encoder: &mut wgpu::CommandEncoder,
         label: &'static str,
         target: &wgpu::TextureView,
-        overlay_bind_group: &wgpu::BindGroup,
+        composition_bind_group: &wgpu::BindGroup,
     ) {
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some(label),
@@ -340,11 +325,7 @@ impl NestedRenderer {
             multiview_mask: None,
         });
         pass.set_pipeline(&self.pipeline);
-        if let Some(client_bind_group) = self.client_bind_group.as_ref() {
-            pass.set_bind_group(0, client_bind_group, &[]);
-            pass.draw(0..3, 0..1);
-        }
-        pass.set_bind_group(0, overlay_bind_group, &[]);
+        pass.set_bind_group(0, composition_bind_group, &[]);
         pass.draw(0..3, 0..1);
     }
 
@@ -386,46 +367,6 @@ impl NestedRenderer {
             self.surface_config.height,
             &pixels,
         )
-    }
-
-    fn upload_client_frame(&mut self, frame: ShmFrame) {
-        let texture = self.device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("weld SHM client texture"),
-            size: wgpu::Extent3d {
-                width: frame.width,
-                height: frame.height,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Bgra8UnormSrgb,
-            usage: wgpu::TextureUsages::COPY_DST | wgpu::TextureUsages::TEXTURE_BINDING,
-            view_formats: &[],
-        });
-        self.queue.write_texture(
-            wgpu::TexelCopyTextureInfo {
-                texture: &texture,
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            &frame.pixels,
-            wgpu::TexelCopyBufferLayout {
-                offset: 0,
-                bytes_per_row: Some(frame.width * 4),
-                rows_per_image: Some(frame.height),
-            },
-            wgpu::Extent3d {
-                width: frame.width,
-                height: frame.height,
-                depth_or_array_layers: 1,
-            },
-        );
-        let texture_view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-        self.client_bind_group =
-            Some(self.create_bind_group("weld client bind group", &texture_view));
-        self.client_texture = Some(texture);
     }
 
     fn create_bind_group(&self, label: &'static str, view: &wgpu::TextureView) -> wgpu::BindGroup {

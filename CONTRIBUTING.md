@@ -27,17 +27,30 @@ Smithay features, vendored source, or local upstream patches.
 
 The first validation slice is a single package using the restricted `bevy`
 umbrella crate. Weld owns the outer winit window, Smithay server, event-loop
-orchestration, and final wgpu composition. Bevy supplies its app schedule,
-renderer, UI primitives, and BSN scene composition, rendering the shell into a
-Weld-owned texture through Bevy's manual render-device path. Do not enable
-Bevy's window runner or expand its features without a concrete need.
+orchestration, and final wgpu presentation. Bevy supplies its app schedule,
+renderer, UI primitives, and BSN scene composition, rendering both client
+surfaces and shell UI into a Weld-owned texture through Bevy's manual
+render-device path. Do not enable Bevy's window runner or expand its features
+without a concrete need.
 
 Smithay's renderer is deliberately outside this first slice. Weld currently
-accepts one xdg-toplevel backed by `wl_shm`, copies its pixels into an owned wgpu
-texture, draws that client layer, and then draws Bevy's transparent shell layer.
-The fixed output size, full redraws, missing input routing, and lack of damage,
-subsurface, popup, dmabuf, presentation-timing, VRR, and HDR support are explicit
-spike boundaries rather than settled compositor architecture.
+accepts one xdg-toplevel backed by `wl_shm`, copies its pixels into an owned
+Bevy image, and presents it through a project-owned `SurfaceNode` that composes
+with ordinary Bevy UI. The client is placed at its intrinsic size rather than
+stretched across the output. The final project-owned wgpu pass only presents or
+captures Bevy's completed texture. `ImageNode` is a provisional SHM backing,
+not the plugin-facing surface contract. The fixed output size, full redraws,
+missing input routing, and lack of damage, subsurface, popup, dmabuf,
+presentation-timing, VRR, and HDR support are explicit spike boundaries rather
+than settled compositor architecture.
+
+Ordinary nested rendering is event driven. Host and client-surface changes
+request a composition directly; Bevy systems that drive continuous visual
+changes should emit `bevy::window::RequestRedraw` while they remain active.
+Bevy primitives participate normally in a requested composition, but their
+mutation is not a universal automatic invalidation signal. Frame pacing for a
+continuous request stream is deferred; an active calloop source can currently
+wake the host sooner than the nominal frame interval.
 
 BSN and Bevy's UI work are references for composition, behavior, accessibility,
 and state synchronization. Do not add Feathers by default. If Weld adopts Bevy
@@ -59,6 +72,22 @@ cargo check
 cargo test <test-name>
 cargo clippy --all-targets --all-features -- -D warnings
 ```
+
+Debug builds apply light optimization to Weld and full optimization to
+dependencies, following Bevy's recommended development profile. They also link
+Bevy through the published `bevy_dylib` development helper so iterative links
+stay short. Run debug executables through Cargo, which supplies the runtime
+search path for `libbevy_dylib` and Rust's shared library. Invoking
+`target/debug/weldwm` directly requires an equivalent `LD_LIBRARY_PATH`.
+
+Release executables do not reference the development dylib and remain
+standalone. Cargo still builds an unused `libbevy_dylib` artifact because
+dependencies cannot vary by profile; do not make the helper optional, since
+that would require a feature flag for ordinary `cargo run`.
+
+Cargo uses Clang and LLD for Linux targets. The shared Rust shell already
+provides both tools, so run builds from that environment rather than depending
+on globally installed linkers.
 
 Run the nested compositor inside a development shell whose glibc is compatible
 with the running NixOS graphics drivers. The shared Rust shell is located at

@@ -1,5 +1,6 @@
 //! Nested validation host for Weld's Smithay, Bevy, and wgpu boundary.
 
+mod compositor;
 mod debug;
 mod renderer;
 mod server;
@@ -14,6 +15,11 @@ use std::{
 };
 
 use anyhow::{Context, Result, anyhow, bail};
+// Cargo features cannot vary by profile. Referencing Bevy's dynamic-linking
+// shim only when debug assertions are active makes plain `cargo run` use the
+// fast development path while release binaries remain standalone.
+#[cfg(debug_assertions)]
+use bevy_dylib as _;
 use clap::Parser;
 use renderer::NestedRenderer;
 use server::ServerState;
@@ -113,9 +119,11 @@ fn main() -> Result<()> {
     let mut server = ServerState::new(&mut calloop, display)?;
     let mut child = spawn_requested_client(&server, &arguments.client)?;
     let child_requested = !arguments.client.is_empty();
+    let remote_debug_enabled = arguments.remote_debug.is_some();
     let mut pending_capture = arguments
         .screenshot
         .map(|path| PendingCapture::startup(path, child_requested));
+    let mut frame_state = FrameState::default();
 
     info!(socket = ?server.socket_name, "Weld nested compositor is ready");
     loop {
@@ -133,36 +141,55 @@ fn main() -> Result<()> {
             break;
         }
 
+        if std::mem::take(&mut host.redraw_requested) {
+            frame_state.request_present();
+        }
         if let Some(size) = host.pending_size.take()
             && size.width > 0
             && size.height > 0
         {
             renderer.resize(size);
             shell.resize(size.width, size.height);
+            frame_state.request_composition();
         }
 
         calloop
             .dispatch(Some(FRAME_INTERVAL), &mut server)
             .context("Smithay calloop dispatch failed")?;
-        if let Some(update) = server.take_surface_update() {
-            renderer.apply_surface_update(update);
+        for event in server.take_surface_events() {
+            shell.enqueue_surface_event(event);
+            frame_state.request_composition();
+        }
+        if server.presentation_requested() {
+            frame_state.request_present();
         }
 
-        shell.update();
-        if shell.should_exit() {
-            if pending_capture
-                .as_ref()
-                .is_some_and(PendingCapture::is_startup)
-            {
-                bail!("Bevy exited before the startup screenshot completed");
+        if frame_state.composition_dirty() || remote_debug_enabled {
+            // Remote debugging remains a full paired Bevy update so extraction cannot miss
+            // main-world changes. Ordinary runs advance for host-driven visual changes or an
+            // explicit Bevy RequestRedraw from the preceding update.
+            shell.update();
+            let bevy_requested_redraw = shell.take_redraw_request();
+            frame_state.composition_rendered();
+            if bevy_requested_redraw {
+                frame_state.request_composition();
             }
-            break;
+            if shell.should_exit() {
+                if pending_capture
+                    .as_ref()
+                    .is_some_and(PendingCapture::is_startup)
+                {
+                    bail!("Bevy exited before the startup screenshot completed");
+                }
+                break;
+            }
         }
 
         if pending_capture.is_none()
             && let Some(request) = shell.take_capture_request()
         {
             pending_capture = Some(PendingCapture::remote(request.request_id, request.path));
+            frame_state.request_present();
         }
         if pending_capture
             .as_ref()
@@ -178,30 +205,36 @@ fn main() -> Result<()> {
         }
 
         let capture_path = pending_capture.as_ref().and_then(|capture| {
-            let client_ready = !capture.wait_for_client || renderer.has_client_frame();
+            let client_ready = !capture.wait_for_client || shell.has_surface_frame();
             client_ready.then_some(capture.path.as_path())
         });
-        let frame = renderer.render(shell.texture_view(), capture_path)?;
-        if frame.presented {
-            server.frame_presented();
+        if capture_path.is_some() {
+            frame_state.request_present();
         }
-        if let Some(capture_result) = frame.capture
-            && let Some(capture) = pending_capture.take()
-        {
-            match capture.remote_request_id {
-                Some(request_id) => {
-                    if let Err(error) = &capture_result {
-                        warn!(request_id, %error, "remote screenshot failed");
+        if frame_state.present_needed() {
+            let frame = renderer.render(shell.texture_view(), capture_path)?;
+            if frame.presented {
+                frame_state.presented();
+                server.frame_presented();
+            }
+            if let Some(capture_result) = frame.capture
+                && let Some(capture) = pending_capture.take()
+            {
+                match capture.remote_request_id {
+                    Some(request_id) => {
+                        if let Err(error) = &capture_result {
+                            warn!(request_id, %error, "remote screenshot failed");
+                        }
+                        shell.complete_capture(request_id, capture_result);
                     }
-                    shell.complete_capture(request_id, capture_result);
+                    None => match capture_result {
+                        Ok(()) => {
+                            info!(path = %capture.path.display(), "startup screenshot saved");
+                            return Ok(());
+                        }
+                        Err(error) => bail!("startup screenshot failed: {error}"),
+                    },
                 }
-                None => match capture_result {
-                    Ok(()) => {
-                        info!(path = %capture.path.display(), "startup screenshot saved");
-                        return Ok(());
-                    }
-                    Err(error) => bail!("startup screenshot failed: {error}"),
-                },
             }
         }
         server.flush_clients();
@@ -216,6 +249,49 @@ fn main() -> Result<()> {
 
     drop(child);
     Ok(())
+}
+
+#[derive(Debug)]
+struct FrameState {
+    composition_dirty: bool,
+    present_needed: bool,
+}
+
+impl Default for FrameState {
+    fn default() -> Self {
+        Self {
+            composition_dirty: true,
+            present_needed: true,
+        }
+    }
+}
+
+impl FrameState {
+    const fn composition_dirty(&self) -> bool {
+        self.composition_dirty
+    }
+
+    const fn present_needed(&self) -> bool {
+        self.present_needed
+    }
+
+    fn request_composition(&mut self) {
+        self.composition_dirty = true;
+        self.present_needed = true;
+    }
+
+    fn request_present(&mut self) {
+        self.present_needed = true;
+    }
+
+    fn composition_rendered(&mut self) {
+        self.composition_dirty = false;
+        self.present_needed = true;
+    }
+
+    fn presented(&mut self) {
+        self.present_needed = false;
+    }
 }
 
 struct PendingCapture {
@@ -269,6 +345,7 @@ fn nonzero_size(size: PhysicalSize<u32>) -> PhysicalSize<u32> {
 struct NestedHost {
     window: Option<Arc<Window>>,
     pending_size: Option<PhysicalSize<u32>>,
+    redraw_requested: bool,
     creation_error: Option<String>,
     close_requested: bool,
 }
@@ -303,7 +380,69 @@ impl ApplicationHandler for NestedHost {
                 event_loop.exit();
             }
             WindowEvent::Resized(size) => self.pending_size = Some(size),
+            WindowEvent::RedrawRequested => self.redraw_requested = true,
             _ => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::FrameState;
+
+    #[test]
+    fn initial_frame_requires_composition_and_presentation() {
+        let frame = FrameState::default();
+
+        assert!(frame.composition_dirty());
+        assert!(frame.present_needed());
+    }
+
+    #[test]
+    fn host_redraw_reuses_the_cached_composition() {
+        let mut frame = FrameState::default();
+        frame.composition_rendered();
+        frame.presented();
+
+        frame.request_present();
+
+        assert!(!frame.composition_dirty());
+        assert!(frame.present_needed());
+    }
+
+    #[test]
+    fn rendered_composition_remains_pending_until_presented() {
+        let mut frame = FrameState::default();
+
+        frame.composition_rendered();
+
+        assert!(!frame.composition_dirty());
+        assert!(frame.present_needed());
+    }
+
+    #[test]
+    fn next_frame_request_survives_presenting_the_current_composition() {
+        let mut frame = FrameState::default();
+        frame.composition_rendered();
+        frame.request_composition();
+
+        frame.presented();
+
+        assert!(frame.composition_dirty());
+        assert!(!frame.present_needed());
+    }
+
+    #[test]
+    fn successful_presentation_clears_only_the_pending_present() {
+        let mut frame = FrameState::default();
+        frame.composition_rendered();
+
+        frame.presented();
+        assert!(!frame.composition_dirty());
+        assert!(!frame.present_needed());
+
+        frame.request_composition();
+        assert!(frame.composition_dirty());
+        assert!(frame.present_needed());
     }
 }
