@@ -15,8 +15,9 @@ use bevy::{
         system::Res, world::World,
     },
     image::Image,
+    math::Rect,
     picking::PickingSystems,
-    prelude::{ImageNode, px},
+    prelude::{ImageNode, NodeImageMode, px},
     render::render_resource::{Extent3d, TextureDimension, TextureFormat},
     ui::{
         BorderRadius, BoxShadow, Display, GlobalZIndex, Node, Overflow, PositionType,
@@ -59,11 +60,37 @@ pub struct SurfaceNode {
 pub(crate) struct SurfaceFrame {
     pub width: u32,
     pub height: u32,
-    /// Integer `wl_surface` buffer scale. The node is sized to the quotient in
-    /// logical pixels while the image retains the full buffer resolution.
-    pub buffer_scale: u32,
+    pub view: SurfaceContentView,
     pub bgra_pixels: Vec<u8>,
     pub opaque: bool,
+}
+
+/// The part of a client buffer displayed by a surface and its logical extent.
+///
+/// Source coordinates are physical image pixels. Destination coordinates are
+/// Wayland surface-logical pixels and therefore also drive Bevy layout and
+/// client-local pointer coordinates.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct SurfaceContentView {
+    pub source_x: f32,
+    pub source_y: f32,
+    pub source_width: f32,
+    pub source_height: f32,
+    pub logical_width: f32,
+    pub logical_height: f32,
+}
+
+impl SurfaceContentView {
+    fn source_rect(self) -> Rect {
+        Rect::from_corners(
+            (self.source_x, self.source_y).into(),
+            (
+                self.source_x + self.source_width,
+                self.source_y + self.source_height,
+            )
+                .into(),
+        )
+    }
 }
 
 /// Owned input translated from the Smithay host into compositor ECS state.
@@ -75,6 +102,10 @@ pub(crate) enum HostSurfaceEvent {
     Frame {
         surface: SurfaceId,
         frame: SurfaceFrame,
+    },
+    ViewChanged {
+        surface: SurfaceId,
+        view: SurfaceContentView,
     },
     Unmapped {
         surface: SurfaceId,
@@ -157,6 +188,7 @@ struct SurfaceRegistry(HashMap<SurfaceId, SurfaceEntry>);
 struct SurfaceEntry {
     entity: Entity,
     image: Option<Handle<Image>>,
+    pixel_size: Option<(u32, u32)>,
     frame_ready: bool,
 }
 
@@ -190,6 +222,9 @@ fn apply_host_surface_events(world: &mut World) {
             }
             HostSurfaceEvent::Frame { surface, frame } => {
                 apply_surface_frame(world, &mut registry, surface, frame);
+            }
+            HostSurfaceEvent::ViewChanged { surface, view } => {
+                apply_surface_view(world, &mut registry, surface, view);
             }
             HostSurfaceEvent::Unmapped { surface } => {
                 unmap_surface(world, &mut registry, surface);
@@ -228,7 +263,7 @@ fn ensure_surface_entity(
 
     let entity = world
         .spawn((AppWindow { surface }, SurfaceNode { surface }))
-        .insert(ImageNode::default())
+        .insert(empty_surface_image_node())
         .insert(Node {
             display: Display::None,
             position_type: PositionType::Absolute,
@@ -253,6 +288,7 @@ fn ensure_surface_entity(
         SurfaceEntry {
             entity,
             image: None,
+            pixel_size: None,
             frame_ready: false,
         },
     );
@@ -270,7 +306,6 @@ fn apply_surface_frame(
             ?surface,
             width = frame.width,
             height = frame.height,
-            buffer_scale = frame.buffer_scale,
             "discarded an invalid surface frame"
         );
         return;
@@ -278,8 +313,6 @@ fn apply_surface_frame(
     let Some(entity) = ensure_surface_entity(world, registry, surface) else {
         return;
     };
-    let logical_width = frame.width as f32 / frame.buffer_scale as f32;
-    let logical_height = frame.height as f32 / frame.buffer_scale as f32;
     if !frame.opaque {
         unpremultiply_bgra(&mut frame.bgra_pixels);
     }
@@ -293,7 +326,6 @@ fn apply_surface_frame(
         .0
         .get(&surface)
         .and_then(|entry| entry.image.clone());
-    let mut replace_image_node = previous.is_none();
     let handle = {
         let Some(mut images) = world.get_resource_mut::<Assets<Image>>() else {
             warn!(
@@ -308,7 +340,6 @@ fn apply_surface_frame(
                 image.data = Some(frame.bgra_pixels);
                 handle
             } else {
-                replace_image_node = true;
                 images.add(surface_image(extent, frame.bgra_pixels))
             }
         } else {
@@ -324,17 +355,50 @@ fn apply_surface_frame(
         );
         return;
     };
-    if replace_image_node {
-        entity_mut.insert(ImageNode::new(handle.clone()));
-    }
+    entity_mut.insert(surface_image_node(handle.clone(), frame.view));
     if let Some(mut node) = entity_mut.get_mut::<Node>() {
         node.display = Display::Flex;
-        node.width = px(logical_width);
-        node.height = px(logical_height);
+        node.width = px(frame.view.logical_width);
+        node.height = px(frame.view.logical_height);
     }
     if let Some(entry) = registry.0.get_mut(&surface) {
         entry.image = Some(handle);
+        entry.pixel_size = Some((frame.width, frame.height));
         entry.frame_ready = true;
+    }
+}
+
+fn apply_surface_view(
+    world: &mut World,
+    registry: &mut SurfaceRegistry,
+    surface: SurfaceId,
+    view: SurfaceContentView,
+) {
+    let Some(entry) = registry.0.get(&surface) else {
+        warn!(?surface, "discarded a view change for an unknown surface");
+        return;
+    };
+    let (Some(handle), Some((width, height))) = (entry.image.clone(), entry.pixel_size) else {
+        warn!(?surface, "discarded a view change for an unmapped surface");
+        return;
+    };
+    if !validate_view(view, width, height) {
+        warn!(?surface, ?view, "discarded an invalid surface view");
+        return;
+    }
+    let entity = entry.entity;
+    let Ok(mut entity_mut) = world.get_entity_mut(entity) else {
+        registry.0.remove(&surface);
+        warn!(
+            ?surface,
+            "discarded a view change because its ECS entity disappeared"
+        );
+        return;
+    };
+    entity_mut.insert(surface_image_node(handle, view));
+    if let Some(mut node) = entity_mut.get_mut::<Node>() {
+        node.width = px(view.logical_width);
+        node.height = px(view.logical_height);
     }
 }
 
@@ -347,10 +411,11 @@ fn unmap_surface(world: &mut World, registry: &mut SurfaceRegistry, surface: Sur
     {
         images.remove(handle.id());
     }
+    entry.pixel_size = None;
     entry.frame_ready = false;
 
     if let Ok(mut entity) = world.get_entity_mut(entry.entity) {
-        entity.insert(ImageNode::default());
+        entity.insert(empty_surface_image_node());
         if let Some(mut node) = entity.get_mut::<Node>() {
             node.display = Display::None;
             node.width = Val::Auto;
@@ -384,8 +449,44 @@ fn validate_frame(frame: &SurfaceFrame) -> bool {
     };
     frame.width > 0
         && frame.height > 0
-        && frame.buffer_scale > 0
         && frame.bgra_pixels.len() == expected
+        && validate_view(frame.view, frame.width, frame.height)
+}
+
+fn validate_view(view: SurfaceContentView, width: u32, height: u32) -> bool {
+    let values = [
+        view.source_x,
+        view.source_y,
+        view.source_width,
+        view.source_height,
+        view.logical_width,
+        view.logical_height,
+    ];
+    values.into_iter().all(f32::is_finite)
+        && view.source_x >= 0.0
+        && view.source_y >= 0.0
+        && view.source_width > 0.0
+        && view.source_height > 0.0
+        && view.logical_width > 0.0
+        && view.logical_height > 0.0
+        && view.source_x + view.source_width <= width as f32
+        && view.source_y + view.source_height <= height as f32
+}
+
+fn surface_image_node(image: Handle<Image>, view: SurfaceContentView) -> ImageNode {
+    ImageNode {
+        image,
+        rect: Some(view.source_rect()),
+        image_mode: NodeImageMode::Stretch,
+        ..Default::default()
+    }
+}
+
+fn empty_surface_image_node() -> ImageNode {
+    ImageNode {
+        image_mode: NodeImageMode::Stretch,
+        ..Default::default()
+    }
 }
 
 fn surface_image(extent: Extent3d, pixels: Vec<u8>) -> Image {
@@ -436,9 +537,20 @@ mod tests {
         SurfaceFrame {
             width: 1,
             height: 1,
-            buffer_scale: 1,
+            view: full_view(1.0, 1.0),
             bgra_pixels: pixel.to_vec(),
             opaque: true,
+        }
+    }
+
+    fn full_view(width: f32, height: f32) -> SurfaceContentView {
+        SurfaceContentView {
+            source_x: 0.0,
+            source_y: 0.0,
+            source_width: width,
+            source_height: height,
+            logical_width: width,
+            logical_height: height,
         }
     }
 
@@ -467,6 +579,7 @@ mod tests {
         assert_eq!(window.surface, surface);
         assert_eq!(node.surface, surface);
         assert_eq!(layout.display, Display::Flex);
+        assert_eq!(image_node.image_mode, NodeImageMode::Stretch);
         let first_handle = image_node.image.clone();
 
         enqueue_surface_event(
@@ -614,7 +727,7 @@ mod tests {
                 frame: SurfaceFrame {
                     width: 1,
                     height: 1,
-                    buffer_scale: 1,
+                    view: full_view(1.0, 1.0),
                     bgra_pixels: vec![25, 50, 75, 128],
                     opaque: false,
                 },
@@ -648,7 +761,7 @@ mod tests {
                 frame: SurfaceFrame {
                     width: 1,
                     height: 1,
-                    buffer_scale: 1,
+                    view: full_view(1.0, 1.0),
                     bgra_pixels: vec![0; 3],
                     opaque: true,
                 },
@@ -671,7 +784,14 @@ mod tests {
                 frame: SurfaceFrame {
                     width: 1_280,
                     height: 960,
-                    buffer_scale: 2,
+                    view: SurfaceContentView {
+                        source_x: 0.0,
+                        source_y: 0.0,
+                        source_width: 1_280.0,
+                        source_height: 960.0,
+                        logical_width: 640.0,
+                        logical_height: 480.0,
+                    },
                     bgra_pixels: vec![0; 1_280 * 960 * 4],
                     opaque: true,
                 },
@@ -695,19 +815,101 @@ mod tests {
     }
 
     #[test]
-    fn rejects_a_zero_buffer_scale() {
+    fn view_changes_update_crop_and_logical_size_without_replacing_the_image() {
+        let (mut app, _) = test_app();
+        let surface = SurfaceId::new(23);
+        enqueue_surface_event(
+            app.world_mut(),
+            HostSurfaceEvent::Frame {
+                surface,
+                frame: SurfaceFrame {
+                    width: 4,
+                    height: 4,
+                    view: full_view(4.0, 4.0),
+                    bgra_pixels: vec![0; 4 * 4 * 4],
+                    opaque: true,
+                },
+            },
+        );
+        app.update();
+        let first_handle = {
+            let mut query = app.world_mut().query::<&ImageNode>();
+            query
+                .single(app.world())
+                .expect("surface should exist")
+                .image
+                .clone()
+        };
+        let view = SurfaceContentView {
+            source_x: 1.0,
+            source_y: 0.5,
+            source_width: 2.0,
+            source_height: 3.0,
+            logical_width: 8.0,
+            logical_height: 6.0,
+        };
+        enqueue_surface_event(
+            app.world_mut(),
+            HostSurfaceEvent::ViewChanged { surface, view },
+        );
+        app.update();
+
+        let mut query = app.world_mut().query::<(&ImageNode, &Node)>();
+        let (image_node, node) = query
+            .single(app.world())
+            .expect("updated surface should exist");
+        assert_eq!(image_node.image, first_handle);
+        assert_eq!(image_node.rect, Some(view.source_rect()));
+        assert_eq!(image_node.image_mode, NodeImageMode::Stretch);
+        assert_eq!(node.width, px(8.0));
+        assert_eq!(node.height, px(6.0));
+    }
+
+    #[test]
+    fn rejects_an_out_of_bounds_surface_crop() {
         let (mut app, _) = test_app();
         enqueue_surface_event(
             app.world_mut(),
             HostSurfaceEvent::Frame {
-                surface: SurfaceId::new(23),
+                surface: SurfaceId::new(29),
                 frame: SurfaceFrame {
                     width: 1,
                     height: 1,
-                    buffer_scale: 0,
+                    view: SurfaceContentView {
+                        source_x: 0.5,
+                        ..full_view(1.0, 1.0)
+                    },
                     bgra_pixels: vec![0; 4],
                     opaque: true,
                 },
+            },
+        );
+        app.update();
+
+        let mut query = app.world_mut().query::<&SurfaceNode>();
+        assert_eq!(query.iter(app.world()).count(), 0);
+    }
+
+    #[test]
+    fn rejects_nonpositive_logical_surface_sizes() {
+        assert!(!validate_view(
+            SurfaceContentView {
+                logical_width: 0.0,
+                ..full_view(1.0, 1.0)
+            },
+            1,
+            1,
+        ));
+    }
+
+    #[test]
+    fn view_changes_do_not_create_unknown_surfaces() {
+        let (mut app, _) = test_app();
+        enqueue_surface_event(
+            app.world_mut(),
+            HostSurfaceEvent::ViewChanged {
+                surface: SurfaceId::new(31),
+                view: full_view(1.0, 1.0),
             },
         );
         app.update();

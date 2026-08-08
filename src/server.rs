@@ -19,15 +19,18 @@ use smithay::{
         wayland_server::{
             Client, Display, DisplayHandle, Resource,
             backend::{ClientData, ClientId, DisconnectReason},
-            protocol::{wl_buffer, wl_seat, wl_shm, wl_surface::WlSurface},
+            protocol::{wl_buffer, wl_output, wl_seat, wl_shm, wl_surface::WlSurface},
         },
     },
-    utils::{Logical, SERIAL_COUNTER, Serial, Size, Transform},
+    utils::{Buffer as BufferCoord, Logical, Rectangle, SERIAL_COUNTER, Serial, Size, Transform},
     wayland::{
         buffer::BufferHandler,
         compositor::{
             BufferAssignment, CompositorClientState, CompositorHandler, CompositorState,
             SurfaceAttributes, send_surface_state, with_states,
+        },
+        fractional_scale::{
+            FractionalScaleHandler, FractionalScaleManagerState, with_fractional_scale,
         },
         output::{OutputHandler, OutputManagerState},
         selection::{
@@ -41,12 +44,15 @@ use smithay::{
         },
         shm::{BufferData, ShmHandler, ShmState, with_buffer_contents},
         socket::ListeningSocketSource,
+        viewporter::{ViewportCachedState, ViewporterState, ensure_viewport_valid},
     },
 };
 use tracing::{debug, info, warn};
 
 use crate::{
-    compositor::{HostSurfaceEvent, SurfaceEventQueue, SurfaceFrame, SurfaceId},
+    compositor::{
+        HostSurfaceEvent, SurfaceContentView, SurfaceEventQueue, SurfaceFrame, SurfaceId,
+    },
     input::{SeatInputEffect, SeatInputEffectKind, SurfaceHit},
     raw_input::{InputPosition, RawScrollFrame, RawScrollSource},
 };
@@ -112,6 +118,16 @@ impl NestedOutputMetrics {
 struct ActiveToplevel {
     surface: ToplevelSurface,
     id: SurfaceId,
+    buffer: Option<SurfaceBufferMetadata>,
+    view: Option<SurfaceContentView>,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct SurfaceBufferMetadata {
+    width: u32,
+    height: u32,
+    scale: u32,
+    transform: wl_output::Transform,
 }
 
 /// Smithay state kept outside Bevy's ECS world.
@@ -121,6 +137,8 @@ pub struct ServerState {
     compositor_state: CompositorState,
     xdg_shell_state: XdgShellState,
     shm_state: ShmState,
+    _viewporter_state: ViewporterState,
+    _fractional_scale_manager_state: FractionalScaleManagerState,
     _output_manager_state: OutputManagerState,
     seat_state: SeatState<Self>,
     data_device_state: DataDeviceState,
@@ -149,6 +167,9 @@ impl ServerState {
         let compositor_state = CompositorState::new::<Self>(&display_handle);
         let xdg_shell_state = XdgShellState::new::<Self>(&display_handle);
         let shm_state = ShmState::new::<Self>(&display_handle, []);
+        let viewporter_state = ViewporterState::new::<Self>(&display_handle);
+        let fractional_scale_manager_state =
+            FractionalScaleManagerState::new::<Self>(&display_handle);
         let output_manager_state = OutputManagerState::new_with_xdg_output::<Self>(&display_handle);
         let data_device_state = DataDeviceState::new::<Self>(&display_handle);
 
@@ -215,6 +236,8 @@ impl ServerState {
             compositor_state,
             xdg_shell_state,
             shm_state,
+            _viewporter_state: viewporter_state,
+            _fractional_scale_manager_state: fractional_scale_manager_state,
             _output_manager_state: output_manager_state,
             seat_state,
             data_device_state,
@@ -248,10 +271,7 @@ impl ServerState {
         else {
             return;
         };
-        let scale = self.output.current_scale().integer_scale();
-        with_states(surface, |states| {
-            send_surface_state(surface, states, scale, Transform::Normal);
-        });
+        send_preferred_surface_scale(&self.output, surface);
     }
 
     pub fn take_surface_events(&mut self) -> impl Iterator<Item = HostSurfaceEvent> + '_ {
@@ -519,35 +539,108 @@ impl ServerState {
     }
 
     fn handle_root_commit(&mut self, surface: &WlSurface) {
-        let Some(surface_id) = self.active_toplevel.as_ref().map(|toplevel| toplevel.id) else {
+        let Some((surface_id, retained_buffer, previous_view)) = self
+            .active_toplevel
+            .as_ref()
+            .map(|toplevel| (toplevel.id, toplevel.buffer, toplevel.view))
+        else {
             return;
         };
-        let (assignment, buffer_scale) = with_states(surface, |states| {
+        let (assignment, buffer_scale, buffer_transform) = with_states(surface, |states| {
             let mut attributes = states.cached_state.get::<SurfaceAttributes>();
             let current = attributes.current();
-            (current.buffer.take(), current.buffer_scale)
+            (
+                current.buffer.take(),
+                current.buffer_scale,
+                current.buffer_transform,
+            )
         });
 
         match assignment {
             Some(BufferAssignment::NewBuffer(buffer)) => {
-                let copied = copy_shm_buffer(&buffer, buffer_scale);
+                let copied = copy_shm_buffer(&buffer).and_then(|copied| {
+                    let metadata = SurfaceBufferMetadata {
+                        width: copied.width,
+                        height: copied.height,
+                        scale: checked_buffer_scale(buffer_scale)?,
+                        transform: buffer_transform,
+                    };
+                    let view = surface_content_view(surface, metadata)?;
+                    Ok((copied, metadata, view))
+                });
                 buffer.release();
                 match copied {
-                    Ok(frame) => self.pending_surface_events.push(HostSurfaceEvent::Frame {
-                        surface: surface_id,
-                        frame,
-                    }),
-                    Err(error) => warn!(%error, "ignored an unsupported client buffer"),
+                    Ok((copied, metadata, view)) => {
+                        if let Some(active) = self.active_toplevel.as_mut() {
+                            active.buffer = Some(metadata);
+                            active.view = Some(view);
+                        }
+                        self.pending_surface_events.push(HostSurfaceEvent::Frame {
+                            surface: surface_id,
+                            frame: SurfaceFrame {
+                                width: copied.width,
+                                height: copied.height,
+                                view,
+                                bgra_pixels: copied.bgra_pixels,
+                                opaque: copied.opaque,
+                            },
+                        });
+                    }
+                    Err(error) => {
+                        if let Some(active) = self.active_toplevel.as_mut() {
+                            active.buffer = None;
+                            active.view = None;
+                        }
+                        warn!(%error, "ignored an unsupported client buffer");
+                    }
                 }
             }
             Some(BufferAssignment::Removed) => {
+                if let Some(active) = self.active_toplevel.as_mut() {
+                    active.buffer = None;
+                    active.view = None;
+                }
                 self.clear_input_focus_for_surface(surface, self.event_time());
                 self.pending_surface_events
                     .push(HostSurfaceEvent::Unmapped {
                         surface: surface_id,
                     });
             }
-            None => {}
+            None => {
+                let Some(retained_buffer) = retained_buffer else {
+                    return;
+                };
+                let metadata = match checked_buffer_scale(buffer_scale) {
+                    Ok(scale) => SurfaceBufferMetadata {
+                        scale,
+                        transform: buffer_transform,
+                        ..retained_buffer
+                    },
+                    Err(error) => {
+                        warn!(%error, "ignored an invalid client surface scale");
+                        return;
+                    }
+                };
+                match surface_content_view(surface, metadata) {
+                    Ok(view) if previous_view != Some(view) => {
+                        if let Some(active) = self.active_toplevel.as_mut() {
+                            active.buffer = Some(metadata);
+                            active.view = Some(view);
+                        }
+                        self.pending_surface_events
+                            .push(HostSurfaceEvent::ViewChanged {
+                                surface: surface_id,
+                                view,
+                            });
+                    }
+                    Ok(_) => {
+                        if let Some(active) = self.active_toplevel.as_mut() {
+                            active.buffer = Some(metadata);
+                        }
+                    }
+                    Err(error) => warn!(%error, "ignored an invalid client surface view"),
+                }
+            }
         }
     }
 
@@ -578,6 +671,21 @@ fn install_output_metrics(
     }
 }
 
+fn send_preferred_surface_scale(output: &Output, surface: &WlSurface) {
+    let output_scale = output.current_scale();
+    with_states(surface, |states| {
+        send_surface_state(
+            surface,
+            states,
+            output_scale.integer_scale(),
+            Transform::Normal,
+        );
+        with_fractional_scale(states, |fractional_scale| {
+            fractional_scale.set_preferred_scale(output_scale.fractional_scale());
+        });
+    });
+}
+
 impl BufferHandler for ServerState {
     fn buffer_destroyed(&mut self, _buffer: &wl_buffer::WlBuffer) {}
 }
@@ -585,6 +693,15 @@ impl BufferHandler for ServerState {
 impl ShmHandler for ServerState {
     fn shm_state(&self) -> &ShmState {
         &self.shm_state
+    }
+}
+
+impl FractionalScaleHandler for ServerState {
+    fn new_fractional_scale(&mut self, surface: WlSurface) {
+        // The initial slice tracks only the active root across later output
+        // changes. Every surface still receives the current scale when it
+        // creates its fractional-scale object.
+        send_preferred_surface_scale(&self.output, &surface);
     }
 }
 
@@ -637,16 +754,18 @@ impl XdgShellHandler for ServerState {
             state.states.set(xdg_toplevel::State::Activated);
         });
         self.output.enter(surface.wl_surface());
-        let scale = self.output.current_scale().integer_scale();
-        with_states(surface.wl_surface(), |states| {
-            send_surface_state(surface.wl_surface(), states, scale, Transform::Normal);
-        });
+        send_preferred_surface_scale(&self.output, surface.wl_surface());
         surface.send_configure();
         let id = self.allocate_surface_id();
         self.pending_surface_events
             .push(HostSurfaceEvent::Mapped { surface: id });
         info!(surface_id = id.raw(), "mapped a nested xdg-toplevel");
-        self.active_toplevel = Some(ActiveToplevel { surface, id });
+        self.active_toplevel = Some(ActiveToplevel {
+            surface,
+            id,
+            buffer: None,
+            view: None,
+        });
         self.presentation_requested = true;
     }
 
@@ -772,14 +891,20 @@ fn smithay_axis_frame(axis: RawScrollFrame, time: u32) -> Option<AxisFrame> {
     Some(frame)
 }
 
-fn copy_shm_buffer(buffer: &wl_buffer::WlBuffer, buffer_scale: i32) -> Result<SurfaceFrame> {
+struct CopiedShmBuffer {
+    width: u32,
+    height: u32,
+    bgra_pixels: Vec<u8>,
+    opaque: bool,
+}
+
+fn copy_shm_buffer(buffer: &wl_buffer::WlBuffer) -> Result<CopiedShmBuffer> {
     if !cfg!(target_endian = "little") {
         bail!("the initial BGRA upload path requires a little-endian target");
     }
-    let buffer_scale = checked_buffer_scale(buffer_scale)?;
 
     with_buffer_contents(buffer, |pointer, pool_length, data| {
-        copy_shm_contents(pointer, pool_length, data, buffer_scale)
+        copy_shm_contents(pointer, pool_length, data)
     })
     .context("buffer is not readable Wayland SHM")?
 }
@@ -788,8 +913,7 @@ fn copy_shm_contents(
     pointer: *const u8,
     pool_length: usize,
     data: BufferData,
-    buffer_scale: u32,
-) -> Result<SurfaceFrame> {
+) -> Result<CopiedShmBuffer> {
     let width = usize::try_from(data.width).context("negative SHM width")?;
     let height = usize::try_from(data.height).context("negative SHM height")?;
     let stride = usize::try_from(data.stride).context("negative SHM stride")?;
@@ -821,13 +945,95 @@ fn copy_shm_contents(
     let source = unsafe { std::slice::from_raw_parts(pointer.add(offset), span) };
     let pixels = normalize_bgra_rows(source, width, height, stride, data.format)?;
 
-    Ok(SurfaceFrame {
+    Ok(CopiedShmBuffer {
         width: u32::try_from(width).context("SHM width exceeds u32")?,
         height: u32::try_from(height).context("SHM height exceeds u32")?,
-        buffer_scale,
         bgra_pixels: pixels,
         opaque: data.format == wl_shm::Format::Xrgb8888,
     })
+}
+
+fn surface_content_view(
+    surface: &WlSurface,
+    metadata: SurfaceBufferMetadata,
+) -> Result<SurfaceContentView> {
+    if metadata.transform != wl_output::Transform::Normal {
+        bail!(
+            "unsupported client buffer transform {:?}; the initial SHM path supports only normal",
+            metadata.transform
+        );
+    }
+    let width = i32::try_from(metadata.width).context("client buffer width exceeds i32")?;
+    let height = i32::try_from(metadata.height).context("client buffer height exceeds i32")?;
+    let scale = i32::try_from(metadata.scale).context("client buffer scale exceeds i32")?;
+    let logical_buffer_size =
+        Size::<i32, BufferCoord>::from((width, height)).to_logical(scale, Transform::Normal);
+
+    with_states(surface, |states| {
+        if !ensure_viewport_valid(states, logical_buffer_size) {
+            bail!("client viewport source extends outside its buffer");
+        }
+        let viewport = {
+            let mut cached = states.cached_state.get::<ViewportCachedState>();
+            *cached.current()
+        };
+        translate_surface_content_view(metadata, logical_buffer_size, viewport)
+    })
+}
+
+fn translate_surface_content_view(
+    metadata: SurfaceBufferMetadata,
+    logical_buffer_size: Size<i32, Logical>,
+    viewport: ViewportCachedState,
+) -> Result<SurfaceContentView> {
+    if metadata.transform != wl_output::Transform::Normal {
+        bail!("only normal client buffer transforms can be translated");
+    }
+    let full_source = Rectangle::from_size(logical_buffer_size.to_f64());
+    let source = viewport.src.unwrap_or(full_source);
+    let destination = viewport.size().unwrap_or(logical_buffer_size);
+    let source_right = source.loc.x + source.size.w;
+    let source_bottom = source.loc.y + source.size.h;
+    if !source.loc.x.is_finite()
+        || !source.loc.y.is_finite()
+        || !source.size.w.is_finite()
+        || !source.size.h.is_finite()
+        || source.loc.x < 0.0
+        || source.loc.y < 0.0
+        || source.size.w <= 0.0
+        || source.size.h <= 0.0
+        || source_right > f64::from(logical_buffer_size.w)
+        || source_bottom > f64::from(logical_buffer_size.h)
+        || destination.w <= 0
+        || destination.h <= 0
+    {
+        bail!("invalid client surface viewport geometry");
+    }
+
+    let scale = f64::from(metadata.scale);
+    let view = SurfaceContentView {
+        source_x: (source.loc.x * scale) as f32,
+        source_y: (source.loc.y * scale) as f32,
+        source_width: (source.size.w * scale) as f32,
+        source_height: (source.size.h * scale) as f32,
+        logical_width: destination.w as f32,
+        logical_height: destination.h as f32,
+    };
+    let values = [
+        view.source_x,
+        view.source_y,
+        view.source_width,
+        view.source_height,
+        view.logical_width,
+        view.logical_height,
+    ];
+    if !values.into_iter().all(f32::is_finite)
+        || view.source_x + view.source_width > metadata.width as f32
+        || view.source_y + view.source_height > metadata.height as f32
+    {
+        bail!("client surface viewport cannot be represented by the SHM image path");
+    }
+    Ok(view)
 }
 
 fn checked_buffer_scale(buffer_scale: i32) -> Result<u32> {
@@ -880,13 +1086,24 @@ smithay::delegate_dispatch2!(ServerState);
 #[cfg(test)]
 mod tests {
     use super::{
-        NestedOutputMetrics, checked_buffer_scale, install_output_metrics, normalize_bgra_rows,
-        smithay_axis_frame,
+        NestedOutputMetrics, SurfaceBufferMetadata, checked_buffer_scale, install_output_metrics,
+        normalize_bgra_rows, smithay_axis_frame, translate_surface_content_view,
     };
+    use crate::compositor::SurfaceContentView;
     use crate::raw_input::{RawScrollFrame, RawScrollSource};
     use smithay::output::{Output, PhysicalProperties, Subpixel};
-    use smithay::reexports::wayland_server::protocol::wl_shm;
-    use smithay::utils::Transform;
+    use smithay::reexports::wayland_server::protocol::{wl_output, wl_shm};
+    use smithay::utils::{Logical, Rectangle, Size, Transform};
+    use smithay::wayland::viewporter::ViewportCachedState;
+
+    fn metadata(width: u32, height: u32, scale: u32) -> SurfaceBufferMetadata {
+        SurfaceBufferMetadata {
+            width,
+            height,
+            scale,
+            transform: wl_output::Transform::Normal,
+        }
+    }
 
     #[test]
     fn nested_output_metrics_preserve_physical_mode_and_fractional_scale() {
@@ -945,6 +1162,94 @@ mod tests {
         assert_eq!(checked_buffer_scale(2).expect("valid scale"), 2);
         assert!(checked_buffer_scale(0).is_err());
         assert!(checked_buffer_scale(-1).is_err());
+    }
+
+    #[test]
+    fn scale_only_surface_view_uses_the_full_buffer() {
+        let view = translate_surface_content_view(
+            metadata(1280, 960, 2),
+            Size::<i32, Logical>::from((640, 480)),
+            ViewportCachedState::default(),
+        )
+        .expect("valid scaled buffer");
+
+        assert_eq!(
+            view,
+            SurfaceContentView {
+                source_x: 0.0,
+                source_y: 0.0,
+                source_width: 1280.0,
+                source_height: 960.0,
+                logical_width: 640.0,
+                logical_height: 480.0,
+            }
+        );
+    }
+
+    #[test]
+    fn viewport_destination_defines_surface_logical_size() {
+        let view = translate_surface_content_view(
+            metadata(800, 600, 1),
+            Size::<i32, Logical>::from((800, 600)),
+            ViewportCachedState {
+                src: None,
+                dst: Some((640, 480).into()),
+            },
+        )
+        .expect("valid fractional-scale viewport");
+
+        assert_eq!(view.logical_width, 640.0);
+        assert_eq!(view.logical_height, 480.0);
+        assert_eq!(view.source_width, 800.0);
+        assert_eq!(view.source_height, 600.0);
+    }
+
+    #[test]
+    fn viewport_source_is_converted_from_logical_to_physical_pixels() {
+        let view = translate_surface_content_view(
+            metadata(1280, 960, 2),
+            Size::<i32, Logical>::from((640, 480)),
+            ViewportCachedState {
+                src: Some(Rectangle::new((10.0, 20.0).into(), (100.0, 50.0).into())),
+                dst: Some((200, 100).into()),
+            },
+        )
+        .expect("valid cropped viewport");
+
+        assert_eq!(view.source_x, 20.0);
+        assert_eq!(view.source_y, 40.0);
+        assert_eq!(view.source_width, 200.0);
+        assert_eq!(view.source_height, 100.0);
+        assert_eq!(view.logical_width, 200.0);
+        assert_eq!(view.logical_height, 100.0);
+    }
+
+    #[test]
+    fn rejects_out_of_bounds_viewport_sources() {
+        let result = translate_surface_content_view(
+            metadata(1280, 960, 2),
+            Size::<i32, Logical>::from((640, 480)),
+            ViewportCachedState {
+                src: Some(Rectangle::new((600.0, 0.0).into(), (100.0, 50.0).into())),
+                dst: Some((100, 50).into()),
+            },
+        );
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn rejects_non_normal_buffer_transforms() {
+        let result = translate_surface_content_view(
+            SurfaceBufferMetadata {
+                transform: wl_output::Transform::_90,
+                ..metadata(640, 480, 1)
+            },
+            Size::<i32, Logical>::from((480, 640)),
+            ViewportCachedState::default(),
+        );
+
+        assert!(result.is_err());
     }
 
     #[test]

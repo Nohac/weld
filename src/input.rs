@@ -664,9 +664,10 @@ fn resolve_pick_candidates(
     Some(SurfaceHit {
         surface,
         // `size` is surface-logical because SurfaceCompositorPlugin explicitly
-        // sizes each node to buffer dimensions / wl_surface buffer scale. That
-        // invariant keeps Bevy transforms and clipping composable while the
-        // protocol receives coordinates in the client's logical space.
+        // sizes each node to its committed viewport destination (or the full
+        // logical buffer when no viewport exists). That invariant keeps Bevy
+        // transforms and clipping composable while the protocol receives
+        // coordinates in the client's logical space.
         local_position: InputPosition::new(
             (position.x + 0.5) * f64::from(size.x),
             (position.y + 0.5) * f64::from(size.y),
