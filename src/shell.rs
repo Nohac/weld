@@ -17,7 +17,7 @@ use bevy::{
         Node, PositionType, Scene, UiRect, UiTargetCamera, px,
     },
     render::{
-        RenderPlugin,
+        RenderApp, RenderPlugin,
         renderer::{
             RenderAdapter, RenderAdapterInfo, RenderDevice, RenderInstance, RenderQueue,
             WgpuWrapper,
@@ -26,13 +26,14 @@ use bevy::{
         texture::{ManualTextureView, ManualTextureViews},
     },
     scene::{WorldSceneExt, bsn},
+    time::TimeReceiver,
     ui::UiScale,
     window::{ExitCondition, RequestRedraw, WindowPlugin},
 };
 
 use crate::compositor::{
     CompositorCamera, HostSurfaceEvent, SurfaceCompositorPlugin, enqueue_surface_event,
-    has_surface_frame,
+    has_surface_frame, set_composition_advance,
 };
 use crate::debug::{
     CaptureRequest, DebugProtocolPlugin, complete_capture, configure_remote_debug,
@@ -101,6 +102,10 @@ impl ShellRenderer {
         }
         app.finish();
         app.cleanup();
+        app.get_sub_app(RenderApp).context(
+            "Bevy RenderPlugin did not create the non-pipelined RenderApp required by Weld",
+        )?;
+        disconnect_render_time(&mut app)?;
 
         let (composition_texture, composition_view) =
             create_composition_target(device, size.x, size.y);
@@ -138,20 +143,26 @@ impl ShellRenderer {
         })
     }
 
-    pub fn update(&mut self, input_time: u32) {
+    /// Advance Bevy policy and input without necessarily extracting or rendering.
+    ///
+    /// The host must call this exactly once for each logical advance. Client
+    /// surface events are applied only when `composition_advance` is true, so
+    /// their asset events remain paired with [`Self::render_composition`].
+    /// Bevy time advances here at input/policy rate rather than render rate;
+    /// systems must use time deltas instead of assuming one update per frame.
+    pub fn advance_main(&mut self, input_time: u32, composition_advance: bool) -> bool {
         set_input_update_time(self.app.world_mut(), input_time);
-        self.app.update();
+        set_composition_advance(self.app.world_mut(), composition_advance);
+        advance_main_app(&mut self.app, &mut self.redraw_requests)
     }
 
-    /// Consume redraw requests produced by the preceding [`App::update`].
+    /// Extract the preceding main-world advance and render Weld's composition.
     ///
-    /// The host must call this exactly once after every update so requests are
-    /// neither dropped nor replayed across event-loop iterations.
-    pub fn take_redraw_request(&mut self) -> bool {
-        let Some(messages) = self.app.world().get_resource::<Messages<RequestRedraw>>() else {
-            return false;
-        };
-        self.redraw_requests.take(messages)
+    /// Construction pins Weld to Bevy's current non-pipelined [`RenderApp`].
+    /// Main-world trackers are retained across input-only advances and cleared
+    /// only after extraction has observed them.
+    pub fn render_composition(&mut self) {
+        render_composition_app(&mut self.app);
     }
 
     pub fn should_exit(&self) -> bool {
@@ -198,6 +209,33 @@ impl ShellRenderer {
     pub fn complete_capture(&mut self, request_id: u64, result: Result<(), String>) {
         complete_capture(self.app.world_mut(), request_id, result);
     }
+}
+
+fn advance_main_app(app: &mut App, redraw_requests: &mut RedrawRequests) -> bool {
+    app.main_mut().run_default_schedule();
+    let Some(messages) = app.world().get_resource::<Messages<RequestRedraw>>() else {
+        return false;
+    };
+    redraw_requests.take(messages)
+}
+
+fn disconnect_render_time(app: &mut App) -> Result<()> {
+    // Weld advances the non-pipelined main world independently of RenderApp,
+    // so Automatic time must use its documented main-world clock fallback.
+    // Dropping the sole receiver is load-bearing: Bevy 0.19's render-side
+    // send_time explicitly ignores Disconnected. Re-verify both assumptions
+    // when updating Bevy.
+    let receiver = app
+        .world_mut()
+        .remove_resource::<TimeReceiver>()
+        .context("Bevy RenderPlugin did not register its main-world TimeReceiver")?;
+    drop(receiver);
+    Ok(())
+}
+
+fn render_composition_app(app: &mut App) {
+    app.update_sub_app_by_label(RenderApp);
+    app.world_mut().clear_trackers();
 }
 
 struct RedrawRequests(MessageCursor<RequestRedraw>);
@@ -268,20 +306,36 @@ fn shell_overlay(_camera: Entity) -> impl Scene {
 #[cfg(test)]
 mod tests {
     use bevy::{
-        app::Update,
-        ecs::message::MessageWriter,
+        app::{SubApp, Update},
+        ecs::{
+            message::MessageWriter,
+            resource::Resource,
+            schedule::{Schedule, ScheduleLabel},
+            system::ResMut,
+        },
+        render::RenderApp,
+        time::{Real, Time, TimePlugin, TimeReceiver, create_time_channels},
         window::{ExitCondition, RequestRedraw, WindowPlugin},
     };
 
-    use super::{App, Messages, RedrawRequests};
+    use super::{
+        App, Messages, RedrawRequests, advance_main_app, disconnect_render_time,
+        render_composition_app,
+    };
+
+    #[derive(Resource, Default)]
+    struct RenderCount(u32);
 
     fn request_redraw(mut requests: MessageWriter<RequestRedraw>) {
         requests.write(RequestRedraw);
         requests.write(RequestRedraw);
     }
 
-    #[test]
-    fn consumes_redraw_requests_once_after_each_app_update() {
+    fn count_render(mut count: ResMut<RenderCount>) {
+        count.0 += 1;
+    }
+
+    fn test_app() -> (App, RedrawRequests) {
         let mut app = App::new();
         app.add_plugins(WindowPlugin {
             primary_window: None,
@@ -289,15 +343,61 @@ mod tests {
             ..Default::default()
         })
         .add_systems(Update, request_redraw);
-        let mut requests = RedrawRequests::new(app.world().resource::<Messages<RequestRedraw>>());
+        let requests = RedrawRequests::new(app.world().resource::<Messages<RequestRedraw>>());
+        (app, requests)
+    }
+
+    #[test]
+    fn consumes_redraw_requests_once_after_each_app_update() {
+        let (mut app, mut requests) = test_app();
 
         // The full Weld app may retain messages longer through TimePlugin; this
         // minimal app exercises the shorter default per-update retention.
-        app.update();
-        assert!(requests.take(app.world().resource::<Messages<RequestRedraw>>()));
+        assert!(advance_main_app(&mut app, &mut requests));
         assert!(!requests.take(app.world().resource::<Messages<RequestRedraw>>()));
 
+        assert!(advance_main_app(&mut app, &mut requests));
+    }
+
+    #[test]
+    fn main_advance_skips_render_app_until_composition() {
+        let (mut app, mut requests) = test_app();
+        let mut render_app = SubApp::new();
+        render_app
+            .world_mut()
+            .insert_resource(RenderCount::default());
+        let mut render_schedule = Schedule::new(Update);
+        render_schedule.add_systems(count_render);
+        render_app.world_mut().add_schedule(render_schedule);
+        render_app.update_schedule = Some(Update.intern());
+        app.insert_sub_app(RenderApp, render_app);
+
+        advance_main_app(&mut app, &mut requests);
+        assert_eq!(
+            app.sub_app(RenderApp).world().resource::<RenderCount>().0,
+            0
+        );
+
+        render_composition_app(&mut app);
+        assert_eq!(
+            app.sub_app(RenderApp).world().resource::<RenderCount>().0,
+            1
+        );
+    }
+
+    #[test]
+    fn disconnected_render_time_uses_the_main_world_clock_fallback() {
+        let mut app = App::new();
+        app.add_plugins(TimePlugin);
+        let (_sender, receiver) = create_time_channels();
+        app.insert_resource(receiver);
+
+        disconnect_render_time(&mut app).expect("test receiver should be removed");
+        assert!(!app.world().contains_resource::<TimeReceiver>());
         app.update();
-        assert!(requests.take(app.world().resource::<Messages<RequestRedraw>>()));
+        let first_elapsed = app.world().resource::<Time<Real>>().elapsed();
+        app.update();
+        let second_elapsed = app.world().resource::<Time<Real>>().elapsed();
+        assert!(second_elapsed > first_elapsed);
     }
 }

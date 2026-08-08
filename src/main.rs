@@ -186,8 +186,9 @@ fn main() -> Result<()> {
             break;
         }
 
+        let input_pending = !host.input_events.is_empty();
         let host_work_drained = host_work_drained(
-            !host.input_events.is_empty(),
+            input_pending,
             host.pending_size.is_some(),
             host.pending_scale_factor.is_some(),
         );
@@ -196,10 +197,6 @@ fn main() -> Result<()> {
         }
         for event in host.input_events.drain(..) {
             shell.enqueue_input_event(event);
-            // Keep extraction paired with the main-world input update. A future
-            // input-only schedule may remove this speculative composition after
-            // its rendering-state invariants are proven.
-            frame_state.request_composition();
         }
         let pending_size = host.pending_size.take();
         let pending_scale_factor = host.pending_scale_factor.take();
@@ -234,7 +231,14 @@ fn main() -> Result<()> {
         }
 
         calloop
-            .dispatch(Some(dispatch_timeout(host_work_drained)), &mut server)
+            .dispatch(
+                Some(dispatch_timeout(
+                    host_work_drained,
+                    &frame_state,
+                    Instant::now(),
+                )),
+                &mut server,
+            )
             .context("Smithay calloop dispatch failed")?;
         for event in server.take_surface_events() {
             shell.enqueue_surface_event(event);
@@ -244,17 +248,25 @@ fn main() -> Result<()> {
             frame_state.request_present();
         }
 
-        if frame_state.composition_dirty() || remote_debug_enabled {
-            // Remote debugging remains a full paired Bevy update so extraction cannot miss
-            // main-world changes. Ordinary runs advance for host-driven visual changes or an
-            // explicit Bevy RequestRedraw from the preceding update.
-            shell.update(started_at.elapsed().as_millis() as u32);
-            let bevy_requested_redraw = shell.take_redraw_request();
+        let update_now = Instant::now();
+        let work = iteration_work(
+            input_pending,
+            frame_state.composition_due(update_now),
+            remote_debug_enabled,
+        );
+        let mut request_next_composition = false;
+        if work.advance_main {
+            // `composition_advance` is intentionally the one shared predicate
+            // for applying client surfaces and running RenderApp. Never
+            // recompute the deadline between these two operations.
+            let bevy_requested_redraw = shell.advance_main(
+                started_at.elapsed().as_millis() as u32,
+                work.composition_advance,
+            );
             for effect in shell.take_input_effects() {
                 server.apply_input_effect(effect);
             }
-            frame_state.composition_rendered();
-            if bevy_requested_redraw {
+            if bevy_requested_redraw && !work.composition_advance {
                 frame_state.request_composition();
             }
             if shell.should_exit() {
@@ -265,6 +277,11 @@ fn main() -> Result<()> {
                     bail!("Bevy exited before the startup screenshot completed");
                 }
                 break;
+            }
+            if work.composition_advance {
+                shell.render_composition();
+                frame_state.composition_rendered(update_now);
+                request_next_composition = bevy_requested_redraw;
             }
         }
 
@@ -294,7 +311,7 @@ fn main() -> Result<()> {
         if capture_path.is_some() {
             frame_state.request_present();
         }
-        if frame_state.present_needed() {
+        if frame_state.presentation_due() {
             let frame = renderer.render(shell.texture_view(), capture_path)?;
             if frame.presented {
                 frame_state.presented();
@@ -319,6 +336,12 @@ fn main() -> Result<()> {
                     },
                 }
             }
+        }
+        // Keep this below presentation: a redraw requested while producing the
+        // current frame schedules the next frame, but must not make the current
+        // completed composition ineligible to present.
+        if request_next_composition {
+            frame_state.request_composition();
         }
         server.flush_clients();
 
@@ -393,11 +416,29 @@ const fn host_work_drained(input_pending: bool, resize_pending: bool, scale_pend
     input_pending || resize_pending || scale_pending
 }
 
-const fn dispatch_timeout(host_work_drained: bool) -> Duration {
+fn dispatch_timeout(host_work_drained: bool, frame_state: &FrameState, now: Instant) -> Duration {
     if host_work_drained {
         Duration::ZERO
     } else {
-        FRAME_INTERVAL
+        frame_state.composition_timeout(now)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct IterationWork {
+    advance_main: bool,
+    composition_advance: bool,
+}
+
+const fn iteration_work(
+    input_pending: bool,
+    composition_due: bool,
+    remote_debug_enabled: bool,
+) -> IterationWork {
+    let composition_advance = composition_due || remote_debug_enabled;
+    IterationWork {
+        advance_main: input_pending || composition_advance,
+        composition_advance,
     }
 }
 
@@ -405,6 +446,7 @@ const fn dispatch_timeout(host_work_drained: bool) -> Duration {
 struct FrameState {
     composition_dirty: bool,
     present_needed: bool,
+    next_composition: Option<Instant>,
 }
 
 impl Default for FrameState {
@@ -412,31 +454,52 @@ impl Default for FrameState {
         Self {
             composition_dirty: true,
             present_needed: true,
+            next_composition: None,
         }
     }
 }
 
 impl FrameState {
+    #[cfg(test)]
     const fn composition_dirty(&self) -> bool {
         self.composition_dirty
     }
 
+    #[cfg(test)]
     const fn present_needed(&self) -> bool {
         self.present_needed
     }
 
+    const fn presentation_due(&self) -> bool {
+        self.present_needed && !self.composition_dirty
+    }
+
     fn request_composition(&mut self) {
         self.composition_dirty = true;
-        self.present_needed = true;
     }
 
     fn request_present(&mut self) {
         self.present_needed = true;
     }
 
-    fn composition_rendered(&mut self) {
+    fn composition_due(&self, now: Instant) -> bool {
+        self.composition_dirty && self.next_composition.is_none_or(|deadline| deadline <= now)
+    }
+
+    fn composition_timeout(&self, now: Instant) -> Duration {
+        if !self.composition_dirty {
+            return FRAME_INTERVAL;
+        }
+        self.next_composition
+            .map(|deadline| deadline.saturating_duration_since(now))
+            .unwrap_or(Duration::ZERO)
+            .min(FRAME_INTERVAL)
+    }
+
+    fn composition_rendered(&mut self, now: Instant) {
         self.composition_dirty = false;
         self.present_needed = true;
+        self.next_composition = Some(now + FRAME_INTERVAL);
     }
 
     fn presented(&mut self) {
@@ -681,10 +744,11 @@ fn logical_input_position(position: PhysicalPosition<f64>, scale_factor: f64) ->
 #[cfg(test)]
 mod tests {
     use super::{
-        FRAME_INTERVAL, FrameState, dispatch_timeout, host_work_drained, linux_button_code,
-        logical_input_position, nested_axis,
+        FRAME_INTERVAL, FrameState, IterationWork, dispatch_timeout, host_work_drained,
+        iteration_work, linux_button_code, logical_input_position, nested_axis,
     };
     use crate::raw_input::{LinuxButtonCode, RawScrollFrame, RawScrollSource};
+    use std::time::Instant;
     use winit::{
         dpi::PhysicalPosition,
         event::{MouseButton, MouseScrollDelta},
@@ -692,25 +756,63 @@ mod tests {
 
     #[test]
     fn input_or_resize_work_gets_one_nonblocking_smithay_dispatch() {
+        let frame = FrameState::default();
+        let now = Instant::now();
         assert_eq!(
-            dispatch_timeout(host_work_drained(true, false, false)),
+            dispatch_timeout(host_work_drained(true, false, false), &frame, now),
             std::time::Duration::ZERO
         );
         assert_eq!(
-            dispatch_timeout(host_work_drained(false, true, false)),
+            dispatch_timeout(host_work_drained(false, true, false), &frame, now),
             std::time::Duration::ZERO
         );
         assert_eq!(
-            dispatch_timeout(host_work_drained(false, false, true)),
+            dispatch_timeout(host_work_drained(false, false, true), &frame, now),
             std::time::Duration::ZERO
         );
     }
 
     #[test]
     fn iterations_without_input_or_resize_keep_the_idle_timeout() {
+        let now = Instant::now();
+        let mut frame = FrameState::default();
+        frame.composition_rendered(now);
+        frame.presented();
         assert_eq!(
-            dispatch_timeout(host_work_drained(false, false, false)),
+            dispatch_timeout(host_work_drained(false, false, false), &frame, now),
             FRAME_INTERVAL
+        );
+    }
+
+    #[test]
+    fn iteration_work_pairs_every_composition_with_one_main_advance() {
+        assert_eq!(
+            iteration_work(false, true, false),
+            IterationWork {
+                advance_main: true,
+                composition_advance: true,
+            }
+        );
+        assert_eq!(
+            iteration_work(true, false, false),
+            IterationWork {
+                advance_main: true,
+                composition_advance: false,
+            }
+        );
+        assert_eq!(
+            iteration_work(false, false, true),
+            IterationWork {
+                advance_main: true,
+                composition_advance: true,
+            }
+        );
+        assert_eq!(
+            iteration_work(false, false, false),
+            IterationWork {
+                advance_main: false,
+                composition_advance: false,
+            }
         );
     }
 
@@ -775,8 +877,9 @@ mod tests {
 
     #[test]
     fn host_redraw_reuses_the_cached_composition() {
+        let now = Instant::now();
         let mut frame = FrameState::default();
-        frame.composition_rendered();
+        frame.composition_rendered(now);
         frame.presented();
 
         frame.request_present();
@@ -787,30 +890,49 @@ mod tests {
 
     #[test]
     fn rendered_composition_remains_pending_until_presented() {
+        let now = Instant::now();
         let mut frame = FrameState::default();
 
-        frame.composition_rendered();
+        frame.composition_rendered(now);
 
         assert!(!frame.composition_dirty());
         assert!(frame.present_needed());
+        assert!(frame.presentation_due());
+    }
+
+    #[test]
+    fn presentation_waits_for_the_dirty_composition() {
+        let now = Instant::now();
+        let mut frame = FrameState::default();
+
+        assert!(frame.present_needed());
+        assert!(!frame.presentation_due());
+
+        frame.composition_rendered(now);
+
+        assert!(frame.presentation_due());
     }
 
     #[test]
     fn next_frame_request_survives_presenting_the_current_composition() {
+        let now = Instant::now();
         let mut frame = FrameState::default();
-        frame.composition_rendered();
-        frame.request_composition();
+        frame.composition_rendered(now);
 
+        assert!(frame.presentation_due());
         frame.presented();
+        frame.request_composition();
 
         assert!(frame.composition_dirty());
         assert!(!frame.present_needed());
+        assert!(!frame.presentation_due());
     }
 
     #[test]
     fn successful_presentation_clears_only_the_pending_present() {
+        let now = Instant::now();
         let mut frame = FrameState::default();
-        frame.composition_rendered();
+        frame.composition_rendered(now);
 
         frame.presented();
         assert!(!frame.composition_dirty());
@@ -818,6 +940,27 @@ mod tests {
 
         frame.request_composition();
         assert!(frame.composition_dirty());
-        assert!(frame.present_needed());
+        assert!(!frame.present_needed());
+    }
+
+    #[test]
+    fn dirty_compositions_wait_for_the_next_frame_deadline() {
+        let start = Instant::now();
+        let mut frame = FrameState::default();
+        frame.composition_rendered(start);
+        frame.presented();
+        frame.request_composition();
+        let before_deadline = start + FRAME_INTERVAL / 2;
+
+        assert!(!frame.composition_due(before_deadline));
+        assert_eq!(
+            dispatch_timeout(false, &frame, before_deadline),
+            FRAME_INTERVAL / 2
+        );
+        assert!(frame.composition_due(start + FRAME_INTERVAL));
+        assert_eq!(
+            dispatch_timeout(false, &frame, start + FRAME_INTERVAL),
+            std::time::Duration::ZERO
+        );
     }
 }

@@ -263,8 +263,9 @@ impl ServerState {
     }
 
     pub fn frame_presented(&mut self) {
-        // No protocol dispatch occurs between observing this request and acknowledging a
-        // successful present, so clearing it here cannot discard a newer client commit.
+        // The host calls this only after presenting a completed, clean composition. No
+        // protocol dispatch occurs between that composition and this acknowledgement,
+        // so clearing the request cannot discard a newer client commit.
         self.presentation_requested = false;
         let Some(toplevel) = self
             .active_toplevel

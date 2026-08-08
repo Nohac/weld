@@ -106,6 +106,11 @@ pub(crate) struct InputBridgePlugin {
 }
 
 impl InputBridgePlugin {
+    /// Build the input bridge for Weld's manual composition target.
+    ///
+    /// Input-only host advances no longer imply a rendered composition.
+    /// Picking observers and action systems that mutate visuals must emit
+    /// [`bevy::window::RequestRedraw`].
     pub(crate) const fn new(target: NormalizedRenderTarget) -> Self {
         Self { target }
     }

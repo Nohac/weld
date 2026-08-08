@@ -12,7 +12,7 @@ use bevy::{
     color::Color,
     ecs::{
         component::Component, entity::Entity, resource::Resource, schedule::IntoScheduleConfigs,
-        world::World,
+        system::Res, world::World,
     },
     image::Image,
     picking::PickingSystems,
@@ -90,11 +90,36 @@ impl Plugin for SurfaceCompositorPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<SurfaceEventQueue>()
             .init_resource::<SurfaceRegistry>()
+            .init_resource::<CompositionAdvance>()
             // Asset change collection and UI measurement happen later in the frame.
             .add_systems(
                 PreUpdate,
-                apply_host_surface_events.before(PickingSystems::Backend),
+                apply_host_surface_events
+                    .run_if(composition_advance_requested)
+                    .before(PickingSystems::Backend),
             );
+    }
+}
+
+/// Gates client-frame application so image asset events are always followed by
+/// render extraction in the same host iteration. Standalone Bevy updates are
+/// composition advances unless the Weld host explicitly marks them otherwise.
+#[derive(Resource)]
+struct CompositionAdvance(bool);
+
+impl Default for CompositionAdvance {
+    fn default() -> Self {
+        Self(true)
+    }
+}
+
+fn composition_advance_requested(advance: Res<CompositionAdvance>) -> bool {
+    advance.0
+}
+
+pub(crate) fn set_composition_advance(world: &mut World, enabled: bool) {
+    if let Some(mut advance) = world.get_resource_mut::<CompositionAdvance>() {
+        advance.0 = enabled;
     }
 }
 
@@ -537,6 +562,45 @@ mod tests {
             frame: frame([4, 4, 4, 255]),
         });
         assert_eq!(events.0.len(), 3);
+    }
+
+    #[test]
+    fn input_only_advances_keep_the_latest_surface_frame_queued_for_composition() {
+        let (mut app, _) = test_app();
+        let surface = SurfaceId::new(5);
+        set_composition_advance(app.world_mut(), false);
+        enqueue_surface_event(
+            app.world_mut(),
+            HostSurfaceEvent::Frame {
+                surface,
+                frame: frame([1, 2, 3, 255]),
+            },
+        );
+        enqueue_surface_event(
+            app.world_mut(),
+            HostSurfaceEvent::Frame {
+                surface,
+                frame: frame([4, 5, 6, 255]),
+            },
+        );
+
+        app.update();
+        app.update();
+        let mut surface_query = app.world_mut().query::<&SurfaceNode>();
+        assert_eq!(surface_query.iter(app.world()).count(), 0);
+
+        set_composition_advance(app.world_mut(), true);
+        app.update();
+        let mut image_query = app.world_mut().query::<&ImageNode>();
+        let image_node = image_query
+            .single(app.world())
+            .expect("latest queued frame should be composed");
+        let image = app
+            .world()
+            .resource::<Assets<Image>>()
+            .get(&image_node.image)
+            .expect("composed frame should have an image asset");
+        assert_eq!(image.data.as_deref(), Some([4, 5, 6, 255].as_slice()));
     }
 
     #[test]
