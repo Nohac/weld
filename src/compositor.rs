@@ -1,28 +1,29 @@
-//! Bevy-facing compositor state and application-surface composition.
+//! Bevy-facing compositor surface state and client-content rendering.
 //!
-//! Smithay feeds this module owned lifecycle events and pixel data. Compositor
-//! plugins operate on [`AppWindow`] and [`SurfaceNode`]; the provisional Bevy
-//! [`ImageNode`] backing and its GPU upload lifecycle remain internal.
+//! Smithay feeds this module owned lifecycle events and pixel data. The durable
+//! [`AppWindow`] entity contains protocol-neutral state only. Presentation
+//! plugins claim that entity separately and render its content through
+//! [`SurfaceNode`]; the provisional Bevy [`ImageNode`] backing remains internal.
 
 use std::collections::{HashMap, VecDeque};
 
 use bevy::{
     app::{App, Plugin, PreUpdate},
     asset::{Assets, Handle, RenderAssetUsages},
-    color::Color,
     ecs::{
-        component::Component, entity::Entity, resource::Resource, schedule::IntoScheduleConfigs,
-        system::Res, world::World,
+        component::Component,
+        entity::Entity,
+        resource::Resource,
+        schedule::{IntoScheduleConfigs, SystemSet},
+        system::{Query, Res},
+        world::World,
     },
     image::Image,
-    math::Rect,
+    math::{Rect, Vec2},
     picking::PickingSystems,
     prelude::{ImageNode, NodeImageMode, px},
     render::render_resource::{Extent3d, TextureDimension, TextureFormat},
-    ui::{
-        BorderRadius, BoxShadow, Display, GlobalZIndex, Node, Overflow, PositionType,
-        UiTargetCamera, Val,
-    },
+    ui::{Display, Node, Val},
 };
 use tracing::warn;
 
@@ -46,13 +47,28 @@ pub struct AppWindow {
     pub surface: SurfaceId,
 }
 
+/// Protocol-neutral state available while an application surface is mapped.
+#[derive(Component, Clone, Copy, Debug, PartialEq)]
+pub struct MappedSurface {
+    pub logical_size: Vec2,
+    pub opaque: bool,
+}
+
 /// A client surface that composes as an ordinary Bevy UI primitive.
 ///
 /// Plugins should decorate or arrange this component's entity rather than
 /// depending on the internal [`ImageNode`] used by the initial SHM path.
 #[derive(Component, Clone, Copy, Debug, Eq, PartialEq)]
+#[require(ImageNode, Node)]
 pub struct SurfaceNode {
     pub surface: SurfaceId,
+}
+
+/// Internal render backing for one mapped client surface.
+#[derive(Component, Clone, Debug)]
+struct SurfaceContent {
+    image: Handle<Image>,
+    view: SurfaceContentView,
 }
 
 /// An owned frame copied from a client buffer at the Smithay boundary.
@@ -96,7 +112,7 @@ impl SurfaceContentView {
 /// Owned input translated from the Smithay host into compositor ECS state.
 #[derive(Debug)]
 pub(crate) enum HostSurfaceEvent {
-    Mapped {
+    Created {
         surface: SurfaceId,
     },
     Frame {
@@ -117,16 +133,42 @@ pub(crate) enum HostSurfaceEvent {
 
 pub(crate) struct SurfaceCompositorPlugin;
 
+/// Stable ordering points around surface ingress and fallback presentation.
+///
+/// A specialized presentation plugin may run after [`Self::Ingress`] and
+/// before [`Self::FallbackPresentation`].
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, SystemSet)]
+pub(crate) enum SurfaceSystems {
+    Ingress,
+    FallbackPresentation,
+}
+
 impl Plugin for SurfaceCompositorPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<SurfaceEventQueue>()
             .init_resource::<SurfaceRegistry>()
             .init_resource::<CompositionAdvance>()
+            .configure_sets(
+                PreUpdate,
+                (
+                    SurfaceSystems::Ingress,
+                    SurfaceSystems::FallbackPresentation,
+                )
+                    .chain()
+                    .before(PickingSystems::Backend),
+            )
             // Asset change collection and UI measurement happen later in the frame.
             .add_systems(
                 PreUpdate,
                 apply_host_surface_events
                     .run_if(composition_advance_requested)
+                    .in_set(SurfaceSystems::Ingress),
+            )
+            .add_systems(
+                PreUpdate,
+                sync_surface_nodes
+                    .run_if(composition_advance_requested)
+                    .after(SurfaceSystems::FallbackPresentation)
                     .before(PickingSystems::Backend),
             );
     }
@@ -136,7 +178,7 @@ impl Plugin for SurfaceCompositorPlugin {
 /// render extraction in the same host iteration. Standalone Bevy updates are
 /// composition advances unless the Weld host explicitly marks them otherwise.
 #[derive(Resource)]
-struct CompositionAdvance(bool);
+pub(crate) struct CompositionAdvance(bool);
 
 impl Default for CompositionAdvance {
     fn default() -> Self {
@@ -144,7 +186,7 @@ impl Default for CompositionAdvance {
     }
 }
 
-fn composition_advance_requested(advance: Res<CompositionAdvance>) -> bool {
+pub(crate) fn composition_advance_requested(advance: Res<CompositionAdvance>) -> bool {
     advance.0
 }
 
@@ -217,7 +259,7 @@ fn apply_host_surface_events(world: &mut World) {
 
     for event in events {
         match event {
-            HostSurfaceEvent::Mapped { surface } => {
+            HostSurfaceEvent::Created { surface } => {
                 ensure_surface_entity(world, &mut registry, surface);
             }
             HostSurfaceEvent::Frame { surface, frame } => {
@@ -250,39 +292,7 @@ fn ensure_surface_entity(
     }
     registry.0.remove(&surface);
 
-    let Some(camera) = world
-        .get_resource::<CompositorCamera>()
-        .map(|camera| camera.0)
-    else {
-        warn!(
-            ?surface,
-            "discarded a surface event because the compositor camera is unavailable"
-        );
-        return None;
-    };
-
-    let entity = world
-        .spawn((AppWindow { surface }, SurfaceNode { surface }))
-        .insert(empty_surface_image_node())
-        .insert(Node {
-            display: Display::None,
-            position_type: PositionType::Absolute,
-            left: px(80),
-            top: px(80),
-            overflow: Overflow::clip(),
-            border_radius: BorderRadius::all(px(18)),
-            ..Default::default()
-        })
-        .insert(BoxShadow::new(
-            Color::srgba(0.0, 0.0, 0.0, 0.55),
-            px(0),
-            px(12),
-            px(2),
-            px(24),
-        ))
-        .insert(GlobalZIndex(0))
-        .insert(UiTargetCamera(camera))
-        .id();
+    let entity = world.spawn(AppWindow { surface }).id();
     registry.0.insert(
         surface,
         SurfaceEntry {
@@ -355,12 +365,16 @@ fn apply_surface_frame(
         );
         return;
     };
-    entity_mut.insert(surface_image_node(handle.clone(), frame.view));
-    if let Some(mut node) = entity_mut.get_mut::<Node>() {
-        node.display = Display::Flex;
-        node.width = px(frame.view.logical_width);
-        node.height = px(frame.view.logical_height);
-    }
+    entity_mut.insert((
+        SurfaceContent {
+            image: handle.clone(),
+            view: frame.view,
+        },
+        MappedSurface {
+            logical_size: Vec2::new(frame.view.logical_width, frame.view.logical_height),
+            opaque: frame.opaque,
+        },
+    ));
     if let Some(entry) = registry.0.get_mut(&surface) {
         entry.image = Some(handle);
         entry.pixel_size = Some((frame.width, frame.height));
@@ -378,7 +392,7 @@ fn apply_surface_view(
         warn!(?surface, "discarded a view change for an unknown surface");
         return;
     };
-    let (Some(handle), Some((width, height))) = (entry.image.clone(), entry.pixel_size) else {
+    let (Some(_handle), Some((width, height))) = (entry.image.as_ref(), entry.pixel_size) else {
         warn!(?surface, "discarded a view change for an unmapped surface");
         return;
     };
@@ -395,10 +409,15 @@ fn apply_surface_view(
         );
         return;
     };
-    entity_mut.insert(surface_image_node(handle, view));
-    if let Some(mut node) = entity_mut.get_mut::<Node>() {
-        node.width = px(view.logical_width);
-        node.height = px(view.logical_height);
+    {
+        let Some(mut content) = entity_mut.get_mut::<SurfaceContent>() else {
+            warn!(?surface, "discarded a view change without surface content");
+            return;
+        };
+        content.view = view;
+    }
+    if let Some(mut mapped) = entity_mut.get_mut::<MappedSurface>() {
+        mapped.logical_size = Vec2::new(view.logical_width, view.logical_height);
     }
 }
 
@@ -415,12 +434,7 @@ fn unmap_surface(world: &mut World, registry: &mut SurfaceRegistry, surface: Sur
     entry.frame_ready = false;
 
     if let Ok(mut entity) = world.get_entity_mut(entry.entity) {
-        entity.insert(empty_surface_image_node());
-        if let Some(mut node) = entity.get_mut::<Node>() {
-            node.display = Display::None;
-            node.width = Val::Auto;
-            node.height = Val::Auto;
-        }
+        entity.remove::<(SurfaceContent, MappedSurface)>();
     }
 }
 
@@ -435,6 +449,50 @@ fn destroy_surface(world: &mut World, registry: &mut SurfaceRegistry, surface: S
     }
     if let Ok(entity) = world.get_entity_mut(entry.entity) {
         entity.despawn();
+    }
+}
+
+fn sync_surface_nodes(
+    surfaces: Query<(&AppWindow, &SurfaceContent)>,
+    mut nodes: Query<(&SurfaceNode, &mut ImageNode, &mut Node)>,
+) {
+    for (surface_node, mut image_node, mut node) in &mut nodes {
+        let content = surfaces.iter().find_map(|(window, content)| {
+            (window.surface == surface_node.surface).then_some(content)
+        });
+        let Some(content) = content else {
+            let empty_image = empty_surface_image_node();
+            if node.display != Display::None {
+                node.display = Display::None;
+                node.width = Val::Auto;
+                node.height = Val::Auto;
+            }
+            if image_node.image != empty_image.image
+                || image_node.rect != empty_image.rect
+                || image_node.image_mode != empty_image.image_mode
+            {
+                *image_node = empty_image;
+            }
+            continue;
+        };
+
+        let expected_image = surface_image_node(content.image.clone(), content.view);
+        if image_node.image != expected_image.image
+            || image_node.rect != expected_image.rect
+            || image_node.image_mode != expected_image.image_mode
+        {
+            *image_node = expected_image;
+        }
+        let logical_width = px(content.view.logical_width);
+        let logical_height = px(content.view.logical_height);
+        if node.display != Display::Flex
+            || node.width != logical_width
+            || node.height != logical_height
+        {
+            node.display = Display::Flex;
+            node.width = logical_width;
+            node.height = logical_height;
+        }
     }
 }
 
@@ -558,7 +616,7 @@ mod tests {
     fn applies_map_and_frame_in_one_update_and_reuses_the_image_handle() {
         let (mut app, _) = test_app();
         let surface = SurfaceId::new(7);
-        enqueue_surface_event(app.world_mut(), HostSurfaceEvent::Mapped { surface });
+        enqueue_surface_event(app.world_mut(), HostSurfaceEvent::Created { surface });
         enqueue_surface_event(
             app.world_mut(),
             HostSurfaceEvent::Frame {
@@ -571,16 +629,14 @@ mod tests {
         assert!(has_surface_frame(app.world()));
         let mut query = app
             .world_mut()
-            .query::<(&AppWindow, &SurfaceNode, &ImageNode, &Node)>();
+            .query::<(&AppWindow, &MappedSurface, &SurfaceContent)>();
         let surfaces = query.iter(app.world()).collect::<Vec<_>>();
-        let [(window, node, image_node, layout)] = surfaces.as_slice() else {
-            panic!("expected one semantic surface entity");
+        let [(window, mapped, content)] = surfaces.as_slice() else {
+            panic!("expected one mapped surface data entity");
         };
         assert_eq!(window.surface, surface);
-        assert_eq!(node.surface, surface);
-        assert_eq!(layout.display, Display::Flex);
-        assert_eq!(image_node.image_mode, NodeImageMode::Stretch);
-        let first_handle = image_node.image.clone();
+        assert_eq!(mapped.logical_size, Vec2::ONE);
+        let first_handle = content.image.clone();
 
         enqueue_surface_event(
             app.world_mut(),
@@ -590,10 +646,10 @@ mod tests {
             },
         );
         app.update();
-        let mut query = app.world_mut().query::<&ImageNode>();
+        let mut query = app.world_mut().query::<&SurfaceContent>();
         let handles = query
             .iter(app.world())
-            .map(|node| node.image.clone())
+            .map(|content| content.image.clone())
             .collect::<Vec<_>>();
         assert_eq!(handles, [first_handle]);
     }
@@ -611,7 +667,7 @@ mod tests {
         );
         app.update();
         let first_handle = {
-            let mut query = app.world_mut().query::<&ImageNode>();
+            let mut query = app.world_mut().query::<&SurfaceContent>();
             query
                 .single(app.world())
                 .expect("surface image should exist")
@@ -628,6 +684,14 @@ mod tests {
                 .get(&first_handle)
                 .is_none()
         );
+        let mut source_query =
+            app.world_mut()
+                .query::<(&AppWindow, Option<&MappedSurface>, Option<&SurfaceContent>)>();
+        let (_, mapped, content) = source_query
+            .single(app.world())
+            .expect("unmapping should preserve the source entity");
+        assert!(mapped.is_none());
+        assert!(content.is_none());
 
         enqueue_surface_event(
             app.world_mut(),
@@ -638,7 +702,7 @@ mod tests {
         );
         app.update();
         let second_handle = {
-            let mut query = app.world_mut().query::<&ImageNode>();
+            let mut query = app.world_mut().query::<&SurfaceContent>();
             query
                 .single(app.world())
                 .expect("remapped surface image should exist")
@@ -649,7 +713,7 @@ mod tests {
 
         enqueue_surface_event(app.world_mut(), HostSurfaceEvent::Destroyed { surface });
         app.update();
-        let mut query = app.world_mut().query::<&SurfaceNode>();
+        let mut query = app.world_mut().query::<&AppWindow>();
         assert_eq!(query.iter(app.world()).count(), 0);
     }
 
@@ -699,19 +763,19 @@ mod tests {
 
         app.update();
         app.update();
-        let mut surface_query = app.world_mut().query::<&SurfaceNode>();
+        let mut surface_query = app.world_mut().query::<&MappedSurface>();
         assert_eq!(surface_query.iter(app.world()).count(), 0);
 
         set_composition_advance(app.world_mut(), true);
         app.update();
-        let mut image_query = app.world_mut().query::<&ImageNode>();
-        let image_node = image_query
+        let mut content_query = app.world_mut().query::<&SurfaceContent>();
+        let content = content_query
             .single(app.world())
             .expect("latest queued frame should be composed");
         let image = app
             .world()
             .resource::<Assets<Image>>()
-            .get(&image_node.image)
+            .get(&content.image)
             .expect("composed frame should have an image asset");
         assert_eq!(image.data.as_deref(), Some([4, 5, 6, 255].as_slice()));
     }
@@ -736,7 +800,7 @@ mod tests {
         app.update();
 
         let image_handle = {
-            let mut query = app.world_mut().query::<&ImageNode>();
+            let mut query = app.world_mut().query::<&SurfaceContent>();
             query
                 .single(app.world())
                 .expect("ARGB surface image should exist")
@@ -769,7 +833,7 @@ mod tests {
         );
         app.update();
 
-        let mut query = app.world_mut().query::<&SurfaceNode>();
+        let mut query = app.world_mut().query::<&AppWindow>();
         assert_eq!(query.iter(app.world()).count(), 0);
     }
 
@@ -799,16 +863,15 @@ mod tests {
         );
         app.update();
 
-        let mut query = app.world_mut().query::<(&ImageNode, &Node)>();
-        let (image_node, node) = query
+        let mut query = app.world_mut().query::<(&MappedSurface, &SurfaceContent)>();
+        let (mapped, content) = query
             .single(app.world())
             .expect("scaled surface should exist");
-        assert_eq!(node.width, px(640.0));
-        assert_eq!(node.height, px(480.0));
+        assert_eq!(mapped.logical_size, Vec2::new(640.0, 480.0));
         let image = app
             .world()
             .resource::<Assets<Image>>()
-            .get(&image_node.image)
+            .get(&content.image)
             .expect("scaled surface image should exist");
         assert_eq!(image.texture_descriptor.size.width, 1_280);
         assert_eq!(image.texture_descriptor.size.height, 960);
@@ -833,7 +896,7 @@ mod tests {
         );
         app.update();
         let first_handle = {
-            let mut query = app.world_mut().query::<&ImageNode>();
+            let mut query = app.world_mut().query::<&SurfaceContent>();
             query
                 .single(app.world())
                 .expect("surface should exist")
@@ -854,15 +917,13 @@ mod tests {
         );
         app.update();
 
-        let mut query = app.world_mut().query::<(&ImageNode, &Node)>();
-        let (image_node, node) = query
+        let mut query = app.world_mut().query::<(&SurfaceContent, &MappedSurface)>();
+        let (content, mapped) = query
             .single(app.world())
             .expect("updated surface should exist");
-        assert_eq!(image_node.image, first_handle);
-        assert_eq!(image_node.rect, Some(view.source_rect()));
-        assert_eq!(image_node.image_mode, NodeImageMode::Stretch);
-        assert_eq!(node.width, px(8.0));
-        assert_eq!(node.height, px(6.0));
+        assert_eq!(content.image, first_handle);
+        assert_eq!(content.view, view);
+        assert_eq!(mapped.logical_size, Vec2::new(8.0, 6.0));
     }
 
     #[test]
@@ -886,7 +947,7 @@ mod tests {
         );
         app.update();
 
-        let mut query = app.world_mut().query::<&SurfaceNode>();
+        let mut query = app.world_mut().query::<&AppWindow>();
         assert_eq!(query.iter(app.world()).count(), 0);
     }
 
@@ -914,7 +975,7 @@ mod tests {
         );
         app.update();
 
-        let mut query = app.world_mut().query::<&SurfaceNode>();
+        let mut query = app.world_mut().query::<&AppWindow>();
         assert_eq!(query.iter(app.world()).count(), 0);
     }
 

@@ -55,7 +55,11 @@ use crate::{
     },
     input::{SeatInputEffect, SeatInputEffectKind, SurfaceHit},
     raw_input::{InputPosition, RawScrollFrame, RawScrollSource},
+    window::SurfaceAction,
 };
+
+// Keep this stable name in sync with scripts/run-app.
+const WELD_SOCKET_NAME: &str = "weld-0";
 
 const CLIENT_WIDTH: i32 = 640;
 const CLIENT_HEIGHT: i32 = 480;
@@ -199,8 +203,12 @@ impl ServerState {
         );
         output.set_preferred(output_mode);
 
-        let listening_socket = ListeningSocketSource::new_auto()
-            .context("failed to create a Wayland listening socket")?;
+        let listening_socket = ListeningSocketSource::with_name(WELD_SOCKET_NAME)
+            .with_context(|| {
+                format!(
+                    "failed to bind Weld Wayland socket {WELD_SOCKET_NAME:?}; another Weld instance may already be running"
+                )
+            })?;
         let socket_name = listening_socket.socket_name().to_os_string();
         let loop_handle = event_loop.handle();
 
@@ -347,6 +355,22 @@ impl ServerState {
                 );
             }
             SeatInputEffectKind::HostFocusLost => self.release_host_input(time),
+        }
+    }
+
+    pub fn apply_surface_action(&mut self, action: SurfaceAction) {
+        match action {
+            SurfaceAction::Close { surface } => {
+                let Some(toplevel) = self
+                    .active_toplevel
+                    .as_ref()
+                    .filter(|toplevel| toplevel.id == surface)
+                else {
+                    warn!(?surface, "ignored a close request for an unknown surface");
+                    return;
+                };
+                toplevel.surface.send_close();
+            }
         }
     }
 
@@ -758,8 +782,8 @@ impl XdgShellHandler for ServerState {
         surface.send_configure();
         let id = self.allocate_surface_id();
         self.pending_surface_events
-            .push(HostSurfaceEvent::Mapped { surface: id });
-        info!(surface_id = id.raw(), "mapped a nested xdg-toplevel");
+            .push(HostSurfaceEvent::Created { surface: id });
+        info!(surface_id = id.raw(), "created a nested xdg-toplevel");
         self.active_toplevel = Some(ActiveToplevel {
             surface,
             id,

@@ -1,0 +1,33 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+if (( $# == 0 )); then
+    echo "usage: ${0##*/} <program> [args...]" >&2
+    exit 2
+fi
+
+if [[ -z "${XDG_RUNTIME_DIR:-}" ]]; then
+    echo "${0##*/}: XDG_RUNTIME_DIR is not set" >&2
+    exit 1
+fi
+
+# Keep this stable name in sync with WELD_SOCKET_NAME in src/server.rs.
+weld_display="weld-0"
+socket_path="${XDG_RUNTIME_DIR}/${weld_display}"
+if [[ ! -S "${socket_path}" ]]; then
+    echo "${0##*/}: Weld is not listening on ${socket_path}" >&2
+    exit 1
+fi
+
+export WAYLAND_DISPLAY="${weld_display}"
+export GDK_BACKEND="wayland"
+export QT_QPA_PLATFORM="wayland"
+export SDL_VIDEODRIVER="wayland"
+export SDL_VIDEO_DRIVER="wayland"
+export MOZ_ENABLE_WAYLAND="1"
+export NIXOS_OZONE_WL="1"
+export XDG_SESSION_TYPE="wayland"
+unset DISPLAY WAYLAND_SOCKET
+
+exec "$@"

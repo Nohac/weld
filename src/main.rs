@@ -7,6 +7,7 @@ mod raw_input;
 mod renderer;
 mod server;
 mod shell;
+mod window;
 
 use std::{
     collections::VecDeque,
@@ -265,6 +266,9 @@ fn main() -> Result<()> {
             );
             for effect in shell.take_input_effects() {
                 server.apply_input_effect(effect);
+            }
+            for action in shell.take_surface_actions() {
+                server.apply_surface_action(action);
             }
             if bevy_requested_redraw && !work.composition_advance {
                 frame_state.request_composition();

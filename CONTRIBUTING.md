@@ -3,14 +3,18 @@
 ## Start here
 
 Weld is at the setup and design-validation stage. Read [IDEA.md](IDEA.md) for
-the motivating direction, but treat it as a proposal to test through small
-increments. It does not authorize implementing the complete roadmap, and its
-crate layout and subsystem boundaries may change as the first vertical slices
-teach us more.
+the motivating direction, but treat it as a proposal rather than an
+implementation checklist. Its crate layout and subsystem boundaries may change
+as the first vertical slices teach us more.
 
-Prefer one package and one direct implementation until a real dependency,
-runtime, reuse, or testing boundary justifies another crate. Do not create
-empty modules or placeholder crates for future milestones.
+Before the first stable release, prioritize architectural coherence over
+changeset size. Sweeping, cross-cutting refactors are acceptable when they
+establish or correct ownership, module, API, and lifecycle boundaries. When
+concrete responsibilities are already distinct, separate them before temporary
+coupling becomes the project structure. Keep one package until a real
+dependency, runtime, reuse, or testing boundary justifies another crate; a
+single package does not imply a single module. Do not create empty modules or
+placeholder crates for future milestones.
 
 For Bevy-related work, read the relevant project skill first:
 
@@ -59,7 +63,10 @@ outside widgets and translate widget events into project-owned actions. We will
 design a Weld-specific visual layer separately when a concrete UI slice exists.
 
 Keep provisional decisions easy to reverse. Before making an architectural
-change, describe the smallest problem it solves and the boundary it introduces.
+change, describe the ownership, boundary, and semantics it establishes. Judge
+pre-stable changes by whether they leave a coherent structure, not by diff
+size. Prefer smaller incremental changes after the structure and compatibility
+expectations have stabilized.
 
 ## Running tools
 
@@ -105,6 +112,17 @@ socket. The verified smoke test uses foot:
 ```text
 cargo run -- foot
 ```
+
+To open another application in an already-running Weld instance, use the
+client launcher from a second shell. It connects the application to Weld's
+`weld-0` Wayland socket and does not start another compositor:
+
+```text
+scripts/run-app foot
+```
+
+The launcher forces common toolkits onto their native Wayland backends and
+disables X11 fallback.
 
 Weld options precede an explicit `--` when a client is also present. Capture a
 settled client-plus-shell composition and exit with:

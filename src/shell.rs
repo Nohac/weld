@@ -44,6 +44,10 @@ use crate::input::{
     take_input_effects,
 };
 use crate::raw_input::RawSeatEvent;
+use crate::window::{
+    DefaultWindowPlugin, SurfaceAction, set_output_physical_size, set_output_scale_factor,
+    take_surface_actions,
+};
 
 const COMPOSITION_VIEW: ManualTextureViewHandle = ManualTextureViewHandle(1);
 
@@ -93,6 +97,7 @@ impl ShellRenderer {
         .add_plugins((
             DebugProtocolPlugin,
             SurfaceCompositorPlugin,
+            DefaultWindowPlugin::new(size, scale_factor),
             InputBridgePlugin::new(NormalizedRenderTarget::TextureView(COMPOSITION_VIEW)),
         ))
         .insert_resource(UiScale(scale_factor as f32));
@@ -175,6 +180,7 @@ impl ShellRenderer {
         let (composition_texture, composition_view) =
             create_composition_target(&self.device, width, height);
         insert_manual_view(&mut self.app, composition_view.clone(), width, height);
+        set_output_physical_size(self.app.world_mut(), UVec2::new(width, height));
         self.composition_texture = composition_texture;
         self.composition_view = composition_view;
     }
@@ -182,6 +188,7 @@ impl ShellRenderer {
     /// Set the compositor-logical to physical scale used by Bevy UI layout.
     pub fn set_scale_factor(&mut self, scale_factor: f64) {
         self.app.world_mut().resource_mut::<UiScale>().0 = scale_factor as f32;
+        set_output_scale_factor(self.app.world_mut(), scale_factor);
     }
 
     pub fn texture_view(&self) -> &wgpu::TextureView {
@@ -198,6 +205,10 @@ impl ShellRenderer {
 
     pub fn take_input_effects(&mut self) -> Vec<SeatInputEffect> {
         take_input_effects(self.app.world_mut())
+    }
+
+    pub fn take_surface_actions(&mut self) -> Vec<SurfaceAction> {
+        take_surface_actions(self.app.world_mut())
     }
 
     pub fn has_surface_frame(&self) -> bool {
