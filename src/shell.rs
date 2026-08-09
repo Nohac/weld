@@ -31,10 +31,7 @@ use bevy::{
     window::{ExitCondition, RequestRedraw, WindowPlugin},
 };
 
-use crate::compositor::{
-    CompositorCamera, HostSurfaceEvent, SurfaceCompositorPlugin, enqueue_surface_event,
-    has_surface_frame, set_composition_advance,
-};
+use crate::composition::{CompositionPlugin, CompositorCamera, set_composition_advance};
 use crate::debug::{
     CaptureRequest, DebugProtocolPlugin, complete_capture, configure_remote_debug,
     take_capture_request,
@@ -43,11 +40,13 @@ use crate::input::{
     InputBridgePlugin, SeatInputEffect, enqueue_raw_input, set_input_update_time,
     take_input_effects,
 };
+use crate::layer::SHELL_Z_INDEX;
 use crate::raw_input::RawSeatEvent;
-use crate::window::{
-    DefaultWindowPlugin, SurfaceAction, set_output_physical_size, set_output_scale_factor,
+use crate::surface::{
+    HostSurfaceEvent, SurfaceAction, SurfacePlugin, enqueue_surface_event, has_surface_frame,
     take_surface_actions,
 };
+use crate::window::{DefaultWindowPlugin, set_output_physical_size, set_output_scale_factor};
 
 const COMPOSITION_VIEW: ManualTextureViewHandle = ManualTextureViewHandle(1);
 
@@ -96,7 +95,8 @@ impl ShellRenderer {
         )
         .add_plugins((
             DebugProtocolPlugin,
-            SurfaceCompositorPlugin,
+            CompositionPlugin,
+            SurfacePlugin,
             DefaultWindowPlugin::new(size, scale_factor),
             InputBridgePlugin::new(NormalizedRenderTarget::TextureView(COMPOSITION_VIEW)),
         ))
@@ -312,7 +312,7 @@ fn shell_overlay(_camera: Entity) -> impl Scene {
             border_radius: BorderRadius::all(px(18)),
         }
         BackgroundColor(Color::srgba(0.08, 0.34, 0.48, 0.82))
-        GlobalZIndex(100)
+        GlobalZIndex(SHELL_Z_INDEX)
     }
 }
 

@@ -1,4 +1,4 @@
-//! Bevy-facing compositor surface state and client-content rendering.
+//! Bevy-facing application-surface state and client-content rendering.
 //!
 //! Smithay feeds this module owned lifecycle events and pixel data. The durable
 //! [`AppWindow`] entity contains protocol-neutral state only. Presentation
@@ -15,7 +15,7 @@ use bevy::{
         entity::Entity,
         resource::Resource,
         schedule::{IntoScheduleConfigs, SystemSet},
-        system::{Query, Res},
+        system::Query,
         world::World,
     },
     image::Image,
@@ -26,6 +26,8 @@ use bevy::{
     ui::{Display, Node, Val},
 };
 use tracing::warn;
+
+use crate::composition::composition_advance_requested;
 
 /// Stable compositor identity for one client surface.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -62,6 +64,22 @@ pub struct MappedSurface {
 #[require(ImageNode, Node)]
 pub struct SurfaceNode {
     pub surface: SurfaceId,
+}
+
+/// Protocol-neutral request emitted by ECS policy for the host to apply.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum SurfaceAction {
+    Close { surface: SurfaceId },
+    Focus { surface: Option<SurfaceId> },
+}
+
+#[derive(Resource, Default)]
+pub(crate) struct SurfaceActionQueue(VecDeque<SurfaceAction>);
+
+impl SurfaceActionQueue {
+    pub(crate) fn push(&mut self, action: SurfaceAction) {
+        self.0.push_back(action);
+    }
 }
 
 /// Internal render backing for one mapped client surface.
@@ -131,7 +149,7 @@ pub(crate) enum HostSurfaceEvent {
     },
 }
 
-pub(crate) struct SurfaceCompositorPlugin;
+pub(crate) struct SurfacePlugin;
 
 /// Stable ordering points around surface ingress and fallback presentation.
 ///
@@ -143,11 +161,11 @@ pub(crate) enum SurfaceSystems {
     FallbackPresentation,
 }
 
-impl Plugin for SurfaceCompositorPlugin {
+impl Plugin for SurfacePlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<SurfaceEventQueue>()
+            .init_resource::<SurfaceActionQueue>()
             .init_resource::<SurfaceRegistry>()
-            .init_resource::<CompositionAdvance>()
             .configure_sets(
                 PreUpdate,
                 (
@@ -173,31 +191,6 @@ impl Plugin for SurfaceCompositorPlugin {
             );
     }
 }
-
-/// Gates client-frame application so image asset events are always followed by
-/// render extraction in the same host iteration. Standalone Bevy updates are
-/// composition advances unless the Weld host explicitly marks them otherwise.
-#[derive(Resource)]
-pub(crate) struct CompositionAdvance(bool);
-
-impl Default for CompositionAdvance {
-    fn default() -> Self {
-        Self(true)
-    }
-}
-
-pub(crate) fn composition_advance_requested(advance: Res<CompositionAdvance>) -> bool {
-    advance.0
-}
-
-pub(crate) fn set_composition_advance(world: &mut World, enabled: bool) {
-    if let Some(mut advance) = world.get_resource_mut::<CompositionAdvance>() {
-        advance.0 = enabled;
-    }
-}
-
-#[derive(Resource, Clone, Copy)]
-pub(crate) struct CompositorCamera(pub Entity);
 
 #[derive(Resource, Default)]
 pub(crate) struct SurfaceEventQueue(VecDeque<HostSurfaceEvent>);
@@ -240,6 +233,13 @@ pub(crate) fn enqueue_surface_event(world: &mut World, event: HostSurfaceEvent) 
         return;
     };
     events.push(event);
+}
+
+pub(crate) fn take_surface_actions(world: &mut World) -> Vec<SurfaceAction> {
+    world
+        .get_resource_mut::<SurfaceActionQueue>()
+        .map(|mut actions| actions.0.drain(..).collect())
+        .unwrap_or_default()
 }
 
 pub(crate) fn has_surface_frame(world: &World) -> bool {
@@ -580,15 +580,15 @@ fn unpremultiply_bgra(pixels: &mut [u8]) {
 mod tests {
     use bevy::app::App;
 
+    use crate::composition::{CompositionPlugin, set_composition_advance};
+
     use super::*;
 
-    fn test_app() -> (App, Entity) {
+    fn test_app() -> App {
         let mut app = App::new();
         app.insert_resource(Assets::<Image>::default())
-            .add_plugins(SurfaceCompositorPlugin);
-        let camera = app.world_mut().spawn_empty().id();
-        app.insert_resource(CompositorCamera(camera));
-        (app, camera)
+            .add_plugins((CompositionPlugin, SurfacePlugin));
+        app
     }
 
     fn frame(pixel: [u8; 4]) -> SurfaceFrame {
@@ -614,7 +614,7 @@ mod tests {
 
     #[test]
     fn applies_map_and_frame_in_one_update_and_reuses_the_image_handle() {
-        let (mut app, _) = test_app();
+        let mut app = test_app();
         let surface = SurfaceId::new(7);
         enqueue_surface_event(app.world_mut(), HostSurfaceEvent::Created { surface });
         enqueue_surface_event(
@@ -656,7 +656,7 @@ mod tests {
 
     #[test]
     fn unmap_drops_the_asset_and_destroy_removes_the_entity() {
-        let (mut app, _) = test_app();
+        let mut app = test_app();
         let surface = SurfaceId::new(11);
         enqueue_surface_event(
             app.world_mut(),
@@ -743,7 +743,7 @@ mod tests {
 
     #[test]
     fn input_only_advances_keep_the_latest_surface_frame_queued_for_composition() {
-        let (mut app, _) = test_app();
+        let mut app = test_app();
         let surface = SurfaceId::new(5);
         set_composition_advance(app.world_mut(), false);
         enqueue_surface_event(
@@ -782,7 +782,7 @@ mod tests {
 
     #[test]
     fn converts_argb_frames_at_the_ingress_boundary() {
-        let (mut app, _) = test_app();
+        let mut app = test_app();
         let surface = SurfaceId::new(13);
         enqueue_surface_event(
             app.world_mut(),
@@ -817,7 +817,7 @@ mod tests {
 
     #[test]
     fn rejects_invalid_frames_without_creating_half_mapped_entities() {
-        let (mut app, _) = test_app();
+        let mut app = test_app();
         enqueue_surface_event(
             app.world_mut(),
             HostSurfaceEvent::Frame {
@@ -839,7 +839,7 @@ mod tests {
 
     #[test]
     fn sizes_the_node_in_surface_logical_pixels_without_downsampling_the_image() {
-        let (mut app, _) = test_app();
+        let mut app = test_app();
         let surface = SurfaceId::new(19);
         enqueue_surface_event(
             app.world_mut(),
@@ -879,7 +879,7 @@ mod tests {
 
     #[test]
     fn view_changes_update_crop_and_logical_size_without_replacing_the_image() {
-        let (mut app, _) = test_app();
+        let mut app = test_app();
         let surface = SurfaceId::new(23);
         enqueue_surface_event(
             app.world_mut(),
@@ -928,7 +928,7 @@ mod tests {
 
     #[test]
     fn rejects_an_out_of_bounds_surface_crop() {
-        let (mut app, _) = test_app();
+        let mut app = test_app();
         enqueue_surface_event(
             app.world_mut(),
             HostSurfaceEvent::Frame {
@@ -965,7 +965,7 @@ mod tests {
 
     #[test]
     fn view_changes_do_not_create_unknown_surfaces() {
-        let (mut app, _) = test_app();
+        let mut app = test_app();
         enqueue_surface_event(
             app.world_mut(),
             HostSurfaceEvent::ViewChanged {

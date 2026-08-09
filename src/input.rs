@@ -47,11 +47,11 @@ use tracing::warn;
 use winit::{keyboard::PhysicalKey, platform::scancode::PhysicalKeyExtScancode};
 
 use crate::{
-    compositor::{SurfaceId, SurfaceNode},
     raw_input::{
         InputPosition, LinuxButtonCode, LinuxKeycode, RawScrollFrame, RawSeatEvent,
         RawSeatEventKind,
     },
+    surface::{SurfaceId, SurfaceNode},
 };
 
 // Weld has no Bevy Window entity: the manual render target is not a window.
@@ -663,7 +663,7 @@ fn resolve_pick_candidates(
     let size = candidate.size?;
     Some(SurfaceHit {
         surface,
-        // `size` is surface-logical because SurfaceCompositorPlugin explicitly
+        // `size` is surface-logical because SurfacePlugin explicitly
         // sizes each node to its committed viewport destination (or the full
         // logical buffer when no viewport exists). That invariant keeps Bevy
         // transforms and clipping composable while the protocol receives

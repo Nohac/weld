@@ -37,16 +37,18 @@ surfaces and shell UI into a Weld-owned texture through Bevy's manual
 render-device path. Do not enable Bevy's window runner or expand its features
 without a concrete need.
 
-Smithay's renderer is deliberately outside this first slice. Weld currently
-accepts one xdg-toplevel backed by `wl_shm`, copies its pixels into an owned
-Bevy image, and presents it through a project-owned `SurfaceNode` that composes
-with ordinary Bevy UI. The client is placed at its intrinsic size rather than
-stretched across the output. The final project-owned wgpu pass only presents or
-captures Bevy's completed texture. `ImageNode` is a provisional SHM backing,
-not the plugin-facing surface contract. The fixed output size, full redraws,
-missing input routing, and lack of damage, subsurface, popup, dmabuf,
-presentation-timing, VRR, and HDR support are explicit spike boundaries rather
-than settled compositor architecture.
+Smithay's renderer is deliberately outside this first slice. Weld accepts
+multiple xdg-toplevels backed by `wl_shm`, copies their pixels into owned Bevy
+images, and exposes their lifecycle through protocol-neutral ECS entities.
+The default window plugin independently claims and decorates each mapped
+surface through a project-owned `SurfaceNode`, so client content composes with
+ordinary Bevy UI. Smithay remains responsible for Wayland protocol state and
+applies focus or close actions chosen by ECS policy; it does not own window
+placement, stacking, or decoration. The final project-owned wgpu pass only
+presents or captures Bevy's completed texture. `ImageNode` is a provisional
+SHM backing, not the plugin-facing surface contract. Subsurfaces, popups,
+dmabuf, damage-aware uploads, presentation timing, VRR, and HDR remain explicit
+spike boundaries rather than settled compositor architecture.
 
 Ordinary nested rendering is event driven. Host and client-surface changes
 request a composition directly; Bevy systems that drive continuous visual

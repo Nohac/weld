@@ -1,12 +1,14 @@
 //! Nested validation host for Weld's Smithay, Bevy, and wgpu boundary.
 
-mod compositor;
+mod composition;
 mod debug;
 mod input;
+mod layer;
 mod raw_input;
 mod renderer;
 mod server;
 mod shell;
+mod surface;
 mod window;
 
 use std::{
@@ -264,11 +266,14 @@ fn main() -> Result<()> {
                 started_at.elapsed().as_millis() as u32,
                 work.composition_advance,
             );
-            for effect in shell.take_input_effects() {
-                server.apply_input_effect(effect);
-            }
+            // ECS focus policy is authoritative and must be applied before the matching
+            // pointer press establishes Smithay's implicit grab. Requests made during an
+            // older grab are queued by the host and retried when that grab ends.
             for action in shell.take_surface_actions() {
                 server.apply_surface_action(action);
+            }
+            for effect in shell.take_input_effects() {
+                server.apply_input_effect(effect);
             }
             if bevy_requested_redraw && !work.composition_advance {
                 frame_state.request_composition();
