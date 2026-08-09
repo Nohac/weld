@@ -4,17 +4,22 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use bevy::{
-    app::{App, PluginGroup},
+    app::{App, PluginGroup, PostUpdate},
     camera::{
         Camera, Camera2d, ClearColorConfig, CompositingSpace, ManualTextureViewHandle,
         NormalizedRenderTarget, RenderTarget,
     },
-    ecs::message::{MessageCursor, Messages},
+    ecs::{
+        message::{MessageCursor, Messages},
+        schedule::IntoScheduleConfigs,
+        world::World,
+    },
     log::LogPlugin,
     math::UVec2,
     prelude::{
-        AlignItems, BackgroundColor, BorderRadius, Color, DefaultPlugins, Entity, GlobalZIndex,
-        Node, PositionType, Scene, UiRect, UiTargetCamera, px,
+        AlignItems, BackgroundColor, BorderRadius, ChildOf, Color, DefaultPlugins, Entity,
+        GlobalZIndex, LayoutConfig, Node, PositionType, Scene, UiRect, UiTargetCamera, With,
+        Without, px,
     },
     render::{
         RenderApp, RenderPlugin,
@@ -27,7 +32,7 @@ use bevy::{
     },
     scene::{WorldSceneExt, bsn},
     time::TimeReceiver,
-    ui::UiScale,
+    ui::{UiScale, UiSystems},
     window::{ExitCondition, RequestRedraw, WindowPlugin},
 };
 
@@ -100,6 +105,10 @@ impl ShellRenderer {
             DefaultWindowPlugin::new(size, scale_factor),
             InputBridgePlugin::new(NormalizedRenderTarget::TextureView(COMPOSITION_VIEW)),
         ))
+        .add_systems(
+            PostUpdate,
+            disable_ui_rounding_on_roots.before(UiSystems::Layout),
+        )
         .insert_resource(UiScale(scale_factor as f32));
         if let Some(address) = remote_debug {
             configure_remote_debug(&mut app, address)
@@ -297,6 +306,19 @@ fn insert_manual_view(app: &mut App, texture_view: wgpu::TextureView, width: u32
             view_format: wgpu::TextureFormat::Rgba8UnormSrgb,
         },
     );
+}
+
+fn disable_ui_rounding_on_roots(world: &mut World) {
+    let roots = {
+        let mut query =
+            world.query_filtered::<Entity, (With<Node>, Without<ChildOf>, Without<LayoutConfig>)>();
+        query.iter(world).collect::<Vec<_>>()
+    };
+    for root in roots {
+        world.entity_mut(root).insert(LayoutConfig {
+            use_rounding: false,
+        });
+    }
 }
 
 fn shell_overlay(_camera: Entity) -> impl Scene {

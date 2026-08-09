@@ -17,6 +17,7 @@ use bevy::{
         resource::Resource,
         schedule::IntoScheduleConfigs,
         system::{Commands, Query, Res, ResMut, SystemParam},
+        template::template,
         world::World,
     },
     math::{Rot2, UVec2, Vec2},
@@ -31,7 +32,7 @@ use bevy::{
         PositionType, Scene, UiRect, UiTransform, Val, With, percent, px,
     },
     scene::{CommandsSceneExt, bsn, on},
-    ui::{UiScale, UiTargetCamera},
+    ui::{LayoutConfig, UiScale, UiTargetCamera},
     window::RequestRedraw,
 };
 use tracing::warn;
@@ -46,6 +47,8 @@ use crate::{
 };
 
 const BORDER_WIDTH: f32 = 3.0;
+const OUTER_BORDER_RADIUS: f32 = 9.0;
+const INNER_BORDER_RADIUS: f32 = OUTER_BORDER_RADIUS - BORDER_WIDTH;
 const HEADER_HEIGHT: f32 = 30.0;
 const CLOSE_BUTTON_SIZE: f32 = 22.0;
 const FOCUSED_BORDER: Color = Color::srgb(0.35, 0.58, 0.88);
@@ -221,7 +224,6 @@ fn present_default_windows(mut params: PresentWindowParams) {
         let mut root = params
             .commands
             .spawn_scene(default_window_scene(window.surface, position));
-        let root_entity = root.id();
         root.insert((
             PresentsSurface(source),
             DefaultWindow {
@@ -230,22 +232,6 @@ fn present_default_windows(mut params: PresentWindowParams) {
             UiTargetCamera(camera.0),
             GlobalZIndex(z_index),
         ));
-        params
-            .commands
-            .spawn((
-                SurfaceNode {
-                    surface: window.surface,
-                },
-                ImageNode::default(),
-                Node {
-                    display: Display::None,
-                    ..Default::default()
-                },
-                ChildOf(root_entity),
-            ))
-            // Observe owned picking targets directly and stop propagation after handling so
-            // focus/raise remains exactly-once regardless of UI traversal details.
-            .observe(focus_window(window.surface));
         params.focus.0 = Some(window.surface);
         params.actions.push(SurfaceAction::Focus {
             surface: Some(window.surface),
@@ -305,11 +291,9 @@ fn default_window_scene(surface: SurfaceId, position: Vec2) -> impl Scene {
             top: px(position.y),
             flex_direction: FlexDirection::Column,
             border: UiRect::all(px(BORDER_WIDTH)),
-            border_radius: BorderRadius::all(px(9)),
-            overflow: Overflow::clip(),
+            border_radius: BorderRadius::all(px(OUTER_BORDER_RADIUS)),
         }
         BorderColor::all(UNFOCUSED_BORDER)
-        BackgroundColor(Color::srgb(0.10, 0.12, 0.16))
         BoxShadow::new(
             Color::srgba(0.0, 0.0, 0.0, 0.55),
             px(0),
@@ -319,68 +303,99 @@ fn default_window_scene(surface: SurfaceId, position: Vec2) -> impl Scene {
         )
         on(focus_window(surface))
         on(drag_window)
-        Children [
-            (
-                Node {
-                    width: percent(100),
-                    height: px(HEADER_HEIGHT),
-                    flex_shrink: 0.0,
-                    align_items: AlignItems::Center,
-                    justify_content: JustifyContent::FlexEnd,
-                }
-                BackgroundColor(Color::srgb(0.14, 0.17, 0.22))
-                on(focus_window(surface))
-                on(drag_window)
-                Children [(
-                    Button
+        Children [(
+            Node {
+                flex_direction: FlexDirection::Column,
+                border_radius: BorderRadius::all(px(INNER_BORDER_RADIUS)),
+                overflow: Overflow::clip(),
+            }
+            BackgroundColor(Color::srgb(0.10, 0.12, 0.16))
+            Children [
+                (
                     Node {
-                        width: px(CLOSE_BUTTON_SIZE),
-                        height: px(CLOSE_BUTTON_SIZE),
-                        margin: UiRect::right(px(4)),
+                        width: percent(100),
+                        height: px(HEADER_HEIGHT),
+                        flex_shrink: 0.0,
                         align_items: AlignItems::Center,
-                        justify_content: JustifyContent::Center,
-                        border_radius: BorderRadius::MAX,
+                        justify_content: JustifyContent::FlexEnd,
+                        border_radius: BorderRadius::px(
+                            INNER_BORDER_RADIUS,
+                            INNER_BORDER_RADIUS,
+                            0.0,
+                            0.0,
+                        ),
                     }
-                    BackgroundColor(Color::srgb(0.54, 0.16, 0.18))
+                    BackgroundColor(Color::srgb(0.14, 0.17, 0.22))
                     on(focus_window(surface))
-                    on(close_window(surface))
+                    on(drag_window)
                     Children [(
-                        Pickable::IGNORE
+                        Button
                         Node {
-                            width: px(12),
-                            height: px(12),
-                            position_type: PositionType::Relative,
+                            width: px(CLOSE_BUTTON_SIZE),
+                            height: px(CLOSE_BUTTON_SIZE),
+                            margin: UiRect::right(px(4)),
+                            align_items: AlignItems::Center,
+                            justify_content: JustifyContent::Center,
+                            border_radius: BorderRadius::MAX,
                         }
-                        Children [
-                            (
-                                Pickable::IGNORE
-                                Node {
-                                    position_type: PositionType::Absolute,
-                                    left: px(0),
-                                    top: px(5),
-                                    width: px(12),
-                                    height: px(2),
-                                }
-                                UiTransform::from_rotation(Rot2::degrees(45.0))
-                                BackgroundColor(Color::WHITE)
-                            ),
-                            (
-                                Pickable::IGNORE
-                                Node {
-                                    position_type: PositionType::Absolute,
-                                    left: px(0),
-                                    top: px(5),
-                                    width: px(12),
-                                    height: px(2),
-                                }
-                                UiTransform::from_rotation(Rot2::degrees(-45.0))
-                                BackgroundColor(Color::WHITE)
-                            ),
-                        ]
+                        BackgroundColor(Color::srgb(0.54, 0.16, 0.18))
+                        on(focus_window(surface))
+                        on(close_window(surface))
+                        Children [(
+                            Pickable::IGNORE
+                            Node {
+                                width: px(12),
+                                height: px(12),
+                                position_type: PositionType::Relative,
+                            }
+                            Children [
+                                (
+                                    Pickable::IGNORE
+                                    Node {
+                                        position_type: PositionType::Absolute,
+                                        left: px(0),
+                                        top: px(5),
+                                        width: px(12),
+                                        height: px(2),
+                                    }
+                                    UiTransform::from_rotation(Rot2::degrees(45.0))
+                                    BackgroundColor(Color::WHITE)
+                                ),
+                                (
+                                    Pickable::IGNORE
+                                    Node {
+                                        position_type: PositionType::Absolute,
+                                        left: px(0),
+                                        top: px(5),
+                                        width: px(12),
+                                        height: px(2),
+                                    }
+                                    UiTransform::from_rotation(Rot2::degrees(-45.0))
+                                    BackgroundColor(Color::WHITE)
+                                ),
+                            ]
+                        )]
                     )]
-                )]
-            ),
-        ]
+                ),
+                (
+                    template(move |_| Ok(SurfaceNode { surface }))
+                    LayoutConfig { use_rounding: true }
+                    ImageNode::default()
+                    Node {
+                        display: Display::None,
+                        border_radius: BorderRadius::px(
+                            0.0,
+                            0.0,
+                            INNER_BORDER_RADIUS,
+                            INNER_BORDER_RADIUS,
+                        ),
+                    }
+                    // Observe owned picking targets directly and stop propagation after
+                    // handling so focus/raise remains exactly-once.
+                    on(focus_window(surface))
+                ),
+            ]
+        )]
     }
 }
 
@@ -481,14 +496,13 @@ fn drag_window(
     if drag.button != PointerButton::Primary || drag.original_event_target() != drag.entity {
         return;
     }
-    let window = if windows.contains(drag.entity) {
-        drag.entity
-    } else {
-        let Ok(parent) = parents.get(drag.entity) else {
+    let mut window = drag.entity;
+    while !windows.contains(window) {
+        let Ok(parent) = parents.get(window) else {
             return;
         };
-        parent.parent()
-    };
+        window = parent.parent();
+    }
     let Ok(mut node) = nodes.get_mut(window) else {
         return;
     };
@@ -643,14 +657,11 @@ mod tests {
             Some(Display::Flex),
         );
 
-        let mut content_nodes = app
-            .world_mut()
-            .query::<(&SurfaceNode, &ChildOf, &ImageNode, &Node)>();
-        let (surface_node, parent, image, node) = content_nodes
+        let mut content_nodes = app.world_mut().query::<(&SurfaceNode, &ImageNode, &Node)>();
+        let (surface_node, image, node) = content_nodes
             .single(app.world())
             .expect("presentation should contain one backed surface node");
         assert_eq!(surface_node.surface, surface);
-        assert_eq!(parent.parent(), root);
         assert_eq!(node.display, Display::Flex);
         assert_eq!(node.width, px(320.0));
         assert_eq!(node.height, px(240.0));
