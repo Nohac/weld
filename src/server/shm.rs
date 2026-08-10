@@ -2,10 +2,10 @@
 
 use anyhow::{Context, Result, anyhow, bail};
 use smithay::{
-    reexports::wayland_server::protocol::{wl_buffer, wl_output, wl_shm, wl_surface::WlSurface},
+    reexports::wayland_server::protocol::{wl_buffer, wl_output, wl_shm},
     utils::{Buffer as BufferCoord, Logical, Rectangle, Size, Transform},
     wayland::{
-        compositor::with_states,
+        compositor::SurfaceData,
         shm::{BufferData, with_buffer_contents},
         viewporter::{ViewportCachedState, ensure_viewport_valid},
     },
@@ -84,7 +84,7 @@ fn copy_shm_contents(
 }
 
 pub(super) fn surface_content_view(
-    surface: &WlSurface,
+    states: &SurfaceData,
     metadata: SurfaceBufferMetadata,
 ) -> Result<SurfaceContentView> {
     if metadata.transform != wl_output::Transform::Normal {
@@ -99,16 +99,14 @@ pub(super) fn surface_content_view(
     let logical_buffer_size =
         Size::<i32, BufferCoord>::from((width, height)).to_logical(scale, Transform::Normal);
 
-    with_states(surface, |states| {
-        if !ensure_viewport_valid(states, logical_buffer_size) {
-            bail!("client viewport source extends outside its buffer");
-        }
-        let viewport = {
-            let mut cached = states.cached_state.get::<ViewportCachedState>();
-            *cached.current()
-        };
-        translate_surface_content_view(metadata, logical_buffer_size, viewport)
-    })
+    if !ensure_viewport_valid(states, logical_buffer_size) {
+        bail!("client viewport source extends outside its buffer");
+    }
+    let viewport = {
+        let mut cached = states.cached_state.get::<ViewportCachedState>();
+        *cached.current()
+    };
+    translate_surface_content_view(metadata, logical_buffer_size, viewport)
 }
 
 fn translate_surface_content_view(

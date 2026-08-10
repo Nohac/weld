@@ -3,9 +3,10 @@
 //! Smithay feeds this module owned lifecycle events and pixel data. The durable
 //! [`AppWindow`] entity contains protocol-neutral state only. Presentation
 //! plugins claim that entity separately and render its content through
-//! [`SurfaceNode`]; the provisional Bevy [`ImageNode`] backing remains internal.
+//! [`SurfaceNode`]; the provisional root and overlay Bevy [`ImageNode`] backing
+//! remains internal.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use bevy::{
     app::{App, Plugin, PreUpdate},
@@ -13,6 +14,8 @@ use bevy::{
     ecs::{
         component::Component,
         entity::Entity,
+        hierarchy::ChildOf,
+        query::{With, Without},
         resource::Resource,
         schedule::{IntoScheduleConfigs, SystemSet},
         system::Query,
@@ -20,10 +23,10 @@ use bevy::{
     },
     image::Image,
     math::{Rect, Vec2},
-    picking::PickingSystems,
+    picking::{Pickable, PickingSystems},
     prelude::{ImageNode, NodeImageMode, px},
     render::render_resource::{Extent3d, TextureDimension, TextureFormat},
-    ui::{Display, Node, Val},
+    ui::{Display, Node, PositionType, Val},
 };
 use tracing::warn;
 
@@ -52,6 +55,8 @@ pub struct AppWindow {
 /// Protocol-neutral state available while an application surface is mapped.
 #[derive(Component, Clone, Copy, Debug, PartialEq)]
 pub struct MappedSurface {
+    /// Window-geometry extent exposed to shell layout, excluding client-side
+    /// shadows and other invisible root-buffer margins.
     pub logical_size: Vec2,
     pub opaque: bool,
 }
@@ -59,12 +64,17 @@ pub struct MappedSurface {
 /// A client surface that composes as an ordinary Bevy UI primitive.
 ///
 /// Plugins should decorate or arrange this component's entity rather than
-/// depending on the internal [`ImageNode`] used by the initial SHM path.
+/// depending on the internal root [`ImageNode`] and ignored overlay children
+/// used by the SHM surface-tree path.
 #[derive(Component, Clone, Copy, Debug, Eq, PartialEq)]
-#[require(ImageNode, Node)]
+#[require(ImageNode, Node, SurfaceGeometryOrigin)]
 pub struct SurfaceNode {
     pub surface: SurfaceId,
 }
+
+/// Root-surface coordinate represented by the presented node's top-left corner.
+#[derive(Component, Clone, Copy, Debug, Default, PartialEq)]
+pub(crate) struct SurfaceGeometryOrigin(pub(crate) Vec2);
 
 /// Protocol-neutral request emitted by ECS policy for the host to apply.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -82,21 +92,88 @@ impl SurfaceActionQueue {
     }
 }
 
-/// Internal render backing for one mapped client surface.
+/// Internal render backing for one mapped client surface tree.
 #[derive(Component, Clone, Debug)]
 struct SurfaceContent {
-    image: Handle<Image>,
-    view: SurfaceContentView,
+    root: SurfaceLayerContent,
+    overlays: Vec<SurfaceLayerContent>,
+    surface_origin: Vec2,
 }
 
-/// An owned frame copied from a client buffer at the Smithay boundary.
+#[derive(Clone, Debug)]
+struct SurfaceLayerContent {
+    layer: SurfaceLayerId,
+    image: Handle<Image>,
+    view: SurfaceContentView,
+    position: Vec2,
+}
+
+/// Stable protocol-neutral identity for one buffer-bearing surface layer.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub(crate) struct SurfaceLayerId(u64);
+
+impl SurfaceLayerId {
+    pub(crate) const fn new(raw: u64) -> Self {
+        Self(raw)
+    }
+
+    pub(crate) const fn raw(self) -> u64 {
+        self.0
+    }
+}
+
+/// Owned pixels for a changed tree layer, or metadata retaining an existing image.
 #[derive(Debug)]
-pub(crate) struct SurfaceFrame {
+pub(crate) struct SurfaceBufferUpdate {
+    pub layer: SurfaceLayerId,
     pub width: u32,
     pub height: u32,
-    pub view: SurfaceContentView,
-    pub bgra_pixels: Vec<u8>,
+    pub bgra_pixels: Option<Vec<u8>>,
     pub opaque: bool,
+}
+
+/// Placement of one imported layer in root-surface logical coordinates.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct SurfaceLayerPlacement {
+    pub layer: SurfaceLayerId,
+    pub position: Vec2,
+    pub view: SurfaceContentView,
+}
+
+/// Complete visible tree state plus pixel deltas copied at the Smithay boundary.
+#[derive(Debug)]
+pub(crate) struct SurfaceTreeSnapshot {
+    pub client_mapped: bool,
+    pub surface_origin: Vec2,
+    pub root: Option<SurfaceLayerPlacement>,
+    pub overlays: Vec<SurfaceLayerPlacement>,
+    pub buffers: Vec<SurfaceBufferUpdate>,
+}
+
+impl SurfaceTreeSnapshot {
+    fn carry_pending_pixels_from(&mut self, previous: &mut Self) {
+        let retained = self
+            .buffers
+            .iter()
+            .map(|buffer| buffer.layer)
+            .collect::<HashSet<_>>();
+        let mut pending = previous
+            .buffers
+            .iter_mut()
+            .filter(|buffer| retained.contains(&buffer.layer))
+            .filter_map(|buffer| {
+                buffer
+                    .bgra_pixels
+                    .take()
+                    .map(|pixels| (buffer.layer, pixels))
+            })
+            .collect::<HashMap<_, _>>();
+        for buffer in &mut self.buffers {
+            if buffer.bgra_pixels.is_none() {
+                buffer.bgra_pixels = pending.remove(&buffer.layer);
+            }
+        }
+    }
 }
 
 /// The part of a client buffer displayed by a surface and its logical extent.
@@ -133,16 +210,9 @@ pub(crate) enum HostSurfaceEvent {
     Created {
         surface: SurfaceId,
     },
-    Frame {
+    TreeSnapshot {
         surface: SurfaceId,
-        frame: SurfaceFrame,
-    },
-    ViewChanged {
-        surface: SurfaceId,
-        view: SurfaceContentView,
-    },
-    Unmapped {
-        surface: SurfaceId,
+        snapshot: SurfaceTreeSnapshot,
     },
     Destroyed {
         surface: SurfaceId,
@@ -197,18 +267,25 @@ pub(crate) struct SurfaceEventQueue(VecDeque<HostSurfaceEvent>);
 
 impl SurfaceEventQueue {
     pub(crate) fn push(&mut self, event: HostSurfaceEvent) {
-        let replaces_last_frame = match (&event, self.0.back()) {
-            (
-                HostSurfaceEvent::Frame { surface, .. },
-                Some(HostSurfaceEvent::Frame {
-                    surface: previous, ..
-                }),
-            ) => surface == previous,
-            _ => false,
+        let event = match event {
+            HostSurfaceEvent::TreeSnapshot {
+                surface,
+                mut snapshot,
+            } => {
+                if let Some(HostSurfaceEvent::TreeSnapshot {
+                    surface: previous_surface,
+                    snapshot: previous,
+                }) = self.0.back_mut()
+                    && surface == *previous_surface
+                {
+                    snapshot.carry_pending_pixels_from(previous);
+                    *previous = snapshot;
+                    return;
+                }
+                HostSurfaceEvent::TreeSnapshot { surface, snapshot }
+            }
+            event => event,
         };
-        if replaces_last_frame {
-            self.0.pop_back();
-        }
         self.0.push_back(event);
     }
 
@@ -222,10 +299,21 @@ struct SurfaceRegistry(HashMap<SurfaceId, SurfaceEntry>);
 
 struct SurfaceEntry {
     entity: Entity,
-    image: Option<Handle<Image>>,
-    pixel_size: Option<(u32, u32)>,
+    buffers: HashMap<SurfaceLayerId, SurfaceBufferAsset>,
     frame_ready: bool,
 }
+
+struct SurfaceBufferAsset {
+    image: Handle<Image>,
+    pixel_size: (u32, u32),
+    opaque: bool,
+}
+
+#[derive(Component, Default)]
+struct SurfaceOverlayNodes(Vec<(SurfaceLayerId, Entity)>);
+
+#[derive(Component)]
+struct SurfaceOverlayNode;
 
 pub(crate) fn enqueue_surface_event(world: &mut World, event: HostSurfaceEvent) {
     let Some(mut events) = world.get_resource_mut::<SurfaceEventQueue>() else {
@@ -262,14 +350,8 @@ fn apply_host_surface_events(world: &mut World) {
             HostSurfaceEvent::Created { surface } => {
                 ensure_surface_entity(world, &mut registry, surface);
             }
-            HostSurfaceEvent::Frame { surface, frame } => {
-                apply_surface_frame(world, &mut registry, surface, frame);
-            }
-            HostSurfaceEvent::ViewChanged { surface, view } => {
-                apply_surface_view(world, &mut registry, surface, view);
-            }
-            HostSurfaceEvent::Unmapped { surface } => {
-                unmap_surface(world, &mut registry, surface);
+            HostSurfaceEvent::TreeSnapshot { surface, snapshot } => {
+                apply_surface_tree_snapshot(world, &mut registry, surface, snapshot);
             }
             HostSurfaceEvent::Destroyed { surface } => {
                 destroy_surface(world, &mut registry, surface);
@@ -297,144 +379,150 @@ fn ensure_surface_entity(
         surface,
         SurfaceEntry {
             entity,
-            image: None,
-            pixel_size: None,
+            buffers: HashMap::new(),
             frame_ready: false,
         },
     );
     Some(entity)
 }
 
-fn apply_surface_frame(
+fn apply_surface_tree_snapshot(
     world: &mut World,
     registry: &mut SurfaceRegistry,
     surface: SurfaceId,
-    mut frame: SurfaceFrame,
+    mut snapshot: SurfaceTreeSnapshot,
 ) {
-    if !validate_frame(&frame) {
-        warn!(
-            ?surface,
-            width = frame.width,
-            height = frame.height,
-            "discarded an invalid surface frame"
-        );
+    if !validate_snapshot(&snapshot) {
+        warn!(?surface, "discarded an invalid surface tree snapshot");
         return;
     }
     let Some(entity) = ensure_surface_entity(world, registry, surface) else {
         return;
     };
-    if !frame.opaque {
-        unpremultiply_bgra(&mut frame.bgra_pixels);
-    }
 
-    let extent = Extent3d {
-        width: frame.width,
-        height: frame.height,
-        depth_or_array_layers: 1,
-    };
-    let previous = registry
-        .0
-        .get(&surface)
-        .and_then(|entry| entry.image.clone());
-    let handle = {
-        let Some(mut images) = world.get_resource_mut::<Assets<Image>>() else {
-            warn!(
-                ?surface,
-                "discarded a surface frame because Bevy image assets are unavailable"
-            );
-            return;
-        };
-        if let Some(handle) = previous {
-            if let Some(mut image) = images.get_mut(&handle) {
-                image.texture_descriptor.size = extent;
-                image.data = Some(frame.bgra_pixels);
-                handle
-            } else {
-                images.add(surface_image(extent, frame.bgra_pixels))
-            }
-        } else {
-            images.add(surface_image(extent, frame.bgra_pixels))
-        }
-    };
-
-    let Ok(mut entity_mut) = world.get_entity_mut(entity) else {
-        registry.0.remove(&surface);
-        warn!(
-            ?surface,
-            "discarded a surface frame because its ECS entity disappeared"
-        );
-        return;
-    };
-    entity_mut.insert((
-        SurfaceContent {
-            image: handle.clone(),
-            view: frame.view,
-        },
-        MappedSurface {
-            logical_size: Vec2::new(frame.view.logical_width, frame.view.logical_height),
-            opaque: frame.opaque,
-        },
-    ));
-    if let Some(entry) = registry.0.get_mut(&surface) {
-        entry.image = Some(handle);
-        entry.pixel_size = Some((frame.width, frame.height));
-        entry.frame_ready = true;
-    }
-}
-
-fn apply_surface_view(
-    world: &mut World,
-    registry: &mut SurfaceRegistry,
-    surface: SurfaceId,
-    view: SurfaceContentView,
-) {
-    let Some(entry) = registry.0.get(&surface) else {
-        warn!(?surface, "discarded a view change for an unknown surface");
-        return;
-    };
-    let (Some(_handle), Some((width, height))) = (entry.image.as_ref(), entry.pixel_size) else {
-        warn!(?surface, "discarded a view change for an unmapped surface");
-        return;
-    };
-    if !validate_view(view, width, height) {
-        warn!(?surface, ?view, "discarded an invalid surface view");
-        return;
-    }
-    let entity = entry.entity;
-    let Ok(mut entity_mut) = world.get_entity_mut(entity) else {
-        registry.0.remove(&surface);
-        warn!(
-            ?surface,
-            "discarded a view change because its ECS entity disappeared"
-        );
-        return;
-    };
-    {
-        let Some(mut content) = entity_mut.get_mut::<SurfaceContent>() else {
-            warn!(?surface, "discarded a view change without surface content");
-            return;
-        };
-        content.view = view;
-    }
-    if let Some(mut mapped) = entity_mut.get_mut::<MappedSurface>() {
-        mapped.logical_size = Vec2::new(view.logical_width, view.logical_height);
-    }
-}
-
-fn unmap_surface(world: &mut World, registry: &mut SurfaceRegistry, surface: SurfaceId) {
+    let retained = snapshot
+        .buffers
+        .iter()
+        .map(|buffer| buffer.layer)
+        .collect::<HashSet<_>>();
     let Some(entry) = registry.0.get_mut(&surface) else {
         return;
     };
-    if let Some(handle) = entry.image.take()
-        && let Some(mut images) = world.get_resource_mut::<Assets<Image>>()
-    {
-        images.remove(handle.id());
+    let removed = entry
+        .buffers
+        .keys()
+        .copied()
+        .filter(|layer| !retained.contains(layer))
+        .collect::<Vec<_>>();
+    if let Some(mut images) = world.get_resource_mut::<Assets<Image>>() {
+        for layer in removed {
+            if let Some(asset) = entry.buffers.remove(&layer) {
+                images.remove(asset.image.id());
+            }
+        }
+        for buffer in &mut snapshot.buffers {
+            let pixel_size = (buffer.width, buffer.height);
+            let extent = Extent3d {
+                width: buffer.width,
+                height: buffer.height,
+                depth_or_array_layers: 1,
+            };
+            if let Some(mut pixels) = buffer.bgra_pixels.take() {
+                if !buffer.opaque {
+                    unpremultiply_bgra(&mut pixels);
+                }
+                let image = if let Some(asset) = entry.buffers.get(&buffer.layer)
+                    && let Some(mut image) = images.get_mut(&asset.image)
+                {
+                    image.texture_descriptor.size = extent;
+                    image.data = Some(pixels);
+                    asset.image.clone()
+                } else {
+                    images.add(surface_image(extent, pixels))
+                };
+                entry.buffers.insert(
+                    buffer.layer,
+                    SurfaceBufferAsset {
+                        image,
+                        pixel_size,
+                        opaque: buffer.opaque,
+                    },
+                );
+            } else if let Some(asset) = entry.buffers.get_mut(&buffer.layer) {
+                asset.pixel_size = pixel_size;
+                asset.opaque = buffer.opaque;
+            }
+        }
+    } else {
+        warn!(
+            ?surface,
+            "discarded surface pixels because Bevy image assets are unavailable"
+        );
+        return;
     }
-    entry.pixel_size = None;
-    entry.frame_ready = false;
 
-    if let Ok(mut entity) = world.get_entity_mut(entry.entity) {
-        entity.remove::<(SurfaceContent, MappedSurface)>();
+    let content = snapshot
+        .client_mapped
+        .then_some(())
+        .and(snapshot.root)
+        .and_then(|root| {
+            let root_asset = entry.buffers.get(&root.layer)?;
+            validate_view(root.view, root_asset.pixel_size.0, root_asset.pixel_size.1).then(|| {
+                let overlays = snapshot
+                    .overlays
+                    .iter()
+                    .filter_map(|placement| {
+                        let asset = entry.buffers.get(&placement.layer)?;
+                        validate_view(placement.view, asset.pixel_size.0, asset.pixel_size.1).then(
+                            || SurfaceLayerContent {
+                                layer: placement.layer,
+                                image: asset.image.clone(),
+                                view: placement.view,
+                                position: placement.position,
+                            },
+                        )
+                    })
+                    .collect();
+                (
+                    SurfaceContent {
+                        root: SurfaceLayerContent {
+                            layer: root.layer,
+                            image: root_asset.image.clone(),
+                            view: root.view,
+                            position: Vec2::ZERO,
+                        },
+                        overlays,
+                        surface_origin: snapshot.surface_origin,
+                    },
+                    root_asset.opaque,
+                )
+            })
+        });
+
+    let Ok(mut entity_mut) = world.get_entity_mut(entity) else {
+        registry.0.remove(&surface);
+        warn!(
+            ?surface,
+            "discarded a surface snapshot because its ECS entity disappeared"
+        );
+        return;
+    };
+    if let Some((content, opaque)) = content {
+        let logical_size = Vec2::new(
+            content.root.view.logical_width,
+            content.root.view.logical_height,
+        );
+        entity_mut.insert((
+            content,
+            MappedSurface {
+                logical_size,
+                opaque,
+            },
+        ));
+        entry.frame_ready = true;
+    } else {
+        entity_mut.remove::<(SurfaceContent, MappedSurface)>();
+        entry.frame_ready = false;
     }
 }
 
@@ -442,21 +530,39 @@ fn destroy_surface(world: &mut World, registry: &mut SurfaceRegistry, surface: S
     let Some(entry) = registry.0.remove(&surface) else {
         return;
     };
-    if let Some(handle) = entry.image
-        && let Some(mut images) = world.get_resource_mut::<Assets<Image>>()
-    {
-        images.remove(handle.id());
+    if let Some(mut images) = world.get_resource_mut::<Assets<Image>>() {
+        for asset in entry.buffers.into_values() {
+            images.remove(asset.image.id());
+        }
     }
     if let Ok(entity) = world.get_entity_mut(entry.entity) {
         entity.despawn();
     }
 }
 
+type SurfaceNodeQuery<'world, 'state> = Query<
+    'world,
+    'state,
+    (
+        Entity,
+        &'static SurfaceNode,
+        &'static mut ImageNode,
+        &'static mut Node,
+        &'static mut SurfaceGeometryOrigin,
+        Option<&'static SurfaceOverlayNodes>,
+    ),
+    Without<SurfaceOverlayNode>,
+>;
+
 fn sync_surface_nodes(
+    mut commands: bevy::ecs::system::Commands,
     surfaces: Query<(&AppWindow, &SurfaceContent)>,
-    mut nodes: Query<(&SurfaceNode, &mut ImageNode, &mut Node)>,
+    mut nodes: SurfaceNodeQuery,
+    mut overlay_nodes: Query<(&mut ImageNode, &mut Node), With<SurfaceOverlayNode>>,
 ) {
-    for (surface_node, mut image_node, mut node) in &mut nodes {
+    for (entity, surface_node, mut image_node, mut node, mut surface_origin, existing_overlays) in
+        &mut nodes
+    {
         let content = surfaces.iter().find_map(|(window, content)| {
             (window.surface == surface_node.surface).then_some(content)
         });
@@ -473,18 +579,27 @@ fn sync_surface_nodes(
             {
                 *image_node = empty_image;
             }
+            surface_origin.0 = Vec2::ZERO;
+            if let Some(existing) = existing_overlays {
+                for (_, overlay) in &existing.0 {
+                    commands.entity(*overlay).despawn();
+                }
+                commands.entity(entity).remove::<SurfaceOverlayNodes>();
+            }
             continue;
         };
 
-        let expected_image = surface_image_node(content.image.clone(), content.view);
+        surface_origin.0 = content.surface_origin;
+
+        let expected_image = surface_image_node(content.root.image.clone(), content.root.view);
         if image_node.image != expected_image.image
             || image_node.rect != expected_image.rect
             || image_node.image_mode != expected_image.image_mode
         {
             *image_node = expected_image;
         }
-        let logical_width = px(content.view.logical_width);
-        let logical_height = px(content.view.logical_height);
+        let logical_width = px(content.root.view.logical_width);
+        let logical_height = px(content.root.view.logical_height);
         if node.display != Display::Flex
             || node.width != logical_width
             || node.height != logical_height
@@ -493,22 +608,78 @@ fn sync_surface_nodes(
             node.width = logical_width;
             node.height = logical_height;
         }
+
+        let mut reusable = existing_overlays
+            .map(|overlays| overlays.0.iter().copied().collect::<HashMap<_, _>>())
+            .unwrap_or_default();
+        let mut ordered = Vec::with_capacity(content.overlays.len());
+        let mut tracked = Vec::with_capacity(content.overlays.len());
+        for overlay in &content.overlays {
+            let expected_image = surface_image_node(overlay.image.clone(), overlay.view);
+            let expected_node = overlay_node(overlay);
+            let overlay_entity = if let Some(overlay_entity) = reusable.remove(&overlay.layer) {
+                if let Ok((mut image_node, mut node)) = overlay_nodes.get_mut(overlay_entity) {
+                    if image_node.image != expected_image.image
+                        || image_node.rect != expected_image.rect
+                        || image_node.image_mode != expected_image.image_mode
+                    {
+                        *image_node = expected_image;
+                    }
+                    if *node != expected_node {
+                        *node = expected_node;
+                    }
+                }
+                overlay_entity
+            } else {
+                commands
+                    .spawn((
+                        SurfaceOverlayNode,
+                        Pickable::IGNORE,
+                        expected_image,
+                        expected_node,
+                        ChildOf(entity),
+                    ))
+                    .id()
+            };
+            ordered.push(overlay_entity);
+            tracked.push((overlay.layer, overlay_entity));
+        }
+        for overlay in reusable.into_values() {
+            commands.entity(overlay).despawn();
+        }
+        commands
+            .entity(entity)
+            .replace_children(&ordered)
+            .insert(SurfaceOverlayNodes(tracked));
     }
 }
 
-fn validate_frame(frame: &SurfaceFrame) -> bool {
-    let Some(expected) = frame
-        .width
-        .checked_mul(frame.height)
-        .and_then(|pixels| pixels.checked_mul(4))
-        .and_then(|bytes| usize::try_from(bytes).ok())
-    else {
-        return false;
-    };
-    frame.width > 0
-        && frame.height > 0
-        && frame.bgra_pixels.len() == expected
-        && validate_view(frame.view, frame.width, frame.height)
+fn overlay_node(layer: &SurfaceLayerContent) -> Node {
+    Node {
+        position_type: PositionType::Absolute,
+        left: px(layer.position.x),
+        top: px(layer.position.y),
+        width: px(layer.view.logical_width),
+        height: px(layer.view.logical_height),
+        ..Default::default()
+    }
+}
+
+fn validate_snapshot(snapshot: &SurfaceTreeSnapshot) -> bool {
+    let mut layers = HashSet::new();
+    snapshot.buffers.iter().all(|buffer| {
+        layers.insert(buffer.layer)
+            && buffer.width > 0
+            && buffer.height > 0
+            && buffer.bgra_pixels.as_ref().is_none_or(|pixels| {
+                buffer
+                    .width
+                    .checked_mul(buffer.height)
+                    .and_then(|count| count.checked_mul(4))
+                    .and_then(|bytes| usize::try_from(bytes).ok())
+                    == Some(pixels.len())
+            })
+    })
 }
 
 fn validate_view(view: SurfaceContentView, width: u32, height: u32) -> bool {
@@ -591,16 +762,6 @@ mod tests {
         app
     }
 
-    fn frame(pixel: [u8; 4]) -> SurfaceFrame {
-        SurfaceFrame {
-            width: 1,
-            height: 1,
-            view: full_view(1.0, 1.0),
-            bgra_pixels: pixel.to_vec(),
-            opaque: true,
-        }
-    }
-
     fn full_view(width: f32, height: f32) -> SurfaceContentView {
         SurfaceContentView {
             source_x: 0.0,
@@ -612,371 +773,244 @@ mod tests {
         }
     }
 
-    #[test]
-    fn applies_map_and_frame_in_one_update_and_reuses_the_image_handle() {
-        let mut app = test_app();
-        let surface = SurfaceId::new(7);
-        enqueue_surface_event(app.world_mut(), HostSurfaceEvent::Created { surface });
-        enqueue_surface_event(
-            app.world_mut(),
-            HostSurfaceEvent::Frame {
-                surface,
-                frame: frame([3, 2, 1, 255]),
-            },
-        );
-        app.update();
+    fn placement(layer: u64, position: Vec2) -> SurfaceLayerPlacement {
+        SurfaceLayerPlacement {
+            layer: SurfaceLayerId::new(layer),
+            position,
+            view: full_view(1.0, 1.0),
+        }
+    }
 
-        assert!(has_surface_frame(app.world()));
-        let mut query = app
-            .world_mut()
-            .query::<(&AppWindow, &MappedSurface, &SurfaceContent)>();
-        let surfaces = query.iter(app.world()).collect::<Vec<_>>();
-        let [(window, mapped, content)] = surfaces.as_slice() else {
-            panic!("expected one mapped surface data entity");
-        };
-        assert_eq!(window.surface, surface);
-        assert_eq!(mapped.logical_size, Vec2::ONE);
-        let first_handle = content.image.clone();
+    fn buffer(layer: u64, pixel: Option<[u8; 4]>) -> SurfaceBufferUpdate {
+        SurfaceBufferUpdate {
+            layer: SurfaceLayerId::new(layer),
+            width: 1,
+            height: 1,
+            bgra_pixels: pixel.map(Vec::from),
+            opaque: true,
+        }
+    }
 
-        enqueue_surface_event(
-            app.world_mut(),
-            HostSurfaceEvent::Frame {
-                surface,
-                frame: frame([7, 6, 5, 255]),
-            },
-        );
-        app.update();
-        let mut query = app.world_mut().query::<&SurfaceContent>();
-        let handles = query
-            .iter(app.world())
-            .map(|content| content.image.clone())
-            .collect::<Vec<_>>();
-        assert_eq!(handles, [first_handle]);
+    fn root_snapshot(pixel: Option<[u8; 4]>) -> SurfaceTreeSnapshot {
+        SurfaceTreeSnapshot {
+            client_mapped: true,
+            surface_origin: Vec2::ZERO,
+            root: Some(placement(1, Vec2::ZERO)),
+            overlays: Vec::new(),
+            buffers: vec![buffer(1, pixel)],
+        }
+    }
+
+    fn snapshot_event(surface: SurfaceId, snapshot: SurfaceTreeSnapshot) -> HostSurfaceEvent {
+        HostSurfaceEvent::TreeSnapshot { surface, snapshot }
     }
 
     #[test]
-    fn unmap_drops_the_asset_and_destroy_removes_the_entity() {
+    fn root_updates_reuse_the_bevy_image() {
         let mut app = test_app();
-        let surface = SurfaceId::new(11);
+        let surface = SurfaceId::new(7);
         enqueue_surface_event(
             app.world_mut(),
-            HostSurfaceEvent::Frame {
-                surface,
-                frame: frame([3, 2, 1, 255]),
-            },
+            snapshot_event(surface, root_snapshot(Some([3, 2, 1, 255]))),
         );
         app.update();
         let first_handle = {
             let mut query = app.world_mut().query::<&SurfaceContent>();
             query
                 .single(app.world())
-                .expect("surface image should exist")
+                .expect("root image should exist")
+                .root
                 .image
                 .clone()
         };
 
-        enqueue_surface_event(app.world_mut(), HostSurfaceEvent::Unmapped { surface });
+        enqueue_surface_event(
+            app.world_mut(),
+            snapshot_event(surface, root_snapshot(Some([7, 6, 5, 255]))),
+        );
+        app.update();
+        let mut query = app.world_mut().query::<&SurfaceContent>();
+        let content = query
+            .single(app.world())
+            .expect("updated root should exist");
+        assert_eq!(content.root.image, first_handle);
+    }
+
+    #[test]
+    fn protocol_unmap_retains_copied_buffers_for_remapping() {
+        let mut app = test_app();
+        let surface = SurfaceId::new(11);
+        enqueue_surface_event(
+            app.world_mut(),
+            snapshot_event(surface, root_snapshot(Some([3, 2, 1, 255]))),
+        );
+        app.update();
+        let first_handle = {
+            let mut query = app.world_mut().query::<&SurfaceContent>();
+            query
+                .single(app.world())
+                .expect("mapped root should exist")
+                .root
+                .image
+                .clone()
+        };
+
+        enqueue_surface_event(
+            app.world_mut(),
+            snapshot_event(
+                surface,
+                SurfaceTreeSnapshot {
+                    client_mapped: false,
+                    surface_origin: Vec2::ZERO,
+                    root: None,
+                    overlays: Vec::new(),
+                    buffers: vec![buffer(1, None)],
+                },
+            ),
+        );
         app.update();
         assert!(!has_surface_frame(app.world()));
         assert!(
             app.world()
                 .resource::<Assets<Image>>()
                 .get(&first_handle)
-                .is_none()
+                .is_some()
         );
-        let mut source_query =
-            app.world_mut()
-                .query::<(&AppWindow, Option<&MappedSurface>, Option<&SurfaceContent>)>();
-        let (_, mapped, content) = source_query
-            .single(app.world())
-            .expect("unmapping should preserve the source entity");
-        assert!(mapped.is_none());
-        assert!(content.is_none());
 
         enqueue_surface_event(
             app.world_mut(),
-            HostSurfaceEvent::Frame {
-                surface,
-                frame: frame([7, 6, 5, 255]),
-            },
+            snapshot_event(surface, root_snapshot(None)),
         );
         app.update();
-        let second_handle = {
-            let mut query = app.world_mut().query::<&SurfaceContent>();
-            query
-                .single(app.world())
-                .expect("remapped surface image should exist")
-                .image
-                .clone()
-        };
-        assert_ne!(first_handle, second_handle);
-
-        enqueue_surface_event(app.world_mut(), HostSurfaceEvent::Destroyed { surface });
-        app.update();
-        let mut query = app.world_mut().query::<&AppWindow>();
-        assert_eq!(query.iter(app.world()).count(), 0);
+        let mut query = app.world_mut().query::<&SurfaceContent>();
+        let remapped = query.single(app.world()).expect("root should remap");
+        assert_eq!(remapped.root.image, first_handle);
     }
 
     #[test]
-    fn coalesces_only_adjacent_frames_for_the_same_surface() {
-        let a = SurfaceId::new(1);
-        let b = SurfaceId::new(2);
+    fn coalescing_preserves_unseen_pixels_and_drops_removed_layers() {
+        let surface = SurfaceId::new(1);
         let mut events = SurfaceEventQueue::default();
-        events.push(HostSurfaceEvent::Frame {
-            surface: a,
-            frame: frame([1, 1, 1, 255]),
-        });
-        events.push(HostSurfaceEvent::Frame {
-            surface: a,
-            frame: frame([2, 2, 2, 255]),
-        });
-        events.push(HostSurfaceEvent::Frame {
-            surface: b,
-            frame: frame([3, 3, 3, 255]),
-        });
-        events.push(HostSurfaceEvent::Frame {
-            surface: a,
-            frame: frame([4, 4, 4, 255]),
-        });
-        assert_eq!(events.0.len(), 3);
+        let mut first = root_snapshot(Some([1, 1, 1, 255]));
+        first.buffers.push(buffer(2, Some([2, 2, 2, 255])));
+        first.overlays.push(placement(2, Vec2::ZERO));
+        events.push(snapshot_event(surface, first));
+
+        let mut next = root_snapshot(None);
+        next.buffers.push(buffer(3, Some([3, 3, 3, 255])));
+        next.overlays.push(placement(3, Vec2::ZERO));
+        events.push(snapshot_event(surface, next));
+
+        let Some(HostSurfaceEvent::TreeSnapshot { snapshot, .. }) = events.0.front() else {
+            panic!("adjacent snapshots should merge");
+        };
+        assert_eq!(events.0.len(), 1);
+        assert_eq!(snapshot.buffers.len(), 2);
+        assert_eq!(
+            snapshot.buffers[0].bgra_pixels.as_deref(),
+            Some([1, 1, 1, 255].as_slice())
+        );
+        assert_eq!(snapshot.buffers[1].layer, SurfaceLayerId::new(3));
     }
 
     #[test]
-    fn input_only_advances_keep_the_latest_surface_frame_queued_for_composition() {
+    fn input_only_advances_keep_latest_tree_pixels_queued() {
         let mut app = test_app();
         let surface = SurfaceId::new(5);
         set_composition_advance(app.world_mut(), false);
         enqueue_surface_event(
             app.world_mut(),
-            HostSurfaceEvent::Frame {
-                surface,
-                frame: frame([1, 2, 3, 255]),
-            },
+            snapshot_event(surface, root_snapshot(Some([1, 2, 3, 255]))),
         );
         enqueue_surface_event(
             app.world_mut(),
-            HostSurfaceEvent::Frame {
-                surface,
-                frame: frame([4, 5, 6, 255]),
-            },
+            snapshot_event(surface, root_snapshot(Some([4, 5, 6, 255]))),
         );
-
         app.update();
         app.update();
-        let mut surface_query = app.world_mut().query::<&MappedSurface>();
-        assert_eq!(surface_query.iter(app.world()).count(), 0);
+        let mut mapped = app.world_mut().query::<&MappedSurface>();
+        assert_eq!(mapped.iter(app.world()).count(), 0);
 
         set_composition_advance(app.world_mut(), true);
         app.update();
-        let mut content_query = app.world_mut().query::<&SurfaceContent>();
-        let content = content_query
+        let mut content = app.world_mut().query::<&SurfaceContent>();
+        let content = content
             .single(app.world())
-            .expect("latest queued frame should be composed");
+            .expect("queued root should compose");
         let image = app
             .world()
             .resource::<Assets<Image>>()
-            .get(&content.image)
-            .expect("composed frame should have an image asset");
+            .get(&content.root.image)
+            .expect("root asset should exist");
         assert_eq!(image.data.as_deref(), Some([4, 5, 6, 255].as_slice()));
     }
 
     #[test]
-    fn converts_argb_frames_at_the_ingress_boundary() {
+    fn overlays_reuse_entities_and_release_removed_assets() {
         let mut app = test_app();
-        let surface = SurfaceId::new(13);
-        enqueue_surface_event(
-            app.world_mut(),
-            HostSurfaceEvent::Frame {
-                surface,
-                frame: SurfaceFrame {
-                    width: 1,
-                    height: 1,
-                    view: full_view(1.0, 1.0),
-                    bgra_pixels: vec![25, 50, 75, 128],
-                    opaque: false,
-                },
-            },
-        );
-        app.update();
-
-        let image_handle = {
-            let mut query = app.world_mut().query::<&SurfaceContent>();
-            query
-                .single(app.world())
-                .expect("ARGB surface image should exist")
-                .image
-                .clone()
-        };
-        let image = app
-            .world()
-            .resource::<Assets<Image>>()
-            .get(&image_handle)
-            .expect("ARGB surface asset should exist");
-        assert_eq!(image.data.as_deref(), Some([50, 100, 149, 128].as_slice()));
-    }
-
-    #[test]
-    fn rejects_invalid_frames_without_creating_half_mapped_entities() {
-        let mut app = test_app();
-        enqueue_surface_event(
-            app.world_mut(),
-            HostSurfaceEvent::Frame {
-                surface: SurfaceId::new(17),
-                frame: SurfaceFrame {
-                    width: 1,
-                    height: 1,
-                    view: full_view(1.0, 1.0),
-                    bgra_pixels: vec![0; 3],
-                    opaque: true,
-                },
-            },
-        );
-        app.update();
-
-        let mut query = app.world_mut().query::<&AppWindow>();
-        assert_eq!(query.iter(app.world()).count(), 0);
-    }
-
-    #[test]
-    fn sizes_the_node_in_surface_logical_pixels_without_downsampling_the_image() {
-        let mut app = test_app();
-        let surface = SurfaceId::new(19);
-        enqueue_surface_event(
-            app.world_mut(),
-            HostSurfaceEvent::Frame {
-                surface,
-                frame: SurfaceFrame {
-                    width: 1_280,
-                    height: 960,
-                    view: SurfaceContentView {
-                        source_x: 0.0,
-                        source_y: 0.0,
-                        source_width: 1_280.0,
-                        source_height: 960.0,
-                        logical_width: 640.0,
-                        logical_height: 480.0,
-                    },
-                    bgra_pixels: vec![0; 1_280 * 960 * 4],
-                    opaque: true,
-                },
-            },
-        );
-        app.update();
-
-        let mut query = app.world_mut().query::<(&MappedSurface, &SurfaceContent)>();
-        let (mapped, content) = query
-            .single(app.world())
-            .expect("scaled surface should exist");
-        assert_eq!(mapped.logical_size, Vec2::new(640.0, 480.0));
-        let image = app
-            .world()
-            .resource::<Assets<Image>>()
-            .get(&content.image)
-            .expect("scaled surface image should exist");
-        assert_eq!(image.texture_descriptor.size.width, 1_280);
-        assert_eq!(image.texture_descriptor.size.height, 960);
-    }
-
-    #[test]
-    fn view_changes_update_crop_and_logical_size_without_replacing_the_image() {
-        let mut app = test_app();
-        let surface = SurfaceId::new(23);
-        enqueue_surface_event(
-            app.world_mut(),
-            HostSurfaceEvent::Frame {
-                surface,
-                frame: SurfaceFrame {
-                    width: 4,
-                    height: 4,
-                    view: full_view(4.0, 4.0),
-                    bgra_pixels: vec![0; 4 * 4 * 4],
-                    opaque: true,
-                },
-            },
-        );
-        app.update();
-        let first_handle = {
-            let mut query = app.world_mut().query::<&SurfaceContent>();
-            query
-                .single(app.world())
-                .expect("surface should exist")
-                .image
-                .clone()
-        };
-        let view = SurfaceContentView {
-            source_x: 1.0,
-            source_y: 0.5,
-            source_width: 2.0,
-            source_height: 3.0,
-            logical_width: 8.0,
-            logical_height: 6.0,
-        };
-        enqueue_surface_event(
-            app.world_mut(),
-            HostSurfaceEvent::ViewChanged { surface, view },
-        );
-        app.update();
-
-        let mut query = app.world_mut().query::<(&SurfaceContent, &MappedSurface)>();
-        let (content, mapped) = query
-            .single(app.world())
-            .expect("updated surface should exist");
-        assert_eq!(content.image, first_handle);
-        assert_eq!(content.view, view);
-        assert_eq!(mapped.logical_size, Vec2::new(8.0, 6.0));
-    }
-
-    #[test]
-    fn rejects_an_out_of_bounds_surface_crop() {
-        let mut app = test_app();
-        enqueue_surface_event(
-            app.world_mut(),
-            HostSurfaceEvent::Frame {
-                surface: SurfaceId::new(29),
-                frame: SurfaceFrame {
-                    width: 1,
-                    height: 1,
-                    view: SurfaceContentView {
-                        source_x: 0.5,
-                        ..full_view(1.0, 1.0)
-                    },
-                    bgra_pixels: vec![0; 4],
-                    opaque: true,
-                },
-            },
-        );
-        app.update();
-
-        let mut query = app.world_mut().query::<&AppWindow>();
-        assert_eq!(query.iter(app.world()).count(), 0);
-    }
-
-    #[test]
-    fn rejects_nonpositive_logical_surface_sizes() {
-        assert!(!validate_view(
-            SurfaceContentView {
-                logical_width: 0.0,
-                ..full_view(1.0, 1.0)
-            },
-            1,
-            1,
+        let surface = SurfaceId::new(29);
+        app.world_mut().spawn((
+            SurfaceNode { surface },
+            ImageNode::default(),
+            Node::default(),
         ));
-    }
-
-    #[test]
-    fn view_changes_do_not_create_unknown_surfaces() {
-        let mut app = test_app();
-        enqueue_surface_event(
-            app.world_mut(),
-            HostSurfaceEvent::ViewChanged {
-                surface: SurfaceId::new(31),
-                view: full_view(1.0, 1.0),
-            },
-        );
+        let mut snapshot = root_snapshot(Some([1, 1, 1, 255]));
+        snapshot.surface_origin = Vec2::new(24.0, 32.0);
+        snapshot.buffers.push(buffer(2, Some([2, 2, 2, 255])));
+        snapshot.overlays.push(placement(2, Vec2::new(4.0, 5.0)));
+        enqueue_surface_event(app.world_mut(), snapshot_event(surface, snapshot));
         app.update();
 
-        let mut query = app.world_mut().query::<&AppWindow>();
+        let mut origins = app.world_mut().query::<&SurfaceGeometryOrigin>();
+        assert_eq!(
+            origins
+                .single(app.world())
+                .expect("surface node should carry its geometry origin")
+                .0,
+            Vec2::new(24.0, 32.0)
+        );
+
+        let first_overlay = {
+            let mut query = app
+                .world_mut()
+                .query_filtered::<Entity, With<SurfaceOverlayNode>>();
+            query.single(app.world()).expect("overlay should exist")
+        };
+        let overlay_image = app
+            .world()
+            .get::<ImageNode>(first_overlay)
+            .expect("overlay should own an image")
+            .image
+            .clone();
+
+        let mut moved = root_snapshot(None);
+        moved.buffers.push(buffer(2, None));
+        moved.overlays.push(placement(2, Vec2::new(8.0, 9.0)));
+        enqueue_surface_event(app.world_mut(), snapshot_event(surface, moved));
+        app.update();
+        let mut query = app
+            .world_mut()
+            .query_filtered::<Entity, With<SurfaceOverlayNode>>();
+        assert_eq!(
+            query.single(app.world()).expect("overlay should be reused"),
+            first_overlay
+        );
+
+        enqueue_surface_event(
+            app.world_mut(),
+            snapshot_event(surface, root_snapshot(None)),
+        );
+        app.update();
+        let mut query = app
+            .world_mut()
+            .query_filtered::<Entity, With<SurfaceOverlayNode>>();
         assert_eq!(query.iter(app.world()).count(), 0);
+        assert!(
+            app.world()
+                .resource::<Assets<Image>>()
+                .get(&overlay_image)
+                .is_none()
+        );
     }
 
     #[test]

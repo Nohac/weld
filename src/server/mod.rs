@@ -3,6 +3,7 @@
 mod output;
 mod seat;
 mod shm;
+mod surface_tree;
 mod toplevel;
 
 pub(crate) use output::NestedOutputMetrics;
@@ -26,7 +27,7 @@ use smithay::{
         fractional_scale::FractionalScaleManagerState,
         output::OutputManagerState,
         selection::data_device::DataDeviceState,
-        shell::xdg::XdgShellState,
+        shell::xdg::{XdgShellState, decoration::XdgDecorationState},
         shm::ShmState,
         socket::ListeningSocketSource,
         viewporter::ViewporterState,
@@ -50,6 +51,7 @@ pub struct ServerState {
     pub socket_name: OsString,
     compositor_state: CompositorState,
     xdg_shell_state: XdgShellState,
+    _xdg_decoration_state: XdgDecorationState,
     shm_state: ShmState,
     _viewporter_state: ViewporterState,
     _fractional_scale_manager_state: FractionalScaleManagerState,
@@ -82,6 +84,7 @@ impl ServerState {
         let display_handle = display.handle();
         let compositor_state = CompositorState::new::<Self>(&display_handle);
         let xdg_shell_state = XdgShellState::new::<Self>(&display_handle);
+        let xdg_decoration_state = XdgDecorationState::new::<Self>(&display_handle);
         let shm_state = ShmState::new::<Self>(&display_handle, []);
         let viewporter_state = ViewporterState::new::<Self>(&display_handle);
         let fractional_scale_manager_state =
@@ -155,6 +158,7 @@ impl ServerState {
             socket_name,
             compositor_state,
             xdg_shell_state,
+            _xdg_decoration_state: xdg_decoration_state,
             shm_state,
             _viewporter_state: viewporter_state,
             _fractional_scale_manager_state: fractional_scale_manager_state,

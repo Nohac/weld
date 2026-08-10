@@ -51,7 +51,7 @@ use crate::{
         InputPosition, LinuxButtonCode, LinuxKeycode, RawScrollFrame, RawSeatEvent,
         RawSeatEventKind,
     },
-    surface::{SurfaceId, SurfaceNode},
+    surface::{SurfaceGeometryOrigin, SurfaceId, SurfaceNode},
 };
 
 // Weld has no Bevy Window entity: the manual render target is not a window.
@@ -404,7 +404,11 @@ fn project_raw_input(
 
 fn resolve_input_effects(
     pointers: Query<(&PointerId, &PointerInteraction, &PointerLocation)>,
-    picked_nodes: Query<(Option<&SurfaceNode>, Option<&ComputedNode>)>,
+    picked_nodes: Query<(
+        Option<&SurfaceNode>,
+        Option<&SurfaceGeometryOrigin>,
+        Option<&ComputedNode>,
+    )>,
     surface_nodes: Query<(&SurfaceNode, &Node)>,
     update_time: Res<InputUpdateTime>,
     mut pending: ResMut<PendingSeatInput>,
@@ -420,9 +424,11 @@ fn resolve_input_effects(
         .and_then(|(_, interaction, location)| {
             location.location().and_then(|_| {
                 resolve_pick_candidates(interaction.iter().map(|(entity, hit)| {
-                    let (surface, node) = picked_nodes.get(*entity).unwrap_or((None, None));
+                    let (surface, surface_origin, node) =
+                        picked_nodes.get(*entity).unwrap_or((None, None, None));
                     PickCandidate {
                         surface: surface.map(|surface| surface.surface),
+                        surface_origin: surface_origin.map_or(Vec2::ZERO, |origin| origin.0),
                         centered_position: hit.position.map(|position| {
                             InputPosition::new(position.x.into(), position.y.into())
                         }),
@@ -647,6 +653,7 @@ fn bevy_scroll(axis: RawScrollFrame) -> (MouseScrollUnit, f32, f32) {
 #[derive(Clone, Copy)]
 struct PickCandidate {
     surface: Option<SurfaceId>,
+    surface_origin: Vec2,
     centered_position: Option<InputPosition>,
     size: Option<Vec2>,
 }
@@ -669,8 +676,8 @@ fn resolve_pick_candidates(
         // transforms and clipping composable while the protocol receives
         // coordinates in the client's logical space.
         local_position: InputPosition::new(
-            (position.x + 0.5) * f64::from(size.x),
-            (position.y + 0.5) * f64::from(size.y),
+            (position.x + 0.5) * f64::from(size.x) + f64::from(candidate.surface_origin.x),
+            (position.y + 0.5) * f64::from(size.y) + f64::from(candidate.surface_origin.y),
         ),
     })
 }
@@ -940,6 +947,7 @@ mod tests {
     ) -> PickCandidate {
         PickCandidate {
             surface: Some(surface),
+            surface_origin: Vec2::ZERO,
             centered_position: Some(centered_position),
             size: Some(size),
         }
@@ -962,6 +970,7 @@ mod tests {
     fn topmost_overlay_blocks_the_surface_below() {
         let overlay = PickCandidate {
             surface: None,
+            surface_origin: Vec2::ZERO,
             centered_position: Some(InputPosition::default()),
             size: Some(Vec2::splat(100.0)),
         };
@@ -1002,6 +1011,20 @@ mod tests {
             bottom_right.local_position,
             InputPosition::new(640.0, 480.0)
         );
+    }
+
+    #[test]
+    fn window_geometry_origin_is_restored_for_client_pointer_coordinates() {
+        let surface = SurfaceId::new(1);
+        let hit = resolve_pick_candidates([PickCandidate {
+            surface: Some(surface),
+            surface_origin: Vec2::new(24.0, 32.0),
+            centered_position: Some(InputPosition::new(-0.5, -0.5)),
+            size: Some(Vec2::new(640.0, 480.0)),
+        }])
+        .expect("window geometry should remain pickable");
+
+        assert_eq!(hit.local_position, InputPosition::new(24.0, 32.0));
     }
 
     #[test]

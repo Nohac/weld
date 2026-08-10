@@ -3,34 +3,38 @@
 use std::{collections::HashMap, hash::Hash};
 
 use smithay::{
-    reexports::wayland_server::{
-        Client, Resource,
-        backend::ObjectId,
-        protocol::{wl_buffer, wl_seat, wl_surface::WlSurface},
+    reexports::{
+        wayland_protocols::xdg::decoration::zv1::server::zxdg_toplevel_decoration_v1::Mode,
+        wayland_server::{
+            Client, Resource,
+            backend::ObjectId,
+            protocol::{wl_buffer, wl_seat, wl_surface::WlSurface},
+        },
     },
     utils::{Logical, Serial, Size},
     wayland::{
         buffer::BufferHandler,
         compositor::{
-            BufferAssignment, CompositorClientState, CompositorHandler, CompositorState,
-            SurfaceAttributes, with_states,
+            CompositorClientState, CompositorHandler, CompositorState, SurfaceAttributes,
+            with_states,
         },
         fractional_scale::FractionalScaleHandler,
         output::OutputHandler,
         shell::xdg::{
             PopupSurface, PositionerState, ToplevelSurface, XdgShellHandler, XdgShellState,
+            decoration::XdgDecorationHandler,
         },
         shm::{ShmHandler, ShmState},
     },
 };
 use tracing::{debug, info, warn};
 
-use crate::surface::{HostSurfaceEvent, SurfaceContentView, SurfaceFrame, SurfaceId};
+use crate::surface::{HostSurfaceEvent, SurfaceId};
 
 use super::{
     ClientState, ServerState,
     output::send_preferred_surface_scale,
-    shm::{SurfaceBufferMetadata, checked_buffer_scale, copy_shm_buffer, surface_content_view},
+    surface_tree::{SurfaceTreeState, collect_surfaces, owning_root, should_drain_callbacks},
 };
 
 const CLIENT_WIDTH: i32 = 640;
@@ -38,11 +42,7 @@ const CLIENT_HEIGHT: i32 = 480;
 
 pub(super) struct ToplevelState {
     pub(super) surface: ToplevelSurface,
-    buffer: Option<SurfaceBufferMetadata>,
-    view: Option<SurfaceContentView>,
-    /// Whether the client currently has a buffer attached, even if Weld could
-    /// not import that buffer into the composition.
-    mapped: bool,
+    tree: SurfaceTreeState,
 }
 
 struct IndexedStore<K, V> {
@@ -139,21 +139,36 @@ impl ServerState {
     }
 
     pub(super) fn send_all_surface_scales(&self) {
-        for toplevel in self.toplevels.values() {
-            if toplevel.surface.alive() {
-                send_preferred_surface_scale(&self.output, toplevel.surface.wl_surface());
-            }
+        let surfaces = self
+            .toplevels
+            .values()
+            .filter(|toplevel| toplevel.surface.alive())
+            .flat_map(|toplevel| collect_surfaces(toplevel.surface.wl_surface()))
+            .filter(Resource::is_alive)
+            .collect::<Vec<_>>();
+        for surface in surfaces {
+            send_preferred_surface_scale(&self.output, &surface);
         }
     }
 
     pub(super) fn complete_surface_presentation(&mut self) {
         let time = self.event_time();
-        for toplevel in self
+        let surfaces = self
             .toplevels
             .values()
-            .filter(|toplevel| toplevel.mapped && toplevel.surface.alive())
-        {
-            with_states(toplevel.surface.wl_surface(), |states| {
+            .filter(|toplevel| {
+                let root = toplevel.surface.wl_surface();
+                toplevel.surface.alive()
+                    && should_drain_callbacks(
+                        toplevel.tree.client_mapped(root),
+                        toplevel.tree.displayable(root),
+                    )
+            })
+            .flat_map(|toplevel| collect_surfaces(toplevel.surface.wl_surface()))
+            .filter(Resource::is_alive)
+            .collect::<Vec<_>>();
+        for surface in surfaces {
+            with_states(&surface, |states| {
                 let mut attributes = states.cached_state.get::<SurfaceAttributes>();
                 for callback in attributes.current().frame_callbacks.drain(..) {
                     callback.done(time);
@@ -162,120 +177,19 @@ impl ServerState {
         }
     }
 
-    fn handle_root_commit(&mut self, surface_id: SurfaceId, surface: &WlSurface) {
-        let Some((retained_buffer, previous_view)) = self
-            .toplevels
-            .get(surface_id)
-            .map(|toplevel| (toplevel.buffer, toplevel.view))
-        else {
+    fn update_surface_tree(&mut self, surface_id: SurfaceId, root: &WlSurface) {
+        let Some(toplevel) = self.toplevels.get_mut(surface_id) else {
             return;
         };
-        let (assignment, buffer_scale, buffer_transform) = with_states(surface, |states| {
-            let mut attributes = states.cached_state.get::<SurfaceAttributes>();
-            let current = attributes.current();
-            (
-                current.buffer.take(),
-                current.buffer_scale,
-                current.buffer_transform,
-            )
-        });
-
-        match assignment {
-            Some(BufferAssignment::NewBuffer(buffer)) => {
-                let copied = copy_shm_buffer(&buffer).and_then(|copied| {
-                    let metadata = SurfaceBufferMetadata {
-                        width: copied.width,
-                        height: copied.height,
-                        scale: checked_buffer_scale(buffer_scale)?,
-                        transform: buffer_transform,
-                    };
-                    let view = surface_content_view(surface, metadata)?;
-                    Ok((copied, metadata, view))
-                });
-                buffer.release();
-                match copied {
-                    Ok((copied, metadata, view)) => {
-                        if let Some(toplevel) = self.toplevels.get_mut(surface_id) {
-                            toplevel.buffer = Some(metadata);
-                            toplevel.view = Some(view);
-                            toplevel.mapped = true;
-                        }
-                        self.pending_surface_events.push(HostSurfaceEvent::Frame {
-                            surface: surface_id,
-                            frame: SurfaceFrame {
-                                width: copied.width,
-                                height: copied.height,
-                                view,
-                                bgra_pixels: copied.bgra_pixels,
-                                opaque: copied.opaque,
-                            },
-                        });
-                    }
-                    Err(error) => {
-                        if let Some(toplevel) = self.toplevels.get_mut(surface_id) {
-                            toplevel.buffer = None;
-                            toplevel.view = None;
-                            toplevel.mapped = true;
-                        }
-                        self.clear_input_focus_for_surface(surface, self.event_time());
-                        self.pending_surface_events
-                            .push(HostSurfaceEvent::Unmapped {
-                                surface: surface_id,
-                            });
-                        warn!(%error, ?surface_id, "could not display a mapped client buffer");
-                    }
-                }
-            }
-            Some(BufferAssignment::Removed) => {
-                if let Some(toplevel) = self.toplevels.get_mut(surface_id) {
-                    toplevel.buffer = None;
-                    toplevel.view = None;
-                    toplevel.mapped = false;
-                }
-                self.clear_input_focus_for_surface(surface, self.event_time());
-                self.pending_surface_events
-                    .push(HostSurfaceEvent::Unmapped {
-                        surface: surface_id,
-                    });
-            }
-            None => {
-                let Some(retained_buffer) = retained_buffer else {
-                    return;
-                };
-                let metadata = match checked_buffer_scale(buffer_scale) {
-                    Ok(scale) => SurfaceBufferMetadata {
-                        scale,
-                        transform: buffer_transform,
-                        ..retained_buffer
-                    },
-                    Err(error) => {
-                        warn!(%error, ?surface_id, "ignored an invalid client surface scale");
-                        return;
-                    }
-                };
-                match surface_content_view(surface, metadata) {
-                    Ok(view) if previous_view != Some(view) => {
-                        if let Some(toplevel) = self.toplevels.get_mut(surface_id) {
-                            toplevel.buffer = Some(metadata);
-                            toplevel.view = Some(view);
-                        }
-                        self.pending_surface_events
-                            .push(HostSurfaceEvent::ViewChanged {
-                                surface: surface_id,
-                                view,
-                            });
-                    }
-                    Ok(_) => {
-                        if let Some(toplevel) = self.toplevels.get_mut(surface_id) {
-                            toplevel.buffer = Some(metadata);
-                        }
-                    }
-                    Err(error) => {
-                        warn!(%error, ?surface_id, "ignored an invalid client surface view");
-                    }
-                }
-            }
+        let snapshot = toplevel.tree.update(surface_id, root);
+        if snapshot.root.is_none() {
+            self.clear_input_focus_for_surface(root, self.event_time());
         }
+        self.pending_surface_events
+            .push(HostSurfaceEvent::TreeSnapshot {
+                surface: surface_id,
+                snapshot,
+            });
     }
 }
 
@@ -307,9 +221,18 @@ impl CompositorHandler for ServerState {
             .compositor_state
     }
 
+    fn new_subsurface(&mut self, surface: &WlSurface, _parent: &WlSurface) {
+        self.output.enter(surface);
+        send_preferred_surface_scale(&self.output, surface);
+    }
+
     fn commit(&mut self, surface: &WlSurface) {
-        let Some(surface_id) = self.toplevels.id_for_surface(surface) else {
-            debug!(surface = ?surface.id(), "ignoring a non-root surface commit");
+        if !SurfaceTreeState::should_process_commit(surface) {
+            return;
+        }
+        let root = owning_root(surface);
+        let Some(surface_id) = self.toplevels.id_for_surface(&root) else {
+            debug!(surface = ?surface.id(), "ignoring a surface outside an xdg-toplevel tree");
             return;
         };
         let Some(toplevel) = self.toplevels.get(surface_id) else {
@@ -320,7 +243,25 @@ impl CompositorHandler for ServerState {
             return;
         }
         self.presentation_requested = true;
-        self.handle_root_commit(surface_id, surface);
+        self.update_surface_tree(surface_id, &root);
+    }
+
+    fn destroyed(&mut self, surface: &WlSurface) {
+        self.output.leave(surface);
+        let root = owning_root(surface);
+        let Some(surface_id) = self.toplevels.id_for_surface(&root) else {
+            return;
+        };
+        let Some(toplevel) = self.toplevels.get_mut(surface_id) else {
+            return;
+        };
+        let snapshot = toplevel.tree.remove_surface(&root, surface);
+        self.presentation_requested = true;
+        self.pending_surface_events
+            .push(HostSurfaceEvent::TreeSnapshot {
+                surface: surface_id,
+                snapshot,
+            });
     }
 }
 
@@ -343,9 +284,7 @@ impl XdgShellHandler for ServerState {
         let rejection_surface = surface.clone();
         let state = ToplevelState {
             surface,
-            buffer: None,
-            view: None,
-            mapped: false,
+            tree: SurfaceTreeState::default(),
         };
         if !self.toplevels.insert(id, state) {
             warn!(?id, "refused a duplicate xdg-toplevel registration");
@@ -383,6 +322,37 @@ impl XdgShellHandler for ServerState {
         }
         self.pending_surface_events
             .push(HostSurfaceEvent::Destroyed { surface: id });
+    }
+}
+
+fn stage_server_side_decoration(toplevel: &ToplevelSurface) {
+    toplevel.with_pending_state(|state| {
+        state.decoration_mode = Some(Mode::ServerSide);
+    });
+}
+
+impl XdgDecorationHandler for ServerState {
+    fn new_decoration(&mut self, toplevel: ToplevelSurface) {
+        stage_server_side_decoration(&toplevel);
+        if toplevel.is_initial_configure_sent() {
+            toplevel.send_pending_configure();
+        }
+    }
+
+    fn request_mode(&mut self, toplevel: ToplevelSurface, _mode: Mode) {
+        stage_server_side_decoration(&toplevel);
+        if toplevel.is_initial_configure_sent() {
+            // Respond even when the client requested client-side decorations and the
+            // compositor's server-side mode therefore did not change.
+            toplevel.send_configure();
+        }
+    }
+
+    fn unset_mode(&mut self, toplevel: ToplevelSurface) {
+        stage_server_side_decoration(&toplevel);
+        if toplevel.is_initial_configure_sent() {
+            toplevel.send_configure();
+        }
     }
 }
 

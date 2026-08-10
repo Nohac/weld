@@ -574,8 +574,9 @@ mod tests {
         composition::CompositionPlugin,
         layer::SHELL_Z_INDEX,
         surface::{
-            HostSurfaceEvent, SurfaceContentView, SurfaceFrame, SurfacePlugin,
-            enqueue_surface_event, take_surface_actions,
+            HostSurfaceEvent, SurfaceBufferUpdate, SurfaceContentView, SurfaceLayerId,
+            SurfaceLayerPlacement, SurfacePlugin, SurfaceTreeSnapshot, enqueue_surface_event,
+            take_surface_actions,
         },
     };
 
@@ -597,20 +598,47 @@ mod tests {
         (app, camera)
     }
 
-    fn frame(width: u32, height: u32) -> SurfaceFrame {
-        SurfaceFrame {
-            width,
-            height,
-            view: SurfaceContentView {
-                source_x: 0.0,
-                source_y: 0.0,
-                source_width: width as f32,
-                source_height: height as f32,
-                logical_width: width as f32,
-                logical_height: height as f32,
+    fn frame(surface: SurfaceId, width: u32, height: u32) -> HostSurfaceEvent {
+        let view = SurfaceContentView {
+            source_x: 0.0,
+            source_y: 0.0,
+            source_width: width as f32,
+            source_height: height as f32,
+            logical_width: width as f32,
+            logical_height: height as f32,
+        };
+        HostSurfaceEvent::TreeSnapshot {
+            surface,
+            snapshot: SurfaceTreeSnapshot {
+                client_mapped: true,
+                surface_origin: Vec2::ZERO,
+                root: Some(SurfaceLayerPlacement {
+                    layer: SurfaceLayerId::new(1),
+                    position: Vec2::ZERO,
+                    view,
+                }),
+                overlays: Vec::new(),
+                buffers: vec![SurfaceBufferUpdate {
+                    layer: SurfaceLayerId::new(1),
+                    width,
+                    height,
+                    bgra_pixels: Some(vec![0; width as usize * height as usize * 4]),
+                    opaque: true,
+                }],
             },
-            bgra_pixels: vec![0; width as usize * height as usize * 4],
-            opaque: true,
+        }
+    }
+
+    fn unmapped(surface: SurfaceId) -> HostSurfaceEvent {
+        HostSurfaceEvent::TreeSnapshot {
+            surface,
+            snapshot: SurfaceTreeSnapshot {
+                client_mapped: false,
+                surface_origin: Vec2::ZERO,
+                root: None,
+                overlays: Vec::new(),
+                buffers: Vec::new(),
+            },
         }
     }
 
@@ -619,13 +647,7 @@ mod tests {
         let (mut app, camera) = test_app();
         let surface = SurfaceId::new(37);
         enqueue_surface_event(app.world_mut(), HostSurfaceEvent::Created { surface });
-        enqueue_surface_event(
-            app.world_mut(),
-            HostSurfaceEvent::Frame {
-                surface,
-                frame: frame(320, 240),
-            },
-        );
+        enqueue_surface_event(app.world_mut(), frame(surface, 320, 240));
 
         app.update();
 
@@ -680,13 +702,7 @@ mod tests {
         let second = SurfaceId::new(52);
         for surface in [first, second] {
             enqueue_surface_event(app.world_mut(), HostSurfaceEvent::Created { surface });
-            enqueue_surface_event(
-                app.world_mut(),
-                HostSurfaceEvent::Frame {
-                    surface,
-                    frame: frame(4, 3),
-                },
-            );
+            enqueue_surface_event(app.world_mut(), frame(surface, 4, 3));
         }
 
         app.update();
@@ -725,13 +741,7 @@ mod tests {
         let first = SurfaceId::new(61);
         let second = SurfaceId::new(62);
         for surface in [first, second] {
-            enqueue_surface_event(
-                app.world_mut(),
-                HostSurfaceEvent::Frame {
-                    surface,
-                    frame: frame(4, 3),
-                },
-            );
+            enqueue_surface_event(app.world_mut(), frame(surface, 4, 3));
         }
         app.update();
         take_surface_actions(app.world_mut());
@@ -797,13 +807,7 @@ mod tests {
     fn unmap_preserves_and_hides_the_presentation_then_destroy_cleans_it_up() {
         let (mut app, _) = test_app();
         let surface = SurfaceId::new(41);
-        enqueue_surface_event(
-            app.world_mut(),
-            HostSurfaceEvent::Frame {
-                surface,
-                frame: frame(2, 2),
-            },
-        );
+        enqueue_surface_event(app.world_mut(), frame(surface, 2, 2));
         app.update();
         assert_eq!(
             take_surface_actions(app.world_mut()),
@@ -824,7 +828,7 @@ mod tests {
             (source, root, content)
         };
 
-        enqueue_surface_event(app.world_mut(), HostSurfaceEvent::Unmapped { surface });
+        enqueue_surface_event(app.world_mut(), unmapped(surface));
         app.update();
         assert!(app.world().get::<MappedSurface>(source).is_none());
         assert_eq!(
@@ -840,13 +844,7 @@ mod tests {
             [SurfaceAction::Focus { surface: None }],
         );
 
-        enqueue_surface_event(
-            app.world_mut(),
-            HostSurfaceEvent::Frame {
-                surface,
-                frame: frame(3, 2),
-            },
-        );
+        enqueue_surface_event(app.world_mut(), frame(surface, 3, 2));
         app.update();
         assert_eq!(
             app.world()
@@ -881,13 +879,7 @@ mod tests {
         let (mut app, camera) = test_app();
         app.world_mut().resource_mut::<UiScale>().0 = 1.5;
         let surface = SurfaceId::new(43);
-        enqueue_surface_event(
-            app.world_mut(),
-            HostSurfaceEvent::Frame {
-                surface,
-                frame: frame(2, 2),
-            },
-        );
+        enqueue_surface_event(app.world_mut(), frame(surface, 2, 2));
         app.update();
         assert_eq!(
             take_surface_actions(app.world_mut()),
@@ -999,13 +991,7 @@ mod tests {
         let (mut app, camera) = test_app();
         app.world_mut().resource_mut::<UiScale>().0 = 1.5;
         let surface = SurfaceId::new(44);
-        enqueue_surface_event(
-            app.world_mut(),
-            HostSurfaceEvent::Frame {
-                surface,
-                frame: frame(2, 2),
-            },
-        );
+        enqueue_surface_event(app.world_mut(), frame(surface, 2, 2));
         app.update();
         take_surface_actions(app.world_mut());
 

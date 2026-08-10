@@ -40,13 +40,25 @@ without a concrete need.
 Smithay's renderer is deliberately outside this first slice. Weld accepts
 multiple xdg-toplevels backed by `wl_shm`, copies their pixels into owned Bevy
 images, and exposes their lifecycle through protocol-neutral ECS entities.
-The default window plugin independently claims and decorates each mapped
-surface through a project-owned `SurfaceNode`, so client content composes with
-ordinary Bevy UI. Smithay remains responsible for Wayland protocol state and
-applies focus or close actions chosen by ECS policy; it does not own window
-placement, stacking, or decoration. The final project-owned wgpu pass only
-presents or captures Bevy's completed texture. `ImageNode` is a provisional
-SHM backing, not the plugin-facing surface contract. Subsurfaces, popups,
+Readable subsurfaces above the toplevel root are ordered and positioned as
+internal Bevy image layers behind the same project-owned `SurfaceNode`; the
+root image stays on that node so its rounded clipping and root-only fast path
+remain intact. The default window plugin independently claims and decorates
+each mapped surface, so client content composes with ordinary Bevy UI. Smithay
+remains responsible for Wayland protocol state and applies focus or close
+actions chosen by ECS policy; it does not own window placement, stacking, or
+decoration. The final project-owned wgpu pass only presents or captures Bevy's
+completed texture. Weld advertises `xdg-decoration` and answers decoration
+objects with server-side mode. Clients that do not bind the global retain
+client-side decorations; the default presenter still adds shell chrome to those
+clients until the next slice treats an absent decoration object as CSD and
+routes `xdg_toplevel` move and resize requests. Committed
+`xdg_surface.set_window_geometry` crops root-buffer shadow margins, defines the
+plugin-facing `MappedSurface.logical_size`, and preserves root-surface input
+coordinates. Geometry spanning subsurfaces outside the root buffer is not yet
+represented. `ImageNode` is a provisional SHM backing, not the plugin-facing
+surface contract. Below-root subsurface ordering, role-only subsurface
+detachment without a later tree commit, precise subsurface input, popups,
 dmabuf, damage-aware uploads, presentation timing, VRR, and HDR remain explicit
 spike boundaries rather than settled compositor architecture.
 
