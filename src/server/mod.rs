@@ -214,6 +214,10 @@ impl ServerState {
         match action {
             SurfaceAction::Close { surface } => self.close_toplevel(surface),
             SurfaceAction::Focus { surface } => self.focus_toplevel(surface),
+            SurfaceAction::Resize {
+                surface,
+                logical_size,
+            } => self.resize_toplevel(surface, logical_size),
         }
     }
 

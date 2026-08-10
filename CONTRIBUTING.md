@@ -49,18 +49,58 @@ remains responsible for Wayland protocol state and applies focus or close
 actions chosen by ECS policy; it does not own window placement, stacking, or
 decoration. The final project-owned wgpu pass only presents or captures Bevy's
 completed texture. Weld advertises `xdg-decoration` and answers decoration
-objects with server-side mode. Clients that do not bind the global retain
-client-side decorations; the default presenter still adds shell chrome to those
-clients until the next slice treats an absent decoration object as CSD and
-routes `xdg_toplevel` move and resize requests. Committed
-`xdg_surface.set_window_geometry` crops root-buffer shadow margins, defines the
-plugin-facing `MappedSurface.logical_size`, and preserves root-surface input
-coordinates. Geometry spanning subsurfaces outside the root buffer is not yet
+objects with server-side mode. Creating a decoration object opts a client into
+Weld's server-side frame; clients that do not bind the global retain their own
+decorations and are presented without duplicate shell chrome. A late
+decoration decision swaps the client- or server-decoration presentation while
+the durable `AppWindow`, placement, stacking, focus, and backing assets remain
+intact. The presentation root's entity identity is intentionally not stable.
+
+Validated pointer `xdg_toplevel.move` and `xdg_toplevel.resize` requests cross
+the Smithay boundary as protocol-neutral ECS messages. The default window
+plugin owns placement and interactive-resize policy, while Smithay owns the
+pointer grab, configure state, and enforcement of the client's committed size
+constraints. Left and top resize edges remain anchored to the size the client
+actually commits. Pointer interactions are implemented; the equivalent touch
+path remains future work. Client-issued protocol move and resize requests are
+accepted only for client-decorated windows; Weld's chrome owns movement for
+server-decorated windows, and SSD resize handles remain outside this slice.
+Smithay does not currently expose a decoration-object destroy callback through
+this handler API, so a toplevel remains server decorated after creating that
+object until the toplevel itself is destroyed.
+
+Committed `xdg_surface.set_window_geometry` defines the plugin-facing
+`MappedSurface.logical_size` and the shell's placement and resize anchor. A
+client-decorated presentation renders the full root surface, including visual
+overflow outside that geometry. If such overflow exists, Weld treats it as a
+client-owned shadow or similar flare and suppresses its fallback shadow; a CSD
+surface without overflow receives the fallback. A server-decorated
+presentation crops the client to its window geometry and uses Weld's frame and
+shadow. Changing decoration ownership therefore changes the presentation's
+visual origin without changing its durable geometry anchor.
+
+Explicit Wayland input regions are evaluated in protocol order and may extend
+outside the window geometry, which keeps client-side resize gutters reachable.
+For an undeclared root input region, Weld deliberately treats only the window
+geometry as interactive even when CSD overflow is visible; this differs from
+the protocol's full-surface default so transparent shadow margins remain inert.
+Subsurfaces without an explicit input region use their full logical extent.
+Picking targets identify the exact root or subsurface layer, and Smithay
+revalidates that target before delivering input to the corresponding live
+`wl_surface`. Geometry spanning subsurfaces outside the root buffer is not yet
 represented. `ImageNode` is a provisional SHM backing, not the plugin-facing
 surface contract. Below-root subsurface ordering, role-only subsurface
-detachment without a later tree commit, precise subsurface input, popups,
-dmabuf, damage-aware uploads, presentation timing, VRR, and HDR remain explicit
-spike boundaries rather than settled compositor architecture.
+detachment without a later tree commit, popups, dmabuf, damage-aware uploads,
+presentation timing, VRR, and HDR remain explicit spike boundaries rather
+than settled compositor architecture.
+
+Nested wheel input stays discrete, while Winit pixel scrolling is treated as a
+finger gesture and retains its start, move, end, cancellation, and per-axis
+stop lifecycle through Bevy projection and Wayland delivery. Axis frames use
+Smithay's existing pointer focus rather than performing another hit test or
+changing focus; focus changes remain the responsibility of pointer motion and
+button events. Leaving the host window or losing host focus cancels any active
+finger axes before clearing pointer state.
 
 Ordinary nested rendering is event driven. Host and client-surface changes
 request a composition directly; Bevy systems that drive continuous visual

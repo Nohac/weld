@@ -8,11 +8,12 @@ use smithay::{
         backend::ObjectId,
         protocol::{wl_buffer::WlBuffer, wl_output, wl_surface::WlSurface},
     },
-    utils::{Logical, Point, Rectangle},
+    utils::{IsAlive, Logical, Point, Rectangle},
     wayland::{
         compositor::{
-            BufferAssignment, SUBSURFACE_ROLE, SubsurfaceCachedState, SurfaceAttributes,
-            TraversalAction, get_parent, is_sync_subsurface, with_states, with_surface_tree_upward,
+            BufferAssignment, RectangleKind, RegionAttributes, SUBSURFACE_ROLE,
+            SubsurfaceCachedState, SurfaceAttributes, TraversalAction, get_parent,
+            is_sync_subsurface, with_states, with_surface_tree_upward,
         },
         shell::xdg::SurfaceCachedState as XdgSurfaceCachedState,
     },
@@ -20,8 +21,8 @@ use smithay::{
 use tracing::warn;
 
 use crate::surface::{
-    SurfaceBufferUpdate, SurfaceContentView, SurfaceId, SurfaceLayerId, SurfaceLayerPlacement,
-    SurfaceTreeSnapshot,
+    SurfaceBufferUpdate, SurfaceContentView, SurfaceId, SurfaceInputPlacement, SurfaceInputRect,
+    SurfaceLayerId, SurfaceLayerPlacement, SurfaceTreeSnapshot, SurfaceWindowGeometry,
 };
 
 use super::shm::{
@@ -52,6 +53,8 @@ struct CachedSurfaceBuffer {
     view: Option<SurfaceContentView>,
     opaque: bool,
     client_mapped: bool,
+    input_region: Option<RegionAttributes>,
+    input_rects: Vec<Rectangle<i32, Logical>>,
 }
 
 #[derive(Clone)]
@@ -67,6 +70,7 @@ struct CommittedNode {
     assignment: Option<BufferAssignment>,
     buffer_scale: i32,
     buffer_transform: wl_output::Transform,
+    input_region: Option<RegionAttributes>,
 }
 
 #[derive(Clone)]
@@ -124,6 +128,7 @@ impl SurfaceTreeState {
                     assignment: current.buffer.take(),
                     buffer_scale: current.buffer_scale,
                     buffer_transform: current.buffer_transform,
+                    input_region: current.input_region.clone(),
                 });
             },
             |_, _, _| true,
@@ -145,6 +150,7 @@ impl SurfaceTreeState {
         for committed in committed {
             self.apply_commit(surface_id, committed, &mut pixel_updates);
         }
+        self.refresh_input_rects(&root.id());
         self.snapshot(root.id(), pixel_updates)
     }
 
@@ -209,6 +215,7 @@ impl SurfaceTreeState {
             .buffers
             .get_mut(&object_id)
             .expect("layer was just inserted");
+        cached.input_region = committed.input_region;
 
         match committed.assignment {
             Some(BufferAssignment::NewBuffer(buffer)) => {
@@ -284,6 +291,8 @@ impl SurfaceTreeState {
                 view: None,
                 opaque: false,
                 client_mapped: false,
+                input_region: None,
+                input_rects: Vec::new(),
             },
         );
         Some(layer)
@@ -299,24 +308,28 @@ impl SurfaceTreeState {
             .get(&root_id)
             .is_some_and(|buffer| buffer.client_mapped);
         let root_index = self.nodes.iter().position(|node| node.object_id == root_id);
-        let (root, surface_origin) = self
+        let (root, window_geometry) = self
             .placement(&root_id, (0, 0).into())
-            .map(|mut root| {
+            .map(|root| {
                 let (view, origin) = crop_root_view(root.view, self.root_geometry);
-                root.view = view;
-                (Some(root), origin)
+                (Some(root), Some(SurfaceWindowGeometry { origin, view }))
             })
-            .unwrap_or((None, bevy::math::Vec2::ZERO));
+            .unwrap_or((None, None));
         let overlays = root_index
             .map(|index| {
                 self.nodes[index + 1..]
                     .iter()
                     .filter(|node| self.protocol_visible(node))
                     .filter_map(|node| self.placement(&node.object_id, node.position))
-                    .map(|mut placement| {
-                        placement.position -= surface_origin;
-                        placement
-                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let inputs = root_index
+            .map(|index| {
+                self.nodes[index..]
+                    .iter()
+                    .filter(|node| self.protocol_visible(node))
+                    .filter_map(|node| self.input_placement(node))
                     .collect()
             })
             .unwrap_or_default();
@@ -339,11 +352,68 @@ impl SurfaceTreeState {
         buffers.sort_unstable_by_key(|buffer| buffer.layer.raw());
         SurfaceTreeSnapshot {
             client_mapped,
-            surface_origin,
             root,
+            window_geometry,
             overlays,
+            inputs,
             buffers,
         }
+    }
+
+    fn input_placement(&self, node: &TreeNode) -> Option<SurfaceInputPlacement> {
+        let cached = self.buffers.get(&node.object_id)?;
+        cached.view?;
+        Some(SurfaceInputPlacement {
+            layer: cached.layer,
+            position: bevy::math::Vec2::new(node.position.x as f32, node.position.y as f32),
+            regions: cached
+                .input_rects
+                .iter()
+                .map(|rectangle| SurfaceInputRect {
+                    position: bevy::math::Vec2::new(rectangle.loc.x as f32, rectangle.loc.y as f32),
+                    size: bevy::math::Vec2::new(rectangle.size.w as f32, rectangle.size.h as f32),
+                })
+                .collect(),
+        })
+    }
+
+    fn refresh_input_rects(&mut self, root_id: &ObjectId) {
+        for node in &self.nodes {
+            let Some(cached) = self.buffers.get_mut(&node.object_id) else {
+                continue;
+            };
+            let Some(view) = cached.view else {
+                cached.input_rects.clear();
+                continue;
+            };
+            let bounds = logical_view_bounds(view);
+            cached.input_rects = match &cached.input_region {
+                Some(region) => effective_region(region, bounds),
+                None if &node.object_id == root_id => {
+                    vec![displayed_root_bounds(view, self.root_geometry)]
+                }
+                None => vec![bounds],
+            };
+        }
+    }
+
+    pub(super) fn input_surface(
+        &self,
+        layer: SurfaceLayerId,
+        local: Point<f64, Logical>,
+    ) -> Option<WlSurface> {
+        let local = local.to_i32_floor();
+        let node = self.nodes.iter().find(|node| {
+            self.buffers.get(&node.object_id).is_some_and(|cached| {
+                cached.layer == layer
+                    && cached.client_mapped
+                    && cached
+                        .input_rects
+                        .iter()
+                        .any(|rectangle| rectangle.contains(local))
+            })
+        })?;
+        node.surface.alive().then(|| node.surface.clone())
     }
 
     fn placement(
@@ -378,6 +448,51 @@ impl SurfaceTreeState {
         }
         true
     }
+}
+
+fn logical_view_bounds(view: SurfaceContentView) -> Rectangle<i32, Logical> {
+    Rectangle::new(
+        (0, 0).into(),
+        (
+            view.logical_width.ceil() as i32,
+            view.logical_height.ceil() as i32,
+        )
+            .into(),
+    )
+}
+
+fn displayed_root_bounds(
+    view: SurfaceContentView,
+    geometry: Option<Rectangle<i32, Logical>>,
+) -> Rectangle<i32, Logical> {
+    let (displayed, origin) = crop_root_view(view, geometry);
+    Rectangle::new(
+        (origin.x as i32, origin.y as i32).into(),
+        (
+            displayed.logical_width.ceil() as i32,
+            displayed.logical_height.ceil() as i32,
+        )
+            .into(),
+    )
+}
+
+fn effective_region(
+    region: &RegionAttributes,
+    bounds: Rectangle<i32, Logical>,
+) -> Vec<Rectangle<i32, Logical>> {
+    let mut effective = Vec::new();
+    for (kind, rectangle) in &region.rects {
+        let Some(rectangle) = bounds.intersection(*rectangle) else {
+            continue;
+        };
+        match kind {
+            RectangleKind::Add => effective.push(rectangle),
+            RectangleKind::Subtract => {
+                effective = Rectangle::subtract_rects_many(effective, [rectangle]);
+            }
+        }
+    }
+    effective
 }
 
 fn crop_root_view(
@@ -499,9 +614,12 @@ fn import_buffer(
 
 #[cfg(test)]
 mod tests {
-    use super::{crop_root_view, should_drain_callbacks};
+    use super::{crop_root_view, displayed_root_bounds, effective_region, should_drain_callbacks};
     use crate::surface::SurfaceContentView;
-    use smithay::utils::Rectangle;
+    use smithay::{
+        utils::Rectangle,
+        wayland::compositor::{RectangleKind, RegionAttributes},
+    };
 
     #[test]
     fn mapped_clients_keep_frame_callbacks_flowing_after_import_failure() {
@@ -550,5 +668,68 @@ mod tests {
         assert_eq!(cropped.source_height, 1080.0);
         assert_eq!(cropped.logical_width, 760.0);
         assert_eq!(cropped.logical_height, 540.0);
+    }
+
+    #[test]
+    fn ordered_input_region_subtraction_is_clipped_to_the_surface() {
+        let region = RegionAttributes {
+            rects: vec![
+                (
+                    RectangleKind::Add,
+                    Rectangle::new((-10, -10).into(), (120, 120).into()),
+                ),
+                (
+                    RectangleKind::Subtract,
+                    Rectangle::new((25, 25).into(), (50, 50).into()),
+                ),
+            ],
+        };
+
+        let effective = effective_region(&region, Rectangle::new((0, 0).into(), (100, 100).into()));
+
+        assert!(
+            effective
+                .iter()
+                .all(|rectangle| !rectangle.contains((50, 50)))
+        );
+        assert!(
+            effective
+                .iter()
+                .any(|rectangle| rectangle.contains((10, 10)))
+        );
+        assert!(effective.iter().all(|rectangle| {
+            rectangle.loc.x >= 0
+                && rectangle.loc.y >= 0
+                && rectangle.loc.x + rectangle.size.w <= 100
+                && rectangle.loc.y + rectangle.size.h <= 100
+        }));
+    }
+
+    #[test]
+    fn explicit_root_input_can_extend_outside_the_displayed_window_geometry() {
+        let bounds = Rectangle::new((0, 0).into(), (688, 528).into());
+        let geometry = Rectangle::new((24, 21).into(), (640, 480).into());
+        let explicit = RegionAttributes {
+            rects: vec![(
+                RectangleKind::Add,
+                Rectangle::new((14, 11).into(), (660, 500).into()),
+            )],
+        };
+
+        let regions = effective_region(&explicit, bounds);
+        let implicit = displayed_root_bounds(
+            SurfaceContentView {
+                source_x: 0.0,
+                source_y: 0.0,
+                source_width: 688.0,
+                source_height: 528.0,
+                logical_width: 688.0,
+                logical_height: 528.0,
+            },
+            Some(geometry),
+        );
+
+        assert!(regions.iter().any(|region| region.contains((14, 11))));
+        assert!(!implicit.contains((14, 11)));
     }
 }

@@ -15,6 +15,7 @@ use bevy::{
         component::Component,
         entity::Entity,
         hierarchy::ChildOf,
+        message::Message,
         query::{With, Without},
         resource::Resource,
         schedule::{IntoScheduleConfigs, SystemSet},
@@ -26,7 +27,7 @@ use bevy::{
     picking::{Pickable, PickingSystems},
     prelude::{ImageNode, NodeImageMode, px},
     render::render_resource::{Extent3d, TextureDimension, TextureFormat},
-    ui::{Display, Node, PositionType, Val},
+    ui::{Display, LayoutConfig, Node, PositionType, Val},
 };
 use tracing::warn;
 
@@ -52,13 +53,50 @@ pub struct AppWindow {
     pub surface: SurfaceId,
 }
 
+/// Which side owns the visible frame and titlebar for an application window.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum WindowDecoration {
+    #[default]
+    ClientSide,
+    ServerSide,
+}
+
+/// A window whose client owns its frame, titlebar, and resize handles.
+#[derive(Component, Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct ClientDecorated;
+
+/// A window whose compositor owns its frame and titlebar.
+#[derive(Component, Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct ServerDecorated;
+
 /// Protocol-neutral state available while an application surface is mapped.
 #[derive(Component, Clone, Copy, Debug, PartialEq)]
 pub struct MappedSurface {
     /// Window-geometry extent exposed to shell layout, excluding client-side
     /// shadows and other invisible root-buffer margins.
     pub logical_size: Vec2,
+    /// Offset from the window-geometry anchor to the full surface bounds.
+    pub visual_offset: Vec2,
+    /// Full surface extent, including client-owned visual overflow.
+    pub visual_size: Vec2,
     pub opaque: bool,
+}
+
+impl MappedSurface {
+    /// Whether the client renders pixels outside its declared window geometry.
+    pub fn has_visual_overflow(self) -> bool {
+        self.visual_offset != Vec2::ZERO || self.visual_size != self.logical_size
+    }
+}
+
+/// Which logical bounds a [`SurfaceNode`] presents.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum SurfaceView {
+    /// Present the complete client surface, including CSD shadow margins.
+    FullSurface,
+    /// Present only the declared xdg window geometry.
+    #[default]
+    WindowGeometry,
 }
 
 /// A client surface that composes as an ordinary Bevy UI primitive.
@@ -67,20 +105,71 @@ pub struct MappedSurface {
 /// depending on the internal root [`ImageNode`] and ignored overlay children
 /// used by the SHM surface-tree path.
 #[derive(Component, Clone, Copy, Debug, Eq, PartialEq)]
-#[require(ImageNode, Node, SurfaceGeometryOrigin)]
+#[require(ImageNode, Node)]
 pub struct SurfaceNode {
     pub surface: SurfaceId,
+    pub view: SurfaceView,
 }
-
-/// Root-surface coordinate represented by the presented node's top-left corner.
-#[derive(Component, Clone, Copy, Debug, Default, PartialEq)]
-pub(crate) struct SurfaceGeometryOrigin(pub(crate) Vec2);
 
 /// Protocol-neutral request emitted by ECS policy for the host to apply.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum SurfaceAction {
-    Close { surface: SurfaceId },
-    Focus { surface: Option<SurfaceId> },
+    Close {
+        surface: SurfaceId,
+    },
+    Focus {
+        surface: Option<SurfaceId>,
+    },
+    Resize {
+        surface: SurfaceId,
+        logical_size: bevy::math::UVec2,
+    },
+}
+
+/// Edge or corner selected by a client for an interactive resize.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum WindowResizeEdge {
+    Top,
+    Bottom,
+    Left,
+    Right,
+    TopLeft,
+    BottomLeft,
+    TopRight,
+    BottomRight,
+}
+
+impl WindowResizeEdge {
+    pub(crate) const fn has_left(self) -> bool {
+        matches!(self, Self::Left | Self::TopLeft | Self::BottomLeft)
+    }
+
+    pub(crate) const fn has_right(self) -> bool {
+        matches!(self, Self::Right | Self::TopRight | Self::BottomRight)
+    }
+
+    pub(crate) const fn has_top(self) -> bool {
+        matches!(self, Self::Top | Self::TopLeft | Self::TopRight)
+    }
+
+    pub(crate) const fn has_bottom(self) -> bool {
+        matches!(self, Self::Bottom | Self::BottomLeft | Self::BottomRight)
+    }
+}
+
+/// Validated client request for compositor-owned pointer interaction.
+#[derive(Clone, Copy, Debug, Eq, Message, PartialEq)]
+pub(crate) enum WindowInteractionRequest {
+    Move {
+        surface: SurfaceId,
+    },
+    Resize {
+        surface: SurfaceId,
+        edges: WindowResizeEdge,
+    },
+    End {
+        surface: SurfaceId,
+    },
 }
 
 #[derive(Resource, Default)]
@@ -96,8 +185,9 @@ impl SurfaceActionQueue {
 #[derive(Component, Clone, Debug)]
 struct SurfaceContent {
     root: SurfaceLayerContent,
+    window_geometry: SurfaceWindowGeometry,
     overlays: Vec<SurfaceLayerContent>,
-    surface_origin: Vec2,
+    inputs: Vec<SurfaceInputPlacement>,
 }
 
 #[derive(Clone, Debug)]
@@ -140,13 +230,36 @@ pub(crate) struct SurfaceLayerPlacement {
     pub view: SurfaceContentView,
 }
 
+/// Effective xdg window geometry within the full root surface.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct SurfaceWindowGeometry {
+    pub origin: Vec2,
+    pub view: SurfaceContentView,
+}
+
+/// One effective rectangular part of a Wayland surface's input region.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct SurfaceInputRect {
+    pub position: Vec2,
+    pub size: Vec2,
+}
+
+/// Input regions for one exact root or subsurface layer.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct SurfaceInputPlacement {
+    pub layer: SurfaceLayerId,
+    pub position: Vec2,
+    pub regions: Vec<SurfaceInputRect>,
+}
+
 /// Complete visible tree state plus pixel deltas copied at the Smithay boundary.
 #[derive(Debug)]
 pub(crate) struct SurfaceTreeSnapshot {
     pub client_mapped: bool,
-    pub surface_origin: Vec2,
     pub root: Option<SurfaceLayerPlacement>,
+    pub window_geometry: Option<SurfaceWindowGeometry>,
     pub overlays: Vec<SurfaceLayerPlacement>,
+    pub inputs: Vec<SurfaceInputPlacement>,
     pub buffers: Vec<SurfaceBufferUpdate>,
 }
 
@@ -209,11 +322,17 @@ impl SurfaceContentView {
 pub(crate) enum HostSurfaceEvent {
     Created {
         surface: SurfaceId,
+        decoration: WindowDecoration,
     },
     TreeSnapshot {
         surface: SurfaceId,
         snapshot: SurfaceTreeSnapshot,
     },
+    DecorationChanged {
+        surface: SurfaceId,
+        decoration: WindowDecoration,
+    },
+    WindowInteraction(WindowInteractionRequest),
     Destroyed {
         surface: SurfaceId,
     },
@@ -236,6 +355,7 @@ impl Plugin for SurfacePlugin {
         app.init_resource::<SurfaceEventQueue>()
             .init_resource::<SurfaceActionQueue>()
             .init_resource::<SurfaceRegistry>()
+            .add_message::<WindowInteractionRequest>()
             .configure_sets(
                 PreUpdate,
                 (
@@ -303,6 +423,10 @@ struct SurfaceEntry {
     frame_ready: bool,
 }
 
+/// Monotonic marker for accepted tree snapshots on an application surface.
+#[derive(Component, Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct SurfaceSnapshotRevision(pub(crate) u64);
+
 struct SurfaceBufferAsset {
     image: Handle<Image>,
     pixel_size: (u32, u32),
@@ -314,6 +438,22 @@ struct SurfaceOverlayNodes(Vec<(SurfaceLayerId, Entity)>);
 
 #[derive(Component)]
 struct SurfaceOverlayNode;
+
+#[derive(Component, Clone, Copy, Debug, PartialEq)]
+pub(crate) struct SurfaceInputNode {
+    pub(crate) surface: SurfaceId,
+    pub(crate) layer: SurfaceLayerId,
+    pub(crate) local_origin: Vec2,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+struct SurfaceInputNodeKey {
+    layer: SurfaceLayerId,
+    region: usize,
+}
+
+#[derive(Component, Default)]
+struct SurfaceInputNodes(Vec<(SurfaceInputNodeKey, Entity)>);
 
 pub(crate) fn enqueue_surface_event(world: &mut World, event: HostSurfaceEvent) {
     let Some(mut events) = world.get_resource_mut::<SurfaceEventQueue>() else {
@@ -347,11 +487,27 @@ fn apply_host_surface_events(world: &mut World) {
 
     for event in events {
         match event {
-            HostSurfaceEvent::Created { surface } => {
-                ensure_surface_entity(world, &mut registry, surface);
+            HostSurfaceEvent::Created {
+                surface,
+                decoration,
+            } => {
+                if let Some(entity) =
+                    ensure_surface_entity(world, &mut registry, surface, decoration)
+                {
+                    set_decoration_marker(world, entity, decoration);
+                }
             }
             HostSurfaceEvent::TreeSnapshot { surface, snapshot } => {
                 apply_surface_tree_snapshot(world, &mut registry, surface, snapshot);
+            }
+            HostSurfaceEvent::DecorationChanged {
+                surface,
+                decoration,
+            } => {
+                set_window_decoration(world, &mut registry, surface, decoration);
+            }
+            HostSurfaceEvent::WindowInteraction(request) => {
+                world.write_message(request);
             }
             HostSurfaceEvent::Destroyed { surface } => {
                 destroy_surface(world, &mut registry, surface);
@@ -366,6 +522,7 @@ fn ensure_surface_entity(
     world: &mut World,
     registry: &mut SurfaceRegistry,
     surface: SurfaceId,
+    decoration: WindowDecoration,
 ) -> Option<Entity> {
     if let Some(entry) = registry.0.get(&surface)
         && world.get_entity(entry.entity).is_ok()
@@ -374,7 +531,10 @@ fn ensure_surface_entity(
     }
     registry.0.remove(&surface);
 
-    let entity = world.spawn(AppWindow { surface }).id();
+    let entity = world
+        .spawn((AppWindow { surface }, SurfaceSnapshotRevision::default()))
+        .id();
+    set_decoration_marker(world, entity, decoration);
     registry.0.insert(
         surface,
         SurfaceEntry {
@@ -384,6 +544,34 @@ fn ensure_surface_entity(
         },
     );
     Some(entity)
+}
+
+fn set_window_decoration(
+    world: &mut World,
+    registry: &mut SurfaceRegistry,
+    surface: SurfaceId,
+    decoration: WindowDecoration,
+) {
+    let Some(entity) = ensure_surface_entity(world, registry, surface, decoration) else {
+        return;
+    };
+    set_decoration_marker(world, entity, decoration);
+}
+
+fn set_decoration_marker(world: &mut World, entity: Entity, decoration: WindowDecoration) {
+    let Ok(mut entity) = world.get_entity_mut(entity) else {
+        return;
+    };
+    match decoration {
+        WindowDecoration::ClientSide => {
+            entity.remove::<ServerDecorated>();
+            entity.insert(ClientDecorated);
+        }
+        WindowDecoration::ServerSide => {
+            entity.remove::<ClientDecorated>();
+            entity.insert(ServerDecorated);
+        }
+    }
 }
 
 fn apply_surface_tree_snapshot(
@@ -396,7 +584,11 @@ fn apply_surface_tree_snapshot(
         warn!(?surface, "discarded an invalid surface tree snapshot");
         return;
     }
-    let Some(entity) = ensure_surface_entity(world, registry, surface) else {
+    // Tree snapshots normally follow Created. Client-side ownership is the
+    // conservative fallback for tests and recovery from missing lifecycle data.
+    let Some(entity) =
+        ensure_surface_entity(world, registry, surface, WindowDecoration::ClientSide)
+    else {
         return;
     };
 
@@ -464,10 +656,16 @@ fn apply_surface_tree_snapshot(
     let content = snapshot
         .client_mapped
         .then_some(())
-        .and(snapshot.root)
-        .and_then(|root| {
+        .and(snapshot.root.zip(snapshot.window_geometry))
+        .and_then(|(root, window_geometry)| {
             let root_asset = entry.buffers.get(&root.layer)?;
-            validate_view(root.view, root_asset.pixel_size.0, root_asset.pixel_size.1).then(|| {
+            (validate_view(root.view, root_asset.pixel_size.0, root_asset.pixel_size.1)
+                && validate_view(
+                    window_geometry.view,
+                    root_asset.pixel_size.0,
+                    root_asset.pixel_size.1,
+                ))
+            .then(|| {
                 let overlays = snapshot
                     .overlays
                     .iter()
@@ -491,8 +689,9 @@ fn apply_surface_tree_snapshot(
                             view: root.view,
                             position: Vec2::ZERO,
                         },
+                        window_geometry,
                         overlays,
-                        surface_origin: snapshot.surface_origin,
+                        inputs: snapshot.inputs,
                     },
                     root_asset.opaque,
                 )
@@ -509,6 +708,11 @@ fn apply_surface_tree_snapshot(
     };
     if let Some((content, opaque)) = content {
         let logical_size = Vec2::new(
+            content.window_geometry.view.logical_width,
+            content.window_geometry.view.logical_height,
+        );
+        let visual_offset = -content.window_geometry.origin;
+        let visual_size = Vec2::new(
             content.root.view.logical_width,
             content.root.view.logical_height,
         );
@@ -516,6 +720,8 @@ fn apply_surface_tree_snapshot(
             content,
             MappedSurface {
                 logical_size,
+                visual_offset,
+                visual_size,
                 opaque,
             },
         ));
@@ -523,6 +729,9 @@ fn apply_surface_tree_snapshot(
     } else {
         entity_mut.remove::<(SurfaceContent, MappedSurface)>();
         entry.frame_ready = false;
+    }
+    if let Some(mut revision) = entity_mut.get_mut::<SurfaceSnapshotRevision>() {
+        revision.0 = revision.0.saturating_add(1);
     }
 }
 
@@ -548,19 +757,32 @@ type SurfaceNodeQuery<'world, 'state> = Query<
         &'static SurfaceNode,
         &'static mut ImageNode,
         &'static mut Node,
-        &'static mut SurfaceGeometryOrigin,
         Option<&'static SurfaceOverlayNodes>,
+        Option<&'static SurfaceInputNodes>,
     ),
-    Without<SurfaceOverlayNode>,
+    (Without<SurfaceOverlayNode>, Without<SurfaceInputNode>),
+>;
+type SurfaceOverlayNodeQuery<'world, 'state> = Query<
+    'world,
+    'state,
+    (&'static mut ImageNode, &'static mut Node),
+    (With<SurfaceOverlayNode>, Without<SurfaceInputNode>),
+>;
+type SurfaceInputNodeQuery<'world, 'state> = Query<
+    'world,
+    'state,
+    (&'static mut SurfaceInputNode, &'static mut Node),
+    (With<SurfaceInputNode>, Without<SurfaceOverlayNode>),
 >;
 
 fn sync_surface_nodes(
     mut commands: bevy::ecs::system::Commands,
     surfaces: Query<(&AppWindow, &SurfaceContent)>,
     mut nodes: SurfaceNodeQuery,
-    mut overlay_nodes: Query<(&mut ImageNode, &mut Node), With<SurfaceOverlayNode>>,
+    mut overlay_nodes: SurfaceOverlayNodeQuery,
+    mut input_nodes: SurfaceInputNodeQuery,
 ) {
-    for (entity, surface_node, mut image_node, mut node, mut surface_origin, existing_overlays) in
+    for (entity, surface_node, mut image_node, mut node, existing_overlays, existing_inputs) in
         &mut nodes
     {
         let content = surfaces.iter().find_map(|(window, content)| {
@@ -579,27 +801,36 @@ fn sync_surface_nodes(
             {
                 *image_node = empty_image;
             }
-            surface_origin.0 = Vec2::ZERO;
             if let Some(existing) = existing_overlays {
                 for (_, overlay) in &existing.0 {
                     commands.entity(*overlay).despawn();
                 }
                 commands.entity(entity).remove::<SurfaceOverlayNodes>();
             }
+            if let Some(existing) = existing_inputs {
+                for (_, input) in &existing.0 {
+                    commands.entity(*input).despawn();
+                }
+                commands.entity(entity).remove::<SurfaceInputNodes>();
+            }
             continue;
         };
 
-        surface_origin.0 = content.surface_origin;
-
-        let expected_image = surface_image_node(content.root.image.clone(), content.root.view);
+        let (root_view, coordinate_origin) = match surface_node.view {
+            SurfaceView::FullSurface => (content.root.view, Vec2::ZERO),
+            SurfaceView::WindowGeometry => {
+                (content.window_geometry.view, content.window_geometry.origin)
+            }
+        };
+        let expected_image = surface_image_node(content.root.image.clone(), root_view);
         if image_node.image != expected_image.image
             || image_node.rect != expected_image.rect
             || image_node.image_mode != expected_image.image_mode
         {
             *image_node = expected_image;
         }
-        let logical_width = px(content.root.view.logical_width);
-        let logical_height = px(content.root.view.logical_height);
+        let logical_width = px(root_view.logical_width);
+        let logical_height = px(root_view.logical_height);
         if node.display != Display::Flex
             || node.width != logical_width
             || node.height != logical_height
@@ -616,7 +847,7 @@ fn sync_surface_nodes(
         let mut tracked = Vec::with_capacity(content.overlays.len());
         for overlay in &content.overlays {
             let expected_image = surface_image_node(overlay.image.clone(), overlay.view);
-            let expected_node = overlay_node(overlay);
+            let expected_node = overlay_node(overlay, coordinate_origin);
             let overlay_entity = if let Some(overlay_entity) = reusable.remove(&overlay.layer) {
                 if let Ok((mut image_node, mut node)) = overlay_nodes.get_mut(overlay_entity) {
                     if image_node.image != expected_image.image
@@ -647,18 +878,79 @@ fn sync_surface_nodes(
         for overlay in reusable.into_values() {
             commands.entity(overlay).despawn();
         }
-        commands
-            .entity(entity)
-            .replace_children(&ordered)
-            .insert(SurfaceOverlayNodes(tracked));
+
+        let mut reusable_inputs = existing_inputs
+            .map(|inputs| inputs.0.iter().copied().collect::<HashMap<_, _>>())
+            .unwrap_or_default();
+        let input_capacity = content
+            .inputs
+            .iter()
+            .map(|input| input.regions.len())
+            .sum::<usize>();
+        let mut tracked_inputs = Vec::with_capacity(input_capacity);
+        for input in &content.inputs {
+            for (region, rectangle) in input.regions.iter().enumerate() {
+                let key = SurfaceInputNodeKey {
+                    layer: input.layer,
+                    region,
+                };
+                let expected_target = SurfaceInputNode {
+                    surface: surface_node.surface,
+                    layer: input.layer,
+                    local_origin: rectangle.position,
+                };
+                let expected_node = input_node(input.position - coordinate_origin, *rectangle);
+                let input_entity = if let Some(input_entity) = reusable_inputs.remove(&key) {
+                    if let Ok((mut target, mut node)) = input_nodes.get_mut(input_entity) {
+                        if *target != expected_target {
+                            *target = expected_target;
+                        }
+                        if *node != expected_node {
+                            *node = expected_node;
+                        }
+                    }
+                    input_entity
+                } else {
+                    commands
+                        .spawn((
+                            expected_target,
+                            Pickable::default(),
+                            LayoutConfig { use_rounding: true },
+                            expected_node,
+                            ChildOf(entity),
+                        ))
+                        .id()
+                };
+                ordered.push(input_entity);
+                tracked_inputs.push((key, input_entity));
+            }
+        }
+        for input in reusable_inputs.into_values() {
+            commands.entity(input).despawn();
+        }
+        commands.entity(entity).replace_children(&ordered).insert((
+            SurfaceOverlayNodes(tracked),
+            SurfaceInputNodes(tracked_inputs),
+        ));
     }
 }
 
-fn overlay_node(layer: &SurfaceLayerContent) -> Node {
+fn input_node(layer_position: Vec2, rectangle: SurfaceInputRect) -> Node {
     Node {
         position_type: PositionType::Absolute,
-        left: px(layer.position.x),
-        top: px(layer.position.y),
+        left: px(layer_position.x + rectangle.position.x),
+        top: px(layer_position.y + rectangle.position.y),
+        width: px(rectangle.size.x),
+        height: px(rectangle.size.y),
+        ..Default::default()
+    }
+}
+
+fn overlay_node(layer: &SurfaceLayerContent, coordinate_origin: Vec2) -> Node {
+    Node {
+        position_type: PositionType::Absolute,
+        left: px(layer.position.x - coordinate_origin.x),
+        top: px(layer.position.y - coordinate_origin.y),
         width: px(layer.view.logical_width),
         height: px(layer.view.logical_height),
         ..Default::default()
@@ -667,7 +959,7 @@ fn overlay_node(layer: &SurfaceLayerContent) -> Node {
 
 fn validate_snapshot(snapshot: &SurfaceTreeSnapshot) -> bool {
     let mut layers = HashSet::new();
-    snapshot.buffers.iter().all(|buffer| {
+    let valid_buffers = snapshot.buffers.iter().all(|buffer| {
         layers.insert(buffer.layer)
             && buffer.width > 0
             && buffer.height > 0
@@ -679,7 +971,24 @@ fn validate_snapshot(snapshot: &SurfaceTreeSnapshot) -> bool {
                     .and_then(|bytes| usize::try_from(bytes).ok())
                     == Some(pixels.len())
             })
-    })
+    });
+    let valid_geometry = match (snapshot.root, snapshot.window_geometry) {
+        (Some(_), Some(geometry)) => geometry.origin.is_finite(),
+        (None, None) => true,
+        _ => false,
+    };
+    valid_buffers
+        && valid_geometry
+        && snapshot.inputs.iter().all(|input| {
+            layers.contains(&input.layer)
+                && input.position.is_finite()
+                && input.regions.iter().all(|region| {
+                    region.position.is_finite()
+                        && region.size.is_finite()
+                        && region.size.x > 0.0
+                        && region.size.y > 0.0
+                })
+        })
 }
 
 fn validate_view(view: SurfaceContentView, width: u32, height: u32) -> bool {
@@ -794,9 +1103,13 @@ mod tests {
     fn root_snapshot(pixel: Option<[u8; 4]>) -> SurfaceTreeSnapshot {
         SurfaceTreeSnapshot {
             client_mapped: true,
-            surface_origin: Vec2::ZERO,
             root: Some(placement(1, Vec2::ZERO)),
+            window_geometry: Some(SurfaceWindowGeometry {
+                origin: Vec2::ZERO,
+                view: full_view(1.0, 1.0),
+            }),
             overlays: Vec::new(),
+            inputs: Vec::new(),
             buffers: vec![buffer(1, pixel)],
         }
     }
@@ -861,9 +1174,10 @@ mod tests {
                 surface,
                 SurfaceTreeSnapshot {
                     client_mapped: false,
-                    surface_origin: Vec2::ZERO,
                     root: None,
+                    window_geometry: None,
                     overlays: Vec::new(),
+                    inputs: Vec::new(),
                     buffers: vec![buffer(1, None)],
                 },
             ),
@@ -950,25 +1264,18 @@ mod tests {
         let mut app = test_app();
         let surface = SurfaceId::new(29);
         app.world_mut().spawn((
-            SurfaceNode { surface },
+            SurfaceNode {
+                surface,
+                view: SurfaceView::WindowGeometry,
+            },
             ImageNode::default(),
             Node::default(),
         ));
         let mut snapshot = root_snapshot(Some([1, 1, 1, 255]));
-        snapshot.surface_origin = Vec2::new(24.0, 32.0);
         snapshot.buffers.push(buffer(2, Some([2, 2, 2, 255])));
         snapshot.overlays.push(placement(2, Vec2::new(4.0, 5.0)));
         enqueue_surface_event(app.world_mut(), snapshot_event(surface, snapshot));
         app.update();
-
-        let mut origins = app.world_mut().query::<&SurfaceGeometryOrigin>();
-        assert_eq!(
-            origins
-                .single(app.world())
-                .expect("surface node should carry its geometry origin")
-                .0,
-            Vec2::new(24.0, 32.0)
-        );
 
         let first_overlay = {
             let mut query = app

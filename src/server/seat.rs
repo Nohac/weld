@@ -7,14 +7,24 @@ use smithay::{
         Seat, SeatHandler,
         dnd::DndGrabHandler,
         keyboard::{FilterResult, KeyboardSource},
-        pointer::{AxisFrame, ButtonEvent, CursorImageStatus, MotionEvent},
+        pointer::{
+            AxisFrame, ButtonEvent, CursorImageStatus, Focus, GestureHoldBeginEvent,
+            GestureHoldEndEvent, GesturePinchBeginEvent, GesturePinchEndEvent,
+            GesturePinchUpdateEvent, GestureSwipeBeginEvent, GestureSwipeEndEvent,
+            GestureSwipeUpdateEvent, GrabStartData, MotionEvent, PointerGrab, PointerInnerHandle,
+            RelativeMotionEvent,
+        },
     },
     reexports::{
         wayland_protocols::xdg::shell::server::xdg_toplevel,
-        wayland_server::{Resource, protocol::wl_surface::WlSurface},
+        wayland_server::{
+            Resource,
+            protocol::{wl_seat, wl_surface::WlSurface},
+        },
     },
     utils::{Logical, SERIAL_COUNTER},
     wayland::{
+        seat::WaylandFocus,
         selection::{
             SelectionHandler,
             data_device::{
@@ -24,12 +34,14 @@ use smithay::{
         shell::xdg::ToplevelSurface,
     },
 };
-use tracing::{debug, warn};
+use tracing::{debug, trace, warn};
 
 use crate::{
     input::{SeatInputEffect, SeatInputEffectKind, SurfaceHit},
     raw_input::{InputPosition, RawScrollFrame, RawScrollSource},
-    surface::SurfaceId,
+    surface::{
+        HostSurfaceEvent, SurfaceId, WindowDecoration, WindowInteractionRequest, WindowResizeEdge,
+    },
 };
 
 use super::ServerState;
@@ -47,11 +59,7 @@ impl ServerState {
                 button,
                 state,
             } => self.apply_pointer_button(position, target, button.0, state, time),
-            SeatInputEffectKind::PointerAxis {
-                position,
-                target,
-                axis,
-            } => self.apply_pointer_axis(position, target, axis, time),
+            SeatInputEffectKind::PointerAxis { axis } => self.apply_pointer_axis(axis, time),
             SeatInputEffectKind::Keyboard { keycode, state } => {
                 let Some(keycode) = keycode.0.checked_add(8) else {
                     warn!(keycode = keycode.0, "ignored an overflowing keyboard code");
@@ -88,6 +96,96 @@ impl ServerState {
             return;
         };
         self.apply_toplevel_focus(requested);
+    }
+
+    pub(super) fn begin_pointer_move(
+        &mut self,
+        surface: ToplevelSurface,
+        seat: wl_seat::WlSeat,
+        serial: smithay::utils::Serial,
+    ) {
+        self.begin_pointer_interaction(surface, seat, serial, PointerInteraction::Move);
+    }
+
+    pub(super) fn begin_pointer_resize(
+        &mut self,
+        surface: ToplevelSurface,
+        seat: wl_seat::WlSeat,
+        serial: smithay::utils::Serial,
+        edges: WindowResizeEdge,
+    ) {
+        self.begin_pointer_interaction(surface, seat, serial, PointerInteraction::Resize(edges));
+    }
+
+    fn begin_pointer_interaction(
+        &mut self,
+        surface: ToplevelSurface,
+        seat_resource: wl_seat::WlSeat,
+        serial: smithay::utils::Serial,
+        interaction: PointerInteraction,
+    ) {
+        let Some(seat) = Seat::<Self>::from_resource(&seat_resource) else {
+            return;
+        };
+        if seat != self.seat {
+            return;
+        }
+        let Some(pointer) = seat.get_pointer() else {
+            return;
+        };
+        if !pointer.has_grab(serial) {
+            return;
+        }
+        let Some(start_data) = pointer.grab_start_data() else {
+            return;
+        };
+        let Some((focused, _)) = &start_data.focus else {
+            return;
+        };
+        if !focused.same_client_as(&surface.wl_surface().id()) {
+            return;
+        }
+        let Some(surface_id) = self.toplevels.id_for_surface(surface.wl_surface()) else {
+            return;
+        };
+        let Some(toplevel) = self.toplevels.get(surface_id) else {
+            return;
+        };
+        if toplevel.decoration != WindowDecoration::ClientSide {
+            return;
+        }
+
+        let request = match interaction {
+            PointerInteraction::Move => WindowInteractionRequest::Move {
+                surface: surface_id,
+            },
+            PointerInteraction::Resize(edges) => WindowInteractionRequest::Resize {
+                surface: surface_id,
+                edges,
+            },
+        };
+        pointer.set_grab(
+            self,
+            WindowProtocolGrab {
+                start_data,
+                surface: surface.clone(),
+                surface_id,
+                resizing: matches!(interaction, PointerInteraction::Resize(_)),
+            },
+            serial,
+            Focus::Clear,
+        );
+        // Installing a grab unsets any previous grab. Stage the new resize state
+        // afterwards so replacing a grab cannot clear the state we just entered.
+        if matches!(interaction, PointerInteraction::Resize(_)) {
+            let changed =
+                surface.with_pending_state(|state| state.states.set(xdg_toplevel::State::Resizing));
+            if changed && surface.is_initial_configure_sent() {
+                surface.send_pending_configure();
+            }
+        }
+        self.pending_surface_events
+            .push(HostSurfaceEvent::WindowInteraction(request));
     }
 
     fn apply_toplevel_focus(&mut self, requested: Option<SurfaceId>) {
@@ -200,31 +298,16 @@ impl ServerState {
         self.retry_pending_focus(pointer.is_grabbed());
     }
 
-    fn apply_pointer_axis(
-        &mut self,
-        position: InputPosition,
-        target: Option<SurfaceHit>,
-        axis: RawScrollFrame,
-        time: u32,
-    ) {
+    fn apply_pointer_axis(&mut self, axis: RawScrollFrame, time: u32) {
+        trace!(?axis, "delivering pointer axis to Smithay's current focus");
         let Some(pointer) = self.seat.get_pointer() else {
             warn!("ignored pointer axis because the seat has no pointer");
             return;
         };
-        self.pointer_position = position;
-        let focus = self.pointer_focus(position, target);
-        pointer.motion(
-            self,
-            focus,
-            &MotionEvent {
-                location: compositor_point(position),
-                serial: SERIAL_COUNTER.next_serial(),
-                time,
-            },
-        );
-        if let Some(frame) = smithay_axis_frame(axis, time) {
-            pointer.axis(self, frame);
-        }
+        let Some(frame) = smithay_axis_frame(axis, time) else {
+            return;
+        };
+        pointer.axis(self, frame);
         pointer.frame(self);
         self.retry_pending_focus(pointer.is_grabbed());
     }
@@ -239,14 +322,14 @@ impl ServerState {
             .toplevels
             .get(target.surface)
             .filter(|toplevel| toplevel.surface.alive())?;
+        let input_surface = toplevel
+            .tree
+            .input_surface(target.layer, compositor_point(target.local_position))?;
         let origin = InputPosition::new(
             position.x - target.local_position.x,
             position.y - target.local_position.y,
         );
-        Some((
-            toplevel.surface.wl_surface().clone(),
-            compositor_point(origin),
-        ))
+        Some((input_surface, compositor_point(origin)))
     }
 
     fn release_host_input(&mut self, time: u32) {
@@ -321,6 +404,159 @@ impl ServerState {
         {
             keyboard.set_focus(self, None, serial);
         }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum PointerInteraction {
+    Move,
+    Resize(WindowResizeEdge),
+}
+
+struct WindowProtocolGrab {
+    start_data: GrabStartData<ServerState>,
+    surface: ToplevelSurface,
+    surface_id: SurfaceId,
+    resizing: bool,
+}
+
+impl PointerGrab<ServerState> for WindowProtocolGrab {
+    fn motion(
+        &mut self,
+        data: &mut ServerState,
+        handle: &mut PointerInnerHandle<'_, ServerState>,
+        _focus: Option<(WlSurface, smithay::utils::Point<f64, Logical>)>,
+        event: &MotionEvent,
+    ) {
+        handle.motion(data, None, event);
+    }
+
+    fn relative_motion(
+        &mut self,
+        data: &mut ServerState,
+        handle: &mut PointerInnerHandle<'_, ServerState>,
+        focus: Option<(WlSurface, smithay::utils::Point<f64, Logical>)>,
+        event: &RelativeMotionEvent,
+    ) {
+        handle.relative_motion(data, focus, event);
+    }
+
+    fn button(
+        &mut self,
+        data: &mut ServerState,
+        handle: &mut PointerInnerHandle<'_, ServerState>,
+        event: &ButtonEvent,
+    ) {
+        handle.button(data, event);
+        if !handle.current_pressed().contains(&self.start_data.button) {
+            handle.unset_grab(self, data, event.serial, event.time, true);
+        }
+    }
+
+    fn axis(
+        &mut self,
+        data: &mut ServerState,
+        handle: &mut PointerInnerHandle<'_, ServerState>,
+        details: AxisFrame,
+    ) {
+        handle.axis(data, details);
+    }
+
+    fn frame(&mut self, data: &mut ServerState, handle: &mut PointerInnerHandle<'_, ServerState>) {
+        handle.frame(data);
+    }
+
+    fn gesture_swipe_begin(
+        &mut self,
+        data: &mut ServerState,
+        handle: &mut PointerInnerHandle<'_, ServerState>,
+        event: &GestureSwipeBeginEvent,
+    ) {
+        handle.gesture_swipe_begin(data, event);
+    }
+
+    fn gesture_swipe_update(
+        &mut self,
+        data: &mut ServerState,
+        handle: &mut PointerInnerHandle<'_, ServerState>,
+        event: &GestureSwipeUpdateEvent,
+    ) {
+        handle.gesture_swipe_update(data, event);
+    }
+
+    fn gesture_swipe_end(
+        &mut self,
+        data: &mut ServerState,
+        handle: &mut PointerInnerHandle<'_, ServerState>,
+        event: &GestureSwipeEndEvent,
+    ) {
+        handle.gesture_swipe_end(data, event);
+    }
+
+    fn gesture_pinch_begin(
+        &mut self,
+        data: &mut ServerState,
+        handle: &mut PointerInnerHandle<'_, ServerState>,
+        event: &GesturePinchBeginEvent,
+    ) {
+        handle.gesture_pinch_begin(data, event);
+    }
+
+    fn gesture_pinch_update(
+        &mut self,
+        data: &mut ServerState,
+        handle: &mut PointerInnerHandle<'_, ServerState>,
+        event: &GesturePinchUpdateEvent,
+    ) {
+        handle.gesture_pinch_update(data, event);
+    }
+
+    fn gesture_pinch_end(
+        &mut self,
+        data: &mut ServerState,
+        handle: &mut PointerInnerHandle<'_, ServerState>,
+        event: &GesturePinchEndEvent,
+    ) {
+        handle.gesture_pinch_end(data, event);
+    }
+
+    fn gesture_hold_begin(
+        &mut self,
+        data: &mut ServerState,
+        handle: &mut PointerInnerHandle<'_, ServerState>,
+        event: &GestureHoldBeginEvent,
+    ) {
+        handle.gesture_hold_begin(data, event);
+    }
+
+    fn gesture_hold_end(
+        &mut self,
+        data: &mut ServerState,
+        handle: &mut PointerInnerHandle<'_, ServerState>,
+        event: &GestureHoldEndEvent,
+    ) {
+        handle.gesture_hold_end(data, event);
+    }
+
+    fn start_data(&self) -> &GrabStartData<ServerState> {
+        &self.start_data
+    }
+
+    fn unset(&mut self, data: &mut ServerState) {
+        if self.resizing && self.surface.alive() {
+            let changed = self
+                .surface
+                .with_pending_state(|state| state.states.unset(xdg_toplevel::State::Resizing));
+            if changed && self.surface.is_initial_configure_sent() {
+                self.surface.send_pending_configure();
+            }
+        }
+        data.pending_surface_events
+            .push(HostSurfaceEvent::WindowInteraction(
+                WindowInteractionRequest::End {
+                    surface: self.surface_id,
+                },
+            ));
     }
 }
 
@@ -421,11 +657,14 @@ fn smithay_axis_frame(axis: RawScrollFrame, time: u32) -> Option<AxisFrame> {
         && axis.vertical == 0.0
         && axis.horizontal_v120.unwrap_or_default() == 0
         && axis.vertical_v120.unwrap_or_default() == 0
+        && !axis.horizontal_stop
+        && !axis.vertical_stop
     {
         return None;
     }
     let source = match axis.source {
         RawScrollSource::Wheel => AxisSource::Wheel,
+        RawScrollSource::Finger => AxisSource::Finger,
         RawScrollSource::Continuous => AxisSource::Continuous,
     };
     let mut frame = AxisFrame::new(time).source(source);
@@ -445,13 +684,19 @@ fn smithay_axis_frame(axis: RawScrollFrame, time: u32) -> Option<AxisFrame> {
     {
         frame = frame.v120(Axis::Vertical, v120);
     }
+    if axis.horizontal_stop {
+        frame = frame.stop(Axis::Horizontal);
+    }
+    if axis.vertical_stop {
+        frame = frame.stop(Axis::Vertical);
+    }
     Some(frame)
 }
 
 #[cfg(test)]
 mod tests {
     use crate::{
-        raw_input::{RawScrollFrame, RawScrollSource},
+        raw_input::{RawScrollFrame, RawScrollPhase, RawScrollSource},
         surface::SurfaceId,
     };
 
@@ -525,14 +770,37 @@ mod tests {
             smithay_axis_frame(
                 RawScrollFrame {
                     source: RawScrollSource::Wheel,
+                    phase: RawScrollPhase::Moved,
                     horizontal: 0.0,
                     vertical: 0.0,
                     horizontal_v120: Some(0),
                     vertical_v120: None,
+                    horizontal_stop: false,
+                    vertical_stop: false,
                 },
                 1,
             )
             .is_none()
+        );
+    }
+
+    #[test]
+    fn preserves_stop_only_finger_frames() {
+        assert!(
+            smithay_axis_frame(
+                RawScrollFrame {
+                    source: RawScrollSource::Finger,
+                    phase: RawScrollPhase::Ended,
+                    horizontal: 0.0,
+                    vertical: 0.0,
+                    horizontal_v120: None,
+                    vertical_v120: None,
+                    horizontal_stop: false,
+                    vertical_stop: true,
+                },
+                1,
+            )
+            .is_some()
         );
     }
 }

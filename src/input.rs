@@ -2,16 +2,18 @@
 //!
 //! [`RawSeatEvent`] values are retained verbatim for protocol delivery while a
 //! same-update projection feeds standard Bevy input and Leafwing's
-//! [`CentralInputStorePlugin`]. Bevy picking decides whether the topmost UI
-//! node is a client [`SurfaceNode`], then this module emits typed
-//! [`SeatInputEffect`] values keyed by [`SurfaceId`]. Smithay resources never
+//! [`CentralInputStorePlugin`]. Bevy picking resolves the topmost exact
+//! [`SurfaceInputNode`], then this module emits typed [`SeatInputEffect`]
+//! values keyed by [`SurfaceId`] and surface layer. Smithay resources never
 //! enter the ECS world.
 //!
 //! Keyboard focus is click-to-focus in the initial slice. A future shortcut
 //! policy belongs after [`InputManagerSystem::Update`] and before protocol
 //! routing; paired interception must annotate rather than replace the lossless
 //! raw stream. That early action phase cannot consult the same update's final
-//! picked surface without a later policy phase.
+//! picked surface without a later policy phase. Invisible
+//! [`SurfaceInputNode`] rectangles are the picking boundary; visual surface
+//! images do not accept input directly.
 
 use std::collections::{HashSet, VecDeque};
 
@@ -43,15 +45,15 @@ use bevy::{
 };
 use bevy_winit::converters::convert_physical_key_code;
 use leafwing_input_manager::plugin::{CentralInputStorePlugin, InputManagerSystem};
-use tracing::warn;
+use tracing::{trace, warn};
 use winit::{keyboard::PhysicalKey, platform::scancode::PhysicalKeyExtScancode};
 
 use crate::{
     raw_input::{
-        InputPosition, LinuxButtonCode, LinuxKeycode, RawScrollFrame, RawSeatEvent,
+        InputPosition, LinuxButtonCode, LinuxKeycode, RawScrollFrame, RawScrollPhase, RawSeatEvent,
         RawSeatEventKind,
     },
-    surface::{SurfaceGeometryOrigin, SurfaceId, SurfaceNode},
+    surface::{SurfaceId, SurfaceInputNode, SurfaceLayerId},
 };
 
 // Weld has no Bevy Window entity: the manual render target is not a window.
@@ -61,6 +63,7 @@ const INPUT_WINDOW: Entity = Entity::PLACEHOLDER;
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct SurfaceHit {
     pub surface: SurfaceId,
+    pub layer: SurfaceLayerId,
     pub local_position: InputPosition,
 }
 
@@ -90,8 +93,6 @@ pub(crate) enum SeatInputEffectKind {
         state: ButtonState,
     },
     PointerAxis {
-        position: InputPosition,
-        target: Option<SurfaceHit>,
         axis: RawScrollFrame,
     },
     Keyboard {
@@ -202,6 +203,7 @@ struct ResolvedPointer {
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct ImplicitPointerGrab {
     surface: SurfaceId,
+    layer: SurfaceLayerId,
     origin: InputPosition,
 }
 
@@ -209,6 +211,7 @@ impl ImplicitPointerGrab {
     fn new(position: InputPosition, hit: SurfaceHit) -> Self {
         Self {
             surface: hit.surface,
+            layer: hit.layer,
             origin: InputPosition::new(
                 position.x - hit.local_position.x,
                 position.y - hit.local_position.y,
@@ -219,6 +222,7 @@ impl ImplicitPointerGrab {
     fn target_at(self, position: InputPosition) -> SurfaceHit {
         SurfaceHit {
             surface: self.surface,
+            layer: self.layer,
             local_position: InputPosition::new(
                 position.x - self.origin.x,
                 position.y - self.origin.y,
@@ -340,23 +344,18 @@ fn project_raw_input(
                     projected_pointer.0.apply(position);
                 }
                 if let Some(position) = projected_pointer.0.host_position {
-                    let (unit, x, y) = bevy_scroll(axis);
+                    let (unit, x, y, phase) = bevy_scroll(axis);
                     messages.mouse_wheel.write(MouseWheel {
                         unit,
                         x,
                         y,
                         window: INPUT_WINDOW,
-                        phase: TouchPhase::Moved,
+                        phase,
                     });
                     messages.pointer_input.write(PointerInput::new(
                         PointerId::Mouse,
                         pointer_location(&target.0, position, ui_scale),
-                        PointerAction::Scroll {
-                            unit,
-                            x,
-                            y,
-                            phase: TouchPhase::Moved,
-                        },
+                        PointerAction::Scroll { unit, x, y, phase },
                     ));
                 }
             }
@@ -404,12 +403,8 @@ fn project_raw_input(
 
 fn resolve_input_effects(
     pointers: Query<(&PointerId, &PointerInteraction, &PointerLocation)>,
-    picked_nodes: Query<(
-        Option<&SurfaceNode>,
-        Option<&SurfaceGeometryOrigin>,
-        Option<&ComputedNode>,
-    )>,
-    surface_nodes: Query<(&SurfaceNode, &Node)>,
+    picked_nodes: Query<(Option<&SurfaceInputNode>, Option<&ComputedNode>)>,
+    surface_nodes: Query<(&SurfaceInputNode, &Node)>,
     update_time: Res<InputUpdateTime>,
     mut pending: ResMut<PendingSeatInput>,
     mut effects: ResMut<InputEffects>,
@@ -424,11 +419,9 @@ fn resolve_input_effects(
         .and_then(|(_, interaction, location)| {
             location.location().and_then(|_| {
                 resolve_pick_candidates(interaction.iter().map(|(entity, hit)| {
-                    let (surface, surface_origin, node) =
-                        picked_nodes.get(*entity).unwrap_or((None, None, None));
+                    let (surface, node) = picked_nodes.get(*entity).unwrap_or((None, None));
                     PickCandidate {
-                        surface: surface.map(|surface| surface.surface),
-                        surface_origin: surface_origin.map_or(Vec2::ZERO, |origin| origin.0),
+                        target: surface.copied(),
                         centered_position: hit.position.map(|position| {
                             InputPosition::new(position.x.into(), position.y.into())
                         }),
@@ -438,9 +431,11 @@ fn resolve_input_effects(
             })
         });
     if routing.implicit_grab.is_some_and(|grab| {
-        !surface_nodes
-            .iter()
-            .any(|(surface, node)| surface.surface == grab.surface && node.display != Display::None)
+        !surface_nodes.iter().any(|(surface, node)| {
+            surface.surface == grab.surface
+                && surface.layer == grab.layer
+                && node.display != Display::None
+        })
     }) {
         routing.implicit_grab = None;
     }
@@ -538,16 +533,9 @@ fn replay_seat_event(
             }
             let position = position.unwrap_or(routing.pointer.last_known_position);
             let target = routed_target(routing, geometric_target, position);
-            routing.last_sent = routing
-                .pointer
-                .host_position
-                .map(|position| ResolvedPointer { position, target });
+            trace!(?axis, ?target, "routed raw pointer axis");
             Some(SeatInputEffect::new(
-                SeatInputEffectKind::PointerAxis {
-                    position,
-                    target,
-                    axis,
-                },
+                SeatInputEffectKind::PointerAxis { axis },
                 time,
             ))
         }
@@ -634,26 +622,33 @@ fn bevy_keycode(keycode: LinuxKeycode) -> KeyCode {
     convert_physical_key_code(PhysicalKey::from_scancode(keycode.0))
 }
 
-fn bevy_scroll(axis: RawScrollFrame) -> (MouseScrollUnit, f32, f32) {
+fn bevy_scroll(axis: RawScrollFrame) -> (MouseScrollUnit, f32, f32, TouchPhase) {
+    let phase = match axis.phase {
+        RawScrollPhase::Started => TouchPhase::Started,
+        RawScrollPhase::Moved => TouchPhase::Moved,
+        RawScrollPhase::Ended => TouchPhase::Ended,
+        RawScrollPhase::Cancelled => TouchPhase::Canceled,
+    };
     if axis.horizontal_v120.is_some() || axis.vertical_v120.is_some() {
         (
             MouseScrollUnit::Line,
             -(axis.horizontal_v120.unwrap_or_default() as f32) / 120.0,
             -(axis.vertical_v120.unwrap_or_default() as f32) / 120.0,
+            phase,
         )
     } else {
         (
             MouseScrollUnit::Pixel,
             -axis.horizontal as f32,
             -axis.vertical as f32,
+            phase,
         )
     }
 }
 
 #[derive(Clone, Copy)]
 struct PickCandidate {
-    surface: Option<SurfaceId>,
-    surface_origin: Vec2,
+    target: Option<SurfaceInputNode>,
     centered_position: Option<InputPosition>,
     size: Option<Vec2>,
 }
@@ -665,19 +660,20 @@ fn resolve_pick_candidates(
     candidates: impl IntoIterator<Item = PickCandidate>,
 ) -> Option<SurfaceHit> {
     let candidate = candidates.into_iter().next()?;
-    let surface = candidate.surface?;
+    let target = candidate.target?;
     let position = candidate.centered_position?;
     let size = candidate.size?;
     Some(SurfaceHit {
-        surface,
+        surface: target.surface,
+        layer: target.layer,
         // `size` is surface-logical because SurfacePlugin explicitly
         // sizes each node to its committed viewport destination (or the full
         // logical buffer when no viewport exists). That invariant keeps Bevy
         // transforms and clipping composable while the protocol receives
         // coordinates in the client's logical space.
         local_position: InputPosition::new(
-            (position.x + 0.5) * f64::from(size.x) + f64::from(candidate.surface_origin.x),
-            (position.y + 0.5) * f64::from(size.y) + f64::from(candidate.surface_origin.y),
+            (position.x + 0.5) * f64::from(size.x) + f64::from(target.local_origin.x),
+            (position.y + 0.5) * f64::from(size.y) + f64::from(target.local_origin.y),
         ),
     })
 }
@@ -690,7 +686,7 @@ fn refresh_grab_origin(routing: &mut PointerRoutingState, geometric: Option<Surf
     ) else {
         return;
     };
-    if grab.surface == hit.surface {
+    if grab.surface == hit.surface && grab.layer == hit.layer {
         *grab = ImplicitPointerGrab::new(position, hit);
     }
 }
@@ -929,6 +925,7 @@ mod tests {
             }),
             implicit_grab: Some(ImplicitPointerGrab {
                 surface,
+                layer: SurfaceLayerId::new(1),
                 origin: InputPosition::default(),
             }),
             ..Default::default()
@@ -946,8 +943,11 @@ mod tests {
         size: Vec2,
     ) -> PickCandidate {
         PickCandidate {
-            surface: Some(surface),
-            surface_origin: Vec2::ZERO,
+            target: Some(SurfaceInputNode {
+                surface,
+                layer: SurfaceLayerId::new(1),
+                local_origin: Vec2::ZERO,
+            }),
             centered_position: Some(centered_position),
             size: Some(size),
         }
@@ -969,8 +969,7 @@ mod tests {
     #[test]
     fn topmost_overlay_blocks_the_surface_below() {
         let overlay = PickCandidate {
-            surface: None,
-            surface_origin: Vec2::ZERO,
+            target: None,
             centered_position: Some(InputPosition::default()),
             size: Some(Vec2::splat(100.0)),
         };
@@ -1014,11 +1013,14 @@ mod tests {
     }
 
     #[test]
-    fn window_geometry_origin_is_restored_for_client_pointer_coordinates() {
+    fn input_region_origin_is_restored_for_client_pointer_coordinates() {
         let surface = SurfaceId::new(1);
         let hit = resolve_pick_candidates([PickCandidate {
-            surface: Some(surface),
-            surface_origin: Vec2::new(24.0, 32.0),
+            target: Some(SurfaceInputNode {
+                surface,
+                layer: SurfaceLayerId::new(1),
+                local_origin: Vec2::new(24.0, 32.0),
+            }),
             centered_position: Some(InputPosition::new(-0.5, -0.5)),
             size: Some(Vec2::new(640.0, 480.0)),
         }])
@@ -1053,6 +1055,7 @@ mod tests {
             position: InputPosition::new(42.0, 24.0),
             target: Some(SurfaceHit {
                 surface: SurfaceId::new(1),
+                layer: SurfaceLayerId::new(1),
                 local_position: InputPosition::new(2.0, 3.0),
             }),
         };
@@ -1085,6 +1088,7 @@ mod tests {
             position: InputPosition::new(50.0, 60.0),
             target: Some(SurfaceHit {
                 surface: SurfaceId::new(2),
+                layer: SurfaceLayerId::new(1),
                 local_position: InputPosition::new(10.0, 20.0),
             }),
         };
@@ -1107,6 +1111,7 @@ mod tests {
                 InputPosition::new(30.0, 40.0),
                 SurfaceHit {
                     surface,
+                    layer: SurfaceLayerId::new(1),
                     local_position: InputPosition::new(10.0, 15.0),
                 },
             )),
@@ -1118,6 +1123,7 @@ mod tests {
             routed_target(&routing, None, routing.pointer.host_position.unwrap()),
             Some(SurfaceHit {
                 surface,
+                layer: SurfaceLayerId::new(1),
                 local_position: InputPosition::new(70.0, 75.0),
             })
         );
@@ -1129,6 +1135,7 @@ mod tests {
         routing.pressed_buttons.insert(LinuxButtonCode(0x110));
         let geometric = SurfaceHit {
             surface: SurfaceId::new(9),
+            layer: SurfaceLayerId::new(1),
             local_position: InputPosition::new(1.0, 2.0),
         };
 
@@ -1145,6 +1152,7 @@ mod tests {
             position,
             target: Some(SurfaceHit {
                 surface: SurfaceId::new(10),
+                layer: SurfaceLayerId::new(1),
                 local_position: InputPosition::new(70.0, 75.0),
             }),
         };
@@ -1182,6 +1190,7 @@ mod tests {
                 initial_position,
                 SurfaceHit {
                     surface,
+                    layer: SurfaceLayerId::new(1),
                     local_position: InputPosition::new(2.0, 3.0),
                 },
             )),
@@ -1224,6 +1233,7 @@ mod tests {
                         position: first_position,
                         target: Some(SurfaceHit {
                             surface,
+                            layer: SurfaceLayerId::new(1),
                             local_position: InputPosition::new(12.0, 13.0),
                         }),
                     },
@@ -1234,6 +1244,7 @@ mod tests {
                         position: final_position,
                         target: Some(SurfaceHit {
                             surface,
+                            layer: SurfaceLayerId::new(1),
                             local_position: InputPosition::new(22.0, 18.0),
                         }),
                     },
@@ -1244,6 +1255,7 @@ mod tests {
 
         let final_hit = SurfaceHit {
             surface,
+            layer: SurfaceLayerId::new(1),
             local_position: InputPosition::new(40.0, 50.0),
         };
         refresh_grab_origin(&mut routing, Some(final_hit));
@@ -1266,12 +1278,14 @@ mod tests {
             },
             implicit_grab: Some(ImplicitPointerGrab {
                 surface,
+                layer: SurfaceLayerId::new(1),
                 origin: InputPosition::default(),
             }),
             ..Default::default()
         };
         let hit = SurfaceHit {
             surface,
+            layer: SurfaceLayerId::new(1),
             local_position: InputPosition::new(20.0, 30.0),
         };
 
@@ -1287,23 +1301,105 @@ mod tests {
     }
 
     #[test]
+    fn pointer_axis_does_not_absorb_a_pending_focus_reconciliation() {
+        let position = InputPosition::new(80.0, 90.0);
+        let previous = ResolvedPointer {
+            position,
+            target: Some(SurfaceHit {
+                surface: SurfaceId::new(1),
+                layer: SurfaceLayerId::new(1),
+                local_position: InputPosition::new(10.0, 20.0),
+            }),
+        };
+        let next = SurfaceHit {
+            surface: SurfaceId::new(2),
+            layer: SurfaceLayerId::new(1),
+            local_position: InputPosition::new(30.0, 40.0),
+        };
+        let mut routing = PointerRoutingState {
+            pointer: PointerPositionState {
+                host_position: Some(position),
+                last_known_position: position,
+            },
+            last_sent: Some(previous),
+            ..Default::default()
+        };
+
+        let effect = replay_seat_event(
+            &mut routing,
+            Some(next),
+            RawSeatEvent::new(
+                RawSeatEventKind::PointerAxis {
+                    position: Some(position),
+                    axis: RawScrollFrame {
+                        source: crate::raw_input::RawScrollSource::Wheel,
+                        phase: RawScrollPhase::Moved,
+                        horizontal: 0.0,
+                        vertical: 15.0,
+                        horizontal_v120: None,
+                        vertical_v120: Some(120),
+                        horizontal_stop: false,
+                        vertical_stop: false,
+                    },
+                },
+                11,
+            ),
+        );
+
+        assert!(matches!(
+            effect,
+            Some(SeatInputEffect {
+                event: SeatInputEffectKind::PointerAxis { .. },
+                time: 11,
+            })
+        ));
+        assert_eq!(routing.last_sent, Some(previous));
+        assert_eq!(
+            reconcile_pointer(
+                routing.last_sent,
+                resolved_pointer(&routing, Some(next)),
+                11
+            ),
+            Some(pointer_motion_effect(
+                ResolvedPointer {
+                    position,
+                    target: Some(next),
+                },
+                11,
+            ))
+        );
+    }
+
+    #[test]
     fn bevy_scroll_reverses_wayland_axes_and_scales_v120() {
         let wheel = RawScrollFrame {
             source: crate::raw_input::RawScrollSource::Wheel,
+            phase: RawScrollPhase::Moved,
             horizontal: -30.0,
             vertical: 45.0,
             horizontal_v120: Some(-240),
             vertical_v120: Some(360),
+            horizontal_stop: false,
+            vertical_stop: false,
         };
         let continuous = RawScrollFrame {
             source: crate::raw_input::RawScrollSource::Continuous,
+            phase: RawScrollPhase::Started,
             horizontal: -4.5,
             vertical: 2.5,
             horizontal_v120: None,
             vertical_v120: None,
+            horizontal_stop: false,
+            vertical_stop: false,
         };
 
-        assert_eq!(bevy_scroll(wheel), (MouseScrollUnit::Line, 2.0, -3.0));
-        assert_eq!(bevy_scroll(continuous), (MouseScrollUnit::Pixel, 4.5, -2.5));
+        assert_eq!(
+            bevy_scroll(wheel),
+            (MouseScrollUnit::Line, 2.0, -3.0, TouchPhase::Moved)
+        );
+        assert_eq!(
+            bevy_scroll(continuous),
+            (MouseScrollUnit::Pixel, 4.5, -2.5, TouchPhase::Started,)
+        );
     }
 }

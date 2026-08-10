@@ -37,17 +37,36 @@ pub(crate) struct LinuxButtonCode(pub u32);
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum RawScrollSource {
     Wheel,
+    Finger,
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "standalone backends can report continuous scrolling without a finger lifecycle"
+        )
+    )]
     Continuous,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum RawScrollPhase {
+    Started,
+    Moved,
+    Ended,
+    Cancelled,
 }
 
 /// Scroll data using Wayland/libinput axis direction and high-resolution wheel units.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct RawScrollFrame {
     pub source: RawScrollSource,
+    pub phase: RawScrollPhase,
     pub horizontal: f64,
     pub vertical: f64,
     pub horizontal_v120: Option<i32>,
     pub vertical_v120: Option<i32>,
+    pub horizontal_stop: bool,
+    pub vertical_stop: bool,
 }
 
 /// One ordered input transition from a nested or standalone seat backend.

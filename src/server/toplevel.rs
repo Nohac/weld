@@ -2,9 +2,12 @@
 
 use std::{collections::HashMap, hash::Hash};
 
+use bevy::math::UVec2;
 use smithay::{
     reexports::{
-        wayland_protocols::xdg::decoration::zv1::server::zxdg_toplevel_decoration_v1::Mode,
+        wayland_protocols::xdg::{
+            decoration::zv1::server::zxdg_toplevel_decoration_v1::Mode, shell::server::xdg_toplevel,
+        },
         wayland_server::{
             Client, Resource,
             backend::ObjectId,
@@ -21,15 +24,15 @@ use smithay::{
         fractional_scale::FractionalScaleHandler,
         output::OutputHandler,
         shell::xdg::{
-            PopupSurface, PositionerState, ToplevelSurface, XdgShellHandler, XdgShellState,
-            decoration::XdgDecorationHandler,
+            PopupSurface, PositionerState, SurfaceCachedState as XdgSurfaceCachedState,
+            ToplevelSurface, XdgShellHandler, XdgShellState, decoration::XdgDecorationHandler,
         },
         shm::{ShmHandler, ShmState},
     },
 };
 use tracing::{debug, info, warn};
 
-use crate::surface::{HostSurfaceEvent, SurfaceId};
+use crate::surface::{HostSurfaceEvent, SurfaceId, WindowDecoration, WindowResizeEdge};
 
 use super::{
     ClientState, ServerState,
@@ -42,7 +45,8 @@ const CLIENT_HEIGHT: i32 = 480;
 
 pub(super) struct ToplevelState {
     pub(super) surface: ToplevelSurface,
-    tree: SurfaceTreeState,
+    pub(super) decoration: WindowDecoration,
+    pub(super) tree: SurfaceTreeState,
 }
 
 struct IndexedStore<K, V> {
@@ -136,6 +140,56 @@ impl ServerState {
             return;
         };
         toplevel.surface.send_close();
+    }
+
+    pub(super) fn resize_toplevel(&mut self, surface: SurfaceId, requested: UVec2) {
+        let Some(toplevel) = self.toplevels.get(surface) else {
+            warn!(?surface, "ignored a resize request for an unknown surface");
+            return;
+        };
+        if !toplevel.surface.alive() {
+            return;
+        }
+        let constraints = with_states(toplevel.surface.wl_surface(), |states| {
+            let mut cached = states.cached_state.get::<XdgSurfaceCachedState>();
+            let current = cached.current();
+            (current.min_size, current.max_size)
+        });
+        let requested_width = i32::try_from(requested.x.max(1)).unwrap_or(i32::MAX);
+        let requested_height = i32::try_from(requested.y.max(1)).unwrap_or(i32::MAX);
+        let size = Size::<i32, Logical>::from((
+            constrain_dimension(requested_width, constraints.0.w, constraints.1.w),
+            constrain_dimension(requested_height, constraints.0.h, constraints.1.h),
+        ));
+        let changed = toplevel.surface.with_pending_state(|state| {
+            if state.size == Some(size) {
+                false
+            } else {
+                state.size = Some(size);
+                true
+            }
+        });
+        if changed && toplevel.surface.is_initial_configure_sent() {
+            toplevel.surface.send_pending_configure();
+        }
+    }
+
+    fn record_server_side_decoration(&mut self, surface: &ToplevelSurface) {
+        let Some(surface_id) = self.toplevels.id_for_surface(surface.wl_surface()) else {
+            return;
+        };
+        let Some(toplevel) = self.toplevels.get_mut(surface_id) else {
+            return;
+        };
+        if toplevel.decoration == WindowDecoration::ServerSide {
+            return;
+        }
+        toplevel.decoration = WindowDecoration::ServerSide;
+        self.pending_surface_events
+            .push(HostSurfaceEvent::DecorationChanged {
+                surface: surface_id,
+                decoration: WindowDecoration::ServerSide,
+            });
     }
 
     pub(super) fn send_all_surface_scales(&self) {
@@ -252,6 +306,7 @@ impl CompositorHandler for ServerState {
         let Some(surface_id) = self.toplevels.id_for_surface(&root) else {
             return;
         };
+        self.clear_input_focus_for_surface(surface, self.event_time());
         let Some(toplevel) = self.toplevels.get_mut(surface_id) else {
             return;
         };
@@ -284,6 +339,7 @@ impl XdgShellHandler for ServerState {
         let rejection_surface = surface.clone();
         let state = ToplevelState {
             surface,
+            decoration: WindowDecoration::ClientSide,
             tree: SurfaceTreeState::default(),
         };
         if !self.toplevels.insert(id, state) {
@@ -291,13 +347,32 @@ impl XdgShellHandler for ServerState {
             rejection_surface.send_close();
             return;
         }
-        self.pending_surface_events
-            .push(HostSurfaceEvent::Created { surface: id });
+        self.pending_surface_events.push(HostSurfaceEvent::Created {
+            surface: id,
+            decoration: WindowDecoration::ClientSide,
+        });
         info!(surface_id = id.raw(), "created a nested xdg-toplevel");
     }
 
     fn new_popup(&mut self, _surface: PopupSurface, _positioner: PositionerState) {
         debug!("ignoring an xdg-popup in the initial slice");
+    }
+
+    fn move_request(&mut self, surface: ToplevelSurface, seat: wl_seat::WlSeat, serial: Serial) {
+        self.begin_pointer_move(surface, seat, serial);
+    }
+
+    fn resize_request(
+        &mut self,
+        surface: ToplevelSurface,
+        seat: wl_seat::WlSeat,
+        serial: Serial,
+        edges: xdg_toplevel::ResizeEdge,
+    ) {
+        let Some(edges) = window_resize_edge(edges) else {
+            return;
+        };
+        self.begin_pointer_resize(surface, seat, serial, edges);
     }
 
     fn grab(&mut self, _surface: PopupSurface, _seat: wl_seat::WlSeat, _serial: Serial) {}
@@ -334,6 +409,7 @@ fn stage_server_side_decoration(toplevel: &ToplevelSurface) {
 impl XdgDecorationHandler for ServerState {
     fn new_decoration(&mut self, toplevel: ToplevelSurface) {
         stage_server_side_decoration(&toplevel);
+        self.record_server_side_decoration(&toplevel);
         if toplevel.is_initial_configure_sent() {
             toplevel.send_pending_configure();
         }
@@ -341,6 +417,7 @@ impl XdgDecorationHandler for ServerState {
 
     fn request_mode(&mut self, toplevel: ToplevelSurface, _mode: Mode) {
         stage_server_side_decoration(&toplevel);
+        self.record_server_side_decoration(&toplevel);
         if toplevel.is_initial_configure_sent() {
             // Respond even when the client requested client-side decorations and the
             // compositor's server-side mode therefore did not change.
@@ -350,10 +427,36 @@ impl XdgDecorationHandler for ServerState {
 
     fn unset_mode(&mut self, toplevel: ToplevelSurface) {
         stage_server_side_decoration(&toplevel);
+        self.record_server_side_decoration(&toplevel);
         if toplevel.is_initial_configure_sent() {
             toplevel.send_configure();
         }
     }
+}
+
+fn window_resize_edge(edges: xdg_toplevel::ResizeEdge) -> Option<WindowResizeEdge> {
+    match edges {
+        xdg_toplevel::ResizeEdge::Top => Some(WindowResizeEdge::Top),
+        xdg_toplevel::ResizeEdge::Bottom => Some(WindowResizeEdge::Bottom),
+        xdg_toplevel::ResizeEdge::Left => Some(WindowResizeEdge::Left),
+        xdg_toplevel::ResizeEdge::Right => Some(WindowResizeEdge::Right),
+        xdg_toplevel::ResizeEdge::TopLeft => Some(WindowResizeEdge::TopLeft),
+        xdg_toplevel::ResizeEdge::BottomLeft => Some(WindowResizeEdge::BottomLeft),
+        xdg_toplevel::ResizeEdge::TopRight => Some(WindowResizeEdge::TopRight),
+        xdg_toplevel::ResizeEdge::BottomRight => Some(WindowResizeEdge::BottomRight),
+        xdg_toplevel::ResizeEdge::None => None,
+        _ => None,
+    }
+}
+
+fn constrain_dimension(requested: i32, minimum: i32, maximum: i32) -> i32 {
+    let minimum = minimum.max(1);
+    let maximum = if maximum > 0 {
+        maximum.max(minimum)
+    } else {
+        i32::MAX
+    };
+    requested.clamp(minimum, maximum)
 }
 
 impl OutputHandler for ServerState {}
@@ -395,5 +498,13 @@ mod tests {
         );
         assert_eq!(next, None);
         assert_eq!(allocate_surface_id(&mut next), None);
+    }
+
+    #[test]
+    fn resize_dimensions_follow_committed_client_constraints() {
+        assert_eq!(constrain_dimension(10, 20, 100), 20);
+        assert_eq!(constrain_dimension(60, 20, 100), 60);
+        assert_eq!(constrain_dimension(120, 20, 100), 100);
+        assert_eq!(constrain_dimension(120, 20, 0), 120);
     }
 }
