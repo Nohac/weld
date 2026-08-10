@@ -37,9 +37,9 @@ surfaces and shell UI into a Weld-owned texture through Bevy's manual
 render-device path. Do not enable Bevy's window runner or expand its features
 without a concrete need.
 
-Smithay's renderer is deliberately outside this first slice. Weld accepts
-multiple xdg-toplevels backed by `wl_shm`, copies their pixels into owned Bevy
-images, and exposes their lifecycle through protocol-neutral ECS entities.
+Weld accepts multiple xdg-toplevels backed by `wl_shm`, copies their pixels
+into owned Bevy images, and exposes their lifecycle through protocol-neutral
+ECS entities.
 Readable subsurfaces above the toplevel root are ordered and positioned as
 internal Bevy image layers behind the same project-owned `SurfaceNode`; the
 root image stays on that node so its rounded clipping and root-only fast path
@@ -47,8 +47,13 @@ remain intact. The default window plugin independently claims and decorates
 each mapped surface, so client content composes with ordinary Bevy UI. Smithay
 remains responsible for Wayland protocol state and applies focus or close
 actions chosen by ECS policy; it does not own window placement, stacking, or
-decoration. The final project-owned wgpu pass only presents or captures Bevy's
-completed texture. Weld advertises `xdg-decoration` and answers decoration
+decoration. The final project-owned wgpu pass presents or captures Bevy's
+completed texture directly in the nested backend. The initial standalone
+backend keeps that composition boundary, then performs a blocking CPU readback
+into one Smithay memory element; Pixman and `DrmCompositor` are used only to
+populate GBM buffers and submit KMS page flips. This is a validation bridge,
+not the intended zero-copy renderer architecture. Weld advertises
+`xdg-decoration` and answers decoration
 objects with server-side mode. Creating a decoration object opts a client into
 Weld's server-side frame; clients that do not bind the global retain their own
 decorations and are presented without duplicate shell chrome. A late
@@ -170,8 +175,8 @@ Cargo uses Clang and LLD for Linux targets. The shared Rust shell already
 provides both tools, so run builds from that environment rather than depending
 on globally installed linkers.
 
-Run the nested compositor inside a development shell whose glibc is compatible
-with the running NixOS graphics drivers. The shared Rust shell is located at
+Run Weld inside a development shell whose glibc is compatible with the running
+NixOS graphics drivers. The shared Rust shell is located at
 `/home/jonas/Dotfiles/nixos/envs/rust`; reload it after its lock file changes.
 
 Launch Weld without a client:
@@ -179,6 +184,11 @@ Launch Weld without a client:
 ```text
 cargo run
 ```
+
+Backend selection defaults to `auto`. A usable Wayland or X11 host selects the
+nested backend, while a bare Linux virtual terminal selects standalone DRM.
+Ambiguous environments fall back to the safer nested startup path. Use
+`--backend nested` or `--backend drm` to override detection while debugging.
 
 Pass a program and arguments to launch it against Weld's private Wayland
 socket. The verified smoke test uses foot:
@@ -216,9 +226,46 @@ uv run --project tools/remote-debug weld-debug screenshot target/weld-remote.png
 Read [REMOTE_DEBUGGING.md](REMOTE_DEBUGGING.md) before changing the protocol,
 capture completion, or exposed Bevy methods.
 
-The nested target intentionally runs until its host window is closed. Client
-warnings about unsupported optional Wayland protocols are expected for this
-minimal slice.
+When auto selects the nested target, it runs until its host window is closed.
+Client warnings about unsupported optional Wayland protocols are expected for
+this minimal slice.
+
+### Standalone DRM backend
+
+Run the transitional standalone backend from an active TTY with a working
+logind or seatd/libseat provider:
+
+```text
+cargo run
+cargo run -- foot
+```
+
+On a bare virtual terminal these commands select DRM automatically. The
+equivalent explicit override is `cargo run -- --backend drm -- foot`.
+
+It currently selects one GPU, one connected output, and that connector's
+preferred mode at scale 1. The cursor is a Bevy-composed software cursor. Use
+the initial compositor shortcuts to launch test clients or stop Weld:
+
+- `Super+Enter`: foot
+- `Super+F`: Firefox
+- `Super+B`: Blender
+- `Super+Shift+Escape`: exit Weld
+
+`SIGINT` and `SIGTERM` also request an orderly shutdown, including when sent
+from another VT. Shutdown delivery can be delayed by up to the five-second
+blocking wgpu readback timeout.
+
+This backend deliberately favors a small end-to-end validation over runtime
+efficiency. Every new Bevy composition crosses the CPU and Pixman before KMS;
+cursor movement therefore damages and transfers the full frame. Hardware
+cursors, direct buffer sharing, dmabuf clients, multiple GPUs or outputs,
+output reconfiguration, and configurable output scaling remain follow-ups.
+The fixed `weld-0` socket also limits a runtime directory to one Weld instance.
+DRM screenshots and remote captures complete only after their page flip and
+report a timeout instead of silently succeeding when presentation stalls.
+The build and deterministic policy checks cover this path, but a real TTY run
+is still required to validate a particular seat, GPU, and display stack.
 
 For dependency changes, edit only the intended dependency. If an existing
 lockfile entry must move, use `cargo update -p <package> --precise <version>`;

@@ -211,8 +211,10 @@ impl ServerState {
         }
     }
 
-    pub(super) fn complete_surface_presentation(&mut self) {
-        let time = self.event_time();
+    pub(crate) fn stage_surface_presentation(&mut self) -> u64 {
+        self.presentation_requested = false;
+        let presentation_id = self.next_presentation_id;
+        self.next_presentation_id = self.next_presentation_id.saturating_add(1);
         let surfaces = self
             .toplevels
             .values()
@@ -240,13 +242,31 @@ impl ServerState {
             )
             .filter(Resource::is_alive)
             .collect::<Vec<_>>();
+        let mut callbacks = Vec::new();
         for surface in surfaces {
             with_states(&surface, |states| {
                 let mut attributes = states.cached_state.get::<SurfaceAttributes>();
-                for callback in attributes.current().frame_callbacks.drain(..) {
-                    callback.done(time);
-                }
+                callbacks.append(&mut attributes.current().frame_callbacks);
             });
+        }
+        self.staged_frame_callbacks
+            .push_back((presentation_id, callbacks));
+        presentation_id
+    }
+
+    pub(crate) fn frame_presented(&mut self, presentation_id: u64) {
+        let time = self.event_time();
+        while self
+            .staged_frame_callbacks
+            .front()
+            .is_some_and(|(staged_id, _)| *staged_id <= presentation_id)
+        {
+            let Some((_, callbacks)) = self.staged_frame_callbacks.pop_front() else {
+                break;
+            };
+            for callback in callbacks {
+                callback.done(time);
+            }
         }
     }
 

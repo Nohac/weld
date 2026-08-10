@@ -1,0 +1,251 @@
+//! Shared host-runtime policy and process lifecycle.
+
+use std::{
+    collections::VecDeque,
+    ffi::{OsStr, OsString},
+    path::PathBuf,
+    process::{Child, Command},
+    time::{Duration, Instant},
+};
+
+use anyhow::{Context, Result};
+
+use crate::server::ServerState;
+
+pub(crate) const FRAME_INTERVAL: Duration = Duration::from_micros(16_667);
+pub(crate) const CAPTURE_DEADLINE: Duration = Duration::from_secs(10);
+const INACTIVE_MAINTENANCE_INTERVAL: Duration = Duration::from_secs(1);
+
+/// Data borrowed by calloop callbacks without making Smithay the owner of
+/// backend events or process policy.
+pub(crate) struct LoopData<Event> {
+    pub(crate) server: ServerState,
+    pub(crate) events: VecDeque<Event>,
+}
+
+impl<Event> LoopData<Event> {
+    pub(crate) fn new(server: ServerState) -> Self {
+        Self {
+            server,
+            events: VecDeque::new(),
+        }
+    }
+}
+
+pub(crate) fn server_mut<Event>(data: &mut LoopData<Event>) -> &mut ServerState {
+    &mut data.server
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum HostCommand {
+    Launch {
+        program: OsString,
+        arguments: Vec<OsString>,
+    },
+    Exit,
+}
+
+#[derive(Default)]
+pub(crate) struct ChildProcesses(Vec<Child>);
+
+impl ChildProcesses {
+    pub(crate) fn spawn_requested(
+        &mut self,
+        server: &ServerState,
+        arguments: &[OsString],
+    ) -> Result<bool> {
+        let Some((program, arguments)) = arguments.split_first() else {
+            return Ok(false);
+        };
+        self.spawn(server, program, arguments)?;
+        Ok(true)
+    }
+
+    pub(crate) fn apply(&mut self, server: &ServerState, command: HostCommand) -> Result<bool> {
+        match command {
+            HostCommand::Launch { program, arguments } => {
+                self.spawn(server, &program, &arguments)?;
+                Ok(false)
+            }
+            HostCommand::Exit => Ok(true),
+        }
+    }
+
+    pub(crate) fn reap(&mut self) {
+        self.0.retain_mut(|process| {
+            process
+                .try_wait()
+                .map(|status| status.is_none())
+                .unwrap_or(true)
+        });
+    }
+
+    fn spawn(
+        &mut self,
+        server: &ServerState,
+        program: &OsStr,
+        arguments: &[OsString],
+    ) -> Result<()> {
+        let mut command = Command::new(program);
+        command.args(arguments);
+        configure_client_command(&mut command, &server.socket_name);
+        let child = command
+            .spawn()
+            .with_context(|| format!("failed to spawn Wayland client {program:?}"))?;
+        self.0.push(child);
+        Ok(())
+    }
+}
+
+/// Keep this environment exactly synchronized with `scripts/run-app`.
+pub(crate) fn configure_client_command(command: &mut Command, socket_name: &OsStr) {
+    command
+        .env("WAYLAND_DISPLAY", socket_name)
+        .env("GDK_BACKEND", "wayland")
+        .env("QT_QPA_PLATFORM", "wayland")
+        .env("SDL_VIDEODRIVER", "wayland")
+        .env("SDL_VIDEO_DRIVER", "wayland")
+        .env("MOZ_ENABLE_WAYLAND", "1")
+        .env("NIXOS_OZONE_WL", "1")
+        .env("XDG_SESSION_TYPE", "wayland")
+        .env_remove("DISPLAY")
+        .env_remove("WAYLAND_SOCKET");
+}
+
+#[derive(Debug)]
+pub(crate) struct FrameState {
+    composition_dirty: bool,
+    present_needed: bool,
+    next_composition: Option<Instant>,
+}
+
+impl Default for FrameState {
+    fn default() -> Self {
+        Self {
+            composition_dirty: true,
+            present_needed: true,
+            next_composition: None,
+        }
+    }
+}
+
+impl FrameState {
+    #[cfg(test)]
+    pub(crate) const fn composition_dirty(&self) -> bool {
+        self.composition_dirty
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn present_needed(&self) -> bool {
+        self.present_needed
+    }
+
+    pub(crate) const fn presentation_due(&self) -> bool {
+        self.present_needed && !self.composition_dirty
+    }
+
+    pub(crate) fn request_composition(&mut self) {
+        self.composition_dirty = true;
+    }
+
+    pub(crate) fn request_present(&mut self) {
+        self.present_needed = true;
+    }
+
+    pub(crate) fn composition_due(&self, now: Instant) -> bool {
+        self.composition_dirty && self.next_composition.is_none_or(|deadline| deadline <= now)
+    }
+
+    pub(crate) fn composition_timeout(&self, now: Instant, session_active: bool) -> Duration {
+        if !session_active {
+            return INACTIVE_MAINTENANCE_INTERVAL;
+        }
+        if !self.composition_dirty {
+            return FRAME_INTERVAL;
+        }
+        self.next_composition
+            .map(|deadline| deadline.saturating_duration_since(now))
+            .unwrap_or(Duration::ZERO)
+            .min(FRAME_INTERVAL)
+    }
+
+    pub(crate) fn composition_rendered(&mut self, now: Instant) {
+        self.composition_dirty = false;
+        self.present_needed = true;
+        self.next_composition = Some(now + FRAME_INTERVAL);
+    }
+
+    pub(crate) fn presented(&mut self) {
+        self.present_needed = false;
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct IterationWork {
+    pub(crate) advance_main: bool,
+    pub(crate) composition_advance: bool,
+}
+
+pub(crate) const fn iteration_work(
+    input_pending: bool,
+    composition_due: bool,
+    remote_debug_enabled: bool,
+    session_active: bool,
+) -> IterationWork {
+    let composition_advance = session_active && (composition_due || remote_debug_enabled);
+    IterationWork {
+        advance_main: input_pending || composition_advance,
+        composition_advance,
+    }
+}
+
+pub(crate) struct PendingCapture {
+    pub(crate) path: PathBuf,
+    pub(crate) remote_request_id: Option<u64>,
+    pub(crate) deadline: Instant,
+    pub(crate) wait_for_client: bool,
+}
+
+impl PendingCapture {
+    pub(crate) fn startup(path: PathBuf, wait_for_client: bool) -> Self {
+        Self {
+            path,
+            remote_request_id: None,
+            deadline: Instant::now() + CAPTURE_DEADLINE,
+            wait_for_client,
+        }
+    }
+
+    pub(crate) fn remote(request_id: u64, path: PathBuf) -> Self {
+        Self {
+            path,
+            remote_request_id: Some(request_id),
+            deadline: Instant::now() + CAPTURE_DEADLINE,
+            wait_for_client: false,
+        }
+    }
+
+    pub(crate) const fn is_startup(&self) -> bool {
+        self.remote_request_id.is_none()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn inactive_session_does_not_poll_an_overdue_composition() {
+        let started_at = Instant::now();
+        let mut frame = FrameState::default();
+        frame.composition_rendered(started_at);
+        frame.request_composition();
+        let overdue = started_at + FRAME_INTERVAL;
+
+        assert_eq!(frame.composition_timeout(overdue, true), Duration::ZERO);
+        assert_eq!(
+            frame.composition_timeout(overdue, false),
+            INACTIVE_MAINTENANCE_INTERVAL
+        );
+    }
+}

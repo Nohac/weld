@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+
+set -uo pipefail
+
+repository_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+cd -- "${repository_dir}"
+
+if (( $# == 0 )); then
+    set -- foot
+fi
+
+RUST_BACKTRACE="${RUST_BACKTRACE:-1}" \
+RUST_LOG="${RUST_LOG:-debug}" \
+    cargo run -- "$@" >crash.log 2>&1
+exit_status=$?
+
+printf '\nexit status: %s\n' "${exit_status}" >>crash.log
+exit "${exit_status}"

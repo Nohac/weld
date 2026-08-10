@@ -12,7 +12,8 @@ if [[ -z "${XDG_RUNTIME_DIR:-}" ]]; then
     exit 1
 fi
 
-# Keep this stable name in sync with WELD_SOCKET_NAME in src/server/mod.rs.
+# Keep this environment synchronized with configure_client_command in
+# src/runtime.rs, and this stable name with WELD_SOCKET_NAME in src/server/mod.rs.
 weld_display="weld-0"
 socket_path="${XDG_RUNTIME_DIR}/${weld_display}"
 if [[ ! -S "${socket_path}" ]]; then

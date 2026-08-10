@@ -1,4 +1,4 @@
-//! Smithay host boundary for the nested compositor.
+//! Smithay Wayland-server boundary shared by host backends.
 
 mod output;
 mod popup;
@@ -7,20 +7,26 @@ mod shm;
 mod surface_tree;
 mod toplevel;
 
-pub(crate) use output::NestedOutputMetrics;
+pub(crate) use output::{OutputDescriptor, OutputMetrics};
 
-use std::{collections::HashSet, ffi::OsString, sync::Arc, time::Instant};
+use std::{
+    collections::{HashSet, VecDeque},
+    ffi::OsString,
+    sync::Arc,
+    time::Instant,
+};
 
 use anyhow::{Context, Result};
 use smithay::{
     desktop::{PopupGrab, PopupManager},
     input::{Seat, SeatState},
-    output::{Output, PhysicalProperties, Subpixel},
+    output::Output,
     reexports::{
-        calloop::{EventLoop, Interest, Mode, PostAction, generic::Generic},
+        calloop::{Interest, LoopHandle, Mode, PostAction, generic::Generic},
         wayland_server::{
             Display, DisplayHandle,
             backend::{ClientData, ClientId, DisconnectReason},
+            protocol::wl_callback::WlCallback,
         },
     },
     utils::Transform,
@@ -63,7 +69,7 @@ pub struct ServerState {
     data_device_state: DataDeviceState,
     seat: Seat<Self>,
     output: Output,
-    output_metrics: NestedOutputMetrics,
+    output_metrics: OutputMetrics,
     toplevels: ToplevelStore,
     popups: PopupStore,
     popup_manager: PopupManager,
@@ -72,6 +78,8 @@ pub struct ServerState {
     pending_focus: Option<Option<SurfaceId>>,
     pending_surface_events: SurfaceEventQueue,
     presentation_requested: bool,
+    next_presentation_id: u64,
+    staged_frame_callbacks: VecDeque<(u64, Vec<WlCallback>)>,
     next_surface_id: Option<u64>,
     started_at: Instant,
     pointer_position: InputPosition,
@@ -81,11 +89,14 @@ pub struct ServerState {
 }
 
 impl ServerState {
-    pub fn new(
-        event_loop: &mut EventLoop<'static, Self>,
+    pub fn new<LoopData: 'static>(
+        loop_handle: &LoopHandle<'static, LoopData>,
         display: Display<Self>,
         started_at: Instant,
-        output_metrics: NestedOutputMetrics,
+        seat_name: &str,
+        output_descriptor: OutputDescriptor,
+        output_metrics: OutputMetrics,
+        server: fn(&mut LoopData) -> &mut Self,
     ) -> Result<Self> {
         let display_handle = display.handle();
         let compositor_state = CompositorState::new::<Self>(&display_handle);
@@ -99,20 +110,14 @@ impl ServerState {
         let data_device_state = DataDeviceState::new::<Self>(&display_handle);
 
         let mut seat_state = SeatState::new();
-        let mut seat = seat_state.new_wl_seat(&display_handle, "weld-nested");
+        let mut seat = seat_state.new_wl_seat(&display_handle, seat_name);
         seat.add_keyboard(Default::default(), 200, 25)
-            .context("failed to initialize the nested keyboard keymap")?;
+            .context("failed to initialize the compositor keyboard keymap")?;
         seat.add_pointer();
 
         let output = Output::new(
-            "weld-nested".to_owned(),
-            PhysicalProperties {
-                size: (0, 0).into(),
-                subpixel: Subpixel::Unknown,
-                make: "Weld".to_owned(),
-                model: "Nested".to_owned(),
-                serial_number: "development".to_owned(),
-            },
+            output_descriptor.name,
+            output_descriptor.physical_properties,
         );
         let output_mode = output_metrics.mode();
         output.create_global::<Self>(&display_handle);
@@ -131,10 +136,9 @@ impl ServerState {
                 )
             })?;
         let socket_name = listening_socket.socket_name().to_os_string();
-        let loop_handle = event_loop.handle();
-
         loop_handle
-            .insert_source(listening_socket, |client_stream, _, state| {
+            .insert_source(listening_socket, move |client_stream, _, state| {
+                let state = server(state);
                 if let Err(error) = state
                     .display_handle
                     .insert_client(client_stream, Arc::new(ClientState::default()))
@@ -147,7 +151,8 @@ impl ServerState {
         loop_handle
             .insert_source(
                 Generic::new(display, Interest::READ, Mode::Level),
-                |_, display, state| {
+                move |_, display, state| {
+                    let state = server(state);
                     // SAFETY: calloop owns this source for the complete event-loop lifetime, so
                     // the contained Display is not moved or accessed concurrently.
                     let result = unsafe { display.get_mut() }.dispatch_clients(state);
@@ -182,6 +187,8 @@ impl ServerState {
             pending_focus: None,
             pending_surface_events: SurfaceEventQueue::default(),
             presentation_requested: false,
+            next_presentation_id: 1,
+            staged_frame_callbacks: VecDeque::new(),
             next_surface_id: Some(1),
             started_at,
             pointer_position: InputPosition::default(),
@@ -189,7 +196,7 @@ impl ServerState {
         })
     }
 
-    pub(crate) fn update_output_metrics(&mut self, metrics: NestedOutputMetrics) {
+    pub(crate) fn update_output_metrics(&mut self, metrics: OutputMetrics) {
         if self.output_metrics == metrics {
             return;
         }
@@ -198,19 +205,16 @@ impl ServerState {
         self.send_all_surface_scales();
     }
 
+    pub(crate) fn output(&self) -> Output {
+        self.output.clone()
+    }
+
     pub fn take_surface_events(&mut self) -> impl Iterator<Item = HostSurfaceEvent> + '_ {
         self.pending_surface_events.drain()
     }
 
     pub const fn presentation_requested(&self) -> bool {
         self.presentation_requested
-    }
-
-    pub fn frame_presented(&mut self) {
-        // No protocol dispatch occurs between composing this frame and acknowledging it, so
-        // clearing the request cannot discard a newer client commit.
-        self.presentation_requested = false;
-        self.complete_surface_presentation();
     }
 
     pub fn flush_clients(&mut self) {

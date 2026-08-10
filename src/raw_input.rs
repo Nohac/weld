@@ -27,7 +27,7 @@ impl InputPosition {
 }
 
 /// A Linux evdev keyboard code, without XKB's protocol offset of eight.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(crate) struct LinuxKeycode(pub u32);
 
 /// A Linux input-event mouse button code such as `BTN_LEFT`.
@@ -38,13 +38,6 @@ pub(crate) struct LinuxButtonCode(pub u32);
 pub(crate) enum RawScrollSource {
     Wheel,
     Finger,
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "standalone backends can report continuous scrolling without a finger lifecycle"
-        )
-    )]
     Continuous,
 }
 

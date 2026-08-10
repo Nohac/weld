@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use bevy::{
-    app::{App, PluginGroup, PostUpdate},
+    app::{App, PluginGroup, PostUpdate, TerminalCtrlCHandlerPlugin},
     camera::{
         Camera, Camera2d, ClearColorConfig, CompositingSpace, ManualTextureViewHandle,
         NormalizedRenderTarget, RenderTarget,
@@ -42,11 +42,13 @@ use crate::debug::{
     take_capture_request,
 };
 use crate::input::{
-    InputBridgePlugin, SeatInputEffect, enqueue_raw_input, set_input_update_time,
+    GlobalShortcutPlugin, InputBridgePlugin, SeatInputEffect, SoftwareCursorPlugin,
+    enqueue_raw_input, set_input_update_time, software_cursor_scene, take_host_commands,
     take_input_effects,
 };
 use crate::layer::SHELL_Z_INDEX;
 use crate::raw_input::RawSeatEvent;
+use crate::runtime::HostCommand;
 use crate::surface::{
     HostSurfaceEvent, SurfaceAction, SurfacePlugin, enqueue_surface_event, has_surface_frame,
     take_surface_actions,
@@ -63,16 +65,27 @@ pub struct ShellRenderer {
     composition_view: wgpu::TextureView,
 }
 
+pub(crate) struct ShellRendererOptions<'a> {
+    pub(crate) size: UVec2,
+    pub(crate) scale_factor: f64,
+    pub(crate) remote_debug: Option<&'a str>,
+    pub(crate) software_cursor: bool,
+}
+
 impl ShellRenderer {
     pub fn new(
         instance: &wgpu::Instance,
         adapter: &wgpu::Adapter,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
-        size: UVec2,
-        scale_factor: f64,
-        remote_debug: Option<&str>,
+        options: ShellRendererOptions<'_>,
     ) -> Result<Self> {
+        let ShellRendererOptions {
+            size,
+            scale_factor,
+            remote_debug,
+            software_cursor,
+        } = options;
         let render_creation = RenderCreation::manual(
             RenderDevice::from(device.clone()),
             RenderQueue(Arc::new(WgpuWrapper::new(queue.clone()))),
@@ -96,7 +109,8 @@ impl ShellRenderer {
             DefaultPlugins
                 .set(window_plugin)
                 .set(render_plugin)
-                .disable::<LogPlugin>(),
+                .disable::<LogPlugin>()
+                .disable::<TerminalCtrlCHandlerPlugin>(),
         )
         .add_plugins((
             DebugProtocolPlugin,
@@ -104,6 +118,7 @@ impl ShellRenderer {
             SurfacePlugin,
             DefaultWindowPlugin::new(size, scale_factor),
             InputBridgePlugin::new(NormalizedRenderTarget::TextureView(COMPOSITION_VIEW)),
+            GlobalShortcutPlugin,
         ))
         .add_systems(
             PostUpdate,
@@ -113,6 +128,9 @@ impl ShellRenderer {
         if let Some(address) = remote_debug {
             configure_remote_debug(&mut app, address)
                 .context("failed to configure remote debugging")?;
+        }
+        if software_cursor {
+            app.add_plugins(SoftwareCursorPlugin);
         }
         app.finish();
         app.cleanup();
@@ -144,6 +162,12 @@ impl ShellRenderer {
             .spawn_scene(shell_overlay(camera))
             .context("failed to spawn the BSN shell overlay")?
             .insert(UiTargetCamera(camera));
+        if software_cursor {
+            app.world_mut()
+                .spawn_scene(software_cursor_scene())
+                .context("failed to spawn the software cursor")?
+                .insert(UiTargetCamera(camera));
+        }
         let redraw_requests = app
             .world()
             .get_resource::<Messages<RequestRedraw>>()
@@ -204,6 +228,10 @@ impl ShellRenderer {
         &self.composition_view
     }
 
+    pub fn texture(&self) -> &wgpu::Texture {
+        &self.composition_texture
+    }
+
     pub fn enqueue_surface_event(&mut self, event: HostSurfaceEvent) {
         enqueue_surface_event(self.app.world_mut(), event);
     }
@@ -214,6 +242,10 @@ impl ShellRenderer {
 
     pub fn take_input_effects(&mut self) -> Vec<SeatInputEffect> {
         take_input_effects(self.app.world_mut())
+    }
+
+    pub fn take_host_commands(&mut self) -> Vec<HostCommand> {
+        take_host_commands(self.app.world_mut())
     }
 
     pub fn take_surface_actions(&mut self) -> Vec<SurfaceAction> {
@@ -290,7 +322,9 @@ fn create_composition_target(
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
         format: wgpu::TextureFormat::Rgba8UnormSrgb,
-        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+            | wgpu::TextureUsages::TEXTURE_BINDING
+            | wgpu::TextureUsages::COPY_SRC,
         view_formats: &[],
     });
     let texture_view = texture.create_view(&wgpu::TextureViewDescriptor::default());

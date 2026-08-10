@@ -7,11 +7,11 @@
 //! values keyed by [`SurfaceId`] and surface layer. Smithay resources never
 //! enter the ECS world.
 //!
-//! Keyboard focus is click-to-focus in the initial slice. A future shortcut
-//! policy belongs after [`InputManagerSystem::Update`] and before protocol
-//! routing; paired interception must annotate rather than replace the lossless
-//! raw stream. That early action phase cannot consult the same update's final
-//! picked surface without a later policy phase. Invisible
+//! Keyboard focus is click-to-focus. Global shortcut policy runs after
+//! [`InputManagerSystem::Update`] and before protocol routing; paired
+//! interception annotates rather than replaces the lossless raw stream. That
+//! early action phase cannot consult the same update's final picked surface
+//! without a later policy phase. Invisible
 //! [`SurfaceInputNode`] rectangles are the picking boundary; visual surface
 //! images do not accept input directly.
 
@@ -21,8 +21,10 @@ use bevy::{
     app::{App, First, Plugin, PreUpdate},
     camera::NormalizedRenderTarget,
     ecs::{
+        component::Component,
         entity::Entity,
         message::{MessageUpdateSystems, MessageWriter},
+        query::With,
         resource::Resource,
         schedule::IntoScheduleConfigs,
         system::{Query, Res, ResMut, SystemParam},
@@ -41,18 +43,27 @@ use bevy::{
             Location, PointerAction, PointerId, PointerInput, PointerInteraction, PointerLocation,
         },
     },
-    ui::{ComputedNode, Display, Node, UiScale},
+    prelude::{BackgroundColor, BorderRadius, Color, GlobalZIndex, Reflect, Scene, px},
+    ui::{ComputedNode, Display, Node, PositionType, UiScale},
+    window::RequestRedraw,
 };
 use bevy_winit::converters::convert_physical_key_code;
-use leafwing_input_manager::plugin::{CentralInputStorePlugin, InputManagerSystem};
+use leafwing_input_manager::{
+    plugin::{CentralInputStorePlugin, InputManagerSystem},
+    prelude::{
+        ActionState, Actionlike, ButtonlikeChord, InputManagerPlugin, InputMap, ModifierKey,
+    },
+};
 use tracing::{trace, warn};
 use winit::{keyboard::PhysicalKey, platform::scancode::PhysicalKeyExtScancode};
 
 use crate::{
+    layer::CURSOR_Z_INDEX,
     raw_input::{
         InputPosition, LinuxButtonCode, LinuxKeycode, RawScrollFrame, RawScrollPhase, RawSeatEvent,
         RawSeatEventKind,
     },
+    runtime::HostCommand,
     surface::{SurfaceId, SurfaceInputNode, SurfaceLayerId},
 };
 
@@ -65,6 +76,209 @@ pub(crate) struct SurfaceHit {
     pub surface: SurfaceId,
     pub layer: SurfaceLayerId,
     pub local_position: InputPosition,
+}
+
+#[derive(Actionlike, Clone, Copy, Debug, Eq, Hash, PartialEq, Reflect)]
+enum GlobalAction {
+    Terminal,
+    Firefox,
+    Blender,
+    Exit,
+}
+
+#[derive(Clone, Copy)]
+enum GlobalShortcutCommand {
+    Launch(&'static str),
+    Exit,
+}
+
+#[derive(Clone, Copy)]
+struct GlobalShortcutDefinition {
+    action: GlobalAction,
+    trigger: LinuxKeycode,
+    trigger_key: KeyCode,
+    shift: bool,
+    command: GlobalShortcutCommand,
+}
+
+impl GlobalShortcutDefinition {
+    fn binding(self) -> ButtonlikeChord {
+        let binding = ButtonlikeChord::modified(ModifierKey::Super, self.trigger_key);
+        if self.shift {
+            binding.with(ModifierKey::Shift)
+        } else {
+            binding
+        }
+    }
+
+    fn host_command(self) -> HostCommand {
+        match self.command {
+            GlobalShortcutCommand::Launch(program) => HostCommand::Launch {
+                program: program.into(),
+                arguments: Vec::new(),
+            },
+            GlobalShortcutCommand::Exit => HostCommand::Exit,
+        }
+    }
+}
+
+const GLOBAL_SHORTCUTS: [GlobalShortcutDefinition; 4] = [
+    GlobalShortcutDefinition {
+        action: GlobalAction::Terminal,
+        trigger: LinuxKeycode(28),
+        trigger_key: KeyCode::Enter,
+        shift: false,
+        command: GlobalShortcutCommand::Launch("foot"),
+    },
+    GlobalShortcutDefinition {
+        action: GlobalAction::Firefox,
+        trigger: LinuxKeycode(33),
+        trigger_key: KeyCode::KeyF,
+        shift: false,
+        command: GlobalShortcutCommand::Launch("firefox"),
+    },
+    GlobalShortcutDefinition {
+        action: GlobalAction::Blender,
+        trigger: LinuxKeycode(48),
+        trigger_key: KeyCode::KeyB,
+        shift: false,
+        command: GlobalShortcutCommand::Launch("blender"),
+    },
+    GlobalShortcutDefinition {
+        action: GlobalAction::Exit,
+        trigger: LinuxKeycode(1),
+        trigger_key: KeyCode::Escape,
+        shift: true,
+        command: GlobalShortcutCommand::Exit,
+    },
+];
+
+#[derive(Component)]
+struct GlobalShortcutBindings;
+
+#[derive(Resource, Default)]
+struct GlobalHostCommands(VecDeque<HostCommand>);
+
+#[derive(Resource, Default)]
+struct ConsumedShortcutKeys(HashSet<LinuxKeycode>);
+
+pub(crate) struct GlobalShortcutPlugin;
+
+impl Plugin for GlobalShortcutPlugin {
+    fn build(&self, app: &mut App) {
+        app.add_plugins(InputManagerPlugin::<GlobalAction>::default())
+            .init_resource::<GlobalHostCommands>()
+            .init_resource::<ConsumedShortcutKeys>()
+            .add_systems(
+                PreUpdate,
+                collect_global_shortcuts
+                    .after(InputManagerSystem::Update)
+                    .before(resolve_input_effects),
+            );
+        app.world_mut()
+            .spawn((GlobalShortcutBindings, global_shortcut_map()));
+    }
+}
+
+fn global_shortcut_map() -> InputMap<GlobalAction> {
+    let mut input_map = InputMap::default();
+    for shortcut in GLOBAL_SHORTCUTS {
+        input_map.insert(shortcut.action, shortcut.binding());
+    }
+    input_map
+}
+
+fn collect_global_shortcuts(
+    bindings: Query<&ActionState<GlobalAction>, With<GlobalShortcutBindings>>,
+    pending: Res<PendingSeatInput>,
+    mut commands: ResMut<GlobalHostCommands>,
+    mut consumed: ResMut<ConsumedShortcutKeys>,
+) {
+    let Some(actions) = bindings.iter().next() else {
+        return;
+    };
+    for shortcut in GLOBAL_SHORTCUTS {
+        if actions.just_pressed(&shortcut.action)
+            && contains_key_press(&pending.0, shortcut.trigger)
+        {
+            consumed.0.insert(shortcut.trigger);
+            commands.0.push_back(shortcut.host_command());
+        }
+    }
+}
+
+fn contains_key_press(events: &VecDeque<RawSeatEvent>, trigger: LinuxKeycode) -> bool {
+    events.iter().any(|event| {
+        matches!(
+            &event.event,
+            RawSeatEventKind::Keyboard {
+                keycode,
+                state: ButtonState::Pressed,
+                ..
+            } if *keycode == trigger
+        )
+    })
+}
+
+pub(crate) fn take_host_commands(world: &mut World) -> Vec<HostCommand> {
+    world
+        .get_resource_mut::<GlobalHostCommands>()
+        .map(|mut commands| commands.0.drain(..).collect())
+        .unwrap_or_default()
+}
+
+#[derive(Clone, Component, Default)]
+pub(crate) struct SoftwareCursor;
+
+pub(crate) struct SoftwareCursorPlugin;
+
+impl Plugin for SoftwareCursorPlugin {
+    fn build(&self, app: &mut App) {
+        app.add_systems(PreUpdate, update_software_cursor);
+    }
+}
+
+pub(crate) fn software_cursor_scene() -> impl Scene {
+    use bevy::picking::Pickable;
+    use bevy::scene::bsn;
+
+    bsn! {
+        Node {
+            display: Display::None,
+            position_type: PositionType::Absolute,
+            width: px(14),
+            height: px(14),
+            border_radius: BorderRadius::all(px(7)),
+        }
+        BackgroundColor(Color::WHITE)
+        GlobalZIndex(CURSOR_Z_INDEX)
+        Pickable::IGNORE
+        SoftwareCursor
+    }
+}
+
+fn update_software_cursor(
+    pointer: Res<ProjectedPointerState>,
+    mut cursors: Query<&mut Node, With<SoftwareCursor>>,
+    mut redraw: MessageWriter<RequestRedraw>,
+) {
+    for mut node in &mut cursors {
+        let next = pointer.0.host_position;
+        let next_display = if next.is_some() {
+            Display::Flex
+        } else {
+            Display::None
+        };
+        let (left, top) = next
+            .map(|position| (px(position.x as f32 - 7.0), px(position.y as f32 - 7.0)))
+            .unwrap_or((px(0), px(0)));
+        if node.display != next_display || node.left != left || node.top != top {
+            node.display = next_display;
+            node.left = left;
+            node.top = top;
+            redraw.write(RequestRedraw);
+        }
+    }
 }
 
 /// Owned policy result consumed and validated by the Smithay host.
@@ -131,6 +345,7 @@ impl Plugin for InputBridgePlugin {
             .init_resource::<InputEffects>()
             .init_resource::<InputUpdateTime>()
             .init_resource::<PointerRoutingState>()
+            .init_resource::<ConsumedShortcutKeys>()
             .add_systems(First, project_raw_input.after(MessageUpdateSystems))
             .add_systems(
                 PreUpdate,
@@ -406,10 +621,14 @@ fn resolve_input_effects(
     picked_nodes: Query<(Option<&SurfaceInputNode>, Option<&ComputedNode>)>,
     surface_nodes: Query<(&SurfaceInputNode, &Node)>,
     update_time: Res<InputUpdateTime>,
-    mut pending: ResMut<PendingSeatInput>,
-    mut effects: ResMut<InputEffects>,
-    mut routing: ResMut<PointerRoutingState>,
+    resources: InputRoutingResources,
 ) {
+    let InputRoutingResources {
+        mut pending,
+        mut effects,
+        mut routing,
+        mut consumed_shortcuts,
+    } = resources;
     // A runtime scale change can leave picking on the previous ComputedNode
     // layout for this update; Bevy refreshes UI layout later in PostUpdate.
     // The following update reconciles a stationary pointer to the new hit.
@@ -444,6 +663,9 @@ fn resolve_input_effects(
     // non-grab SurfaceHit still comes from Bevy's single end-of-update pick,
     // so its local position can be sampled later than the replayed position.
     for raw_event in pending.0.drain(..) {
+        if consume_shortcut_event(&mut consumed_shortcuts.0, &raw_event) {
+            continue;
+        }
         if let Some(effect) = replay_seat_event(&mut routing, geometric_target, raw_event) {
             effects.0.push_back(effect);
         }
@@ -454,6 +676,30 @@ fn resolve_input_effects(
     if let Some(effect) = reconcile_pointer(routing.last_sent, current, update_time.0) {
         effects.0.push_back(effect);
         routing.last_sent = current;
+    }
+}
+
+#[derive(SystemParam)]
+struct InputRoutingResources<'w> {
+    pending: ResMut<'w, PendingSeatInput>,
+    effects: ResMut<'w, InputEffects>,
+    routing: ResMut<'w, PointerRoutingState>,
+    consumed_shortcuts: ResMut<'w, ConsumedShortcutKeys>,
+}
+
+fn consume_shortcut_event(consumed: &mut HashSet<LinuxKeycode>, event: &RawSeatEvent) -> bool {
+    match &event.event {
+        RawSeatEventKind::Keyboard { keycode, state, .. } if consumed.contains(keycode) => {
+            if *state == ButtonState::Released {
+                consumed.remove(keycode);
+            }
+            true
+        }
+        RawSeatEventKind::HostFocusLost => {
+            consumed.clear();
+            false
+        }
+        _ => false,
     }
 }
 
@@ -789,6 +1035,18 @@ mod tests {
         (app, input)
     }
 
+    fn shortcut_test_app() -> App {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .add_plugins(InputPlugin)
+            .add_message::<PointerInput>()
+            .add_plugins(InputBridgePlugin::new(NormalizedRenderTarget::TextureView(
+                ManualTextureViewHandle(1),
+            )))
+            .add_plugins(GlobalShortcutPlugin);
+        app
+    }
+
     #[test]
     fn raw_keyboard_input_reaches_leafwing_in_the_same_update() {
         let (mut app, input) = projection_test_app();
@@ -821,6 +1079,153 @@ mod tests {
                 41,
             )]
         );
+    }
+
+    #[test]
+    fn global_shortcut_emits_and_consumes_trigger_pair_in_the_same_update() {
+        let mut app = shortcut_test_app();
+        for event in [
+            RawSeatEvent::new(
+                RawSeatEventKind::Keyboard {
+                    keycode: LinuxKeycode(125),
+                    logical_key: None,
+                    state: ButtonState::Pressed,
+                },
+                10,
+            ),
+            RawSeatEvent::new(
+                RawSeatEventKind::Keyboard {
+                    keycode: LinuxKeycode(33),
+                    logical_key: None,
+                    state: ButtonState::Pressed,
+                },
+                11,
+            ),
+        ] {
+            enqueue_raw_input(app.world_mut(), event);
+        }
+
+        app.update();
+
+        assert_eq!(
+            take_host_commands(app.world_mut()),
+            [HostCommand::Launch {
+                program: "firefox".into(),
+                arguments: Vec::new(),
+            }]
+        );
+        assert_eq!(
+            take_input_effects(app.world_mut()),
+            [SeatInputEffect::new(
+                SeatInputEffectKind::Keyboard {
+                    keycode: LinuxKeycode(125),
+                    state: ButtonState::Pressed,
+                },
+                10,
+            )]
+        );
+
+        for event in [
+            RawSeatEvent::new(
+                RawSeatEventKind::Keyboard {
+                    keycode: LinuxKeycode(33),
+                    logical_key: None,
+                    state: ButtonState::Released,
+                },
+                12,
+            ),
+            RawSeatEvent::new(
+                RawSeatEventKind::Keyboard {
+                    keycode: LinuxKeycode(125),
+                    logical_key: None,
+                    state: ButtonState::Released,
+                },
+                13,
+            ),
+        ] {
+            enqueue_raw_input(app.world_mut(), event);
+        }
+        app.update();
+
+        assert_eq!(
+            take_input_effects(app.world_mut()),
+            [SeatInputEffect::new(
+                SeatInputEffectKind::Keyboard {
+                    keycode: LinuxKeycode(125),
+                    state: ButtonState::Released,
+                },
+                13,
+            )]
+        );
+    }
+
+    #[test]
+    fn pressing_a_modifier_after_a_client_key_does_not_consume_its_release() {
+        let mut app = shortcut_test_app();
+        enqueue_raw_input(
+            app.world_mut(),
+            RawSeatEvent::new(
+                RawSeatEventKind::Keyboard {
+                    keycode: LinuxKeycode(33),
+                    logical_key: None,
+                    state: ButtonState::Pressed,
+                },
+                10,
+            ),
+        );
+        app.update();
+        assert!(take_host_commands(app.world_mut()).is_empty());
+        assert_eq!(take_input_effects(app.world_mut()).len(), 1);
+
+        enqueue_raw_input(
+            app.world_mut(),
+            RawSeatEvent::new(
+                RawSeatEventKind::Keyboard {
+                    keycode: LinuxKeycode(125),
+                    logical_key: None,
+                    state: ButtonState::Pressed,
+                },
+                11,
+            ),
+        );
+        app.update();
+        assert!(take_host_commands(app.world_mut()).is_empty());
+        assert_eq!(take_input_effects(app.world_mut()).len(), 1);
+
+        enqueue_raw_input(
+            app.world_mut(),
+            RawSeatEvent::new(
+                RawSeatEventKind::Keyboard {
+                    keycode: LinuxKeycode(33),
+                    logical_key: None,
+                    state: ButtonState::Released,
+                },
+                12,
+            ),
+        );
+        app.update();
+        assert_eq!(take_input_effects(app.world_mut()).len(), 1);
+    }
+
+    #[test]
+    fn host_focus_loss_clears_a_consumed_shortcut_release() {
+        let mut consumed = HashSet::from([LinuxKeycode(33)]);
+        assert!(!consume_shortcut_event(
+            &mut consumed,
+            &RawSeatEvent::new(RawSeatEventKind::HostFocusLost, 20),
+        ));
+        assert!(consumed.is_empty());
+        assert!(!consume_shortcut_event(
+            &mut consumed,
+            &RawSeatEvent::new(
+                RawSeatEventKind::Keyboard {
+                    keycode: LinuxKeycode(33),
+                    logical_key: None,
+                    state: ButtonState::Released,
+                },
+                21,
+            ),
+        ));
     }
 
     #[test]

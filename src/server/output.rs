@@ -1,8 +1,8 @@
-//! Nested Wayland output metrics and surface scale advertisement.
+//! Wayland output metrics and surface scale advertisement.
 
 use anyhow::{Context, Result, bail};
 use smithay::{
-    output::{Mode as OutputMode, Output, Scale},
+    output::{Mode as OutputMode, Output, PhysicalProperties, Scale, Subpixel},
     reexports::wayland_server::protocol::wl_surface::WlSurface,
     utils::Transform,
     wayland::{
@@ -11,40 +11,68 @@ use smithay::{
     },
 };
 
-/// Physical host extent plus the effective logical scale advertised to nested
+pub(crate) struct OutputDescriptor {
+    pub(crate) name: String,
+    pub(crate) physical_properties: PhysicalProperties,
+}
+
+impl OutputDescriptor {
+    pub(crate) fn nested() -> Self {
+        Self {
+            name: "weld-nested".to_owned(),
+            physical_properties: PhysicalProperties {
+                size: (0, 0).into(),
+                subpixel: Subpixel::Unknown,
+                make: "Weld".to_owned(),
+                model: "Nested".to_owned(),
+                serial_number: "development".to_owned(),
+            },
+        }
+    }
+}
+
+/// Physical host extent plus the effective logical scale advertised to
 /// clients.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) struct NestedOutputMetrics {
+pub(crate) struct OutputMetrics {
     physical_width: i32,
     physical_height: i32,
+    refresh_millihertz: i32,
     scale_factor: f64,
 }
 
-impl NestedOutputMetrics {
+impl OutputMetrics {
     pub(crate) fn new(
         physical_width: u32,
         physical_height: u32,
         scale_factor: f64,
     ) -> Result<Self> {
         if physical_width == 0 || physical_height == 0 {
-            bail!("nested output dimensions must be nonzero");
+            bail!("output dimensions must be nonzero");
         }
         if !scale_factor.is_finite() || scale_factor <= 0.0 {
-            bail!("nested output scale must be finite and positive");
+            bail!("output scale must be finite and positive");
         }
         Ok(Self {
-            physical_width: i32::try_from(physical_width)
-                .context("nested output width exceeds i32")?,
-            physical_height: i32::try_from(physical_height)
-                .context("nested output height exceeds i32")?,
+            physical_width: i32::try_from(physical_width).context("output width exceeds i32")?,
+            physical_height: i32::try_from(physical_height).context("output height exceeds i32")?,
+            refresh_millihertz: 60_000,
             scale_factor,
         })
+    }
+
+    pub(crate) fn with_refresh_millihertz(mut self, refresh_millihertz: i32) -> Result<Self> {
+        if refresh_millihertz <= 0 {
+            bail!("output refresh must be positive");
+        }
+        self.refresh_millihertz = refresh_millihertz;
+        Ok(self)
     }
 
     pub(super) fn mode(self) -> OutputMode {
         OutputMode {
             size: (self.physical_width, self.physical_height).into(),
-            refresh: 60_000,
+            refresh: self.refresh_millihertz,
         }
     }
 
@@ -67,8 +95,8 @@ impl NestedOutputMetrics {
 
 pub(super) fn install_output_metrics(
     output: &Output,
-    previous: NestedOutputMetrics,
-    next: NestedOutputMetrics,
+    previous: OutputMetrics,
+    next: OutputMetrics,
 ) {
     let previous_mode = previous.mode();
     let next_mode = next.mode();
@@ -105,7 +133,7 @@ mod tests {
 
     #[test]
     fn nested_output_metrics_preserve_physical_mode_and_fractional_scale() {
-        let metrics = NestedOutputMetrics::new(1200, 800, 1.25).expect("valid output metrics");
+        let metrics = OutputMetrics::new(1200, 800, 1.25).expect("valid output metrics");
         assert_eq!(metrics.mode().size, (1200, 800).into());
         assert_eq!(metrics.scale().fractional_scale(), 1.25);
         assert_eq!(metrics.scale().integer_scale(), 2);
@@ -114,17 +142,17 @@ mod tests {
 
     #[test]
     fn nested_output_metrics_reject_invalid_values() {
-        assert!(NestedOutputMetrics::new(0, 800, 1.25).is_err());
-        assert!(NestedOutputMetrics::new(1200, 800, 0.0).is_err());
-        assert!(NestedOutputMetrics::new(1200, 800, f64::NAN).is_err());
+        assert!(OutputMetrics::new(0, 800, 1.25).is_err());
+        assert!(OutputMetrics::new(1200, 800, 0.0).is_err());
+        assert!(OutputMetrics::new(1200, 800, f64::NAN).is_err());
     }
 
     #[test]
     fn replacing_nested_metrics_keeps_one_current_preferred_mode() {
-        let initial = NestedOutputMetrics::new(1200, 800, 1.25).expect("valid metrics");
-        let resized = NestedOutputMetrics::new(1300, 900, 1.25).expect("valid metrics");
-        let resized_again = NestedOutputMetrics::new(1400, 1000, 1.25).expect("valid metrics");
-        let scale_only = NestedOutputMetrics::new(1400, 1000, 1.5).expect("valid metrics");
+        let initial = OutputMetrics::new(1200, 800, 1.25).expect("valid metrics");
+        let resized = OutputMetrics::new(1300, 900, 1.25).expect("valid metrics");
+        let resized_again = OutputMetrics::new(1400, 1000, 1.25).expect("valid metrics");
+        let scale_only = OutputMetrics::new(1400, 1000, 1.5).expect("valid metrics");
         let output = Output::new(
             "test".to_owned(),
             PhysicalProperties {
