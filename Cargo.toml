@@ -26,6 +26,7 @@ leafwing-input-manager = { version = "0.21.0", default-features = false, feature
 png = "0.18.1"
 pollster = "0.4.0"
 smithay = { path = "vendor/smithay", default-features = false, features = [
+    "desktop",
     "wayland_frontend",
 ] }
 tracing = "0.1.44"

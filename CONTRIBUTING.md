@@ -56,6 +56,14 @@ decoration decision swaps the client- or server-decoration presentation while
 the durable `AppWindow`, placement, stacking, focus, and backing assets remain
 intact. The presentation root's entity identity is intentionally not stable.
 
+Enabling Smithay's `desktop` feature for focused protocol utilities does not
+make its `Window` or `Space` types authoritative for ordinary application
+windows; their placement, stacking, presentation, and picking remain ECS-owned.
+When `wlr-layer-shell` becomes a concrete implementation slice, prefer
+Smithay's `LayerMap` as the host-side layout engine for anchors, margins,
+exclusive zones, and configure state, then project its committed results into
+ECS instead of reimplementing that protocol policy.
+
 Validated pointer `xdg_toplevel.move` and `xdg_toplevel.resize` requests cross
 the Smithay boundary as protocol-neutral ECS messages. The default window
 plugin owns placement and interactive-resize policy, while Smithay owns the
@@ -79,6 +87,18 @@ presentation crops the client to its window geometry and uses Weld's frame and
 shadow. Changing decoration ownership therefore changes the presentation's
 visual origin without changing its durable geometry anchor.
 
+XDG popups use Smithay's `PopupManager` for protocol trees, committed
+positioner state, and explicit seat grabs, while each mapped popup has a
+separate protocol-neutral `AppPopup` ECS role. Popup presentation reuses the
+ordinary full client-surface tree, input regions, scaling, and client-owned
+visual overflow beneath its owning window presentation. The parent presenter
+publishes its client window-geometry anchor, so popup code does not depend on a
+particular decoration implementation. Popups never receive `AppWindow`,
+`WindowPlacement`, shell decorations, fallback shadows, or interactive
+move/resize policy. The initial popup slice honors committed client positioner
+geometry directly; output-edge flip, slide, and resize constraints remain a
+bounded follow-up using the owner's on-output client geometry.
+
 Explicit Wayland input regions are evaluated in protocol order and may extend
 outside the window geometry, which keeps client-side resize gutters reachable.
 For an undeclared root input region, Weld deliberately treats only the window
@@ -90,7 +110,7 @@ revalidates that target before delivering input to the corresponding live
 `wl_surface`. Geometry spanning subsurfaces outside the root buffer is not yet
 represented. `ImageNode` is a provisional SHM backing, not the plugin-facing
 surface contract. Below-root subsurface ordering, role-only subsurface
-detachment without a later tree commit, popups, dmabuf, damage-aware uploads,
+detachment without a later tree commit, dmabuf, damage-aware uploads,
 presentation timing, VRR, and HDR remain explicit spike boundaries rather
 than settled compositor architecture.
 

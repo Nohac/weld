@@ -1,6 +1,7 @@
 //! Smithay host boundary for the nested compositor.
 
 mod output;
+mod popup;
 mod seat;
 mod shm;
 mod surface_tree;
@@ -12,6 +13,7 @@ use std::{collections::HashSet, ffi::OsString, sync::Arc, time::Instant};
 
 use anyhow::{Context, Result};
 use smithay::{
+    desktop::{PopupGrab, PopupManager},
     input::{Seat, SeatState},
     output::{Output, PhysicalProperties, Subpixel},
     reexports::{
@@ -40,6 +42,7 @@ use crate::{
     surface::{HostSurfaceEvent, SurfaceAction, SurfaceEventQueue, SurfaceId},
 };
 use output::install_output_metrics;
+use popup::PopupStore;
 use toplevel::ToplevelStore;
 
 // Keep this stable name in sync with scripts/run-app.
@@ -62,6 +65,9 @@ pub struct ServerState {
     output: Output,
     output_metrics: NestedOutputMetrics,
     toplevels: ToplevelStore,
+    popups: PopupStore,
+    popup_manager: PopupManager,
+    popup_grab: Option<PopupGrab<Self>>,
     focused_toplevel: Option<SurfaceId>,
     pending_focus: Option<Option<SurfaceId>>,
     pending_surface_events: SurfaceEventQueue,
@@ -169,6 +175,9 @@ impl ServerState {
             output,
             output_metrics,
             toplevels: ToplevelStore::default(),
+            popups: PopupStore::default(),
+            popup_manager: PopupManager::default(),
+            popup_grab: None,
             focused_toplevel: None,
             pending_focus: None,
             pending_surface_events: SurfaceEventQueue::default(),
@@ -205,6 +214,10 @@ impl ServerState {
     }
 
     pub fn flush_clients(&mut self) {
+        self.popup_manager.cleanup();
+        if self.popup_grab.as_ref().is_some_and(PopupGrab::has_ended) {
+            self.popup_grab = None;
+        }
         if let Err(error) = self.display_handle.flush_clients() {
             warn!(%error, "failed to flush Wayland clients");
         }

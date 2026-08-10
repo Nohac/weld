@@ -1,6 +1,7 @@
 //! Default client- and server-decorated presentations built from ECS state.
 
 mod client;
+mod popup;
 mod server;
 
 use std::{
@@ -30,7 +31,7 @@ use bevy::{
     },
     prelude::{BorderColor, BoxShadow, ChildOf, Display, GlobalZIndex, Node, Val, With, px},
     scene::CommandsSceneExt,
-    ui::{UiScale, UiTargetCamera},
+    ui::{UiScale, UiTargetCamera, ZIndex},
     window::RequestRedraw,
 };
 use tracing::warn;
@@ -39,9 +40,9 @@ use crate::{
     composition::{CompositorCamera, composition_advance_requested},
     layer::{WINDOW_Z_INDEX_MAX, WINDOW_Z_INDEX_MIN},
     surface::{
-        AppWindow, ClientDecorated, MappedSurface, ServerDecorated, SurfaceAction,
-        SurfaceActionQueue, SurfaceId, SurfaceNode, SurfaceSnapshotRevision, SurfaceSystems,
-        WindowInteractionRequest, WindowResizeEdge,
+        AppPopup, AppWindow, ClientDecorated, ClientSurface, MappedSurface, ServerDecorated,
+        SurfaceAction, SurfaceActionQueue, SurfaceId, SurfaceNode, SurfaceSnapshotRevision,
+        SurfaceSystems, WindowInteractionRequest, WindowResizeEdge,
     },
 };
 
@@ -76,6 +77,15 @@ pub(crate) struct PresentsSurface(Entity);
 #[derive(Component, Debug)]
 #[relationship_target(relationship = PresentsSurface, linked_spawn)]
 pub(crate) struct PrimaryPresentation(Entity);
+
+/// Client window-geometry origin within a presentation root's padding box.
+///
+/// Popup presentation consumes this component without knowing whether the
+/// parent window uses client, server, or third-party decorations.
+#[derive(Component, Clone, Copy, Debug, Default, PartialEq)]
+pub(crate) struct WindowGeometryAnchor {
+    pub(crate) offset: Vec2,
+}
 
 #[derive(Component, Clone, Copy, Debug)]
 struct DefaultWindow {
@@ -207,6 +217,8 @@ impl Plugin for DefaultWindowPlugin {
                     initialize_window_placements,
                     present_client_windows,
                     present_server_windows,
+                    ApplyDeferred,
+                    present_popups,
                 )
                     .chain()
                     .run_if(composition_advance_requested)
@@ -214,7 +226,8 @@ impl Plugin for DefaultWindowPlugin {
             )
             .add_systems(
                 PreUpdate,
-                sync_default_window_state
+                (sync_default_window_state, sync_popup_presentations)
+                    .chain()
                     .run_if(composition_advance_requested)
                     .after(SurfaceSystems::FallbackPresentation)
                     .before(PickingSystems::Backend),
@@ -313,7 +326,12 @@ fn initialize_window_placements(
 type ClientPresentationSourceQuery<'w, 's> = Query<
     'w,
     's,
-    (Entity, &'static AppWindow, &'static WindowPlacement),
+    (
+        Entity,
+        &'static AppWindow,
+        &'static WindowPlacement,
+        &'static MappedSurface,
+    ),
     (With<ClientDecorated>, Without<PrimaryPresentation>),
 >;
 type ServerPresentationSourceQuery<'w, 's> = Query<
@@ -336,13 +354,16 @@ fn present_client_windows(
         }
         return;
     };
-    for (source, window, placement) in &surfaces {
+    for (source, window, placement, mapped) in &surfaces {
         commands.spawn_scene(client::scene(window.surface)).insert((
             PresentsSurface(source),
             DefaultWindow {
                 surface: window.surface,
             },
             client::ClientWindowPresentation,
+            WindowGeometryAnchor {
+                offset: -mapped.visual_offset,
+            },
             UiTargetCamera(camera.0),
             GlobalZIndex(placement.z_index),
         ));
@@ -369,9 +390,140 @@ fn present_server_windows(
                 surface: window.surface,
             },
             server::ServerWindowPresentation,
+            WindowGeometryAnchor {
+                offset: Vec2::new(0.0, HEADER_HEIGHT),
+            },
             UiTargetCamera(camera.0),
             GlobalZIndex(placement.z_index),
         ));
+    }
+}
+
+type PopupPresentationSourceQuery<'w, 's> = Query<
+    'w,
+    's,
+    (
+        Entity,
+        &'static ClientSurface,
+        &'static AppPopup,
+        &'static MappedSurface,
+    ),
+    Without<PrimaryPresentation>,
+>;
+
+fn present_popups(
+    mut commands: Commands,
+    popups: PopupPresentationSourceQuery,
+    windows: Query<(&AppWindow, &PrimaryPresentation)>,
+    anchors: Query<&WindowGeometryAnchor>,
+) {
+    for (source, client_surface, popup, mapped) in &popups {
+        let Some(parent) = windows.iter().find_map(|(window, presentation)| {
+            (window.surface == popup.owner).then_some(presentation.0)
+        }) else {
+            continue;
+        };
+        let Ok(anchor) = anchors.get(parent) else {
+            continue;
+        };
+        let position = popup_visual_position(*popup, *mapped, *anchor);
+        commands
+            .spawn_scene(popup::scene(client_surface.surface))
+            .insert((
+                PresentsSurface(source),
+                popup::PopupPresentation,
+                ChildOf(parent),
+                ZIndex(popup.stack_index),
+                popup_node(position, true),
+            ));
+    }
+}
+
+type PopupStateQuery<'w, 's> = Query<
+    'w,
+    's,
+    (
+        &'static AppPopup,
+        Option<&'static MappedSurface>,
+        &'static PrimaryPresentation,
+    ),
+>;
+
+type PopupRootQuery<'w, 's> = Query<
+    'w,
+    's,
+    (
+        Entity,
+        &'static PresentsSurface,
+        &'static mut Node,
+        &'static mut ZIndex,
+        Option<&'static ChildOf>,
+    ),
+    With<popup::PopupPresentation>,
+>;
+
+fn sync_popup_presentations(
+    mut commands: Commands,
+    popups: PopupStateQuery,
+    windows: Query<(&AppWindow, &PrimaryPresentation)>,
+    anchors: Query<&WindowGeometryAnchor>,
+    mut presentations: PopupRootQuery,
+) {
+    for (root, claim, mut node, mut z_index, parent) in &mut presentations {
+        let Ok((popup, mapped, source_presentation)) = popups.get(claim.0) else {
+            node.display = Display::None;
+            continue;
+        };
+        if source_presentation.0 != root {
+            continue;
+        }
+        let Some(mapped) = mapped else {
+            node.display = Display::None;
+            continue;
+        };
+        let Some(owner_root) = windows.iter().find_map(|(window, presentation)| {
+            (window.surface == popup.owner).then_some(presentation.0)
+        }) else {
+            node.display = Display::None;
+            continue;
+        };
+        let Ok(anchor) = anchors.get(owner_root) else {
+            node.display = Display::None;
+            continue;
+        };
+        if parent.is_none_or(|parent| parent.parent() != owner_root) {
+            commands.entity(root).insert(ChildOf(owner_root));
+        }
+
+        let expected = popup_node(popup_visual_position(*popup, *mapped, *anchor), true);
+        if *node != expected {
+            *node = expected;
+        }
+        if z_index.0 != popup.stack_index {
+            z_index.0 = popup.stack_index;
+        }
+    }
+}
+
+fn popup_visual_position(
+    popup: AppPopup,
+    mapped: MappedSurface,
+    anchor: WindowGeometryAnchor,
+) -> Vec2 {
+    anchor.offset + popup.position + mapped.visual_offset
+}
+
+fn popup_node(position: Vec2, visible: bool) -> Node {
+    Node {
+        position_type: bevy::ui::PositionType::Absolute,
+        left: px(position.x),
+        top: px(position.y),
+        display: if visible {
+            Display::Flex
+        } else {
+            Display::None
+        },
+        ..Default::default()
     }
 }
 
@@ -395,6 +547,7 @@ type WindowRootQuery<'w, 's> = Query<
         &'static mut DefaultWindow,
         &'static PresentsSurface,
         &'static mut GlobalZIndex,
+        &'static mut WindowGeometryAnchor,
         &'static mut Node,
         Option<&'static BoxShadow>,
         Option<&'static mut BorderColor>,
@@ -461,9 +614,9 @@ fn sync_default_window_state(params: SyncDefaultWindowParams) {
                 if !state.client_owned {
                     continue;
                 }
-                let Some((_, _, _, _, _, _, _)) = windows
+                let Some((_, _, _, _, _, _, _, _)) = windows
                     .iter_mut()
-                    .find(|(_, window, _, _, _, _, _)| window.surface == surface)
+                    .find(|(_, window, _, _, _, _, _, _)| window.surface == surface)
                 else {
                     continue;
                 };
@@ -507,7 +660,7 @@ fn sync_default_window_state(params: SyncDefaultWindowParams) {
     }
 
     let mut clear_finished_resize = false;
-    for (root, window, _, mut z_index, mut node, shadow, _) in &mut windows {
+    for (root, window, _, mut z_index, mut geometry_anchor, mut node, shadow, _) in &mut windows {
         let state = surface_states.get(&window.surface);
         let mapped = state.is_some_and(|state| state.mapped.is_some());
         let display = if mapped { Display::Flex } else { Display::None };
@@ -520,6 +673,11 @@ fn sync_default_window_state(params: SyncDefaultWindowParams) {
                 .mapped
                 .filter(|_| state.client_owned)
                 .map_or(Vec2::ZERO, |mapped| mapped.visual_offset);
+            geometry_anchor.offset = if state.client_owned {
+                -visual_offset
+            } else {
+                Vec2::new(0.0, HEADER_HEIGHT)
+            };
             let visual_position = state.placement.position + visual_offset;
             node.left = px(visual_position.x);
             node.top = px(visual_position.y);
@@ -563,9 +721,9 @@ fn sync_default_window_state(params: SyncDefaultWindowParams) {
 
     let next = windows
         .iter()
-        .filter(|(_, window, _, _, _, _, _)| mapped_surfaces.contains(&window.surface))
-        .max_by_key(|(_, _, _, z_index, _, _, _)| z_index.0)
-        .map(|(_, window, _, _, _, _, _)| window.surface);
+        .filter(|(_, window, _, _, _, _, _, _)| mapped_surfaces.contains(&window.surface))
+        .max_by_key(|(_, _, _, z_index, _, _, _, _)| z_index.0)
+        .map(|(_, window, _, _, _, _, _, _)| window.surface);
     let focused_surface_is_unmapped = focus
         .0
         .is_some_and(|surface| !mapped_surfaces.contains(&surface));
@@ -575,7 +733,7 @@ fn sync_default_window_state(params: SyncDefaultWindowParams) {
         actions.push(SurfaceAction::Focus { surface: next });
     }
 
-    for (_, window, _, _, _, _, border) in &mut windows {
+    for (_, window, _, _, _, _, _, border) in &mut windows {
         let Some(mut border) = border else {
             continue;
         };
@@ -1028,6 +1186,13 @@ mod tests {
         }
     }
 
+    fn client_created(surface: SurfaceId) -> HostSurfaceEvent {
+        HostSurfaceEvent::Created {
+            surface,
+            decoration: WindowDecoration::ClientSide,
+        }
+    }
+
     #[test]
     fn fallback_claims_a_mapped_surface_and_builds_backed_ui_in_one_update() {
         let (mut app, camera) = test_app();
@@ -1092,6 +1257,7 @@ mod tests {
         let (mut app, _) = test_app();
         let surface = SurfaceId::new(38);
         let geometry_origin = Vec2::new(20.0, 18.0);
+        enqueue_surface_event(app.world_mut(), client_created(surface));
         enqueue_surface_event(
             app.world_mut(),
             frame_with_geometry(surface, 360, 276, geometry_origin, UVec2::new(320, 240)),
@@ -1276,9 +1442,99 @@ mod tests {
     }
 
     #[test]
+    fn popup_tracks_the_owners_client_geometry_across_decoration_replacement() {
+        let (mut app, _) = test_app();
+        let owner = SurfaceId::new(71);
+        let popup_surface = SurfaceId::new(72);
+        enqueue_surface_event(app.world_mut(), client_created(owner));
+        enqueue_surface_event(
+            app.world_mut(),
+            frame_with_geometry(owner, 360, 276, Vec2::new(20.0, 18.0), UVec2::new(320, 240)),
+        );
+        enqueue_surface_event(
+            app.world_mut(),
+            HostSurfaceEvent::PopupConfigured {
+                surface: popup_surface,
+                popup: AppPopup {
+                    owner,
+                    position: Vec2::new(100.0, 50.0),
+                    stack_index: 2,
+                },
+            },
+        );
+        enqueue_surface_event(
+            app.world_mut(),
+            frame_with_geometry(
+                popup_surface,
+                120,
+                80,
+                Vec2::new(8.0, 6.0),
+                UVec2::new(100, 60),
+            ),
+        );
+        app.update();
+
+        let owner_root = app
+            .world_mut()
+            .query::<(&AppWindow, &PrimaryPresentation)>()
+            .single(app.world())
+            .expect("owner window should be presented")
+            .1
+            .0;
+        let (popup_source, popup_root) = app
+            .world_mut()
+            .query::<(Entity, &AppPopup, &PrimaryPresentation)>()
+            .single(app.world())
+            .map(|(source, _, presentation)| (source, presentation.0))
+            .expect("mapped popup should be presented");
+        assert_eq!(
+            app.world().get::<ChildOf>(popup_root).map(ChildOf::parent),
+            Some(owner_root)
+        );
+        let node = app
+            .world()
+            .get::<Node>(popup_root)
+            .expect("popup root should have absolute layout");
+        assert_eq!((node.left, node.top), (px(112.0), px(62.0)));
+        assert!(app.world().get::<BoxShadow>(popup_root).is_none());
+        assert!(app.world().get::<AppWindow>(popup_source).is_none());
+        assert!(app.world().get::<WindowPlacement>(popup_source).is_none());
+
+        enqueue_surface_event(app.world_mut(), server_decorated(owner));
+        app.update();
+
+        let replacement_owner = app
+            .world_mut()
+            .query::<(&AppWindow, &PrimaryPresentation)>()
+            .single(app.world())
+            .expect("server-decorated owner should be presented")
+            .1
+            .0;
+        let replacement_popup = app
+            .world()
+            .get::<PrimaryPresentation>(popup_source)
+            .expect("popup should be reclaimed after owner presentation replacement")
+            .0;
+        assert_ne!(replacement_owner, owner_root);
+        assert_ne!(replacement_popup, popup_root);
+        assert_eq!(
+            app.world()
+                .get::<ChildOf>(replacement_popup)
+                .map(ChildOf::parent),
+            Some(replacement_owner)
+        );
+        let node = app
+            .world()
+            .get::<Node>(replacement_popup)
+            .expect("reclaimed popup should retain absolute layout");
+        assert_eq!((node.left, node.top), (px(92.0), px(74.0)));
+    }
+
+    #[test]
     fn validated_client_move_activates_mid_drag() {
         let (mut app, _) = test_app();
         let surface = SurfaceId::new(39);
+        enqueue_surface_event(app.world_mut(), client_created(surface));
         enqueue_surface_event(app.world_mut(), frame(surface, 320, 240));
         app.update();
         take_surface_actions(app.world_mut());
@@ -1339,6 +1595,7 @@ mod tests {
     fn left_resize_anchors_to_committed_sizes_through_the_final_snapshot() {
         let (mut app, _) = test_app();
         let surface = SurfaceId::new(40);
+        enqueue_surface_event(app.world_mut(), client_created(surface));
         enqueue_surface_event(app.world_mut(), frame(surface, 100, 80));
         app.update();
         take_surface_actions(app.world_mut());
@@ -1479,6 +1736,7 @@ mod tests {
         let first = SurfaceId::new(61);
         let second = SurfaceId::new(62);
         for surface in [first, second] {
+            enqueue_surface_event(app.world_mut(), client_created(surface));
             enqueue_surface_event(app.world_mut(), frame(surface, 4, 3));
         }
         app.update();
@@ -1545,6 +1803,7 @@ mod tests {
     fn unmap_preserves_and_hides_the_presentation_then_destroy_cleans_it_up() {
         let (mut app, _) = test_app();
         let surface = SurfaceId::new(41);
+        enqueue_surface_event(app.world_mut(), client_created(surface));
         enqueue_surface_event(app.world_mut(), frame(surface, 2, 2));
         app.update();
         assert_eq!(
@@ -1617,6 +1876,7 @@ mod tests {
         let (mut app, camera) = test_app();
         app.world_mut().resource_mut::<UiScale>().0 = 1.5;
         let surface = SurfaceId::new(43);
+        enqueue_surface_event(app.world_mut(), client_created(surface));
         enqueue_surface_event(app.world_mut(), server_decorated(surface));
         enqueue_surface_event(app.world_mut(), frame(surface, 2, 2));
         app.update();
@@ -1729,6 +1989,7 @@ mod tests {
         let (mut app, camera) = test_app();
         app.world_mut().resource_mut::<UiScale>().0 = 1.5;
         let surface = SurfaceId::new(44);
+        enqueue_surface_event(app.world_mut(), client_created(surface));
         enqueue_surface_event(app.world_mut(), server_decorated(surface));
         enqueue_surface_event(app.world_mut(), frame(surface, 2, 2));
         app.update();

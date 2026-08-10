@@ -318,13 +318,21 @@ impl ServerState {
         target: Option<SurfaceHit>,
     ) -> Option<(WlSurface, smithay::utils::Point<f64, Logical>)> {
         let target = target?;
-        let toplevel = self
+        let tree = if let Some(toplevel) = self
             .toplevels
             .get(target.surface)
-            .filter(|toplevel| toplevel.surface.alive())?;
-        let input_surface = toplevel
-            .tree
-            .input_surface(target.layer, compositor_point(target.local_position))?;
+            .filter(|toplevel| toplevel.surface.alive())
+        {
+            &toplevel.tree
+        } else {
+            &self
+                .popups
+                .get(target.surface)
+                .filter(|popup| popup.surface.alive())?
+                .tree
+        };
+        let input_surface =
+            tree.input_surface(target.layer, compositor_point(target.local_position))?;
         let origin = InputPosition::new(
             position.x - target.local_position.x,
             position.y - target.local_position.y,
@@ -333,6 +341,10 @@ impl ServerState {
     }
 
     fn release_host_input(&mut self, time: u32) {
+        // Ordinary focus clearing is intentionally ignored by active popup
+        // grabs. End the protocol grab first so losing nested host focus cannot
+        // leave a client menu open and holding Weld's seat.
+        self.dismiss_popup_grab();
         let serial = SERIAL_COUNTER.next_serial();
         if let Some(pointer) = self.seat.get_pointer() {
             for button in std::mem::take(&mut self.pressed_pointer_buttons) {

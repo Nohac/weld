@@ -1,7 +1,7 @@
 //! Bevy-facing application-surface state and client-content rendering.
 //!
 //! Smithay feeds this module owned lifecycle events and pixel data. The durable
-//! [`AppWindow`] entity contains protocol-neutral state only. Presentation
+//! [`ClientSurface`] entities contain protocol-neutral state only. Presentation
 //! plugins claim that entity separately and render its content through
 //! [`SurfaceNode`]; the provisional root and overlay Bevy [`ImageNode`] backing
 //! remains internal.
@@ -51,6 +51,24 @@ impl SurfaceId {
 #[derive(Component, Clone, Copy, Debug, Eq, PartialEq)]
 pub struct AppWindow {
     pub surface: SurfaceId,
+}
+
+/// Generic identity shared by every buffer-bearing client surface role.
+#[derive(Component, Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ClientSurface {
+    pub surface: SurfaceId,
+}
+
+/// Protocol-owned popup placement relative to its owning window geometry.
+///
+/// Unlike [`AppWindow`], this role has no shell-owned placement, decoration,
+/// dragging, or resizing policy. Presentation plugins consume the committed
+/// position and stacking rank without rewriting them.
+#[derive(Component, Clone, Copy, Debug, PartialEq)]
+pub struct AppPopup {
+    pub owner: SurfaceId,
+    pub position: Vec2,
+    pub stack_index: i32,
 }
 
 /// Which side owns the visible frame and titlebar for an application window.
@@ -332,6 +350,10 @@ pub(crate) enum HostSurfaceEvent {
         surface: SurfaceId,
         decoration: WindowDecoration,
     },
+    PopupConfigured {
+        surface: SurfaceId,
+        popup: AppPopup,
+    },
     WindowInteraction(WindowInteractionRequest),
     Destroyed {
         surface: SurfaceId,
@@ -415,7 +437,10 @@ impl SurfaceEventQueue {
 }
 
 #[derive(Resource, Default)]
-struct SurfaceRegistry(HashMap<SurfaceId, SurfaceEntry>);
+struct SurfaceRegistry {
+    entries: HashMap<SurfaceId, SurfaceEntry>,
+    pending_snapshots: HashMap<SurfaceId, SurfaceTreeSnapshot>,
+}
 
 struct SurfaceEntry {
     entity: Entity,
@@ -473,7 +498,7 @@ pub(crate) fn take_surface_actions(world: &mut World) -> Vec<SurfaceAction> {
 pub(crate) fn has_surface_frame(world: &World) -> bool {
     world
         .get_resource::<SurfaceRegistry>()
-        .is_some_and(|registry| registry.0.values().any(|entry| entry.frame_ready))
+        .is_some_and(|registry| registry.entries.values().any(|entry| entry.frame_ready))
 }
 
 fn apply_host_surface_events(world: &mut World) {
@@ -492,19 +517,29 @@ fn apply_host_surface_events(world: &mut World) {
                 decoration,
             } => {
                 if let Some(entity) =
-                    ensure_surface_entity(world, &mut registry, surface, decoration)
+                    ensure_window_entity(world, &mut registry, surface, decoration)
                 {
                     set_decoration_marker(world, entity, decoration);
+                    apply_pending_snapshot(world, &mut registry, surface);
                 }
             }
             HostSurfaceEvent::TreeSnapshot { surface, snapshot } => {
-                apply_surface_tree_snapshot(world, &mut registry, surface, snapshot);
+                if registry.entries.contains_key(&surface) {
+                    apply_surface_tree_snapshot(world, &mut registry, surface, snapshot);
+                } else {
+                    queue_pending_snapshot(&mut registry, surface, snapshot);
+                }
             }
             HostSurfaceEvent::DecorationChanged {
                 surface,
                 decoration,
             } => {
                 set_window_decoration(world, &mut registry, surface, decoration);
+            }
+            HostSurfaceEvent::PopupConfigured { surface, popup } => {
+                if ensure_popup_entity(world, &mut registry, surface, popup).is_some() {
+                    apply_pending_snapshot(world, &mut registry, surface);
+                }
             }
             HostSurfaceEvent::WindowInteraction(request) => {
                 world.write_message(request);
@@ -518,24 +553,39 @@ fn apply_host_surface_events(world: &mut World) {
     world.insert_resource(registry);
 }
 
-fn ensure_surface_entity(
+fn ensure_window_entity(
     world: &mut World,
     registry: &mut SurfaceRegistry,
     surface: SurfaceId,
     decoration: WindowDecoration,
 ) -> Option<Entity> {
-    if let Some(entry) = registry.0.get(&surface)
+    if let Some(entry) = registry.entries.get(&surface)
         && world.get_entity(entry.entity).is_ok()
     {
+        if world.get::<AppPopup>(entry.entity).is_some() {
+            warn!(
+                ?surface,
+                "ignored an application-window role conflicting with a popup"
+            );
+            return None;
+        }
+        let Ok(mut entity) = world.get_entity_mut(entry.entity) else {
+            return None;
+        };
+        entity.insert((ClientSurface { surface }, AppWindow { surface }));
         return Some(entry.entity);
     }
-    registry.0.remove(&surface);
+    registry.entries.remove(&surface);
 
     let entity = world
-        .spawn((AppWindow { surface }, SurfaceSnapshotRevision::default()))
+        .spawn((
+            ClientSurface { surface },
+            AppWindow { surface },
+            SurfaceSnapshotRevision::default(),
+        ))
         .id();
     set_decoration_marker(world, entity, decoration);
-    registry.0.insert(
+    registry.entries.insert(
         surface,
         SurfaceEntry {
             entity,
@@ -546,15 +596,88 @@ fn ensure_surface_entity(
     Some(entity)
 }
 
+fn ensure_popup_entity(
+    world: &mut World,
+    registry: &mut SurfaceRegistry,
+    surface: SurfaceId,
+    popup: AppPopup,
+) -> Option<Entity> {
+    if let Some(entry) = registry.entries.get(&surface)
+        && world.get_entity(entry.entity).is_ok()
+    {
+        if world.get::<AppWindow>(entry.entity).is_some() {
+            warn!(
+                ?surface,
+                "ignored a popup role conflicting with an application window"
+            );
+            return None;
+        }
+        let Ok(mut entity) = world.get_entity_mut(entry.entity) else {
+            return None;
+        };
+        entity.insert((ClientSurface { surface }, popup));
+        return Some(entry.entity);
+    }
+    registry.entries.remove(&surface);
+
+    let entity = world
+        .spawn((
+            ClientSurface { surface },
+            popup,
+            SurfaceSnapshotRevision::default(),
+        ))
+        .id();
+    registry.entries.insert(
+        surface,
+        SurfaceEntry {
+            entity,
+            buffers: HashMap::new(),
+            frame_ready: false,
+        },
+    );
+    Some(entity)
+}
+
+fn queue_pending_snapshot(
+    registry: &mut SurfaceRegistry,
+    surface: SurfaceId,
+    mut snapshot: SurfaceTreeSnapshot,
+) {
+    if let Some(previous) = registry.pending_snapshots.get_mut(&surface) {
+        snapshot.carry_pending_pixels_from(previous);
+        *previous = snapshot;
+    } else {
+        registry.pending_snapshots.insert(surface, snapshot);
+    }
+}
+
+fn apply_pending_snapshot(world: &mut World, registry: &mut SurfaceRegistry, surface: SurfaceId) {
+    if let Some(snapshot) = registry.pending_snapshots.remove(&surface) {
+        apply_surface_tree_snapshot(world, registry, surface, snapshot);
+    }
+}
+
 fn set_window_decoration(
     world: &mut World,
     registry: &mut SurfaceRegistry,
     surface: SurfaceId,
     decoration: WindowDecoration,
 ) {
-    let Some(entity) = ensure_surface_entity(world, registry, surface, decoration) else {
+    let Some(entry) = registry.entries.get(&surface) else {
+        warn!(
+            ?surface,
+            "ignored a decoration update for an unknown surface"
+        );
         return;
     };
+    let entity = entry.entity;
+    if world.get::<AppWindow>(entity).is_none() {
+        warn!(
+            ?surface,
+            "ignored a window decoration update for a non-window surface"
+        );
+        return;
+    }
     set_decoration_marker(world, entity, decoration);
 }
 
@@ -584,11 +707,8 @@ fn apply_surface_tree_snapshot(
         warn!(?surface, "discarded an invalid surface tree snapshot");
         return;
     }
-    // Tree snapshots normally follow Created. Client-side ownership is the
-    // conservative fallback for tests and recovery from missing lifecycle data.
-    let Some(entity) =
-        ensure_surface_entity(world, registry, surface, WindowDecoration::ClientSide)
-    else {
+    let Some(entity) = registry.entries.get(&surface).map(|entry| entry.entity) else {
+        queue_pending_snapshot(registry, surface, snapshot);
         return;
     };
 
@@ -597,7 +717,7 @@ fn apply_surface_tree_snapshot(
         .iter()
         .map(|buffer| buffer.layer)
         .collect::<HashSet<_>>();
-    let Some(entry) = registry.0.get_mut(&surface) else {
+    let Some(entry) = registry.entries.get_mut(&surface) else {
         return;
     };
     let removed = entry
@@ -699,7 +819,7 @@ fn apply_surface_tree_snapshot(
         });
 
     let Ok(mut entity_mut) = world.get_entity_mut(entity) else {
-        registry.0.remove(&surface);
+        registry.entries.remove(&surface);
         warn!(
             ?surface,
             "discarded a surface snapshot because its ECS entity disappeared"
@@ -736,7 +856,8 @@ fn apply_surface_tree_snapshot(
 }
 
 fn destroy_surface(world: &mut World, registry: &mut SurfaceRegistry, surface: SurfaceId) {
-    let Some(entry) = registry.0.remove(&surface) else {
+    registry.pending_snapshots.remove(&surface);
+    let Some(entry) = registry.entries.remove(&surface) else {
         return;
     };
     if let Some(mut images) = world.get_resource_mut::<Assets<Image>>() {
@@ -777,7 +898,7 @@ type SurfaceInputNodeQuery<'world, 'state> = Query<
 
 fn sync_surface_nodes(
     mut commands: bevy::ecs::system::Commands,
-    surfaces: Query<(&AppWindow, &SurfaceContent)>,
+    surfaces: Query<(&ClientSurface, &SurfaceContent)>,
     mut nodes: SurfaceNodeQuery,
     mut overlay_nodes: SurfaceOverlayNodeQuery,
     mut input_nodes: SurfaceInputNodeQuery,
@@ -785,8 +906,8 @@ fn sync_surface_nodes(
     for (entity, surface_node, mut image_node, mut node, existing_overlays, existing_inputs) in
         &mut nodes
     {
-        let content = surfaces.iter().find_map(|(window, content)| {
-            (window.surface == surface_node.surface).then_some(content)
+        let content = surfaces.iter().find_map(|(surface, content)| {
+            (surface.surface == surface_node.surface).then_some(content)
         });
         let Some(content) = content else {
             let empty_image = empty_surface_image_node();
@@ -1118,10 +1239,21 @@ mod tests {
         HostSurfaceEvent::TreeSnapshot { surface, snapshot }
     }
 
+    fn register_window(app: &mut App, surface: SurfaceId) {
+        enqueue_surface_event(
+            app.world_mut(),
+            HostSurfaceEvent::Created {
+                surface,
+                decoration: WindowDecoration::ClientSide,
+            },
+        );
+    }
+
     #[test]
     fn root_updates_reuse_the_bevy_image() {
         let mut app = test_app();
         let surface = SurfaceId::new(7);
+        register_window(&mut app, surface);
         enqueue_surface_event(
             app.world_mut(),
             snapshot_event(surface, root_snapshot(Some([3, 2, 1, 255]))),
@@ -1150,9 +1282,47 @@ mod tests {
     }
 
     #[test]
+    fn a_snapshot_waits_for_its_popup_role_without_becoming_a_window() {
+        let mut app = test_app();
+        let surface = SurfaceId::new(8);
+        enqueue_surface_event(
+            app.world_mut(),
+            snapshot_event(surface, root_snapshot(Some([3, 2, 1, 255]))),
+        );
+        app.update();
+
+        let mut windows = app.world_mut().query::<&AppWindow>();
+        assert_eq!(windows.iter(app.world()).count(), 0);
+
+        enqueue_surface_event(
+            app.world_mut(),
+            HostSurfaceEvent::PopupConfigured {
+                surface,
+                popup: AppPopup {
+                    owner: SurfaceId::new(1),
+                    position: Vec2::new(10.0, 20.0),
+                    stack_index: 1,
+                },
+            },
+        );
+        app.update();
+
+        let mut popups = app
+            .world_mut()
+            .query::<(&AppPopup, &MappedSurface, Option<&ClientDecorated>)>();
+        let (popup, mapped, decoration) = popups
+            .single(app.world())
+            .expect("the queued popup snapshot should map after role registration");
+        assert_eq!(popup.owner, SurfaceId::new(1));
+        assert_eq!(mapped.logical_size, Vec2::ONE);
+        assert!(decoration.is_none());
+    }
+
+    #[test]
     fn protocol_unmap_retains_copied_buffers_for_remapping() {
         let mut app = test_app();
         let surface = SurfaceId::new(11);
+        register_window(&mut app, surface);
         enqueue_surface_event(
             app.world_mut(),
             snapshot_event(surface, root_snapshot(Some([3, 2, 1, 255]))),
@@ -1232,6 +1402,7 @@ mod tests {
         let mut app = test_app();
         let surface = SurfaceId::new(5);
         set_composition_advance(app.world_mut(), false);
+        register_window(&mut app, surface);
         enqueue_surface_event(
             app.world_mut(),
             snapshot_event(surface, root_snapshot(Some([1, 2, 3, 255]))),
@@ -1263,6 +1434,7 @@ mod tests {
     fn overlays_reuse_entities_and_release_removed_assets() {
         let mut app = test_app();
         let surface = SurfaceId::new(29);
+        register_window(&mut app, surface);
         app.world_mut().spawn((
             SurfaceNode {
                 surface,

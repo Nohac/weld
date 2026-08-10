@@ -49,7 +49,7 @@ pub(super) struct ToplevelState {
     pub(super) tree: SurfaceTreeState,
 }
 
-struct IndexedStore<K, V> {
+pub(super) struct IndexedStore<K, V> {
     by_id: HashMap<SurfaceId, V>,
     id_by_key: HashMap<K, SurfaceId>,
 }
@@ -64,7 +64,7 @@ impl<K, V> Default for IndexedStore<K, V> {
 }
 
 impl<K: Clone + Eq + Hash, V> IndexedStore<K, V> {
-    fn insert(&mut self, id: SurfaceId, key: K, value: V) -> bool {
+    pub(super) fn insert(&mut self, id: SurfaceId, key: K, value: V) -> bool {
         if self.by_id.contains_key(&id) || self.id_by_key.contains_key(&key) {
             return false;
         }
@@ -73,24 +73,24 @@ impl<K: Clone + Eq + Hash, V> IndexedStore<K, V> {
         true
     }
 
-    fn get(&self, id: SurfaceId) -> Option<&V> {
+    pub(super) fn get(&self, id: SurfaceId) -> Option<&V> {
         self.by_id.get(&id)
     }
 
-    fn get_mut(&mut self, id: SurfaceId) -> Option<&mut V> {
+    pub(super) fn get_mut(&mut self, id: SurfaceId) -> Option<&mut V> {
         self.by_id.get_mut(&id)
     }
 
-    fn id_for_key(&self, key: &K) -> Option<SurfaceId> {
+    pub(super) fn id_for_key(&self, key: &K) -> Option<SurfaceId> {
         self.id_by_key.get(key).copied()
     }
 
-    fn remove_by_key(&mut self, key: &K) -> Option<(SurfaceId, V)> {
+    pub(super) fn remove_by_key(&mut self, key: &K) -> Option<(SurfaceId, V)> {
         let id = self.id_by_key.remove(key)?;
         self.by_id.remove(&id).map(|value| (id, value))
     }
 
-    fn values(&self) -> impl Iterator<Item = &V> {
+    pub(super) fn values(&self) -> impl Iterator<Item = &V> {
         self.by_id.values()
     }
 }
@@ -198,6 +198,12 @@ impl ServerState {
             .values()
             .filter(|toplevel| toplevel.surface.alive())
             .flat_map(|toplevel| collect_surfaces(toplevel.surface.wl_surface()))
+            .chain(
+                self.popups
+                    .values()
+                    .filter(|popup| popup.surface.alive())
+                    .flat_map(|popup| collect_surfaces(popup.surface.wl_surface())),
+            )
             .filter(Resource::is_alive)
             .collect::<Vec<_>>();
         for surface in surfaces {
@@ -219,6 +225,19 @@ impl ServerState {
                     )
             })
             .flat_map(|toplevel| collect_surfaces(toplevel.surface.wl_surface()))
+            .chain(
+                self.popups
+                    .values()
+                    .filter(|popup| {
+                        let root = popup.surface.wl_surface();
+                        popup.surface.alive()
+                            && should_drain_callbacks(
+                                popup.tree.client_mapped(root),
+                                popup.tree.displayable(root),
+                            )
+                    })
+                    .flat_map(|popup| collect_surfaces(popup.surface.wl_surface())),
+            )
             .filter(Resource::is_alive)
             .collect::<Vec<_>>();
         for surface in surfaces {
@@ -286,7 +305,9 @@ impl CompositorHandler for ServerState {
         }
         let root = owning_root(surface);
         let Some(surface_id) = self.toplevels.id_for_surface(&root) else {
-            debug!(surface = ?surface.id(), "ignoring a surface outside an xdg-toplevel tree");
+            if !self.commit_popup(&root) {
+                debug!(surface = ?surface.id(), "ignoring a surface outside a tracked xdg surface tree");
+            }
             return;
         };
         let Some(toplevel) = self.toplevels.get(surface_id) else {
@@ -304,6 +325,7 @@ impl CompositorHandler for ServerState {
         self.output.leave(surface);
         let root = owning_root(surface);
         let Some(surface_id) = self.toplevels.id_for_surface(&root) else {
+            self.remove_popup_surface(&root, surface);
             return;
         };
         self.clear_input_focus_for_surface(surface, self.event_time());
@@ -354,8 +376,8 @@ impl XdgShellHandler for ServerState {
         info!(surface_id = id.raw(), "created a nested xdg-toplevel");
     }
 
-    fn new_popup(&mut self, _surface: PopupSurface, _positioner: PositionerState) {
-        debug!("ignoring an xdg-popup in the initial slice");
+    fn new_popup(&mut self, surface: PopupSurface, positioner: PositionerState) {
+        self.register_popup(surface, positioner);
     }
 
     fn move_request(&mut self, surface: ToplevelSurface, seat: wl_seat::WlSeat, serial: Serial) {
@@ -375,14 +397,17 @@ impl XdgShellHandler for ServerState {
         self.begin_pointer_resize(surface, seat, serial, edges);
     }
 
-    fn grab(&mut self, _surface: PopupSurface, _seat: wl_seat::WlSeat, _serial: Serial) {}
+    fn grab(&mut self, surface: PopupSurface, seat: wl_seat::WlSeat, serial: Serial) {
+        self.begin_popup_grab(surface, seat, serial);
+    }
 
     fn reposition_request(
         &mut self,
-        _surface: PopupSurface,
-        _positioner: PositionerState,
-        _token: u32,
+        surface: PopupSurface,
+        positioner: PositionerState,
+        token: u32,
     ) {
+        self.reposition_popup(surface, positioner, token);
     }
 
     fn toplevel_destroyed(&mut self, surface: ToplevelSurface) {
@@ -397,6 +422,10 @@ impl XdgShellHandler for ServerState {
         }
         self.pending_surface_events
             .push(HostSurfaceEvent::Destroyed { surface: id });
+    }
+
+    fn popup_destroyed(&mut self, surface: PopupSurface) {
+        self.destroy_popup(surface);
     }
 }
 
