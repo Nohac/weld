@@ -211,7 +211,7 @@ impl ServerState {
         }
     }
 
-    pub(crate) fn stage_surface_presentation(&mut self) -> u64 {
+    pub(crate) fn stage_frame_callbacks(&mut self) -> u64 {
         self.presentation_requested = false;
         let presentation_id = self.next_presentation_id;
         self.next_presentation_id = self.next_presentation_id.saturating_add(1);
@@ -254,7 +254,7 @@ impl ServerState {
         presentation_id
     }
 
-    pub(crate) fn frame_presented(&mut self, presentation_id: u64) {
+    pub(crate) fn complete_frame_callbacks(&mut self, presentation_id: u64) {
         let time = self.event_time();
         while self
             .staged_frame_callbacks

@@ -51,6 +51,11 @@ acquisition.
 
 ## VT-switch evidence
 
+The DRM-only virtual-terminal shortcut plugin maps `Ctrl+Alt+F1` through
+`Ctrl+Alt+F10` to one-shot ECS requests. The DRM host suspends the presenter
+before passing a request to libseat. Nested mode does not install this plugin
+and has no VT-switch request path.
+
 One refined probe run requested a VT switch and then entered FIFO surface
 acquisition. Acquisition blocked for 7011 ms and returned `Lost` only when the
 user switched back. During that wait, calloop could not process Smithay's
@@ -101,6 +106,15 @@ Production behavior should be event driven:
 The probe's short calloop service interval and missing-event deadline are
 diagnostic instrumentation for its intentionally single-threaded form. They
 are not production scheduling policy and must not become status polling.
+
+The host-side presenter lifecycle should be represented as one explicit state
+machine once the first hardware integration has validated the real event
+ordering. Its states need to cover configuring, ready, session-suspended,
+connector-unavailable, mode-incompatible, device-lost, stopping, and stopped.
+Only the cross-thread interruption facts remain atomic: whether acquisition is
+allowed and the epoch that invalidates work already blocking in the driver.
+Readiness, retry budget, shutdown, and output compatibility belong to the host
+state transition rather than independent booleans.
 
 Shutdown needs an explicit lifecycle rather than a timeout disguised as
 coordination. In particular, the worker may still own wgpu objects while
@@ -179,6 +193,12 @@ physical output to become unavailable while the compositor continues running.
 Native driver segmentation faults or process aborts cannot be contained inside
 the same process; stronger isolation would require a separate presentation
 process and shareable GPU buffers.
+
+`Surface::configure` is contained against synchronous Rust panics. wgpu reports
+non-panicking validation failures through the device-global uncaptured-error
+callback shared with Bevy, so the worker cannot safely attribute such an error
+to configuration alone. Weld logs that shared-device error, and the bounded
+next acquisition determines whether physical presentation becomes unavailable.
 
 On a connector or GPU change, the host retains logical output and window state,
 stops sending work to the affected presenter, and reprobes from udev evidence.

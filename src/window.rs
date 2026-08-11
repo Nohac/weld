@@ -1362,12 +1362,12 @@ mod tests {
             .world()
             .get::<Node>(root)
             .expect("client presentation should remain alive while moving");
-        assert_eq!(
-            (moved_client_node.left, moved_client_node.top),
-            (
-                px(placement.position.x - geometry_origin.x),
-                px(placement.position.y - geometry_origin.y),
-            )
+        let moved_position = absolute_position(moved_client_node.left, moved_client_node.top)
+            .expect("client presentation should remain absolutely positioned");
+        let expected_position = placement.position - geometry_origin;
+        assert!(
+            moved_position.distance(expected_position) < 0.001,
+            "client position {moved_position:?} should preserve geometry anchor {expected_position:?}"
         );
         enqueue_surface_event(
             app.world_mut(),

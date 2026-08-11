@@ -1,46 +1,27 @@
-//! Standalone libseat/udev/libinput/DRM backend.
-//!
-//! Bevy remains the compositor renderer. This transitional backend reads its
-//! completed texture into one memory element, then uses Pixman and Smithay's
-//! [`DrmCompositor`] only to populate a GBM scanout buffer and submit KMS.
+//! Standalone libseat, udev, libinput, and direct-wgpu DRM backend.
 
-use std::{path::PathBuf, time::Instant};
+use std::{
+    path::PathBuf,
+    time::{Duration, Instant},
+};
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Context, Result, anyhow};
 use bevy::math::UVec2;
-use calloop::signals::Signals;
+use calloop::{
+    channel::{self, Event as ChannelEvent},
+    signals::Signals,
+};
 use smithay::{
     backend::{
-        SwapBuffersError,
-        allocator::{
-            Fourcc,
-            gbm::{GbmAllocator, GbmBufferFlags, GbmDevice},
-        },
-        drm::{
-            DrmDevice, DrmDeviceFd, DrmDeviceNotifier, DrmEvent,
-            compositor::{DrmCompositor, FrameError, FrameFlags, RenderFrameError},
-            exporter::gbm::{GbmFramebufferExporter, NodeFilter},
-        },
+        drm::DrmDeviceFd,
         libinput::{LibinputInputBackend, LibinputSessionInterface},
-        renderer::{
-            ImportDma,
-            element::{
-                Kind,
-                memory::{MemoryRenderBuffer, MemoryRenderBufferRenderElement},
-            },
-            pixman::PixmanRenderer,
-        },
         session::{Event as SessionEvent, Session, libseat::LibSeatSession},
         udev::{UdevBackend, UdevEvent},
     },
     reexports::{
-        calloop::EventLoop as CalloopEventLoop,
-        drm::control::{Mode as DrmMode, connector, crtc},
-        gbm::Device as RawGbmDevice,
-        input::Libinput,
-        wayland_server::Display,
+        calloop::EventLoop as CalloopEventLoop, drm::control::connector, input::Libinput,
+        rustix::fs::Dev, wayland_server::Display,
     },
-    utils::Transform,
 };
 use smithay_drm_extras::drm_scanner::{DrmScanEvent, DrmScanner};
 use tracing::{debug, error, info, warn};
@@ -51,77 +32,104 @@ use crate::{
         raw::{RawSeatEvent, RawSeatEventKind},
         source::libinput::LibinputAdapter,
     },
-    renderer::{WgpuContext, read_composition_rgba, write_png},
+    renderer::{read_composition_rgba, write_png},
     runtime::{
         ChildProcesses, FrameState, HostCommand, LoopData, PendingCapture, iteration_work,
         server_mut,
     },
-    server::{OutputDescriptor, OutputMetrics, ServerState},
-    shell::{ShellRenderer, ShellRendererOptions},
+    server::ServerState,
+    shell::{CompositionTargetId, ShellRenderer, ShellRendererOptions},
 };
 
+mod direct;
 mod discovery;
+mod presenter;
 
+use direct::DirectDrmGpu;
 use discovery::{DrmDeviceDiscovery, connector_name, discover_output, output_description};
+use presenter::{FrameOutcome, PresenterEvent, PresenterHandle};
 
-type WeldDrmCompositor = DrmCompositor<
-    GbmAllocator<DrmDeviceFd>,
-    GbmFramebufferExporter<DrmDeviceFd>,
-    PresentedFrame,
-    DrmDeviceFd,
->;
-
-#[derive(Clone, Copy, Debug)]
-struct PresentedFrame {
-    sequence: u64,
-    presentation_id: u64,
-}
-
-enum PresentOutcome {
-    Queued(u64),
-    Empty,
-    Retry,
-}
+const PRESENTER_SHUTDOWN_DEADLINE: Duration = Duration::from_millis(250);
 
 enum DrmRuntimeEvent {
     Input(RawSeatEvent),
-    VBlank(crtc::Handle),
-    DrmError(String),
     Session(SessionEvent),
     Udev(UdevEvent),
+    Presenter(PresenterEvent),
     Command(HostCommand),
 }
 
-struct DrmBootstrap {
-    session: LibSeatSession,
-    notifier: Option<DrmDeviceNotifier>,
-    drm: DrmDevice,
-    gbm: RawGbmDevice<DrmDeviceFd>,
+struct OutputMonitor {
+    drm: DrmDeviceFd,
     scanner: DrmScanner,
-    device_id: smithay::reexports::rustix::fs::Dev,
+    device_id: Dev,
     device_path: PathBuf,
-    connector: connector::Info,
-    crtc: crtc::Handle,
-    mode: DrmMode,
+    connector: connector::Handle,
+    connected: bool,
+    mode_compatible: bool,
 }
 
-struct DrmPresenter {
-    _session: LibSeatSession,
-    drm: DrmDevice,
-    compositor: WeldDrmCompositor,
-    pixman: PixmanRenderer,
-    frame: MemoryRenderBuffer,
-    crtc: crtc::Handle,
-    connector_name: String,
-    device_id: smithay::reexports::rustix::fs::Dev,
-    device_path: PathBuf,
-    scanner: DrmScanner,
-    session_active: bool,
-    frame_pending: bool,
-    next_sequence: u64,
-    pending_capture: Option<(u64, PendingCapture)>,
-    pixels: Vec<u8>,
-    presentation_id: u64,
+impl OutputMonitor {
+    fn handle(&mut self, event: UdevEvent, presenter: &mut PresenterHandle, session_active: bool) {
+        match event {
+            UdevEvent::Changed { device_id } if device_id == self.device_id => {
+                let scan = match self.scanner.scan_connectors(&self.drm) {
+                    Ok(scan) => scan,
+                    Err(error) => {
+                        warn!(%error, "failed to rescan the selected DRM device");
+                        return;
+                    }
+                };
+                for event in scan {
+                    match event {
+                        DrmScanEvent::Disconnected { connector, .. }
+                            if connector.handle() == self.connector =>
+                        {
+                            self.connected = false;
+                            presenter.suspend();
+                            warn!("active DRM connector disconnected; composition remains live");
+                        }
+                        DrmScanEvent::Connected { connector, .. }
+                            if connector.handle() == self.connector =>
+                        {
+                            self.connected = true;
+                            if self.mode_compatible && session_active {
+                                presenter.activate();
+                                info!("active DRM connector reconnected; reconfiguring presenter");
+                            } else if !self.mode_compatible {
+                                warn!(
+                                    "active DRM connector reconnected with changed modes; restart is still required"
+                                );
+                            }
+                        }
+                        DrmScanEvent::Changed { connector, .. }
+                            if connector.handle() == self.connector =>
+                        {
+                            self.connected = false;
+                            self.mode_compatible = false;
+                            presenter.suspend();
+                            warn!(
+                                "active connector modes changed; physical presentation is unavailable until restart"
+                            );
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            UdevEvent::Removed { device_id } if device_id == self.device_id => {
+                self.connected = false;
+                presenter.suspend();
+                error!(
+                    path = %self.device_path.display(),
+                    "selected DRM device was removed; composition remains live"
+                );
+            }
+            UdevEvent::Added { device_id, path } => {
+                warn!(?device_id, path = %path.display(), "additional DRM GPUs are not supported yet");
+            }
+            UdevEvent::Changed { .. } | UdevEvent::Removed { .. } => {}
+        }
+    }
 }
 
 pub(crate) fn run(arguments: AppArguments, signals: Signals) -> Result<()> {
@@ -133,8 +141,20 @@ pub(crate) fn run(arguments: AppArguments, signals: Signals) -> Result<()> {
         LibSeatSession::new().context("failed to acquire a libseat session")?;
     let seat_name = session.seat();
     let udev = UdevBackend::new(&seat_name).context("failed to initialize DRM udev discovery")?;
-    let mut bootstrap = DrmBootstrap::new(session, udev.device_list())?;
-    let (output_descriptor, output_metrics) = bootstrap.output_description()?;
+    let device = DrmDeviceDiscovery::new(session, udev.device_list())?;
+    let output = discover_output(&device.drm)?;
+    let selected_connector_name = connector_name(&output.connector);
+    let (output_descriptor, output_metrics) = output_description(&output.connector, output.mode)?;
+    let direct_gpu = DirectDrmGpu::new(
+        &device.drm,
+        device.device_id,
+        &device.device_path,
+        &output.connector,
+        output.mode,
+    )?;
+    let refresh_millihertz = direct_gpu.mode.refresh_millihertz;
+    let capture_device = direct_gpu.device.clone();
+    let capture_queue = direct_gpu.queue.clone();
 
     let display = Display::<ServerState>::new().context("failed to create the Wayland display")?;
     let server = ServerState::new(
@@ -158,7 +178,7 @@ pub(crate) fn run(arguments: AppArguments, signals: Signals) -> Result<()> {
         .context("failed to register process signals")?;
 
     let mut libinput_context = Libinput::new_with_udev::<LibinputSessionInterface<LibSeatSession>>(
-        bootstrap.session.clone().into(),
+        device.session.clone().into(),
     );
     libinput_context
         .udev_assign_seat(&seat_name)
@@ -202,50 +222,12 @@ pub(crate) fn run(arguments: AppArguments, signals: Signals) -> Result<()> {
             data.events.push_back(DrmRuntimeEvent::Udev(event));
         })
         .map_err(|_| anyhow!("failed to register udev notifications"))?;
-    let drm_notifier = bootstrap
-        .notifier
-        .take()
-        .context("DRM notifier was already installed")?;
-    let drm_registration = calloop
-        .handle()
-        .insert_source(drm_notifier, |event, _, data| match event {
-            DrmEvent::VBlank(crtc) => data.events.push_back(DrmRuntimeEvent::VBlank(crtc)),
-            DrmEvent::Error(error) => data
-                .events
-                .push_back(DrmRuntimeEvent::DrmError(error.to_string())),
-        })
-        .context("failed to register DRM events")?;
 
-    let result = run_active_drm(
-        &mut calloop,
-        &mut loop_data,
-        bootstrap,
-        started_at,
-        arguments,
-        output_metrics,
-    );
-    // The notifier owns the last device Arc after the presenter drops. Remove it
-    // while calloop's libseat notifier still owns the strong seat reference, so
-    // atomic state restoration retains DRM authority.
-    calloop.handle().remove(drm_registration);
-    result
-}
-
-fn run_active_drm(
-    calloop: &mut CalloopEventLoop<'static, LoopData<DrmRuntimeEvent>>,
-    loop_data: &mut LoopData<DrmRuntimeEvent>,
-    bootstrap: DrmBootstrap,
-    started_at: Instant,
-    arguments: AppArguments,
-    output_metrics: OutputMetrics,
-) -> Result<()> {
-    let mut presenter = bootstrap.into_presenter(loop_data.server.output())?;
-    let gpu = WgpuContext::headless()?;
     let mut shell = ShellRenderer::new(
-        gpu.instance(),
-        gpu.adapter(),
-        gpu.device(),
-        gpu.queue(),
+        &direct_gpu.instance,
+        &direct_gpu.adapter,
+        &direct_gpu.device,
+        &direct_gpu.queue,
         ShellRendererOptions {
             size: UVec2::new(
                 output_metrics.physical_width(),
@@ -254,28 +236,52 @@ fn run_active_drm(
             scale_factor: output_metrics.scale_factor(),
             remote_debug: arguments.remote_debug.as_deref(),
             software_cursor: true,
+            virtual_terminal_shortcuts: true,
         },
     )?;
+    // Declared before the presenter so Rust drops the worker first. A worker
+    // stuck in native acquisition still retains its own fd clone until process
+    // teardown; the host never closes the libseat session underneath it.
+    let mut session_owner = device.session;
+    let (presenter_events, presenter_source) = channel::channel();
+    calloop
+        .handle()
+        .insert_source(presenter_source, |event, _, data| match event {
+            ChannelEvent::Msg(event) => data.events.push_back(DrmRuntimeEvent::Presenter(event)),
+            ChannelEvent::Closed => data
+                .events
+                .push_back(DrmRuntimeEvent::Presenter(PresenterEvent::Stopped)),
+        })
+        .map_err(|_| anyhow!("failed to register direct DRM presenter results"))?;
+    let mut presenter = PresenterHandle::spawn(direct_gpu, presenter_events)?;
+    let mut output_monitor = OutputMonitor {
+        drm: device.drm,
+        scanner: output.scanner,
+        device_id: device.device_id,
+        device_path: device.device_path,
+        connector: output.connector.handle(),
+        connected: true,
+        mode_compatible: true,
+    };
     let mut children = ChildProcesses::default();
     let child_requested = children.spawn_requested(&loop_data.server, &arguments.client)?;
     let mut pending_capture = arguments
         .screenshot
         .map(|path| PendingCapture::startup(path, child_requested));
     let remote_debug_enabled = arguments.remote_debug.is_some();
-    let mut frame_state = FrameState::default();
-
+    let mut frame_state = FrameState::default().with_refresh_millihertz(refresh_millihertz);
+    let mut session_active = true;
     info!(
         socket = ?loop_data.server.socket_name,
-        connector = %presenter.connector_name(),
-        "Weld DRM compositor is ready"
+        connector = %selected_connector_name,
+        "Weld direct DRM compositor is ready"
     );
     let mut exit_requested = false;
     while !exit_requested {
+        let now = Instant::now();
+        let timeout = dispatch_timeout(&frame_state, pending_capture.as_ref(), now);
         calloop
-            .dispatch(
-                Some(frame_state.composition_timeout(Instant::now(), presenter.session_active)),
-                loop_data,
-            )
+            .dispatch(timeout, &mut loop_data)
             .context("DRM calloop dispatch failed")?;
 
         let mut input_pending = false;
@@ -285,34 +291,30 @@ fn run_active_drm(
                     input_pending = true;
                     shell.enqueue_input_event(event);
                 }
-                DrmRuntimeEvent::VBlank(crtc) => {
-                    if let Some(frame) = presenter.frame_submitted(crtc)? {
-                        loop_data.server.frame_presented(frame.presentation_id);
-                        if let Some((capture_sequence, capture)) = presenter.pending_capture.take()
-                        {
-                            if capture_sequence == frame.sequence {
-                                exit_requested |= complete_capture(&mut shell, capture, Ok(()))?;
-                            } else {
-                                presenter.pending_capture = Some((capture_sequence, capture));
-                            }
-                        }
-                    }
-                }
-                DrmRuntimeEvent::DrmError(message) => warn!(%message, "DRM event error"),
                 DrmRuntimeEvent::Session(SessionEvent::PauseSession) => {
-                    presenter.pause();
+                    session_active = false;
+                    presenter.suspend();
                     input_pending = true;
                     shell.enqueue_input_event(RawSeatEvent::new(
                         RawSeatEventKind::HostFocusLost,
                         started_at.elapsed().as_millis() as u32,
                     ));
+                    info!("libseat session paused; physical presentation suspended");
                 }
                 DrmRuntimeEvent::Session(SessionEvent::ActivateSession) => {
-                    presenter.activate()?;
-                    frame_state.request_composition();
-                    frame_state.request_present();
+                    session_active = true;
+                    if output_monitor.connected && output_monitor.mode_compatible {
+                        presenter.activate();
+                    }
+                    info!("libseat session activated; presenter reconfiguration requested");
                 }
-                DrmRuntimeEvent::Udev(event) => presenter.handle_udev(event)?,
+                DrmRuntimeEvent::Udev(event) => {
+                    output_monitor.handle(event, &mut presenter, session_active);
+                }
+                DrmRuntimeEvent::Presenter(event) => {
+                    log_presenter_event(&event);
+                    presenter.handle_event(&event);
+                }
                 DrmRuntimeEvent::Command(command) => {
                     exit_requested |= children.apply(&loop_data.server, command)?;
                 }
@@ -327,7 +329,7 @@ fn run_active_drm(
             frame_state.request_composition();
         }
         if loop_data.server.presentation_requested() {
-            frame_state.request_present();
+            frame_state.request_composition();
         }
 
         let now = Instant::now();
@@ -335,7 +337,7 @@ fn run_active_drm(
             input_pending,
             frame_state.composition_due(now),
             remote_debug_enabled,
-            presenter.session_active,
+            true,
         );
         let mut request_next_composition = false;
         if work.advance_main {
@@ -352,6 +354,28 @@ fn run_active_drm(
             for command in shell.take_host_commands() {
                 exit_requested |= children.apply(&loop_data.server, command)?;
             }
+            if let Some(virtual_terminal) = shell.take_virtual_terminal_switch_request() {
+                presenter.suspend();
+                match session_owner.change_vt(virtual_terminal) {
+                    Ok(()) => {
+                        session_active = false;
+                        info!(virtual_terminal, "requested virtual-terminal switch");
+                    }
+                    Err(error) => {
+                        warn!(
+                            virtual_terminal,
+                            %error,
+                            "failed to switch virtual terminal"
+                        );
+                        if session_active
+                            && output_monitor.connected
+                            && output_monitor.mode_compatible
+                        {
+                            presenter.activate();
+                        }
+                    }
+                }
+            }
             if bevy_requested_redraw && !work.composition_advance {
                 frame_state.request_composition();
             }
@@ -359,26 +383,41 @@ fn run_active_drm(
                 break;
             }
             if work.composition_advance {
-                shell.render_composition();
-                let pixels = read_composition_rgba(
-                    gpu.device(),
-                    gpu.queue(),
-                    shell.texture(),
-                    output_metrics.physical_width(),
-                    output_metrics.physical_height(),
-                )?;
-                let presentation_id = loop_data.server.stage_surface_presentation();
-                // A startup capture may wait across several client compositions;
-                // retaining pixels only while that pre-submit slot exists keeps
-                // ordinary cursor and animation frames out of the extra memcpy.
-                presenter.update_frame(&pixels, presentation_id, pending_capture.is_some())?;
+                let target = host_composition_target(&shell, presenter.in_flight_target());
+                shell.render_composition_to(target);
+                let callback_batch = loop_data.server.stage_frame_callbacks();
+                loop_data.server.complete_frame_callbacks(callback_batch);
                 frame_state.composition_rendered(now);
                 request_next_composition = bevy_requested_redraw;
+
+                let capture_ready = pending_capture
+                    .as_ref()
+                    .is_some_and(|capture| !capture.wait_for_client || shell.has_surface_frame());
+                if capture_ready && let Some(capture) = pending_capture.take() {
+                    let result = read_composition_rgba(
+                        &capture_device,
+                        &capture_queue,
+                        shell.target_texture(target),
+                        output_metrics.physical_width(),
+                        output_metrics.physical_height(),
+                    )
+                    .and_then(|pixels| {
+                        write_png(
+                            &capture.path,
+                            output_metrics.physical_width(),
+                            output_metrics.physical_height(),
+                            &pixels,
+                        )
+                    })
+                    .map_err(|error| error.to_string());
+                    exit_requested |= complete_capture(&mut shell, capture, result)?;
+                }
+                presenter.offer(target, shell.target_view(target).clone());
+                frame_state.presented();
             }
         }
 
         if pending_capture.is_none()
-            && presenter.pending_capture.is_none()
             && let Some(request) = shell.take_capture_request()
         {
             pending_capture = Some(PendingCapture::remote(request.request_id, request.path));
@@ -392,49 +431,8 @@ fn run_active_drm(
             exit_requested |= complete_capture(
                 &mut shell,
                 capture,
-                Err("screenshot timed out before DRM presentation".to_owned()),
+                Err("screenshot timed out before a composition was available".to_owned()),
             )?;
-        }
-        if presenter
-            .pending_capture
-            .as_ref()
-            .is_some_and(|(_, capture)| capture.deadline <= Instant::now())
-            && let Some((_, capture)) = presenter.pending_capture.take()
-        {
-            exit_requested |= complete_capture(
-                &mut shell,
-                capture,
-                Err("screenshot timed out waiting for a DRM page flip".to_owned()),
-            )?;
-        }
-
-        if presenter.session_active && frame_state.presentation_due() && !presenter.frame_pending {
-            let capture_ready = pending_capture
-                .as_ref()
-                .is_some_and(|capture| !capture.wait_for_client || shell.has_surface_frame());
-            match presenter.queue_frame()? {
-                PresentOutcome::Queued(sequence) => {
-                    frame_state.presented();
-                    if capture_ready && let Some(capture) = pending_capture.take() {
-                        let capture_result = write_png(
-                            &capture.path,
-                            output_metrics.physical_width(),
-                            output_metrics.physical_height(),
-                            presenter.frame_pixels(),
-                        )
-                        .map_err(|error| error.to_string());
-                        presenter.clear_capture_pixels();
-                        if capture_result.is_ok() {
-                            presenter.pending_capture = Some((sequence, capture));
-                        } else {
-                            exit_requested |=
-                                complete_capture(&mut shell, capture, capture_result)?;
-                        }
-                    }
-                }
-                PresentOutcome::Empty => frame_state.presented(),
-                PresentOutcome::Retry => {}
-            }
         }
         if request_next_composition {
             frame_state.request_composition();
@@ -443,269 +441,92 @@ fn run_active_drm(
         children.reap();
     }
 
+    shutdown_presenter(&mut calloop, &mut loop_data, &mut presenter)?;
     Ok(())
 }
 
-impl DrmBootstrap {
-    fn new<'a>(
-        session: LibSeatSession,
-        devices: impl Iterator<Item = (smithay::reexports::rustix::fs::Dev, &'a std::path::Path)>,
-    ) -> Result<Self> {
-        let device = DrmDeviceDiscovery::new(session, devices)?;
-        let (drm, notifier) = DrmDevice::new(device.drm.clone(), true)
-            .context("failed to initialize the DRM device")?;
-        // Preserve the transitional path's reset-before-scan ordering. The
-        // direct path will scan the raw DrmDeviceFd without constructing this
-        // Smithay KMS wrapper.
-        let output = discover_output(&drm)?;
-        let gbm = GbmDevice::new(device.drm).context("failed to initialize GBM")?;
-        Ok(Self {
-            session: device.session,
-            notifier: Some(notifier),
-            drm,
-            gbm,
-            scanner: output.scanner,
-            device_id: device.device_id,
-            device_path: device.device_path,
-            connector: output.connector,
-            crtc: output.crtc,
-            mode: output.mode,
-        })
+fn shutdown_presenter(
+    calloop: &mut CalloopEventLoop<'static, LoopData<DrmRuntimeEvent>>,
+    loop_data: &mut LoopData<DrmRuntimeEvent>,
+    presenter: &mut PresenterHandle,
+) -> Result<()> {
+    presenter.begin_shutdown();
+    let deadline = Instant::now() + PRESENTER_SHUTDOWN_DEADLINE;
+    while !presenter.stopped() && Instant::now() < deadline {
+        calloop
+            .dispatch(
+                Some(deadline.saturating_duration_since(Instant::now())),
+                loop_data,
+            )
+            .context("DRM calloop dispatch failed during presenter shutdown")?;
+        while let Some(event) = loop_data.events.pop_front() {
+            if let DrmRuntimeEvent::Presenter(event) = event {
+                log_presenter_event(&event);
+                presenter.handle_event(&event);
+            }
+        }
     }
-
-    fn output_description(&self) -> Result<(OutputDescriptor, OutputMetrics)> {
-        output_description(&self.connector, self.mode)
+    presenter.join_if_finished();
+    if !presenter.stopped() {
+        warn!(
+            timeout_milliseconds = PRESENTER_SHUTDOWN_DEADLINE.as_millis(),
+            "direct DRM presenter did not stop promptly; detaching until process teardown"
+        );
     }
+    Ok(())
+}
 
-    fn into_presenter(mut self, output: smithay::output::Output) -> Result<DrmPresenter> {
-        let surface = self
-            .drm
-            .create_surface(self.crtc, self.mode, &[self.connector.handle()])
-            .context("failed to create the DRM output surface")?;
-        let pixman = PixmanRenderer::new().context("failed to initialize Pixman")?;
-        let allocator = GbmAllocator::new(
-            self.gbm.clone(),
-            GbmBufferFlags::RENDERING | GbmBufferFlags::SCANOUT,
-        );
-        let exporter = GbmFramebufferExporter::new(self.gbm.clone(), NodeFilter::None);
-        let compositor = DrmCompositor::new(
-            &output,
-            surface,
-            None,
-            allocator,
-            exporter,
-            [Fourcc::Abgr8888, Fourcc::Xbgr8888],
-            pixman.dmabuf_formats(),
-            self.drm.cursor_size(),
-            None,
-        )
-        .map_err(|error| anyhow!("failed to initialize DRM compositor: {error}"))?;
-        let size = self.mode.size();
-        let frame = MemoryRenderBuffer::new(
-            Fourcc::Abgr8888,
-            (i32::from(size.0), i32::from(size.1)),
-            1,
-            Transform::Normal,
-            None,
-        );
-        Ok(DrmPresenter {
-            _session: self.session,
-            drm: self.drm,
-            compositor,
-            pixman,
-            frame,
-            crtc: self.crtc,
-            connector_name: connector_name(&self.connector),
-            device_id: self.device_id,
-            device_path: self.device_path,
-            scanner: self.scanner,
-            session_active: true,
-            frame_pending: false,
-            next_sequence: 1,
-            pending_capture: None,
-            pixels: Vec::new(),
-            presentation_id: 0,
-        })
+fn host_composition_target(
+    shell: &ShellRenderer,
+    worker_target: Option<CompositionTargetId>,
+) -> CompositionTargetId {
+    let [first, second] = shell.target_ids();
+    if worker_target == Some(first) {
+        second
+    } else {
+        first
     }
 }
 
-impl DrmPresenter {
-    fn connector_name(&self) -> String {
-        self.connector_name.clone()
+fn dispatch_timeout(
+    frame_state: &FrameState,
+    capture: Option<&PendingCapture>,
+    now: Instant,
+) -> Option<std::time::Duration> {
+    let composition = frame_state.composition_demand_timeout(now);
+    let capture = capture.map(|capture| capture.deadline.saturating_duration_since(now));
+    match (composition, capture) {
+        (Some(composition), Some(capture)) => Some(composition.min(capture)),
+        (Some(composition), None) => Some(composition),
+        (None, Some(capture)) => Some(capture),
+        (None, None) => None,
     }
+}
 
-    fn update_frame(
-        &mut self,
-        pixels: &[u8],
-        presentation_id: u64,
-        retain_capture_pixels: bool,
-    ) -> Result<()> {
-        let size = self.compositor.current_mode().size();
-        let damage =
-            smithay::utils::Rectangle::from_size((i32::from(size.0), i32::from(size.1)).into());
-        self.frame.render().draw(|target| {
-            if target.len() != pixels.len() {
-                bail!(
-                    "DRM memory frame has {} bytes but Bevy produced {}",
-                    target.len(),
-                    pixels.len()
-                );
-            }
-            target.copy_from_slice(pixels);
-            Ok(vec![damage])
-        })?;
-        if retain_capture_pixels {
-            self.pixels.clear();
-            self.pixels.extend_from_slice(pixels);
+fn log_presenter_event(event: &PresenterEvent) {
+    match event {
+        PresenterEvent::Ready { epoch } => info!(epoch, "direct DRM presenter is ready"),
+        PresenterEvent::FrameReleased {
+            outcome: FrameOutcome::Presented,
+            ..
+        } => {}
+        PresenterEvent::FrameReleased {
+            outcome: FrameOutcome::Unavailable,
+            ..
+        } => error!("direct DRM frame made physical presentation unavailable"),
+        PresenterEvent::FrameReleased { outcome, .. } => {
+            debug!(?outcome, "direct DRM frame was not presented")
         }
-        self.presentation_id = presentation_id;
-        Ok(())
-    }
-
-    fn frame_pixels(&self) -> &[u8] {
-        &self.pixels
-    }
-
-    fn clear_capture_pixels(&mut self) {
-        self.pixels.clear();
-    }
-
-    fn queue_frame(&mut self) -> Result<PresentOutcome> {
-        let element = MemoryRenderBufferRenderElement::from_buffer(
-            &mut self.pixman,
-            (0.0, 0.0),
-            &self.frame,
-            None,
-            None,
-            None,
-            Kind::Unspecified,
-        )?;
-        match self.compositor.render_frame(
-            &mut self.pixman,
-            &[element],
-            [0.0, 0.0, 0.0, 1.0],
-            FrameFlags::empty(),
-        ) {
-            Ok(_) => {}
-            Err(RenderFrameError::PrepareFrame(FrameError::EmptyFrame)) => {
-                debug!("DRM composition produced no scanout changes");
-                return Ok(PresentOutcome::Empty);
-            }
-            Err(RenderFrameError::PrepareFrame(FrameError::NoFreeSlotsError)) => {
-                warn!("DRM swapchain has no free slot; deferring presentation");
-                return Ok(PresentOutcome::Retry);
-            }
-            Err(RenderFrameError::PrepareFrame(error)) => {
-                let description = error.to_string();
-                match SwapBuffersError::from(error) {
-                    SwapBuffersError::TemporaryFailure(_) => {
-                        debug!(error = %description, "temporary DRM render failure");
-                        return Ok(PresentOutcome::Retry);
-                    }
-                    SwapBuffersError::AlreadySwapped | SwapBuffersError::ContextLost(_) => {
-                        bail!("failed to render DRM frame: {description}")
-                    }
-                }
-            }
-            Err(RenderFrameError::RenderFrame(error)) => {
-                bail!("failed to render DRM frame: {error}")
-            }
+        PresenterEvent::OutputUnavailable(message) => {
+            error!(%message, "physical DRM presentation is unavailable")
         }
-        let sequence = self.next_sequence;
-        match self.compositor.queue_frame(PresentedFrame {
-            sequence,
-            presentation_id: self.presentation_id,
-        }) {
-            Ok(()) => {}
-            Err(FrameError::EmptyFrame) => {
-                debug!("DRM compositor declined an empty frame");
-                return Ok(PresentOutcome::Empty);
-            }
-            Err(FrameError::NoFreeSlotsError) => {
-                warn!("DRM swapchain has no free slot; deferring page flip");
-                return Ok(PresentOutcome::Retry);
-            }
-            Err(error) => {
-                let description = error.to_string();
-                match SwapBuffersError::from(error) {
-                    SwapBuffersError::TemporaryFailure(_) => {
-                        debug!(error = %description, "temporary DRM page-flip failure");
-                        return Ok(PresentOutcome::Retry);
-                    }
-                    SwapBuffersError::AlreadySwapped | SwapBuffersError::ContextLost(_) => {
-                        bail!("failed to queue DRM frame: {description}")
-                    }
-                }
-            }
+        PresenterEvent::DeviceLost(message) => {
+            error!(%message, "direct DRM wgpu device was lost")
         }
-        self.next_sequence = self.next_sequence.saturating_add(1);
-        self.frame_pending = true;
-        Ok(PresentOutcome::Queued(sequence))
-    }
-
-    fn frame_submitted(&mut self, crtc: crtc::Handle) -> Result<Option<PresentedFrame>> {
-        if crtc != self.crtc {
-            return Ok(None);
+        PresenterEvent::UncapturedError(message) => {
+            error!(%message, "uncaptured error on the shared compositor wgpu device")
         }
-        let sequence = self
-            .compositor
-            .frame_submitted()
-            .map_err(|error| anyhow!("failed to retire DRM frame: {error}"))?;
-        self.frame_pending = false;
-        Ok(sequence)
-    }
-
-    fn pause(&mut self) {
-        self.session_active = false;
-        self.drm.pause();
-        self.frame_pending = false;
-    }
-
-    fn activate(&mut self) -> Result<()> {
-        self.drm
-            .activate(true)
-            .context("failed to reactivate DRM after VT switch")?;
-        self.compositor
-            .clear()
-            .context("failed to discard the pre-pause DRM frame")?;
-        self.compositor
-            .reset_state()
-            .context("failed to reset DRM output after VT switch")?;
-        self.session_active = true;
-        Ok(())
-    }
-
-    fn handle_udev(&mut self, event: UdevEvent) -> Result<()> {
-        match event {
-            UdevEvent::Changed { device_id } if device_id == self.device_id => {
-                for event in self.scanner.scan_connectors(&self.drm)? {
-                    match event {
-                        DrmScanEvent::Disconnected {
-                            crtc: Some(crtc), ..
-                        } if crtc == self.crtc => {
-                            bail!("the active DRM connector was disconnected")
-                        }
-                        DrmScanEvent::Changed {
-                            crtc: Some(crtc), ..
-                        } if crtc == self.crtc => {
-                            warn!("active connector modes changed; restart Weld to select a mode")
-                        }
-                        _ => {}
-                    }
-                }
-            }
-            UdevEvent::Removed { device_id } if device_id == self.device_id => {
-                bail!(
-                    "the selected DRM device {} was removed",
-                    self.device_path.display()
-                )
-            }
-            UdevEvent::Added { device_id, path } => {
-                warn!(?device_id, path = %path.display(), "additional DRM GPUs are not supported yet")
-            }
-            UdevEvent::Changed { .. } | UdevEvent::Removed { .. } => {}
-        }
-        Ok(())
+        PresenterEvent::Stopped => warn!("direct DRM presenter worker stopped"),
     }
 }
 

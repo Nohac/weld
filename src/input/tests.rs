@@ -14,9 +14,9 @@ use leafwing_input_manager::prelude::{ActionState, Actionlike, InputManagerPlugi
 
 use super::{
     GlobalShortcutPlugin, InputBridgePlugin, SeatInputEffect, SeatInputEffectKind,
-    enqueue_raw_input,
+    VirtualTerminalShortcutPlugin, enqueue_raw_input,
     raw::{InputPosition, LinuxButtonCode, LinuxKeycode, RawSeatEvent, RawSeatEventKind},
-    take_host_commands, take_input_effects,
+    take_host_commands, take_input_effects, take_virtual_terminal_switch_request,
 };
 use crate::runtime::HostCommand;
 
@@ -55,6 +55,18 @@ fn shortcut_test_app() -> App {
             ManualTextureViewHandle(1),
         )))
         .add_plugins(GlobalShortcutPlugin);
+    app
+}
+
+fn virtual_terminal_shortcut_test_app() -> App {
+    let mut app = App::new();
+    app.add_plugins(MinimalPlugins)
+        .add_plugins(InputPlugin)
+        .add_message::<PointerInput>()
+        .add_plugins(InputBridgePlugin::new(NormalizedRenderTarget::TextureView(
+            ManualTextureViewHandle(1),
+        )))
+        .add_plugins(VirtualTerminalShortcutPlugin);
     app
 }
 
@@ -168,6 +180,65 @@ fn global_shortcut_emits_and_consumes_trigger_pair_in_the_same_update() {
             13,
         )]
     );
+}
+
+#[test]
+fn drm_virtual_terminal_shortcut_emits_and_consumes_the_function_key() {
+    let mut app = virtual_terminal_shortcut_test_app();
+    for (keycode, time) in [(29, 10), (56, 11), (60, 12)] {
+        enqueue_raw_input(
+            app.world_mut(),
+            RawSeatEvent::new(
+                RawSeatEventKind::Keyboard {
+                    keycode: LinuxKeycode(keycode),
+                    logical_key: None,
+                    state: ButtonState::Pressed,
+                },
+                time,
+            ),
+        );
+    }
+
+    app.update();
+
+    assert_eq!(
+        take_virtual_terminal_switch_request(app.world_mut()),
+        Some(2)
+    );
+    assert_eq!(
+        take_input_effects(app.world_mut()),
+        [
+            SeatInputEffect::new(
+                SeatInputEffectKind::Keyboard {
+                    keycode: LinuxKeycode(29),
+                    state: ButtonState::Pressed,
+                },
+                10,
+            ),
+            SeatInputEffect::new(
+                SeatInputEffectKind::Keyboard {
+                    keycode: LinuxKeycode(56),
+                    state: ButtonState::Pressed,
+                },
+                11,
+            ),
+        ]
+    );
+
+    enqueue_raw_input(
+        app.world_mut(),
+        RawSeatEvent::new(
+            RawSeatEventKind::Keyboard {
+                keycode: LinuxKeycode(60),
+                logical_key: None,
+                state: ButtonState::Released,
+            },
+            13,
+        ),
+    );
+    app.update();
+
+    assert!(take_input_effects(app.world_mut()).is_empty());
 }
 
 #[test]

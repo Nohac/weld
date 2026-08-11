@@ -44,8 +44,8 @@ use crate::debug::{
 use crate::input::raw::RawSeatEvent;
 use crate::input::{
     GlobalShortcutPlugin, InputBridgePlugin, SeatInputEffect, SoftwareCursorPlugin,
-    enqueue_raw_input, set_input_update_time, software_cursor_scene, take_host_commands,
-    take_input_effects,
+    VirtualTerminalShortcutPlugin, enqueue_raw_input, set_input_update_time, software_cursor_scene,
+    take_host_commands, take_input_effects, take_virtual_terminal_switch_request,
 };
 use crate::layer::SHELL_Z_INDEX;
 use crate::runtime::HostCommand;
@@ -60,6 +60,11 @@ const COMPOSITION_TARGET_COUNT: usize = 2;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct CompositionTargetId(usize);
+
+impl CompositionTargetId {
+    pub(crate) const FIRST: Self = Self(0);
+    pub(crate) const SECOND: Self = Self(1);
+}
 
 struct CompositionTarget {
     texture: wgpu::Texture,
@@ -79,6 +84,7 @@ pub(crate) struct ShellRendererOptions<'a> {
     pub(crate) scale_factor: f64,
     pub(crate) remote_debug: Option<&'a str>,
     pub(crate) software_cursor: bool,
+    pub(crate) virtual_terminal_shortcuts: bool,
 }
 
 impl ShellRenderer {
@@ -94,6 +100,7 @@ impl ShellRenderer {
             scale_factor,
             remote_debug,
             software_cursor,
+            virtual_terminal_shortcuts,
         } = options;
         let render_creation = RenderCreation::manual(
             RenderDevice::from(device.clone()),
@@ -140,6 +147,9 @@ impl ShellRenderer {
         }
         if software_cursor {
             app.add_plugins(SoftwareCursorPlugin);
+        }
+        if virtual_terminal_shortcuts {
+            app.add_plugins(VirtualTerminalShortcutPlugin);
         }
         app.finish();
         app.cleanup();
@@ -192,7 +202,7 @@ impl ShellRenderer {
             redraw_requests,
             device: device.clone(),
             composition_targets,
-            completed_target: CompositionTargetId(0),
+            completed_target: CompositionTargetId::FIRST,
         })
     }
 
@@ -218,7 +228,7 @@ impl ShellRenderer {
         // Keep the current presenters pinned to their original target. Direct
         // DRM selects between both targets explicitly once worker ownership is
         // active, avoiding per-frame Bevy bind-group churn before then.
-        let target = CompositionTargetId(0);
+        let target = CompositionTargetId::FIRST;
         self.render_composition_to(target);
         target
     }
@@ -254,7 +264,7 @@ impl ShellRenderer {
         );
         set_output_physical_size(self.app.world_mut(), UVec2::new(width, height));
         self.composition_targets = composition_targets;
-        self.completed_target = CompositionTargetId(0);
+        self.completed_target = CompositionTargetId::FIRST;
     }
 
     /// Set the compositor-logical to physical scale used by Bevy UI layout.
@@ -267,16 +277,16 @@ impl ShellRenderer {
         self.target_view(self.completed_target)
     }
 
-    pub fn texture(&self) -> &wgpu::Texture {
-        self.target_texture(self.completed_target)
-    }
-
     pub(crate) fn target_view(&self, target: CompositionTargetId) -> &wgpu::TextureView {
         &self.composition_targets[target.0].view
     }
 
     pub(crate) fn target_texture(&self, target: CompositionTargetId) -> &wgpu::Texture {
         &self.composition_targets[target.0].texture
+    }
+
+    pub(crate) const fn target_ids(&self) -> [CompositionTargetId; COMPOSITION_TARGET_COUNT] {
+        [CompositionTargetId::FIRST, CompositionTargetId::SECOND]
     }
 
     pub fn enqueue_surface_event(&mut self, event: HostSurfaceEvent) {
@@ -293,6 +303,10 @@ impl ShellRenderer {
 
     pub fn take_host_commands(&mut self) -> Vec<HostCommand> {
         take_host_commands(self.app.world_mut())
+    }
+
+    pub fn take_virtual_terminal_switch_request(&mut self) -> Option<i32> {
+        take_virtual_terminal_switch_request(self.app.world_mut())
     }
 
     pub fn take_surface_actions(&mut self) -> Vec<SurfaceAction> {

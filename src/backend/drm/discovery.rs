@@ -11,7 +11,7 @@ use smithay::{
     },
     output::{Mode as SmithayOutputMode, PhysicalProperties},
     reexports::{
-        drm::control::{Mode, ModeTypeFlags, connector, crtc},
+        drm::control::{Mode, ModeTypeFlags, connector},
         rustix::fs::{Dev, OFlags},
     },
     utils::DeviceFd,
@@ -30,7 +30,6 @@ pub(super) struct DrmDeviceDiscovery {
 pub(super) struct DrmOutputDiscovery {
     pub(super) scanner: DrmScanner,
     pub(super) connector: connector::Info,
-    pub(super) crtc: crtc::Handle,
     pub(super) mode: Mode,
 }
 
@@ -70,7 +69,7 @@ pub(super) fn discover_output(
     drm: &impl smithay::reexports::drm::control::Device,
 ) -> Result<DrmOutputDiscovery> {
     let mut scanner = DrmScanner::new();
-    let (connector, crtc) = scanner
+    let (connector, _crtc) = scanner
         .scan_connectors(drm)?
         .into_iter()
         .find_map(|event| match event {
@@ -85,7 +84,6 @@ pub(super) fn discover_output(
     Ok(DrmOutputDiscovery {
         scanner,
         connector,
-        crtc,
         mode,
     })
 }

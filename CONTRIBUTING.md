@@ -2,10 +2,8 @@
 
 ## Start here
 
-Weld is at the setup and design-validation stage. Read [IDEA.md](IDEA.md) for
-the motivating direction, but treat it as a proposal rather than an
-implementation checklist. Its crate layout and subsystem boundaries may change
-as the first vertical slices teach us more.
+Read [IDEA.md](IDEA.md) for the motivating direction, but treat it as a
+proposal rather than an implementation checklist or settled source of truth.
 
 Before the first stable release, prioritize architectural coherence over
 changeset size. Sweeping, cross-cutting refactors are acceptable when they
@@ -29,126 +27,8 @@ Smithay features, vendored source, or local upstream patches.
 
 Tracked architecture evidence belongs under `docs/`; agent workflows and
 reusable implementation guidance belong under `.agents/skills/`.
-
-## Current technical direction
-
-The first validation slice is a single package using the restricted `bevy`
-umbrella crate. Weld owns the outer winit window, Smithay server, event-loop
-orchestration, and final wgpu presentation. Bevy supplies its app schedule,
-renderer, UI primitives, and BSN scene composition, rendering both client
-surfaces and shell UI into a Weld-owned texture through Bevy's manual
-render-device path. Do not enable Bevy's window runner or expand its features
-without a concrete need.
-
-Weld accepts multiple xdg-toplevels backed by `wl_shm`, copies their pixels
-into owned Bevy images, and exposes their lifecycle through protocol-neutral
-ECS entities.
-Readable subsurfaces above the toplevel root are ordered and positioned as
-internal Bevy image layers behind the same project-owned `SurfaceNode`; the
-root image stays on that node so its rounded clipping and root-only fast path
-remain intact. The default window plugin independently claims and decorates
-each mapped surface, so client content composes with ordinary Bevy UI. Smithay
-remains responsible for Wayland protocol state and applies focus or close
-actions chosen by ECS policy; it does not own window placement, stacking, or
-decoration. The final project-owned wgpu pass presents or captures Bevy's
-completed texture directly in the nested backend. The initial standalone
-backend keeps that composition boundary, then performs a blocking CPU readback
-into one Smithay memory element; Pixman and `DrmCompositor` are used only to
-populate GBM buffers and submit KMS page flips. This is a validation bridge,
-not the intended zero-copy renderer architecture. Weld advertises
-`xdg-decoration` and answers decoration
-objects with server-side mode. Creating a decoration object opts a client into
-Weld's server-side frame; clients that do not bind the global retain their own
-decorations and are presented without duplicate shell chrome. A late
-decoration decision swaps the client- or server-decoration presentation while
-the durable `AppWindow`, placement, stacking, focus, and backing assets remain
-intact. The presentation root's entity identity is intentionally not stable.
-
-Enabling Smithay's `desktop` feature for focused protocol utilities does not
-make its `Window` or `Space` types authoritative for ordinary application
-windows; their placement, stacking, presentation, and picking remain ECS-owned.
-When `wlr-layer-shell` becomes a concrete implementation slice, prefer
-Smithay's `LayerMap` as the host-side layout engine for anchors, margins,
-exclusive zones, and configure state, then project its committed results into
-ECS instead of reimplementing that protocol policy.
-
-Validated pointer `xdg_toplevel.move` and `xdg_toplevel.resize` requests cross
-the Smithay boundary as protocol-neutral ECS messages. The default window
-plugin owns placement and interactive-resize policy, while Smithay owns the
-pointer grab, configure state, and enforcement of the client's committed size
-constraints. Left and top resize edges remain anchored to the size the client
-actually commits. Pointer interactions are implemented; the equivalent touch
-path remains future work. Client-issued protocol move and resize requests are
-accepted only for client-decorated windows; Weld's chrome owns movement for
-server-decorated windows, and SSD resize handles remain outside this slice.
-Smithay does not currently expose a decoration-object destroy callback through
-this handler API, so a toplevel remains server decorated after creating that
-object until the toplevel itself is destroyed.
-
-Committed `xdg_surface.set_window_geometry` defines the plugin-facing
-`MappedSurface.logical_size` and the shell's placement and resize anchor. A
-client-decorated presentation renders the full root surface, including visual
-overflow outside that geometry. If such overflow exists, Weld treats it as a
-client-owned shadow or similar flare and suppresses its fallback shadow; a CSD
-surface without overflow receives the fallback. A server-decorated
-presentation crops the client to its window geometry and uses Weld's frame and
-shadow. Changing decoration ownership therefore changes the presentation's
-visual origin without changing its durable geometry anchor.
-
-XDG popups use Smithay's `PopupManager` for protocol trees, committed
-positioner state, and explicit seat grabs, while each mapped popup has a
-separate protocol-neutral `AppPopup` ECS role. Popup presentation reuses the
-ordinary full client-surface tree, input regions, scaling, and client-owned
-visual overflow beneath its owning window presentation. The parent presenter
-publishes its client window-geometry anchor, so popup code does not depend on a
-particular decoration implementation. Popups never receive `AppWindow`,
-`WindowPlacement`, shell decorations, fallback shadows, or interactive
-move/resize policy. The initial popup slice honors committed client positioner
-geometry directly; output-edge flip, slide, and resize constraints remain a
-bounded follow-up using the owner's on-output client geometry.
-
-Explicit Wayland input regions are evaluated in protocol order and may extend
-outside the window geometry, which keeps client-side resize gutters reachable.
-For an undeclared root input region, Weld deliberately treats only the window
-geometry as interactive even when CSD overflow is visible; this differs from
-the protocol's full-surface default so transparent shadow margins remain inert.
-Subsurfaces without an explicit input region use their full logical extent.
-Picking targets identify the exact root or subsurface layer, and Smithay
-revalidates that target before delivering input to the corresponding live
-`wl_surface`. Geometry spanning subsurfaces outside the root buffer is not yet
-represented. `ImageNode` is a provisional SHM backing, not the plugin-facing
-surface contract. Below-root subsurface ordering, role-only subsurface
-detachment without a later tree commit, dmabuf, damage-aware uploads,
-presentation timing, VRR, and HDR remain explicit spike boundaries rather
-than settled compositor architecture.
-
-Nested wheel input stays discrete, while Winit pixel scrolling is treated as a
-finger gesture and retains its start, move, end, cancellation, and per-axis
-stop lifecycle through Bevy projection and Wayland delivery. Axis frames use
-Smithay's existing pointer focus rather than performing another hit test or
-changing focus; focus changes remain the responsibility of pointer motion and
-button events. Leaving the host window or losing host focus cancels any active
-finger axes before clearing pointer state.
-
-Ordinary nested rendering is event driven. Host and client-surface changes
-request a composition directly; Bevy systems that drive continuous visual
-changes should emit `bevy::window::RequestRedraw` while they remain active.
-Bevy primitives participate normally in a requested composition, but their
-mutation is not a universal automatic invalidation signal. Frame pacing for a
-continuous request stream is deferred; an active calloop source can currently
-wake the host sooner than the nominal frame interval.
-
-BSN and Bevy's UI work are references for composition, behavior, accessibility,
-and state synchronization. Do not add Feathers by default. If Weld adopts Bevy
-scene or headless-widget infrastructure, keep domain state authoritative
-outside widgets and translate widget events into project-owned actions. We will
-design a Weld-specific visual layer separately when a concrete UI slice exists.
-
-Keep provisional decisions easy to reverse. Before making an architectural
-change, describe the ownership, boundary, and semantics it establishes. Judge
-pre-stable changes by whether they leave a coherent structure, not by diff
-size. Prefer smaller incremental changes after the structure and compatibility
-expectations have stabilized.
+Read [Architecture](docs/architecture.md) before changing subsystem ownership
+or lifecycle boundaries.
 
 ## Running tools
 
@@ -230,13 +110,11 @@ Read [REMOTE_DEBUGGING.md](REMOTE_DEBUGGING.md) before changing the protocol,
 capture completion, or exposed Bevy methods.
 
 When auto selects the nested target, it runs until its host window is closed.
-Client warnings about unsupported optional Wayland protocols are expected for
-this minimal slice.
 
 ### Standalone DRM backend
 
-Run the transitional standalone backend from an active TTY with a working
-logind or seatd/libseat provider:
+Run the standalone backend from an active TTY with a working logind or
+seatd/libseat provider:
 
 ```text
 cargo run
@@ -246,29 +124,17 @@ cargo run -- foot
 On a bare virtual terminal these commands select DRM automatically. The
 equivalent explicit override is `cargo run -- --backend drm -- foot`.
 
-It currently selects one GPU, one connected output, and that connector's
-preferred mode at scale 1. The cursor is a Bevy-composed software cursor. Use
-the initial compositor shortcuts to launch test clients or stop Weld:
+Use the compositor shortcuts to launch clients or stop Weld:
 
 - `Super+Enter`: foot
 - `Super+F`: Firefox
 - `Super+B`: Blender
 - `Super+Shift+Escape`: exit Weld
+- `Ctrl+Alt+F1` through `Ctrl+Alt+F10` (DRM only): switch virtual terminal
 
 `SIGINT` and `SIGTERM` also request an orderly shutdown, including when sent
-from another VT. Shutdown delivery can be delayed by up to the five-second
-blocking wgpu readback timeout.
-
-This backend deliberately favors a small end-to-end validation over runtime
-efficiency. Every new Bevy composition crosses the CPU and Pixman before KMS;
-cursor movement therefore damages and transfers the full frame. Hardware
-cursors, direct buffer sharing, dmabuf clients, multiple GPUs or outputs,
-output reconfiguration, and configurable output scaling remain follow-ups.
-The fixed `weld-0` socket also limits a runtime directory to one Weld instance.
-DRM screenshots and remote captures complete only after their page flip and
-report a timeout instead of silently succeeding when presentation stalls.
-The build and deterministic policy checks cover this path, but a real TTY run
-is still required to validate a particular seat, GPU, and display stack.
+from another VT. A real TTY run is required to validate a particular seat,
+GPU, and display stack.
 
 Use the standalone direct-wgpu probe to validate Vulkan display discovery,
 presentation, and VT recovery independently from Weld's compositor backend:
@@ -311,6 +177,10 @@ wiring before its behavior has settled.
   `SAFETY` comment that states the upheld invariant.
 - Prefer `#[expect(...)]` with a reason over `#[allow(...)]` for necessary lint
   exceptions.
+- Do not suppress structural lints such as excessive function arguments by
+  default. Prefer correcting the ownership boundary or introducing a cohesive
+  context type; when an exception is genuinely clearer, document the concrete
+  reason on the narrowest `#[expect(...)]`.
 - Keep imports at module scope and use descriptive names rather than
   abbreviations.
 - Link Rust types as [`TypeName`] in doc comments when rustdoc can resolve them.

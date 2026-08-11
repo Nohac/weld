@@ -86,6 +86,7 @@ pub(crate) fn run(arguments: AppArguments, signals: Signals) -> Result<()> {
             scale_factor: initial_scale_factor,
             remote_debug: arguments.remote_debug.as_deref(),
             software_cursor: false,
+            virtual_terminal_shortcuts: false,
         },
     )?;
 
@@ -258,7 +259,7 @@ pub(crate) fn run(arguments: AppArguments, signals: Signals) -> Result<()> {
             }
             if work.composition_advance {
                 shell.render_composition();
-                pending_presentation_id = Some(loop_data.server.stage_surface_presentation());
+                pending_presentation_id = Some(loop_data.server.stage_frame_callbacks());
                 frame_state.composition_rendered(update_now);
                 request_next_composition = bevy_requested_redraw;
             }
@@ -295,7 +296,7 @@ pub(crate) fn run(arguments: AppArguments, signals: Signals) -> Result<()> {
             if frame.presented {
                 frame_state.presented();
                 if let Some(presentation_id) = pending_presentation_id.take() {
-                    loop_data.server.frame_presented(presentation_id);
+                    loop_data.server.complete_frame_callbacks(presentation_id);
                 }
             }
             if let Some(capture_result) = frame.capture

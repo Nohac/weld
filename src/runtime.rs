@@ -117,6 +117,7 @@ pub(crate) struct FrameState {
     composition_dirty: bool,
     present_needed: bool,
     next_composition: Option<Instant>,
+    frame_interval: Duration,
 }
 
 impl Default for FrameState {
@@ -125,11 +126,22 @@ impl Default for FrameState {
             composition_dirty: true,
             present_needed: true,
             next_composition: None,
+            frame_interval: FRAME_INTERVAL,
         }
     }
 }
 
 impl FrameState {
+    pub(crate) fn with_refresh_millihertz(mut self, refresh_millihertz: u32) -> Self {
+        if refresh_millihertz > 0 {
+            self.frame_interval = Duration::from_nanos(
+                (1_000_000_000_000_u64 / u64::from(refresh_millihertz))
+                    .clamp(1_000_000, 100_000_000),
+            );
+        }
+        self
+    }
+
     #[cfg(test)]
     pub(crate) const fn composition_dirty(&self) -> bool {
         self.composition_dirty
@@ -161,18 +173,27 @@ impl FrameState {
             return INACTIVE_MAINTENANCE_INTERVAL;
         }
         if !self.composition_dirty {
-            return FRAME_INTERVAL;
+            return self.frame_interval;
         }
         self.next_composition
             .map(|deadline| deadline.saturating_duration_since(now))
             .unwrap_or(Duration::ZERO)
-            .min(FRAME_INTERVAL)
+            .min(self.frame_interval)
+    }
+
+    pub(crate) fn composition_demand_timeout(&self, now: Instant) -> Option<Duration> {
+        self.composition_dirty.then(|| {
+            self.next_composition
+                .map(|deadline| deadline.saturating_duration_since(now))
+                .unwrap_or(Duration::ZERO)
+                .min(self.frame_interval)
+        })
     }
 
     pub(crate) fn composition_rendered(&mut self, now: Instant) {
         self.composition_dirty = false;
         self.present_needed = true;
-        self.next_composition = Some(now + FRAME_INTERVAL);
+        self.next_composition = Some(now + self.frame_interval);
     }
 
     pub(crate) fn presented(&mut self) {
@@ -246,6 +267,24 @@ mod tests {
         assert_eq!(
             frame.composition_timeout(overdue, false),
             INACTIVE_MAINTENANCE_INTERVAL
+        );
+    }
+
+    #[test]
+    fn output_refresh_drives_pacing_with_defensive_bounds() {
+        let now = Instant::now();
+        let mut high_refresh = FrameState::default().with_refresh_millihertz(120_000);
+        high_refresh.composition_rendered(now);
+        assert_eq!(
+            high_refresh.composition_timeout(now, true),
+            Duration::from_nanos(8_333_333)
+        );
+
+        let mut implausibly_slow = FrameState::default().with_refresh_millihertz(1);
+        implausibly_slow.composition_rendered(now);
+        assert_eq!(
+            implausibly_slow.composition_timeout(now, true),
+            Duration::from_millis(100)
         );
     }
 }

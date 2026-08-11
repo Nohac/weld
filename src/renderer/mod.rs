@@ -17,55 +17,11 @@ use tracing::warn;
 use winit::event_loop::OwnedDisplayHandle;
 use winit::{dpi::PhysicalSize, window::Window};
 
+mod composite;
+
+pub(crate) use composite::CompositionBlitter;
+
 const CAPTURE_GPU_TIMEOUT: Duration = Duration::from_secs(5);
-
-pub(crate) struct WgpuContext {
-    instance: wgpu::Instance,
-    adapter: wgpu::Adapter,
-    device: wgpu::Device,
-    queue: wgpu::Queue,
-}
-
-impl WgpuContext {
-    pub(crate) fn headless() -> Result<Self> {
-        let mut descriptor = wgpu::InstanceDescriptor::new_without_display_handle();
-        descriptor.backends = wgpu::Backends::VULKAN;
-        let instance = wgpu::Instance::new(descriptor);
-        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-            power_preference: wgpu::PowerPreference::HighPerformance,
-            compatible_surface: None,
-            force_fallback_adapter: false,
-        }))
-        .context("no Vulkan adapter is available for standalone composition")?;
-        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-            label: Some("weld standalone device"),
-            ..Default::default()
-        }))
-        .context("failed to create the standalone wgpu device")?;
-        Ok(Self {
-            instance,
-            adapter,
-            device,
-            queue,
-        })
-    }
-
-    pub(crate) const fn instance(&self) -> &wgpu::Instance {
-        &self.instance
-    }
-
-    pub(crate) const fn adapter(&self) -> &wgpu::Adapter {
-        &self.adapter
-    }
-
-    pub(crate) const fn device(&self) -> &wgpu::Device {
-        &self.device
-    }
-
-    pub(crate) const fn queue(&self) -> &wgpu::Queue {
-        &self.queue
-    }
-}
 
 pub(crate) fn read_composition_rgba(
     device: &wgpu::Device,
@@ -143,9 +99,7 @@ pub struct NestedRenderer {
     device: wgpu::Device,
     queue: wgpu::Queue,
     surface_config: wgpu::SurfaceConfiguration,
-    bind_group_layout: wgpu::BindGroupLayout,
-    pipeline: wgpu::RenderPipeline,
-    sampler: wgpu::Sampler,
+    blitter: CompositionBlitter,
 }
 
 impl NestedRenderer {
@@ -185,67 +139,7 @@ impl NestedRenderer {
             .context("nested surface has no sRGB format")?;
         surface.configure(&device, &surface_config);
 
-        let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("weld layer bind group layout"),
-            entries: &[
-                wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                        multisampled: false,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                    count: None,
-                },
-            ],
-        });
-        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("weld compositor pipeline layout"),
-            bind_group_layouts: &[Some(&bind_group_layout)],
-            immediate_size: 0,
-        });
-        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("weld compositor shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("composite.wgsl").into()),
-        });
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("weld compositor pipeline"),
-            layout: Some(&pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: Some("vertex"),
-                compilation_options: Default::default(),
-                buffers: &[],
-            },
-            primitive: wgpu::PrimitiveState::default(),
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState::default(),
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: Some("fragment"),
-                compilation_options: Default::default(),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: surface_config.format,
-                    blend: Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-            }),
-            multiview_mask: None,
-            cache: None,
-        });
-        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-            label: Some("weld compositor sampler"),
-            mag_filter: wgpu::FilterMode::Linear,
-            min_filter: wgpu::FilterMode::Linear,
-            ..Default::default()
-        });
+        let blitter = CompositionBlitter::new(&device, surface_config.format);
 
         Ok(Self {
             window,
@@ -255,9 +149,7 @@ impl NestedRenderer {
             device,
             queue,
             surface_config,
-            bind_group_layout,
-            pipeline,
-            sampler,
+            blitter,
         })
     }
 
@@ -316,14 +208,17 @@ impl NestedRenderer {
         let output_view = surface_texture
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
-        let composition_bind_group =
-            self.create_bind_group("weld Bevy composition bind group", composition);
+        let composition_bind_group = self.blitter.create_bind_group(
+            &self.device,
+            "weld Bevy composition bind group",
+            composition,
+        );
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("weld compositor encoder"),
             });
-        self.encode_composite_pass(
+        self.blitter.encode(
             &mut encoder,
             "weld compositor pass",
             &output_view,
@@ -346,7 +241,7 @@ impl NestedRenderer {
                 view_formats: &[],
             });
             let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-            self.encode_composite_pass(
+            self.blitter.encode(
                 &mut encoder,
                 "weld screenshot composition pass",
                 &view,
@@ -407,39 +302,6 @@ impl NestedRenderer {
         })
     }
 
-    fn encode_composite_pass(
-        &self,
-        encoder: &mut wgpu::CommandEncoder,
-        label: &'static str,
-        target: &wgpu::TextureView,
-        composition_bind_group: &wgpu::BindGroup,
-    ) {
-        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-            label: Some(label),
-            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                view: target,
-                depth_slice: None,
-                resolve_target: None,
-                ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(wgpu::Color {
-                        r: 0.025,
-                        g: 0.032,
-                        b: 0.045,
-                        a: 1.0,
-                    }),
-                    store: wgpu::StoreOp::Store,
-                },
-            })],
-            depth_stencil_attachment: None,
-            timestamp_writes: None,
-            occlusion_query_set: None,
-            multiview_mask: None,
-        });
-        pass.set_pipeline(&self.pipeline);
-        pass.set_bind_group(0, composition_bind_group, &[]);
-        pass.draw(0..3, 0..1);
-    }
-
     fn save_capture(
         &self,
         capture: CaptureReadback,
@@ -478,23 +340,6 @@ impl NestedRenderer {
             self.surface_config.height,
             &pixels,
         )
-    }
-
-    fn create_bind_group(&self, label: &'static str, view: &wgpu::TextureView) -> wgpu::BindGroup {
-        self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some(label),
-            layout: &self.bind_group_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::Sampler(&self.sampler),
-                },
-            ],
-        })
     }
 
     fn recreate_surface(&mut self) -> Result<()> {

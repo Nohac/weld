@@ -205,10 +205,6 @@ impl ServerState {
         self.send_all_surface_scales();
     }
 
-    pub(crate) fn output(&self) -> Output {
-        self.output.clone()
-    }
-
     pub fn take_surface_events(&mut self) -> impl Iterator<Item = HostSurfaceEvent> + '_ {
         self.pending_surface_events.drain()
     }

@@ -10,6 +10,7 @@ mod projection;
 mod routing;
 mod shortcuts;
 mod state;
+mod virtual_terminal;
 
 pub(crate) mod raw;
 pub(crate) mod source;
@@ -25,6 +26,9 @@ pub(crate) use projection::enqueue_raw_input;
 pub(crate) use routing::{SeatInputEffect, SeatInputEffectKind, SurfaceHit, take_input_effects};
 pub(crate) use shortcuts::{GlobalShortcutPlugin, take_host_commands};
 pub(crate) use state::set_input_update_time;
+pub(crate) use virtual_terminal::{
+    VirtualTerminalShortcutPlugin, take_virtual_terminal_switch_request,
+};
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq, SystemSet)]
 enum InputSystems {
