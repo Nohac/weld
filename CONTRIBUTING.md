@@ -27,6 +27,9 @@ For compositor-host work, read [smithay](.agents/skills/smithay/SKILL.md) before
 changing protocol dispatch, event-loop integration, backends, rendering,
 Smithay features, vendored source, or local upstream patches.
 
+Tracked architecture evidence belongs under `docs/`; agent workflows and
+reusable implementation guidance belong under `.agents/skills/`.
+
 ## Current technical direction
 
 The first validation slice is a single package using the restricted `bevy`
@@ -266,6 +269,23 @@ DRM screenshots and remote captures complete only after their page flip and
 report a timeout instead of silently succeeding when presentation stalls.
 The build and deterministic policy checks cover this path, but a real TTY run
 is still required to validate a particular seat, GPU, and display stack.
+
+Use the standalone direct-wgpu probe to validate Vulkan display discovery,
+presentation, and VT recovery independently from Weld's compositor backend:
+
+```text
+scripts/run-drm-wsi-probe --seconds 30
+scripts/run-drm-wsi-probe --seconds 30 --switch-vt 1
+```
+
+Run it from a bare TTY and switch back before the deadline. A requested VT
+cycle succeeds only after presenting a frame following activation. Also verify
+that the destination VT's graphical compositor remains usable and that the
+text console is restored after exit. Output defaults to
+`/tmp/weld-drm-wsi-probe.log`; set `WELD_DRM_WSI_PROBE_LOG` to override it.
+
+See [Direct DRM presentation](docs/drm-presentation.md) for the probe evidence,
+ownership boundaries, and production integration constraints.
 
 For dependency changes, edit only the intended dependency. If an existing
 lockfile entry must move, use `cargo update -p <package> --precise <version>`;

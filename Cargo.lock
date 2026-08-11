@@ -5351,6 +5351,7 @@ name = "weldwm"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "ash",
  "bevy",
  "bevy_dylib",
  "bevy_winit",

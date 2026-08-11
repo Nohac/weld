@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+repository_root="$(cd -- "${script_dir}/.." && pwd)"
+probe_log="${WELD_DRM_WSI_PROBE_LOG:-/tmp/weld-drm-wsi-probe.log}"
+
+export WGPU_VALIDATION="${WGPU_VALIDATION:-1}"
+export RUST_LOG="${RUST_LOG:-info,wgpu_hal::vulkan::drm=trace}"
+
+echo "Writing DRM WSI probe output to ${probe_log}" >&2
+cd -- "${repository_root}"
+cargo run --example drm_wsi_probe -- "$@" 2>&1 | tee "${probe_log}"
