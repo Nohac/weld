@@ -1,0 +1,21 @@
+repository = "https://github.com/bevyengine/bevy.git"
+tag = "v0.19.0"
+revision = "c6f634ca9f406d68ba5109d921247b654cb42c10"
+compatibility_revision = "5036d978a294a3fbb1c42bf005d6a255e2978a74"
+crates = [
+  "bevy_camera",
+  "bevy_color",
+  "bevy_image",
+  "bevy_light",
+  "bevy_material",
+  "bevy_mesh",
+  "bevy_pbr",
+  "bevy_reflect",
+  "bevy_render",
+  "bevy_shader",
+  "bevy_sprite",
+  "bevy_text",
+]
+source = "Published crates.io sources for version 0.19.0"
+refresh = "Replace each listed crate with its published source for the target Bevy release, then reapply only the relevant changes from compatibility_revision."
+remove_when = "Weld adopts a suitable Bevy release that natively depends on wgpu 30 or newer."

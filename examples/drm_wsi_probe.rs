@@ -205,6 +205,7 @@ fn main() -> Result<()> {
             power_preference: wgpu::PowerPreference::HighPerformance,
             compatible_surface: Some(&surface),
             force_fallback_adapter: false,
+            apply_limit_buckets: false,
         }))
         .context("no Vulkan adapter can present to the direct DRM surface")?;
     ensure_same_adapter(&adapter, &compatible_adapter)?;
@@ -726,7 +727,7 @@ fn present_clear_frame(
         });
     }
     queue.submit([encoder.finish()]);
-    surface_texture.present();
+    queue.present(surface_texture);
     if suboptimal {
         Ok(PresentOutcome::PresentedSuboptimal)
     } else {

@@ -91,6 +91,7 @@ impl DirectDrmGpu {
             power_preference: wgpu::PowerPreference::HighPerformance,
             compatible_surface: Some(&surface),
             force_fallback_adapter: false,
+            apply_limit_buckets: false,
         }))
         .context("no Vulkan adapter can present to the direct DRM surface")?;
         ensure_same_adapter(&preflight_adapter, &adapter)?;

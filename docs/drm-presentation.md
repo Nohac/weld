@@ -19,6 +19,14 @@ The initial target is modern Vulkan hardware, one GPU, and one output. This
 does not establish singleton presenter or output APIs that would prevent later
 multi-output or multi-GPU work.
 
+Weld temporarily patches its Bevy 0.19 rendering crates to wgpu 30. Version 30
+adds the initial resource state to `Device::create_texture_from_hal`, allowing
+a future DMA-BUF importer to adopt an already initialized Vulkan image without
+lying to wgpu's resource tracker. This dependency pin enables that work but
+does not implement the import path. It must be removed, together with
+`vendor/bevy-wgpu30`, when Weld adopts a suitable Bevy release with native wgpu
+30 or newer support.
+
 ## Validated display path
 
 The probe has presented directly through wgpu on AMD RADV using:

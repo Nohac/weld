@@ -8,6 +8,15 @@ surfaces and shell UI into a Weld-owned texture through Bevy's manual
 render-device path. Do not enable Bevy's window runner or expand its features
 without a concrete need.
 
+Bevy's public APIs remain pinned to 0.19, while the active rendering crates are
+temporarily patched under `vendor/bevy-wgpu30` to use wgpu 30 as one coherent
+type generation. This pin exists because wgpu 30 lets Weld tell the resource
+tracker the initial state of an already initialized HAL texture, which is a
+prerequisite for importing client DMA-BUF images without an intermediate CPU
+copy. The pin does not itself implement DMA-BUF import. Remove the vendor tree,
+its provenance record, and the root `[patch.crates-io]` section when Weld
+adopts a suitable Bevy release that natively depends on wgpu 30 or newer.
+
 Weld accepts multiple xdg-toplevels backed by `wl_shm`, copies their pixels
 into owned Bevy images, and exposes their lifecycle through protocol-neutral
 ECS entities.

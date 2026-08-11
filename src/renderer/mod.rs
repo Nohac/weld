@@ -73,7 +73,9 @@ pub(crate) fn read_composition_rgba(
         .recv_timeout(CAPTURE_GPU_TIMEOUT)
         .context("GPU composition mapping callback did not complete")?
         .context("GPU composition buffer mapping failed")?;
-    let mapped = slice.get_mapped_range();
+    let mapped = slice
+        .get_mapped_range()
+        .context("GPU composition mapped range is unavailable")?;
     let pixels = decode_capture_rows(
         &mapped,
         width,
@@ -119,6 +121,7 @@ impl NestedRenderer {
             power_preference: wgpu::PowerPreference::HighPerformance,
             compatible_surface: Some(&surface),
             force_fallback_adapter: false,
+            apply_limit_buckets: false,
         }))
         .context("no Vulkan adapter can present to the nested window")?;
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
@@ -286,7 +289,7 @@ impl NestedRenderer {
         });
 
         let submission = self.queue.submit([encoder.finish()]);
-        surface_texture.present();
+        self.queue.present(surface_texture);
 
         let capture_result = capture.zip(capture_path).map(|(capture, path)| {
             self.save_capture(capture, submission, path)
@@ -324,7 +327,9 @@ impl NestedRenderer {
             .context("GPU screenshot mapping callback did not complete")?
             .context("GPU screenshot buffer mapping failed")?;
 
-        let mapped = slice.get_mapped_range();
+        let mapped = slice
+            .get_mapped_range()
+            .context("GPU screenshot mapped range is unavailable")?;
         let pixels = decode_capture_rows(
             &mapped,
             self.surface_config.width,

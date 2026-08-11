@@ -39,7 +39,8 @@ smithay-drm-extras = { path = "vendor/smithay/smithay-drm-extras", default-featu
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.22", features = ["env-filter"] }
 wayland-sys = { version = "0.31.11", features = ["client", "dlopen"] }
-wgpu = { version = "29.0.3", default-features = false, features = [
+wgpu = { version = "30", default-features = false, features = [
+    "drm",
     "naga-ir",
     "vulkan",
     "wgsl",
@@ -65,3 +66,19 @@ opt-level = 3
 
 [profile.release]
 panic = "unwind"
+
+# Temporary Bevy 0.19 compatibility layer. Remove this entire section when
+# Weld adopts a Bevy release that natively depends on wgpu 30 or newer.
+[patch.crates-io]
+bevy_camera = { path = "vendor/bevy-wgpu30/bevy_camera" }
+bevy_color = { path = "vendor/bevy-wgpu30/bevy_color" }
+bevy_image = { path = "vendor/bevy-wgpu30/bevy_image" }
+bevy_light = { path = "vendor/bevy-wgpu30/bevy_light" }
+bevy_material = { path = "vendor/bevy-wgpu30/bevy_material" }
+bevy_mesh = { path = "vendor/bevy-wgpu30/bevy_mesh" }
+bevy_pbr = { path = "vendor/bevy-wgpu30/bevy_pbr" }
+bevy_reflect = { path = "vendor/bevy-wgpu30/bevy_reflect" }
+bevy_render = { path = "vendor/bevy-wgpu30/bevy_render" }
+bevy_shader = { path = "vendor/bevy-wgpu30/bevy_shader" }
+bevy_sprite = { path = "vendor/bevy-wgpu30/bevy_sprite" }
+bevy_text = { path = "vendor/bevy-wgpu30/bevy_text" }

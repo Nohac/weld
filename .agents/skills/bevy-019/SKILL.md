@@ -35,6 +35,11 @@ description: Implement, review, or migrate Weld code against Bevy 0.19 specifica
 ## Version and dependency rules
 
 - Target the Bevy 0.19 release line and write 0.19 syntax.
+- Bevy APIs remain pinned to 0.19, but Weld temporarily patches the active
+  rendering crates in `vendor/bevy-wgpu30` to use wgpu 30. Read
+  `vendor/bevy-wgpu30.upstream` before changing that compatibility layer, and
+  remove it when Weld adopts a suitable Bevy release with native wgpu 30 or
+  newer support.
 - Select features deliberately. Do not inherit a feature set from a full Bevy
   game or editor when Weld only needs a standalone crate.
 - Check the 0.18-to-0.19 migration guide when adapting older examples.

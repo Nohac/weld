@@ -522,7 +522,7 @@ impl FramePresenter<'_> {
             &bind_group,
         );
         self.queue.submit([encoder.finish()]);
-        surface_texture.present();
+        self.queue.present(surface_texture);
         if suboptimal && configure_surface(self.surface, self.device, self.surface_config).is_err()
         {
             return FrameOutcome::Unavailable;
