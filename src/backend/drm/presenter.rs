@@ -14,7 +14,10 @@ use anyhow::{Context, Result};
 use calloop::channel::Sender as CalloopSender;
 use tracing::{debug, warn};
 
-use crate::{renderer::CompositionBlitter, shell::CompositionTargetId};
+use crate::{
+    renderer::{CompositionBlitter, CursorOverlay},
+    shell::CompositionTargetId,
+};
 
 use super::direct::DirectDrmGpu;
 
@@ -58,7 +61,15 @@ struct FrameTicket {
 #[derive(Clone)]
 struct PendingFrame {
     ticket: FrameTicket,
-    composition: wgpu::TextureView,
+    payload: PresentedComposition,
+}
+
+#[derive(Clone)]
+struct PresentedComposition {
+    // wgpu resources are reference-counted. Cloning this handle retains the
+    // same GPU texture view; it never copies composition pixels.
+    view: wgpu::TextureView,
+    cursor: CursorOverlay,
 }
 
 struct FrameQueue<Payload> {
@@ -153,7 +164,7 @@ pub(super) struct PresenterHandle {
     epoch: Arc<AtomicU64>,
     active: Arc<AtomicBool>,
     ready: bool,
-    frames: FrameQueue<wgpu::TextureView>,
+    frames: FrameQueue<PresentedComposition>,
     stopped: bool,
     shutdown_requested: bool,
 }
@@ -211,13 +222,21 @@ impl PresenterHandle {
             .map(|(ticket, _)| ticket.target)
     }
 
-    pub(super) fn offer(&mut self, target: CompositionTargetId, composition: wgpu::TextureView) {
+    pub(super) fn offer(
+        &mut self,
+        target: CompositionTargetId,
+        composition: wgpu::TextureView,
+        cursor: CursorOverlay,
+    ) {
         let submit_now = self.can_submit();
         if let Some(frame) = self.frames.offer(
             PRESENTER_GENERATION,
             self.epoch.load(Ordering::Acquire),
             target,
-            composition,
+            PresentedComposition {
+                view: composition,
+                cursor,
+            },
             submit_now,
         ) {
             self.send_frame(frame);
@@ -329,14 +348,15 @@ impl PresenterHandle {
                 .is_some_and(|worker| !worker.is_finished())
     }
 
-    fn send_frame(&mut self, frame: (FrameTicket, wgpu::TextureView)) {
+    fn send_frame(&mut self, frame: (FrameTicket, PresentedComposition)) {
+        let (ticket, payload) = frame;
         let command = PresenterCommand::Frame(PendingFrame {
-            ticket: frame.0,
-            composition: frame.1.clone(),
+            ticket,
+            payload: payload.clone(),
         });
         if self.commands.send(command).is_err() {
             self.ready = false;
-            self.frames.send_failed(frame);
+            self.frames.send_failed((ticket, payload));
         }
     }
 
@@ -481,10 +501,14 @@ impl FramePresenter<'_> {
         let output = surface_texture
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
+        // FrameQueue permits only one worker-owned submission at a time, so
+        // this shared uniform is rewritten immediately before the matching
+        // queue submission and cannot be overtaken by a later cursor payload.
+        self.blitter.set_cursor(self.queue, frame.payload.cursor);
         let bind_group = self.blitter.create_bind_group(
             self.device,
             "weld direct DRM composition bind group",
-            &frame.composition,
+            &frame.payload.view,
         );
         let mut encoder = self
             .device

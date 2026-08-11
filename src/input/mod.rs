@@ -5,7 +5,6 @@
 //! then resolves Bevy picking and emits protocol-neutral client effects in
 //! PreUpdate. Smithay resources never enter the ECS world.
 
-mod cursor;
 mod projection;
 mod routing;
 mod shortcuts;
@@ -21,11 +20,10 @@ use bevy::{
     ecs::schedule::SystemSet,
 };
 
-pub(crate) use cursor::{SoftwareCursorPlugin, software_cursor_scene};
 pub(crate) use projection::enqueue_raw_input;
 pub(crate) use routing::{SeatInputEffect, SeatInputEffectKind, SurfaceHit, take_input_effects};
 pub(crate) use shortcuts::{GlobalShortcutPlugin, take_host_commands};
-pub(crate) use state::set_input_update_time;
+pub(crate) use state::{projected_pointer_position, set_input_update_time};
 pub(crate) use virtual_terminal::{
     VirtualTerminalShortcutPlugin, take_virtual_terminal_switch_request,
 };

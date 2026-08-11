@@ -41,11 +41,11 @@ use crate::debug::{
     CaptureRequest, DebugProtocolPlugin, complete_capture, configure_remote_debug,
     take_capture_request,
 };
-use crate::input::raw::RawSeatEvent;
+use crate::input::raw::{InputPosition, RawSeatEvent};
 use crate::input::{
-    GlobalShortcutPlugin, InputBridgePlugin, SeatInputEffect, SoftwareCursorPlugin,
-    VirtualTerminalShortcutPlugin, enqueue_raw_input, set_input_update_time, software_cursor_scene,
-    take_host_commands, take_input_effects, take_virtual_terminal_switch_request,
+    GlobalShortcutPlugin, InputBridgePlugin, SeatInputEffect, VirtualTerminalShortcutPlugin,
+    enqueue_raw_input, projected_pointer_position, set_input_update_time, take_host_commands,
+    take_input_effects, take_virtual_terminal_switch_request,
 };
 use crate::layer::SHELL_Z_INDEX;
 use crate::runtime::HostCommand;
@@ -83,7 +83,6 @@ pub(crate) struct ShellRendererOptions<'a> {
     pub(crate) size: UVec2,
     pub(crate) scale_factor: f64,
     pub(crate) remote_debug: Option<&'a str>,
-    pub(crate) software_cursor: bool,
     pub(crate) virtual_terminal_shortcuts: bool,
 }
 
@@ -99,7 +98,6 @@ impl ShellRenderer {
             size,
             scale_factor,
             remote_debug,
-            software_cursor,
             virtual_terminal_shortcuts,
         } = options;
         let render_creation = RenderCreation::manual(
@@ -145,9 +143,6 @@ impl ShellRenderer {
             configure_remote_debug(&mut app, address)
                 .context("failed to configure remote debugging")?;
         }
-        if software_cursor {
-            app.add_plugins(SoftwareCursorPlugin);
-        }
         if virtual_terminal_shortcuts {
             app.add_plugins(VirtualTerminalShortcutPlugin);
         }
@@ -185,12 +180,6 @@ impl ShellRenderer {
             .spawn_scene(shell_overlay(camera))
             .context("failed to spawn the BSN shell overlay")?
             .insert(UiTargetCamera(camera));
-        if software_cursor {
-            app.world_mut()
-                .spawn_scene(software_cursor_scene())
-                .context("failed to spawn the software cursor")?
-                .insert(UiTargetCamera(camera));
-        }
         let redraw_requests = app
             .world()
             .get_resource::<Messages<RequestRedraw>>()
@@ -277,6 +266,10 @@ impl ShellRenderer {
         self.target_view(self.completed_target)
     }
 
+    pub(crate) const fn completed_target(&self) -> CompositionTargetId {
+        self.completed_target
+    }
+
     pub(crate) fn target_view(&self, target: CompositionTargetId) -> &wgpu::TextureView {
         &self.composition_targets[target.0].view
     }
@@ -295,6 +288,10 @@ impl ShellRenderer {
 
     pub fn enqueue_input_event(&mut self, event: RawSeatEvent) {
         enqueue_raw_input(self.app.world_mut(), event);
+    }
+
+    pub(crate) fn pointer_position(&self) -> Option<InputPosition> {
+        projected_pointer_position(self.app.world())
     }
 
     pub fn take_input_effects(&mut self) -> Vec<SeatInputEffect> {

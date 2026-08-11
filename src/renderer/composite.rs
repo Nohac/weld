@@ -1,9 +1,49 @@
 //! Shared GPU composition blit used by nested and direct presentation.
 
+use wgpu::util::DeviceExt;
+
+const CURSOR_UNIFORM_SIZE: usize = 16;
+
+/// Cursor state applied by the physical presenter after Bevy composition.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(crate) struct CursorOverlay {
+    center_x: f32,
+    center_y: f32,
+    radius: f32,
+    visible: f32,
+}
+
+impl CursorOverlay {
+    pub(crate) fn from_logical(position: Option<(f64, f64)>, scale_factor: f64) -> Self {
+        let Some((x, y)) = position else {
+            return Self::default();
+        };
+        Self {
+            center_x: (x * scale_factor) as f32,
+            center_y: (y * scale_factor) as f32,
+            radius: (7.0 * scale_factor) as f32,
+            visible: 1.0,
+        }
+    }
+
+    fn uniform_bytes(self) -> [u8; CURSOR_UNIFORM_SIZE] {
+        let mut bytes = [0; CURSOR_UNIFORM_SIZE];
+        for (index, value) in [self.center_x, self.center_y, self.radius, self.visible]
+            .into_iter()
+            .enumerate()
+        {
+            let offset = index * size_of::<f32>();
+            bytes[offset..offset + size_of::<f32>()].copy_from_slice(&value.to_le_bytes());
+        }
+        bytes
+    }
+}
+
 pub(crate) struct CompositionBlitter {
     bind_group_layout: wgpu::BindGroupLayout,
     pipeline: wgpu::RenderPipeline,
     sampler: wgpu::Sampler,
+    cursor_uniform: wgpu::Buffer,
 }
 
 impl CompositionBlitter {
@@ -25,6 +65,16 @@ impl CompositionBlitter {
                     binding: 1,
                     visibility: wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
                     count: None,
                 },
             ],
@@ -69,11 +119,21 @@ impl CompositionBlitter {
             min_filter: wgpu::FilterMode::Linear,
             ..Default::default()
         });
+        let cursor_uniform = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("weld presenter cursor uniform"),
+            contents: &CursorOverlay::default().uniform_bytes(),
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::UNIFORM,
+        });
         Self {
             bind_group_layout,
             pipeline,
             sampler,
+            cursor_uniform,
         }
+    }
+
+    pub(crate) fn set_cursor(&self, queue: &wgpu::Queue, cursor: CursorOverlay) {
+        queue.write_buffer(&self.cursor_uniform, 0, &cursor.uniform_bytes());
     }
 
     pub(crate) fn create_bind_group(
@@ -93,6 +153,10 @@ impl CompositionBlitter {
                 wgpu::BindGroupEntry {
                     binding: 1,
                     resource: wgpu::BindingResource::Sampler(&self.sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: self.cursor_uniform.as_entire_binding(),
                 },
             ],
         })
@@ -129,5 +193,27 @@ impl CompositionBlitter {
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, composition, &[]);
         pass.draw(0..3, 0..1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::CursorOverlay;
+
+    #[test]
+    fn cursor_overlay_scales_logical_position_and_radius_to_physical_pixels() {
+        assert_eq!(
+            CursorOverlay::from_logical(Some((80.0, 40.0)), 1.25),
+            CursorOverlay {
+                center_x: 100.0,
+                center_y: 50.0,
+                radius: 8.75,
+                visible: 1.0,
+            }
+        );
+        assert_eq!(
+            CursorOverlay::from_logical(None, 1.25),
+            CursorOverlay::default()
+        );
     }
 }

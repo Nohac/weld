@@ -27,7 +27,10 @@ remain responsive while a driver blocks. Bevy owns two identified composition
 targets; the host never writes the target currently owned by that worker, and
 pending compositions are bounded to the newest host-owned target. Physical
 output availability does not gate demand-driven composition or client frame
-callbacks. Weld advertises
+callbacks. The DRM cursor is presentation metadata rather than a Bevy UI node:
+cursor-only motion reuses the completed composition and updates the final wgpu
+blit without running Bevy's render app. Pointer interactions that actually
+change shell UI still request an ordinary composition. Weld advertises
 `xdg-decoration` and answers decoration
 objects with server-side mode. Creating a decoration object opts a client into
 Weld's server-side frame; clients that do not bind the global retain their own

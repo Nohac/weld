@@ -130,11 +130,15 @@ stream, client commit, Bevy redraw, or other composition consumer.
 
 ## Composition ownership
 
-Bevy renders into two project-owned composition targets. Target identity is
-part of every presenter frame request and result; the host never renders into
-a target while the presentation worker owns it. While FIFO acquisition blocks
-for one target, newer state may be rendered and coalesced into the other target
-without growing a frame queue.
+Bevy renders into two project-owned composition targets. Target identity and
+the latest presenter-owned cursor overlay are part of every presenter frame
+request; target identity is repeated in the result. The host never renders
+into a target while the presentation worker owns it. While FIFO acquisition
+blocks for one target, newer state may be rendered and coalesced into the
+other target without growing a frame queue. Cursor-only motion offers the
+completed target again with updated overlay metadata instead of dirtying Bevy
+composition. The pending slot retains only the newest complete composition and
+cursor payload.
 
 Every terminal presenter result releases its target, including deferred,
 interrupted, unavailable-output, device-loss, worker-stop, and panic outcomes.
@@ -145,12 +149,18 @@ the channel before the host can submit another Bevy write to that target. Both
 operations use the same wgpu queue, so the later write is ordered after the
 blit read.
 
+The worker owns one cursor uniform shared across its submissions and rewrites
+it immediately before submitting the matching frame. Its one-in-flight queue
+ordering prevents a later cursor payload from overtaking that write. Nested
+presentation leaves the same uniform hidden and relies on its host cursor.
+
 Resizing or replacing the targets first advances their generation. The host
 then waits for or invalidates any outstanding ownership before dropping and
 recreating both textures. A screenshot reads the completed target associated
 with the requested frame. Its copy submission uses the same queue and retains
 that target until readback has been ordered, preventing a later composition
-from overwriting it first.
+from overwriting it first. Captures omit the presenter or host cursor in both
+DRM and nested modes.
 
 Nested and direct presentation deliberately complete client frame callbacks
 at different boundaries. The nested backend completes them after its host

@@ -55,3 +55,9 @@ pub(crate) fn set_input_update_time(world: &mut World, time: u32) {
         update_time.0 = time;
     }
 }
+
+pub(crate) fn projected_pointer_position(world: &World) -> Option<InputPosition> {
+    world
+        .get_resource::<ProjectedPointerState>()
+        .and_then(|pointer| pointer.0.host_position)
+}

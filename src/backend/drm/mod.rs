@@ -32,7 +32,7 @@ use crate::{
         raw::{RawSeatEvent, RawSeatEventKind},
         source::libinput::LibinputAdapter,
     },
-    renderer::{read_composition_rgba, write_png},
+    renderer::{CursorOverlay, read_composition_rgba, write_png},
     runtime::{
         ChildProcesses, FrameState, HostCommand, LoopData, PendingCapture, iteration_work,
         server_mut,
@@ -235,7 +235,6 @@ pub(crate) fn run(arguments: AppArguments, signals: Signals) -> Result<()> {
             ),
             scale_factor: output_metrics.scale_factor(),
             remote_debug: arguments.remote_debug.as_deref(),
-            software_cursor: true,
             virtual_terminal_shortcuts: true,
         },
     )?;
@@ -270,6 +269,7 @@ pub(crate) fn run(arguments: AppArguments, signals: Signals) -> Result<()> {
         .map(|path| PendingCapture::startup(path, child_requested));
     let remote_debug_enabled = arguments.remote_debug.is_some();
     let mut frame_state = FrameState::default().with_refresh_millihertz(refresh_millihertz);
+    let mut cursor = CursorOverlay::default();
     let mut session_active = true;
     info!(
         socket = ?loop_data.server.socket_name,
@@ -345,6 +345,16 @@ pub(crate) fn run(arguments: AppArguments, signals: Signals) -> Result<()> {
                 started_at.elapsed().as_millis() as u32,
                 work.composition_advance,
             );
+            let next_cursor = CursorOverlay::from_logical(
+                shell
+                    .pointer_position()
+                    .map(|position| (position.x, position.y)),
+                output_metrics.scale_factor(),
+            );
+            if next_cursor != cursor {
+                cursor = next_cursor;
+                frame_state.request_present();
+            }
             for action in shell.take_surface_actions() {
                 loop_data.server.apply_surface_action(action);
             }
@@ -412,7 +422,7 @@ pub(crate) fn run(arguments: AppArguments, signals: Signals) -> Result<()> {
                     .map_err(|error| error.to_string());
                     exit_requested |= complete_capture(&mut shell, capture, result)?;
                 }
-                presenter.offer(target, shell.target_view(target).clone());
+                presenter.offer(target, shell.target_view(target).clone(), cursor);
                 frame_state.presented();
             }
         }
@@ -436,6 +446,15 @@ pub(crate) fn run(arguments: AppArguments, signals: Signals) -> Result<()> {
         }
         if request_next_composition {
             frame_state.request_composition();
+        }
+        if frame_state.presentation_due()
+            && session_active
+            && output_monitor.connected
+            && output_monitor.mode_compatible
+        {
+            let target = shell.completed_target();
+            presenter.offer(target, shell.target_view(target).clone(), cursor);
+            frame_state.presented();
         }
         loop_data.server.flush_clients();
         children.reap();

@@ -19,7 +19,7 @@ use winit::{dpi::PhysicalSize, window::Window};
 
 mod composite;
 
-pub(crate) use composite::CompositionBlitter;
+pub(crate) use composite::{CompositionBlitter, CursorOverlay};
 
 const CAPTURE_GPU_TIMEOUT: Duration = Duration::from_secs(5);
 

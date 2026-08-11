@@ -85,7 +85,6 @@ pub(crate) fn run(arguments: AppArguments, signals: Signals) -> Result<()> {
             size: UVec2::new(initial_size.width, initial_size.height),
             scale_factor: initial_scale_factor,
             remote_debug: arguments.remote_debug.as_deref(),
-            software_cursor: false,
             virtual_terminal_shortcuts: false,
         },
     )?;
