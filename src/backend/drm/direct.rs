@@ -14,6 +14,8 @@ use smithay::{
 };
 use tracing::info;
 
+use crate::dmabuf::{DmabufCapabilities, request_weld_device};
+
 #[derive(Clone, Copy, Debug)]
 pub(super) struct DirectMode {
     pub(super) plane_index: u32,
@@ -32,6 +34,7 @@ pub(super) struct DirectDrmGpu {
     pub(super) surface_config: wgpu::SurfaceConfiguration,
     pub(super) mode: DirectMode,
     pub(super) _drm: DrmDeviceFd,
+    pub(super) dmabuf_capabilities: Option<DmabufCapabilities>,
 }
 
 impl DirectDrmGpu {
@@ -95,11 +98,9 @@ impl DirectDrmGpu {
         }))
         .context("no Vulkan adapter can present to the direct DRM surface")?;
         ensure_same_adapter(&preflight_adapter, &adapter)?;
-        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-            label: Some("weld direct DRM device"),
-            ..Default::default()
-        }))
-        .context("failed to create the direct DRM wgpu device")?;
+        let (device, queue, dmabuf_capabilities) =
+            request_weld_device(&adapter, "weld direct DRM device")
+                .context("failed to create the direct DRM wgpu device")?;
 
         let capabilities = surface.get_capabilities(&adapter);
         let mut surface_config = surface
@@ -137,6 +138,7 @@ impl DirectDrmGpu {
             surface_config,
             mode: direct_mode,
             _drm: drm.clone(),
+            dmabuf_capabilities,
         })
     }
 }

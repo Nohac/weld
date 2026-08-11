@@ -17,10 +17,10 @@ use smithay::{
 };
 use tracing::{debug, info, warn};
 
-use crate::surface::{AppPopup, HostSurfaceEvent, SurfaceId};
+use crate::surface::{AppPopup, SurfaceId};
 
 use super::{
-    ServerState,
+    PendingSurfaceEvent, PendingSurfaceEventKind, ServerState,
     output::send_preferred_surface_scale,
     surface_tree::SurfaceTreeState,
     toplevel::{IndexedStore, allocate_surface_id},
@@ -113,10 +113,11 @@ impl ServerState {
         }
 
         let snapshot = {
-            let Some(popup) = self.popups.get_mut(surface_id) else {
+            let (popups, releases) = (&mut self.popups, &mut self.dmabuf_releases);
+            let Some(popup) = popups.get_mut(surface_id) else {
                 return true;
             };
-            popup.tree.update(surface_id, root)
+            popup.tree.update(surface_id, root, releases)
         };
         if snapshot.root.is_none() {
             self.clear_input_focus_for_surface(root, self.event_time());
@@ -127,11 +128,10 @@ impl ServerState {
         // surface's MultiCache entry.
         self.publish_popup_layout(root);
         self.presentation_requested = true;
-        self.pending_surface_events
-            .push(HostSurfaceEvent::TreeSnapshot {
-                surface: surface_id,
-                snapshot,
-            });
+        self.pending_surface_events.push_back(PendingSurfaceEvent {
+            surface: surface_id,
+            kind: PendingSurfaceEventKind::TreeSnapshot(snapshot),
+        });
         true
     }
 
@@ -145,11 +145,10 @@ impl ServerState {
         };
         let snapshot = popup.tree.remove_surface(root, removed);
         self.presentation_requested = true;
-        self.pending_surface_events
-            .push(HostSurfaceEvent::TreeSnapshot {
-                surface: surface_id,
-                snapshot,
-            });
+        self.pending_surface_events.push_back(PendingSurfaceEvent {
+            surface: surface_id,
+            kind: PendingSurfaceEventKind::TreeSnapshot(snapshot),
+        });
         true
     }
 
@@ -161,8 +160,10 @@ impl ServerState {
         self.clear_input_focus_for_surface(wl_surface, self.event_time());
         self.output.leave(wl_surface);
         self.presentation_requested = true;
-        self.pending_surface_events
-            .push(HostSurfaceEvent::Destroyed { surface: id });
+        self.pending_surface_events.push_back(PendingSurfaceEvent {
+            surface: id,
+            kind: PendingSurfaceEventKind::Destroyed,
+        });
     }
 
     pub(super) fn reposition_popup(
@@ -277,8 +278,10 @@ impl ServerState {
                 continue;
             }
             state.published = Some(popup);
-            self.pending_surface_events
-                .push(HostSurfaceEvent::PopupConfigured { surface, popup });
+            self.pending_surface_events.push_back(PendingSurfaceEvent {
+                surface,
+                kind: PendingSurfaceEventKind::PopupConfigured(popup),
+            });
         }
     }
 }

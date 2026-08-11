@@ -11,15 +11,68 @@ without a concrete need.
 Bevy's public APIs remain pinned to 0.19, while the active rendering crates are
 temporarily patched under `vendor/bevy-wgpu30` to use wgpu 30 as one coherent
 type generation. This pin exists because wgpu 30 lets Weld tell the resource
-tracker the initial state of an already initialized HAL texture, which is a
-prerequisite for importing client DMA-BUF images without an intermediate CPU
-copy. The pin does not itself implement DMA-BUF import. Remove the vendor tree,
-its provenance record, and the root `[patch.crates-io]` section when Weld
-adopts a suitable Bevy release that natively depends on wgpu 30 or newer.
+tracker the initial state of an already initialized HAL texture. Weld uses that
+API for its DMA-BUF import path. Remove the vendor tree, its provenance record,
+and the root `[patch.crates-io]` section when Weld adopts a suitable Bevy
+release that natively depends on wgpu 30 or newer; the import architecture does
+not otherwise depend on the patch being local.
 
-Weld accepts multiple xdg-toplevels backed by `wl_shm`, copies their pixels
-into owned Bevy images, and exposes their lifecycle through protocol-neutral
-ECS entities.
+Weld accepts multiple xdg-toplevels backed by `wl_shm` or linux-dmabuf and
+exposes their lifecycle through protocol-neutral ECS entities. SHM pixels are
+copied into Bevy images. A DMA-BUF is imported as an external Vulkan image and
+GPU-blitted into a Weld-owned Bevy image; there is no CPU pixel copy or mapping
+in that path. The blit is intentional until Bevy can safely retain a client
+buffer through every later redraw: it gives Weld durable image ownership and
+allows `wl_buffer.release` as soon as GPU consumption completes.
+
+The boundary has three distinct representations. Smithay emits a host-only
+surface snapshot whose changed layer is retained content, owned SHM pixels, or
+a validated DMA-BUF plus an opaque release identity. `ShellRenderer` consumes
+that snapshot and resolves the external image into a Bevy handle. ECS receives
+only retained content, pixels, or a Bevy `Handle<Image>`; plugins never handle
+Smithay protocol objects, file descriptors, Vulkan images, or wgpu resources.
+Adjacent ECS snapshots coalesce while carrying the newest unobserved content.
+
+Linux-dmabuf is advertised at protocol version 6 only when the selected Vulkan
+adapter exposes a DRM render node, external DMA-BUF memory, foreign queue-family
+ownership, and at least one sampleable/importable format-modifier pair. The
+first slice accepts one-plane ARGB8888, XRGB8888, ABGR8888, and XBGR8888 with
+explicit modifiers and optional `Y_INVERT`; implicit modifiers, multiplane and
+YUV formats, HDR formats, interlacing, and cross-GPU transfer are rejected. If
+capability discovery fails, Weld omits the global and retains SHM rather than
+advertising a path that can silently fall back.
+
+Protocol creation performs the real Vulkan import before acknowledging a
+DMA-BUF. Each live `wl_buffer` pins that imported Vulkan image and memory in a
+shared source cache until the client destroys the buffer; commits reuse the
+same import rather than duplicating its file descriptor and native objects per
+frame. Multiple in-flight uses of one buffer share a release identity, and the
+server emits one release only after every submitted use has completed.
+
+Client implicit fences become Smithay commit blockers registered with calloop.
+After readiness, the shell submits a raw Vulkan foreign-queue acquire, the wgpu
+blit, and a raw Vulkan foreign-queue release together in that order. wgpu 30
+forbids mixing raw and WebGPU commands in one encoder, so these are three
+command buffers in one queue submission with one completion identity. A
+persistent completion worker waits for its `SubmissionIndex` and wakes calloop;
+only the server thread then sends `wl_buffer.release`. There are no timers,
+status polling, per-frame threads, or Wayland resources in the worker.
+Polling the shared wgpu device also retires deferred GPU resources on that
+completion thread; wgpu supports this, and the worker is therefore an explicit
+part of imported-resource destruction ownership rather than only a notifier.
+The first acquire uses `GENERAL` as the producer-owned layout, following the
+Wayland/Vulkan compositor convention for an initialized external image; after
+the cached image's first use, Weld's matching release establishes that exact
+layout for every subsequent acquire. Running this path with Vulkan validation
+layers is a release gate once those layers are available in the development
+environment.
+
+Wayland ARGB channels are premultiplied in their encoded representation while
+Bevy UI blends straight alpha. The DMA-BUF shader therefore samples a non-sRGB
+view, unpremultiplies encoded RGB (or forces alpha for X formats), and writes a
+non-sRGB view of a `Bgra8UnormSrgb` backing image. Bevy later samples its default
+sRGB view. This matches the established SHM conversion without applying the
+transfer function at the wrong point.
 Readable subsurfaces above the toplevel root are ordered and positioned as
 internal Bevy image layers behind the same project-owned `SurfaceNode`; the
 root image stays on that node so its rounded clipping and root-only fast path
@@ -100,9 +153,9 @@ Subsurfaces without an explicit input region use their full logical extent.
 Picking targets identify the exact root or subsurface layer, and Smithay
 revalidates that target before delivering input to the corresponding live
 `wl_surface`. Geometry spanning subsurfaces outside the root buffer is not yet
-represented. `ImageNode` is a provisional SHM backing, not the plugin-facing
-surface contract. Below-root subsurface ordering, role-only subsurface
-detachment without a later tree commit, dmabuf, damage-aware uploads,
+represented. `ImageNode` is a project-owned presentation detail, not the
+plugin-facing surface contract. Below-root subsurface ordering, role-only
+subsurface detachment without a later tree commit, damage-aware uploads,
 presentation timing, VRR, and HDR remain explicit spike boundaries rather
 than settled compositor architecture.
 

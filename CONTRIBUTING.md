@@ -183,6 +183,8 @@ wiring before its behavior has settled.
   reason on the narrowest `#[expect(...)]`.
 - Keep imports at module scope and use descriptive names rather than
   abbreviations.
+- When every variant of an enum carries the same field, extract that field
+  into an enclosing struct and keep only variant-specific data in the enum.
 - Link Rust types as [`TypeName`] in doc comments when rustdoc can resolve them.
 
 Document non-obvious ownership, ordering, lifetime, protocol, and thread

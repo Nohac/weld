@@ -39,12 +39,10 @@ use tracing::{debug, trace, warn};
 use crate::{
     input::raw::{InputPosition, RawScrollFrame, RawScrollSource},
     input::{SeatInputEffect, SeatInputEffectKind, SurfaceHit},
-    surface::{
-        HostSurfaceEvent, SurfaceId, WindowDecoration, WindowInteractionRequest, WindowResizeEdge,
-    },
+    surface::{SurfaceId, WindowDecoration, WindowInteractionRequestKind, WindowResizeEdge},
 };
 
-use super::ServerState;
+use super::{PendingSurfaceEvent, PendingSurfaceEventKind, ServerState};
 
 impl ServerState {
     pub(crate) fn apply_input_effect(&mut self, effect: SeatInputEffect) {
@@ -156,13 +154,8 @@ impl ServerState {
         }
 
         let request = match interaction {
-            PointerInteraction::Move => WindowInteractionRequest::Move {
-                surface: surface_id,
-            },
-            PointerInteraction::Resize(edges) => WindowInteractionRequest::Resize {
-                surface: surface_id,
-                edges,
-            },
+            PointerInteraction::Move => WindowInteractionRequestKind::Move,
+            PointerInteraction::Resize(edges) => WindowInteractionRequestKind::Resize { edges },
         };
         pointer.set_grab(
             self,
@@ -184,8 +177,10 @@ impl ServerState {
                 surface.send_pending_configure();
             }
         }
-        self.pending_surface_events
-            .push(HostSurfaceEvent::WindowInteraction(request));
+        self.pending_surface_events.push_back(PendingSurfaceEvent {
+            surface: surface_id,
+            kind: PendingSurfaceEventKind::WindowInteraction(request),
+        });
     }
 
     fn apply_toplevel_focus(&mut self, requested: Option<SurfaceId>) {
@@ -563,12 +558,10 @@ impl PointerGrab<ServerState> for WindowProtocolGrab {
                 self.surface.send_pending_configure();
             }
         }
-        data.pending_surface_events
-            .push(HostSurfaceEvent::WindowInteraction(
-                WindowInteractionRequest::End {
-                    surface: self.surface_id,
-                },
-            ));
+        data.pending_surface_events.push_back(PendingSurfaceEvent {
+            surface: self.surface_id,
+            kind: PendingSurfaceEventKind::WindowInteraction(WindowInteractionRequestKind::End),
+        });
     }
 }
 

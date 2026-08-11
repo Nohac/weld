@@ -177,17 +177,16 @@ impl WindowResizeEdge {
 
 /// Validated client request for compositor-owned pointer interaction.
 #[derive(Clone, Copy, Debug, Eq, Message, PartialEq)]
-pub(crate) enum WindowInteractionRequest {
-    Move {
-        surface: SurfaceId,
-    },
-    Resize {
-        surface: SurfaceId,
-        edges: WindowResizeEdge,
-    },
-    End {
-        surface: SurfaceId,
-    },
+pub(crate) struct WindowInteractionRequest {
+    pub(crate) surface: SurfaceId,
+    pub(crate) kind: WindowInteractionRequestKind,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum WindowInteractionRequestKind {
+    Move,
+    Resize { edges: WindowResizeEdge },
+    End,
 }
 
 #[derive(Resource, Default)]
@@ -230,13 +229,21 @@ impl SurfaceLayerId {
     }
 }
 
-/// Owned pixels for a changed tree layer, or metadata retaining an existing image.
+/// ECS-facing content for a surface layer. Host buffer types stop before this boundary.
+#[derive(Debug)]
+pub(crate) enum SurfaceBufferContent {
+    Retained,
+    Pixels(Vec<u8>),
+    RenderImage(Handle<Image>),
+}
+
+/// Updated metadata and optional content for one tree layer.
 #[derive(Debug)]
 pub(crate) struct SurfaceBufferUpdate {
     pub layer: SurfaceLayerId,
     pub width: u32,
     pub height: u32,
-    pub bgra_pixels: Option<Vec<u8>>,
+    pub content: SurfaceBufferContent,
     pub opaque: bool,
 }
 
@@ -282,7 +289,7 @@ pub(crate) struct SurfaceTreeSnapshot {
 }
 
 impl SurfaceTreeSnapshot {
-    fn carry_pending_pixels_from(&mut self, previous: &mut Self) {
+    fn carry_pending_content_from(&mut self, previous: &mut Self) {
         let retained = self
             .buffers
             .iter()
@@ -293,15 +300,17 @@ impl SurfaceTreeSnapshot {
             .iter_mut()
             .filter(|buffer| retained.contains(&buffer.layer))
             .filter_map(|buffer| {
-                buffer
-                    .bgra_pixels
-                    .take()
-                    .map(|pixels| (buffer.layer, pixels))
+                let content =
+                    std::mem::replace(&mut buffer.content, SurfaceBufferContent::Retained);
+                (!matches!(content, SurfaceBufferContent::Retained))
+                    .then_some((buffer.layer, content))
             })
             .collect::<HashMap<_, _>>();
         for buffer in &mut self.buffers {
-            if buffer.bgra_pixels.is_none() {
-                buffer.bgra_pixels = pending.remove(&buffer.layer);
+            if matches!(buffer.content, SurfaceBufferContent::Retained)
+                && let Some(content) = pending.remove(&buffer.layer)
+            {
+                buffer.content = content;
             }
         }
     }
@@ -337,27 +346,19 @@ impl SurfaceContentView {
 
 /// Owned input translated from the Smithay host into compositor ECS state.
 #[derive(Debug)]
-pub(crate) enum HostSurfaceEvent {
-    Created {
-        surface: SurfaceId,
-        decoration: WindowDecoration,
-    },
-    TreeSnapshot {
-        surface: SurfaceId,
-        snapshot: SurfaceTreeSnapshot,
-    },
-    DecorationChanged {
-        surface: SurfaceId,
-        decoration: WindowDecoration,
-    },
-    PopupConfigured {
-        surface: SurfaceId,
-        popup: AppPopup,
-    },
-    WindowInteraction(WindowInteractionRequest),
-    Destroyed {
-        surface: SurfaceId,
-    },
+pub(crate) struct HostSurfaceEvent {
+    pub(crate) surface: SurfaceId,
+    pub(crate) kind: HostSurfaceEventKind,
+}
+
+#[derive(Debug)]
+pub(crate) enum HostSurfaceEventKind {
+    Created { decoration: WindowDecoration },
+    TreeSnapshot(SurfaceTreeSnapshot),
+    DecorationChanged { decoration: WindowDecoration },
+    PopupConfigured(AppPopup),
+    WindowInteraction(WindowInteractionRequestKind),
+    Destroyed,
 }
 
 pub(crate) struct SurfacePlugin;
@@ -409,30 +410,24 @@ pub(crate) struct SurfaceEventQueue(VecDeque<HostSurfaceEvent>);
 
 impl SurfaceEventQueue {
     pub(crate) fn push(&mut self, event: HostSurfaceEvent) {
-        let event = match event {
-            HostSurfaceEvent::TreeSnapshot {
-                surface,
-                mut snapshot,
-            } => {
-                if let Some(HostSurfaceEvent::TreeSnapshot {
+        let HostSurfaceEvent { surface, kind } = event;
+        let kind = match kind {
+            HostSurfaceEventKind::TreeSnapshot(mut snapshot) => {
+                if let Some(HostSurfaceEvent {
                     surface: previous_surface,
-                    snapshot: previous,
+                    kind: HostSurfaceEventKind::TreeSnapshot(previous),
                 }) = self.0.back_mut()
                     && surface == *previous_surface
                 {
-                    snapshot.carry_pending_pixels_from(previous);
+                    snapshot.carry_pending_content_from(previous);
                     *previous = snapshot;
                     return;
                 }
-                HostSurfaceEvent::TreeSnapshot { surface, snapshot }
+                HostSurfaceEventKind::TreeSnapshot(snapshot)
             }
-            event => event,
+            kind => kind,
         };
-        self.0.push_back(event);
-    }
-
-    pub(crate) fn drain(&mut self) -> impl Iterator<Item = HostSurfaceEvent> + '_ {
-        self.0.drain(..)
+        self.0.push_back(HostSurfaceEvent { surface, kind });
     }
 }
 
@@ -510,12 +505,9 @@ fn apply_host_surface_events(world: &mut World) {
         .remove_resource::<SurfaceRegistry>()
         .unwrap_or_default();
 
-    for event in events {
-        match event {
-            HostSurfaceEvent::Created {
-                surface,
-                decoration,
-            } => {
+    for HostSurfaceEvent { surface, kind } in events {
+        match kind {
+            HostSurfaceEventKind::Created { decoration } => {
                 if let Some(entity) =
                     ensure_window_entity(world, &mut registry, surface, decoration)
                 {
@@ -523,28 +515,25 @@ fn apply_host_surface_events(world: &mut World) {
                     apply_pending_snapshot(world, &mut registry, surface);
                 }
             }
-            HostSurfaceEvent::TreeSnapshot { surface, snapshot } => {
+            HostSurfaceEventKind::TreeSnapshot(snapshot) => {
                 if registry.entries.contains_key(&surface) {
                     apply_surface_tree_snapshot(world, &mut registry, surface, snapshot);
                 } else {
                     queue_pending_snapshot(&mut registry, surface, snapshot);
                 }
             }
-            HostSurfaceEvent::DecorationChanged {
-                surface,
-                decoration,
-            } => {
+            HostSurfaceEventKind::DecorationChanged { decoration } => {
                 set_window_decoration(world, &mut registry, surface, decoration);
             }
-            HostSurfaceEvent::PopupConfigured { surface, popup } => {
+            HostSurfaceEventKind::PopupConfigured(popup) => {
                 if ensure_popup_entity(world, &mut registry, surface, popup).is_some() {
                     apply_pending_snapshot(world, &mut registry, surface);
                 }
             }
-            HostSurfaceEvent::WindowInteraction(request) => {
-                world.write_message(request);
+            HostSurfaceEventKind::WindowInteraction(kind) => {
+                world.write_message(WindowInteractionRequest { surface, kind });
             }
-            HostSurfaceEvent::Destroyed { surface } => {
+            HostSurfaceEventKind::Destroyed => {
                 destroy_surface(world, &mut registry, surface);
             }
         }
@@ -644,7 +633,7 @@ fn queue_pending_snapshot(
     mut snapshot: SurfaceTreeSnapshot,
 ) {
     if let Some(previous) = registry.pending_snapshots.get_mut(&surface) {
-        snapshot.carry_pending_pixels_from(previous);
+        snapshot.carry_pending_content_from(previous);
         *previous = snapshot;
     } else {
         registry.pending_snapshots.insert(surface, snapshot);
@@ -739,19 +728,43 @@ fn apply_surface_tree_snapshot(
                 height: buffer.height,
                 depth_or_array_layers: 1,
             };
-            if let Some(mut pixels) = buffer.bgra_pixels.take() {
+            let content = std::mem::replace(&mut buffer.content, SurfaceBufferContent::Retained);
+            if let SurfaceBufferContent::Pixels(mut pixels) = content {
                 if !buffer.opaque {
                     unpremultiply_bgra(&mut pixels);
                 }
-                let image = if let Some(asset) = entry.buffers.get(&buffer.layer)
-                    && let Some(mut image) = images.get_mut(&asset.image)
+                let image = if let Some(previous) = entry.buffers.get(&buffer.layer)
+                    && let Some(mut image) = images.get_mut(&previous.image)
+                    && image.asset_usage.contains(RenderAssetUsages::RENDER_WORLD)
                 {
                     image.texture_descriptor.size = extent;
                     image.data = Some(pixels);
-                    asset.image.clone()
+                    previous.image.clone()
                 } else {
-                    images.add(surface_image(extent, pixels))
+                    let image = images.add(surface_image(extent, pixels));
+                    if let Some(previous) = entry.buffers.get(&buffer.layer) {
+                        images.remove(previous.image.id());
+                    }
+                    image
                 };
+                entry.buffers.insert(
+                    buffer.layer,
+                    SurfaceBufferAsset {
+                        image,
+                        pixel_size,
+                        opaque: buffer.opaque,
+                    },
+                );
+            } else if let SurfaceBufferContent::RenderImage(image) = content {
+                if images.get(&image).is_none() {
+                    warn!(?surface, ?buffer.layer, "discarded an unknown rendered surface image");
+                    continue;
+                }
+                if let Some(previous) = entry.buffers.get(&buffer.layer)
+                    && previous.image != image
+                {
+                    images.remove(previous.image.id());
+                }
                 entry.buffers.insert(
                     buffer.layer,
                     SurfaceBufferAsset {
@@ -1084,14 +1097,17 @@ fn validate_snapshot(snapshot: &SurfaceTreeSnapshot) -> bool {
         layers.insert(buffer.layer)
             && buffer.width > 0
             && buffer.height > 0
-            && buffer.bgra_pixels.as_ref().is_none_or(|pixels| {
-                buffer
-                    .width
-                    .checked_mul(buffer.height)
-                    .and_then(|count| count.checked_mul(4))
-                    .and_then(|bytes| usize::try_from(bytes).ok())
-                    == Some(pixels.len())
-            })
+            && match &buffer.content {
+                SurfaceBufferContent::Pixels(pixels) => {
+                    buffer
+                        .width
+                        .checked_mul(buffer.height)
+                        .and_then(|count| count.checked_mul(4))
+                        .and_then(|bytes| usize::try_from(bytes).ok())
+                        == Some(pixels.len())
+                }
+                SurfaceBufferContent::Retained | SurfaceBufferContent::RenderImage(_) => true,
+            }
     });
     let valid_geometry = match (snapshot.root, snapshot.window_geometry) {
         (Some(_), Some(geometry)) => geometry.origin.is_finite(),
@@ -1216,7 +1232,10 @@ mod tests {
             layer: SurfaceLayerId::new(layer),
             width: 1,
             height: 1,
-            bgra_pixels: pixel.map(Vec::from),
+            content: pixel
+                .map(Vec::from)
+                .map(SurfaceBufferContent::Pixels)
+                .unwrap_or(SurfaceBufferContent::Retained),
             opaque: true,
         }
     }
@@ -1236,15 +1255,20 @@ mod tests {
     }
 
     fn snapshot_event(surface: SurfaceId, snapshot: SurfaceTreeSnapshot) -> HostSurfaceEvent {
-        HostSurfaceEvent::TreeSnapshot { surface, snapshot }
+        HostSurfaceEvent {
+            surface,
+            kind: HostSurfaceEventKind::TreeSnapshot(snapshot),
+        }
     }
 
     fn register_window(app: &mut App, surface: SurfaceId) {
         enqueue_surface_event(
             app.world_mut(),
-            HostSurfaceEvent::Created {
+            HostSurfaceEvent {
                 surface,
-                decoration: WindowDecoration::ClientSide,
+                kind: HostSurfaceEventKind::Created {
+                    decoration: WindowDecoration::ClientSide,
+                },
             },
         );
     }
@@ -1296,13 +1320,13 @@ mod tests {
 
         enqueue_surface_event(
             app.world_mut(),
-            HostSurfaceEvent::PopupConfigured {
+            HostSurfaceEvent {
                 surface,
-                popup: AppPopup {
+                kind: HostSurfaceEventKind::PopupConfigured(AppPopup {
                     owner: SurfaceId::new(1),
                     position: Vec2::new(10.0, 20.0),
                     stack_index: 1,
-                },
+                }),
             },
         );
         app.update();
@@ -1385,16 +1409,57 @@ mod tests {
         next.overlays.push(placement(3, Vec2::ZERO));
         events.push(snapshot_event(surface, next));
 
-        let Some(HostSurfaceEvent::TreeSnapshot { snapshot, .. }) = events.0.front() else {
+        let Some(HostSurfaceEvent {
+            kind: HostSurfaceEventKind::TreeSnapshot(snapshot),
+            ..
+        }) = events.0.front()
+        else {
             panic!("adjacent snapshots should merge");
         };
         assert_eq!(events.0.len(), 1);
         assert_eq!(snapshot.buffers.len(), 2);
         assert_eq!(
-            snapshot.buffers[0].bgra_pixels.as_deref(),
+            match &snapshot.buffers[0].content {
+                SurfaceBufferContent::Pixels(pixels) => Some(pixels.as_slice()),
+                _ => None,
+            },
             Some([1, 1, 1, 255].as_slice())
         );
         assert_eq!(snapshot.buffers[1].layer, SurfaceLayerId::new(3));
+    }
+
+    #[test]
+    fn coalescing_preserves_an_unseen_imported_render_image() {
+        let surface = SurfaceId::new(1);
+        let image = Handle::<Image>::default();
+        let mut first = root_snapshot(None);
+        first.buffers[0].content = SurfaceBufferContent::RenderImage(image.clone());
+        let mut events = SurfaceEventQueue::default();
+        events.push(snapshot_event(surface, first));
+        events.push(snapshot_event(surface, root_snapshot(None)));
+
+        let Some(HostSurfaceEvent {
+            kind: HostSurfaceEventKind::TreeSnapshot(snapshot),
+            ..
+        }) = events.0.front()
+        else {
+            panic!("adjacent snapshots should merge");
+        };
+        let SurfaceBufferContent::RenderImage(carried) = &snapshot.buffers[0].content else {
+            panic!("the pending imported image should survive a retained update");
+        };
+        assert_eq!(carried, &image);
+    }
+
+    #[test]
+    fn snapshot_validation_accepts_imported_images_but_checks_copied_pixel_lengths() {
+        let mut imported = root_snapshot(None);
+        imported.buffers[0].content = SurfaceBufferContent::RenderImage(Handle::default());
+        assert!(validate_snapshot(&imported));
+
+        let mut malformed_copy = root_snapshot(None);
+        malformed_copy.buffers[0].content = SurfaceBufferContent::Pixels(vec![0; 3]);
+        assert!(!validate_snapshot(&malformed_copy));
     }
 
     #[test]

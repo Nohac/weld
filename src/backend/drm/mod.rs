@@ -28,6 +28,7 @@ use tracing::{debug, error, info, warn};
 
 use crate::{
     AppArguments,
+    dmabuf::DmabufSourceCache,
     input::{
         raw::{RawSeatEvent, RawSeatEventKind},
         source::libinput::LibinputAdapter,
@@ -37,7 +38,7 @@ use crate::{
         ChildProcesses, FrameState, HostCommand, LoopData, PendingCapture, iteration_work,
         server_mut,
     },
-    server::ServerState,
+    server::{ServerOptions, ServerState},
     shell::{CompositionTargetId, ShellRenderer, ShellRendererOptions},
 };
 
@@ -153,18 +154,25 @@ pub(crate) fn run(arguments: AppArguments, signals: Signals) -> Result<()> {
         output.mode,
     )?;
     let refresh_millihertz = direct_gpu.mode.refresh_millihertz;
+    let dmabuf_sources = DmabufSourceCache::new(&direct_gpu.device);
     let capture_device = direct_gpu.device.clone();
     let capture_queue = direct_gpu.queue.clone();
+    let (dmabuf_release_sender, dmabuf_release_source) = channel::channel();
 
     let display = Display::<ServerState>::new().context("failed to create the Wayland display")?;
     let server = ServerState::new(
         &calloop.handle(),
         display,
-        started_at,
-        &seat_name,
-        output_descriptor,
-        output_metrics,
+        dmabuf_release_source,
         server_mut::<DrmRuntimeEvent>,
+        ServerOptions {
+            started_at,
+            seat_name: &seat_name,
+            output_descriptor,
+            output_metrics,
+            dmabuf_capabilities: direct_gpu.dmabuf_capabilities.as_ref(),
+            dmabuf_sources: dmabuf_sources.clone(),
+        },
     )?;
     let mut loop_data = LoopData::new(server);
 
@@ -228,6 +236,8 @@ pub(crate) fn run(arguments: AppArguments, signals: Signals) -> Result<()> {
         &direct_gpu.adapter,
         &direct_gpu.device,
         &direct_gpu.queue,
+        dmabuf_release_sender,
+        dmabuf_sources,
         ShellRendererOptions {
             size: UVec2::new(
                 output_metrics.physical_width(),

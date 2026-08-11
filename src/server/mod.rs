@@ -1,5 +1,6 @@
 //! Smithay Wayland-server boundary shared by host backends.
 
+mod dmabuf;
 mod output;
 mod popup;
 mod seat;
@@ -8,6 +9,7 @@ mod surface_tree;
 mod toplevel;
 
 pub(crate) use output::{OutputDescriptor, OutputMetrics};
+pub(crate) use surface_tree::{PendingSurfaceBufferContent, PendingSurfaceTreeSnapshot};
 
 use std::{
     collections::{HashSet, VecDeque},
@@ -18,13 +20,18 @@ use std::{
 
 use anyhow::{Context, Result};
 use smithay::{
+    backend::allocator::dmabuf::DmabufSource,
     desktop::{PopupGrab, PopupManager},
     input::{Seat, SeatState},
     output::Output,
     reexports::{
-        calloop::{Interest, LoopHandle, Mode, PostAction, generic::Generic},
+        calloop::{
+            Interest, LoopHandle, Mode, PostAction,
+            channel::{Channel, Event as ChannelEvent},
+            generic::Generic,
+        },
         wayland_server::{
-            Display, DisplayHandle,
+            Client, Display, DisplayHandle,
             backend::{ClientData, ClientId, DisconnectReason},
             protocol::wl_callback::WlCallback,
         },
@@ -44,9 +51,14 @@ use smithay::{
 use tracing::{debug, warn};
 
 use crate::{
+    dmabuf::{DmabufCapabilities, DmabufReleaseId, DmabufSourceCache},
     input::raw::InputPosition,
-    surface::{HostSurfaceEvent, SurfaceAction, SurfaceEventQueue, SurfaceId},
+    surface::{
+        AppPopup, HostSurfaceEvent, HostSurfaceEventKind, SurfaceAction, SurfaceId,
+        WindowDecoration, WindowInteractionRequestKind,
+    },
 };
+use dmabuf::{DmabufProtocol, DmabufReleaseStore};
 use output::install_output_metrics;
 use popup::PopupStore;
 use toplevel::ToplevelStore;
@@ -62,6 +74,9 @@ pub struct ServerState {
     xdg_shell_state: XdgShellState,
     _xdg_decoration_state: XdgDecorationState,
     shm_state: ShmState,
+    dmabuf_protocol: DmabufProtocol,
+    dmabuf_releases: DmabufReleaseStore,
+    dmabuf_sources: DmabufSourceCache,
     _viewporter_state: ViewporterState,
     _fractional_scale_manager_state: FractionalScaleManagerState,
     _output_manager_state: OutputManagerState,
@@ -76,7 +91,7 @@ pub struct ServerState {
     popup_grab: Option<PopupGrab<Self>>,
     focused_toplevel: Option<SurfaceId>,
     pending_focus: Option<Option<SurfaceId>>,
-    pending_surface_events: SurfaceEventQueue,
+    pending_surface_events: VecDeque<PendingSurfaceEvent>,
     presentation_requested: bool,
     next_presentation_id: u64,
     staged_frame_callbacks: VecDeque<(u64, Vec<WlCallback>)>,
@@ -86,23 +101,40 @@ pub struct ServerState {
     // This mirrors delivered presses only so host focus loss can synthesize
     // matching releases; ECS pointer routing remains the policy authority.
     pressed_pointer_buttons: HashSet<u32>,
+    dmabuf_blocker_installer: Option<Box<dyn Fn(DmabufSource, Client) -> bool>>,
+}
+
+pub(crate) struct ServerOptions<'a> {
+    pub(crate) started_at: Instant,
+    pub(crate) seat_name: &'a str,
+    pub(crate) output_descriptor: OutputDescriptor,
+    pub(crate) output_metrics: OutputMetrics,
+    pub(crate) dmabuf_capabilities: Option<&'a DmabufCapabilities>,
+    pub(crate) dmabuf_sources: DmabufSourceCache,
 }
 
 impl ServerState {
     pub fn new<LoopData: 'static>(
         loop_handle: &LoopHandle<'static, LoopData>,
         display: Display<Self>,
-        started_at: Instant,
-        seat_name: &str,
-        output_descriptor: OutputDescriptor,
-        output_metrics: OutputMetrics,
+        dmabuf_release_source: Channel<DmabufReleaseId>,
         server: fn(&mut LoopData) -> &mut Self,
+        options: ServerOptions<'_>,
     ) -> Result<Self> {
+        let ServerOptions {
+            started_at,
+            seat_name,
+            output_descriptor,
+            output_metrics,
+            dmabuf_capabilities,
+            dmabuf_sources,
+        } = options;
         let display_handle = display.handle();
         let compositor_state = CompositorState::new::<Self>(&display_handle);
         let xdg_shell_state = XdgShellState::new::<Self>(&display_handle);
         let xdg_decoration_state = XdgDecorationState::new::<Self>(&display_handle);
         let shm_state = ShmState::new::<Self>(&display_handle, []);
+        let dmabuf_protocol = DmabufProtocol::new(&display_handle, dmabuf_capabilities)?;
         let viewporter_state = ViewporterState::new::<Self>(&display_handle);
         let fractional_scale_manager_state =
             FractionalScaleManagerState::new::<Self>(&display_handle);
@@ -164,6 +196,32 @@ impl ServerState {
             )
             .context("failed to register the Wayland display")?;
 
+        loop_handle
+            .insert_source(dmabuf_release_source, move |event, _, state| {
+                if let ChannelEvent::Msg(release) = event {
+                    server(state).complete_dmabuf_release(release);
+                }
+            })
+            .map_err(|_| anyhow::anyhow!("failed to register DMA-BUF completion results"))?;
+
+        let dmabuf_blocker_installer = dmabuf_capabilities.map(|_| {
+            let blocker_handle = loop_handle.clone();
+            Box::new(move |source: DmabufSource, client: Client| {
+                blocker_handle
+                    .insert_source(source, move |_, _, loop_data| {
+                        let state = server(loop_data);
+                        let display_handle = state.display_handle.clone();
+                        if let Some(client_state) = client.get_data::<ClientState>() {
+                            client_state
+                                .compositor_state
+                                .blocker_cleared(state, &display_handle);
+                        }
+                        Ok(())
+                    })
+                    .is_ok()
+            }) as Box<dyn Fn(DmabufSource, Client) -> bool>
+        });
+
         Ok(Self {
             display_handle,
             socket_name,
@@ -171,6 +229,9 @@ impl ServerState {
             xdg_shell_state,
             _xdg_decoration_state: xdg_decoration_state,
             shm_state,
+            dmabuf_protocol,
+            dmabuf_releases: DmabufReleaseStore::default(),
+            dmabuf_sources,
             _viewporter_state: viewporter_state,
             _fractional_scale_manager_state: fractional_scale_manager_state,
             _output_manager_state: output_manager_state,
@@ -185,7 +246,7 @@ impl ServerState {
             popup_grab: None,
             focused_toplevel: None,
             pending_focus: None,
-            pending_surface_events: SurfaceEventQueue::default(),
+            pending_surface_events: VecDeque::new(),
             presentation_requested: false,
             next_presentation_id: 1,
             staged_frame_callbacks: VecDeque::new(),
@@ -193,6 +254,7 @@ impl ServerState {
             started_at,
             pointer_position: InputPosition::default(),
             pressed_pointer_buttons: HashSet::new(),
+            dmabuf_blocker_installer,
         })
     }
 
@@ -205,8 +267,12 @@ impl ServerState {
         self.send_all_surface_scales();
     }
 
-    pub fn take_surface_events(&mut self) -> impl Iterator<Item = HostSurfaceEvent> + '_ {
-        self.pending_surface_events.drain()
+    pub fn take_surface_events(&mut self) -> impl Iterator<Item = PendingSurfaceEvent> + '_ {
+        self.pending_surface_events.drain(..)
+    }
+
+    pub(crate) fn complete_dmabuf_release(&mut self, release: DmabufReleaseId) {
+        self.dmabuf_releases.complete(release);
     }
 
     pub const fn presentation_requested(&self) -> bool {
@@ -236,6 +302,46 @@ impl ServerState {
 
     fn event_time(&self) -> u32 {
         self.started_at.elapsed().as_millis() as u32
+    }
+}
+
+/// Host-only ingress. Its tree snapshots may still own Smithay DMA-BUFs.
+#[derive(Debug)]
+pub(crate) struct PendingSurfaceEvent {
+    pub(crate) surface: SurfaceId,
+    pub(crate) kind: PendingSurfaceEventKind,
+}
+
+#[derive(Debug)]
+pub(crate) enum PendingSurfaceEventKind {
+    Created { decoration: WindowDecoration },
+    TreeSnapshot(surface_tree::PendingSurfaceTreeSnapshot),
+    DecorationChanged { decoration: WindowDecoration },
+    PopupConfigured(AppPopup),
+    WindowInteraction(WindowInteractionRequestKind),
+    Destroyed,
+}
+
+impl PendingSurfaceEvent {
+    pub(crate) fn without_tree_payload(self) -> Option<HostSurfaceEvent> {
+        let Self { surface, kind } = self;
+        let kind = match kind {
+            PendingSurfaceEventKind::Created { decoration } => {
+                HostSurfaceEventKind::Created { decoration }
+            }
+            PendingSurfaceEventKind::DecorationChanged { decoration } => {
+                HostSurfaceEventKind::DecorationChanged { decoration }
+            }
+            PendingSurfaceEventKind::PopupConfigured(popup) => {
+                HostSurfaceEventKind::PopupConfigured(popup)
+            }
+            PendingSurfaceEventKind::WindowInteraction(request) => {
+                HostSurfaceEventKind::WindowInteraction(request)
+            }
+            PendingSurfaceEventKind::Destroyed => HostSurfaceEventKind::Destroyed,
+            PendingSurfaceEventKind::TreeSnapshot(_) => return None,
+        };
+        Some(HostSurfaceEvent { surface, kind })
     }
 }
 

@@ -41,6 +41,7 @@ use crate::debug::{
     CaptureRequest, DebugProtocolPlugin, complete_capture, configure_remote_debug,
     take_capture_request,
 };
+use crate::dmabuf::{DmabufImporter, DmabufReleaseId, DmabufSourceCache};
 use crate::input::raw::{InputPosition, RawSeatEvent};
 use crate::input::{
     GlobalShortcutPlugin, InputBridgePlugin, SeatInputEffect, VirtualTerminalShortcutPlugin,
@@ -49,11 +50,17 @@ use crate::input::{
 };
 use crate::layer::SHELL_Z_INDEX;
 use crate::runtime::HostCommand;
+use crate::server::{
+    PendingSurfaceBufferContent, PendingSurfaceEvent, PendingSurfaceEventKind,
+    PendingSurfaceTreeSnapshot,
+};
 use crate::surface::{
-    HostSurfaceEvent, SurfaceAction, SurfacePlugin, enqueue_surface_event, has_surface_frame,
-    take_surface_actions,
+    HostSurfaceEvent, HostSurfaceEventKind, SurfaceAction, SurfaceBufferContent,
+    SurfaceBufferUpdate, SurfacePlugin, SurfaceTreeSnapshot, enqueue_surface_event,
+    has_surface_frame, take_surface_actions,
 };
 use crate::window::{DefaultWindowPlugin, set_output_physical_size, set_output_scale_factor};
+use calloop::channel::Sender as CalloopSender;
 
 const COMPOSITION_VIEW: ManualTextureViewHandle = ManualTextureViewHandle(1);
 const COMPOSITION_TARGET_COUNT: usize = 2;
@@ -77,6 +84,8 @@ pub struct ShellRenderer {
     device: wgpu::Device,
     composition_targets: [CompositionTarget; COMPOSITION_TARGET_COUNT],
     completed_target: CompositionTargetId,
+    dmabuf_importer: Option<DmabufImporter>,
+    dmabuf_release_sender: CalloopSender<DmabufReleaseId>,
 }
 
 pub(crate) struct ShellRendererOptions<'a> {
@@ -92,6 +101,8 @@ impl ShellRenderer {
         adapter: &wgpu::Adapter,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
+        dmabuf_release_sender: CalloopSender<DmabufReleaseId>,
+        dmabuf_sources: DmabufSourceCache,
         options: ShellRendererOptions<'_>,
     ) -> Result<Self> {
         let ShellRendererOptions {
@@ -185,6 +196,8 @@ impl ShellRenderer {
             .get_resource::<Messages<RequestRedraw>>()
             .map(RedrawRequests::new)
             .context("Bevy WindowPlugin did not register redraw messages")?;
+        let dmabuf_importer =
+            DmabufImporter::new(device, queue, dmabuf_release_sender.clone(), dmabuf_sources)?;
 
         Ok(Self {
             app,
@@ -192,6 +205,8 @@ impl ShellRenderer {
             device: device.clone(),
             composition_targets,
             completed_target: CompositionTargetId::FIRST,
+            dmabuf_importer,
+            dmabuf_release_sender,
         })
     }
 
@@ -282,8 +297,114 @@ impl ShellRenderer {
         [CompositionTargetId::FIRST, CompositionTargetId::SECOND]
     }
 
-    pub fn enqueue_surface_event(&mut self, event: HostSurfaceEvent) {
-        enqueue_surface_event(self.app.world_mut(), event);
+    pub fn enqueue_surface_event(&mut self, event: PendingSurfaceEvent) {
+        let PendingSurfaceEvent { surface, kind } = event;
+        match kind {
+            PendingSurfaceEventKind::TreeSnapshot(snapshot) => {
+                let snapshot = self.prepare_surface_snapshot(surface, snapshot);
+                enqueue_surface_event(
+                    self.app.world_mut(),
+                    HostSurfaceEvent {
+                        surface,
+                        kind: HostSurfaceEventKind::TreeSnapshot(snapshot),
+                    },
+                );
+            }
+            PendingSurfaceEventKind::Destroyed => {
+                if let Some(importer) = &mut self.dmabuf_importer {
+                    importer.remove_surface(surface);
+                }
+                enqueue_surface_event(
+                    self.app.world_mut(),
+                    HostSurfaceEvent {
+                        surface,
+                        kind: HostSurfaceEventKind::Destroyed,
+                    },
+                );
+            }
+            kind => {
+                let event = PendingSurfaceEvent { surface, kind };
+                if let Some(event) = event.without_tree_payload() {
+                    enqueue_surface_event(self.app.world_mut(), event);
+                }
+            }
+        }
+    }
+
+    fn prepare_surface_snapshot(
+        &mut self,
+        surface: crate::surface::SurfaceId,
+        snapshot: PendingSurfaceTreeSnapshot,
+    ) -> SurfaceTreeSnapshot {
+        let PendingSurfaceTreeSnapshot {
+            client_mapped,
+            root,
+            window_geometry,
+            overlays,
+            inputs,
+            buffers,
+        } = snapshot;
+        let retained = buffers.iter().map(|buffer| buffer.layer).collect();
+        if let Some(importer) = &mut self.dmabuf_importer {
+            importer.retain_surface_layers(surface, &retained);
+        }
+        let buffers = buffers
+            .into_iter()
+            .map(|buffer| {
+                let content = match buffer.content {
+                    PendingSurfaceBufferContent::Retained => SurfaceBufferContent::Retained,
+                    PendingSurfaceBufferContent::ShmPixels(pixels) => {
+                        if let Some(importer) = &mut self.dmabuf_importer {
+                            importer.remove_layer(surface, buffer.layer);
+                        }
+                        SurfaceBufferContent::Pixels(pixels)
+                    }
+                    PendingSurfaceBufferContent::ImportedDmabuf(frame) => {
+                        let imported = if let Some(importer) = &mut self.dmabuf_importer {
+                            importer
+                                .import(
+                                    &mut self.app,
+                                    surface,
+                                    buffer.layer,
+                                    frame,
+                                    buffer.opaque,
+                                )
+                                .map_err(|error| {
+                                    tracing::warn!(
+                                        %error,
+                                        ?surface,
+                                        layer = ?buffer.layer,
+                                        "failed to import a committed DMA-BUF"
+                                    );
+                                })
+                                .ok()
+                        } else {
+                            let _ = self.dmabuf_release_sender.send(frame.release);
+                            tracing::warn!(?surface, layer = ?buffer.layer, "received a DMA-BUF without an importer");
+                            None
+                        };
+                        imported
+                            .map(SurfaceBufferContent::RenderImage)
+                            .unwrap_or(SurfaceBufferContent::Retained)
+                    }
+                };
+                SurfaceBufferUpdate {
+                    layer: buffer.layer,
+                    width: buffer.width,
+                    height: buffer.height,
+                    content,
+                    opaque: buffer.opaque,
+                }
+            })
+            .collect();
+        SurfaceTreeSnapshot {
+            client_mapped,
+            root,
+            window_geometry,
+            overlays,
+            inputs,
+            buffers,
+        }
     }
 
     pub fn enqueue_input_event(&mut self, event: RawSeatEvent) {

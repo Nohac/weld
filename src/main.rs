@@ -3,6 +3,7 @@
 mod backend;
 mod composition;
 mod debug;
+mod dmabuf;
 mod input;
 mod layer;
 mod renderer;

@@ -14,10 +14,11 @@ use crate::runtime::{
 };
 #[cfg(test)]
 use crate::runtime::{FRAME_INTERVAL, IterationWork};
-use crate::server::{OutputDescriptor, OutputMetrics, ServerState};
+use crate::server::{OutputDescriptor, OutputMetrics, ServerOptions, ServerState};
 use crate::shell::{ShellRenderer, ShellRendererOptions};
 use anyhow::{Context, Result, anyhow, bail};
 use bevy::math::UVec2;
+use calloop::channel;
 use calloop::signals::Signals;
 use smithay::reexports::{
     calloop::{EventLoop as CalloopEventLoop, Interest, Mode, PostAction, generic::Generic},
@@ -76,11 +77,14 @@ pub(crate) fn run(arguments: AppArguments, signals: Signals) -> Result<()> {
     let display_handle = host_event_loop.owned_display_handle();
     let host_wake_fd = host_display_wake_fd(&display_handle)?;
     let mut renderer = NestedRenderer::new(window, display_handle, initial_size)?;
+    let (dmabuf_release_sender, dmabuf_release_source) = channel::channel();
     let mut shell = ShellRenderer::new(
         renderer.instance(),
         renderer.adapter(),
         renderer.device(),
         renderer.queue(),
+        dmabuf_release_sender,
+        renderer.dmabuf_sources(),
         ShellRendererOptions {
             size: UVec2::new(initial_size.width, initial_size.height),
             scale_factor: initial_scale_factor,
@@ -95,11 +99,16 @@ pub(crate) fn run(arguments: AppArguments, signals: Signals) -> Result<()> {
     let server = ServerState::new(
         &calloop.handle(),
         display,
-        started_at,
-        "weld-seat0",
-        OutputDescriptor::nested(),
-        output_metrics,
+        dmabuf_release_source,
         server_mut::<NestedEvent>,
+        ServerOptions {
+            started_at,
+            seat_name: "weld-seat0",
+            output_descriptor: OutputDescriptor::nested(),
+            output_metrics,
+            dmabuf_capabilities: renderer.dmabuf_capabilities(),
+            dmabuf_sources: renderer.dmabuf_sources(),
+        },
     )?;
     let mut loop_data = LoopData::new(server);
     calloop

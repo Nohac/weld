@@ -17,6 +17,8 @@ use tracing::warn;
 use winit::event_loop::OwnedDisplayHandle;
 use winit::{dpi::PhysicalSize, window::Window};
 
+use crate::dmabuf::{DmabufCapabilities, DmabufSourceCache, request_weld_device};
+
 mod composite;
 
 pub(crate) use composite::{CompositionBlitter, CursorOverlay};
@@ -102,6 +104,8 @@ pub struct NestedRenderer {
     queue: wgpu::Queue,
     surface_config: wgpu::SurfaceConfiguration,
     blitter: CompositionBlitter,
+    dmabuf_capabilities: Option<DmabufCapabilities>,
+    dmabuf_sources: DmabufSourceCache,
 }
 
 impl NestedRenderer {
@@ -124,11 +128,10 @@ impl NestedRenderer {
             apply_limit_buckets: false,
         }))
         .context("no Vulkan adapter can present to the nested window")?;
-        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-            label: Some("weld nested device"),
-            ..Default::default()
-        }))
-        .context("failed to create the nested wgpu device")?;
+        let (device, queue, dmabuf_capabilities) =
+            request_weld_device(&adapter, "weld nested device")
+                .context("failed to create the nested wgpu device")?;
+        let dmabuf_sources = DmabufSourceCache::new(&device);
 
         let mut surface_config = surface
             .get_default_config(&adapter, size.width.max(1), size.height.max(1))
@@ -153,6 +156,8 @@ impl NestedRenderer {
             queue,
             surface_config,
             blitter,
+            dmabuf_capabilities,
+            dmabuf_sources,
         })
     }
 
@@ -170,6 +175,14 @@ impl NestedRenderer {
 
     pub fn queue(&self) -> &wgpu::Queue {
         &self.queue
+    }
+
+    pub(crate) fn dmabuf_capabilities(&self) -> Option<&DmabufCapabilities> {
+        self.dmabuf_capabilities.as_ref()
+    }
+
+    pub(crate) fn dmabuf_sources(&self) -> DmabufSourceCache {
+        self.dmabuf_sources.clone()
     }
 
     pub fn resize(&mut self, size: PhysicalSize<u32>) {

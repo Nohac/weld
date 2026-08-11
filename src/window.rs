@@ -42,7 +42,7 @@ use crate::{
     surface::{
         AppPopup, AppWindow, ClientDecorated, ClientSurface, MappedSurface, ServerDecorated,
         SurfaceAction, SurfaceActionQueue, SurfaceId, SurfaceNode, SurfaceSnapshotRevision,
-        SurfaceSystems, WindowInteractionRequest, WindowResizeEdge,
+        SurfaceSystems, WindowInteractionRequest, WindowInteractionRequestKind, WindowResizeEdge,
     },
 };
 
@@ -602,9 +602,9 @@ fn sync_default_window_state(params: SyncDefaultWindowParams) {
         .collect::<HashSet<_>>();
 
     for request in interaction_requests.read().copied() {
-        match request {
-            WindowInteractionRequest::Move { surface }
-            | WindowInteractionRequest::Resize { surface, .. } => {
+        let WindowInteractionRequest { surface, kind } = request;
+        match kind {
+            WindowInteractionRequestKind::Move | WindowInteractionRequestKind::Resize { .. } => {
                 let Some(state) = surface_states.get(&surface) else {
                     continue;
                 };
@@ -620,12 +620,12 @@ fn sync_default_window_state(params: SyncDefaultWindowParams) {
                 else {
                     continue;
                 };
-                let kind = match request {
-                    WindowInteractionRequest::Move { .. } => WindowInteractionKind::Move,
-                    WindowInteractionRequest::Resize { edges, .. } => {
+                let kind = match kind {
+                    WindowInteractionRequestKind::Move => WindowInteractionKind::Move,
+                    WindowInteractionRequestKind::Resize { edges } => {
                         WindowInteractionKind::Resize(edges)
                     }
-                    WindowInteractionRequest::End { .. } => continue,
+                    WindowInteractionRequestKind::End => continue,
                 };
                 interaction.0 = Some(WindowInteraction {
                     surface,
@@ -636,7 +636,7 @@ fn sync_default_window_state(params: SyncDefaultWindowParams) {
                     end_after_revision: None,
                 });
             }
-            WindowInteractionRequest::End { surface } => {
+            WindowInteractionRequestKind::End => {
                 if interaction
                     .0
                     .as_ref()
@@ -1074,10 +1074,10 @@ mod tests {
         composition::CompositionPlugin,
         layer::SHELL_Z_INDEX,
         surface::{
-            HostSurfaceEvent, SurfaceBufferUpdate, SurfaceContentView, SurfaceInputNode,
-            SurfaceInputPlacement, SurfaceInputRect, SurfaceLayerId, SurfaceLayerPlacement,
-            SurfacePlugin, SurfaceTreeSnapshot, SurfaceWindowGeometry, WindowDecoration,
-            enqueue_surface_event, take_surface_actions,
+            HostSurfaceEvent, HostSurfaceEventKind, SurfaceBufferUpdate, SurfaceContentView,
+            SurfaceInputNode, SurfaceInputPlacement, SurfaceInputRect, SurfaceLayerId,
+            SurfaceLayerPlacement, SurfacePlugin, SurfaceTreeSnapshot, SurfaceWindowGeometry,
+            WindowDecoration, enqueue_surface_event, take_surface_actions,
         },
     };
 
@@ -1132,9 +1132,9 @@ mod tests {
             logical_width: geometry_size.x as f32,
             logical_height: geometry_size.y as f32,
         };
-        HostSurfaceEvent::TreeSnapshot {
+        HostSurfaceEvent {
             surface,
-            snapshot: SurfaceTreeSnapshot {
+            kind: HostSurfaceEventKind::TreeSnapshot(SurfaceTreeSnapshot {
                 client_mapped: true,
                 root: Some(SurfaceLayerPlacement {
                     layer: SurfaceLayerId::new(1),
@@ -1158,38 +1158,62 @@ mod tests {
                     layer: SurfaceLayerId::new(1),
                     width,
                     height,
-                    bgra_pixels: Some(vec![0; width as usize * height as usize * 4]),
+                    content: crate::surface::SurfaceBufferContent::Pixels(vec![
+                        0;
+                        width as usize
+                            * height
+                                as usize
+                            * 4
+                    ]),
                     opaque: true,
                 }],
-            },
+            }),
         }
     }
 
     fn unmapped(surface: SurfaceId) -> HostSurfaceEvent {
-        HostSurfaceEvent::TreeSnapshot {
+        HostSurfaceEvent {
             surface,
-            snapshot: SurfaceTreeSnapshot {
+            kind: HostSurfaceEventKind::TreeSnapshot(SurfaceTreeSnapshot {
                 client_mapped: false,
                 root: None,
                 window_geometry: None,
                 overlays: Vec::new(),
                 inputs: Vec::new(),
                 buffers: Vec::new(),
-            },
+            }),
         }
     }
 
     fn server_decorated(surface: SurfaceId) -> HostSurfaceEvent {
-        HostSurfaceEvent::DecorationChanged {
+        HostSurfaceEvent {
             surface,
-            decoration: WindowDecoration::ServerSide,
+            kind: HostSurfaceEventKind::DecorationChanged {
+                decoration: WindowDecoration::ServerSide,
+            },
         }
     }
 
     fn client_created(surface: SurfaceId) -> HostSurfaceEvent {
-        HostSurfaceEvent::Created {
+        HostSurfaceEvent {
             surface,
-            decoration: WindowDecoration::ClientSide,
+            kind: HostSurfaceEventKind::Created {
+                decoration: WindowDecoration::ClientSide,
+            },
+        }
+    }
+
+    fn interaction(surface: SurfaceId, kind: WindowInteractionRequestKind) -> HostSurfaceEvent {
+        HostSurfaceEvent {
+            surface,
+            kind: HostSurfaceEventKind::WindowInteraction(kind),
+        }
+    }
+
+    fn destroyed(surface: SurfaceId) -> HostSurfaceEvent {
+        HostSurfaceEvent {
+            surface,
+            kind: HostSurfaceEventKind::Destroyed,
         }
     }
 
@@ -1199,9 +1223,11 @@ mod tests {
         let surface = SurfaceId::new(37);
         enqueue_surface_event(
             app.world_mut(),
-            HostSurfaceEvent::Created {
+            HostSurfaceEvent {
                 surface,
-                decoration: WindowDecoration::ClientSide,
+                kind: HostSurfaceEventKind::Created {
+                    decoration: WindowDecoration::ClientSide,
+                },
             },
         );
         enqueue_surface_event(app.world_mut(), frame(surface, 320, 240));
@@ -1336,7 +1362,7 @@ mod tests {
         );
         enqueue_surface_event(
             app.world_mut(),
-            HostSurfaceEvent::WindowInteraction(WindowInteractionRequest::Move { surface }),
+            interaction(surface, WindowInteractionRequestKind::Move),
         );
         app.update();
         let delta = Vec2::new(7.0, 9.0);
@@ -1371,7 +1397,7 @@ mod tests {
         );
         enqueue_surface_event(
             app.world_mut(),
-            HostSurfaceEvent::WindowInteraction(WindowInteractionRequest::End { surface }),
+            interaction(surface, WindowInteractionRequestKind::End),
         );
         app.update();
 
@@ -1453,13 +1479,13 @@ mod tests {
         );
         enqueue_surface_event(
             app.world_mut(),
-            HostSurfaceEvent::PopupConfigured {
+            HostSurfaceEvent {
                 surface: popup_surface,
-                popup: AppPopup {
+                kind: HostSurfaceEventKind::PopupConfigured(AppPopup {
                     owner,
                     position: Vec2::new(100.0, 50.0),
                     stack_index: 2,
-                },
+                }),
             },
         );
         enqueue_surface_event(
@@ -1558,7 +1584,7 @@ mod tests {
 
         enqueue_surface_event(
             app.world_mut(),
-            HostSurfaceEvent::WindowInteraction(WindowInteractionRequest::Move { surface }),
+            interaction(surface, WindowInteractionRequestKind::Move),
         );
         app.update();
         assert!(
@@ -1618,10 +1644,12 @@ mod tests {
         };
         enqueue_surface_event(
             app.world_mut(),
-            HostSurfaceEvent::WindowInteraction(WindowInteractionRequest::Resize {
+            interaction(
                 surface,
-                edges: WindowResizeEdge::Left,
-            }),
+                WindowInteractionRequestKind::Resize {
+                    edges: WindowResizeEdge::Left,
+                },
+            ),
         );
         app.update();
         app.world_mut().trigger(Pointer::new(
@@ -1664,7 +1692,7 @@ mod tests {
 
         enqueue_surface_event(
             app.world_mut(),
-            HostSurfaceEvent::WindowInteraction(WindowInteractionRequest::End { surface }),
+            interaction(surface, WindowInteractionRequestKind::End),
         );
         app.update();
         enqueue_surface_event(app.world_mut(), frame(surface, 90, 80));
@@ -1692,9 +1720,11 @@ mod tests {
         for surface in [first, second] {
             enqueue_surface_event(
                 app.world_mut(),
-                HostSurfaceEvent::Created {
+                HostSurfaceEvent {
                     surface,
-                    decoration: WindowDecoration::ClientSide,
+                    kind: HostSurfaceEventKind::Created {
+                        decoration: WindowDecoration::ClientSide,
+                    },
                 },
             );
             enqueue_surface_event(app.world_mut(), frame(surface, 4, 3));
@@ -1777,10 +1807,7 @@ mod tests {
             .collect::<std::collections::HashMap<_, _>>();
         assert!(z_indices[&first] > z_indices[&second]);
 
-        enqueue_surface_event(
-            app.world_mut(),
-            HostSurfaceEvent::Destroyed { surface: first },
-        );
+        enqueue_surface_event(app.world_mut(), destroyed(first));
         app.update();
 
         let mut remaining = app.world_mut().query::<&DefaultWindow>();
@@ -1864,7 +1891,7 @@ mod tests {
             }],
         );
 
-        enqueue_surface_event(app.world_mut(), HostSurfaceEvent::Destroyed { surface });
+        enqueue_surface_event(app.world_mut(), destroyed(surface));
         app.update();
         assert!(app.world().get_entity(source).is_err());
         assert!(app.world().get_entity(root).is_err());

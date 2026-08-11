@@ -2,7 +2,9 @@
 
 use std::collections::{HashMap, HashSet};
 
+use anyhow::Context;
 use smithay::{
+    backend::allocator::{Buffer, format::has_alpha},
     reexports::wayland_server::{
         Resource,
         backend::ObjectId,
@@ -15,19 +17,49 @@ use smithay::{
             SubsurfaceCachedState, SurfaceAttributes, TraversalAction, get_parent,
             is_sync_subsurface, with_states, with_surface_tree_upward,
         },
+        dmabuf::get_dmabuf,
         shell::xdg::SurfaceCachedState as XdgSurfaceCachedState,
     },
 };
 use tracing::warn;
 
 use crate::surface::{
-    SurfaceBufferUpdate, SurfaceContentView, SurfaceId, SurfaceInputPlacement, SurfaceInputRect,
-    SurfaceLayerId, SurfaceLayerPlacement, SurfaceTreeSnapshot, SurfaceWindowGeometry,
+    SurfaceContentView, SurfaceId, SurfaceInputPlacement, SurfaceInputRect, SurfaceLayerId,
+    SurfaceLayerPlacement, SurfaceWindowGeometry,
 };
 
+use crate::dmabuf::PendingDmabufFrame;
+
+use super::dmabuf::DmabufReleaseStore;
 use super::shm::{
     SurfaceBufferMetadata, checked_buffer_scale, copy_shm_buffer, surface_content_view,
 };
+
+#[derive(Debug)]
+pub(crate) enum PendingSurfaceBufferContent {
+    Retained,
+    ShmPixels(Vec<u8>),
+    ImportedDmabuf(PendingDmabufFrame),
+}
+
+#[derive(Debug)]
+pub(crate) struct PendingSurfaceBufferUpdate {
+    pub(crate) layer: SurfaceLayerId,
+    pub(crate) width: u32,
+    pub(crate) height: u32,
+    pub(crate) content: PendingSurfaceBufferContent,
+    pub(crate) opaque: bool,
+}
+
+#[derive(Debug)]
+pub(crate) struct PendingSurfaceTreeSnapshot {
+    pub(crate) client_mapped: bool,
+    pub(crate) root: Option<SurfaceLayerPlacement>,
+    pub(crate) window_geometry: Option<SurfaceWindowGeometry>,
+    pub(crate) overlays: Vec<SurfaceLayerPlacement>,
+    pub(crate) inputs: Vec<SurfaceInputPlacement>,
+    pub(crate) buffers: Vec<PendingSurfaceBufferUpdate>,
+}
 
 pub(super) struct SurfaceTreeState {
     buffers: HashMap<ObjectId, CachedSurfaceBuffer>,
@@ -97,7 +129,8 @@ impl SurfaceTreeState {
         &mut self,
         surface_id: SurfaceId,
         root: &WlSurface,
-    ) -> SurfaceTreeSnapshot {
+        releases: &mut DmabufReleaseStore,
+    ) -> PendingSurfaceTreeSnapshot {
         let mut committed = Vec::new();
         let mut root_geometry = None;
         with_surface_tree_upward(
@@ -146,19 +179,19 @@ impl SurfaceTreeState {
             .map(|committed| committed.node.clone())
             .collect();
 
-        let mut pixel_updates = HashMap::new();
+        let mut content_updates = HashMap::new();
         for committed in committed {
-            self.apply_commit(surface_id, committed, &mut pixel_updates);
+            self.apply_commit(surface_id, committed, releases, &mut content_updates);
         }
         self.refresh_input_rects(&root.id());
-        self.snapshot(root.id(), pixel_updates)
+        self.snapshot(root.id(), content_updates)
     }
 
     pub(super) fn remove_surface(
         &mut self,
         root: &WlSurface,
         removed: &WlSurface,
-    ) -> SurfaceTreeSnapshot {
+    ) -> PendingSurfaceTreeSnapshot {
         let removed_id = removed.id();
         let mut removed_ids = HashSet::from([removed_id.clone()]);
         loop {
@@ -191,17 +224,12 @@ impl SurfaceTreeState {
             .is_some_and(|buffer| buffer.client_mapped)
     }
 
-    pub(super) fn displayable(&self, root: &WlSurface) -> bool {
-        self.buffers
-            .get(&root.id())
-            .is_some_and(|buffer| buffer.metadata.is_some() && buffer.view.is_some())
-    }
-
     fn apply_commit(
         &mut self,
         surface_id: SurfaceId,
         committed: CommittedNode,
-        pixel_updates: &mut HashMap<ObjectId, Vec<u8>>,
+        releases: &mut DmabufReleaseStore,
+        content_updates: &mut HashMap<ObjectId, PendingSurfaceBufferContent>,
     ) {
         let object_id = committed.node.object_id;
         if self.layer_for(&object_id).is_none() {
@@ -224,15 +252,15 @@ impl SurfaceTreeState {
                     &buffer,
                     committed.buffer_scale,
                     committed.buffer_transform,
+                    releases,
                 );
-                buffer.release();
                 cached.client_mapped = true;
                 match imported {
                     Ok(imported) => {
                         cached.metadata = Some(imported.metadata);
                         cached.view = Some(imported.view);
                         cached.opaque = imported.opaque;
-                        pixel_updates.insert(object_id, imported.pixels);
+                        content_updates.insert(object_id, imported.content);
                     }
                     Err(error) => {
                         cached.metadata = None;
@@ -301,8 +329,8 @@ impl SurfaceTreeState {
     fn snapshot(
         &self,
         root_id: ObjectId,
-        mut pixel_updates: HashMap<ObjectId, Vec<u8>>,
-    ) -> SurfaceTreeSnapshot {
+        mut content_updates: HashMap<ObjectId, PendingSurfaceBufferContent>,
+    ) -> PendingSurfaceTreeSnapshot {
         let client_mapped = self
             .buffers
             .get(&root_id)
@@ -340,17 +368,19 @@ impl SurfaceTreeState {
                 let cached = self.buffers.get(&node.object_id)?;
                 let metadata = cached.metadata?;
                 cached.view?;
-                Some(SurfaceBufferUpdate {
+                Some(PendingSurfaceBufferUpdate {
                     layer: cached.layer,
                     width: metadata.width,
                     height: metadata.height,
-                    bgra_pixels: pixel_updates.remove(&node.object_id),
+                    content: content_updates
+                        .remove(&node.object_id)
+                        .unwrap_or(PendingSurfaceBufferContent::Retained),
                     opaque: cached.opaque,
                 })
             })
             .collect::<Vec<_>>();
         buffers.sort_unstable_by_key(|buffer| buffer.layer.raw());
-        SurfaceTreeSnapshot {
+        PendingSurfaceTreeSnapshot {
             client_mapped,
             root,
             window_geometry,
@@ -568,10 +598,6 @@ pub(super) fn collect_surfaces(root: &WlSurface) -> Vec<WlSurface> {
     surfaces
 }
 
-pub(super) const fn should_drain_callbacks(client_mapped: bool, _displayable: bool) -> bool {
-    client_mapped
-}
-
 fn surface_offset(states: &smithay::wayland::compositor::SurfaceData) -> Point<i32, Logical> {
     if states.role != Some(SUBSURFACE_ROLE) {
         return (0, 0).into();
@@ -586,7 +612,7 @@ fn surface_offset(states: &smithay::wayland::compositor::SurfaceData) -> Point<i
 struct ImportedBuffer {
     metadata: SurfaceBufferMetadata,
     view: SurfaceContentView,
-    pixels: Vec<u8>,
+    content: PendingSurfaceBufferContent,
     opaque: bool,
 }
 
@@ -595,8 +621,47 @@ fn import_buffer(
     buffer: &WlBuffer,
     buffer_scale: i32,
     buffer_transform: wl_output::Transform,
+    releases: &mut DmabufReleaseStore,
 ) -> anyhow::Result<ImportedBuffer> {
-    let copied = copy_shm_buffer(buffer)?;
+    if let Ok(dmabuf) = get_dmabuf(buffer).cloned() {
+        let imported = (|| {
+            let size = dmabuf.size();
+            let width = u32::try_from(size.w).context("negative DMA-BUF width")?;
+            let height = u32::try_from(size.h).context("negative DMA-BUF height")?;
+            let metadata = SurfaceBufferMetadata {
+                width,
+                height,
+                scale: checked_buffer_scale(buffer_scale)?,
+                transform: buffer_transform,
+            };
+            let view = with_states(surface, |states| surface_content_view(states, metadata))?;
+            let release = releases
+                .register(buffer.clone())
+                .context("DMA-BUF release identity space is exhausted")?;
+            Ok(ImportedBuffer {
+                metadata,
+                view,
+                content: PendingSurfaceBufferContent::ImportedDmabuf(PendingDmabufFrame {
+                    dmabuf: dmabuf.clone(),
+                    release,
+                }),
+                opaque: !has_alpha(dmabuf.format().code),
+            })
+        })();
+        if imported.is_err() {
+            buffer.release();
+        }
+        return imported;
+    }
+
+    let copied = match copy_shm_buffer(buffer) {
+        Ok(copied) => copied,
+        Err(error) => {
+            buffer.release();
+            return Err(error);
+        }
+    };
+    buffer.release();
     let metadata = SurfaceBufferMetadata {
         width: copied.width,
         height: copied.height,
@@ -607,25 +672,19 @@ fn import_buffer(
     Ok(ImportedBuffer {
         metadata,
         view,
-        pixels: copied.bgra_pixels,
+        content: PendingSurfaceBufferContent::ShmPixels(copied.bgra_pixels),
         opaque: copied.opaque,
     })
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{crop_root_view, displayed_root_bounds, effective_region, should_drain_callbacks};
+    use super::{crop_root_view, displayed_root_bounds, effective_region};
     use crate::surface::SurfaceContentView;
     use smithay::{
         utils::Rectangle,
         wayland::compositor::{RectangleKind, RegionAttributes},
     };
-
-    #[test]
-    fn mapped_clients_keep_frame_callbacks_flowing_after_import_failure() {
-        assert!(should_drain_callbacks(true, false));
-        assert!(!should_drain_callbacks(false, true));
-    }
 
     #[test]
     fn identity_window_geometry_preserves_the_view_exactly() {

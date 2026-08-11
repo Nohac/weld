@@ -20,12 +20,130 @@ does not establish singleton presenter or output APIs that would prevent later
 multi-output or multi-GPU work.
 
 Weld temporarily patches its Bevy 0.19 rendering crates to wgpu 30. Version 30
-adds the initial resource state to `Device::create_texture_from_hal`, allowing
-a future DMA-BUF importer to adopt an already initialized Vulkan image without
-lying to wgpu's resource tracker. This dependency pin enables that work but
-does not implement the import path. It must be removed, together with
-`vendor/bevy-wgpu30`, when Weld adopts a suitable Bevy release with native wgpu
-30 or newer support.
+adds the initial resource state to `Device::create_texture_from_hal`; the
+linux-dmabuf importer uses it to adopt an initialized external Vulkan image
+without a discard transition. The same device is opened with
+`VK_EXT_queue_family_foreign` so the importer can acquire the image from and
+release it back to the Wayland producer. This dependency override must be
+removed, together with `vendor/bevy-wgpu30`, when Weld adopts a suitable Bevy
+release with native wgpu 30 or newer support. The raw barriers and import path
+remain necessary unless a future safe wgpu API owns those transitions too.
+
+DMA-BUF import is independent of physical presentation and remains active while
+the VT or connector is unavailable. A persistent GPU-completion worker waits
+for each import blit and returns only a numeric release identity through a
+wakeable calloop channel. It does not poll, use deadlines, carry Wayland
+objects, or submit Vulkan work. This lets clients reuse buffers while Weld
+continues demand-driven headless composition during a session pause.
+
+The protocol acknowledges a buffer only after the shared Vulkan source cache
+has imported it successfully. A live `wl_buffer` owns that cached native image
+until destruction, while per-commit GPU completions are reference-counted so
+the server does not release a reused buffer early. The initial foreign acquire
+assumes the producer presents initialized images in `GENERAL`; Weld's release
+barrier makes that layout exact for all later uses of the cached import.
+
+### Copy terminology and wgpu dependency
+
+The current DMA-BUF path is **CPU zero-copy**, not end-to-end zero-copy. Weld
+never maps or copies client pixels through the CPU: it imports the client's
+DMA-BUF as an external Vulkan image. A GPU render pass then samples that image
+into a Weld-owned Bevy image so the client buffer can be released after GPU
+completion while Bevy retains durable content for later redraws. That GPU blit
+is intentional and remains part of this implementation.
+
+The temporary wgpu 30 pin is therefore still required. Weld passes the known
+initial resource state when adopting the initialized Vulkan image through
+`Device::create_texture_from_hal`; the Bevy 0.19 wgpu generation does not
+provide the required contract. Remove the pin only after Weld adopts a Bevy
+release with native wgpu 30 or newer support, or replaces this import path with
+another design that preserves external-image state and ownership correctly.
+
+## Deferred performance baseline
+
+Performance was sampled on an AMD Strix integrated GPU (Radeon 880M/890M)
+while three YouTube videos played in three separate Firefox windows. This is a
+diagnostic baseline, not a cross-hardware target. The current result is
+acceptable for the initial integration, so deeper optimization is deferred.
+
+With playback stopped, Weld used approximately 0–1% CPU, aggregate GPU busy
+was 6–7%, and the AMD driver reported roughly 10–13 W PPT. With all three
+videos playing, the stable ranges were:
+
+- Weld CPU: 12–14%;
+- Weld's per-process graphics-engine busy time: 14–16%;
+- selected Firefox video and media processes: 38–45% CPU;
+- Firefox graphics-engine busy time: about 4%;
+- Firefox RDD media-engine busy time: about 5%;
+- aggregate GPU busy: 18–20%;
+- AMD PPT: approximately 20–23 W;
+- GPU edge temperature: 58–60°C;
+- APU temperature: usually 71–75°C.
+
+Firefox's RDD process accumulated AMD media-engine time throughout playback,
+so hardware media acceleration was active even though this kernel's aggregate
+`vcn_busy_percent` remained zero. Do not use that one aggregate counter as the
+sole decoder signal.
+
+Weld's main compositor thread accounted for roughly 9–12% CPU. The DRM
+presenter used about 1–2%, and the DMA-BUF completion worker used 0–1%. The
+next investigation should therefore begin with frame orchestration, Bevy
+composition frequency, and per-frame DMA-BUF command preparation rather than
+completion waiting. Switching away from Weld did not remove this workload:
+demand-driven headless composition intentionally continues while the VT is
+inactive so clients and future streaming consumers keep progressing.
+
+### Reproducing the profile
+
+Use intervals of at least 30 seconds and record the active VT so visible and
+headless samples are not confused. Compare the same client state with playback
+stopped, playing on Weld's active VT, and playing after switching away.
+
+1. Identify the GPU and Weld process:
+
+   ```sh
+   lspci -nnk | rg -A4 -i 'vga|3d|display'
+   ps -eo pid,ppid,psr,pcpu,stat,comm,args | rg 'weldwm|firefox'
+   cat /sys/class/tty/tty0/active
+   ```
+
+2. Resolve the matching DRM card and its hwmon directory, then sample the
+   driver's aggregate counters:
+
+   ```sh
+   cat /sys/class/drm/card1/device/gpu_busy_percent
+   cat /sys/class/drm/card1/device/vcn_busy_percent
+   cat /sys/class/drm/card1/device/hwmon/hwmon*/power1_average
+   cat /sys/class/drm/card1/device/hwmon/hwmon*/temp1_input
+   cat /sys/class/drm/card1/device/hwmon/hwmon*/freq1_input
+   ```
+
+   Card and hwmon indices are machine-specific. `power1_average` and
+   temperatures use microwatts and millidegrees Celsius respectively.
+
+3. Inspect per-process DRM contexts through `/proc/<pid>/fdinfo/*`:
+
+   ```sh
+   rg 'drm-driver|drm-engine|drm-total|drm-resident' /proc/<pid>/fdinfo/*
+   ```
+
+   Take counter deltas across a timed interval. Multiple file descriptors can
+   expose the same DRM context and identical cumulative counters, so choose one
+   descriptor per context rather than summing duplicates.
+
+4. Separate compositor thread costs:
+
+   ```sh
+   ps -T -p <weld-pid> -o pid=,tid=,psr=,pcpu=,stat=,comm= --sort=-pcpu
+   top -H -b -d 1 -n 10 -p <weld-pid>
+   ```
+
+When profiling resumes, add rate and duration counters for DMA-BUF commits and
+pixels, Bevy compositions, physical presentations, frame callbacks, import
+preparation, ECS advancement, rendering, and presentation. Then compare the
+development binary with a release build. Static release linking and higher
+optimization may reduce main-thread CPU, but should not be assumed to reduce
+GPU composition or memory bandwidth without measurements.
 
 ## Validated display path
 

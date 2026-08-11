@@ -19,8 +19,9 @@ use smithay::{
         buffer::BufferHandler,
         compositor::{
             CompositorClientState, CompositorHandler, CompositorState, SurfaceAttributes,
-            with_states,
+            add_blocker, add_pre_commit_hook, with_states,
         },
+        dmabuf::get_dmabuf,
         fractional_scale::FractionalScaleHandler,
         output::OutputHandler,
         shell::xdg::{
@@ -32,12 +33,12 @@ use smithay::{
 };
 use tracing::{debug, info, warn};
 
-use crate::surface::{HostSurfaceEvent, SurfaceId, WindowDecoration, WindowResizeEdge};
+use crate::surface::{SurfaceId, WindowDecoration, WindowResizeEdge};
 
 use super::{
-    ClientState, ServerState,
+    ClientState, PendingSurfaceEvent, PendingSurfaceEventKind, ServerState,
     output::send_preferred_surface_scale,
-    surface_tree::{SurfaceTreeState, collect_surfaces, owning_root, should_drain_callbacks},
+    surface_tree::{SurfaceTreeState, collect_surfaces, owning_root},
 };
 
 const CLIENT_WIDTH: i32 = 640;
@@ -185,11 +186,12 @@ impl ServerState {
             return;
         }
         toplevel.decoration = WindowDecoration::ServerSide;
-        self.pending_surface_events
-            .push(HostSurfaceEvent::DecorationChanged {
-                surface: surface_id,
+        self.pending_surface_events.push_back(PendingSurfaceEvent {
+            surface: surface_id,
+            kind: PendingSurfaceEventKind::DecorationChanged {
                 decoration: WindowDecoration::ServerSide,
-            });
+            },
+        });
     }
 
     pub(super) fn send_all_surface_scales(&self) {
@@ -220,11 +222,7 @@ impl ServerState {
             .values()
             .filter(|toplevel| {
                 let root = toplevel.surface.wl_surface();
-                toplevel.surface.alive()
-                    && should_drain_callbacks(
-                        toplevel.tree.client_mapped(root),
-                        toplevel.tree.displayable(root),
-                    )
+                toplevel.surface.alive() && toplevel.tree.client_mapped(root)
             })
             .flat_map(|toplevel| collect_surfaces(toplevel.surface.wl_surface()))
             .chain(
@@ -232,11 +230,7 @@ impl ServerState {
                     .values()
                     .filter(|popup| {
                         let root = popup.surface.wl_surface();
-                        popup.surface.alive()
-                            && should_drain_callbacks(
-                                popup.tree.client_mapped(root),
-                                popup.tree.displayable(root),
-                            )
+                        popup.surface.alive() && popup.tree.client_mapped(root)
                     })
                     .flat_map(|popup| collect_surfaces(popup.surface.wl_surface())),
             )
@@ -271,23 +265,28 @@ impl ServerState {
     }
 
     fn update_surface_tree(&mut self, surface_id: SurfaceId, root: &WlSurface) {
-        let Some(toplevel) = self.toplevels.get_mut(surface_id) else {
+        let (toplevels, releases) = (&mut self.toplevels, &mut self.dmabuf_releases);
+        let Some(toplevel) = toplevels.get_mut(surface_id) else {
             return;
         };
-        let snapshot = toplevel.tree.update(surface_id, root);
+        let snapshot = toplevel.tree.update(surface_id, root, releases);
         if snapshot.root.is_none() {
             self.clear_input_focus_for_surface(root, self.event_time());
         }
-        self.pending_surface_events
-            .push(HostSurfaceEvent::TreeSnapshot {
-                surface: surface_id,
-                snapshot,
-            });
+        self.pending_surface_events.push_back(PendingSurfaceEvent {
+            surface: surface_id,
+            kind: PendingSurfaceEventKind::TreeSnapshot(snapshot),
+        });
     }
 }
 
 impl BufferHandler for ServerState {
-    fn buffer_destroyed(&mut self, _buffer: &wl_buffer::WlBuffer) {}
+    fn buffer_destroyed(&mut self, buffer: &wl_buffer::WlBuffer) {
+        if let Ok(dmabuf) = get_dmabuf(buffer) {
+            self.dmabuf_sources.remove(dmabuf);
+        }
+        self.dmabuf_releases.destroyed(buffer);
+    }
 }
 
 impl ShmHandler for ServerState {
@@ -312,6 +311,48 @@ impl CompositorHandler for ServerState {
             .get_data::<ClientState>()
             .expect("Weld inserts ClientState for every accepted client")
             .compositor_state
+    }
+
+    fn new_surface(&mut self, surface: &WlSurface) {
+        if self.dmabuf_blocker_installer.is_none() {
+            return;
+        }
+        add_pre_commit_hook::<Self, _>(surface, |state, _, surface| {
+            let dmabuf = with_states(surface, |states| {
+                states
+                    .cached_state
+                    .get::<SurfaceAttributes>()
+                    .pending()
+                    .buffer
+                    .as_ref()
+                    .and_then(|assignment| match assignment {
+                        smithay::wayland::compositor::BufferAssignment::NewBuffer(buffer) => {
+                            get_dmabuf(buffer).cloned().ok()
+                        }
+                        _ => None,
+                    })
+            });
+            let Some(dmabuf) = dmabuf else {
+                return;
+            };
+            let Ok((blocker, source)) =
+                dmabuf.generate_blocker(smithay::reexports::calloop::Interest::READ)
+            else {
+                return;
+            };
+            let Some(client) = surface.client() else {
+                return;
+            };
+            let installed = state
+                .dmabuf_blocker_installer
+                .as_ref()
+                .is_some_and(|install| install(source, client));
+            if installed {
+                add_blocker(surface, blocker);
+            } else {
+                warn!(surface = ?surface.id(), "could not install a DMA-BUF readiness blocker");
+            }
+        });
     }
 
     fn new_subsurface(&mut self, surface: &WlSurface, _parent: &WlSurface) {
@@ -354,11 +395,10 @@ impl CompositorHandler for ServerState {
         };
         let snapshot = toplevel.tree.remove_surface(&root, surface);
         self.presentation_requested = true;
-        self.pending_surface_events
-            .push(HostSurfaceEvent::TreeSnapshot {
-                surface: surface_id,
-                snapshot,
-            });
+        self.pending_surface_events.push_back(PendingSurfaceEvent {
+            surface: surface_id,
+            kind: PendingSurfaceEventKind::TreeSnapshot(snapshot),
+        });
     }
 }
 
@@ -389,9 +429,11 @@ impl XdgShellHandler for ServerState {
             rejection_surface.send_close();
             return;
         }
-        self.pending_surface_events.push(HostSurfaceEvent::Created {
+        self.pending_surface_events.push_back(PendingSurfaceEvent {
             surface: id,
-            decoration: WindowDecoration::ClientSide,
+            kind: PendingSurfaceEventKind::Created {
+                decoration: WindowDecoration::ClientSide,
+            },
         });
         info!(surface_id = id.raw(), "created a nested xdg-toplevel");
     }
@@ -440,8 +482,10 @@ impl XdgShellHandler for ServerState {
         if self.focused_toplevel == Some(id) {
             self.focused_toplevel = None;
         }
-        self.pending_surface_events
-            .push(HostSurfaceEvent::Destroyed { surface: id });
+        self.pending_surface_events.push_back(PendingSurfaceEvent {
+            surface: id,
+            kind: PendingSurfaceEventKind::Destroyed,
+        });
     }
 
     fn popup_destroyed(&mut self, surface: PopupSurface) {
