@@ -44,7 +44,7 @@ use smithay::{
 use tracing::{debug, warn};
 
 use crate::{
-    raw_input::InputPosition,
+    input::raw::InputPosition,
     surface::{HostSurfaceEvent, SurfaceAction, SurfaceEventQueue, SurfaceId},
 };
 use output::install_output_metrics;

@@ -1,8 +1,8 @@
-//! Lossless, backend-neutral seat input owned by Weld.
+//! Backend-neutral seat input shared across Weld's input pipeline.
 //!
-//! Nested Winit and future libinput adapters produce these values. They retain
-//! protocol ordering and Linux codes independently of the Bevy/Leafwing action
-//! projection and never contain Smithay resources.
+//! Nested Winit and standalone libinput sources produce these values. ECS
+//! projection and Smithay delivery consume them without introducing host or
+//! protocol resources into the vocabulary.
 
 use bevy::{
     input::{ButtonState, keyboard::Key},

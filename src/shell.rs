@@ -41,13 +41,13 @@ use crate::debug::{
     CaptureRequest, DebugProtocolPlugin, complete_capture, configure_remote_debug,
     take_capture_request,
 };
+use crate::input::raw::RawSeatEvent;
 use crate::input::{
     GlobalShortcutPlugin, InputBridgePlugin, SeatInputEffect, SoftwareCursorPlugin,
     enqueue_raw_input, set_input_update_time, software_cursor_scene, take_host_commands,
     take_input_effects,
 };
 use crate::layer::SHELL_Z_INDEX;
-use crate::raw_input::RawSeatEvent;
 use crate::runtime::HostCommand;
 use crate::surface::{
     HostSurfaceEvent, SurfaceAction, SurfacePlugin, enqueue_surface_event, has_surface_frame,

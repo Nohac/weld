@@ -37,8 +37,8 @@ use smithay::{
 use tracing::{debug, trace, warn};
 
 use crate::{
+    input::raw::{InputPosition, RawScrollFrame, RawScrollSource},
     input::{SeatInputEffect, SeatInputEffectKind, SurfaceHit},
-    raw_input::{InputPosition, RawScrollFrame, RawScrollSource},
     surface::{
         HostSurfaceEvent, SurfaceId, WindowDecoration, WindowInteractionRequest, WindowResizeEdge,
     },
@@ -708,7 +708,7 @@ fn smithay_axis_frame(axis: RawScrollFrame, time: u32) -> Option<AxisFrame> {
 #[cfg(test)]
 mod tests {
     use crate::{
-        raw_input::{RawScrollFrame, RawScrollPhase, RawScrollSource},
+        input::raw::{RawScrollFrame, RawScrollPhase, RawScrollSource},
         surface::SurfaceId,
     };
 

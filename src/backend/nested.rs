@@ -1,17 +1,13 @@
 //! Nested Winit validation backend for Weld's Smithay, Bevy, and wgpu boundary.
 
 use std::{
-    collections::VecDeque,
     os::fd::{BorrowedFd, OwnedFd},
     sync::Arc,
     time::{Duration, Instant},
 };
 
 use crate::AppArguments;
-use crate::raw_input::{
-    InputPosition, LinuxButtonCode, LinuxKeycode, RawScrollFrame, RawScrollPhase, RawScrollSource,
-    RawSeatEvent, RawSeatEventKind,
-};
+use crate::input::source::nested::NestedAdapter;
 use crate::renderer::NestedRenderer;
 use crate::runtime::{
     ChildProcesses, FrameState, HostCommand, LoopData, PendingCapture, iteration_work, server_mut,
@@ -22,20 +18,18 @@ use crate::server::{OutputDescriptor, OutputMetrics, ServerState};
 use crate::shell::{ShellRenderer, ShellRendererOptions};
 use anyhow::{Context, Result, anyhow, bail};
 use bevy::math::UVec2;
-use bevy_winit::converters::{convert_element_state, convert_logical_key};
 use calloop::signals::Signals;
 use smithay::reexports::{
     calloop::{EventLoop as CalloopEventLoop, Interest, Mode, PostAction, generic::Generic},
     wayland_server::Display,
 };
-use tracing::{info, trace, warn};
+use tracing::{info, warn};
 use winit::{
     application::ApplicationHandler,
-    dpi::{LogicalSize, PhysicalPosition, PhysicalSize},
-    event::{MouseButton, MouseScrollDelta, TouchPhase, WindowEvent},
+    dpi::{LogicalSize, PhysicalSize},
+    event::WindowEvent,
     event_loop::{ActiveEventLoop, ControlFlow, EventLoop, OwnedDisplayHandle},
     platform::pump_events::{EventLoopExtPumpEvents, PumpStatus},
-    platform::scancode::PhysicalKeyExtScancode,
     raw_window_handle::{HasDisplayHandle, RawDisplayHandle},
     window::{Window, WindowAttributes, WindowId},
 };
@@ -156,7 +150,7 @@ pub(crate) fn run(arguments: AppArguments, signals: Signals) -> Result<()> {
             break;
         }
 
-        let input_pending = !host.input_events.is_empty();
+        let input_pending = host.input.has_pending();
         let host_work_drained = host_work_drained(
             input_pending,
             host.pending_size.is_some(),
@@ -165,7 +159,7 @@ pub(crate) fn run(arguments: AppArguments, signals: Signals) -> Result<()> {
         if std::mem::take(&mut host.redraw_requested) {
             frame_state.request_present();
         }
-        for event in host.input_events.drain(..) {
+        for event in host.input.drain() {
             shell.enqueue_input_event(event);
         }
         let pending_size = host.pending_size.take();
@@ -422,9 +416,7 @@ struct NestedHost {
     window: Option<Arc<Window>>,
     pending_size: Option<PhysicalSize<u32>>,
     pending_scale_factor: Option<f64>,
-    input_events: VecDeque<RawSeatEvent>,
-    pointer_position: Option<InputPosition>,
-    active_scroll_axes: ActiveScrollAxes,
+    input: NestedAdapter,
     scale_factor: f64,
     redraw_requested: bool,
     creation_error: Option<String>,
@@ -438,9 +430,7 @@ impl NestedHost {
             window: None,
             pending_size: None,
             pending_scale_factor: None,
-            input_events: VecDeque::new(),
-            pointer_position: None,
-            active_scroll_axes: ActiveScrollAxes::default(),
+            input: NestedAdapter::default(),
             scale_factor: 1.0,
             redraw_requested: false,
             creation_error: None,
@@ -502,197 +492,20 @@ impl ApplicationHandler for NestedHost {
                 self.pending_scale_factor = Some(scale_factor);
             }
             WindowEvent::RedrawRequested => self.redraw_requested = true,
-            WindowEvent::Focused(false) => {
-                self.pointer_position = None;
-                let time = self.event_time();
-                self.cancel_active_scroll(time);
-                self.input_events
-                    .push_back(RawSeatEvent::new(RawSeatEventKind::HostFocusLost, time));
-            }
-            // Click-to-focus is deliberate in this initial slice: regaining host
-            // focus does not restore the previously focused client automatically.
-            WindowEvent::Focused(true) => {}
-            WindowEvent::CursorMoved { position, .. } => {
-                let position = logical_input_position(position, self.scale_factor);
-                self.pointer_position = Some(position);
-                let time = self.event_time();
-                self.input_events.push_back(RawSeatEvent::new(
-                    RawSeatEventKind::PointerMotion { position },
-                    time,
-                ));
-            }
-            WindowEvent::CursorLeft { .. } => {
-                let position = self.pointer_position.take().unwrap_or_default();
-                let time = self.event_time();
-                self.cancel_active_scroll(time);
-                self.input_events.push_back(RawSeatEvent::new(
-                    RawSeatEventKind::PointerLeft { position },
-                    time,
-                ));
-            }
-            WindowEvent::MouseInput { state, button, .. } => {
-                if let Some(button) = linux_button_code(button) {
-                    let time = self.event_time();
-                    self.input_events.push_back(RawSeatEvent::new(
-                        RawSeatEventKind::PointerButton {
-                            position: self.pointer_position,
-                            button,
-                            state: convert_element_state(state),
-                        },
-                        time,
-                    ));
-                }
-            }
-            WindowEvent::MouseWheel { delta, phase, .. } => {
-                let time = self.event_time();
-                trace!(?delta, ?phase, "received nested host scroll");
-                let axis = nested_axis(
-                    delta,
-                    phase,
-                    self.scale_factor,
-                    &mut self.active_scroll_axes,
-                );
-                self.input_events.push_back(RawSeatEvent::new(
-                    RawSeatEventKind::PointerAxis {
-                        position: self.pointer_position,
-                        axis,
-                    },
-                    time,
-                ));
-            }
-            WindowEvent::KeyboardInput {
-                event,
-                is_synthetic,
-                ..
-            } if !is_synthetic && !event.repeat => {
-                if let Some(keycode) = event.physical_key.to_scancode() {
-                    let time = self.event_time();
-                    self.input_events.push_back(RawSeatEvent::new(
-                        RawSeatEventKind::Keyboard {
-                            keycode: LinuxKeycode(keycode),
-                            logical_key: Some(convert_logical_key(&event.logical_key)),
-                            state: convert_element_state(event.state),
-                        },
-                        time,
-                    ));
-                }
-            }
-            _ => {}
+            event => self
+                .input
+                .handle_window_event(event, self.scale_factor, self.event_time()),
         }
     }
-}
-
-#[derive(Default)]
-struct ActiveScrollAxes {
-    horizontal: bool,
-    vertical: bool,
-}
-
-impl NestedHost {
-    fn cancel_active_scroll(&mut self, time: u32) {
-        if !self.active_scroll_axes.horizontal && !self.active_scroll_axes.vertical {
-            return;
-        }
-        self.input_events.push_back(RawSeatEvent::new(
-            RawSeatEventKind::PointerAxis {
-                position: self.pointer_position,
-                axis: RawScrollFrame {
-                    source: RawScrollSource::Finger,
-                    phase: RawScrollPhase::Cancelled,
-                    horizontal: 0.0,
-                    vertical: 0.0,
-                    horizontal_v120: None,
-                    vertical_v120: None,
-                    horizontal_stop: self.active_scroll_axes.horizontal,
-                    vertical_stop: self.active_scroll_axes.vertical,
-                },
-            },
-            time,
-        ));
-        self.active_scroll_axes = ActiveScrollAxes::default();
-    }
-}
-
-const fn linux_button_code(button: MouseButton) -> Option<LinuxButtonCode> {
-    match button {
-        MouseButton::Left => Some(LinuxButtonCode(0x110)),
-        MouseButton::Right => Some(LinuxButtonCode(0x111)),
-        MouseButton::Middle => Some(LinuxButtonCode(0x112)),
-        MouseButton::Forward => Some(LinuxButtonCode(0x114)),
-        MouseButton::Back => Some(LinuxButtonCode(0x113)),
-        MouseButton::Other(_) => None,
-    }
-}
-
-fn nested_axis(
-    delta: MouseScrollDelta,
-    phase: TouchPhase,
-    scale_factor: f64,
-    active: &mut ActiveScrollAxes,
-) -> RawScrollFrame {
-    match delta {
-        MouseScrollDelta::LineDelta(horizontal, vertical) => RawScrollFrame {
-            source: RawScrollSource::Wheel,
-            phase: RawScrollPhase::Moved,
-            horizontal: -f64::from(horizontal) * 15.0,
-            vertical: -f64::from(vertical) * 15.0,
-            horizontal_v120: Some((-horizontal * 120.0) as i32),
-            vertical_v120: Some((-vertical * 120.0) as i32),
-            horizontal_stop: false,
-            vertical_stop: false,
-        },
-        MouseScrollDelta::PixelDelta(delta) => {
-            let horizontal = -delta.x / scale_factor;
-            let vertical = -delta.y / scale_factor;
-            let phase = raw_scroll_phase(phase);
-            let ending = matches!(phase, RawScrollPhase::Ended | RawScrollPhase::Cancelled);
-            let horizontal_stop = ending && active.horizontal;
-            let vertical_stop = ending && active.vertical;
-            if ending {
-                *active = ActiveScrollAxes::default();
-            } else {
-                active.horizontal |= horizontal != 0.0;
-                active.vertical |= vertical != 0.0;
-            }
-            RawScrollFrame {
-                source: RawScrollSource::Finger,
-                phase,
-                horizontal,
-                vertical,
-                horizontal_v120: None,
-                vertical_v120: None,
-                horizontal_stop,
-                vertical_stop,
-            }
-        }
-    }
-}
-
-const fn raw_scroll_phase(phase: TouchPhase) -> RawScrollPhase {
-    match phase {
-        TouchPhase::Started => RawScrollPhase::Started,
-        TouchPhase::Moved => RawScrollPhase::Moved,
-        TouchPhase::Ended => RawScrollPhase::Ended,
-        TouchPhase::Cancelled => RawScrollPhase::Cancelled,
-    }
-}
-
-fn logical_input_position(position: PhysicalPosition<f64>, scale_factor: f64) -> InputPosition {
-    InputPosition::new(position.x / scale_factor, position.y / scale_factor)
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        ActiveScrollAxes, FRAME_INTERVAL, FrameState, IterationWork, dispatch_timeout,
-        host_work_drained, iteration_work, linux_button_code, logical_input_position, nested_axis,
+        FRAME_INTERVAL, FrameState, IterationWork, dispatch_timeout, host_work_drained,
+        iteration_work,
     };
-    use crate::raw_input::{LinuxButtonCode, RawScrollFrame, RawScrollPhase, RawScrollSource};
     use std::time::Instant;
-    use winit::{
-        dpi::PhysicalPosition,
-        event::{MouseButton, MouseScrollDelta},
-    };
 
     #[test]
     fn input_or_resize_work_gets_one_nonblocking_smithay_dispatch() {
@@ -760,89 +573,6 @@ mod tests {
                 advance_main: false,
                 composition_advance: false,
             }
-        );
-    }
-
-    #[test]
-    fn mouse_buttons_map_to_canonical_linux_codes() {
-        let cases = [
-            (MouseButton::Left, Some(LinuxButtonCode(0x110))),
-            (MouseButton::Right, Some(LinuxButtonCode(0x111))),
-            (MouseButton::Middle, Some(LinuxButtonCode(0x112))),
-            (MouseButton::Back, Some(LinuxButtonCode(0x113))),
-            (MouseButton::Forward, Some(LinuxButtonCode(0x114))),
-            (MouseButton::Other(9), None),
-        ];
-
-        for (button, expected) in cases {
-            assert_eq!(linux_button_code(button), expected);
-        }
-    }
-
-    #[test]
-    fn nested_scroll_converts_to_wayland_axis_direction() {
-        assert_eq!(
-            nested_axis(
-                MouseScrollDelta::LineDelta(2.0, -3.0),
-                winit::event::TouchPhase::Cancelled,
-                1.25,
-                &mut ActiveScrollAxes::default(),
-            ),
-            RawScrollFrame {
-                source: RawScrollSource::Wheel,
-                phase: RawScrollPhase::Moved,
-                horizontal: -30.0,
-                vertical: 45.0,
-                horizontal_v120: Some(-240),
-                vertical_v120: Some(360),
-                horizontal_stop: false,
-                vertical_stop: false,
-            }
-        );
-        let mut active = ActiveScrollAxes::default();
-        assert_eq!(
-            nested_axis(
-                MouseScrollDelta::PixelDelta(PhysicalPosition::new(5.0, -2.5)),
-                winit::event::TouchPhase::Started,
-                1.25,
-                &mut active,
-            ),
-            RawScrollFrame {
-                source: RawScrollSource::Finger,
-                phase: RawScrollPhase::Started,
-                horizontal: -4.0,
-                vertical: 2.0,
-                horizontal_v120: None,
-                vertical_v120: None,
-                horizontal_stop: false,
-                vertical_stop: false,
-            }
-        );
-        assert_eq!(
-            nested_axis(
-                MouseScrollDelta::PixelDelta(PhysicalPosition::new(0.0, 0.0)),
-                winit::event::TouchPhase::Ended,
-                1.25,
-                &mut active,
-            ),
-            RawScrollFrame {
-                source: RawScrollSource::Finger,
-                phase: RawScrollPhase::Ended,
-                horizontal: 0.0,
-                vertical: 0.0,
-                horizontal_v120: None,
-                vertical_v120: None,
-                horizontal_stop: true,
-                vertical_stop: true,
-            }
-        );
-    }
-
-    #[test]
-    fn host_physical_pointer_positions_become_compositor_logical() {
-        assert_eq!(
-            logical_input_position(PhysicalPosition::new(100.0, 50.0), 1.25),
-            crate::raw_input::InputPosition::new(80.0, 40.0)
         );
     }
 
