@@ -404,7 +404,7 @@ pub(crate) fn run(arguments: AppArguments, signals: Signals) -> Result<()> {
             }
             if work.composition_advance {
                 let target = host_composition_target(&shell, presenter.in_flight_target());
-                shell.render_composition_to(target);
+                shell.render_composition_to(target)?;
                 let callback_batch = loop_data.server.stage_frame_callbacks();
                 loop_data.server.complete_frame_callbacks(callback_batch);
                 frame_state.composition_rendered(now);

@@ -1,7 +1,8 @@
-//! DMA-BUF import, encoded-space conversion, and Bevy GPU-image ownership.
+//! Direct DMA-BUF sampling and client-buffer lifetime ownership.
 
 use std::{
     collections::{HashMap, HashSet},
+    rc::Rc,
     sync::mpsc,
     thread::{self, JoinHandle},
 };
@@ -20,32 +21,102 @@ use bevy::{
     },
 };
 use calloop::channel::Sender as CalloopSender;
-use smithay::backend::allocator::Buffer;
 use tracing::{debug, error, warn};
-use wgpu::util::DeviceExt;
 
 use crate::{
-    dmabuf::{DmabufReleaseId, DmabufSourceCache, PendingDmabufFrame},
-    surface::{SurfaceId, SurfaceLayerId},
+    dmabuf::{DmabufReleaseId, DmabufSourceCache, ImportedDmabufSource, PendingDmabufFrame},
+    surface::{SurfaceId, SurfaceImageEncoding, SurfaceLayerId, SurfaceRenderImage},
 };
 
-const DESTINATION_VIEW_FORMATS: &[wgpu::TextureFormat] = &[wgpu::TextureFormat::Bgra8Unorm];
-
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-struct TargetKey {
+struct SurfaceLayerKey {
     surface: SurfaceId,
     layer: SurfaceLayerId,
 }
 
-struct ImportedTarget {
+struct StagedImage {
     handle: Handle<Image>,
-    texture: wgpu::Texture,
-    size: (u32, u32),
+    source: Rc<ImportedDmabufSource>,
+    release: DmabufReleaseId,
+}
+
+struct DisplayedImage {
+    handle: Handle<Image>,
+    source: Rc<ImportedDmabufSource>,
+    release: DmabufReleaseId,
+}
+
+#[derive(Default)]
+struct SurfaceLayerImages {
+    staged: Option<StagedImage>,
+    displayed: Option<DisplayedImage>,
+}
+
+#[derive(Default)]
+struct AcquiredSources(HashMap<vk::Image, usize>);
+
+struct SourceRetirementPlan {
+    counts: HashMap<vk::Image, usize>,
+    releases: Vec<vk::Image>,
+}
+
+impl AcquiredSources {
+    fn contains(&self, image: vk::Image) -> bool {
+        self.0.contains_key(&image)
+    }
+
+    fn retain(&mut self, image: vk::Image) {
+        *self.0.entry(image).or_default() += 1;
+    }
+
+    fn plan_retirements(
+        &self,
+        images: impl IntoIterator<Item = vk::Image>,
+    ) -> Result<SourceRetirementPlan> {
+        let mut counts = HashMap::<_, usize>::new();
+        for image in images {
+            *counts.entry(image).or_default() += 1;
+        }
+        let mut releases = Vec::new();
+        for (&image, &retiring) in &counts {
+            let acquired = self.0.get(&image).copied().unwrap_or_default();
+            if retiring > acquired {
+                bail!(
+                    "DMA-BUF source retirement underflow: retiring {retiring} of {acquired} uses"
+                );
+            }
+            if retiring == acquired {
+                releases.push(image);
+            }
+        }
+        Ok(SourceRetirementPlan { counts, releases })
+    }
+
+    fn commit_retirements(&mut self, plan: &SourceRetirementPlan) {
+        for (&image, &retiring) in &plan.counts {
+            let Some(acquired) = self.0.get_mut(&image) else {
+                continue;
+            };
+            *acquired -= retiring;
+            if *acquired == 0 {
+                self.0.remove(&image);
+            }
+        }
+    }
+
+    fn images(&self) -> impl Iterator<Item = vk::Image> + '_ {
+        self.0.keys().copied()
+    }
+
+    fn clear(&mut self) {
+        self.0.clear();
+    }
 }
 
 struct CompletionWork {
     submission: wgpu::SubmissionIndex,
-    release: DmabufReleaseId,
+    releases: Vec<DmabufReleaseId>,
+    _textures: Vec<wgpu::Texture>,
 }
 
 enum CompletionCommand {
@@ -53,16 +124,17 @@ enum CompletionCommand {
     Shutdown,
 }
 
-/// Imports client memory, blits it into Weld-owned images, and owns completion.
+/// Owns direct client-image promotion, retirement, and GPU completion.
 pub(crate) struct DmabufImporter {
     device: wgpu::Device,
     queue: wgpu::Queue,
     raw_device: ash::Device,
     queue_family: u32,
-    bind_group_layout: wgpu::BindGroupLayout,
-    pipeline: wgpu::RenderPipeline,
     sources: DmabufSourceCache,
-    targets: HashMap<TargetKey, ImportedTarget>,
+    layers: HashMap<SurfaceLayerKey, SurfaceLayerImages>,
+    superseded: Vec<StagedImage>,
+    retiring: Vec<DisplayedImage>,
+    acquired_sources: AcquiredSources,
     release_sender: CalloopSender<DmabufReleaseId>,
     completion_sender: mpsc::Sender<CompletionCommand>,
     completion_thread: Option<JoinHandle<()>>,
@@ -90,65 +162,6 @@ impl DmabufImporter {
                 .context("DMA-BUF device is not backed by Vulkan")?;
             (raw.raw_device().clone(), raw.queue_family_index())
         };
-        let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("weld DMA-BUF import bind group layout"),
-            entries: &[
-                wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                        multisampled: false,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-            ],
-        });
-        let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("weld DMA-BUF import pipeline layout"),
-            bind_group_layouts: &[Some(&bind_group_layout)],
-            immediate_size: 0,
-        });
-        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("weld DMA-BUF import shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("importer.wgsl").into()),
-        });
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("weld DMA-BUF import pipeline"),
-            layout: Some(&layout),
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: Some("vertex"),
-                compilation_options: Default::default(),
-                buffers: &[],
-            },
-            primitive: wgpu::PrimitiveState::default(),
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState::default(),
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: Some("fragment"),
-                compilation_options: Default::default(),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: wgpu::TextureFormat::Bgra8Unorm,
-                    blend: None,
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-            }),
-            multiview_mask: None,
-            cache: None,
-        });
         let (completion_sender, completion_receiver) = mpsc::channel();
         let completion_device = device.clone();
         let completion_release_sender = release_sender.clone();
@@ -167,16 +180,18 @@ impl DmabufImporter {
             queue: queue.clone(),
             raw_device,
             queue_family,
-            bind_group_layout,
-            pipeline,
             sources,
-            targets: HashMap::new(),
+            layers: HashMap::new(),
+            superseded: Vec::new(),
+            retiring: Vec::new(),
+            acquired_sources: AcquiredSources::default(),
             release_sender,
             completion_sender,
             completion_thread: Some(completion_thread),
         }))
     }
 
+    /// Stage a fresh client-buffer identity without acquiring it for rendering yet.
     pub(crate) fn import(
         &mut self,
         app: &mut App,
@@ -184,206 +199,258 @@ impl DmabufImporter {
         layer: SurfaceLayerId,
         frame: PendingDmabufFrame,
         opaque: bool,
-    ) -> Result<Handle<Image>> {
-        let result = self.import_inner(app, surface, layer, &frame, opaque);
+    ) -> Result<SurfaceRenderImage> {
+        let result = self.stage(app, surface, layer, &frame, opaque);
         if result.is_err() {
             let _ = self.release_sender.send(frame.release);
         }
         result
     }
 
-    fn import_inner(
+    fn stage(
         &mut self,
         app: &mut App,
         surface: SurfaceId,
         layer: SurfaceLayerId,
         frame: &PendingDmabufFrame,
         opaque: bool,
-    ) -> Result<Handle<Image>> {
-        let size = frame.dmabuf.size();
-        let width = u32::try_from(size.w).context("negative DMA-BUF width")?;
-        let height = u32::try_from(size.h).context("negative DMA-BUF height")?;
+    ) -> Result<SurfaceRenderImage> {
         let source = self
             .sources
             .get(&frame.dmabuf)
             .context("committed DMA-BUF was not imported during protocol creation")?;
-        let (target_texture, target_handle) = {
-            let target = self.target(app, surface, layer, width, height)?;
-            (target.texture.clone(), target.handle.clone())
-        };
-        let target_view = target_texture.create_view(&wgpu::TextureViewDescriptor {
-            label: Some("weld DMA-BUF encoded blit target"),
-            format: Some(wgpu::TextureFormat::Bgra8Unorm),
-            ..Default::default()
-        });
-        let options = [
-            u32::from(frame.dmabuf.y_inverted()),
-            u32::from(opaque),
-            0,
-            0,
-        ];
-        let option_bytes = options
-            .into_iter()
-            .flat_map(u32::to_le_bytes)
-            .collect::<Vec<_>>();
-        let option_buffer = self
-            .device
-            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("weld DMA-BUF import options"),
-                contents: &option_bytes,
-                usage: wgpu::BufferUsages::UNIFORM,
-            });
-        let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("weld DMA-BUF import bind group"),
-            layout: &self.bind_group_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&source.view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: option_buffer.as_entire_binding(),
-                },
-            ],
-        });
-        let acquire = self.external_barrier_command(source.image, true)?;
-        let mut encoder = self
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("weld DMA-BUF import encoder"),
-            });
-        {
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("weld DMA-BUF encoded blit"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &target_view,
-                    depth_slice: None,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: None,
-                timestamp_writes: None,
-                occlusion_query_set: None,
-                multiview_mask: None,
-            });
-            pass.set_pipeline(&self.pipeline);
-            pass.set_bind_group(0, &bind_group, &[]);
-            pass.draw(0..3, 0..1);
-        }
-        let release = self.external_barrier_command(source.image, false)?;
-        // wgpu 30 forbids mixing raw HAL and WebGPU recording in one encoder.
-        // One queue submission preserves acquire -> blit -> release ordering
-        // while retaining one completion identity and no CPU-side wait. Build
-        // every buffer before submitting any of them: the raw buffers refer to
-        // the VkImage without retaining it, while the middle tracked buffer
-        // keeps the imported wgpu texture alive for the complete submission.
-        let commands = [acquire, encoder.finish(), release];
-        let submission = self.queue.submit(commands);
-        let completion = CompletionCommand::Wait(CompletionWork {
-            submission,
-            release: frame.release,
-        });
-        if let Err(mpsc::SendError(CompletionCommand::Wait(work))) =
-            self.completion_sender.send(completion)
-        {
-            self.device
-                .poll(wgpu::PollType::Wait {
-                    submission_index: Some(work.submission),
-                    timeout: None,
-                })
-                .context("DMA-BUF fallback completion wait failed")?;
-            bail!("DMA-BUF completion worker stopped");
-        }
-        debug!(
-            ?surface,
-            ?layer,
-            width,
-            height,
-            "submitted DMA-BUF GPU blit"
+        let extent = source.texture.size();
+        let image = Image::new_uninit(
+            extent,
+            wgpu::TextureDimension::D2,
+            source.format,
+            RenderAssetUsages::MAIN_WORLD,
         );
-        Ok(target_handle)
+        let handle = app
+            .world_mut()
+            .get_resource_mut::<Assets<Image>>()
+            .context("Bevy image assets are unavailable")?
+            .add(image);
+        let key = SurfaceLayerKey { surface, layer };
+        let layer_images = self.layers.entry(key).or_default();
+        if let Some(staged) = layer_images.staged.replace(StagedImage {
+            handle: handle.clone(),
+            source,
+            release: frame.release,
+        }) {
+            // Its owned placeholder may still be referenced by a queued ECS
+            // snapshot. Keep it until the next main-world advance has drained
+            // those events, then release it without a GPU ownership transfer.
+            self.superseded.push(staged);
+        }
+        Ok(SurfaceRenderImage {
+            image: handle,
+            encoding: if opaque {
+                SurfaceImageEncoding::EncodedOpaque
+            } else {
+                SurfaceImageEncoding::EncodedPremultiplied
+            },
+            y_inverted: frame.dmabuf.y_inverted(),
+        })
     }
 
-    fn target(
-        &mut self,
-        app: &mut App,
-        surface: SurfaceId,
-        layer: SurfaceLayerId,
-        width: u32,
-        height: u32,
-    ) -> Result<&ImportedTarget> {
-        let key = TargetKey { surface, layer };
-        let reusable = self
-            .targets
-            .get(&key)
-            .is_some_and(|target| target.size == (width, height));
-        if !reusable {
-            self.targets.remove(&key);
-            let extent = wgpu::Extent3d {
-                width,
-                height,
-                depth_or_array_layers: 1,
-            };
-            let descriptor = wgpu::TextureDescriptor {
-                label: Some("weld client surface image"),
-                size: extent,
-                mip_level_count: 1,
-                sample_count: 1,
-                dimension: wgpu::TextureDimension::D2,
-                format: wgpu::TextureFormat::Bgra8UnormSrgb,
-                usage: wgpu::TextureUsages::RENDER_ATTACHMENT
-                    | wgpu::TextureUsages::TEXTURE_BINDING,
-                view_formats: DESTINATION_VIEW_FORMATS,
-            };
-            let texture = self.device.create_texture(&descriptor);
-            let image = Image::new_uninit(
-                extent,
-                wgpu::TextureDimension::D2,
-                wgpu::TextureFormat::Bgra8UnormSrgb,
-                RenderAssetUsages::MAIN_WORLD,
-            );
-            let handle = app
-                .world_mut()
-                .get_resource_mut::<Assets<Image>>()
-                .context("Bevy image assets are unavailable")?
-                .add(image);
+    /// Promote the newest referenced buffers before Bevy records its composition.
+    pub(crate) fn prepare_render(&mut self, app: &mut App) -> Result<()> {
+        let superseded = std::mem::take(&mut self.superseded);
+        self.release_never_acquired(app, superseded);
+
+        let sampler = {
             let render_app = app
-                .get_sub_app_mut(RenderApp)
+                .get_sub_app(RenderApp)
                 .context("Bevy RenderApp is unavailable")?;
-            let sampler = render_app.world().resource::<DefaultImageSampler>().clone();
-            let gpu_texture = Texture::from(texture.clone());
-            let gpu_view =
-                TextureView::from(texture.create_view(&wgpu::TextureViewDescriptor::default()));
             render_app
+                .world()
+                .get_resource::<RenderAssets<GpuImage>>()
+                .context("Bevy GPU image assets are unavailable")?;
+            render_app
+                .world()
+                .get_resource::<DefaultImageSampler>()
+                .context("Bevy default image sampler is unavailable")?
+                .clone()
+        };
+        let referenced_handles = {
+            let images = app
+                .world()
+                .get_resource::<Assets<Image>>()
+                .context("Bevy image assets are unavailable")?;
+            self.layers
+                .values()
+                .filter_map(|layer| layer.staged.as_ref())
+                .filter(|staged| images.contains(&staged.handle))
+                .map(|staged| staged.handle.id())
+                .collect::<HashSet<_>>()
+        };
+
+        let staged = self
+            .layers
+            .iter_mut()
+            .filter_map(|(key, images)| images.staged.take().map(|image| (*key, image)))
+            .collect::<Vec<_>>();
+        if staged.is_empty() {
+            return Ok(());
+        }
+
+        let referenced = staged
+            .into_iter()
+            .partition::<Vec<_>, _>(|(_, staged)| referenced_handles.contains(&staged.handle.id()));
+        let (referenced, discarded) = referenced;
+        self.release_never_acquired(app, discarded.into_iter().map(|(_, image)| image).collect());
+        if referenced.is_empty() {
+            return Ok(());
+        }
+
+        let mut promotions = Vec::with_capacity(referenced.len());
+        let mut commands = Vec::with_capacity(referenced.len());
+        let mut failed = Vec::new();
+        let mut planned_acquires = HashSet::new();
+        {
+            let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
+                self.release_never_acquired(
+                    app,
+                    referenced.into_iter().map(|(_, image)| image).collect(),
+                );
+                bail!("Bevy RenderApp disappeared while promoting DMA-BUFs");
+            };
+            let Some(mut gpu_images) = render_app
                 .world_mut()
-                .resource_mut::<RenderAssets<GpuImage>>()
-                .insert(
-                    handle.id(),
+                .get_resource_mut::<RenderAssets<GpuImage>>()
+            else {
+                self.release_never_acquired(
+                    app,
+                    referenced.into_iter().map(|(_, image)| image).collect(),
+                );
+                bail!("Bevy GPU image assets disappeared while promoting DMA-BUFs");
+            };
+            for (key, staged) in referenced {
+                let needs_acquire = !self.acquired_sources.contains(staged.source.image)
+                    && !planned_acquires.contains(&staged.source.image);
+                if needs_acquire {
+                    match self.external_barrier_command(staged.source.image, true) {
+                        Ok(command) => {
+                            commands.push(command);
+                            planned_acquires.insert(staged.source.image);
+                        }
+                        Err(error) => {
+                            failed.push(staged);
+                            warn!(%error, ?key.surface, ?key.layer, "could not acquire a staged DMA-BUF");
+                            continue;
+                        }
+                    }
+                }
+                let descriptor = imported_texture_descriptor(&staged.source);
+                gpu_images.insert(
+                    staged.handle.id(),
                     GpuImage {
-                        texture: gpu_texture,
-                        texture_view: gpu_view,
+                        texture: Texture::from(staged.source.texture.clone()),
+                        texture_view: TextureView::from(staged.source.view.clone()),
                         sampler: (*sampler).clone(),
                         texture_descriptor: descriptor,
                         texture_view_descriptor: None,
                         had_data: false,
                     },
                 );
-            self.targets.insert(
-                key,
-                ImportedTarget {
-                    handle,
-                    texture,
-                    size: (width, height),
-                },
-            );
+                promotions.push((key, staged));
+            }
+            if !failed.is_empty() {
+                for (_, staged) in promotions.drain(..) {
+                    gpu_images.remove(staged.handle.id());
+                    failed.push(staged);
+                }
+            }
         }
-        self.targets
-            .get(&key)
-            .context("DMA-BUF target insertion failed")
+        let acquisition_failed = !failed.is_empty();
+        self.release_never_acquired(app, failed);
+        if acquisition_failed {
+            bail!("could not acquire the complete staged DMA-BUF batch");
+        }
+        if promotions.is_empty() {
+            return Ok(());
+        }
+
+        self.queue.submit(commands);
+        for (key, staged) in promotions {
+            self.acquired_sources.retain(staged.source.image);
+            let images = self.layers.entry(key).or_default();
+            if let Some(displayed) = images.displayed.replace(DisplayedImage {
+                handle: staged.handle,
+                source: staged.source,
+                release: staged.release,
+            }) {
+                self.retiring.push(displayed);
+            }
+            debug!(?key.surface, ?key.layer, "promoted direct DMA-BUF image");
+        }
+        Ok(())
+    }
+
+    /// Retire replaced buffers after Bevy has submitted every possible old-image read.
+    pub(crate) fn finish_render(&mut self, app: &mut App) -> Result<()> {
+        if self.retiring.is_empty() {
+            return Ok(());
+        }
+        let retirement = self
+            .acquired_sources
+            .plan_retirements(self.retiring.iter().map(|image| image.source.image))?;
+        let mut commands = Vec::with_capacity(retirement.releases.len());
+        for image in &retirement.releases {
+            commands.push(self.external_barrier_command(*image, false)?);
+        }
+        {
+            let render_app = app
+                .get_sub_app_mut(RenderApp)
+                .context("Bevy RenderApp is unavailable")?;
+            let mut gpu_images = render_app
+                .world_mut()
+                .get_resource_mut::<RenderAssets<GpuImage>>()
+                .context("Bevy GPU image assets are unavailable")?;
+            for image in &self.retiring {
+                gpu_images.remove(image.handle.id());
+            }
+        }
+        self.acquired_sources.commit_retirements(&retirement);
+        let retiring = std::mem::take(&mut self.retiring);
+        remove_placeholders(app, retiring.iter().map(|image| &image.handle));
+
+        let submission = self.queue.submit(commands);
+        let work = CompletionWork {
+            submission,
+            releases: retiring.iter().map(|image| image.release).collect(),
+            _textures: retiring
+                .iter()
+                .map(|image| image.source.texture.clone())
+                .collect(),
+        };
+        self.queue_completion(work);
+        Ok(())
+    }
+
+    fn release_never_acquired(&self, app: &mut App, images: Vec<StagedImage>) {
+        remove_placeholders(app, images.iter().map(|image| &image.handle));
+        for image in images {
+            let _ = self.release_sender.send(image.release);
+        }
+    }
+
+    fn queue_completion(&self, work: CompletionWork) {
+        if let Err(mpsc::SendError(CompletionCommand::Wait(work))) =
+            self.completion_sender.send(CompletionCommand::Wait(work))
+        {
+            let result = self.device.poll(wgpu::PollType::Wait {
+                submission_index: Some(work.submission),
+                timeout: None,
+            });
+            if let Err(error) = result {
+                warn!(%error, "DMA-BUF fallback completion wait failed");
+            }
+            for release in work.releases {
+                let _ = self.release_sender.send(release);
+            }
+        }
     }
 
     fn external_barrier_command(
@@ -405,7 +472,7 @@ impl DmabufImporter {
         let recorded =
             // SAFETY: the callback records one Vulkan barrier into wgpu's
             // active command buffer without ending or submitting it. The image
-            // belongs to this device and is kept alive through queue submit.
+            // belongs to this device and is retained through GPU completion.
             unsafe {
                 encoder.as_hal_mut::<wgpu::hal::api::Vulkan, _, _>(|raw_encoder| {
                     let raw_encoder = raw_encoder?;
@@ -476,27 +543,124 @@ impl DmabufImporter {
         surface: SurfaceId,
         retained: &HashSet<SurfaceLayerId>,
     ) {
-        self.targets
-            .retain(|key, _| key.surface != surface || retained.contains(&key.layer));
+        let removed = self
+            .layers
+            .keys()
+            .copied()
+            .filter(|key| key.surface == surface && !retained.contains(&key.layer))
+            .collect::<Vec<_>>();
+        for key in removed {
+            self.remove_key(key);
+        }
     }
 
     pub(crate) fn remove_surface(&mut self, surface: SurfaceId) {
-        self.targets.retain(|key, _| key.surface != surface);
+        let removed = self
+            .layers
+            .keys()
+            .copied()
+            .filter(|key| key.surface == surface)
+            .collect::<Vec<_>>();
+        for key in removed {
+            self.remove_key(key);
+        }
     }
 
     pub(crate) fn remove_layer(&mut self, surface: SurfaceId, layer: SurfaceLayerId) {
-        self.targets.remove(&TargetKey { surface, layer });
+        self.remove_key(SurfaceLayerKey { surface, layer });
+    }
+
+    fn remove_key(&mut self, key: SurfaceLayerKey) {
+        let Some(images) = self.layers.remove(&key) else {
+            return;
+        };
+        if let Some(staged) = images.staged {
+            self.superseded.push(staged);
+        }
+        if let Some(displayed) = images.displayed {
+            self.retiring.push(displayed);
+        }
+    }
+
+    fn submit_shutdown_releases(&mut self) {
+        let mut staged = std::mem::take(&mut self.superseded);
+        let layers = std::mem::take(&mut self.layers);
+        let mut displayed = std::mem::take(&mut self.retiring);
+        for images in layers.into_values() {
+            staged.extend(images.staged);
+            displayed.extend(images.displayed);
+        }
+        for image in staged {
+            let _ = self.release_sender.send(image.release);
+        }
+        if let Err(error) = self
+            .acquired_sources
+            .plan_retirements(displayed.iter().map(|image| image.source.image))
+        {
+            warn!(%error, "could not validate acquired DMA-BUFs during shutdown");
+            return;
+        }
+        let acquired_images = self.acquired_sources.images().collect::<Vec<_>>();
+        if acquired_images.is_empty() {
+            return;
+        }
+        let commands = acquired_images
+            .iter()
+            .filter_map(|image| {
+                self.external_barrier_command(*image, false)
+                    .map_err(|error| {
+                        warn!(%error, "could not release an acquired DMA-BUF during shutdown");
+                    })
+                    .ok()
+            })
+            .collect::<Vec<_>>();
+        if commands.len() != acquired_images.len() {
+            return;
+        }
+        let submission = self.queue.submit(commands);
+        self.acquired_sources.clear();
+        self.queue_completion(CompletionWork {
+            submission,
+            releases: displayed.iter().map(|image| image.release).collect(),
+            _textures: displayed
+                .drain(..)
+                .map(|image| image.source.texture.clone())
+                .collect(),
+        });
     }
 }
 
 impl Drop for DmabufImporter {
     fn drop(&mut self) {
+        self.submit_shutdown_releases();
         let _ = self.completion_sender.send(CompletionCommand::Shutdown);
         if let Some(thread) = self.completion_thread.take()
             && thread.join().is_err()
         {
             error!("DMA-BUF completion worker panicked during shutdown");
         }
+    }
+}
+
+fn imported_texture_descriptor(source: &ImportedDmabufSource) -> wgpu::TextureDescriptor<'static> {
+    wgpu::TextureDescriptor {
+        label: Some("weld direct client DMA-BUF"),
+        size: source.texture.size(),
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: source.format,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING,
+        view_formats: &[],
+    }
+}
+
+fn remove_placeholders<'a>(app: &mut App, handles: impl IntoIterator<Item = &'a Handle<Image>>) {
+    let Some(mut images) = app.world_mut().get_resource_mut::<Assets<Image>>() else {
+        return;
+    };
+    for handle in handles {
+        images.remove(handle.id());
     }
 }
 
@@ -514,10 +678,64 @@ fn completion_loop(
             timeout: None,
         });
         if let Err(error) = result {
-            warn!(%error, ?work.release, "DMA-BUF GPU completion wait failed; releasing client buffer during recovery");
+            warn!(%error, releases = ?work.releases, "DMA-BUF GPU completion wait failed; releasing client buffers during recovery");
         }
-        if release_sender.send(work.release).is_err() {
-            break;
+        for release in work.releases {
+            if release_sender.send(release).is_err() {
+                return;
+            }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use ash::vk::Handle;
+
+    use super::AcquiredSources;
+
+    fn image(raw: u64) -> ash::vk::Image {
+        ash::vk::Image::from_raw(raw)
+    }
+
+    #[test]
+    fn shared_source_stays_acquired_until_its_final_use_retires() {
+        let source = image(1);
+        let mut acquired = AcquiredSources::default();
+        acquired.retain(source);
+        acquired.retain(source);
+
+        let first_retirement = acquired.plan_retirements([source]).unwrap();
+        assert!(first_retirement.releases.is_empty());
+        acquired.commit_retirements(&first_retirement);
+        assert!(acquired.contains(source));
+
+        let final_retirement = acquired.plan_retirements([source]).unwrap();
+        assert_eq!(final_retirement.releases, [source]);
+        acquired.commit_retirements(&final_retirement);
+        assert!(!acquired.contains(source));
+    }
+
+    #[test]
+    fn one_retirement_batch_releases_a_shared_source_once() {
+        let source = image(1);
+        let mut acquired = AcquiredSources::default();
+        acquired.retain(source);
+        acquired.retain(source);
+
+        let retirement = acquired.plan_retirements([source, source]).unwrap();
+        assert_eq!(retirement.releases, [source]);
+        acquired.commit_retirements(&retirement);
+        assert!(!acquired.contains(source));
+    }
+
+    #[test]
+    fn retirement_underflow_is_rejected_without_mutating_the_ledger() {
+        let source = image(1);
+        let mut acquired = AcquiredSources::default();
+        acquired.retain(source);
+
+        assert!(acquired.plan_retirements([source, source]).is_err());
+        assert!(acquired.contains(source));
     }
 }

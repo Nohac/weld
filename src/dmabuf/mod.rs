@@ -6,7 +6,7 @@ mod source;
 
 pub(crate) use device::{DmabufCapabilities, request_weld_device};
 pub(crate) use importer::DmabufImporter;
-pub(crate) use source::DmabufSourceCache;
+pub(crate) use source::{DmabufSourceCache, ImportedDmabufSource};
 
 use smithay::backend::allocator::dmabuf::Dmabuf;
 

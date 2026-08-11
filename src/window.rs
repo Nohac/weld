@@ -1057,7 +1057,7 @@ mod tests {
     use std::time::Duration;
 
     use bevy::{
-        asset::{AssetPlugin, Assets},
+        asset::{AssetApp, AssetPlugin, Assets},
         camera::{ManualTextureViewHandle, NormalizedRenderTarget},
         ecs::message::Messages,
         image::Image,
@@ -1065,7 +1065,6 @@ mod tests {
             backend::HitData,
             pointer::{Location, PointerId},
         },
-        prelude::ImageNode,
         scene::ScenePlugin,
         ui::widget::Button,
     };
@@ -1085,7 +1084,12 @@ mod tests {
 
     fn test_app() -> (App, Entity) {
         let mut app = App::new();
-        app.add_plugins((AssetPlugin::default(), ScenePlugin))
+        app.add_plugins((
+            bevy::app::TaskPoolPlugin::default(),
+            AssetPlugin::default(),
+            ScenePlugin,
+        ));
+        app.init_asset::<bevy::shader::Shader>()
             .insert_resource(Assets::<Image>::default())
             .insert_resource(UiScale(1.0))
             .add_message::<RequestRedraw>()
@@ -1262,20 +1266,14 @@ mod tests {
             Some(Display::Flex),
         );
 
-        let mut content_nodes = app.world_mut().query::<(&SurfaceNode, &ImageNode, &Node)>();
-        let (surface_node, image, node) = content_nodes
+        let mut content_nodes = app.world_mut().query::<(&SurfaceNode, &Node)>();
+        let (surface_node, node) = content_nodes
             .single(app.world())
             .expect("presentation should contain one backed surface node");
         assert_eq!(surface_node.surface, surface);
         assert_eq!(node.display, Display::Flex);
         assert_eq!(node.width, px(320.0));
         assert_eq!(node.height, px(240.0));
-        assert!(
-            app.world()
-                .resource::<Assets<Image>>()
-                .get(&image.image)
-                .is_some()
-        );
     }
 
     #[test]
@@ -1325,21 +1323,14 @@ mod tests {
             )
         );
         assert!(client_root.get::<BoxShadow>().is_none());
-        let (client_surface, client_image, client_surface_node) = app
+        let (client_surface, client_surface_node) = app
             .world_mut()
-            .query::<(&SurfaceNode, &ImageNode, &Node)>()
+            .query::<(&SurfaceNode, &Node)>()
             .single(app.world())
             .expect("client presentation should contain its full surface");
         assert_eq!(
             client_surface.view,
             crate::surface::SurfaceView::FullSurface
-        );
-        assert_eq!(
-            client_image.rect,
-            Some(bevy::math::Rect::from_corners(
-                Vec2::ZERO,
-                Vec2::new(360.0, 276.0),
-            ))
         );
         assert_eq!(
             (client_surface_node.width, client_surface_node.height),
@@ -1428,21 +1419,14 @@ mod tests {
             Some(placement.z_index)
         );
         assert!(root_entity.get::<BoxShadow>().is_some());
-        let (server_surface, server_image, server_surface_node) = app
+        let (server_surface, server_surface_node) = app
             .world_mut()
-            .query::<(&SurfaceNode, &ImageNode, &Node)>()
+            .query::<(&SurfaceNode, &Node)>()
             .single(app.world())
             .expect("server presentation should contain the geometry crop");
         assert_eq!(
             server_surface.view,
             crate::surface::SurfaceView::WindowGeometry
-        );
-        assert_eq!(
-            server_image.rect,
-            Some(bevy::math::Rect::from_corners(
-                Vec2::new(20.0, 18.0),
-                Vec2::new(340.0, 258.0),
-            ))
         );
         assert_eq!(
             (server_surface_node.width, server_surface_node.height),

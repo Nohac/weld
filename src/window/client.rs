@@ -3,7 +3,7 @@
 use bevy::{
     ecs::{component::Component, template::template},
     picking::Pickable,
-    prelude::{Children, Display, ImageNode, Node, PositionType, Scene},
+    prelude::{Children, Display, Node, PositionType, Scene},
     scene::bsn,
     ui::LayoutConfig,
 };
@@ -29,7 +29,6 @@ pub(super) fn scene(surface: SurfaceId) -> impl Scene {
             }))
             Pickable::IGNORE
             LayoutConfig { use_rounding: true }
-            ImageNode::default()
             Node {
                 display: Display::None,
             }

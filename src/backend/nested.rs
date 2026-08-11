@@ -266,7 +266,7 @@ pub(crate) fn run(arguments: AppArguments, signals: Signals) -> Result<()> {
                 break;
             }
             if work.composition_advance {
-                shell.render_composition();
+                shell.render_composition()?;
                 pending_presentation_id = Some(loop_data.server.stage_frame_callbacks());
                 frame_state.composition_rendered(update_now);
                 request_next_composition = bevy_requested_redraw;

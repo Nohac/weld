@@ -31,10 +31,10 @@ remain necessary unless a future safe wgpu API owns those transitions too.
 
 DMA-BUF import is independent of physical presentation and remains active while
 the VT or connector is unavailable. A persistent GPU-completion worker waits
-for each import blit and returns only a numeric release identity through a
-wakeable calloop channel. It does not poll, use deadlines, carry Wayland
-objects, or submit Vulkan work. This lets clients reuse buffers while Weld
-continues demand-driven headless composition during a session pause.
+for retiring-image release barriers and returns only numeric release identities
+through a wakeable calloop channel. It does not poll, use deadlines, carry
+Wayland objects, or submit Vulkan work. This lets clients reuse buffers while
+Weld continues demand-driven headless composition during a session pause.
 
 The protocol acknowledges a buffer only after the shared Vulkan source cache
 has imported it successfully. A live `wl_buffer` owns that cached native image
@@ -43,14 +43,35 @@ the server does not release a reused buffer early. The initial foreign acquire
 assumes the producer presents initialized images in `GENERAL`; Weld's release
 barrier makes that layout exact for all later uses of the cached import.
 
-### Copy terminology and wgpu dependency
+### Direct sampling and wgpu dependency
 
-The current DMA-BUF path is **CPU zero-copy**, not end-to-end zero-copy. Weld
-never maps or copies client pixels through the CPU: it imports the client's
-DMA-BUF as an external Vulkan image. A GPU render pass then samples that image
-into a Weld-owned Bevy image so the client buffer can be released after GPU
-completion while Bevy retains durable content for later redraws. That GPU blit
-is intentional and remains part of this implementation.
+The current DMA-BUF path is end-to-end zero-copy for client surface content.
+Weld imports the client's allocation as an external Vulkan image and Bevy's
+surface material samples it directly into the final composition. There is no
+intermediate client-sized texture or normalization pass.
+
+This requires retaining the displayed `wl_buffer` rather than releasing it
+after one copy. A newly committed buffer is staged until the corresponding ECS
+image is ready. Weld acquires it before Bevy's next submission, retains it in
+render-queue ownership across unchanged redraws, and retires its predecessor
+only after that same RenderApp run can no longer reference the predecessor.
+The post-Bevy release barrier is ordered after every possible old-image read;
+`wl_buffer.release` follows its GPU completion. A staged buffer superseded
+before promotion was never read and can be released immediately after queued
+ECS state has drained. Acquisition is reference-counted by imported Vulkan
+image, not by ECS layer identity. Reattaching one buffer or displaying the same
+buffer in multiple layers therefore performs one 0-to-1 acquire and one final
+1-to-0 release while preserving a completion identity for every protocol use.
+
+Normalization is fused into composition. Pixel-aligned 1:1 samples normally
+need one texel load. Scaled, rotated, or subpixel samples use four loads so each
+encoded premultiplied texel can be unpremultiplied and converted to linear color
+before interpolation. Those taps clamp to the full texture, not the viewport
+crop. This scaled translucent path is more expensive per composition sample
+than an ordinary hardware-filtered Bevy image; the intended win is removal of
+the full-surface source read, intermediate write, and intermediate reread on
+every client commit. Profile ARGB Firefox content specifically rather than
+assuming the opaque path represents the workload.
 
 The temporary wgpu 30 pin is therefore still required. Weld passes the known
 initial resource state when adopting the initialized Vulkan image through
@@ -61,10 +82,10 @@ another design that preserves external-image state and ownership correctly.
 
 ## Deferred performance baseline
 
-Performance was sampled on an AMD Strix integrated GPU (Radeon 880M/890M)
-while three YouTube videos played in three separate Firefox windows. This is a
-diagnostic baseline, not a cross-hardware target. The current result is
-acceptable for the initial integration, so deeper optimization is deferred.
+Performance was sampled on the earlier GPU-normalization-blit checkpoint using
+an AMD Strix integrated GPU (Radeon 880M/890M) while three YouTube videos played
+in three separate Firefox windows. This is a diagnostic before-baseline, not a
+cross-hardware target or a measurement of the direct-sampling path.
 
 With playback stopped, Weld used approximately 0–1% CPU, aggregate GPU busy
 was 6–7%, and the AMD driver reported roughly 10–13 W PPT. With all three
@@ -92,6 +113,16 @@ composition frequency, and per-frame DMA-BUF command preparation rather than
 completion waiting. Switching away from Weld did not remove this workload:
 demand-driven headless composition intentionally continues while the VT is
 inactive so clients and future streaming consumers keep progressing.
+
+The first informal observation after direct sampling replaced the normalization
+blit was approximately 10–13% Weld CPU with three videos playing in separate
+Firefox windows. Rapid pointer movement and window dragging did not push Weld
+past approximately 20–21%. Laptop temperatures were roughly 70–80°C, but no
+instrumented GPU counters were recorded. Repeating the three-video experiment
+under Sway produced approximately 5–7% CPU and a temperature about 5°C lower.
+These are informal observations rather than controlled samples, but they show
+that direct sampling removes a substantial cost without yet reaching Sway's
+frame-orchestration and composition efficiency.
 
 ### Reproducing the profile
 
@@ -138,9 +169,10 @@ stopped, playing on Weld's active VT, and playing after switching away.
    top -H -b -d 1 -n 10 -p <weld-pid>
    ```
 
-When profiling resumes, add rate and duration counters for DMA-BUF commits and
-pixels, Bevy compositions, physical presentations, frame callbacks, import
-preparation, ECS advancement, rendering, and presentation. Then compare the
+When profiling resumes, add rate and duration counters for DMA-BUF commits,
+one-tap and four-tap surface samples, Bevy compositions, physical
+presentations, frame callbacks, import preparation, ECS advancement, rendering,
+and presentation. Then compare the
 development binary with a release build. Static release linking and higher
 optimization may reduce main-thread CPU, but should not be assumed to reduce
 GPU composition or memory bandwidth without measurements.
@@ -253,6 +285,13 @@ The initial standalone implementation keeps demand-driven composition active
 while its VT or connector is unavailable so client frame callbacks continue to
 make progress. It does not run a free-running refresh timer without a capture,
 stream, client commit, Bevy redraw, or other composition consumer.
+
+The output refresh rate bounds presentation opportunities for continuous work;
+it does not force every client to commit at that rate. Clients may update more
+slowly, and idle or occluded clients should reuse their retained buffers.
+Multi-output refresh differences, VRR, exclusive fullscreen scanout, and
+headless streaming introduce their own consumer cadences without changing the
+DMA-BUF ownership rule.
 
 ## Composition ownership
 

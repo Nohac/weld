@@ -7,9 +7,10 @@ use ash::vk;
 use smithay::backend::allocator::{Buffer, Fourcc, dmabuf::Dmabuf};
 
 pub(crate) struct ImportedDmabufSource {
-    pub(crate) _texture: wgpu::Texture,
+    pub(crate) texture: wgpu::Texture,
     pub(crate) view: wgpu::TextureView,
     pub(crate) image: vk::Image,
+    pub(crate) format: wgpu::TextureFormat,
 }
 
 #[derive(Clone)]
@@ -123,9 +124,10 @@ impl DmabufSourceCache {
         };
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
         let imported = Rc::new(ImportedDmabufSource {
-            _texture: texture,
+            texture,
             view,
             image,
+            format,
         });
         self.imported
             .borrow_mut()

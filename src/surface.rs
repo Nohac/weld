@@ -3,14 +3,13 @@
 //! Smithay feeds this module owned lifecycle events and pixel data. The durable
 //! [`ClientSurface`] entities contain protocol-neutral state only. Presentation
 //! plugins claim that entity separately and render its content through
-//! [`SurfaceNode`]; the provisional root and overlay Bevy [`ImageNode`] backing
-//! remains internal.
+//! [`SurfaceNode`]; its root and overlay rendering materials remain internal.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 
 use bevy::{
     app::{App, Plugin, PreUpdate},
-    asset::{Assets, Handle, RenderAssetUsages},
+    asset::{Asset, Assets, Handle, RenderAssetUsages, load_internal_asset, uuid_handle},
     ecs::{
         component::Component,
         entity::Entity,
@@ -19,19 +18,52 @@ use bevy::{
         query::{With, Without},
         resource::Resource,
         schedule::{IntoScheduleConfigs, SystemSet},
-        system::Query,
+        system::{Query, ResMut},
         world::World,
     },
     image::Image,
-    math::{Rect, Vec2},
+    math::{UVec2, Vec2, Vec4},
     picking::{Pickable, PickingSystems},
-    prelude::{ImageNode, NodeImageMode, px},
-    render::render_resource::{Extent3d, TextureDimension, TextureFormat},
+    prelude::px,
+    reflect::TypePath,
+    render::render_resource::{AsBindGroup, Extent3d, ShaderType, TextureDimension, TextureFormat},
+    shader::{Shader, ShaderRef},
     ui::{Display, LayoutConfig, Node, PositionType, Val},
+    ui_render::{
+        UiMaterialPlugin, prelude::UiMaterial, stack_z_offsets, ui_material::MaterialNode,
+    },
 };
 use tracing::warn;
 
 use crate::composition::composition_advance_requested;
+
+const SURFACE_MATERIAL_SHADER: Handle<Shader> =
+    uuid_handle!("f69ff2a0-2dc4-4a34-8f64-bf77475398a1");
+
+#[derive(Clone, Copy, Debug, PartialEq, ShaderType)]
+struct SurfaceMaterialParameters {
+    source_rect: Vec4,
+    buffer_size: Vec2,
+    flags: UVec2,
+}
+
+#[derive(Asset, AsBindGroup, Clone, Debug, PartialEq, TypePath)]
+struct SurfaceUiMaterial {
+    #[texture(0, filterable = false)]
+    image: Handle<Image>,
+    #[uniform(1)]
+    parameters: SurfaceMaterialParameters,
+}
+
+impl UiMaterial for SurfaceUiMaterial {
+    fn fragment_shader() -> ShaderRef {
+        SURFACE_MATERIAL_SHADER.into()
+    }
+
+    fn stack_z_offset() -> f32 {
+        stack_z_offsets::IMAGE
+    }
+}
 
 /// Stable compositor identity for one client surface.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -120,10 +152,9 @@ pub enum SurfaceView {
 /// A client surface that composes as an ordinary Bevy UI primitive.
 ///
 /// Plugins should decorate or arrange this component's entity rather than
-/// depending on the internal root [`ImageNode`] and ignored overlay children
-/// used by the SHM surface-tree path.
+/// depending on its internal material and ignored overlay children.
 #[derive(Component, Clone, Copy, Debug, Eq, PartialEq)]
-#[require(ImageNode, Node)]
+#[require(MaterialNode<SurfaceUiMaterial>, Node)]
 pub struct SurfaceNode {
     pub surface: SurfaceId,
     pub view: SurfaceView,
@@ -213,6 +244,9 @@ struct SurfaceLayerContent {
     image: Handle<Image>,
     view: SurfaceContentView,
     position: Vec2,
+    pixel_size: (u32, u32),
+    encoding: SurfaceImageEncoding,
+    y_inverted: bool,
 }
 
 /// Stable protocol-neutral identity for one buffer-bearing surface layer.
@@ -234,7 +268,23 @@ impl SurfaceLayerId {
 pub(crate) enum SurfaceBufferContent {
     Retained,
     Pixels(Vec<u8>),
-    RenderImage(Handle<Image>),
+    RenderImage(SurfaceRenderImage),
+}
+
+/// Sampling metadata for an externally owned image resolved before ECS ingress.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct SurfaceRenderImage {
+    pub(crate) image: Handle<Image>,
+    pub(crate) encoding: SurfaceImageEncoding,
+    pub(crate) y_inverted: bool,
+}
+
+/// Color representation consumed by the private surface material.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum SurfaceImageEncoding {
+    LinearStraight,
+    EncodedPremultiplied,
+    EncodedOpaque,
 }
 
 /// Updated metadata and optional content for one tree layer.
@@ -331,19 +381,6 @@ pub(crate) struct SurfaceContentView {
     pub logical_height: f32,
 }
 
-impl SurfaceContentView {
-    fn source_rect(self) -> Rect {
-        Rect::from_corners(
-            (self.source_x, self.source_y).into(),
-            (
-                self.source_x + self.source_width,
-                self.source_y + self.source_height,
-            )
-                .into(),
-        )
-    }
-}
-
 /// Owned input translated from the Smithay host into compositor ECS state.
 #[derive(Debug)]
 pub(crate) struct HostSurfaceEvent {
@@ -375,6 +412,13 @@ pub(crate) enum SurfaceSystems {
 
 impl Plugin for SurfacePlugin {
     fn build(&self, app: &mut App) {
+        load_internal_asset!(
+            app,
+            SURFACE_MATERIAL_SHADER,
+            "surface_material.wgsl",
+            Shader::from_wgsl
+        );
+        app.add_plugins(UiMaterialPlugin::<SurfaceUiMaterial>::default());
         app.init_resource::<SurfaceEventQueue>()
             .init_resource::<SurfaceActionQueue>()
             .init_resource::<SurfaceRegistry>()
@@ -451,6 +495,8 @@ struct SurfaceBufferAsset {
     image: Handle<Image>,
     pixel_size: (u32, u32),
     opaque: bool,
+    encoding: SurfaceImageEncoding,
+    y_inverted: bool,
 }
 
 #[derive(Component, Default)]
@@ -753,24 +799,28 @@ fn apply_surface_tree_snapshot(
                         image,
                         pixel_size,
                         opaque: buffer.opaque,
+                        encoding: SurfaceImageEncoding::LinearStraight,
+                        y_inverted: false,
                     },
                 );
-            } else if let SurfaceBufferContent::RenderImage(image) = content {
-                if images.get(&image).is_none() {
+            } else if let SurfaceBufferContent::RenderImage(render_image) = content {
+                if images.get(&render_image.image).is_none() {
                     warn!(?surface, ?buffer.layer, "discarded an unknown rendered surface image");
                     continue;
                 }
                 if let Some(previous) = entry.buffers.get(&buffer.layer)
-                    && previous.image != image
+                    && previous.image != render_image.image
                 {
                     images.remove(previous.image.id());
                 }
                 entry.buffers.insert(
                     buffer.layer,
                     SurfaceBufferAsset {
-                        image,
+                        image: render_image.image,
                         pixel_size,
                         opaque: buffer.opaque,
+                        encoding: render_image.encoding,
+                        y_inverted: render_image.y_inverted,
                     },
                 );
             } else if let Some(asset) = entry.buffers.get_mut(&buffer.layer) {
@@ -810,6 +860,9 @@ fn apply_surface_tree_snapshot(
                                 image: asset.image.clone(),
                                 view: placement.view,
                                 position: placement.position,
+                                pixel_size: asset.pixel_size,
+                                encoding: asset.encoding,
+                                y_inverted: asset.y_inverted,
                             },
                         )
                     })
@@ -821,6 +874,9 @@ fn apply_surface_tree_snapshot(
                             image: root_asset.image.clone(),
                             view: root.view,
                             position: Vec2::ZERO,
+                            pixel_size: root_asset.pixel_size,
+                            encoding: root_asset.encoding,
+                            y_inverted: root_asset.y_inverted,
                         },
                         window_geometry,
                         overlays,
@@ -889,7 +945,7 @@ type SurfaceNodeQuery<'world, 'state> = Query<
     (
         Entity,
         &'static SurfaceNode,
-        &'static mut ImageNode,
+        &'static mut MaterialNode<SurfaceUiMaterial>,
         &'static mut Node,
         Option<&'static SurfaceOverlayNodes>,
         Option<&'static SurfaceInputNodes>,
@@ -899,7 +955,10 @@ type SurfaceNodeQuery<'world, 'state> = Query<
 type SurfaceOverlayNodeQuery<'world, 'state> = Query<
     'world,
     'state,
-    (&'static mut ImageNode, &'static mut Node),
+    (
+        &'static mut MaterialNode<SurfaceUiMaterial>,
+        &'static mut Node,
+    ),
     (With<SurfaceOverlayNode>, Without<SurfaceInputNode>),
 >;
 type SurfaceInputNodeQuery<'world, 'state> = Query<
@@ -911,30 +970,25 @@ type SurfaceInputNodeQuery<'world, 'state> = Query<
 
 fn sync_surface_nodes(
     mut commands: bevy::ecs::system::Commands,
+    mut materials: ResMut<Assets<SurfaceUiMaterial>>,
     surfaces: Query<(&ClientSurface, &SurfaceContent)>,
     mut nodes: SurfaceNodeQuery,
     mut overlay_nodes: SurfaceOverlayNodeQuery,
     mut input_nodes: SurfaceInputNodeQuery,
 ) {
-    for (entity, surface_node, mut image_node, mut node, existing_overlays, existing_inputs) in
+    for (entity, surface_node, mut material_node, mut node, existing_overlays, existing_inputs) in
         &mut nodes
     {
         let content = surfaces.iter().find_map(|(surface, content)| {
             (surface.surface == surface_node.surface).then_some(content)
         });
         let Some(content) = content else {
-            let empty_image = empty_surface_image_node();
             if node.display != Display::None {
                 node.display = Display::None;
                 node.width = Val::Auto;
                 node.height = Val::Auto;
             }
-            if image_node.image != empty_image.image
-                || image_node.rect != empty_image.rect
-                || image_node.image_mode != empty_image.image_mode
-            {
-                *image_node = empty_image;
-            }
+            clear_surface_material(&mut materials, &mut material_node);
             if let Some(existing) = existing_overlays {
                 for (_, overlay) in &existing.0 {
                     commands.entity(*overlay).despawn();
@@ -956,13 +1010,8 @@ fn sync_surface_nodes(
                 (content.window_geometry.view, content.window_geometry.origin)
             }
         };
-        let expected_image = surface_image_node(content.root.image.clone(), root_view);
-        if image_node.image != expected_image.image
-            || image_node.rect != expected_image.rect
-            || image_node.image_mode != expected_image.image_mode
-        {
-            *image_node = expected_image;
-        }
+        let expected_material = surface_material(&content.root, root_view);
+        update_surface_material(&mut materials, &mut material_node, expected_material);
         let logical_width = px(root_view.logical_width);
         let logical_height = px(root_view.logical_height);
         if node.display != Display::Flex
@@ -980,16 +1029,11 @@ fn sync_surface_nodes(
         let mut ordered = Vec::with_capacity(content.overlays.len());
         let mut tracked = Vec::with_capacity(content.overlays.len());
         for overlay in &content.overlays {
-            let expected_image = surface_image_node(overlay.image.clone(), overlay.view);
+            let expected_material = surface_material(overlay, overlay.view);
             let expected_node = overlay_node(overlay, coordinate_origin);
             let overlay_entity = if let Some(overlay_entity) = reusable.remove(&overlay.layer) {
-                if let Ok((mut image_node, mut node)) = overlay_nodes.get_mut(overlay_entity) {
-                    if image_node.image != expected_image.image
-                        || image_node.rect != expected_image.rect
-                        || image_node.image_mode != expected_image.image_mode
-                    {
-                        *image_node = expected_image;
-                    }
+                if let Ok((mut material_node, mut node)) = overlay_nodes.get_mut(overlay_entity) {
+                    update_surface_material(&mut materials, &mut material_node, expected_material);
                     if *node != expected_node {
                         *node = expected_node;
                     }
@@ -1000,7 +1044,7 @@ fn sync_surface_nodes(
                     .spawn((
                         SurfaceOverlayNode,
                         Pickable::IGNORE,
-                        expected_image,
+                        MaterialNode(materials.add(expected_material)),
                         expected_node,
                         ChildOf(entity),
                     ))
@@ -1148,19 +1192,48 @@ fn validate_view(view: SurfaceContentView, width: u32, height: u32) -> bool {
         && view.source_y + view.source_height <= height as f32
 }
 
-fn surface_image_node(image: Handle<Image>, view: SurfaceContentView) -> ImageNode {
-    ImageNode {
-        image,
-        rect: Some(view.source_rect()),
-        image_mode: NodeImageMode::Stretch,
-        ..Default::default()
+fn surface_material(layer: &SurfaceLayerContent, view: SurfaceContentView) -> SurfaceUiMaterial {
+    let encoding = match layer.encoding {
+        SurfaceImageEncoding::LinearStraight => 0,
+        SurfaceImageEncoding::EncodedPremultiplied => 1,
+        SurfaceImageEncoding::EncodedOpaque => 2,
+    };
+    SurfaceUiMaterial {
+        image: layer.image.clone(),
+        parameters: SurfaceMaterialParameters {
+            source_rect: Vec4::new(
+                view.source_x,
+                view.source_y,
+                view.source_width,
+                view.source_height,
+            ),
+            buffer_size: Vec2::new(layer.pixel_size.0 as f32, layer.pixel_size.1 as f32),
+            flags: UVec2::new(encoding, u32::from(layer.y_inverted)),
+        },
     }
 }
 
-fn empty_surface_image_node() -> ImageNode {
-    ImageNode {
-        image_mode: NodeImageMode::Stretch,
-        ..Default::default()
+fn update_surface_material(
+    materials: &mut Assets<SurfaceUiMaterial>,
+    node: &mut MaterialNode<SurfaceUiMaterial>,
+    expected: SurfaceUiMaterial,
+) {
+    if let Some(mut material) = materials.get_mut(&node.0) {
+        if *material != expected {
+            *material = expected;
+        }
+    } else {
+        node.0 = materials.add(expected);
+    }
+}
+
+fn clear_surface_material(
+    materials: &mut Assets<SurfaceUiMaterial>,
+    node: &mut MaterialNode<SurfaceUiMaterial>,
+) {
+    if node.0 != Handle::default() {
+        materials.remove(node.0.id());
+        node.0 = Handle::default();
     }
 }
 
@@ -1195,7 +1268,7 @@ fn unpremultiply_bgra(pixels: &mut [u8]) {
 
 #[cfg(test)]
 mod tests {
-    use bevy::app::App;
+    use bevy::{app::App, asset::AssetApp};
 
     use crate::composition::{CompositionPlugin, set_composition_advance};
 
@@ -1203,7 +1276,12 @@ mod tests {
 
     fn test_app() -> App {
         let mut app = App::new();
-        app.insert_resource(Assets::<Image>::default())
+        app.add_plugins((
+            bevy::app::TaskPoolPlugin::default(),
+            bevy::asset::AssetPlugin::default(),
+        ));
+        app.init_asset::<Shader>()
+            .insert_resource(Assets::<Image>::default())
             .add_plugins((CompositionPlugin, SurfacePlugin));
         app
     }
@@ -1431,7 +1509,11 @@ mod tests {
     #[test]
     fn coalescing_preserves_an_unseen_imported_render_image() {
         let surface = SurfaceId::new(1);
-        let image = Handle::<Image>::default();
+        let image = SurfaceRenderImage {
+            image: Handle::default(),
+            encoding: SurfaceImageEncoding::EncodedPremultiplied,
+            y_inverted: true,
+        };
         let mut first = root_snapshot(None);
         first.buffers[0].content = SurfaceBufferContent::RenderImage(image.clone());
         let mut events = SurfaceEventQueue::default();
@@ -1454,7 +1536,11 @@ mod tests {
     #[test]
     fn snapshot_validation_accepts_imported_images_but_checks_copied_pixel_lengths() {
         let mut imported = root_snapshot(None);
-        imported.buffers[0].content = SurfaceBufferContent::RenderImage(Handle::default());
+        imported.buffers[0].content = SurfaceBufferContent::RenderImage(SurfaceRenderImage {
+            image: Handle::default(),
+            encoding: SurfaceImageEncoding::EncodedOpaque,
+            y_inverted: false,
+        });
         assert!(validate_snapshot(&imported));
 
         let mut malformed_copy = root_snapshot(None);
@@ -1505,7 +1591,6 @@ mod tests {
                 surface,
                 view: SurfaceView::WindowGeometry,
             },
-            ImageNode::default(),
             Node::default(),
         ));
         let mut snapshot = root_snapshot(Some([1, 1, 1, 255]));
@@ -1522,8 +1607,13 @@ mod tests {
         };
         let overlay_image = app
             .world()
-            .get::<ImageNode>(first_overlay)
-            .expect("overlay should own an image")
+            .get::<MaterialNode<SurfaceUiMaterial>>(first_overlay)
+            .and_then(|node| {
+                app.world()
+                    .resource::<Assets<SurfaceUiMaterial>>()
+                    .get(&node.0)
+            })
+            .expect("overlay should own a surface material")
             .image
             .clone();
 

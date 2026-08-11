@@ -6,8 +6,8 @@ use bevy::{
     picking::Pickable,
     prelude::{
         AlignItems, BackgroundColor, BorderColor, BorderRadius, Button, Children, Display,
-        FlexDirection, ImageNode, JustifyContent, Node, Overflow, PositionType, Rot2, Scene,
-        UiRect, UiTransform, percent, px,
+        FlexDirection, JustifyContent, Node, Overflow, PositionType, Rot2, Scene, UiRect,
+        UiTransform, percent, px,
     },
     scene::{bsn, on},
     ui::LayoutConfig,
@@ -113,7 +113,6 @@ pub(super) fn scene(surface: SurfaceId) -> impl Scene {
                     }))
                     Pickable::IGNORE
                     LayoutConfig { use_rounding: true }
-                    ImageNode::default()
                     Node {
                         display: Display::None,
                         overflow: Overflow::clip(),

@@ -20,18 +20,17 @@ not otherwise depend on the patch being local.
 Weld accepts multiple xdg-toplevels backed by `wl_shm` or linux-dmabuf and
 exposes their lifecycle through protocol-neutral ECS entities. SHM pixels are
 copied into Bevy images. A DMA-BUF is imported as an external Vulkan image and
-GPU-blitted into a Weld-owned Bevy image; there is no CPU pixel copy or mapping
-in that path. The blit is intentional until Bevy can safely retain a client
-buffer through every later redraw: it gives Weld durable image ownership and
-allows `wl_buffer.release` as soon as GPU consumption completes.
+sampled directly by the private material behind `SurfaceNode`; the path has no
+CPU pixel copy, GPU normalization blit, or intermediate surface texture.
 
 The boundary has three distinct representations. Smithay emits a host-only
 surface snapshot whose changed layer is retained content, owned SHM pixels, or
 a validated DMA-BUF plus an opaque release identity. `ShellRenderer` consumes
 that snapshot and resolves the external image into a Bevy handle. ECS receives
-only retained content, pixels, or a Bevy `Handle<Image>`; plugins never handle
-Smithay protocol objects, file descriptors, Vulkan images, or wgpu resources.
-Adjacent ECS snapshots coalesce while carrying the newest unobserved content.
+only retained content, pixels, or a Bevy `Handle<Image>` with project-owned
+sampling metadata; plugins never handle Smithay protocol objects, file
+descriptors, Vulkan images, or wgpu resources. Adjacent ECS snapshots coalesce
+while carrying the newest unobserved content.
 
 Linux-dmabuf is advertised at protocol version 6 only when the selected Vulkan
 adapter exposes a DRM render node, external DMA-BUF memory, foreign queue-family
@@ -50,29 +49,48 @@ frame. Multiple in-flight uses of one buffer share a release identity, and the
 server emits one release only after every submitted use has completed.
 
 Client implicit fences become Smithay commit blockers registered with calloop.
-After readiness, the shell submits a raw Vulkan foreign-queue acquire, the wgpu
-blit, and a raw Vulkan foreign-queue release together in that order. wgpu 30
-forbids mixing raw and WebGPU commands in one encoder, so these are three
-command buffers in one queue submission with one completion identity. A
-persistent completion worker waits for its `SubmissionIndex` and wakes calloop;
-only the server thread then sends `wl_buffer.release`. There are no timers,
-status polling, per-frame threads, or Wayland resources in the worker.
-Polling the shared wgpu device also retires deferred GPU resources on that
-completion thread; wgpu supports this, and the worker is therefore an explicit
-part of imported-resource destruction ownership rather than only a notifier.
-The first acquire uses `GENERAL` as the producer-owned layout, following the
-Wayland/Vulkan compositor convention for an initialized external image; after
-the cached image's first use, Weld's matching release establishes that exact
-layout for every subsequent acquire. Running this path with Vulkan validation
-layers is a release gate once those layers are available in the development
+After readiness, each layer moves through staged, displayed, and retiring
+states. Immediately before Bevy renders, Weld promotes the newest referenced
+staged buffer, inserts its imported texture as a fresh Bevy GPU-image identity,
+and submits a raw Vulkan foreign-queue acquire. The buffer stays acquired and
+unreleased across every redraw that reuses it. When a replacement or removal
+reaches ECS, the old image remains valid through that RenderApp submission;
+only afterward does Weld submit its foreign-queue release. Queue submission
+order therefore surrounds every possible Bevy read without modifying Bevy's
+renderer. Superseded staged buffers were never sampled and need no ownership
+transfer. Replacement, unmap, layer removal, and destruction all request a
+composition; shutdown explicitly drains acquired buffers if that composition
+cannot run. Vulkan ownership is tracked per imported image rather than per
+surface layer: reattaching one `wl_buffer` or displaying it in multiple layers
+shares one acquire, and the image is released only when its final displayed use
+retires. Each protocol use still completes independently.
+
+A persistent completion worker waits for release-barrier `SubmissionIndex`
+values and wakes calloop; only the server thread then sends
+`wl_buffer.release`. There are no timers, status polling, per-frame threads, or
+Wayland resources in the worker. The first acquire uses `GENERAL` as the
+producer-owned layout, following the Wayland/Vulkan compositor convention for
+an initialized external image. Running this path with Vulkan validation layers
+is a release gate once those layers are available in the development
 environment.
 
 Wayland ARGB channels are premultiplied in their encoded representation while
-Bevy UI blends straight alpha. The DMA-BUF shader therefore samples a non-sRGB
-view, unpremultiplies encoded RGB (or forces alpha for X formats), and writes a
-non-sRGB view of a `Bgra8UnormSrgb` backing image. Bevy later samples its default
-sRGB view. This matches the established SHM conversion without applying the
-transfer function at the wrong point.
+Bevy UI blends straight alpha. The surface material loads source texels from
+the imported non-sRGB view, unpremultiplies encoded RGB (or forces alpha for X
+formats), converts sRGB to linear, and returns straight alpha directly into
+Bevy composition. Pixel-aligned 1:1 presentation uses one texel load within a
+small alignment tolerance. Scaling, rotation, or subpixel placement loads four
+neighboring texels, normalizes each independently, and interpolates in linear
+space. Taps clamp to the complete client texture rather than a viewport crop,
+matching Bevy's former image sampling. This makes a scaled translucent sample
+more expensive than a normal Bevy image sample, but removes the full-surface
+read, write, and later reread previously performed for every client commit.
+The material's whole-buffer `Y_INVERT` and viewport-coordinate mapping execute
+in WGSL and are covered by runtime visual validation. Duplicating that
+coordinate expression in Rust would not verify the shader; a shader execution
+or image-comparison harness is the appropriate automated coverage when Weld
+adds one.
+
 Readable subsurfaces above the toplevel root are ordered and positioned as
 internal Bevy image layers behind the same project-owned `SurfaceNode`; the
 root image stays on that node so its rounded clipping and root-only fast path
@@ -153,8 +171,8 @@ Subsurfaces without an explicit input region use their full logical extent.
 Picking targets identify the exact root or subsurface layer, and Smithay
 revalidates that target before delivering input to the corresponding live
 `wl_surface`. Geometry spanning subsurfaces outside the root buffer is not yet
-represented. `ImageNode` is a project-owned presentation detail, not the
-plugin-facing surface contract. Below-root subsurface ordering, role-only
+represented. The private surface material is a project-owned presentation
+detail, not the plugin-facing surface contract. Below-root subsurface ordering, role-only
 subsurface detachment without a later tree commit, damage-aware uploads,
 presentation timing, VRR, and HDR remain explicit spike boundaries rather
 than settled compositor architecture.
@@ -167,13 +185,16 @@ changing focus; focus changes remain the responsibility of pointer motion and
 button events. Leaving the host window or losing host focus cancels any active
 finger axes before clearing pointer state.
 
-Ordinary nested rendering is event driven. Host and client-surface changes
-request a composition directly; Bevy systems that drive continuous visual
-changes should emit `bevy::window::RequestRedraw` while they remain active.
-Bevy primitives participate normally in a requested composition, but their
-mutation is not a universal automatic invalidation signal. Frame pacing for a
-continuous request stream is deferred; an active calloop source can currently
-wake the host sooner than the nominal frame interval.
+Ordinary rendering is event driven. Host and client-surface changes request a
+composition directly; Bevy systems that drive continuous visual changes should
+emit `bevy::window::RequestRedraw` while they remain active. An output refresh
+rate is the upper presentation opportunity for a continuous stream, not a
+requirement that every visible client submit a new buffer each refresh. Idle,
+slow, or occluded clients reuse or retain their current buffer. Different
+outputs, VRR, exclusive scanout, and headless or streaming consumers may expose
+different cadences. Bevy primitives participate normally in a requested
+composition, but their mutation is not a universal automatic invalidation
+signal.
 
 BSN and Bevy's UI work are references for composition, behavior, accessibility,
 and state synchronization. Do not add Feathers by default. If Weld adopts Bevy

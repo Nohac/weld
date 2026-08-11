@@ -68,7 +68,7 @@ pub(crate) fn request_weld_device(
     };
     info!(
         format_modifier_pairs = capabilities.formats.len(),
-        "enabled zero-CPU-copy linux-dmabuf import"
+        "enabled direct linux-dmabuf sampling"
     );
     Ok((device, queue, Some(capabilities)))
 }

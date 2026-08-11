@@ -228,20 +228,20 @@ impl ShellRenderer {
     /// Construction pins Weld to Bevy's current non-pipelined [`RenderApp`].
     /// Main-world trackers are retained across input-only advances and cleared
     /// only after extraction has observed them.
-    pub(crate) fn render_composition(&mut self) -> CompositionTargetId {
+    pub(crate) fn render_composition(&mut self) -> Result<CompositionTargetId> {
         // Keep the current presenters pinned to their original target. Direct
         // DRM selects between both targets explicitly once worker ownership is
         // active, avoiding per-frame Bevy bind-group churn before then.
         let target = CompositionTargetId::FIRST;
-        self.render_composition_to(target);
-        target
+        self.render_composition_to(target)?;
+        Ok(target)
     }
 
     /// Render into one explicitly host-owned composition target.
     ///
     /// Direct presentation uses the target identity to prevent Bevy from
     /// overwriting a texture while the presentation worker still owns it.
-    pub(crate) fn render_composition_to(&mut self, target: CompositionTargetId) {
+    pub(crate) fn render_composition_to(&mut self, target: CompositionTargetId) -> Result<()> {
         let composition_target = &self.composition_targets[target.0];
         let size = composition_target.texture.size();
         insert_manual_view(
@@ -250,8 +250,15 @@ impl ShellRenderer {
             size.width,
             size.height,
         );
+        if let Some(importer) = &mut self.dmabuf_importer {
+            importer.prepare_render(&mut self.app)?;
+        }
         render_composition_app(&mut self.app);
+        if let Some(importer) = &mut self.dmabuf_importer {
+            importer.finish_render(&mut self.app)?;
+        }
         self.completed_target = target;
+        Ok(())
     }
 
     pub fn should_exit(&self) -> bool {
