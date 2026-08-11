@@ -2,9 +2,9 @@
 
 This note records evidence and architectural decisions for replacing Weld's
 transitional CPU-copy DRM renderer with direct wgpu presentation. The retained
-probe at `examples/drm_wsi_probe.rs` is intentionally independent from the
-production compositor so it remains useful for isolating driver, session, and
-VT behavior.
+probe at `crates/weld-core/examples/drm_wsi_probe.rs` is intentionally
+independent from the production compositor, so it remains useful for isolating
+driver, session, and VT behavior.
 
 ## Current direction
 

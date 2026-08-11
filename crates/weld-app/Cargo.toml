@@ -1,0 +1,25 @@
+[package]
+name = "weld-app"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[features]
+test-support = []
+
+[dependencies]
+anyhow.workspace = true
+bevy = { workspace = true, features = [
+    "bevy_remote",
+    "scene",
+    "std",
+    "ui_bevy_render",
+    "ui_picking",
+] }
+# Converter functions only. Weld owns the outer event loop.
+bevy_winit.workspace = true
+leafwing-input-manager = { workspace = true, features = ["keyboard", "mouse", "picking"] }
+tracing.workspace = true
+weld-core = { path = "../weld-core" }
+wgpu = { workspace = true, features = ["naga-ir", "vulkan", "wgsl"] }
+winit = { workspace = true, features = ["rwh_06"] }

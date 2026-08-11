@@ -5299,17 +5299,27 @@ dependencies = [
 ]
 
 [[package]]
-name = "weldwm"
+name = "weld-app"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bevy",
+ "bevy_winit",
+ "leafwing-input-manager",
+ "tracing",
+ "weld-core",
+ "wgpu",
+ "winit",
+]
+
+[[package]]
+name = "weld-core"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "ash",
- "bevy",
- "bevy_dylib",
- "bevy_winit",
  "calloop 0.14.4",
  "clap",
- "leafwing-input-manager",
  "png",
  "pollster",
  "smithay",
@@ -5320,6 +5330,31 @@ dependencies = [
  "wgpu",
  "winit",
  "x11-dl",
+]
+
+[[package]]
+name = "weld-window"
+version = "0.1.0"
+dependencies = [
+ "bevy",
+ "tracing",
+ "weld-app",
+]
+
+[[package]]
+name = "weldwm"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bevy",
+ "bevy_dylib",
+ "calloop 0.14.4",
+ "clap",
+ "tracing",
+ "tracing-subscriber",
+ "weld-app",
+ "weld-core",
+ "weld-window",
 ]
 
 [[package]]

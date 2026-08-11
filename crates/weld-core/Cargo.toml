@@ -1,0 +1,30 @@
+[package]
+name = "weld-core"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+ash.workspace = true
+calloop.workspace = true
+png.workspace = true
+pollster.workspace = true
+smithay = { workspace = true, features = [
+    "backend_drm",
+    "backend_libinput",
+    "backend_session_libseat",
+    "backend_udev",
+    "desktop",
+    "wayland_frontend",
+] }
+smithay-drm-extras.workspace = true
+tracing.workspace = true
+wayland-sys = { version = "0.31.11", features = ["client", "dlopen"] }
+wgpu = { workspace = true, features = ["drm", "naga-ir", "vulkan", "wgsl"] }
+winit = { workspace = true, features = ["rwh_06", "wayland", "wayland-dlopen", "x11"] }
+x11-dl.workspace = true
+
+[dev-dependencies]
+clap.workspace = true
+tracing-subscriber.workspace = true

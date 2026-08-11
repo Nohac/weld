@@ -11,4 +11,4 @@ export RUST_LOG="${RUST_LOG:-info,wgpu_hal::vulkan::drm=trace}"
 
 echo "Writing DRM WSI probe output to ${probe_log}" >&2
 cd -- "${repository_root}"
-cargo run --example drm_wsi_probe -- "$@" 2>&1 | tee "${probe_log}"
+cargo run -p weld-core --example drm_wsi_probe -- "$@" 2>&1 | tee "${probe_log}"

@@ -9,10 +9,10 @@ Before the first stable release, prioritize architectural coherence over
 changeset size. Sweeping, cross-cutting refactors are acceptable when they
 establish or correct ownership, module, API, and lifecycle boundaries. When
 concrete responsibilities are already distinct, separate them before temporary
-coupling becomes the project structure. Keep one package until a real
-dependency, runtime, reuse, or testing boundary justifies another crate; a
-single package does not imply a single module. Do not create empty modules or
-placeholder crates for future milestones.
+coupling becomes the project structure. Add crates only for real dependency,
+runtime, reuse, or testing boundaries, and do not create empty modules or
+placeholder crates for future milestones. The current crate responsibilities
+and dependency direction are recorded in [Architecture](docs/architecture.md).
 
 For Bevy-related work, read the relevant project skill first:
 
@@ -37,9 +37,9 @@ check first, then widen as the change warrants:
 
 ```text
 cargo fmt --check
-cargo check
+cargo check --workspace
 cargo test <test-name>
-cargo clippy --all-targets --all-features -- -D warnings
+cargo clippy --workspace --all-targets --all-features -- -D warnings
 ```
 
 Debug builds apply light optimization to Weld and full optimization to

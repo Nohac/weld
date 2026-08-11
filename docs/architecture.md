@@ -1,7 +1,35 @@
 # Architecture
 
-The first validation slice is a single package using the restricted `bevy`
-umbrella crate. Weld owns the outer winit window, Smithay server, event-loop
+Weld is a workspace with three reusable layers and one standard distribution:
+
+- `weld-core` owns Smithay, Wayland protocol state, native input sources,
+  backend event loops, DMA-BUF ownership, and final wgpu presentation. It has
+  no Bevy dependency.
+- `weld-app` owns the Bevy application and render bridge, the plugin-facing
+  application model, input projection, surface entities, and composition into
+  a core-owned texture. Plugin APIs use Weld and Bevy types rather than
+  Smithay protocol objects.
+- `weld-window` is an optional policy crate that claims ordinary application
+  surfaces and supplies Weld's default client- and server-decorated window and
+  popup presentations.
+- `weldwm` is the standard distribution. It selects a backend, constructs the
+  Bevy `App` after the backend has opened its GPU context, chooses plugins and
+  shortcuts, and supplies the executable. It is one possible assembly of the
+  reusable crates, not the owner of their implementation.
+
+Dependencies point inward: `weld-app` depends on `weld-core`, `weld-window`
+depends on `weld-app`, and the distribution depends on all three. Core must not
+depend on Bevy, and the application or policy crates must not depend directly
+on Smithay. A custom distribution can replace `weld-window`, add application
+plugins, or build a different application host while retaining the native
+backend and protocol machinery.
+
+`weld-app` keeps native host-ingress records behind its public surface facade.
+The `test-support` feature exposes those records only so downstream policy
+crates can exercise complete lifecycle behavior; distributions and plugins
+must not enable it in production.
+
+Weld owns the outer winit window or DRM session, Smithay server, event-loop
 orchestration, and final wgpu presentation. Bevy supplies its app schedule,
 renderer, UI primitives, and BSN scene composition, rendering both client
 surfaces and shell UI into a Weld-owned texture through Bevy's manual
@@ -23,14 +51,24 @@ copied into Bevy images. A DMA-BUF is imported as an external Vulkan image and
 sampled directly by the private material behind `SurfaceNode`; the path has no
 CPU pixel copy, GPU normalization blit, or intermediate surface texture.
 
-The boundary has three distinct representations. Smithay emits a host-only
+The boundary has three distinct representations. Smithay emits a core-owned
 surface snapshot whose changed layer is retained content, owned SHM pixels, or
-a validated DMA-BUF plus an opaque release identity. `ShellRenderer` consumes
-that snapshot and resolves the external image into a Bevy handle. ECS receives
-only retained content, pixels, or a Bevy `Handle<Image>` with project-owned
-sampling metadata; plugins never handle Smithay protocol objects, file
-descriptors, Vulkan images, or wgpu resources. Adjacent ECS snapshots coalesce
-while carrying the newest unobserved content.
+a validated DMA-BUF plus an opaque release identity. `AppShell` translates
+that snapshot and asks the core-owned DMA-BUF manager to resolve an external
+image into a Bevy handle. Application plugins receive only retained content,
+pixels, or a Bevy `Handle<Image>` with project-owned sampling metadata; they
+never handle Smithay protocol objects, file descriptors, Vulkan images, or
+wgpu resources. Adjacent application snapshots coalesce while carrying the
+newest unobserved content.
+
+The native backend opens the wgpu instance, adapter, device, queue, output
+extent, composition target, and DMA-BUF resources before invoking the
+distribution's application-host factory. That ordering prevents Bevy from
+selecting a second device. The resulting `CompositionHost` is a Bevy-free core
+contract: backends deliver protocol-neutral surface and seat changes, advance
+application policy, request composition into a core-owned target, and collect
+protocol actions. `AppShell` is the standard Bevy implementation, but the core
+does not require it.
 
 Linux-dmabuf is advertised at protocol version 6 only when the selected Vulkan
 adapter exposes a DRM render node, external DMA-BUF memory, foreign queue-family

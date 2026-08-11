@@ -16,16 +16,6 @@ rust-version = "1.87"
 features = ["test_all_features", "libseat/docs_rs"]
 rustdoc-args = ["--cfg", "docsrs"]
 
-[workspace]
-resolver = "3"
-members = [
-    "smithay-drm-extras",
-    "smallvil",
-    "anvil",
-    "wlcs_anvil",
-    "test_clients",
-]
-
 [dependencies]
 appendlist = "1.4"
 ash = { version = "0.38.0", optional = true }

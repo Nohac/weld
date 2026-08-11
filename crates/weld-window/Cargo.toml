@@ -1,0 +1,13 @@
+[package]
+name = "weld-window"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+bevy = { workspace = true, features = ["scene", "std", "ui_bevy_render", "ui_picking"] }
+tracing.workspace = true
+weld-app = { path = "../weld-app" }
+
+[dev-dependencies]
+weld-app = { path = "../weld-app", features = ["test-support"] }
