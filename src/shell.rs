@@ -56,13 +56,22 @@ use crate::surface::{
 use crate::window::{DefaultWindowPlugin, set_output_physical_size, set_output_scale_factor};
 
 const COMPOSITION_VIEW: ManualTextureViewHandle = ManualTextureViewHandle(1);
+const COMPOSITION_TARGET_COUNT: usize = 2;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct CompositionTargetId(usize);
+
+struct CompositionTarget {
+    texture: wgpu::Texture,
+    view: wgpu::TextureView,
+}
 
 pub struct ShellRenderer {
     app: App,
     redraw_requests: RedrawRequests,
     device: wgpu::Device,
-    composition_texture: wgpu::Texture,
-    composition_view: wgpu::TextureView,
+    composition_targets: [CompositionTarget; COMPOSITION_TARGET_COUNT],
+    completed_target: CompositionTargetId,
 }
 
 pub(crate) struct ShellRendererOptions<'a> {
@@ -139,9 +148,13 @@ impl ShellRenderer {
         )?;
         disconnect_render_time(&mut app)?;
 
-        let (composition_texture, composition_view) =
-            create_composition_target(device, size.x, size.y);
-        insert_manual_view(&mut app, composition_view.clone(), size.x, size.y);
+        let composition_targets = create_composition_targets(device, size.x, size.y);
+        insert_manual_view(
+            &mut app,
+            composition_targets[0].view.clone(),
+            size.x,
+            size.y,
+        );
 
         let camera = app
             .world_mut()
@@ -178,8 +191,8 @@ impl ShellRenderer {
             app,
             redraw_requests,
             device: device.clone(),
-            composition_texture,
-            composition_view,
+            composition_targets,
+            completed_target: CompositionTargetId(0),
         })
     }
 
@@ -201,8 +214,30 @@ impl ShellRenderer {
     /// Construction pins Weld to Bevy's current non-pipelined [`RenderApp`].
     /// Main-world trackers are retained across input-only advances and cleared
     /// only after extraction has observed them.
-    pub fn render_composition(&mut self) {
+    pub(crate) fn render_composition(&mut self) -> CompositionTargetId {
+        // Keep the current presenters pinned to their original target. Direct
+        // DRM selects between both targets explicitly once worker ownership is
+        // active, avoiding per-frame Bevy bind-group churn before then.
+        let target = CompositionTargetId(0);
+        self.render_composition_to(target);
+        target
+    }
+
+    /// Render into one explicitly host-owned composition target.
+    ///
+    /// Direct presentation uses the target identity to prevent Bevy from
+    /// overwriting a texture while the presentation worker still owns it.
+    pub(crate) fn render_composition_to(&mut self, target: CompositionTargetId) {
+        let composition_target = &self.composition_targets[target.0];
+        let size = composition_target.texture.size();
+        insert_manual_view(
+            &mut self.app,
+            composition_target.view.clone(),
+            size.width,
+            size.height,
+        );
         render_composition_app(&mut self.app);
+        self.completed_target = target;
     }
 
     pub fn should_exit(&self) -> bool {
@@ -210,12 +245,16 @@ impl ShellRenderer {
     }
 
     pub fn resize(&mut self, width: u32, height: u32) {
-        let (composition_texture, composition_view) =
-            create_composition_target(&self.device, width, height);
-        insert_manual_view(&mut self.app, composition_view.clone(), width, height);
+        let composition_targets = create_composition_targets(&self.device, width, height);
+        insert_manual_view(
+            &mut self.app,
+            composition_targets[0].view.clone(),
+            width,
+            height,
+        );
         set_output_physical_size(self.app.world_mut(), UVec2::new(width, height));
-        self.composition_texture = composition_texture;
-        self.composition_view = composition_view;
+        self.composition_targets = composition_targets;
+        self.completed_target = CompositionTargetId(0);
     }
 
     /// Set the compositor-logical to physical scale used by Bevy UI layout.
@@ -225,11 +264,19 @@ impl ShellRenderer {
     }
 
     pub fn texture_view(&self) -> &wgpu::TextureView {
-        &self.composition_view
+        self.target_view(self.completed_target)
     }
 
     pub fn texture(&self) -> &wgpu::Texture {
-        &self.composition_texture
+        self.target_texture(self.completed_target)
+    }
+
+    pub(crate) fn target_view(&self, target: CompositionTargetId) -> &wgpu::TextureView {
+        &self.composition_targets[target.0].view
+    }
+
+    pub(crate) fn target_texture(&self, target: CompositionTargetId) -> &wgpu::Texture {
+        &self.composition_targets[target.0].texture
     }
 
     pub fn enqueue_surface_event(&mut self, event: HostSurfaceEvent) {
@@ -306,11 +353,15 @@ impl RedrawRequests {
     }
 }
 
-fn create_composition_target(
+fn create_composition_targets(
     device: &wgpu::Device,
     width: u32,
     height: u32,
-) -> (wgpu::Texture, wgpu::TextureView) {
+) -> [CompositionTarget; COMPOSITION_TARGET_COUNT] {
+    std::array::from_fn(|_| create_composition_target(device, width, height))
+}
+
+fn create_composition_target(device: &wgpu::Device, width: u32, height: u32) -> CompositionTarget {
     let texture = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("weld Bevy composition"),
         size: wgpu::Extent3d {
@@ -328,7 +379,10 @@ fn create_composition_target(
         view_formats: &[],
     });
     let texture_view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-    (texture, texture_view)
+    CompositionTarget {
+        texture,
+        view: texture_view,
+    }
 }
 
 fn insert_manual_view(app: &mut App, texture_view: wgpu::TextureView, width: u32, height: u32) {

@@ -109,9 +109,41 @@ is dropped. This ownership and termination rule is a design gate for the
 production presenter.
 
 Physical presentation availability and composition policy remain separate.
-The initial standalone policy may suspend composition while its VT is inactive,
-but a later headless or streaming consumer must be able to keep composition
-active without a physical DRM presentation.
+The initial standalone implementation keeps demand-driven composition active
+while its VT or connector is unavailable so client frame callbacks continue to
+make progress. It does not run a free-running refresh timer without a capture,
+stream, client commit, Bevy redraw, or other composition consumer.
+
+## Composition ownership
+
+Bevy renders into two project-owned composition targets. Target identity is
+part of every presenter frame request and result; the host never renders into
+a target while the presentation worker owns it. While FIFO acquisition blocks
+for one target, newer state may be rendered and coalesced into the other target
+without growing a frame queue.
+
+Every terminal presenter result releases its target, including deferred,
+interrupted, unavailable-output, device-loss, worker-stop, and panic outcomes.
+The result carries the presenter generation, target identity, and frame
+identity so a late result cannot release a target now owned by newer work.
+After the worker submits its blit and calls present, its release event crosses
+the channel before the host can submit another Bevy write to that target. Both
+operations use the same wgpu queue, so the later write is ordered after the
+blit read.
+
+Resizing or replacing the targets first advances their generation. The host
+then waits for or invalidates any outstanding ownership before dropping and
+recreating both textures. A screenshot reads the completed target associated
+with the requested frame. Its copy submission uses the same queue and retains
+that target until readback has been ordered, preventing a later composition
+from overwriting it first.
+
+Nested and direct presentation deliberately complete client frame callbacks
+at different boundaries. The nested backend completes them after its host
+surface accepts the present. Direct DRM completes them after Bevy composition,
+independent of whether a physical output currently accepts that frame. This is
+what keeps clients live through VT switches and output loss; it is not a claim
+of exact scanout timing.
 
 ## Output resilience contract
 
@@ -129,9 +161,9 @@ The production backend should distinguish at least:
   reprobed;
 - an output whose presenter generation failed and must be replaced.
 
-Only the active state permits physical presentation. Composition policy is
-independent: the initial standalone mode may suspend composition in the other
-states, while future headless or streaming consumers may keep it enabled.
+Only the active state permits physical presentation. Composition stays
+available in every state and remains demand-driven when there is no physical,
+capture, or streaming consumer.
 
 State changes are driven by libseat, udev, wgpu callbacks, and presenter
 channel readiness. They must not depend on periodic status polling. Pending

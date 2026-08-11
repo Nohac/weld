@@ -60,6 +60,12 @@ ash = "0.38.0"
 # dependencies enough optimization for a usable compositor development build.
 [profile.dev]
 opt-level = 1
+# Direct DRM surface creation and presenter workers contain Rust panics at
+# explicit unwind boundaries. Keep that contract visible in every used profile.
+panic = "unwind"
 
 [profile.dev.package."*"]
 opt-level = 3
+
+[profile.release]
+panic = "unwind"

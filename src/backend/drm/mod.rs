@@ -31,18 +31,16 @@ use smithay::{
             pixman::PixmanRenderer,
         },
         session::{Event as SessionEvent, Session, libseat::LibSeatSession},
-        udev::{UdevBackend, UdevEvent, primary_gpu},
+        udev::{UdevBackend, UdevEvent},
     },
-    output::{Mode as SmithayOutputMode, PhysicalProperties},
     reexports::{
         calloop::EventLoop as CalloopEventLoop,
-        drm::control::{Mode as DrmMode, ModeTypeFlags, connector, crtc},
+        drm::control::{Mode as DrmMode, connector, crtc},
         gbm::Device as RawGbmDevice,
         input::Libinput,
-        rustix::fs::OFlags,
         wayland_server::Display,
     },
-    utils::{DeviceFd, Transform},
+    utils::Transform,
 };
 use smithay_drm_extras::drm_scanner::{DrmScanEvent, DrmScanner};
 use tracing::{debug, error, info, warn};
@@ -61,6 +59,10 @@ use crate::{
     server::{OutputDescriptor, OutputMetrics, ServerState},
     shell::{ShellRenderer, ShellRendererOptions},
 };
+
+mod discovery;
+
+use discovery::{DrmDeviceDiscovery, connector_name, discover_output, output_description};
 
 type WeldDrmCompositor = DrmCompositor<
     GbmAllocator<DrmDeviceFd>,
@@ -446,82 +448,33 @@ fn run_active_drm(
 
 impl DrmBootstrap {
     fn new<'a>(
-        mut session: LibSeatSession,
+        session: LibSeatSession,
         devices: impl Iterator<Item = (smithay::reexports::rustix::fs::Dev, &'a std::path::Path)>,
     ) -> Result<Self> {
-        let primary =
-            primary_gpu(session.seat())?.context("no DRM GPU was found for the active seat")?;
-        let devices = devices
-            .map(|(device_id, path)| (device_id, path.to_path_buf()))
-            .collect::<Vec<_>>();
-        let (device_id, device_path) = devices
-            .iter()
-            .find(|(_, path)| *path == primary)
-            .cloned()
-            .or_else(|| devices.first().cloned())
-            .context("udev reported no DRM devices for the active seat")?;
-        let fd = session
-            .open(
-                &device_path,
-                OFlags::RDWR | OFlags::CLOEXEC | OFlags::NOCTTY | OFlags::NONBLOCK,
-            )
-            .with_context(|| format!("failed to open DRM device {}", device_path.display()))?;
-        let fd = DrmDeviceFd::new(DeviceFd::from(fd));
-        let (drm, notifier) =
-            DrmDevice::new(fd.clone(), true).context("failed to initialize the DRM device")?;
-        let gbm = GbmDevice::new(fd).context("failed to initialize GBM")?;
-        let mut scanner = DrmScanner::new();
-        let (connector, crtc) = scanner
-            .scan_connectors(&drm)?
-            .into_iter()
-            .find_map(|event| match event {
-                DrmScanEvent::Connected {
-                    connector,
-                    crtc: Some(crtc),
-                } if !connector.modes().is_empty() => Some((connector, crtc)),
-                _ => None,
-            })
-            .context("no connected DRM connector with a usable CRTC and mode")?;
-        let mode = preferred_mode(&connector)?;
+        let device = DrmDeviceDiscovery::new(session, devices)?;
+        let (drm, notifier) = DrmDevice::new(device.drm.clone(), true)
+            .context("failed to initialize the DRM device")?;
+        // Preserve the transitional path's reset-before-scan ordering. The
+        // direct path will scan the raw DrmDeviceFd without constructing this
+        // Smithay KMS wrapper.
+        let output = discover_output(&drm)?;
+        let gbm = GbmDevice::new(device.drm).context("failed to initialize GBM")?;
         Ok(Self {
-            session,
+            session: device.session,
             notifier: Some(notifier),
             drm,
             gbm,
-            scanner,
-            device_id,
-            device_path,
-            connector,
-            crtc,
-            mode,
+            scanner: output.scanner,
+            device_id: device.device_id,
+            device_path: device.device_path,
+            connector: output.connector,
+            crtc: output.crtc,
+            mode: output.mode,
         })
     }
 
     fn output_description(&self) -> Result<(OutputDescriptor, OutputMetrics)> {
-        let name = connector_name(&self.connector);
-        let (physical_width, physical_height) = self.connector.size().unwrap_or((0, 0));
-        let wl_mode = SmithayOutputMode::from(self.mode);
-        let metrics = OutputMetrics::new(
-            u32::try_from(wl_mode.size.w).context("negative DRM mode width")?,
-            u32::try_from(wl_mode.size.h).context("negative DRM mode height")?,
-            1.0,
-        )?
-        .with_refresh_millihertz(wl_mode.refresh)?;
-        let descriptor = OutputDescriptor {
-            name,
-            physical_properties: PhysicalProperties {
-                size: (
-                    i32::try_from(physical_width).context("physical output width exceeds i32")?,
-                    i32::try_from(physical_height).context("physical output height exceeds i32")?,
-                )
-                    .into(),
-                subpixel: self.connector.subpixel().into(),
-                make: "Unknown".to_owned(),
-                model: "Unknown".to_owned(),
-                serial_number: "Unknown".to_owned(),
-            },
-        };
-        Ok((descriptor, metrics))
+        output_description(&self.connector, self.mode)
     }
 
     fn into_presenter(mut self, output: smithay::output::Output) -> Result<DrmPresenter> {
@@ -754,24 +707,6 @@ impl DrmPresenter {
         }
         Ok(())
     }
-}
-
-fn preferred_mode(connector: &connector::Info) -> Result<DrmMode> {
-    connector
-        .modes()
-        .iter()
-        .copied()
-        .find(|mode| mode.mode_type().contains(ModeTypeFlags::PREFERRED))
-        .or_else(|| connector.modes().first().copied())
-        .context("DRM connector has no modes")
-}
-
-fn connector_name(connector: &connector::Info) -> String {
-    format!(
-        "{}-{}",
-        connector.interface().as_str(),
-        connector.interface_id()
-    )
 }
 
 fn complete_capture(
