@@ -1,14 +1,15 @@
 # Agent rules
 
 - Read `CONTRIBUTING.md` before changing code or project structure.
-- Treat `IDEA.md` as an initial design proposal and discussion starter, not an
-  implementation checklist or settled source of truth.
+- Treat Direction and Exploration material under `docs/spec/` as design input
+  and discussion starters, not implementation checklists or settled source of
+  truth.
 - Before the first stable release, prioritize architectural coherence over
   changeset size. Sweeping, cross-cutting refactors are acceptable when they
   establish or correct ownership, module, API, and lifecycle boundaries. Split
   concrete responsibilities before temporary coupling becomes the project
-  structure, but do not create placeholders for roadmap-only ideas from
-  `IDEA.md`.
+  structure, but do not create placeholders for Direction or Exploration work
+  recorded under `docs/spec/`.
 - Read the relevant skill under `.agents/skills/` before changing Smithay,
   Bevy ECS, rendering, or scene/UI code.
 

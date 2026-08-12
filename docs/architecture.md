@@ -1,5 +1,9 @@
 # Architecture
 
+This document records the repository's implemented ownership and lifecycle
+boundaries. The subject-oriented [Weld specifications](spec/README.md) preserve
+project intent and future direction without presenting it as current behavior.
+
 Weld is a workspace with three reusable layers and one standard distribution:
 
 - `weld-core` owns Smithay, Wayland protocol state, native input sources,

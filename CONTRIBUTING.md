@@ -2,8 +2,10 @@
 
 ## Start here
 
-Read [IDEA.md](IDEA.md) for the motivating direction, but treat it as a
-proposal rather than an implementation checklist or settled source of truth.
+Read the [Weld specifications](docs/spec/README.md) for project intent and
+future direction. Their status labels distinguish verified behavior from
+agreed constraints and exploratory ideas; only Implemented material describes
+the repository as it exists.
 
 Before the first stable release, prioritize architectural coherence over
 changeset size. Sweeping, cross-cutting refactors are acceptable when they
