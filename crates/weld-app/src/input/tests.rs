@@ -16,6 +16,7 @@ use super::{
     },
     take_host_commands, take_input_effects, take_virtual_terminal_switch_request,
 };
+use crate::ActiveBackend;
 use weld_core::runtime::HostCommand;
 use winit::keyboard::Key;
 
@@ -59,7 +60,8 @@ fn shortcut_test_app() -> App {
 
 fn virtual_terminal_shortcut_test_app() -> App {
     let mut app = App::new();
-    app.add_plugins(MinimalPlugins)
+    app.insert_resource(ActiveBackend::Drm)
+        .add_plugins(MinimalPlugins)
         .add_plugins(InputPlugin)
         .add_message::<PointerInput>()
         .add_plugins(InputBridgePlugin::new(NormalizedRenderTarget::TextureView(
@@ -67,6 +69,18 @@ fn virtual_terminal_shortcut_test_app() -> App {
         )))
         .add_plugins(VirtualTerminalShortcutPlugin);
     app
+}
+
+#[test]
+fn virtual_terminal_plugin_is_inactive_without_the_drm_backend() {
+    let mut app = App::new();
+    app.insert_resource(ActiveBackend::Nested)
+        .add_plugins(VirtualTerminalShortcutPlugin);
+
+    assert!(
+        !app.world()
+            .contains_resource::<super::virtual_terminal::VirtualTerminalSwitchRequest>()
+    );
 }
 
 #[test]

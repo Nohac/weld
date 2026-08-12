@@ -2,7 +2,7 @@
 
 use bevy::{
     app::{App, Plugin},
-    ecs::{entity::Entity, resource::Resource, system::Res, world::World},
+    ecs::{resource::Resource, system::Res, world::World},
 };
 
 /// Installs the host-controlled composition advance state.
@@ -33,7 +33,3 @@ pub(crate) fn set_composition_advance(world: &mut World, enabled: bool) {
         advance.0 = enabled;
     }
 }
-
-/// Camera rendering Weld's complete Bevy composition.
-#[derive(Resource, Clone, Copy)]
-pub struct CompositorCamera(pub Entity);

@@ -5,7 +5,7 @@ edition.workspace = true
 publish.workspace = true
 
 [dependencies]
-bevy = { workspace = true, features = ["scene", "std", "ui_bevy_render", "ui_picking"] }
+bevy.workspace = true
 tracing.workspace = true
 weld-app = { path = "../weld-app" }
 

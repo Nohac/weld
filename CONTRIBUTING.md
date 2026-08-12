@@ -49,6 +49,20 @@ stay short. Run debug executables through Cargo, which supplies the runtime
 search path for `libbevy_dylib` and Rust's shared library. Invoking
 `target/debug/weldwm` directly requires an equivalent `LD_LIBRARY_PATH`.
 
+A standalone library build such as `cargo build -p weld-app` has no final
+executable in which Cargo can use `bevy_dylib`. It therefore builds a separate
+static-compatible dependency graph instead of reusing the distribution's
+dynamic graph. This is a Cargo linkage boundary, not a Bevy feature mismatch.
+
+Unit-test binaries remain statically linked. Force-linking `bevy_dylib` from a
+test target makes Cargo rebuild the dependency graph in `prefer-dynamic` mode,
+which is slower and substantially increases `target/` size.
+
+All workspace crates that use Bevy inherit one exact version and feature set
+from the root workspace dependency. Keep that set centralized: crate-local
+feature additions make package-specific Cargo commands build another Bevy
+artifact instead of reusing the distribution's prebuilt Bevy artifacts.
+
 Release executables do not reference the development dylib and remain
 standalone. Cargo still builds an unused `libbevy_dylib` artifact because
 dependencies cannot vary by profile; do not make the helper optional, since
@@ -57,6 +71,11 @@ that would require a feature flag for ordinary `cargo run`.
 Cargo uses Clang and LLD for Linux targets. The shared Rust shell already
 provides both tools, so run builds from that environment rather than depending
 on globally installed linkers.
+
+Bevy system-font discovery requires Fontconfig development metadata while
+building and `libfontconfig` at runtime. The shared Rust shell provides both;
+other environments must make Fontconfig available to `pkg-config` and the
+runtime loader.
 
 Run Weld inside a development shell whose glibc is compatible with the running
 NixOS graphics drivers. The shared Rust shell is located at

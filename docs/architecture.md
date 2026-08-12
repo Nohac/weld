@@ -12,10 +12,10 @@ Weld is a workspace with three reusable layers and one standard distribution:
 - `weld-window` is an optional policy crate that claims ordinary application
   surfaces and supplies Weld's default client- and server-decorated window and
   popup presentations.
-- `weldwm` is the standard distribution. It selects a backend, constructs the
-  Bevy `App` after the backend has opened its GPU context, chooses plugins and
-  shortcuts, and supplies the executable. It is one possible assembly of the
-  reusable crates, not the owner of their implementation.
+- `weldwm` is the standard distribution. It requests a backend, configures the
+  `WeldApp` returned by the builder with plugins and shortcuts, and supplies
+  the executable. It is one possible assembly of the reusable crates, not the
+  owner of their implementation.
 
 Dependencies point inward: `weld-app` depends on `weld-core`, `weld-window`
 depends on `weld-app`, and the distribution depends on all three. Core must not
@@ -23,6 +23,46 @@ depend on Bevy, and the application or policy crates must not depend directly
 on Smithay. A custom distribution can replace `weld-window`, add application
 plugins, or build a different application host while retaining the native
 backend and protocol machinery.
+
+Distributions normally construct Weld through `WeldApp::builder()`. Building
+resolves and opens the native backend and GPU first, then returns a wrapper
+around the real Bevy `App`. The distribution may add ordinary Bevy plugins,
+systems, and resources before calling `run()`. `ActiveBackend` is inserted
+before plugin construction, and `WeldAppExt` lets any standard Bevy plugin
+inspect it without requiring a separate Weld plugin trait. The low-level
+`HostBuilder` and `CompositionHost` contract remain available for non-Bevy
+application hosts; backend module entry points are implementation details.
+
+Plugins spawn ordinary UI roots without selecting a camera. Weld marks its
+single composition camera as Bevy's `IsDefaultUiCamera`, so normal UI targets
+the compositor output automatically. Once Weld supports multiple outputs,
+output-specific roots will select their camera with `UiTargetCamera`; exactly
+one composition camera remains the default for otherwise untargeted plugin UI.
+
+`weld-app` re-exports its exact supported Bevy version as `weld_app::bevy` so
+plugins can share Weld's ECS, application, and rendering types without an
+independent version choice. A plugin may depend directly on that same exact
+Bevy release when it needs to enable an additional additive feature, but a
+different Bevy version has incompatible types and builds a separate framework
+artifact. Until Weld removes its temporary wgpu 30 compatibility patch, an
+out-of-tree distribution must also carry the root patch configuration described
+below; dependency patches do not propagate from a library crate.
+
+The builder is bootstrap-only. Reloadable window, input, appearance, and other
+policy settings belong in ECS resources, where Bevy change detection lets
+systems observe replacements without recreating the application or losing
+client and window state. A setting backed by live native state must eventually
+cross the host boundary as a typed request; backend choice, GPU selection, and
+other immutable roots require a deeper reinitialization or process restart.
+
+The one-shot runtime does not yet implement application replacement or crash
+recovery, but its ownership boundaries must leave that possible. Smithay and
+the live Wayland socket and client connections belong to core rather than to
+Bevy policy. Any future replacement flow should snapshot durable policy and
+window state with Weld identifiers and project-owned data—not Bevy `Entity`
+values or raw Smithay objects—then rehydrate a new application host against
+the retained core connection state. Do not partially rebuild those roots as a
+side effect of ordinary settings reload.
 
 `weld-app` keeps native host-ingress records behind its public surface facade.
 The `test-support` feature exposes those records only so downstream policy
@@ -61,14 +101,15 @@ never handle Smithay protocol objects, file descriptors, Vulkan images, or
 wgpu resources. Adjacent application snapshots coalesce while carrying the
 newest unobserved content.
 
-The native backend opens the wgpu instance, adapter, device, queue, output
-extent, composition target, and DMA-BUF resources before invoking the
-distribution's application-host factory. That ordering prevents Bevy from
-selecting a second device. The resulting `CompositionHost` is a Bevy-free core
-contract: backends deliver protocol-neutral surface and seat changes, advance
-application policy, request composition into a core-owned target, and collect
-protocol actions. `AppShell` is the standard Bevy implementation, but the core
-does not require it.
+`HostBuilder::prepare` opens the wgpu instance, adapter, device, queue, output
+extent, composition target, and DMA-BUF resources before Bevy is constructed.
+That ordering prevents Bevy from selecting a second device. Preparation yields
+a render context and a same-thread, one-shot runtime; the context is consumed
+while constructing `AppShell` and is not retained across output resizes. The
+resulting `CompositionHost` is a Bevy-free core contract: backends deliver
+protocol-neutral surface and seat changes, advance application policy, request
+composition into a core-owned target, and collect protocol actions. `AppShell`
+is the standard Bevy implementation, but the core does not require it.
 
 Linux-dmabuf is advertised at protocol version 6 only when the selected Vulkan
 adapter exposes a DRM render node, external DMA-BUF memory, foreign queue-family

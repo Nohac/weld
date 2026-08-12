@@ -2,7 +2,8 @@
 
 use std::{ffi::OsString, path::PathBuf};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
+use calloop::signals::{Signal, Signals};
 
 use crate::{
     dmabuf::DmabufContext,
@@ -13,10 +14,73 @@ use crate::{
 };
 
 /// Distribution options consumed by either host backend.
-pub struct RunOptions {
-    pub client: Vec<OsString>,
-    pub screenshot: Option<PathBuf>,
-    pub remote_debug_enabled: bool,
+#[derive(Default)]
+pub(crate) struct RunOptions {
+    pub(crate) client: Vec<OsString>,
+    pub(crate) screenshot: Option<PathBuf>,
+    pub(crate) remote_debug_enabled: bool,
+}
+
+/// Native host selected before an application is constructed.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum HostBackend {
+    #[default]
+    Nested,
+    Drm,
+}
+
+/// Configures and opens a native compositor host before application setup.
+#[derive(Default)]
+pub struct HostBuilder {
+    backend: HostBackend,
+    options: RunOptions,
+}
+
+impl HostBuilder {
+    /// Creates a builder that prepares the nested backend by default.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Selects the native backend to prepare.
+    pub fn backend(mut self, backend: HostBackend) -> Self {
+        self.backend = backend;
+        self
+    }
+
+    /// Configures an optional client command to launch once the host is ready.
+    pub fn launch<I, S>(mut self, command: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<OsString>,
+    {
+        self.options.client = command.into_iter().map(Into::into).collect();
+        self
+    }
+
+    /// Requests a startup screenshot at the given path.
+    pub fn screenshot(mut self, path: Option<PathBuf>) -> Self {
+        self.options.screenshot = path;
+        self
+    }
+
+    /// Records whether the host must remain live for remote capture requests.
+    pub fn remote_debug_enabled(mut self, enabled: bool) -> Self {
+        self.options.remote_debug_enabled = enabled;
+        self
+    }
+
+    /// Opens the selected backend and GPU resources on the current thread.
+    pub fn prepare(self) -> Result<PreparedHost> {
+        // Install the signalfd mask before the backend creates wgpu or any
+        // application workers. Subsequently created threads inherit it.
+        let signals = Signals::new(&[Signal::SIGINT, Signal::SIGTERM])
+            .context("failed to initialize process signal handling")?;
+        match self.backend {
+            HostBackend::Nested => crate::backend::nested::prepare(self.options, signals),
+            HostBackend::Drm => crate::backend::drm::prepare(self.options, signals),
+        }
+    }
 }
 
 /// GPU and output state required to construct a Bevy-backed application host.
@@ -30,6 +94,54 @@ pub struct RenderContext {
     pub extent: Extent,
     pub scale_factor: f64,
     pub initial_target: wgpu::TextureView,
+}
+
+type RunPreparedHost = Box<dyn FnOnce(Box<dyn CompositionHost>) -> Result<()>>;
+
+/// Native event-loop state ready to drive one application host.
+pub struct PreparedRuntime {
+    run: RunPreparedHost,
+}
+
+impl PreparedRuntime {
+    pub(crate) fn new(run: impl FnOnce(Box<dyn CompositionHost>) -> Result<()> + 'static) -> Self {
+        Self { run: Box::new(run) }
+    }
+
+    /// Drives the prepared native event loop with one application host.
+    ///
+    /// This must run on the thread that prepared the host.
+    pub fn run(self, host: impl CompositionHost + 'static) -> Result<()> {
+        (self.run)(Box::new(host))
+    }
+}
+
+/// A native host whose GPU is ready for application construction.
+pub struct PreparedHost {
+    context: RenderContext,
+    runtime: PreparedRuntime,
+}
+
+impl PreparedHost {
+    pub(crate) fn new(
+        context: RenderContext,
+        run: impl FnOnce(Box<dyn CompositionHost>) -> Result<()> + 'static,
+    ) -> Self {
+        Self {
+            context,
+            runtime: PreparedRuntime::new(run),
+        }
+    }
+
+    /// Borrows the GPU context needed to construct an application host.
+    pub const fn render_context(&self) -> &RenderContext {
+        &self.context
+    }
+
+    /// Separates the GPU context from the one-shot native runtime.
+    pub fn into_parts(self) -> (RenderContext, PreparedRuntime) {
+        (self.context, self.runtime)
+    }
 }
 
 #[derive(Debug)]

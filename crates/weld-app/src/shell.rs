@@ -27,11 +27,11 @@ use bevy::{
         texture::{ManualTextureView, ManualTextureViews},
     },
     time::TimeReceiver,
-    ui::{UiScale, UiSystems},
+    ui::{IsDefaultUiCamera, UiScale, UiSystems},
     window::{ExitCondition, RequestRedraw, WindowPlugin},
 };
 
-use crate::composition::{CompositorCamera, set_composition_advance};
+use crate::composition::set_composition_advance;
 use crate::debug::{complete_capture, take_capture_request};
 use crate::dmabuf::DmabufImporter;
 use crate::input::{
@@ -65,13 +65,13 @@ pub struct AppShell {
 }
 
 /// Installs Weld's application model without selecting a window policy.
-pub struct WeldAppPlugin {
+pub(crate) struct WeldAppPlugin {
     extent: Extent,
     scale_factor: f64,
 }
 
 impl WeldAppPlugin {
-    pub const fn new(extent: Extent, scale_factor: f64) -> Self {
+    pub(crate) const fn new(extent: Extent, scale_factor: f64) -> Self {
         Self {
             extent,
             scale_factor,
@@ -140,21 +140,7 @@ impl AppShell {
             context.extent.height,
         );
 
-        let camera = app
-            .world_mut()
-            .spawn((
-                Camera2d,
-                Camera {
-                    clear_color: ClearColorConfig::Custom(Color::NONE),
-                    ..Default::default()
-                },
-                RenderTarget::TextureView(COMPOSITION_VIEW),
-                // Bevy UI shaders emit linear RGB. The manual sRGB target performs
-                // the transfer encoding when those values are written.
-                CompositingSpace::Linear,
-            ))
-            .id();
-        app.insert_resource(CompositorCamera(camera));
+        spawn_compositor_camera(app.world_mut());
         let redraw_requests = app
             .world()
             .get_resource::<Messages<RequestRedraw>>()
@@ -399,6 +385,23 @@ impl AppShell {
     }
 }
 
+fn spawn_compositor_camera(world: &mut World) -> Entity {
+    world
+        .spawn((
+            Camera2d,
+            Camera {
+                clear_color: ClearColorConfig::Custom(Color::NONE),
+                ..Default::default()
+            },
+            RenderTarget::TextureView(COMPOSITION_VIEW),
+            IsDefaultUiCamera,
+            // Bevy UI shaders emit linear RGB. The manual sRGB target performs
+            // the transfer encoding when those values are written.
+            CompositingSpace::Linear,
+        ))
+        .id()
+}
+
 impl CompositionHost for AppShell {
     fn enqueue_surface_event(&mut self, event: PendingSurfaceEvent) {
         AppShell::enqueue_surface_event(self, event);
@@ -627,7 +630,7 @@ fn disable_ui_rounding_on_roots(world: &mut World) {
 #[cfg(test)]
 mod tests {
     use bevy::{
-        app::{SubApp, Update},
+        app::{HierarchyPropagatePlugin, PostUpdate, PropagateSet, SubApp, Update},
         ecs::{
             message::MessageWriter,
             resource::Resource,
@@ -636,12 +639,13 @@ mod tests {
         },
         render::RenderApp,
         time::{Real, Time, TimePlugin, TimeReceiver, create_time_channels},
+        ui::{ComputedUiTargetCamera, Node, UiScale, update::propagate_ui_target_cameras},
         window::{ExitCondition, RequestRedraw, WindowPlugin},
     };
 
     use super::{
         App, Messages, RedrawRequests, advance_main_app, disconnect_render_time,
-        render_composition_app,
+        render_composition_app, spawn_compositor_camera,
     };
 
     #[derive(Resource, Default)]
@@ -720,5 +724,30 @@ mod tests {
         app.update();
         let second_elapsed = app.world().resource::<Time<Real>>().elapsed();
         assert!(second_elapsed > first_elapsed);
+    }
+
+    #[test]
+    fn untargeted_ui_roots_use_the_compositor_camera() {
+        let mut app = App::new();
+        app.init_resource::<UiScale>()
+            .add_plugins(HierarchyPropagatePlugin::<ComputedUiTargetCamera>::new(
+                PostUpdate,
+            ))
+            .configure_sets(
+                PostUpdate,
+                PropagateSet::<ComputedUiTargetCamera>::default(),
+            )
+            .add_systems(Update, propagate_ui_target_cameras);
+
+        let camera = spawn_compositor_camera(app.world_mut());
+        let root = app.world_mut().spawn(Node::default()).id();
+        app.update();
+
+        assert_eq!(
+            app.world()
+                .get::<ComputedUiTargetCamera>(root)
+                .and_then(ComputedUiTargetCamera::get),
+            Some(camera),
+        );
     }
 }

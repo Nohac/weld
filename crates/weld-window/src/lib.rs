@@ -30,13 +30,12 @@ use bevy::{
     },
     prelude::{BorderColor, BoxShadow, ChildOf, Display, GlobalZIndex, Node, Val, With, px},
     scene::CommandsSceneExt,
-    ui::{UiScale, UiTargetCamera, ZIndex},
+    ui::{UiScale, ZIndex},
     window::RequestRedraw,
 };
-use tracing::warn;
 
 use weld_app::{
-    composition::{CompositorCamera, composition_advance_requested},
+    composition::composition_advance_requested,
     layer::{WINDOW_Z_INDEX_MAX, WINDOW_Z_INDEX_MIN},
     output::OutputGeometry,
     surface::{
@@ -167,12 +166,12 @@ impl PlacementRandom {
     }
 }
 
-/// Default window and popup policy for an application using
-/// [`WeldAppPlugin`](weld_app::WeldAppPlugin).
+/// Default window and popup policy for an application hosted by
+/// [`WeldApp`](weld_app::WeldApp).
 ///
-/// Install [`WeldAppPlugin`](weld_app::WeldAppPlugin) before this plugin; it
-/// supplies the surface ingress and [`OutputGeometry`] resources consumed by
-/// these systems.
+/// Construct the application with [`WeldApp::builder`](weld_app::WeldApp::builder)
+/// before installing this plugin. The builder supplies the surface ingress and
+/// [`OutputGeometry`] resources consumed by these systems.
 pub struct DefaultWindowPlugin;
 
 impl Plugin for DefaultWindowPlugin {
@@ -303,19 +302,7 @@ type ServerPresentationSourceQuery<'w, 's> = Query<
     (With<ServerDecorated>, Without<PrimaryPresentation>),
 >;
 
-fn present_client_windows(
-    mut commands: Commands,
-    camera: Option<Res<CompositorCamera>>,
-    surfaces: ClientPresentationSourceQuery,
-) {
-    let Some(camera) = camera else {
-        if !surfaces.is_empty() {
-            warn!(
-                "left client-decorated surfaces unclaimed because the compositor camera is unavailable"
-            );
-        }
-        return;
-    };
+fn present_client_windows(mut commands: Commands, surfaces: ClientPresentationSourceQuery) {
     for (source, window, placement, mapped) in &surfaces {
         commands.spawn_scene(client::scene(window.surface)).insert((
             PresentsSurface(source),
@@ -326,25 +313,12 @@ fn present_client_windows(
             WindowGeometryAnchor {
                 offset: -mapped.visual_offset,
             },
-            UiTargetCamera(camera.0),
             GlobalZIndex(placement.z_index),
         ));
     }
 }
 
-fn present_server_windows(
-    mut commands: Commands,
-    camera: Option<Res<CompositorCamera>>,
-    surfaces: ServerPresentationSourceQuery,
-) {
-    let Some(camera) = camera else {
-        if !surfaces.is_empty() {
-            warn!(
-                "left server-decorated surfaces unclaimed because the compositor camera is unavailable"
-            );
-        }
-        return;
-    };
+fn present_server_windows(mut commands: Commands, surfaces: ServerPresentationSourceQuery) {
     for (source, window, placement) in &surfaces {
         commands.spawn_scene(server::scene(window.surface)).insert((
             PresentsSurface(source),
@@ -355,7 +329,6 @@ fn present_server_windows(
             WindowGeometryAnchor {
                 offset: Vec2::new(0.0, HEADER_HEIGHT),
             },
-            UiTargetCamera(camera.0),
             GlobalZIndex(placement.z_index),
         ));
     }
@@ -1051,7 +1024,6 @@ mod tests {
             .add_message::<RequestRedraw>()
             .add_plugins((CompositionPlugin, SurfacePlugin, DefaultWindowPlugin));
         let camera = app.world_mut().spawn_empty().id();
-        app.insert_resource(CompositorCamera(camera));
         (app, camera)
     }
 
@@ -1175,7 +1147,7 @@ mod tests {
 
     #[test]
     fn fallback_claims_a_mapped_surface_and_builds_backed_ui_in_one_update() {
-        let (mut app, camera) = test_app();
+        let (mut app, _) = test_app();
         let surface = SurfaceId::new(37);
         enqueue_surface_event(
             app.world_mut(),
@@ -1208,10 +1180,6 @@ mod tests {
         assert_eq!(
             root_entity.get::<PresentsSurface>().map(|claim| claim.0),
             Some(source)
-        );
-        assert_eq!(
-            root_entity.get::<UiTargetCamera>().map(|target| target.0),
-            Some(camera),
         );
         assert_eq!(
             root_entity.get::<Node>().map(|node| node.display),

@@ -11,6 +11,8 @@ use bevy::{
     input::{ButtonInput, InputSystems as BevyInputSystems, keyboard::KeyCode},
 };
 
+use crate::{ActiveBackend, WeldAppExt};
+
 use super::{
     InputSystems,
     raw::{ButtonState, RawSeatEventKind},
@@ -21,12 +23,20 @@ const FIRST_FUNCTION_KEY: u32 = 59;
 const LAST_FUNCTION_KEY: u32 = 68;
 
 #[derive(Resource, Default)]
-struct VirtualTerminalSwitchRequest(Option<i32>);
+pub(crate) struct VirtualTerminalSwitchRequest(Option<i32>);
 
+/// Enables virtual-terminal shortcuts when added to a DRM-backed [`crate::WeldApp`].
+///
+/// Add this after [`crate::WeldAppBuilder::build`] has inserted the resolved
+/// [`ActiveBackend`]. The plugin is intentionally inactive for other Bevy apps
+/// and for Weld's nested backend.
 pub struct VirtualTerminalShortcutPlugin;
 
 impl Plugin for VirtualTerminalShortcutPlugin {
     fn build(&self, app: &mut App) {
+        if app.backend() != Some(ActiveBackend::Drm) {
+            return;
+        }
         app.init_resource::<VirtualTerminalSwitchRequest>()
             .add_systems(
                 PreUpdate,

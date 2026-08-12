@@ -1,12 +1,13 @@
 //! Bevy application integration and plugin-facing compositor model.
 
+mod builder;
 pub mod composition;
 pub mod debug;
 mod dmabuf;
 pub mod input;
 pub mod layer;
 pub mod output;
-pub mod shell;
+mod shell;
 #[path = "surface.rs"]
 mod surface_impl;
 
@@ -39,12 +40,13 @@ pub mod surface {
     pub(crate) use crate::surface_impl::has_surface_frame;
 }
 
-pub use shell::{AppShell, WeldAppPlugin, configure_rendering};
-pub use weld_core::host::RenderContext;
+/// Bevy version supported by Weld applications and plugins.
+pub use bevy;
+pub use builder::{ActiveBackend, Backend, WeldApp, WeldAppBuilder, WeldAppExt};
 
 pub mod prelude {
     pub use crate::{
-        WeldAppPlugin,
+        ActiveBackend, Backend, WeldApp, WeldAppBuilder, WeldAppExt,
         output::OutputGeometry,
         surface::{
             AppPopup, AppWindow, ClientDecorated, ClientSurface, MappedSurface, ServerDecorated,

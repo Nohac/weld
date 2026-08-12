@@ -9,13 +9,7 @@ test-support = []
 
 [dependencies]
 anyhow.workspace = true
-bevy = { workspace = true, features = [
-    "bevy_remote",
-    "scene",
-    "std",
-    "ui_bevy_render",
-    "ui_picking",
-] }
+bevy.workspace = true
 # Converter functions only. Weld owns the outer event loop.
 bevy_winit.workspace = true
 leafwing-input-manager = { workspace = true, features = ["keyboard", "mouse", "picking"] }
