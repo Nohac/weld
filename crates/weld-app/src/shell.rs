@@ -573,7 +573,7 @@ fn advance_main_app(app: &mut App, redraw_requests: &mut RedrawRequests) -> bool
 fn disconnect_render_time(app: &mut App) -> Result<()> {
     // Weld advances the non-pipelined main world independently of RenderApp,
     // so Automatic time must use its documented main-world clock fallback.
-    // Dropping the sole receiver is load-bearing: Bevy 0.19's render-side
+    // Dropping the sole receiver is load-bearing: Bevy 0.19.1's render-side
     // send_time explicitly ignores Disconnected. Re-verify both assumptions
     // when updating Bevy.
     let receiver = app

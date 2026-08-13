@@ -12,7 +12,7 @@
 [package]
 edition = "2024"
 name = "bevy_mesh"
-version = "0.19.0"
+version = "0.19.1"
 build = false
 autolib = false
 autobins = false
@@ -48,29 +48,29 @@ name = "bevy_mesh"
 path = "src/lib.rs"
 
 [dependencies.bevy_app]
-version = "0.19.0"
+version = "0.19.1"
 
 [dependencies.bevy_asset]
-version = "0.19.0"
+version = "0.19.1"
 
 [dependencies.bevy_derive]
-version = "0.19.0"
+version = "0.19.1"
 
 [dependencies.bevy_ecs]
-version = "0.19.0"
+version = "0.19.1"
 
 [dependencies.bevy_encase_derive]
-version = "0.19.0"
+version = "0.19.1"
 
 [dependencies.bevy_math]
-version = "0.19.0"
+version = "0.19.1"
 
 [dependencies.bevy_mikktspace]
 version = "1"
 optional = true
 
 [dependencies.bevy_platform]
-version = "0.19.0"
+version = "0.19.1"
 features = [
     "std",
     "serialize",
@@ -78,10 +78,10 @@ features = [
 default-features = false
 
 [dependencies.bevy_reflect]
-version = "0.19.0"
+version = "0.19.1"
 
 [dependencies.bevy_transform]
-version = "0.19.0"
+version = "0.19.1"
 
 [dependencies.bitflags]
 version = "2.3"

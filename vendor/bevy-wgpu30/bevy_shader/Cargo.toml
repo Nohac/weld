@@ -12,7 +12,7 @@
 [package]
 edition = "2024"
 name = "bevy_shader"
-version = "0.19.0"
+version = "0.19.1"
 build = false
 autolib = false
 autobins = false
@@ -55,16 +55,16 @@ name = "bevy_shader"
 path = "src/lib.rs"
 
 [dependencies.bevy_asset]
-version = "0.19.0"
+version = "0.19.1"
 
 [dependencies.bevy_platform]
-version = "0.19.0"
+version = "0.19.1"
 
 [dependencies.bevy_reflect]
-version = "0.19.0"
+version = "0.19.1"
 
 [dependencies.bevy_utils]
-version = "0.19.0"
+version = "0.19.1"
 
 [dependencies.naga]
 version = "30"

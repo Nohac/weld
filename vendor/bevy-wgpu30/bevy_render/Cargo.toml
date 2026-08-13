@@ -12,7 +12,7 @@
 [package]
 edition = "2024"
 name = "bevy_render"
-version = "0.19.0"
+version = "0.19.1"
 build = false
 autolib = false
 autobins = false
@@ -73,53 +73,53 @@ path = "src/lib.rs"
 version = "2.3.0"
 
 [dependencies.bevy_app]
-version = "0.19.0"
+version = "0.19.1"
 
 [dependencies.bevy_asset]
-version = "0.19.0"
+version = "0.19.1"
 
 [dependencies.bevy_camera]
-version = "0.19.0"
+version = "0.19.1"
 
 [dependencies.bevy_color]
-version = "0.19.0"
+version = "0.19.1"
 features = [
     "serialize",
     "wgpu-types",
 ]
 
 [dependencies.bevy_derive]
-version = "0.19.0"
+version = "0.19.1"
 
 [dependencies.bevy_diagnostic]
-version = "0.19.0"
+version = "0.19.1"
 
 [dependencies.bevy_ecs]
-version = "0.19.0"
+version = "0.19.1"
 
 [dependencies.bevy_encase_derive]
-version = "0.19.0"
+version = "0.19.1"
 
 [dependencies.bevy_image]
-version = "0.19.0"
+version = "0.19.1"
 
 [dependencies.bevy_log]
-version = "0.19.0"
+version = "0.19.1"
 
 [dependencies.bevy_material]
-version = "0.19.0"
+version = "0.19.1"
 
 [dependencies.bevy_material_macros]
-version = "0.19.0"
+version = "0.19.1"
 
 [dependencies.bevy_math]
-version = "0.19.0"
+version = "0.19.1"
 
 [dependencies.bevy_mesh]
-version = "0.19.0"
+version = "0.19.1"
 
 [dependencies.bevy_platform]
-version = "0.19.0"
+version = "0.19.1"
 features = [
     "std",
     "serialize",
@@ -127,28 +127,28 @@ features = [
 default-features = false
 
 [dependencies.bevy_reflect]
-version = "0.19.0"
+version = "0.19.1"
 
 [dependencies.bevy_render_macros]
-version = "0.19.0"
+version = "0.19.1"
 
 [dependencies.bevy_shader]
-version = "0.19.0"
+version = "0.19.1"
 
 [dependencies.bevy_tasks]
-version = "0.19.0"
+version = "0.19.1"
 
 [dependencies.bevy_time]
-version = "0.19.0"
+version = "0.19.1"
 
 [dependencies.bevy_transform]
-version = "0.19.0"
+version = "0.19.1"
 
 [dependencies.bevy_utils]
-version = "0.19.0"
+version = "0.19.1"
 
 [dependencies.bevy_window]
-version = "0.19.0"
+version = "0.19.1"
 
 [dependencies.bitflags]
 version = "2"
@@ -247,21 +247,26 @@ version = "1"
 [dev-dependencies.proptest-derive]
 version = "0.2"
 
+[dev-dependencies.wgpu]
+version = "30"
+features = ["noop"]
+default-features = false
+
 [target.'cfg(all(target_arch = "wasm32", target_feature = "atomics"))'.dependencies.send_wrapper]
 version = "0.6.0"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies.bevy_app]
-version = "0.19.0"
+version = "0.19.1"
 features = ["web"]
 default-features = false
 
 [target.'cfg(target_arch = "wasm32")'.dependencies.bevy_platform]
-version = "0.19.0"
+version = "0.19.1"
 features = ["web"]
 default-features = false
 
 [target.'cfg(target_arch = "wasm32")'.dependencies.bevy_reflect]
-version = "0.19.0"
+version = "0.19.1"
 features = ["web"]
 default-features = false
 

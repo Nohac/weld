@@ -7,7 +7,7 @@ description: Implement, review, or migrate Weld code against Bevy 0.19 specifica
 
 1. Read `CONTRIBUTING.md` before changing code or structure.
 2. Confirm uncertain APIs in versioned Bevy 0.19 documentation or the
-   `v0.19.0` source tag. Do not copy `main` blindly.
+   `v0.19.1` source tag. Do not copy `main` blindly.
 3. Add only the standalone Bevy crate and features required by the current
    slice.
 4. Preserve Weld's host boundaries and test policy without a display server
@@ -64,5 +64,5 @@ description: Implement, review, or migrate Weld code against Bevy 0.19 specifica
 
 - [Bevy 0.19 release notes](https://bevy.org/news/bevy-0-19/)
 - [Bevy 0.18 to 0.19 migration guide](https://bevy.org/learn/migration-guides/0-18-to-0-19/)
-- [Bevy ECS 0.19 API](https://docs.rs/bevy_ecs/0.19.0/bevy_ecs/)
-- [Bevy source at v0.19.0](https://github.com/bevyengine/bevy/tree/v0.19.0)
+- [Bevy ECS 0.19 API](https://docs.rs/bevy_ecs/0.19.1/bevy_ecs/)
+- [Bevy source at v0.19.1](https://github.com/bevyengine/bevy/tree/v0.19.1)

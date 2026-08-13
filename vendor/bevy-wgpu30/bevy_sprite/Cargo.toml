@@ -12,7 +12,7 @@
 [package]
 edition = "2024"
 name = "bevy_sprite"
-version = "0.19.0"
+version = "0.19.1"
 build = false
 autolib = false
 autobins = false
@@ -49,51 +49,51 @@ name = "bevy_sprite"
 path = "src/lib.rs"
 
 [dependencies.bevy_app]
-version = "0.19.0"
+version = "0.19.1"
 
 [dependencies.bevy_asset]
-version = "0.19.0"
+version = "0.19.1"
 
 [dependencies.bevy_camera]
-version = "0.19.0"
+version = "0.19.1"
 
 [dependencies.bevy_color]
-version = "0.19.0"
+version = "0.19.1"
 
 [dependencies.bevy_derive]
-version = "0.19.0"
+version = "0.19.1"
 
 [dependencies.bevy_ecs]
-version = "0.19.0"
+version = "0.19.1"
 
 [dependencies.bevy_image]
-version = "0.19.0"
+version = "0.19.1"
 
 [dependencies.bevy_log]
-version = "0.19.0"
+version = "0.19.1"
 
 [dependencies.bevy_math]
-version = "0.19.0"
+version = "0.19.1"
 
 [dependencies.bevy_mesh]
-version = "0.19.0"
+version = "0.19.1"
 
 [dependencies.bevy_picking]
-version = "0.19.0"
+version = "0.19.1"
 optional = true
 
 [dependencies.bevy_reflect]
-version = "0.19.0"
+version = "0.19.1"
 
 [dependencies.bevy_text]
-version = "0.19.0"
+version = "0.19.1"
 optional = true
 
 [dependencies.bevy_transform]
-version = "0.19.0"
+version = "0.19.1"
 
 [dependencies.bevy_window]
-version = "0.19.0"
+version = "0.19.1"
 optional = true
 
 [dependencies.radsort]

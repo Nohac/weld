@@ -13,7 +13,7 @@
 edition = "2024"
 rust-version = "1.85.0"
 name = "bevy_color"
-version = "0.19.0"
+version = "0.19.1"
 build = false
 autolib = false
 autobins = false
@@ -73,12 +73,12 @@ name = "bevy_color"
 path = "src/lib.rs"
 
 [dependencies.bevy_math]
-version = "0.19.0"
+version = "0.19.1"
 features = ["curve"]
 default-features = false
 
 [dependencies.bevy_reflect]
-version = "0.19.0"
+version = "0.19.1"
 optional = true
 default-features = false
 
