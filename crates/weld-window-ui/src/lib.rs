@@ -7,8 +7,8 @@ mod interaction;
 mod mount;
 mod popup;
 
-pub use interaction::WindowMoveHandle;
-pub use mount::surface_content;
+pub use interaction::{WindowMoveHandle, WindowResizeFrame, WindowResizeHandle};
+pub use mount::{surface_content, surface_content_with_node};
 
 use bevy::{
     app::{App, Plugin, PreUpdate},
@@ -58,6 +58,8 @@ impl Plugin for WindowUiPlugin {
     fn build(&self, app: &mut App) {
         app.add_observer(interaction::activate_window)
             .add_observer(interaction::begin_move_handle)
+            .add_observer(interaction::begin_resize_frame)
+            .add_observer(interaction::begin_resize_handle)
             .add_observer(interaction::drag_window)
             .add_observer(interaction::end_drag)
             .add_observer(interaction::cancel_drag)

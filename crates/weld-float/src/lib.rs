@@ -42,13 +42,19 @@ impl Plugin for FloatPlugin {
                 PreUpdate,
                 (
                     initialize_windows,
-                    cleanup_resize_anchors,
-                    initialize_resize_anchors,
                     reconcile_anchored_resize,
                     reconcile_focus,
                 )
                     .chain()
                     .run_if(composition_advance_requested)
+                    .in_set(WindowSystems::Management),
+            )
+            .add_systems(
+                PreUpdate,
+                (cleanup_resize_anchors, initialize_resize_anchors)
+                    .chain()
+                    .after(initialize_windows)
+                    .before(reconcile_anchored_resize)
                     .in_set(WindowSystems::Management),
             );
     }
@@ -268,11 +274,11 @@ fn cleanup_resize_anchors(
     }
 }
 
-/// Captures the far outer edge before pointer deltas mutate desired geometry.
+/// Computes the fixed outer edge before picking can mutate desired geometry.
 ///
-/// Resize sessions currently originate from pre-picking protocol ingress. A
-/// future pointer-owned resize handle must establish this anchor in its begin
-/// path before emitting the first delta.
+/// The component insertion is deferred until the end of `PreUpdate`, but this
+/// ungated system runs before picking on every main-world advance, so the
+/// stored value reflects geometry before that advance's pointer deltas.
 fn initialize_resize_anchors(
     mut commands: Commands,
     manager: Res<DefaultFloatManager>,

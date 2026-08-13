@@ -17,7 +17,7 @@ use bevy::{
     },
 };
 use tracing::info;
-use weld_core::{HostBackend, HostBuilder, PreparedHost};
+use weld_core::{HostBackend, HostBuilder, OutputScale, PreparedHost};
 
 use crate::{
     debug::{DebugProtocolPlugin, configure_remote_debug},
@@ -68,6 +68,7 @@ pub struct WeldAppBuilder {
     client: Vec<OsString>,
     screenshot: Option<PathBuf>,
     remote_debug: Option<String>,
+    scale: Option<OutputScale>,
 }
 
 impl WeldAppBuilder {
@@ -99,6 +100,12 @@ impl WeldAppBuilder {
         self
     }
 
+    /// Configures an explicit standalone DRM output scale.
+    pub fn scale(mut self, scale: Option<OutputScale>) -> Self {
+        self.scale = scale;
+        self
+    }
+
     /// Open the selected native host and create its configurable Bevy application.
     ///
     /// An exceptional nested-host exit during the initial blocking window pump
@@ -120,6 +127,7 @@ impl WeldAppBuilder {
             .launch(self.client)
             .screenshot(self.screenshot)
             .remote_debug_enabled(self.remote_debug.is_some())
+            .output_scale(self.scale)
             .prepare()?;
 
         let context = prepared.render_context();
@@ -363,11 +371,13 @@ mod tests {
             .backend(Backend::Drm)
             .launch(["foot", "--maximized"])
             .screenshot(Some(PathBuf::from("frame.png")))
-            .remote_debug(Some("127.0.0.1:15702".to_owned()));
+            .remote_debug(Some("127.0.0.1:15702".to_owned()))
+            .scale(Some(OutputScale::new(1.5).expect("valid scale")));
 
         assert_eq!(builder.backend, Backend::Drm);
         assert_eq!(builder.client, ["foot", "--maximized"]);
         assert_eq!(builder.screenshot, Some(PathBuf::from("frame.png")));
         assert_eq!(builder.remote_debug.as_deref(), Some("127.0.0.1:15702"));
+        assert_eq!(builder.scale.map(OutputScale::value), Some(1.5));
     }
 }

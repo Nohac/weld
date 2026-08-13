@@ -148,7 +148,8 @@ pub(crate) fn prepare(options: RunOptions, signals: Signals) -> Result<PreparedH
     let device = DrmDeviceDiscovery::new(session, udev.device_list())?;
     let output = discover_output(&device.drm)?;
     let selected_connector_name = connector_name(&output.connector);
-    let (output_descriptor, output_metrics) = output_description(&output.connector, output.mode)?;
+    let (output_descriptor, output_metrics) =
+        output_description(&output.connector, output.mode, options.output_scale)?;
     let direct_gpu = DirectDrmGpu::new(
         &device.drm,
         device.device_id,

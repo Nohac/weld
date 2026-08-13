@@ -152,6 +152,9 @@ cargo run -- foot
 
 On a bare virtual terminal these commands select DRM automatically. The
 equivalent explicit override is `cargo run -- --backend drm -- foot`.
+Set the standalone output scale with `cargo run -- --scale 2 -- foot`.
+Fractional values are supported; nested mode follows its host compositor and
+warns when an explicit scale is ignored.
 
 Use the compositor shortcuts to launch clients or stop Weld:
 

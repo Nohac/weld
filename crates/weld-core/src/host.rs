@@ -1,9 +1,10 @@
 //! Application-host contract driven by Weld's native backends.
 
-use std::{ffi::OsString, path::PathBuf};
+use std::{ffi::OsString, path::PathBuf, str::FromStr};
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use calloop::signals::{Signal, Signals};
+use tracing::warn;
 
 use crate::{
     dmabuf::DmabufContext,
@@ -19,6 +20,44 @@ pub(crate) struct RunOptions {
     pub(crate) client: Vec<OsString>,
     pub(crate) screenshot: Option<PathBuf>,
     pub(crate) remote_debug_enabled: bool,
+    pub(crate) output_scale: OutputScale,
+}
+
+/// Valid logical scale applied to a physical compositor output.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct OutputScale(f64);
+
+impl OutputScale {
+    /// Validates a finite, positive output scale.
+    pub fn new(value: f64) -> Result<Self> {
+        if !value.is_finite() || value <= 0.0 {
+            bail!("output scale must be finite and positive");
+        }
+        Ok(Self(value))
+    }
+
+    /// Returns the validated scale factor.
+    pub const fn value(self) -> f64 {
+        self.0
+    }
+}
+
+impl Default for OutputScale {
+    fn default() -> Self {
+        Self(1.0)
+    }
+}
+
+impl FromStr for OutputScale {
+    type Err = anyhow::Error;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        Self::new(
+            value
+                .parse::<f64>()
+                .with_context(|| format!("invalid output scale {value:?}"))?,
+        )
+    }
 }
 
 /// Native host selected before an application is constructed.
@@ -34,6 +73,7 @@ pub enum HostBackend {
 pub struct HostBuilder {
     backend: HostBackend,
     options: RunOptions,
+    output_scale: Option<OutputScale>,
 }
 
 impl HostBuilder {
@@ -70,16 +110,41 @@ impl HostBuilder {
         self
     }
 
+    /// Configures an explicit scale for standalone DRM output.
+    pub fn output_scale(mut self, scale: Option<OutputScale>) -> Self {
+        self.output_scale = scale;
+        self
+    }
+
     /// Opens the selected backend and GPU resources on the current thread.
-    pub fn prepare(self) -> Result<PreparedHost> {
+    pub fn prepare(mut self) -> Result<PreparedHost> {
         // Install the signalfd mask before the backend creates wgpu or any
         // application workers. Subsequently created threads inherit it.
         let signals = Signals::new(&[Signal::SIGINT, Signal::SIGTERM])
             .context("failed to initialize process signal handling")?;
+        if self.output_scale.is_some() && self.backend == HostBackend::Nested {
+            warn!("ignored explicit output scale because the nested backend follows its host");
+        }
+        self.options.output_scale = self.output_scale.unwrap_or_default();
         match self.backend {
             HostBackend::Nested => crate::backend::nested::prepare(self.options, signals),
             HostBackend::Drm => crate::backend::drm::prepare(self.options, signals),
         }
+    }
+}
+
+#[cfg(test)]
+mod output_scale_tests {
+    use super::OutputScale;
+
+    #[test]
+    fn output_scale_rejects_non_positive_and_non_finite_values() {
+        assert_eq!(OutputScale::new(1.25).expect("valid scale").value(), 1.25);
+        assert!(OutputScale::new(0.0).is_err());
+        assert!(OutputScale::new(-1.0).is_err());
+        assert!(OutputScale::new(f64::NAN).is_err());
+        assert!(OutputScale::new(f64::INFINITY).is_err());
+        assert!("0".parse::<OutputScale>().is_err());
     }
 }
 

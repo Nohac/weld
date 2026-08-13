@@ -48,10 +48,11 @@ pub mod surface {
 /// Bevy version supported by Weld applications and plugins.
 pub use bevy;
 pub use builder::{ActiveBackend, Backend, WeldApp, WeldAppBuilder, WeldAppExt};
+pub use weld_core::OutputScale;
 
 pub mod prelude {
     pub use crate::{
-        ActiveBackend, Backend, WeldApp, WeldAppBuilder, WeldAppExt,
+        ActiveBackend, Backend, OutputScale, WeldApp, WeldAppBuilder, WeldAppExt,
         output::OutputGeometry,
         surface::{
             ClientDecorated, ClientPopup, ClientSurface, ClientToplevel, MappedSurface,

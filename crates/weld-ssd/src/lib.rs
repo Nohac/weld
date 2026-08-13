@@ -22,27 +22,34 @@ use bevy::{
     prelude::{
         AlignItems, BackgroundColor, BorderColor, BorderRadius, BoxShadow, Button, Children,
         FlexDirection, GlobalZIndex, JustifyContent, Node, Overflow, PositionType, Rot2, Scene,
-        UiRect, UiTransform, percent, px,
+        SceneList, UiRect, UiTransform, ZIndex, percent, px,
     },
-    scene::{CommandsSceneExt, bsn, on},
+    scene::{CommandsSceneExt, bsn, bsn_list, on},
     window::RequestRedraw,
 };
 use weld_app::{
     composition::composition_advance_requested,
-    surface::{ClientToplevel, MappedSurface, ServerDecorated, SurfaceId, SurfaceView},
+    surface::{
+        ClientToplevel, MappedSurface, ServerDecorated, SurfaceId, SurfaceView, ToplevelResizeEdge,
+    },
 };
 use weld_window::{
     FocusedWindow, PresentationInsets, PresentationOffset, PresentsWindow,
     PrimaryWindowPresentation, WindowGeometryAnchor, WindowIntent, WindowIntentKind,
     WindowOccupant, WindowSystems, WindowZOrder,
 };
-use weld_window_ui::{WindowMoveHandle, surface_content};
+use weld_window_ui::{WindowMoveHandle, WindowResizeHandle, surface_content_with_node};
 
 const BORDER_WIDTH: f32 = 3.0;
 const OUTER_BORDER_RADIUS: f32 = 9.0;
 const INNER_BORDER_RADIUS: f32 = OUTER_BORDER_RADIUS - BORDER_WIDTH;
 const HEADER_HEIGHT: f32 = 30.0;
 const CLOSE_BUTTON_SIZE: f32 = 22.0;
+const RESIZE_GRAB_EXTENT: f32 = 12.0;
+const RESIZE_HALO_EXTENT: f32 = RESIZE_GRAB_EXTENT - BORDER_WIDTH;
+// Absolute children are positioned from the root padding box. Including the
+// border in the negative inset makes each handle stop at the body edge.
+const RESIZE_HANDLE_INSET: f32 = -(RESIZE_HALO_EXTENT + BORDER_WIDTH);
 const FOCUSED_BORDER: Color = Color::srgb(0.35, 0.58, 0.88);
 const UNFOCUSED_BORDER: Color = Color::srgb(0.28, 0.34, 0.42);
 
@@ -160,7 +167,16 @@ fn sync_focus_style(
 }
 
 fn scene(window: bevy::ecs::entity::Entity, surface: SurfaceId) -> impl Scene {
-    let content = surface_content(surface, SurfaceView::WindowGeometry);
+    let content = surface_content_with_node(
+        surface,
+        SurfaceView::WindowGeometry,
+        Node {
+            overflow: Overflow::clip(),
+            border_radius: BorderRadius::px(0.0, 0.0, INNER_BORDER_RADIUS, INNER_BORDER_RADIUS),
+            ..Default::default()
+        },
+    );
+    let resize_handles = resize_handles();
     bsn! {
         Node {
             position_type: PositionType::Absolute,
@@ -170,82 +186,186 @@ fn scene(window: bevy::ecs::entity::Entity, surface: SurfaceId) -> impl Scene {
         }
         BorderColor::all(UNFOCUSED_BORDER)
         template(|_| Ok(window_shadow()))
-        Children [(
-            WindowBody
-            Node {
-                flex_direction: FlexDirection::Column,
-                border_radius: BorderRadius::all(px(INNER_BORDER_RADIUS)),
-                overflow: Overflow::clip(),
-            }
-            BackgroundColor(Color::srgb(0.10, 0.12, 0.16))
-            Children [
-                (
-                    WindowMoveHandle
-                    Node {
-                        width: percent(100),
-                        height: px(HEADER_HEIGHT),
-                        flex_shrink: 0.0,
-                        align_items: AlignItems::Center,
-                        justify_content: JustifyContent::FlexEnd,
-                        border_radius: BorderRadius::px(
-                            INNER_BORDER_RADIUS,
-                            INNER_BORDER_RADIUS,
-                            0.0,
-                            0.0,
-                        ),
-                    }
-                    BackgroundColor(Color::srgb(0.14, 0.17, 0.22))
-                    Children [(
-                        Button
+        Children [
+            (
+                WindowBody
+                Node {
+                    flex_direction: FlexDirection::Column,
+                    border_radius: BorderRadius::all(px(INNER_BORDER_RADIUS)),
+                    overflow: Overflow::clip(),
+                }
+                BackgroundColor(Color::srgb(0.10, 0.12, 0.16))
+                Children [
+                    (
+                        WindowMoveHandle
                         Node {
-                            width: px(CLOSE_BUTTON_SIZE),
-                            height: px(CLOSE_BUTTON_SIZE),
-                            margin: UiRect::right(px(4)),
+                            width: percent(100),
+                            height: px(HEADER_HEIGHT),
+                            flex_shrink: 0.0,
                             align_items: AlignItems::Center,
-                            justify_content: JustifyContent::Center,
-                            border_radius: BorderRadius::MAX,
+                            justify_content: JustifyContent::FlexEnd,
+                            border_radius: BorderRadius::px(
+                                INNER_BORDER_RADIUS,
+                                INNER_BORDER_RADIUS,
+                                0.0,
+                                0.0,
+                            ),
                         }
-                        BackgroundColor(Color::srgb(0.54, 0.16, 0.18))
-                        on(close_window(window))
+                        BackgroundColor(Color::srgb(0.14, 0.17, 0.22))
                         Children [(
-                            Pickable::IGNORE
+                            Button
                             Node {
-                                width: px(12),
-                                height: px(12),
-                                position_type: PositionType::Relative,
+                                width: px(CLOSE_BUTTON_SIZE),
+                                height: px(CLOSE_BUTTON_SIZE),
+                                margin: UiRect::right(px(4)),
+                                align_items: AlignItems::Center,
+                                justify_content: JustifyContent::Center,
+                                border_radius: BorderRadius::MAX,
                             }
-                            Children [
-                                (
-                                    Pickable::IGNORE
-                                    Node {
-                                        position_type: PositionType::Absolute,
-                                        left: px(0),
-                                        top: px(5),
-                                        width: px(12),
-                                        height: px(2),
-                                    }
-                                    UiTransform::from_rotation(Rot2::degrees(45.0))
-                                    BackgroundColor(Color::WHITE)
-                                ),
-                                (
-                                    Pickable::IGNORE
-                                    Node {
-                                        position_type: PositionType::Absolute,
-                                        left: px(0),
-                                        top: px(5),
-                                        width: px(12),
-                                        height: px(2),
-                                    }
-                                    UiTransform::from_rotation(Rot2::degrees(-45.0))
-                                    BackgroundColor(Color::WHITE)
-                                ),
-                            ]
+                            BackgroundColor(Color::srgb(0.54, 0.16, 0.18))
+                            on(close_window(window))
+                            Children [(
+                                Pickable::IGNORE
+                                Node {
+                                    width: px(12),
+                                    height: px(12),
+                                    position_type: PositionType::Relative,
+                                }
+                                Children [
+                                    (
+                                        Pickable::IGNORE
+                                        Node {
+                                            position_type: PositionType::Absolute,
+                                            left: px(0),
+                                            top: px(5),
+                                            width: px(12),
+                                            height: px(2),
+                                        }
+                                        UiTransform::from_rotation(Rot2::degrees(45.0))
+                                        BackgroundColor(Color::WHITE)
+                                    ),
+                                    (
+                                        Pickable::IGNORE
+                                        Node {
+                                            position_type: PositionType::Absolute,
+                                            left: px(0),
+                                            top: px(5),
+                                            width: px(12),
+                                            height: px(2),
+                                        }
+                                        UiTransform::from_rotation(Rot2::degrees(-45.0))
+                                        BackgroundColor(Color::WHITE)
+                                    ),
+                                ]
+                            )]
                         )]
-                    )]
-                ),
-                {content},
-            ]
-        )]
+                    ),
+                    {content},
+                ]
+            ),
+            {resize_handles},
+        ]
+    }
+}
+
+fn resize_handles() -> impl SceneList {
+    bsn_list![
+        resize_handle(
+            ToplevelResizeEdge::Top,
+            Node {
+                position_type: PositionType::Absolute,
+                left: px(0),
+                right: px(0),
+                top: px(RESIZE_HANDLE_INSET),
+                height: px(RESIZE_GRAB_EXTENT),
+                ..Default::default()
+            }
+        ),
+        resize_handle(
+            ToplevelResizeEdge::Bottom,
+            Node {
+                position_type: PositionType::Absolute,
+                left: px(0),
+                right: px(0),
+                bottom: px(RESIZE_HANDLE_INSET),
+                height: px(RESIZE_GRAB_EXTENT),
+                ..Default::default()
+            }
+        ),
+        resize_handle(
+            ToplevelResizeEdge::Left,
+            Node {
+                position_type: PositionType::Absolute,
+                left: px(RESIZE_HANDLE_INSET),
+                top: px(0),
+                bottom: px(0),
+                width: px(RESIZE_GRAB_EXTENT),
+                ..Default::default()
+            }
+        ),
+        resize_handle(
+            ToplevelResizeEdge::Right,
+            Node {
+                position_type: PositionType::Absolute,
+                right: px(RESIZE_HANDLE_INSET),
+                top: px(0),
+                bottom: px(0),
+                width: px(RESIZE_GRAB_EXTENT),
+                ..Default::default()
+            }
+        ),
+        resize_handle(
+            ToplevelResizeEdge::TopLeft,
+            Node {
+                position_type: PositionType::Absolute,
+                left: px(RESIZE_HANDLE_INSET),
+                top: px(RESIZE_HANDLE_INSET),
+                width: px(RESIZE_GRAB_EXTENT),
+                height: px(RESIZE_GRAB_EXTENT),
+                ..Default::default()
+            }
+        ),
+        resize_handle(
+            ToplevelResizeEdge::TopRight,
+            Node {
+                position_type: PositionType::Absolute,
+                right: px(RESIZE_HANDLE_INSET),
+                top: px(RESIZE_HANDLE_INSET),
+                width: px(RESIZE_GRAB_EXTENT),
+                height: px(RESIZE_GRAB_EXTENT),
+                ..Default::default()
+            }
+        ),
+        resize_handle(
+            ToplevelResizeEdge::BottomLeft,
+            Node {
+                position_type: PositionType::Absolute,
+                left: px(RESIZE_HANDLE_INSET),
+                bottom: px(RESIZE_HANDLE_INSET),
+                width: px(RESIZE_GRAB_EXTENT),
+                height: px(RESIZE_GRAB_EXTENT),
+                ..Default::default()
+            }
+        ),
+        resize_handle(
+            ToplevelResizeEdge::BottomRight,
+            Node {
+                position_type: PositionType::Absolute,
+                right: px(RESIZE_HANDLE_INSET),
+                bottom: px(RESIZE_HANDLE_INSET),
+                width: px(RESIZE_GRAB_EXTENT),
+                height: px(RESIZE_GRAB_EXTENT),
+                ..Default::default()
+            }
+        ),
+    ]
+}
+
+fn resize_handle(edge: ToplevelResizeEdge, node: Node) -> impl Scene {
+    bsn! {
+        template(move |_| Ok(WindowResizeHandle(edge)))
+        ZIndex(0)
+        template(move |_| Ok(node.clone()))
     }
 }
 
@@ -308,7 +428,9 @@ mod tests {
         PrimaryWindowPresentation, WindowGeometry, WindowGeometryAnchor, WindowInteractionSession,
         WindowPlugin, WindowVisibility, WindowZOrder,
     };
-    use weld_window_ui::{PrimarySurfacePresentation, WindowMoveHandle, WindowUiPlugin};
+    use weld_window_ui::{
+        PrimarySurfacePresentation, WindowMoveHandle, WindowResizeHandle, WindowUiPlugin,
+    };
 
     use super::*;
 
@@ -580,6 +702,104 @@ mod tests {
         app.update();
 
         assert!(take_surface_actions(app.world_mut()).contains(&SurfaceAction::Close { surface }));
+    }
+
+    #[test]
+    fn ssd_content_clips_and_outward_handle_starts_resize() {
+        let mut app = test_app();
+        let surface = SurfaceId::new(49);
+        enqueue_surface_event(
+            app.world_mut(),
+            HostSurfaceEvent {
+                surface,
+                kind: HostSurfaceEventKind::Created {
+                    decoration: WindowDecoration::ServerSide,
+                },
+            },
+        );
+        enqueue_surface_event(app.world_mut(), frame(surface, 320, 240));
+        app.update();
+
+        let window = app
+            .world_mut()
+            .query::<(&ClientToplevel, &OccupiesWindow)>()
+            .single(app.world())
+            .expect("server-decorated toplevel should be admitted")
+            .1
+            .0;
+        let (_, content_node) = app
+            .world_mut()
+            .query::<(&SurfaceNode, &Node)>()
+            .single(app.world())
+            .expect("SSD should mount one client surface node");
+        assert_eq!(content_node.overflow, Overflow::clip());
+        assert_eq!(
+            content_node.border_radius,
+            BorderRadius::px(0.0, 0.0, INNER_BORDER_RADIUS, INNER_BORDER_RADIUS,)
+        );
+
+        let outer_size = app
+            .world()
+            .get::<WindowGeometry>(window)
+            .expect("floating manager should initialize outer geometry")
+            .size;
+        let resize_handle = app
+            .world_mut()
+            .query::<(bevy::ecs::entity::Entity, &WindowResizeHandle)>()
+            .iter(app.world())
+            .find_map(|(entity, handle)| (handle.0 == ToplevelResizeEdge::Right).then_some(entity))
+            .expect("SSD should expose a right-edge resize handle");
+        let camera = app.world_mut().spawn_empty().id();
+        let location = Location {
+            target: NormalizedRenderTarget::TextureView(ManualTextureViewHandle(1)),
+            position: Vec2::ZERO,
+        };
+        take_surface_actions(app.world_mut());
+
+        app.world_mut().trigger(Pointer::new(
+            PointerId::Mouse,
+            location.clone(),
+            Press {
+                button: PointerButton::Primary,
+                hit: HitData::new(camera, 0.0, Some(Vec2::new(0.495, 0.0).extend(0.0)), None),
+                count: 1,
+            },
+            resize_handle,
+        ));
+        app.update();
+        assert!(matches!(
+            app.world().get::<WindowInteractionSession>(window),
+            Some(WindowInteractionSession {
+                kind: weld_window::WindowInteractionKind::Resize(ToplevelResizeEdge::Right),
+                ..
+            })
+        ));
+
+        app.world_mut().trigger(Pointer::new(
+            PointerId::Mouse,
+            location,
+            Drag {
+                button: PointerButton::Primary,
+                distance: Vec2::new(20.0, 0.0),
+                delta: Vec2::new(20.0, 0.0),
+            },
+            resize_handle,
+        ));
+        app.update();
+
+        assert_eq!(
+            app.world()
+                .get::<WindowGeometry>(window)
+                .expect("border resize should update desired outer geometry")
+                .size,
+            outer_size + Vec2::new(20.0, 0.0)
+        );
+        assert!(
+            take_surface_actions(app.world_mut()).contains(&SurfaceAction::Resize {
+                surface,
+                logical_size: UVec2::new(340, 240),
+            })
+        );
     }
 
     #[test]

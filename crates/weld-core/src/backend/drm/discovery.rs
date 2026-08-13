@@ -18,7 +18,10 @@ use smithay::{
 };
 use smithay_drm_extras::drm_scanner::{DrmScanEvent, DrmScanner};
 
-use crate::server::{OutputDescriptor, OutputMetrics};
+use crate::{
+    OutputScale,
+    server::{OutputDescriptor, OutputMetrics},
+};
 
 pub(super) struct DrmDeviceDiscovery {
     pub(super) session: LibSeatSession,
@@ -91,6 +94,7 @@ pub(super) fn discover_output(
 pub(super) fn output_description(
     connector: &connector::Info,
     mode: Mode,
+    scale: OutputScale,
 ) -> Result<(OutputDescriptor, OutputMetrics)> {
     let name = connector_name(connector);
     let (physical_width, physical_height) = connector.size().unwrap_or((0, 0));
@@ -98,7 +102,7 @@ pub(super) fn output_description(
     let metrics = OutputMetrics::new(
         u32::try_from(wl_mode.size.w).context("negative DRM mode width")?,
         u32::try_from(wl_mode.size.h).context("negative DRM mode height")?,
-        1.0,
+        scale,
     )?
     .with_refresh_millihertz(wl_mode.refresh)?;
     let descriptor = OutputDescriptor {

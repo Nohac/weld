@@ -6,7 +6,6 @@ use std::{
     time::{Duration, Instant},
 };
 
-use crate::host::{CompositionDemand, CompositionTargets, PreparedHost, RenderContext, RunOptions};
 use crate::input::source::nested::NestedAdapter;
 use crate::renderer::NestedRenderer;
 #[cfg(test)]
@@ -15,6 +14,10 @@ use crate::runtime::{
     ChildProcesses, FrameState, HostCommand, LoopData, PendingCapture, iteration_work, server_mut,
 };
 use crate::server::{OutputDescriptor, OutputMetrics, ServerOptions, ServerState};
+use crate::{
+    OutputScale,
+    host::{CompositionDemand, CompositionTargets, PreparedHost, RenderContext, RunOptions},
+};
 use anyhow::{Context, Result, anyhow, bail};
 use calloop::channel;
 use calloop::signals::Signals;
@@ -73,7 +76,7 @@ pub(crate) fn prepare(options: RunOptions, signals: Signals) -> Result<PreparedH
     let mut output_metrics = OutputMetrics::new(
         initial_size.width,
         initial_size.height,
-        initial_scale_factor,
+        OutputScale::new(initial_scale_factor)?,
     )?;
     let display_handle = host_event_loop.owned_display_handle();
     let host_wake_fd = host_display_wake_fd(&display_handle)?;
@@ -224,8 +227,11 @@ pub(crate) fn prepare(options: RunOptions, signals: Signals) -> Result<PreparedH
                 metrics_changed = true;
             }
             if metrics_changed {
-                output_metrics =
-                    OutputMetrics::new(physical_size.width, physical_size.height, scale_factor)?;
+                output_metrics = OutputMetrics::new(
+                    physical_size.width,
+                    physical_size.height,
+                    OutputScale::new(scale_factor)?,
+                )?;
                 loop_data.server.update_output_metrics(output_metrics);
                 shell.set_output_geometry(
                     targets

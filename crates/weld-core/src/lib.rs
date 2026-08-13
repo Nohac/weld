@@ -12,6 +12,6 @@ pub mod server;
 pub mod surface;
 
 pub use host::{
-    CompositionDemand, CompositionHost, HostBackend, HostBuilder, PreparedHost, PreparedRuntime,
-    RenderContext,
+    CompositionDemand, CompositionHost, HostBackend, HostBuilder, OutputScale, PreparedHost,
+    PreparedRuntime, RenderContext,
 };

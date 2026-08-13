@@ -11,6 +11,8 @@ use smithay::{
     },
 };
 
+use crate::OutputScale;
+
 pub(crate) struct OutputDescriptor {
     pub(crate) name: String,
     pub(crate) physical_properties: PhysicalProperties,
@@ -45,19 +47,16 @@ impl OutputMetrics {
     pub(crate) fn new(
         physical_width: u32,
         physical_height: u32,
-        scale_factor: f64,
+        scale: OutputScale,
     ) -> Result<Self> {
         if physical_width == 0 || physical_height == 0 {
             bail!("output dimensions must be nonzero");
-        }
-        if !scale_factor.is_finite() || scale_factor <= 0.0 {
-            bail!("output scale must be finite and positive");
         }
         Ok(Self {
             physical_width: i32::try_from(physical_width).context("output width exceeds i32")?,
             physical_height: i32::try_from(physical_height).context("output height exceeds i32")?,
             refresh_millihertz: 60_000,
-            scale_factor,
+            scale_factor: scale.value(),
         })
     }
 
@@ -131,9 +130,13 @@ mod tests {
 
     use super::*;
 
+    fn scale(value: f64) -> OutputScale {
+        OutputScale::new(value).expect("valid output scale")
+    }
+
     #[test]
     fn nested_output_metrics_preserve_physical_mode_and_fractional_scale() {
-        let metrics = OutputMetrics::new(1200, 800, 1.25).expect("valid output metrics");
+        let metrics = OutputMetrics::new(1200, 800, scale(1.25)).expect("valid output metrics");
         assert_eq!(metrics.mode().size, (1200, 800).into());
         assert_eq!(metrics.scale().fractional_scale(), 1.25);
         assert_eq!(metrics.scale().integer_scale(), 2);
@@ -141,18 +144,16 @@ mod tests {
     }
 
     #[test]
-    fn nested_output_metrics_reject_invalid_values() {
-        assert!(OutputMetrics::new(0, 800, 1.25).is_err());
-        assert!(OutputMetrics::new(1200, 800, 0.0).is_err());
-        assert!(OutputMetrics::new(1200, 800, f64::NAN).is_err());
+    fn nested_output_metrics_reject_zero_dimensions() {
+        assert!(OutputMetrics::new(0, 800, OutputScale::default()).is_err());
     }
 
     #[test]
     fn replacing_nested_metrics_keeps_one_current_preferred_mode() {
-        let initial = OutputMetrics::new(1200, 800, 1.25).expect("valid metrics");
-        let resized = OutputMetrics::new(1300, 900, 1.25).expect("valid metrics");
-        let resized_again = OutputMetrics::new(1400, 1000, 1.25).expect("valid metrics");
-        let scale_only = OutputMetrics::new(1400, 1000, 1.5).expect("valid metrics");
+        let initial = OutputMetrics::new(1200, 800, scale(1.25)).expect("valid metrics");
+        let resized = OutputMetrics::new(1300, 900, scale(1.25)).expect("valid metrics");
+        let resized_again = OutputMetrics::new(1400, 1000, scale(1.25)).expect("valid metrics");
+        let scale_only = OutputMetrics::new(1400, 1000, scale(1.5)).expect("valid metrics");
         let output = Output::new(
             "test".to_owned(),
             PhysicalProperties {

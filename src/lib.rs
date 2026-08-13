@@ -16,7 +16,7 @@ use bevy::{
 };
 use clap::{Parser, ValueEnum};
 use weld_app::{
-    Backend, WeldApp,
+    Backend, OutputScale, WeldApp,
     input::{GlobalShortcutPlugin, VirtualTerminalShortcutPlugin},
 };
 use weld_float::FloatPlugin;
@@ -71,6 +71,11 @@ pub struct AppArguments {
     #[arg(long, value_name = "PATH")]
     pub(crate) screenshot: Option<PathBuf>,
 
+    /// Standalone DRM output scale. Fractional values are supported; clients
+    /// without fractional-scale support receive the rounded Wayland scale.
+    #[arg(long, value_name = "FACTOR")]
+    pub(crate) scale: Option<OutputScale>,
+
     /// Optional client program followed by its arguments.
     #[arg(value_name = "CLIENT_AND_ARGS", allow_hyphen_values = true)]
     pub(crate) client: Vec<OsString>,
@@ -84,6 +89,7 @@ pub fn run(arguments: AppArguments) -> Result<()> {
         .launch(arguments.client)
         .screenshot(arguments.screenshot)
         .remote_debug(arguments.remote_debug)
+        .scale(arguments.scale)
         .build()?;
     app.add_plugins((
         WindowPlugin,
