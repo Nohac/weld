@@ -16,10 +16,10 @@ mod surface_impl;
 /// Plugin-facing application surface model.
 pub mod surface {
     pub use crate::surface_impl::{
-        AppPopup, AppWindow, ClientDecorated, ClientSurface, MappedSurface, ServerDecorated,
-        SurfaceAction, SurfaceActionQueue, SurfaceCommitRevisions, SurfaceId, SurfaceLayerId,
-        SurfaceNode, SurfaceSystems, SurfaceView, WindowDecoration, WindowInteractionRequest,
-        WindowInteractionRequestKind, WindowResizeEdge,
+        ClientDecorated, ClientPopup, ClientSurface, ClientToplevel, MappedSurface,
+        ServerDecorated, SurfaceAction, SurfaceActionQueue, SurfaceCommitRevisions, SurfaceId,
+        SurfaceLayerId, SurfaceNode, SurfaceSystems, SurfaceView, ToplevelInteractionRequest,
+        ToplevelInteractionRequestKind, ToplevelResizeEdge, WindowDecoration,
     };
 
     #[cfg(feature = "test-support")]
@@ -54,10 +54,10 @@ pub mod prelude {
         ActiveBackend, Backend, WeldApp, WeldAppBuilder, WeldAppExt,
         output::OutputGeometry,
         surface::{
-            AppPopup, AppWindow, ClientDecorated, ClientSurface, MappedSurface, ServerDecorated,
-            SurfaceAction, SurfaceActionQueue, SurfaceId, SurfaceNode, SurfaceView,
-            WindowDecoration, WindowInteractionRequest, WindowInteractionRequestKind,
-            WindowResizeEdge,
+            ClientDecorated, ClientPopup, ClientSurface, ClientToplevel, MappedSurface,
+            ServerDecorated, SurfaceAction, SurfaceActionQueue, SurfaceId, SurfaceNode,
+            SurfaceView, ToplevelInteractionRequest, ToplevelInteractionRequestKind,
+            ToplevelResizeEdge, WindowDecoration,
         },
     };
 }

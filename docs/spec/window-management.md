@@ -2,15 +2,16 @@
 
 ## Current boundary — Implemented
 
-`weld-window` currently claims ordinary application surfaces and supplies
-Weld's default client- and server-decorated window and popup presentations. It
-is optional, so another distribution can replace that policy without changing
-the Smithay host. The exact current ownership is documented in
-[Architecture](../architecture.md).
+The first policy-neutral split is implemented. `weld-window` owns durable
+managed windows and optional client occupancy independently of UI;
+`weld-window-ui` supplies reusable unstyled Bevy UI presentation behavior;
+`weld-ssd` supplies the current opinionated decoration scene; and `weld-float`
+supplies default freeform management policy. A client surface can disappear
+without despawning a managed window whose vacancy policy is `Retain`.
 
-The policy-neutral model below is a direction for evolving this boundary. It
-does not describe the current `weld-window` crate as already split, and its
-responsibility labels are not promised package names.
+The exact implemented ownership and dependency direction are documented in
+[Architecture](../architecture.md). Persistent matching, workspaces, native
+tiling, and persistence below remain direction rather than completed features.
 
 ## Managed frame model — Direction
 
@@ -109,8 +110,8 @@ appear across workspaces.
 
 ## Composable responsibilities — Direction
 
-The current default window policy should evolve into independently composable
-responsibilities as real implementation boundaries require them:
+The initial default window policy is split into independently composable
+responsibilities:
 
 - **Window primitives** own the ECS managed-frame and occupant contracts,
   surface claiming, generic interactions, focus/selection, geometry,
@@ -131,6 +132,14 @@ as the name of the conventional freeform manager.
 These labels describe separable plugin responsibilities. They do not require
 creating forecast-only crates; a package split should follow an implemented
 dependency, runtime, reuse, or testing boundary.
+
+A future tiler should be able to depend on `weld-window` alone. It would claim
+a managed frame by attaching its own `ManagedBy` relationship, derive layout
+from its ECS container tree, and write the frame's `WindowGeometry`,
+`WindowVisibility`, and `WindowZOrder`. It would consume the same
+`WindowIntent` stream and issue the same `WindowCommand` protocol effects as
+the floating manager. Adding `weld-window-ui` or `weld-ssd` would then be a
+separate presentation choice rather than a requirement of tiling policy.
 
 ## Native tiling foundation — Direction
 

@@ -12,7 +12,14 @@ profiling-tracy = [
 ]
 
 [workspace]
-members = ["crates/weld-app", "crates/weld-core", "crates/weld-window"]
+members = [
+  "crates/weld-app",
+  "crates/weld-core",
+  "crates/weld-float",
+  "crates/weld-ssd",
+  "crates/weld-window",
+  "crates/weld-window-ui",
+]
 exclude = ["vendor/smithay", "vendor/smithay/smithay-drm-extras"]
 resolver = "3"
 
@@ -56,6 +63,9 @@ clap.workspace = true
 weld-app = { path = "crates/weld-app" }
 weld-core = { path = "crates/weld-core" }
 weld-window = { path = "crates/weld-window" }
+weld-window-ui = { path = "crates/weld-window-ui" }
+weld-ssd = { path = "crates/weld-ssd" }
+weld-float = { path = "crates/weld-float" }
 tracing.workspace = true
 tracing-subscriber.workspace = true
 tracing-tracy = { workspace = true, optional = true }

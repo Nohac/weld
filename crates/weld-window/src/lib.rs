@@ -1,1023 +1,683 @@
-//! Default client- and server-decorated presentations built from ECS state.
+//! UI-independent managed-window state and lifecycle.
+//!
+//! Client toplevels are short-lived protocol objects owned by `weld-app`.
+//! [`ManagedWindow`] entities are durable compositor objects that managers and
+//! presenters manipulate without depending on a particular surface or UI tree.
 
 const PROFILE_TARGET: &str = "weld_profile";
 
-mod client;
-mod popup;
-mod server;
-
-use std::{
-    collections::{HashMap, HashSet, hash_map::RandomState},
-    hash::BuildHasher,
-};
+use std::collections::HashMap;
 
 use bevy::{
     app::{App, Plugin, PreUpdate},
-    color::Color,
     ecs::{
         component::Component,
         entity::Entity,
-        message::{MessageReader, MessageWriter},
+        event::EntityEvent,
+        message::MessageReader,
         observer::On,
         query::Without,
+        relationship::Relationship,
         resource::Resource,
-        schedule::{ApplyDeferred, IntoScheduleConfigs},
+        schedule::{ApplyDeferred, IntoScheduleConfigs, SystemSet},
         system::{Commands, Query, Res, ResMut, SystemParam},
     },
     math::{UVec2, Vec2},
-    picking::{
-        PickingSystems,
-        events::{Click, Drag, Pointer, Press},
-        pointer::PointerButton,
-    },
-    prelude::{BorderColor, BoxShadow, ChildOf, Display, GlobalZIndex, Node, Val, With, px},
-    scene::CommandsSceneExt,
-    ui::{UiScale, ZIndex},
-    window::RequestRedraw,
+    picking::PickingSystems,
 };
-
 use weld_app::{
     composition::composition_advance_requested,
-    layer::{WINDOW_Z_INDEX_MAX, WINDOW_Z_INDEX_MIN},
-    output::OutputGeometry,
     surface::{
-        AppPopup, AppWindow, ClientDecorated, ClientSurface, MappedSurface, ServerDecorated,
-        SurfaceAction, SurfaceActionQueue, SurfaceCommitRevisions, SurfaceId, SurfaceNode,
-        SurfaceSystems, WindowInteractionRequest, WindowInteractionRequestKind, WindowResizeEdge,
+        ClientDecorated, ClientToplevel, MappedSurface, SurfaceAction, SurfaceActionQueue,
+        SurfaceId, SurfaceSystems, ToplevelInteractionRequest, ToplevelInteractionRequestKind,
+        ToplevelResizeEdge,
     },
 };
 
-const BORDER_WIDTH: f32 = 3.0;
-const OUTER_BORDER_RADIUS: f32 = 9.0;
-const INNER_BORDER_RADIUS: f32 = OUTER_BORDER_RADIUS - BORDER_WIDTH;
-const HEADER_HEIGHT: f32 = 30.0;
-const CLOSE_BUTTON_SIZE: f32 = 22.0;
-const FOCUSED_BORDER: Color = Color::srgb(0.35, 0.58, 0.88);
-const UNFOCUSED_BORDER: Color = Color::srgb(0.28, 0.34, 0.42);
+/// Stable process-independent identity for a managed window.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct WindowId(u64);
 
-fn window_shadow() -> BoxShadow {
-    BoxShadow::new(
-        Color::srgba(0.0, 0.0, 0.0, 0.55),
-        px(0),
-        px(12),
-        px(2),
-        px(24),
-    )
+impl WindowId {
+    pub const fn new(raw: u64) -> Self {
+        Self(raw)
+    }
+
+    pub const fn raw(self) -> u64 {
+        self.0
+    }
 }
 
-/// A presentation root claiming the primary view of a surface.
-///
-/// Inserting a second claim displaces the relationship from the old root but
-/// does not despawn that root. A future multi-presenter API must either reject
-/// replacement or explicitly clean up the displaced presentation.
-#[derive(Component, Clone, Copy, Debug)]
-#[relationship(relationship_target = PrimaryPresentation)]
-pub(crate) struct PresentsSurface(Entity);
+/// A durable window-management object, independent of its client occupant.
+#[derive(Component, Clone, Copy, Debug, Eq, PartialEq)]
+#[require(
+    WindowGeometry,
+    WindowVisibility,
+    WindowZOrder,
+    WindowVacancy,
+    AppliedPresentationInsets,
+    LastRequestedClientSize
+)]
+pub struct ManagedWindow {
+    pub id: WindowId,
+}
 
-/// The one primary presentation currently related to a surface data entity.
+/// Desired outer geometry controlled by the active window manager.
+#[derive(Component, Clone, Copy, Debug, Default, PartialEq)]
+pub struct WindowGeometry {
+    pub position: Vec2,
+    pub size: Vec2,
+}
+
+/// Whether a manager wants the window represented locally.
+#[derive(Component, Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum WindowVisibility {
+    #[default]
+    Visible,
+    Hidden,
+}
+
+/// Manager-owned stacking order.
+#[derive(Component, Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct WindowZOrder(pub i32);
+
+/// What to do when the client occupant disappears.
+#[derive(Component, Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum WindowVacancy {
+    #[default]
+    Remove,
+    Retain,
+}
+
+/// Attaches a client-toplevel entity to a managed window.
+#[derive(Component, Clone, Copy, Debug, Eq, PartialEq)]
+#[relationship(relationship_target = WindowOccupant)]
+pub struct OccupiesWindow(pub Entity);
+
+/// The single client-toplevel entity currently occupying a window.
 #[derive(Component, Debug)]
-#[relationship_target(relationship = PresentsSurface, linked_spawn)]
-pub(crate) struct PrimaryPresentation(Entity);
+#[relationship_target(relationship = OccupiesWindow)]
+pub struct WindowOccupant(Entity);
+
+impl WindowOccupant {
+    pub fn entity(&self) -> Entity {
+        self.0
+    }
+}
+
+/// Assigns a window to a manager entity.
+#[derive(Component, Clone, Copy, Debug, Eq, PartialEq)]
+#[relationship(relationship_target = ManagedWindows)]
+pub struct ManagedBy(pub Entity);
+
+/// Windows assigned to one manager entity.
+#[derive(Component, Debug)]
+#[relationship_target(relationship = ManagedBy)]
+pub struct ManagedWindows(Vec<Entity>);
+
+impl ManagedWindows {
+    pub fn iter(&self) -> impl Iterator<Item = Entity> + '_ {
+        self.0.iter().copied()
+    }
+}
+
+/// A presentation root claiming the primary local view of a window.
+///
+/// Presenters must claim only a window without an existing primary root and
+/// revoke only roots they spawned. Despawning the window despawns the related
+/// root regardless of which presenter authored it.
+#[derive(Component, Clone, Copy, Debug, Eq, PartialEq)]
+#[relationship(relationship_target = PrimaryWindowPresentation)]
+pub struct PresentsWindow(pub Entity);
+
+/// The authoritative presentation root for a managed window.
+#[derive(Component, Debug)]
+#[relationship_target(relationship = PresentsWindow, linked_spawn)]
+pub struct PrimaryWindowPresentation(Entity);
+
+impl PrimaryWindowPresentation {
+    pub fn entity(&self) -> Entity {
+        self.0
+    }
+}
+
+/// Visual overflow from the desired outer-geometry origin.
+///
+/// This is authored on the root named by [`PrimaryWindowPresentation`]. A
+/// value on any other entity is ignored; absence means zero.
+#[derive(Component, Clone, Copy, Debug, Default, PartialEq)]
+pub struct PresentationOffset(pub Vec2);
+
+/// Compositor chrome included in [`WindowGeometry::size`].
+///
+/// This is authored on the root named by [`PrimaryWindowPresentation`]. A
+/// value on any other entity is ignored; absence means zero.
+#[derive(Component, Clone, Copy, Debug, Default, PartialEq)]
+pub struct PresentationInsets {
+    pub left: f32,
+    pub top: f32,
+    pub right: f32,
+    pub bottom: f32,
+}
+
+impl PresentationInsets {
+    pub const fn new(left: f32, top: f32, right: f32, bottom: f32) -> Self {
+        Self {
+            left,
+            top,
+            right,
+            bottom,
+        }
+    }
+
+    pub fn extent(self) -> Vec2 {
+        Vec2::new(self.left + self.right, self.top + self.bottom)
+    }
+}
 
 /// Client window-geometry origin within a presentation root's padding box.
 ///
-/// Popup presentation consumes this component without knowing whether the
-/// parent window uses client, server, or third-party decorations.
+/// This is authored on the root named by [`PrimaryWindowPresentation`]. A
+/// value on any other entity is ignored; absence means zero.
 #[derive(Component, Clone, Copy, Debug, Default, PartialEq)]
-pub(crate) struct WindowGeometryAnchor {
-    pub(crate) offset: Vec2,
+pub struct WindowGeometryAnchor(pub Vec2);
+
+/// Manager-level focus selection. Vacant selection does not focus a client.
+#[derive(Resource, Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct FocusedWindow(Option<Entity>);
+
+impl FocusedWindow {
+    pub fn entity(&self) -> Option<Entity> {
+        self.0
+    }
 }
 
-#[derive(Component, Clone, Copy, Debug)]
-struct DefaultWindow {
-    surface: SurfaceId,
+/// A reusable request from presentation behavior to window-management policy.
+#[derive(Clone, Copy, Debug, EntityEvent, PartialEq)]
+pub struct WindowIntent {
+    #[event_target]
+    pub window: Entity,
+    pub kind: WindowIntentKind,
 }
 
-#[derive(Component, Clone, Copy, Default)]
-pub(crate) struct WindowBody;
-
-#[derive(Component, Clone, Copy, Default)]
-pub(crate) struct WindowHeader;
-
-/// Durable shell placement owned by the application-window entity.
-#[derive(Component, Clone, Copy, Debug, PartialEq)]
-pub struct WindowPlacement {
-    pub position: Vec2,
-    pub z_index: i32,
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum WindowIntentKind {
+    Activate,
+    CloseRequested,
+    MoveBy(Vec2),
+    ResizeBy(Vec2),
+    InteractionEnded,
 }
 
-#[derive(Resource, Default)]
-struct ActiveWindowInteraction(Option<WindowInteraction>);
-
-struct WindowInteraction {
-    surface: SurfaceId,
-    kind: WindowInteractionKind,
-    desired_size: Vec2,
-    last_requested_size: UVec2,
-    fixed_anchor: Vec2,
-    end_after_revision: Option<u64>,
+/// A validated operation requested of the managed-window domain.
+#[derive(Clone, Copy, Debug, EntityEvent, PartialEq)]
+pub struct WindowCommand {
+    #[event_target]
+    pub window: Entity,
+    pub kind: WindowCommandKind,
 }
 
-#[derive(Clone, Copy)]
-enum WindowInteractionKind {
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WindowCommandKind {
+    BeginInteraction(WindowInteractionKind),
+    Focus,
+    ClearFocus,
+    CloseOccupant,
+    DetachOccupant,
+    EndInteraction,
+    FinishInteraction,
+    RemoveWindow,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WindowInteractionKind {
     Move,
-    Resize(WindowResizeEdge),
+    Resize(ToplevelResizeEdge),
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WindowInteractionPhase {
+    Active,
+    Ending,
+}
+
+/// Queryable identity and lifetime of an active pointer interaction.
+#[derive(Component, Clone, Copy, Debug, Eq, PartialEq)]
+pub struct WindowInteractionSession {
+    pub kind: WindowInteractionKind,
+    pub phase: WindowInteractionPhase,
+}
+
+/// Stable ID lookup for persistence, IPC, and plugin boundaries.
 #[derive(Resource, Default)]
-struct WindowFocus(Option<SurfaceId>);
-
-#[derive(Resource)]
-struct WindowStack {
-    next: Option<i32>,
+pub struct WindowRegistry {
+    by_id: HashMap<WindowId, Entity>,
 }
 
-impl Default for WindowStack {
-    fn default() -> Self {
-        Self {
-            next: Some(WINDOW_Z_INDEX_MIN),
-        }
+impl WindowRegistry {
+    pub fn entity(&self, id: WindowId) -> Option<Entity> {
+        self.by_id.get(&id).copied()
     }
 }
 
-impl WindowStack {
-    fn allocate(&mut self) -> Option<i32> {
-        let current = self.next?;
-        self.next = current
-            .checked_add(1)
-            .filter(|next| *next <= WINDOW_Z_INDEX_MAX);
-        Some(current)
-    }
+/// Ordering points shared by window-domain, manager, and presenter plugins.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, SystemSet)]
+pub enum WindowSystems {
+    Admission,
+    PresentationRevoke,
+    PresentationClaim,
+    PresentationMetrics,
+    Interaction,
+    Management,
+    UiReconcile,
+    FinalReconcile,
 }
 
-#[derive(Resource)]
-struct PlacementRandom(RandomState);
+/// Installs the UI-independent managed-window domain.
+pub struct WindowPlugin;
 
-impl Default for PlacementRandom {
-    fn default() -> Self {
-        Self(RandomState::new())
-    }
-}
-
-impl PlacementRandom {
-    fn samples(&self, surface: SurfaceId) -> Vec2 {
-        Vec2::new(
-            hash_unit(self.0.hash_one((surface.raw(), 0_u8))),
-            hash_unit(self.0.hash_one((surface.raw(), 1_u8))),
-        )
-    }
-}
-
-/// Default window and popup policy for an application hosted by
-/// [`WeldApp`](weld_app::WeldApp).
-///
-/// Construct the application with [`WeldApp::builder`](weld_app::WeldApp::builder)
-/// before installing this plugin. The builder supplies the surface ingress and
-/// [`OutputGeometry`] resources consumed by these systems.
-pub struct DefaultWindowPlugin;
-
-impl Plugin for DefaultWindowPlugin {
+impl Plugin for WindowPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<PlacementRandom>()
-            .init_resource::<WindowFocus>()
-            .init_resource::<WindowStack>()
-            .init_resource::<ActiveWindowInteraction>()
-            .add_observer(focus_window)
-            .add_observer(drag_window)
-            .add_systems(
+        app.init_resource::<NextWindowId>()
+            .init_resource::<WindowRegistry>()
+            .init_resource::<FocusedWindow>()
+            .init_resource::<AppliedClientFocus>()
+            .add_observer(apply_window_command)
+            .configure_sets(
                 PreUpdate,
                 (
-                    revoke_mismatched_presentations,
-                    ApplyDeferred,
-                    initialize_window_placements,
-                    present_client_windows,
-                    present_server_windows,
-                    ApplyDeferred,
-                    present_popups,
+                    WindowSystems::Admission,
+                    WindowSystems::PresentationRevoke,
+                    WindowSystems::PresentationClaim,
+                    WindowSystems::PresentationMetrics,
+                    WindowSystems::Interaction,
+                    WindowSystems::Management,
+                    WindowSystems::UiReconcile,
                 )
                     .chain()
-                    .run_if(composition_advance_requested)
-                    .in_set(SurfaceSystems::FallbackPresentation),
+                    .after(SurfaceSystems::Ingress)
+                    .before(SurfaceSystems::FallbackPresentation)
+                    .before(PickingSystems::Backend),
+            )
+            .configure_sets(
+                PreUpdate,
+                WindowSystems::FinalReconcile
+                    .after(WindowSystems::UiReconcile)
+                    .after(PickingSystems::Last),
             )
             .add_systems(
                 PreUpdate,
-                (sync_default_window_state, sync_popup_presentations)
-                    .chain()
+                admit_mapped_toplevels
                     .run_if(composition_advance_requested)
-                    .after(SurfaceSystems::FallbackPresentation)
+                    .in_set(WindowSystems::Admission),
+            )
+            .add_systems(
+                PreUpdate,
+                ApplyDeferred
+                    .run_if(composition_advance_requested)
+                    .after(WindowSystems::Admission)
+                    .before(WindowSystems::PresentationRevoke),
+            )
+            .add_systems(
+                PreUpdate,
+                ApplyDeferred
+                    .run_if(composition_advance_requested)
+                    .after(WindowSystems::PresentationRevoke)
+                    .before(WindowSystems::PresentationClaim),
+            )
+            .add_systems(
+                PreUpdate,
+                ApplyDeferred
+                    .run_if(composition_advance_requested)
+                    .after(WindowSystems::PresentationClaim)
+                    .before(WindowSystems::PresentationMetrics),
+            )
+            .add_systems(
+                PreUpdate,
+                ApplyDeferred
+                    .run_if(composition_advance_requested)
+                    .after(WindowSystems::Interaction)
+                    .before(WindowSystems::Management),
+            )
+            .add_systems(
+                PreUpdate,
+                ApplyDeferred
+                    .run_if(composition_advance_requested)
+                    .after(WindowSystems::UiReconcile)
                     .before(PickingSystems::Backend),
+            )
+            .add_systems(
+                PreUpdate,
+                (
+                    reconcile_presentation_insets.in_set(WindowSystems::PresentationMetrics),
+                    (invalidate_interactions, handle_protocol_interactions)
+                        .chain()
+                        .in_set(WindowSystems::Interaction),
+                    (reconcile_window_sizes, remove_unretained_vacancies)
+                        .chain()
+                        .in_set(WindowSystems::UiReconcile),
+                    (
+                        synchronize_registry,
+                        reconcile_window_sizes,
+                        reconcile_client_focus,
+                    )
+                        .chain()
+                        .in_set(WindowSystems::FinalReconcile),
+                )
+                    .run_if(composition_advance_requested),
             );
     }
 }
 
-type DecorationOwnershipQuery<'w, 's> = Query<
-    'w,
-    's,
-    (
-        Entity,
-        Option<&'static ClientDecorated>,
-        Option<&'static ServerDecorated>,
-        Option<&'static PrimaryPresentation>,
-    ),
->;
-type PresentationKindQuery<'w, 's> = Query<
-    'w,
-    's,
-    (
-        Option<&'static client::ClientWindowPresentation>,
-        Option<&'static server::ServerWindowPresentation>,
-    ),
->;
+#[derive(Resource, Default)]
+struct NextWindowId(u64);
 
-fn revoke_mismatched_presentations(
-    mut commands: Commands,
-    sources: DecorationOwnershipQuery,
-    presentations: PresentationKindQuery,
-) {
-    for (source, client_owned, server_owned, presentation) in &sources {
-        let Some(presentation) = presentation else {
-            continue;
-        };
-        let Ok((is_client, is_server)) = presentations.get(presentation.0) else {
-            continue;
-        };
-        // Presentation roots owned by another plugin remain authoritative.
-        if is_client.is_none() && is_server.is_none() {
-            continue;
-        }
-        let matches_owner = (client_owned.is_some() && is_client.is_some())
-            || (server_owned.is_some() && is_server.is_some());
-        if !matches_owner {
-            commands.entity(presentation.0).despawn();
-            commands.entity(source).remove::<PrimaryPresentation>();
+impl NextWindowId {
+    fn allocate(&mut self, registry: &WindowRegistry) -> WindowId {
+        loop {
+            let id = WindowId(self.0);
+            self.0 = self.0.saturating_add(1);
+            if registry.entity(id).is_none() {
+                return id;
+            }
         }
     }
 }
 
-fn initialize_window_placements(
+#[derive(Component, Clone, Copy, Debug, Default, PartialEq)]
+struct AppliedPresentationInsets(PresentationInsets);
+
+#[derive(Component, Clone, Copy, Debug, Default, PartialEq)]
+struct LastRequestedClientSize(UVec2);
+
+#[derive(Resource, Default)]
+struct AppliedClientFocus {
+    surface: Option<SurfaceId>,
+    reassert: bool,
+}
+
+fn admit_mapped_toplevels(
     mut commands: Commands,
-    output: Res<OutputGeometry>,
-    random: Res<PlacementRandom>,
-    mut focus: ResMut<WindowFocus>,
-    mut stack: ResMut<WindowStack>,
-    mut actions: ResMut<SurfaceActionQueue>,
-    surfaces: Query<
-        (Entity, &AppWindow, &MappedSurface, Option<&ServerDecorated>),
-        Without<WindowPlacement>,
-    >,
+    mut next_id: ResMut<NextWindowId>,
+    mut registry: ResMut<WindowRegistry>,
+    surfaces: Query<(Entity, &ClientToplevel, &MappedSurface), Without<OccupiesWindow>>,
 ) {
-    let mut unplaced = surfaces.iter().collect::<Vec<_>>();
-    unplaced.sort_unstable_by_key(|(_, window, _, _)| window.surface.raw());
-    for (entity, window, mapped, server_owned) in unplaced {
-        let decorated_size = window_extent(mapped.logical_size, server_owned.is_some());
-        let position = random_placement(
-            output.logical_size(),
-            decorated_size,
-            random.samples(window.surface),
-        );
-        let z_index = stack.allocate().unwrap_or(WINDOW_Z_INDEX_MAX);
+    let _admission_span =
+        tracing::trace_span!(target: PROFILE_TARGET, "weld_window_admit_mapped_toplevels")
+            .entered();
+    let mut unclaimed = surfaces.iter().collect::<Vec<_>>();
+    unclaimed.sort_unstable_by_key(|(_, toplevel, _)| toplevel.surface.raw());
+    for (surface_entity, _, mapped) in unclaimed {
+        let id = next_id.allocate(&registry);
+        let client_size = rounded_size(mapped.logical_size);
+        let window = commands
+            .spawn((
+                ManagedWindow { id },
+                WindowGeometry {
+                    position: Vec2::ZERO,
+                    size: mapped.logical_size,
+                },
+                WindowVisibility::Visible,
+                WindowZOrder::default(),
+                WindowVacancy::Remove,
+                AppliedPresentationInsets::default(),
+                LastRequestedClientSize(client_size),
+            ))
+            .id();
         commands
-            .entity(entity)
-            .insert(WindowPlacement { position, z_index });
-        tracing::trace!(
-            target: PROFILE_TARGET,
-            surface = window.surface.raw(),
-            position_x = position.x,
-            position_y = position.y,
-            width = decorated_size.x,
-            height = decorated_size.y,
-            z_index,
-            "initialized application window placement"
-        );
-        focus.0 = Some(window.surface);
-        actions.push(SurfaceAction::Focus {
-            surface: Some(window.surface),
+            .entity(surface_entity)
+            .insert(OccupiesWindow(window));
+        registry.by_id.insert(id, window);
+    }
+}
+
+fn reconcile_presentation_insets(
+    mut windows: Query<(
+        &mut WindowGeometry,
+        &mut AppliedPresentationInsets,
+        Option<&PrimaryWindowPresentation>,
+    )>,
+    roots: Query<&PresentationInsets>,
+) {
+    for (mut geometry, mut applied, presentation) in &mut windows {
+        let current = presentation
+            .and_then(|presentation| roots.get(presentation.entity()).ok())
+            .copied()
+            .unwrap_or_default();
+        if applied.0 == current {
+            continue;
+        }
+        geometry.size = (geometry.size + current.extent() - applied.0.extent()).max(Vec2::ONE);
+        applied.0 = current;
+    }
+}
+
+fn reconcile_window_sizes(
+    mut windows: Query<(
+        &WindowGeometry,
+        &mut LastRequestedClientSize,
+        Option<&WindowOccupant>,
+        Option<&PrimaryWindowPresentation>,
+    )>,
+    roots: Query<&PresentationInsets>,
+    occupants: Query<(&ClientToplevel, Option<&MappedSurface>)>,
+    mut actions: ResMut<SurfaceActionQueue>,
+) {
+    for (geometry, mut last_requested, occupant, presentation) in &mut windows {
+        let Some((toplevel, Some(_))) =
+            occupant.and_then(|occupant| occupants.get(occupant.entity()).ok())
+        else {
+            continue;
+        };
+        let insets = presentation
+            .and_then(|presentation| roots.get(presentation.entity()).ok())
+            .copied()
+            .unwrap_or_default();
+        let requested = rounded_size((geometry.size - insets.extent()).max(Vec2::ONE));
+        if requested == last_requested.0 {
+            continue;
+        }
+        last_requested.0 = requested;
+        actions.push(SurfaceAction::Resize {
+            surface: toplevel.surface,
+            logical_size: requested,
         });
     }
 }
 
-type ClientPresentationSourceQuery<'w, 's> = Query<
-    'w,
-    's,
-    (
-        Entity,
-        &'static AppWindow,
-        &'static WindowPlacement,
-        &'static MappedSurface,
-    ),
-    (With<ClientDecorated>, Without<PrimaryPresentation>),
->;
-type ServerPresentationSourceQuery<'w, 's> = Query<
-    'w,
-    's,
-    (Entity, &'static AppWindow, &'static WindowPlacement),
-    (With<ServerDecorated>, Without<PrimaryPresentation>),
->;
-
-fn present_client_windows(mut commands: Commands, surfaces: ClientPresentationSourceQuery) {
-    for (source, window, placement, mapped) in &surfaces {
-        tracing::trace!(
-            target: PROFILE_TARGET,
-            surface = window.surface.raw(),
-            source = ?source,
-            width = mapped.logical_size.x,
-            height = mapped.logical_size.y,
-            "created client-decorated window presentation"
-        );
-        commands.spawn_scene(client::scene(window.surface)).insert((
-            PresentsSurface(source),
-            DefaultWindow {
-                surface: window.surface,
-            },
-            client::ClientWindowPresentation,
-            WindowGeometryAnchor {
-                offset: -mapped.visual_offset,
-            },
-            GlobalZIndex(placement.z_index),
-        ));
-    }
-}
-
-fn present_server_windows(mut commands: Commands, surfaces: ServerPresentationSourceQuery) {
-    for (source, window, placement) in &surfaces {
-        tracing::trace!(
-            target: PROFILE_TARGET,
-            surface = window.surface.raw(),
-            source = ?source,
-            "created server-decorated window presentation"
-        );
-        commands.spawn_scene(server::scene(window.surface)).insert((
-            PresentsSurface(source),
-            DefaultWindow {
-                surface: window.surface,
-            },
-            server::ServerWindowPresentation,
-            WindowGeometryAnchor {
-                offset: Vec2::new(0.0, HEADER_HEIGHT),
-            },
-            GlobalZIndex(placement.z_index),
-        ));
-    }
-}
-
-type PopupPresentationSourceQuery<'w, 's> = Query<
-    'w,
-    's,
-    (
-        Entity,
-        &'static ClientSurface,
-        &'static AppPopup,
-        &'static MappedSurface,
-    ),
-    Without<PrimaryPresentation>,
->;
-
-fn present_popups(
+fn remove_unretained_vacancies(
     mut commands: Commands,
-    popups: PopupPresentationSourceQuery,
-    windows: Query<(&AppWindow, &PrimaryPresentation)>,
-    anchors: Query<&WindowGeometryAnchor>,
+    windows: Query<(Entity, &WindowVacancy), Without<WindowOccupant>>,
 ) {
-    for (source, client_surface, popup, mapped) in &popups {
-        let Some(parent) = windows.iter().find_map(|(window, presentation)| {
-            (window.surface == popup.owner).then_some(presentation.0)
-        }) else {
-            continue;
-        };
-        let Ok(anchor) = anchors.get(parent) else {
-            continue;
-        };
-        let position = popup_visual_position(*popup, *mapped, *anchor);
-        commands
-            .spawn_scene(popup::scene(client_surface.surface))
-            .insert((
-                PresentsSurface(source),
-                popup::PopupPresentation,
-                ChildOf(parent),
-                ZIndex(popup.stack_index),
-                popup_node(position, true),
-            ));
+    for (window, vacancy) in &windows {
+        if *vacancy == WindowVacancy::Remove {
+            commands.entity(window).despawn();
+        }
     }
 }
 
-type PopupStateQuery<'w, 's> = Query<
-    'w,
-    's,
-    (
-        &'static AppPopup,
-        Option<&'static MappedSurface>,
-        &'static PrimaryPresentation,
-    ),
->;
+fn synchronize_registry(
+    mut registry: ResMut<WindowRegistry>,
+    windows: Query<(Entity, &ManagedWindow)>,
+) {
+    registry.by_id.retain(|_, entity| windows.contains(*entity));
+    for (entity, window) in &windows {
+        registry.by_id.entry(window.id).or_insert(entity);
+    }
+}
 
-type PopupRootQuery<'w, 's> = Query<
-    'w,
-    's,
-    (
-        Entity,
-        &'static PresentsSurface,
-        &'static mut Node,
-        &'static mut ZIndex,
-        Option<&'static ChildOf>,
-    ),
-    With<popup::PopupPresentation>,
->;
-
-fn sync_popup_presentations(
+fn invalidate_interactions(
     mut commands: Commands,
-    popups: PopupStateQuery,
-    windows: Query<(&AppWindow, &PrimaryPresentation)>,
-    anchors: Query<&WindowGeometryAnchor>,
-    mut presentations: PopupRootQuery,
+    windows: Query<(Entity, &WindowOccupant), bevy::ecs::query::With<WindowInteractionSession>>,
+    occupants: Query<Option<&MappedSurface>>,
 ) {
-    for (root, claim, mut node, mut z_index, parent) in &mut presentations {
-        let Ok((popup, mapped, source_presentation)) = popups.get(claim.0) else {
-            node.display = Display::None;
-            continue;
-        };
-        if source_presentation.0 != root {
-            continue;
-        }
-        let Some(mapped) = mapped else {
-            node.display = Display::None;
-            continue;
-        };
-        let Some(owner_root) = windows.iter().find_map(|(window, presentation)| {
-            (window.surface == popup.owner).then_some(presentation.0)
-        }) else {
-            node.display = Display::None;
-            continue;
-        };
-        let Ok(anchor) = anchors.get(owner_root) else {
-            node.display = Display::None;
-            continue;
-        };
-        if parent.is_none_or(|parent| parent.parent() != owner_root) {
-            commands.entity(root).insert(ChildOf(owner_root));
-        }
-
-        let expected = popup_node(popup_visual_position(*popup, *mapped, *anchor), true);
-        if *node != expected {
-            *node = expected;
-        }
-        if z_index.0 != popup.stack_index {
-            z_index.0 = popup.stack_index;
+    for (window, occupant) in &windows {
+        let mapped = occupants
+            .get(occupant.entity())
+            .ok()
+            .is_some_and(|mapped| mapped.is_some());
+        if !mapped {
+            commands.entity(window).remove::<WindowInteractionSession>();
         }
     }
 }
 
-fn popup_visual_position(
-    popup: AppPopup,
-    mapped: MappedSurface,
-    anchor: WindowGeometryAnchor,
-) -> Vec2 {
-    anchor.offset + popup.position + mapped.visual_offset
-}
-
-fn popup_node(position: Vec2, visible: bool) -> Node {
-    Node {
-        position_type: bevy::ui::PositionType::Absolute,
-        left: px(position.x),
-        top: px(position.y),
-        display: if visible {
-            Display::Flex
-        } else {
-            Display::None
-        },
-        ..Default::default()
-    }
-}
-
-type WindowSurfaceQuery<'w, 's> = Query<
-    'w,
-    's,
-    (
-        Entity,
-        &'static AppWindow,
-        Option<&'static MappedSurface>,
-        &'static WindowPlacement,
-        Option<&'static ClientDecorated>,
-    ),
->;
-type WindowRootQuery<'w, 's> = Query<
-    'w,
-    's,
-    (
-        Entity,
-        &'static mut DefaultWindow,
-        &'static PresentsSurface,
-        &'static mut GlobalZIndex,
-        &'static mut WindowGeometryAnchor,
-        &'static mut Node,
-        Option<&'static BoxShadow>,
-        Option<&'static mut BorderColor>,
-    ),
-    (
-        Without<WindowBody>,
-        Without<WindowHeader>,
-        Without<SurfaceNode>,
-    ),
->;
-#[derive(SystemParam)]
-struct SyncDefaultWindowParams<'w, 's> {
-    surfaces: WindowSurfaceQuery<'w, 's>,
-    windows: WindowRootQuery<'w, 's>,
-    commands: Commands<'w, 's>,
-    interaction_requests: MessageReader<'w, 's, WindowInteractionRequest>,
-    interaction: ResMut<'w, ActiveWindowInteraction>,
-    focus: ResMut<'w, WindowFocus>,
-    actions: ResMut<'w, SurfaceActionQueue>,
-    commit_revisions: Res<'w, SurfaceCommitRevisions>,
-}
-
-fn sync_default_window_state(params: SyncDefaultWindowParams) {
-    let SyncDefaultWindowParams {
-        surfaces,
-        mut windows,
-        mut commands,
-        mut interaction_requests,
-        mut interaction,
-        mut focus,
-        mut actions,
-        commit_revisions,
-    } = params;
-    let surface_states = surfaces
-        .iter()
-        .map(|(entity, window, mapped, placement, client_owned)| {
-            (
-                window.surface,
-                WindowSurfaceState {
-                    entity,
-                    mapped: mapped.copied(),
-                    revision: commit_revisions.revision(window.surface),
-                    placement: *placement,
-                    client_owned: client_owned.is_some(),
-                },
-            )
-        })
-        .collect::<HashMap<_, _>>();
-    let mapped_surfaces = surface_states
-        .iter()
-        .filter_map(|(surface, state)| state.mapped.map(|_| *surface))
-        .collect::<HashSet<_>>();
-
-    for request in interaction_requests.read().copied() {
-        let WindowInteractionRequest { surface, kind } = request;
-        match kind {
-            WindowInteractionRequestKind::Move | WindowInteractionRequestKind::Resize { .. } => {
-                let Some(state) = surface_states.get(&surface) else {
-                    continue;
-                };
-                let Some(mapped) = state.mapped else {
-                    continue;
-                };
-                if !state.client_owned {
-                    continue;
-                }
-                let Some((_, _, _, _, _, _, _, _)) = windows
-                    .iter_mut()
-                    .find(|(_, window, _, _, _, _, _, _)| window.surface == surface)
-                else {
-                    continue;
-                };
-                let kind = match kind {
-                    WindowInteractionRequestKind::Move => WindowInteractionKind::Move,
-                    WindowInteractionRequestKind::Resize { edges } => {
-                        WindowInteractionKind::Resize(edges)
-                    }
-                    WindowInteractionRequestKind::End => continue,
-                };
-                interaction.0 = Some(WindowInteraction {
-                    surface,
-                    kind,
-                    desired_size: mapped.logical_size,
-                    last_requested_size: rounded_logical_size(mapped.logical_size),
-                    fixed_anchor: state.placement.position + mapped.logical_size,
-                    end_after_revision: None,
+fn handle_protocol_interactions(
+    mut commands: Commands,
+    mut requests: MessageReader<ToplevelInteractionRequest>,
+    surfaces: Query<(
+        &ClientToplevel,
+        &OccupiesWindow,
+        Option<&MappedSurface>,
+        Option<&ClientDecorated>,
+    )>,
+    interactions: Query<&WindowInteractionSession>,
+) {
+    for request in requests.read().copied() {
+        let Some((_, occupancy, Some(_), Some(_))) = surfaces
+            .iter()
+            .find(|(toplevel, _, _, _)| toplevel.surface == request.surface)
+        else {
+            continue;
+        };
+        let window = occupancy.get();
+        match request.kind {
+            ToplevelInteractionRequestKind::Move => {
+                commands.entity(window).trigger(|window| WindowCommand {
+                    window,
+                    kind: WindowCommandKind::BeginInteraction(WindowInteractionKind::Move),
                 });
             }
-            WindowInteractionRequestKind::End => {
-                if interaction
-                    .0
-                    .as_ref()
-                    .is_some_and(|active| active.surface == surface)
-                {
-                    let revision = surface_states
-                        .get(&surface)
-                        .map_or(0, |state| state.revision);
-                    finish_window_interaction(&mut interaction, revision);
-                }
+            ToplevelInteractionRequestKind::Resize { edges } => {
+                commands.entity(window).trigger(|window| WindowCommand {
+                    window,
+                    kind: WindowCommandKind::BeginInteraction(WindowInteractionKind::Resize(edges)),
+                });
             }
-        }
-    }
-
-    if interaction.0.as_ref().is_some_and(|active| {
-        surface_states
-            .get(&active.surface)
-            .is_none_or(|state| state.mapped.is_none() || !state.client_owned)
-    }) {
-        interaction.0 = None;
-    }
-
-    let mut clear_finished_resize = false;
-    for (root, window, _, mut z_index, mut geometry_anchor, mut node, shadow, _) in &mut windows {
-        let state = surface_states.get(&window.surface);
-        let mapped = state.is_some_and(|state| state.mapped.is_some());
-        let display = if mapped { Display::Flex } else { Display::None };
-        if node.display != display {
-            node.display = display;
-            tracing::trace!(
-                target: PROFILE_TARGET,
-                surface = window.surface.raw(),
-                visible = mapped,
-                "changed application window root visibility"
-            );
-        }
-        if let Some(state) = state {
-            if z_index.0 != state.placement.z_index {
-                z_index.0 = state.placement.z_index;
-            }
-            let visual_offset = state
-                .mapped
-                .filter(|_| state.client_owned)
-                .map_or(Vec2::ZERO, |mapped| mapped.visual_offset);
-            let expected_anchor = if state.client_owned {
-                -visual_offset
-            } else {
-                Vec2::new(0.0, HEADER_HEIGHT)
-            };
-            if geometry_anchor.offset != expected_anchor {
-                geometry_anchor.offset = expected_anchor;
-            }
-            let visual_position = state.placement.position + visual_offset;
-            let expected_left = px(visual_position.x);
-            let expected_top = px(visual_position.y);
-            if node.left != expected_left {
-                node.left = expected_left;
-            }
-            if node.top != expected_top {
-                node.top = expected_top;
-            }
-            if state.client_owned
-                && let Some(mapped) = state.mapped
-            {
-                match (mapped.has_visual_overflow(), shadow.is_some()) {
-                    (true, true) => {
-                        commands.entity(root).remove::<BoxShadow>();
-                    }
-                    (false, false) => {
-                        commands.entity(root).insert(window_shadow());
-                    }
-                    _ => {}
-                }
-            }
-            if let (Some(mapped), Some(active)) = (state.mapped, interaction.0.as_ref())
-                && active.surface == window.surface
-                && let WindowInteractionKind::Resize(edges) = active.kind
-            {
-                let mut placement = state.placement;
-                if edges.has_left() {
-                    placement.position.x = active.fixed_anchor.x - mapped.logical_size.x;
-                }
-                if edges.has_top() {
-                    placement.position.y = active.fixed_anchor.y - mapped.logical_size.y;
-                }
-                let visual_position = placement.position + visual_offset;
-                let expected_left = px(visual_position.x);
-                let expected_top = px(visual_position.y);
-                if node.left != expected_left {
-                    node.left = expected_left;
-                }
-                if node.top != expected_top {
-                    node.top = expected_top;
-                }
-                if placement != state.placement {
-                    commands.entity(state.entity).insert(placement);
-                }
-                clear_finished_resize = active
-                    .end_after_revision
-                    .is_some_and(|revision| state.revision > revision);
-            }
-        }
-    }
-    if clear_finished_resize {
-        interaction.0 = None;
-    }
-
-    let next = windows
-        .iter()
-        .filter(|(_, window, _, _, _, _, _, _)| mapped_surfaces.contains(&window.surface))
-        .max_by_key(|(_, _, _, z_index, _, _, _, _)| z_index.0)
-        .map(|(_, window, _, _, _, _, _, _)| window.surface);
-    let focused_surface_is_unmapped = focus
-        .0
-        .is_some_and(|surface| !mapped_surfaces.contains(&surface));
-    let visible_surface_needs_focus = focus.0.is_none() && next.is_some();
-    if (focused_surface_is_unmapped || visible_surface_needs_focus) && focus.0 != next {
-        focus.0 = next;
-        actions.push(SurfaceAction::Focus { surface: next });
-    }
-
-    for (_, window, _, _, _, _, _, border) in &mut windows {
-        let Some(mut border) = border else {
-            continue;
-        };
-        let color = if focus.0 == Some(window.surface) {
-            FOCUSED_BORDER
-        } else {
-            UNFOCUSED_BORDER
-        };
-        if *border != BorderColor::all(color) {
-            *border = BorderColor::all(color);
-        }
-    }
-}
-
-#[derive(Clone, Copy)]
-struct WindowSurfaceState {
-    entity: Entity,
-    mapped: Option<MappedSurface>,
-    revision: u64,
-    placement: WindowPlacement,
-    client_owned: bool,
-}
-
-fn finish_window_interaction(interaction: &mut ActiveWindowInteraction, revision: u64) {
-    let Some(active) = interaction.0.as_mut() else {
-        return;
-    };
-    if matches!(active.kind, WindowInteractionKind::Resize(edges) if edges.has_left() || edges.has_top())
-    {
-        active.end_after_revision.get_or_insert(revision);
-    } else {
-        interaction.0 = None;
-    }
-}
-
-fn focus_window(mut press: On<Pointer<Press>>, mut params: FocusWindowParams) {
-    if press.button != PointerButton::Primary {
-        return;
-    }
-    let mut window = press.entity;
-    while !params.windows.contains(window) {
-        let Ok(parent) = params.parents.get(window) else {
-            return;
-        };
-        window = parent.parent();
-    }
-    press.propagate(false);
-    let Ok((default_window, claim, mut root_z_index)) = params.windows.get_mut(window) else {
-        return;
-    };
-    let surface = default_window.surface;
-    let source = claim.0;
-    let top_z_index = params
-        .placements
-        .iter()
-        .map(|placement| placement.z_index)
-        .max();
-    let current_z_index = params
-        .placements
-        .get(source)
-        .ok()
-        .map(|placement| placement.z_index);
-    if current_z_index != top_z_index {
-        let z_index = next_window_z(&mut params.stack, &mut params.placements);
-        if let Ok(mut placement) = params.placements.get_mut(source) {
-            placement.z_index = z_index;
-        }
-        root_z_index.0 = z_index;
-    }
-    params.focus.0 = Some(surface);
-    params.actions.push(SurfaceAction::Focus {
-        surface: Some(surface),
-    });
-    params.redraw.write(RequestRedraw);
-}
-
-#[derive(SystemParam)]
-struct FocusWindowParams<'w, 's> {
-    focus: ResMut<'w, WindowFocus>,
-    stack: ResMut<'w, WindowStack>,
-    actions: ResMut<'w, SurfaceActionQueue>,
-    windows: Query<
-        'w,
-        's,
-        (
-            &'static DefaultWindow,
-            &'static PresentsSurface,
-            &'static mut GlobalZIndex,
-        ),
-        With<DefaultWindow>,
-    >,
-    placements: Query<'w, 's, &'static mut WindowPlacement>,
-    parents: Query<'w, 's, &'static ChildOf>,
-    redraw: MessageWriter<'w, RequestRedraw>,
-}
-
-fn next_window_z(stack: &mut WindowStack, placements: &mut Query<&mut WindowPlacement>) -> i32 {
-    if let Some(z_index) = stack.allocate() {
-        return z_index;
-    }
-    rebase_window_stack(stack, placements);
-    stack.allocate().unwrap_or(WINDOW_Z_INDEX_MAX)
-}
-
-fn rebase_window_stack(stack: &mut WindowStack, placements: &mut Query<&mut WindowPlacement>) {
-    let mut order = placements
-        .iter_mut()
-        .map(|placement| placement.z_index)
-        .collect::<Vec<_>>();
-    rebase_window_order(stack, &mut order);
-    let mut placements = placements.iter_mut().collect::<Vec<_>>();
-    placements.sort_unstable_by_key(|placement| placement.z_index);
-    for (mut placement, z_index) in placements.into_iter().zip(order) {
-        placement.z_index = z_index;
-    }
-}
-
-fn rebase_window_order(stack: &mut WindowStack, order: &mut [i32]) {
-    order.sort_unstable();
-    for (offset, z_index) in order.iter_mut().enumerate() {
-        let offset = i32::try_from(offset).unwrap_or(WINDOW_Z_INDEX_MAX);
-        *z_index = WINDOW_Z_INDEX_MIN
-            .saturating_add(offset)
-            .min(WINDOW_Z_INDEX_MAX);
-    }
-    stack.next = match order.last().copied() {
-        Some(z_index) => z_index
-            .checked_add(1)
-            .filter(|next| *next <= WINDOW_Z_INDEX_MAX),
-        None => Some(WINDOW_Z_INDEX_MIN),
-    };
-}
-
-#[derive(SystemParam)]
-struct DragWindowParams<'w, 's> {
-    windows: Query<'w, 's, &'static DefaultWindow>,
-    server_windows: Query<'w, 's, (), With<server::ServerWindowPresentation>>,
-    presentations: Query<'w, 's, &'static PresentsSurface>,
-    placements: Query<'w, 's, &'static mut WindowPlacement>,
-    headers: Query<'w, 's, (), With<WindowHeader>>,
-    parents: Query<'w, 's, &'static ChildOf>,
-    nodes: Query<'w, 's, &'static mut Node>,
-    ui_scale: Res<'w, UiScale>,
-    interaction: ResMut<'w, ActiveWindowInteraction>,
-    actions: ResMut<'w, SurfaceActionQueue>,
-    redraw: MessageWriter<'w, RequestRedraw>,
-}
-
-fn drag_window(mut drag: On<Pointer<Drag>>, params: DragWindowParams) {
-    let DragWindowParams {
-        windows,
-        server_windows,
-        presentations,
-        mut placements,
-        headers,
-        parents,
-        mut nodes,
-        ui_scale,
-        mut interaction,
-        mut actions,
-        mut redraw,
-    } = params;
-    if drag.button != PointerButton::Primary {
-        return;
-    }
-    let mut window = drag.entity;
-    while windows.get(window).is_err() {
-        let Ok(parent) = parents.get(window) else {
-            return;
-        };
-        window = parent.parent();
-    }
-    let Ok(default_window) = windows.get(window) else {
-        return;
-    };
-    let shell_drag_target = drag.entity == window || headers.contains(drag.entity);
-    let direct_shell_drag = server_windows.contains(window)
-        && shell_drag_target
-        && drag.original_event_target() == drag.entity;
-    let protocol_interaction = interaction.0.as_ref().is_some_and(|active| {
-        active.surface == default_window.surface && active.end_after_revision.is_none()
-    });
-    if !direct_shell_drag && !protocol_interaction {
-        return;
-    }
-    let Some(delta) = logical_drag_delta(drag.delta, ui_scale.0) else {
-        return;
-    };
-    let Ok(mut node) = nodes.get_mut(window) else {
-        return;
-    };
-    let Ok(claim) = presentations.get(window) else {
-        return;
-    };
-    match interaction.0.as_mut().filter(|active| {
-        active.surface == default_window.surface && active.end_after_revision.is_none()
-    }) {
-        Some(active) => match active.kind {
-            WindowInteractionKind::Move => {
-                let Ok(mut placement) = placements.get_mut(claim.0) else {
-                    return;
-                };
-                if !translate_window(&mut node, &mut placement, delta) {
-                    return;
-                }
-            }
-            WindowInteractionKind::Resize(edges) => {
-                active.desired_size = resized_desired_size(active.desired_size, delta, edges);
-                let requested = rounded_logical_size(active.desired_size);
-                if requested != active.last_requested_size {
-                    active.last_requested_size = requested;
-                    actions.push(SurfaceAction::Resize {
-                        surface: active.surface,
-                        logical_size: requested,
+            ToplevelInteractionRequestKind::End => {
+                if interactions.get(window).is_ok() {
+                    commands.entity(window).trigger(|window| WindowIntent {
+                        window,
+                        kind: WindowIntentKind::InteractionEnded,
                     });
                 }
             }
-        },
-        None => {
-            let Ok(mut placement) = placements.get_mut(claim.0) else {
+        }
+    }
+}
+
+#[derive(SystemParam)]
+struct ApplyWindowCommandParams<'w, 's> {
+    commands: Commands<'w, 's>,
+    windows: Query<'w, 's, (&'static ManagedWindow, Option<&'static WindowOccupant>)>,
+    occupants: Query<'w, 's, (&'static ClientToplevel, Option<&'static MappedSurface>)>,
+    sessions: Query<'w, 's, &'static mut WindowInteractionSession>,
+    focus: ResMut<'w, FocusedWindow>,
+    applied_focus: ResMut<'w, AppliedClientFocus>,
+    actions: ResMut<'w, SurfaceActionQueue>,
+}
+
+fn apply_window_command(command: On<WindowCommand>, params: ApplyWindowCommandParams) {
+    let ApplyWindowCommandParams {
+        mut commands,
+        windows,
+        occupants,
+        mut sessions,
+        mut focus,
+        mut applied_focus,
+        mut actions,
+    } = params;
+    let window = command.window;
+    match command.kind {
+        WindowCommandKind::ClearFocus => {
+            if focus.0 == Some(window) {
+                focus.0 = None;
+                applied_focus.reassert = true;
+            }
+        }
+        WindowCommandKind::Focus => {
+            if windows.contains(window) {
+                focus.0 = Some(window);
+                applied_focus.reassert = true;
+            }
+        }
+        WindowCommandKind::BeginInteraction(kind) => {
+            let Ok((_, occupant)) = windows.get(window) else {
                 return;
             };
-            if !translate_window(&mut node, &mut placement, delta) {
+            let mapped = occupant
+                .and_then(|occupant| occupants.get(occupant.entity()).ok())
+                .is_some_and(|(_, mapped)| mapped.is_some());
+            if mapped {
+                commands.entity(window).insert(WindowInteractionSession {
+                    kind,
+                    phase: WindowInteractionPhase::Active,
+                });
+            }
+        }
+        WindowCommandKind::CloseOccupant => {
+            let Ok((_, occupant)) = windows.get(window) else {
                 return;
+            };
+            if let Some((toplevel, _)) =
+                occupant.and_then(|occupant| occupants.get(occupant.entity()).ok())
+            {
+                actions.push(SurfaceAction::Close {
+                    surface: toplevel.surface,
+                });
+            }
+        }
+        WindowCommandKind::DetachOccupant => {
+            let Ok((_, occupant)) = windows.get(window) else {
+                return;
+            };
+            if let Some(occupant) = occupant {
+                commands
+                    .entity(occupant.entity())
+                    .remove::<OccupiesWindow>();
+            }
+        }
+        WindowCommandKind::EndInteraction => {
+            if let Ok(mut session) = sessions.get_mut(window) {
+                session.phase = WindowInteractionPhase::Ending;
+            }
+        }
+        WindowCommandKind::FinishInteraction => {
+            if windows.contains(window) {
+                commands.entity(window).remove::<WindowInteractionSession>();
+            }
+        }
+        WindowCommandKind::RemoveWindow => {
+            if windows.contains(window) {
+                commands.entity(window).despawn();
             }
         }
     }
-    drag.propagate(false);
-    redraw.write(RequestRedraw);
 }
 
-fn close_window(
-    surface: SurfaceId,
-) -> impl FnMut(On<Pointer<Click>>, ResMut<SurfaceActionQueue>) + Clone {
-    move |mut click: On<Pointer<Click>>, mut actions: ResMut<SurfaceActionQueue>| {
-        if click.button != PointerButton::Primary {
-            return;
-        }
-        click.propagate(false);
-        actions.push(SurfaceAction::Close { surface });
+fn reconcile_client_focus(
+    focus: Res<FocusedWindow>,
+    mut applied: ResMut<AppliedClientFocus>,
+    windows: Query<(&WindowVisibility, Option<&WindowOccupant>)>,
+    occupants: Query<(&ClientToplevel, Option<&MappedSurface>)>,
+    mut actions: ResMut<SurfaceActionQueue>,
+) {
+    let surface = focus.0.and_then(|window| {
+        let (WindowVisibility::Visible, Some(occupant)) = windows.get(window).ok()? else {
+            return None;
+        };
+        let (toplevel, mapped) = occupants.get(occupant.entity()).ok()?;
+        mapped.map(|_| toplevel.surface)
+    });
+    if surface == applied.surface && !applied.reassert {
+        return;
     }
+    applied.surface = surface;
+    applied.reassert = false;
+    actions.push(SurfaceAction::Focus { surface });
 }
 
-fn random_placement(output_size: Vec2, decorated_size: Vec2, samples: Vec2) -> Vec2 {
-    let available = (output_size - decorated_size).max(Vec2::ZERO);
-    Vec2::new(
-        available.x * samples.x.clamp(0.0, 1.0),
-        available.y * samples.y.clamp(0.0, 1.0),
-    )
-}
-
-fn window_extent(content_size: Vec2, server_side: bool) -> Vec2 {
-    if server_side {
-        content_size + Vec2::new(BORDER_WIDTH * 2.0, HEADER_HEIGHT + BORDER_WIDTH * 2.0)
-    } else {
-        content_size
-    }
-}
-
-fn absolute_position(left: Val, top: Val) -> Option<Vec2> {
-    let (Val::Px(left), Val::Px(top)) = (left, top) else {
-        return None;
-    };
-    Some(Vec2::new(left, top))
-}
-
-fn translate_window(node: &mut Node, placement: &mut WindowPlacement, delta: Vec2) -> bool {
-    let Some(visual_position) = absolute_position(node.left, node.top) else {
-        return false;
-    };
-    let visual_position = visual_position + delta;
-    node.left = px(visual_position.x);
-    node.top = px(visual_position.y);
-    placement.position += delta;
-    true
-}
-
-fn logical_drag_delta(delta: Vec2, scale: f32) -> Option<Vec2> {
-    (scale.is_finite() && scale > 0.0).then_some(delta / scale)
-}
-
-fn resized_desired_size(size: Vec2, delta: Vec2, edges: WindowResizeEdge) -> Vec2 {
-    let mut resized = size;
-    if edges.has_left() {
-        resized.x -= delta.x;
-    }
-    if edges.has_right() {
-        resized.x += delta.x;
-    }
-    if edges.has_top() {
-        resized.y -= delta.y;
-    }
-    if edges.has_bottom() {
-        resized.y += delta.y;
-    }
-    resized.max(Vec2::ONE)
-}
-
-fn rounded_logical_size(size: Vec2) -> UVec2 {
+fn rounded_size(size: Vec2) -> UVec2 {
     let maximum = i32::MAX as f32;
     UVec2::new(
         size.x.round().clamp(1.0, maximum) as u32,
@@ -1025,1133 +685,134 @@ fn rounded_logical_size(size: Vec2) -> UVec2 {
     )
 }
 
-fn hash_unit(hash: u64) -> f32 {
-    (hash as f64 / u64::MAX as f64) as f32
-}
-
 #[cfg(test)]
 mod tests {
-    use bevy::ecs::world::World;
-    use std::time::Duration;
-
-    use bevy::{
-        asset::{AssetApp, AssetPlugin, Assets},
-        camera::{ManualTextureViewHandle, NormalizedRenderTarget},
-        ecs::message::Messages,
-        image::Image,
-        picking::{
-            backend::HitData,
-            pointer::{Location, PointerId},
-        },
-        scene::ScenePlugin,
-        ui::widget::Button,
-    };
-
+    use bevy::{app::App, math::Vec2};
     use weld_app::{
         composition::CompositionPlugin,
-        layer::SHELL_Z_INDEX,
         surface::{
-            HostSurfaceEvent, HostSurfaceEventKind, SurfaceBufferUpdate, SurfaceContentView,
-            SurfaceInputNode, SurfaceInputPlacement, SurfaceInputRect, SurfaceLayerId,
-            SurfaceLayerPlacement, SurfacePlugin, SurfaceTreeSnapshot, SurfaceWindowGeometry,
-            WindowDecoration, enqueue_surface_event, take_surface_actions,
+            ClientDecorated, ClientToplevel, MappedSurface, SurfaceAction, SurfaceActionQueue,
+            SurfaceId, ToplevelInteractionRequest, take_surface_actions,
         },
     };
 
     use super::*;
 
-    fn test_app() -> (App, Entity) {
+    fn test_app() -> App {
         let mut app = App::new();
-        app.add_plugins((
-            bevy::app::TaskPoolPlugin::default(),
-            AssetPlugin::default(),
-            ScenePlugin,
-        ));
-        app.init_asset::<bevy::shader::Shader>()
-            .insert_resource(Assets::<Image>::default())
-            .insert_resource(UiScale(1.0))
-            .insert_resource(OutputGeometry::from_physical(UVec2::new(1_000, 800), 1.0))
-            .add_message::<RequestRedraw>()
-            .add_plugins((CompositionPlugin, SurfacePlugin, DefaultWindowPlugin));
-        let camera = app.world_mut().spawn_empty().id();
-        (app, camera)
+        app.add_plugins((CompositionPlugin, WindowPlugin))
+            .init_resource::<SurfaceActionQueue>()
+            .add_message::<ToplevelInteractionRequest>();
+        app
     }
 
-    fn frame(surface: SurfaceId, width: u32, height: u32) -> HostSurfaceEvent {
-        frame_with_geometry(
-            surface,
-            width,
-            height,
-            Vec2::ZERO,
-            UVec2::new(width, height),
-        )
-    }
-
-    fn frame_with_geometry(
-        surface: SurfaceId,
-        width: u32,
-        height: u32,
-        geometry_origin: Vec2,
-        geometry_size: UVec2,
-    ) -> HostSurfaceEvent {
-        let full_view = SurfaceContentView {
-            source_x: 0.0,
-            source_y: 0.0,
-            source_width: width as f32,
-            source_height: height as f32,
-            logical_width: width as f32,
-            logical_height: height as f32,
-        };
-        let geometry_view = SurfaceContentView {
-            source_x: geometry_origin.x,
-            source_y: geometry_origin.y,
-            source_width: geometry_size.x as f32,
-            source_height: geometry_size.y as f32,
-            logical_width: geometry_size.x as f32,
-            logical_height: geometry_size.y as f32,
-        };
-        HostSurfaceEvent {
-            surface,
-            kind: HostSurfaceEventKind::TreeSnapshot(SurfaceTreeSnapshot {
-                client_mapped: true,
-                root: Some(SurfaceLayerPlacement {
-                    layer: SurfaceLayerId::new(1),
-                    position: Vec2::ZERO,
-                    view: full_view,
-                }),
-                window_geometry: Some(SurfaceWindowGeometry {
-                    origin: geometry_origin,
-                    view: geometry_view,
-                }),
-                overlays: Vec::new(),
-                inputs: vec![SurfaceInputPlacement {
-                    layer: SurfaceLayerId::new(1),
-                    position: Vec2::ZERO,
-                    regions: vec![SurfaceInputRect {
-                        position: geometry_origin,
-                        size: geometry_size.as_vec2(),
-                    }],
-                }],
-                buffers: vec![SurfaceBufferUpdate {
-                    layer: SurfaceLayerId::new(1),
-                    width,
-                    height,
-                    content: weld_app::surface::SurfaceBufferContent::Pixels(vec![
-                        0;
-                        width as usize
-                            * height
-                                as usize
-                            * 4
-                    ]),
+    fn mapped_toplevel(app: &mut App, surface: SurfaceId) -> Entity {
+        app.world_mut()
+            .spawn((
+                ClientToplevel { surface },
+                ClientDecorated,
+                MappedSurface {
+                    logical_size: Vec2::new(320.0, 240.0),
+                    visual_offset: Vec2::ZERO,
+                    visual_size: Vec2::new(320.0, 240.0),
                     opaque: true,
-                }],
-            }),
-        }
-    }
-
-    fn unmapped(surface: SurfaceId) -> HostSurfaceEvent {
-        HostSurfaceEvent {
-            surface,
-            kind: HostSurfaceEventKind::TreeSnapshot(SurfaceTreeSnapshot {
-                client_mapped: false,
-                root: None,
-                window_geometry: None,
-                overlays: Vec::new(),
-                inputs: Vec::new(),
-                buffers: Vec::new(),
-            }),
-        }
-    }
-
-    fn server_decorated(surface: SurfaceId) -> HostSurfaceEvent {
-        HostSurfaceEvent {
-            surface,
-            kind: HostSurfaceEventKind::DecorationChanged {
-                decoration: WindowDecoration::ServerSide,
-            },
-        }
-    }
-
-    fn client_created(surface: SurfaceId) -> HostSurfaceEvent {
-        HostSurfaceEvent {
-            surface,
-            kind: HostSurfaceEventKind::Created {
-                decoration: WindowDecoration::ClientSide,
-            },
-        }
-    }
-
-    fn interaction(surface: SurfaceId, kind: WindowInteractionRequestKind) -> HostSurfaceEvent {
-        HostSurfaceEvent {
-            surface,
-            kind: HostSurfaceEventKind::WindowInteraction(kind),
-        }
-    }
-
-    fn destroyed(surface: SurfaceId) -> HostSurfaceEvent {
-        HostSurfaceEvent {
-            surface,
-            kind: HostSurfaceEventKind::Destroyed,
-        }
-    }
-
-    #[test]
-    fn fallback_claims_a_mapped_surface_and_builds_backed_ui_in_one_update() {
-        let (mut app, _) = test_app();
-        let surface = SurfaceId::new(37);
-        enqueue_surface_event(
-            app.world_mut(),
-            HostSurfaceEvent {
-                surface,
-                kind: HostSurfaceEventKind::Created {
-                    decoration: WindowDecoration::ClientSide,
                 },
-            },
-        );
-        enqueue_surface_event(app.world_mut(), frame(surface, 320, 240));
-
-        app.update();
-
-        let (source, root) = {
-            let mut sources =
-                app.world_mut()
-                    .query::<(Entity, &AppWindow, &MappedSurface, &PrimaryPresentation)>();
-            let (source, window, mapped, presentation) = sources
-                .single(app.world())
-                .expect("surface should be mapped and claimed");
-            assert_eq!(window.surface, surface);
-            assert_eq!(mapped.logical_size, Vec2::new(320.0, 240.0));
-            (source, presentation.0)
-        };
-        let root_entity = app
-            .world()
-            .get_entity(root)
-            .expect("presentation root should exist");
-        assert_eq!(
-            root_entity.get::<PresentsSurface>().map(|claim| claim.0),
-            Some(source)
-        );
-        assert_eq!(
-            root_entity.get::<Node>().map(|node| node.display),
-            Some(Display::Flex),
-        );
-
-        let mut content_nodes = app.world_mut().query::<(&SurfaceNode, &Node)>();
-        let (surface_node, node) = content_nodes
-            .single(app.world())
-            .expect("presentation should contain one backed surface node");
-        assert_eq!(surface_node.surface, surface);
-        assert_eq!(node.display, Display::Flex);
-        assert_eq!(node.width, px(320.0));
-        assert_eq!(node.height, px(240.0));
+            ))
+            .id()
     }
 
     #[test]
-    fn decoration_swap_preserves_client_overflow_and_the_geometry_anchor() {
-        let (mut app, _) = test_app();
-        let surface = SurfaceId::new(38);
-        let geometry_origin = Vec2::new(20.0, 18.0);
-        enqueue_surface_event(app.world_mut(), client_created(surface));
-        enqueue_surface_event(
-            app.world_mut(),
-            frame_with_geometry(surface, 360, 276, geometry_origin, UVec2::new(320, 240)),
-        );
+    fn admission_creates_a_distinct_durable_window_and_occupancy() {
+        let mut app = test_app();
+        let surface = mapped_toplevel(&mut app, SurfaceId::new(7));
+
         app.update();
 
-        let (source, root, mut placement) = {
-            let mut sources = app
-                .world_mut()
-                .query::<(Entity, &AppWindow, &PrimaryPresentation)>();
-            let (source, _, presentation) = sources
-                .single(app.world())
-                .expect("client-decorated surface should be presented");
-            assert!(app.world().get::<ClientDecorated>(source).is_some());
-            let root = presentation.0;
-            let placement = *app
-                .world()
-                .get::<WindowPlacement>(source)
-                .expect("source should own its placement");
-            (source, root, placement)
-        };
-        let mapped = *app
+        let occupancy = *app
             .world()
-            .get::<MappedSurface>(source)
-            .expect("surface should expose both geometry and visual bounds");
-        assert_eq!(mapped.logical_size, Vec2::new(320.0, 240.0));
-        assert_eq!(mapped.visual_offset, -geometry_origin);
-        assert_eq!(mapped.visual_size, Vec2::new(360.0, 276.0));
-        assert!(mapped.has_visual_overflow());
-        let client_root = app.world().entity(root);
-        let client_node = client_root
-            .get::<Node>()
-            .expect("client presentation should have a root node");
-        assert_eq!(
-            (client_node.left, client_node.top),
-            (
-                px(placement.position.x - geometry_origin.x),
-                px(placement.position.y - geometry_origin.y),
-            )
-        );
-        assert!(client_root.get::<BoxShadow>().is_none());
-        let (client_surface, client_surface_node) = app
-            .world_mut()
-            .query::<(&SurfaceNode, &Node)>()
-            .single(app.world())
-            .expect("client presentation should contain its full surface");
-        assert_eq!(
-            client_surface.view,
-            weld_app::surface::SurfaceView::FullSurface
-        );
-        assert_eq!(
-            (client_surface_node.width, client_surface_node.height),
-            (px(360.0), px(276.0))
-        );
-
-        let input = app
-            .world_mut()
-            .query::<(Entity, &SurfaceInputNode)>()
-            .single(app.world())
-            .expect("client geometry should remain interactive")
-            .0;
-        let client_input_node = app
+            .get::<OccupiesWindow>(surface)
+            .expect("mapped toplevel should occupy a managed window");
+        assert_ne!(surface, occupancy.0);
+        let managed = app
             .world()
-            .get::<Node>(input)
-            .expect("client input region should have layout");
+            .get::<ManagedWindow>(occupancy.0)
+            .expect("occupancy should target a managed window");
         assert_eq!(
-            (client_input_node.left, client_input_node.top),
-            (px(geometry_origin.x), px(geometry_origin.y))
+            app.world().resource::<WindowRegistry>().entity(managed.id),
+            Some(occupancy.0)
         );
-        enqueue_surface_event(
-            app.world_mut(),
-            interaction(surface, WindowInteractionRequestKind::Move),
-        );
-        app.update();
-        let delta = Vec2::new(7.0, 9.0);
-        app.world_mut().trigger(Pointer::new(
-            PointerId::Mouse,
-            Location {
-                target: NormalizedRenderTarget::TextureView(ManualTextureViewHandle(1)),
-                position: Vec2::ZERO,
-            },
-            Drag {
-                button: PointerButton::Primary,
-                distance: delta,
-                delta,
-            },
-            input,
-        ));
-        placement.position += delta;
-        assert_eq!(
-            app.world().get::<WindowPlacement>(source).copied(),
-            Some(placement)
-        );
-        let moved_client_node = app
-            .world()
-            .get::<Node>(root)
-            .expect("client presentation should remain alive while moving");
-        let moved_position = absolute_position(moved_client_node.left, moved_client_node.top)
-            .expect("client presentation should remain absolutely positioned");
-        let expected_position = placement.position - geometry_origin;
-        assert!(
-            moved_position.distance(expected_position) < 0.001,
-            "client position {moved_position:?} should preserve geometry anchor {expected_position:?}"
-        );
-        enqueue_surface_event(
-            app.world_mut(),
-            interaction(surface, WindowInteractionRequestKind::End),
-        );
-        app.update();
-
-        enqueue_surface_event(app.world_mut(), server_decorated(surface));
-        app.update();
-
-        let source_entity = app.world().entity(source);
-        let replacement = source_entity
-            .get::<PrimaryPresentation>()
-            .map(|presentation| presentation.0)
-            .expect("server presenter should claim the source");
-        assert_ne!(replacement, root);
-        assert!(app.world().get_entity(root).is_err());
-        assert_eq!(
-            source_entity.get::<WindowPlacement>().copied(),
-            Some(placement)
-        );
-        assert!(source_entity.get::<ServerDecorated>().is_some());
-        assert!(source_entity.get::<ClientDecorated>().is_none());
-        let root_entity = app.world().entity(replacement);
-        let node = root_entity.get::<Node>().expect("root should remain alive");
-        assert_eq!(
-            (node.left, node.top),
-            (px(placement.position.x), px(placement.position.y))
-        );
-        assert_eq!(
-            root_entity.get::<GlobalZIndex>().map(|index| index.0),
-            Some(placement.z_index)
-        );
-        assert!(root_entity.get::<BoxShadow>().is_some());
-        let (server_surface, server_surface_node) = app
-            .world_mut()
-            .query::<(&SurfaceNode, &Node)>()
-            .single(app.world())
-            .expect("server presentation should contain the geometry crop");
-        assert_eq!(
-            server_surface.view,
-            weld_app::surface::SurfaceView::WindowGeometry
-        );
-        assert_eq!(
-            (server_surface_node.width, server_surface_node.height),
-            (px(320.0), px(240.0))
-        );
-        let server_input_node = app
-            .world_mut()
-            .query::<(&SurfaceInputNode, &Node)>()
-            .single(app.world())
-            .expect("server input should be rebased to window geometry")
-            .1;
-        assert_eq!(
-            (server_input_node.left, server_input_node.top),
-            (px(0.0), px(0.0))
-        );
-        assert_eq!(
-            app.world_mut()
-                .query::<&WindowHeader>()
-                .iter(app.world())
-                .count(),
-            1
-        );
-    }
-
-    #[test]
-    fn popup_tracks_the_owners_client_geometry_across_decoration_replacement() {
-        let (mut app, _) = test_app();
-        let owner = SurfaceId::new(71);
-        let popup_surface = SurfaceId::new(72);
-        enqueue_surface_event(app.world_mut(), client_created(owner));
-        enqueue_surface_event(
-            app.world_mut(),
-            frame_with_geometry(owner, 360, 276, Vec2::new(20.0, 18.0), UVec2::new(320, 240)),
-        );
-        enqueue_surface_event(
-            app.world_mut(),
-            HostSurfaceEvent {
-                surface: popup_surface,
-                kind: HostSurfaceEventKind::PopupConfigured(AppPopup {
-                    owner,
-                    position: Vec2::new(100.0, 50.0),
-                    stack_index: 2,
-                }),
-            },
-        );
-        enqueue_surface_event(
-            app.world_mut(),
-            frame_with_geometry(
-                popup_surface,
-                120,
-                80,
-                Vec2::new(8.0, 6.0),
-                UVec2::new(100, 60),
-            ),
-        );
-        app.update();
-
-        let owner_root = app
-            .world_mut()
-            .query::<(&AppWindow, &PrimaryPresentation)>()
-            .single(app.world())
-            .expect("owner window should be presented")
-            .1
-            .0;
-        let (popup_source, popup_root) = app
-            .world_mut()
-            .query::<(Entity, &AppPopup, &PrimaryPresentation)>()
-            .single(app.world())
-            .map(|(source, _, presentation)| (source, presentation.0))
-            .expect("mapped popup should be presented");
-        assert_eq!(
-            app.world().get::<ChildOf>(popup_root).map(ChildOf::parent),
-            Some(owner_root)
-        );
-        let node = app
-            .world()
-            .get::<Node>(popup_root)
-            .expect("popup root should have absolute layout");
-        assert_eq!((node.left, node.top), (px(112.0), px(62.0)));
-        assert!(app.world().get::<BoxShadow>(popup_root).is_none());
-        assert!(app.world().get::<AppWindow>(popup_source).is_none());
-        assert!(app.world().get::<WindowPlacement>(popup_source).is_none());
-
-        enqueue_surface_event(app.world_mut(), server_decorated(owner));
-        app.update();
-
-        let replacement_owner = app
-            .world_mut()
-            .query::<(&AppWindow, &PrimaryPresentation)>()
-            .single(app.world())
-            .expect("server-decorated owner should be presented")
-            .1
-            .0;
-        let replacement_popup = app
-            .world()
-            .get::<PrimaryPresentation>(popup_source)
-            .expect("popup should be reclaimed after owner presentation replacement")
-            .0;
-        assert_ne!(replacement_owner, owner_root);
-        assert_ne!(replacement_popup, popup_root);
         assert_eq!(
             app.world()
-                .get::<ChildOf>(replacement_popup)
-                .map(ChildOf::parent),
-            Some(replacement_owner)
+                .get::<WindowOccupant>(occupancy.0)
+                .map(WindowOccupant::entity),
+            Some(surface)
         );
-        let node = app
-            .world()
-            .get::<Node>(replacement_popup)
-            .expect("reclaimed popup should retain absolute layout");
-        assert_eq!((node.left, node.top), (px(92.0), px(74.0)));
     }
 
     #[test]
-    fn validated_client_move_activates_mid_drag() {
-        let (mut app, _) = test_app();
-        let surface = SurfaceId::new(39);
-        enqueue_surface_event(app.world_mut(), client_created(surface));
-        enqueue_surface_event(app.world_mut(), frame(surface, 320, 240));
+    fn retained_window_survives_occupant_destruction() {
+        let mut app = test_app();
+        let surface = mapped_toplevel(&mut app, SurfaceId::new(8));
         app.update();
+        let window = app
+            .world()
+            .get::<OccupiesWindow>(surface)
+            .expect("mapped toplevel should be admitted")
+            .0;
+        app.world_mut()
+            .entity_mut(window)
+            .insert(WindowVacancy::Retain);
+
+        app.world_mut().entity_mut(surface).despawn();
+        app.update();
+
+        assert!(app.world().get_entity(window).is_ok());
+        assert!(app.world().get::<WindowOccupant>(window).is_none());
+    }
+
+    #[test]
+    fn presentation_insets_preserve_client_size_until_manager_resizes() {
+        let mut app = test_app();
+        let surface = mapped_toplevel(&mut app, SurfaceId::new(9));
+        app.update();
+        let window = app
+            .world()
+            .get::<OccupiesWindow>(surface)
+            .expect("mapped toplevel should be admitted")
+            .0;
         take_surface_actions(app.world_mut());
+        app.world_mut().spawn((
+            PresentsWindow(window),
+            PresentationInsets::new(3.0, 33.0, 3.0, 3.0),
+        ));
 
-        let root = app
-            .world_mut()
-            .query::<(Entity, &DefaultWindow)>()
-            .single(app.world())
-            .expect("window should exist")
-            .0;
-        let content = app
-            .world_mut()
-            .query::<(Entity, &SurfaceInputNode)>()
-            .single(app.world())
-            .expect("content should exist")
-            .0;
-        let initial = {
-            let node = app.world().get::<Node>(root).expect("root should exist");
-            absolute_position(node.left, node.top).expect("root should be absolutely positioned")
-        };
-
-        enqueue_surface_event(
-            app.world_mut(),
-            interaction(surface, WindowInteractionRequestKind::Move),
-        );
         app.update();
+
+        assert_eq!(
+            app.world()
+                .get::<WindowGeometry>(window)
+                .expect("managed window should retain geometry")
+                .size,
+            Vec2::new(326.0, 276.0)
+        );
         assert!(
-            app.world()
-                .resource::<ActiveWindowInteraction>()
-                .0
-                .is_some()
+            take_surface_actions(app.world_mut())
+                .into_iter()
+                .all(|action| !matches!(action, SurfaceAction::Resize { .. }))
         );
-        app.world_mut().trigger(Pointer::new(
-            PointerId::Mouse,
-            Location {
-                target: NormalizedRenderTarget::TextureView(ManualTextureViewHandle(1)),
-                position: Vec2::ZERO,
-            },
-            Drag {
-                button: PointerButton::Primary,
-                distance: Vec2::new(12.0, 8.0),
-                delta: Vec2::new(12.0, 8.0),
-            },
-            content,
-        ));
 
-        let node = app
-            .world()
-            .get::<Node>(root)
-            .expect("root should remain alive");
-        assert_eq!(
-            absolute_position(node.left, node.top),
-            Some(initial + Vec2::new(12.0, 8.0))
-        );
-    }
+        app.world_mut()
+            .get_mut::<WindowGeometry>(window)
+            .expect("managed window should retain geometry")
+            .size
+            .x += 10.0;
+        app.update();
 
-    #[test]
-    fn left_resize_anchors_to_committed_sizes_through_the_final_snapshot() {
-        let (mut app, _) = test_app();
-        let surface = SurfaceId::new(40);
-        enqueue_surface_event(app.world_mut(), client_created(surface));
-        enqueue_surface_event(app.world_mut(), frame(surface, 100, 80));
-        app.update();
-        take_surface_actions(app.world_mut());
-
-        let root = app
-            .world_mut()
-            .query::<(Entity, &DefaultWindow)>()
-            .single(app.world())
-            .expect("window should exist")
-            .0;
-        let content = app
-            .world_mut()
-            .query::<(Entity, &SurfaceInputNode)>()
-            .single(app.world())
-            .expect("content should exist")
-            .0;
-        let initial = {
-            let node = app.world().get::<Node>(root).expect("root should exist");
-            absolute_position(node.left, node.top).expect("root should be absolutely positioned")
-        };
-        enqueue_surface_event(
-            app.world_mut(),
-            interaction(
-                surface,
-                WindowInteractionRequestKind::Resize {
-                    edges: WindowResizeEdge::Left,
-                },
-            ),
-        );
-        app.update();
-        app.world_mut().trigger(Pointer::new(
-            PointerId::Mouse,
-            Location {
-                target: NormalizedRenderTarget::TextureView(ManualTextureViewHandle(1)),
-                position: Vec2::ZERO,
-            },
-            Drag {
-                button: PointerButton::Primary,
-                distance: Vec2::new(10.0, 0.0),
-                delta: Vec2::new(10.0, 0.0),
-            },
-            content,
-        ));
-        assert_eq!(
-            take_surface_actions(app.world_mut()),
-            [SurfaceAction::Resize {
-                surface,
-                logical_size: UVec2::new(90, 80),
-            }]
-        );
-        let node = app
-            .world()
-            .get::<Node>(root)
-            .expect("root should remain alive");
-        let position = absolute_position(node.left, node.top)
-            .expect("root should remain absolutely positioned");
-        assert!(position.distance(initial) < 0.001);
-
-        enqueue_surface_event(app.world_mut(), frame(surface, 95, 80));
-        app.update();
-        let node = app
-            .world()
-            .get::<Node>(root)
-            .expect("root should remain alive");
-        let position = absolute_position(node.left, node.top)
-            .expect("root should remain absolutely positioned");
-        assert!(position.distance(initial + Vec2::new(5.0, 0.0)) < 0.001);
-
-        enqueue_surface_event(
-            app.world_mut(),
-            interaction(surface, WindowInteractionRequestKind::End),
-        );
-        app.update();
-        enqueue_surface_event(app.world_mut(), frame(surface, 90, 80));
-        app.update();
-        let node = app
-            .world()
-            .get::<Node>(root)
-            .expect("root should remain alive");
-        let position = absolute_position(node.left, node.top)
-            .expect("root should remain absolutely positioned");
-        assert!(position.distance(initial + Vec2::new(10.0, 0.0)) < 0.001);
         assert!(
-            app.world()
-                .resource::<ActiveWindowInteraction>()
-                .0
-                .is_none()
+            take_surface_actions(app.world_mut()).contains(&SurfaceAction::Resize {
+                surface: SurfaceId::new(9),
+                logical_size: UVec2::new(330, 240),
+            })
         );
-    }
-
-    #[test]
-    fn content_only_client_commit_finishes_a_released_left_resize() {
-        let (mut app, _) = test_app();
-        let surface = SurfaceId::new(41);
-        enqueue_surface_event(app.world_mut(), client_created(surface));
-        enqueue_surface_event(app.world_mut(), frame(surface, 100, 80));
-        app.update();
-
-        enqueue_surface_event(
-            app.world_mut(),
-            interaction(
-                surface,
-                WindowInteractionRequestKind::Resize {
-                    edges: WindowResizeEdge::Left,
-                },
-            ),
-        );
-        app.update();
-        enqueue_surface_event(
-            app.world_mut(),
-            interaction(surface, WindowInteractionRequestKind::End),
-        );
-        app.update();
-        assert!(
-            app.world()
-                .resource::<ActiveWindowInteraction>()
-                .0
-                .as_ref()
-                .is_some_and(|active| active.end_after_revision.is_some())
-        );
-
-        enqueue_surface_event(app.world_mut(), frame(surface, 100, 80));
-        app.update();
-        assert!(
-            app.world()
-                .resource::<ActiveWindowInteraction>()
-                .0
-                .is_none()
-        );
-    }
-
-    #[test]
-    fn fallback_presents_multiple_surfaces_with_independent_roots() {
-        let (mut app, _) = test_app();
-        let first = SurfaceId::new(51);
-        let second = SurfaceId::new(52);
-        for surface in [first, second] {
-            enqueue_surface_event(
-                app.world_mut(),
-                HostSurfaceEvent {
-                    surface,
-                    kind: HostSurfaceEventKind::Created {
-                        decoration: WindowDecoration::ClientSide,
-                    },
-                },
-            );
-            enqueue_surface_event(app.world_mut(), frame(surface, 4, 3));
-        }
-
-        app.update();
-
-        let mut windows = app
-            .world_mut()
-            .query::<(&DefaultWindow, &GlobalZIndex, &BorderColor)>();
-        let mut presented = windows
-            .iter(app.world())
-            .map(|(window, z_index, border)| (window.surface, z_index.0, *border))
-            .collect::<Vec<_>>();
-        presented.sort_unstable_by_key(|(surface, _, _)| surface.raw());
-        assert_eq!(presented.len(), 2);
-        assert_eq!(presented[0].0, first);
-        assert_eq!(presented[0].1, WINDOW_Z_INDEX_MIN);
-        assert_eq!(presented[0].2, BorderColor::all(UNFOCUSED_BORDER));
-        assert_eq!(presented[1].0, second);
-        assert_eq!(presented[1].1, WINDOW_Z_INDEX_MIN + 1);
-        assert_eq!(presented[1].2, BorderColor::all(FOCUSED_BORDER));
-        assert_eq!(
-            take_surface_actions(app.world_mut()),
-            [
-                SurfaceAction::Focus {
-                    surface: Some(first),
-                },
-                SurfaceAction::Focus {
-                    surface: Some(second),
-                },
-            ],
-        );
-    }
-
-    #[test]
-    fn pressing_and_destroying_windows_updates_focus_without_replacing_siblings() {
-        let (mut app, camera) = test_app();
-        let first = SurfaceId::new(61);
-        let second = SurfaceId::new(62);
-        for surface in [first, second] {
-            enqueue_surface_event(app.world_mut(), client_created(surface));
-            enqueue_surface_event(app.world_mut(), frame(surface, 4, 3));
-        }
-        app.update();
-        take_surface_actions(app.world_mut());
-
-        let first_root = {
-            let mut windows = app.world_mut().query::<(Entity, &DefaultWindow)>();
-            windows
-                .iter(app.world())
-                .find_map(|(entity, window)| (window.surface == first).then_some(entity))
-                .expect("first window should have a presentation root")
-        };
-        let location = Location {
-            target: NormalizedRenderTarget::TextureView(ManualTextureViewHandle(1)),
-            position: Vec2::ZERO,
-        };
-        app.world_mut().trigger(Pointer::new(
-            PointerId::Mouse,
-            location,
-            Press {
-                button: PointerButton::Primary,
-                hit: HitData::new(camera, 0.0, None, None),
-                count: 1,
-            },
-            first_root,
-        ));
-
-        assert_eq!(
-            take_surface_actions(app.world_mut()),
-            [SurfaceAction::Focus {
-                surface: Some(first),
-            }],
-        );
-        let mut windows = app.world_mut().query::<(&DefaultWindow, &GlobalZIndex)>();
-        let z_indices = windows
-            .iter(app.world())
-            .map(|(window, z_index)| (window.surface, z_index.0))
-            .collect::<std::collections::HashMap<_, _>>();
-        assert!(z_indices[&first] > z_indices[&second]);
-
-        enqueue_surface_event(app.world_mut(), destroyed(first));
-        app.update();
-
-        let mut remaining = app.world_mut().query::<&DefaultWindow>();
-        assert_eq!(
-            remaining
-                .iter(app.world())
-                .map(|window| window.surface)
-                .collect::<Vec<_>>(),
-            [second],
-        );
-        assert_eq!(
-            take_surface_actions(app.world_mut()),
-            [SurfaceAction::Focus {
-                surface: Some(second),
-            }],
-        );
-    }
-
-    #[test]
-    fn unmap_preserves_and_hides_the_presentation_then_destroy_cleans_it_up() {
-        let (mut app, _) = test_app();
-        let surface = SurfaceId::new(41);
-        enqueue_surface_event(app.world_mut(), client_created(surface));
-        enqueue_surface_event(app.world_mut(), frame(surface, 2, 2));
-        app.update();
-        assert_eq!(
-            take_surface_actions(app.world_mut()),
-            [SurfaceAction::Focus {
-                surface: Some(surface),
-            }],
-        );
-        let (source, root, content) = {
-            let mut sources = app.world_mut().query::<(Entity, &PrimaryPresentation)>();
-            let (source, presentation) = sources
-                .single(app.world())
-                .expect("surface should be claimed");
-            let root = presentation.0;
-            let mut content_nodes = app.world_mut().query::<(Entity, &SurfaceNode)>();
-            let (content, _) = content_nodes
-                .single(app.world())
-                .expect("surface content node should exist");
-            (source, root, content)
-        };
-
-        enqueue_surface_event(app.world_mut(), unmapped(surface));
-        app.update();
-        assert!(app.world().get::<MappedSurface>(source).is_none());
-        assert_eq!(
-            app.world().get::<Node>(root).map(|node| node.display),
-            Some(Display::None),
-        );
-        assert_eq!(
-            app.world().get::<Node>(content).map(|node| node.display),
-            Some(Display::None),
-        );
-        assert_eq!(
-            take_surface_actions(app.world_mut()),
-            [SurfaceAction::Focus { surface: None }],
-        );
-
-        enqueue_surface_event(app.world_mut(), frame(surface, 3, 2));
-        app.update();
-        assert_eq!(
-            app.world()
-                .get::<PrimaryPresentation>(source)
-                .map(|presentation| presentation.0),
-            Some(root),
-        );
-        assert_eq!(
-            app.world().get::<Node>(root).map(|node| node.display),
-            Some(Display::Flex),
-        );
-        assert_eq!(
-            app.world().get::<Node>(content).map(|node| node.display),
-            Some(Display::Flex),
-        );
-        assert_eq!(
-            take_surface_actions(app.world_mut()),
-            [SurfaceAction::Focus {
-                surface: Some(surface),
-            }],
-        );
-
-        enqueue_surface_event(app.world_mut(), destroyed(surface));
-        app.update();
-        assert!(app.world().get_entity(source).is_err());
-        assert!(app.world().get_entity(root).is_err());
-        assert!(app.world().get_entity(content).is_err());
-    }
-
-    #[test]
-    fn window_observers_drag_only_chrome_and_emit_close_actions() {
-        let (mut app, camera) = test_app();
-        app.world_mut().resource_mut::<UiScale>().0 = 1.5;
-        let surface = SurfaceId::new(43);
-        enqueue_surface_event(app.world_mut(), client_created(surface));
-        enqueue_surface_event(app.world_mut(), server_decorated(surface));
-        enqueue_surface_event(app.world_mut(), frame(surface, 2, 2));
-        app.update();
-        assert_eq!(
-            take_surface_actions(app.world_mut()),
-            [SurfaceAction::Focus {
-                surface: Some(surface),
-            }],
-        );
-
-        let root = {
-            let mut roots = app.world_mut().query::<(Entity, &DefaultWindow)>();
-            roots
-                .single(app.world())
-                .expect("default window root should exist")
-                .0
-        };
-        let content = {
-            let mut contents = app.world_mut().query::<(Entity, &SurfaceInputNode)>();
-            contents
-                .single(app.world())
-                .expect("surface content should exist")
-                .0
-        };
-        let (button, header) = {
-            let mut buttons = app
-                .world_mut()
-                .query_filtered::<(Entity, &ChildOf), With<Button>>();
-            let (button, parent) = buttons
-                .single(app.world())
-                .expect("close button should exist");
-            (button, parent.parent())
-        };
-        let initial_position = {
-            let node = app
-                .world()
-                .get::<Node>(root)
-                .expect("window root should have layout");
-            (node.left, node.top)
-        };
-        let location = Location {
-            target: NormalizedRenderTarget::TextureView(ManualTextureViewHandle(1)),
-            position: Vec2::ZERO,
-        };
-        let drag = Drag {
-            button: PointerButton::Primary,
-            distance: Vec2::new(12.0, 8.0),
-            delta: Vec2::new(12.0, 8.0),
-        };
-
-        app.world_mut().trigger(Pointer::new(
-            PointerId::Mouse,
-            location.clone(),
-            drag.clone(),
-            content,
-        ));
-        app.world_mut().trigger(Pointer::new(
-            PointerId::Mouse,
-            location.clone(),
-            drag.clone(),
-            button,
-        ));
-        assert!(app.world().resource::<Messages<RequestRedraw>>().is_empty());
-        let node = app
-            .world()
-            .get::<Node>(root)
-            .expect("window root should remain alive");
-        assert_eq!((node.left, node.top), initial_position);
-
-        app.world_mut().trigger(Pointer::new(
-            PointerId::Mouse,
-            location.clone(),
-            drag,
-            header,
-        ));
-        let node = app
-            .world()
-            .get::<Node>(root)
-            .expect("window root should remain alive");
-        let (Some(initial_position), Some(delta)) = (
-            absolute_position(initial_position.0, initial_position.1),
-            logical_drag_delta(Vec2::new(12.0, 8.0), 1.5),
-        ) else {
-            panic!("random placement should use pixel positions");
-        };
-        let position = initial_position + delta;
-        assert_eq!(node.left, px(position.x));
-        assert_eq!(node.top, px(position.y));
-        assert_eq!(app.world().resource::<Messages<RequestRedraw>>().len(), 1);
-
-        app.world_mut().trigger(Pointer::new(
-            PointerId::Mouse,
-            location,
-            Click {
-                button: PointerButton::Primary,
-                hit: HitData::new(camera, 0.0, None, None),
-                duration: Duration::ZERO,
-                count: 1,
-            },
-            button,
-        ));
-        assert_eq!(
-            take_surface_actions(app.world_mut()),
-            [SurfaceAction::Close { surface }],
-        );
-    }
-
-    #[test]
-    fn content_and_chrome_presses_reassert_focus_without_burning_stack_slots() {
-        let (mut app, camera) = test_app();
-        app.world_mut().resource_mut::<UiScale>().0 = 1.5;
-        let surface = SurfaceId::new(44);
-        enqueue_surface_event(app.world_mut(), client_created(surface));
-        enqueue_surface_event(app.world_mut(), server_decorated(surface));
-        enqueue_surface_event(app.world_mut(), frame(surface, 2, 2));
-        app.update();
-        take_surface_actions(app.world_mut());
-
-        let content = {
-            let mut contents = app.world_mut().query::<(Entity, &SurfaceInputNode)>();
-            contents
-                .single(app.world())
-                .expect("surface content should exist")
-                .0
-        };
-        let (button, header) = {
-            let mut buttons = app
-                .world_mut()
-                .query_filtered::<(Entity, &ChildOf), With<Button>>();
-            let (button, parent) = buttons
-                .single(app.world())
-                .expect("close button should exist");
-            (button, parent.parent())
-        };
-        let next_z_index = app.world().resource::<WindowStack>().next;
-        let location = Location {
-            target: NormalizedRenderTarget::TextureView(ManualTextureViewHandle(1)),
-            position: Vec2::ZERO,
-        };
-        let press = Press {
-            button: PointerButton::Primary,
-            hit: HitData::new(camera, 0.0, None, None),
-            count: 1,
-        };
-
-        for target in [content, header, button] {
-            app.world_mut().trigger(Pointer::new(
-                PointerId::Mouse,
-                location.clone(),
-                press.clone(),
-                target,
-            ));
-            assert_eq!(
-                take_surface_actions(app.world_mut()),
-                [SurfaceAction::Focus {
-                    surface: Some(surface),
-                }],
-            );
-        }
-        assert_eq!(app.world().resource::<WindowStack>().next, next_z_index);
-    }
-
-    #[test]
-    fn random_placement_keeps_the_complete_window_inside_the_output() {
-        assert_eq!(
-            random_placement(
-                Vec2::new(1_000.0, 800.0),
-                Vec2::new(640.0, 510.0),
-                Vec2::new(1.0, 0.5),
-            ),
-            Vec2::new(360.0, 145.0),
-        );
-    }
-
-    #[test]
-    fn oversized_windows_start_at_the_output_origin() {
-        assert_eq!(
-            random_placement(
-                Vec2::new(400.0, 300.0),
-                Vec2::new(640.0, 510.0),
-                Vec2::new(0.5, 0.5),
-            ),
-            Vec2::ZERO,
-        );
-    }
-
-    #[test]
-    fn drag_screen_pixels_are_converted_to_logical_ui_units() {
-        assert_eq!(
-            logical_drag_delta(Vec2::new(25.0, 10.0), 1.25),
-            Some(Vec2::new(20.0, 8.0)),
-        );
-    }
-
-    #[test]
-    fn resize_edges_apply_pointer_delta_to_the_requested_axes() {
-        let size = Vec2::new(100.0, 80.0);
-        let delta = Vec2::new(10.0, 5.0);
-        let cases = [
-            (WindowResizeEdge::Top, Vec2::new(100.0, 75.0)),
-            (WindowResizeEdge::Bottom, Vec2::new(100.0, 85.0)),
-            (WindowResizeEdge::Left, Vec2::new(90.0, 80.0)),
-            (WindowResizeEdge::Right, Vec2::new(110.0, 80.0)),
-            (WindowResizeEdge::TopLeft, Vec2::new(90.0, 75.0)),
-            (WindowResizeEdge::BottomLeft, Vec2::new(90.0, 85.0)),
-            (WindowResizeEdge::TopRight, Vec2::new(110.0, 75.0)),
-            (WindowResizeEdge::BottomRight, Vec2::new(110.0, 85.0)),
-        ];
-
-        for (edges, expected) in cases {
-            assert_eq!(resized_desired_size(size, delta, edges), expected);
-        }
-    }
-
-    #[test]
-    fn exhausted_window_stack_rebases_in_order_below_the_shell_band() {
-        let mut order = [90, 10, 40];
-        let mut stack = WindowStack { next: None };
-
-        rebase_window_order(&mut stack, &mut order);
-
-        assert_eq!(
-            order,
-            [
-                WINDOW_Z_INDEX_MIN,
-                WINDOW_Z_INDEX_MIN + 1,
-                WINDOW_Z_INDEX_MIN + 2
-            ],
-        );
-        assert!(order.iter().all(|z_index| *z_index < SHELL_Z_INDEX));
-        assert_eq!(stack.allocate(), Some(WINDOW_Z_INDEX_MIN + 3));
-    }
-
-    #[test]
-    fn window_stack_exhausts_at_the_top_of_its_reserved_band() {
-        let mut stack = WindowStack {
-            next: Some(WINDOW_Z_INDEX_MAX),
-        };
-
-        assert_eq!(stack.allocate(), Some(WINDOW_Z_INDEX_MAX));
-        assert_eq!(stack.allocate(), None);
-    }
-
-    #[test]
-    fn surface_actions_are_drained_once() {
-        let mut world = World::new();
-        world.init_resource::<SurfaceActionQueue>();
-        let action = SurfaceAction::Close {
-            surface: SurfaceId::new(7),
-        };
-        world.resource_mut::<SurfaceActionQueue>().push(action);
-
-        assert_eq!(take_surface_actions(&mut world), [action]);
-        assert!(take_surface_actions(&mut world).is_empty());
     }
 }

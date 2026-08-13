@@ -1,0 +1,16 @@
+[package]
+name = "weld-ssd"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+bevy.workspace = true
+tracing.workspace = true
+weld-app = { path = "../weld-app" }
+weld-window = { path = "../weld-window" }
+weld-window-ui = { path = "../weld-window-ui" }
+
+[dev-dependencies]
+weld-app = { path = "../weld-app", features = ["test-support"] }
+weld-float = { path = "../weld-float" }

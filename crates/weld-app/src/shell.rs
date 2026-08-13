@@ -40,11 +40,11 @@ use crate::input::{
 };
 use crate::output::OutputGeometry;
 use crate::surface::{
-    AppPopup, HostSurfaceEvent, HostSurfaceEventKind, SurfaceAction, SurfaceBufferContent,
+    ClientPopup, HostSurfaceEvent, HostSurfaceEventKind, SurfaceAction, SurfaceBufferContent,
     SurfaceBufferUpdate, SurfaceContentView, SurfaceInputPlacement, SurfaceInputRect,
-    SurfaceLayerPlacement, SurfaceTreeSnapshot, SurfaceWindowGeometry, WindowDecoration,
-    WindowInteractionRequestKind, WindowResizeEdge, enqueue_surface_event, has_surface_frame,
-    publish_surface_bindings, take_surface_actions,
+    SurfaceLayerPlacement, SurfaceTreeSnapshot, SurfaceWindowGeometry,
+    ToplevelInteractionRequestKind, ToplevelResizeEdge, WindowDecoration, enqueue_surface_event,
+    has_surface_frame, publish_surface_bindings, take_surface_actions,
 };
 use weld_core::host::{CaptureRequest, RenderContext};
 use weld_core::input::{InputPosition, RawSeatEvent, SeatInputEffect};
@@ -340,7 +340,7 @@ impl AppShell {
                 self.app.world_mut(),
                 HostSurfaceEvent {
                     surface,
-                    kind: HostSurfaceEventKind::PopupConfigured(AppPopup {
+                    kind: HostSurfaceEventKind::PopupConfigured(ClientPopup {
                         owner: popup.owner,
                         position: bevy::math::Vec2::new(popup.position.x, popup.position.y),
                         stack_index: popup.stack_index,
@@ -563,30 +563,32 @@ fn app_decoration(decoration: weld_core::surface::WindowDecoration) -> WindowDec
 
 fn app_interaction(
     interaction: weld_core::surface::WindowInteractionRequestKind,
-) -> WindowInteractionRequestKind {
+) -> ToplevelInteractionRequestKind {
     match interaction {
         weld_core::surface::WindowInteractionRequestKind::Move => {
-            WindowInteractionRequestKind::Move
+            ToplevelInteractionRequestKind::Move
         }
         weld_core::surface::WindowInteractionRequestKind::Resize { edges } => {
-            WindowInteractionRequestKind::Resize {
+            ToplevelInteractionRequestKind::Resize {
                 edges: match edges {
-                    weld_core::surface::WindowResizeEdge::Top => WindowResizeEdge::Top,
-                    weld_core::surface::WindowResizeEdge::Bottom => WindowResizeEdge::Bottom,
-                    weld_core::surface::WindowResizeEdge::Left => WindowResizeEdge::Left,
-                    weld_core::surface::WindowResizeEdge::Right => WindowResizeEdge::Right,
-                    weld_core::surface::WindowResizeEdge::TopLeft => WindowResizeEdge::TopLeft,
+                    weld_core::surface::WindowResizeEdge::Top => ToplevelResizeEdge::Top,
+                    weld_core::surface::WindowResizeEdge::Bottom => ToplevelResizeEdge::Bottom,
+                    weld_core::surface::WindowResizeEdge::Left => ToplevelResizeEdge::Left,
+                    weld_core::surface::WindowResizeEdge::Right => ToplevelResizeEdge::Right,
+                    weld_core::surface::WindowResizeEdge::TopLeft => ToplevelResizeEdge::TopLeft,
                     weld_core::surface::WindowResizeEdge::BottomLeft => {
-                        WindowResizeEdge::BottomLeft
+                        ToplevelResizeEdge::BottomLeft
                     }
-                    weld_core::surface::WindowResizeEdge::TopRight => WindowResizeEdge::TopRight,
+                    weld_core::surface::WindowResizeEdge::TopRight => ToplevelResizeEdge::TopRight,
                     weld_core::surface::WindowResizeEdge::BottomRight => {
-                        WindowResizeEdge::BottomRight
+                        ToplevelResizeEdge::BottomRight
                     }
                 },
             }
         }
-        weld_core::surface::WindowInteractionRequestKind::End => WindowInteractionRequestKind::End,
+        weld_core::surface::WindowInteractionRequestKind::End => {
+            ToplevelInteractionRequestKind::End
+        }
     }
 }
 

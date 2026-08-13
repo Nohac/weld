@@ -4,7 +4,7 @@ This document records the repository's implemented ownership and lifecycle
 boundaries. The subject-oriented [Weld specifications](spec/README.md) preserve
 project intent and future direction without presenting it as current behavior.
 
-Weld is a workspace with three reusable layers and one standard distribution:
+Weld is a workspace of reusable layers and one standard distribution:
 
 - `weld-core` owns Smithay, Wayland protocol state, native input sources,
   backend event loops, DMA-BUF ownership, and final wgpu presentation. It has
@@ -13,20 +13,42 @@ Weld is a workspace with three reusable layers and one standard distribution:
   application model, input projection, surface entities, and composition into
   a core-owned texture. Plugin APIs use Weld and Bevy types rather than
   Smithay protocol objects.
-- `weld-window` is an optional policy crate that claims ordinary application
-  surfaces and supplies Weld's default client- and server-decorated window and
-  popup presentations.
+- `weld-window` owns UI-independent managed-window identity, occupancy,
+  geometry, visibility, stacking, focus, interaction, and presentation
+  contracts. Managed windows are distinct from the shorter-lived client
+  surfaces that occupy them.
+- `weld-window-ui` projects managed windows into unstyled Bevy UI roots. It
+  supplies reusable client-surface mounts, client-decorated and popup
+  presentation, presentation arbitration, and pointer-to-window-intent
+  behavior.
+- `weld-ssd` supplies Weld's current opinionated BSN server-decoration scene.
+  It validates the presentation contract but is optional policy that another
+  shell or window manager can replace.
+- `weld-float` supplies conventional freeform placement, focus, stacking,
+  movement, and interactive-resize policy without owning UI entities.
 - `weldwm` is the standard distribution. It requests a backend, configures the
   `WeldApp` returned by the builder with plugins and shortcuts, and supplies
   the executable. It is one possible assembly of the reusable crates, not the
   owner of their implementation.
 
-Dependencies point inward: `weld-app` depends on `weld-core`, `weld-window`
-depends on `weld-app`, and the distribution depends on all three. Core must not
-depend on Bevy, and the application or policy crates must not depend directly
-on Smithay. A custom distribution can replace `weld-window`, add application
-plugins, or build a different application host while retaining the native
+Dependencies point inward: `weld-app` depends on `weld-core`; `weld-window`
+depends on `weld-app`; the UI and floating-policy crates depend on the window
+domain rather than on each other; and the distribution composes the complete
+set. Core must not depend on Bevy, and the application or policy crates must
+not depend directly on Smithay. A custom distribution can retain
+`weld-window` while replacing `weld-window-ui`, `weld-ssd`, `weld-float`, or
+all three, or build a different application host while retaining the native
 backend and protocol machinery.
+
+The presentation split follows Bevy UI's separation of raw UI infrastructure,
+unstyled reusable behavior, and opinionated Feathers scenes without depending
+on Feathers itself. `weld-app` supplies the raw client-surface rendering
+primitive; `weld-window` is the UI-independent application domain beneath the
+analogy; `weld-window-ui` supplies reusable Node-based presentation behavior;
+and `weld-ssd` supplies one styled BSN composition. Domain systems never query
+SSD scene markers. Weld does not currently enable `bevy_ui_widgets`, because
+its input-focus and dispatch plugins must first be reconciled explicitly with
+compositor keyboard focus and global shortcut routing.
 
 Distributions normally construct Weld through `WeldApp::builder()`. Building
 resolves and opens the native backend and GPU first, then returns a wrapper
@@ -198,11 +220,14 @@ adds one.
 Readable subsurfaces above the toplevel root are ordered and positioned as
 internal Bevy image layers behind the same project-owned `SurfaceNode`; the
 root image stays on that node so its rounded clipping and root-only fast path
-remain intact. The default window plugin independently claims and decorates
-each mapped surface, so client content composes with ordinary Bevy UI. Smithay
-remains responsible for Wayland protocol state and applies focus or close
-actions chosen by ECS policy; it does not own window placement, stacking, or
-decoration. The final project-owned wgpu pass presents or captures Bevy's
+remain intact. On first map, `weld-window` admits each client toplevel into a
+distinct `ManagedWindow` and relates the short-lived surface entity as its
+occupant. Presenters claim the managed window independently, so client content
+composes with ordinary Bevy UI without making presentation-root identity or
+surface lifetime authoritative for window policy. Smithay remains responsible
+for Wayland protocol state and applies focus or close actions chosen by ECS
+policy; it does not own window placement, stacking, or decoration. The final
+project-owned wgpu pass presents or captures Bevy's
 completed texture directly in both backends. Standalone DRM uses the Vulkan
 display WSI validated by the retained probe and never constructs Smithay's
 Pixman, GBM, or `DrmCompositor` presentation path. FIFO acquisition and
@@ -240,8 +265,11 @@ objects with server-side mode. Creating a decoration object opts a client into
 Weld's server-side frame; clients that do not bind the global retain their own
 decorations and are presented without duplicate shell chrome. A late
 decoration decision swaps the client- or server-decoration presentation while
-the durable `AppWindow`, placement, stacking, focus, and backing assets remain
-intact. The presentation root's entity identity is intentionally not stable.
+the durable `ManagedWindow`, desired geometry, stacking, focus, occupant, and
+backing assets remain intact. Presentation insets adjust outer desired geometry
+by their delta, preserving desired client content size without configuring a
+client solely because chrome changed. The presentation root's entity identity
+is intentionally not stable.
 
 Enabling Smithay's `desktop` feature for focused protocol utilities does not
 make its `Window` or `Space` types authoritative for ordinary application
@@ -252,8 +280,10 @@ exclusive zones, and configure state, then project its committed results into
 ECS instead of reimplementing that protocol policy.
 
 Validated pointer `xdg_toplevel.move` and `xdg_toplevel.resize` requests cross
-the Smithay boundary as protocol-neutral ECS messages. The default window
-plugin owns placement and interactive-resize policy, while Smithay owns the
+the Smithay boundary as protocol-neutral ECS messages. `weld-window` validates
+the occupant and owns the UI-neutral interaction session, `weld-window-ui`
+translates pointer motion into window intents, and `weld-float` owns placement
+and interactive-resize policy. Smithay owns the
 pointer grab, configure state, and enforcement of the client's committed size
 constraints. Repeated interactive-resize sizes are latest-value coalesced at
 the Smithay server boundary and configured at most once per composition tick;
@@ -283,12 +313,12 @@ visual origin without changing its durable geometry anchor.
 
 XDG popups use Smithay's `PopupManager` for protocol trees, committed
 positioner state, and explicit seat grabs, while each mapped popup has a
-separate protocol-neutral `AppPopup` ECS role. Popup presentation reuses the
+separate protocol-neutral `ClientPopup` ECS role. Popup presentation reuses the
 ordinary full client-surface tree, input regions, scaling, and client-owned
 visual overflow beneath its owning window presentation. The parent presenter
 publishes its client window-geometry anchor, so popup code does not depend on a
-particular decoration implementation. Popups never receive `AppWindow`,
-`WindowPlacement`, shell decorations, fallback shadows, or interactive
+particular decoration implementation. Popups never receive `ManagedWindow`,
+`WindowGeometry`, shell decorations, fallback shadows, or interactive
 move/resize policy. The initial popup slice honors committed client positioner
 geometry directly; output-edge flip, slide, and resize constraints remain a
 bounded follow-up using the owner's on-output client geometry.

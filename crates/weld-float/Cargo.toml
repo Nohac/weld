@@ -1,0 +1,10 @@
+[package]
+name = "weld-float"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+bevy.workspace = true
+weld-app = { path = "../weld-app" }
+weld-window = { path = "../weld-window" }

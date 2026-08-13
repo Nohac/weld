@@ -19,7 +19,10 @@ use weld_app::{
     Backend, WeldApp,
     input::{GlobalShortcutPlugin, VirtualTerminalShortcutPlugin},
 };
-use weld_window::DefaultWindowPlugin;
+use weld_float::FloatPlugin;
+use weld_ssd::SsdPlugin;
+use weld_window::WindowPlugin;
+use weld_window_ui::WindowUiPlugin;
 
 const DEFAULT_REMOTE_ADDRESS: &str = "127.0.0.1:15702";
 #[cfg(feature = "profiling-tracy")]
@@ -83,7 +86,10 @@ pub fn run(arguments: AppArguments) -> Result<()> {
         .remote_debug(arguments.remote_debug)
         .build()?;
     app.add_plugins((
-        DefaultWindowPlugin,
+        WindowPlugin,
+        WindowUiPlugin,
+        SsdPlugin,
+        FloatPlugin,
         GlobalShortcutPlugin,
         VirtualTerminalShortcutPlugin,
         DistributionOverlayPlugin,

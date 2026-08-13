@@ -5489,12 +5489,43 @@ dependencies = [
 ]
 
 [[package]]
+name = "weld-float"
+version = "0.1.0"
+dependencies = [
+ "bevy",
+ "weld-app",
+ "weld-window",
+]
+
+[[package]]
+name = "weld-ssd"
+version = "0.1.0"
+dependencies = [
+ "bevy",
+ "tracing",
+ "weld-app",
+ "weld-float",
+ "weld-window",
+ "weld-window-ui",
+]
+
+[[package]]
 name = "weld-window"
 version = "0.1.0"
 dependencies = [
  "bevy",
  "tracing",
  "weld-app",
+]
+
+[[package]]
+name = "weld-window-ui"
+version = "0.1.0"
+dependencies = [
+ "bevy",
+ "tracing",
+ "weld-app",
+ "weld-window",
 ]
 
 [[package]]
@@ -5510,7 +5541,10 @@ dependencies = [
  "tracing-tracy",
  "weld-app",
  "weld-core",
+ "weld-float",
+ "weld-ssd",
  "weld-window",
+ "weld-window-ui",
 ]
 
 [[package]]

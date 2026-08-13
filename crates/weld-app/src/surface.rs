@@ -94,7 +94,7 @@ impl UiMaterial for SurfaceUiMaterial {
 
 /// Semantic application-window state exposed to compositor plugins.
 #[derive(Component, Clone, Copy, Debug, Eq, PartialEq)]
-pub struct AppWindow {
+pub struct ClientToplevel {
     pub surface: SurfaceId,
 }
 
@@ -106,11 +106,11 @@ pub struct ClientSurface {
 
 /// Protocol-owned popup placement relative to its owning window geometry.
 ///
-/// Unlike [`AppWindow`], this role has no shell-owned placement, decoration,
+/// Unlike [`ClientToplevel`], this role has no shell-owned placement, decoration,
 /// dragging, or resizing policy. Presentation plugins consume the committed
 /// position and stacking rank without rewriting them.
 #[derive(Component, Clone, Copy, Debug, PartialEq)]
-pub struct AppPopup {
+pub struct ClientPopup {
     pub owner: SurfaceId,
     pub position: Vec2,
     pub stack_index: i32,
@@ -190,7 +190,7 @@ pub enum SurfaceAction {
 
 /// Edge or corner selected by a client for an interactive resize.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum WindowResizeEdge {
+pub enum ToplevelResizeEdge {
     Top,
     Bottom,
     Left,
@@ -201,7 +201,7 @@ pub enum WindowResizeEdge {
     BottomRight,
 }
 
-impl WindowResizeEdge {
+impl ToplevelResizeEdge {
     pub const fn has_left(self) -> bool {
         matches!(self, Self::Left | Self::TopLeft | Self::BottomLeft)
     }
@@ -221,15 +221,15 @@ impl WindowResizeEdge {
 
 /// Validated client request for compositor-owned pointer interaction.
 #[derive(Clone, Copy, Debug, Eq, Message, PartialEq)]
-pub struct WindowInteractionRequest {
+pub struct ToplevelInteractionRequest {
     pub surface: SurfaceId,
-    pub kind: WindowInteractionRequestKind,
+    pub kind: ToplevelInteractionRequestKind,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum WindowInteractionRequestKind {
+pub enum ToplevelInteractionRequestKind {
     Move,
-    Resize { edges: WindowResizeEdge },
+    Resize { edges: ToplevelResizeEdge },
     End,
 }
 
@@ -405,8 +405,8 @@ pub enum HostSurfaceEventKind {
     Created { decoration: WindowDecoration },
     TreeSnapshot(SurfaceTreeSnapshot),
     DecorationChanged { decoration: WindowDecoration },
-    PopupConfigured(AppPopup),
-    WindowInteraction(WindowInteractionRequestKind),
+    PopupConfigured(ClientPopup),
+    WindowInteraction(ToplevelInteractionRequestKind),
     Destroyed,
 }
 
@@ -437,7 +437,7 @@ impl Plugin for SurfacePlugin {
             .init_resource::<SurfaceRegistry>()
             .init_resource::<SurfaceCommitRevisions>()
             .init_resource::<MaterialSelectorRegistry>()
-            .add_message::<WindowInteractionRequest>()
+            .add_message::<ToplevelInteractionRequest>()
             .configure_sets(
                 PreUpdate,
                 (
@@ -717,7 +717,7 @@ fn apply_host_surface_events(world: &mut World) {
                 }
             }
             HostSurfaceEventKind::WindowInteraction(kind) => {
-                world.write_message(WindowInteractionRequest { surface, kind });
+                world.write_message(ToplevelInteractionRequest { surface, kind });
             }
             HostSurfaceEventKind::Destroyed => {
                 destroy_surface(world, &mut registry, surface);
@@ -737,7 +737,7 @@ fn ensure_window_entity(
     if let Some(entry) = registry.entries.get(&surface)
         && world.get_entity(entry.entity).is_ok()
     {
-        if world.get::<AppPopup>(entry.entity).is_some() {
+        if world.get::<ClientPopup>(entry.entity).is_some() {
             warn!(
                 ?surface,
                 "ignored an application-window role conflicting with a popup"
@@ -747,13 +747,13 @@ fn ensure_window_entity(
         let Ok(mut entity) = world.get_entity_mut(entry.entity) else {
             return None;
         };
-        entity.insert((ClientSurface { surface }, AppWindow { surface }));
+        entity.insert((ClientSurface { surface }, ClientToplevel { surface }));
         return Some(entry.entity);
     }
     registry.entries.remove(&surface);
 
     let entity = world
-        .spawn((ClientSurface { surface }, AppWindow { surface }))
+        .spawn((ClientSurface { surface }, ClientToplevel { surface }))
         .id();
     set_decoration_marker(world, entity, decoration);
     registry.entries.insert(
@@ -771,12 +771,12 @@ fn ensure_popup_entity(
     world: &mut World,
     registry: &mut SurfaceRegistry,
     surface: SurfaceId,
-    popup: AppPopup,
+    popup: ClientPopup,
 ) -> Option<Entity> {
     if let Some(entry) = registry.entries.get(&surface)
         && world.get_entity(entry.entity).is_ok()
     {
-        if world.get::<AppWindow>(entry.entity).is_some() {
+        if world.get::<ClientToplevel>(entry.entity).is_some() {
             warn!(
                 ?surface,
                 "ignored a popup role conflicting with an application window"
@@ -836,7 +836,7 @@ fn set_window_decoration(
         return;
     };
     let entity = entry.entity;
-    if world.get::<AppWindow>(entity).is_none() {
+    if world.get::<ClientToplevel>(entity).is_none() {
         warn!(
             ?surface,
             "ignored a window decoration update for a non-window surface"
@@ -1702,14 +1702,14 @@ mod tests {
         );
         app.update();
 
-        let mut windows = app.world_mut().query::<&AppWindow>();
+        let mut windows = app.world_mut().query::<&ClientToplevel>();
         assert_eq!(windows.iter(app.world()).count(), 0);
 
         enqueue_surface_event(
             app.world_mut(),
             HostSurfaceEvent {
                 surface,
-                kind: HostSurfaceEventKind::PopupConfigured(AppPopup {
+                kind: HostSurfaceEventKind::PopupConfigured(ClientPopup {
                     owner: SurfaceId::new(1),
                     position: Vec2::new(10.0, 20.0),
                     stack_index: 1,
@@ -1720,7 +1720,7 @@ mod tests {
 
         let mut popups = app
             .world_mut()
-            .query::<(&AppPopup, &MappedSurface, Option<&ClientDecorated>)>();
+            .query::<(&ClientPopup, &MappedSurface, Option<&ClientDecorated>)>();
         let (popup, mapped, decoration) = popups
             .single(app.world())
             .expect("the queued popup snapshot should map after role registration");
