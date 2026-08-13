@@ -9,7 +9,7 @@ use tracing::warn;
 use crate::{
     dmabuf::DmabufContext,
     input::{InputPosition, RawSeatEvent, SeatInputEffect},
-    runtime::HostCommand,
+    runtime::{HostCommand, OutputScaleAdjustment},
     server::PendingSurfaceEvent,
     surface::{Extent, SurfaceAction},
 };
@@ -28,6 +28,8 @@ pub(crate) struct RunOptions {
 pub struct OutputScale(f64);
 
 impl OutputScale {
+    const STEP: f64 = 0.25;
+
     /// Validates a finite, positive output scale.
     pub fn new(value: f64) -> Result<Self> {
         if !value.is_finite() || value <= 0.0 {
@@ -39,6 +41,18 @@ impl OutputScale {
     /// Returns the validated scale factor.
     pub const fn value(self) -> f64 {
         self.0
+    }
+
+    /// Returns the next quarter-step scale in the requested direction.
+    pub fn adjust(self, adjustment: OutputScaleAdjustment) -> Option<Self> {
+        let next = match adjustment {
+            OutputScaleAdjustment::Increase => ((self.0 / Self::STEP).floor() + 1.0) * Self::STEP,
+            OutputScaleAdjustment::Decrease if self.0 <= Self::STEP => return None,
+            OutputScaleAdjustment::Decrease => {
+                (((self.0 / Self::STEP).ceil() - 1.0) * Self::STEP).max(Self::STEP)
+            }
+        };
+        Self::new(next).ok().filter(|next| *next != self)
     }
 }
 
@@ -136,6 +150,7 @@ impl HostBuilder {
 #[cfg(test)]
 mod output_scale_tests {
     use super::OutputScale;
+    use crate::runtime::OutputScaleAdjustment;
 
     #[test]
     fn output_scale_rejects_non_positive_and_non_finite_values() {
@@ -145,6 +160,31 @@ mod output_scale_tests {
         assert!(OutputScale::new(f64::NAN).is_err());
         assert!(OutputScale::new(f64::INFINITY).is_err());
         assert!("0".parse::<OutputScale>().is_err());
+    }
+
+    #[test]
+    fn output_scale_adjustments_snap_to_directional_quarter_steps() {
+        let scale = OutputScale::new(1.1).expect("valid scale");
+        assert_eq!(
+            scale.adjust(OutputScaleAdjustment::Increase),
+            Some(OutputScale::new(1.25).expect("valid scale"))
+        );
+        assert_eq!(
+            scale.adjust(OutputScaleAdjustment::Decrease),
+            Some(OutputScale::new(1.0).expect("valid scale"))
+        );
+        assert_eq!(
+            OutputScale::new(0.25)
+                .expect("valid scale")
+                .adjust(OutputScaleAdjustment::Decrease),
+            None
+        );
+        assert_eq!(
+            OutputScale::new(0.1)
+                .expect("valid scale")
+                .adjust(OutputScaleAdjustment::Decrease),
+            None
+        );
     }
 }
 

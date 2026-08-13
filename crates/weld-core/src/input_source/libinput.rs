@@ -18,6 +18,7 @@ pub struct LibinputAdapter {
     logical_height: f64,
     pointer: InputPosition,
     finger_axes: ActiveScrollAxes,
+    last_event_time_msec: u32,
 }
 
 #[derive(Default)]
@@ -33,6 +34,7 @@ impl LibinputAdapter {
             logical_height,
             pointer: InputPosition::new(logical_width / 2.0, logical_height / 2.0),
             finger_axes: ActiveScrollAxes::default(),
+            last_event_time_msec: 0,
         }
     }
 
@@ -48,6 +50,7 @@ impl LibinputAdapter {
     pub fn convert(&mut self, event: InputEvent<LibinputInputBackend>) -> Option<RawSeatEvent> {
         match event {
             InputEvent::Keyboard { event, .. } => {
+                self.last_event_time_msec = event.time_msec();
                 let raw: u32 = event.key_code().into();
                 raw.checked_sub(8).map(|keycode| {
                     RawSeatEvent::new(
@@ -64,6 +67,7 @@ impl LibinputAdapter {
                 })
             }
             InputEvent::PointerMotion { event, .. } => {
+                self.last_event_time_msec = event.time_msec();
                 self.pointer = self.clamp(InputPosition::new(
                     self.pointer.x + event.delta_x(),
                     self.pointer.y + event.delta_y(),
@@ -76,6 +80,7 @@ impl LibinputAdapter {
                 ))
             }
             InputEvent::PointerMotionAbsolute { event, .. } => {
+                self.last_event_time_msec = event.time_msec();
                 self.pointer = self.clamp(InputPosition::new(
                     event.x_transformed(self.logical_width as i32),
                     event.y_transformed(self.logical_height as i32),
@@ -87,18 +92,22 @@ impl LibinputAdapter {
                     event.time_msec(),
                 ))
             }
-            InputEvent::PointerButton { event, .. } => Some(RawSeatEvent::new(
-                RawSeatEventKind::PointerButton {
-                    position: Some(self.pointer),
-                    button: LinuxButtonCode(event.button_code()),
-                    state: match event.state() {
-                        ButtonState::Pressed => WeldButtonState::Pressed,
-                        ButtonState::Released => WeldButtonState::Released,
+            InputEvent::PointerButton { event, .. } => {
+                self.last_event_time_msec = event.time_msec();
+                Some(RawSeatEvent::new(
+                    RawSeatEventKind::PointerButton {
+                        position: Some(self.pointer),
+                        button: LinuxButtonCode(event.button_code()),
+                        state: match event.state() {
+                            ButtonState::Pressed => WeldButtonState::Pressed,
+                            ButtonState::Released => WeldButtonState::Released,
+                        },
                     },
-                },
-                event.time_msec(),
-            )),
+                    event.time_msec(),
+                ))
+            }
             InputEvent::PointerAxis { event, .. } => {
+                self.last_event_time_msec = event.time_msec();
                 let source = match event.source() {
                     AxisSource::Wheel | AxisSource::WheelTilt => RawScrollSource::Wheel,
                     AxisSource::Finger => RawScrollSource::Finger,
@@ -122,6 +131,35 @@ impl LibinputAdapter {
             }
             _ => None,
         }
+    }
+
+    /// Updates logical bounds after a scale-only output change.
+    ///
+    /// The physical mode is unchanged, so preserving the pointer's normalized
+    /// location also preserves its physical display location. A motion event is
+    /// always returned for changed bounds so compositor focus is recomputed
+    /// even when rounding leaves the logical coordinates unchanged.
+    pub fn update_output_bounds(
+        &mut self,
+        logical_width: f64,
+        logical_height: f64,
+    ) -> Option<RawSeatEvent> {
+        if self.logical_width == logical_width && self.logical_height == logical_height {
+            return None;
+        }
+        let position = InputPosition::new(
+            self.pointer.x * logical_width / self.logical_width,
+            self.pointer.y * logical_height / self.logical_height,
+        );
+        self.logical_width = logical_width;
+        self.logical_height = logical_height;
+        self.pointer = self.clamp(position);
+        Some(RawSeatEvent::new(
+            RawSeatEventKind::PointerMotion {
+                position: self.pointer,
+            },
+            self.last_event_time_msec,
+        ))
     }
 
     fn clamp(&self, position: InputPosition) -> InputPosition {
@@ -200,6 +238,24 @@ mod tests {
             adapter.clamp(InputPosition::new(-20.0, 5000.0)),
             InputPosition::new(0.0, 1079.0)
         );
+    }
+
+    #[test]
+    fn scale_only_bounds_change_preserves_physical_pointer_location_and_time() {
+        let mut adapter = LibinputAdapter::new(1920.0, 1080.0);
+        adapter.pointer = InputPosition::new(1440.0, 810.0);
+        adapter.last_event_time_msec = 42;
+
+        assert_eq!(
+            adapter.update_output_bounds(1280.0, 720.0),
+            Some(RawSeatEvent::new(
+                RawSeatEventKind::PointerMotion {
+                    position: InputPosition::new(960.0, 540.0),
+                },
+                42,
+            ))
+        );
+        assert_eq!(adapter.update_output_bounds(1280.0, 720.0), None);
     }
 
     #[test]

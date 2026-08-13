@@ -10,7 +10,7 @@ use bevy::{
         observer::On,
         query::{With, Without},
         resource::Resource,
-        schedule::IntoScheduleConfigs,
+        schedule::{IntoScheduleConfigs, common_conditions::resource_changed},
         system::{Commands, Query, Res, ResMut, SystemParam},
     },
     math::Vec2,
@@ -55,6 +55,13 @@ impl Plugin for FloatPlugin {
                     .chain()
                     .after(initialize_windows)
                     .before(reconcile_anchored_resize)
+                    .in_set(WindowSystems::Management),
+            )
+            .add_systems(
+                PreUpdate,
+                clamp_windows_to_output
+                    .run_if(resource_changed::<OutputGeometry>)
+                    .after(initialize_windows)
                     .in_set(WindowSystems::Management),
             );
     }
@@ -154,6 +161,23 @@ fn initialize_windows(
             window: entity,
             kind: WindowCommandKind::Focus,
         });
+    }
+}
+
+fn clamp_windows_to_output(
+    manager: Res<DefaultFloatManager>,
+    output: Res<OutputGeometry>,
+    mut windows: Query<(&ManagedBy, &mut WindowGeometry), Without<WindowInteractionSession>>,
+) {
+    for (managed_by, mut geometry) in &mut windows {
+        if managed_by.0 != manager.0 {
+            continue;
+        }
+        let position =
+            clamped_window_position(geometry.position, geometry.size, output.logical_size());
+        if geometry.position != position {
+            geometry.position = position;
+        }
     }
 }
 
@@ -493,6 +517,10 @@ fn random_placement(output_size: Vec2, window_size: Vec2, samples: Vec2) -> Vec2
     )
 }
 
+fn clamped_window_position(position: Vec2, window_size: Vec2, output_size: Vec2) -> Vec2 {
+    position.clamp(Vec2::ZERO, (output_size - window_size).max(Vec2::ZERO))
+}
+
 fn resized_size(size: Vec2, delta: Vec2, edges: ToplevelResizeEdge) -> Vec2 {
     let mut resized = size;
     if edges.has_left() {
@@ -554,6 +582,26 @@ mod tests {
                 Vec2::splat(0.5),
             ),
             Vec2::ZERO
+        );
+    }
+
+    #[test]
+    fn existing_window_position_is_clamped_when_the_logical_output_shrinks() {
+        assert_eq!(
+            clamped_window_position(
+                Vec2::new(900.0, 700.0),
+                Vec2::new(300.0, 200.0),
+                Vec2::new(1_000.0, 800.0),
+            ),
+            Vec2::new(700.0, 600.0),
+        );
+        assert_eq!(
+            clamped_window_position(
+                Vec2::new(10.0, 20.0),
+                Vec2::new(1_200.0, 900.0),
+                Vec2::new(1_000.0, 800.0),
+            ),
+            Vec2::ZERO,
         );
     }
 

@@ -161,6 +161,7 @@ Use the compositor shortcuts to launch clients or stop Weld:
 - `Super+Enter`: foot
 - `Super+F`: Firefox
 - `Super+B`: Blender
+- `Super+=` / `Super+-` (DRM only): increase or decrease output scale by 0.25
 - `Super+Shift+Escape`: exit Weld
 - `Ctrl+Alt+F1` through `Ctrl+Alt+F10` (DRM only): switch virtual terminal
 

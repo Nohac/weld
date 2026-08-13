@@ -19,9 +19,10 @@ pub(crate) const BEVY_SETTLE_COMPOSITIONS: u8 = 5;
 
 /// Data borrowed by calloop callbacks without making Smithay the owner of
 /// backend events or process policy.
-pub(crate) struct LoopData<Event> {
+pub(crate) struct LoopData<Event, BackendState = ()> {
     pub(crate) server: ServerState,
     pub(crate) events: VecDeque<Event>,
+    pub(crate) backend_state: BackendState,
 }
 
 impl<Event> LoopData<Event> {
@@ -29,12 +30,31 @@ impl<Event> LoopData<Event> {
         Self {
             server,
             events: VecDeque::new(),
+            backend_state: (),
         }
     }
 }
 
-pub(crate) fn server_mut<Event>(data: &mut LoopData<Event>) -> &mut ServerState {
+impl<Event, BackendState> LoopData<Event, BackendState> {
+    pub(crate) fn with_state(server: ServerState, backend_state: BackendState) -> Self {
+        Self {
+            server,
+            events: VecDeque::new(),
+            backend_state,
+        }
+    }
+}
+
+pub(crate) fn server_mut<Event, BackendState>(
+    data: &mut LoopData<Event, BackendState>,
+) -> &mut ServerState {
     &mut data.server
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum OutputScaleAdjustment {
+    Increase,
+    Decrease,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -43,7 +63,15 @@ pub enum HostCommand {
         program: OsString,
         arguments: Vec<OsString>,
     },
+    AdjustOutputScale(OutputScaleAdjustment),
     Exit,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum HostCommandEffect {
+    Continue,
+    Exit,
+    AdjustOutputScale(OutputScaleAdjustment),
 }
 
 #[derive(Default)]
@@ -62,13 +90,20 @@ impl ChildProcesses {
         Ok(true)
     }
 
-    pub(crate) fn apply(&mut self, server: &ServerState, command: HostCommand) -> Result<bool> {
+    pub(crate) fn apply(
+        &mut self,
+        server: &ServerState,
+        command: HostCommand,
+    ) -> Result<HostCommandEffect> {
         match command {
             HostCommand::Launch { program, arguments } => {
                 self.spawn(server, &program, &arguments)?;
-                Ok(false)
+                Ok(HostCommandEffect::Continue)
             }
-            HostCommand::Exit => Ok(true),
+            HostCommand::AdjustOutputScale(adjustment) => {
+                Ok(HostCommandEffect::AdjustOutputScale(adjustment))
+            }
+            HostCommand::Exit => Ok(HostCommandEffect::Exit),
         }
     }
 

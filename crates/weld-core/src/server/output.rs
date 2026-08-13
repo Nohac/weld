@@ -52,12 +52,14 @@ impl OutputMetrics {
         if physical_width == 0 || physical_height == 0 {
             bail!("output dimensions must be nonzero");
         }
-        Ok(Self {
+        let metrics = Self {
             physical_width: i32::try_from(physical_width).context("output width exceeds i32")?,
             physical_height: i32::try_from(physical_height).context("output height exceeds i32")?,
             refresh_millihertz: 60_000,
             scale_factor: scale.value(),
-        })
+        };
+        metrics.validate_logical_size()?;
+        Ok(metrics)
     }
 
     pub(crate) fn with_refresh_millihertz(mut self, refresh_millihertz: i32) -> Result<Self> {
@@ -66,6 +68,21 @@ impl OutputMetrics {
         }
         self.refresh_millihertz = refresh_millihertz;
         Ok(self)
+    }
+
+    pub(crate) fn with_scale(mut self, scale: OutputScale) -> Result<Self> {
+        self.scale_factor = scale.value();
+        self.validate_logical_size()?;
+        Ok(self)
+    }
+
+    fn validate_logical_size(self) -> Result<()> {
+        if f64::from(self.physical_width) / self.scale_factor < 1.0
+            || f64::from(self.physical_height) / self.scale_factor < 1.0
+        {
+            bail!("output scale leaves less than one logical pixel on an axis");
+        }
+        Ok(())
     }
 
     pub(super) fn mode(self) -> OutputMode {
@@ -146,6 +163,7 @@ mod tests {
     #[test]
     fn nested_output_metrics_reject_zero_dimensions() {
         assert!(OutputMetrics::new(0, 800, OutputScale::default()).is_err());
+        assert!(OutputMetrics::new(800, 600, scale(1_000.0)).is_err());
     }
 
     #[test]
@@ -182,5 +200,16 @@ mod tests {
         assert_eq!(output.modes(), [scale_only.mode()]);
         assert_eq!(output.current_mode(), Some(scale_only.mode()));
         assert_eq!(output.preferred_mode(), Some(scale_only.mode()));
+    }
+
+    #[test]
+    fn replacing_scale_preserves_the_physical_mode_and_refresh() {
+        let initial = OutputMetrics::new(1920, 1080, scale(1.0))
+            .and_then(|metrics| metrics.with_refresh_millihertz(144_000))
+            .expect("valid metrics");
+        let scaled = initial.with_scale(scale(1.5)).expect("valid scale");
+
+        assert_eq!(scaled.mode(), initial.mode());
+        assert_eq!(scaled.scale_factor(), 1.5);
     }
 }

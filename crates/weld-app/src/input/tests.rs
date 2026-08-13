@@ -17,7 +17,7 @@ use super::{
     take_host_commands, take_input_effects, take_virtual_terminal_switch_request,
 };
 use crate::ActiveBackend;
-use weld_core::runtime::HostCommand;
+use weld_core::runtime::{HostCommand, OutputScaleAdjustment};
 use winit::keyboard::Key;
 
 #[derive(Actionlike, Clone, Copy, Debug, Eq, Hash, PartialEq, Reflect)]
@@ -47,8 +47,13 @@ fn projection_test_app() -> (App, Entity) {
 }
 
 fn shortcut_test_app() -> App {
+    shortcut_test_app_for(ActiveBackend::Nested)
+}
+
+fn shortcut_test_app_for(backend: ActiveBackend) -> App {
     let mut app = App::new();
-    app.add_plugins(MinimalPlugins)
+    app.insert_resource(backend)
+        .add_plugins(MinimalPlugins)
         .add_plugins(InputPlugin)
         .add_message::<PointerInput>()
         .add_plugins(InputBridgePlugin::new(NormalizedRenderTarget::TextureView(
@@ -192,6 +197,76 @@ fn global_shortcut_emits_and_consumes_trigger_pair_in_the_same_update() {
             },
             13,
         )]
+    );
+}
+
+#[test]
+fn output_scale_shortcuts_are_emitted_and_consumed_only_for_drm() {
+    let events = [
+        RawSeatEvent::new(
+            RawSeatEventKind::Keyboard {
+                keycode: LinuxKeycode(125),
+                logical_key: None,
+                state: ButtonState::Pressed,
+            },
+            10,
+        ),
+        RawSeatEvent::new(
+            RawSeatEventKind::Keyboard {
+                keycode: LinuxKeycode(13),
+                logical_key: None,
+                state: ButtonState::Pressed,
+            },
+            11,
+        ),
+    ];
+
+    let mut drm = shortcut_test_app_for(ActiveBackend::Drm);
+    for event in events.iter().cloned() {
+        enqueue_raw_input(drm.world_mut(), event);
+    }
+    drm.update();
+    assert_eq!(
+        take_host_commands(drm.world_mut()),
+        [HostCommand::AdjustOutputScale(
+            OutputScaleAdjustment::Increase
+        )]
+    );
+    assert_eq!(
+        take_input_effects(drm.world_mut()),
+        [SeatInputEffect::new(
+            SeatInputEffectKind::Keyboard {
+                keycode: LinuxKeycode(125),
+                state: ButtonState::Pressed,
+            },
+            10,
+        )]
+    );
+
+    let mut nested = shortcut_test_app_for(ActiveBackend::Nested);
+    for event in events.iter().cloned() {
+        enqueue_raw_input(nested.world_mut(), event);
+    }
+    nested.update();
+    assert!(take_host_commands(nested.world_mut()).is_empty());
+    assert_eq!(
+        take_input_effects(nested.world_mut()),
+        [
+            SeatInputEffect::new(
+                SeatInputEffectKind::Keyboard {
+                    keycode: LinuxKeycode(125),
+                    state: ButtonState::Pressed,
+                },
+                10,
+            ),
+            SeatInputEffect::new(
+                SeatInputEffectKind::Keyboard {
+                    keycode: LinuxKeycode(13),
+                    state: ButtonState::Pressed,
+                },
+                11,
+            ),
+        ]
     );
 }
 

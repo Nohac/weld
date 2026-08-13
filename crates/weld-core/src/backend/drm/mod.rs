@@ -26,6 +26,7 @@ use smithay_drm_extras::drm_scanner::{DrmScanEvent, DrmScanner};
 use tracing::{debug, error, info, warn};
 
 use crate::{
+    OutputScale,
     dmabuf::DmabufSourceCache,
     host::{
         CompositionDemand, CompositionHost, CompositionTargetId, CompositionTargets, PreparedHost,
@@ -34,10 +35,10 @@ use crate::{
     input::{RawSeatEvent, RawSeatEventKind, source::libinput::LibinputAdapter},
     renderer::{CursorOverlay, read_composition_rgba, write_png},
     runtime::{
-        ChildProcesses, FrameState, HostCommand, LoopData, PendingCapture, iteration_work,
-        server_mut,
+        ChildProcesses, FrameState, HostCommand, HostCommandEffect, LoopData, PendingCapture,
+        iteration_work, server_mut,
     },
-    server::{ServerOptions, ServerState},
+    server::{OutputMetrics, ServerOptions, ServerState},
 };
 
 mod direct;
@@ -68,6 +69,74 @@ struct OutputMonitor {
     connector: connector::Handle,
     connected: bool,
     mode_compatible: bool,
+}
+
+struct DrmHostCommandContext<'a> {
+    children: &'a mut ChildProcesses,
+    server: &'a mut ServerState,
+    input_adapter: &'a mut LibinputAdapter,
+    events: &'a mut std::collections::VecDeque<DrmRuntimeEvent>,
+    shell: &'a mut dyn CompositionHost,
+    target: wgpu::TextureView,
+    extent: crate::surface::Extent,
+    output_metrics: &'a mut OutputMetrics,
+    frame_state: &'a mut FrameState,
+}
+
+fn apply_host_command(context: DrmHostCommandContext<'_>, command: HostCommand) -> Result<bool> {
+    let DrmHostCommandContext {
+        children,
+        server,
+        input_adapter,
+        events,
+        shell,
+        target,
+        extent,
+        output_metrics,
+        frame_state,
+    } = context;
+    match children.apply(server, command)? {
+        HostCommandEffect::Continue => Ok(false),
+        HostCommandEffect::Exit => Ok(true),
+        HostCommandEffect::AdjustOutputScale(adjustment) => {
+            let current = match OutputScale::new(output_metrics.scale_factor()) {
+                Ok(current) => current,
+                Err(error) => {
+                    warn!(%error, "ignored output-scale adjustment from invalid current state");
+                    return Ok(false);
+                }
+            };
+            let Some(next_scale) = current.adjust(adjustment) else {
+                return Ok(false);
+            };
+            let candidate = match output_metrics.with_scale(next_scale) {
+                Ok(candidate) => candidate,
+                Err(error) => {
+                    warn!(
+                        scale_factor = next_scale.value(),
+                        %error,
+                        "ignored invalid runtime output scale"
+                    );
+                    return Ok(false);
+                }
+            };
+
+            let logical_width = f64::from(candidate.physical_width()) / candidate.scale_factor();
+            let logical_height = f64::from(candidate.physical_height()) / candidate.scale_factor();
+            server.update_output_metrics(candidate);
+            if let Some(event) = input_adapter.update_output_bounds(logical_width, logical_height) {
+                events.push_back(DrmRuntimeEvent::Input(event));
+            }
+            shell.set_output_geometry(target, extent, candidate.scale_factor());
+            *output_metrics = candidate;
+            frame_state.request_settled_composition();
+            info!(
+                scale_factor = candidate.scale_factor(),
+                "updated standalone output scale"
+            );
+            Ok(false)
+        }
+    }
 }
 
 impl OutputMonitor {
@@ -138,7 +207,7 @@ pub(crate) fn prepare(options: RunOptions, signals: Signals) -> Result<PreparedH
         tracing::trace_span!(target: crate::PROFILE_TARGET, "drm_backend_prepare").entered();
 
     let started_at = Instant::now();
-    let mut calloop: CalloopEventLoop<'static, LoopData<DrmRuntimeEvent>> =
+    let mut calloop: CalloopEventLoop<'static, LoopData<DrmRuntimeEvent, LibinputAdapter>> =
         CalloopEventLoop::try_new().context("failed to create the DRM calloop event loop")?;
 
     let (session, session_notifier) =
@@ -148,8 +217,12 @@ pub(crate) fn prepare(options: RunOptions, signals: Signals) -> Result<PreparedH
     let device = DrmDeviceDiscovery::new(session, udev.device_list())?;
     let output = discover_output(&device.drm)?;
     let selected_connector_name = connector_name(&output.connector);
-    let (output_descriptor, output_metrics) =
+    let (output_descriptor, mut output_metrics) =
         output_description(&output.connector, output.mode, options.output_scale)?;
+    let logical_width = f64::from(output_metrics.physical_width()) / output_metrics.scale_factor();
+    let logical_height =
+        f64::from(output_metrics.physical_height()) / output_metrics.scale_factor();
+    let input_adapter = LibinputAdapter::new(logical_width, logical_height);
     let direct_gpu = DirectDrmGpu::new(
         &device.drm,
         device.device_id,
@@ -168,7 +241,7 @@ pub(crate) fn prepare(options: RunOptions, signals: Signals) -> Result<PreparedH
         &calloop.handle(),
         display,
         dmabuf_release_source,
-        server_mut::<DrmRuntimeEvent>,
+        server_mut::<DrmRuntimeEvent, LibinputAdapter>,
         ServerOptions {
             started_at,
             seat_name: &seat_name,
@@ -178,7 +251,7 @@ pub(crate) fn prepare(options: RunOptions, signals: Signals) -> Result<PreparedH
             dmabuf_sources: dmabuf_sources.clone(),
         },
     )?;
-    let mut loop_data = LoopData::new(server);
+    let mut loop_data = LoopData::with_state(server, input_adapter);
 
     calloop
         .handle()
@@ -196,17 +269,13 @@ pub(crate) fn prepare(options: RunOptions, signals: Signals) -> Result<PreparedH
         .udev_assign_seat(&seat_name)
         .map_err(|error| anyhow!("failed to assign libinput to {seat_name}: {error:?}"))?;
     let input_backend = LibinputInputBackend::new(libinput_context.clone());
-    let logical_width = f64::from(output_metrics.physical_width()) / output_metrics.scale_factor();
-    let logical_height =
-        f64::from(output_metrics.physical_height()) / output_metrics.scale_factor();
-    let mut input_adapter = LibinputAdapter::new(logical_width, logical_height);
-    loop_data
-        .events
-        .push_back(DrmRuntimeEvent::Input(input_adapter.initial_event()));
+    loop_data.events.push_back(DrmRuntimeEvent::Input(
+        loop_data.backend_state.initial_event(),
+    ));
     calloop
         .handle()
-        .insert_source(input_backend, move |event, _, data| {
-            if let Some(event) = input_adapter.convert(event) {
+        .insert_source(input_backend, |event, _, data| {
+            if let Some(event) = data.backend_state.convert(event) {
                 data.events.push_back(DrmRuntimeEvent::Input(event));
             }
         })
@@ -371,7 +440,24 @@ pub(crate) fn prepare(options: RunOptions, signals: Signals) -> Result<PreparedH
                         }
                         DrmRuntimeEvent::Command(command) => {
                             event_counts[4] += 1;
-                            exit_requested |= children.apply(&loop_data.server, command)?;
+                            // Signal commands currently only request exit. Keep them on the
+                            // shared path so future host commands cannot bypass backend policy.
+                            let target =
+                                host_composition_target(&targets, presenter.in_flight_target());
+                            exit_requested |= apply_host_command(
+                                DrmHostCommandContext {
+                                    children: &mut children,
+                                    server: &mut loop_data.server,
+                                    input_adapter: &mut loop_data.backend_state,
+                                    events: &mut loop_data.events,
+                                    shell: shell.as_mut(),
+                                    target: targets.view(target).clone(),
+                                    extent: targets.extent(),
+                                    output_metrics: &mut output_metrics,
+                                    frame_state: &mut frame_state,
+                                },
+                                command,
+                            )?;
                         }
                     }
                 }
@@ -463,7 +549,22 @@ pub(crate) fn prepare(options: RunOptions, signals: Signals) -> Result<PreparedH
                         loop_data.server.apply_input_effect(effect);
                     }
                     for command in host_commands {
-                        exit_requested |= children.apply(&loop_data.server, command)?;
+                        let target =
+                            host_composition_target(&targets, presenter.in_flight_target());
+                        exit_requested |= apply_host_command(
+                            DrmHostCommandContext {
+                                children: &mut children,
+                                server: &mut loop_data.server,
+                                input_adapter: &mut loop_data.backend_state,
+                                events: &mut loop_data.events,
+                                shell: shell.as_mut(),
+                                target: targets.view(target).clone(),
+                                extent: targets.extent(),
+                                output_metrics: &mut output_metrics,
+                                frame_state: &mut frame_state,
+                            },
+                            command,
+                        )?;
                     }
                 }
                 if let Some(virtual_terminal) = virtual_terminal {
@@ -587,8 +688,8 @@ pub(crate) fn prepare(options: RunOptions, signals: Signals) -> Result<PreparedH
 }
 
 fn shutdown_presenter(
-    calloop: &mut CalloopEventLoop<'static, LoopData<DrmRuntimeEvent>>,
-    loop_data: &mut LoopData<DrmRuntimeEvent>,
+    calloop: &mut CalloopEventLoop<'static, LoopData<DrmRuntimeEvent, LibinputAdapter>>,
+    loop_data: &mut LoopData<DrmRuntimeEvent, LibinputAdapter>,
     presenter: &mut PresenterHandle,
 ) -> Result<()> {
     presenter.begin_shutdown();

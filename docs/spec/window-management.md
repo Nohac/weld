@@ -184,6 +184,36 @@ deterministic operations, and observable transitions are the important early
 constraints that keep such an adapter feasible without copying i3's internals
 into Weld's general window model.
 
+## Per-window accessibility zoom — Exploration
+
+Weld could provide compositor-owned zoom for an individual managed frame. The
+zoom should be ECS state on the durable window primitive rather than behavior
+hidden in server decorations, a particular manager, or a client surface. That
+would let floating, tiling, remote, and custom presentation plugins expose the
+same accessibility capability.
+
+A complete implementation should scale the window's composed presentation as
+one unit, including client content, server or client decorations, shadows,
+popups, clipping, and input regions. Bevy UI transforms are a candidate for
+composition and transformed picking. The host could additionally advertise an
+effective preferred buffer scale derived from the output scale and window zoom
+to the occupied Wayland surface tree. Clients that honor integer or fractional
+preferred scale could then redraw sharply; clients that do not would remain
+usable through compositor sampling but may look softer.
+
+The geometry contract needs validation before selecting a component schema.
+One candidate keeps `WindowGeometry` as the final desktop footprint and shows
+less client-logical content as zoom increases. This remains predictable for
+tiling and placement. A manager may separately enlarge that footprint when it
+wants to preserve the visible content area. Resize deltas, constraints, popup
+placement, surface-local pointer coordinates, clamping, and per-surface scale
+lifecycle must all remain coherent under either policy.
+
+Focused-window increase, decrease, and reset shortcuts are a useful initial
+interaction, but bindings belong to configurable policy rather than the window
+primitive itself. Per-window zoom should compose with output scaling instead
+of replacing it.
+
 ## Open work — Exploration
 
 - Exact ECS components and relationships for frames, occupants, and layout
@@ -191,5 +221,6 @@ into Weld's general window model.
 - Frame claim arbitration and transactional occupant replacement.
 - Persistence storage, rule migration, and multiple-match interaction.
 - Default vacant-frame presentation and accessibility semantics.
+- Per-window accessibility zoom geometry and preferred-buffer-scale policy.
 - The smallest native tiling slice that validates the tree and operation
   contracts.

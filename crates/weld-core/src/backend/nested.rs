@@ -11,7 +11,8 @@ use crate::renderer::NestedRenderer;
 #[cfg(test)]
 use crate::runtime::{BEVY_SETTLE_COMPOSITIONS, FRAME_INTERVAL, IterationWork};
 use crate::runtime::{
-    ChildProcesses, FrameState, HostCommand, LoopData, PendingCapture, iteration_work, server_mut,
+    ChildProcesses, FrameState, HostCommand, HostCommandEffect, LoopData, PendingCapture,
+    iteration_work, server_mut,
 };
 use crate::server::{OutputDescriptor, OutputMetrics, ServerOptions, ServerState};
 use crate::{
@@ -111,7 +112,7 @@ pub(crate) fn prepare(options: RunOptions, signals: Signals) -> Result<PreparedH
             &calloop.handle(),
             display,
             dmabuf_release_source,
-            server_mut::<NestedEvent>,
+            server_mut::<NestedEvent, ()>,
             ServerOptions {
                 started_at,
                 seat_name: "weld-seat0",
@@ -213,11 +214,6 @@ pub(crate) fn prepare(options: RunOptions, signals: Signals) -> Result<PreparedH
                 && size != physical_size
             {
                 physical_size = size;
-                renderer.resize(size);
-                targets.resize(
-                    renderer.device(),
-                    crate::surface::Extent::new(size.width, size.height),
-                );
                 metrics_changed = true;
             }
             if let Some(pending_scale_factor) = pending_scale_factor
@@ -227,20 +223,42 @@ pub(crate) fn prepare(options: RunOptions, signals: Signals) -> Result<PreparedH
                 metrics_changed = true;
             }
             if metrics_changed {
-                output_metrics = OutputMetrics::new(
-                    physical_size.width,
-                    physical_size.height,
-                    OutputScale::new(scale_factor)?,
-                )?;
-                loop_data.server.update_output_metrics(output_metrics);
-                shell.set_output_geometry(
-                    targets
-                        .view(crate::host::CompositionTargetId::FIRST)
-                        .clone(),
-                    targets.extent(),
-                    scale_factor,
-                );
-                frame_state.request_composition();
+                let candidate = OutputScale::new(scale_factor).and_then(|scale| {
+                    OutputMetrics::new(physical_size.width, physical_size.height, scale)
+                });
+                match candidate {
+                    Ok(candidate) => {
+                        if physical_size.width != output_metrics.physical_width()
+                            || physical_size.height != output_metrics.physical_height()
+                        {
+                            renderer.resize(physical_size);
+                            targets.resize(
+                                renderer.device(),
+                                crate::surface::Extent::new(
+                                    physical_size.width,
+                                    physical_size.height,
+                                ),
+                            );
+                        }
+                        output_metrics = candidate;
+                        loop_data.server.update_output_metrics(output_metrics);
+                        shell.set_output_geometry(
+                            targets
+                                .view(crate::host::CompositionTargetId::FIRST)
+                                .clone(),
+                            targets.extent(),
+                            scale_factor,
+                        );
+                        frame_state.request_composition();
+                    }
+                    Err(error) => warn!(
+                        width = physical_size.width,
+                        height = physical_size.height,
+                        scale_factor,
+                        %error,
+                        "ignored invalid nested output geometry"
+                    ),
+                }
             }
 
             let timeout = dispatch_timeout(host_work_drained, &frame_state, Instant::now());
@@ -324,7 +342,8 @@ pub(crate) fn prepare(options: RunOptions, signals: Signals) -> Result<PreparedH
                         loop_data.server.apply_input_effect(effect);
                     }
                     for command in host_commands {
-                        command_exit_requested |= children.apply(&loop_data.server, command)?;
+                        command_exit_requested |=
+                            apply_host_command(&mut children, &loop_data.server, command)?;
                     }
                 }
                 if bevy_requested_redraw && !work.composition_advance {
@@ -426,7 +445,8 @@ pub(crate) fn prepare(options: RunOptions, signals: Signals) -> Result<PreparedH
             while let Some(event) = loop_data.events.pop_front() {
                 match event {
                     NestedEvent::Command(command) => {
-                        exit_requested |= children.apply(&loop_data.server, command)?;
+                        exit_requested |=
+                            apply_host_command(&mut children, &loop_data.server, command)?;
                     }
                 }
             }
@@ -437,6 +457,24 @@ pub(crate) fn prepare(options: RunOptions, signals: Signals) -> Result<PreparedH
         }
         Ok(())
     }))
+}
+
+fn apply_host_command(
+    children: &mut ChildProcesses,
+    server: &ServerState,
+    command: HostCommand,
+) -> Result<bool> {
+    match children.apply(server, command)? {
+        HostCommandEffect::Continue => Ok(false),
+        HostCommandEffect::Exit => Ok(true),
+        HostCommandEffect::AdjustOutputScale(adjustment) => {
+            warn!(
+                ?adjustment,
+                "ignored output-scale shortcut because nested scale is host-owned"
+            );
+            Ok(false)
+        }
+    }
 }
 
 fn host_display_wake_fd(display: &OwnedDisplayHandle) -> Result<Option<OwnedFd>> {
