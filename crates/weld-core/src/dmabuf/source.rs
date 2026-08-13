@@ -1,12 +1,20 @@
 //! Cached Vulkan imports for live Wayland DMA-BUF objects.
 
-use std::{cell::RefCell, collections::HashMap, rc::Rc};
+use std::{
+    cell::{Cell, RefCell},
+    collections::HashMap,
+    rc::Rc,
+};
 
 use anyhow::{Context, Result, bail};
 use ash::vk;
 use smithay::backend::allocator::{Buffer, Fourcc, dmabuf::Dmabuf};
 
+use super::ImportId;
+
 pub(crate) struct ImportedDmabufSource {
+    pub(crate) id: ImportId,
+    pub(crate) alive: Cell<bool>,
     pub(crate) texture: wgpu::Texture,
     pub(crate) view: wgpu::TextureView,
     pub(crate) image: vk::Image,
@@ -18,6 +26,7 @@ pub(crate) struct DmabufSourceCache {
     device: wgpu::Device,
     max_dimension: u32,
     imported: Rc<RefCell<HashMap<Dmabuf, Rc<ImportedDmabufSource>>>>,
+    next_import_id: Rc<Cell<Option<u64>>>,
 }
 
 impl DmabufSourceCache {
@@ -26,6 +35,7 @@ impl DmabufSourceCache {
             device: device.clone(),
             max_dimension: device.limits().max_texture_dimension_2d,
             imported: Rc::new(RefCell::new(HashMap::new())),
+            next_import_id: Rc::new(Cell::new(Some(1))),
         }
     }
 
@@ -123,7 +133,15 @@ impl DmabufSourceCache {
                 .raw_handle()
         };
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let id = ImportId::new(
+            self.next_import_id
+                .get()
+                .context("DMA-BUF import identity space is exhausted")?,
+        );
+        self.next_import_id.set(id.next());
         let imported = Rc::new(ImportedDmabufSource {
+            id,
+            alive: Cell::new(true),
             texture,
             view,
             image,
@@ -140,7 +158,9 @@ impl DmabufSourceCache {
     }
 
     pub(crate) fn remove(&self, dmabuf: &Dmabuf) {
-        self.imported.borrow_mut().remove(dmabuf);
+        if let Some(imported) = self.imported.borrow_mut().remove(dmabuf) {
+            imported.alive.set(false);
+        }
     }
 }
 

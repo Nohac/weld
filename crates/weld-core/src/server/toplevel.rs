@@ -143,12 +143,22 @@ impl ServerState {
     }
 
     pub(super) fn resize_toplevel(&mut self, surface: SurfaceId, requested: Extent) {
+        let changed = self.stage_toplevel_size(surface, requested);
         let Some(toplevel) = self.toplevels.get(surface) else {
-            warn!(?surface, "ignored a resize request for an unknown surface");
             return;
         };
+        if changed && toplevel.surface.is_initial_configure_sent() {
+            toplevel.surface.send_pending_configure();
+        }
+    }
+
+    pub(super) fn stage_toplevel_size(&self, surface: SurfaceId, requested: Extent) -> bool {
+        let Some(toplevel) = self.toplevels.get(surface) else {
+            warn!(?surface, "ignored a resize request for an unknown surface");
+            return false;
+        };
         if !toplevel.surface.alive() {
-            return;
+            return false;
         }
         let constraints = with_states(toplevel.surface.wl_surface(), |states| {
             let mut cached = states.cached_state.get::<XdgSurfaceCachedState>();
@@ -161,17 +171,14 @@ impl ServerState {
             constrain_dimension(requested_width, constraints.0.w, constraints.1.w),
             constrain_dimension(requested_height, constraints.0.h, constraints.1.h),
         ));
-        let changed = toplevel.surface.with_pending_state(|state| {
+        toplevel.surface.with_pending_state(|state| {
             if state.size == Some(size) {
                 false
             } else {
                 state.size = Some(size);
                 true
             }
-        });
-        if changed && toplevel.surface.is_initial_configure_sent() {
-            toplevel.surface.send_pending_configure();
-        }
+        })
     }
 
     fn record_server_side_decoration(&mut self, surface: &ToplevelSurface) {
@@ -481,6 +488,7 @@ impl XdgShellHandler for ServerState {
         if self.focused_toplevel == Some(id) {
             self.focused_toplevel = None;
         }
+        self.pending_resizes.discard(id);
         self.pending_surface_events.push_back(PendingSurfaceEvent {
             surface: id,
             kind: PendingSurfaceEventKind::Destroyed,

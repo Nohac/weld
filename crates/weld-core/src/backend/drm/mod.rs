@@ -499,6 +499,7 @@ pub(crate) fn prepare(options: RunOptions, signals: Signals) -> Result<PreparedH
                     break;
                 }
                 if work.composition_advance {
+                    loop_data.server.flush_pending_resizes();
                     let target = host_composition_target(&targets, presenter.in_flight_target());
                     shell.render_composition(targets.view(target).clone(), targets.extent())?;
                     targets.mark_completed(target);

@@ -3,6 +3,7 @@
 mod dmabuf;
 mod output;
 mod popup;
+mod resize;
 mod seat;
 mod shm;
 mod surface_tree;
@@ -54,12 +55,14 @@ use crate::{
     dmabuf::{DmabufCapabilities, DmabufReleaseId, DmabufSourceCache},
     input::InputPosition,
     surface::{
-        PopupDescriptor, SurfaceAction, SurfaceId, WindowDecoration, WindowInteractionRequestKind,
+        Extent, PopupDescriptor, SurfaceAction, SurfaceId, WindowDecoration,
+        WindowInteractionRequestKind,
     },
 };
 use dmabuf::{DmabufProtocol, DmabufReleaseStore};
 use output::install_output_metrics;
 use popup::PopupStore;
+use resize::PendingResizeRequests;
 use toplevel::ToplevelStore;
 
 // Keep this stable name in sync with scripts/run-app.
@@ -90,6 +93,7 @@ pub struct ServerState {
     popup_grab: Option<PopupGrab<Self>>,
     focused_toplevel: Option<SurfaceId>,
     pending_focus: Option<Option<SurfaceId>>,
+    pending_resizes: PendingResizeRequests,
     pending_surface_events: VecDeque<PendingSurfaceEvent>,
     presentation_requested: bool,
     next_presentation_id: u64,
@@ -254,6 +258,7 @@ impl ServerState {
             popup_grab: None,
             focused_toplevel: None,
             pending_focus: None,
+            pending_resizes: PendingResizeRequests::default(),
             pending_surface_events: VecDeque::new(),
             presentation_requested: false,
             next_presentation_id: 1,
@@ -303,13 +308,28 @@ impl ServerState {
 
     pub fn apply_surface_action(&mut self, action: SurfaceAction) {
         match action {
-            SurfaceAction::Close { surface } => self.close_toplevel(surface),
+            SurfaceAction::Close { surface } => {
+                self.pending_resizes.discard(surface);
+                self.close_toplevel(surface);
+            }
             SurfaceAction::Focus { surface } => self.focus_toplevel(surface),
             SurfaceAction::Resize {
                 surface,
                 logical_size,
-            } => self.resize_toplevel(surface, logical_size),
+            } => self.pending_resizes.queue(surface, logical_size),
         }
+    }
+
+    /// Applies at most one configure per surface at the current composition boundary.
+    pub(crate) fn flush_pending_resizes(&mut self) {
+        let pending = self.pending_resizes.drain().collect::<Vec<_>>();
+        for (surface, logical_size) in pending {
+            self.resize_toplevel(surface, logical_size);
+        }
+    }
+
+    fn take_pending_resize(&mut self, surface: SurfaceId) -> Option<Extent> {
+        self.pending_resizes.take(surface)
     }
 
     fn event_time(&self) -> u32 {

@@ -42,7 +42,7 @@ use weld_app::{
     output::OutputGeometry,
     surface::{
         AppPopup, AppWindow, ClientDecorated, ClientSurface, MappedSurface, ServerDecorated,
-        SurfaceAction, SurfaceActionQueue, SurfaceId, SurfaceNode, SurfaceSnapshotRevision,
+        SurfaceAction, SurfaceActionQueue, SurfaceCommitRevisions, SurfaceId, SurfaceNode,
         SurfaceSystems, WindowInteractionRequest, WindowInteractionRequestKind, WindowResizeEdge,
     },
 };
@@ -495,7 +495,6 @@ type WindowSurfaceQuery<'w, 's> = Query<
         Entity,
         &'static AppWindow,
         Option<&'static MappedSurface>,
-        &'static SurfaceSnapshotRevision,
         &'static WindowPlacement,
         Option<&'static ClientDecorated>,
     ),
@@ -528,6 +527,7 @@ struct SyncDefaultWindowParams<'w, 's> {
     interaction: ResMut<'w, ActiveWindowInteraction>,
     focus: ResMut<'w, WindowFocus>,
     actions: ResMut<'w, SurfaceActionQueue>,
+    commit_revisions: Res<'w, SurfaceCommitRevisions>,
 }
 
 fn sync_default_window_state(params: SyncDefaultWindowParams) {
@@ -539,23 +539,22 @@ fn sync_default_window_state(params: SyncDefaultWindowParams) {
         mut interaction,
         mut focus,
         mut actions,
+        commit_revisions,
     } = params;
     let surface_states = surfaces
         .iter()
-        .map(
-            |(entity, window, mapped, revision, placement, client_owned)| {
-                (
-                    window.surface,
-                    WindowSurfaceState {
-                        entity,
-                        mapped: mapped.copied(),
-                        revision: revision.0,
-                        placement: *placement,
-                        client_owned: client_owned.is_some(),
-                    },
-                )
-            },
-        )
+        .map(|(entity, window, mapped, placement, client_owned)| {
+            (
+                window.surface,
+                WindowSurfaceState {
+                    entity,
+                    mapped: mapped.copied(),
+                    revision: commit_revisions.revision(window.surface),
+                    placement: *placement,
+                    client_owned: client_owned.is_some(),
+                },
+            )
+        })
         .collect::<HashMap<_, _>>();
     let mapped_surfaces = surface_states
         .iter()
@@ -635,19 +634,30 @@ fn sync_default_window_state(params: SyncDefaultWindowParams) {
             );
         }
         if let Some(state) = state {
-            z_index.0 = state.placement.z_index;
+            if z_index.0 != state.placement.z_index {
+                z_index.0 = state.placement.z_index;
+            }
             let visual_offset = state
                 .mapped
                 .filter(|_| state.client_owned)
                 .map_or(Vec2::ZERO, |mapped| mapped.visual_offset);
-            geometry_anchor.offset = if state.client_owned {
+            let expected_anchor = if state.client_owned {
                 -visual_offset
             } else {
                 Vec2::new(0.0, HEADER_HEIGHT)
             };
+            if geometry_anchor.offset != expected_anchor {
+                geometry_anchor.offset = expected_anchor;
+            }
             let visual_position = state.placement.position + visual_offset;
-            node.left = px(visual_position.x);
-            node.top = px(visual_position.y);
+            let expected_left = px(visual_position.x);
+            let expected_top = px(visual_position.y);
+            if node.left != expected_left {
+                node.left = expected_left;
+            }
+            if node.top != expected_top {
+                node.top = expected_top;
+            }
             if state.client_owned
                 && let Some(mapped) = state.mapped
             {
@@ -673,9 +683,17 @@ fn sync_default_window_state(params: SyncDefaultWindowParams) {
                     placement.position.y = active.fixed_anchor.y - mapped.logical_size.y;
                 }
                 let visual_position = placement.position + visual_offset;
-                node.left = px(visual_position.x);
-                node.top = px(visual_position.y);
-                commands.entity(state.entity).insert(placement);
+                let expected_left = px(visual_position.x);
+                let expected_top = px(visual_position.y);
+                if node.left != expected_left {
+                    node.left = expected_left;
+                }
+                if node.top != expected_top {
+                    node.top = expected_top;
+                }
+                if placement != state.placement {
+                    commands.entity(state.entity).insert(placement);
+                }
                 clear_finished_resize = active
                     .end_after_revision
                     .is_some_and(|revision| state.revision > revision);
@@ -1640,6 +1658,47 @@ mod tests {
         let position = absolute_position(node.left, node.top)
             .expect("root should remain absolutely positioned");
         assert!(position.distance(initial + Vec2::new(10.0, 0.0)) < 0.001);
+        assert!(
+            app.world()
+                .resource::<ActiveWindowInteraction>()
+                .0
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn content_only_client_commit_finishes_a_released_left_resize() {
+        let (mut app, _) = test_app();
+        let surface = SurfaceId::new(41);
+        enqueue_surface_event(app.world_mut(), client_created(surface));
+        enqueue_surface_event(app.world_mut(), frame(surface, 100, 80));
+        app.update();
+
+        enqueue_surface_event(
+            app.world_mut(),
+            interaction(
+                surface,
+                WindowInteractionRequestKind::Resize {
+                    edges: WindowResizeEdge::Left,
+                },
+            ),
+        );
+        app.update();
+        enqueue_surface_event(
+            app.world_mut(),
+            interaction(surface, WindowInteractionRequestKind::End),
+        );
+        app.update();
+        assert!(
+            app.world()
+                .resource::<ActiveWindowInteraction>()
+                .0
+                .as_ref()
+                .is_some_and(|active| active.end_after_revision.is_some())
+        );
+
+        enqueue_surface_event(app.world_mut(), frame(surface, 100, 80));
+        app.update();
         assert!(
             app.world()
                 .resource::<ActiveWindowInteraction>()

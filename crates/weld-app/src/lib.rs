@@ -17,9 +17,9 @@ mod surface_impl;
 pub mod surface {
     pub use crate::surface_impl::{
         AppPopup, AppWindow, ClientDecorated, ClientSurface, MappedSurface, ServerDecorated,
-        SurfaceAction, SurfaceActionQueue, SurfaceId, SurfaceLayerId, SurfaceNode,
-        SurfaceSnapshotRevision, SurfaceSystems, SurfaceView, WindowDecoration,
-        WindowInteractionRequest, WindowInteractionRequestKind, WindowResizeEdge,
+        SurfaceAction, SurfaceActionQueue, SurfaceCommitRevisions, SurfaceId, SurfaceLayerId,
+        SurfaceNode, SurfaceSystems, SurfaceView, WindowDecoration, WindowInteractionRequest,
+        WindowInteractionRequestKind, WindowResizeEdge,
     };
 
     #[cfg(feature = "test-support")]
@@ -39,7 +39,10 @@ pub mod surface {
         SurfaceTreeSnapshot, SurfaceWindowGeometry, enqueue_surface_event, take_surface_actions,
     };
 
-    pub(crate) use crate::surface_impl::has_surface_frame;
+    pub(crate) use crate::surface_impl::{
+        has_surface_frame, promote_dmabuf_sources, publish_surface_bindings, referenced_dmabuf_ids,
+        reject_dmabuf_sources,
+    };
 }
 
 /// Bevy version supported by Weld applications and plugins.

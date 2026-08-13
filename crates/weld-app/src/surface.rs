@@ -9,16 +9,16 @@ use std::collections::{HashMap, HashSet, VecDeque};
 
 use bevy::{
     app::{App, Plugin, PreUpdate},
-    asset::{Asset, Assets, Handle, RenderAssetUsages, load_internal_asset, uuid_handle},
+    asset::{Asset, AssetId, Assets, Handle, RenderAssetUsages, load_internal_asset, uuid_handle},
     ecs::{
         component::Component,
         entity::Entity,
-        hierarchy::ChildOf,
+        hierarchy::{ChildOf, Children},
         message::Message,
         query::{With, Without},
         resource::Resource,
         schedule::{IntoScheduleConfigs, SystemSet},
-        system::{Query, ResMut},
+        system::{Query, ResMut, SystemParam},
         world::World,
     },
     image::Image,
@@ -26,7 +26,10 @@ use bevy::{
     picking::{Pickable, PickingSystems},
     prelude::px,
     reflect::TypePath,
-    render::render_resource::{AsBindGroup, Extent3d, ShaderType, TextureDimension, TextureFormat},
+    render::{
+        RenderApp,
+        render_resource::{AsBindGroup, Extent3d, ShaderType, TextureDimension, TextureFormat},
+    },
     shader::{Shader, ShaderRef},
     ui::{Display, LayoutConfig, Node, PositionType, Val},
     ui_render::{
@@ -34,9 +37,14 @@ use bevy::{
     },
 };
 use tracing::warn;
+use weld_core::dmabuf::ImportId;
 pub use weld_core::surface::{SurfaceId, SurfaceLayerId};
 
 use crate::composition::composition_advance_requested;
+
+#[path = "surface/binding.rs"]
+mod binding;
+pub(crate) use binding::publish_surface_bindings;
 
 const SURFACE_MATERIAL_SHADER: Handle<Shader> =
     uuid_handle!("f69ff2a0-2dc4-4a34-8f64-bf77475398a1");
@@ -46,6 +54,24 @@ struct SurfaceMaterialParameters {
     source_rect: Vec4,
     buffer_size: Vec2,
     flags: UVec2,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+struct SurfaceParameterKey([u32; 8]);
+
+impl From<SurfaceMaterialParameters> for SurfaceParameterKey {
+    fn from(parameters: SurfaceMaterialParameters) -> Self {
+        Self([
+            parameters.source_rect.x.to_bits(),
+            parameters.source_rect.y.to_bits(),
+            parameters.source_rect.z.to_bits(),
+            parameters.source_rect.w.to_bits(),
+            parameters.buffer_size.x.to_bits(),
+            parameters.buffer_size.y.to_bits(),
+            parameters.flags.x,
+            parameters.flags.y,
+        ])
+    }
 }
 
 #[derive(Asset, AsBindGroup, Clone, Debug, PartialEq, TypePath)]
@@ -217,7 +243,7 @@ impl SurfaceActionQueue {
 }
 
 /// Internal render backing for one mapped client surface tree.
-#[derive(Component, Clone, Debug)]
+#[derive(Component, Clone, Debug, PartialEq)]
 struct SurfaceContent {
     root: SurfaceLayerContent,
     window_geometry: SurfaceWindowGeometry,
@@ -225,15 +251,13 @@ struct SurfaceContent {
     inputs: Vec<SurfaceInputPlacement>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 struct SurfaceLayerContent {
     layer: SurfaceLayerId,
     image: Handle<Image>,
     view: SurfaceContentView,
     position: Vec2,
     pixel_size: (u32, u32),
-    encoding: SurfaceImageEncoding,
-    y_inverted: bool,
 }
 
 /// ECS-facing content for a surface layer. Host buffer types stop before this boundary.
@@ -249,15 +273,18 @@ pub enum SurfaceBufferContent {
 #[derive(Clone, Debug, PartialEq)]
 #[doc(hidden)]
 pub struct SurfaceRenderImage {
+    pub import: ImportId,
     pub image: Handle<Image>,
     pub encoding: SurfaceImageEncoding,
     pub y_inverted: bool,
+    pub promoted: bool,
 }
 
 /// Color representation consumed by the private surface material.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[doc(hidden)]
 pub enum SurfaceImageEncoding {
+    Unbound,
     LinearStraight,
     EncodedPremultiplied,
     EncodedOpaque,
@@ -408,6 +435,8 @@ impl Plugin for SurfacePlugin {
         app.init_resource::<SurfaceEventQueue>()
             .init_resource::<SurfaceActionQueue>()
             .init_resource::<SurfaceRegistry>()
+            .init_resource::<SurfaceCommitRevisions>()
+            .init_resource::<MaterialSelectorRegistry>()
             .add_message::<WindowInteractionRequest>()
             .configure_sets(
                 PreUpdate,
@@ -432,6 +461,9 @@ impl Plugin for SurfacePlugin {
                     .after(SurfaceSystems::FallbackPresentation)
                     .before(PickingSystems::Backend),
             );
+        if let Some(render_app) = app.get_sub_app_mut(RenderApp) {
+            binding::configure_render_app(render_app);
+        }
     }
 }
 
@@ -467,25 +499,45 @@ struct SurfaceRegistry {
     pending_snapshots: HashMap<SurfaceId, SurfaceTreeSnapshot>,
 }
 
+#[derive(Resource, Default)]
+struct MaterialSelectorRegistry(HashMap<AssetId<SurfaceUiMaterial>, MaterialSelector>);
+
+#[derive(Clone, Copy)]
+struct MaterialSelector {
+    surface: SurfaceId,
+    layer: SurfaceLayerId,
+    parameters: SurfaceParameterKey,
+}
+
 struct SurfaceEntry {
     entity: Entity,
     buffers: HashMap<SurfaceLayerId, SurfaceBufferAsset>,
     frame_ready: bool,
 }
 
-/// Monotonic marker for accepted tree snapshots on an application surface.
-#[derive(Component, Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub struct SurfaceSnapshotRevision(pub u64);
+/// Monotonic client-commit sequence, kept outside surface components.
+#[derive(Resource, Default)]
+pub struct SurfaceCommitRevisions(HashMap<SurfaceId, u64>);
+
+impl SurfaceCommitRevisions {
+    pub fn revision(&self, surface: SurfaceId) -> u64 {
+        self.0.get(&surface).copied().unwrap_or_default()
+    }
+}
 
 struct SurfaceBufferAsset {
+    /// Stable material-facing selector for this surface layer.
     image: Handle<Image>,
     pixel_size: (u32, u32),
     opaque: bool,
     encoding: SurfaceImageEncoding,
-    y_inverted: bool,
+    displayed_dmabuf: Option<SurfaceRenderImage>,
+    displayed_pixel_size: Option<(u32, u32)>,
+    pending_dmabuf: Option<SurfaceRenderImage>,
+    generation: u64,
 }
 
-#[derive(Component, Default)]
+#[derive(Component, Default, PartialEq)]
 struct SurfaceOverlayNodes(Vec<(SurfaceLayerId, Entity)>);
 
 #[derive(Component)]
@@ -505,7 +557,7 @@ struct SurfaceInputNodeKey {
     region: usize,
 }
 
-#[derive(Component, Default)]
+#[derive(Component, Default, PartialEq)]
 struct SurfaceInputNodes(Vec<(SurfaceInputNodeKey, Entity)>);
 
 #[doc(hidden)]
@@ -529,6 +581,105 @@ pub(crate) fn has_surface_frame(world: &World) -> bool {
     world
         .get_resource::<SurfaceRegistry>()
         .is_some_and(|registry| registry.entries.values().any(|entry| entry.frame_ready))
+}
+
+pub(crate) fn referenced_dmabuf_ids(world: &World) -> HashSet<ImportId> {
+    let Some(registry) = world.get_resource::<SurfaceRegistry>() else {
+        return HashSet::new();
+    };
+    registry
+        .entries
+        .values()
+        .flat_map(|entry| entry.buffers.values())
+        .flat_map(|buffer| {
+            buffer
+                .displayed_dmabuf
+                .iter()
+                .chain(buffer.pending_dmabuf.iter())
+                .map(|image| image.import)
+        })
+        .chain(
+            registry
+                .pending_snapshots
+                .values()
+                .flat_map(|snapshot| snapshot.buffers.iter())
+                .filter_map(|buffer| match &buffer.content {
+                    SurfaceBufferContent::RenderImage(image) => Some(image.import),
+                    SurfaceBufferContent::Retained | SurfaceBufferContent::Pixels(_) => None,
+                }),
+        )
+        .collect()
+}
+
+pub(crate) fn promote_dmabuf_sources(world: &mut World, promoted: &[ImportId]) {
+    let promoted = promoted.iter().copied().collect::<HashSet<_>>();
+    let Some(mut registry) = world.get_resource_mut::<SurfaceRegistry>() else {
+        return;
+    };
+    for buffer in registry
+        .entries
+        .values_mut()
+        .flat_map(|entry| entry.buffers.values_mut())
+    {
+        if buffer
+            .pending_dmabuf
+            .as_ref()
+            .is_some_and(|image| promoted.contains(&image.import))
+        {
+            buffer.displayed_dmabuf = buffer.pending_dmabuf.take();
+            buffer.displayed_pixel_size = Some(buffer.pixel_size);
+        }
+    }
+    for image in registry
+        .pending_snapshots
+        .values_mut()
+        .flat_map(|snapshot| snapshot.buffers.iter_mut())
+        .filter_map(|buffer| match &mut buffer.content {
+            SurfaceBufferContent::RenderImage(image) => Some(image),
+            SurfaceBufferContent::Retained | SurfaceBufferContent::Pixels(_) => None,
+        })
+    {
+        if promoted.contains(&image.import) {
+            image.promoted = true;
+        }
+    }
+}
+
+pub(crate) fn reject_dmabuf_sources(world: &mut World, rejected: &HashSet<ImportId>) {
+    let Some(mut registry) = world.get_resource_mut::<SurfaceRegistry>() else {
+        return;
+    };
+    for buffer in registry
+        .entries
+        .values_mut()
+        .flat_map(|entry| entry.buffers.values_mut())
+    {
+        if buffer
+            .pending_dmabuf
+            .as_ref()
+            .is_some_and(|image| rejected.contains(&image.import))
+        {
+            buffer.pending_dmabuf = None;
+            if buffer.displayed_pixel_size != Some(buffer.pixel_size) {
+                buffer.displayed_dmabuf = None;
+                buffer.displayed_pixel_size = None;
+            }
+        }
+    }
+    for buffer in registry
+        .pending_snapshots
+        .values_mut()
+        .flat_map(|snapshot| snapshot.buffers.iter_mut())
+    {
+        let rejected_image = matches!(
+            &buffer.content,
+            SurfaceBufferContent::RenderImage(image)
+                if rejected.contains(&image.import)
+        );
+        if rejected_image {
+            buffer.content = SurfaceBufferContent::Retained;
+        }
+    }
 }
 
 fn apply_host_surface_events(world: &mut World) {
@@ -602,11 +753,7 @@ fn ensure_window_entity(
     registry.entries.remove(&surface);
 
     let entity = world
-        .spawn((
-            ClientSurface { surface },
-            AppWindow { surface },
-            SurfaceSnapshotRevision::default(),
-        ))
+        .spawn((ClientSurface { surface }, AppWindow { surface }))
         .id();
     set_decoration_marker(world, entity, decoration);
     registry.entries.insert(
@@ -644,13 +791,7 @@ fn ensure_popup_entity(
     }
     registry.entries.remove(&surface);
 
-    let entity = world
-        .spawn((
-            ClientSurface { surface },
-            popup,
-            SurfaceSnapshotRevision::default(),
-        ))
-        .id();
+    let entity = world.spawn((ClientSurface { surface }, popup)).id();
     registry.entries.insert(
         surface,
         SurfaceEntry {
@@ -735,6 +876,10 @@ fn apply_surface_tree_snapshot(
         queue_pending_snapshot(registry, surface, snapshot);
         return;
     };
+    if let Some(mut revisions) = world.get_resource_mut::<SurfaceCommitRevisions>() {
+        let revision = revisions.0.entry(surface).or_default();
+        *revision = revision.saturating_add(1);
+    }
 
     let retained = snapshot
         .buffers
@@ -765,6 +910,10 @@ fn apply_surface_tree_snapshot(
             };
             let content = std::mem::replace(&mut buffer.content, SurfaceBufferContent::Retained);
             if let SurfaceBufferContent::Pixels(mut pixels) = content {
+                let generation = entry
+                    .buffers
+                    .get(&buffer.layer)
+                    .map_or(1, |asset| asset.generation.saturating_add(1));
                 if !buffer.opaque {
                     unpremultiply_bgra(&mut pixels);
                 }
@@ -789,7 +938,10 @@ fn apply_surface_tree_snapshot(
                         pixel_size,
                         opaque: buffer.opaque,
                         encoding: SurfaceImageEncoding::LinearStraight,
-                        y_inverted: false,
+                        displayed_dmabuf: None,
+                        displayed_pixel_size: None,
+                        pending_dmabuf: None,
+                        generation,
                     },
                 );
             } else if let SurfaceBufferContent::RenderImage(render_image) = content {
@@ -797,19 +949,39 @@ fn apply_surface_tree_snapshot(
                     warn!(?surface, ?buffer.layer, "discarded an unknown rendered surface image");
                     continue;
                 }
-                if let Some(previous) = entry.buffers.get(&buffer.layer)
-                    && previous.image != render_image.image
-                {
-                    images.remove(previous.image.id());
-                }
+                let selector = entry.buffers.get(&buffer.layer).map_or_else(
+                    || images.add(transparent_surface_image()),
+                    |previous| previous.image.clone(),
+                );
+                let (mut displayed_dmabuf, mut displayed_pixel_size, generation) = entry
+                    .buffers
+                    .get(&buffer.layer)
+                    .map_or((None, None, 0), |previous| {
+                        (
+                            previous.displayed_dmabuf.clone(),
+                            previous.displayed_pixel_size,
+                            previous.generation,
+                        )
+                    });
+                let encoding = render_image.encoding;
+                let pending_dmabuf = if render_image.promoted {
+                    displayed_pixel_size = Some(pixel_size);
+                    displayed_dmabuf = Some(render_image);
+                    None
+                } else {
+                    Some(render_image)
+                };
                 entry.buffers.insert(
                     buffer.layer,
                     SurfaceBufferAsset {
-                        image: render_image.image,
+                        image: selector,
                         pixel_size,
                         opaque: buffer.opaque,
-                        encoding: render_image.encoding,
-                        y_inverted: render_image.y_inverted,
+                        encoding,
+                        displayed_dmabuf,
+                        displayed_pixel_size,
+                        pending_dmabuf,
+                        generation,
                     },
                 );
             } else if let Some(asset) = entry.buffers.get_mut(&buffer.layer) {
@@ -850,8 +1022,6 @@ fn apply_surface_tree_snapshot(
                                 view: placement.view,
                                 position: placement.position,
                                 pixel_size: asset.pixel_size,
-                                encoding: asset.encoding,
-                                y_inverted: asset.y_inverted,
                             },
                         )
                     })
@@ -864,8 +1034,6 @@ fn apply_surface_tree_snapshot(
                             view: root.view,
                             position: Vec2::ZERO,
                             pixel_size: root_asset.pixel_size,
-                            encoding: root_asset.encoding,
-                            y_inverted: root_asset.y_inverted,
                         },
                         window_geometry,
                         overlays,
@@ -894,43 +1062,56 @@ fn apply_surface_tree_snapshot(
             content.root.view.logical_width,
             content.root.view.logical_height,
         );
-        entity_mut.insert((
-            content,
-            MappedSurface {
-                logical_size,
-                visual_offset,
-                visual_size,
-                opaque,
-            },
-        ));
+        let mapped = MappedSurface {
+            logical_size,
+            visual_offset,
+            visual_size,
+            opaque,
+        };
+        let content_changed = entity_mut.get::<SurfaceContent>() != Some(&content);
+        let mapping_changed = entity_mut.get::<MappedSurface>() != Some(&mapped);
+        if content_changed {
+            entity_mut.insert(content);
+        }
+        if mapping_changed {
+            entity_mut.insert(mapped);
+        }
         entry.frame_ready = true;
-        tracing::trace!(
-            target: crate::PROFILE_TARGET,
-            surface = surface.raw(),
-            logical_width = logical_size.x,
-            logical_height = logical_size.y,
-            visual_offset_x = visual_offset.x,
-            visual_offset_y = visual_offset.y,
-            visual_width = visual_size.x,
-            visual_height = visual_size.y,
-            "mapped surface snapshot in ECS"
-        );
+        if content_changed || mapping_changed {
+            tracing::trace!(
+                target: crate::PROFILE_TARGET,
+                surface = surface.raw(),
+                logical_width = logical_size.x,
+                logical_height = logical_size.y,
+                visual_offset_x = visual_offset.x,
+                visual_offset_y = visual_offset.y,
+                visual_width = visual_size.x,
+                visual_height = visual_size.y,
+                "mapped structural surface state in ECS"
+            );
+        }
     } else {
-        entity_mut.remove::<(SurfaceContent, MappedSurface)>();
+        let was_mapped =
+            entity_mut.contains::<SurfaceContent>() || entity_mut.contains::<MappedSurface>();
+        if was_mapped {
+            entity_mut.remove::<(SurfaceContent, MappedSurface)>();
+        }
         entry.frame_ready = false;
-        tracing::trace!(
-            target: crate::PROFILE_TARGET,
-            surface = surface.raw(),
-            "unmapped surface snapshot in ECS"
-        );
-    }
-    if let Some(mut revision) = entity_mut.get_mut::<SurfaceSnapshotRevision>() {
-        revision.0 = revision.0.saturating_add(1);
+        if was_mapped {
+            tracing::trace!(
+                target: crate::PROFILE_TARGET,
+                surface = surface.raw(),
+                "unmapped structural surface state in ECS"
+            );
+        }
     }
 }
 
 fn destroy_surface(world: &mut World, registry: &mut SurfaceRegistry, surface: SurfaceId) {
     registry.pending_snapshots.remove(&surface);
+    if let Some(mut revisions) = world.get_resource_mut::<SurfaceCommitRevisions>() {
+        revisions.0.remove(&surface);
+    }
     let Some(entry) = registry.entries.remove(&surface) else {
         return;
     };
@@ -954,6 +1135,7 @@ type SurfaceNodeQuery<'world, 'state> = Query<
         &'static mut Node,
         Option<&'static SurfaceOverlayNodes>,
         Option<&'static SurfaceInputNodes>,
+        Option<&'static Children>,
     ),
     (Without<SurfaceOverlayNode>, Without<SurfaceInputNode>),
 >;
@@ -973,16 +1155,38 @@ type SurfaceInputNodeQuery<'world, 'state> = Query<
     (With<SurfaceInputNode>, Without<SurfaceOverlayNode>),
 >;
 
-fn sync_surface_nodes(
-    mut commands: bevy::ecs::system::Commands,
-    mut materials: ResMut<Assets<SurfaceUiMaterial>>,
-    surfaces: Query<(&ClientSurface, &SurfaceContent)>,
-    mut nodes: SurfaceNodeQuery,
-    mut overlay_nodes: SurfaceOverlayNodeQuery,
-    mut input_nodes: SurfaceInputNodeQuery,
-) {
-    for (entity, surface_node, mut material_node, mut node, existing_overlays, existing_inputs) in
-        &mut nodes
+#[derive(SystemParam)]
+struct SyncSurfaceNodesParams<'w, 's> {
+    commands: bevy::ecs::system::Commands<'w, 's>,
+    materials: ResMut<'w, Assets<SurfaceUiMaterial>>,
+    surfaces: Query<'w, 's, (&'static ClientSurface, &'static SurfaceContent)>,
+    nodes: SurfaceNodeQuery<'w, 's>,
+    overlay_nodes: SurfaceOverlayNodeQuery<'w, 's>,
+    input_nodes: SurfaceInputNodeQuery<'w, 's>,
+    registry: bevy::ecs::system::Res<'w, SurfaceRegistry>,
+    selector_registry: ResMut<'w, MaterialSelectorRegistry>,
+}
+
+fn sync_surface_nodes(params: SyncSurfaceNodesParams) {
+    let SyncSurfaceNodesParams {
+        mut commands,
+        mut materials,
+        surfaces,
+        mut nodes,
+        mut overlay_nodes,
+        mut input_nodes,
+        registry,
+        mut selector_registry,
+    } = params;
+    for (
+        entity,
+        surface_node,
+        mut material_node,
+        mut node,
+        existing_overlays,
+        existing_inputs,
+        existing_children,
+    ) in &mut nodes
     {
         let content = surfaces.iter().find_map(|(surface, content)| {
             (surface.surface == surface_node.surface).then_some(content)
@@ -993,9 +1197,16 @@ fn sync_surface_nodes(
                 node.width = Val::Auto;
                 node.height = Val::Auto;
             }
-            clear_surface_material(&mut materials, &mut material_node);
+            clear_surface_material(&mut materials, &mut selector_registry, &mut material_node);
             if let Some(existing) = existing_overlays {
                 for (_, overlay) in &existing.0 {
+                    if let Ok((mut overlay_material, _)) = overlay_nodes.get_mut(*overlay) {
+                        clear_surface_material(
+                            &mut materials,
+                            &mut selector_registry,
+                            &mut overlay_material,
+                        );
+                    }
                     commands.entity(*overlay).despawn();
                 }
                 commands.entity(entity).remove::<SurfaceOverlayNodes>();
@@ -1015,8 +1226,21 @@ fn sync_surface_nodes(
                 (content.window_geometry.view, content.window_geometry.origin)
             }
         };
-        let expected_material = surface_material(&content.root, root_view);
-        update_surface_material(&mut materials, &mut material_node, expected_material);
+        let Some(entry) = registry.entries.get(&surface_node.surface) else {
+            continue;
+        };
+        let Some(root_buffer) = entry.buffers.get(&content.root.layer) else {
+            continue;
+        };
+        let expected_material = surface_material(&content.root, root_view, root_buffer);
+        update_surface_material(
+            &mut materials,
+            &mut selector_registry,
+            &mut material_node,
+            expected_material,
+            surface_node.surface,
+            content.root.layer,
+        );
         let logical_width = px(root_view.logical_width);
         let logical_height = px(root_view.logical_height);
         if node.display != Display::Flex
@@ -1041,22 +1265,41 @@ fn sync_surface_nodes(
         let mut ordered = Vec::with_capacity(content.overlays.len());
         let mut tracked = Vec::with_capacity(content.overlays.len());
         for overlay in &content.overlays {
-            let expected_material = surface_material(overlay, overlay.view);
+            let Some(overlay_buffer) = entry.buffers.get(&overlay.layer) else {
+                continue;
+            };
+            let expected_material = surface_material(overlay, overlay.view, overlay_buffer);
             let expected_node = overlay_node(overlay, coordinate_origin);
             let overlay_entity = if let Some(overlay_entity) = reusable.remove(&overlay.layer) {
                 if let Ok((mut material_node, mut node)) = overlay_nodes.get_mut(overlay_entity) {
-                    update_surface_material(&mut materials, &mut material_node, expected_material);
+                    update_surface_material(
+                        &mut materials,
+                        &mut selector_registry,
+                        &mut material_node,
+                        expected_material,
+                        surface_node.surface,
+                        overlay.layer,
+                    );
                     if *node != expected_node {
                         *node = expected_node;
                     }
                 }
                 overlay_entity
             } else {
+                let material = materials.add(expected_material.clone());
+                selector_registry.0.insert(
+                    material.id(),
+                    MaterialSelector {
+                        surface: surface_node.surface,
+                        layer: overlay.layer,
+                        parameters: expected_material.parameters.into(),
+                    },
+                );
                 commands
                     .spawn((
                         SurfaceOverlayNode,
                         Pickable::IGNORE,
-                        MaterialNode(materials.add(expected_material)),
+                        MaterialNode(material),
                         expected_node,
                         ChildOf(entity),
                     ))
@@ -1066,6 +1309,9 @@ fn sync_surface_nodes(
             tracked.push((overlay.layer, overlay_entity));
         }
         for overlay in reusable.into_values() {
+            if let Ok((mut material_node, _)) = overlay_nodes.get_mut(overlay) {
+                clear_surface_material(&mut materials, &mut selector_registry, &mut material_node);
+            }
             commands.entity(overlay).despawn();
         }
 
@@ -1118,10 +1364,19 @@ fn sync_surface_nodes(
         for input in reusable_inputs.into_values() {
             commands.entity(input).despawn();
         }
-        commands.entity(entity).replace_children(&ordered).insert((
-            SurfaceOverlayNodes(tracked),
-            SurfaceInputNodes(tracked_inputs),
-        ));
+        if existing_children
+            .is_none_or(|children| !children.iter().copied().eq(ordered.iter().copied()))
+        {
+            commands.entity(entity).replace_children(&ordered);
+        }
+        if existing_overlays.map(|nodes| &nodes.0) != Some(&tracked) {
+            commands.entity(entity).insert(SurfaceOverlayNodes(tracked));
+        }
+        if existing_inputs.map(|nodes| &nodes.0) != Some(&tracked_inputs) {
+            commands
+                .entity(entity)
+                .insert(SurfaceInputNodes(tracked_inputs));
+        }
     }
 }
 
@@ -1204,12 +1459,19 @@ fn validate_view(view: SurfaceContentView, width: u32, height: u32) -> bool {
         && view.source_y + view.source_height <= height as f32
 }
 
-fn surface_material(layer: &SurfaceLayerContent, view: SurfaceContentView) -> SurfaceUiMaterial {
-    let encoding = match layer.encoding {
-        SurfaceImageEncoding::LinearStraight => 0,
-        SurfaceImageEncoding::EncodedPremultiplied => 1,
-        SurfaceImageEncoding::EncodedOpaque => 2,
+fn surface_material(
+    layer: &SurfaceLayerContent,
+    view: SurfaceContentView,
+    buffer: &SurfaceBufferAsset,
+) -> SurfaceUiMaterial {
+    let (source_encoding, y_inverted) = if let Some(displayed) = &buffer.displayed_dmabuf {
+        (displayed.encoding, displayed.y_inverted)
+    } else if buffer.encoding == SurfaceImageEncoding::LinearStraight {
+        (SurfaceImageEncoding::LinearStraight, false)
+    } else {
+        (SurfaceImageEncoding::Unbound, false)
     };
+    let encoding = encoding_flag(source_encoding);
     SurfaceUiMaterial {
         image: layer.image.clone(),
         parameters: SurfaceMaterialParameters {
@@ -1220,30 +1482,54 @@ fn surface_material(layer: &SurfaceLayerContent, view: SurfaceContentView) -> Su
                 view.source_height,
             ),
             buffer_size: Vec2::new(layer.pixel_size.0 as f32, layer.pixel_size.1 as f32),
-            flags: UVec2::new(encoding, u32::from(layer.y_inverted)),
+            flags: UVec2::new(encoding, u32::from(y_inverted)),
         },
+    }
+}
+
+const fn encoding_flag(encoding: SurfaceImageEncoding) -> u32 {
+    match encoding {
+        SurfaceImageEncoding::Unbound => 3,
+        SurfaceImageEncoding::LinearStraight => 0,
+        SurfaceImageEncoding::EncodedPremultiplied => 1,
+        SurfaceImageEncoding::EncodedOpaque => 2,
     }
 }
 
 fn update_surface_material(
     materials: &mut Assets<SurfaceUiMaterial>,
+    selectors: &mut MaterialSelectorRegistry,
     node: &mut MaterialNode<SurfaceUiMaterial>,
     expected: SurfaceUiMaterial,
+    surface: SurfaceId,
+    layer: SurfaceLayerId,
 ) {
+    let parameters = expected.parameters.into();
     if let Some(mut material) = materials.get_mut(&node.0) {
         if *material != expected {
             *material = expected;
         }
     } else {
+        selectors.0.remove(&node.0.id());
         node.0 = materials.add(expected);
     }
+    selectors.0.insert(
+        node.0.id(),
+        MaterialSelector {
+            surface,
+            layer,
+            parameters,
+        },
+    );
 }
 
 fn clear_surface_material(
     materials: &mut Assets<SurfaceUiMaterial>,
+    selectors: &mut MaterialSelectorRegistry,
     node: &mut MaterialNode<SurfaceUiMaterial>,
 ) {
     if node.0 != Handle::default() {
+        selectors.0.remove(&node.0.id());
         materials.remove(node.0.id());
         node.0 = Handle::default();
     }
@@ -1256,6 +1542,17 @@ fn surface_image(extent: Extent3d, pixels: Vec<u8>) -> Image {
         pixels,
         TextureFormat::Bgra8UnormSrgb,
         RenderAssetUsages::RENDER_WORLD,
+    )
+}
+
+fn transparent_surface_image() -> Image {
+    surface_image(
+        Extent3d {
+            width: 1,
+            height: 1,
+            depth_or_array_layers: 1,
+        },
+        vec![0, 0, 0, 0],
     )
 }
 
@@ -1280,7 +1577,7 @@ fn unpremultiply_bgra(pixels: &mut [u8]) {
 
 #[cfg(test)]
 mod tests {
-    use bevy::{app::App, asset::AssetApp};
+    use bevy::{app::App, asset::AssetApp, ecs::change_detection::DetectChanges};
 
     use crate::composition::{CompositionPlugin, set_composition_advance};
 
@@ -1522,9 +1819,11 @@ mod tests {
     fn coalescing_preserves_an_unseen_imported_render_image() {
         let surface = SurfaceId::new(1);
         let image = SurfaceRenderImage {
+            import: ImportId::for_test(7),
             image: Handle::default(),
             encoding: SurfaceImageEncoding::EncodedPremultiplied,
             y_inverted: true,
+            promoted: false,
         };
         let mut first = root_snapshot(None);
         first.buffers[0].content = SurfaceBufferContent::RenderImage(image.clone());
@@ -1549,15 +1848,98 @@ mod tests {
     fn snapshot_validation_accepts_imported_images_but_checks_copied_pixel_lengths() {
         let mut imported = root_snapshot(None);
         imported.buffers[0].content = SurfaceBufferContent::RenderImage(SurfaceRenderImage {
+            import: ImportId::for_test(8),
             image: Handle::default(),
             encoding: SurfaceImageEncoding::EncodedOpaque,
             y_inverted: false,
+            promoted: false,
         });
         assert!(validate_snapshot(&imported));
 
         let mut malformed_copy = root_snapshot(None);
         malformed_copy.buffers[0].content = SurfaceBufferContent::Pixels(vec![0; 3]);
         assert!(!validate_snapshot(&malformed_copy));
+    }
+
+    #[test]
+    fn a_pre_role_snapshot_keeps_its_dma_import_referenced() {
+        let mut app = test_app();
+        let surface = SurfaceId::new(31);
+        let import = ImportId::for_test(11);
+        let mut snapshot = root_snapshot(None);
+        snapshot.buffers[0].content = SurfaceBufferContent::RenderImage(SurfaceRenderImage {
+            import,
+            image: Handle::default(),
+            encoding: SurfaceImageEncoding::EncodedOpaque,
+            y_inverted: false,
+            promoted: false,
+        });
+        enqueue_surface_event(app.world_mut(), snapshot_event(surface, snapshot));
+        app.update();
+
+        assert_eq!(referenced_dmabuf_ids(app.world()), HashSet::from([import]));
+    }
+
+    #[test]
+    fn a_content_only_commit_advances_commit_state_without_changing_surface_components() {
+        let mut app = test_app();
+        let surface = SurfaceId::new(32);
+        register_window(&mut app, surface);
+        enqueue_surface_event(
+            app.world_mut(),
+            snapshot_event(surface, root_snapshot(Some([1, 2, 3, 255]))),
+        );
+        app.update();
+        let entity = app
+            .world_mut()
+            .query_filtered::<Entity, With<ClientSurface>>()
+            .single(app.world())
+            .expect("surface should exist");
+        let content_tick = app
+            .world()
+            .entity(entity)
+            .get_ref::<SurfaceContent>()
+            .expect("surface content should exist")
+            .last_changed();
+        let mapped_tick = app
+            .world()
+            .entity(entity)
+            .get_ref::<MappedSurface>()
+            .expect("mapped state should exist")
+            .last_changed();
+        let revision = app
+            .world()
+            .resource::<SurfaceCommitRevisions>()
+            .revision(surface);
+
+        enqueue_surface_event(
+            app.world_mut(),
+            snapshot_event(surface, root_snapshot(Some([4, 5, 6, 255]))),
+        );
+        app.update();
+
+        assert_eq!(
+            app.world()
+                .entity(entity)
+                .get_ref::<SurfaceContent>()
+                .expect("surface content should remain")
+                .last_changed(),
+            content_tick
+        );
+        assert_eq!(
+            app.world()
+                .entity(entity)
+                .get_ref::<MappedSurface>()
+                .expect("mapped state should remain")
+                .last_changed(),
+            mapped_tick
+        );
+        assert_eq!(
+            app.world()
+                .resource::<SurfaceCommitRevisions>()
+                .revision(surface),
+            revision + 1
+        );
     }
 
     #[test]

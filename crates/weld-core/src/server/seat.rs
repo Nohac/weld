@@ -551,12 +551,19 @@ impl PointerGrab<ServerState> for WindowProtocolGrab {
     }
 
     fn unset(&mut self, data: &mut ServerState) {
-        if self.resizing && self.surface.alive() {
-            let changed = self
-                .surface
-                .with_pending_state(|state| state.states.unset(xdg_toplevel::State::Resizing));
-            if changed && self.surface.is_initial_configure_sent() {
-                self.surface.send_pending_configure();
+        if self.resizing {
+            let pending_size = data.take_pending_resize(self.surface_id);
+            if self.surface.alive() {
+                let pending_size_changed = pending_size
+                    .is_some_and(|size| data.stage_toplevel_size(self.surface_id, size));
+                let resizing_state_changed = self
+                    .surface
+                    .with_pending_state(|state| state.states.unset(xdg_toplevel::State::Resizing));
+                if (pending_size_changed || resizing_state_changed)
+                    && self.surface.is_initial_configure_sent()
+                {
+                    self.surface.send_pending_configure();
+                }
             }
         }
         data.pending_surface_events.push_back(PendingSurfaceEvent {

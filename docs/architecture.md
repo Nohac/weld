@@ -105,6 +105,15 @@ never handle Smithay protocol objects, file descriptors, Vulkan images, or
 wgpu resources. Adjacent application snapshots coalesce while carrying the
 newest unobserved content.
 
+Surface entities describe protocol lifecycle, mapping, geometry, and input
+structure. A buffer-only commit updates private surface and render resources;
+it does not replace surface components. A resource-owned commit sequence is
+kept separately for policies such as completing an anchored resize after the
+next client commit. Each surface layer also owns a stable transparent selector
+image. Materials keep that selector handle while the private render binding
+chooses the currently displayed client image, so rotating a client buffer pool
+does not appear as ECS or material identity churn.
+
 `HostBuilder::prepare` opens the wgpu instance, adapter, device, queue, output
 extent, composition target, and DMA-BUF resources before Bevy is constructed.
 That ordering prevents Bevy from selecting a second device. Preparation yields
@@ -134,10 +143,13 @@ server emits one release only after every submitted use has completed.
 Client implicit fences become Smithay commit blockers registered with calloop.
 After readiness, each layer moves through staged, displayed, and retiring
 states. Immediately before Bevy renders, Weld promotes the newest referenced
-staged buffer, inserts its imported texture as a fresh Bevy GPU-image identity,
-and submits a raw Vulkan foreign-queue acquire. The buffer stays acquired and
-unreleased across every redraw that reuses it. When a replacement or removal
-reaches ECS, the old image remains valid through that RenderApp submission;
+staged buffer, installs its imported texture under the stable GPU-image
+identity of that live `wl_buffer` if needed, and submits a raw Vulkan
+foreign-queue acquire. All images acquired for one composition share one
+command encoder and barrier batch. The buffer stays acquired and unreleased
+across every redraw that reuses it. When a replacement or removal reaches the
+application surface registry, the old image remains valid through that
+RenderApp submission;
 only afterward does Weld submit its foreign-queue release. Queue submission
 order therefore surrounds every possible Bevy read without modifying Bevy's
 renderer. Superseded staged buffers were never sampled and need no ownership
@@ -147,6 +159,15 @@ cannot run. Vulkan ownership is tracked per imported image rather than per
 surface layer: reattaching one `wl_buffer` or displaying it in multiple layers
 shares one acquire, and the image is released only when its final displayed use
 retires. Each protocol use still completes independently.
+
+Prepared surface-material bind groups are cached by material, stable imported
+image, sampling parameters, and resource generation. The cache retains the
+entries for every still-live member of a rotating client buffer pool and
+evicts them when the material changes, the selector disappears, or the client
+destroys the buffer. Promotion is transactional: the surface registry publishes
+a pending image only after native acquisition and GPU-image installation both
+succeed. Failure retains a compatible previously displayed image, or the
+transparent selector when no compatible image exists.
 
 A persistent completion worker waits for release-barrier `SubmissionIndex`
 values and wakes calloop; only the server thread then sends
@@ -234,7 +255,14 @@ Validated pointer `xdg_toplevel.move` and `xdg_toplevel.resize` requests cross
 the Smithay boundary as protocol-neutral ECS messages. The default window
 plugin owns placement and interactive-resize policy, while Smithay owns the
 pointer grab, configure state, and enforcement of the client's committed size
-constraints. Left and top resize edges remain anchored to the size the client
+constraints. Repeated interactive-resize sizes are latest-value coalesced at
+the Smithay server boundary and configured at most once per composition tick;
+pointer motion, buttons, axes, and keyboard input still reach clients without
+that pacing. Pointer-button effects are applied after ECS surface actions, so
+ending the grab can fold its latched final size and the cleared `Resizing` state
+into one final configure. Destruction and close requests discard any latched
+size; future maximize or fullscreen policy must do the same before issuing its
+own configure. Left and top resize edges remain anchored to the size the client
 actually commits. Pointer interactions are implemented; the equivalent touch
 path remains future work. Client-issued protocol move and resize requests are
 accepted only for client-decorated windows; Weld's chrome owns movement for

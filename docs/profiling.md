@@ -65,6 +65,14 @@ Bevy's frame mark is emitted by `render_composition`, not by physical
 presentation, so presentation work may appear at the beginning of the next
 Tracy frame.
 
+The DMA-BUF stable-binding change should be evaluated after the client buffer
+pools have warmed. Compare equivalent three-video captures using Tracy's
+statistics for bind-group creation, command-encoder finish, and queue submit,
+plus process CPU over the same steady-state interval. Bind-group creation may
+occur once for each live buffer/material/parameter combination during warm-up;
+steady rotation should then reuse those entries. Record measured results here
+only after a controlled before/after capture.
+
 ## Repeatable scenarios
 
 The scenario scripts build Weld, prepare clients, print the manual actions and

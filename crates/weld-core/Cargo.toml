@@ -6,6 +6,7 @@ publish.workspace = true
 
 [features]
 profiling-tracy = ["dep:tracing-tracy"]
+test-support = []
 
 [dependencies]
 anyhow.workspace = true

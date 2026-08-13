@@ -14,6 +14,7 @@ use bevy::{
         texture::GpuImage,
     },
 };
+use tracing::warn;
 use weld_core::{
     dmabuf::{
         DmabufContext, DmabufManager, ImportId, ImportedImageRegistry, PendingDmabufFrame,
@@ -22,11 +23,15 @@ use weld_core::{
     surface::{SurfaceId, SurfaceLayerId},
 };
 
-use crate::surface::{SurfaceImageEncoding, SurfaceRenderImage};
+use crate::surface::{
+    SurfaceImageEncoding, SurfaceRenderImage, promote_dmabuf_sources, referenced_dmabuf_ids,
+    reject_dmabuf_sources,
+};
 
 pub(crate) struct DmabufImporter {
     manager: DmabufManager,
     handles: HashMap<ImportId, Handle<Image>>,
+    installed: HashSet<ImportId>,
 }
 
 impl DmabufImporter {
@@ -38,6 +43,7 @@ impl DmabufImporter {
         Ok(context.create_manager(device, queue)?.map(|manager| Self {
             manager,
             handles: HashMap::new(),
+            installed: HashSet::new(),
         }))
     }
 
@@ -50,19 +56,25 @@ impl DmabufImporter {
         opaque: bool,
     ) -> Result<SurfaceRenderImage> {
         let staged = self.manager.stage(surface, layer, frame)?;
-        let image = Image::new_uninit(
-            staged.extent,
-            wgpu::TextureDimension::D2,
-            staged.format,
-            RenderAssetUsages::MAIN_WORLD,
-        );
-        let handle = app
-            .world_mut()
-            .get_resource_mut::<Assets<Image>>()
-            .context("Bevy image assets are unavailable")?
-            .add(image);
-        self.handles.insert(staged.id, handle.clone());
+        let handle = if let Some(handle) = self.handles.get(&staged.id) {
+            handle.clone()
+        } else {
+            let image = Image::new_uninit(
+                staged.extent,
+                wgpu::TextureDimension::D2,
+                staged.format,
+                RenderAssetUsages::MAIN_WORLD,
+            );
+            let handle = app
+                .world_mut()
+                .get_resource_mut::<Assets<Image>>()
+                .context("Bevy image assets are unavailable")?
+                .add(image);
+            self.handles.insert(staged.id, handle.clone());
+            handle
+        };
         Ok(SurfaceRenderImage {
+            import: staged.id,
             image: handle,
             encoding: if opaque {
                 SurfaceImageEncoding::EncodedOpaque
@@ -70,33 +82,51 @@ impl DmabufImporter {
                 SurfaceImageEncoding::EncodedPremultiplied
             },
             y_inverted: staged.y_inverted,
+            promoted: false,
         })
     }
 
     pub(crate) fn prepare_render(&mut self, app: &mut App) -> Result<()> {
-        let referenced = {
-            let images = app
-                .world()
-                .get_resource::<Assets<Image>>()
-                .context("Bevy image assets are unavailable")?;
-            self.manager
-                .staged_ids()
-                .filter(|id| {
-                    self.handles
-                        .get(id)
-                        .is_some_and(|handle| images.contains(handle))
-                })
-                .collect::<HashSet<_>>()
+        let referenced = referenced_dmabuf_ids(app.world());
+        let Self {
+            manager,
+            handles,
+            installed,
+        } = self;
+        let mut registry = BevyImageRegistry {
+            app,
+            handles,
+            installed,
         };
-        let Self { manager, handles } = self;
-        let mut registry = BevyImageRegistry { app, handles };
-        manager.prepare_render(&referenced, &mut registry)
+        match manager.prepare_render(&referenced, &mut registry) {
+            Ok(promoted) => promote_dmabuf_sources(registry.app.world_mut(), &promoted),
+            Err(error) => {
+                reject_dmabuf_sources(registry.app.world_mut(), &referenced);
+                warn!(%error, "kept previous client buffers after DMA-BUF promotion failed");
+            }
+        }
+        Ok(())
     }
 
     pub(crate) fn finish_render(&mut self, app: &mut App) -> Result<()> {
-        let Self { manager, handles } = self;
-        let mut registry = BevyImageRegistry { app, handles };
+        let Self {
+            manager,
+            handles,
+            installed,
+        } = self;
+        let mut registry = BevyImageRegistry {
+            app,
+            handles,
+            installed,
+        };
         manager.finish_render(&mut registry)
+    }
+
+    pub(crate) fn installed_image_ids(&self) -> HashSet<bevy::asset::AssetId<Image>> {
+        self.installed
+            .iter()
+            .filter_map(|id| self.handles.get(id).map(|handle| handle.id()))
+            .collect()
     }
 
     pub(crate) fn retain_surface_layers(
@@ -119,6 +149,7 @@ impl DmabufImporter {
 struct BevyImageRegistry<'a> {
     app: &'a mut App,
     handles: &'a mut HashMap<ImportId, Handle<Image>>,
+    installed: &'a mut HashSet<ImportId>,
 }
 
 impl ImportedImageRegistry for BevyImageRegistry<'_> {
@@ -137,6 +168,9 @@ impl ImportedImageRegistry for BevyImageRegistry<'_> {
             .get_resource_mut::<RenderAssets<GpuImage>>()
             .context("Bevy GPU image assets are unavailable")?;
         for image in images {
+            if self.installed.contains(&image.id) {
+                continue;
+            }
             let handle = self
                 .handles
                 .get(&image.id)
@@ -161,11 +195,15 @@ impl ImportedImageRegistry for BevyImageRegistry<'_> {
                     had_data: false,
                 },
             );
+            self.installed.insert(image.id);
         }
         Ok(())
     }
 
-    fn remove(&mut self, images: &[ImportId]) {
+    fn prune(&mut self, images: &[ImportId]) {
+        for id in images {
+            self.installed.remove(id);
+        }
         let handles = images
             .iter()
             .filter_map(|id| self.handles.remove(id))

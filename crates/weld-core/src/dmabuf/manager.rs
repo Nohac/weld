@@ -12,7 +12,9 @@ use ash::vk;
 use calloop::channel::Sender as CalloopSender;
 use tracing::{debug, error, warn};
 
-use super::{DmabufReleaseId, DmabufSourceCache, ImportedDmabufSource, PendingDmabufFrame};
+use super::{
+    DmabufReleaseId, DmabufSourceCache, ImportId, ImportedDmabufSource, PendingDmabufFrame,
+};
 use crate::surface::{SurfaceId, SurfaceLayerId};
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -111,10 +113,6 @@ enum CompletionCommand {
     Shutdown,
 }
 
-/// Opaque identity shared with the Bevy image registry without exposing native handles.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub struct ImportId(u64);
-
 /// Metadata needed to allocate the application-side placeholder image.
 pub struct StagedImport {
     pub id: ImportId,
@@ -134,7 +132,7 @@ pub struct PromotionImage {
 /// Application-owned image registry called inside the native promotion transaction.
 pub trait ImportedImageRegistry {
     fn install(&mut self, images: &[PromotionImage]) -> Result<()>;
-    fn remove(&mut self, images: &[ImportId]);
+    fn prune(&mut self, images: &[ImportId]);
 }
 
 /// Native DMA-BUF services supplied to an application host.
@@ -187,11 +185,11 @@ pub struct DmabufManager {
     layers: HashMap<SurfaceLayerKey, SurfaceLayerImages>,
     superseded: Vec<StagedImage>,
     retiring: Vec<DisplayedImage>,
+    known_sources: HashMap<ImportId, Rc<ImportedDmabufSource>>,
     acquired_sources: AcquiredSources,
     release_sender: CalloopSender<DmabufReleaseId>,
     completion_sender: mpsc::Sender<CompletionCommand>,
     completion_thread: Option<JoinHandle<()>>,
-    next_import_id: Option<u64>,
 }
 
 impl DmabufManager {
@@ -238,11 +236,11 @@ impl DmabufManager {
             layers: HashMap::new(),
             superseded: Vec::new(),
             retiring: Vec::new(),
+            known_sources: HashMap::new(),
             acquired_sources: AcquiredSources::default(),
             release_sender,
             completion_sender,
             completion_thread: Some(completion_thread),
-            next_import_id: Some(1),
         }))
     }
 
@@ -270,11 +268,8 @@ impl DmabufManager {
             .sources
             .get(&frame.dmabuf)
             .context("committed DMA-BUF was not imported during protocol creation")?;
-        let id = ImportId(
-            self.next_import_id
-                .context("DMA-BUF import identity space is exhausted")?,
-        );
-        self.next_import_id = id.0.checked_add(1);
+        let id = source.id;
+        self.known_sources.insert(id, source.clone());
         let extent = source.texture.size();
         let format = source.format;
         let key = SurfaceLayerKey { surface, layer };
@@ -308,10 +303,10 @@ impl DmabufManager {
         &mut self,
         referenced_ids: &HashSet<ImportId>,
         registry: &mut impl ImportedImageRegistry,
-    ) -> Result<()> {
+    ) -> Result<Vec<ImportId>> {
         let superseded = std::mem::take(&mut self.superseded);
-        registry.remove(&import_ids(&superseded));
         self.release_never_acquired(superseded);
+        self.prune_dead_sources(registry);
 
         let staged = self
             .layers
@@ -319,7 +314,7 @@ impl DmabufManager {
             .filter_map(|(key, images)| images.staged.take().map(|image| (*key, image)))
             .collect::<Vec<_>>();
         if staged.is_empty() {
-            return Ok(());
+            return Ok(Vec::new());
         }
 
         let referenced = staged
@@ -330,60 +325,66 @@ impl DmabufManager {
             .into_iter()
             .map(|(_, image)| image)
             .collect::<Vec<_>>();
-        registry.remove(&import_ids(&discarded));
         self.release_never_acquired(discarded);
+        self.prune_dead_sources(registry);
         if referenced.is_empty() {
-            return Ok(());
+            return Ok(Vec::new());
         }
 
-        let mut commands = Vec::with_capacity(referenced.len());
         let mut planned_acquires = HashSet::new();
-        let mut acquisition_error = None;
         for (_, staged) in &referenced {
             let needs_acquire = !self.acquired_sources.contains(staged.source.image)
                 && !planned_acquires.contains(&staged.source.image);
             if needs_acquire {
-                match self.external_barrier_command(staged.source.image, true) {
-                    Ok(command) => {
-                        commands.push(command);
-                        planned_acquires.insert(staged.source.image);
-                    }
-                    Err(error) => {
-                        acquisition_error = Some(error);
-                        break;
-                    }
-                }
+                planned_acquires.insert(staged.source.image);
             }
         }
-        if let Some(error) = acquisition_error {
-            let failed = referenced
-                .into_iter()
-                .map(|(_, image)| image)
-                .collect::<Vec<_>>();
-            registry.remove(&import_ids(&failed));
-            self.release_never_acquired(failed);
-            return Err(error).context("could not acquire the complete staged DMA-BUF batch");
-        }
+        let planned_acquires = planned_acquires.into_iter().collect::<Vec<_>>();
+        let acquire_command = match self.external_barrier_command(&planned_acquires, true) {
+            Ok(command) => command,
+            Err(error) => {
+                let failed = referenced
+                    .into_iter()
+                    .map(|(_, image)| image)
+                    .collect::<Vec<_>>();
+                self.release_never_acquired(failed);
+                self.prune_dead_sources(registry);
+                return Err(error).context("could not acquire the complete staged DMA-BUF batch");
+            }
+        };
         let promotion_images = referenced
             .iter()
-            .map(|(_, staged)| PromotionImage {
-                id: staged.id,
-                texture: staged.source.texture.clone(),
-                view: staged.source.view.clone(),
-                format: staged.source.format,
+            .map(|(_, staged)| staged)
+            .fold(HashMap::new(), |mut images, staged| {
+                images.entry(staged.id).or_insert_with(|| PromotionImage {
+                    id: staged.id,
+                    texture: staged.source.texture.clone(),
+                    view: staged.source.view.clone(),
+                    format: staged.source.format,
+                });
+                images
             })
+            .into_values()
             .collect::<Vec<_>>();
         if let Err(error) = registry.install(&promotion_images) {
             let failed = referenced
                 .into_iter()
                 .map(|(_, image)| image)
                 .collect::<Vec<_>>();
-            registry.remove(&import_ids(&failed));
             self.release_never_acquired(failed);
+            self.prune_dead_sources(registry);
             return Err(error).context("could not install the complete staged DMA-BUF batch");
         }
 
-        self.queue.submit(commands);
+        if let Some(command) = acquire_command {
+            self.queue.submit([command]);
+        }
+        let promoted = referenced
+            .iter()
+            .map(|(_, staged)| staged.id)
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
         for (key, staged) in referenced {
             self.acquired_sources.retain(staged.source.image);
             let images = self.layers.entry(key).or_default();
@@ -396,7 +397,7 @@ impl DmabufManager {
             }
             debug!(?key.surface, ?key.layer, "promoted direct DMA-BUF image");
         }
-        Ok(())
+        Ok(promoted)
     }
 
     /// Retire replaced buffers after Bevy has submitted every possible old-image read.
@@ -407,21 +408,11 @@ impl DmabufManager {
         let retirement = self
             .acquired_sources
             .plan_retirements(self.retiring.iter().map(|image| image.source.image))?;
-        let mut commands = Vec::with_capacity(retirement.releases.len());
-        for image in &retirement.releases {
-            commands.push(self.external_barrier_command(*image, false)?);
-        }
-        registry.remove(
-            &self
-                .retiring
-                .iter()
-                .map(|image| image.id)
-                .collect::<Vec<_>>(),
-        );
+        let release_command = self.external_barrier_command(&retirement.releases, false)?;
         self.acquired_sources.commit_retirements(&retirement);
         let retiring = std::mem::take(&mut self.retiring);
 
-        let submission = self.queue.submit(commands);
+        let submission = self.queue.submit(release_command);
         let work = CompletionWork {
             submission,
             releases: retiring.iter().map(|image| image.release).collect(),
@@ -431,6 +422,7 @@ impl DmabufManager {
                 .collect(),
         };
         self.queue_completion(work);
+        self.prune_dead_sources(registry);
         Ok(())
     }
 
@@ -459,9 +451,12 @@ impl DmabufManager {
 
     fn external_barrier_command(
         &self,
-        image: vk::Image,
+        images: &[vk::Image],
         acquire: bool,
-    ) -> Result<wgpu::CommandBuffer> {
+    ) -> Result<Option<wgpu::CommandBuffer>> {
+        if images.is_empty() {
+            return Ok(None);
+        }
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -495,29 +490,34 @@ impl DmabufManager {
                             vk::QUEUE_FAMILY_FOREIGN_EXT,
                         )
                     };
-                    let barrier = vk::ImageMemoryBarrier::default()
-                        .src_access_mask(if acquire {
-                            vk::AccessFlags::MEMORY_WRITE
-                        } else {
-                            vk::AccessFlags::SHADER_READ
+                    let barriers = images
+                        .iter()
+                        .map(|&image| {
+                            vk::ImageMemoryBarrier::default()
+                                .src_access_mask(if acquire {
+                                    vk::AccessFlags::MEMORY_WRITE
+                                } else {
+                                    vk::AccessFlags::SHADER_READ
+                                })
+                                .dst_access_mask(if acquire {
+                                    vk::AccessFlags::SHADER_READ
+                                } else {
+                                    vk::AccessFlags::empty()
+                                })
+                                .old_layout(old_layout)
+                                .new_layout(new_layout)
+                                .src_queue_family_index(source_family)
+                                .dst_queue_family_index(destination_family)
+                                .image(image)
+                                .subresource_range(vk::ImageSubresourceRange {
+                                    aspect_mask: vk::ImageAspectFlags::COLOR,
+                                    base_mip_level: 0,
+                                    level_count: 1,
+                                    base_array_layer: 0,
+                                    layer_count: 1,
+                                })
                         })
-                        .dst_access_mask(if acquire {
-                            vk::AccessFlags::SHADER_READ
-                        } else {
-                            vk::AccessFlags::empty()
-                        })
-                        .old_layout(old_layout)
-                        .new_layout(new_layout)
-                        .src_queue_family_index(source_family)
-                        .dst_queue_family_index(destination_family)
-                        .image(image)
-                        .subresource_range(vk::ImageSubresourceRange {
-                            aspect_mask: vk::ImageAspectFlags::COLOR,
-                            base_mip_level: 0,
-                            level_count: 1,
-                            base_array_layer: 0,
-                            layer_count: 1,
-                        });
+                        .collect::<Vec<_>>();
                     raw_device.cmd_pipeline_barrier(
                         raw_encoder.raw_handle(),
                         if acquire {
@@ -533,13 +533,40 @@ impl DmabufManager {
                         vk::DependencyFlags::empty(),
                         &[],
                         &[],
-                        &[barrier],
+                        &barriers,
                     );
                     Some(())
                 })
             };
         recorded.context("wgpu command encoder is not backed by Vulkan")?;
-        Ok(encoder.finish())
+        Ok(Some(encoder.finish()))
+    }
+
+    fn prune_dead_sources(&mut self, registry: &mut impl ImportedImageRegistry) {
+        let retained = self
+            .layers
+            .values()
+            .flat_map(|images| {
+                images
+                    .staged
+                    .iter()
+                    .map(|image| image.id)
+                    .chain(images.displayed.iter().map(|image| image.id))
+            })
+            .chain(self.superseded.iter().map(|image| image.id))
+            .chain(self.retiring.iter().map(|image| image.id))
+            .collect::<HashSet<_>>();
+        let pruned = self
+            .known_sources
+            .iter()
+            .filter_map(|(&id, source)| {
+                (!source.alive.get() && !retained.contains(&id)).then_some(id)
+            })
+            .collect::<Vec<_>>();
+        registry.prune(&pruned);
+        for id in pruned {
+            self.known_sources.remove(&id);
+        }
     }
 
     pub fn retain_surface_layers(
@@ -608,20 +635,14 @@ impl DmabufManager {
         if acquired_images.is_empty() {
             return;
         }
-        let commands = acquired_images
-            .iter()
-            .filter_map(|image| {
-                self.external_barrier_command(*image, false)
-                    .map_err(|error| {
-                        warn!(%error, "could not release an acquired DMA-BUF during shutdown");
-                    })
-                    .ok()
-            })
-            .collect::<Vec<_>>();
-        if commands.len() != acquired_images.len() {
-            return;
-        }
-        let submission = self.queue.submit(commands);
+        let command = match self.external_barrier_command(&acquired_images, false) {
+            Ok(command) => command,
+            Err(error) => {
+                warn!(%error, "could not release acquired DMA-BUFs during shutdown");
+                return;
+            }
+        };
+        let submission = self.queue.submit(command);
         self.acquired_sources.clear();
         self.queue_completion(CompletionWork {
             submission,
@@ -644,10 +665,6 @@ impl Drop for DmabufManager {
             error!("DMA-BUF completion worker panicked during shutdown");
         }
     }
-}
-
-fn import_ids(images: &[StagedImage]) -> Vec<ImportId> {
-    images.iter().map(|image| image.id).collect()
 }
 
 fn completion_loop(

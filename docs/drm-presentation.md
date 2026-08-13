@@ -43,6 +43,15 @@ the server does not release a reused buffer early. The initial foreign acquire
 assumes the producer presents initialized images in `GENERAL`; Weld's release
 barrier makes that layout exact for all later uses of the cached import.
 
+That native import, its Bevy image identity, and warmed material bind groups
+are stable for the lifetime of the `wl_buffer`. Commits create presentation
+leases, not new GPU images. A client buffer-pool rotation therefore reuses its
+already prepared bindings after warm-up. Acquires for one composition are
+recorded into one barrier command buffer. Release submission remains
+unconditional when a protocol lease retires—even if a shared image needs no
+ownership transition—because its submission index is the fence that orders
+`wl_buffer.release` after Bevy's preceding reads.
+
 ### Direct sampling and wgpu dependency
 
 The current DMA-BUF path is end-to-end zero-copy for client surface content.
@@ -108,9 +117,10 @@ sole decoder signal.
 
 Weld's main compositor thread accounted for roughly 9–12% CPU. The DRM
 presenter used about 1–2%, and the DMA-BUF completion worker used 0–1%. The
-next investigation should therefore begin with frame orchestration, Bevy
-composition frequency, and per-frame DMA-BUF command preparation rather than
-completion waiting. Switching away from Weld did not remove this workload:
+trace that produced these figures motivated the stable image/bind-group cache
+and barrier batching described above. Re-measure before attributing the
+remaining cost to frame orchestration or Bevy composition frequency. Switching
+away from Weld did not remove this workload:
 demand-driven headless composition intentionally continues while the VT is
 inactive so clients and future streaming consumers keep progressing.
 

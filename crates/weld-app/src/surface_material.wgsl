@@ -14,6 +14,7 @@ var<uniform> parameters: SurfaceMaterialParameters;
 const LINEAR_STRAIGHT: u32 = 0u;
 const ENCODED_PREMULTIPLIED: u32 = 1u;
 const ENCODED_OPAQUE: u32 = 2u;
+const UNBOUND: u32 = 3u;
 const ALIGNMENT_EPSILON: f32 = 0.001;
 
 fn srgb_to_linear_channel(encoded: f32) -> f32 {
@@ -102,6 +103,9 @@ fn rounded_box_distance(point: vec2<f32>, size: vec2<f32>, radii: vec4<f32>) -> 
 
 @fragment
 fn fragment(in: UiVertexOutput) -> @location(0) vec4<f32> {
+    if parameters.flags.x == UNBOUND {
+        return vec4<f32>(0.0);
+    }
     var color = sample_surface(source_pixel(in.uv));
     let point = (in.uv - vec2<f32>(0.5)) * in.size;
     let edge_alpha = saturate(0.5 - rounded_box_distance(point, in.size, in.border_radius));

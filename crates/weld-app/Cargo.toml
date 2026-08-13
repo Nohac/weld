@@ -5,7 +5,7 @@ edition.workspace = true
 publish.workspace = true
 
 [features]
-test-support = []
+test-support = ["weld-core/test-support"]
 
 [dependencies]
 anyhow.workspace = true
@@ -17,3 +17,6 @@ tracing.workspace = true
 weld-core = { path = "../weld-core" }
 wgpu = { workspace = true, features = ["naga-ir", "vulkan", "wgsl"] }
 winit = { workspace = true, features = ["rwh_06"] }
+
+[dev-dependencies]
+weld-core = { path = "../weld-core", features = ["test-support"] }

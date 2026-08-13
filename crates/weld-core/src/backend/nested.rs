@@ -337,6 +337,7 @@ pub(crate) fn prepare(options: RunOptions, signals: Signals) -> Result<PreparedH
                     break;
                 }
                 if work.composition_advance {
+                    loop_data.server.flush_pending_resizes();
                     let target = crate::host::CompositionTargetId::FIRST;
                     shell.render_composition(targets.view(target).clone(), targets.extent())?;
                     targets.mark_completed(target);

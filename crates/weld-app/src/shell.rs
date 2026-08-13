@@ -44,7 +44,7 @@ use crate::surface::{
     SurfaceBufferUpdate, SurfaceContentView, SurfaceInputPlacement, SurfaceInputRect,
     SurfaceLayerPlacement, SurfaceTreeSnapshot, SurfaceWindowGeometry, WindowDecoration,
     WindowInteractionRequestKind, WindowResizeEdge, enqueue_surface_event, has_surface_frame,
-    take_surface_actions,
+    publish_surface_bindings, take_surface_actions,
 };
 use weld_core::host::{CaptureRequest, RenderContext};
 use weld_core::input::{InputPosition, RawSeatEvent, SeatInputEffect};
@@ -239,6 +239,12 @@ impl AppShell {
                 importer.prepare_render(&mut self.app)?;
             }
         }
+        let installed_images = self
+            .dmabuf_importer
+            .as_ref()
+            .map(DmabufImporter::installed_image_ids)
+            .unwrap_or_default();
+        publish_surface_bindings(&mut self.app, installed_images);
         {
             let _bevy_render_span =
                 tracing::trace_span!(target: crate::PROFILE_TARGET, "bevy_render_composition")
