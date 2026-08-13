@@ -6,14 +6,14 @@ use std::{
     time::{Duration, Instant},
 };
 
-use crate::host::{CompositionTargets, PreparedHost, RenderContext, RunOptions};
+use crate::host::{CompositionDemand, CompositionTargets, PreparedHost, RenderContext, RunOptions};
 use crate::input::source::nested::NestedAdapter;
 use crate::renderer::NestedRenderer;
+#[cfg(test)]
+use crate::runtime::{BEVY_SETTLE_COMPOSITIONS, FRAME_INTERVAL, IterationWork};
 use crate::runtime::{
     ChildProcesses, FrameState, HostCommand, LoopData, PendingCapture, iteration_work, server_mut,
 };
-#[cfg(test)]
-use crate::runtime::{FRAME_INTERVAL, IterationWork};
 use crate::server::{OutputDescriptor, OutputMetrics, ServerOptions, ServerState};
 use anyhow::{Context, Result, anyhow, bail};
 use calloop::channel;
@@ -38,6 +38,9 @@ enum NestedEvent {
 }
 
 pub(crate) fn prepare(options: RunOptions, signals: Signals) -> Result<PreparedHost> {
+    let _prepare_span =
+        tracing::trace_span!(target: crate::PROFILE_TARGET, "nested_backend_prepare").entered();
+
     let started_at = Instant::now();
     let mut host_event_loop =
         EventLoop::new().context("failed to create the nested host event loop")?;
@@ -149,10 +152,13 @@ pub(crate) fn prepare(options: RunOptions, signals: Signals) -> Result<PreparedH
 
         info!(socket = ?loop_data.server.socket_name, "Weld nested compositor is ready");
         loop {
-            let host_exited = matches!(
-                host_event_loop.pump_app_events(Some(Duration::ZERO), &mut host),
-                PumpStatus::Exit(_)
-            ) || host.close_requested;
+            let pump_status = {
+                let _pump_span =
+                    tracing::trace_span!(target: crate::PROFILE_TARGET, "winit_pump_events")
+                        .entered();
+                host_event_loop.pump_app_events(Some(Duration::ZERO), &mut host)
+            };
+            let host_exited = matches!(pump_status, PumpStatus::Exit(_)) || host.close_requested;
             host.refresh_scale_factor();
             if host_exited {
                 if pending_capture
@@ -173,8 +179,22 @@ pub(crate) fn prepare(options: RunOptions, signals: Signals) -> Result<PreparedH
             if std::mem::take(&mut host.redraw_requested) {
                 frame_state.request_present();
             }
-            for event in host.input.drain() {
-                shell.enqueue_input_event(event);
+            if input_pending {
+                let _input_span = tracing::trace_span!(
+                    target: crate::PROFILE_TARGET,
+                    "nested_host_input_ingress"
+                )
+                .entered();
+                let mut event_count = 0_usize;
+                for event in host.input.drain() {
+                    shell.enqueue_input_event(event);
+                    event_count += 1;
+                }
+                tracing::trace!(
+                    target: crate::PROFILE_TARGET,
+                    event_count,
+                    "host input batch"
+                );
             }
             let pending_size = host.pending_size.take();
             let pending_scale_factor = host.pending_scale_factor.take();
@@ -208,26 +228,45 @@ pub(crate) fn prepare(options: RunOptions, signals: Signals) -> Result<PreparedH
                     OutputMetrics::new(physical_size.width, physical_size.height, scale_factor)?;
                 loop_data.server.update_output_metrics(output_metrics);
                 shell.set_output_geometry(
-                    targets.view(targets.completed()).clone(),
+                    targets
+                        .view(crate::host::CompositionTargetId::FIRST)
+                        .clone(),
                     targets.extent(),
                     scale_factor,
                 );
                 frame_state.request_composition();
             }
 
-            calloop
-                .dispatch(
-                    Some(dispatch_timeout(
-                        host_work_drained,
-                        &frame_state,
-                        Instant::now(),
-                    )),
-                    &mut loop_data,
+            let timeout = dispatch_timeout(host_work_drained, &frame_state, Instant::now());
+            {
+                let _dispatch_span = tracing::trace_span!(
+                    target: crate::PROFILE_TARGET,
+                    "nested_calloop_wait_and_dispatch"
                 )
-                .context("Smithay calloop dispatch failed")?;
-            for event in loop_data.server.take_surface_events() {
-                shell.enqueue_surface_event(event);
-                frame_state.request_composition();
+                .entered();
+                calloop
+                    .dispatch(Some(timeout), &mut loop_data)
+                    .context("Smithay calloop dispatch failed")?;
+            }
+            if loop_data.server.has_surface_events() {
+                let _surface_span = tracing::trace_span!(
+                    target: crate::PROFILE_TARGET,
+                    "nested_host_surface_ingress"
+                )
+                .entered();
+                let mut event_count = 0_usize;
+                for event in loop_data.server.take_surface_events() {
+                    match shell.enqueue_surface_event(event) {
+                        CompositionDemand::Ordinary => frame_state.request_composition(),
+                        CompositionDemand::Settle => frame_state.request_settled_composition(),
+                    }
+                    event_count += 1;
+                }
+                tracing::trace!(
+                    target: crate::PROFILE_TARGET,
+                    event_count,
+                    "host surface batch"
+                );
             }
             if loop_data.server.presentation_requested() {
                 frame_state.request_present();
@@ -250,17 +289,37 @@ pub(crate) fn prepare(options: RunOptions, signals: Signals) -> Result<PreparedH
                     started_at.elapsed().as_millis() as u32,
                     work.composition_advance,
                 );
-                // ECS focus policy is authoritative and must be applied before the matching
-                // pointer press establishes Smithay's implicit grab. Requests made during an
-                // older grab are queued by the host and retried when that grab ends.
-                for action in shell.take_surface_actions() {
-                    loop_data.server.apply_surface_action(action);
-                }
-                for effect in shell.take_input_effects() {
-                    loop_data.server.apply_input_effect(effect);
-                }
-                for command in shell.take_host_commands() {
-                    command_exit_requested |= children.apply(&loop_data.server, command)?;
+                let surface_actions = shell.take_surface_actions();
+                let input_effects = shell.take_input_effects();
+                let host_commands = shell.take_host_commands();
+                if !surface_actions.is_empty()
+                    || !input_effects.is_empty()
+                    || !host_commands.is_empty()
+                {
+                    let _results_span = tracing::trace_span!(
+                        target: crate::PROFILE_TARGET,
+                        "nested_apply_ecs_results"
+                    )
+                    .entered();
+                    tracing::trace!(
+                        target: crate::PROFILE_TARGET,
+                        surface_actions = surface_actions.len(),
+                        input_effects = input_effects.len(),
+                        host_commands = host_commands.len(),
+                        "ECS result batch"
+                    );
+                    // ECS focus policy is authoritative and must be applied before the matching
+                    // pointer press establishes Smithay's implicit grab. Requests made during an
+                    // older grab are queued by the host and retried when that grab ends.
+                    for action in surface_actions {
+                        loop_data.server.apply_surface_action(action);
+                    }
+                    for effect in input_effects {
+                        loop_data.server.apply_input_effect(effect);
+                    }
+                    for command in host_commands {
+                        command_exit_requested |= children.apply(&loop_data.server, command)?;
+                    }
                 }
                 if bevy_requested_redraw && !work.composition_advance {
                     frame_state.request_composition();
@@ -348,7 +407,14 @@ pub(crate) fn prepare(options: RunOptions, signals: Signals) -> Result<PreparedH
             if request_next_composition {
                 frame_state.request_composition();
             }
-            loop_data.server.flush_clients();
+            {
+                let _flush_span = tracing::trace_span!(
+                    target: crate::PROFILE_TARGET,
+                    "nested_flush_wayland_clients"
+                )
+                .entered();
+                loop_data.server.flush_clients();
+            }
             let mut exit_requested = false;
             while let Some(event) = loop_data.events.pop_front() {
                 match event {
@@ -527,10 +593,16 @@ impl ApplicationHandler for NestedHost {
 #[cfg(test)]
 mod tests {
     use super::{
-        FRAME_INTERVAL, FrameState, IterationWork, dispatch_timeout, host_work_drained,
-        iteration_work,
+        BEVY_SETTLE_COMPOSITIONS, FRAME_INTERVAL, FrameState, IterationWork, dispatch_timeout,
+        host_work_drained, iteration_work,
     };
     use std::time::Instant;
+
+    fn finish_initial_settle(frame: &mut FrameState, now: Instant) {
+        for _ in 0..BEVY_SETTLE_COMPOSITIONS {
+            frame.composition_rendered(now);
+        }
+    }
 
     #[test]
     fn input_or_resize_work_gets_one_nonblocking_smithay_dispatch() {
@@ -554,7 +626,7 @@ mod tests {
     fn iterations_without_input_or_resize_keep_the_idle_timeout() {
         let now = Instant::now();
         let mut frame = FrameState::default();
-        frame.composition_rendered(now);
+        finish_initial_settle(&mut frame, now);
         frame.presented();
         assert_eq!(
             dispatch_timeout(host_work_drained(false, false, false), &frame, now),
@@ -582,7 +654,7 @@ mod tests {
             iteration_work(false, false, true, true),
             IterationWork {
                 advance_main: true,
-                composition_advance: true,
+                composition_advance: false,
             }
         );
         assert_eq!(
@@ -595,7 +667,7 @@ mod tests {
         assert_eq!(
             iteration_work(false, true, true, false),
             IterationWork {
-                advance_main: false,
+                advance_main: true,
                 composition_advance: false,
             }
         );
@@ -613,7 +685,7 @@ mod tests {
     fn host_redraw_reuses_the_cached_composition() {
         let now = Instant::now();
         let mut frame = FrameState::default();
-        frame.composition_rendered(now);
+        finish_initial_settle(&mut frame, now);
         frame.presented();
 
         frame.request_present();
@@ -627,7 +699,7 @@ mod tests {
         let now = Instant::now();
         let mut frame = FrameState::default();
 
-        frame.composition_rendered(now);
+        finish_initial_settle(&mut frame, now);
 
         assert!(!frame.composition_dirty());
         assert!(frame.present_needed());
@@ -635,7 +707,7 @@ mod tests {
     }
 
     #[test]
-    fn presentation_waits_for_the_dirty_composition() {
+    fn completed_intermediate_settle_composition_is_presentable() {
         let now = Instant::now();
         let mut frame = FrameState::default();
 
@@ -645,13 +717,44 @@ mod tests {
         frame.composition_rendered(now);
 
         assert!(frame.presentation_due());
+        assert!(frame.settle_compositions_remaining() > 0);
+    }
+
+    #[test]
+    fn ordinary_demand_does_not_extend_or_cancel_settling() {
+        let now = Instant::now();
+        let mut frame = FrameState::default();
+        frame.composition_rendered(now);
+        let remaining = frame.settle_compositions_remaining();
+
+        frame.request_composition();
+
+        assert_eq!(frame.settle_compositions_remaining(), remaining);
+        frame.composition_rendered(now);
+        assert_eq!(
+            frame.settle_compositions_remaining(),
+            remaining.saturating_sub(1)
+        );
+    }
+
+    #[test]
+    fn settle_requests_replace_instead_of_accumulating_the_budget() {
+        let mut frame = FrameState::default();
+
+        frame.request_settled_composition();
+        frame.request_settled_composition();
+
+        assert_eq!(
+            frame.settle_compositions_remaining(),
+            BEVY_SETTLE_COMPOSITIONS
+        );
     }
 
     #[test]
     fn next_frame_request_survives_presenting_the_current_composition() {
         let now = Instant::now();
         let mut frame = FrameState::default();
-        frame.composition_rendered(now);
+        finish_initial_settle(&mut frame, now);
 
         assert!(frame.presentation_due());
         frame.presented();
@@ -666,7 +769,7 @@ mod tests {
     fn successful_presentation_clears_only_the_pending_present() {
         let now = Instant::now();
         let mut frame = FrameState::default();
-        frame.composition_rendered(now);
+        finish_initial_settle(&mut frame, now);
 
         frame.presented();
         assert!(!frame.composition_dirty());
@@ -681,7 +784,7 @@ mod tests {
     fn dirty_compositions_wait_for_the_next_frame_deadline() {
         let start = Instant::now();
         let mut frame = FrameState::default();
-        frame.composition_rendered(start);
+        finish_initial_settle(&mut frame, start);
         frame.presented();
         frame.request_composition();
         let before_deadline = start + FRAME_INTERVAL / 2;

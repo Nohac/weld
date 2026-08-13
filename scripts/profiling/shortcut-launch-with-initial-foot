@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+usage() {
+    cat <<'EOF'
+Usage: shortcut-launch-with-initial-foot [run-scenario options]
+
+Start Weld with foot as its initial client, then capture launch-shortcut
+handling as a working control for the empty-start shortcut scenario.
+
+During the capture window, press Super+B once to launch Blender. You may also
+press Super+F once to compare Firefox startup.
+
+The default capture duration is 15 seconds. Common options include --backend,
+--warmup, --duration, --output, and --force. A later explicit option overrides
+the scenario default.
+
+Foot and any shortcut targets used during the scenario must be installed.
+EOF
+}
+
+if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+    usage
+    exit 0
+fi
+
+script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+instructions='Foot starts as the initial client. After it appears, press Super+B once and note whether Blender appears. You may also press Super+F once to compare Firefox startup.'
+exec "${script_dir}/run-scenario" \
+    --name shortcut-launch-with-initial-foot \
+    --instructions "${instructions}" \
+    --duration 15 \
+    "$@" \
+    -- foot

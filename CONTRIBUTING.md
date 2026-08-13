@@ -47,9 +47,11 @@ cargo clippy --workspace --all-targets --all-features -- -D warnings
 Debug builds apply light optimization to Weld and full optimization to
 dependencies, following Bevy's recommended development profile. They also link
 Bevy through the published `bevy_dylib` development helper so iterative links
-stay short. Run debug executables through Cargo, which supplies the runtime
-search path for `libbevy_dylib` and Rust's shared library. Invoking
-`target/debug/weldwm` directly requires an equivalent `LD_LIBRARY_PATH`.
+stay short. The `profiling-tracy` feature is the exception: it links Bevy into
+the executable so the native Tracy client is not split across a dynamic-library
+boundary. Run debug executables through Cargo, which supplies the runtime search
+path for `libbevy_dylib` and Rust's shared library. Invoking `target/debug/weldwm`
+directly requires an equivalent `LD_LIBRARY_PATH`.
 
 A standalone library build such as `cargo build -p weld-app` has no final
 executable in which Cargo can use `bevy_dylib`. It therefore builds a separate
@@ -129,6 +131,12 @@ uv run --project tools/remote-debug weld-debug screenshot target/weld-remote.png
 
 Read [REMOTE_DEBUGGING.md](REMOTE_DEBUGGING.md) before changing the protocol,
 capture completion, or exposed Bevy methods.
+
+### Tracy profiling
+
+Use the opt-in Tracy integration and repeatable scenarios described in
+[Profiling](docs/profiling.md). Profiling is a measurement workflow, not a
+requirement for ordinary changes.
 
 When auto selects the nested target, it runs until its host window is closed.
 

@@ -383,6 +383,11 @@ fn run_worker(
     epoch: Arc<AtomicU64>,
     active: Arc<AtomicBool>,
 ) {
+    #[cfg(feature = "profiling-tracy")]
+    if let Some(client) = tracing_tracy::client::Client::running() {
+        client.set_thread_name("weld-drm-presenter");
+    }
+
     let blitter = CompositionBlitter::new(&gpu.device, gpu.surface_config.format);
     let initial_epoch = epoch.load(Ordering::Acquire);
     if configure_surface(&gpu.surface, &gpu.device, &gpu.surface_config).is_err() {
@@ -408,6 +413,11 @@ fn run_worker(
     while let Ok(command) = commands.recv() {
         match command {
             PresenterCommand::Frame(frame) => {
+                let _frame_span = tracing::trace_span!(
+                    target: crate::PROFILE_TARGET,
+                    "drm_present_frame",
+                )
+                .entered();
                 let mut outcome = frame_presenter.present(&frame);
                 match outcome {
                     FrameOutcome::Presented => consecutive_deferred_frames = 0,
@@ -469,7 +479,14 @@ impl FramePresenter<'_> {
         {
             return FrameOutcome::Interrupted;
         }
-        let current = self.surface.get_current_texture();
+        let current = {
+            let _acquire_span = tracing::trace_span!(
+                target: crate::PROFILE_TARGET,
+                "acquire_surface_texture"
+            )
+            .entered();
+            self.surface.get_current_texture()
+        };
         if !self.active.load(Ordering::Acquire)
             || self.epoch.load(Ordering::Acquire) != frame.ticket.epoch
         {
@@ -498,31 +515,38 @@ impl FramePresenter<'_> {
                 return FrameOutcome::Unavailable;
             }
         };
-        let output = surface_texture
-            .texture
-            .create_view(&wgpu::TextureViewDescriptor::default());
-        // FrameQueue permits only one worker-owned submission at a time, so
-        // this shared uniform is rewritten immediately before the matching
-        // queue submission and cannot be overtaken by a later cursor payload.
-        self.blitter.set_cursor(self.queue, frame.payload.cursor);
-        let bind_group = self.blitter.create_bind_group(
-            self.device,
-            "weld direct DRM composition bind group",
-            &frame.payload.view,
-        );
-        let mut encoder = self
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("weld direct DRM composition encoder"),
-            });
-        self.blitter.encode(
-            &mut encoder,
-            "weld direct DRM composition pass",
-            &output,
-            &bind_group,
-        );
-        self.queue.submit([encoder.finish()]);
-        self.queue.present(surface_texture);
+        {
+            let _submit_span = tracing::trace_span!(
+                target: crate::PROFILE_TARGET,
+                "encode_submit_present"
+            )
+            .entered();
+            let output = surface_texture
+                .texture
+                .create_view(&wgpu::TextureViewDescriptor::default());
+            // FrameQueue permits only one worker-owned submission at a time, so
+            // this shared uniform is rewritten immediately before the matching
+            // queue submission and cannot be overtaken by a later cursor payload.
+            self.blitter.set_cursor(self.queue, frame.payload.cursor);
+            let bind_group = self.blitter.create_bind_group(
+                self.device,
+                "weld direct DRM composition bind group",
+                &frame.payload.view,
+            );
+            let mut encoder = self
+                .device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("weld direct DRM composition encoder"),
+                });
+            self.blitter.encode(
+                &mut encoder,
+                "weld direct DRM composition pass",
+                &output,
+                &bind_group,
+            );
+            self.queue.submit([encoder.finish()]);
+            self.queue.present(surface_texture);
+        }
         if suboptimal && configure_surface(self.surface, self.device, self.surface_config).is_err()
         {
             return FrameOutcome::Unavailable;

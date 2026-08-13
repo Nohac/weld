@@ -4,6 +4,13 @@ version.workspace = true
 edition.workspace = true
 publish.workspace = true
 
+[features]
+profiling-tracy = [
+  "bevy/trace_tracy",
+  "dep:tracing-tracy",
+  "weld-core/profiling-tracy",
+]
+
 [workspace]
 members = ["crates/weld-app", "crates/weld-core", "crates/weld-window"]
 exclude = ["vendor/smithay", "vendor/smithay/smithay-drm-extras"]
@@ -36,6 +43,7 @@ smithay = { path = "vendor/smithay", default-features = false }
 smithay-drm-extras = { path = "vendor/smithay/smithay-drm-extras", default-features = false }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.22", features = ["env-filter"] }
+tracing-tracy = "0.11.4"
 wgpu = { version = "30", default-features = false }
 winit = { version = "0.30.13", default-features = false }
 x11-dl = "2.21.0"
@@ -50,6 +58,7 @@ weld-core = { path = "crates/weld-core" }
 weld-window = { path = "crates/weld-window" }
 tracing.workspace = true
 tracing-subscriber.workspace = true
+tracing-tracy = { workspace = true, optional = true }
 
 # Keep Weld's code quick to rebuild while giving Bevy, Smithay, wgpu, and other
 # dependencies enough optimization for a usable compositor development build.

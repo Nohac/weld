@@ -1,0 +1,154 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+default_video_url='https://www.youtube.com/watch?v=aqz-KE-bpKQ&autoplay=1&mute=1'
+
+usage() {
+    cat <<'EOF'
+Usage: three-firefox-videos [OPTIONS]
+
+Launch three isolated Firefox instances against Weld and capture video playback.
+During the capture, make sure all three videos are playing. Additional manual
+interaction is optional and should be kept consistent between comparison runs.
+
+Options:
+  --url URL             Video URL (or set WELD_PROFILE_VIDEO_URL)
+  --fresh               Use disposable cold Firefox profiles
+  --backend BACKEND     drm or nested (default: drm)
+  --tracy-port PORT     Weld and collector TCP port (default: 18086)
+  --warmup SECONDS      Setup time before capture connects (default: 2)
+  --duration SECONDS    Live capture duration (default: 40)
+  --output PATH         Explicit trace path
+  --force               Replace an explicitly selected output path
+  -h, --help            Show this help
+
+For a steady playback baseline, pass a longer --warmup that gives all three
+videos time to begin playing before capture starts.
+EOF
+}
+
+script_path="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/$(basename -- "${BASH_SOURCE[0]}")"
+repository_root="$(cd -- "$(dirname -- "${script_path}")/../.." && pwd)"
+
+launch_clients() {
+    local video_url="$1"
+    local profile_root="$2"
+    local -a firefox_processes=()
+
+    command -v firefox >/dev/null 2>&1 || {
+        printf 'three-firefox-videos: firefox was not found\n' >&2
+        return 127
+    }
+
+    stop_firefox() {
+        trap - EXIT INT TERM
+        for process in "${firefox_processes[@]}"; do
+            kill -TERM "${process}" 2>/dev/null || true
+        done
+        for process in "${firefox_processes[@]}"; do
+            wait "${process}" 2>/dev/null || true
+        done
+    }
+    trap stop_firefox EXIT
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+
+    # Weld already supplied the canonical private Wayland environment through
+    # configure_client_command; do not duplicate that environment here.
+    for instance in 1 2 3; do
+        profile="${profile_root}/instance-${instance}"
+        mkdir -p -- "${profile}"
+        cat >"${profile}/user.js" <<'EOF'
+user_pref("browser.shell.checkDefaultBrowser", false);
+user_pref("browser.startup.homepage_override.mstone", "ignore");
+user_pref("datareporting.policy.dataSubmissionEnabled", false);
+user_pref("media.autoplay.block-webaudio", false);
+user_pref("media.autoplay.blocking_policy", 0);
+user_pref("media.autoplay.default", 0);
+user_pref("toolkit.telemetry.reportingpolicy.firstRun", false);
+EOF
+        firefox --no-remote --profile "${profile}" "${video_url}" &
+        firefox_processes+=("$!")
+    done
+    wait
+}
+
+if [[ "${1:-}" == "--launch-clients" ]]; then
+    shift
+    if (( $# != 2 )); then
+        printf 'three-firefox-videos: internal launcher requires URL and profile root\n' >&2
+        exit 2
+    fi
+    launch_clients "$1" "$2"
+    exit
+fi
+
+video_url="${WELD_PROFILE_VIDEO_URL:-${default_video_url}}"
+fresh=false
+runner_arguments=()
+while (( $# > 0 )); do
+    case "$1" in
+        --url)
+            (( $# >= 2 )) || { printf '%s\n' 'three-firefox-videos: --url requires a value' >&2; exit 2; }
+            video_url="$2"
+            shift 2
+            ;;
+        --fresh)
+            fresh=true
+            shift
+            ;;
+        --backend|--tracy-port|--warmup|--duration|--output)
+            (( $# >= 2 )) || { printf 'three-firefox-videos: %s requires a value\n' "$1" >&2; exit 2; }
+            runner_arguments+=("$1" "$2")
+            shift 2
+            ;;
+        --force)
+            runner_arguments+=("$1")
+            shift
+            ;;
+        -h|--help)
+            usage
+            exit 0
+            ;;
+        *)
+            printf 'three-firefox-videos: unknown option: %s\n' "$1" >&2
+            exit 2
+            ;;
+    esac
+done
+
+mkdir -p -- "${repository_root}/target/profiling"
+fresh_profile_root=""
+if [[ "${fresh}" == true ]]; then
+    fresh_profile_root="$(mktemp -d "${repository_root}/target/profiling/three-firefox-videos.XXXXXX")"
+    profile_root="${fresh_profile_root}"
+else
+    profile_root="${repository_root}/target/profiling/three-firefox-videos"
+fi
+
+cleanup_fresh_profile() {
+    if [[ -z "${fresh_profile_root}" ]]; then
+        return
+    fi
+    case "${fresh_profile_root}" in
+        "${repository_root}"/target/profiling/three-firefox-videos.*)
+            rm -rf -- "${fresh_profile_root}"
+            ;;
+        *)
+            printf 'Refusing to remove unexpected profile path: %s\n' "${fresh_profile_root}" >&2
+            ;;
+    esac
+}
+trap cleanup_fresh_profile EXIT
+
+instructions='Ensure all three Firefox videos are playing during the capture window. For a steady playback baseline, request enough --warmup time for playback to begin, then leave the windows and pointer still. For an interaction comparison, repeat the same named action throughout the capture.'
+set +e
+"${repository_root}/scripts/profiling/run-scenario" \
+    --name three-firefox-videos \
+    --instructions "${instructions}" \
+    "${runner_arguments[@]}" \
+    -- "${script_path}" --launch-clients "${video_url}" "${profile_root}"
+status=$?
+set -e
+exit "${status}"

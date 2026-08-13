@@ -15,6 +15,11 @@ const IMPORT_FORMATS: [(Fourcc, vk::Format); 4] = [
     (Fourcc::Xbgr8888, vk::Format::R8G8B8A8_UNORM),
 ];
 
+#[cfg(feature = "profiling-tracy")]
+const PROFILING_FEATURES: wgpu::Features = wgpu::Features::TIMESTAMP_QUERY
+    .union(wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS)
+    .union(wgpu::Features::TIMESTAMP_QUERY_INSIDE_PASSES);
+
 /// The exact device and format/modifier pairs Weld can import through wgpu.
 #[derive(Clone, Debug)]
 pub struct DmabufCapabilities {
@@ -30,6 +35,7 @@ pub fn request_weld_device(
         warn!("linux-dmabuf unavailable on the selected Vulkan adapter; retaining the SHM path");
         let descriptor = wgpu::DeviceDescriptor {
             label: Some(label),
+            required_features: required_device_features(adapter, wgpu::Features::empty()),
             ..Default::default()
         };
         let (device, queue) = pollster::block_on(adapter.request_device(&descriptor))
@@ -39,7 +45,10 @@ pub fn request_weld_device(
 
     let descriptor = wgpu::DeviceDescriptor {
         label: Some(label),
-        required_features: wgpu::Features::VULKAN_EXTERNAL_MEMORY_DMA_BUF,
+        required_features: required_device_features(
+            adapter,
+            wgpu::Features::VULKAN_EXTERNAL_MEMORY_DMA_BUF,
+        ),
         ..Default::default()
     };
     // SAFETY: capability discovery verified the Vulkan backend, wgpu's
@@ -71,6 +80,14 @@ pub fn request_weld_device(
         "enabled direct linux-dmabuf sampling"
     );
     Ok((device, queue, Some(capabilities)))
+}
+
+fn required_device_features(adapter: &wgpu::Adapter, required: wgpu::Features) -> wgpu::Features {
+    #[cfg(feature = "profiling-tracy")]
+    let required = required.union(adapter.features().intersection(PROFILING_FEATURES));
+    #[cfg(not(feature = "profiling-tracy"))]
+    let _ = adapter;
+    required
 }
 
 fn discover_capabilities(adapter: &wgpu::Adapter) -> Result<Option<DmabufCapabilities>> {

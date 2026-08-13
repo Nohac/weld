@@ -904,9 +904,25 @@ fn apply_surface_tree_snapshot(
             },
         ));
         entry.frame_ready = true;
+        tracing::trace!(
+            target: crate::PROFILE_TARGET,
+            surface = surface.raw(),
+            logical_width = logical_size.x,
+            logical_height = logical_size.y,
+            visual_offset_x = visual_offset.x,
+            visual_offset_y = visual_offset.y,
+            visual_width = visual_size.x,
+            visual_height = visual_size.y,
+            "mapped surface snapshot in ECS"
+        );
     } else {
         entity_mut.remove::<(SurfaceContent, MappedSurface)>();
         entry.frame_ready = false;
+        tracing::trace!(
+            target: crate::PROFILE_TARGET,
+            surface = surface.raw(),
+            "unmapped surface snapshot in ECS"
+        );
     }
     if let Some(mut revision) = entity_mut.get_mut::<SurfaceSnapshotRevision>() {
         revision.0 = revision.0.saturating_add(1);
@@ -1010,6 +1026,13 @@ fn sync_surface_nodes(
             node.display = Display::Flex;
             node.width = logical_width;
             node.height = logical_height;
+            tracing::trace!(
+                target: crate::PROFILE_TARGET,
+                surface = surface_node.surface.raw(),
+                width = root_view.logical_width,
+                height = root_view.logical_height,
+                "made surface content node visible"
+            );
         }
 
         let mut reusable = existing_overlays

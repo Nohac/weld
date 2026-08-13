@@ -1,6 +1,6 @@
 //! Bevy-owned compositor scene rendered into a Weld-owned wgpu texture.
 
-use std::sync::Arc;
+use std::{collections::HashSet, sync::Arc};
 
 use anyhow::{Context, Result};
 use bevy::{
@@ -54,7 +54,7 @@ use weld_core::server::{
     PendingSurfaceTreeSnapshot,
 };
 use weld_core::surface::{Extent, SurfaceAction as CoreSurfaceAction};
-use weld_core::{CompositionHost, dmabuf::DmabufContext};
+use weld_core::{CompositionDemand, CompositionHost, dmabuf::DmabufContext};
 
 const COMPOSITION_VIEW: ManualTextureViewHandle = ManualTextureViewHandle(1);
 pub struct AppShell {
@@ -62,6 +62,45 @@ pub struct AppShell {
     redraw_requests: RedrawRequests,
     dmabuf_importer: Option<DmabufImporter>,
     dmabuf: DmabufContext,
+    surface_demand: SurfaceCompositionDemand,
+}
+
+#[derive(Default)]
+struct SurfaceCompositionDemand {
+    mapped_surfaces: HashSet<crate::surface::SurfaceId>,
+}
+
+impl SurfaceCompositionDemand {
+    fn classify(&mut self, event: &PendingSurfaceEvent) -> CompositionDemand {
+        let surface = event.surface;
+        match &event.kind {
+            PendingSurfaceEventKind::TreeSnapshot(snapshot) if snapshot.client_mapped => {
+                if self.mapped_surfaces.insert(surface) {
+                    CompositionDemand::Settle
+                } else {
+                    CompositionDemand::Ordinary
+                }
+            }
+            PendingSurfaceEventKind::TreeSnapshot(_) => {
+                if self.mapped_surfaces.remove(&surface) {
+                    CompositionDemand::Settle
+                } else {
+                    CompositionDemand::Ordinary
+                }
+            }
+            PendingSurfaceEventKind::Destroyed => {
+                self.mapped_surfaces.remove(&surface);
+                CompositionDemand::Settle
+            }
+            PendingSurfaceEventKind::WindowInteraction(_) => CompositionDemand::Ordinary,
+            PendingSurfaceEventKind::Created { .. } => {
+                self.mapped_surfaces.remove(&surface);
+                CompositionDemand::Settle
+            }
+            PendingSurfaceEventKind::DecorationChanged { .. }
+            | PendingSurfaceEventKind::PopupConfigured(_) => CompositionDemand::Settle,
+        }
+    }
 }
 
 /// Installs Weld's application model without selecting a window policy.
@@ -126,6 +165,9 @@ pub fn configure_rendering(app: &mut App, context: &RenderContext) {
 
 impl AppShell {
     pub fn new(mut app: App, context: RenderContext) -> Result<Self> {
+        let _startup_span =
+            tracing::trace_span!(target: crate::PROFILE_TARGET, "weld_app_shell_startup").entered();
+
         app.finish();
         app.cleanup();
         app.get_sub_app(RenderApp).context(
@@ -139,8 +181,8 @@ impl AppShell {
             context.extent.width,
             context.extent.height,
         );
-
         spawn_compositor_camera(app.world_mut());
+
         let redraw_requests = app
             .world()
             .get_resource::<Messages<RequestRedraw>>()
@@ -154,6 +196,7 @@ impl AppShell {
             redraw_requests,
             dmabuf_importer,
             dmabuf: context.dmabuf,
+            surface_demand: SurfaceCompositionDemand::default(),
         })
     }
 
@@ -165,6 +208,13 @@ impl AppShell {
     /// Bevy time advances here at input/policy rate rather than render rate;
     /// systems must use time deltas instead of assuming one update per frame.
     pub fn advance_main(&mut self, input_time: u32, composition_advance: bool) -> bool {
+        let _advance_span = if composition_advance {
+            tracing::trace_span!(target: crate::PROFILE_TARGET, "weld_app_advance_composition")
+                .entered()
+        } else {
+            tracing::trace_span!(target: crate::PROFILE_TARGET, "weld_app_advance_input").entered()
+        };
+
         set_input_update_time(self.app.world_mut(), input_time);
         set_composition_advance(self.app.world_mut(), composition_advance);
         advance_main_app(&mut self.app, &mut self.redraw_requests)
@@ -176,13 +226,32 @@ impl AppShell {
     /// Main-world trackers are retained across input-only advances and cleared
     /// only after extraction has observed them.
     pub fn render_composition(&mut self, target: wgpu::TextureView, extent: Extent) -> Result<()> {
+        let _composition_span =
+            tracing::trace_span!(target: crate::PROFILE_TARGET, "weld_render_composition")
+                .entered();
+
         insert_manual_view(&mut self.app, target, extent.width, extent.height);
-        if let Some(importer) = &mut self.dmabuf_importer {
-            importer.prepare_render(&mut self.app)?;
+        {
+            let _prepare_span =
+                tracing::trace_span!(target: crate::PROFILE_TARGET, "weld_prepare_dmabuf_imports")
+                    .entered();
+            if let Some(importer) = &mut self.dmabuf_importer {
+                importer.prepare_render(&mut self.app)?;
+            }
         }
-        render_composition_app(&mut self.app);
-        if let Some(importer) = &mut self.dmabuf_importer {
-            importer.finish_render(&mut self.app)?;
+        {
+            let _bevy_render_span =
+                tracing::trace_span!(target: crate::PROFILE_TARGET, "bevy_render_composition")
+                    .entered();
+            render_composition_app(&mut self.app);
+        }
+        {
+            let _finish_span =
+                tracing::trace_span!(target: crate::PROFILE_TARGET, "weld_finish_dmabuf_imports")
+                    .entered();
+            if let Some(importer) = &mut self.dmabuf_importer {
+                importer.finish_render(&mut self.app)?;
+            }
         }
         Ok(())
     }
@@ -205,10 +274,16 @@ impl AppShell {
             .update(extent, scale_factor);
     }
 
-    pub fn enqueue_surface_event(&mut self, event: PendingSurfaceEvent) {
+    pub fn enqueue_surface_event(&mut self, event: PendingSurfaceEvent) -> CompositionDemand {
+        let demand = self.surface_demand.classify(&event);
         let PendingSurfaceEvent { surface, kind } = event;
         match kind {
             PendingSurfaceEventKind::TreeSnapshot(snapshot) => {
+                let _ingress_span = tracing::trace_span!(
+                    target: crate::PROFILE_TARGET,
+                    "weld_surface_snapshot_ingress"
+                )
+                .entered();
                 let snapshot = self.prepare_surface_snapshot(surface, snapshot);
                 enqueue_surface_event(
                     self.app.world_mut(),
@@ -230,15 +305,22 @@ impl AppShell {
                     },
                 );
             }
-            PendingSurfaceEventKind::Created { decoration } => enqueue_surface_event(
-                self.app.world_mut(),
-                HostSurfaceEvent {
-                    surface,
-                    kind: HostSurfaceEventKind::Created {
-                        decoration: app_decoration(decoration),
+            PendingSurfaceEventKind::Created { decoration } => {
+                let _created_span = tracing::trace_span!(
+                    target: crate::PROFILE_TARGET,
+                    "weld_surface_created_ingress"
+                )
+                .entered();
+                enqueue_surface_event(
+                    self.app.world_mut(),
+                    HostSurfaceEvent {
+                        surface,
+                        kind: HostSurfaceEventKind::Created {
+                            decoration: app_decoration(decoration),
+                        },
                     },
-                },
-            ),
+                );
+            }
             PendingSurfaceEventKind::DecorationChanged { decoration } => enqueue_surface_event(
                 self.app.world_mut(),
                 HostSurfaceEvent {
@@ -267,6 +349,7 @@ impl AppShell {
                 },
             ),
         }
+        demand
     }
 
     fn prepare_surface_snapshot(
@@ -403,8 +486,8 @@ fn spawn_compositor_camera(world: &mut World) -> Entity {
 }
 
 impl CompositionHost for AppShell {
-    fn enqueue_surface_event(&mut self, event: PendingSurfaceEvent) {
-        AppShell::enqueue_surface_event(self, event);
+    fn enqueue_surface_event(&mut self, event: PendingSurfaceEvent) -> CompositionDemand {
+        AppShell::enqueue_surface_event(self, event)
     }
 
     fn enqueue_input_event(&mut self, event: RawSeatEvent) {
@@ -644,8 +727,13 @@ mod tests {
     };
 
     use super::{
-        App, Messages, RedrawRequests, advance_main_app, disconnect_render_time,
-        render_composition_app, spawn_compositor_camera,
+        App, Messages, RedrawRequests, SurfaceCompositionDemand, advance_main_app,
+        disconnect_render_time, render_composition_app, spawn_compositor_camera,
+    };
+    use weld_core::{
+        CompositionDemand,
+        server::{PendingSurfaceEvent, PendingSurfaceEventKind, PendingSurfaceTreeSnapshot},
+        surface::SurfaceId,
     };
 
     #[derive(Resource, Default)]
@@ -670,6 +758,54 @@ mod tests {
         .add_systems(Update, request_redraw);
         let requests = RedrawRequests::new(app.world().resource::<Messages<RequestRedraw>>());
         (app, requests)
+    }
+
+    fn snapshot_event(surface: SurfaceId, client_mapped: bool) -> PendingSurfaceEvent {
+        PendingSurfaceEvent {
+            surface,
+            kind: PendingSurfaceEventKind::TreeSnapshot(PendingSurfaceTreeSnapshot {
+                client_mapped,
+                root: None,
+                window_geometry: None,
+                overlays: Vec::new(),
+                inputs: Vec::new(),
+                buffers: Vec::new(),
+            }),
+        }
+    }
+
+    #[test]
+    fn only_the_first_snapshot_of_a_mapping_requests_settling() {
+        let surface = SurfaceId::new(1);
+        let mut demand = SurfaceCompositionDemand::default();
+
+        assert_eq!(
+            demand.classify(&snapshot_event(surface, true)),
+            CompositionDemand::Settle
+        );
+        assert_eq!(
+            demand.classify(&snapshot_event(surface, true)),
+            CompositionDemand::Ordinary
+        );
+    }
+
+    #[test]
+    fn an_unmapped_surface_settles_again_when_it_is_remapped() {
+        let surface = SurfaceId::new(1);
+        let mut demand = SurfaceCompositionDemand::default();
+
+        assert_eq!(
+            demand.classify(&snapshot_event(surface, true)),
+            CompositionDemand::Settle
+        );
+        assert_eq!(
+            demand.classify(&snapshot_event(surface, false)),
+            CompositionDemand::Settle
+        );
+        assert_eq!(
+            demand.classify(&snapshot_event(surface, true)),
+            CompositionDemand::Settle
+        );
     }
 
     #[test]

@@ -1,5 +1,7 @@
 //! Bevy application integration and plugin-facing compositor model.
 
+pub(crate) const PROFILE_TARGET: &str = "weld_profile";
+
 mod builder;
 pub mod composition;
 pub mod debug;

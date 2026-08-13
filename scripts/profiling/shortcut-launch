@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+usage() {
+    cat <<'EOF'
+Usage: shortcut-launch [run-scenario options]
+
+Start Weld without an initial client and capture launch-shortcut handling.
+During the capture window, press one or more of these several times:
+
+  Super+Enter  launch foot
+  Super+F      launch Firefox
+  Super+B      launch Blender
+
+Common options: --backend, --warmup, --duration, --output, and --force. Warmup
+defaults to two seconds; --duration controls the capture interval that follows.
+
+The selected shortcut targets must be installed. A missing foot, firefox, or
+blender executable terminates Weld; the runner retains the partial trace when
+Tracy was already connected.
+EOF
+}
+
+if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+    usage
+    exit 0
+fi
+
+script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+instructions='Weld starts with no client. During the capture window, press Super+Enter, Super+F, or Super+B several times and note whether the requested applications appear.'
+exec "${script_dir}/run-scenario" \
+    --name shortcut-launch \
+    --instructions "${instructions}" \
+    "$@"

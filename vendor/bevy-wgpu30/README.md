@@ -12,8 +12,11 @@ provenance and the included crate list are recorded in
 `../bevy-wgpu30.upstream`.
 
 Local changes are limited to dependency constraints, wgpu 30 API adaptations
-in `bevy_render` and `bevy_pbr`, and the corresponding upstream WGSL changes.
-Do not reformat or otherwise rewrite unrelated vendored source.
+in `bevy_render` and `bevy_pbr`, the corresponding upstream WGSL changes, and
+a Tracy GPU guard for Weld's manually created wgpu device. Reapply that guard
+when refreshing the published sources so devices without timestamp-query
+support retain CPU tracing instead of panicking. Do not reformat or otherwise
+rewrite unrelated vendored source.
 
 This is a temporary bridge, not a permanent Bevy fork. Remove this directory,
 `../bevy-wgpu30.upstream`, and Weld's `[patch.crates-io]` entries when Weld

@@ -201,8 +201,20 @@ impl NestedRenderer {
     ) -> Result<FrameResult> {
         use wgpu::CurrentSurfaceTexture;
 
-        let (surface_texture, reconfigure_after_present) = match self.surface.get_current_texture()
-        {
+        let _present_span = tracing::trace_span!(
+            target: crate::PROFILE_TARGET,
+            "nested_present_frame"
+        )
+        .entered();
+        let current_surface_texture = {
+            let _acquire_span = tracing::trace_span!(
+                target: crate::PROFILE_TARGET,
+                "acquire_surface_texture"
+            )
+            .entered();
+            self.surface.get_current_texture()
+        };
+        let (surface_texture, reconfigure_after_present) = match current_surface_texture {
             CurrentSurfaceTexture::Success(texture) => (texture, false),
             CurrentSurfaceTexture::Suboptimal(texture) => (texture, true),
             CurrentSurfaceTexture::Timeout | CurrentSurfaceTexture::Occluded => {
@@ -221,88 +233,96 @@ impl NestedRenderer {
             }
         };
 
-        let output_view = surface_texture
-            .texture
-            .create_view(&wgpu::TextureViewDescriptor::default());
-        let composition_bind_group = self.blitter.create_bind_group(
-            &self.device,
-            "weld Bevy composition bind group",
-            composition,
-        );
-        let mut encoder = self
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("weld compositor encoder"),
-            });
-        self.blitter.encode(
-            &mut encoder,
-            "weld compositor pass",
-            &output_view,
-            &composition_bind_group,
-        );
-
-        let capture = capture_path.map(|_| {
-            let texture = self.device.create_texture(&wgpu::TextureDescriptor {
-                label: Some("weld screenshot texture"),
-                size: wgpu::Extent3d {
-                    width: self.surface_config.width,
-                    height: self.surface_config.height,
-                    depth_or_array_layers: 1,
-                },
-                mip_level_count: 1,
-                sample_count: 1,
-                dimension: wgpu::TextureDimension::D2,
-                format: self.surface_config.format,
-                usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
-                view_formats: &[],
-            });
-            let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let (submission, capture) = {
+            let _submit_span = tracing::trace_span!(
+                target: crate::PROFILE_TARGET,
+                "encode_submit_present"
+            )
+            .entered();
+            let output_view = surface_texture
+                .texture
+                .create_view(&wgpu::TextureViewDescriptor::default());
+            let composition_bind_group = self.blitter.create_bind_group(
+                &self.device,
+                "weld Bevy composition bind group",
+                composition,
+            );
+            let mut encoder = self
+                .device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("weld compositor encoder"),
+                });
             self.blitter.encode(
                 &mut encoder,
-                "weld screenshot composition pass",
-                &view,
+                "weld compositor pass",
+                &output_view,
                 &composition_bind_group,
             );
 
-            let unpadded_bytes_per_row = self.surface_config.width * 4;
-            let padded_bytes_per_row =
-                unpadded_bytes_per_row.next_multiple_of(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT);
-            let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("weld screenshot readback"),
-                size: u64::from(padded_bytes_per_row) * u64::from(self.surface_config.height),
-                usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-                mapped_at_creation: false,
-            });
-            encoder.copy_texture_to_buffer(
-                wgpu::TexelCopyTextureInfo {
-                    texture: &texture,
-                    mip_level: 0,
-                    origin: wgpu::Origin3d::ZERO,
-                    aspect: wgpu::TextureAspect::All,
-                },
-                wgpu::TexelCopyBufferInfo {
-                    buffer: &buffer,
-                    layout: wgpu::TexelCopyBufferLayout {
-                        offset: 0,
-                        bytes_per_row: Some(padded_bytes_per_row),
-                        rows_per_image: Some(self.surface_config.height),
+            let capture = capture_path.map(|_| {
+                let texture = self.device.create_texture(&wgpu::TextureDescriptor {
+                    label: Some("weld screenshot texture"),
+                    size: wgpu::Extent3d {
+                        width: self.surface_config.width,
+                        height: self.surface_config.height,
+                        depth_or_array_layers: 1,
                     },
-                },
-                wgpu::Extent3d {
-                    width: self.surface_config.width,
-                    height: self.surface_config.height,
-                    depth_or_array_layers: 1,
-                },
-            );
-            CaptureReadback {
-                _texture: texture,
-                buffer,
-                padded_bytes_per_row,
-            }
-        });
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format: self.surface_config.format,
+                    usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+                    view_formats: &[],
+                });
+                let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+                self.blitter.encode(
+                    &mut encoder,
+                    "weld screenshot composition pass",
+                    &view,
+                    &composition_bind_group,
+                );
 
-        let submission = self.queue.submit([encoder.finish()]);
-        self.queue.present(surface_texture);
+                let unpadded_bytes_per_row = self.surface_config.width * 4;
+                let padded_bytes_per_row =
+                    unpadded_bytes_per_row.next_multiple_of(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT);
+                let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("weld screenshot readback"),
+                    size: u64::from(padded_bytes_per_row) * u64::from(self.surface_config.height),
+                    usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                    mapped_at_creation: false,
+                });
+                encoder.copy_texture_to_buffer(
+                    wgpu::TexelCopyTextureInfo {
+                        texture: &texture,
+                        mip_level: 0,
+                        origin: wgpu::Origin3d::ZERO,
+                        aspect: wgpu::TextureAspect::All,
+                    },
+                    wgpu::TexelCopyBufferInfo {
+                        buffer: &buffer,
+                        layout: wgpu::TexelCopyBufferLayout {
+                            offset: 0,
+                            bytes_per_row: Some(padded_bytes_per_row),
+                            rows_per_image: Some(self.surface_config.height),
+                        },
+                    },
+                    wgpu::Extent3d {
+                        width: self.surface_config.width,
+                        height: self.surface_config.height,
+                        depth_or_array_layers: 1,
+                    },
+                );
+                CaptureReadback {
+                    _texture: texture,
+                    buffer,
+                    padded_bytes_per_row,
+                }
+            });
+
+            let submission = self.queue.submit([encoder.finish()]);
+            self.queue.present(surface_texture);
+            (submission, capture)
+        };
 
         let capture_result = capture.zip(capture_path).map(|(capture, path)| {
             self.save_capture(capture, submission, path)
@@ -324,6 +344,12 @@ impl NestedRenderer {
         submission: wgpu::SubmissionIndex,
         path: &Path,
     ) -> Result<()> {
+        let _capture_span = tracing::trace_span!(
+            target: crate::PROFILE_TARGET,
+            "capture_readback_encode"
+        )
+        .entered();
+
         let slice = capture.buffer.slice(..);
         let (sender, receiver) = mpsc::sync_channel(1);
         slice.map_async(wgpu::MapMode::Read, move |result| {

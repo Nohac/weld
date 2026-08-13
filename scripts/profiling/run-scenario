@@ -1,0 +1,465 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+usage() {
+    cat <<'EOF'
+Usage: run-scenario --name NAME --instructions TEXT [OPTIONS] [-- CLIENT...]
+
+Build an optimized Tracy-enabled Weld, run one profiling scenario in an
+isolated process group, capture it once, and tear down Weld and its clients.
+
+Options:
+  --name NAME          Trace filename stem and scenario label (required)
+  --instructions TEXT Manual actions to perform during capture (required)
+  --backend BACKEND    drm or nested (default: drm)
+  --tracy-port PORT    Weld and collector TCP port (default: 18086)
+  --warmup SECONDS     Setup time before tracy-capture connects (default: 2)
+  --duration SECONDS   Live capture duration (default: 40)
+  --output PATH        Explicit .tracy output path
+  --screenshot-after SECONDS
+                       Capture Weld's offscreen composition this many seconds
+                       after Tracy starts
+  --screenshot-output PATH
+                       Composition PNG path (defaults beside the trace)
+  --force              Replace an explicitly selected output path
+  -h, --help           Show this help
+
+The default two-second warmup is a short startup margin, not enough to settle
+every workload. Raise --warmup when a measurement requires a stable workload,
+or set it to zero to capture immediately. The Tracy client buffers from process
+startup, so startup remains at the beginning of the trace. Capture gets a fixed
+30-second allowance beyond its requested duration to connect and write the
+trace; unusually long or dense captures may require raising that constant.
+EOF
+}
+
+fail() {
+    printf 'run-scenario: %s\n' "$*" >&2
+    exit 2
+}
+
+require_value() {
+    if (( $# < 2 )); then
+        fail "$1 requires a value"
+    fi
+}
+
+script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+repository_root="$(cd -- "${script_dir}/../.." && pwd)"
+name=""
+instructions=""
+backend="drm"
+tracy_port=18086
+warmup_seconds=2
+duration_seconds=40
+output=""
+force=false
+screenshot_after=""
+screenshot_output=""
+readonly CAPTURE_CONNECT_ALLOWANCE_SECONDS=30
+
+while (( $# > 0 )); do
+    case "$1" in
+        --name)
+            require_value "$@"
+            name="$2"
+            shift 2
+            ;;
+        --instructions)
+            require_value "$@"
+            instructions="$2"
+            shift 2
+            ;;
+        --backend)
+            require_value "$@"
+            backend="$2"
+            shift 2
+            ;;
+        --tracy-port)
+            require_value "$@"
+            tracy_port="$2"
+            shift 2
+            ;;
+        --warmup)
+            require_value "$@"
+            warmup_seconds="$2"
+            shift 2
+            ;;
+        --duration)
+            require_value "$@"
+            duration_seconds="$2"
+            shift 2
+            ;;
+        --output)
+            require_value "$@"
+            output="$2"
+            shift 2
+            ;;
+        --screenshot-after)
+            require_value "$@"
+            screenshot_after="$2"
+            shift 2
+            ;;
+        --screenshot-output)
+            require_value "$@"
+            screenshot_output="$2"
+            shift 2
+            ;;
+        --force)
+            force=true
+            shift
+            ;;
+        -h|--help)
+            usage
+            exit 0
+            ;;
+        --)
+            shift
+            break
+            ;;
+        *)
+            fail "unknown option: $1"
+            ;;
+    esac
+done
+
+client=("$@")
+
+if (( BASH_VERSINFO[0] < 5 || (BASH_VERSINFO[0] == 5 && BASH_VERSINFO[1] < 1) )); then
+    fail "Bash 5.1 or newer is required"
+fi
+[[ -n "${name}" ]] || fail "--name is required"
+[[ "${name}" =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]*$ ]] || fail "--name is not filename-safe"
+[[ -n "${instructions}" ]] || fail "--instructions is required"
+[[ "${backend}" == "drm" || "${backend}" == "nested" ]] || fail "--backend must be drm or nested"
+[[ "${tracy_port}" =~ ^[1-9][0-9]*$ ]] || fail "--tracy-port must be an integer from 1024 through 65535"
+tracy_port=$((10#${tracy_port}))
+(( tracy_port >= 1024 && tracy_port <= 65535 )) || fail "--tracy-port must be an integer from 1024 through 65535"
+[[ "${warmup_seconds}" =~ ^[0-9]+$ ]] || fail "--warmup must be a non-negative integer"
+[[ "${duration_seconds}" =~ ^[1-9][0-9]*$ ]] || fail "--duration must be a positive integer"
+if [[ -n "${screenshot_after}" ]]; then
+    [[ "${screenshot_after}" =~ ^[0-9]+$ ]] || fail "--screenshot-after must be a non-negative integer"
+    (( screenshot_after < duration_seconds )) || fail "--screenshot-after must be less than --duration"
+elif [[ -n "${screenshot_output}" ]]; then
+    fail "--screenshot-output requires --screenshot-after"
+fi
+
+for command in cargo env setsid ps; do
+    command -v "${command}" >/dev/null 2>&1 || fail "required command not found: ${command}"
+done
+command -v tracy-capture >/dev/null 2>&1 || fail \
+    "tracy-capture was not found; enter nix develop /home/jonas/Dotfiles/nixos/envs/rust"
+if [[ -n "${screenshot_after}" ]]; then
+    command -v uv >/dev/null 2>&1 || fail "uv is required for offscreen composition capture"
+fi
+
+timestamp="$(date +%Y%m%d-%H%M%S)"
+if [[ -z "${output}" ]]; then
+    output="target/traces/${name}-${backend}-${timestamp}.tracy"
+fi
+if [[ "${output}" != /* ]]; then
+    output="${repository_root}/${output}"
+fi
+if [[ -e "${output}" && "${force}" != true ]]; then
+    fail "output already exists (pass --force to replace it): ${output}"
+fi
+
+if [[ -n "${screenshot_after}" ]]; then
+    if [[ -z "${screenshot_output}" ]]; then
+        screenshot_output="${output%.tracy}.png"
+    elif [[ "${screenshot_output}" != /* ]]; then
+        screenshot_output="${repository_root}/${screenshot_output}"
+    fi
+    if [[ -e "${screenshot_output}" && "${force}" != true ]]; then
+        fail "screenshot output already exists (pass --force to replace it): ${screenshot_output}"
+    fi
+fi
+
+mkdir -p -- "$(dirname -- "${output}")"
+mkdir -p -- "${repository_root}/target/profiling"
+instructions_path="${output%.tracy}.txt"
+session_pid_file="$(mktemp "${repository_root}/target/profiling/weld-session.XXXXXX")"
+
+if (( warmup_seconds > 0 )); then
+    startup_timeline="  T+0: Weld and scenario clients start.
+  T+${warmup_seconds}: tracy-capture connects; perform the manual actions."
+    analysis_guidance="Select the stable tail beginning around T+${warmup_seconds} when the warmup was chosen to settle the workload."
+else
+    startup_timeline="  T+0: Weld and scenario clients start; tracy-capture connects immediately.
+  T+0: Perform the manual actions."
+    analysis_guidance="Capture starts immediately; expect startup work at the beginning of the trace."
+fi
+
+cat >"${instructions_path}" <<EOF
+Scenario: ${name}
+Backend: ${backend}
+Tracy port: ${tracy_port}
+Warmup: ${warmup_seconds} seconds
+Capture: ${duration_seconds} seconds
+Trace: ${output}
+
+Manual actions:
+${instructions}
+
+Timeline:
+${startup_timeline}
+  T+$((warmup_seconds + duration_seconds)): capture ends and the process group stops.
+
+The default Tracy client retains startup data. ${analysis_guidance}
+EOF
+
+printf '%s\n' "$(cat -- "${instructions_path}")"
+printf '\nBuilding the optimized profiling binary before the scenario starts...\n' >&2
+cd -- "${repository_root}"
+cargo build --release -p weldwm --features profiling-tracy
+
+weld_wait_pid=""
+weld_session_pid=""
+weld_process_group=""
+warmup_pid=""
+capture_pid=""
+capture_watchdog_pid=""
+screenshot_pid=""
+screenshot_status=0
+
+child_has_exited() {
+    local child_pid="$1"
+    local process_state
+    if [[ -z "${child_pid}" ]] || ! kill -0 "${child_pid}" 2>/dev/null; then
+        return 0
+    fi
+    process_state="$(ps -o stat= -p "${child_pid}" 2>/dev/null | tr -d '[:space:]' || true)"
+    [[ -z "${process_state}" || "${process_state}" == Z* ]]
+}
+
+wait_for_child_exit() {
+    local child_pid="$1"
+    for _ in {1..50}; do
+        if child_has_exited "${child_pid}"; then
+            return 0
+        fi
+        sleep 0.1
+    done
+    return 1
+}
+
+terminate_and_reap() {
+    local child_pid="$1"
+    if [[ -z "${child_pid}" ]]; then
+        return
+    fi
+    if ! child_has_exited "${child_pid}"; then
+        kill -TERM "${child_pid}" 2>/dev/null || true
+    fi
+    if ! wait_for_child_exit "${child_pid}"; then
+        kill -KILL "${child_pid}" 2>/dev/null || true
+        wait_for_child_exit "${child_pid}" || true
+    fi
+    wait "${child_pid}" 2>/dev/null || true
+}
+
+load_process_group() {
+    local reported_pid
+    local detected_group
+    for _ in {1..50}; do
+        reported_pid=""
+        if [[ -s "${session_pid_file}" ]]; then
+            read -r reported_pid <"${session_pid_file}" || true
+        fi
+        if [[ "${reported_pid}" =~ ^[1-9][0-9]*$ ]]; then
+            detected_group="$(ps -o pgid= -p "${reported_pid}" 2>/dev/null | tr -d '[:space:]' || true)"
+            if [[ "${detected_group}" == "${reported_pid}" ]]; then
+                weld_session_pid="${reported_pid}"
+                weld_process_group="${detected_group}"
+                return 0
+            fi
+        fi
+        sleep 0.05
+    done
+    return 1
+}
+
+group_running() {
+    [[ -n "${weld_process_group}" ]] && kill -0 -- "-${weld_process_group}" 2>/dev/null
+}
+
+stop_process_group() {
+    if ! group_running; then
+        return
+    fi
+    kill -TERM -- "-${weld_process_group}" 2>/dev/null || true
+    for _ in {1..50}; do
+        if ! group_running; then
+            return
+        fi
+        sleep 0.1
+    done
+    printf 'Weld process group did not stop after SIGTERM; sending SIGKILL\n' >&2
+    kill -KILL -- "-${weld_process_group}" 2>/dev/null || true
+}
+
+cleanup() {
+    trap '' INT TERM
+    trap - EXIT
+    if [[ -n "${warmup_pid}" ]]; then
+        terminate_and_reap "${warmup_pid}"
+        warmup_pid=""
+    fi
+    if [[ -n "${capture_watchdog_pid}" ]]; then
+        terminate_and_reap "${capture_watchdog_pid}"
+        capture_watchdog_pid=""
+    fi
+    if [[ -n "${capture_pid}" ]]; then
+        terminate_and_reap "${capture_pid}"
+        capture_pid=""
+    fi
+    if [[ -n "${screenshot_pid}" ]]; then
+        terminate_and_reap "${screenshot_pid}"
+        screenshot_pid=""
+    fi
+    if [[ -z "${weld_process_group}" && -n "${weld_wait_pid}" ]]; then
+        load_process_group || true
+    fi
+    stop_process_group
+    if [[ -n "${weld_wait_pid}" ]]; then
+        if [[ -z "${weld_process_group}" ]] && ! child_has_exited "${weld_wait_pid}"; then
+            kill -TERM "${weld_wait_pid}" 2>/dev/null || true
+        fi
+        if ! wait_for_child_exit "${weld_wait_pid}"; then
+            kill -KILL "${weld_wait_pid}" 2>/dev/null || true
+            wait_for_child_exit "${weld_wait_pid}" || true
+        fi
+        wait "${weld_wait_pid}" 2>/dev/null || true
+        weld_wait_pid=""
+    fi
+    rm -f -- "${session_pid_file}"
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+weld_command=(env "TRACY_PORT=${tracy_port}" "${repository_root}/target/release/weldwm" --backend "${backend}")
+if [[ -n "${screenshot_after}" ]]; then
+    weld_command+=(--remote-debug)
+fi
+if (( ${#client[@]} > 0 )); then
+    weld_command+=(-- "${client[@]}")
+fi
+
+# The post-setsid process reports its own session-leader PID before exec. This
+# remains authoritative even if Ctrl-C kills the outer setsid monitor before
+# this runner's cleanup trap executes. Exec preserves the PID as Weld's PGID.
+setsid --fork --wait bash -c \
+    'printf "%s\n" "$$" >"$1"; shift; exec "$@"' \
+    _ "${session_pid_file}" "${weld_command[@]}" &
+weld_wait_pid=$!
+load_process_group || fail "could not identify Weld's self-reported process group"
+
+sleep "${warmup_seconds}" &
+warmup_pid=$!
+set +e
+wait -n "${weld_wait_pid}" "${warmup_pid}"
+first_status=$?
+set -e
+if ! kill -0 "${weld_wait_pid}" 2>/dev/null; then
+    warmup_pid=""
+    weld_status=${first_status}
+    weld_wait_pid=""
+    fail "Weld exited during scenario warmup with status ${weld_status}"
+fi
+warmup_pid=""
+if (( first_status != 0 )); then
+    fail "scenario warmup failed with status ${first_status}"
+fi
+
+printf '\nCapture is starting now. Perform the scenario actions for %s seconds.\n' "${duration_seconds}" >&2
+capture_command=(tracy-capture -o "${output}" -p "${tracy_port}" -s "${duration_seconds}")
+if [[ "${force}" == true ]]; then
+    capture_command+=(-f)
+fi
+"${capture_command[@]}" &
+capture_pid=$!
+if [[ -n "${screenshot_after}" ]]; then
+    (
+        sleep "${screenshot_after}"
+        uv run --project "${repository_root}/tools/remote-debug" \
+            weld-debug screenshot "${screenshot_output}"
+    ) &
+    screenshot_pid=$!
+fi
+capture_deadline_seconds=$((duration_seconds + CAPTURE_CONNECT_ALLOWANCE_SECONDS))
+sleep "${capture_deadline_seconds}" &
+capture_watchdog_pid=$!
+set +e
+wait -n "${weld_wait_pid}" "${capture_pid}" "${capture_watchdog_pid}"
+first_status=$?
+set -e
+
+if child_has_exited "${weld_wait_pid}"; then
+    terminate_and_reap "${capture_watchdog_pid}"
+    capture_watchdog_pid=""
+    weld_status=${first_status}
+    weld_wait_pid=""
+    capture_flushed=true
+    if ! wait_for_child_exit "${capture_pid}"; then
+        capture_flushed=false
+        terminate_and_reap "${capture_pid}"
+    else
+        set +e
+        wait "${capture_pid}"
+        capture_status=$?
+        set -e
+        if (( capture_status != 0 )); then
+            capture_flushed=false
+        fi
+    fi
+    capture_pid=""
+    if [[ "${capture_flushed}" == true && -s "${output}" ]]; then
+        fail "Weld exited during capture with status ${weld_status}; partial trace retained at ${output}"
+    fi
+    fail "Weld exited during capture with status ${weld_status}; Tracy could not flush a trace"
+elif child_has_exited "${capture_pid}"; then
+    capture_status=${first_status}
+    capture_pid=""
+    terminate_and_reap "${capture_watchdog_pid}"
+    capture_watchdog_pid=""
+    if [[ -n "${screenshot_pid}" ]]; then
+        set +e
+        wait "${screenshot_pid}"
+        screenshot_status=$?
+        set -e
+        screenshot_pid=""
+    fi
+    stop_process_group
+    if ! wait_for_child_exit "${weld_wait_pid}"; then
+        kill -KILL "${weld_wait_pid}" 2>/dev/null || true
+        wait_for_child_exit "${weld_wait_pid}" || true
+    fi
+    set +e
+    wait "${weld_wait_pid}"
+    weld_status=$?
+    set -e
+    weld_wait_pid=""
+    if (( capture_status != 0 )); then
+        fail "Tracy capture failed with status ${capture_status}"
+    fi
+    if (( screenshot_status != 0 )); then
+        fail "offscreen composition capture failed with status ${screenshot_status}; trace retained at ${output}"
+    fi
+    if (( weld_status != 0 )); then
+        printf 'Weld teardown returned status %s; the completed trace is retained\n' "${weld_status}" >&2
+    fi
+else
+    capture_watchdog_pid=""
+    terminate_and_reap "${capture_pid}"
+    capture_pid=""
+    fail "Tracy did not connect to port ${tracy_port} and complete within ${capture_deadline_seconds} seconds; stop any process using that port or select another with --tracy-port"
+fi
+
+trap - EXIT INT TERM
+rm -f -- "${session_pid_file}"
+printf '\nSaved trace: %s\nInstructions: %s\n' "${output}" "${instructions_path}"
+if [[ -n "${screenshot_output}" ]]; then
+    printf 'Offscreen composition: %s\n' "${screenshot_output}"
+fi

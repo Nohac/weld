@@ -15,6 +15,7 @@ use crate::server::ServerState;
 pub(crate) const FRAME_INTERVAL: Duration = Duration::from_micros(16_667);
 pub(crate) const CAPTURE_DEADLINE: Duration = Duration::from_secs(10);
 const INACTIVE_MAINTENANCE_INTERVAL: Duration = Duration::from_secs(1);
+pub(crate) const BEVY_SETTLE_COMPOSITIONS: u8 = 5;
 
 /// Data borrowed by calloop callbacks without making Smithay the owner of
 /// backend events or process policy.
@@ -86,12 +87,20 @@ impl ChildProcesses {
         program: &OsStr,
         arguments: &[OsString],
     ) -> Result<()> {
+        let _launch_span =
+            tracing::trace_span!(target: crate::PROFILE_TARGET, "host_launch_client").entered();
         let mut command = Command::new(program);
         command.args(arguments);
         configure_client_command(&mut command, &server.socket_name);
         let child = command
             .spawn()
             .with_context(|| format!("failed to spawn Wayland client {program:?}"))?;
+        tracing::trace!(
+            target: crate::PROFILE_TARGET,
+            ?program,
+            process_id = child.id(),
+            "launched Wayland client"
+        );
         self.0.push(child);
         Ok(())
     }
@@ -115,6 +124,7 @@ pub(crate) fn configure_client_command(command: &mut Command, socket_name: &OsSt
 #[derive(Debug)]
 pub(crate) struct FrameState {
     composition_dirty: bool,
+    settle_compositions_remaining: u8,
     present_needed: bool,
     next_composition: Option<Instant>,
     frame_interval: Duration,
@@ -124,6 +134,10 @@ impl Default for FrameState {
     fn default() -> Self {
         Self {
             composition_dirty: true,
+            // Bevy's own winit runner forces five startup updates because
+            // plugin startup, layout, extraction, and GPU asset preparation
+            // need not settle in one pass. Weld drives those stages manually.
+            settle_compositions_remaining: BEVY_SETTLE_COMPOSITIONS,
             present_needed: true,
             next_composition: None,
             frame_interval: FRAME_INTERVAL,
@@ -152,6 +166,11 @@ impl FrameState {
         self.present_needed
     }
 
+    #[cfg(test)]
+    pub(crate) const fn settle_compositions_remaining(&self) -> u8 {
+        self.settle_compositions_remaining
+    }
+
     pub(crate) const fn presentation_due(&self) -> bool {
         self.present_needed && !self.composition_dirty
     }
@@ -160,19 +179,28 @@ impl FrameState {
         self.composition_dirty = true;
     }
 
+    /// Request enough paced compositions for deferred Bevy work to settle.
+    ///
+    /// Structural changes such as newly mapped surface trees can span main
+    /// schedules, render extraction, asset preparation, and the GPU queue.
+    pub(crate) fn request_settled_composition(&mut self) {
+        self.composition_dirty = true;
+        self.settle_compositions_remaining = BEVY_SETTLE_COMPOSITIONS;
+    }
+
     pub(crate) fn request_present(&mut self) {
         self.present_needed = true;
     }
 
     pub(crate) fn composition_due(&self, now: Instant) -> bool {
-        self.composition_dirty && self.next_composition.is_none_or(|deadline| deadline <= now)
+        self.composition_pending() && self.next_composition.is_none_or(|deadline| deadline <= now)
     }
 
     pub(crate) fn composition_timeout(&self, now: Instant, session_active: bool) -> Duration {
         if !session_active {
             return INACTIVE_MAINTENANCE_INTERVAL;
         }
-        if !self.composition_dirty {
+        if !self.composition_pending() {
             return self.frame_interval;
         }
         self.next_composition
@@ -181,8 +209,12 @@ impl FrameState {
             .min(self.frame_interval)
     }
 
-    pub(crate) fn composition_demand_timeout(&self, now: Instant) -> Option<Duration> {
-        self.composition_dirty.then(|| {
+    pub(crate) fn composition_demand_timeout(
+        &self,
+        now: Instant,
+        session_active: bool,
+    ) -> Option<Duration> {
+        (session_active && self.composition_pending()).then(|| {
             self.next_composition
                 .map(|deadline| deadline.saturating_duration_since(now))
                 .unwrap_or(Duration::ZERO)
@@ -192,12 +224,17 @@ impl FrameState {
 
     pub(crate) fn composition_rendered(&mut self, now: Instant) {
         self.composition_dirty = false;
+        self.settle_compositions_remaining = self.settle_compositions_remaining.saturating_sub(1);
         self.present_needed = true;
         self.next_composition = Some(now + self.frame_interval);
     }
 
     pub(crate) fn presented(&mut self) {
         self.present_needed = false;
+    }
+
+    const fn composition_pending(&self) -> bool {
+        self.composition_dirty || self.settle_compositions_remaining > 0
     }
 }
 
@@ -213,9 +250,11 @@ pub(crate) const fn iteration_work(
     remote_debug_enabled: bool,
     session_active: bool,
 ) -> IterationWork {
-    let composition_advance = session_active && (composition_due || remote_debug_enabled);
+    let composition_advance = session_active && composition_due;
     IterationWork {
-        advance_main: input_pending || composition_advance,
+        // Remote debugging needs main-world service, but must not implicitly
+        // turn demand-driven composition into a continuous renderer.
+        advance_main: input_pending || composition_advance || remote_debug_enabled,
         composition_advance,
     }
 }

@@ -1,7 +1,7 @@
 use crate::renderer::{RenderAdapterInfo, RenderDevice, RenderQueue};
 use tracy_client::{Client, GpuContext, GpuContextType};
 use wgpu::{
-    Backend, BufferDescriptor, BufferUsages, CommandEncoderDescriptor, MapMode, PollType,
+    Backend, BufferDescriptor, BufferUsages, CommandEncoderDescriptor, Features, MapMode, PollType,
     QuerySetDescriptor, QueryType, QUERY_SIZE,
 };
 
@@ -10,6 +10,12 @@ pub fn new_tracy_gpu_context(
     device: &RenderDevice,
     queue: &RenderQueue,
 ) -> Option<GpuContext> {
+    let timestamp_features =
+        Features::TIMESTAMP_QUERY.union(Features::TIMESTAMP_QUERY_INSIDE_ENCODERS);
+    if !device.features().contains(timestamp_features) {
+        return None;
+    }
+
     let tracy_gpu_backend = match adapter_info.backend {
         Backend::Vulkan => GpuContextType::Vulkan,
         Backend::Dx12 => GpuContextType::Direct3D12,
@@ -30,7 +36,7 @@ pub fn new_tracy_gpu_context(
         }
     };
 
-    let tracy_client = Client::running().unwrap();
+    let tracy_client = Client::running()?;
     tracy_client
         .new_gpu_context(
             Some("RenderQueue"),

@@ -1,5 +1,7 @@
 //! Native compositor host, protocol server, GPU ownership, and backends.
 
+pub(crate) const PROFILE_TARGET: &str = "weld_profile";
+
 mod backend;
 pub mod dmabuf;
 pub mod host;
@@ -10,5 +12,6 @@ pub mod server;
 pub mod surface;
 
 pub use host::{
-    CompositionHost, HostBackend, HostBuilder, PreparedHost, PreparedRuntime, RenderContext,
+    CompositionDemand, CompositionHost, HostBackend, HostBuilder, PreparedHost, PreparedRuntime,
+    RenderContext,
 };

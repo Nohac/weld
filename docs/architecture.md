@@ -186,11 +186,31 @@ completed texture directly in both backends. Standalone DRM uses the Vulkan
 display WSI validated by the retained probe and never constructs Smithay's
 Pixman, GBM, or `DrmCompositor` presentation path. FIFO acquisition and
 presentation run on an event-driven worker so libseat, Wayland, input, and ECS
-remain responsive while a driver blocks. Bevy owns two identified composition
-targets; the host never writes the target currently owned by that worker, and
-pending compositions are bounded to the newest host-owned target. Physical
-output availability does not gate demand-driven composition or client frame
-callbacks. The DRM cursor is presentation metadata rather than a Bevy UI node:
+remain responsive while a driver blocks. The current bootstrap allocates a
+fixed pair of composition targets in `weld-core`. For each composition, core
+hands `weld-app` the view that is free for rendering; the app binds that view to
+its stable Bevy camera target. This is provisional ownership debt, not the
+intended plugin-facing composition contract: core should expose GPU/output
+capabilities and final presentation primitives, while the application layer
+requests its render targets or layers, binds them to Bevy cameras, and chooses
+how they compose. Core may enforce presenter ownership and back-pressure for
+submitted targets, but it must not hardcode the application layer graph. Until
+that boundary is refactored, the host never writes the target currently owned
+by the DRM worker, and pending compositions are bounded to the newest
+host-owned target.
+
+Physical output availability does not gate demand-driven composition or client
+frame callbacks. Startup, first client mapping, and structural shell changes
+start a bounded settling sequence because Bevy's main schedule, layout, render
+extraction, asset preparation, and GPU submission need not converge in one
+pass. Ordinary client buffer commits request one composition and never extend
+an in-flight settling sequence. Each completed intermediate composition is
+eligible for immediate presentation. The fixed budget mirrors Bevy winit's
+finite startup-update margin without turning Weld into a continuous renderer,
+but remains a stopgap until Bevy exposes a reliable signal for pending deferred
+or render-world work. Remote debugging services the main world at a bounded
+maintenance rate and on other host wakes, but does not itself create
+composition demand. The DRM cursor is presentation metadata rather than a Bevy UI node:
 cursor-only motion reuses the completed composition and updates the final wgpu
 blit without running Bevy's render app. Pointer interactions that actually
 change shell UI still request an ordinary composition. Weld advertises

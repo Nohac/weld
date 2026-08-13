@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+    cat <<'EOF'
+Usage: composition-handoff [run-scenario options]
+
+Diagnose DRM presentation when Weld starts without a client. Press Super+Enter
+as soon as Tracy capture begins. The scenario records both a trace and Weld's
+offscreen Bevy composition four seconds later.
+EOF
+    exit 0
+fi
+
+script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+instructions='Press Super+Enter as soon as capture starts, then leave the Foot window untouched. The script captures the offscreen Bevy composition after four seconds.'
+exec "${script_dir}/run-scenario" \
+    --name composition-handoff \
+    --instructions "${instructions}" \
+    --duration 8 \
+    --screenshot-after 4 \
+    "$@"

@@ -131,6 +131,12 @@ impl SurfaceTreeState {
         root: &WlSurface,
         releases: &mut DmabufReleaseStore,
     ) -> PendingSurfaceTreeSnapshot {
+        let _update_span = tracing::trace_span!(
+            target: crate::PROFILE_TARGET,
+            "smithay_surface_tree_update"
+        )
+        .entered();
+
         let mut committed = Vec::new();
         let mut root_geometry = None;
         with_surface_tree_upward(
@@ -331,6 +337,12 @@ impl SurfaceTreeState {
         root_id: ObjectId,
         mut content_updates: HashMap<ObjectId, PendingSurfaceBufferContent>,
     ) -> PendingSurfaceTreeSnapshot {
+        let _snapshot_span = tracing::trace_span!(
+            target: crate::PROFILE_TARGET,
+            "smithay_surface_tree_snapshot"
+        )
+        .entered();
+
         let client_mapped = self
             .buffers
             .get(&root_id)

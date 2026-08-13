@@ -1,5 +1,7 @@
 //! Default client- and server-decorated presentations built from ECS state.
 
+const PROFILE_TARGET: &str = "weld_profile";
+
 mod client;
 mod popup;
 mod server;
@@ -277,6 +279,16 @@ fn initialize_window_placements(
         commands
             .entity(entity)
             .insert(WindowPlacement { position, z_index });
+        tracing::trace!(
+            target: PROFILE_TARGET,
+            surface = window.surface.raw(),
+            position_x = position.x,
+            position_y = position.y,
+            width = decorated_size.x,
+            height = decorated_size.y,
+            z_index,
+            "initialized application window placement"
+        );
         focus.0 = Some(window.surface);
         actions.push(SurfaceAction::Focus {
             surface: Some(window.surface),
@@ -304,6 +316,14 @@ type ServerPresentationSourceQuery<'w, 's> = Query<
 
 fn present_client_windows(mut commands: Commands, surfaces: ClientPresentationSourceQuery) {
     for (source, window, placement, mapped) in &surfaces {
+        tracing::trace!(
+            target: PROFILE_TARGET,
+            surface = window.surface.raw(),
+            source = ?source,
+            width = mapped.logical_size.x,
+            height = mapped.logical_size.y,
+            "created client-decorated window presentation"
+        );
         commands.spawn_scene(client::scene(window.surface)).insert((
             PresentsSurface(source),
             DefaultWindow {
@@ -320,6 +340,12 @@ fn present_client_windows(mut commands: Commands, surfaces: ClientPresentationSo
 
 fn present_server_windows(mut commands: Commands, surfaces: ServerPresentationSourceQuery) {
     for (source, window, placement) in &surfaces {
+        tracing::trace!(
+            target: PROFILE_TARGET,
+            surface = window.surface.raw(),
+            source = ?source,
+            "created server-decorated window presentation"
+        );
         commands.spawn_scene(server::scene(window.surface)).insert((
             PresentsSurface(source),
             DefaultWindow {
@@ -601,6 +627,12 @@ fn sync_default_window_state(params: SyncDefaultWindowParams) {
         let display = if mapped { Display::Flex } else { Display::None };
         if node.display != display {
             node.display = display;
+            tracing::trace!(
+                target: PROFILE_TARGET,
+                surface = window.surface.raw(),
+                visible = mapped,
+                "changed application window root visibility"
+            );
         }
         if let Some(state) = state {
             z_index.0 = state.placement.z_index;

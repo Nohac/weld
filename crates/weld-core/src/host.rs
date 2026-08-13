@@ -150,9 +150,18 @@ pub struct CaptureRequest {
     pub path: PathBuf,
 }
 
+/// Amount of Bevy composition work requested by one host surface event.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CompositionDemand {
+    /// One composition is sufficient for an ordinary content update.
+    Ordinary,
+    /// Several paced compositions are required for deferred Bevy work to converge.
+    Settle,
+}
+
 /// Bevy-independent interface through which a backend drives application policy and composition.
 pub trait CompositionHost {
-    fn enqueue_surface_event(&mut self, event: PendingSurfaceEvent);
+    fn enqueue_surface_event(&mut self, event: PendingSurfaceEvent) -> CompositionDemand;
     fn enqueue_input_event(&mut self, event: RawSeatEvent);
     fn advance_main(&mut self, input_time: u32, composition_advance: bool) -> bool;
     fn render_composition(&mut self, target: wgpu::TextureView, extent: Extent) -> Result<()>;

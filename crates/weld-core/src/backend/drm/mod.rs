@@ -28,8 +28,8 @@ use tracing::{debug, error, info, warn};
 use crate::{
     dmabuf::DmabufSourceCache,
     host::{
-        CompositionHost, CompositionTargetId, CompositionTargets, PreparedHost, RenderContext,
-        RunOptions,
+        CompositionDemand, CompositionHost, CompositionTargetId, CompositionTargets, PreparedHost,
+        RenderContext, RunOptions,
     },
     input::{RawSeatEvent, RawSeatEventKind, source::libinput::LibinputAdapter},
     renderer::{CursorOverlay, read_composition_rgba, write_png},
@@ -47,6 +47,8 @@ mod presenter;
 use direct::DirectDrmGpu;
 use discovery::{DrmDeviceDiscovery, connector_name, discover_output, output_description};
 use presenter::{FrameOutcome, PresenterEvent, PresenterHandle};
+
+const REMOTE_DEBUG_MAINTENANCE_INTERVAL: Duration = Duration::from_millis(100);
 
 const PRESENTER_SHUTDOWN_DEADLINE: Duration = Duration::from_millis(250);
 
@@ -132,6 +134,9 @@ impl OutputMonitor {
 }
 
 pub(crate) fn prepare(options: RunOptions, signals: Signals) -> Result<PreparedHost> {
+    let _prepare_span =
+        tracing::trace_span!(target: crate::PROFILE_TARGET, "drm_backend_prepare").entered();
+
     let started_at = Instant::now();
     let mut calloop: CalloopEventLoop<'static, LoopData<DrmRuntimeEvent>> =
         CalloopEventLoop::try_new().context("failed to create the DRM calloop event loop")?;
@@ -302,54 +307,106 @@ pub(crate) fn prepare(options: RunOptions, signals: Signals) -> Result<PreparedH
         let mut exit_requested = false;
         while !exit_requested {
             let now = Instant::now();
-            let timeout = dispatch_timeout(&frame_state, pending_capture.as_ref(), now);
-            calloop
-                .dispatch(timeout, &mut loop_data)
-                .context("DRM calloop dispatch failed")?;
+            let timeout = dispatch_timeout(
+                &frame_state,
+                pending_capture.as_ref(),
+                remote_debug_enabled,
+                session_active,
+                now,
+            );
+            {
+                let _dispatch_span = tracing::trace_span!(
+                    target: crate::PROFILE_TARGET,
+                    "drm_calloop_wait_and_dispatch"
+                )
+                .entered();
+                calloop
+                    .dispatch(timeout, &mut loop_data)
+                    .context("DRM calloop dispatch failed")?;
+            }
 
             let mut input_pending = false;
-            while let Some(event) = loop_data.events.pop_front() {
-                match event {
-                    DrmRuntimeEvent::Input(event) => {
-                        input_pending = true;
-                        shell.enqueue_input_event(event);
-                    }
-                    DrmRuntimeEvent::Session(SessionEvent::PauseSession) => {
-                        session_active = false;
-                        presenter.suspend();
-                        input_pending = true;
-                        shell.enqueue_input_event(RawSeatEvent::new(
-                            RawSeatEventKind::HostFocusLost,
-                            started_at.elapsed().as_millis() as u32,
-                        ));
-                        info!("libseat session paused; physical presentation suspended");
-                    }
-                    DrmRuntimeEvent::Session(SessionEvent::ActivateSession) => {
-                        session_active = true;
-                        if output_monitor.connected && output_monitor.mode_compatible {
-                            presenter.activate();
+            if !loop_data.events.is_empty() {
+                let _events_span = tracing::trace_span!(
+                    target: crate::PROFILE_TARGET,
+                    "drm_runtime_event_drain"
+                )
+                .entered();
+                let mut event_counts = [0_usize; 5];
+                while let Some(event) = loop_data.events.pop_front() {
+                    match event {
+                        DrmRuntimeEvent::Input(event) => {
+                            event_counts[0] += 1;
+                            input_pending = true;
+                            shell.enqueue_input_event(event);
                         }
-                        info!("libseat session activated; presenter reconfiguration requested");
-                    }
-                    DrmRuntimeEvent::Udev(event) => {
-                        output_monitor.handle(event, &mut presenter, session_active);
-                    }
-                    DrmRuntimeEvent::Presenter(event) => {
-                        log_presenter_event(&event);
-                        presenter.handle_event(&event);
-                    }
-                    DrmRuntimeEvent::Command(command) => {
-                        exit_requested |= children.apply(&loop_data.server, command)?;
+                        DrmRuntimeEvent::Session(SessionEvent::PauseSession) => {
+                            event_counts[1] += 1;
+                            session_active = false;
+                            presenter.suspend();
+                            input_pending = true;
+                            shell.enqueue_input_event(RawSeatEvent::new(
+                                RawSeatEventKind::HostFocusLost,
+                                started_at.elapsed().as_millis() as u32,
+                            ));
+                            info!("libseat session paused; physical presentation suspended");
+                        }
+                        DrmRuntimeEvent::Session(SessionEvent::ActivateSession) => {
+                            event_counts[1] += 1;
+                            session_active = true;
+                            if output_monitor.connected && output_monitor.mode_compatible {
+                                presenter.activate();
+                            }
+                            info!("libseat session activated; presenter reconfiguration requested");
+                        }
+                        DrmRuntimeEvent::Udev(event) => {
+                            event_counts[2] += 1;
+                            output_monitor.handle(event, &mut presenter, session_active);
+                        }
+                        DrmRuntimeEvent::Presenter(event) => {
+                            event_counts[3] += 1;
+                            log_presenter_event(&event);
+                            presenter.handle_event(&event);
+                        }
+                        DrmRuntimeEvent::Command(command) => {
+                            event_counts[4] += 1;
+                            exit_requested |= children.apply(&loop_data.server, command)?;
+                        }
                     }
                 }
+                tracing::trace!(
+                    target: crate::PROFILE_TARGET,
+                    input = event_counts[0],
+                    session = event_counts[1],
+                    udev = event_counts[2],
+                    presenter = event_counts[3],
+                    command = event_counts[4],
+                    "DRM runtime event batch"
+                );
             }
             if exit_requested {
                 break;
             }
 
-            for event in loop_data.server.take_surface_events() {
-                shell.enqueue_surface_event(event);
-                frame_state.request_composition();
+            if loop_data.server.has_surface_events() {
+                let _surface_span = tracing::trace_span!(
+                    target: crate::PROFILE_TARGET,
+                    "drm_host_surface_ingress"
+                )
+                .entered();
+                let mut event_count = 0_usize;
+                for event in loop_data.server.take_surface_events() {
+                    match shell.enqueue_surface_event(event) {
+                        CompositionDemand::Ordinary => frame_state.request_composition(),
+                        CompositionDemand::Settle => frame_state.request_settled_composition(),
+                    }
+                    event_count += 1;
+                }
+                tracing::trace!(
+                    target: crate::PROFILE_TARGET,
+                    event_count,
+                    "host surface batch"
+                );
             }
             if loop_data.server.presentation_requested() {
                 frame_state.request_composition();
@@ -360,7 +417,7 @@ pub(crate) fn prepare(options: RunOptions, signals: Signals) -> Result<PreparedH
                 input_pending,
                 frame_state.composition_due(now),
                 remote_debug_enabled,
-                true,
+                session_active,
             );
             let mut request_next_composition = false;
             if work.advance_main {
@@ -378,16 +435,42 @@ pub(crate) fn prepare(options: RunOptions, signals: Signals) -> Result<PreparedH
                     cursor = next_cursor;
                     frame_state.request_present();
                 }
-                for action in shell.take_surface_actions() {
-                    loop_data.server.apply_surface_action(action);
+                let surface_actions = shell.take_surface_actions();
+                let input_effects = shell.take_input_effects();
+                let host_commands = shell.take_host_commands();
+                let virtual_terminal = shell.take_virtual_terminal_switch_request();
+                if !surface_actions.is_empty()
+                    || !input_effects.is_empty()
+                    || !host_commands.is_empty()
+                {
+                    let _results_span = tracing::trace_span!(
+                        target: crate::PROFILE_TARGET,
+                        "drm_apply_ecs_results"
+                    )
+                    .entered();
+                    tracing::trace!(
+                        target: crate::PROFILE_TARGET,
+                        surface_actions = surface_actions.len(),
+                        input_effects = input_effects.len(),
+                        host_commands = host_commands.len(),
+                        "ECS result batch"
+                    );
+                    for action in surface_actions {
+                        loop_data.server.apply_surface_action(action);
+                    }
+                    for effect in input_effects {
+                        loop_data.server.apply_input_effect(effect);
+                    }
+                    for command in host_commands {
+                        exit_requested |= children.apply(&loop_data.server, command)?;
+                    }
                 }
-                for effect in shell.take_input_effects() {
-                    loop_data.server.apply_input_effect(effect);
-                }
-                for command in shell.take_host_commands() {
-                    exit_requested |= children.apply(&loop_data.server, command)?;
-                }
-                if let Some(virtual_terminal) = shell.take_virtual_terminal_switch_request() {
+                if let Some(virtual_terminal) = virtual_terminal {
+                    let _virtual_terminal_span = tracing::trace_span!(
+                        target: crate::PROFILE_TARGET,
+                        "apply_virtual_terminal_request"
+                    )
+                    .entered();
                     presenter.suspend();
                     match session_owner.change_vt(virtual_terminal) {
                         Ok(()) => {
@@ -428,6 +511,11 @@ pub(crate) fn prepare(options: RunOptions, signals: Signals) -> Result<PreparedH
                         !capture.wait_for_client || shell.has_surface_frame()
                     });
                     if capture_ready && let Some(capture) = pending_capture.take() {
+                        let _capture_span = tracing::trace_span!(
+                            target: crate::PROFILE_TARGET,
+                            "capture_readback_encode"
+                        )
+                        .entered();
                         let result = read_composition_rgba(
                             &capture_device,
                             &capture_queue,
@@ -480,7 +568,14 @@ pub(crate) fn prepare(options: RunOptions, signals: Signals) -> Result<PreparedH
                 presenter.offer(target, targets.view(target).clone(), cursor);
                 frame_state.presented();
             }
-            loop_data.server.flush_clients();
+            {
+                let _flush_span = tracing::trace_span!(
+                    target: crate::PROFILE_TARGET,
+                    "drm_flush_wayland_clients"
+                )
+                .entered();
+                loop_data.server.flush_clients();
+            }
             children.reap();
         }
 
@@ -535,16 +630,17 @@ fn host_composition_target(
 fn dispatch_timeout(
     frame_state: &FrameState,
     capture: Option<&PendingCapture>,
+    remote_debug_enabled: bool,
+    session_active: bool,
     now: Instant,
 ) -> Option<std::time::Duration> {
-    let composition = frame_state.composition_demand_timeout(now);
+    let composition = frame_state.composition_demand_timeout(now, session_active);
+    let remote_debug = remote_debug_enabled.then_some(REMOTE_DEBUG_MAINTENANCE_INTERVAL);
     let capture = capture.map(|capture| capture.deadline.saturating_duration_since(now));
-    match (composition, capture) {
-        (Some(composition), Some(capture)) => Some(composition.min(capture)),
-        (Some(composition), None) => Some(composition),
-        (None, Some(capture)) => Some(capture),
-        (None, None) => None,
-    }
+    [composition, remote_debug, capture]
+        .into_iter()
+        .flatten()
+        .min()
 }
 
 fn log_presenter_event(event: &PresenterEvent) {
@@ -588,5 +684,32 @@ fn complete_capture(
             result.map_err(anyhow::Error::msg)?;
             Ok(true)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{FrameState, REMOTE_DEBUG_MAINTENANCE_INTERVAL, dispatch_timeout};
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn inactive_remote_debug_uses_its_maintenance_interval() {
+        let timeout = dispatch_timeout(&FrameState::default(), None, true, false, Instant::now());
+
+        assert_eq!(timeout, Some(REMOTE_DEBUG_MAINTENANCE_INTERVAL));
+    }
+
+    #[test]
+    fn inactive_composition_demand_does_not_poll_without_maintenance_work() {
+        let timeout = dispatch_timeout(&FrameState::default(), None, false, false, Instant::now());
+
+        assert_eq!(timeout, None);
+    }
+
+    #[test]
+    fn active_overdue_composition_dispatches_immediately() {
+        let timeout = dispatch_timeout(&FrameState::default(), None, false, true, Instant::now());
+
+        assert_eq!(timeout, Some(Duration::ZERO));
     }
 }

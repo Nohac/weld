@@ -169,12 +169,21 @@ impl ServerState {
         let socket_name = listening_socket.socket_name().to_os_string();
         loop_handle
             .insert_source(listening_socket, move |client_stream, _, state| {
+                let _accept_span = tracing::trace_span!(
+                    target: crate::PROFILE_TARGET,
+                    "host_accept_wayland_client"
+                )
+                .entered();
                 let state = server(state);
-                if let Err(error) = state
+                match state
                     .display_handle
                     .insert_client(client_stream, Arc::new(ClientState::default()))
                 {
-                    warn!(%error, "rejected a Wayland client");
+                    Ok(_) => tracing::trace!(
+                        target: crate::PROFILE_TARGET,
+                        "accepted Wayland client"
+                    ),
+                    Err(error) => warn!(%error, "rejected a Wayland client"),
                 }
             })
             .context("failed to register the Wayland listening socket")?;
@@ -268,6 +277,10 @@ impl ServerState {
 
     pub fn take_surface_events(&mut self) -> impl Iterator<Item = PendingSurfaceEvent> + '_ {
         self.pending_surface_events.drain(..)
+    }
+
+    pub(crate) fn has_surface_events(&self) -> bool {
+        !self.pending_surface_events.is_empty()
     }
 
     pub(crate) fn complete_dmabuf_release(&mut self, release: DmabufReleaseId) {

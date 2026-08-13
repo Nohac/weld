@@ -17,5 +17,5 @@ crates = [
   "bevy_text",
 ]
 source = "Published crates.io sources for version 0.19.1"
-refresh = "Replace each listed crate with its published source for the target Bevy release, then reapply only the relevant changes from compatibility_revision."
+refresh = "Replace each listed crate with its published source for the target Bevy release, then reapply the relevant changes from compatibility_revision and the documented manual-device Tracy timestamp guard."
 remove_when = "Weld adopts a suitable Bevy release that natively depends on wgpu 30 or newer."
