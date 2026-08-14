@@ -40,7 +40,7 @@ use crate::{
     renderer::{CursorOverlay, GpuCursor, read_composition_rgba, write_png},
     runtime::{
         ChildProcesses, FrameState, HostCommand, HostCommandEffect, LoopData, PendingCapture,
-        iteration_work, server_mut,
+        REMOTE_DEBUG_MAINTENANCE_INTERVAL, iteration_work, server_mut,
     },
     server::{OutputMetrics, ServerOptions, ServerState},
 };
@@ -52,8 +52,6 @@ mod presenter;
 use direct::DirectDrmGpu;
 use discovery::{DrmDeviceDiscovery, connector_name, discover_output, output_description};
 use presenter::{FrameOutcome, PresenterEvent, PresenterHandle};
-
-const REMOTE_DEBUG_MAINTENANCE_INTERVAL: Duration = Duration::from_millis(100);
 
 const PRESENTER_SHUTDOWN_DEADLINE: Duration = Duration::from_millis(250);
 
@@ -444,6 +442,7 @@ pub(crate) fn prepare(options: RunOptions, signals: Signals) -> Result<PreparedH
             .map(|path| PendingCapture::startup(path, child_requested));
         let remote_debug_enabled = options.remote_debug_enabled;
         let mut frame_state = FrameState::default().with_refresh_millihertz(refresh_millihertz);
+        let mut next_remote_service = Instant::now();
         let mut cursor = DrmCursor::new(
             &capture_device,
             &capture_queue,
@@ -495,7 +494,9 @@ pub(crate) fn prepare(options: RunOptions, signals: Signals) -> Result<PreparedH
                             event_counts[0] += 1;
                             input_pending = true;
                             cursor_position_changed |= cursor.observe_input(&event);
-                            shell.enqueue_input_event(event);
+                            if shell.enqueue_input_event(event.clone()) {
+                                loop_data.server.forward_raw_input(event);
+                            }
                         }
                         DrmRuntimeEvent::Session(SessionEvent::PauseSession) => {
                             event_counts[1] += 1;
@@ -508,14 +509,18 @@ pub(crate) fn prepare(options: RunOptions, signals: Signals) -> Result<PreparedH
                                 .into_iter()
                                 .flatten()
                             {
-                                shell.enqueue_input_event(event);
+                                if shell.enqueue_input_event(event.clone()) {
+                                    loop_data.server.forward_raw_input(event);
+                                }
                             }
                             let focus_lost = RawSeatEvent::new(
                                 RawSeatEventKind::HostFocusLost,
                                 loop_data.backend_state.last_event_time_msec(),
                             );
                             cursor_position_changed |= cursor.observe_input(&focus_lost);
-                            shell.enqueue_input_event(focus_lost);
+                            if shell.enqueue_input_event(focus_lost.clone()) {
+                                loop_data.server.forward_raw_input(focus_lost);
+                            }
                             info!("libseat session paused; physical presentation suspended");
                         }
                         DrmRuntimeEvent::Session(SessionEvent::ActivateSession) => {
@@ -597,6 +602,10 @@ pub(crate) fn prepare(options: RunOptions, signals: Signals) -> Result<PreparedH
                 }
             }
 
+            if input_pending {
+                frame_state.request_composition();
+            }
+
             if loop_data.server.has_surface_events() {
                 let _surface_span = tracing::trace_span!(
                     target: crate::PROFILE_TARGET,
@@ -622,18 +631,15 @@ pub(crate) fn prepare(options: RunOptions, signals: Signals) -> Result<PreparedH
             }
 
             let now = Instant::now();
-            let work = iteration_work(
-                input_pending,
-                frame_state.composition_due(now),
-                remote_debug_enabled,
-                session_active,
-            );
+            if remote_debug_enabled && now >= next_remote_service {
+                shell.service_remote_debug();
+                next_remote_service = now + REMOTE_DEBUG_MAINTENANCE_INTERVAL;
+            }
+
+            let work = iteration_work(frame_state.composition_due(now), session_active);
             let mut bevy_requested_redraw = false;
             if work.advance_main {
-                bevy_requested_redraw = shell.advance_main(
-                    started_at.elapsed().as_millis() as u32,
-                    work.composition_advance,
-                );
+                bevy_requested_redraw = shell.advance_main(started_at.elapsed().as_millis() as u32);
                 let surface_actions = shell.take_surface_actions();
                 let input_effects = shell.take_input_effects();
                 let host_commands = shell.take_host_commands();
@@ -708,9 +714,6 @@ pub(crate) fn prepare(options: RunOptions, signals: Signals) -> Result<PreparedH
                     }
                 }
                 cursor.apply_host_update(&mut loop_data.server, cursor_update, now);
-                if bevy_requested_redraw && !work.composition_advance {
-                    frame_state.request_composition();
-                }
                 if shell.should_exit() || exit_requested {
                     break;
                 }
@@ -723,7 +726,7 @@ pub(crate) fn prepare(options: RunOptions, signals: Signals) -> Result<PreparedH
                 now,
             );
 
-            if work.composition_advance {
+            if work.advance_main {
                 loop_data.server.flush_pending_resizes();
                 let target = host_composition_target(&targets, presenter.in_flight_target());
                 shell.render_composition(targets.view(target).clone(), targets.extent())?;
@@ -780,7 +783,7 @@ pub(crate) fn prepare(options: RunOptions, signals: Signals) -> Result<PreparedH
                     Err("screenshot timed out before a composition was available".to_owned()),
                 )?;
             }
-            if work.composition_advance && bevy_requested_redraw {
+            if work.advance_main && bevy_requested_redraw {
                 frame_state.request_composition();
             }
             if frame_state.presentation_due()

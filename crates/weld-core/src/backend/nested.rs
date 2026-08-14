@@ -153,6 +153,7 @@ pub(crate) fn prepare(options: RunOptions, signals: Signals) -> Result<PreparedH
             .screenshot
             .map(|path| PendingCapture::startup(path, child_requested));
         let mut frame_state = FrameState::default();
+        let mut next_remote_service = Instant::now();
         let mut pending_presentation_id = None;
 
         info!(socket = ?loop_data.server.socket_name, "Weld nested compositor is ready");
@@ -185,6 +186,7 @@ pub(crate) fn prepare(options: RunOptions, signals: Signals) -> Result<PreparedH
                 frame_state.request_present();
             }
             if input_pending {
+                frame_state.request_composition();
                 let _input_span = tracing::trace_span!(
                     target: crate::PROFILE_TARGET,
                     "nested_host_input_ingress"
@@ -192,7 +194,9 @@ pub(crate) fn prepare(options: RunOptions, signals: Signals) -> Result<PreparedH
                 .entered();
                 let mut event_count = 0_usize;
                 for event in host.input.drain() {
-                    shell.enqueue_input_event(event);
+                    if shell.enqueue_input_event(event.clone()) {
+                        loop_data.server.forward_raw_input(event);
+                    }
                     event_count += 1;
                 }
                 tracing::trace!(
@@ -298,22 +302,18 @@ pub(crate) fn prepare(options: RunOptions, signals: Signals) -> Result<PreparedH
             }
 
             let update_now = Instant::now();
-            let work = iteration_work(
-                input_pending,
-                frame_state.composition_due(update_now),
-                remote_debug_enabled,
-                true,
-            );
+            if remote_debug_enabled && update_now >= next_remote_service {
+                shell.service_remote_debug();
+                next_remote_service =
+                    update_now + crate::runtime::REMOTE_DEBUG_MAINTENANCE_INTERVAL;
+            }
+
+            let work = iteration_work(frame_state.composition_due(update_now), true);
             let mut request_next_composition = false;
             let mut command_exit_requested = false;
             if work.advance_main {
-                // `composition_advance` is intentionally the one shared predicate
-                // for applying client surfaces and running RenderApp. Never
-                // recompute the deadline between these two operations.
-                let bevy_requested_redraw = shell.advance_main(
-                    started_at.elapsed().as_millis() as u32,
-                    work.composition_advance,
-                );
+                let bevy_requested_redraw =
+                    shell.advance_main(started_at.elapsed().as_millis() as u32);
                 let surface_actions = shell.take_surface_actions();
                 let input_effects = shell.take_input_effects();
                 let host_commands = shell.take_host_commands();
@@ -351,9 +351,6 @@ pub(crate) fn prepare(options: RunOptions, signals: Signals) -> Result<PreparedH
                 if let Some(appearance) = cursor_update.appearance {
                     loop_data.server.set_shell_cursor(appearance);
                 }
-                if bevy_requested_redraw && !work.composition_advance {
-                    frame_state.request_composition();
-                }
                 if shell.should_exit() {
                     if pending_capture
                         .as_ref()
@@ -366,7 +363,7 @@ pub(crate) fn prepare(options: RunOptions, signals: Signals) -> Result<PreparedH
                 if command_exit_requested {
                     break;
                 }
-                if work.composition_advance {
+                if work.advance_main {
                     loop_data.server.flush_pending_resizes();
                     let target = crate::host::CompositionTargetId::FIRST;
                     shell.render_composition(targets.view(target).clone(), targets.extent())?;
@@ -708,38 +705,19 @@ mod tests {
     #[test]
     fn iteration_work_pairs_every_composition_with_one_main_advance() {
         assert_eq!(
-            iteration_work(false, true, false, true),
-            IterationWork {
-                advance_main: true,
-                composition_advance: true,
-            }
+            iteration_work(true, true),
+            IterationWork { advance_main: true }
         );
         assert_eq!(
-            iteration_work(true, false, false, true),
-            IterationWork {
-                advance_main: true,
-                composition_advance: false,
-            }
-        );
-        assert_eq!(
-            iteration_work(false, false, true, true),
-            IterationWork {
-                advance_main: true,
-                composition_advance: false,
-            }
-        );
-        assert_eq!(
-            iteration_work(false, false, false, true),
+            iteration_work(false, true),
             IterationWork {
                 advance_main: false,
-                composition_advance: false,
             }
         );
         assert_eq!(
-            iteration_work(false, true, true, false),
+            iteration_work(true, false),
             IterationWork {
-                advance_main: true,
-                composition_advance: false,
+                advance_main: false,
             }
         );
     }

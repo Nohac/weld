@@ -13,6 +13,7 @@ use anyhow::{Context, Result};
 use crate::server::ServerState;
 
 pub(crate) const FRAME_INTERVAL: Duration = Duration::from_micros(16_667);
+pub(crate) const REMOTE_DEBUG_MAINTENANCE_INTERVAL: Duration = Duration::from_millis(100);
 pub(crate) const CAPTURE_DEADLINE: Duration = Duration::from_secs(10);
 const INACTIVE_MAINTENANCE_INTERVAL: Duration = Duration::from_secs(1);
 pub(crate) const BEVY_SETTLE_COMPOSITIONS: u8 = 5;
@@ -276,21 +277,11 @@ impl FrameState {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct IterationWork {
     pub(crate) advance_main: bool,
-    pub(crate) composition_advance: bool,
 }
 
-pub(crate) const fn iteration_work(
-    input_pending: bool,
-    composition_due: bool,
-    remote_debug_enabled: bool,
-    session_active: bool,
-) -> IterationWork {
-    let composition_advance = session_active && composition_due;
+pub(crate) const fn iteration_work(composition_due: bool, session_active: bool) -> IterationWork {
     IterationWork {
-        // Remote debugging needs main-world service, but must not implicitly
-        // turn demand-driven composition into a continuous renderer.
-        advance_main: input_pending || composition_advance || remote_debug_enabled,
-        composition_advance,
+        advance_main: session_active && composition_due,
     }
 }
 

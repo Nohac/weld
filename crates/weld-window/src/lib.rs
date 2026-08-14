@@ -25,13 +25,10 @@ use bevy::{
     math::{UVec2, Vec2},
     picking::PickingSystems,
 };
-use weld_app::{
-    composition::composition_advance_requested,
-    surface::{
-        ClientDecorated, ClientToplevel, MappedSurface, SurfaceAction, SurfaceActionQueue,
-        SurfaceCommitRevisions, SurfaceId, SurfaceSystems, ToplevelInteractionRequest,
-        ToplevelInteractionRequestKind, ToplevelResizeEdge,
-    },
+use weld_app::surface::{
+    ClientDecorated, ClientToplevel, MappedSurface, SurfaceAction, SurfaceActionQueue,
+    SurfaceCommitRevisions, SurfaceId, SurfaceSystems, ToplevelInteractionRequest,
+    ToplevelInteractionRequestKind, ToplevelResizeEdge,
 };
 
 /// Stable process-independent identity for a managed window.
@@ -308,63 +305,50 @@ impl Plugin for WindowPlugin {
             )
             .add_systems(
                 PreUpdate,
-                admit_mapped_toplevels
-                    .run_if(composition_advance_requested)
-                    .in_set(WindowSystems::Admission),
+                admit_mapped_toplevels.in_set(WindowSystems::Admission),
             )
             .add_systems(
                 PreUpdate,
                 ApplyDeferred
-                    .run_if(composition_advance_requested)
                     .after(WindowSystems::Admission)
                     .before(WindowSystems::PresentationRevoke),
             )
             .add_systems(
                 PreUpdate,
                 ApplyDeferred
-                    .run_if(composition_advance_requested)
                     .after(WindowSystems::PresentationRevoke)
                     .before(WindowSystems::PresentationClaim),
             )
             .add_systems(
                 PreUpdate,
                 ApplyDeferred
-                    .run_if(composition_advance_requested)
                     .after(WindowSystems::PresentationClaim)
                     .before(WindowSystems::PresentationMetrics),
             )
             .add_systems(
                 PreUpdate,
                 ApplyDeferred
-                    .run_if(composition_advance_requested)
                     .after(WindowSystems::Interaction)
                     .before(WindowSystems::Management),
             )
             .add_systems(
                 PreUpdate,
                 ApplyDeferred
-                    .run_if(composition_advance_requested)
                     .after(WindowSystems::UiReconcile)
                     .before(PickingSystems::Backend),
             )
             .add_systems(
                 PreUpdate,
                 (
-                    reconcile_presentation_insets
-                        .run_if(composition_advance_requested)
-                        .in_set(WindowSystems::PresentationMetrics),
+                    reconcile_presentation_insets.in_set(WindowSystems::PresentationMetrics),
                     (invalidate_interactions, handle_protocol_interactions)
                         .chain()
-                        .run_if(composition_advance_requested)
                         .in_set(WindowSystems::Interaction),
                     (reconcile_window_sizes, remove_unretained_vacancies)
                         .chain()
-                        .run_if(composition_advance_requested)
                         .in_set(WindowSystems::UiReconcile),
                     (
-                        (synchronize_registry, reconcile_window_sizes)
-                            .chain()
-                            .run_if(composition_advance_requested),
+                        (synchronize_registry, reconcile_window_sizes).chain(),
                         reconcile_client_focus,
                     )
                         .chain()
@@ -760,19 +744,16 @@ pub fn rounded_client_size(size: Vec2) -> UVec2 {
 #[cfg(test)]
 mod tests {
     use bevy::{app::App, math::Vec2};
-    use weld_app::{
-        composition::CompositionPlugin,
-        surface::{
-            ClientDecorated, ClientToplevel, MappedSurface, SurfaceAction, SurfaceActionQueue,
-            SurfaceId, ToplevelInteractionRequest, take_surface_actions,
-        },
+    use weld_app::surface::{
+        ClientDecorated, ClientToplevel, MappedSurface, SurfaceAction, SurfaceActionQueue,
+        SurfaceId, ToplevelInteractionRequest, take_surface_actions,
     };
 
     use super::*;
 
     fn test_app() -> App {
         let mut app = App::new();
-        app.add_plugins((CompositionPlugin, WindowPlugin))
+        app.add_plugins(WindowPlugin)
             .init_resource::<SurfaceActionQueue>()
             .add_message::<ToplevelInteractionRequest>();
         app

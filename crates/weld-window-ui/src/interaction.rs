@@ -11,7 +11,7 @@ use bevy::{
         system::{Commands, Query, Res, SystemParam},
     },
     picking::{
-        events::{Cancel, Drag, DragEnd, Pointer, Press},
+        events::{Cancel, Drag, Pointer, Press, Release},
         pointer::PointerButton,
     },
     ui::{ComputedNode, UiScale},
@@ -246,24 +246,33 @@ pub(crate) fn drag_window(mut drag: On<Pointer<Drag>>, params: DragWindowParams)
     redraw.write(RequestRedraw);
 }
 
-pub(crate) fn end_drag(
-    drag_end: On<Pointer<DragEnd>>,
+pub(crate) fn end_interaction_on_release(
+    mut release: On<Pointer<Release>>,
     mut commands: Commands,
-    presentations: Query<&PresentsWindow>,
-    parents: Query<&ChildOf>,
-    interactions: Query<&WindowInteractionSession>,
+    interactions: Query<(Entity, &WindowInteractionSession)>,
+    mut redraw: bevy::ecs::message::MessageWriter<RequestRedraw>,
 ) {
-    if drag_end.button != PointerButton::Primary {
+    if release.button != PointerButton::Primary {
         return;
     }
-    let Some(window) = presented_window(drag_end.entity, &presentations, &parents) else {
-        return;
-    };
-    if interactions.get(window).is_ok() {
+
+    let mut ended_interaction = false;
+    for (window, interaction) in &interactions {
+        if interaction.phase != WindowInteractionPhase::Active {
+            continue;
+        }
         commands.trigger(WindowIntent {
             window,
             kind: WindowIntentKind::InteractionEnded,
         });
+        ended_interaction = true;
+    }
+    if ended_interaction {
+        release.propagate(false);
+        // Cursor resolution may already have observed the active interaction
+        // in this frame. Guarantee one follow-up frame to publish the hover
+        // cursor after the interaction session is removed.
+        redraw.write(RequestRedraw);
     }
 }
 
@@ -273,6 +282,7 @@ pub(crate) fn cancel_drag(
     presentations: Query<&PresentsWindow>,
     parents: Query<&ChildOf>,
     interactions: Query<&WindowInteractionSession>,
+    mut redraw: bevy::ecs::message::MessageWriter<RequestRedraw>,
 ) {
     let Some(window) = presented_window(cancel.entity, &presentations, &parents) else {
         return;
@@ -282,6 +292,7 @@ pub(crate) fn cancel_drag(
             window,
             kind: WindowIntentKind::InteractionEnded,
         });
+        redraw.write(RequestRedraw);
     }
 }
 
@@ -384,7 +395,7 @@ mod tests {
         math::{Vec2, Vec3},
         picking::{
             backend::HitData,
-            events::{Drag, Pointer, Press},
+            events::{Drag, Pointer, Press, Release},
             pointer::{Location, PointerButton, PointerId},
         },
         sprite::BorderRect,
@@ -399,7 +410,8 @@ mod tests {
 
     use super::{
         WindowMoveHandle, WindowResizeFrame, WindowResizeHandle, activate_window,
-        begin_resize_frame, begin_resize_handle, drag_window, logical_drag_delta, resize_edge_at,
+        begin_resize_frame, begin_resize_handle, drag_window, end_interaction_on_release,
+        logical_drag_delta, resize_edge_at,
     };
 
     #[derive(Resource, Default)]
@@ -652,6 +664,50 @@ mod tests {
         assert_eq!(
             app.world().resource::<RecordedInteractions>().intents,
             vec![WindowIntentKind::Activate]
+        );
+        assert_eq!(
+            redraws
+                .read(
+                    app.world()
+                        .resource::<bevy::ecs::message::Messages<RequestRedraw>>()
+                )
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn primary_release_ends_an_active_interaction_without_a_drag() {
+        let mut app = App::new();
+        app.add_message::<RequestRedraw>()
+            .init_resource::<RecordedInteractions>()
+            .add_observer(end_interaction_on_release)
+            .add_observer(record_intent);
+        app.world_mut().spawn(WindowInteractionSession {
+            kind: WindowInteractionKind::Resize(ToplevelResizeEdge::Left),
+            phase: WindowInteractionPhase::Active,
+        });
+        let pointer_target = app.world_mut().spawn_empty().id();
+        let camera = app.world_mut().spawn_empty().id();
+        let mut redraws = MessageCursor::<RequestRedraw>::default();
+
+        app.world_mut().trigger(Pointer::new(
+            PointerId::Mouse,
+            Location {
+                target: NormalizedRenderTarget::TextureView(ManualTextureViewHandle(1)),
+                position: Vec2::ZERO,
+            },
+            Release {
+                button: PointerButton::Primary,
+                hit: HitData::new(camera, 0.0, None, None),
+            },
+            pointer_target,
+        ));
+        app.update();
+
+        assert_eq!(
+            app.world().resource::<RecordedInteractions>().intents,
+            vec![WindowIntentKind::InteractionEnded]
         );
         assert_eq!(
             redraws

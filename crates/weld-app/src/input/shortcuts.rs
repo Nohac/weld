@@ -3,32 +3,25 @@
 use std::collections::{HashSet, VecDeque};
 
 use bevy::{
-    app::{App, Plugin, PreUpdate},
-    ecs::{
-        component::Component,
-        resource::Resource,
-        schedule::IntoScheduleConfigs,
-        system::{Query, Res, ResMut},
-        world::World,
-    },
+    app::{App, Plugin},
+    ecs::{resource::Resource, world::World},
     input::keyboard::KeyCode,
     prelude::Reflect,
 };
 use leafwing_input_manager::{
-    plugin::{InputManagerPlugin, InputManagerSystem},
-    prelude::{ActionState, Actionlike, ButtonlikeChord, InputMap, ModifierKey},
+    plugin::InputManagerPlugin,
+    prelude::{Actionlike, ButtonlikeChord, InputMap, ModifierKey},
 };
 
 use super::{
-    InputSystems,
     raw::{ButtonState, LinuxKeycode, RawSeatEvent, RawSeatEventKind},
-    state::{ConsumedShortcutKeys, PendingSeatInput},
+    state::ConsumedShortcutKeys,
 };
 use crate::{ActiveBackend, WeldAppExt};
 use weld_core::runtime::{HostCommand, OutputScaleAdjustment};
 
 #[derive(Actionlike, Clone, Copy, Debug, Eq, Hash, PartialEq, Reflect)]
-enum GlobalAction {
+pub(super) enum GlobalAction {
     Terminal,
     Firefox,
     Blender,
@@ -129,11 +122,14 @@ const GLOBAL_SHORTCUTS: [GlobalShortcutDefinition; 6] = [
     },
 ];
 
-#[derive(Component)]
-struct GlobalShortcutBindings(Vec<GlobalShortcutDefinition>);
-
 #[derive(Resource, Default)]
 struct GlobalHostCommands(VecDeque<HostCommand>);
+
+#[derive(Resource)]
+struct RawGlobalShortcutState {
+    shortcuts: Vec<GlobalShortcutDefinition>,
+    pressed: HashSet<LinuxKeycode>,
+}
 
 pub struct GlobalShortcutPlugin;
 
@@ -147,14 +143,11 @@ impl Plugin for GlobalShortcutPlugin {
         let input_map = global_shortcut_map(&shortcuts);
         app.add_plugins(InputManagerPlugin::<GlobalAction>::default())
             .init_resource::<GlobalHostCommands>()
-            .add_systems(
-                PreUpdate,
-                collect_global_shortcuts
-                    .after(InputManagerSystem::Update)
-                    .before(InputSystems::Resolve),
-            );
-        app.world_mut()
-            .spawn((GlobalShortcutBindings(shortcuts), input_map));
+            .insert_resource(RawGlobalShortcutState {
+                shortcuts: shortcuts.clone(),
+                pressed: HashSet::new(),
+            });
+        app.world_mut().spawn(input_map);
     }
 }
 
@@ -166,36 +159,74 @@ fn global_shortcut_map(shortcuts: &[GlobalShortcutDefinition]) -> InputMap<Globa
     input_map
 }
 
-fn collect_global_shortcuts(
-    bindings: Query<(&ActionState<GlobalAction>, &GlobalShortcutBindings)>,
-    pending: Res<PendingSeatInput>,
-    mut commands: ResMut<GlobalHostCommands>,
-    mut consumed: ResMut<ConsumedShortcutKeys>,
-) {
-    let Some((actions, shortcuts)) = bindings.iter().next() else {
-        return;
-    };
-    for shortcut in &shortcuts.0 {
-        if actions.just_pressed(&shortcut.action)
-            && contains_key_press(&pending.0, shortcut.trigger)
+pub(crate) fn filter_global_shortcut_event(world: &mut World, event: &RawSeatEvent) -> bool {
+    let RawSeatEventKind::Keyboard { keycode, state, .. } = &event.event else {
+        if matches!(event.event, RawSeatEventKind::HostFocusLost)
+            && let Some(mut shortcuts) = world.get_resource_mut::<RawGlobalShortcutState>()
         {
-            consumed.0.insert(shortcut.trigger);
-            commands.0.push_back(shortcut.host_command());
+            shortcuts.pressed.clear();
+            if let Some(mut consumed) = world.get_resource_mut::<ConsumedShortcutKeys>() {
+                consumed.0.clear();
+            }
         }
+        return false;
+    };
+
+    let command = {
+        let Some(mut shortcuts) = world.get_resource_mut::<RawGlobalShortcutState>() else {
+            return false;
+        };
+        let newly_pressed = match state {
+            ButtonState::Pressed => shortcuts.pressed.insert(*keycode),
+            ButtonState::Released => {
+                shortcuts.pressed.remove(keycode);
+                false
+            }
+        };
+        if !newly_pressed {
+            None
+        } else {
+            let super_pressed = modifier_pressed(&shortcuts.pressed, &[125, 126]);
+            let shift_pressed = modifier_pressed(&shortcuts.pressed, &[42, 54]);
+            shortcuts
+                .shortcuts
+                .iter()
+                .find(|shortcut| {
+                    shortcut.trigger == *keycode
+                        && super_pressed
+                        && (!shortcut.shift || shift_pressed)
+                })
+                .copied()
+                .map(GlobalShortcutDefinition::host_command)
+        }
+    };
+
+    let consumed = world
+        .get_resource::<ConsumedShortcutKeys>()
+        .is_some_and(|consumed| consumed.0.contains(keycode));
+    if let Some(command) = command {
+        if let Some(mut consumed) = world.get_resource_mut::<ConsumedShortcutKeys>() {
+            consumed.0.insert(*keycode);
+        }
+        if let Some(mut commands) = world.get_resource_mut::<GlobalHostCommands>() {
+            commands.0.push_back(command);
+        }
+        true
+    } else {
+        if consumed
+            && *state == ButtonState::Released
+            && let Some(mut consumed) = world.get_resource_mut::<ConsumedShortcutKeys>()
+        {
+            consumed.0.remove(keycode);
+        }
+        consumed
     }
 }
 
-fn contains_key_press(events: &VecDeque<RawSeatEvent>, trigger: LinuxKeycode) -> bool {
-    events.iter().any(|event| {
-        matches!(
-            &event.event,
-            RawSeatEventKind::Keyboard {
-                keycode,
-                state: ButtonState::Pressed,
-                ..
-            } if *keycode == trigger
-        )
-    })
+fn modifier_pressed(pressed: &HashSet<LinuxKeycode>, keycodes: &[u32]) -> bool {
+    keycodes
+        .iter()
+        .any(|keycode| pressed.contains(&LinuxKeycode(*keycode)))
 }
 
 pub(crate) fn take_host_commands(world: &mut World) -> Vec<HostCommand> {
@@ -203,52 +234,4 @@ pub(crate) fn take_host_commands(world: &mut World) -> Vec<HostCommand> {
         .get_resource_mut::<GlobalHostCommands>()
         .map(|mut commands| commands.0.drain(..).collect())
         .unwrap_or_default()
-}
-
-pub(super) fn consume_shortcut_event(
-    consumed: &mut HashSet<LinuxKeycode>,
-    event: &RawSeatEvent,
-) -> bool {
-    match &event.event {
-        RawSeatEventKind::Keyboard { keycode, state, .. } if consumed.contains(keycode) => {
-            if *state == ButtonState::Released {
-                consumed.remove(keycode);
-            }
-            true
-        }
-        RawSeatEventKind::HostFocusLost => {
-            consumed.clear();
-            false
-        }
-        _ => false,
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use std::collections::HashSet;
-
-    use super::consume_shortcut_event;
-    use crate::input::raw::{ButtonState, LinuxKeycode, RawSeatEvent, RawSeatEventKind};
-
-    #[test]
-    fn host_focus_loss_clears_a_consumed_shortcut_release() {
-        let mut consumed = HashSet::from([LinuxKeycode(33)]);
-        assert!(!consume_shortcut_event(
-            &mut consumed,
-            &RawSeatEvent::new(RawSeatEventKind::HostFocusLost, 20),
-        ));
-        assert!(consumed.is_empty());
-        assert!(!consume_shortcut_event(
-            &mut consumed,
-            &RawSeatEvent::new(
-                RawSeatEventKind::Keyboard {
-                    keycode: LinuxKeycode(33),
-                    logical_key: None,
-                    state: ButtonState::Released,
-                },
-                21,
-            ),
-        ));
-    }
 }

@@ -230,6 +230,7 @@ impl ServerState {
             }
             pointer.set_grab(self, PopupPointerGrab::new(&grab), serial, Focus::Keep);
         }
+        self.ordinary_implicit_grab = None;
         self.popup_grab = Some(grab);
     }
 

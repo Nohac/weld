@@ -17,6 +17,7 @@ use bevy::{
     log::LogPlugin,
     math::UVec2,
     prelude::{ChildOf, Color, DefaultPlugins, Entity, LayoutConfig, Node, With, Without},
+    remote::RemoteLast,
     render::{
         RenderApp, RenderPlugin,
         renderer::{
@@ -31,13 +32,13 @@ use bevy::{
     window::{ExitCondition, RequestRedraw, WindowPlugin},
 };
 
-use crate::composition::set_composition_advance;
 use crate::cursor::{CursorHostTracker, CursorPlugin, take_cursor_update};
 use crate::debug::{complete_capture, take_capture_request};
 use crate::dmabuf::DmabufImporter;
 use crate::input::{
-    InputBridgePlugin, enqueue_raw_input, projected_pointer_position, set_input_update_time,
-    take_host_commands, take_input_effects, take_virtual_terminal_switch_request,
+    InputBridgePlugin, enqueue_raw_input, filter_global_shortcut_event,
+    filter_virtual_terminal_event, set_input_update_time, take_host_commands, take_input_effects,
+    take_virtual_terminal_switch_request,
 };
 use crate::output::OutputGeometry;
 use crate::surface::{
@@ -48,7 +49,7 @@ use crate::surface::{
     has_surface_frame, publish_surface_bindings, take_surface_actions,
 };
 use weld_core::host::{CaptureRequest, RenderContext};
-use weld_core::input::{InputPosition, RawSeatEvent, SeatInputEffect};
+use weld_core::input::{RawSeatEvent, SeatInputEffect};
 use weld_core::runtime::HostCommand;
 use weld_core::server::{
     PendingSurfaceBufferContent, PendingSurfaceEvent, PendingSurfaceEventKind,
@@ -123,7 +124,6 @@ impl WeldAppPlugin {
 impl Plugin for WeldAppPlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins((
-            crate::composition::CompositionPlugin,
             CursorPlugin,
             crate::surface::SurfacePlugin,
             InputBridgePlugin::new(NormalizedRenderTarget::TextureView(COMPOSITION_VIEW)),
@@ -204,31 +204,24 @@ impl AppShell {
         })
     }
 
-    /// Advance Bevy policy and input without necessarily extracting or rendering.
-    ///
-    /// The host must call this exactly once for each logical advance. Client
-    /// surface events are applied only when `composition_advance` is true, so
-    /// their asset events remain paired with [`Self::render_composition`].
-    /// Bevy time advances here at input/policy rate rather than render rate;
-    /// systems must use time deltas instead of assuming one update per frame.
-    pub fn advance_main(&mut self, input_time: u32, composition_advance: bool) -> bool {
-        let _advance_span = if composition_advance {
+    /// Advance Bevy policy once for the composition frame being prepared.
+    pub fn advance_main(&mut self, input_time: u32) -> bool {
+        let _advance_span =
             tracing::trace_span!(target: crate::PROFILE_TARGET, "weld_app_advance_composition")
-                .entered()
-        } else {
-            tracing::trace_span!(target: crate::PROFILE_TARGET, "weld_app_advance_input").entered()
-        };
-
+                .entered();
         set_input_update_time(self.app.world_mut(), input_time);
-        set_composition_advance(self.app.world_mut(), composition_advance);
         advance_main_app(&mut self.app, &mut self.redraw_requests)
+    }
+
+    pub fn service_remote_debug(&mut self) {
+        let _ = self.app.world_mut().try_run_schedule(RemoteLast);
     }
 
     /// Extract the preceding main-world advance and render Weld's composition.
     ///
     /// Construction pins Weld to Bevy's current non-pipelined [`RenderApp`].
-    /// Main-world trackers are retained across input-only advances and cleared
-    /// only after extraction has observed them.
+    /// Main-world trackers are cleared only after extraction has observed the
+    /// refresh-paced application frame.
     pub fn render_composition(&mut self, target: wgpu::TextureView, extent: Extent) -> Result<()> {
         let _composition_span =
             tracing::trace_span!(target: crate::PROFILE_TARGET, "weld_render_composition")
@@ -438,12 +431,11 @@ impl AppShell {
         }
     }
 
-    pub fn enqueue_input_event(&mut self, event: RawSeatEvent) {
+    pub fn enqueue_input_event(&mut self, event: RawSeatEvent) -> bool {
+        let consumed = filter_global_shortcut_event(self.app.world_mut(), &event)
+            | filter_virtual_terminal_event(self.app.world_mut(), &event);
         enqueue_raw_input(self.app.world_mut(), event);
-    }
-
-    pub(crate) fn pointer_position(&self) -> Option<InputPosition> {
-        projected_pointer_position(self.app.world())
+        !consumed
     }
 
     pub fn take_input_effects(&mut self) -> Vec<SeatInputEffect> {
@@ -504,12 +496,16 @@ impl CompositionHost for AppShell {
         AppShell::enqueue_surface_event(self, event)
     }
 
-    fn enqueue_input_event(&mut self, event: RawSeatEvent) {
-        AppShell::enqueue_input_event(self, event);
+    fn enqueue_input_event(&mut self, event: RawSeatEvent) -> bool {
+        AppShell::enqueue_input_event(self, event)
     }
 
-    fn advance_main(&mut self, input_time: u32, composition_advance: bool) -> bool {
-        AppShell::advance_main(self, input_time, composition_advance)
+    fn advance_main(&mut self, input_time: u32) -> bool {
+        AppShell::advance_main(self, input_time)
+    }
+
+    fn service_remote_debug(&mut self) {
+        AppShell::service_remote_debug(self);
     }
 
     fn render_composition(&mut self, target: wgpu::TextureView, extent: Extent) -> Result<()> {
@@ -527,10 +523,6 @@ impl CompositionHost for AppShell {
 
     fn should_exit(&self) -> bool {
         AppShell::should_exit(self)
-    }
-
-    fn pointer_position(&self) -> Option<InputPosition> {
-        AppShell::pointer_position(self)
     }
 
     fn take_input_effects(&mut self) -> Vec<SeatInputEffect> {

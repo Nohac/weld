@@ -6,9 +6,10 @@ use anyhow::{Context, Result, bail};
 use bevy::{
     app::{App, Plugin},
     ecs::reflect::{ReflectMessage, ReflectResource},
-    prelude::{Message, MessageReader, Reflect, ResMut, Resource, Update, World},
+    ecs::schedule::IntoScheduleConfigs,
+    prelude::{Message, MessageReader, Reflect, ResMut, Resource, World},
     remote::{
-        RemoteMethods, RemotePlugin,
+        RemoteLast, RemoteMethods, RemotePlugin, RemoteSystems,
         builtin_methods::{BRP_GET_RESOURCE_METHOD, BRP_WRITE_MESSAGE_METHOD, RPC_DISCOVER_METHOD},
         http::RemoteHttpPlugin,
     },
@@ -70,7 +71,10 @@ impl Plugin for DebugProtocolPlugin {
             .add_message::<RemoteScreenshotRequest>()
             .init_resource::<RemoteDebugStatus>()
             .init_resource::<DebugBridge>()
-            .add_systems(Update, collect_remote_screenshot_requests);
+            .add_systems(
+                RemoteLast,
+                collect_remote_screenshot_requests.after(RemoteSystems::ProcessRequests),
+            );
     }
 }
 

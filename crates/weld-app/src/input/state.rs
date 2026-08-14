@@ -19,9 +19,10 @@ pub(super) fn register(app: &mut App) {
 #[derive(Resource, Default)]
 pub(super) struct PendingSeatInput(pub(super) VecDeque<RawSeatEvent>);
 
-/// Projection and protocol routing deliberately own separate instances: the
-/// former advances in First, while the latter replays lossless events in
-/// PreUpdate. Merging them collapses every batch to its final pointer state.
+/// Projection and frame-paced focus publication deliberately own separate
+/// instances: the former advances in First, while the latter replays lossless
+/// events in PreUpdate. Merging them collapses every batch to its final pointer
+/// state.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub(super) struct PointerPositionState {
     pub(super) host_position: Option<InputPosition>,
@@ -54,10 +55,4 @@ pub(crate) fn set_input_update_time(world: &mut World, time: u32) {
     if let Some(mut update_time) = world.get_resource_mut::<InputUpdateTime>() {
         update_time.0 = time;
     }
-}
-
-pub(crate) fn projected_pointer_position(world: &World) -> Option<InputPosition> {
-    world
-        .get_resource::<ProjectedPointerState>()
-        .and_then(|pointer| pointer.0.host_position)
 }

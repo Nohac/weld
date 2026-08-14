@@ -32,10 +32,15 @@ projects the committed result into application policy.
 ## Current input path — Implemented
 
 Nested winit input and DRM/libinput input enter through separate adapters,
-then share timestamped, seat-aware raw records, projection, routing, shortcut,
-and client-delivery layers. The nested adapter respects the host compositor's
-logical key mapping; the direct backend owns its keymap. Cursor-only DRM motion
-can update presentation without running a full Bevy composition.
+then share timestamped, seat-aware raw records. Reserved compositor shortcuts
+are filtered synchronously; every other event is delivered to the focused
+client at input pace through Smithay and retained for lossless Bevy/Leafwing
+projection on the next refresh-paced application frame. Bevy picking publishes
+the client layer and coordinate transform that core retains between frames.
+The nested adapter respects the host compositor's logical key mapping; the
+direct backend owns its keymap. DRM cursor motion can update presentation
+immediately from the completed composition, while also requesting one
+refresh-capped application composition for Bevy/Leafwing input and picking.
 
 Standalone DRM touchpads use clickfinger when the device supports it, mapping
 one, two, and three-finger physical clicks to left, right, and middle buttons.

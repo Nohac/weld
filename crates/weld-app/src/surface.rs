@@ -40,8 +40,6 @@ use tracing::warn;
 use weld_core::dmabuf::ImportId;
 pub use weld_core::surface::{SurfaceId, SurfaceLayerId};
 
-use crate::composition::composition_advance_requested;
-
 #[path = "surface/binding.rs"]
 mod binding;
 pub(crate) use binding::publish_surface_bindings;
@@ -450,14 +448,11 @@ impl Plugin for SurfacePlugin {
             // Asset change collection and UI measurement happen later in the frame.
             .add_systems(
                 PreUpdate,
-                apply_host_surface_events
-                    .run_if(composition_advance_requested)
-                    .in_set(SurfaceSystems::Ingress),
+                apply_host_surface_events.in_set(SurfaceSystems::Ingress),
             )
             .add_systems(
                 PreUpdate,
                 sync_surface_nodes
-                    .run_if(composition_advance_requested)
                     .after(SurfaceSystems::FallbackPresentation)
                     .before(PickingSystems::Backend),
             );
@@ -1579,8 +1574,6 @@ fn unpremultiply_bgra(pixels: &mut [u8]) {
 mod tests {
     use bevy::{app::App, asset::AssetApp, ecs::change_detection::DetectChanges};
 
-    use crate::composition::{CompositionPlugin, set_composition_advance};
-
     use super::*;
 
     fn test_app() -> App {
@@ -1591,7 +1584,7 @@ mod tests {
         ));
         app.init_asset::<Shader>()
             .insert_resource(Assets::<Image>::default())
-            .add_plugins((CompositionPlugin, SurfacePlugin));
+            .add_plugins(SurfacePlugin);
         app
     }
 
@@ -1940,39 +1933,6 @@ mod tests {
                 .revision(surface),
             revision + 1
         );
-    }
-
-    #[test]
-    fn input_only_advances_keep_latest_tree_pixels_queued() {
-        let mut app = test_app();
-        let surface = SurfaceId::new(5);
-        set_composition_advance(app.world_mut(), false);
-        register_window(&mut app, surface);
-        enqueue_surface_event(
-            app.world_mut(),
-            snapshot_event(surface, root_snapshot(Some([1, 2, 3, 255]))),
-        );
-        enqueue_surface_event(
-            app.world_mut(),
-            snapshot_event(surface, root_snapshot(Some([4, 5, 6, 255]))),
-        );
-        app.update();
-        app.update();
-        let mut mapped = app.world_mut().query::<&MappedSurface>();
-        assert_eq!(mapped.iter(app.world()).count(), 0);
-
-        set_composition_advance(app.world_mut(), true);
-        app.update();
-        let mut content = app.world_mut().query::<&SurfaceContent>();
-        let content = content
-            .single(app.world())
-            .expect("queued root should compose");
-        let image = app
-            .world()
-            .resource::<Assets<Image>>()
-            .get(&content.root.image)
-            .expect("root asset should exist");
-        assert_eq!(image.data.as_deref(), Some([4, 5, 6, 255].as_slice()));
     }
 
     #[test]

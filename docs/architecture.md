@@ -254,12 +254,13 @@ an in-flight settling sequence. Each completed intermediate composition is
 eligible for immediate presentation. The fixed budget mirrors Bevy winit's
 finite startup-update margin without turning Weld into a continuous renderer,
 but remains a stopgap until Bevy exposes a reliable signal for pending deferred
-or render-world work. Remote debugging services the main world at a bounded
-maintenance rate and on other host wakes, but does not itself create
-composition demand. The DRM cursor is presentation metadata rather than a Bevy
-UI node: cursor-only motion reuses the completed composition and updates the
-final wgpu blit without running Bevy's render app. Pointer interactions that
-actually change shell UI still request an ordinary composition. `weld-core`
+or render-world work. Remote debugging services only Bevy's `RemoteLast`
+schedule at a bounded maintenance rate between application frames and does not
+itself create composition demand. The DRM cursor is presentation metadata
+rather than a Bevy UI node: raw motion can immediately reuse the completed
+composition and update the final wgpu blit. The same input batch requests one
+refresh-capped application composition so Bevy/Leafwing state, picking, hover,
+and cursor policy still advance without running at device-event pace. `weld-core`
 owns the Bevy-free cursor model, Smithay cursor-surface lifecycle, Xcursor
 discovery, immutable GPU uploads, and final composition geometry. `weld-app`
 exposes the reloadable `CursorSettings` ECS resource; replacing that resource
@@ -301,13 +302,25 @@ exclude the cursor; that is deliberate so future streaming can carry cursor
 metadata independently.
 
 Standalone input additionally publishes the newest raw compositor-logical
-pointer position to the cursor presenter before ECS picking and protocol
-routing complete, then offers a cursor-only frame against the last completed
-composition. The same ordered event still passes through the ordinary ECS
-pipeline, and any resulting focus or shape change can replace the queued frame.
-This removes avoidable application-schedule latency, but a software cursor can
-still trail a hardware cursor plane by up to the display/presentation latency;
-hardware-plane support remains the path to eliminating that final bound.
+pointer position to the cursor presenter before application picking completes,
+then offers a cursor-only frame against the last completed composition. Core
+also forwards every unconsumed raw event through Smithay immediately, using the
+client input target and compositor-to-surface affine mapping published by the
+most recent application frame. The same ordered event is retained losslessly
+for the next Bevy/Leafwing projection. Input therefore requests at most one
+application update at the output refresh cadence rather than running the Bevy
+schedule at device-event pace. A software cursor can still trail a hardware
+cursor plane by up to the display/presentation latency; hardware-plane support
+remains the path to eliminating that final bound.
+
+Bevy remains authoritative for root/layer selection and shell interaction.
+Smithay re-evaluates the selected surface tree's current input regions and
+subsurface ordering for every raw pointer event. Crossing an application-owned
+clip boundary or moving between Bevy layers becomes authoritative on the next
+composition frame; motion within the published client layer uses the retained
+affine mapping at raw input pace. A held pointer button suppresses
+frame-published pointer-focus replacement; Smithay grabs themselves remain
+authoritative over event delivery.
 
 Standalone input preserves each libinput device's default acceleration profile
 and speed. The eventual input-settings API must preserve global, device-type,
@@ -327,9 +340,10 @@ Libinput swipe, pinch, and hold transitions retain their begin/update/end
 lifecycle, finger counts, cancellation, translation, cumulative pinch scale,
 rotation, and timestamps through the ECS input bridge. Plugins receive the
 backend-neutral `TouchpadGesture` message, and the same ordered transition is
-forwarded to the focused client through `wp_pointer_gestures_v1` without
-requesting a composition by itself. Gesture consumption is not implemented
-yet: a plugin and the focused client currently both observe the gesture.
+forwarded immediately to the focused client through `wp_pointer_gestures_v1`.
+The buffered event also requests a refresh-paced application frame. Gesture
+consumption is not implemented yet: a plugin and the focused client currently
+both observe the gesture.
 Losing the DRM session emits cancelled gesture and finger-scroll transitions
 using the last libinput timestamp before clearing focus, so switching virtual
 terminals cannot leave a client gesture active. Device-removal cancellation is
@@ -372,15 +386,17 @@ and interactive-resize policy. Smithay owns the pointer grab, configure state,
 and enforcement of the client's committed size constraints. Repeated
 interactive-resize sizes are latest-value coalesced at the Smithay server
 boundary and configured at most once per composition tick; pointer motion,
-buttons, axes, and keyboard input still reach clients without that pacing.
-Pointer-button effects are applied after ECS surface actions, so
-ending the grab can fold its latched final size and the cleared `Resizing` state
-into one final configure. Destruction and close requests discard any latched
-size; future maximize or fullscreen policy must do the same before issuing its
-own configure. Client-focus reconciliation also runs during input-only main
-updates. A click activation therefore emits its focus action in the same batch
-as the pointer press, and the host applies that action before Smithay establishes
-the matching implicit click grab. The window domain records the surface commit revision at each
+buttons, axes, gestures, and keyboard input reach clients without that pacing.
+Click activation is observed on the next application frame, after Smithay may
+already have established the ordinary implicit click grab. Core records the
+positive owner of that ordinary grab so the matching activation may apply
+immediately. An ordinary click on shell chrome has no client owner and permits
+ECS policy to activate any concrete toplevel during that grab; clear-focus
+still waits. Popup and protocol move/resize grabs clear the exception and keep
+their normal grab authority. Ending a resize can fold its latched final size
+and the cleared `Resizing` state into one final configure. Destruction and close
+requests discard any latched size; future maximize or fullscreen policy must do
+the same before issuing its own configure. The window domain records the surface commit revision at each
 client resize request. Left and top resize edges remain anchored until that
 revision advances, regardless of whether a constrained client commits the
 exact requested size. Pointer interactions are implemented; the equivalent

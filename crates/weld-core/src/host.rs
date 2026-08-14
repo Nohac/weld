@@ -8,7 +8,7 @@ use tracing::warn;
 
 use crate::{
     dmabuf::DmabufContext,
-    input::{InputPosition, RawSeatEvent, SeatInputEffect},
+    input::{RawSeatEvent, SeatInputEffect},
     runtime::{HostCommand, OutputScaleAdjustment},
     server::PendingSurfaceEvent,
     surface::{Extent, SurfaceAction},
@@ -267,8 +267,13 @@ pub enum CompositionDemand {
 /// Bevy-independent interface through which a backend drives application policy and composition.
 pub trait CompositionHost {
     fn enqueue_surface_event(&mut self, event: PendingSurfaceEvent) -> CompositionDemand;
-    fn enqueue_input_event(&mut self, event: RawSeatEvent);
-    fn advance_main(&mut self, input_time: u32, composition_advance: bool) -> bool;
+    /// Buffers an input event for the next application frame and returns
+    /// whether core should also forward it to the focused client immediately.
+    fn enqueue_input_event(&mut self, event: RawSeatEvent) -> bool;
+    fn advance_main(&mut self, input_time: u32) -> bool;
+    /// Services the restricted remote-control schedule without advancing the
+    /// application world.
+    fn service_remote_debug(&mut self);
     fn render_composition(&mut self, target: wgpu::TextureView, extent: Extent) -> Result<()>;
     /// Register output geometry and a composition target before the next main advance.
     ///
@@ -277,7 +282,6 @@ pub trait CompositionHost {
     /// [`Self::advance_main`] returns so layout observes the matching extent.
     fn set_output_geometry(&mut self, target: wgpu::TextureView, extent: Extent, scale_factor: f64);
     fn should_exit(&self) -> bool;
-    fn pointer_position(&self) -> Option<InputPosition>;
     fn take_input_effects(&mut self) -> Vec<SeatInputEffect>;
     fn take_cursor_update(&mut self) -> crate::cursor::CursorHostUpdate;
     fn take_host_commands(&mut self) -> Vec<HostCommand>;

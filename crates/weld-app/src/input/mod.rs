@@ -1,9 +1,10 @@
 //! Input sources, Bevy/Leafwing projection, and client-surface routing.
 //!
 //! Host-specific sources emit owned raw::RawSeatEvent values. The input
-//! bridge projects each batch into standard Bevy and Leafwing input in First,
-//! then resolves Bevy picking and emits protocol-neutral client effects in
-//! PreUpdate. Smithay resources never enter the ECS world.
+//! bridge projects each refresh-paced batch into standard Bevy and Leafwing
+//! input in First, then publishes the picked client target in PreUpdate. Core
+//! retains that target and forwards unconsumed raw events to Smithay at input
+//! pace. Smithay resources never enter the application world.
 
 mod projection;
 mod routing;
@@ -25,10 +26,12 @@ pub use projection::TouchpadGesture;
 pub(crate) use projection::enqueue_raw_input;
 pub(crate) use routing::take_input_effects;
 pub use shortcuts::GlobalShortcutPlugin;
-pub(crate) use shortcuts::take_host_commands;
-pub(crate) use state::{projected_pointer_position, set_input_update_time};
+pub(crate) use shortcuts::{filter_global_shortcut_event, take_host_commands};
+pub(crate) use state::set_input_update_time;
 pub use virtual_terminal::VirtualTerminalShortcutPlugin;
-pub(crate) use virtual_terminal::take_virtual_terminal_switch_request;
+pub(crate) use virtual_terminal::{
+    filter_virtual_terminal_event, take_virtual_terminal_switch_request,
+};
 pub use weld_core::input::{
     InputDelta, PointerGesture, PointerGestureKind, SeatInputEffect, SeatInputEffectKind,
     SurfaceHit, TouchpadHold, TouchpadPinch, TouchpadSwipe,
@@ -46,9 +49,9 @@ pub(crate) struct InputBridgePlugin {
 impl InputBridgePlugin {
     /// Build the input bridge for Weld's manual composition target.
     ///
-    /// Input-only host advances no longer imply a rendered composition.
-    /// Picking observers and action systems that mutate visuals must emit a
-    /// Bevy RequestRedraw message.
+    /// Raw input is buffered until the next refresh-paced application frame.
+    /// Client delivery remains independent of that frame through the target
+    /// most recently published by picking.
     pub(crate) const fn new(target: NormalizedRenderTarget) -> Self {
         Self { target }
     }

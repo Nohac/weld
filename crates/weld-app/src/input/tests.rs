@@ -7,10 +7,11 @@ use bevy::{
     prelude::{MinimalPlugins, Reflect},
 };
 use leafwing_input_manager::prelude::{ActionState, Actionlike, InputManagerPlugin, InputMap};
+use winit::keyboard::Key;
 
 use super::{
-    GlobalShortcutPlugin, InputBridgePlugin, SeatInputEffect, SeatInputEffectKind, TouchpadGesture,
-    VirtualTerminalShortcutPlugin, enqueue_raw_input,
+    GlobalShortcutPlugin, InputBridgePlugin, TouchpadGesture, VirtualTerminalShortcutPlugin,
+    enqueue_raw_input, filter_global_shortcut_event, filter_virtual_terminal_event,
     raw::{
         ButtonState, InputDelta, InputPosition, LinuxButtonCode, LinuxKeycode, PointerGesture,
         RawSeatEvent, RawSeatEventKind, TouchpadPinch,
@@ -19,7 +20,6 @@ use super::{
 };
 use crate::ActiveBackend;
 use weld_core::runtime::{HostCommand, OutputScaleAdjustment};
-use winit::keyboard::Key;
 
 #[derive(Actionlike, Clone, Copy, Debug, Eq, Hash, PartialEq, Reflect)]
 enum TestAction {
@@ -57,11 +57,7 @@ fn projection_test_app() -> (App, Entity) {
     (app, input)
 }
 
-fn shortcut_test_app() -> App {
-    shortcut_test_app_for(ActiveBackend::Nested)
-}
-
-fn shortcut_test_app_for(backend: ActiveBackend) -> App {
+fn shortcut_test_app(backend: ActiveBackend) -> App {
     let mut app = App::new();
     app.insert_resource(backend)
         .add_plugins(MinimalPlugins)
@@ -74,17 +70,11 @@ fn shortcut_test_app_for(backend: ActiveBackend) -> App {
     app
 }
 
-fn virtual_terminal_shortcut_test_app() -> App {
-    let mut app = App::new();
-    app.insert_resource(ActiveBackend::Drm)
-        .add_plugins(MinimalPlugins)
-        .add_plugins(InputPlugin)
-        .add_message::<PointerInput>()
-        .add_plugins(InputBridgePlugin::new(NormalizedRenderTarget::TextureView(
-            ManualTextureViewHandle(1),
-        )))
-        .add_plugins(VirtualTerminalShortcutPlugin);
-    app
+fn enqueue_host_input(app: &mut App, event: RawSeatEvent) -> bool {
+    let consumed = filter_global_shortcut_event(app.world_mut(), &event)
+        | filter_virtual_terminal_event(app.world_mut(), &event);
+    enqueue_raw_input(app.world_mut(), event);
+    !consumed
 }
 
 #[test]
@@ -100,17 +90,19 @@ fn virtual_terminal_plugin_is_inactive_without_the_drm_backend() {
 }
 
 #[test]
-fn raw_keyboard_input_reaches_leafwing_in_the_same_update() {
+fn raw_keyboard_input_reaches_leafwing_on_the_next_frame() {
     let (mut app, input) = projection_test_app();
-    let event = RawSeatEvent::new(
-        RawSeatEventKind::Keyboard {
-            keycode: LinuxKeycode(33),
-            logical_key: Some(Key::Character("f".into())),
-            state: ButtonState::Pressed,
-        },
-        41,
+    enqueue_raw_input(
+        app.world_mut(),
+        RawSeatEvent::new(
+            RawSeatEventKind::Keyboard {
+                keycode: LinuxKeycode(33),
+                logical_key: Some(Key::Character("f".into())),
+                state: ButtonState::Pressed,
+            },
+            41,
+        ),
     );
-    enqueue_raw_input(app.world_mut(), event.clone());
 
     app.update();
 
@@ -121,44 +113,32 @@ fn raw_keyboard_input_reaches_leafwing_in_the_same_update() {
         .expect("Leafwing should attach action state");
     assert!(action_state.pressed(&TestAction::Activate));
     assert!(action_state.just_pressed(&TestAction::Activate));
-    assert_eq!(
-        take_input_effects(app.world_mut()),
-        [SeatInputEffect::new(
-            SeatInputEffectKind::Keyboard {
-                keycode: LinuxKeycode(33),
-                state: ButtonState::Pressed,
-            },
-            41,
-        )]
-    );
+    assert!(take_input_effects(app.world_mut()).is_empty());
 }
 
 #[test]
-fn global_shortcut_emits_and_consumes_trigger_pair_in_the_same_update() {
-    let mut app = shortcut_test_app();
-    for event in [
-        RawSeatEvent::new(
-            RawSeatEventKind::Keyboard {
-                keycode: LinuxKeycode(125),
-                logical_key: None,
-                state: ButtonState::Pressed,
-            },
-            10,
-        ),
-        RawSeatEvent::new(
-            RawSeatEventKind::Keyboard {
-                keycode: LinuxKeycode(33),
-                logical_key: None,
-                state: ButtonState::Pressed,
-            },
-            11,
-        ),
-    ] {
-        enqueue_raw_input(app.world_mut(), event);
-    }
+fn global_shortcut_is_consumed_before_the_frame_and_still_buffered() {
+    let mut app = shortcut_test_app(ActiveBackend::Nested);
+    let super_press = RawSeatEvent::new(
+        RawSeatEventKind::Keyboard {
+            keycode: LinuxKeycode(125),
+            logical_key: None,
+            state: ButtonState::Pressed,
+        },
+        10,
+    );
+    let trigger_press = RawSeatEvent::new(
+        RawSeatEventKind::Keyboard {
+            keycode: LinuxKeycode(33),
+            logical_key: None,
+            state: ButtonState::Pressed,
+        },
+        11,
+    );
 
-    app.update();
-
+    assert!(enqueue_host_input(&mut app, super_press));
+    assert!(!enqueue_host_input(&mut app, trigger_press.clone()));
+    assert!(!enqueue_host_input(&mut app, trigger_press));
     assert_eq!(
         take_host_commands(app.world_mut()),
         [HostCommand::Launch {
@@ -166,280 +146,120 @@ fn global_shortcut_emits_and_consumes_trigger_pair_in_the_same_update() {
             arguments: Vec::new(),
         }]
     );
-    assert_eq!(
-        take_input_effects(app.world_mut()),
-        [SeatInputEffect::new(
-            SeatInputEffectKind::Keyboard {
-                keycode: LinuxKeycode(125),
-                state: ButtonState::Pressed,
-            },
-            10,
-        )]
-    );
 
-    for event in [
+    app.update();
+    let action = app
+        .world_mut()
+        .query::<&ActionState<super::shortcuts::GlobalAction>>()
+        .single(app.world())
+        .expect("global shortcut should retain its Leafwing mapping");
+    assert!(action.pressed(&super::shortcuts::GlobalAction::Firefox));
+    assert!(take_input_effects(app.world_mut()).is_empty());
+
+    let trigger_release = RawSeatEvent::new(
+        RawSeatEventKind::Keyboard {
+            keycode: LinuxKeycode(33),
+            logical_key: None,
+            state: ButtonState::Released,
+        },
+        12,
+    );
+    assert!(!enqueue_host_input(&mut app, trigger_release));
+    assert!(enqueue_host_input(
+        &mut app,
+        RawSeatEvent::new(
+            RawSeatEventKind::Keyboard {
+                keycode: LinuxKeycode(125),
+                logical_key: None,
+                state: ButtonState::Released,
+            },
+            13,
+        )
+    ));
+    assert!(enqueue_host_input(
+        &mut app,
         RawSeatEvent::new(
             RawSeatEventKind::Keyboard {
                 keycode: LinuxKeycode(33),
                 logical_key: None,
-                state: ButtonState::Released,
+                state: ButtonState::Pressed,
             },
-            12,
-        ),
-        RawSeatEvent::new(
-            RawSeatEventKind::Keyboard {
-                keycode: LinuxKeycode(125),
-                logical_key: None,
-                state: ButtonState::Released,
-            },
-            13,
-        ),
-    ] {
-        enqueue_raw_input(app.world_mut(), event);
-    }
-    app.update();
-
-    assert_eq!(
-        take_input_effects(app.world_mut()),
-        [SeatInputEffect::new(
-            SeatInputEffectKind::Keyboard {
-                keycode: LinuxKeycode(125),
-                state: ButtonState::Released,
-            },
-            13,
-        )]
-    );
+            14,
+        )
+    ));
+    assert!(take_host_commands(app.world_mut()).is_empty());
 }
 
 #[test]
-fn output_scale_shortcuts_are_emitted_and_consumed_only_for_drm() {
-    let events = [
-        RawSeatEvent::new(
-            RawSeatEventKind::Keyboard {
-                keycode: LinuxKeycode(125),
-                logical_key: None,
-                state: ButtonState::Pressed,
-            },
-            10,
-        ),
-        RawSeatEvent::new(
-            RawSeatEventKind::Keyboard {
-                keycode: LinuxKeycode(13),
-                logical_key: None,
-                state: ButtonState::Pressed,
-            },
-            11,
-        ),
-    ];
+fn output_scale_shortcuts_are_enabled_only_for_drm() {
+    let events = || {
+        [
+            RawSeatEvent::new(
+                RawSeatEventKind::Keyboard {
+                    keycode: LinuxKeycode(125),
+                    logical_key: None,
+                    state: ButtonState::Pressed,
+                },
+                10,
+            ),
+            RawSeatEvent::new(
+                RawSeatEventKind::Keyboard {
+                    keycode: LinuxKeycode(13),
+                    logical_key: None,
+                    state: ButtonState::Pressed,
+                },
+                11,
+            ),
+        ]
+    };
 
-    let mut drm = shortcut_test_app_for(ActiveBackend::Drm);
-    for event in events.iter().cloned() {
-        enqueue_raw_input(drm.world_mut(), event);
-    }
-    drm.update();
+    let mut drm = shortcut_test_app(ActiveBackend::Drm);
+    assert!(enqueue_host_input(&mut drm, events()[0].clone()));
+    assert!(!enqueue_host_input(&mut drm, events()[1].clone()));
     assert_eq!(
         take_host_commands(drm.world_mut()),
         [HostCommand::AdjustOutputScale(
             OutputScaleAdjustment::Increase
         )]
     );
-    assert_eq!(
-        take_input_effects(drm.world_mut()),
-        [SeatInputEffect::new(
-            SeatInputEffectKind::Keyboard {
-                keycode: LinuxKeycode(125),
-                state: ButtonState::Pressed,
-            },
-            10,
-        )]
-    );
 
-    let mut nested = shortcut_test_app_for(ActiveBackend::Nested);
-    for event in events.iter().cloned() {
-        enqueue_raw_input(nested.world_mut(), event);
+    let mut nested = shortcut_test_app(ActiveBackend::Nested);
+    for event in events() {
+        assert!(enqueue_host_input(&mut nested, event));
     }
-    nested.update();
     assert!(take_host_commands(nested.world_mut()).is_empty());
-    assert_eq!(
-        take_input_effects(nested.world_mut()),
-        [
-            SeatInputEffect::new(
-                SeatInputEffectKind::Keyboard {
-                    keycode: LinuxKeycode(125),
-                    state: ButtonState::Pressed,
-                },
-                10,
-            ),
-            SeatInputEffect::new(
-                SeatInputEffectKind::Keyboard {
-                    keycode: LinuxKeycode(13),
-                    state: ButtonState::Pressed,
-                },
-                11,
-            ),
-        ]
-    );
 }
 
 #[test]
-fn drm_virtual_terminal_shortcut_emits_and_consumes_the_function_key() {
-    let mut app = virtual_terminal_shortcut_test_app();
-    for (keycode, time) in [(29, 10), (56, 11), (60, 12)] {
-        enqueue_raw_input(
-            app.world_mut(),
-            RawSeatEvent::new(
-                RawSeatEventKind::Keyboard {
-                    keycode: LinuxKeycode(keycode),
-                    logical_key: None,
-                    state: ButtonState::Pressed,
-                },
-                time,
+fn drm_virtual_terminal_shortcut_is_consumed_before_the_frame() {
+    let mut app = projection_test_app().0;
+    app.insert_resource(ActiveBackend::Drm)
+        .add_plugins(VirtualTerminalShortcutPlugin);
+
+    for (keycode, time, forwarded) in [(29, 10, true), (56, 11, true), (60, 12, false)] {
+        assert_eq!(
+            enqueue_host_input(
+                &mut app,
+                RawSeatEvent::new(
+                    RawSeatEventKind::Keyboard {
+                        keycode: LinuxKeycode(keycode),
+                        logical_key: None,
+                        state: ButtonState::Pressed,
+                    },
+                    time,
+                ),
             ),
+            forwarded
         );
     }
-
-    app.update();
-
     assert_eq!(
         take_virtual_terminal_switch_request(app.world_mut()),
         Some(2)
     );
-    assert_eq!(
-        take_input_effects(app.world_mut()),
-        [
-            SeatInputEffect::new(
-                SeatInputEffectKind::Keyboard {
-                    keycode: LinuxKeycode(29),
-                    state: ButtonState::Pressed,
-                },
-                10,
-            ),
-            SeatInputEffect::new(
-                SeatInputEffectKind::Keyboard {
-                    keycode: LinuxKeycode(56),
-                    state: ButtonState::Pressed,
-                },
-                11,
-            ),
-        ]
-    );
-
-    enqueue_raw_input(
-        app.world_mut(),
-        RawSeatEvent::new(
-            RawSeatEventKind::Keyboard {
-                keycode: LinuxKeycode(60),
-                logical_key: None,
-                state: ButtonState::Released,
-            },
-            13,
-        ),
-    );
-    app.update();
-
-    assert!(take_input_effects(app.world_mut()).is_empty());
 }
 
 #[test]
-fn pressing_a_modifier_after_a_client_key_does_not_consume_its_release() {
-    let mut app = shortcut_test_app();
-    enqueue_raw_input(
-        app.world_mut(),
-        RawSeatEvent::new(
-            RawSeatEventKind::Keyboard {
-                keycode: LinuxKeycode(33),
-                logical_key: None,
-                state: ButtonState::Pressed,
-            },
-            10,
-        ),
-    );
-    app.update();
-    assert!(take_host_commands(app.world_mut()).is_empty());
-    assert_eq!(take_input_effects(app.world_mut()).len(), 1);
-
-    enqueue_raw_input(
-        app.world_mut(),
-        RawSeatEvent::new(
-            RawSeatEventKind::Keyboard {
-                keycode: LinuxKeycode(125),
-                logical_key: None,
-                state: ButtonState::Pressed,
-            },
-            11,
-        ),
-    );
-    app.update();
-    assert!(take_host_commands(app.world_mut()).is_empty());
-    assert_eq!(take_input_effects(app.world_mut()).len(), 1);
-
-    enqueue_raw_input(
-        app.world_mut(),
-        RawSeatEvent::new(
-            RawSeatEventKind::Keyboard {
-                keycode: LinuxKeycode(33),
-                logical_key: None,
-                state: ButtonState::Released,
-            },
-            12,
-        ),
-    );
-    app.update();
-    assert_eq!(take_input_effects(app.world_mut()).len(), 1);
-}
-
-#[test]
-fn raw_event_order_and_timestamps_survive_projection() {
-    let (mut app, _) = projection_test_app();
-    let events = [
-        RawSeatEvent::new(
-            RawSeatEventKind::PointerMotion {
-                position: InputPosition::new(12.0, 34.0),
-            },
-            7,
-        ),
-        RawSeatEvent::new(
-            RawSeatEventKind::PointerButton {
-                position: Some(InputPosition::new(12.0, 34.0)),
-                button: LinuxButtonCode(0x110),
-                state: ButtonState::Pressed,
-            },
-            8,
-        ),
-        RawSeatEvent::new(RawSeatEventKind::HostFocusLost, 9),
-    ];
-    for event in events.iter().cloned() {
-        enqueue_raw_input(app.world_mut(), event);
-    }
-
-    app.update();
-
-    assert_eq!(
-        take_input_effects(app.world_mut()),
-        [
-            SeatInputEffect::new(
-                SeatInputEffectKind::PointerMotion {
-                    position: InputPosition::new(12.0, 34.0),
-                    target: None,
-                },
-                7,
-            ),
-            SeatInputEffect::new(
-                SeatInputEffectKind::PointerButton {
-                    position: InputPosition::new(12.0, 34.0),
-                    target: None,
-                    button: LinuxButtonCode(0x110),
-                    state: ButtonState::Pressed,
-                },
-                8,
-            ),
-            SeatInputEffect::new(SeatInputEffectKind::HostFocusLost, 9),
-        ]
-    );
-}
-
-#[test]
-fn touchpad_gesture_sequence_reaches_plugins_and_client_effects_in_the_same_update() {
+fn touchpad_gestures_remain_lossless_in_the_frame_projection() {
     let (mut app, _) = projection_test_app();
     app.init_resource::<CapturedTouchpadGestures>()
         .add_systems(Update, capture_touchpad_gestures);
@@ -472,10 +292,6 @@ fn touchpad_gesture_sequence_reaches_plugins_and_client_effects_in_the_same_upda
             ),
         );
     }
-    enqueue_raw_input(
-        app.world_mut(),
-        RawSeatEvent::new(RawSeatEventKind::HostFocusLost, 22),
-    );
 
     app.update();
 
@@ -483,37 +299,12 @@ fn touchpad_gesture_sequence_reaches_plugins_and_client_effects_in_the_same_upda
         app.world().resource::<CapturedTouchpadGestures>().0,
         gestures
     );
-    assert_eq!(
-        take_input_effects(app.world_mut()),
-        [
-            SeatInputEffect::new(
-                SeatInputEffectKind::PointerGesture {
-                    gesture: gestures[0].gesture,
-                },
-                gestures[0].time,
-            ),
-            SeatInputEffect::new(
-                SeatInputEffectKind::PointerGesture {
-                    gesture: gestures[1].gesture,
-                },
-                gestures[1].time,
-            ),
-            SeatInputEffect::new(
-                SeatInputEffectKind::PointerGesture {
-                    gesture: gestures[2].gesture,
-                },
-                gestures[2].time,
-            ),
-            SeatInputEffect::new(SeatInputEffectKind::HostFocusLost, 22),
-        ]
-    );
 }
 
 #[test]
 fn host_focus_loss_releases_leafwing_inputs() {
     let (mut app, input) = projection_test_app();
-    enqueue_raw_input(
-        app.world_mut(),
+    for event in [
         RawSeatEvent::new(
             RawSeatEventKind::Keyboard {
                 keycode: LinuxKeycode(33),
@@ -522,9 +313,6 @@ fn host_focus_loss_releases_leafwing_inputs() {
             },
             1,
         ),
-    );
-    enqueue_raw_input(
-        app.world_mut(),
         RawSeatEvent::new(
             RawSeatEventKind::PointerButton {
                 position: Some(InputPosition::new(10.0, 10.0)),
@@ -533,13 +321,16 @@ fn host_focus_loss_releases_leafwing_inputs() {
             },
             1,
         ),
-    );
+    ] {
+        enqueue_raw_input(app.world_mut(), event);
+    }
     app.update();
     enqueue_raw_input(
         app.world_mut(),
         RawSeatEvent::new(RawSeatEventKind::HostFocusLost, 2),
     );
     app.update();
+
     let action_state = app
         .world()
         .entity(input)

@@ -27,11 +27,8 @@ use bevy::{
     scene::{CommandsSceneExt, bsn, bsn_list, on},
     window::RequestRedraw,
 };
-use weld_app::{
-    composition::composition_advance_requested,
-    surface::{
-        ClientToplevel, MappedSurface, ServerDecorated, SurfaceId, SurfaceView, ToplevelResizeEdge,
-    },
+use weld_app::surface::{
+    ClientToplevel, MappedSurface, ServerDecorated, SurfaceId, SurfaceView, ToplevelResizeEdge,
 };
 use weld_window::{
     FocusedWindow, PresentationInsets, PresentationOffset, PresentsWindow,
@@ -66,27 +63,19 @@ impl Plugin for SsdPlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(
             PreUpdate,
-            revoke_ssd_presentations
-                .run_if(composition_advance_requested)
-                .in_set(WindowSystems::PresentationRevoke),
+            revoke_ssd_presentations.in_set(WindowSystems::PresentationRevoke),
         )
         .add_systems(
             PreUpdate,
-            present_ssd_windows
-                .run_if(composition_advance_requested)
-                .in_set(WindowSystems::PresentationClaim),
+            present_ssd_windows.in_set(WindowSystems::PresentationClaim),
         )
         .add_systems(
             PreUpdate,
-            sync_focus_style
-                .run_if(composition_advance_requested)
-                .in_set(WindowSystems::UiReconcile),
+            sync_focus_style.in_set(WindowSystems::UiReconcile),
         )
         .add_systems(
             PreUpdate,
-            sync_focus_style
-                .run_if(composition_advance_requested)
-                .in_set(WindowSystems::FinalReconcile),
+            sync_focus_style.in_set(WindowSystems::FinalReconcile),
         );
     }
 }
@@ -412,7 +401,6 @@ mod tests {
         window::RequestRedraw,
     };
     use weld_app::{
-        composition::CompositionPlugin,
         output::OutputGeometry,
         surface::{
             ClientPopup, ClientToplevel, HostSurfaceEvent, HostSurfaceEventKind, SurfaceAction,
@@ -447,7 +435,6 @@ mod tests {
             .insert_resource(OutputGeometry::from_physical(UVec2::new(1_000, 800), 1.0))
             .add_message::<RequestRedraw>()
             .add_plugins((
-                CompositionPlugin,
                 SurfacePlugin,
                 WindowPlugin,
                 WindowUiPlugin,

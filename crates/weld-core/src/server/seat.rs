@@ -38,32 +38,73 @@ use tracing::{debug, trace, warn};
 use crate::{
     input::{
         ButtonState, InputDelta, InputPosition, PointerGesture, RawScrollFrame, RawScrollSource,
-        SeatInputEffect, SeatInputEffectKind, SurfaceHit, TouchpadHold, TouchpadPinch,
-        TouchpadSwipe,
+        RawSeatEvent, RawSeatEventKind, SeatInputEffect, SeatInputEffectKind, SurfaceHit,
+        TouchpadHold, TouchpadPinch, TouchpadSwipe,
     },
     surface::{SurfaceId, WindowDecoration, WindowInteractionRequestKind, WindowResizeEdge},
 };
 
 use super::{PendingSurfaceEvent, PendingSurfaceEventKind, ServerState};
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct OrdinaryImplicitGrab {
+    owner: Option<SurfaceId>,
+}
+
 impl ServerState {
     pub(crate) fn apply_input_effect(&mut self, effect: SeatInputEffect) {
         let SeatInputEffect { event, time } = effect;
         match event {
-            SeatInputEffectKind::PointerMotion { position, target } => {
-                self.apply_pointer_motion(position, target, time)
+            SeatInputEffectKind::PointerFocus { position, target } => {
+                if !accepts_published_pointer_focus(&self.pressed_pointer_buttons) {
+                    return;
+                }
+                self.pointer_input_target = target;
+                self.apply_pointer_motion(
+                    position,
+                    target.map(|target| target.hit(position)),
+                    time,
+                );
             }
-            SeatInputEffectKind::PointerButton {
+        }
+    }
+
+    /// Deliver one raw backend event using focus policy published by the most
+    /// recent Bevy composition frame.
+    pub(crate) fn forward_raw_input(&mut self, raw_event: RawSeatEvent) {
+        let RawSeatEvent { event, time } = raw_event;
+        match event {
+            RawSeatEventKind::PointerMotion { position } => {
+                self.apply_pointer_motion(position, self.pointer_hit(position), time);
+            }
+            RawSeatEventKind::PointerLeft { position } => {
+                self.pointer_input_target = None;
+                self.apply_pointer_motion(position, None, time);
+            }
+            RawSeatEventKind::PointerButton {
                 position,
-                target,
                 button,
                 state,
-            } => self.apply_pointer_button(position, target, button.0, state, time),
-            SeatInputEffectKind::PointerAxis { axis } => self.apply_pointer_axis(axis, time),
-            SeatInputEffectKind::PointerGesture { gesture } => {
-                self.apply_pointer_gesture(gesture, time)
+            } => {
+                let position = position.unwrap_or(self.pointer_position);
+                self.apply_pointer_button(
+                    position,
+                    self.pointer_hit(position),
+                    button.0,
+                    state,
+                    time,
+                );
             }
-            SeatInputEffectKind::Keyboard { keycode, state } => {
+            RawSeatEventKind::PointerAxis { position, axis } => {
+                if let Some(position) = position {
+                    self.pointer_position = position;
+                }
+                self.apply_pointer_axis(axis, time);
+            }
+            RawSeatEventKind::PointerGesture { gesture } => {
+                self.apply_pointer_gesture(gesture, time);
+            }
+            RawSeatEventKind::Keyboard { keycode, state, .. } => {
                 let Some(keycode) = keycode.0.checked_add(8) else {
                     warn!(keycode = keycode.0, "ignored an overflowing keyboard code");
                     return;
@@ -81,8 +122,12 @@ impl ServerState {
                     |_, _, _| FilterResult::Forward,
                 );
             }
-            SeatInputEffectKind::HostFocusLost => self.release_host_input(time),
+            RawSeatEventKind::HostFocusLost => self.release_host_input(time),
         }
+    }
+
+    fn pointer_hit(&self, position: InputPosition) -> Option<SurfaceHit> {
+        self.pointer_input_target.map(|target| target.hit(position))
     }
 
     pub(super) fn focus_toplevel(&mut self, requested: Option<SurfaceId>) {
@@ -90,6 +135,8 @@ impl ServerState {
             .seat
             .get_pointer()
             .is_some_and(|pointer| pointer.is_grabbed());
+        let grabbed =
+            focus_request_remains_protected(grabbed, self.ordinary_implicit_grab, requested);
         let Some(requested) = transition_pending_focus(
             &mut self.pending_focus,
             grabbed,
@@ -173,6 +220,7 @@ impl ServerState {
             serial,
             Focus::Clear,
         );
+        self.ordinary_implicit_grab = None;
         // Installing a grab unsets any previous grab. Stage the new resize state
         // afterwards so replacing a grab cannot clear the state we just entered.
         if matches!(interaction, PointerInteraction::Resize(_)) {
@@ -240,7 +288,11 @@ impl ServerState {
         };
         self.pointer_position = position;
         let focus = self.pointer_focus(position, target);
-        let shell_owns_cursor = focus.is_none() && !pointer.is_grabbed();
+        let shell_owns_cursor = shell_owns_cursor(
+            focus.is_none(),
+            pointer.is_grabbed(),
+            self.ordinary_implicit_grab,
+        );
         pointer.motion(
             self,
             focus,
@@ -270,7 +322,12 @@ impl ServerState {
         self.pointer_position = position;
         let serial = SERIAL_COUNTER.next_serial();
         let focus = self.pointer_focus(position, target);
-        let shell_owns_cursor = focus.is_none() && !pointer.is_grabbed();
+        let pointer_was_grabbed = pointer.is_grabbed();
+        let shell_owns_cursor = shell_owns_cursor(
+            focus.is_none(),
+            pointer_was_grabbed,
+            self.ordinary_implicit_grab,
+        );
         pointer.motion(
             self,
             focus,
@@ -282,10 +339,18 @@ impl ServerState {
         );
         match state {
             ButtonState::Pressed => {
+                if self.pressed_pointer_buttons.is_empty() && !pointer_was_grabbed {
+                    self.ordinary_implicit_grab = Some(OrdinaryImplicitGrab {
+                        owner: target.map(|target| target.surface),
+                    });
+                }
                 self.pressed_pointer_buttons.insert(button);
             }
             ButtonState::Released => {
                 self.pressed_pointer_buttons.remove(&button);
+                if self.pressed_pointer_buttons.is_empty() {
+                    self.ordinary_implicit_grab = None;
+                }
             }
         }
         pointer.button(
@@ -442,6 +507,8 @@ impl ServerState {
         // grabs. End the protocol grab first so losing nested host focus cannot
         // leave a client menu open and holding Weld's seat.
         self.dismiss_popup_grab();
+        self.pointer_input_target = None;
+        self.ordinary_implicit_grab = None;
         let serial = SERIAL_COUNTER.next_serial();
         if let Some(pointer) = self.seat.get_pointer() {
             for button in std::mem::take(&mut self.pressed_pointer_buttons) {
@@ -493,6 +560,13 @@ impl ServerState {
     }
 
     pub(super) fn clear_input_focus_for_surface(&mut self, surface: &WlSurface, time: u32) {
+        let removed_target = self.pointer_input_target.is_some_and(|target| {
+            self.toplevels.id_for_surface(surface) == Some(target.surface)
+                || self.popups.id_for_surface(surface) == Some(target.surface)
+        });
+        if removed_target {
+            self.pointer_input_target = None;
+        }
         let serial = SERIAL_COUNTER.next_serial();
         if let Some(pointer) = self.seat.get_pointer()
             && pointer.current_focus().as_ref() == Some(surface)
@@ -681,6 +755,29 @@ enum FocusTransition {
     HostFocusLost,
 }
 
+fn accepts_published_pointer_focus(pressed_buttons: &std::collections::HashSet<u32>) -> bool {
+    pressed_buttons.is_empty()
+}
+
+fn focus_request_remains_protected(
+    grabbed: bool,
+    ordinary_grab: Option<OrdinaryImplicitGrab>,
+    requested: Option<SurfaceId>,
+) -> bool {
+    let ordinary_click_activation = requested.is_some()
+        && ordinary_grab.is_some_and(|grab| grab.owner.is_none() || grab.owner == requested);
+    grabbed && !ordinary_click_activation
+}
+
+fn shell_owns_cursor(
+    no_client_focus: bool,
+    pointer_is_grabbed: bool,
+    ordinary_grab: Option<OrdinaryImplicitGrab>,
+) -> bool {
+    no_client_focus
+        && (!pointer_is_grabbed || ordinary_grab.is_some_and(|grab| grab.owner.is_none()))
+}
+
 fn transition_pending_focus(
     pending: &mut Option<Option<SurfaceId>>,
     grabbed: bool,
@@ -819,12 +916,70 @@ fn smithay_axis_frame(axis: RawScrollFrame, time: u32) -> Option<AxisFrame> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
+
     use crate::{
         input::{RawScrollFrame, RawScrollPhase, RawScrollSource},
         surface::SurfaceId,
     };
 
-    use super::{FocusTransition, smithay_axis_frame, transition_pending_focus};
+    use super::{
+        FocusTransition, OrdinaryImplicitGrab, accepts_published_pointer_focus,
+        focus_request_remains_protected, shell_owns_cursor, smithay_axis_frame,
+        transition_pending_focus,
+    };
+
+    #[test]
+    fn popup_grab_accepts_published_focus_until_a_button_is_held() {
+        let mut buttons = HashSet::new();
+        assert!(accepts_published_pointer_focus(&buttons));
+
+        buttons.insert(0x110);
+        assert!(!accepts_published_pointer_focus(&buttons));
+    }
+
+    #[test]
+    fn only_positive_ordinary_click_state_bypasses_grab_focus_protection() {
+        let first = SurfaceId::new(1);
+        let second = SurfaceId::new(2);
+
+        assert!(focus_request_remains_protected(true, None, Some(first)));
+        assert!(focus_request_remains_protected(true, None, None));
+        assert!(!focus_request_remains_protected(false, None, Some(first)));
+
+        let client_click = Some(OrdinaryImplicitGrab { owner: Some(first) });
+        assert!(!focus_request_remains_protected(
+            true,
+            client_click,
+            Some(first)
+        ));
+        assert!(focus_request_remains_protected(
+            true,
+            client_click,
+            Some(second)
+        ));
+        assert!(focus_request_remains_protected(true, client_click, None));
+
+        let shell_click = Some(OrdinaryImplicitGrab { owner: None });
+        assert!(!focus_request_remains_protected(
+            true,
+            shell_click,
+            Some(second)
+        ));
+        assert!(focus_request_remains_protected(true, shell_click, None));
+    }
+
+    #[test]
+    fn shell_cursor_remains_owned_during_a_shell_implicit_grab() {
+        let shell_grab = Some(OrdinaryImplicitGrab { owner: None });
+        let client_grab = Some(OrdinaryImplicitGrab {
+            owner: Some(SurfaceId::new(1)),
+        });
+
+        assert!(shell_owns_cursor(true, true, shell_grab));
+        assert!(!shell_owns_cursor(true, true, client_grab));
+        assert!(!shell_owns_cursor(false, true, shell_grab));
+    }
 
     #[test]
     fn focus_requests_apply_immediately_without_a_grab() {

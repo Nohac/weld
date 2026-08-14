@@ -26,7 +26,6 @@ use bevy::{
     window::RequestRedraw,
 };
 use weld_app::{
-    composition::composition_advance_requested,
     cursor::{CursorRequest, CursorSystems},
     surface::{ClientDecorated, ClientPopup, ClientSurface, ClientToplevel, MappedSurface},
 };
@@ -63,7 +62,7 @@ impl Plugin for WindowUiPlugin {
             .add_observer(interaction::begin_resize_frame)
             .add_observer(interaction::begin_resize_handle)
             .add_observer(interaction::drag_window)
-            .add_observer(interaction::end_drag)
+            .add_observer(interaction::end_interaction_on_release)
             .add_observer(interaction::cancel_drag)
             .add_systems(
                 PreUpdate,
@@ -74,34 +73,26 @@ impl Plugin for WindowUiPlugin {
             )
             .add_systems(
                 PreUpdate,
-                revoke_client_presentations
-                    .run_if(composition_advance_requested)
-                    .in_set(WindowSystems::PresentationRevoke),
+                revoke_client_presentations.in_set(WindowSystems::PresentationRevoke),
             )
             .add_systems(
                 PreUpdate,
-                present_client_windows
-                    .run_if(composition_advance_requested)
-                    .in_set(WindowSystems::PresentationClaim),
+                present_client_windows.in_set(WindowSystems::PresentationClaim),
             )
             .add_systems(
                 PreUpdate,
                 (sync_client_presentation_metrics, present_popups)
-                    .run_if(composition_advance_requested)
                     .in_set(WindowSystems::PresentationMetrics),
             )
             .add_systems(
                 PreUpdate,
                 (sync_window_roots, sync_popup_presentations)
                     .chain()
-                    .run_if(composition_advance_requested)
                     .in_set(WindowSystems::UiReconcile),
             )
             .add_systems(
                 PreUpdate,
-                sync_window_roots
-                    .run_if(composition_advance_requested)
-                    .in_set(WindowSystems::FinalReconcile),
+                sync_window_roots.in_set(WindowSystems::FinalReconcile),
             );
     }
 }

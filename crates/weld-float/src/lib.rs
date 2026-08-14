@@ -16,7 +16,6 @@ use bevy::{
     math::Vec2,
 };
 use weld_app::{
-    composition::composition_advance_requested,
     layer::{WINDOW_Z_INDEX_MAX, WINDOW_Z_INDEX_MIN},
     output::OutputGeometry,
     surface::{MappedSurface, SurfaceCommitRevisions, ToplevelResizeEdge},
@@ -47,7 +46,6 @@ impl Plugin for FloatPlugin {
                     reconcile_focus,
                 )
                     .chain()
-                    .run_if(composition_advance_requested)
                     .in_set(WindowSystems::Management),
             )
             .add_systems(
@@ -595,7 +593,6 @@ mod tests {
         picking::PickingSystems,
     };
     use weld_app::{
-        composition::{CompositionPlugin, set_composition_advance_for_test},
         output::OutputGeometry,
         surface::{
             ClientDecorated, ClientToplevel, MappedSurface, SurfaceAction, SurfaceActionQueue,
@@ -717,7 +714,7 @@ mod tests {
     #[test]
     fn activating_the_top_window_reasserts_focus_without_using_a_stack_slot() {
         let mut app = App::new();
-        app.add_plugins((CompositionPlugin, WindowPlugin, FloatPlugin))
+        app.add_plugins((WindowPlugin, FloatPlugin))
             .insert_resource(OutputGeometry::from_physical(UVec2::new(800, 600), 1.0))
             .init_resource::<SurfaceActionQueue>()
             .init_resource::<SurfaceCommitRevisions>()
@@ -753,9 +750,9 @@ mod tests {
     }
 
     #[test]
-    fn focus_changes_during_an_input_only_update() {
+    fn focus_changes_during_the_frame_that_observes_activation() {
         let mut app = App::new();
-        app.add_plugins((CompositionPlugin, WindowPlugin, FloatPlugin))
+        app.add_plugins((WindowPlugin, FloatPlugin))
             .insert_resource(OutputGeometry::from_physical(UVec2::new(800, 600), 1.0))
             .init_resource::<SurfaceActionQueue>()
             .init_resource::<SurfaceCommitRevisions>()
@@ -820,7 +817,6 @@ mod tests {
         };
         take_surface_actions(app.world_mut());
 
-        set_composition_advance_for_test(app.world_mut(), false);
         app.insert_resource(ActivateOnPickingLast(target_window));
         app.update();
 
@@ -838,7 +834,7 @@ mod tests {
     #[test]
     fn ending_an_anchored_resize_does_not_wait_after_the_client_has_committed() {
         let mut app = App::new();
-        app.add_plugins((CompositionPlugin, WindowPlugin, FloatPlugin))
+        app.add_plugins((WindowPlugin, FloatPlugin))
             .insert_resource(OutputGeometry::from_physical(UVec2::new(800, 600), 1.0))
             .init_resource::<SurfaceActionQueue>()
             .init_resource::<SurfaceCommitRevisions>()

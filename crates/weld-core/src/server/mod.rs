@@ -56,7 +56,7 @@ use tracing::{debug, warn};
 
 use crate::{
     dmabuf::{DmabufCapabilities, DmabufReleaseId, DmabufSourceCache},
-    input::InputPosition,
+    input::{InputPosition, SurfaceInputTarget},
     surface::{
         Extent, PopupDescriptor, SurfaceAction, SurfaceId, WindowDecoration,
         WindowInteractionRequestKind,
@@ -67,6 +67,7 @@ use dmabuf::{DmabufProtocol, DmabufReleaseStore};
 use output::install_output_metrics;
 use popup::PopupStore;
 use resize::PendingResizeRequests;
+use seat::OrdinaryImplicitGrab;
 use toplevel::ToplevelStore;
 
 // Keep this stable name in sync with scripts/run-app.
@@ -107,6 +108,8 @@ pub struct ServerState {
     next_surface_id: Option<u64>,
     started_at: Instant,
     pointer_position: InputPosition,
+    pointer_input_target: Option<SurfaceInputTarget>,
+    ordinary_implicit_grab: Option<OrdinaryImplicitGrab>,
     // This mirrors delivered presses only so host focus loss can synthesize
     // matching releases; ECS pointer routing remains the policy authority.
     pressed_pointer_buttons: HashSet<u32>,
@@ -281,6 +284,8 @@ impl ServerState {
             next_surface_id: Some(1),
             started_at,
             pointer_position: InputPosition::default(),
+            pointer_input_target: None,
+            ordinary_implicit_grab: None,
             pressed_pointer_buttons: HashSet::new(),
             cursor_status: CursorImageStatus::default_named(),
             shell_cursor: crate::cursor::CursorAppearance::default(),
