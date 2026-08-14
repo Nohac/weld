@@ -173,8 +173,9 @@ Use the compositor shortcuts to launch clients or stop Weld:
 from another VT. A real TTY run is required to validate a particular seat,
 GPU, and display stack.
 
-Use the standalone direct-wgpu probe to validate Vulkan display discovery,
-presentation, and VT recovery independently from Weld's compositor backend:
+Use the standalone direct-wgpu probe as a historical diagnostic for Vulkan
+Display discovery, presentation, and VT recovery independently from Weld's
+production GBM/KMS backend:
 
 ```text
 scripts/run-drm-wsi-probe --seconds 30
@@ -189,6 +190,13 @@ text console is restored after exit. Output defaults to
 
 See [Direct DRM presentation](docs/drm-presentation.md) for the probe evidence,
 ownership boundaries, and production integration constraints.
+
+Validate the production GBM/KMS path, including proof that the Vulkan
+validation layer loaded, from a bare TTY with:
+
+```text
+scripts/run-gbm-kms-validation
+```
 
 For dependency changes, edit only the intended dependency. If an existing
 lockfile entry must move, use `cargo update -p <package> --precise <version>`;

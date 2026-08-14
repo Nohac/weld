@@ -1,9 +1,9 @@
 //! Direct Vulkan DRM presentation probe.
 //!
-//! This intentionally bypasses Weld and Smithay's DRM compositor. It verifies
-//! that wgpu can own the selected connector, present without a CPU copy, and
-//! survive a libseat pause/activate cycle before that path is integrated into
-//! the compositor.
+//! This historical diagnostic intentionally bypasses Weld's production
+//! Smithay GBM/KMS sink. It verifies that wgpu Display WSI can own the selected
+//! connector, present without a CPU copy, and survive a libseat pause/activate
+//! cycle independently from the compositor.
 
 use std::{
     collections::VecDeque,

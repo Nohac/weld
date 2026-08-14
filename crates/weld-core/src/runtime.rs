@@ -15,7 +15,6 @@ use crate::server::ServerState;
 pub(crate) const FRAME_INTERVAL: Duration = Duration::from_micros(16_667);
 pub(crate) const REMOTE_DEBUG_MAINTENANCE_INTERVAL: Duration = Duration::from_millis(100);
 pub(crate) const CAPTURE_DEADLINE: Duration = Duration::from_secs(10);
-const INACTIVE_MAINTENANCE_INTERVAL: Duration = Duration::from_secs(1);
 pub(crate) const BEVY_SETTLE_COMPOSITIONS: u8 = 5;
 
 /// Data borrowed by calloop callbacks without making Smithay the owner of
@@ -232,10 +231,7 @@ impl FrameState {
         self.composition_pending() && self.next_composition.is_none_or(|deadline| deadline <= now)
     }
 
-    pub(crate) fn composition_timeout(&self, now: Instant, session_active: bool) -> Duration {
-        if !session_active {
-            return INACTIVE_MAINTENANCE_INTERVAL;
-        }
+    pub(crate) fn composition_timeout(&self, now: Instant) -> Duration {
         if !self.composition_pending() {
             return self.frame_interval;
         }
@@ -245,12 +241,8 @@ impl FrameState {
             .min(self.frame_interval)
     }
 
-    pub(crate) fn composition_demand_timeout(
-        &self,
-        now: Instant,
-        session_active: bool,
-    ) -> Option<Duration> {
-        (session_active && self.composition_pending()).then(|| {
+    pub(crate) fn composition_demand_timeout(&self, now: Instant) -> Option<Duration> {
+        self.composition_pending().then(|| {
             self.next_composition
                 .map(|deadline| deadline.saturating_duration_since(now))
                 .unwrap_or(Duration::ZERO)
@@ -279,9 +271,9 @@ pub(crate) struct IterationWork {
     pub(crate) advance_main: bool,
 }
 
-pub(crate) const fn iteration_work(composition_due: bool, session_active: bool) -> IterationWork {
+pub(crate) const fn iteration_work(composition_due: bool) -> IterationWork {
     IterationWork {
-        advance_main: session_active && composition_due,
+        advance_main: composition_due,
     }
 }
 
@@ -321,34 +313,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn inactive_session_does_not_poll_an_overdue_composition() {
-        let started_at = Instant::now();
-        let mut frame = FrameState::default();
-        frame.composition_rendered(started_at);
-        frame.request_composition();
-        let overdue = started_at + FRAME_INTERVAL;
-
-        assert_eq!(frame.composition_timeout(overdue, true), Duration::ZERO);
-        assert_eq!(
-            frame.composition_timeout(overdue, false),
-            INACTIVE_MAINTENANCE_INTERVAL
-        );
-    }
-
-    #[test]
     fn output_refresh_drives_pacing_with_defensive_bounds() {
         let now = Instant::now();
         let mut high_refresh = FrameState::default().with_refresh_millihertz(120_000);
         high_refresh.composition_rendered(now);
         assert_eq!(
-            high_refresh.composition_timeout(now, true),
+            high_refresh.composition_timeout(now),
             Duration::from_nanos(8_333_333)
         );
 
         let mut implausibly_slow = FrameState::default().with_refresh_millihertz(1);
         implausibly_slow.composition_rendered(now);
         assert_eq!(
-            implausibly_slow.composition_timeout(now, true),
+            implausibly_slow.composition_timeout(now),
             Duration::from_millis(100)
         );
     }

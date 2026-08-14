@@ -20,6 +20,9 @@ Detailed current ownership and lifecycle evidence belongs in
 [Architecture](../architecture.md). Direct display validation and recovery
 evidence belongs in [Direct DRM presentation](../drm-presentation.md). The
 subject specs link to those documents instead of duplicating their internals.
+Implementation ideas retained from comparisons with related projects live in
+[Possible future improvements](../possible-future-improvements.md); that note is
+exploratory rather than an additional roadmap.
 
 ## Subjects
 

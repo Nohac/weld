@@ -1,6 +1,7 @@
-//! Standalone libseat, udev, libinput, and direct-wgpu DRM backend.
+//! Standalone libseat, udev, libinput, and Smithay GBM/KMS backend.
 
 use std::{
+    ops::{Deref, DerefMut},
     path::PathBuf,
     time::{Duration, Instant},
 };
@@ -12,18 +13,23 @@ use calloop::{
 };
 use smithay::{
     backend::{
-        drm::DrmDeviceFd,
+        drm::{DrmDevice, DrmEvent},
         libinput::{LibinputInputBackend, LibinputSessionInterface},
         session::{Event as SessionEvent, Session, libseat::LibSeatSession},
         udev::{UdevBackend, UdevEvent},
     },
     reexports::{
-        calloop::EventLoop as CalloopEventLoop, drm::control::connector, input::Libinput,
-        rustix::fs::Dev, wayland_server::Display,
+        calloop::{
+            EventLoop as CalloopEventLoop, LoopHandle as CalloopLoopHandle, RegistrationToken,
+        },
+        drm::control::connector,
+        input::Libinput,
+        rustix::fs::Dev,
+        wayland_server::Display,
     },
 };
 use smithay_drm_extras::drm_scanner::{DrmScanEvent, DrmScanner};
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info, trace, warn};
 
 use crate::{
     OutputScale,
@@ -45,13 +51,13 @@ use crate::{
     server::{OutputMetrics, ServerOptions, ServerState},
 };
 
-mod direct;
 mod discovery;
+mod gpu;
 mod presenter;
 
-use direct::DirectDrmGpu;
 use discovery::{DrmDeviceDiscovery, connector_name, discover_output, output_description};
-use presenter::{FrameOutcome, PresenterEvent, PresenterHandle};
+use gpu::DrmGpu;
+use presenter::{PresenterEvent, PresenterHandle};
 
 const PRESENTER_SHUTDOWN_DEADLINE: Duration = Duration::from_millis(250);
 
@@ -59,18 +65,51 @@ enum DrmRuntimeEvent {
     Input(RawSeatEvent),
     Session(SessionEvent),
     Udev(UdevEvent),
+    Drm(DrmEvent),
     Presenter(PresenterEvent),
     Command(HostCommand),
 }
 
+/// Owns the registered DRM device through libseat-managed shutdown.
+///
+/// This guard must remain a host-loop local and must never be dropped from a
+/// calloop callback, where [`CalloopLoopHandle::remove`] would borrow the source
+/// registry recursively.
+struct RegisteredDrmDevice<'event_loop> {
+    handle: CalloopLoopHandle<'event_loop, LoopData<DrmRuntimeEvent, LibinputAdapter>>,
+    token: RegistrationToken,
+    device: DrmDevice,
+}
+
+impl Deref for RegisteredDrmDevice<'_> {
+    type Target = DrmDevice;
+
+    fn deref(&self) -> &Self::Target {
+        &self.device
+    }
+}
+
+impl DerefMut for RegisteredDrmDevice<'_> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.device
+    }
+}
+
+impl Drop for RegisteredDrmDevice<'_> {
+    fn drop(&mut self) {
+        self.handle.remove(self.token);
+        self.device.pause();
+    }
+}
+
 struct OutputMonitor {
-    drm: DrmDeviceFd,
     scanner: DrmScanner,
     device_id: Dev,
     device_path: PathBuf,
     connector: connector::Handle,
     connected: bool,
     mode_compatible: bool,
+    event_source_healthy: bool,
 }
 
 struct DrmHostCommandContext<'a> {
@@ -215,10 +254,20 @@ fn apply_host_command(context: DrmHostCommandContext<'_>, command: HostCommand) 
 }
 
 impl OutputMonitor {
-    fn handle(&mut self, event: UdevEvent, presenter: &mut PresenterHandle, session_active: bool) {
+    const fn physical_available(&self, session_active: bool) -> bool {
+        session_active && self.connected && self.mode_compatible && self.event_source_healthy
+    }
+
+    fn handle(
+        &mut self,
+        event: UdevEvent,
+        drm: &mut DrmDevice,
+        presenter: &mut PresenterHandle,
+        session_active: bool,
+    ) {
         match event {
             UdevEvent::Changed { device_id } if device_id == self.device_id => {
-                let scan = match self.scanner.scan_connectors(&self.drm) {
+                let scan = match self.scanner.scan_connectors(drm) {
                     Ok(scan) => scan,
                     Err(error) => {
                         warn!(%error, "failed to rescan the selected DRM device");
@@ -238,9 +287,16 @@ impl OutputMonitor {
                             if connector.handle() == self.connector =>
                         {
                             self.connected = true;
-                            if self.mode_compatible && session_active {
-                                presenter.activate();
-                                info!("active DRM connector reconnected; reconfiguring presenter");
+                            if self.physical_available(session_active) {
+                                if let Err(error) = drm.reset_state() {
+                                    error!(%error, "failed to reset DRM state after connector recovery");
+                                } else if let Err(error) = presenter.activate_after_session() {
+                                    error!(%error, "failed to reactivate GBM/KMS presentation");
+                                } else {
+                                    info!(
+                                        "active DRM connector reconnected; GBM/KMS presentation restored"
+                                    );
+                                }
                             } else if !self.mode_compatible {
                                 warn!(
                                     "active DRM connector reconnected with changed modes; restart is still required"
@@ -264,6 +320,7 @@ impl OutputMonitor {
             UdevEvent::Removed { device_id } if device_id == self.device_id => {
                 self.connected = false;
                 presenter.suspend();
+                drm.pause();
                 error!(
                     path = %self.device_path.display(),
                     "selected DRM device was removed; composition remains live"
@@ -298,17 +355,17 @@ pub(crate) fn prepare(options: RunOptions, signals: Signals) -> Result<PreparedH
     let logical_height =
         f64::from(output_metrics.physical_height()) / output_metrics.scale_factor();
     let input_adapter = LibinputAdapter::new(logical_width, logical_height);
-    let direct_gpu = DirectDrmGpu::new(
-        &device.drm,
-        device.device_id,
-        &device.device_path,
-        &output.connector,
-        output.mode,
-    )?;
-    let refresh_millihertz = direct_gpu.mode.refresh_millihertz;
-    let dmabuf_sources = DmabufSourceCache::new(&direct_gpu.device);
-    let capture_device = direct_gpu.device.clone();
-    let capture_queue = direct_gpu.queue.clone();
+    let (mut drm_device, drm_notifier) = DrmDevice::new(device.drm.clone(), true)
+        .context("failed to initialize Smithay DRM device")?;
+    let drm_surface = drm_device
+        .create_surface(output.crtc, output.mode, &[output.connector.handle()])
+        .context("failed to create Smithay DRM output surface")?;
+    let gpu = DrmGpu::new(device.device_id, &device.device_path)?;
+    let refresh_millihertz = u32::try_from(smithay::output::Mode::from(output.mode).refresh)
+        .context("DRM mode has a negative refresh rate")?;
+    let dmabuf_sources = DmabufSourceCache::new(&gpu.device);
+    let capture_device = gpu.device.clone();
+    let capture_queue = gpu.queue.clone();
     let (dmabuf_release_sender, dmabuf_release_source) = channel::channel();
 
     let display = Display::<ServerState>::new().context("failed to create the Wayland display")?;
@@ -322,7 +379,7 @@ pub(crate) fn prepare(options: RunOptions, signals: Signals) -> Result<PreparedH
             seat_name: &seat_name,
             output_descriptor,
             output_metrics,
-            dmabuf_capabilities: direct_gpu.dmabuf_capabilities.as_ref(),
+            dmabuf_capabilities: gpu.dmabuf_capabilities.as_ref(),
             dmabuf_sources: dmabuf_sources.clone(),
         },
     )?;
@@ -379,18 +436,25 @@ pub(crate) fn prepare(options: RunOptions, signals: Signals) -> Result<PreparedH
         })
         .map_err(|_| anyhow!("failed to register udev notifications"))?;
 
+    let drm_notifier_registration = calloop
+        .handle()
+        .insert_source(drm_notifier, |event, _, data| {
+            data.events.push_back(DrmRuntimeEvent::Drm(event));
+        })
+        .map_err(|_| anyhow!("failed to register DRM page-flip notifications"))?;
+
     let mut targets = CompositionTargets::new(
-        &direct_gpu.device,
+        &gpu.device,
         crate::surface::Extent::new(
             output_metrics.physical_width(),
             output_metrics.physical_height(),
         ),
     );
     let context = RenderContext {
-        instance: direct_gpu.instance.clone(),
-        adapter: direct_gpu.adapter.clone(),
-        device: direct_gpu.device.clone(),
-        queue: direct_gpu.queue.clone(),
+        instance: gpu.instance.clone(),
+        adapter: gpu.adapter.clone(),
+        device: gpu.device.clone(),
+        queue: gpu.queue.clone(),
         dmabuf: crate::dmabuf::DmabufContext::new(dmabuf_release_sender, dmabuf_sources),
         extent: targets.extent(),
         scale_factor: output_metrics.scale_factor(),
@@ -402,17 +466,27 @@ pub(crate) fn prepare(options: RunOptions, signals: Signals) -> Result<PreparedH
         device_id,
         device_path,
     } = device;
+    let crtc = output.crtc;
     let scanner = output.scanner;
     let connector = output.connector.handle();
 
     Ok(PreparedHost::new(context, move |host| {
         let mut shell = host;
-        // Declared before the presenter so Rust drops the worker first. A
-        // worker stuck in native acquisition still retains its own fd clone
-        // until process teardown; the host never closes the libseat session
-        // underneath it. These explicit locals avoid relying on closure
-        // capture-field drop order.
+        // These host-loop locals deliberately drop in reverse declaration order:
+        // presenter (and DrmSurface), registered DrmDevice, then the remaining
+        // weak session handle and fd clone. RegisteredDrmDevice removes its
+        // notifier and pauses before releasing the device, preventing Smithay
+        // from replaying file-scoped KMS object IDs captured from the previous
+        // session. The captured calloop and its LibSeatSessionNotifier drop last.
+        // This ordering remains important for notifier, fd, and seat teardown
+        // even though device restoration is deliberately suppressed.
         let mut session_owner = session;
+        let drm = drm;
+        let mut drm_device = RegisteredDrmDevice {
+            handle: calloop.handle(),
+            token: drm_notifier_registration,
+            device: drm_device,
+        };
         let (presenter_events, presenter_source) = channel::channel();
         calloop
             .handle()
@@ -424,16 +498,17 @@ pub(crate) fn prepare(options: RunOptions, signals: Signals) -> Result<PreparedH
                     .events
                     .push_back(DrmRuntimeEvent::Presenter(PresenterEvent::Stopped)),
             })
-            .map_err(|_| anyhow!("failed to register direct DRM presenter results"))?;
-        let mut presenter = PresenterHandle::spawn(direct_gpu, presenter_events)?;
+            .map_err(|_| anyhow!("failed to register GBM/KMS presenter results"))?;
+        let mut presenter =
+            PresenterHandle::spawn(gpu, drm_surface, drm.clone(), crtc, presenter_events)?;
         let mut output_monitor = OutputMonitor {
-            drm,
             scanner,
             device_id,
             device_path,
             connector,
             connected: true,
             mode_compatible: true,
+            event_source_healthy: true,
         };
         let mut children = ChildProcesses::default();
         let child_requested = children.spawn_requested(&loop_data.server, &options.client)?;
@@ -453,7 +528,7 @@ pub(crate) fn prepare(options: RunOptions, signals: Signals) -> Result<PreparedH
         info!(
             socket = ?loop_data.server.socket_name,
             connector = %selected_connector_name,
-            "Weld direct DRM compositor is ready"
+            "Weld GBM/KMS compositor is ready"
         );
         let mut exit_requested = false;
         while !exit_requested {
@@ -462,9 +537,7 @@ pub(crate) fn prepare(options: RunOptions, signals: Signals) -> Result<PreparedH
                 frame_state: &frame_state,
                 capture: pending_capture.as_ref(),
                 remote_debug_enabled,
-                session_active,
-                output_connected: output_monitor.connected,
-                output_mode_compatible: output_monitor.mode_compatible,
+                physical_output_available: output_monitor.physical_available(session_active),
                 cursor_animation: cursor.animation_deadline,
                 now,
             });
@@ -487,7 +560,7 @@ pub(crate) fn prepare(options: RunOptions, signals: Signals) -> Result<PreparedH
                     "drm_runtime_event_drain"
                 )
                 .entered();
-                let mut event_counts = [0_usize; 5];
+                let mut event_counts = [0_usize; 6];
                 while let Some(event) = loop_data.events.pop_front() {
                     match event {
                         DrmRuntimeEvent::Input(event) => {
@@ -502,6 +575,7 @@ pub(crate) fn prepare(options: RunOptions, signals: Signals) -> Result<PreparedH
                             event_counts[1] += 1;
                             session_active = false;
                             presenter.suspend();
+                            drm_device.pause();
                             input_pending = true;
                             for event in loop_data
                                 .backend_state
@@ -525,30 +599,58 @@ pub(crate) fn prepare(options: RunOptions, signals: Signals) -> Result<PreparedH
                         }
                         DrmRuntimeEvent::Session(SessionEvent::ActivateSession) => {
                             event_counts[1] += 1;
+                            let recovering = !session_active;
                             session_active = true;
-                            if output_monitor.connected && output_monitor.mode_compatible {
-                                presenter.activate();
-                                frame_state.request_present();
+                            if recovering {
+                                match drm_device.activate(true) {
+                                    Ok(()) if output_monitor.physical_available(session_active) => {
+                                        match presenter.activate_after_session() {
+                                            Ok(()) => frame_state.request_present(),
+                                            Err(error) => error!(
+                                                %error,
+                                                "failed to restore GBM/KMS presentation"
+                                            ),
+                                        }
+                                    }
+                                    Ok(()) => {}
+                                    Err(error) => error!(
+                                        %error,
+                                        "failed to reactivate Smithay DRM device"
+                                    ),
+                                }
                             }
-                            info!("libseat session activated; presenter reconfiguration requested");
+                            info!("libseat session activated; GBM/KMS recovery processed");
                         }
                         DrmRuntimeEvent::Udev(event) => {
                             event_counts[2] += 1;
-                            output_monitor.handle(event, &mut presenter, session_active);
-                            if session_active
-                                && output_monitor.connected
-                                && output_monitor.mode_compatible
-                            {
+                            output_monitor.handle(
+                                event,
+                                &mut drm_device,
+                                &mut presenter,
+                                session_active,
+                            );
+                            if output_monitor.physical_available(session_active) {
                                 frame_state.request_present();
                             }
                         }
-                        DrmRuntimeEvent::Presenter(event) => {
+                        DrmRuntimeEvent::Drm(DrmEvent::VBlank(crtc)) => {
                             event_counts[3] += 1;
+                            presenter.frame_submitted(crtc);
+                        }
+                        DrmRuntimeEvent::Drm(DrmEvent::Error(error)) => {
+                            event_counts[3] += 1;
+                            output_monitor.event_source_healthy = false;
+                            presenter.suspend();
+                            drm_device.pause();
+                            error!(%error, "DRM page-flip event source failed; physical output requires restart");
+                        }
+                        DrmRuntimeEvent::Presenter(event) => {
+                            event_counts[4] += 1;
                             log_presenter_event(&event);
                             presenter.handle_event(&event);
                         }
                         DrmRuntimeEvent::Command(command) => {
-                            event_counts[4] += 1;
+                            event_counts[5] += 1;
                             // Signal commands currently only request exit. Keep them on the
                             // shared path so future host commands cannot bypass backend policy.
                             let target =
@@ -575,8 +677,9 @@ pub(crate) fn prepare(options: RunOptions, signals: Signals) -> Result<PreparedH
                     input = event_counts[0],
                     session = event_counts[1],
                     udev = event_counts[2],
-                    presenter = event_counts[3],
-                    command = event_counts[4],
+                    drm = event_counts[3],
+                    presenter = event_counts[4],
+                    command = event_counts[5],
                     "DRM runtime event batch"
                 );
             }
@@ -592,9 +695,7 @@ pub(crate) fn prepare(options: RunOptions, signals: Signals) -> Result<PreparedH
                     Instant::now(),
                 );
                 if frame_state.presentation_due()
-                    && session_active
-                    && output_monitor.connected
-                    && output_monitor.mode_compatible
+                    && output_monitor.physical_available(session_active)
                 {
                     let target = targets.completed();
                     presenter.offer(target, targets.view(target).clone(), cursor.overlay.clone());
@@ -636,7 +737,7 @@ pub(crate) fn prepare(options: RunOptions, signals: Signals) -> Result<PreparedH
                 next_remote_service = now + REMOTE_DEBUG_MAINTENANCE_INTERVAL;
             }
 
-            let work = iteration_work(frame_state.composition_due(now), session_active);
+            let work = iteration_work(frame_state.composition_due(now));
             let mut bevy_requested_redraw = false;
             if work.advance_main {
                 bevy_requested_redraw = shell.advance_main(started_at.elapsed().as_millis() as u32);
@@ -693,6 +794,7 @@ pub(crate) fn prepare(options: RunOptions, signals: Signals) -> Result<PreparedH
                     )
                     .entered();
                     presenter.suspend();
+                    drm_device.pause();
                     match session_owner.change_vt(virtual_terminal) {
                         Ok(()) => {
                             session_active = false;
@@ -704,11 +806,21 @@ pub(crate) fn prepare(options: RunOptions, signals: Signals) -> Result<PreparedH
                                 %error,
                                 "failed to switch virtual terminal"
                             );
-                            if session_active
-                                && output_monitor.connected
-                                && output_monitor.mode_compatible
-                            {
-                                presenter.activate();
+                            if output_monitor.physical_available(session_active) {
+                                match drm_device.activate(true) {
+                                    Ok(()) => {
+                                        if let Err(error) = presenter.activate_after_session() {
+                                            error!(
+                                                %error,
+                                                "failed to restore GBM/KMS after rejected VT switch"
+                                            );
+                                        }
+                                    }
+                                    Err(activate_error) => error!(
+                                        %activate_error,
+                                        "failed to reactivate DRM after rejected VT switch"
+                                    ),
+                                }
                             }
                         }
                     }
@@ -762,8 +874,10 @@ pub(crate) fn prepare(options: RunOptions, signals: Signals) -> Result<PreparedH
                     .map_err(|error| error.to_string());
                     exit_requested |= complete_capture(shell.as_mut(), capture, result)?;
                 }
-                presenter.offer(target, targets.view(target).clone(), cursor.overlay.clone());
-                frame_state.presented();
+                if output_monitor.physical_available(session_active) {
+                    presenter.offer(target, targets.view(target).clone(), cursor.overlay.clone());
+                    frame_state.presented();
+                }
             }
 
             if pending_capture.is_none()
@@ -786,11 +900,7 @@ pub(crate) fn prepare(options: RunOptions, signals: Signals) -> Result<PreparedH
             if work.advance_main && bevy_requested_redraw {
                 frame_state.request_composition();
             }
-            if frame_state.presentation_due()
-                && session_active
-                && output_monitor.connected
-                && output_monitor.mode_compatible
-            {
+            if frame_state.presentation_due() && output_monitor.physical_available(session_active) {
                 let target = targets.completed();
                 presenter.offer(target, targets.view(target).clone(), cursor.overlay.clone());
                 frame_state.presented();
@@ -836,7 +946,7 @@ fn shutdown_presenter(
     if !presenter.stopped() {
         warn!(
             timeout_milliseconds = PRESENTER_SHUTDOWN_DEADLINE.as_millis(),
-            "direct DRM presenter did not stop promptly; detaching until process teardown"
+            "GBM/KMS presenter did not stop promptly; detaching until process teardown"
         );
     }
     Ok(())
@@ -858,9 +968,7 @@ struct DispatchTimeoutContext<'a> {
     frame_state: &'a FrameState,
     capture: Option<&'a PendingCapture>,
     remote_debug_enabled: bool,
-    session_active: bool,
-    output_connected: bool,
-    output_mode_compatible: bool,
+    physical_output_available: bool,
     cursor_animation: Option<Instant>,
     now: Instant,
 }
@@ -870,16 +978,14 @@ fn dispatch_timeout(context: DispatchTimeoutContext<'_>) -> Option<std::time::Du
         frame_state,
         capture,
         remote_debug_enabled,
-        session_active,
-        output_connected,
-        output_mode_compatible,
+        physical_output_available,
         cursor_animation,
         now,
     } = context;
-    let composition = frame_state.composition_demand_timeout(now, session_active);
+    let composition = frame_state.composition_demand_timeout(now);
     let remote_debug = remote_debug_enabled.then_some(REMOTE_DEBUG_MAINTENANCE_INTERVAL);
     let capture = capture.map(|capture| capture.deadline.saturating_duration_since(now));
-    let cursor = (session_active && output_connected && output_mode_compatible)
+    let cursor = physical_output_available
         .then(|| cursor_animation.map(|deadline| deadline.saturating_duration_since(now)))
         .flatten();
     [composition, remote_debug, capture, cursor]
@@ -890,28 +996,20 @@ fn dispatch_timeout(context: DispatchTimeoutContext<'_>) -> Option<std::time::Du
 
 fn log_presenter_event(event: &PresenterEvent) {
     match event {
-        PresenterEvent::Ready { epoch } => info!(epoch, "direct DRM presenter is ready"),
-        PresenterEvent::FrameReleased {
-            outcome: FrameOutcome::Presented,
-            ..
-        } => {}
-        PresenterEvent::FrameReleased {
-            outcome: FrameOutcome::Unavailable,
-            ..
-        } => error!("direct DRM frame made physical presentation unavailable"),
-        PresenterEvent::FrameReleased { outcome, .. } => {
-            debug!(?outcome, "direct DRM frame was not presented")
+        PresenterEvent::Ready { epoch } => info!(epoch, "GBM/KMS presenter is ready"),
+        PresenterEvent::Frame(frame) => {
+            trace!(?frame, "GBM/KMS presenter frame event")
         }
         PresenterEvent::OutputUnavailable(message) => {
             error!(%message, "physical DRM presentation is unavailable")
         }
         PresenterEvent::DeviceLost(message) => {
-            error!(%message, "direct DRM wgpu device was lost")
+            error!(%message, "GBM/KMS wgpu device was lost")
         }
         PresenterEvent::UncapturedError(message) => {
             error!(%message, "uncaptured error on the shared compositor wgpu device")
         }
-        PresenterEvent::Stopped => warn!("direct DRM presenter worker stopped"),
+        PresenterEvent::Stopped => warn!("GBM/KMS presenter worker stopped"),
     }
 }
 
@@ -941,36 +1039,37 @@ mod tests {
 
     #[test]
     fn inactive_remote_debug_uses_its_maintenance_interval() {
-        let frame_state = FrameState::default();
+        let now = Instant::now();
+        let mut frame_state = FrameState::default();
+        for _ in 0..crate::runtime::BEVY_SETTLE_COMPOSITIONS {
+            frame_state.composition_rendered(now);
+        }
+        frame_state.presented();
         let timeout = dispatch_timeout(DispatchTimeoutContext {
             frame_state: &frame_state,
             capture: None,
             remote_debug_enabled: true,
-            session_active: false,
-            output_connected: true,
-            output_mode_compatible: true,
+            physical_output_available: false,
             cursor_animation: None,
-            now: Instant::now(),
+            now,
         });
 
         assert_eq!(timeout, Some(REMOTE_DEBUG_MAINTENANCE_INTERVAL));
     }
 
     #[test]
-    fn inactive_composition_demand_does_not_poll_without_maintenance_work() {
+    fn inactive_output_keeps_demand_driven_composition_live() {
         let frame_state = FrameState::default();
         let timeout = dispatch_timeout(DispatchTimeoutContext {
             frame_state: &frame_state,
             capture: None,
             remote_debug_enabled: false,
-            session_active: false,
-            output_connected: true,
-            output_mode_compatible: true,
+            physical_output_available: false,
             cursor_animation: Some(Instant::now()),
             now: Instant::now(),
         });
 
-        assert_eq!(timeout, None);
+        assert_eq!(timeout, Some(Duration::ZERO));
     }
 
     #[test]
@@ -980,9 +1079,7 @@ mod tests {
             frame_state: &frame_state,
             capture: None,
             remote_debug_enabled: false,
-            session_active: true,
-            output_connected: true,
-            output_mode_compatible: true,
+            physical_output_available: true,
             cursor_animation: None,
             now: Instant::now(),
         });
@@ -1005,9 +1102,7 @@ mod tests {
                 frame_state: &frame,
                 capture: None,
                 remote_debug_enabled: false,
-                session_active: true,
-                output_connected: true,
-                output_mode_compatible: true,
+                physical_output_available: true,
                 cursor_animation: Some(deadline),
                 now,
             }),
@@ -1018,9 +1113,7 @@ mod tests {
                 frame_state: &frame,
                 capture: None,
                 remote_debug_enabled: false,
-                session_active: true,
-                output_connected: false,
-                output_mode_compatible: true,
+                physical_output_available: false,
                 cursor_animation: Some(deadline),
                 now,
             }),

@@ -308,7 +308,7 @@ pub(crate) fn prepare(options: RunOptions, signals: Signals) -> Result<PreparedH
                     update_now + crate::runtime::REMOTE_DEBUG_MAINTENANCE_INTERVAL;
             }
 
-            let work = iteration_work(frame_state.composition_due(update_now), true);
+            let work = iteration_work(frame_state.composition_due(update_now));
             let mut request_next_composition = false;
             let mut command_exit_requested = false;
             if work.advance_main {
@@ -546,7 +546,7 @@ fn dispatch_timeout(host_work_drained: bool, frame_state: &FrameState, now: Inst
     if host_work_drained {
         Duration::ZERO
     } else {
-        frame_state.composition_timeout(now, true)
+        frame_state.composition_timeout(now)
     }
 }
 
@@ -704,18 +704,9 @@ mod tests {
 
     #[test]
     fn iteration_work_pairs_every_composition_with_one_main_advance() {
+        assert_eq!(iteration_work(true), IterationWork { advance_main: true });
         assert_eq!(
-            iteration_work(true, true),
-            IterationWork { advance_main: true }
-        );
-        assert_eq!(
-            iteration_work(false, true),
-            IterationWork {
-                advance_main: false,
-            }
-        );
-        assert_eq!(
-            iteration_work(true, false),
+            iteration_work(false),
             IterationWork {
                 advance_main: false,
             }

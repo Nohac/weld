@@ -1,19 +1,26 @@
 # Direct DRM presentation
 
-This note records evidence and architectural decisions for replacing Weld's
-transitional CPU-copy DRM renderer with direct wgpu presentation. The retained
-probe at `crates/weld-core/examples/drm_wsi_probe.rs` is intentionally
-independent from the production compositor, so it remains useful for isolating
-driver, session, and VT behavior.
+This note records DRM presentation evidence, ownership rules, and recovery
+requirements. The production backend now uses Smithay's GBM/KMS surface with a
+wgpu full-screen blit. The retained Vulkan Display WSI probe at
+`crates/weld-core/examples/drm_wsi_probe.rs` is intentionally independent from
+the production compositor, so it remains useful for isolating driver, session,
+and VT behavior.
 
 ## Current direction
 
-Vulkan and wgpu will be the sole presenter for a connector while Weld owns it.
-Smithay remains responsible for Wayland protocols, libseat, udev, input, and
-surface state, but Weld will not construct Smithay DRM compositor, GBM, or
-Pixman renderer objects for presentation. Once the direct path replaces the
-transitional backend, the Pixman and GBM renderer features will be removed
-without a fallback.
+Smithay owns the DRM device, connector/CRTC state, GBM swapchain, page flips,
+and vblank retirement. Weld uses `GbmBufferedSurface` as the scanout allocator
+and KMS sink, but does not use Smithay render elements or a Smithay renderer.
+wgpu imports each leased scanout DMA-BUF and renders the completed Bevy
+composition plus the compositor cursor into it.
+
+This first production path still performs one full-output GPU blit for every
+physical presentation. Removing that blit by rendering Bevy directly into a
+leased output buffer is the next optimization pass, with the offscreen path
+retained whenever capture, headless operation, streaming, or an inactive output
+needs independent composition. The staged work is tracked in
+[DRM rendering improvement plan](drm-rendering-improvement-plan.md).
 
 The initial target is modern Vulkan hardware, one GPU, and one output. This
 does not establish singleton presenter or output APIs that would prevent later
@@ -187,7 +194,7 @@ development binary with a release build. Static release linking and higher
 optimization may reduce main-thread CPU, but should not be assumed to reduce
 GPU composition or memory bandwidth without measurements.
 
-## Validated display path
+## Historical Display WSI probe evidence
 
 The probe has presented directly through wgpu on AMD RADV using:
 
@@ -196,15 +203,12 @@ The probe has presented directly through wgpu on AMD RADV using:
 - 2240 by 1400 at 60002 mHz;
 - `Bgra8UnormSrgb` with FIFO presentation.
 
-The initial production path requires an eight-bit sRGB surface format and FIFO
-presentation and fails clearly when either is unavailable. These are explicit
-compatibility requirements, not fallback preferences.
+These results validate the separate probe, not the production GBM/KMS sink.
 
-Discovery uses `DrmDeviceFd` and `DrmScanner` directly. Avoiding Smithay's
-`DrmDevice` also avoids its atomic KMS snapshot and restoration lifecycle,
-which conflicts with Vulkan display WSI changing KMS state independently.
-The DRM fd must outlive the complete wgpu instance because Mesa may retain and
-use that raw fd after surface creation.
+The probe uses `DrmDeviceFd` and `DrmScanner` directly. Avoiding Smithay's
+`DrmDevice` isolates the WSI experiment from Smithay's atomic KMS snapshot and
+restoration lifecycle. Production deliberately makes Smithay's `DrmDevice` the
+sole KMS owner instead.
 
 wgpu-hal matches the requested display mode exactly. The Smithay-to-Vulkan
 refresh tolerance is used only to select the closest Vulkan mode; the exact
@@ -254,41 +258,43 @@ diagnostic fallback if a driver rejects the preferred order.
 
 ## Production event boundary
 
-Direct FIFO acquisition must not run on Weld's Wayland and session thread.
-wgpu supplies a one-second timeout to each of three sequential waits, but the
-tested Mesa display WSI still blocked for 7011 ms. The apparent bound therefore
-cannot make same-thread acquisition safe.
+The calloop thread owns every Smithay and KMS object. It leases a GBM buffer,
+sends only the DMA-BUF and immutable frame payload to a worker, and queues the
+buffer through `GbmBufferedSurface` after the worker reports GPU completion.
+The matching CRTC vblank retires the frame. The worker owns wgpu import, command
+recording, submission, and the potentially blocking completion wait; its
+results return through a wakeable calloop channel.
 
-Production behavior should be event driven:
+Only one physical frame is active. Its phase is rendering or awaiting vblank,
+and one pending slot coalesces newer frames. Session epochs invalidate stale
+work. If a VT activates while the worker still owns a leased buffer, activation
+waits for that terminal worker event before clearing Smithay's stale scanout
+state or reusing the slot. There is no presentation polling.
 
-- calloop reacts to registered libseat, Wayland, input, udev, and presenter
-  channel readiness;
-- Bevy composition runs from damage and redraw requests;
-- an isolated presentation worker owns surface acquisition and presentation,
-  blocks naturally in wgpu, and publishes results through a wakeable channel;
-- session availability and presentation commands cross that owned channel
-  boundary without carrying Smithay or ECS objects;
-- the host thread never synchronously waits for a presentation result or joins
-  a worker that may be stuck in acquisition.
+Transient presentation errors have a bounded reset budget and retry the newest
+retained frame. A retired vblank replenishes that budget. An exhausted budget,
+a failed reset, device loss, or a failed DRM event source disables only physical
+presentation; the event source failure requires restart because Weld can no
+longer retire page flips. Scanout construction also rejects implicit DRM
+modifiers before the worker starts, rather than failing on the first Vulkan
+import.
 
-The probe's short calloop service interval and missing-event deadline are
-diagnostic instrumentation for its intentionally single-threaded form. They
-are not production scheduling policy and must not become status polling.
+The Display WSI probe's short calloop service interval and missing-event
+deadline remain diagnostic instrumentation for its intentionally
+single-threaded form. They are not production scheduling policy.
 
-The host-side presenter lifecycle should be represented as one explicit state
-machine once the first hardware integration has validated the real event
-ordering. Its states need to cover configuring, ready, session-suspended,
-connector-unavailable, mode-incompatible, device-lost, stopping, and stopped.
-Only the cross-thread interruption facts remain atomic: whether acquisition is
-allowed and the epoch that invalidates work already blocking in the driver.
-Readiness, retry budget, shutdown, and output compatibility belong to the host
-state transition rather than independent booleans.
-
-Shutdown needs an explicit lifecycle rather than a timeout disguised as
-coordination. In particular, the worker may still own wgpu objects while
-blocked, yet the libseat-owned DRM fd must remain alive until the wgpu instance
-is dropped. This ownership and termination rule is a design gate for the
-production presenter.
+Shutdown order is part of the KMS ownership contract. The presenter and its
+`DrmSurface` retire first, then Weld removes the registered DRM notifier and
+pauses `DrmDevice` before dropping it. Pausing deliberately suppresses
+Smithay's generic previous-state replay: that snapshot can contain file-scoped
+framebuffer and property-blob identifiers owned by the compositor that ran
+before Weld, so replaying it through Weld's DRM file is invalid. The display
+can remain on Weld's last scanout until libseat or logind switches the VT and
+the receiving session performs its own modeset; this is the same observable
+fallback as a failed snapshot replay, without issuing the invalid commit.
+Calloop's libseat notifier remains the actual seat owner until device and fd
+teardown completes. A host-loop RAII guard preserves that ordering on normal
+return, early errors, and panic unwinding.
 
 Physical presentation availability and composition policy remain separate.
 The initial standalone implementation keeps demand-driven composition active
@@ -307,22 +313,18 @@ DMA-BUF ownership rule.
 
 Bevy renders into two project-owned composition targets. Target identity and
 the latest presenter-owned cursor overlay are part of every presenter frame
-request; target identity is repeated in the result. The host never renders
-into a target while the presentation worker owns it. While FIFO acquisition
-blocks for one target, newer state may be rendered and coalesced into the
-other target without growing a frame queue. Cursor-only motion offers the
-completed target again with updated overlay metadata instead of dirtying Bevy
-composition. The pending slot retains only the newest complete composition and
-cursor payload.
+request. The host never renders into a target while the presentation worker
+owns it. While the worker prepares one target, newer state may be rendered and
+coalesced into the other without growing a frame queue. Cursor-only motion
+offers the completed target again with updated overlay metadata instead of
+dirtying Bevy composition.
 
-Every terminal presenter result releases its target, including deferred,
-interrupted, unavailable-output, device-loss, worker-stop, and panic outcomes.
-The result carries the presenter generation, target identity, and frame
-identity so a late result cannot release a target now owned by newer work.
-After the worker submits its blit and calls present, its release event crosses
-the channel before the host can submit another Bevy write to that target. Both
-operations use the same wgpu queue, so the later write is ordered after the
-blit read.
+Every terminal presenter result releases its target, including interrupted and
+unavailable-output outcomes. Tickets carry presenter generation, session epoch,
+target identity, and frame identity so late results cannot release newer work.
+The worker waits for its ordered acquire/blit/release submission before its
+prepared event crosses the channel. Only then can the host queue the GBM buffer
+or reuse the Bevy source target.
 
 The worker owns one cursor uniform shared across its submissions and rewrites
 it immediately before submitting the matching frame. Its one-in-flight queue
@@ -379,25 +381,17 @@ Native driver segmentation faults or process aborts cannot be contained inside
 the same process; stronger isolation would require a separate presentation
 process and shareable GPU buffers.
 
-`Surface::configure` is contained against synchronous Rust panics. wgpu reports
-non-panicking validation failures through the device-global uncaptured-error
-callback shared with Bevy, so the worker cannot safely attribute such an error
-to configuration alone. Weld logs that shared-device error, and the bounded
-next acquisition determines whether physical presentation becomes unavailable.
+wgpu reports uncaptured errors and device loss through callbacks shared with
+Bevy. Weld forwards them to the host so physical presentation can become
+unavailable without treating a recoverable Rust error as a compositor panic.
 
 On a connector or GPU change, the host retains logical output and window state,
 stops sending work to the affected presenter, and reprobes from udev evidence.
-A replacement presenter uses a new generation only after the previous wgpu
-instance has been safely dropped. If a driver leaves the old worker stuck in
-acquisition, shutdown and replacement must preserve the DRM-fd lifetime rather
-than closing it underneath the driver.
-
-An in-process worker that remains stuck cannot safely be replaced on the same
-connector because the old Vulkan instance still owns the display. Weld must
-then keep that output unavailable and continue without physical presentation
-until process restart. Automatic recovery from that condition requires the
-future presentation-process boundary so the failed presenter and its fd can be
-terminated together without taking down the compositor host.
+A replacement presenter uses a new generation only after the previous worker
+and imported output buffers have been safely retired. If a native driver blocks
+indefinitely or aborts, stronger fault containment still requires a future
+presentation-process boundary; ordinary Rust and device errors remain
+recoverable in process.
 
 The direct backend is not considered robust until it passes repeated and
 long-duration tests covering monitor power off and wake, cable unplug and

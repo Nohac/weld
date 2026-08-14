@@ -1,0 +1,151 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+usage() {
+    cat <<'EOF'
+Usage: run-gbm-kms-validation [--duration SECONDS] [--log PATH] [-- CLIENT...]
+
+Build Weld, run its production GBM/KMS backend from the active TTY with the
+Vulkan validation layer enabled, request clean shutdown after the selected
+duration, and inspect the captured log.
+
+Options:
+  --duration SECONDS  Run time before SIGTERM (default: 20)
+  --log PATH          Output log (default: target/validation/gbm-kms.log)
+  -h, --help          Show this help
+
+Run this from a real TTY. During the run, exercise clients and optionally switch
+away from and back to Weld's VT. Arguments following -- launch an initial client.
+EOF
+}
+
+fail() {
+    printf 'run-gbm-kms-validation: %s\n' "$*" >&2
+    exit 2
+}
+
+script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+repository_root="$(cd -- "${script_dir}/.." && pwd)"
+duration_seconds=20
+validation_log="${repository_root}/target/validation/gbm-kms.log"
+
+while (( $# > 0 )); do
+    case "$1" in
+        --duration)
+            (( $# >= 2 )) || fail "--duration requires a value"
+            duration_seconds="$2"
+            shift 2
+            ;;
+        --log)
+            (( $# >= 2 )) || fail "--log requires a value"
+            validation_log="$2"
+            shift 2
+            ;;
+        -h|--help)
+            usage
+            exit 0
+            ;;
+        --)
+            shift
+            break
+            ;;
+        *)
+            fail "unknown option: $1"
+            ;;
+    esac
+done
+
+[[ "${duration_seconds}" =~ ^[1-9][0-9]*$ ]] || fail "--duration must be a positive integer"
+[[ -t 0 && -t 1 ]] || fail "this validation must run interactively from a real TTY"
+
+client=("$@")
+if [[ "${validation_log}" != /* ]]; then
+    validation_log="${repository_root}/${validation_log}"
+fi
+
+for command in cargo rustc rg tail vulkaninfo; do
+    command -v "${command}" >/dev/null 2>&1 || fail "required command not found: ${command}"
+done
+
+mkdir -p -- "$(dirname -- "${validation_log}")"
+cd -- "${repository_root}"
+
+rust_target_libdir="$(rustc --print target-libdir)"
+export LD_LIBRARY_PATH="${repository_root}/target/debug/deps:${rust_target_libdir}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
+export VK_INSTANCE_LAYERS=VK_LAYER_KHRONOS_validation
+export VK_LOADER_LAYERS_ENABLE=VK_LAYER_KHRONOS_validation
+export VK_LOADER_DEBUG=layer
+export WGPU_VALIDATION=1
+export RUST_LOG="${RUST_LOG:-info,weld_core=debug,smithay=debug}"
+
+layer_probe_log="${validation_log}.layer-probe"
+if ! vulkaninfo --summary > "${layer_probe_log}" 2>&1; then
+    tail -n 80 "${layer_probe_log}" >&2
+    fail "the Vulkan validation preflight could not initialize Vulkan"
+fi
+if ! rg -q 'Insert instance layer.*VK_LAYER_KHRONOS_validation|VK_LAYER_KHRONOS_validation.*Insert instance layer' \
+    "${layer_probe_log}"; then
+    tail -n 80 "${layer_probe_log}" >&2
+    fail "the Vulkan loader cannot load VK_LAYER_KHRONOS_validation"
+fi
+
+cargo build -p weldwm
+
+weld_pid=""
+watchdog_pid=""
+
+cleanup() {
+    if [[ -n "${watchdog_pid}" ]]; then
+        kill -TERM "${watchdog_pid}" 2>/dev/null || true
+        wait "${watchdog_pid}" 2>/dev/null || true
+    fi
+    if [[ -n "${weld_pid}" ]] && kill -0 "${weld_pid}" 2>/dev/null; then
+        kill -TERM "${weld_pid}" 2>/dev/null || true
+        wait "${weld_pid}" 2>/dev/null || true
+    fi
+}
+trap cleanup EXIT INT TERM
+
+printf 'Writing GBM/KMS validation output to %s\n' "${validation_log}" >&2
+"${repository_root}/target/debug/weldwm" --backend drm "${client[@]}" \
+    > "${validation_log}" 2>&1 &
+weld_pid=$!
+
+(
+    sleep "${duration_seconds}"
+    kill -TERM "${weld_pid}" 2>/dev/null || true
+    sleep 5
+    kill -KILL "${weld_pid}" 2>/dev/null || true
+) &
+watchdog_pid=$!
+
+set +e
+wait "${weld_pid}"
+weld_status=$?
+set -e
+weld_pid=""
+kill -TERM "${watchdog_pid}" 2>/dev/null || true
+wait "${watchdog_pid}" 2>/dev/null || true
+watchdog_pid=""
+
+if (( weld_status != 0 )); then
+    tail -n 80 "${validation_log}" >&2
+    fail "Weld did not shut down cleanly (status ${weld_status})"
+fi
+if ! rg -q 'Insert instance layer.*VK_LAYER_KHRONOS_validation|VK_LAYER_KHRONOS_validation.*Insert instance layer' \
+    "${validation_log}"; then
+    tail -n 80 "${validation_log}" >&2
+    fail "the log does not prove that VK_LAYER_KHRONOS_validation loaded"
+fi
+if rg -q 'Device still active, trying to restore previous state|Failed to restore previous state' \
+    "${validation_log}"; then
+    tail -n 80 "${validation_log}" >&2
+    fail "Smithay attempted to replay the previous DRM file's KMS state"
+fi
+if rg -q 'Validation Error|VUID-|ERROR[^\n]*[Vv]alidation' "${validation_log}"; then
+    tail -n 80 "${validation_log}" >&2
+    fail "Vulkan validation reported an error; inspect ${validation_log}"
+fi
+
+printf 'GBM/KMS validation completed without reported Vulkan errors.\n'

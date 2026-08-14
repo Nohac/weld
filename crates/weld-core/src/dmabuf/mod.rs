@@ -4,6 +4,7 @@ mod device;
 mod manager;
 mod source;
 
+pub(crate) use device::renderable_scanout_formats;
 pub use device::{DmabufCapabilities, request_weld_device};
 pub use manager::{
     DmabufContext, DmabufManager, ImportedImageRegistry, PromotionImage, StagedImport,

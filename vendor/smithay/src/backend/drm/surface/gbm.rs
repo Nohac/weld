@@ -411,6 +411,20 @@ where
         self.swapchain.reset_buffers()
     }
 
+    /// Clears the physical surface and discards buffers whose page-flip
+    /// completion may have been lost while the DRM device was inactive.
+    ///
+    /// Call this after reactivating the device. Unlike [`Self::reset_buffers`],
+    /// this preserves the swapchain slots so renderer imports keyed by their
+    /// allocations remain reusable.
+    pub fn clear_pending_scanout(&mut self) -> Result<(), Error<A::Error>> {
+        self.drm.clear().map_err(Error::DrmError)?;
+        self.pending_fb = None;
+        self.queued_fb = None;
+        self.next_fb = None;
+        Ok(())
+    }
+
     /// Reset the age for all buffers.
     ///
     /// This can be used to efficiently clear the damage history without having to

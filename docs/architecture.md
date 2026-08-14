@@ -228,12 +228,15 @@ surface lifetime authoritative for window policy. Smithay remains responsible
 for Wayland protocol state and applies focus or close actions chosen by ECS
 policy; it does not own window placement, stacking, or decoration. The final
 project-owned wgpu pass presents or captures Bevy's
-completed texture directly in both backends. Standalone DRM uses the Vulkan
-display WSI validated by the retained probe and never constructs Smithay's
-Pixman, GBM, or `DrmCompositor` presentation path. FIFO acquisition and
-presentation run on an event-driven worker so libseat, Wayland, input, and ECS
-remain responsive while a driver blocks. The current bootstrap allocates a
-fixed pair of composition targets in `weld-core`. For each composition, core
+completed texture directly in both backends. Standalone DRM uses Smithay's
+`GbmBufferedSurface` for GBM allocation and KMS page flips, without adopting a
+Smithay renderer or render-element graph. A wgpu worker imports each leased
+scanout DMA-BUF and currently performs one full-screen GPU blit into it before
+the calloop thread queues it. Removing that output blit is the next rendering
+optimization; it is tracked in the
+[DRM rendering improvement plan](drm-rendering-improvement-plan.md). The
+current bootstrap allocates a fixed pair of composition targets in `weld-core`.
+For each composition, core
 hands `weld-app` the view that is free for rendering; the app binds that view to
 its stable Bevy camera target. This is provisional ownership debt, not the
 intended plugin-facing composition contract: core should expose GPU/output
@@ -243,7 +246,8 @@ how they compose. Core may enforce presenter ownership and back-pressure for
 submitted targets, but it must not hardcode the application layer graph. Until
 that boundary is refactored, the host never writes the target currently owned
 by the DRM worker, and pending compositions are bounded to the newest
-host-owned target.
+host-owned target. The old Vulkan Display WSI probe remains a self-contained
+hardware diagnostic and is not part of production presentation.
 
 Physical output availability does not gate demand-driven composition or client
 frame callbacks. Startup, first client mapping, and structural shell changes

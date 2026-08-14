@@ -17,6 +17,7 @@ png.workspace = true
 pollster.workspace = true
 smithay = { workspace = true, features = [
     "backend_drm",
+    "backend_gbm",
     "backend_libinput",
     "backend_session_libseat",
     "backend_udev",

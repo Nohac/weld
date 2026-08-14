@@ -1,0 +1,168 @@
+# Possible future improvements
+
+**Status: Exploration.** This note records implementation ideas worth revisiting
+after comparing Weld with [Nourish](https://github.com/y5-snowies/nourish). It is
+not a roadmap, compatibility target, or implementation checklist. The subject
+[specifications](spec/README.md) remain the source for Weld's direction, while
+[Architecture](architecture.md) records what the repository actually implements.
+Any item taken forward must first be checked against Weld's pinned Smithay tree,
+Bevy version, and supported hardware.
+
+## Boundary to preserve
+
+Nourish and Weld place their primary scene graph on opposite sides of the
+renderer boundary. Nourish composes Smithay render elements with a custom Vulkan
+renderer and can feed Bevy or Iced output into that composition through
+DMA-BUFs. Weld imports client surfaces into Bevy so client content, shell UI,
+effects, clipping, and transforms remain ordinary Bevy composition.
+
+The useful parts of Nourish are therefore lifecycle, synchronization, output,
+and interop techniques—not its primary scene hierarchy or renderer wholesale.
+Weld plugins should continue to see Weld and Bevy types rather than Smithay,
+wgpu-hal, Vulkan, KMS, or DMA-BUF details.
+
+## Candidate investigations
+
+### Smithay-managed output buffers with Bevy composition
+
+Weld's first Smithay-managed path now lets DRM/GBM allocate and manage scanout
+buffers and KMS state, then imports those buffers as wgpu render targets for a
+full-screen blit. The remaining investigation is to let Bevy render the final
+scene directly into them before Smithay presents them.
+
+This could make multi-output hotplug, VRR, HDR, hardware planes, and direct
+scanout easier to integrate without adding a CPU pixel copy or replacing Bevy
+as the compositor scene graph. It is an architectural hypothesis, not a proven
+port of Nourish: render-target import, GPU synchronization, damage, modifier
+negotiation, and scanout lifetime still need hardware validation. See
+[Rendering](spec/rendering.md) and
+[Direct DRM presentation](drm-presentation.md). The staged implementation and
+its deliberately retained full-screen blit are tracked in the
+[DRM rendering improvement plan](drm-rendering-improvement-plan.md).
+
+### Output-owned presentation state
+
+Model each physical output as an independently recoverable presentation state
+machine. Its output identity, CRTC, connector, mode, scale, composition target,
+camera, scanout buffers, in-flight frame, damage, presentation timing, color
+state, and protocol global should have one clear lifetime.
+
+Important invariants include:
+
+- Route vblank only to the output owning the reported CRTC. Ignore a late
+  event for a removed output instead of falling back to a primary output.
+- Pace each output from its own refresh and presentation history so one display
+  cannot accidentally throttle another.
+- Retire output-scoped GPU resources and the matching `wl_output` state
+  together on removal or mode replacement.
+- Keep logical windows and policy stable while their presentation moves
+  between output cameras and targets.
+
+### Explicit client synchronization
+
+Add capability-gated `linux-drm-syncobj-v1` support through Smithay. Commits
+with a new buffer and acquire point should be blocked until the acquire point
+signals; completion should wake calloop, unblock the commit, drain the resulting
+surface effects, and request composition without waiting for unrelated Wayland
+traffic. Release points must signal only after Weld's final GPU use completes.
+
+Explicit synchronization should complement the existing implicit-fence path,
+not silently replace it on unsupported clients or hardware. The advertised
+protocol and format/modifier set must match the synchronization path Weld can
+actually honor.
+
+### Multi-plane DMA-BUF import
+
+Weld's current direct-sampling path deliberately accepts one-plane formats.
+Supporting modifier layouts such as AMD DCC or Intel CCS may require importing
+multiple DRM planes into one Vulkan image and extending the temporary wgpu-hal
+interop patch if upstream wgpu still lacks the needed API.
+
+Nourish demonstrates that such a patch is feasible, but its assumption that
+all planes share the first file descriptor must not be copied without proof.
+Weld should validate shared backing and plane metadata, explicitly support or
+reject disjoint allocations, and advertise only format/modifier combinations
+that have passed a real import probe. YUV and other genuinely multi-image
+formats remain a separate design problem.
+
+### Bounded off-thread GPU producers
+
+Some future features—remote encoders and decoders, isolated plugin scenes, or
+headless consumers—may benefit from a worker rendering into a bounded DMA-BUF
+ring while the compositor samples the newest completed slot. Useful properties
+from Nourish's worker design are blocking while idle, coalescing redundant tick
+requests, bounding queues toward the latest frame, and explicitly waking
+calloop when publication makes new damage visible.
+
+Publication needs a monotonic generation that survives ring rebuilds so a
+resize cannot look like an old frame. GPU objects must remain pinned through
+their final in-flight use. If a non-`Send` Bevy `App` is involved, construct it
+on its owning worker from sendable configuration rather than moving it between
+threads. This is not a reason to move Weld's main shell application or raw
+client input path off the compositor thread.
+
+### Native startup environment hygiene
+
+When DRM was selected before Vulkan initialization, Nourish removes inherited
+`WAYLAND_DISPLAY` and `DISPLAY` values so Mesa device-selection layers cannot
+connect to a stale desktop socket during concurrent graphics startup. Weld
+should investigate the same narrowly scoped precaution if startup traces show
+that behavior. Nested mode must retain its host environment, and launched
+clients must still receive Weld's private Wayland socket explicitly.
+
+### Fail-soft display and GPU recovery
+
+Output sleep, unplug, session pause, late vblank, and recoverable presentation
+errors should affect only the relevant output. The Wayland control plane and
+headless or streaming composition should remain alive during a zero-output
+period. Recovery should be an event-driven state transition that rebuilds only
+resources whose capabilities were lost.
+
+Watchdogs are appropriate only for a verified driver stall or a narrowly
+bounded first-frame/resume failure. Timers and polling should not replace
+libseat, udev, vblank, GPU-completion, or presenter-channel events. Device loss
+that invalidates all graphics ownership remains distinct from an ordinary
+output lifecycle event. See [Platform completeness](spec/platform-completeness.md).
+
+### Cache and pacing invariants
+
+The comparison also reinforces several smaller rules for future renderer work:
+
+- Cache imported scanout targets by allocation identity and let dead buffers
+  retire without a cache entry keeping them alive forever.
+- Separately pin every resource used by an in-flight GPU submission.
+- Wake the host explicitly when off-thread publication changes what can be
+  composed; damage tracking cannot observe unpublished worker state.
+- Derive recurring deadlines from the prior deadline rather than completion
+  time to avoid pacing drift.
+- Do not compare or combine timestamps from clocks whose epochs have not been
+  proven compatible.
+
+Weld already applies the corresponding source-buffer lifetime principles in
+its DMA-BUF manager. These are constraints for extending the design, not a
+proposal to replace the current direct-sampling path.
+
+## Ideas intentionally not adopted
+
+- Smithay render elements do not become Weld's public or primary scene graph.
+- A custom Vulkan renderer does not replace Bevy/wgpu merely because Nourish
+  has one.
+- Pixman or GLES must not become a silent fallback that makes an advertised
+  fast path appear functional.
+- Ordinary scenes do not each receive a separate Bevy application or worker
+  thread.
+- Broad global atomics, locks, timers, and generated micro-crates are not an
+  architecture pattern to copy.
+- Direct scanout or hardware-plane promotion must remain optional; normal Bevy
+  composition is the correctness path whenever shell UI or effects are visible.
+
+## Suggested investigation order
+
+1. Explicit synchronization, because it completes the client-buffer ownership
+   contract independently of the physical output design.
+2. Smithay-managed output targets plus one per-output presentation record,
+   proven first on one connector without changing plugin-facing composition.
+3. Multi-output hotplug, independent vblank routing, and fail-soft recovery.
+4. Multi-plane import with exact modifier probing and validation.
+5. Off-thread producer rings only when streaming or isolated rendering has a
+   concrete consumer.
