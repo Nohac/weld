@@ -44,7 +44,7 @@ bevy_winit = { version = "=0.19.1", default-features = false }
 calloop = { version = "0.14.4", features = ["signals"] }
 clap = { version = "4.5", features = ["derive"] }
 leafwing-input-manager = { version = "0.21.0", default-features = false }
-input = "0.10.0"
+input = { version = "0.10.0", features = ["libinput_1_26"] }
 png = "0.18.1"
 pollster = "0.4.0"
 smithay = { path = "vendor/smithay", default-features = false }

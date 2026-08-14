@@ -21,6 +21,7 @@ use bevy::{
     ecs::schedule::SystemSet,
 };
 
+pub use projection::TouchpadGesture;
 pub(crate) use projection::enqueue_raw_input;
 pub(crate) use routing::take_input_effects;
 pub use shortcuts::GlobalShortcutPlugin;
@@ -28,7 +29,10 @@ pub(crate) use shortcuts::take_host_commands;
 pub(crate) use state::{projected_pointer_position, set_input_update_time};
 pub use virtual_terminal::VirtualTerminalShortcutPlugin;
 pub(crate) use virtual_terminal::take_virtual_terminal_switch_request;
-pub use weld_core::input::{SeatInputEffect, SeatInputEffectKind, SurfaceHit};
+pub use weld_core::input::{
+    InputDelta, PointerGesture, PointerGestureKind, SeatInputEffect, SeatInputEffectKind,
+    SurfaceHit, TouchpadHold, TouchpadPinch, TouchpadSwipe,
+};
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq, SystemSet)]
 pub(crate) enum InputSystems {

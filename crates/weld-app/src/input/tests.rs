@@ -1,7 +1,7 @@
 use bevy::{
-    app::App,
+    app::{App, Update},
     camera::{ManualTextureViewHandle, NormalizedRenderTarget},
-    ecs::entity::Entity,
+    ecs::{entity::Entity, message::MessageReader, resource::Resource, system::ResMut},
     input::{InputPlugin, keyboard::KeyCode, mouse::MouseButton},
     picking::pointer::PointerInput,
     prelude::{MinimalPlugins, Reflect},
@@ -9,10 +9,11 @@ use bevy::{
 use leafwing_input_manager::prelude::{ActionState, Actionlike, InputManagerPlugin, InputMap};
 
 use super::{
-    GlobalShortcutPlugin, InputBridgePlugin, SeatInputEffect, SeatInputEffectKind,
+    GlobalShortcutPlugin, InputBridgePlugin, SeatInputEffect, SeatInputEffectKind, TouchpadGesture,
     VirtualTerminalShortcutPlugin, enqueue_raw_input,
     raw::{
-        ButtonState, InputPosition, LinuxButtonCode, LinuxKeycode, RawSeatEvent, RawSeatEventKind,
+        ButtonState, InputDelta, InputPosition, LinuxButtonCode, LinuxKeycode, PointerGesture,
+        RawSeatEvent, RawSeatEventKind, TouchpadPinch,
     },
     take_host_commands, take_input_effects, take_virtual_terminal_switch_request,
 };
@@ -24,6 +25,16 @@ use winit::keyboard::Key;
 enum TestAction {
     Activate,
     Click,
+}
+
+#[derive(Default, Resource)]
+struct CapturedTouchpadGestures(Vec<TouchpadGesture>);
+
+fn capture_touchpad_gestures(
+    mut gestures: MessageReader<TouchpadGesture>,
+    mut captured: ResMut<CapturedTouchpadGestures>,
+) {
+    captured.0.extend(gestures.read().copied());
 }
 
 fn projection_test_app() -> (App, Entity) {
@@ -423,6 +434,77 @@ fn raw_event_order_and_timestamps_survive_projection() {
                 8,
             ),
             SeatInputEffect::new(SeatInputEffectKind::HostFocusLost, 9),
+        ]
+    );
+}
+
+#[test]
+fn touchpad_gesture_sequence_reaches_plugins_and_client_effects_in_the_same_update() {
+    let (mut app, _) = projection_test_app();
+    app.init_resource::<CapturedTouchpadGestures>()
+        .add_systems(Update, capture_touchpad_gestures);
+    let gestures = [
+        TouchpadGesture::new(
+            PointerGesture::Pinch(TouchpadPinch::Begin { fingers: 2 }),
+            20,
+        ),
+        TouchpadGesture::new(
+            PointerGesture::Pinch(TouchpadPinch::Update {
+                delta: InputDelta::new(1.5, -2.0),
+                scale: 1.25,
+                rotation: 3.0,
+            }),
+            21,
+        ),
+        TouchpadGesture::new(
+            PointerGesture::Pinch(TouchpadPinch::End { cancelled: true }),
+            22,
+        ),
+    ];
+    for gesture in gestures {
+        enqueue_raw_input(
+            app.world_mut(),
+            RawSeatEvent::new(
+                RawSeatEventKind::PointerGesture {
+                    gesture: gesture.gesture,
+                },
+                gesture.time,
+            ),
+        );
+    }
+    enqueue_raw_input(
+        app.world_mut(),
+        RawSeatEvent::new(RawSeatEventKind::HostFocusLost, 22),
+    );
+
+    app.update();
+
+    assert_eq!(
+        app.world().resource::<CapturedTouchpadGestures>().0,
+        gestures
+    );
+    assert_eq!(
+        take_input_effects(app.world_mut()),
+        [
+            SeatInputEffect::new(
+                SeatInputEffectKind::PointerGesture {
+                    gesture: gestures[0].gesture,
+                },
+                gestures[0].time,
+            ),
+            SeatInputEffect::new(
+                SeatInputEffectKind::PointerGesture {
+                    gesture: gestures[1].gesture,
+                },
+                gestures[1].time,
+            ),
+            SeatInputEffect::new(
+                SeatInputEffectKind::PointerGesture {
+                    gesture: gestures[2].gesture,
+                },
+                gestures[2].time,
+            ),
+            SeatInputEffect::new(SeatInputEffectKind::HostFocusLost, 22),
         ]
     );
 }

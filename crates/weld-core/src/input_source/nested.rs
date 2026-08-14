@@ -107,16 +107,10 @@ impl NestedAdapter {
         self.events.push_back(RawSeatEvent::new(
             RawSeatEventKind::PointerAxis {
                 position: self.pointer_position,
-                axis: RawScrollFrame {
-                    source: RawScrollSource::Finger,
-                    phase: RawScrollPhase::Cancelled,
-                    horizontal: 0.0,
-                    vertical: 0.0,
-                    horizontal_v120: None,
-                    vertical_v120: None,
-                    horizontal_stop: self.active_scroll_axes.horizontal,
-                    vertical_stop: self.active_scroll_axes.vertical,
-                },
+                axis: RawScrollFrame::cancelled_finger(
+                    self.active_scroll_axes.horizontal,
+                    self.active_scroll_axes.vertical,
+                ),
             },
             time,
         ));

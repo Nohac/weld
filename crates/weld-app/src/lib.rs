@@ -55,6 +55,10 @@ pub mod prelude {
     pub use crate::{
         ActiveBackend, Backend, OutputScale, WeldApp, WeldAppBuilder, WeldAppExt,
         cursor::{CursorIcon, CursorRequest, CursorSettings, CursorSystems, SystemCursorIcon},
+        input::{
+            InputDelta, PointerGesture, PointerGestureKind, TouchpadGesture, TouchpadHold,
+            TouchpadPinch, TouchpadSwipe,
+        },
         output::OutputGeometry,
         surface::{
             ClientDecorated, ClientPopup, ClientSurface, ClientToplevel, MappedSurface,

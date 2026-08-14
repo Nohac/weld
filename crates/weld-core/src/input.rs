@@ -44,6 +44,9 @@ pub enum SeatInputEffectKind {
     PointerAxis {
         axis: RawScrollFrame,
     },
+    PointerGesture {
+        gesture: PointerGesture,
+    },
     Keyboard {
         keycode: LinuxKeycode,
         state: ButtonState,

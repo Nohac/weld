@@ -37,6 +37,22 @@ and client-delivery layers. The nested adapter respects the host compositor's
 logical key mapping; the direct backend owns its keymap. Cursor-only DRM motion
 can update presentation without running a full Bevy composition.
 
+Standalone DRM touchpads use clickfinger when the device supports it, mapping
+one, two, and three-finger physical clicks to left, right, and middle buttons.
+Tap-capable devices also enable one, two, and three-finger left, right, and
+middle taps. Tap-and-drag, drag-lock, and disable-while-typing retain their
+libinput defaults.
+Libinput swipe, pinch, and hold gestures are exposed as full-fidelity Bevy
+messages and forwarded to clients through the Wayland pointer-gestures
+protocol. Gesture consumption is not implemented yet, so compositor plugins
+cannot currently claim a gesture and suppress delivery to the focused client.
+DRM session loss cancels active gestures and finger scrolling before clearing
+focus. Per-device cancellation on hot unplug remains future work alongside raw
+device identity.
+The nested Linux backend does not receive equivalent gesture events from
+Winit; finger scrolling remains ordinary axis input rather than being guessed
+into a higher-level gesture.
+
 ## Seats and devices — Direction
 
 A seat is a logical collection of input capabilities, not a synonym for one

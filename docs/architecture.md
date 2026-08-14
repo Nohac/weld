@@ -310,9 +310,40 @@ still trail a hardware cursor plane by up to the display/presentation latency;
 hardware-plane support remains the path to eliminating that final bound.
 
 Standalone input preserves each libinput device's default acceleration profile
-and speed. The eventual input-settings API must scope overrides per device or
-device type. Nested mode continues to use motion already transformed by the
-parent compositor.
+and speed. The eventual input-settings API must preserve global, device-type,
+and device-specific locality as described by
+[reloadable configuration](spec/plugins-and-configuration.md#reloadable-configuration--direction).
+Nested mode continues to use motion already transformed by the parent
+compositor.
+
+Standalone DRM configures clickfinger on devices that advertise it and fixes
+the clickfinger map to one/two/three-finger left/right/middle clicks. It does
+the same for tap-to-click on devices that advertise tapping. Tap-and-drag,
+drag-lock, and disable-while-typing remain at their libinput defaults. This
+hardcoded device policy is an initial default; the eventual input-settings
+resource must make it reloadable. The explicit clickfinger map raises Weld's
+system libinput requirement to 1.26.
+Libinput swipe, pinch, and hold transitions retain their begin/update/end
+lifecycle, finger counts, cancellation, translation, cumulative pinch scale,
+rotation, and timestamps through the ECS input bridge. Plugins receive the
+backend-neutral `TouchpadGesture` message, and the same ordered transition is
+forwarded to the focused client through `wp_pointer_gestures_v1` without
+requesting a composition by itself. Gesture consumption is not implemented
+yet: a plugin and the focused client currently both observe the gesture.
+Losing the DRM session emits cancelled gesture and finger-scroll transitions
+using the last libinput timestamp before clearing focus, so switching virtual
+terminals cannot leave a client gesture active. Device-removal cancellation is
+deferred until raw input carries device identity; cancelling the whole logical
+seat when an unrelated device disappears would be incorrect. A later gesture
+begin repairs any stale tracked sequence before forwarding the new begin.
+Nested Linux gesture forwarding remains unavailable because Winit does not
+expose the parent Wayland compositor's pointer-gesture stream; Weld does not
+reinterpret ordinary finger scrolling as pinch or swipe input.
+
+DRM reconciliation motion outside the raw input stream still uses Weld process
+uptime rather than libinput's monotonic clock. Unifying those pre-existing
+timestamp domains remains separate input-clock work; synthesized gesture and
+scroll cancellation itself stays in the libinput domain.
 
 Weld advertises `xdg-decoration` and answers decoration
 objects with server-side mode. Creating a decoration object opts a client into

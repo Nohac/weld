@@ -44,6 +44,7 @@ use smithay::{
         cursor_shape::CursorShapeManagerState,
         fractional_scale::FractionalScaleManagerState,
         output::OutputManagerState,
+        pointer_gestures::PointerGesturesState,
         selection::data_device::DataDeviceState,
         shell::xdg::{XdgShellState, decoration::XdgDecorationState},
         shm::ShmState,
@@ -79,6 +80,7 @@ pub struct ServerState {
     xdg_shell_state: XdgShellState,
     _xdg_decoration_state: XdgDecorationState,
     _cursor_shape_manager_state: CursorShapeManagerState,
+    _pointer_gestures_state: PointerGesturesState,
     shm_state: ShmState,
     dmabuf_protocol: DmabufProtocol,
     dmabuf_releases: DmabufReleaseStore,
@@ -146,6 +148,7 @@ impl ServerState {
         let xdg_shell_state = XdgShellState::new::<Self>(&display_handle);
         let xdg_decoration_state = XdgDecorationState::new::<Self>(&display_handle);
         let cursor_shape_manager_state = CursorShapeManagerState::new::<Self>(&display_handle);
+        let pointer_gestures_state = PointerGesturesState::new::<Self>(&display_handle);
         let shm_state = ShmState::new::<Self>(&display_handle, []);
         let dmabuf_protocol = DmabufProtocol::new(&display_handle, dmabuf_capabilities)?;
         let viewporter_state = ViewporterState::new::<Self>(&display_handle);
@@ -251,6 +254,7 @@ impl ServerState {
             xdg_shell_state,
             _xdg_decoration_state: xdg_decoration_state,
             _cursor_shape_manager_state: cursor_shape_manager_state,
+            _pointer_gestures_state: pointer_gestures_state,
             shm_state,
             dmabuf_protocol,
             dmabuf_releases: DmabufReleaseStore::default(),

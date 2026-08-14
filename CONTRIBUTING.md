@@ -156,6 +156,10 @@ Set the standalone output scale with `cargo run -- --scale 2 -- foot`.
 Fractional values are supported; nested mode follows its host compositor and
 warns when an explicit scale is ignored.
 
+Standalone input requires system libinput 1.26 or newer so Weld can set an
+explicit one/two/three-finger left/right/middle clickfinger map. The shared
+Rust development shell provides a compatible version.
+
 Use the compositor shortcuts to launch clients or stop Weld:
 
 - `Super+Enter`: foot

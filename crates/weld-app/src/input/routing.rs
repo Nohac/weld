@@ -249,6 +249,10 @@ fn replay_seat_event(
                 time,
             ))
         }
+        RawSeatEventKind::PointerGesture { gesture } => Some(SeatInputEffect::new(
+            SeatInputEffectKind::PointerGesture { gesture },
+            time,
+        )),
         RawSeatEventKind::Keyboard { keycode, state, .. } => Some(SeatInputEffect::new(
             SeatInputEffectKind::Keyboard { keycode, state },
             time,

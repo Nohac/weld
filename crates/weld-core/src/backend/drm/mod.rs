@@ -352,7 +352,7 @@ pub(crate) fn prepare(options: RunOptions, signals: Signals) -> Result<PreparedH
     calloop
         .handle()
         .insert_source(input_backend, |event, _, data| {
-            if let Some(event) = data.backend_state.convert(event) {
+            for event in data.backend_state.convert(event).into_iter().flatten() {
                 data.events.push_back(DrmRuntimeEvent::Input(event));
             }
         })
@@ -502,10 +502,20 @@ pub(crate) fn prepare(options: RunOptions, signals: Signals) -> Result<PreparedH
                             session_active = false;
                             presenter.suspend();
                             input_pending = true;
-                            shell.enqueue_input_event(RawSeatEvent::new(
+                            for event in loop_data
+                                .backend_state
+                                .cancel_active_input()
+                                .into_iter()
+                                .flatten()
+                            {
+                                shell.enqueue_input_event(event);
+                            }
+                            let focus_lost = RawSeatEvent::new(
                                 RawSeatEventKind::HostFocusLost,
-                                started_at.elapsed().as_millis() as u32,
-                            ));
+                                loop_data.backend_state.last_event_time_msec(),
+                            );
+                            cursor_position_changed |= cursor.observe_input(&focus_lost);
+                            shell.enqueue_input_event(focus_lost);
                             info!("libseat session paused; physical presentation suspended");
                         }
                         DrmRuntimeEvent::Session(SessionEvent::ActivateSession) => {

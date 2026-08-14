@@ -2,15 +2,19 @@
 
 use smithay::backend::{
     input::{
-        AbsolutePositionEvent, Axis, AxisSource, ButtonState, Event, InputEvent, KeyState,
-        KeyboardKeyEvent, PointerAxisEvent, PointerButtonEvent, PointerMotionEvent,
+        AbsolutePositionEvent, Axis, AxisSource, ButtonState, Event, GestureBeginEvent,
+        GestureEndEvent, GesturePinchUpdateEvent as _, GestureSwipeUpdateEvent as _, InputEvent,
+        KeyState, KeyboardKeyEvent, PointerAxisEvent, PointerButtonEvent, PointerMotionEvent,
     },
     libinput::LibinputInputBackend,
 };
+use smithay::reexports::input::{ClickMethod, ClickfingerButtonMap, Device, TapButtonMap};
+use tracing::{debug, trace, warn};
 
 use crate::input::{
-    ButtonState as WeldButtonState, InputPosition, LinuxButtonCode, LinuxKeycode, RawScrollFrame,
-    RawScrollPhase, RawScrollSource, RawSeatEvent, RawSeatEventKind,
+    ButtonState as WeldButtonState, InputDelta, InputPosition, LinuxButtonCode, LinuxKeycode,
+    PointerGesture, PointerGestureKind, RawScrollFrame, RawScrollPhase, RawScrollSource,
+    RawSeatEvent, RawSeatEventKind, TouchpadHold, TouchpadPinch, TouchpadSwipe,
 };
 
 pub struct LibinputAdapter {
@@ -18,6 +22,7 @@ pub struct LibinputAdapter {
     logical_height: f64,
     pointer: InputPosition,
     finger_axes: ActiveScrollAxes,
+    active_gesture: ActiveGesture,
     last_event_time_msec: u32,
 }
 
@@ -34,6 +39,7 @@ impl LibinputAdapter {
             logical_height,
             pointer: InputPosition::new(logical_width / 2.0, logical_height / 2.0),
             finger_axes: ActiveScrollAxes::default(),
+            active_gesture: ActiveGesture::default(),
             last_event_time_msec: 0,
         }
     }
@@ -47,12 +53,18 @@ impl LibinputAdapter {
         )
     }
 
-    pub fn convert(&mut self, event: InputEvent<LibinputInputBackend>) -> Option<RawSeatEvent> {
-        match event {
+    pub fn convert(
+        &mut self,
+        event: InputEvent<LibinputInputBackend>,
+    ) -> [Option<RawSeatEvent>; 2] {
+        let converted = match event {
+            InputEvent::DeviceAdded { mut device } => {
+                configure_pointer_device(&mut device);
+                empty_batch()
+            }
             InputEvent::Keyboard { event, .. } => {
-                self.last_event_time_msec = event.time_msec();
                 let raw: u32 = event.key_code().into();
-                raw.checked_sub(8).map(|keycode| {
+                single_event(raw.checked_sub(8).map(|keycode| {
                     RawSeatEvent::new(
                         RawSeatEventKind::Keyboard {
                             keycode: LinuxKeycode(keycode),
@@ -64,56 +76,50 @@ impl LibinputAdapter {
                         },
                         event.time_msec(),
                     )
-                })
+                }))
             }
             InputEvent::PointerMotion { event, .. } => {
-                self.last_event_time_msec = event.time_msec();
                 self.pointer = self.clamp(InputPosition::new(
                     self.pointer.x + event.delta_x(),
                     self.pointer.y + event.delta_y(),
                 ));
-                Some(RawSeatEvent::new(
+                single_event(Some(RawSeatEvent::new(
                     RawSeatEventKind::PointerMotion {
                         position: self.pointer,
                     },
                     event.time_msec(),
-                ))
+                )))
             }
             InputEvent::PointerMotionAbsolute { event, .. } => {
-                self.last_event_time_msec = event.time_msec();
                 self.pointer = self.clamp(InputPosition::new(
                     event.x_transformed(self.logical_width as i32),
                     event.y_transformed(self.logical_height as i32),
                 ));
-                Some(RawSeatEvent::new(
+                single_event(Some(RawSeatEvent::new(
                     RawSeatEventKind::PointerMotion {
                         position: self.pointer,
                     },
                     event.time_msec(),
-                ))
+                )))
             }
-            InputEvent::PointerButton { event, .. } => {
-                self.last_event_time_msec = event.time_msec();
-                Some(RawSeatEvent::new(
-                    RawSeatEventKind::PointerButton {
-                        position: Some(self.pointer),
-                        button: LinuxButtonCode(event.button_code()),
-                        state: match event.state() {
-                            ButtonState::Pressed => WeldButtonState::Pressed,
-                            ButtonState::Released => WeldButtonState::Released,
-                        },
+            InputEvent::PointerButton { event, .. } => single_event(Some(RawSeatEvent::new(
+                RawSeatEventKind::PointerButton {
+                    position: Some(self.pointer),
+                    button: LinuxButtonCode(event.button_code()),
+                    state: match event.state() {
+                        ButtonState::Pressed => WeldButtonState::Pressed,
+                        ButtonState::Released => WeldButtonState::Released,
                     },
-                    event.time_msec(),
-                ))
-            }
+                },
+                event.time_msec(),
+            ))),
             InputEvent::PointerAxis { event, .. } => {
-                self.last_event_time_msec = event.time_msec();
                 let source = match event.source() {
                     AxisSource::Wheel | AxisSource::WheelTilt => RawScrollSource::Wheel,
                     AxisSource::Finger => RawScrollSource::Finger,
                     AxisSource::Continuous => RawScrollSource::Continuous,
                 };
-                Some(RawSeatEvent::new(
+                single_event(Some(RawSeatEvent::new(
                     RawSeatEventKind::PointerAxis {
                         position: Some(self.pointer),
                         axis: self.scroll_frame(
@@ -127,10 +133,92 @@ impl LibinputAdapter {
                         ),
                     },
                     event.time_msec(),
-                ))
+                )))
             }
-            _ => None,
+            InputEvent::GestureSwipeBegin { event } => self.active_gesture.transition(
+                PointerGesture::Swipe(TouchpadSwipe::Begin {
+                    fingers: event.fingers(),
+                }),
+                event.time_msec(),
+            ),
+            InputEvent::GestureSwipeUpdate { event } => self.active_gesture.transition(
+                PointerGesture::Swipe(TouchpadSwipe::Update {
+                    delta: InputDelta::new(event.delta_x(), event.delta_y()),
+                }),
+                event.time_msec(),
+            ),
+            InputEvent::GestureSwipeEnd { event } => self.active_gesture.transition(
+                PointerGesture::Swipe(TouchpadSwipe::End {
+                    cancelled: event.cancelled(),
+                }),
+                event.time_msec(),
+            ),
+            InputEvent::GesturePinchBegin { event } => self.active_gesture.transition(
+                PointerGesture::Pinch(TouchpadPinch::Begin {
+                    fingers: event.fingers(),
+                }),
+                event.time_msec(),
+            ),
+            InputEvent::GesturePinchUpdate { event } => self.active_gesture.transition(
+                PointerGesture::Pinch(TouchpadPinch::Update {
+                    delta: InputDelta::new(event.delta_x(), event.delta_y()),
+                    scale: event.scale(),
+                    rotation: event.rotation(),
+                }),
+                event.time_msec(),
+            ),
+            InputEvent::GesturePinchEnd { event } => self.active_gesture.transition(
+                PointerGesture::Pinch(TouchpadPinch::End {
+                    cancelled: event.cancelled(),
+                }),
+                event.time_msec(),
+            ),
+            InputEvent::GestureHoldBegin { event } => self.active_gesture.transition(
+                PointerGesture::Hold(TouchpadHold::Begin {
+                    fingers: event.fingers(),
+                }),
+                event.time_msec(),
+            ),
+            InputEvent::GestureHoldEnd { event } => self.active_gesture.transition(
+                PointerGesture::Hold(TouchpadHold::End {
+                    cancelled: event.cancelled(),
+                }),
+                event.time_msec(),
+            ),
+            _ => empty_batch(),
+        };
+        if let Some(event) = converted.iter().flatten().last() {
+            self.last_event_time_msec = event.time;
         }
+        converted
+    }
+
+    /// Cancels active libinput streams before the logical seat loses focus.
+    ///
+    /// The gesture end precedes the finger-scroll cancellation. The caller
+    /// must preserve that order and then append [`RawSeatEventKind::HostFocusLost`]
+    /// at [`Self::last_event_time_msec`] so clients receive every end before
+    /// Smithay clears pointer focus.
+    pub fn cancel_active_input(&mut self) -> [Option<RawSeatEvent>; 2] {
+        let gesture = self.active_gesture.cancel(self.last_event_time_msec);
+        let scroll = (self.finger_axes.horizontal || self.finger_axes.vertical).then(|| {
+            RawSeatEvent::new(
+                RawSeatEventKind::PointerAxis {
+                    position: Some(self.pointer),
+                    axis: RawScrollFrame::cancelled_finger(
+                        self.finger_axes.horizontal,
+                        self.finger_axes.vertical,
+                    ),
+                },
+                self.last_event_time_msec,
+            )
+        });
+        self.finger_axes = ActiveScrollAxes::default();
+        [gesture, scroll]
+    }
+
+    pub const fn last_event_time_msec(&self) -> u32 {
+        self.last_event_time_msec
     }
 
     /// Updates logical bounds after a scale-only output change.
@@ -215,11 +303,144 @@ impl LibinputAdapter {
     }
 }
 
+#[derive(Default)]
+struct ActiveGesture(Option<PointerGestureKind>);
+
+impl ActiveGesture {
+    fn transition(&mut self, gesture: PointerGesture, time: u32) -> [Option<RawSeatEvent>; 2] {
+        let kind = gesture.kind();
+        if gesture.is_begin() {
+            // Libinput normally serializes gestures. Keeping two fixed slots
+            // repairs a stale stream without allocating on the input hot path.
+            let previous = self.0.replace(kind);
+            if let Some(previous) = previous {
+                trace!(
+                    ?previous,
+                    ?kind,
+                    "repaired a stale touchpad gesture before a new begin"
+                );
+            }
+            let cancelled = previous.map(|active| pointer_gesture_event(active.cancelled(), time));
+            let begin = pointer_gesture_event(gesture, time);
+            return match cancelled {
+                Some(end) => [Some(end), Some(begin)],
+                None => single_event(Some(begin)),
+            };
+        }
+        if self.0 != Some(kind) {
+            trace!(
+                active = ?self.0,
+                ?kind,
+                "dropped an unpaired touchpad gesture update or end"
+            );
+            return empty_batch();
+        }
+        if gesture.is_end() {
+            self.0 = None;
+        }
+        single_event(Some(pointer_gesture_event(gesture, time)))
+    }
+
+    fn cancel(&mut self, time: u32) -> Option<RawSeatEvent> {
+        self.0
+            .take()
+            .map(|kind| pointer_gesture_event(kind.cancelled(), time))
+    }
+}
+
+const fn pointer_gesture_event(gesture: PointerGesture, time: u32) -> RawSeatEvent {
+    RawSeatEvent::new(RawSeatEventKind::PointerGesture { gesture }, time)
+}
+
+const fn empty_batch() -> [Option<RawSeatEvent>; 2] {
+    [None, None]
+}
+
+const fn single_event(event: Option<RawSeatEvent>) -> [Option<RawSeatEvent>; 2] {
+    [event, None]
+}
+
+fn preferred_click_method(methods: &[ClickMethod]) -> Option<ClickMethod> {
+    methods
+        .contains(&ClickMethod::Clickfinger)
+        .then_some(ClickMethod::Clickfinger)
+}
+
+fn configure_pointer_device(device: &mut Device) {
+    configure_tapping(device);
+    configure_clickfinger(device);
+}
+
+fn configure_tapping(device: &mut Device) {
+    if device.config_tap_finger_count() == 0 {
+        return;
+    }
+    let left_right_middle = match device.config_tap_set_button_map(TapButtonMap::LeftRightMiddle) {
+        Ok(()) => true,
+        Err(error) => {
+            warn!(
+                device = ?device.sysname(),
+                ?error,
+                "failed to set tap-to-click left/right/middle mapping; using the device mapping"
+            );
+            false
+        }
+    };
+    if let Err(error) = device.config_tap_set_enabled(true) {
+        warn!(
+            device = ?device.sysname(),
+            ?error,
+            "failed to enable tap-to-click"
+        );
+        return;
+    }
+    if left_right_middle {
+        debug!(
+            device = ?device.sysname(),
+            "enabled one/two/three-finger left/right/middle taps"
+        );
+    } else {
+        debug!(device = ?device.sysname(), "enabled taps using the device button mapping");
+    }
+}
+
+fn configure_clickfinger(device: &mut Device) {
+    let Some(method) = preferred_click_method(&device.config_click_methods()) else {
+        return;
+    };
+    if let Err(error) = device.config_click_set_method(method) {
+        warn!(
+            device = ?device.sysname(),
+            ?error,
+            "failed to enable clickfinger touchpad clicks"
+        );
+        return;
+    }
+    if let Err(error) =
+        device.config_click_clickfinger_set_button_map(ClickfingerButtonMap::LeftRightMiddle)
+    {
+        warn!(
+            device = ?device.sysname(),
+            ?error,
+            "failed to set clickfinger left/right/middle mapping"
+        );
+        return;
+    }
+    debug!(
+        device = ?device.sysname(),
+        "enabled one/two/three-finger left/right/middle clicks"
+    );
+}
+
 #[cfg(test)]
 mod tests {
-    use super::LibinputAdapter;
+    use smithay::reexports::input::ClickMethod;
+
+    use super::{ActiveGesture, LibinputAdapter, preferred_click_method};
     use crate::input::{
-        InputPosition, RawScrollPhase, RawScrollSource, RawSeatEvent, RawSeatEventKind,
+        InputDelta, InputPosition, PointerGesture, PointerGestureKind, RawScrollPhase,
+        RawScrollSource, RawSeatEvent, RawSeatEventKind, TouchpadHold, TouchpadPinch,
+        TouchpadSwipe,
     };
 
     #[test]
@@ -276,5 +497,110 @@ mod tests {
         assert!(!vertical_stop.horizontal_stop);
         assert!(vertical_stop.vertical_stop);
         assert_eq!(vertical_stop.phase, RawScrollPhase::Ended);
+    }
+
+    #[test]
+    fn clickfinger_is_selected_only_when_the_device_supports_it() {
+        assert_eq!(
+            preferred_click_method(&[ClickMethod::ButtonAreas, ClickMethod::Clickfinger]),
+            Some(ClickMethod::Clickfinger)
+        );
+        assert_eq!(preferred_click_method(&[ClickMethod::ButtonAreas]), None);
+    }
+
+    #[test]
+    fn gesture_lifecycle_repairs_stale_begins_and_drops_unpaired_events() {
+        let mut active = ActiveGesture::default();
+        let pinch_begin = PointerGesture::Pinch(TouchpadPinch::Begin { fingers: 2 });
+        assert_eq!(
+            active.transition(pinch_begin, 10),
+            [
+                Some(RawSeatEvent::new(
+                    RawSeatEventKind::PointerGesture {
+                        gesture: pinch_begin,
+                    },
+                    10,
+                )),
+                None,
+            ]
+        );
+
+        let unmatched_swipe = PointerGesture::Swipe(TouchpadSwipe::Update {
+            delta: InputDelta::new(1.0, 2.0),
+        });
+        assert_eq!(active.transition(unmatched_swipe, 11), [None, None]);
+        assert_eq!(
+            active.transition(
+                PointerGesture::Hold(TouchpadHold::End { cancelled: false }),
+                12,
+            ),
+            [None, None]
+        );
+
+        let hold_begin = PointerGesture::Hold(TouchpadHold::Begin { fingers: 3 });
+        assert_eq!(
+            active.transition(hold_begin, 13),
+            [
+                Some(RawSeatEvent::new(
+                    RawSeatEventKind::PointerGesture {
+                        gesture: PointerGestureKind::Pinch.cancelled(),
+                    },
+                    13,
+                )),
+                Some(RawSeatEvent::new(
+                    RawSeatEventKind::PointerGesture {
+                        gesture: hold_begin,
+                    },
+                    13,
+                )),
+            ]
+        );
+        assert_eq!(
+            active.transition(
+                PointerGesture::Hold(TouchpadHold::End { cancelled: false }),
+                14,
+            ),
+            [
+                Some(RawSeatEvent::new(
+                    RawSeatEventKind::PointerGesture {
+                        gesture: PointerGesture::Hold(TouchpadHold::End { cancelled: false }),
+                    },
+                    14,
+                )),
+                None,
+            ]
+        );
+    }
+
+    #[test]
+    fn focus_loss_cancels_active_gesture_and_finger_scroll_with_libinput_time() {
+        let mut adapter = LibinputAdapter::new(1920.0, 1080.0);
+        adapter.active_gesture.0 = Some(PointerGestureKind::Swipe);
+        adapter.finger_axes.horizontal = true;
+        adapter.finger_axes.vertical = true;
+        adapter.last_event_time_msec = 42;
+
+        let cancelled = adapter.cancel_active_input();
+
+        assert_eq!(
+            cancelled[0],
+            Some(RawSeatEvent::new(
+                RawSeatEventKind::PointerGesture {
+                    gesture: PointerGestureKind::Swipe.cancelled(),
+                },
+                42,
+            ))
+        );
+        assert_eq!(
+            cancelled[1],
+            Some(RawSeatEvent::new(
+                RawSeatEventKind::PointerAxis {
+                    position: Some(InputPosition::new(960.0, 540.0)),
+                    axis: crate::input::RawScrollFrame::cancelled_finger(true, true),
+                },
+                42,
+            ))
+        );
+        assert_eq!(adapter.cancel_active_input(), [None, None]);
     }
 }

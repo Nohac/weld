@@ -6,7 +6,7 @@ use bevy::{
     app::{App, First},
     camera::NormalizedRenderTarget,
     ecs::{
-        message::{MessageUpdateSystems, MessageWriter},
+        message::{Message, MessageUpdateSystems, MessageWriter},
         resource::Resource,
         schedule::IntoScheduleConfigs,
         system::{Res, ResMut, SystemParam},
@@ -29,8 +29,8 @@ use winit::{keyboard::PhysicalKey, platform::scancode::PhysicalKeyExtScancode};
 
 use super::{
     raw::{
-        ButtonState, InputPosition, LinuxButtonCode, LinuxKeycode, RawScrollFrame, RawScrollPhase,
-        RawSeatEvent, RawSeatEventKind,
+        ButtonState, InputPosition, LinuxButtonCode, LinuxKeycode, PointerGesture, RawScrollFrame,
+        RawScrollPhase, RawSeatEvent, RawSeatEventKind,
     },
     state::{PendingSeatInput, ProjectedPointerState},
 };
@@ -44,10 +44,24 @@ pub(super) fn register(app: &mut App, target: NormalizedRenderTarget) {
         app.add_plugins(CentralInputStorePlugin);
     }
     app.insert_resource(InputTarget(target))
+        .add_message::<TouchpadGesture>()
         .init_resource::<UiScale>()
         .init_resource::<RawInputIngress>()
         .init_resource::<ProjectedMouseButtons>()
         .add_systems(First, project_raw_input.after(MessageUpdateSystems));
+}
+
+/// One full-fidelity touchpad gesture transition available to Weld plugins.
+#[derive(Clone, Copy, Debug, Message, PartialEq)]
+pub struct TouchpadGesture {
+    pub gesture: PointerGesture,
+    pub time: u32,
+}
+
+impl TouchpadGesture {
+    pub const fn new(gesture: PointerGesture, time: u32) -> Self {
+        Self { gesture, time }
+    }
 }
 
 #[derive(Resource)]
@@ -67,6 +81,7 @@ struct ProjectionMessages<'w> {
     mouse_button_input: MessageWriter<'w, MouseButtonInput>,
     mouse_motion: MessageWriter<'w, MouseMotion>,
     mouse_wheel: MessageWriter<'w, MouseWheel>,
+    touchpad_gesture: MessageWriter<'w, TouchpadGesture>,
 }
 
 pub(crate) fn enqueue_raw_input(world: &mut World, event: RawSeatEvent) {
@@ -175,6 +190,11 @@ fn project_raw_input(
                         PointerAction::Scroll { unit, x, y, phase },
                     ));
                 }
+            }
+            RawSeatEventKind::PointerGesture { gesture } => {
+                messages
+                    .touchpad_gesture
+                    .write(TouchpadGesture::new(gesture, raw_event.time));
             }
             RawSeatEventKind::HostFocusLost => {
                 projected_pointer.0.clear_host();

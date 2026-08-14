@@ -37,8 +37,9 @@ use tracing::{debug, trace, warn};
 
 use crate::{
     input::{
-        ButtonState, InputPosition, RawScrollFrame, RawScrollSource, SeatInputEffect,
-        SeatInputEffectKind, SurfaceHit,
+        ButtonState, InputDelta, InputPosition, PointerGesture, RawScrollFrame, RawScrollSource,
+        SeatInputEffect, SeatInputEffectKind, SurfaceHit, TouchpadHold, TouchpadPinch,
+        TouchpadSwipe,
     },
     surface::{SurfaceId, WindowDecoration, WindowInteractionRequestKind, WindowResizeEdge},
 };
@@ -59,6 +60,9 @@ impl ServerState {
                 state,
             } => self.apply_pointer_button(position, target, button.0, state, time),
             SeatInputEffectKind::PointerAxis { axis } => self.apply_pointer_axis(axis, time),
+            SeatInputEffectKind::PointerGesture { gesture } => {
+                self.apply_pointer_gesture(gesture, time)
+            }
             SeatInputEffectKind::Keyboard { keycode, state } => {
                 let Some(keycode) = keycode.0.checked_add(8) else {
                     warn!(keycode = keycode.0, "ignored an overflowing keyboard code");
@@ -310,6 +314,99 @@ impl ServerState {
         pointer.axis(self, frame);
         pointer.frame(self);
         self.retry_pending_focus(pointer.is_grabbed());
+    }
+
+    fn apply_pointer_gesture(&mut self, gesture: PointerGesture, time: u32) {
+        let Some(pointer) = self.seat.get_pointer() else {
+            warn!("ignored touchpad gesture because the seat has no pointer");
+            return;
+        };
+        match gesture {
+            PointerGesture::Swipe(TouchpadSwipe::Begin { fingers }) => {
+                pointer.gesture_swipe_begin(
+                    self,
+                    &GestureSwipeBeginEvent {
+                        serial: SERIAL_COUNTER.next_serial(),
+                        time,
+                        fingers,
+                    },
+                );
+            }
+            PointerGesture::Swipe(TouchpadSwipe::Update { delta }) => {
+                pointer.gesture_swipe_update(
+                    self,
+                    &GestureSwipeUpdateEvent {
+                        time,
+                        delta: gesture_delta(delta),
+                    },
+                );
+            }
+            PointerGesture::Swipe(TouchpadSwipe::End { cancelled }) => {
+                pointer.gesture_swipe_end(
+                    self,
+                    &GestureSwipeEndEvent {
+                        serial: SERIAL_COUNTER.next_serial(),
+                        time,
+                        cancelled,
+                    },
+                );
+            }
+            PointerGesture::Pinch(TouchpadPinch::Begin { fingers }) => {
+                pointer.gesture_pinch_begin(
+                    self,
+                    &GesturePinchBeginEvent {
+                        serial: SERIAL_COUNTER.next_serial(),
+                        time,
+                        fingers,
+                    },
+                );
+            }
+            PointerGesture::Pinch(TouchpadPinch::Update {
+                delta,
+                scale,
+                rotation,
+            }) => {
+                pointer.gesture_pinch_update(
+                    self,
+                    &GesturePinchUpdateEvent {
+                        time,
+                        delta: gesture_delta(delta),
+                        scale,
+                        rotation,
+                    },
+                );
+            }
+            PointerGesture::Pinch(TouchpadPinch::End { cancelled }) => {
+                pointer.gesture_pinch_end(
+                    self,
+                    &GesturePinchEndEvent {
+                        serial: SERIAL_COUNTER.next_serial(),
+                        time,
+                        cancelled,
+                    },
+                );
+            }
+            PointerGesture::Hold(TouchpadHold::Begin { fingers }) => {
+                pointer.gesture_hold_begin(
+                    self,
+                    &GestureHoldBeginEvent {
+                        serial: SERIAL_COUNTER.next_serial(),
+                        time,
+                        fingers,
+                    },
+                );
+            }
+            PointerGesture::Hold(TouchpadHold::End { cancelled }) => {
+                pointer.gesture_hold_end(
+                    self,
+                    &GestureHoldEndEvent {
+                        serial: SERIAL_COUNTER.next_serial(),
+                        time,
+                        cancelled,
+                    },
+                );
+            }
+        }
     }
 
     fn pointer_focus(
@@ -659,6 +756,10 @@ impl WaylandDndGrabHandler for ServerState {}
 
 fn compositor_point(position: InputPosition) -> smithay::utils::Point<f64, Logical> {
     (position.x, position.y).into()
+}
+
+fn gesture_delta(delta: InputDelta) -> smithay::utils::Point<f64, Logical> {
+    (delta.x, delta.y).into()
 }
 
 const fn smithay_key_state(state: ButtonState) -> KeyState {

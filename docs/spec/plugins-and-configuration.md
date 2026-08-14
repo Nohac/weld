@@ -38,6 +38,16 @@ such as TOML or KDL for common composition, rules, themes, and bindings. Rust
 plugins remain available when configuration needs new behavior rather than
 data. The exact schema and reload transaction are not yet selected.
 
+The Weld-owned settings model should cover the meaningful input and compositor
+controls users rely on when adopting it without copying another compositor's
+configuration shape. Resolution must preserve global defaults, device-type or
+class overrides, and stable device-specific overrides with explicit
+precedence. Future Sway, Hyprland, or other compatibility importers should
+translate into those typed settings and report unsupported or lossy mappings
+instead of silently changing their meaning. Hot reload and device add or resume
+should apply the resolved settings only to affected devices while retaining
+clients and window state.
+
 A failed reload must leave the last working configuration active and report a
 structured error.
 
