@@ -3,8 +3,11 @@
 use bevy::{
     ecs::{
         component::Component,
+        entity::Entity,
         hierarchy::ChildOf,
+        message::MessageWriter,
         observer::On,
+        query::{Added, Without},
         system::{Commands, Query, Res, SystemParam},
     },
     picking::{
@@ -12,8 +15,9 @@ use bevy::{
         pointer::PointerButton,
     },
     ui::{ComputedNode, UiScale},
-    window::RequestRedraw,
+    window::{CursorIcon, RequestRedraw, SystemCursorIcon},
 };
+use weld_app::cursor::CursorRequest;
 use weld_app::surface::ToplevelResizeEdge;
 use weld_window::{
     PresentsWindow, WindowCommand, WindowCommandKind, WindowIntent, WindowIntentKind,
@@ -33,6 +37,52 @@ pub struct WindowResizeHandle(pub ToplevelResizeEdge);
 pub struct WindowResizeFrame {
     /// Length of the corner target measured along each border edge, in logical pixels.
     pub corner_grab_extent: f32,
+}
+
+type AddedResizeHandles<'w, 's> = Query<
+    'w,
+    's,
+    (Entity, &'static WindowResizeHandle),
+    (Added<WindowResizeHandle>, Without<CursorIcon>),
+>;
+
+pub(crate) fn attach_resize_cursor_icons(mut commands: Commands, handles: AddedResizeHandles) {
+    for (entity, handle) in &handles {
+        commands
+            .entity(entity)
+            .insert(CursorIcon::System(resize_cursor_icon(handle.0)));
+    }
+}
+
+const fn resize_cursor_icon(edge: ToplevelResizeEdge) -> SystemCursorIcon {
+    match edge {
+        ToplevelResizeEdge::Top | ToplevelResizeEdge::Bottom => SystemCursorIcon::NsResize,
+        ToplevelResizeEdge::Left | ToplevelResizeEdge::Right => SystemCursorIcon::EwResize,
+        ToplevelResizeEdge::TopLeft | ToplevelResizeEdge::BottomRight => {
+            SystemCursorIcon::NwseResize
+        }
+        ToplevelResizeEdge::BottomLeft | ToplevelResizeEdge::TopRight => {
+            SystemCursorIcon::NeswResize
+        }
+    }
+}
+
+pub(crate) fn request_interaction_cursor(
+    interactions: Query<&WindowInteractionSession>,
+    mut requests: MessageWriter<CursorRequest>,
+) {
+    let cursor = interactions.iter().find_map(|interaction| {
+        if interaction.phase != WindowInteractionPhase::Active {
+            return None;
+        }
+        match interaction.kind {
+            WindowInteractionKind::Move => None,
+            WindowInteractionKind::Resize(edge) => Some(resize_cursor_icon(edge)),
+        }
+    });
+    if let Some(cursor) = cursor {
+        requests.write(CursorRequest(cursor));
+    }
 }
 
 impl WindowResizeFrame {

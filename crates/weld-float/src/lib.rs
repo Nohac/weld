@@ -22,10 +22,11 @@ use weld_app::{
     surface::{MappedSurface, SurfaceCommitRevisions, ToplevelResizeEdge},
 };
 use weld_window::{
-    FocusedWindow, ManagedBy, ManagedWindow, PresentationInsets, PrimaryWindowPresentation,
-    WindowCommand, WindowCommandKind, WindowGeometry, WindowIntent, WindowIntentKind,
-    WindowInteractionKind, WindowInteractionPhase, WindowInteractionSession, WindowOccupant,
-    WindowSystems, WindowVacancy, WindowVisibility, WindowZOrder,
+    ClientResizeState, FocusedWindow, ManagedBy, ManagedWindow, PresentationInsets,
+    PrimaryWindowPresentation, WindowCommand, WindowCommandKind, WindowGeometry, WindowIntent,
+    WindowIntentKind, WindowInteractionKind, WindowInteractionPhase, WindowInteractionSession,
+    WindowOccupant, WindowSystems, WindowVacancy, WindowVisibility, WindowZOrder,
+    rounded_client_size,
 };
 
 /// The default freeform window manager.
@@ -200,6 +201,11 @@ struct HandleWindowIntentParams<'w, 's> {
     windows: FloatWindowQuery<'w, 's>,
     insets: Query<'w, 's, &'static PresentationInsets>,
     presentations: Query<'w, 's, &'static PrimaryWindowPresentation>,
+    window_occupants: Query<'w, 's, &'static WindowOccupant>,
+    occupants: Query<'w, 's, &'static weld_app::surface::ClientToplevel>,
+    resize_states: Query<'w, 's, &'static ClientResizeState>,
+    anchors: Query<'w, 's, &'static mut ResizeAnchor>,
+    revisions: Res<'w, SurfaceCommitRevisions>,
 }
 
 fn handle_window_intent(intent: On<WindowIntent>, params: HandleWindowIntentParams) {
@@ -210,6 +216,11 @@ fn handle_window_intent(intent: On<WindowIntent>, params: HandleWindowIntentPara
         mut windows,
         insets,
         presentations,
+        window_occupants,
+        occupants,
+        resize_states,
+        mut anchors,
+        revisions,
     } = params;
     let window = intent.window;
     if intent.kind == WindowIntentKind::Activate {
@@ -275,10 +286,41 @@ fn handle_window_intent(intent: On<WindowIntent>, params: HandleWindowIntentPara
             }) = interaction
                 && (edges.has_left() || edges.has_top())
             {
-                commands.trigger(WindowCommand {
-                    window,
-                    kind: WindowCommandKind::EndInteraction,
+                let mapped_occupant = window_occupants
+                    .get(window)
+                    .ok()
+                    .and_then(|occupant| occupants.get(occupant.entity()).ok());
+                let presentation_insets = presentations
+                    .get(window)
+                    .ok()
+                    .and_then(|presentation| insets.get(presentation.entity()).ok())
+                    .copied()
+                    .unwrap_or_default();
+                let desired_client_size = rounded_client_size(
+                    (geometry.size - presentation_insets.extent()).max(Vec2::ONE),
+                );
+                let pending_after_revision = mapped_occupant.and_then(|toplevel| {
+                    let resize = resize_states.get(window).ok()?;
+                    if resize.requested_size() != desired_client_size {
+                        Some(revisions.revision(toplevel.surface))
+                    } else {
+                        resize.pending_after_revision(toplevel.surface)
+                    }
                 });
+                if let (Some(after_revision), Ok(mut anchor)) =
+                    (pending_after_revision, anchors.get_mut(window))
+                {
+                    anchor.end_after_revision = Some(after_revision);
+                    commands.trigger(WindowCommand {
+                        window,
+                        kind: WindowCommandKind::EndInteraction,
+                    });
+                } else {
+                    commands.trigger(WindowCommand {
+                        window,
+                        kind: WindowCommandKind::FinishInteraction,
+                    });
+                }
             } else {
                 commands.trigger(WindowCommand {
                     window,
@@ -351,7 +393,7 @@ fn reconcile_anchored_resize(
     occupants: Query<(&weld_app::surface::ClientToplevel, &MappedSurface)>,
     insets: Query<&PresentationInsets>,
 ) {
-    for (window, mut geometry, managed_by, occupant, interaction, mut anchor, presentation) in
+    for (window, mut geometry, managed_by, occupant, interaction, anchor, presentation) in
         &mut windows
     {
         if managed_by.0 != manager.0 {
@@ -381,8 +423,10 @@ fn reconcile_anchored_resize(
         }
         if interaction.phase == WindowInteractionPhase::Ending {
             let revision = revisions.revision(toplevel.surface);
-            let expected = anchor.end_after_revision.get_or_insert(revision);
-            if revision > *expected {
+            if anchor
+                .end_after_revision
+                .is_none_or(|expected| revision > expected)
+            {
                 commands.trigger(WindowCommand {
                     window,
                     kind: WindowCommandKind::FinishInteraction,
@@ -544,18 +588,45 @@ fn hash_unit(hash: u64) -> f32 {
 
 #[cfg(test)]
 mod tests {
-    use bevy::{app::App, math::UVec2};
+    use bevy::{
+        app::{App, PreUpdate},
+        ecs::{resource::Resource, schedule::IntoScheduleConfigs, system::Commands},
+        math::UVec2,
+        picking::PickingSystems,
+    };
     use weld_app::{
-        composition::CompositionPlugin,
+        composition::{CompositionPlugin, set_composition_advance_for_test},
         output::OutputGeometry,
-        surface::{SurfaceActionQueue, SurfaceCommitRevisions, ToplevelInteractionRequest},
+        surface::{
+            ClientDecorated, ClientToplevel, MappedSurface, SurfaceAction, SurfaceActionQueue,
+            SurfaceCommitRevisions, SurfaceId, ToplevelInteractionRequest, take_surface_actions,
+        },
     };
     use weld_window::{
-        FocusedWindow, ManagedWindow, WindowGeometry, WindowIntent, WindowIntentKind, WindowPlugin,
-        WindowVacancy, WindowZOrder,
+        FocusedWindow, ManagedWindow, OccupiesWindow, WindowCommand, WindowCommandKind,
+        WindowGeometry, WindowIntent, WindowIntentKind, WindowInteractionKind,
+        WindowInteractionSession, WindowPlugin, WindowVacancy, WindowZOrder,
     };
 
     use super::*;
+
+    #[derive(Resource)]
+    struct ActivateOnPickingLast(Entity);
+
+    fn activate_on_picking_last(
+        mut commands: Commands,
+        request: Option<Res<ActivateOnPickingLast>>,
+    ) {
+        let Some(request) = request else {
+            return;
+        };
+        let window = request.0;
+        commands.remove_resource::<ActivateOnPickingLast>();
+        commands.trigger(WindowIntent {
+            window,
+            kind: WindowIntentKind::Activate,
+        });
+    }
 
     #[test]
     fn placement_stays_within_the_available_output() {
@@ -678,6 +749,145 @@ mod tests {
         assert_eq!(
             app.world().resource::<FocusedWindow>().entity(),
             Some(window)
+        );
+    }
+
+    #[test]
+    fn focus_changes_during_an_input_only_update() {
+        let mut app = App::new();
+        app.add_plugins((CompositionPlugin, WindowPlugin, FloatPlugin))
+            .insert_resource(OutputGeometry::from_physical(UVec2::new(800, 600), 1.0))
+            .init_resource::<SurfaceActionQueue>()
+            .init_resource::<SurfaceCommitRevisions>()
+            .add_message::<ToplevelInteractionRequest>()
+            .add_systems(
+                PreUpdate,
+                activate_on_picking_last.in_set(PickingSystems::Last),
+            );
+        let first_surface = SurfaceId::new(81);
+        let second_surface = SurfaceId::new(82);
+        let first_occupant = app
+            .world_mut()
+            .spawn((
+                ClientToplevel {
+                    surface: first_surface,
+                },
+                ClientDecorated,
+                MappedSurface {
+                    logical_size: Vec2::new(320.0, 240.0),
+                    visual_offset: Vec2::ZERO,
+                    visual_size: Vec2::new(320.0, 240.0),
+                    opaque: true,
+                },
+            ))
+            .id();
+        let second_occupant = app
+            .world_mut()
+            .spawn((
+                ClientToplevel {
+                    surface: second_surface,
+                },
+                ClientDecorated,
+                MappedSurface {
+                    logical_size: Vec2::new(320.0, 240.0),
+                    visual_offset: Vec2::ZERO,
+                    visual_size: Vec2::new(320.0, 240.0),
+                    opaque: true,
+                },
+            ))
+            .id();
+
+        app.update();
+        let first_window = app
+            .world()
+            .get::<OccupiesWindow>(first_occupant)
+            .expect("first toplevel should occupy a window")
+            .0;
+        let second_window = app
+            .world()
+            .get::<OccupiesWindow>(second_occupant)
+            .expect("second toplevel should occupy a window")
+            .0;
+        let focused = app
+            .world()
+            .resource::<FocusedWindow>()
+            .entity()
+            .expect("one admitted window should be focused");
+        let (target_window, target_surface) = if focused == first_window {
+            (second_window, second_surface)
+        } else {
+            (first_window, first_surface)
+        };
+        take_surface_actions(app.world_mut());
+
+        set_composition_advance_for_test(app.world_mut(), false);
+        app.insert_resource(ActivateOnPickingLast(target_window));
+        app.update();
+
+        assert_eq!(
+            app.world().resource::<FocusedWindow>().entity(),
+            Some(target_window)
+        );
+        assert!(
+            take_surface_actions(app.world_mut()).contains(&SurfaceAction::Focus {
+                surface: Some(target_surface),
+            })
+        );
+    }
+
+    #[test]
+    fn ending_an_anchored_resize_does_not_wait_after_the_client_has_committed() {
+        let mut app = App::new();
+        app.add_plugins((CompositionPlugin, WindowPlugin, FloatPlugin))
+            .insert_resource(OutputGeometry::from_physical(UVec2::new(800, 600), 1.0))
+            .init_resource::<SurfaceActionQueue>()
+            .init_resource::<SurfaceCommitRevisions>()
+            .add_message::<ToplevelInteractionRequest>();
+        let occupant = app
+            .world_mut()
+            .spawn((
+                ClientToplevel {
+                    surface: SurfaceId::new(91),
+                },
+                ClientDecorated,
+                MappedSurface {
+                    logical_size: Vec2::new(320.0, 240.0),
+                    visual_offset: Vec2::ZERO,
+                    visual_size: Vec2::new(320.0, 240.0),
+                    opaque: true,
+                },
+            ))
+            .id();
+        app.update();
+        let window = app
+            .world()
+            .get::<OccupiesWindow>(occupant)
+            .expect("mapped toplevel should be admitted")
+            .0;
+
+        app.world_mut().trigger(WindowCommand {
+            window,
+            kind: WindowCommandKind::BeginInteraction(WindowInteractionKind::Resize(
+                ToplevelResizeEdge::Left,
+            )),
+        });
+        app.update();
+        assert!(
+            app.world()
+                .get::<WindowInteractionSession>(window)
+                .is_some()
+        );
+
+        app.world_mut().trigger(WindowIntent {
+            window,
+            kind: WindowIntentKind::InteractionEnded,
+        });
+        app.update();
+
+        assert!(
+            app.world()
+                .get::<WindowInteractionSession>(window)
+                .is_none()
         );
     }
 }

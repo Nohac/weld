@@ -233,7 +233,7 @@ fn main() -> Result<()> {
         bail!("direct DRM surface does not support FIFO presentation");
     }
     surface_config.present_mode = wgpu::PresentMode::Fifo;
-    surface_config.desired_maximum_frame_latency = 3;
+    surface_config.desired_maximum_frame_latency = 1;
     info!(
         formats = ?capabilities.formats,
         present_modes = ?capabilities.present_modes,

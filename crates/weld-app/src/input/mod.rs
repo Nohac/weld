@@ -31,7 +31,7 @@ pub(crate) use virtual_terminal::take_virtual_terminal_switch_request;
 pub use weld_core::input::{SeatInputEffect, SeatInputEffectKind, SurfaceHit};
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq, SystemSet)]
-enum InputSystems {
+pub(crate) enum InputSystems {
     Resolve,
 }
 

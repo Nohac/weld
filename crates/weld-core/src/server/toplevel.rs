@@ -367,6 +367,9 @@ impl CompositorHandler for ServerState {
     }
 
     fn commit(&mut self, surface: &WlSurface) {
+        if self.commit_cursor_surface(surface) {
+            return;
+        }
         if !SurfaceTreeState::should_process_commit(surface) {
             return;
         }
@@ -389,6 +392,7 @@ impl CompositorHandler for ServerState {
     }
 
     fn destroyed(&mut self, surface: &WlSurface) {
+        self.remove_cursor_surface(surface);
         self.output.leave(surface);
         let root = owning_root(surface);
         let Some(surface_id) = self.toplevels.id_for_surface(&root) else {

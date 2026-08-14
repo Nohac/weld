@@ -32,6 +32,7 @@ use bevy::{
 };
 
 use crate::composition::set_composition_advance;
+use crate::cursor::{CursorHostTracker, CursorPlugin, take_cursor_update};
 use crate::debug::{complete_capture, take_capture_request};
 use crate::dmabuf::DmabufImporter;
 use crate::input::{
@@ -63,6 +64,7 @@ pub struct AppShell {
     dmabuf_importer: Option<DmabufImporter>,
     dmabuf: DmabufContext,
     surface_demand: SurfaceCompositionDemand,
+    cursor: CursorHostTracker,
 }
 
 #[derive(Default)]
@@ -122,6 +124,7 @@ impl Plugin for WeldAppPlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins((
             crate::composition::CompositionPlugin,
+            CursorPlugin,
             crate::surface::SurfacePlugin,
             InputBridgePlugin::new(NormalizedRenderTarget::TextureView(COMPOSITION_VIEW)),
         ))
@@ -197,6 +200,7 @@ impl AppShell {
             dmabuf_importer,
             dmabuf: context.dmabuf,
             surface_demand: SurfaceCompositionDemand::default(),
+            cursor: CursorHostTracker::default(),
         })
     }
 
@@ -446,6 +450,10 @@ impl AppShell {
         take_input_effects(self.app.world_mut())
     }
 
+    pub fn take_cursor_update(&mut self) -> weld_core::cursor::CursorHostUpdate {
+        take_cursor_update(self.app.world(), &mut self.cursor)
+    }
+
     pub fn take_host_commands(&mut self) -> Vec<HostCommand> {
         take_host_commands(self.app.world_mut())
     }
@@ -527,6 +535,10 @@ impl CompositionHost for AppShell {
 
     fn take_input_effects(&mut self) -> Vec<SeatInputEffect> {
         AppShell::take_input_effects(self)
+    }
+
+    fn take_cursor_update(&mut self) -> weld_core::cursor::CursorHostUpdate {
+        AppShell::take_cursor_update(self)
     }
 
     fn take_host_commands(&mut self) -> Vec<HostCommand> {

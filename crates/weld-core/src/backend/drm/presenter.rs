@@ -525,13 +525,15 @@ impl FramePresenter<'_> {
                 .texture
                 .create_view(&wgpu::TextureViewDescriptor::default());
             // FrameQueue permits only one worker-owned submission at a time, so
-            // this shared uniform is rewritten immediately before the matching
-            // queue submission and cannot be overtaken by a later cursor payload.
-            self.blitter.set_cursor(self.queue, frame.payload.cursor);
+            // this shared uniform is rewritten on the worker immediately before
+            // the matching queue submission. Cursor textures are immutable once
+            // published, and the frame payload retains the matching texture view.
+            self.blitter.set_cursor(self.queue, &frame.payload.cursor);
             let bind_group = self.blitter.create_bind_group(
                 self.device,
                 "weld direct DRM composition bind group",
                 &frame.payload.view,
+                frame.payload.cursor.texture_view(),
             );
             let mut encoder = self
                 .device

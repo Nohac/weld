@@ -27,13 +27,17 @@ use tracing::{debug, error, info, warn};
 
 use crate::{
     OutputScale,
+    cursor::CursorHostUpdate,
     dmabuf::DmabufSourceCache,
     host::{
         CompositionDemand, CompositionHost, CompositionTargetId, CompositionTargets, PreparedHost,
         RenderContext, RunOptions,
     },
-    input::{RawSeatEvent, RawSeatEventKind, source::libinput::LibinputAdapter},
-    renderer::{CursorOverlay, read_composition_rgba, write_png},
+    input::{
+        InputPosition, RawPointerUpdate, RawSeatEvent, RawSeatEventKind,
+        source::libinput::LibinputAdapter,
+    },
+    renderer::{CursorOverlay, GpuCursor, read_composition_rgba, write_png},
     runtime::{
         ChildProcesses, FrameState, HostCommand, HostCommandEffect, LoopData, PendingCapture,
         iteration_work, server_mut,
@@ -81,6 +85,79 @@ struct DrmHostCommandContext<'a> {
     extent: crate::surface::Extent,
     output_metrics: &'a mut OutputMetrics,
     frame_state: &'a mut FrameState,
+}
+
+struct DrmCursor {
+    gpu: GpuCursor,
+    overlay: CursorOverlay,
+    animation_deadline: Option<Instant>,
+    position: Option<InputPosition>,
+}
+
+impl DrmCursor {
+    fn new(device: &wgpu::Device, queue: &wgpu::Queue, output_scale: f64, now: Instant) -> Self {
+        Self {
+            gpu: GpuCursor::new(
+                device,
+                queue,
+                crate::cursor::CursorConfiguration::default(),
+                output_scale,
+                now,
+            ),
+            overlay: CursorOverlay::hidden(),
+            animation_deadline: None,
+            position: None,
+        }
+    }
+
+    fn observe_input(&mut self, event: &RawSeatEvent) -> bool {
+        let Some(update) = event.pointer_update() else {
+            return false;
+        };
+        let position = match update {
+            RawPointerUpdate::Position(position) => Some(position),
+            RawPointerUpdate::Clear => None,
+        };
+        if self.position == position {
+            return false;
+        }
+        self.position = position;
+        true
+    }
+
+    fn apply_host_update(
+        &mut self,
+        server: &mut ServerState,
+        update: CursorHostUpdate,
+        now: Instant,
+    ) {
+        if let Some(configuration) = update.configuration {
+            self.gpu.set_configuration(configuration, now);
+        }
+        if let Some(appearance) = update.appearance {
+            server.set_shell_cursor(appearance);
+        }
+    }
+
+    fn refresh(
+        &mut self,
+        server: &mut ServerState,
+        output_scale: f64,
+        frame_state: &mut FrameState,
+        now: Instant,
+    ) {
+        if let Some(image) = server.take_cursor_image() {
+            self.gpu.set_image(image, now);
+        }
+        self.gpu.set_position(self.position);
+        self.gpu.set_output_scale(output_scale);
+        let evaluated = self.gpu.evaluate(now);
+        self.animation_deadline = evaluated.next_animation;
+        if evaluated.overlay != self.overlay {
+            self.overlay = evaluated.overlay;
+            frame_state.request_present();
+        }
+    }
 }
 
 fn apply_host_command(context: DrmHostCommandContext<'_>, command: HostCommand) -> Result<bool> {
@@ -367,7 +444,12 @@ pub(crate) fn prepare(options: RunOptions, signals: Signals) -> Result<PreparedH
             .map(|path| PendingCapture::startup(path, child_requested));
         let remote_debug_enabled = options.remote_debug_enabled;
         let mut frame_state = FrameState::default().with_refresh_millihertz(refresh_millihertz);
-        let mut cursor = CursorOverlay::default();
+        let mut cursor = DrmCursor::new(
+            &capture_device,
+            &capture_queue,
+            output_metrics.scale_factor(),
+            Instant::now(),
+        );
         let mut session_active = true;
         info!(
             socket = ?loop_data.server.socket_name,
@@ -377,13 +459,16 @@ pub(crate) fn prepare(options: RunOptions, signals: Signals) -> Result<PreparedH
         let mut exit_requested = false;
         while !exit_requested {
             let now = Instant::now();
-            let timeout = dispatch_timeout(
-                &frame_state,
-                pending_capture.as_ref(),
+            let timeout = dispatch_timeout(DispatchTimeoutContext {
+                frame_state: &frame_state,
+                capture: pending_capture.as_ref(),
                 remote_debug_enabled,
                 session_active,
+                output_connected: output_monitor.connected,
+                output_mode_compatible: output_monitor.mode_compatible,
+                cursor_animation: cursor.animation_deadline,
                 now,
-            );
+            });
             {
                 let _dispatch_span = tracing::trace_span!(
                     target: crate::PROFILE_TARGET,
@@ -396,6 +481,7 @@ pub(crate) fn prepare(options: RunOptions, signals: Signals) -> Result<PreparedH
             }
 
             let mut input_pending = false;
+            let mut cursor_position_changed = false;
             if !loop_data.events.is_empty() {
                 let _events_span = tracing::trace_span!(
                     target: crate::PROFILE_TARGET,
@@ -408,6 +494,7 @@ pub(crate) fn prepare(options: RunOptions, signals: Signals) -> Result<PreparedH
                         DrmRuntimeEvent::Input(event) => {
                             event_counts[0] += 1;
                             input_pending = true;
+                            cursor_position_changed |= cursor.observe_input(&event);
                             shell.enqueue_input_event(event);
                         }
                         DrmRuntimeEvent::Session(SessionEvent::PauseSession) => {
@@ -426,12 +513,19 @@ pub(crate) fn prepare(options: RunOptions, signals: Signals) -> Result<PreparedH
                             session_active = true;
                             if output_monitor.connected && output_monitor.mode_compatible {
                                 presenter.activate();
+                                frame_state.request_present();
                             }
                             info!("libseat session activated; presenter reconfiguration requested");
                         }
                         DrmRuntimeEvent::Udev(event) => {
                             event_counts[2] += 1;
                             output_monitor.handle(event, &mut presenter, session_active);
+                            if session_active
+                                && output_monitor.connected
+                                && output_monitor.mode_compatible
+                            {
+                                frame_state.request_present();
+                            }
                         }
                         DrmRuntimeEvent::Presenter(event) => {
                             event_counts[3] += 1;
@@ -475,6 +569,24 @@ pub(crate) fn prepare(options: RunOptions, signals: Signals) -> Result<PreparedH
                 break;
             }
 
+            if cursor_position_changed {
+                cursor.refresh(
+                    &mut loop_data.server,
+                    output_metrics.scale_factor(),
+                    &mut frame_state,
+                    Instant::now(),
+                );
+                if frame_state.presentation_due()
+                    && session_active
+                    && output_monitor.connected
+                    && output_monitor.mode_compatible
+                {
+                    let target = targets.completed();
+                    presenter.offer(target, targets.view(target).clone(), cursor.overlay.clone());
+                    frame_state.presented();
+                }
+            }
+
             if loop_data.server.has_surface_events() {
                 let _surface_span = tracing::trace_span!(
                     target: crate::PROFILE_TARGET,
@@ -506,25 +618,16 @@ pub(crate) fn prepare(options: RunOptions, signals: Signals) -> Result<PreparedH
                 remote_debug_enabled,
                 session_active,
             );
-            let mut request_next_composition = false;
+            let mut bevy_requested_redraw = false;
             if work.advance_main {
-                let bevy_requested_redraw = shell.advance_main(
+                bevy_requested_redraw = shell.advance_main(
                     started_at.elapsed().as_millis() as u32,
                     work.composition_advance,
                 );
-                let next_cursor = CursorOverlay::from_logical(
-                    shell
-                        .pointer_position()
-                        .map(|position| (position.x, position.y)),
-                    output_metrics.scale_factor(),
-                );
-                if next_cursor != cursor {
-                    cursor = next_cursor;
-                    frame_state.request_present();
-                }
                 let surface_actions = shell.take_surface_actions();
                 let input_effects = shell.take_input_effects();
                 let host_commands = shell.take_host_commands();
+                let cursor_update = shell.take_cursor_update();
                 let virtual_terminal = shell.take_virtual_terminal_switch_request();
                 if !surface_actions.is_empty()
                     || !input_effects.is_empty()
@@ -594,52 +697,60 @@ pub(crate) fn prepare(options: RunOptions, signals: Signals) -> Result<PreparedH
                         }
                     }
                 }
+                cursor.apply_host_update(&mut loop_data.server, cursor_update, now);
                 if bevy_requested_redraw && !work.composition_advance {
                     frame_state.request_composition();
                 }
                 if shell.should_exit() || exit_requested {
                     break;
                 }
-                if work.composition_advance {
-                    loop_data.server.flush_pending_resizes();
-                    let target = host_composition_target(&targets, presenter.in_flight_target());
-                    shell.render_composition(targets.view(target).clone(), targets.extent())?;
-                    targets.mark_completed(target);
-                    let callback_batch = loop_data.server.stage_frame_callbacks();
-                    loop_data.server.complete_frame_callbacks(callback_batch);
-                    frame_state.composition_rendered(now);
-                    request_next_composition = bevy_requested_redraw;
+            }
 
-                    let capture_ready = pending_capture.as_ref().is_some_and(|capture| {
-                        !capture.wait_for_client || shell.has_surface_frame()
-                    });
-                    if capture_ready && let Some(capture) = pending_capture.take() {
-                        let _capture_span = tracing::trace_span!(
-                            target: crate::PROFILE_TARGET,
-                            "capture_readback_encode"
-                        )
-                        .entered();
-                        let result = read_composition_rgba(
-                            &capture_device,
-                            &capture_queue,
-                            targets.texture(target),
+            cursor.refresh(
+                &mut loop_data.server,
+                output_metrics.scale_factor(),
+                &mut frame_state,
+                now,
+            );
+
+            if work.composition_advance {
+                loop_data.server.flush_pending_resizes();
+                let target = host_composition_target(&targets, presenter.in_flight_target());
+                shell.render_composition(targets.view(target).clone(), targets.extent())?;
+                targets.mark_completed(target);
+                let callback_batch = loop_data.server.stage_frame_callbacks();
+                loop_data.server.complete_frame_callbacks(callback_batch);
+                frame_state.composition_rendered(now);
+
+                let capture_ready = pending_capture
+                    .as_ref()
+                    .is_some_and(|capture| !capture.wait_for_client || shell.has_surface_frame());
+                if capture_ready && let Some(capture) = pending_capture.take() {
+                    let _capture_span = tracing::trace_span!(
+                        target: crate::PROFILE_TARGET,
+                        "capture_readback_encode"
+                    )
+                    .entered();
+                    let result = read_composition_rgba(
+                        &capture_device,
+                        &capture_queue,
+                        targets.texture(target),
+                        output_metrics.physical_width(),
+                        output_metrics.physical_height(),
+                    )
+                    .and_then(|pixels| {
+                        write_png(
+                            &capture.path,
                             output_metrics.physical_width(),
                             output_metrics.physical_height(),
+                            &pixels,
                         )
-                        .and_then(|pixels| {
-                            write_png(
-                                &capture.path,
-                                output_metrics.physical_width(),
-                                output_metrics.physical_height(),
-                                &pixels,
-                            )
-                        })
-                        .map_err(|error| error.to_string());
-                        exit_requested |= complete_capture(shell.as_mut(), capture, result)?;
-                    }
-                    presenter.offer(target, targets.view(target).clone(), cursor);
-                    frame_state.presented();
+                    })
+                    .map_err(|error| error.to_string());
+                    exit_requested |= complete_capture(shell.as_mut(), capture, result)?;
                 }
+                presenter.offer(target, targets.view(target).clone(), cursor.overlay.clone());
+                frame_state.presented();
             }
 
             if pending_capture.is_none()
@@ -659,7 +770,7 @@ pub(crate) fn prepare(options: RunOptions, signals: Signals) -> Result<PreparedH
                     Err("screenshot timed out before a composition was available".to_owned()),
                 )?;
             }
-            if request_next_composition {
+            if work.composition_advance && bevy_requested_redraw {
                 frame_state.request_composition();
             }
             if frame_state.presentation_due()
@@ -668,7 +779,7 @@ pub(crate) fn prepare(options: RunOptions, signals: Signals) -> Result<PreparedH
                 && output_monitor.mode_compatible
             {
                 let target = targets.completed();
-                presenter.offer(target, targets.view(target).clone(), cursor);
+                presenter.offer(target, targets.view(target).clone(), cursor.overlay.clone());
                 frame_state.presented();
             }
             {
@@ -730,17 +841,35 @@ fn host_composition_target(
     }
 }
 
-fn dispatch_timeout(
-    frame_state: &FrameState,
-    capture: Option<&PendingCapture>,
+struct DispatchTimeoutContext<'a> {
+    frame_state: &'a FrameState,
+    capture: Option<&'a PendingCapture>,
     remote_debug_enabled: bool,
     session_active: bool,
+    output_connected: bool,
+    output_mode_compatible: bool,
+    cursor_animation: Option<Instant>,
     now: Instant,
-) -> Option<std::time::Duration> {
+}
+
+fn dispatch_timeout(context: DispatchTimeoutContext<'_>) -> Option<std::time::Duration> {
+    let DispatchTimeoutContext {
+        frame_state,
+        capture,
+        remote_debug_enabled,
+        session_active,
+        output_connected,
+        output_mode_compatible,
+        cursor_animation,
+        now,
+    } = context;
     let composition = frame_state.composition_demand_timeout(now, session_active);
     let remote_debug = remote_debug_enabled.then_some(REMOTE_DEBUG_MAINTENANCE_INTERVAL);
     let capture = capture.map(|capture| capture.deadline.saturating_duration_since(now));
-    [composition, remote_debug, capture]
+    let cursor = (session_active && output_connected && output_mode_compatible)
+        .then(|| cursor_animation.map(|deadline| deadline.saturating_duration_since(now)))
+        .flatten();
+    [composition, remote_debug, capture, cursor]
         .into_iter()
         .flatten()
         .min()
@@ -792,27 +921,97 @@ fn complete_capture(
 
 #[cfg(test)]
 mod tests {
-    use super::{FrameState, REMOTE_DEBUG_MAINTENANCE_INTERVAL, dispatch_timeout};
+    use super::{
+        DispatchTimeoutContext, FrameState, REMOTE_DEBUG_MAINTENANCE_INTERVAL, dispatch_timeout,
+    };
     use std::time::{Duration, Instant};
 
     #[test]
     fn inactive_remote_debug_uses_its_maintenance_interval() {
-        let timeout = dispatch_timeout(&FrameState::default(), None, true, false, Instant::now());
+        let frame_state = FrameState::default();
+        let timeout = dispatch_timeout(DispatchTimeoutContext {
+            frame_state: &frame_state,
+            capture: None,
+            remote_debug_enabled: true,
+            session_active: false,
+            output_connected: true,
+            output_mode_compatible: true,
+            cursor_animation: None,
+            now: Instant::now(),
+        });
 
         assert_eq!(timeout, Some(REMOTE_DEBUG_MAINTENANCE_INTERVAL));
     }
 
     #[test]
     fn inactive_composition_demand_does_not_poll_without_maintenance_work() {
-        let timeout = dispatch_timeout(&FrameState::default(), None, false, false, Instant::now());
+        let frame_state = FrameState::default();
+        let timeout = dispatch_timeout(DispatchTimeoutContext {
+            frame_state: &frame_state,
+            capture: None,
+            remote_debug_enabled: false,
+            session_active: false,
+            output_connected: true,
+            output_mode_compatible: true,
+            cursor_animation: Some(Instant::now()),
+            now: Instant::now(),
+        });
 
         assert_eq!(timeout, None);
     }
 
     #[test]
     fn active_overdue_composition_dispatches_immediately() {
-        let timeout = dispatch_timeout(&FrameState::default(), None, false, true, Instant::now());
+        let frame_state = FrameState::default();
+        let timeout = dispatch_timeout(DispatchTimeoutContext {
+            frame_state: &frame_state,
+            capture: None,
+            remote_debug_enabled: false,
+            session_active: true,
+            output_connected: true,
+            output_mode_compatible: true,
+            cursor_animation: None,
+            now: Instant::now(),
+        });
 
         assert_eq!(timeout, Some(Duration::ZERO));
+    }
+
+    #[test]
+    fn cursor_animation_wakes_only_an_available_output() {
+        let now = Instant::now();
+        let deadline = now + Duration::from_millis(12);
+        let mut frame = FrameState::default();
+        for _ in 0..crate::runtime::BEVY_SETTLE_COMPOSITIONS {
+            frame.composition_rendered(now);
+        }
+        frame.presented();
+
+        assert_eq!(
+            dispatch_timeout(DispatchTimeoutContext {
+                frame_state: &frame,
+                capture: None,
+                remote_debug_enabled: false,
+                session_active: true,
+                output_connected: true,
+                output_mode_compatible: true,
+                cursor_animation: Some(deadline),
+                now,
+            }),
+            Some(Duration::from_millis(12))
+        );
+        assert_eq!(
+            dispatch_timeout(DispatchTimeoutContext {
+                frame_state: &frame,
+                capture: None,
+                remote_debug_enabled: false,
+                session_active: true,
+                output_connected: false,
+                output_mode_compatible: true,
+                cursor_animation: Some(deadline),
+                now,
+            }),
+            None
+        );
     }
 }

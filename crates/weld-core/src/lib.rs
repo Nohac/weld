@@ -3,6 +3,7 @@
 pub(crate) const PROFILE_TARGET: &str = "weld_profile";
 
 mod backend;
+pub mod cursor;
 pub mod dmabuf;
 pub mod host;
 pub mod input;

@@ -256,11 +256,65 @@ finite startup-update margin without turning Weld into a continuous renderer,
 but remains a stopgap until Bevy exposes a reliable signal for pending deferred
 or render-world work. Remote debugging services the main world at a bounded
 maintenance rate and on other host wakes, but does not itself create
-composition demand. The DRM cursor is presentation metadata rather than a Bevy UI node:
-cursor-only motion reuses the completed composition and updates the final wgpu
-blit without running Bevy's render app. Pointer interactions that actually
-change shell UI still request an ordinary composition. Weld advertises
-`xdg-decoration` and answers decoration
+composition demand. The DRM cursor is presentation metadata rather than a Bevy
+UI node: cursor-only motion reuses the completed composition and updates the
+final wgpu blit without running Bevy's render app. Pointer interactions that
+actually change shell UI still request an ordinary composition. `weld-core`
+owns the Bevy-free cursor model, Smithay cursor-surface lifecycle, Xcursor
+discovery, immutable GPU uploads, and final composition geometry. `weld-app`
+exposes the reloadable `CursorSettings` ECS resource; replacing that resource
+changes the theme or logical nominal size without exposing Smithay or wgpu to
+plugins. Weld also interprets Bevy's standard `CursorIcon` component on the
+hovered UI entity or its ancestors. Systems that need a transient global
+override publish `CursorRequest` each update before `CursorSystems::Resolve`.
+`weld-window-ui` uses those primitives to install directional shapes on resize
+handles and retain the corresponding shape during an active resize. Client
+cursor requests remain authoritative only while Smithay owns pointer focus;
+Weld UI intent takes over as soon as the pointer returns to shell chrome.
+
+Standalone mode advertises `wp_cursor_shape_manager_v1` and honors hidden,
+named, and legacy client-surface cursor requests. Named shapes resolve through
+the configured raster Xcursor theme, including theme inheritance and animation.
+The DRM dispatch deadline includes the next animation frame only while the
+session and output are available, so an idle, paused, or disconnected cursor
+does not introduce polling. SHM cursor surfaces are copied at the Smithay
+boundary, unpremultiplied in their encoded BGRA representation, and normalized
+to the compositor's configured logical size. This intentionally prevents a
+client-provided bitmap from changing the user's cursor size. Client DMA-BUF
+cursor surfaces are not imported yet: Weld releases them, warns, and displays
+the configured default shape rather than creating a second ad hoc DMA-BUF
+ownership path. Scalable cursor-theme assets and hardware cursor planes are
+also future work.
+
+The final pass samples cursor pixels as sRGB, premultiplies each linear texel
+before interpolation, and composites them over Bevy's premultiplied output.
+Pixel-aligned 1:1 cursors use a single texture load; scaled or subpixel cursors
+use four linear-space taps. Published cursor textures are immutable because
+the DRM presenter may retain and requeue a frame. The presenter worker writes
+the matching geometry uniform immediately before its submission. Nested mode
+continues to use the host window-system cursor and binds a transparent cursor
+to Weld's final blit. `CursorSettings` theme and size changes are therefore
+inert in nested mode, although Bevy `CursorIcon` and `CursorRequest` shape and
+visibility changes still reach the host cursor. Screenshots and remote captures
+currently read the Bevy composition before the DRM cursor blit and therefore
+exclude the cursor; that is deliberate so future streaming can carry cursor
+metadata independently.
+
+Standalone input additionally publishes the newest raw compositor-logical
+pointer position to the cursor presenter before ECS picking and protocol
+routing complete, then offers a cursor-only frame against the last completed
+composition. The same ordered event still passes through the ordinary ECS
+pipeline, and any resulting focus or shape change can replace the queued frame.
+This removes avoidable application-schedule latency, but a software cursor can
+still trail a hardware cursor plane by up to the display/presentation latency;
+hardware-plane support remains the path to eliminating that final bound.
+
+Standalone input preserves each libinput device's default acceleration profile
+and speed. The eventual input-settings API must scope overrides per device or
+device type. Nested mode continues to use motion already transformed by the
+parent compositor.
+
+Weld advertises `xdg-decoration` and answers decoration
 objects with server-side mode. Creating a decoration object opts a client into
 Weld's server-side frame; clients that do not bind the global retain their own
 decorations and are presented without duplicate shell chrome. A late
@@ -283,20 +337,31 @@ Validated pointer `xdg_toplevel.move` and `xdg_toplevel.resize` requests cross
 the Smithay boundary as protocol-neutral ECS messages. `weld-window` validates
 the occupant and owns the UI-neutral interaction session, `weld-window-ui`
 translates pointer motion into window intents, and `weld-float` owns placement
-and interactive-resize policy. Smithay owns the
-pointer grab, configure state, and enforcement of the client's committed size
-constraints. Repeated interactive-resize sizes are latest-value coalesced at
-the Smithay server boundary and configured at most once per composition tick;
-pointer motion, buttons, axes, and keyboard input still reach clients without
-that pacing. Pointer-button effects are applied after ECS surface actions, so
+and interactive-resize policy. Smithay owns the pointer grab, configure state,
+and enforcement of the client's committed size constraints. Repeated
+interactive-resize sizes are latest-value coalesced at the Smithay server
+boundary and configured at most once per composition tick; pointer motion,
+buttons, axes, and keyboard input still reach clients without that pacing.
+Pointer-button effects are applied after ECS surface actions, so
 ending the grab can fold its latched final size and the cleared `Resizing` state
 into one final configure. Destruction and close requests discard any latched
 size; future maximize or fullscreen policy must do the same before issuing its
-own configure. Left and top resize edges remain anchored to the size the client
-actually commits. Pointer interactions are implemented; the equivalent touch
-path remains future work. Client-issued protocol move and resize requests are
-accepted only for client-decorated windows; Weld's chrome owns movement for
-server-decorated windows, and SSD resize handles remain outside this slice.
+own configure. Client-focus reconciliation also runs during input-only main
+updates. A click activation therefore emits its focus action in the same batch
+as the pointer press, and the host applies that action before Smithay establishes
+the matching implicit click grab. The window domain records the surface commit revision at each
+client resize request. Left and top resize edges remain anchored until that
+revision advances, regardless of whether a constrained client commits the
+exact requested size. Pointer interactions are implemented; the equivalent
+touch path remains future work. Client-issued protocol move and resize requests
+are accepted only for client-decorated windows; Weld's chrome owns movement
+for server-decorated windows, and SSD resize handles remain outside this slice.
+Client-decorated applications also own the threshold for deciding that a press
+has become a titlebar drag. Before the client sends `xdg_toplevel.move`, Weld
+cannot distinguish that intent from clicking any other client-owned control.
+Weld therefore neither predicts the move nor replays the pre-request distance;
+this matches the observed Sway behavior and avoids snapping when the grab
+begins.
 Smithay does not currently expose a decoration-object destroy callback through
 this handler API, so a toplevel remains server decorated after creating that
 object until the toplevel itself is destroyed.

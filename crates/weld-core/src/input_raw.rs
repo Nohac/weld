@@ -84,6 +84,27 @@ impl RawSeatEvent {
     pub const fn new(event: RawSeatEventKind, time: u32) -> Self {
         Self { event, time }
     }
+
+    /// Pointer-presence change carried by this transition.
+    pub(crate) const fn pointer_update(&self) -> Option<RawPointerUpdate> {
+        match &self.event {
+            RawSeatEventKind::PointerMotion { position } => {
+                Some(RawPointerUpdate::Position(*position))
+            }
+            RawSeatEventKind::PointerLeft { .. } | RawSeatEventKind::HostFocusLost => {
+                Some(RawPointerUpdate::Clear)
+            }
+            RawSeatEventKind::PointerButton { .. }
+            | RawSeatEventKind::PointerAxis { .. }
+            | RawSeatEventKind::Keyboard { .. } => None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum RawPointerUpdate {
+    Position(InputPosition),
+    Clear,
 }
 
 #[derive(Clone, Debug, PartialEq)]

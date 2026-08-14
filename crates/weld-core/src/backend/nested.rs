@@ -17,6 +17,7 @@ use crate::runtime::{
 use crate::server::{OutputDescriptor, OutputMetrics, ServerOptions, ServerState};
 use crate::{
     OutputScale,
+    cursor::CursorImage,
     host::{CompositionDemand, CompositionTargets, PreparedHost, RenderContext, RunOptions},
 };
 use anyhow::{Context, Result, anyhow, bail};
@@ -316,6 +317,7 @@ pub(crate) fn prepare(options: RunOptions, signals: Signals) -> Result<PreparedH
                 let surface_actions = shell.take_surface_actions();
                 let input_effects = shell.take_input_effects();
                 let host_commands = shell.take_host_commands();
+                let cursor_update = shell.take_cursor_update();
                 if !surface_actions.is_empty()
                     || !input_effects.is_empty()
                     || !host_commands.is_empty()
@@ -346,6 +348,9 @@ pub(crate) fn prepare(options: RunOptions, signals: Signals) -> Result<PreparedH
                             apply_host_command(&mut children, &loop_data.server, command)?;
                     }
                 }
+                if let Some(appearance) = cursor_update.appearance {
+                    loop_data.server.set_shell_cursor(appearance);
+                }
                 if bevy_requested_redraw && !work.composition_advance {
                     frame_state.request_composition();
                 }
@@ -370,6 +375,10 @@ pub(crate) fn prepare(options: RunOptions, signals: Signals) -> Result<PreparedH
                     frame_state.composition_rendered(update_now);
                     request_next_composition = bevy_requested_redraw;
                 }
+            }
+
+            if let Some(image) = loop_data.server.take_cursor_image() {
+                apply_nested_cursor(&host, image);
             }
 
             if pending_capture.is_none()
@@ -546,6 +555,23 @@ fn dispatch_timeout(host_work_drained: bool, frame_state: &FrameState, now: Inst
 
 fn nonzero_size(size: PhysicalSize<u32>) -> PhysicalSize<u32> {
     PhysicalSize::new(size.width.max(1), size.height.max(1))
+}
+
+fn apply_nested_cursor(host: &NestedHost, image: CursorImage) {
+    let Some(window) = &host.window else {
+        return;
+    };
+    match image {
+        CursorImage::Hidden => window.set_cursor_visible(false),
+        CursorImage::Named(icon) => {
+            window.set_cursor(icon);
+            window.set_cursor_visible(true);
+        }
+        CursorImage::Surface(_) => {
+            window.set_cursor(crate::cursor::CursorIcon::Default);
+            window.set_cursor_visible(true);
+        }
+    }
 }
 
 struct NestedHost {

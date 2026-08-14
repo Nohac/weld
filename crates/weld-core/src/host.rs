@@ -279,6 +279,7 @@ pub trait CompositionHost {
     fn should_exit(&self) -> bool;
     fn pointer_position(&self) -> Option<InputPosition>;
     fn take_input_effects(&mut self) -> Vec<SeatInputEffect>;
+    fn take_cursor_update(&mut self) -> crate::cursor::CursorHostUpdate;
     fn take_host_commands(&mut self) -> Vec<HostCommand>;
     fn take_virtual_terminal_switch_request(&mut self) -> Option<i32>;
     fn take_surface_actions(&mut self) -> Vec<SurfaceAction>;

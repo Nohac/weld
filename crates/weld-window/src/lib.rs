@@ -29,8 +29,8 @@ use weld_app::{
     composition::composition_advance_requested,
     surface::{
         ClientDecorated, ClientToplevel, MappedSurface, SurfaceAction, SurfaceActionQueue,
-        SurfaceId, SurfaceSystems, ToplevelInteractionRequest, ToplevelInteractionRequestKind,
-        ToplevelResizeEdge,
+        SurfaceCommitRevisions, SurfaceId, SurfaceSystems, ToplevelInteractionRequest,
+        ToplevelInteractionRequestKind, ToplevelResizeEdge,
     },
 };
 
@@ -56,7 +56,7 @@ impl WindowId {
     WindowZOrder,
     WindowVacancy,
     AppliedPresentationInsets,
-    LastRequestedClientSize
+    ClientResizeState
 )]
 pub struct ManagedWindow {
     pub id: WindowId,
@@ -282,6 +282,7 @@ impl Plugin for WindowPlugin {
             .init_resource::<WindowRegistry>()
             .init_resource::<FocusedWindow>()
             .init_resource::<AppliedClientFocus>()
+            .init_resource::<SurfaceCommitRevisions>()
             .add_observer(apply_window_command)
             .configure_sets(
                 PreUpdate,
@@ -349,22 +350,26 @@ impl Plugin for WindowPlugin {
             .add_systems(
                 PreUpdate,
                 (
-                    reconcile_presentation_insets.in_set(WindowSystems::PresentationMetrics),
+                    reconcile_presentation_insets
+                        .run_if(composition_advance_requested)
+                        .in_set(WindowSystems::PresentationMetrics),
                     (invalidate_interactions, handle_protocol_interactions)
                         .chain()
+                        .run_if(composition_advance_requested)
                         .in_set(WindowSystems::Interaction),
                     (reconcile_window_sizes, remove_unretained_vacancies)
                         .chain()
+                        .run_if(composition_advance_requested)
                         .in_set(WindowSystems::UiReconcile),
                     (
-                        synchronize_registry,
-                        reconcile_window_sizes,
+                        (synchronize_registry, reconcile_window_sizes)
+                            .chain()
+                            .run_if(composition_advance_requested),
                         reconcile_client_focus,
                     )
                         .chain()
                         .in_set(WindowSystems::FinalReconcile),
-                )
-                    .run_if(composition_advance_requested),
+                ),
             );
     }
 }
@@ -387,8 +392,67 @@ impl NextWindowId {
 #[derive(Component, Clone, Copy, Debug, Default, PartialEq)]
 struct AppliedPresentationInsets(PresentationInsets);
 
-#[derive(Component, Clone, Copy, Debug, Default, PartialEq)]
-struct LastRequestedClientSize(UVec2);
+/// Client configure lifecycle retained independently of desired window geometry.
+#[derive(Component, Clone, Copy, Debug)]
+pub struct ClientResizeState {
+    surface: Option<SurfaceId>,
+    requested_size: UVec2,
+    pending: Option<PendingClientResize>,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct PendingClientResize {
+    surface: SurfaceId,
+    after_revision: u64,
+}
+
+impl Default for ClientResizeState {
+    fn default() -> Self {
+        Self {
+            surface: None,
+            requested_size: UVec2::ONE,
+            pending: None,
+        }
+    }
+}
+
+impl ClientResizeState {
+    /// Last client content size requested by the window domain.
+    pub const fn requested_size(&self) -> UVec2 {
+        self.requested_size
+    }
+
+    /// Commit revision that must advance before the current resize is settled.
+    pub fn pending_after_revision(&self, surface: SurfaceId) -> Option<u64> {
+        self.pending
+            .filter(|pending| pending.surface == surface)
+            .map(|pending| pending.after_revision)
+    }
+
+    fn observe_commit(&mut self, surface: SurfaceId, revision: u64) {
+        if self.surface != Some(surface) {
+            self.surface = Some(surface);
+            self.requested_size = UVec2::ZERO;
+            self.pending = None;
+            return;
+        }
+        if self
+            .pending
+            .is_some_and(|pending| pending.surface == surface && revision > pending.after_revision)
+        {
+            self.pending = None;
+        }
+    }
+
+    fn request(&mut self, surface: SurfaceId, requested_size: UVec2, after_revision: u64) {
+        self.surface = Some(surface);
+        self.requested_size = requested_size;
+        self.pending = Some(PendingClientResize {
+            surface,
+            after_revision,
+        });
+    }
+}
 
 #[derive(Resource, Default)]
 struct AppliedClientFocus {
@@ -407,9 +471,9 @@ fn admit_mapped_toplevels(
             .entered();
     let mut unclaimed = surfaces.iter().collect::<Vec<_>>();
     unclaimed.sort_unstable_by_key(|(_, toplevel, _)| toplevel.surface.raw());
-    for (surface_entity, _, mapped) in unclaimed {
+    for (surface_entity, toplevel, mapped) in unclaimed {
         let id = next_id.allocate(&registry);
-        let client_size = rounded_size(mapped.logical_size);
+        let client_size = rounded_client_size(mapped.logical_size);
         let window = commands
             .spawn((
                 ManagedWindow { id },
@@ -421,7 +485,11 @@ fn admit_mapped_toplevels(
                 WindowZOrder::default(),
                 WindowVacancy::Remove,
                 AppliedPresentationInsets::default(),
-                LastRequestedClientSize(client_size),
+                ClientResizeState {
+                    surface: Some(toplevel.surface),
+                    requested_size: client_size,
+                    pending: None,
+                },
             ))
             .id();
         commands
@@ -455,29 +523,32 @@ fn reconcile_presentation_insets(
 fn reconcile_window_sizes(
     mut windows: Query<(
         &WindowGeometry,
-        &mut LastRequestedClientSize,
+        &mut ClientResizeState,
         Option<&WindowOccupant>,
         Option<&PrimaryWindowPresentation>,
     )>,
     roots: Query<&PresentationInsets>,
     occupants: Query<(&ClientToplevel, Option<&MappedSurface>)>,
+    revisions: Res<SurfaceCommitRevisions>,
     mut actions: ResMut<SurfaceActionQueue>,
 ) {
-    for (geometry, mut last_requested, occupant, presentation) in &mut windows {
+    for (geometry, mut resize, occupant, presentation) in &mut windows {
         let Some((toplevel, Some(_))) =
             occupant.and_then(|occupant| occupants.get(occupant.entity()).ok())
         else {
             continue;
         };
+        let revision = revisions.revision(toplevel.surface);
+        resize.observe_commit(toplevel.surface, revision);
         let insets = presentation
             .and_then(|presentation| roots.get(presentation.entity()).ok())
             .copied()
             .unwrap_or_default();
-        let requested = rounded_size((geometry.size - insets.extent()).max(Vec2::ONE));
-        if requested == last_requested.0 {
+        let requested = rounded_client_size((geometry.size - insets.extent()).max(Vec2::ONE));
+        if requested == resize.requested_size {
             continue;
         }
-        last_requested.0 = requested;
+        resize.request(toplevel.surface, requested, revision);
         actions.push(SurfaceAction::Resize {
             surface: toplevel.surface,
             logical_size: requested,
@@ -677,7 +748,8 @@ fn reconcile_client_focus(
     actions.push(SurfaceAction::Focus { surface });
 }
 
-fn rounded_size(size: Vec2) -> UVec2 {
+/// Rounds a logical client content size to the xdg-toplevel configure domain.
+pub fn rounded_client_size(size: Vec2) -> UVec2 {
     let maximum = i32::MAX as f32;
     UVec2::new(
         size.x.round().clamp(1.0, maximum) as u32,
@@ -719,6 +791,29 @@ mod tests {
                 },
             ))
             .id()
+    }
+
+    #[test]
+    fn resize_settles_on_a_new_commit_even_when_the_client_uses_another_size() {
+        let surface = SurfaceId::new(71);
+        let mut resize = ClientResizeState::default();
+        resize.request(surface, UVec2::new(503, 409), 12);
+
+        resize.observe_commit(surface, 13);
+
+        assert_eq!(resize.requested_size(), UVec2::new(503, 409));
+        assert_eq!(resize.pending_after_revision(surface), None);
+    }
+
+    #[test]
+    fn resize_remains_pending_until_the_surface_revision_advances() {
+        let surface = SurfaceId::new(72);
+        let mut resize = ClientResizeState::default();
+        resize.request(surface, UVec2::new(503, 409), 12);
+
+        resize.observe_commit(surface, 12);
+
+        assert_eq!(resize.pending_after_revision(surface), Some(12));
     }
 
     #[test]

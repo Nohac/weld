@@ -236,6 +236,7 @@ impl ServerState {
         };
         self.pointer_position = position;
         let focus = self.pointer_focus(position, target);
+        let shell_owns_cursor = focus.is_none() && !pointer.is_grabbed();
         pointer.motion(
             self,
             focus,
@@ -246,6 +247,7 @@ impl ServerState {
             },
         );
         pointer.frame(self);
+        self.set_shell_cursor_ownership(shell_owns_cursor);
         self.retry_pending_focus(pointer.is_grabbed());
     }
 
@@ -264,6 +266,7 @@ impl ServerState {
         self.pointer_position = position;
         let serial = SERIAL_COUNTER.next_serial();
         let focus = self.pointer_focus(position, target);
+        let shell_owns_cursor = focus.is_none() && !pointer.is_grabbed();
         pointer.motion(
             self,
             focus,
@@ -291,6 +294,7 @@ impl ServerState {
             },
         );
         pointer.frame(self);
+        self.set_shell_cursor_ownership(shell_owns_cursor);
         self.retry_pending_focus(pointer.is_grabbed());
     }
 
@@ -631,7 +635,13 @@ impl SeatHandler for ServerState {
         set_data_device_focus(&self.display_handle, seat, client);
     }
 
-    fn cursor_image(&mut self, _seat: &Seat<Self>, _image: CursorImageStatus) {}
+    fn cursor_image(&mut self, _seat: &Seat<Self>, image: CursorImageStatus) {
+        self.set_client_cursor_image(image);
+    }
+}
+
+impl smithay::input::tablet::TabletSeatHandler for ServerState {
+    type ToolFocus = WlSurface;
 }
 
 impl SelectionHandler for ServerState {

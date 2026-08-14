@@ -12,6 +12,7 @@ test-support = []
 anyhow.workspace = true
 ash.workspace = true
 calloop.workspace = true
+input.workspace = true
 png.workspace = true
 pollster.workspace = true
 smithay = { workspace = true, features = [
@@ -29,6 +30,7 @@ wayland-sys = { version = "0.31.11", features = ["client", "dlopen"] }
 wgpu = { workspace = true, features = ["drm", "naga-ir", "vulkan", "wgsl"] }
 winit = { workspace = true, features = ["rwh_06", "wayland", "wayland-dlopen", "x11"] }
 x11-dl.workspace = true
+xcursor.workspace = true
 
 [dev-dependencies]
 clap.workspace = true

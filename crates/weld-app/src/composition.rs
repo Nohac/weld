@@ -33,3 +33,9 @@ pub(crate) fn set_composition_advance(world: &mut World, enabled: bool) {
         advance.0 = enabled;
     }
 }
+
+#[cfg(feature = "test-support")]
+#[doc(hidden)]
+pub fn set_composition_advance_for_test(world: &mut World, enabled: bool) {
+    set_composition_advance(world, enabled);
+}

@@ -3097,6 +3097,7 @@ dependencies = [
  "bitflags 2.13.1",
  "input-sys",
  "libc",
+ "log",
  "udev",
 ]
 
@@ -5475,6 +5476,7 @@ dependencies = [
  "ash",
  "calloop 0.14.4",
  "clap",
+ "input",
  "png",
  "pollster",
  "smithay",
@@ -5486,6 +5488,7 @@ dependencies = [
  "wgpu",
  "winit",
  "x11-dl",
+ "xcursor",
 ]
 
 [[package]]

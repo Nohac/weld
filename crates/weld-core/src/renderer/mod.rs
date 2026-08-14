@@ -20,8 +20,10 @@ use winit::{dpi::PhysicalSize, window::Window};
 use crate::dmabuf::{DmabufCapabilities, DmabufSourceCache, request_weld_device};
 
 mod composite;
+mod cursor;
 
-pub(crate) use composite::{CompositionBlitter, CursorOverlay};
+pub(crate) use composite::CompositionBlitter;
+pub(crate) use cursor::{CursorOverlay, GpuCursor};
 
 const CAPTURE_GPU_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -246,6 +248,7 @@ impl NestedRenderer {
                 &self.device,
                 "weld Bevy composition bind group",
                 composition,
+                None,
             );
             let mut encoder = self
                 .device

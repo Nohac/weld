@@ -27,6 +27,7 @@ use bevy::{
 };
 use weld_app::{
     composition::composition_advance_requested,
+    cursor::{CursorRequest, CursorSystems},
     surface::{ClientDecorated, ClientPopup, ClientSurface, ClientToplevel, MappedSurface},
 };
 use weld_window::{
@@ -56,13 +57,21 @@ pub struct WindowUiPlugin;
 
 impl Plugin for WindowUiPlugin {
     fn build(&self, app: &mut App) {
-        app.add_observer(interaction::activate_window)
+        app.add_message::<CursorRequest>()
+            .add_observer(interaction::activate_window)
             .add_observer(interaction::begin_move_handle)
             .add_observer(interaction::begin_resize_frame)
             .add_observer(interaction::begin_resize_handle)
             .add_observer(interaction::drag_window)
             .add_observer(interaction::end_drag)
             .add_observer(interaction::cancel_drag)
+            .add_systems(
+                PreUpdate,
+                (
+                    interaction::attach_resize_cursor_icons,
+                    interaction::request_interaction_cursor.before(CursorSystems::Resolve),
+                ),
+            )
             .add_systems(
                 PreUpdate,
                 revoke_client_presentations

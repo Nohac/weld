@@ -1,5 +1,6 @@
 //! Smithay Wayland-server boundary shared by host backends.
 
+mod cursor;
 mod dmabuf;
 mod output;
 mod popup;
@@ -23,7 +24,7 @@ use anyhow::{Context, Result};
 use smithay::{
     backend::allocator::dmabuf::DmabufSource,
     desktop::{PopupGrab, PopupManager},
-    input::{Seat, SeatState},
+    input::{Seat, SeatState, pointer::CursorImageStatus},
     output::Output,
     reexports::{
         calloop::{
@@ -40,6 +41,7 @@ use smithay::{
     utils::Transform,
     wayland::{
         compositor::{CompositorClientState, CompositorState},
+        cursor_shape::CursorShapeManagerState,
         fractional_scale::FractionalScaleManagerState,
         output::OutputManagerState,
         selection::data_device::DataDeviceState,
@@ -59,6 +61,7 @@ use crate::{
         WindowInteractionRequestKind,
     },
 };
+use cursor::CursorSurfaceStore;
 use dmabuf::{DmabufProtocol, DmabufReleaseStore};
 use output::install_output_metrics;
 use popup::PopupStore;
@@ -75,6 +78,7 @@ pub struct ServerState {
     compositor_state: CompositorState,
     xdg_shell_state: XdgShellState,
     _xdg_decoration_state: XdgDecorationState,
+    _cursor_shape_manager_state: CursorShapeManagerState,
     shm_state: ShmState,
     dmabuf_protocol: DmabufProtocol,
     dmabuf_releases: DmabufReleaseStore,
@@ -104,6 +108,11 @@ pub struct ServerState {
     // This mirrors delivered presses only so host focus loss can synthesize
     // matching releases; ECS pointer routing remains the policy authority.
     pressed_pointer_buttons: HashSet<u32>,
+    cursor_status: CursorImageStatus,
+    shell_cursor: crate::cursor::CursorAppearance,
+    shell_owns_cursor: bool,
+    cursor_surfaces: CursorSurfaceStore,
+    pending_cursor_image: Option<crate::cursor::CursorImage>,
     dmabuf_blocker_installer: Option<Box<dyn Fn(DmabufSource, Client) -> bool>>,
 }
 
@@ -136,6 +145,7 @@ impl ServerState {
         let compositor_state = CompositorState::new::<Self>(&display_handle);
         let xdg_shell_state = XdgShellState::new::<Self>(&display_handle);
         let xdg_decoration_state = XdgDecorationState::new::<Self>(&display_handle);
+        let cursor_shape_manager_state = CursorShapeManagerState::new::<Self>(&display_handle);
         let shm_state = ShmState::new::<Self>(&display_handle, []);
         let dmabuf_protocol = DmabufProtocol::new(&display_handle, dmabuf_capabilities)?;
         let viewporter_state = ViewporterState::new::<Self>(&display_handle);
@@ -240,6 +250,7 @@ impl ServerState {
             compositor_state,
             xdg_shell_state,
             _xdg_decoration_state: xdg_decoration_state,
+            _cursor_shape_manager_state: cursor_shape_manager_state,
             shm_state,
             dmabuf_protocol,
             dmabuf_releases: DmabufReleaseStore::default(),
@@ -267,6 +278,13 @@ impl ServerState {
             started_at,
             pointer_position: InputPosition::default(),
             pressed_pointer_buttons: HashSet::new(),
+            cursor_status: CursorImageStatus::default_named(),
+            shell_cursor: crate::cursor::CursorAppearance::default(),
+            shell_owns_cursor: true,
+            cursor_surfaces: CursorSurfaceStore::default(),
+            pending_cursor_image: Some(crate::cursor::CursorImage::Named(
+                crate::cursor::CursorIcon::Default,
+            )),
             dmabuf_blocker_installer,
         })
     }
