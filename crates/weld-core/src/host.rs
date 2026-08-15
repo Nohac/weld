@@ -198,7 +198,7 @@ pub struct RenderContext {
     pub dmabuf: DmabufContext,
     pub extent: Extent,
     pub scale_factor: f64,
-    pub initial_target: wgpu::TextureView,
+    pub composition_format: wgpu::TextureFormat,
 }
 
 type RunPreparedHost = Box<dyn FnOnce(Box<dyn CompositionHost>) -> Result<()>>;
@@ -274,13 +274,12 @@ pub trait CompositionHost {
     /// Services the restricted remote-control schedule without advancing the
     /// application world.
     fn service_remote_debug(&mut self);
-    fn render_composition(&mut self, target: wgpu::TextureView, extent: Extent) -> Result<()>;
-    /// Register output geometry and a composition target before the next main advance.
-    ///
-    /// The target must be free for the application to render into. Implementations
-    /// must make the view visible to their renderer before the next
-    /// [`Self::advance_main`] returns so layout observes the matching extent.
-    fn set_output_geometry(&mut self, target: wgpu::TextureView, extent: Extent, scale_factor: f64);
+    fn render_composition(
+        &mut self,
+        destination: CompositionDestination,
+    ) -> Result<CompositionFrame>;
+    /// Register output geometry before the next main advance.
+    fn set_output_geometry(&mut self, extent: Extent, scale_factor: f64);
     fn should_exit(&self) -> bool;
     fn take_input_effects(&mut self) -> Vec<SeatInputEffect>;
     fn take_cursor_update(&mut self) -> crate::cursor::CursorHostUpdate;
@@ -292,82 +291,69 @@ pub trait CompositionHost {
     fn complete_capture(&mut self, request_id: u64, result: Result<(), String>);
 }
 
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub(crate) struct CompositionTargetId(usize);
-
-impl CompositionTargetId {
-    pub(crate) const FIRST: Self = Self(0);
-    pub(crate) const SECOND: Self = Self(1);
-}
-
-struct CompositionTarget {
-    texture: wgpu::Texture,
+/// One concrete GPU view selected for the next application composition.
+#[derive(Clone)]
+pub struct CompositionTargetView {
     view: wgpu::TextureView,
-}
-
-pub(crate) struct CompositionTargets {
-    targets: [CompositionTarget; 2],
-    completed: CompositionTargetId,
     extent: Extent,
+    format: wgpu::TextureFormat,
 }
 
-impl CompositionTargets {
-    pub(crate) fn new(device: &wgpu::Device, extent: Extent) -> Self {
+impl CompositionTargetView {
+    pub fn new(view: wgpu::TextureView, extent: Extent, format: wgpu::TextureFormat) -> Self {
         Self {
-            targets: [create_target(device, extent), create_target(device, extent)],
-            completed: CompositionTargetId::FIRST,
+            view,
             extent,
+            format,
         }
     }
 
-    pub(crate) fn resize(&mut self, device: &wgpu::Device, extent: Extent) {
-        self.targets = [create_target(device, extent), create_target(device, extent)];
-        self.completed = CompositionTargetId::FIRST;
-        self.extent = extent;
+    pub fn view(&self) -> &wgpu::TextureView {
+        &self.view
     }
 
-    pub(crate) const fn ids(&self) -> [CompositionTargetId; 2] {
-        [CompositionTargetId::FIRST, CompositionTargetId::SECOND]
-    }
-
-    pub(crate) const fn completed(&self) -> CompositionTargetId {
-        self.completed
-    }
-
-    pub(crate) fn mark_completed(&mut self, target: CompositionTargetId) {
-        self.completed = target;
-    }
-
-    pub(crate) fn view(&self, target: CompositionTargetId) -> &wgpu::TextureView {
-        &self.targets[target.0].view
-    }
-
-    pub(crate) fn texture(&self, target: CompositionTargetId) -> &wgpu::Texture {
-        &self.targets[target.0].texture
-    }
-
-    pub(crate) const fn extent(&self) -> Extent {
+    pub const fn extent(&self) -> Extent {
         self.extent
+    }
+
+    pub const fn format(&self) -> wgpu::TextureFormat {
+        self.format
     }
 }
 
-fn create_target(device: &wgpu::Device, extent: Extent) -> CompositionTarget {
-    let texture = device.create_texture(&wgpu::TextureDescriptor {
-        label: Some("weld Bevy composition target"),
-        size: wgpu::Extent3d {
-            width: extent.width,
-            height: extent.height,
-            depth_or_array_layers: 1,
-        },
-        mip_level_count: 1,
-        sample_count: 1,
-        dimension: wgpu::TextureDimension::D2,
-        format: wgpu::TextureFormat::Rgba8UnormSrgb,
-        usage: wgpu::TextureUsages::RENDER_ATTACHMENT
-            | wgpu::TextureUsages::TEXTURE_BINDING
-            | wgpu::TextureUsages::COPY_SRC,
-        view_formats: &[],
-    });
-    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-    CompositionTarget { texture, view }
+/// Selects whether the application renders into its retained target or a
+/// backend-leased external target for this composition.
+pub enum CompositionDestination {
+    Owned,
+    External(CompositionTargetView),
+}
+
+/// Completed application composition and any storage retained for readback.
+pub struct CompositionFrame {
+    target: CompositionTargetView,
+    owned_texture: Option<wgpu::Texture>,
+}
+
+impl CompositionFrame {
+    pub fn owned(target: CompositionTargetView, texture: wgpu::Texture) -> Self {
+        Self {
+            target,
+            owned_texture: Some(texture),
+        }
+    }
+
+    pub fn external(target: CompositionTargetView) -> Self {
+        Self {
+            target,
+            owned_texture: None,
+        }
+    }
+
+    pub const fn target(&self) -> &CompositionTargetView {
+        &self.target
+    }
+
+    pub fn owned_texture(&self) -> Option<&wgpu::Texture> {
+        self.owned_texture.as_ref()
+    }
 }

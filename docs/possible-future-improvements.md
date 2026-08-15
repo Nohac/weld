@@ -23,22 +23,20 @@ wgpu-hal, Vulkan, KMS, or DMA-BUF details.
 
 ## Candidate investigations
 
-### Smithay-managed output buffers with Bevy composition
+### Smithay-managed output buffers beyond the first direct target
 
-Weld's first Smithay-managed path now lets DRM/GBM allocate and manage scanout
-buffers and KMS state, then imports those buffers as wgpu render targets for a
-full-screen blit. The remaining investigation is to let Bevy render the final
-scene directly into them before Smithay presents them.
+Weld now lets DRM/GBM allocate scanout buffers and binds each leased image
+directly to Bevy's stable output target while the physical output is active.
+The retained application texture takes over when that output is inactive or a
+capture requires owned storage. Remaining investigations include independent
+multi-output targets, native completion fences, damage clips, hardware cursor
+planes, simultaneous streaming consumers, VRR, HDR, overlay promotion, and
+fullscreen client direct scanout.
 
-This could make multi-output hotplug, VRR, HDR, hardware planes, and direct
-scanout easier to integrate without adding a CPU pixel copy or replacing Bevy
-as the compositor scene graph. It is an architectural hypothesis, not a proven
-port of Nourish: render-target import, GPU synchronization, damage, modifier
-negotiation, and scanout lifetime still need hardware validation. See
-[Rendering](spec/rendering.md) and
-[Direct DRM presentation](drm-presentation.md). The staged implementation and
-its deliberately retained full-screen blit are tracked in the
-[DRM rendering improvement plan](drm-rendering-improvement-plan.md).
+The current Vulkan ownership and modifier path still needs validation across
+AMD, Intel, and NVIDIA drivers before portability claims are justified. See
+[Rendering](spec/rendering.md), [Direct DRM presentation](drm-presentation.md),
+and the [DRM rendering improvement plan](drm-rendering-improvement-plan.md).
 
 ### Output-owned presentation state
 

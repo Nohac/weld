@@ -6,9 +6,9 @@ usage() {
     cat <<'EOF'
 Usage: run-gbm-kms-validation [--duration SECONDS] [--log PATH] [-- CLIENT...]
 
-Build Weld, run its production GBM/KMS backend from the active TTY with the
-Vulkan validation layer enabled, request clean shutdown after the selected
-duration, and inspect the captured log.
+Build Weld, run its production GBM/KMS backend from the active TTY with Vulkan
+core and synchronization validation enabled, request clean shutdown after the
+selected duration, and inspect the captured log.
 
 Options:
   --duration SECONDS  Run time before SIGTERM (default: 20)
@@ -75,6 +75,7 @@ rust_target_libdir="$(rustc --print target-libdir)"
 export LD_LIBRARY_PATH="${repository_root}/target/debug/deps:${rust_target_libdir}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
 export VK_INSTANCE_LAYERS=VK_LAYER_KHRONOS_validation
 export VK_LOADER_LAYERS_ENABLE=VK_LAYER_KHRONOS_validation
+export VK_LAYER_VALIDATE_SYNC=1
 export VK_LOADER_DEBUG=layer
 export WGPU_VALIDATION=1
 export RUST_LOG="${RUST_LOG:-info,weld_core=debug,smithay=debug}"
@@ -143,7 +144,7 @@ if rg -q 'Device still active, trying to restore previous state|Failed to restor
     tail -n 80 "${validation_log}" >&2
     fail "Smithay attempted to replay the previous DRM file's KMS state"
 fi
-if rg -q 'Validation Error|VUID-|ERROR[^\n]*[Vv]alidation' "${validation_log}"; then
+if rg -q 'Validation Error|VUID-|SYNC-HAZARD|ERROR[^\n]*[Vv]alidation' "${validation_log}"; then
     tail -n 80 "${validation_log}" >&2
     fail "Vulkan validation reported an error; inspect ${validation_log}"
 fi

@@ -1,16 +1,9 @@
-//! Shared GPU composition blit used by nested and direct presentation.
-
-use wgpu::util::DeviceExt;
-
-use super::cursor::CursorOverlay;
+//! Full-output composition blit used by nested presentation.
 
 pub(crate) struct CompositionBlitter {
     bind_group_layout: wgpu::BindGroupLayout,
     pipeline: wgpu::RenderPipeline,
     sampler: wgpu::Sampler,
-    cursor_uniform: wgpu::Buffer,
-    _fallback_cursor_texture: wgpu::Texture,
-    fallback_cursor_view: wgpu::TextureView,
 }
 
 impl CompositionBlitter {
@@ -29,29 +22,9 @@ impl CompositionBlitter {
                     count: None,
                 },
                 wgpu::BindGroupLayoutEntry {
-                    binding: 3,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                        multisampled: false,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
                     binding: 1,
                     visibility: wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 2,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
                     count: None,
                 },
             ],
@@ -96,39 +69,11 @@ impl CompositionBlitter {
             min_filter: wgpu::FilterMode::Linear,
             ..Default::default()
         });
-        let cursor_uniform = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("weld presenter cursor uniform"),
-            contents: &CursorOverlay::hidden().uniform_bytes(),
-            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::UNIFORM,
-        });
-        let fallback_cursor_texture = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("weld transparent fallback cursor"),
-            size: wgpu::Extent3d {
-                width: 1,
-                height: 1,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba8UnormSrgb,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING,
-            view_formats: &[],
-        });
-        let fallback_cursor_view =
-            fallback_cursor_texture.create_view(&wgpu::TextureViewDescriptor::default());
         Self {
             bind_group_layout,
             pipeline,
             sampler,
-            cursor_uniform,
-            _fallback_cursor_texture: fallback_cursor_texture,
-            fallback_cursor_view,
         }
-    }
-
-    pub(crate) fn set_cursor(&self, queue: &wgpu::Queue, cursor: &CursorOverlay) {
-        queue.write_buffer(&self.cursor_uniform, 0, &cursor.uniform_bytes());
     }
 
     pub(crate) fn create_bind_group(
@@ -136,7 +81,6 @@ impl CompositionBlitter {
         device: &wgpu::Device,
         label: &'static str,
         composition: &wgpu::TextureView,
-        cursor: Option<&wgpu::TextureView>,
     ) -> wgpu::BindGroup {
         device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some(label),
@@ -149,16 +93,6 @@ impl CompositionBlitter {
                 wgpu::BindGroupEntry {
                     binding: 1,
                     resource: wgpu::BindingResource::Sampler(&self.sampler),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: self.cursor_uniform.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 3,
-                    resource: wgpu::BindingResource::TextureView(
-                        cursor.unwrap_or(&self.fallback_cursor_view),
-                    ),
                 },
             ],
         })
@@ -206,7 +140,7 @@ mod tests {
     };
 
     #[test]
-    fn final_composition_shader_validates_for_fragment_derivatives() {
+    fn nested_composition_shader_validates() {
         let module = parse_str(include_str!("composite.wgsl")).expect("valid WGSL syntax");
         Validator::new(ValidationFlags::all(), Capabilities::all())
             .validate(&module)

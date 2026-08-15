@@ -36,8 +36,8 @@ use crate::{
     cursor::CursorHostUpdate,
     dmabuf::DmabufSourceCache,
     host::{
-        CompositionDemand, CompositionHost, CompositionTargetId, CompositionTargets, PreparedHost,
-        RenderContext, RunOptions,
+        CompositionDemand, CompositionDestination, CompositionHost, PreparedHost, RenderContext,
+        RunOptions,
     },
     input::{
         InputPosition, RawPointerUpdate, RawSeatEvent, RawSeatEventKind,
@@ -45,8 +45,8 @@ use crate::{
     },
     renderer::{CursorOverlay, GpuCursor, read_composition_rgba, write_png},
     runtime::{
-        ChildProcesses, FrameState, HostCommand, HostCommandEffect, LoopData, PendingCapture,
-        REMOTE_DEBUG_MAINTENANCE_INTERVAL, iteration_work, server_mut,
+        ChildProcesses, FRAME_INTERVAL, FrameState, HostCommand, HostCommandEffect, LoopData,
+        PendingCapture, REMOTE_DEBUG_MAINTENANCE_INTERVAL, iteration_work, server_mut,
     },
     server::{OutputMetrics, ServerOptions, ServerState},
 };
@@ -57,7 +57,7 @@ mod presenter;
 
 use discovery::{DrmDeviceDiscovery, connector_name, discover_output, output_description};
 use gpu::DrmGpu;
-use presenter::{PresenterEvent, PresenterHandle};
+use presenter::{PresenterEvent, PresenterHandle, PresenterTargetAvailability};
 
 const PRESENTER_SHUTDOWN_DEADLINE: Duration = Duration::from_millis(250);
 
@@ -118,8 +118,6 @@ struct DrmHostCommandContext<'a> {
     input_adapter: &'a mut LibinputAdapter,
     events: &'a mut std::collections::VecDeque<DrmRuntimeEvent>,
     shell: &'a mut dyn CompositionHost,
-    target: wgpu::TextureView,
-    extent: crate::surface::Extent,
     output_metrics: &'a mut OutputMetrics,
     frame_state: &'a mut FrameState,
 }
@@ -192,7 +190,7 @@ impl DrmCursor {
         self.animation_deadline = evaluated.next_animation;
         if evaluated.overlay != self.overlay {
             self.overlay = evaluated.overlay;
-            frame_state.request_present();
+            frame_state.request_composition();
         }
     }
 }
@@ -204,8 +202,6 @@ fn apply_host_command(context: DrmHostCommandContext<'_>, command: HostCommand) 
         input_adapter,
         events,
         shell,
-        target,
-        extent,
         output_metrics,
         frame_state,
     } = context;
@@ -241,7 +237,13 @@ fn apply_host_command(context: DrmHostCommandContext<'_>, command: HostCommand) 
             if let Some(event) = input_adapter.update_output_bounds(logical_width, logical_height) {
                 events.push_back(DrmRuntimeEvent::Input(event));
             }
-            shell.set_output_geometry(target, extent, candidate.scale_factor());
+            shell.set_output_geometry(
+                crate::surface::Extent::new(
+                    candidate.physical_width(),
+                    candidate.physical_height(),
+                ),
+                candidate.scale_factor(),
+            );
             *output_metrics = candidate;
             frame_state.request_settled_composition();
             info!(
@@ -443,12 +445,9 @@ pub(crate) fn prepare(options: RunOptions, signals: Signals) -> Result<PreparedH
         })
         .map_err(|_| anyhow!("failed to register DRM page-flip notifications"))?;
 
-    let mut targets = CompositionTargets::new(
-        &gpu.device,
-        crate::surface::Extent::new(
-            output_metrics.physical_width(),
-            output_metrics.physical_height(),
-        ),
+    let output_extent = crate::surface::Extent::new(
+        output_metrics.physical_width(),
+        output_metrics.physical_height(),
     );
     let context = RenderContext {
         instance: gpu.instance.clone(),
@@ -456,9 +455,9 @@ pub(crate) fn prepare(options: RunOptions, signals: Signals) -> Result<PreparedH
         device: gpu.device.clone(),
         queue: gpu.queue.clone(),
         dmabuf: crate::dmabuf::DmabufContext::new(dmabuf_release_sender, dmabuf_sources),
-        extent: targets.extent(),
+        extent: output_extent,
         scale_factor: output_metrics.scale_factor(),
-        initial_target: targets.view(CompositionTargetId::FIRST).clone(),
+        composition_format: wgpu::TextureFormat::Bgra8UnormSrgb,
     };
     let DrmDeviceDiscovery {
         session,
@@ -533,11 +532,19 @@ pub(crate) fn prepare(options: RunOptions, signals: Signals) -> Result<PreparedH
         let mut exit_requested = false;
         while !exit_requested {
             let now = Instant::now();
+            let physical_output_available = output_monitor.physical_available(session_active);
+            let capture_ready = pending_capture
+                .as_ref()
+                .is_some_and(|capture| !capture.wait_for_client || shell.has_surface_frame());
+            let composition_blocked = physical_output_available
+                && !capture_ready
+                && presenter.target_availability() == PresenterTargetAvailability::Busy;
             let timeout = dispatch_timeout(DispatchTimeoutContext {
                 frame_state: &frame_state,
                 capture: pending_capture.as_ref(),
                 remote_debug_enabled,
-                physical_output_available: output_monitor.physical_available(session_active),
+                physical_output_available,
+                composition_blocked,
                 cursor_animation: cursor.animation_deadline,
                 now,
             });
@@ -605,7 +612,7 @@ pub(crate) fn prepare(options: RunOptions, signals: Signals) -> Result<PreparedH
                                 match drm_device.activate(true) {
                                     Ok(()) if output_monitor.physical_available(session_active) => {
                                         match presenter.activate_after_session() {
-                                            Ok(()) => frame_state.request_present(),
+                                            Ok(()) => frame_state.request_composition(),
                                             Err(error) => error!(
                                                 %error,
                                                 "failed to restore GBM/KMS presentation"
@@ -630,7 +637,7 @@ pub(crate) fn prepare(options: RunOptions, signals: Signals) -> Result<PreparedH
                                 session_active,
                             );
                             if output_monitor.physical_available(session_active) {
-                                frame_state.request_present();
+                                frame_state.request_composition();
                             }
                         }
                         DrmRuntimeEvent::Drm(DrmEvent::VBlank(crtc)) => {
@@ -647,14 +654,20 @@ pub(crate) fn prepare(options: RunOptions, signals: Signals) -> Result<PreparedH
                         DrmRuntimeEvent::Presenter(event) => {
                             event_counts[4] += 1;
                             log_presenter_event(&event);
+                            let availability = presenter.target_availability();
                             presenter.handle_event(&event);
+                            if availability != PresenterTargetAvailability::Ready
+                                && presenter.target_availability()
+                                    == PresenterTargetAvailability::Ready
+                                && output_monitor.physical_available(session_active)
+                            {
+                                frame_state.request_composition();
+                            }
                         }
                         DrmRuntimeEvent::Command(command) => {
                             event_counts[5] += 1;
                             // Signal commands currently only request exit. Keep them on the
                             // shared path so future host commands cannot bypass backend policy.
-                            let target =
-                                host_composition_target(&targets, presenter.in_flight_target());
                             exit_requested |= apply_host_command(
                                 DrmHostCommandContext {
                                     children: &mut children,
@@ -662,8 +675,6 @@ pub(crate) fn prepare(options: RunOptions, signals: Signals) -> Result<PreparedH
                                     input_adapter: &mut loop_data.backend_state,
                                     events: &mut loop_data.events,
                                     shell: shell.as_mut(),
-                                    target: targets.view(target).clone(),
-                                    extent: targets.extent(),
                                     output_metrics: &mut output_metrics,
                                     frame_state: &mut frame_state,
                                 },
@@ -694,13 +705,6 @@ pub(crate) fn prepare(options: RunOptions, signals: Signals) -> Result<PreparedH
                     &mut frame_state,
                     Instant::now(),
                 );
-                if frame_state.presentation_due()
-                    && output_monitor.physical_available(session_active)
-                {
-                    let target = targets.completed();
-                    presenter.offer(target, targets.view(target).clone(), cursor.overlay.clone());
-                    frame_state.presented();
-                }
             }
 
             if input_pending {
@@ -737,7 +741,14 @@ pub(crate) fn prepare(options: RunOptions, signals: Signals) -> Result<PreparedH
                 next_remote_service = now + REMOTE_DEBUG_MAINTENANCE_INTERVAL;
             }
 
-            let work = iteration_work(frame_state.composition_due(now));
+            let physical_output_available = output_monitor.physical_available(session_active);
+            let capture_ready = pending_capture
+                .as_ref()
+                .is_some_and(|capture| !capture.wait_for_client || shell.has_surface_frame());
+            let composition_blocked = physical_output_available
+                && !capture_ready
+                && presenter.target_availability() == PresenterTargetAvailability::Busy;
+            let work = iteration_work(frame_state.composition_due(now) && !composition_blocked);
             let mut bevy_requested_redraw = false;
             if work.advance_main {
                 bevy_requested_redraw = shell.advance_main(started_at.elapsed().as_millis() as u32);
@@ -769,8 +780,6 @@ pub(crate) fn prepare(options: RunOptions, signals: Signals) -> Result<PreparedH
                         loop_data.server.apply_input_effect(effect);
                     }
                     for command in host_commands {
-                        let target =
-                            host_composition_target(&targets, presenter.in_flight_target());
                         exit_requested |= apply_host_command(
                             DrmHostCommandContext {
                                 children: &mut children,
@@ -778,8 +787,6 @@ pub(crate) fn prepare(options: RunOptions, signals: Signals) -> Result<PreparedH
                                 input_adapter: &mut loop_data.backend_state,
                                 events: &mut loop_data.events,
                                 shell: shell.as_mut(),
-                                target: targets.view(target).clone(),
-                                extent: targets.extent(),
                                 output_metrics: &mut output_metrics,
                                 frame_state: &mut frame_state,
                             },
@@ -814,6 +821,8 @@ pub(crate) fn prepare(options: RunOptions, signals: Signals) -> Result<PreparedH
                                                 %error,
                                                 "failed to restore GBM/KMS after rejected VT switch"
                                             );
+                                        } else {
+                                            frame_state.request_composition();
                                         }
                                     }
                                     Err(activate_error) => error!(
@@ -840,43 +849,73 @@ pub(crate) fn prepare(options: RunOptions, signals: Signals) -> Result<PreparedH
 
             if work.advance_main {
                 loop_data.server.flush_pending_resizes();
-                let target = host_composition_target(&targets, presenter.in_flight_target());
-                shell.render_composition(targets.view(target).clone(), targets.extent())?;
-                targets.mark_completed(target);
+                let physical_output_available = output_monitor.physical_available(session_active);
+                let capture_ready = pending_capture
+                    .as_ref()
+                    .is_some_and(|capture| !capture.wait_for_client || shell.has_surface_frame());
+                let acquired_frame = (physical_output_available && !capture_ready)
+                    .then(|| presenter.acquire_frame())
+                    .flatten();
+                let destination = acquired_frame
+                    .as_ref()
+                    .map(|frame| CompositionDestination::External(frame.target().clone()))
+                    .unwrap_or(CompositionDestination::Owned);
+                let composition = match shell.render_composition(destination) {
+                    Ok(composition) => composition,
+                    Err(error) => {
+                        if let Some(frame) = acquired_frame {
+                            presenter.abort_frame(frame);
+                        }
+                        return Err(error).context("Bevy composition failed");
+                    }
+                };
                 let callback_batch = loop_data.server.stage_frame_callbacks();
                 loop_data.server.complete_frame_callbacks(callback_batch);
                 frame_state.composition_rendered(now);
 
-                let capture_ready = pending_capture
-                    .as_ref()
-                    .is_some_and(|capture| !capture.wait_for_client || shell.has_surface_frame());
                 if capture_ready && let Some(capture) = pending_capture.take() {
                     let _capture_span = tracing::trace_span!(
                         target: crate::PROFILE_TARGET,
                         "capture_readback_encode"
                     )
                     .entered();
-                    let result = read_composition_rgba(
-                        &capture_device,
-                        &capture_queue,
-                        targets.texture(target),
-                        output_metrics.physical_width(),
-                        output_metrics.physical_height(),
-                    )
-                    .and_then(|pixels| {
-                        write_png(
-                            &capture.path,
-                            output_metrics.physical_width(),
-                            output_metrics.physical_height(),
-                            &pixels,
-                        )
-                    })
-                    .map_err(|error| error.to_string());
+                    let result = composition
+                        .owned_texture()
+                        .context("capture composition did not retain owned storage")
+                        .and_then(|texture| {
+                            read_composition_rgba(
+                                &capture_device,
+                                &capture_queue,
+                                texture,
+                                composition.target().extent().width,
+                                composition.target().extent().height,
+                                composition.target().format(),
+                            )
+                        })
+                        .and_then(|pixels| {
+                            write_png(
+                                &capture.path,
+                                composition.target().extent().width,
+                                composition.target().extent().height,
+                                &pixels,
+                            )
+                        })
+                        .map_err(|error| error.to_string());
                     exit_requested |= complete_capture(shell.as_mut(), capture, result)?;
                 }
-                if output_monitor.physical_available(session_active) {
-                    presenter.offer(target, targets.view(target).clone(), cursor.overlay.clone());
+
+                if let Some(frame) = acquired_frame {
+                    if let Err(error) = presenter.finish_frame(&frame, &cursor.overlay) {
+                        presenter.abort_frame(frame);
+                        return Err(error).context("failed to finalize direct GBM frame");
+                    }
                     frame_state.presented();
+                } else if physical_output_available
+                    && presenter.target_availability() != PresenterTargetAvailability::Unavailable
+                {
+                    // Captures and transient presenter outages render into the
+                    // retained target. The next frame must refresh scanout.
+                    frame_state.request_composition();
                 }
             }
 
@@ -899,11 +938,6 @@ pub(crate) fn prepare(options: RunOptions, signals: Signals) -> Result<PreparedH
             }
             if work.advance_main && bevy_requested_redraw {
                 frame_state.request_composition();
-            }
-            if frame_state.presentation_due() && output_monitor.physical_available(session_active) {
-                let target = targets.completed();
-                presenter.offer(target, targets.view(target).clone(), cursor.overlay.clone());
-                frame_state.presented();
             }
             {
                 let _flush_span = tracing::trace_span!(
@@ -952,23 +986,12 @@ fn shutdown_presenter(
     Ok(())
 }
 
-fn host_composition_target(
-    targets: &CompositionTargets,
-    worker_target: Option<CompositionTargetId>,
-) -> CompositionTargetId {
-    let [first, second] = targets.ids();
-    if worker_target == Some(first) {
-        second
-    } else {
-        first
-    }
-}
-
 struct DispatchTimeoutContext<'a> {
     frame_state: &'a FrameState,
     capture: Option<&'a PendingCapture>,
     remote_debug_enabled: bool,
     physical_output_available: bool,
+    composition_blocked: bool,
     cursor_animation: Option<Instant>,
     now: Instant,
 }
@@ -979,10 +1002,17 @@ fn dispatch_timeout(context: DispatchTimeoutContext<'_>) -> Option<std::time::Du
         capture,
         remote_debug_enabled,
         physical_output_available,
+        composition_blocked,
         cursor_animation,
         now,
     } = context;
-    let composition = frame_state.composition_demand_timeout(now);
+    let composition = if composition_blocked {
+        frame_state
+            .composition_demand_timeout(now)
+            .map(|_| FRAME_INTERVAL)
+    } else {
+        frame_state.composition_demand_timeout(now)
+    };
     let remote_debug = remote_debug_enabled.then_some(REMOTE_DEBUG_MAINTENANCE_INTERVAL);
     let capture = capture.map(|capture| capture.deadline.saturating_duration_since(now));
     let cursor = physical_output_available
@@ -1050,6 +1080,7 @@ mod tests {
             capture: None,
             remote_debug_enabled: true,
             physical_output_available: false,
+            composition_blocked: false,
             cursor_animation: None,
             now,
         });
@@ -1065,6 +1096,7 @@ mod tests {
             capture: None,
             remote_debug_enabled: false,
             physical_output_available: false,
+            composition_blocked: false,
             cursor_animation: Some(Instant::now()),
             now: Instant::now(),
         });
@@ -1080,6 +1112,7 @@ mod tests {
             capture: None,
             remote_debug_enabled: false,
             physical_output_available: true,
+            composition_blocked: false,
             cursor_animation: None,
             now: Instant::now(),
         });
@@ -1103,6 +1136,7 @@ mod tests {
                 capture: None,
                 remote_debug_enabled: false,
                 physical_output_available: true,
+                composition_blocked: false,
                 cursor_animation: Some(deadline),
                 now,
             }),
@@ -1114,10 +1148,30 @@ mod tests {
                 capture: None,
                 remote_debug_enabled: false,
                 physical_output_available: false,
+                composition_blocked: false,
                 cursor_animation: Some(deadline),
                 now,
             }),
             None
+        );
+    }
+
+    #[test]
+    fn busy_presenter_retries_pending_composition_at_a_bounded_rate() {
+        let now = Instant::now();
+        let frame_state = FrameState::default();
+
+        assert_eq!(
+            dispatch_timeout(DispatchTimeoutContext {
+                frame_state: &frame_state,
+                capture: None,
+                remote_debug_enabled: false,
+                physical_output_available: true,
+                composition_blocked: true,
+                cursor_animation: None,
+                now,
+            }),
+            Some(crate::runtime::FRAME_INTERVAL)
         );
     }
 }

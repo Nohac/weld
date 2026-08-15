@@ -3,6 +3,7 @@
 use std::{collections::HashMap, fmt, sync::Arc, time::Instant};
 
 use tracing::warn;
+use wgpu::util::DeviceExt;
 
 use crate::{
     cursor::{
@@ -10,6 +11,7 @@ use crate::{
         XcursorResolver, client_cursor_geometry, named_cursor_geometry,
     },
     input::InputPosition,
+    surface::Extent,
 };
 
 pub(super) const CURSOR_UNIFORM_SIZE: usize = 48;
@@ -47,6 +49,30 @@ impl CursorOverlay {
         bytes
     }
 
+    fn scissor(&self, target_width: u32, target_height: u32) -> Option<CursorScissor> {
+        self.texture.as_ref()?;
+        let origin_x = self.uniform[0];
+        let origin_y = self.uniform[1];
+        let width = self.uniform[2];
+        let height = self.uniform[3];
+        if width <= 0.0 || height <= 0.0 {
+            return None;
+        }
+        let left = origin_x.floor().max(0.0).min(target_width as f32) as u32;
+        let top = origin_y.floor().max(0.0).min(target_height as f32) as u32;
+        let right = (origin_x + width).ceil().max(0.0).min(target_width as f32) as u32;
+        let bottom = (origin_y + height)
+            .ceil()
+            .max(0.0)
+            .min(target_height as f32) as u32;
+        (right > left && bottom > top).then_some(CursorScissor {
+            x: left,
+            y: top,
+            width: right - left,
+            height: bottom - top,
+        })
+    }
+
     fn visible(
         texture: Arc<CursorTexture>,
         texture_width: u32,
@@ -70,6 +96,155 @@ impl CursorOverlay {
                 0.0,
             ],
         }
+    }
+}
+
+struct CursorScissor {
+    x: u32,
+    y: u32,
+    width: u32,
+    height: u32,
+}
+
+/// Draws only the compositor cursor over a completed direct-scanout frame.
+pub(crate) struct CursorOverlayRenderer {
+    device: wgpu::Device,
+    queue: wgpu::Queue,
+    bind_group_layout: wgpu::BindGroupLayout,
+    pipeline: wgpu::RenderPipeline,
+    uniform: wgpu::Buffer,
+}
+
+impl CursorOverlayRenderer {
+    pub(crate) fn new(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        target_format: wgpu::TextureFormat,
+    ) -> Self {
+        let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("weld cursor overlay bind group layout"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+            ],
+        });
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("weld cursor overlay pipeline layout"),
+            bind_group_layouts: &[Some(&bind_group_layout)],
+            immediate_size: 0,
+        });
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("weld cursor overlay shader"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("cursor_overlay.wgsl").into()),
+        });
+        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("weld cursor overlay pipeline"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vertex"),
+                compilation_options: Default::default(),
+                buffers: &[],
+            },
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fragment"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: target_format,
+                    blend: Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            multiview_mask: None,
+            cache: None,
+        });
+        let uniform = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("weld cursor overlay uniform"),
+            contents: &CursorOverlay::hidden().uniform_bytes(),
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::UNIFORM,
+        });
+        Self {
+            device: device.clone(),
+            queue: queue.clone(),
+            bind_group_layout,
+            pipeline,
+            uniform,
+        }
+    }
+
+    pub(crate) fn encode(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        target: &wgpu::TextureView,
+        target_extent: Extent,
+        cursor: &CursorOverlay,
+    ) {
+        let Some(texture) = cursor.texture_view() else {
+            return;
+        };
+        let Some(scissor) = cursor.scissor(target_extent.width, target_extent.height) else {
+            return;
+        };
+        self.queue
+            .write_buffer(&self.uniform, 0, &cursor.uniform_bytes());
+        let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("weld cursor overlay bind group"),
+            layout: &self.bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: self.uniform.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(texture),
+                },
+            ],
+        });
+        // Bevy's output pass clears and stores the complete target first. This
+        // Load is therefore initialized even for a newly imported GBM image.
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("weld cursor overlay pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: target,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Load,
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        pass.set_pipeline(&self.pipeline);
+        pass.set_bind_group(0, &bind_group, &[]);
+        pass.set_scissor_rect(scissor.x, scissor.y, scissor.width, scissor.height);
+        pass.draw(0..3, 0..1);
     }
 }
 
@@ -333,5 +508,21 @@ fn hidden_evaluation() -> CursorEvaluation {
     CursorEvaluation {
         overlay: CursorOverlay::hidden(),
         next_animation: None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use wgpu::naga::{
+        front::wgsl::parse_str,
+        valid::{Capabilities, ValidationFlags, Validator},
+    };
+
+    #[test]
+    fn cursor_overlay_shader_validates() {
+        let module = parse_str(include_str!("cursor_overlay.wgsl")).expect("valid WGSL syntax");
+        Validator::new(ValidationFlags::all(), Capabilities::all())
+            .validate(&module)
+            .expect("valid WGSL module");
     }
 }

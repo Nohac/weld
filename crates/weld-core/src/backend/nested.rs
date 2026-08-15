@@ -18,7 +18,10 @@ use crate::server::{OutputDescriptor, OutputMetrics, ServerOptions, ServerState}
 use crate::{
     OutputScale,
     cursor::CursorImage,
-    host::{CompositionDemand, CompositionTargets, PreparedHost, RenderContext, RunOptions},
+    host::{
+        CompositionDemand, CompositionDestination, CompositionFrame, PreparedHost, RenderContext,
+        RunOptions,
+    },
 };
 use anyhow::{Context, Result, anyhow, bail};
 use calloop::channel;
@@ -84,21 +87,16 @@ pub(crate) fn prepare(options: RunOptions, signals: Signals) -> Result<PreparedH
     let host_wake_fd = host_display_wake_fd(&display_handle)?;
     let mut renderer = NestedRenderer::new(window, display_handle, initial_size)?;
     let (dmabuf_release_sender, dmabuf_release_source) = channel::channel();
-    let mut targets = CompositionTargets::new(
-        renderer.device(),
-        crate::surface::Extent::new(initial_size.width, initial_size.height),
-    );
+    let initial_extent = crate::surface::Extent::new(initial_size.width, initial_size.height);
     let context = RenderContext {
         instance: renderer.instance().clone(),
         adapter: renderer.adapter().clone(),
         device: renderer.device().clone(),
         queue: renderer.queue().clone(),
         dmabuf: crate::dmabuf::DmabufContext::new(dmabuf_release_sender, renderer.dmabuf_sources()),
-        extent: targets.extent(),
+        extent: initial_extent,
         scale_factor: initial_scale_factor,
-        initial_target: targets
-            .view(crate::host::CompositionTargetId::FIRST)
-            .clone(),
+        composition_format: wgpu::TextureFormat::Rgba8UnormSrgb,
     };
 
     Ok(PreparedHost::new(context, move |application| {
@@ -153,6 +151,7 @@ pub(crate) fn prepare(options: RunOptions, signals: Signals) -> Result<PreparedH
             .screenshot
             .map(|path| PendingCapture::startup(path, child_requested));
         let mut frame_state = FrameState::default();
+        let mut completed_composition: Option<CompositionFrame> = None;
         let mut next_remote_service = Instant::now();
         let mut pending_presentation_id = None;
 
@@ -237,21 +236,11 @@ pub(crate) fn prepare(options: RunOptions, signals: Signals) -> Result<PreparedH
                             || physical_size.height != output_metrics.physical_height()
                         {
                             renderer.resize(physical_size);
-                            targets.resize(
-                                renderer.device(),
-                                crate::surface::Extent::new(
-                                    physical_size.width,
-                                    physical_size.height,
-                                ),
-                            );
                         }
                         output_metrics = candidate;
                         loop_data.server.update_output_metrics(output_metrics);
                         shell.set_output_geometry(
-                            targets
-                                .view(crate::host::CompositionTargetId::FIRST)
-                                .clone(),
-                            targets.extent(),
+                            crate::surface::Extent::new(physical_size.width, physical_size.height),
                             scale_factor,
                         );
                         frame_state.request_composition();
@@ -365,9 +354,8 @@ pub(crate) fn prepare(options: RunOptions, signals: Signals) -> Result<PreparedH
                 }
                 if work.advance_main {
                     loop_data.server.flush_pending_resizes();
-                    let target = crate::host::CompositionTargetId::FIRST;
-                    shell.render_composition(targets.view(target).clone(), targets.extent())?;
-                    targets.mark_completed(target);
+                    completed_composition =
+                        Some(shell.render_composition(CompositionDestination::Owned)?);
                     pending_presentation_id = Some(loop_data.server.stage_frame_callbacks());
                     frame_state.composition_rendered(update_now);
                     request_next_composition = bevy_requested_redraw;
@@ -405,8 +393,10 @@ pub(crate) fn prepare(options: RunOptions, signals: Signals) -> Result<PreparedH
             if capture_path.is_some() {
                 frame_state.request_present();
             }
-            if frame_state.presentation_due() {
-                let frame = renderer.render(targets.view(targets.completed()), capture_path)?;
+            if frame_state.presentation_due()
+                && let Some(composition) = completed_composition.as_ref()
+            {
+                let frame = renderer.render(composition.target().view(), capture_path)?;
                 if frame.presented {
                     frame_state.presented();
                     if let Some(presentation_id) = pending_presentation_id.take() {

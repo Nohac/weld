@@ -48,7 +48,9 @@ use crate::surface::{
     ToplevelInteractionRequestKind, ToplevelResizeEdge, WindowDecoration, enqueue_surface_event,
     has_surface_frame, publish_surface_bindings, take_surface_actions,
 };
-use weld_core::host::{CaptureRequest, RenderContext};
+use weld_core::host::{
+    CaptureRequest, CompositionDestination, CompositionFrame, CompositionTargetView, RenderContext,
+};
 use weld_core::input::{RawSeatEvent, SeatInputEffect};
 use weld_core::runtime::HostCommand;
 use weld_core::server::{
@@ -61,11 +63,48 @@ use weld_core::{CompositionDemand, CompositionHost, dmabuf::DmabufContext};
 const COMPOSITION_VIEW: ManualTextureViewHandle = ManualTextureViewHandle(1);
 pub struct AppShell {
     app: App,
+    device: wgpu::Device,
+    owned_target: OwnedCompositionTarget,
     redraw_requests: RedrawRequests,
     dmabuf_importer: Option<DmabufImporter>,
     dmabuf: DmabufContext,
     surface_demand: SurfaceCompositionDemand,
     cursor: CursorHostTracker,
+}
+
+struct OwnedCompositionTarget {
+    texture: wgpu::Texture,
+    target: CompositionTargetView,
+}
+
+impl OwnedCompositionTarget {
+    fn new(device: &wgpu::Device, extent: Extent, format: wgpu::TextureFormat) -> Self {
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("weld Bevy composition target"),
+            size: wgpu::Extent3d {
+                width: extent.width,
+                height: extent.height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                | wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        Self {
+            texture,
+            target: CompositionTargetView::new(view, extent, format),
+        }
+    }
+
+    fn frame(&self) -> CompositionFrame {
+        CompositionFrame::owned(self.target.clone(), self.texture.clone())
+    }
 }
 
 #[derive(Default)]
@@ -178,12 +217,12 @@ impl AppShell {
         )?;
         disconnect_render_time(&mut app)?;
 
-        insert_manual_view(
-            &mut app,
-            context.initial_target,
-            context.extent.width,
-            context.extent.height,
+        let owned_target = OwnedCompositionTarget::new(
+            &context.device,
+            context.extent,
+            context.composition_format,
         );
+        insert_manual_view(&mut app, &owned_target.target);
         spawn_compositor_camera(app.world_mut());
 
         let redraw_requests = app
@@ -196,6 +235,8 @@ impl AppShell {
 
         Ok(Self {
             app,
+            device: context.device,
+            owned_target,
             redraw_requests,
             dmabuf_importer,
             dmabuf: context.dmabuf,
@@ -222,12 +263,19 @@ impl AppShell {
     /// Construction pins Weld to Bevy's current non-pipelined [`RenderApp`].
     /// Main-world trackers are cleared only after extraction has observed the
     /// refresh-paced application frame.
-    pub fn render_composition(&mut self, target: wgpu::TextureView, extent: Extent) -> Result<()> {
+    pub fn render_composition(
+        &mut self,
+        destination: CompositionDestination,
+    ) -> Result<CompositionFrame> {
         let _composition_span =
             tracing::trace_span!(target: crate::PROFILE_TARGET, "weld_render_composition")
                 .entered();
 
-        insert_manual_view(&mut self.app, target, extent.width, extent.height);
+        let frame = match destination {
+            CompositionDestination::Owned => self.owned_target.frame(),
+            CompositionDestination::External(target) => CompositionFrame::external(target),
+        };
+        insert_manual_view(&mut self.app, frame.target());
         {
             let _prepare_span =
                 tracing::trace_span!(target: crate::PROFILE_TARGET, "weld_prepare_dmabuf_imports")
@@ -256,20 +304,22 @@ impl AppShell {
                 importer.finish_render(&mut self.app)?;
             }
         }
-        Ok(())
+        Ok(frame)
     }
 
     pub fn should_exit(&self) -> bool {
         self.app.should_exit().is_some()
     }
 
-    pub fn set_output_geometry(
-        &mut self,
-        target: wgpu::TextureView,
-        extent: Extent,
-        scale_factor: f64,
-    ) {
-        insert_manual_view(&mut self.app, target, extent.width, extent.height);
+    pub fn set_output_geometry(&mut self, extent: Extent, scale_factor: f64) {
+        if self.owned_target.target.extent() != extent {
+            self.owned_target = OwnedCompositionTarget::new(
+                &self.device,
+                extent,
+                self.owned_target.target.format(),
+            );
+        }
+        insert_manual_view(&mut self.app, &self.owned_target.target);
         self.app.world_mut().resource_mut::<UiScale>().0 = scale_factor as f32;
         self.app
             .world_mut()
@@ -479,7 +529,9 @@ fn spawn_compositor_camera(world: &mut World) -> Entity {
         .spawn((
             Camera2d,
             Camera {
-                clear_color: ClearColorConfig::Custom(Color::NONE),
+                // Direct GBM scanout has no later full-output clear. Keeping this
+                // explicit also guarantees the cursor pass loads initialized pixels.
+                clear_color: ClearColorConfig::Custom(Color::linear_rgba(0.025, 0.032, 0.045, 1.0)),
                 ..Default::default()
             },
             RenderTarget::TextureView(COMPOSITION_VIEW),
@@ -508,17 +560,15 @@ impl CompositionHost for AppShell {
         AppShell::service_remote_debug(self);
     }
 
-    fn render_composition(&mut self, target: wgpu::TextureView, extent: Extent) -> Result<()> {
-        AppShell::render_composition(self, target, extent)
+    fn render_composition(
+        &mut self,
+        destination: CompositionDestination,
+    ) -> Result<CompositionFrame> {
+        AppShell::render_composition(self, destination)
     }
 
-    fn set_output_geometry(
-        &mut self,
-        target: wgpu::TextureView,
-        extent: Extent,
-        scale_factor: f64,
-    ) {
-        AppShell::set_output_geometry(self, target, extent, scale_factor);
+    fn set_output_geometry(&mut self, extent: Extent, scale_factor: f64) {
+        AppShell::set_output_geometry(self, extent, scale_factor);
     }
 
     fn should_exit(&self) -> bool {
@@ -698,13 +748,13 @@ impl RedrawRequests {
     }
 }
 
-fn insert_manual_view(app: &mut App, texture_view: wgpu::TextureView, width: u32, height: u32) {
+fn insert_manual_view(app: &mut App, target: &CompositionTargetView) {
     app.world_mut().resource_mut::<ManualTextureViews>().insert(
         COMPOSITION_VIEW,
         ManualTextureView {
-            texture_view: texture_view.into(),
-            size: UVec2::new(width, height),
-            view_format: wgpu::TextureFormat::Rgba8UnormSrgb,
+            texture_view: target.view().clone().into(),
+            size: UVec2::new(target.extent().width, target.extent().height),
+            view_format: target.format(),
         },
     );
 }

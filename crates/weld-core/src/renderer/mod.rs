@@ -23,7 +23,7 @@ mod composite;
 mod cursor;
 
 pub(crate) use composite::CompositionBlitter;
-pub(crate) use cursor::{CursorOverlay, GpuCursor};
+pub(crate) use cursor::{CursorOverlay, CursorOverlayRenderer, GpuCursor};
 
 const CAPTURE_GPU_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -33,6 +33,7 @@ pub(crate) fn read_composition_rgba(
     texture: &wgpu::Texture,
     width: u32,
     height: u32,
+    format: wgpu::TextureFormat,
 ) -> Result<Vec<u8>> {
     let row_bytes = width * 4;
     let padded_bytes_per_row = row_bytes.next_multiple_of(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT);
@@ -80,13 +81,7 @@ pub(crate) fn read_composition_rgba(
     let mapped = slice
         .get_mapped_range()
         .context("GPU composition mapped range is unavailable")?;
-    let pixels = decode_capture_rows(
-        &mapped,
-        width,
-        height,
-        padded_bytes_per_row,
-        wgpu::TextureFormat::Rgba8UnormSrgb,
-    )?;
+    let pixels = decode_capture_rows(&mapped, width, height, padded_bytes_per_row, format)?;
     drop(mapped);
     buffer.unmap();
     Ok(pixels)
@@ -248,7 +243,6 @@ impl NestedRenderer {
                 &self.device,
                 "weld Bevy composition bind group",
                 composition,
-                None,
             );
             let mut encoder = self
                 .device

@@ -137,14 +137,15 @@ chooses the currently displayed client image, so rotating a client buffer pool
 does not appear as ECS or material identity churn.
 
 `HostBuilder::prepare` opens the wgpu instance, adapter, device, queue, output
-extent, composition target, and DMA-BUF resources before Bevy is constructed.
+extent, composition format, and DMA-BUF resources before Bevy is constructed.
 That ordering prevents Bevy from selecting a second device. Preparation yields
 a render context and a same-thread, one-shot runtime; the context is consumed
 while constructing `AppShell` and is not retained across output resizes. The
 resulting `CompositionHost` is a Bevy-free core contract: backends deliver
 protocol-neutral surface and seat changes, advance application policy, request
-composition into a core-owned target, and collect protocol actions. `AppShell`
-is the standard Bevy implementation, but the core does not require it.
+composition into an owned or backend-leased target, and collect protocol
+actions. `AppShell` is the standard Bevy implementation and owns the retained
+offscreen target, but the core does not require it.
 
 Linux-dmabuf is advertised at protocol version 6 only when the selected Vulkan
 adapter exposes a DRM render node, external DMA-BUF memory, foreign queue-family
@@ -230,24 +231,26 @@ policy; it does not own window placement, stacking, or decoration. The final
 project-owned wgpu pass presents or captures Bevy's
 completed texture directly in both backends. Standalone DRM uses Smithay's
 `GbmBufferedSurface` for GBM allocation and KMS page flips, without adopting a
-Smithay renderer or render-element graph. A wgpu worker imports each leased
-scanout DMA-BUF and currently performs one full-screen GPU blit into it before
-the calloop thread queues it. Removing that output blit is the next rendering
-optimization; it is tracked in the
-[DRM rendering improvement plan](drm-rendering-improvement-plan.md). The
-current bootstrap allocates a fixed pair of composition targets in `weld-core`.
-For each composition, core
-hands `weld-app` the view that is free for rendering; the app binds that view to
-its stable Bevy camera target. This is provisional ownership debt, not the
-intended plugin-facing composition contract: core should expose GPU/output
-capabilities and final presentation primitives, while the application layer
-requests its render targets or layers, binds them to Bevy cameras, and chooses
-how they compose. Core may enforce presenter ownership and back-pressure for
-submitted targets, but it must not hardcode the application layer graph. Until
-that boundary is refactored, the host never writes the target currently owned
-by the DRM worker, and pending compositions are bounded to the newest
-host-owned target. The old Vulkan Display WSI probe remains a self-contained
-hardware diagnostic and is not part of production presentation.
+Smithay renderer or render-element graph. `weld-app` owns one retained
+composition texture and binds its output camera to a stable Bevy
+`ManualTextureViewHandle`. For an active DRM output, core leases and imports a
+GBM scanout image, acquires Vulkan foreign ownership, and supplies that view as
+the application's destination for one composition. Replacing the view behind
+the stable handle is invisible to cameras, UI targeting, picking, and plugins.
+Bevy renders the full scene directly into scanout; core follows with only the
+scissored cursor overlay and foreign release before KMS receives the buffer.
+
+When the VT/output is inactive or a capture requires retained storage, core
+selects the application-owned target instead. DRM gives both targets the same
+`Bgra8UnormSrgb` format so a switch does not re-specialize Bevy's UI and sprite
+pipelines. The application owns render-target allocation and scene binding;
+core owns backend leases, synchronization, back-pressure, and presentation.
+Direct composition waits for the prior scanout frame to retire rather than
+rendering ahead into a second core-owned texture. New demand remains coalesced
+in host frame state, with a bounded recovery wakeup if a presenter event is
+lost. The old Vulkan Display WSI probe remains a self-contained hardware
+diagnostic and is not part of production presentation. Detailed sequencing is
+tracked in the [DRM rendering improvement plan](drm-rendering-improvement-plan.md).
 
 Physical output availability does not gate demand-driven composition or client
 frame callbacks. Startup, first client mapping, and structural shell changes
@@ -261,10 +264,10 @@ but remains a stopgap until Bevy exposes a reliable signal for pending deferred
 or render-world work. Remote debugging services only Bevy's `RemoteLast`
 schedule at a bounded maintenance rate between application frames and does not
 itself create composition demand. The DRM cursor is presentation metadata
-rather than a Bevy UI node: raw motion can immediately reuse the completed
-composition and update the final wgpu blit. The same input batch requests one
-refresh-capped application composition so Bevy/Leafwing state, picking, hover,
-and cursor policy still advance without running at device-event pace. `weld-core`
+rather than a Bevy UI node. Raw motion requests one refresh-capped application
+composition so Bevy/Leafwing state, picking, hover, and cursor policy advance
+without running at device-event pace; after Bevy writes the leased output,
+core overlays the newest cursor into the same image. `weld-core`
 owns the Bevy-free cursor model, Smithay cursor-surface lifecycle, Xcursor
 discovery, immutable GPU uploads, and final composition geometry. `weld-app`
 exposes the reloadable `CursorSettings` ECS resource; replacing that resource
@@ -291,24 +294,26 @@ the configured default shape rather than creating a second ad hoc DMA-BUF
 ownership path. Scalable cursor-theme assets and hardware cursor planes are
 also future work.
 
-The final pass samples cursor pixels as sRGB, premultiplies each linear texel
+The cursor pass samples pixels as sRGB, premultiplies each linear texel
 before interpolation, and composites them over Bevy's premultiplied output.
 Pixel-aligned 1:1 cursors use a single texture load; scaled or subpixel cursors
-use four linear-space taps. Published cursor textures are immutable because
-the DRM presenter may retain and requeue a frame. The presenter worker writes
-the matching geometry uniform immediately before its submission. Nested mode
-continues to use the host window-system cursor and binds a transparent cursor
-to Weld's final blit. `CursorSettings` theme and size changes are therefore
+use four linear-space taps. The pass uses `LoadOp::Load`, premultiplied alpha,
+and a scissor clamped to the cursor bounds; Bevy's opaque full-output clear is
+the required initialization before that load. Published cursor textures are
+immutable across queued GPU work. Nested mode continues to use the host
+window-system cursor and its scene-only final blit. `CursorSettings` theme and
+size changes are therefore
 inert in nested mode, although Bevy `CursorIcon` and `CursorRequest` shape and
 visibility changes still reach the host cursor. Screenshots and remote captures
-currently read the Bevy composition before the DRM cursor blit and therefore
-exclude the cursor; that is deliberate so future streaming can carry cursor
+read the owned Bevy composition and therefore exclude the cursor. The output
+camera now supplies the same opaque background previously added by the DRM
+blit, so DRM captures no longer preserve an accidental transparent background.
+Cursor exclusion remains deliberate so future streaming can carry cursor
 metadata independently.
 
 Standalone input additionally publishes the newest raw compositor-logical
-pointer position to the cursor presenter before application picking completes,
-then offers a cursor-only frame against the last completed composition. Core
-also forwards every unconsumed raw event through Smithay immediately, using the
+pointer position before application picking completes. Core also forwards
+every unconsumed raw event through Smithay immediately, using the
 client input target and compositor-to-surface affine mapping published by the
 most recent application frame. The same ordered event is retained losslessly
 for the next Bevy/Leafwing projection. Input therefore requests at most one

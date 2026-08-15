@@ -27,8 +27,9 @@ use smithay::{
 use tracing::{debug, warn};
 
 use crate::{
-    host::CompositionTargetId,
-    renderer::{CompositionBlitter, CursorOverlay},
+    host::CompositionTargetView,
+    renderer::{CursorOverlay, CursorOverlayRenderer},
+    surface::Extent,
 };
 
 use super::gpu::DrmGpu;
@@ -60,10 +61,6 @@ impl PresenterLifecycle {
             state: PresenterState::Starting,
             recovery_attempts_remaining: TRANSIENT_RECOVERY_ATTEMPTS,
         }
-    }
-
-    const fn is_ready(&self) -> bool {
-        matches!(self.state, PresenterState::Ready)
     }
 
     const fn is_stopped(&self) -> bool {
@@ -152,15 +149,6 @@ struct FrameTicket {
     generation: u64,
     epoch: u64,
     frame_id: u64,
-    target: CompositionTargetId,
-}
-
-#[derive(Clone)]
-struct PresentedComposition {
-    // wgpu resources are reference-counted. Cloning these handles retains the
-    // same GPU resources and never copies composition or cursor pixels.
-    view: wgpu::TextureView,
-    cursor: CursorOverlay,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -169,60 +157,39 @@ enum ActiveFramePhase {
     AwaitingVblank,
 }
 
-struct ActiveFrame<Payload> {
+struct ActiveFrame {
     ticket: FrameTicket,
-    payload: Payload,
     phase: ActiveFramePhase,
 }
 
-struct PendingFrame<Payload> {
-    ticket: FrameTicket,
-    payload: Payload,
-}
-
-struct FrameQueue<Payload> {
-    active: Option<ActiveFrame<Payload>>,
-    pending: Option<PendingFrame<Payload>>,
+struct FrameTracker {
+    active: Option<ActiveFrame>,
     next_frame_id: u64,
 }
 
-impl<Payload: Clone> FrameQueue<Payload> {
+impl FrameTracker {
     const fn new() -> Self {
         Self {
             active: None,
-            pending: None,
             next_frame_id: 1,
         }
     }
 
-    fn offer(
-        &mut self,
-        generation: u64,
-        epoch: u64,
-        target: CompositionTargetId,
-        payload: Payload,
-    ) {
+    fn begin(&mut self, generation: u64, epoch: u64) -> Option<FrameTicket> {
+        if self.active.is_some() {
+            return None;
+        }
         let ticket = FrameTicket {
             generation,
             epoch,
             frame_id: self.next_frame_id,
-            target,
         };
         self.next_frame_id = self.next_frame_id.saturating_add(1);
-        self.pending = Some(PendingFrame { ticket, payload });
-    }
-
-    fn begin_rendering(&mut self) -> Option<PendingFrame<Payload>> {
-        if self.active.is_some() {
-            return None;
-        }
-        let frame = self.pending.take()?;
         self.active = Some(ActiveFrame {
-            ticket: frame.ticket,
-            payload: frame.payload.clone(),
+            ticket,
             phase: ActiveFramePhase::Rendering,
         });
-        Some(frame)
+        Some(ticket)
     }
 
     fn mark_awaiting_vblank(&mut self, ticket: FrameTicket) -> bool {
@@ -244,23 +211,6 @@ impl<Payload: Clone> FrameQueue<Payload> {
         self.release(ticket, ActiveFramePhase::AwaitingVblank)
     }
 
-    fn defer_rendering(&mut self, ticket: FrameTicket) -> bool {
-        let Some(active) = self.active.take() else {
-            return false;
-        };
-        if active.ticket != ticket || active.phase != ActiveFramePhase::Rendering {
-            self.active = Some(active);
-            return false;
-        }
-        if self.pending.is_none() {
-            self.pending = Some(PendingFrame {
-                ticket: active.ticket,
-                payload: active.payload,
-            });
-        }
-        true
-    }
-
     fn release(&mut self, ticket: FrameTicket, phase: ActiveFramePhase) -> bool {
         let Some(active) = self.active.as_ref() else {
             return false;
@@ -274,11 +224,9 @@ impl<Payload: Clone> FrameQueue<Payload> {
 
     fn clear(&mut self) {
         self.active = None;
-        self.pending = None;
     }
 
     fn suspend(&mut self) {
-        self.pending = None;
         self.drop_awaiting_vblank();
     }
 
@@ -292,30 +240,10 @@ impl<Payload: Clone> FrameQueue<Payload> {
         }
     }
 
-    fn defer_awaiting_vblank(&mut self) {
-        let Some(active) = self.active.take() else {
-            return;
-        };
-        if active.phase != ActiveFramePhase::AwaitingVblank {
-            self.active = Some(active);
-            return;
-        }
-        if self.pending.is_none() {
-            self.pending = Some(PendingFrame {
-                ticket: active.ticket,
-                payload: active.payload,
-            });
-        }
-    }
-
     fn has_rendering_frame(&self) -> bool {
         self.active
             .as_ref()
             .is_some_and(|frame| frame.phase == ActiveFramePhase::Rendering)
-    }
-
-    fn active_target(&self) -> Option<CompositionTargetId> {
-        self.active.as_ref().map(|frame| frame.ticket.target)
     }
 
     fn is_rendering(&self, ticket: FrameTicket) -> bool {
@@ -325,16 +253,35 @@ impl<Payload: Clone> FrameQueue<Payload> {
     }
 }
 
-struct RenderFrame {
+pub(super) struct AcquiredFrame {
     ticket: FrameTicket,
-    composition: PresentedComposition,
-    scanout: Dmabuf,
+    target: CompositionTargetView,
+    image: vk::Image,
+}
+
+impl AcquiredFrame {
+    pub(super) const fn target(&self) -> &CompositionTargetView {
+        &self.target
+    }
+}
+
+struct CompletionWork {
+    ticket: FrameTicket,
+    submission: wgpu::SubmissionIndex,
+    present: bool,
 }
 
 enum PresenterCommand {
-    Frame(RenderFrame),
+    Wait(CompletionWork),
     Suspend,
     Shutdown,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum PresenterTargetAvailability {
+    Ready,
+    Busy,
+    Unavailable,
 }
 
 pub(super) struct PresenterHandle {
@@ -345,8 +292,12 @@ pub(super) struct PresenterHandle {
     active: Arc<AtomicBool>,
     crtc: crtc::Handle,
     scanout: ScanoutSurface,
-    frames: FrameQueue<PresentedComposition>,
+    frames: FrameTracker,
     lifecycle: PresenterLifecycle,
+    device: wgpu::Device,
+    queue: wgpu::Queue,
+    imports: ScanoutImportCache,
+    cursor_renderer: CursorOverlayRenderer,
     shutdown_requested: bool,
 }
 
@@ -379,11 +330,15 @@ impl PresenterHandle {
             );
         }
 
+        let imports = ScanoutImportCache::new(&gpu.device)?;
+        let cursor_renderer = CursorOverlayRenderer::new(&gpu.device, &gpu.queue, SCANOUT_FORMAT);
+
         let (commands, command_receiver) = mpsc::channel();
         let epoch = Arc::new(AtomicU64::new(1));
         let active = Arc::new(AtomicBool::new(true));
         let worker_epoch = Arc::clone(&epoch);
         let worker_active = Arc::clone(&active);
+        let worker_device = gpu.device.clone();
 
         let uncaptured_events = events.clone();
         gpu.device.on_uncaptured_error(Arc::new(move |error| {
@@ -402,7 +357,7 @@ impl PresenterHandle {
                 let stopped_events = worker_events.clone();
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     run_worker(
-                        gpu,
+                        worker_device,
                         command_receiver,
                         worker_events,
                         worker_epoch,
@@ -426,32 +381,139 @@ impl PresenterHandle {
             active,
             crtc,
             scanout,
-            frames: FrameQueue::new(),
+            frames: FrameTracker::new(),
             lifecycle: PresenterLifecycle::new(),
+            device: gpu.device,
+            queue: gpu.queue,
+            imports,
+            cursor_renderer,
             shutdown_requested: false,
         })
     }
 
-    pub(super) fn in_flight_target(&self) -> Option<CompositionTargetId> {
-        self.frames.active_target()
+    pub(super) fn target_availability(&self) -> PresenterTargetAvailability {
+        if !self.active.load(Ordering::Acquire) {
+            return PresenterTargetAvailability::Unavailable;
+        }
+        match self.lifecycle.state {
+            PresenterState::Ready if self.frames.active.is_none() => {
+                PresenterTargetAvailability::Ready
+            }
+            PresenterState::Starting
+            | PresenterState::Ready
+            | PresenterState::ActivatingAfterSession => PresenterTargetAvailability::Busy,
+            PresenterState::Suspended | PresenterState::Unavailable | PresenterState::Stopped => {
+                PresenterTargetAvailability::Unavailable
+            }
+        }
     }
 
-    pub(super) fn offer(
+    pub(super) fn acquire_frame(&mut self) -> Option<AcquiredFrame> {
+        if self.target_availability() != PresenterTargetAvailability::Ready {
+            return None;
+        }
+        match self.try_acquire_frame() {
+            Ok(frame) => Some(frame),
+            Err(error) => {
+                self.report_unavailable(format!("failed to acquire direct GBM target: {error}"));
+                None
+            }
+        }
+    }
+
+    fn try_acquire_frame(&mut self) -> Result<AcquiredFrame> {
+        let ticket = self
+            .frames
+            .begin(PRESENTER_GENERATION, self.epoch.load(Ordering::Acquire))
+            .context("physical frame became busy while acquiring its target")?;
+        let acquired = (|| {
+            let (scanout, _age) = self
+                .scanout
+                .next_buffer()
+                .context("failed to lease GBM scanout buffer")?;
+            let imported = self.imports.acquire(&self.device, &self.queue, &scanout)?;
+            Ok(AcquiredFrame {
+                ticket,
+                target: CompositionTargetView::new(imported.view, imported.extent, SCANOUT_FORMAT),
+                image: imported.image,
+            })
+        })();
+        if acquired.is_err() {
+            self.frames.release_rendering(ticket);
+        }
+        acquired
+    }
+
+    pub(super) fn finish_frame(
         &mut self,
-        target: CompositionTargetId,
-        composition: wgpu::TextureView,
-        cursor: CursorOverlay,
-    ) {
-        self.frames.offer(
-            PRESENTER_GENERATION,
-            self.epoch.load(Ordering::Acquire),
-            target,
-            PresentedComposition {
-                view: composition,
-                cursor,
-            },
+        frame: &AcquiredFrame,
+        cursor: &CursorOverlay,
+    ) -> Result<()> {
+        let release = barrier_command(
+            &self.device,
+            &self.imports.raw_device,
+            self.imports.queue_family,
+            frame.image,
+            true,
+            BarrierDirection::Release,
+        )?;
+        let mut cursor_encoder =
+            self.device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("weld direct cursor encoder"),
+                });
+        self.cursor_renderer.encode(
+            &mut cursor_encoder,
+            frame.target.view(),
+            frame.target.extent(),
+            cursor,
         );
-        self.submit_pending();
+        let submission = self.queue.submit([cursor_encoder.finish(), release]);
+        self.queue_completion(CompletionWork {
+            ticket: frame.ticket,
+            submission,
+            present: true,
+        });
+        Ok(())
+    }
+
+    pub(super) fn abort_frame(&mut self, frame: AcquiredFrame) {
+        let release = barrier_command(
+            &self.device,
+            &self.imports.raw_device,
+            self.imports.queue_family,
+            frame.image,
+            true,
+            BarrierDirection::Release,
+        );
+        match release {
+            Ok(release) => {
+                let submission = self.queue.submit([release]);
+                self.queue_completion(CompletionWork {
+                    ticket: frame.ticket,
+                    submission,
+                    present: false,
+                });
+            }
+            Err(error) => {
+                self.frames.release_rendering(frame.ticket);
+                self.report_terminal_unavailable(format!(
+                    "failed to release aborted GBM target: {error}"
+                ));
+            }
+        }
+    }
+
+    fn queue_completion(&mut self, work: CompletionWork) {
+        if let Err(mpsc::SendError(PresenterCommand::Wait(work))) =
+            self.commands.send(PresenterCommand::Wait(work))
+        {
+            let outcome = wait_for_completion(&self.device, &work);
+            let _ = self.events.send(PresenterEvent::Frame(PresenterFrameEvent {
+                ticket: work.ticket,
+                kind: outcome,
+            }));
+        }
     }
 
     pub(super) fn suspend(&mut self) {
@@ -482,7 +544,6 @@ impl PresenterHandle {
         let epoch = self.epoch.load(Ordering::Acquire);
         self.lifecycle.mark_ready();
         debug!(epoch, "GBM/KMS presenter activated");
-        self.submit_pending();
         Ok(())
     }
 
@@ -493,7 +554,6 @@ impl PresenterHandle {
                     && self.active.load(Ordering::Acquire) =>
             {
                 self.lifecycle.mark_ready();
-                self.submit_pending();
             }
             PresenterEvent::Frame(frame) => self.handle_frame_event(*frame),
             PresenterEvent::DeviceLost(_) => {
@@ -524,7 +584,6 @@ impl PresenterHandle {
                 } else {
                     self.lifecycle.reset_recovery_budget();
                 }
-                self.submit_pending();
             }
             Ok(None) => debug!(?event_crtc, "ignored vblank without a pending Weld frame"),
             Err(error) => self.report_unavailable(format!(
@@ -583,10 +642,10 @@ impl PresenterHandle {
                         }
                     }
                     Err(GbmBufferedSurfaceError::DrmError(DrmError::DeviceInactive)) => {
-                        self.frames.defer_rendering(event.ticket);
+                        self.frames.release_rendering(event.ticket);
                     }
                     Err(error) => {
-                        self.frames.defer_rendering(event.ticket);
+                        self.frames.release_rendering(event.ticket);
                         self.report_unavailable(format!(
                             "failed to queue completed GBM buffer: {error}"
                         ));
@@ -594,18 +653,13 @@ impl PresenterHandle {
                 }
             }
             PresenterFrameEventKind::Released(outcome) => {
-                let released = match outcome {
-                    FrameOutcome::Interrupted => self.frames.release_rendering(event.ticket),
-                    FrameOutcome::Unavailable => self.frames.defer_rendering(event.ticket),
-                };
+                let released = self.frames.release_rendering(event.ticket);
                 if !released {
                     debug!(ticket = ?event.ticket, ?outcome, "ignored stale worker release");
                     return;
                 }
                 if outcome == FrameOutcome::Unavailable {
                     self.report_unavailable("GPU scanout preparation failed".to_owned());
-                } else {
-                    self.submit_pending();
                 }
                 self.finish_deferred_activation();
             }
@@ -622,40 +676,9 @@ impl PresenterHandle {
         }
     }
 
-    fn submit_pending(&mut self) {
-        if !self.lifecycle.is_ready()
-            || !self.active.load(Ordering::Acquire)
-            || self.frames.active.is_some()
-            || self.worker.as_ref().is_none_or(JoinHandle::is_finished)
-            || self.frames.pending.is_none()
-        {
-            return;
-        }
-        let scanout = match self.scanout.next_buffer() {
-            Ok((scanout, _age)) => scanout,
-            Err(GbmBufferedSurfaceError::DrmError(DrmError::DeviceInactive)) => return,
-            Err(error) => {
-                self.report_unavailable(format!("failed to lease GBM scanout buffer: {error}"));
-                return;
-            }
-        };
-        let Some(frame) = self.frames.begin_rendering() else {
-            return;
-        };
-        let command = PresenterCommand::Frame(RenderFrame {
-            ticket: frame.ticket,
-            composition: frame.payload,
-            scanout,
-        });
-        if self.commands.send(command).is_err() {
-            self.frames.defer_rendering(frame.ticket);
-            self.report_unavailable("GBM/KMS presenter worker stopped".to_owned());
-        }
-    }
-
     fn report_unavailable(&mut self, message: String) {
         let _ = self.events.send(PresenterEvent::OutputUnavailable(message));
-        self.frames.defer_awaiting_vblank();
+        self.frames.drop_awaiting_vblank();
         if !self.active.load(Ordering::Acquire)
             || self.frames.has_rendering_frame()
             || !self.lifecycle.begin_transient_recovery()
@@ -665,7 +688,6 @@ impl PresenterHandle {
         match self.scanout.clear_pending_scanout() {
             Ok(()) => {
                 self.lifecycle.mark_ready();
-                self.submit_pending();
             }
             Err(error) => self.report_terminal_unavailable(format!(
                 "failed to reset GBM/KMS after a presentation error: {error}"
@@ -687,7 +709,7 @@ impl Drop for PresenterHandle {
 }
 
 fn run_worker(
-    gpu: DrmGpu,
+    device: wgpu::Device,
     commands: mpsc::Receiver<PresenterCommand>,
     events: CalloopSender<PresenterEvent>,
     epoch: Arc<AtomicU64>,
@@ -698,56 +720,46 @@ fn run_worker(
         client.set_thread_name("weld-drm-presenter");
     }
 
-    let blitter = CompositionBlitter::new(&gpu.device, SCANOUT_FORMAT);
-    let mut scanout_cache = match ScanoutImportCache::new(&gpu.device) {
-        Ok(cache) => cache,
-        Err(error) => {
-            let _ = events.send(PresenterEvent::OutputUnavailable(error.to_string()));
-            return;
-        }
-    };
     let _ = events.send(PresenterEvent::Ready {
         epoch: epoch.load(Ordering::Acquire),
     });
 
     while let Ok(command) = commands.recv() {
         match command {
-            PresenterCommand::Frame(frame) => {
+            PresenterCommand::Wait(work) => {
                 let _span = tracing::trace_span!(
                     target: crate::PROFILE_TARGET,
-                    "drm_present_frame"
+                    "drm_wait_for_frame"
                 )
                 .entered();
-                let outcome = if !active.load(Ordering::Acquire)
-                    || epoch.load(Ordering::Acquire) != frame.ticket.epoch
+                let mut kind = wait_for_completion(&device, &work);
+                if matches!(kind, PresenterFrameEventKind::Prepared)
+                    && (!active.load(Ordering::Acquire)
+                        || epoch.load(Ordering::Acquire) != work.ticket.epoch)
                 {
-                    FrameOutcome::Interrupted
-                } else {
-                    match scanout_cache.render(&gpu.device, &gpu.queue, &blitter, &frame) {
-                        Ok(())
-                            if active.load(Ordering::Acquire)
-                                && epoch.load(Ordering::Acquire) == frame.ticket.epoch =>
-                        {
-                            let _ = events.send(PresenterEvent::Frame(PresenterFrameEvent {
-                                ticket: frame.ticket,
-                                kind: PresenterFrameEventKind::Prepared,
-                            }));
-                            continue;
-                        }
-                        Ok(()) => FrameOutcome::Interrupted,
-                        Err(error) => {
-                            warn!(%error, "failed to prepare GBM scanout buffer");
-                            FrameOutcome::Unavailable
-                        }
-                    }
-                };
+                    kind = PresenterFrameEventKind::Released(FrameOutcome::Interrupted);
+                }
                 let _ = events.send(PresenterEvent::Frame(PresenterFrameEvent {
-                    ticket: frame.ticket,
-                    kind: PresenterFrameEventKind::Released(outcome),
+                    ticket: work.ticket,
+                    kind,
                 }));
             }
             PresenterCommand::Suspend => {}
             PresenterCommand::Shutdown => break,
+        }
+    }
+}
+
+fn wait_for_completion(device: &wgpu::Device, work: &CompletionWork) -> PresenterFrameEventKind {
+    match device.poll(wgpu::PollType::Wait {
+        submission_index: Some(work.submission.clone()),
+        timeout: None,
+    }) {
+        Ok(_) if work.present => PresenterFrameEventKind::Prepared,
+        Ok(_) => PresenterFrameEventKind::Released(FrameOutcome::Interrupted),
+        Err(error) => {
+            warn!(%error, "failed to complete direct GBM frame");
+            PresenterFrameEventKind::Released(FrameOutcome::Unavailable)
         }
     }
 }
@@ -794,16 +806,15 @@ impl ScanoutImportCache {
         })
     }
 
-    fn render(
+    fn acquire(
         &mut self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
-        blitter: &CompositionBlitter,
-        frame: &RenderFrame,
-    ) -> Result<()> {
+        dmabuf: &Dmabuf,
+    ) -> Result<ImportedScanoutTarget> {
         let raw_device = self.raw_device.clone();
         let queue_family = self.queue_family;
-        let target = self.import(device, &frame.scanout)?;
+        let target = self.import(device, dmabuf)?;
         let acquire = barrier_command(
             device,
             &raw_device,
@@ -813,43 +824,17 @@ impl ScanoutImportCache {
             BarrierDirection::Acquire,
         )?;
 
-        blitter.set_cursor(queue, &frame.composition.cursor);
-        let bind_group = blitter.create_bind_group(
-            device,
-            "weld GBM composition bind group",
-            &frame.composition.view,
-            frame.composition.cursor.texture_view(),
-        );
-        let mut render_encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("weld GBM composition encoder"),
-        });
-        blitter.encode(
-            &mut render_encoder,
-            "weld GBM composition pass",
-            &target.view,
-            &bind_group,
-        );
-
-        let release = barrier_command(
-            device,
-            &raw_device,
-            queue_family,
-            target.image,
-            true,
-            BarrierDirection::Release,
-        )?;
-        // wgpu forbids mixing raw-HAL and ordinary encoding on one encoder.
-        // Submitting the raw acquire, normal blit, and raw release as one
-        // ordered batch preserves both that API boundary and Vulkan ordering.
-        let submission = queue.submit([acquire, render_encoder.finish(), release]);
+        queue.submit([acquire]);
         target.used = true;
-        device
-            .poll(wgpu::PollType::Wait {
-                submission_index: Some(submission),
-                timeout: None,
-            })
-            .context("waiting for the GBM scanout blit failed")?;
-        Ok(())
+        let size = dmabuf.size();
+        Ok(ImportedScanoutTarget {
+            view: target.view.clone(),
+            image: target.image,
+            extent: Extent::new(
+                u32::try_from(size.w).context("negative GBM buffer width")?,
+                u32::try_from(size.h).context("negative GBM buffer height")?,
+            ),
+        })
     }
 
     fn import<'a>(
@@ -866,6 +851,12 @@ impl ScanoutImportCache {
             }
         }
     }
+}
+
+struct ImportedScanoutTarget {
+    view: wgpu::TextureView,
+    image: vk::Image,
+    extent: Extent,
 }
 
 #[derive(Clone, Copy)]
@@ -1089,8 +1080,8 @@ fn import_scanout(device: &wgpu::Device, dmabuf: &Dmabuf) -> Result<ImportedScan
 mod tests {
     use super::*;
 
-    fn queue() -> FrameQueue<&'static str> {
-        FrameQueue::new()
+    fn frames() -> FrameTracker {
+        FrameTracker::new()
     }
 
     #[test]
@@ -1104,7 +1095,7 @@ mod tests {
         assert!(lifecycle.worker_became_idle());
 
         lifecycle.mark_ready();
-        assert!(lifecycle.is_ready());
+        assert_eq!(lifecycle.state, PresenterState::Ready);
     }
 
     #[test]
@@ -1125,67 +1116,51 @@ mod tests {
     }
 
     #[test]
-    fn active_frame_coalesces_pending_work_to_the_newest_frame() {
-        let mut frames = queue();
-        frames.offer(1, 1, CompositionTargetId::FIRST, "first");
-        let first = frames.begin_rendering().expect("first frame should start");
-        frames.offer(1, 1, CompositionTargetId::SECOND, "older");
-        frames.offer(1, 1, CompositionTargetId::SECOND, "latest");
+    fn a_second_frame_cannot_start_until_the_active_frame_retires() {
+        let mut frames = frames();
+        let first = frames.begin(1, 1).expect("first frame should start");
 
-        assert!(frames.mark_awaiting_vblank(first.ticket));
-        assert!(frames.release_vblank(first.ticket));
-        let next = frames
-            .begin_rendering()
-            .expect("latest frame should remain");
-        assert_eq!(next.payload, "latest");
+        assert!(frames.begin(1, 1).is_none());
+        assert!(frames.mark_awaiting_vblank(first));
+        assert!(frames.release_vblank(first));
+        assert!(frames.begin(1, 1).is_some());
     }
 
     #[test]
     fn wrong_phase_cannot_release_active_frame() {
-        let mut frames = queue();
-        frames.offer(1, 1, CompositionTargetId::FIRST, "frame");
-        let frame = frames.begin_rendering().expect("frame should start");
+        let mut frames = frames();
+        let frame = frames.begin(1, 1).expect("frame should start");
 
-        assert!(!frames.release_vblank(frame.ticket));
-        assert_eq!(frames.active_target(), Some(CompositionTargetId::FIRST));
-        assert!(frames.release_rendering(frame.ticket));
+        assert!(!frames.release_vblank(frame));
+        assert!(frames.release_rendering(frame));
     }
 
     #[test]
     fn suspend_keeps_a_worker_owned_target_until_rendering_finishes() {
-        let mut frames = queue();
-        frames.offer(1, 1, CompositionTargetId::FIRST, "rendering");
-        let rendering = frames.begin_rendering().expect("frame should start");
-        frames.offer(1, 1, CompositionTargetId::SECOND, "pending");
+        let mut frames = frames();
+        let rendering = frames.begin(1, 1).expect("frame should start");
 
         frames.suspend();
 
-        assert_eq!(frames.active_target(), Some(CompositionTargetId::FIRST));
-        assert!(frames.pending.is_none());
-        assert!(frames.release_rendering(rendering.ticket));
+        assert!(frames.is_rendering(rendering));
+        assert!(frames.release_rendering(rendering));
 
-        frames.offer(1, 2, CompositionTargetId::SECOND, "presented");
-        let presented = frames.begin_rendering().expect("frame should restart");
-        assert!(frames.mark_awaiting_vblank(presented.ticket));
+        let presented = frames.begin(1, 2).expect("frame should restart");
+        assert!(frames.mark_awaiting_vblank(presented));
         frames.suspend();
-        assert_eq!(frames.active_target(), None);
+        assert!(frames.active.is_none());
     }
 
     #[test]
     fn stale_worker_or_vblank_ticket_cannot_release_current_frame() {
-        let mut frames = queue();
-        frames.offer(1, 4, CompositionTargetId::FIRST, "old");
-        let old = frames.begin_rendering().expect("old frame should start");
+        let mut frames = frames();
+        let old = frames.begin(1, 4).expect("old frame should start");
         frames.clear();
-        frames.offer(1, 6, CompositionTargetId::SECOND, "current");
-        let current = frames
-            .begin_rendering()
-            .expect("current frame should start");
+        let current = frames.begin(1, 6).expect("current frame should start");
 
-        assert!(!frames.release_rendering(old.ticket));
-        assert!(!frames.release_vblank(old.ticket));
-        assert_eq!(frames.active_target(), Some(CompositionTargetId::SECOND));
-        assert!(frames.mark_awaiting_vblank(current.ticket));
-        assert!(frames.release_vblank(current.ticket));
+        assert!(!frames.release_rendering(old));
+        assert!(!frames.release_vblank(old));
+        assert!(frames.mark_awaiting_vblank(current));
+        assert!(frames.release_vblank(current));
     }
 }

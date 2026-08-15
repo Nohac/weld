@@ -1,8 +1,8 @@
 # Direct DRM presentation
 
 This note records DRM presentation evidence, ownership rules, and recovery
-requirements. The production backend now uses Smithay's GBM/KMS surface with a
-wgpu full-screen blit. The retained Vulkan Display WSI probe at
+requirements. The production backend now renders Bevy directly into Smithay's
+GBM/KMS buffers while a physical output is active. The retained Vulkan Display WSI probe at
 `crates/weld-core/examples/drm_wsi_probe.rs` is intentionally independent from
 the production compositor, so it remains useful for isolating driver, session,
 and VT behavior.
@@ -12,14 +12,16 @@ and VT behavior.
 Smithay owns the DRM device, connector/CRTC state, GBM swapchain, page flips,
 and vblank retirement. Weld uses `GbmBufferedSurface` as the scanout allocator
 and KMS sink, but does not use Smithay render elements or a Smithay renderer.
-wgpu imports each leased scanout DMA-BUF and renders the completed Bevy
-composition plus the compositor cursor into it.
+wgpu imports each leased scanout DMA-BUF, Bevy renders the full scene directly
+into it, and a scissored pass overlays the compositor cursor before ownership
+returns to KMS. There is no intermediate full-output texture or scene blit on
+the active physical path.
 
-This first production path still performs one full-output GPU blit for every
-physical presentation. Removing that blit by rendering Bevy directly into a
-leased output buffer is the next optimization pass, with the offscreen path
-retained whenever capture, headless operation, streaming, or an inactive output
-needs independent composition. The staged work is tracked in
+`weld-app` retains an owned texture behind the same stable Bevy camera handle.
+That texture becomes the destination while the VT/output is inactive or a
+capture requires owned storage. Returning to the output requests a fresh
+direct composition instead of copying the retained image into scanout. The
+staged work and remaining follow-ups are tracked in the
 [DRM rendering improvement plan](drm-rendering-improvement-plan.md).
 
 The initial target is modern Vulkan hardware, one GPU, and one output. This
@@ -259,24 +261,27 @@ diagnostic fallback if a driver rejects the preferred order.
 ## Production event boundary
 
 The calloop thread owns every Smithay and KMS object. It leases a GBM buffer,
-sends only the DMA-BUF and immutable frame payload to a worker, and queues the
-buffer through `GbmBufferedSurface` after the worker reports GPU completion.
-The matching CRTC vblank retires the frame. The worker owns wgpu import, command
-recording, submission, and the potentially blocking completion wait; its
-results return through a wakeable calloop channel.
+safely imports and acquires it, and gives its wgpu view to Bevy immediately
+before composition. After Bevy submits, the same calloop thread records the
+cursor overlay and foreign release. It sends only a `SubmissionIndex` and frame
+ticket to the worker, then queues the buffer through `GbmBufferedSurface` after
+the worker reports GPU completion. The matching CRTC vblank retires the frame.
+Worker results return through a wakeable calloop channel.
 
 Only one physical frame is active. Its phase is rendering or awaiting vblank,
-and one pending slot coalesces newer frames. Session epochs invalidate stale
-work. If a VT activates while the worker still owns a leased buffer, activation
+while application `FrameState` coalesces newer demand. Session epochs invalidate
+stale work. If a VT activates while the worker still waits on a leased buffer, activation
 waits for that terminal worker event before clearing Smithay's stale scanout
-state or reusing the slot. There is no presentation polling.
+state or reusing the slot. The event channel is the normal wakeup; a bounded
+frame-interval timeout prevents a missing result from causing a permanent sleep
+or a zero-timeout spin.
 
 Transient presentation errors have a bounded reset budget and retry the newest
 retained frame. A retired vblank replenishes that budget. An exhausted budget,
 a failed reset, device loss, or a failed DRM event source disables only physical
 presentation; the event source failure requires restart because Weld can no
 longer retire page flips. Scanout construction also rejects implicit DRM
-modifiers before the worker starts, rather than failing on the first Vulkan
+modifiers before direct composition starts, rather than failing on the first Vulkan
 import.
 
 The Display WSI probe's short calloop service interval and missing-event
@@ -311,33 +316,33 @@ DMA-BUF ownership rule.
 
 ## Composition ownership
 
-Bevy renders into two project-owned composition targets. Target identity and
-the latest presenter-owned cursor overlay are part of every presenter frame
-request. The host never renders into a target while the presentation worker
-owns it. While the worker prepares one target, newer state may be rendered and
-coalesced into the other without growing a frame queue. Cursor-only motion
-offers the completed target again with updated overlay metadata instead of
-dirtying Bevy composition.
+`weld-app` owns one retained texture and one stable manual-view handle. DRM
+selects `Bgra8UnormSrgb` for that texture because its leased scanout views use
+the same format. Switching between them therefore changes neither the camera
+target identity nor Bevy's pipeline specialization key.
 
-Every terminal presenter result releases its target, including interrupted and
-unavailable-output outcomes. Tickets carry presenter generation, session epoch,
-target identity, and frame identity so late results cannot release newer work.
-The worker waits for its ordered acquire/blit/release submission before its
-prepared event crosses the channel. Only then can the host queue the GBM buffer
-or reuse the Bevy source target.
+For a physical frame, core acquires the leased image first and passes its view
+as an external destination. The shared wgpu queue then orders the raw Vulkan
+acquire, Bevy's render submissions, the scissored cursor pass, and the raw
+foreign release. The output camera performs an opaque full-target clear before
+the cursor pass uses `LoadOp::Load`; changing that camera to a non-writing clear
+mode would violate the initialization contract for a fresh imported buffer.
+The completion worker waits only for the final release submission. Tickets
+carry presenter generation, session epoch, and frame identity so late results
+cannot release newer work.
 
-The worker owns one cursor uniform shared across its submissions and rewrites
-it immediately before submitting the matching frame. Its one-in-flight queue
-ordering prevents a later cursor payload from overtaking that write. Nested
-presentation leaves the same uniform hidden and relies on its host cursor.
+Direct composition is serialized behind scanout availability. This removes the
+old full-output blit but also removes the previous overlap where Bevy rendered
+into a second offscreen target while the worker prepared the first. Cursor
+motion requests one refresh-capped composition rather than re-presenting a
+retained scene independently; a KMS cursor plane remains the route to decouple
+cursor latency from Bevy composition.
 
-Resizing or replacing the targets first advances their generation. The host
-then waits for or invalidates any outstanding ownership before dropping and
-recreating both textures. A screenshot reads the completed target associated
-with the requested frame. Its copy submission uses the same queue and retains
-that target until readback has been ordered, preventing a later composition
-from overwriting it first. Captures omit the presenter or host cursor in both
-DRM and nested modes.
+When no physical target is usable, composition selects the retained texture and
+continues demand-driven. A screenshot also selects that target and reads it
+before requesting the next direct physical frame. DRM captures now contain the
+opaque output background formerly supplied by the removed blit, but still omit
+the cursor. Nested captures likewise omit the host-system cursor.
 
 Nested and direct presentation deliberately complete client frame callbacks
 at different boundaries. The nested backend completes them after its host
