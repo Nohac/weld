@@ -401,7 +401,7 @@ mod tests {
         window::RequestRedraw,
     };
     use weld_app::{
-        output::OutputGeometry,
+        output::{OutputGeometry, OutputId, OutputPosition, PrimaryOutput, WeldOutput},
         surface::{
             ClientPopup, ClientToplevel, HostSurfaceEvent, HostSurfaceEventKind, SurfaceAction,
             SurfaceBufferUpdate, SurfaceContentView, SurfaceId, SurfaceLayerId,
@@ -432,7 +432,6 @@ mod tests {
         app.init_asset::<bevy::shader::Shader>()
             .insert_resource(Assets::<Image>::default())
             .insert_resource(UiScale(1.0))
-            .insert_resource(OutputGeometry::from_physical(UVec2::new(1_000, 800), 1.0))
             .add_message::<RequestRedraw>()
             .add_plugins((
                 SurfacePlugin,
@@ -441,6 +440,14 @@ mod tests {
                 SsdPlugin,
                 FloatPlugin,
             ));
+        app.world_mut().spawn((
+            WeldOutput {
+                id: OutputId::new(1),
+            },
+            OutputGeometry::from_physical(UVec2::new(1_000, 800), 1.0),
+            OutputPosition::default(),
+            PrimaryOutput,
+        ));
         app
     }
 

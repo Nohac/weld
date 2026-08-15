@@ -91,6 +91,26 @@ pub enum WindowVacancy {
     Retain,
 }
 
+/// Assigns a managed window to an output entity.
+///
+/// [`WindowGeometry`] is expressed in the assigned output's local logical
+/// coordinate space. Removing the output clears this relationship without
+/// removing the durable window.
+#[derive(Component, Clone, Copy, Debug, Eq, PartialEq)]
+#[relationship(relationship_target = OutputWindows)]
+pub struct WindowOutput(pub Entity);
+
+/// Managed windows currently assigned to an output.
+#[derive(Component, Debug)]
+#[relationship_target(relationship = WindowOutput)]
+pub struct OutputWindows(Vec<Entity>);
+
+impl OutputWindows {
+    pub fn iter(&self) -> impl Iterator<Item = Entity> + '_ {
+        self.0.iter().copied()
+    }
+}
+
 /// Attaches a client-toplevel entity to a managed window.
 #[derive(Component, Clone, Copy, Debug, Eq, PartialEq)]
 #[relationship(relationship_target = WindowOccupant)]

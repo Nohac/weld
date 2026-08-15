@@ -58,7 +58,10 @@ pub mod prelude {
             InputDelta, PointerGesture, PointerGestureKind, TouchpadGesture, TouchpadHold,
             TouchpadPinch, TouchpadSwipe,
         },
-        output::OutputGeometry,
+        output::{
+            OutputCompositionCamera, OutputGeometry, OutputId, OutputPosition, PrimaryOutput,
+            RendersOutput, WeldOutput,
+        },
         surface::{
             ClientDecorated, ClientPopup, ClientSurface, ClientToplevel, MappedSurface,
             ServerDecorated, SurfaceAction, SurfaceActionQueue, SurfaceId, SurfaceNode,

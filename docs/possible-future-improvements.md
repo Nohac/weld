@@ -56,6 +56,24 @@ Important invariants include:
 - Keep logical windows and policy stable while their presentation moves
   between output cameras and targets.
 
+Windows that cross an output boundary need one presentation projection for
+each intersected output. Each projection targets that output's camera and uses
+its scale, clipping, transform, color state, and composition target; Weld-owned
+SSD, shadows, and other UI are therefore rendered independently per output.
+The window keeps one authoritative home output for policy, while output
+intersections and projection entities are derived state rather than competing
+window ownership.
+
+The client surface does not need a separate Wayland buffer for every
+projection. When overlapping outputs use different scales, Weld should prefer
+one client buffer rendered at the highest useful intersected scale and sample
+it into every output projection, downscaling where necessary. This keeps one
+temporally coherent surface state across outputs. Retaining buffers from
+successive preferred-scale changes would create stale per-output versions,
+delay buffer release, and encourage redraw feedback near output boundaries.
+Preferred-scale changes should use hysteresis so small boundary movements do
+not repeatedly force the client to re-render.
+
 ### Explicit client synchronization
 
 Add capability-gated `linux-drm-syncobj-v1` support through Smithay. Commits

@@ -5,26 +5,28 @@ use std::{collections::hash_map::RandomState, hash::BuildHasher};
 use bevy::{
     app::{App, Plugin, PreUpdate},
     ecs::{
+        change_detection::{DetectChanges, Ref},
         component::Component,
         entity::Entity,
         observer::On,
-        query::Without,
+        query::{Changed, With, Without},
         resource::Resource,
-        schedule::{IntoScheduleConfigs, common_conditions::resource_changed},
+        schedule::IntoScheduleConfigs,
         system::{Commands, Query, Res, ResMut, SystemParam},
     },
     math::Vec2,
 };
 use weld_app::{
     layer::{WINDOW_Z_INDEX_MAX, WINDOW_Z_INDEX_MIN},
-    output::OutputGeometry,
+    output::{OutputGeometry, PrimaryOutput, WeldOutput},
     surface::{MappedSurface, SurfaceCommitRevisions, ToplevelResizeEdge},
 };
 use weld_window::{
     ClientResizeState, FocusedWindow, ManagedBy, ManagedWindow, PresentationInsets,
     PrimaryWindowPresentation, WindowCommand, WindowCommandKind, WindowGeometry, WindowIntent,
     WindowIntentKind, WindowInteractionKind, WindowInteractionSession, WindowOccupant,
-    WindowSystems, WindowVacancy, WindowVisibility, WindowZOrder, rounded_client_size,
+    WindowOutput, WindowSystems, WindowVacancy, WindowVisibility, WindowZOrder,
+    rounded_client_size,
 };
 
 /// The default freeform window manager.
@@ -41,6 +43,7 @@ impl Plugin for FloatPlugin {
                 PreUpdate,
                 (
                     initialize_windows,
+                    adopt_orphaned_windows,
                     reconcile_anchored_resize,
                     reconcile_focus,
                 )
@@ -57,8 +60,7 @@ impl Plugin for FloatPlugin {
             .add_systems(
                 PreUpdate,
                 clamp_windows_to_output
-                    .run_if(resource_changed::<OutputGeometry>)
-                    .after(initialize_windows)
+                    .after(reconcile_focus)
                     .in_set(WindowSystems::Management),
             );
     }
@@ -118,6 +120,9 @@ struct ResizeAnchor {
     end_after_revision: Option<u64>,
 }
 
+#[derive(Component)]
+struct PendingOutputClamp;
+
 type UnmanagedWindowQuery<'w, 's> = Query<
     'w,
     's,
@@ -125,36 +130,73 @@ type UnmanagedWindowQuery<'w, 's> = Query<
         Entity,
         &'static ManagedWindow,
         Option<&'static WindowOccupant>,
+        Option<&'static WindowOutput>,
         &'static mut WindowGeometry,
         &'static mut WindowZOrder,
     ),
     Without<ManagedBy>,
 >;
 
+type OutputQuery<'w, 's> = Query<
+    'w,
+    's,
+    (
+        Entity,
+        Option<&'static OutputGeometry>,
+        Option<&'static PrimaryOutput>,
+    ),
+    With<WeldOutput>,
+>;
+
 fn initialize_windows(
     mut commands: Commands,
     manager: Res<DefaultFloatManager>,
-    output: Res<OutputGeometry>,
     random: Res<PlacementRandom>,
     mut stack: ResMut<WindowStack>,
     mut windows: UnmanagedWindowQuery,
     occupants: Query<&weld_app::surface::ClientToplevel>,
+    outputs: OutputQuery,
 ) {
+    let mut primary_outputs = outputs.iter().filter(|(_, _, primary)| primary.is_some());
+    let Some((primary_output, primary_geometry, _)) = primary_outputs.next() else {
+        return;
+    };
+    if primary_outputs.next().is_some() {
+        // Reporting this requires a latched diagnostic so a broken runtime
+        // configuration cannot emit one warning on every application frame.
+        return;
+    }
+    let Some(primary_geometry) = primary_geometry else {
+        return;
+    };
+
     let mut unmanaged = windows.iter_mut().collect::<Vec<_>>();
-    unmanaged.sort_unstable_by_key(|(_, window, _, _, _)| window.id);
-    for (entity, window, occupant, mut geometry, mut z_order) in unmanaged {
+    unmanaged.sort_unstable_by_key(|(_, window, _, _, _, _)| window.id);
+    for (entity, window, occupant, assigned_output, mut geometry, mut z_order) in unmanaged {
+        let output = assigned_output.map_or(primary_output, |output| output.0);
+        let output_geometry = if output == primary_output {
+            primary_geometry
+        } else if let Ok((_, Some(output_geometry), _)) = outputs.get(output) {
+            output_geometry
+        } else {
+            continue;
+        };
         let placement_key = occupant
             .and_then(|occupant| occupants.get(occupant.entity()).ok())
             .map_or(window.id.raw(), |toplevel| toplevel.surface.raw());
         let position = random_placement(
-            output.logical_size(),
+            output_geometry.logical_size(),
             geometry.size,
             random.samples(placement_key),
         );
         let allocated = stack.allocate().unwrap_or(WINDOW_Z_INDEX_MAX);
         geometry.position = position;
         z_order.0 = allocated;
-        commands.entity(entity).insert(ManagedBy(manager.0));
+        let mut entity_commands = commands.entity(entity);
+        entity_commands.insert(ManagedBy(manager.0));
+        if assigned_output.is_none() {
+            entity_commands.insert(WindowOutput(output));
+        }
         commands.trigger(WindowCommand {
             window: entity,
             kind: WindowCommandKind::Focus,
@@ -162,26 +204,102 @@ fn initialize_windows(
     }
 }
 
-type ClampWindowQuery<'w, 's> = Query<
+type OrphanedWindowQuery<'w, 's> = Query<
     'w,
     's,
-    (&'static ManagedBy, &'static mut WindowGeometry),
-    (Without<WindowInteractionSession>, Without<ResizeAnchor>),
+    (
+        Entity,
+        &'static ManagedBy,
+        &'static mut WindowGeometry,
+        Option<&'static WindowInteractionSession>,
+        Option<&'static ResizeAnchor>,
+    ),
+    (With<ManagedWindow>, Without<WindowOutput>),
 >;
 
-fn clamp_windows_to_output(
+fn adopt_orphaned_windows(
+    mut commands: Commands,
     manager: Res<DefaultFloatManager>,
-    output: Res<OutputGeometry>,
-    mut windows: ClampWindowQuery,
+    outputs: OutputQuery,
+    mut windows: OrphanedWindowQuery,
 ) {
-    for (managed_by, mut geometry) in &mut windows {
+    let mut primary_outputs = outputs.iter().filter(|(_, _, primary)| primary.is_some());
+    let Some((primary_output, primary_geometry, _)) = primary_outputs.next() else {
+        return;
+    };
+    if primary_outputs.next().is_some() {
+        return;
+    }
+    let Some(primary_geometry) = primary_geometry else {
+        return;
+    };
+
+    for (window, managed_by, mut geometry, interaction, anchor) in &mut windows {
         if managed_by.0 != manager.0 {
             continue;
         }
-        let position =
-            clamped_window_position(geometry.position, geometry.size, output.logical_size());
+        let mut entity_commands = commands.entity(window);
+        entity_commands.insert(WindowOutput(primary_output));
+        if interaction.is_some() || anchor.is_some() {
+            entity_commands.insert(PendingOutputClamp);
+            continue;
+        }
+        geometry.position = clamped_window_position(
+            geometry.position,
+            geometry.size,
+            primary_geometry.logical_size(),
+        );
+        entity_commands.remove::<PendingOutputClamp>();
+    }
+}
+
+type ClampWindowQuery<'w, 's> = Query<
+    'w,
+    's,
+    (
+        Entity,
+        &'static ManagedBy,
+        Ref<'static, WindowOutput>,
+        &'static mut WindowGeometry,
+        Option<&'static WindowInteractionSession>,
+        Option<&'static ResizeAnchor>,
+        Option<&'static PendingOutputClamp>,
+    ),
+>;
+
+fn clamp_windows_to_output(
+    mut commands: Commands,
+    manager: Res<DefaultFloatManager>,
+    changed_outputs: Query<Entity, (With<WeldOutput>, Changed<OutputGeometry>)>,
+    outputs: Query<&OutputGeometry, With<WeldOutput>>,
+    mut windows: ClampWindowQuery,
+) {
+    let changed_outputs = changed_outputs.iter().collect::<Vec<_>>();
+    for (window, managed_by, output, mut geometry, interaction, anchor, pending) in &mut windows {
+        if managed_by.0 != manager.0
+            || (pending.is_none() && !output.is_changed() && !changed_outputs.contains(&output.0))
+        {
+            continue;
+        }
+        if interaction.is_some() || anchor.is_some() {
+            if pending.is_none() {
+                commands.entity(window).insert(PendingOutputClamp);
+            }
+            continue;
+        }
+        let Ok(output_geometry) = outputs.get(output.0) else {
+            continue;
+        };
+        let position = clamped_window_position(
+            geometry.position,
+            geometry.size,
+            output_geometry.logical_size(),
+        );
         if geometry.position != position {
             geometry.position = position;
+        }
+        if pending.is_some() {
+            commands.entity(window).remove::<PendingOutputClamp>();
         }
     }
 }
@@ -579,7 +697,7 @@ mod tests {
         picking::PickingSystems,
     };
     use weld_app::{
-        output::OutputGeometry,
+        output::{OutputGeometry, OutputId, OutputPosition, PrimaryOutput, WeldOutput},
         surface::{
             ClientDecorated, ClientToplevel, MappedSurface, SurfaceAction, SurfaceActionQueue,
             SurfaceCommitRevisions, SurfaceId, ToplevelInteractionRequest, take_surface_actions,
@@ -588,7 +706,7 @@ mod tests {
     use weld_window::{
         FocusedWindow, ManagedWindow, OccupiesWindow, WindowCommand, WindowCommandKind,
         WindowGeometry, WindowIntent, WindowIntentKind, WindowInteractionKind,
-        WindowInteractionSession, WindowPlugin, WindowVacancy, WindowZOrder,
+        WindowInteractionSession, WindowOutput, WindowPlugin, WindowVacancy, WindowZOrder,
     };
 
     use super::*;
@@ -609,6 +727,26 @@ mod tests {
             window,
             kind: WindowIntentKind::Activate,
         });
+    }
+
+    fn spawn_output(
+        app: &mut App,
+        id: u64,
+        physical_size: UVec2,
+        scale_factor: f64,
+        primary: bool,
+    ) -> Entity {
+        let mut output = app.world_mut().spawn((
+            WeldOutput {
+                id: OutputId::new(id),
+            },
+            OutputGeometry::from_physical(physical_size, scale_factor),
+            OutputPosition::default(),
+        ));
+        if primary {
+            output.insert(PrimaryOutput);
+        }
+        output.id()
     }
 
     #[test]
@@ -637,6 +775,211 @@ mod tests {
             ),
             Vec2::ZERO
         );
+    }
+
+    #[test]
+    fn windows_wait_for_a_primary_output_before_float_management() {
+        let mut app = App::new();
+        app.add_plugins((WindowPlugin, FloatPlugin))
+            .init_resource::<SurfaceActionQueue>()
+            .init_resource::<SurfaceCommitRevisions>()
+            .add_message::<ToplevelInteractionRequest>();
+        let window = app
+            .world_mut()
+            .spawn((
+                ManagedWindow {
+                    id: weld_window::WindowId::new(1),
+                },
+                WindowVacancy::Retain,
+                WindowGeometry {
+                    position: Vec2::splat(500.0),
+                    size: Vec2::new(200.0, 100.0),
+                },
+            ))
+            .id();
+
+        app.update();
+        assert!(app.world().get::<ManagedBy>(window).is_none());
+
+        let output = spawn_output(&mut app, 1, UVec2::new(800, 600), 1.0, true);
+        app.update();
+
+        assert!(app.world().get::<ManagedBy>(window).is_some());
+        assert_eq!(
+            app.world().get::<WindowOutput>(window),
+            Some(&WindowOutput(output))
+        );
+    }
+
+    #[test]
+    fn placement_and_clamping_follow_each_windows_assigned_output() {
+        let mut app = App::new();
+        app.add_plugins((WindowPlugin, FloatPlugin))
+            .init_resource::<SurfaceActionQueue>()
+            .init_resource::<SurfaceCommitRevisions>()
+            .add_message::<ToplevelInteractionRequest>();
+        let primary = spawn_output(&mut app, 1, UVec2::new(1_000, 800), 1.0, true);
+        let secondary = spawn_output(&mut app, 2, UVec2::new(800, 600), 2.0, false);
+        let primary_window = app
+            .world_mut()
+            .spawn((
+                ManagedWindow {
+                    id: weld_window::WindowId::new(2),
+                },
+                WindowVacancy::Retain,
+                WindowGeometry {
+                    position: Vec2::splat(2_000.0),
+                    size: Vec2::new(300.0, 200.0),
+                },
+            ))
+            .id();
+        let secondary_window = app
+            .world_mut()
+            .spawn((
+                ManagedWindow {
+                    id: weld_window::WindowId::new(3),
+                },
+                WindowVacancy::Retain,
+                WindowOutput(secondary),
+                WindowGeometry {
+                    position: Vec2::splat(2_000.0),
+                    size: Vec2::new(300.0, 200.0),
+                },
+            ))
+            .id();
+
+        app.update();
+        let primary_position = app
+            .world()
+            .get::<WindowGeometry>(primary_window)
+            .expect("primary window should retain geometry")
+            .position;
+        let secondary_position = app
+            .world()
+            .get::<WindowGeometry>(secondary_window)
+            .expect("secondary window should retain geometry")
+            .position;
+        assert_eq!(
+            app.world().get::<WindowOutput>(primary_window),
+            Some(&WindowOutput(primary))
+        );
+        assert_eq!(
+            app.world().get::<WindowOutput>(secondary_window),
+            Some(&WindowOutput(secondary))
+        );
+        assert!(primary_position.cmpge(Vec2::ZERO).all());
+        assert!(primary_position.cmple(Vec2::new(700.0, 600.0)).all());
+        assert!(secondary_position.cmpge(Vec2::ZERO).all());
+        assert!(secondary_position.cmple(Vec2::new(100.0, 100.0)).all());
+
+        // Let the deferred relationship insertion age past Bevy's change tick
+        // before isolating a change to the secondary output.
+        app.update();
+        app.world_mut()
+            .get_mut::<WindowGeometry>(primary_window)
+            .expect("primary window should retain geometry")
+            .position = Vec2::new(900.0, 700.0);
+        app.world_mut()
+            .get_mut::<WindowGeometry>(secondary_window)
+            .expect("secondary window should retain geometry")
+            .position = Vec2::new(90.0, 90.0);
+        *app.world_mut()
+            .get_mut::<OutputGeometry>(secondary)
+            .expect("secondary output should retain geometry") =
+            OutputGeometry::from_physical(UVec2::new(400, 200), 1.0);
+
+        app.update();
+
+        assert_eq!(
+            app.world()
+                .get::<WindowGeometry>(primary_window)
+                .expect("primary window should retain geometry")
+                .position,
+            Vec2::new(900.0, 700.0),
+        );
+        assert_eq!(
+            app.world()
+                .get::<WindowGeometry>(secondary_window)
+                .expect("secondary window should retain geometry")
+                .position,
+            Vec2::new(90.0, 0.0),
+        );
+    }
+
+    #[test]
+    fn removed_outputs_rehome_windows_without_interrupting_interactions() {
+        let mut app = App::new();
+        app.add_plugins((WindowPlugin, FloatPlugin))
+            .init_resource::<SurfaceActionQueue>()
+            .init_resource::<SurfaceCommitRevisions>()
+            .add_message::<ToplevelInteractionRequest>();
+        let primary = spawn_output(&mut app, 1, UVec2::new(500, 400), 1.0, true);
+        let secondary = spawn_output(&mut app, 2, UVec2::new(1_000, 800), 1.0, false);
+        let window = app
+            .world_mut()
+            .spawn((
+                ManagedWindow {
+                    id: weld_window::WindowId::new(4),
+                },
+                WindowVacancy::Retain,
+                WindowOutput(secondary),
+                WindowGeometry {
+                    position: Vec2::ZERO,
+                    size: Vec2::new(300.0, 200.0),
+                },
+            ))
+            .id();
+        app.update();
+        app.update();
+        let manager = *app
+            .world()
+            .get::<ManagedBy>(window)
+            .expect("window should be managed before output removal");
+        let z_order = *app
+            .world()
+            .get::<WindowZOrder>(window)
+            .expect("window should be stacked before output removal");
+        app.world_mut()
+            .get_mut::<WindowGeometry>(window)
+            .expect("window should retain geometry")
+            .position = Vec2::new(900.0, 700.0);
+        app.world_mut()
+            .entity_mut(window)
+            .insert(WindowInteractionSession {
+                kind: WindowInteractionKind::Move,
+            });
+
+        assert!(app.world_mut().despawn(secondary));
+        app.update();
+
+        assert_eq!(app.world().get::<ManagedBy>(window), Some(&manager));
+        assert_eq!(app.world().get::<WindowZOrder>(window), Some(&z_order));
+        assert_eq!(
+            app.world().get::<WindowOutput>(window),
+            Some(&WindowOutput(primary))
+        );
+        assert_eq!(
+            app.world()
+                .get::<WindowGeometry>(window)
+                .expect("window should retain geometry during interaction")
+                .position,
+            Vec2::new(900.0, 700.0),
+        );
+
+        app.world_mut()
+            .entity_mut(window)
+            .remove::<WindowInteractionSession>();
+        app.update();
+
+        assert_eq!(
+            app.world()
+                .get::<WindowGeometry>(window)
+                .expect("window should retain geometry after re-adoption")
+                .position,
+            Vec2::new(200.0, 200.0),
+        );
+        assert_eq!(app.world().get::<ManagedBy>(window), Some(&manager));
+        assert_eq!(app.world().get::<WindowZOrder>(window), Some(&z_order));
     }
 
     #[test]
@@ -701,10 +1044,10 @@ mod tests {
     fn activating_the_top_window_reasserts_focus_without_using_a_stack_slot() {
         let mut app = App::new();
         app.add_plugins((WindowPlugin, FloatPlugin))
-            .insert_resource(OutputGeometry::from_physical(UVec2::new(800, 600), 1.0))
             .init_resource::<SurfaceActionQueue>()
             .init_resource::<SurfaceCommitRevisions>()
             .add_message::<ToplevelInteractionRequest>();
+        spawn_output(&mut app, 1, UVec2::new(800, 600), 1.0, true);
         let window = app
             .world_mut()
             .spawn((
@@ -739,7 +1082,6 @@ mod tests {
     fn focus_changes_during_the_frame_that_observes_activation() {
         let mut app = App::new();
         app.add_plugins((WindowPlugin, FloatPlugin))
-            .insert_resource(OutputGeometry::from_physical(UVec2::new(800, 600), 1.0))
             .init_resource::<SurfaceActionQueue>()
             .init_resource::<SurfaceCommitRevisions>()
             .add_message::<ToplevelInteractionRequest>()
@@ -747,6 +1089,7 @@ mod tests {
                 PreUpdate,
                 activate_on_picking_last.in_set(PickingSystems::Last),
             );
+        spawn_output(&mut app, 1, UVec2::new(800, 600), 1.0, true);
         let first_surface = SurfaceId::new(81);
         let second_surface = SurfaceId::new(82);
         let first_occupant = app
@@ -821,10 +1164,10 @@ mod tests {
     fn ending_an_already_settled_resize_removes_the_session_and_anchor() {
         let mut app = App::new();
         app.add_plugins((WindowPlugin, FloatPlugin))
-            .insert_resource(OutputGeometry::from_physical(UVec2::new(800, 600), 1.0))
             .init_resource::<SurfaceActionQueue>()
             .init_resource::<SurfaceCommitRevisions>()
             .add_message::<ToplevelInteractionRequest>();
+        spawn_output(&mut app, 1, UVec2::new(800, 600), 1.0, true);
         let occupant = app
             .world_mut()
             .spawn((
@@ -878,10 +1221,10 @@ mod tests {
     fn resize_anchor_outlives_the_session_until_client_settlement() {
         let mut app = App::new();
         app.add_plugins((WindowPlugin, FloatPlugin))
-            .insert_resource(OutputGeometry::from_physical(UVec2::new(800, 600), 1.0))
             .init_resource::<SurfaceActionQueue>()
             .init_resource::<SurfaceCommitRevisions>()
             .add_message::<ToplevelInteractionRequest>();
+        spawn_output(&mut app, 1, UVec2::new(800, 600), 1.0, true);
         let occupant = app
             .world_mut()
             .spawn((

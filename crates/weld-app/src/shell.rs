@@ -2,7 +2,7 @@
 
 use std::{collections::HashSet, sync::Arc};
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use bevy::{
     app::{App, Plugin, PluginGroup, PostUpdate, TerminalCtrlCHandlerPlugin},
     camera::{
@@ -40,7 +40,9 @@ use crate::input::{
     filter_virtual_terminal_event, set_input_update_time, take_host_commands, take_input_effects,
     take_virtual_terminal_switch_request,
 };
-use crate::output::OutputGeometry;
+use crate::output::{
+    OutputGeometry, OutputId, OutputPosition, PrimaryOutput, RendersOutput, WeldOutput,
+};
 use crate::surface::{
     ClientPopup, HostSurfaceEvent, HostSurfaceEventKind, SurfaceAction, SurfaceBufferContent,
     SurfaceBufferUpdate, SurfaceContentView, SurfaceInputPlacement, SurfaceInputRect,
@@ -61,10 +63,12 @@ use weld_core::surface::{Extent, SurfaceAction as CoreSurfaceAction};
 use weld_core::{CompositionDemand, CompositionHost, dmabuf::DmabufContext};
 
 const COMPOSITION_VIEW: ManualTextureViewHandle = ManualTextureViewHandle(1);
+const PRIMARY_OUTPUT_ID: OutputId = OutputId::new(1);
 pub struct AppShell {
     app: App,
     device: wgpu::Device,
     owned_target: OwnedCompositionTarget,
+    primary_output: Entity,
     redraw_requests: RedrawRequests,
     dmabuf_importer: Option<DmabufImporter>,
     dmabuf: DmabufContext,
@@ -162,6 +166,14 @@ impl WeldAppPlugin {
 
 impl Plugin for WeldAppPlugin {
     fn build(&self, app: &mut App) {
+        app.world_mut().spawn((
+            WeldOutput {
+                id: PRIMARY_OUTPUT_ID,
+            },
+            OutputGeometry::new(self.extent, self.scale_factor),
+            OutputPosition::default(),
+            PrimaryOutput,
+        ));
         app.add_plugins((
             CursorPlugin,
             crate::surface::SurfacePlugin,
@@ -171,8 +183,7 @@ impl Plugin for WeldAppPlugin {
             PostUpdate,
             disable_ui_rounding_on_roots.before(UiSystems::Layout),
         )
-        .insert_resource(UiScale(self.scale_factor as f32))
-        .insert_resource(OutputGeometry::new(self.extent, self.scale_factor));
+        .insert_resource(UiScale(self.scale_factor as f32));
     }
 }
 
@@ -223,7 +234,8 @@ impl AppShell {
             context.composition_format,
         );
         insert_manual_view(&mut app, &owned_target.target);
-        spawn_compositor_camera(app.world_mut());
+        let primary_output = primary_output_entity(app.world_mut())?;
+        spawn_compositor_camera(app.world_mut(), primary_output);
 
         let redraw_requests = app
             .world()
@@ -237,6 +249,7 @@ impl AppShell {
             app,
             device: context.device,
             owned_target,
+            primary_output,
             redraw_requests,
             dmabuf_importer,
             dmabuf: context.dmabuf,
@@ -320,11 +333,20 @@ impl AppShell {
             );
         }
         insert_manual_view(&mut self.app, &self.owned_target.target);
-        self.app.world_mut().resource_mut::<UiScale>().0 = scale_factor as f32;
-        self.app
+        let geometry = OutputGeometry::new(extent, scale_factor);
+        self.app.world_mut().resource_mut::<UiScale>().0 = geometry.scale_factor();
+        let Some(mut output_geometry) = self
+            .app
             .world_mut()
-            .resource_mut::<OutputGeometry>()
-            .update(extent, scale_factor);
+            .get_mut::<OutputGeometry>(self.primary_output)
+        else {
+            tracing::error!(
+                output = ?self.primary_output,
+                "primary output entity disappeared before its geometry update"
+            );
+            return;
+        };
+        *output_geometry = geometry;
     }
 
     pub fn enqueue_surface_event(&mut self, event: PendingSurfaceEvent) -> CompositionDemand {
@@ -524,7 +546,22 @@ impl AppShell {
     }
 }
 
-fn spawn_compositor_camera(world: &mut World) -> Entity {
+fn primary_output_entity(world: &mut World) -> Result<Entity> {
+    let mut query = world.query_filtered::<Entity, (With<PrimaryOutput>, With<WeldOutput>)>();
+    let mut outputs = query.iter(world);
+    let output = outputs
+        .next()
+        .context("WeldAppPlugin did not create a primary output")?;
+    if outputs.next().is_some() {
+        bail!("Weld application contains more than one primary output");
+    }
+    world
+        .get::<OutputGeometry>(output)
+        .context("primary Weld output has no output geometry")?;
+    Ok(output)
+}
+
+fn spawn_compositor_camera(world: &mut World, output: Entity) -> Entity {
     world
         .spawn((
             Camera2d,
@@ -539,6 +576,7 @@ fn spawn_compositor_camera(world: &mut World) -> Entity {
             // Bevy UI shaders emit linear RGB. The manual sRGB target performs
             // the transfer encoding when those values are written.
             CompositingSpace::Linear,
+            RendersOutput(output),
         ))
         .id()
 }
@@ -789,8 +827,9 @@ mod tests {
     };
 
     use super::{
-        App, Messages, RedrawRequests, SurfaceCompositionDemand, advance_main_app,
-        disconnect_render_time, render_composition_app, spawn_compositor_camera,
+        App, Messages, OutputGeometry, PRIMARY_OUTPUT_ID, RedrawRequests, SurfaceCompositionDemand,
+        UVec2, WeldOutput, advance_main_app, disconnect_render_time, render_composition_app,
+        spawn_compositor_camera,
     };
     use weld_core::{
         CompositionDemand,
@@ -937,7 +976,16 @@ mod tests {
             )
             .add_systems(Update, propagate_ui_target_cameras);
 
-        let camera = spawn_compositor_camera(app.world_mut());
+        let output = app
+            .world_mut()
+            .spawn((
+                WeldOutput {
+                    id: PRIMARY_OUTPUT_ID,
+                },
+                OutputGeometry::from_physical(UVec2::ONE, 1.0),
+            ))
+            .id();
+        let camera = spawn_compositor_camera(app.world_mut(), output);
         let root = app.world_mut().spawn(Node::default()).id();
         app.update();
 

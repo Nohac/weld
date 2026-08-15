@@ -59,11 +59,42 @@ inspect it without requiring a separate Weld plugin trait. The low-level
 `HostBuilder` and `CompositionHost` contract remain available for non-Bevy
 application hosts; backend module entry points are implementation details.
 
-Plugins spawn ordinary UI roots without selecting a camera. Weld marks its
-single composition camera as Bevy's `IsDefaultUiCamera`, so normal UI targets
-the compositor output automatically. Once Weld supports multiple outputs,
-output-specific roots will select their camera with `UiTargetCamera`; exactly
-one composition camera remains the default for otherwise untargeted plugin UI.
+`weld-app` represents application-visible outputs as `WeldOutput` entities.
+`OutputGeometry` carries physical size and logical scale, while the separate
+`OutputPosition` locates the output in compositor-wide logical topology without
+changing output-local layout. One entity is currently marked `PrimaryOutput`.
+The shell's composition camera relates to it through `RendersOutput` and
+`OutputCompositionCamera`, giving plugins a Bevy entity to use with
+`UiTargetCamera` without exposing a native texture or wgpu handle.
+
+Plugins may continue to spawn ordinary UI roots without selecting a camera.
+Weld marks the primary output's composition camera as Bevy's
+`IsDefaultUiCamera`, so normal UI targets the current compositor output
+automatically. Future output-specific roots can select another output's camera
+with `UiTargetCamera`; exactly one composition camera remains the default for
+otherwise untargeted plugin UI.
+
+Managed windows carry a `WindowOutput` relationship, and `WindowGeometry` is
+expressed in that output's local logical coordinates. `weld-float` assigns new
+unassigned windows to the primary output, preserves explicit assignments, and
+places or clamps each window against only its assigned `OutputGeometry`.
+Changing `OutputPosition` therefore does not disturb local window layout.
+If an assigned output entity disappears, `weld-float` preserves the durable
+window and its stacking, reassigns it to the primary output, and defers any
+required clamp until an active move or resize interaction has ended.
+When no unique primary output exists, floating admission waits rather than
+inventing an origin or silently claiming the window.
+
+This is an application-policy foundation, not native multi-output support.
+`CompositionHost::set_output_geometry` still carries no output identity, core's
+`OutputDescriptor` is not yet correlated with application-side `OutputId`, and
+the host currently supplies one renderable primary output, one composition
+target, and one input projection. Native discovery, hotplug, per-output input,
+and multiple presentation targets remain future host work. Mixed-DPI rendering
+also remains constrained by Bevy 0.19: manual texture-view targets report a
+camera scale of `1.0`, while `UiScale` is global. Weld records scale per output
+but applies that global render scale only to the current primary output rather
+than simulating incorrect per-camera scale behavior.
 
 `weld-app` re-exports its exact supported Bevy version as `weld_app::bevy` so
 plugins can share Weld's ECS, application, and rendering types without an
