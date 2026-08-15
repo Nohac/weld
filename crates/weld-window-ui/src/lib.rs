@@ -62,13 +62,18 @@ impl Plugin for WindowUiPlugin {
             .add_observer(interaction::begin_resize_frame)
             .add_observer(interaction::begin_resize_handle)
             .add_observer(interaction::drag_window)
-            .add_observer(interaction::end_interaction_on_release)
             .add_observer(interaction::cancel_drag)
+            .configure_sets(
+                PreUpdate,
+                WindowSystems::InteractionFinalize.before(CursorSystems::Resolve),
+            )
             .add_systems(
                 PreUpdate,
                 (
                     interaction::attach_resize_cursor_icons,
-                    interaction::request_interaction_cursor.before(CursorSystems::Resolve),
+                    interaction::request_interaction_cursor
+                        .after(WindowSystems::InteractionFinalize)
+                        .before(CursorSystems::Resolve),
                 ),
             )
             .add_systems(

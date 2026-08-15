@@ -389,10 +389,16 @@ ECS instead of reimplementing that protocol policy.
 
 Validated pointer `xdg_toplevel.move` and `xdg_toplevel.resize` requests cross
 the Smithay boundary as protocol-neutral ECS messages. `weld-window` validates
-the occupant and owns the UI-neutral interaction session, `weld-window-ui`
-translates pointer motion into window intents, and `weld-float` owns placement
-and interactive-resize policy. Smithay owns the pointer grab, configure state,
-and enforcement of the client's committed size constraints. Repeated
+the occupant and owns the UI-neutral interaction session, which exists only
+for the lifetime of the live primary-pointer interaction. Physical primary
+button release ends every active session from standard Bevy input regardless
+of the pointer's current hover target. Protocol end and pointer cancellation
+use the same idempotent domain command. `weld-window-ui` translates pointer
+motion into window intents and derives its cursor override from the live
+session, while `weld-float` owns placement and interactive-resize policy.
+Protocol move and resize are currently primary-button-only; equivalent touch
+interaction remains future work. Smithay owns the pointer grab, configure
+state, and enforcement of the client's committed size constraints. Repeated
 interactive-resize sizes are latest-value coalesced at the Smithay server
 boundary and configured at most once per composition tick; pointer motion,
 buttons, axes, gestures, and keyboard input reach clients without that pacing.
@@ -405,11 +411,13 @@ still waits. Popup and protocol move/resize grabs clear the exception and keep
 their normal grab authority. Ending a resize can fold its latched final size
 and the cleared `Resizing` state into one final configure. Destruction and close
 requests discard any latched size; future maximize or fullscreen policy must do
-the same before issuing its own configure. The window domain records the surface commit revision at each
-client resize request. Left and top resize edges remain anchored until that
-revision advances, regardless of whether a constrained client commits the
-exact requested size. Pointer interactions are implemented; the equivalent
-touch path remains future work. Client-issued protocol move and resize requests
+the same before issuing its own configure. The window domain records the
+surface commit revision at each client resize request. For left and top edges,
+`weld-float` retains the fixed edge in a private settlement anchor as the live
+interaction session ends. That anchor remains until the revision
+advances, regardless of whether a constrained client commits the exact
+requested size, and is discarded if its occupant unmaps. Client-issued
+protocol move and resize requests
 are accepted only for client-decorated windows; Weld's chrome owns movement
 for server-decorated windows, and SSD resize handles remain outside this slice.
 Client-decorated applications also own the threshold for deciding that a press

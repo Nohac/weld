@@ -8,7 +8,7 @@ use bevy::{
         component::Component,
         entity::Entity,
         observer::On,
-        query::{With, Without},
+        query::Without,
         resource::Resource,
         schedule::{IntoScheduleConfigs, common_conditions::resource_changed},
         system::{Commands, Query, Res, ResMut, SystemParam},
@@ -23,9 +23,8 @@ use weld_app::{
 use weld_window::{
     ClientResizeState, FocusedWindow, ManagedBy, ManagedWindow, PresentationInsets,
     PrimaryWindowPresentation, WindowCommand, WindowCommandKind, WindowGeometry, WindowIntent,
-    WindowIntentKind, WindowInteractionKind, WindowInteractionPhase, WindowInteractionSession,
-    WindowOccupant, WindowSystems, WindowVacancy, WindowVisibility, WindowZOrder,
-    rounded_client_size,
+    WindowIntentKind, WindowInteractionKind, WindowInteractionSession, WindowOccupant,
+    WindowSystems, WindowVacancy, WindowVisibility, WindowZOrder, rounded_client_size,
 };
 
 /// The default freeform window manager.
@@ -50,8 +49,7 @@ impl Plugin for FloatPlugin {
             )
             .add_systems(
                 PreUpdate,
-                (cleanup_resize_anchors, initialize_resize_anchors)
-                    .chain()
+                initialize_resize_anchors
                     .after(initialize_windows)
                     .before(reconcile_anchored_resize)
                     .in_set(WindowSystems::Management),
@@ -116,6 +114,7 @@ impl WindowStack {
 #[derive(Component, Clone, Copy)]
 struct ResizeAnchor {
     fixed: Vec2,
+    edges: ToplevelResizeEdge,
     end_after_revision: Option<u64>,
 }
 
@@ -163,10 +162,17 @@ fn initialize_windows(
     }
 }
 
+type ClampWindowQuery<'w, 's> = Query<
+    'w,
+    's,
+    (&'static ManagedBy, &'static mut WindowGeometry),
+    (Without<WindowInteractionSession>, Without<ResizeAnchor>),
+>;
+
 fn clamp_windows_to_output(
     manager: Res<DefaultFloatManager>,
     output: Res<OutputGeometry>,
-    mut windows: Query<(&ManagedBy, &mut WindowGeometry), Without<WindowInteractionSession>>,
+    mut windows: ClampWindowQuery,
 ) {
     for (managed_by, mut geometry) in &mut windows {
         if managed_by.0 != manager.0 {
@@ -263,7 +269,6 @@ fn handle_window_intent(intent: On<WindowIntent>, params: HandleWindowIntentPara
         WindowIntentKind::ResizeBy(delta) => {
             let Some(WindowInteractionSession {
                 kind: WindowInteractionKind::Resize(edges),
-                phase: WindowInteractionPhase::Active,
             }) = interaction
             else {
                 return;
@@ -277,72 +282,49 @@ fn handle_window_intent(intent: On<WindowIntent>, params: HandleWindowIntentPara
             let minimum = presentation_insets.extent() + Vec2::ONE;
             geometry.size = resized_size(geometry.size, delta, *edges).max(minimum);
         }
-        WindowIntentKind::InteractionEnded => {
-            if let Some(WindowInteractionSession {
-                kind: WindowInteractionKind::Resize(edges),
-                ..
-            }) = interaction
-                && (edges.has_left() || edges.has_top())
-            {
-                let mapped_occupant = window_occupants
-                    .get(window)
-                    .ok()
-                    .and_then(|occupant| occupants.get(occupant.entity()).ok());
-                let presentation_insets = presentations
-                    .get(window)
-                    .ok()
-                    .and_then(|presentation| insets.get(presentation.entity()).ok())
-                    .copied()
-                    .unwrap_or_default();
-                let desired_client_size = rounded_client_size(
-                    (geometry.size - presentation_insets.extent()).max(Vec2::ONE),
-                );
-                let pending_after_revision = mapped_occupant.and_then(|toplevel| {
-                    let resize = resize_states.get(window).ok()?;
-                    if resize.requested_size() != desired_client_size {
-                        Some(revisions.revision(toplevel.surface))
-                    } else {
-                        resize.pending_after_revision(toplevel.surface)
-                    }
-                });
-                if let (Some(after_revision), Ok(mut anchor)) =
-                    (pending_after_revision, anchors.get_mut(window))
-                {
-                    anchor.end_after_revision = Some(after_revision);
-                    commands.trigger(WindowCommand {
-                        window,
-                        kind: WindowCommandKind::EndInteraction,
-                    });
+        WindowIntentKind::InteractionEnded(kind) => {
+            let WindowInteractionKind::Resize(edges) = kind else {
+                return;
+            };
+            if !edges.has_left() && !edges.has_top() {
+                return;
+            }
+            let mapped_occupant = window_occupants
+                .get(window)
+                .ok()
+                .and_then(|occupant| occupants.get(occupant.entity()).ok());
+            let presentation_insets = presentations
+                .get(window)
+                .ok()
+                .and_then(|presentation| insets.get(presentation.entity()).ok())
+                .copied()
+                .unwrap_or_default();
+            let desired_client_size =
+                rounded_client_size((geometry.size - presentation_insets.extent()).max(Vec2::ONE));
+            let pending_after_revision = mapped_occupant.and_then(|toplevel| {
+                let resize = resize_states.get(window).ok()?;
+                if resize.requested_size() != desired_client_size {
+                    Some(revisions.revision(toplevel.surface))
                 } else {
-                    commands.trigger(WindowCommand {
-                        window,
-                        kind: WindowCommandKind::FinishInteraction,
-                    });
+                    resize.pending_after_revision(toplevel.surface)
                 }
+            });
+            if let (Some(after_revision), Ok(mut anchor)) =
+                (pending_after_revision, anchors.get_mut(window))
+            {
+                anchor.end_after_revision = Some(after_revision);
             } else {
-                commands.trigger(WindowCommand {
-                    window,
-                    kind: WindowCommandKind::FinishInteraction,
-                });
+                commands.entity(window).remove::<ResizeAnchor>();
             }
         }
     }
 }
 
-fn cleanup_resize_anchors(
-    mut commands: Commands,
-    windows: Query<Entity, (With<ResizeAnchor>, Without<WindowInteractionSession>)>,
-) {
-    for window in &windows {
-        commands.entity(window).remove::<ResizeAnchor>();
-    }
-}
-
 /// Computes the fixed outer edge before picking can mutate desired geometry.
 ///
-/// The component insertion is deferred until the end of `PreUpdate`, but this
-/// ungated system runs before picking on every main-world advance, so the
-/// stored value reflects geometry before that advance's pointer deltas.
+/// The component insertion is deferred until the window pipeline flush before
+/// picking. This system runs before picking on every main-world advance, so
+/// the stored value reflects geometry before that advance's pointer deltas.
 fn initialize_resize_anchors(
     mut commands: Commands,
     manager: Res<DefaultFloatManager>,
@@ -363,6 +345,7 @@ fn initialize_resize_anchors(
         if managed_by.0 == manager.0 && (edges.has_left() || edges.has_top()) {
             commands.entity(window).insert(ResizeAnchor {
                 fixed: geometry.position + geometry.size,
+                edges,
                 end_after_revision: None,
             });
         }
@@ -376,9 +359,9 @@ type AnchoredResizeQuery<'w, 's> = Query<
         Entity,
         &'static mut WindowGeometry,
         &'static ManagedBy,
-        &'static WindowOccupant,
-        &'static WindowInteractionSession,
-        &'static mut ResizeAnchor,
+        Option<&'static WindowOccupant>,
+        Option<&'static WindowInteractionSession>,
+        &'static ResizeAnchor,
         Option<&'static PrimaryWindowPresentation>,
     ),
 >;
@@ -395,16 +378,26 @@ fn reconcile_anchored_resize(
         &mut windows
     {
         if managed_by.0 != manager.0 {
+            commands.entity(window).remove::<ResizeAnchor>();
             continue;
         }
-        let WindowInteractionKind::Resize(edges) = interaction.kind else {
+        if let Some(interaction) = interaction {
+            let interaction_matches_anchor =
+                interaction.kind == WindowInteractionKind::Resize(anchor.edges);
+            if anchor.end_after_revision.is_some() || !interaction_matches_anchor {
+                commands.entity(window).remove::<ResizeAnchor>();
+                continue;
+            }
+        } else if anchor.end_after_revision.is_none() {
+            commands.entity(window).remove::<ResizeAnchor>();
+            continue;
+        }
+        let Some(occupant) = occupant else {
+            commands.entity(window).remove::<ResizeAnchor>();
             continue;
         };
         let Ok((toplevel, mapped)) = occupants.get(occupant.entity()) else {
-            commands.trigger(WindowCommand {
-                window,
-                kind: WindowCommandKind::FinishInteraction,
-            });
+            commands.entity(window).remove::<ResizeAnchor>();
             continue;
         };
         let inset_extent = presentation
@@ -413,22 +406,15 @@ fn reconcile_anchored_resize(
             .unwrap_or_default()
             .extent();
         let committed_outer_size = mapped.logical_size + inset_extent;
-        if edges.has_left() {
+        if anchor.edges.has_left() {
             geometry.position.x = anchor.fixed.x - committed_outer_size.x;
         }
-        if edges.has_top() {
+        if anchor.edges.has_top() {
             geometry.position.y = anchor.fixed.y - committed_outer_size.y;
         }
-        if interaction.phase == WindowInteractionPhase::Ending {
+        if let Some(expected) = anchor.end_after_revision {
             let revision = revisions.revision(toplevel.surface);
-            if anchor
-                .end_after_revision
-                .is_none_or(|expected| revision > expected)
-            {
-                commands.trigger(WindowCommand {
-                    window,
-                    kind: WindowCommandKind::FinishInteraction,
-                });
+            if revision > expected {
                 commands.entity(window).remove::<ResizeAnchor>();
             }
         }
@@ -832,7 +818,7 @@ mod tests {
     }
 
     #[test]
-    fn ending_an_anchored_resize_does_not_wait_after_the_client_has_committed() {
+    fn ending_an_already_settled_resize_removes_the_session_and_anchor() {
         let mut app = App::new();
         app.add_plugins((WindowPlugin, FloatPlugin))
             .insert_resource(OutputGeometry::from_physical(UVec2::new(800, 600), 1.0))
@@ -874,9 +860,9 @@ mod tests {
                 .is_some()
         );
 
-        app.world_mut().trigger(WindowIntent {
+        app.world_mut().trigger(WindowCommand {
             window,
-            kind: WindowIntentKind::InteractionEnded,
+            kind: WindowCommandKind::EndInteraction,
         });
         app.update();
 
@@ -885,5 +871,93 @@ mod tests {
                 .get::<WindowInteractionSession>(window)
                 .is_none()
         );
+        assert!(app.world().get::<ResizeAnchor>(window).is_none());
+    }
+
+    #[test]
+    fn resize_anchor_outlives_the_session_until_client_settlement() {
+        let mut app = App::new();
+        app.add_plugins((WindowPlugin, FloatPlugin))
+            .insert_resource(OutputGeometry::from_physical(UVec2::new(800, 600), 1.0))
+            .init_resource::<SurfaceActionQueue>()
+            .init_resource::<SurfaceCommitRevisions>()
+            .add_message::<ToplevelInteractionRequest>();
+        let occupant = app
+            .world_mut()
+            .spawn((
+                ClientToplevel {
+                    surface: SurfaceId::new(92),
+                },
+                ClientDecorated,
+                MappedSurface {
+                    logical_size: Vec2::new(320.0, 240.0),
+                    visual_offset: Vec2::ZERO,
+                    visual_size: Vec2::new(320.0, 240.0),
+                    opaque: true,
+                },
+            ))
+            .id();
+        app.update();
+        let window = app
+            .world()
+            .get::<OccupiesWindow>(occupant)
+            .expect("mapped toplevel should be admitted")
+            .0;
+
+        app.world_mut().trigger(WindowCommand {
+            window,
+            kind: WindowCommandKind::BeginInteraction(WindowInteractionKind::Resize(
+                ToplevelResizeEdge::Left,
+            )),
+        });
+        app.update();
+        app.world_mut().trigger(WindowIntent {
+            window,
+            kind: WindowIntentKind::ResizeBy(Vec2::new(20.0, 0.0)),
+        });
+        app.update();
+        app.world_mut().trigger(WindowCommand {
+            window,
+            kind: WindowCommandKind::EndInteraction,
+        });
+        app.update();
+
+        assert!(
+            app.world()
+                .get::<WindowInteractionSession>(window)
+                .is_none()
+        );
+        assert_eq!(
+            app.world()
+                .get::<ResizeAnchor>(window)
+                .and_then(|anchor| anchor.end_after_revision),
+            Some(0)
+        );
+
+        app.world_mut().trigger(WindowCommand {
+            window,
+            kind: WindowCommandKind::BeginInteraction(WindowInteractionKind::Resize(
+                ToplevelResizeEdge::Top,
+            )),
+        });
+        app.update();
+        assert!(app.world().get::<ResizeAnchor>(window).is_none());
+
+        app.update();
+        assert!(matches!(
+            app.world().get::<ResizeAnchor>(window),
+            Some(ResizeAnchor {
+                edges: ToplevelResizeEdge::Top,
+                end_after_revision: None,
+                ..
+            })
+        ));
+
+        app.world_mut()
+            .entity_mut(occupant)
+            .remove::<MappedSurface>();
+        app.update();
+
+        assert!(app.world().get::<ResizeAnchor>(window).is_none());
     }
 }

@@ -11,16 +11,21 @@ use std::collections::HashMap;
 use bevy::{
     app::{App, Plugin, PreUpdate},
     ecs::{
+        change_detection::{DetectChanges, Ref},
         component::Component,
         entity::Entity,
         event::EntityEvent,
         message::MessageReader,
         observer::On,
-        query::Without,
+        query::{With, Without},
         relationship::Relationship,
         resource::Resource,
         schedule::{ApplyDeferred, IntoScheduleConfigs, SystemSet},
         system::{Commands, Query, Res, ResMut, SystemParam},
+    },
+    input::{
+        ButtonState,
+        mouse::{MouseButton, MouseButtonInput},
     },
     math::{UVec2, Vec2},
     picking::PickingSystems,
@@ -203,7 +208,7 @@ pub enum WindowIntentKind {
     CloseRequested,
     MoveBy(Vec2),
     ResizeBy(Vec2),
-    InteractionEnded,
+    InteractionEnded(WindowInteractionKind),
 }
 
 /// A validated operation requested of the managed-window domain.
@@ -222,7 +227,6 @@ pub enum WindowCommandKind {
     CloseOccupant,
     DetachOccupant,
     EndInteraction,
-    FinishInteraction,
     RemoveWindow,
 }
 
@@ -232,17 +236,10 @@ pub enum WindowInteractionKind {
     Resize(ToplevelResizeEdge),
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum WindowInteractionPhase {
-    Active,
-    Ending,
-}
-
 /// Queryable identity and lifetime of an active pointer interaction.
 #[derive(Component, Clone, Copy, Debug, Eq, PartialEq)]
 pub struct WindowInteractionSession {
     pub kind: WindowInteractionKind,
-    pub phase: WindowInteractionPhase,
 }
 
 /// Stable ID lookup for persistence, IPC, and plugin boundaries.
@@ -267,6 +264,7 @@ pub enum WindowSystems {
     Interaction,
     Management,
     UiReconcile,
+    InteractionFinalize,
     FinalReconcile,
 }
 
@@ -280,6 +278,7 @@ impl Plugin for WindowPlugin {
             .init_resource::<FocusedWindow>()
             .init_resource::<AppliedClientFocus>()
             .init_resource::<SurfaceCommitRevisions>()
+            .add_message::<MouseButtonInput>()
             .add_observer(apply_window_command)
             .configure_sets(
                 PreUpdate,
@@ -296,6 +295,12 @@ impl Plugin for WindowPlugin {
                     .after(SurfaceSystems::Ingress)
                     .before(SurfaceSystems::FallbackPresentation)
                     .before(PickingSystems::Backend),
+            )
+            .configure_sets(
+                PreUpdate,
+                WindowSystems::InteractionFinalize
+                    .after(PickingSystems::Hover)
+                    .before(WindowSystems::FinalReconcile),
             )
             .configure_sets(
                 PreUpdate,
@@ -336,6 +341,16 @@ impl Plugin for WindowPlugin {
                 ApplyDeferred
                     .after(WindowSystems::UiReconcile)
                     .before(PickingSystems::Backend),
+            )
+            .add_systems(
+                PreUpdate,
+                (
+                    ApplyDeferred,
+                    end_pointer_interactions_on_primary_release,
+                    ApplyDeferred,
+                )
+                    .chain()
+                    .in_set(WindowSystems::InteractionFinalize),
             )
             .add_systems(
                 PreUpdate,
@@ -563,7 +578,7 @@ fn synchronize_registry(
 
 fn invalidate_interactions(
     mut commands: Commands,
-    windows: Query<(Entity, &WindowOccupant), bevy::ecs::query::With<WindowInteractionSession>>,
+    windows: Query<(Entity, &WindowOccupant), With<WindowInteractionSession>>,
     occupants: Query<Option<&MappedSurface>>,
 ) {
     for (window, occupant) in &windows {
@@ -586,7 +601,6 @@ fn handle_protocol_interactions(
         Option<&MappedSurface>,
         Option<&ClientDecorated>,
     )>,
-    interactions: Query<&WindowInteractionSession>,
 ) {
     for request in requests.read().copied() {
         let Some((_, occupancy, Some(_), Some(_))) = surfaces
@@ -610,14 +624,45 @@ fn handle_protocol_interactions(
                 });
             }
             ToplevelInteractionRequestKind::End => {
-                if interactions.get(window).is_ok() {
-                    commands.entity(window).trigger(|window| WindowIntent {
-                        window,
-                        kind: WindowIntentKind::InteractionEnded,
-                    });
-                }
+                commands.entity(window).trigger(|window| WindowCommand {
+                    window,
+                    kind: WindowCommandKind::EndInteraction,
+                });
             }
         }
+    }
+}
+
+fn end_pointer_interactions_on_primary_release(
+    mut button_inputs: MessageReader<MouseButtonInput>,
+    sessions: Query<(Entity, Ref<WindowInteractionSession>)>,
+    mut commands: Commands,
+) {
+    let (saw_primary_release, final_primary_state) =
+        button_inputs
+            .read()
+            .fold((false, None), |(saw_release, final_state), input| {
+                if input.button != MouseButton::Left {
+                    return (saw_release, final_state);
+                }
+                (
+                    saw_release || input.state == ButtonState::Released,
+                    Some(input.state),
+                )
+            });
+    let should_end = |session: &Ref<WindowInteractionSession>| match final_primary_state {
+        Some(ButtonState::Released) => true,
+        Some(ButtonState::Pressed) if saw_primary_release => !session.is_added(),
+        _ => false,
+    };
+    for (window, session) in &sessions {
+        if !should_end(&session) {
+            continue;
+        }
+        commands.entity(window).trigger(|window| WindowCommand {
+            window,
+            kind: WindowCommandKind::EndInteraction,
+        });
     }
 }
 
@@ -626,7 +671,6 @@ struct ApplyWindowCommandParams<'w, 's> {
     commands: Commands<'w, 's>,
     windows: Query<'w, 's, (&'static ManagedWindow, Option<&'static WindowOccupant>)>,
     occupants: Query<'w, 's, (&'static ClientToplevel, Option<&'static MappedSurface>)>,
-    sessions: Query<'w, 's, &'static mut WindowInteractionSession>,
     focus: ResMut<'w, FocusedWindow>,
     applied_focus: ResMut<'w, AppliedClientFocus>,
     actions: ResMut<'w, SurfaceActionQueue>,
@@ -637,7 +681,6 @@ fn apply_window_command(command: On<WindowCommand>, params: ApplyWindowCommandPa
         mut commands,
         windows,
         occupants,
-        mut sessions,
         mut focus,
         mut applied_focus,
         mut actions,
@@ -664,10 +707,9 @@ fn apply_window_command(command: On<WindowCommand>, params: ApplyWindowCommandPa
                 .and_then(|occupant| occupants.get(occupant.entity()).ok())
                 .is_some_and(|(_, mapped)| mapped.is_some());
             if mapped {
-                commands.entity(window).insert(WindowInteractionSession {
-                    kind,
-                    phase: WindowInteractionPhase::Active,
-                });
+                commands
+                    .entity(window)
+                    .insert(WindowInteractionSession { kind });
             }
         }
         WindowCommandKind::CloseOccupant => {
@@ -693,14 +735,18 @@ fn apply_window_command(command: On<WindowCommand>, params: ApplyWindowCommandPa
             }
         }
         WindowCommandKind::EndInteraction => {
-            if let Ok(mut session) = sessions.get_mut(window) {
-                session.phase = WindowInteractionPhase::Ending;
-            }
-        }
-        WindowCommandKind::FinishInteraction => {
-            if windows.contains(window) {
-                commands.entity(window).remove::<WindowInteractionSession>();
-            }
+            commands.queue(move |world: &mut bevy::ecs::world::World| {
+                let session = world
+                    .get_entity_mut(window)
+                    .ok()
+                    .and_then(|mut entity| entity.take::<WindowInteractionSession>());
+                if let Some(session) = session {
+                    world.trigger(WindowIntent {
+                        window,
+                        kind: WindowIntentKind::InteractionEnded(session.kind),
+                    });
+                }
+            });
         }
         WindowCommandKind::RemoveWindow => {
             if windows.contains(window) {
@@ -743,7 +789,21 @@ pub fn rounded_client_size(size: Vec2) -> UVec2 {
 
 #[cfg(test)]
 mod tests {
-    use bevy::{app::App, math::Vec2};
+    use bevy::{
+        app::{App, PreUpdate},
+        ecs::{
+            observer::On,
+            resource::Resource,
+            schedule::IntoScheduleConfigs,
+            system::{Commands, ResMut},
+        },
+        input::{
+            ButtonState,
+            mouse::{MouseButton, MouseButtonInput},
+        },
+        math::Vec2,
+        picking::PickingSystems,
+    };
     use weld_app::surface::{
         ClientDecorated, ClientToplevel, MappedSurface, SurfaceAction, SurfaceActionQueue,
         SurfaceId, ToplevelInteractionRequest, take_surface_actions,
@@ -751,12 +811,31 @@ mod tests {
 
     use super::*;
 
+    #[derive(Resource, Default)]
+    struct EndedInteractions(Vec<WindowInteractionKind>);
+
+    fn record_ended_interaction(intent: On<WindowIntent>, mut ended: ResMut<EndedInteractions>) {
+        if let WindowIntentKind::InteractionEnded(kind) = intent.kind {
+            ended.0.push(kind);
+        }
+    }
+
     fn test_app() -> App {
         let mut app = App::new();
         app.add_plugins(WindowPlugin)
             .init_resource::<SurfaceActionQueue>()
+            .init_resource::<EndedInteractions>()
+            .add_observer(record_ended_interaction)
             .add_message::<ToplevelInteractionRequest>();
         app
+    }
+
+    fn write_mouse_button(app: &mut App, button: MouseButton, state: ButtonState) {
+        app.world_mut().write_message(MouseButtonInput {
+            button,
+            state,
+            window: Entity::PLACEHOLDER,
+        });
     }
 
     fn mapped_toplevel(app: &mut App, surface: SurfaceId) -> Entity {
@@ -889,6 +968,258 @@ mod tests {
                 surface: SurfaceId::new(9),
                 logical_size: UVec2::new(330, 240),
             })
+        );
+    }
+
+    #[test]
+    fn primary_release_ends_an_interaction_without_a_hover_target() {
+        let mut app = test_app();
+        let window = app
+            .world_mut()
+            .spawn((
+                ManagedWindow {
+                    id: WindowId::new(10),
+                },
+                WindowVacancy::Retain,
+                WindowInteractionSession {
+                    kind: WindowInteractionKind::Resize(ToplevelResizeEdge::Left),
+                },
+            ))
+            .id();
+
+        write_mouse_button(&mut app, MouseButton::Left, ButtonState::Released);
+        app.update();
+
+        assert!(
+            app.world()
+                .get::<WindowInteractionSession>(window)
+                .is_none()
+        );
+        assert_eq!(
+            app.world().resource::<EndedInteractions>().0,
+            [WindowInteractionKind::Resize(ToplevelResizeEdge::Left)]
+        );
+    }
+
+    #[test]
+    fn secondary_release_preserves_an_interaction() {
+        let mut app = test_app();
+        let window = app
+            .world_mut()
+            .spawn((
+                ManagedWindow {
+                    id: WindowId::new(11),
+                },
+                WindowVacancy::Retain,
+                WindowInteractionSession {
+                    kind: WindowInteractionKind::Move,
+                },
+            ))
+            .id();
+
+        write_mouse_button(&mut app, MouseButton::Right, ButtonState::Released);
+        app.update();
+
+        assert!(
+            app.world()
+                .get::<WindowInteractionSession>(window)
+                .is_some()
+        );
+        assert!(app.world().resource::<EndedInteractions>().0.is_empty());
+    }
+
+    #[test]
+    fn duplicate_end_commands_emit_one_interaction_end() {
+        let mut app = test_app();
+        let window = app
+            .world_mut()
+            .spawn((
+                ManagedWindow {
+                    id: WindowId::new(12),
+                },
+                WindowVacancy::Retain,
+                WindowInteractionSession {
+                    kind: WindowInteractionKind::Move,
+                },
+            ))
+            .id();
+
+        for _ in 0..2 {
+            app.world_mut().trigger(WindowCommand {
+                window,
+                kind: WindowCommandKind::EndInteraction,
+            });
+        }
+        app.update();
+
+        assert!(
+            app.world()
+                .get::<WindowInteractionSession>(window)
+                .is_none()
+        );
+        assert_eq!(
+            app.world().resource::<EndedInteractions>().0,
+            [WindowInteractionKind::Move]
+        );
+    }
+
+    #[derive(Resource)]
+    struct BeginInteractionOnHover(Entity);
+
+    fn begin_interaction_on_hover(
+        mut commands: Commands,
+        begin: Option<ResMut<BeginInteractionOnHover>>,
+    ) {
+        let Some(begin) = begin else {
+            return;
+        };
+        let window = begin.0;
+        commands.remove_resource::<BeginInteractionOnHover>();
+        commands.trigger(WindowCommand {
+            window,
+            kind: WindowCommandKind::BeginInteraction(WindowInteractionKind::Move),
+        });
+    }
+
+    #[test]
+    fn same_update_begin_and_release_does_not_leave_a_session() {
+        let mut app = test_app();
+        app.add_systems(
+            PreUpdate,
+            begin_interaction_on_hover.in_set(PickingSystems::Hover),
+        );
+        let surface = mapped_toplevel(&mut app, SurfaceId::new(13));
+        app.update();
+        let window = app
+            .world()
+            .get::<OccupiesWindow>(surface)
+            .expect("mapped toplevel should be admitted")
+            .0;
+        app.insert_resource(BeginInteractionOnHover(window));
+        write_mouse_button(&mut app, MouseButton::Left, ButtonState::Released);
+
+        app.update();
+
+        assert!(
+            app.world()
+                .get::<WindowInteractionSession>(window)
+                .is_none()
+        );
+        assert_eq!(
+            app.world().resource::<EndedInteractions>().0,
+            [WindowInteractionKind::Move]
+        );
+    }
+
+    #[test]
+    fn all_releases_are_consumed_before_the_next_interaction() {
+        let mut app = test_app();
+        app.add_systems(
+            PreUpdate,
+            begin_interaction_on_hover.in_set(PickingSystems::Hover),
+        );
+        let surface = mapped_toplevel(&mut app, SurfaceId::new(15));
+        app.update();
+        let window = app
+            .world()
+            .get::<OccupiesWindow>(surface)
+            .expect("mapped toplevel should be admitted")
+            .0;
+
+        write_mouse_button(&mut app, MouseButton::Left, ButtonState::Released);
+        write_mouse_button(&mut app, MouseButton::Left, ButtonState::Released);
+        app.update();
+        app.insert_resource(BeginInteractionOnHover(window));
+        app.update();
+
+        assert!(
+            app.world()
+                .get::<WindowInteractionSession>(window)
+                .is_some()
+        );
+        assert!(app.world().resource::<EndedInteractions>().0.is_empty());
+    }
+
+    #[test]
+    fn trailing_press_ends_an_old_interaction_and_preserves_the_new_one() {
+        let mut app = test_app();
+        app.add_systems(
+            PreUpdate,
+            begin_interaction_on_hover.in_set(PickingSystems::Hover),
+        );
+        let old_window = app
+            .world_mut()
+            .spawn((
+                ManagedWindow {
+                    id: WindowId::new(17),
+                },
+                WindowVacancy::Retain,
+                WindowInteractionSession {
+                    kind: WindowInteractionKind::Move,
+                },
+            ))
+            .id();
+        let surface = mapped_toplevel(&mut app, SurfaceId::new(16));
+        app.update();
+        let window = app
+            .world()
+            .get::<OccupiesWindow>(surface)
+            .expect("mapped toplevel should be admitted")
+            .0;
+        app.insert_resource(BeginInteractionOnHover(window));
+        write_mouse_button(&mut app, MouseButton::Left, ButtonState::Released);
+        write_mouse_button(&mut app, MouseButton::Left, ButtonState::Pressed);
+
+        app.update();
+
+        assert!(
+            app.world()
+                .get::<WindowInteractionSession>(window)
+                .is_some()
+        );
+        assert!(
+            app.world()
+                .get::<WindowInteractionSession>(old_window)
+                .is_none()
+        );
+        assert_eq!(
+            app.world().resource::<EndedInteractions>().0,
+            [WindowInteractionKind::Move]
+        );
+    }
+
+    #[test]
+    fn protocol_end_and_physical_release_emit_one_interaction_end() {
+        let mut app = test_app();
+        let surface_id = SurfaceId::new(14);
+        let surface = mapped_toplevel(&mut app, surface_id);
+        app.update();
+        let window = app
+            .world()
+            .get::<OccupiesWindow>(surface)
+            .expect("mapped toplevel should be admitted")
+            .0;
+        app.world_mut().trigger(WindowCommand {
+            window,
+            kind: WindowCommandKind::BeginInteraction(WindowInteractionKind::Move),
+        });
+        app.update();
+
+        app.world_mut().write_message(ToplevelInteractionRequest {
+            surface: surface_id,
+            kind: ToplevelInteractionRequestKind::End,
+        });
+        write_mouse_button(&mut app, MouseButton::Left, ButtonState::Released);
+        app.update();
+
+        assert!(
+            app.world()
+                .get::<WindowInteractionSession>(window)
+                .is_none()
+        );
+        assert_eq!(
+            app.world().resource::<EndedInteractions>().0,
+            [WindowInteractionKind::Move]
         );
     }
 }
