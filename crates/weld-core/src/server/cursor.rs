@@ -8,6 +8,7 @@ use smithay::{
     wayland::{
         compositor::{BufferAssignment, SurfaceAttributes, get_role, with_states},
         dmabuf::get_dmabuf,
+        drm_syncobj::DrmSyncobjCachedState,
         seat::CURSOR_IMAGE_ROLE,
     },
 };
@@ -17,6 +18,7 @@ use crate::cursor::{ClientCursorImage, CursorAppearance, CursorImage, unpremulti
 
 use super::{
     ServerState,
+    dmabuf::signal_release_point,
     shm::{SurfaceBufferMetadata, checked_buffer_scale, copy_shm_buffer, surface_content_view},
 };
 
@@ -100,17 +102,23 @@ impl ServerState {
     }
 
     fn refresh_cursor_surface(&mut self, surface: &WlSurface) {
-        let (assignment, buffer_scale, buffer_transform, buffer_delta) =
+        let (assignment, release_point, buffer_scale, buffer_transform, buffer_delta) =
             with_states(surface, |states| {
                 let mut attributes = states.cached_state.get::<SurfaceAttributes>();
                 let current = attributes.current();
+                let mut syncobj = states.cached_state.get::<DrmSyncobjCachedState>();
+                let syncobj = syncobj.current();
+                syncobj.acquire_point = None;
+                let release_point = syncobj.release_point.take();
                 (
                     current.buffer.take(),
+                    release_point,
                     current.buffer_scale,
                     current.buffer_transform,
                     current.buffer_delta.take(),
                 )
             });
+        signal_release_point(release_point, "cursor buffer consumed without GPU sampling");
         if let Some(buffer_delta) = buffer_delta {
             with_states(surface, |states| {
                 let Some(attributes) = states.data_map.get::<CursorImageSurfaceData>() else {

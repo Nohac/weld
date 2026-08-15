@@ -191,10 +191,24 @@ Protocol creation performs the real Vulkan import before acknowledging a
 DMA-BUF. Each live `wl_buffer` pins that imported Vulkan image and memory in a
 shared source cache until the client destroys the buffer; commits reuse the
 same import rather than duplicating its file descriptor and native objects per
-frame. Multiple in-flight uses of one buffer share a release identity, and the
-server emits one release only after every submitted use has completed.
+frame. Every committed use has its own release identity even when several uses
+refer to that shared imported image. The server still groups the legacy
+`wl_buffer.release` event by buffer and emits it only after every submitted use
+has completed.
 
-Client implicit fences become Smithay commit blockers registered with calloop.
+When the Vulkan render node supports syncobj eventfd notification, Weld also
+advertises `linux-drm-syncobj-v1`. Smithay validates each explicit-sync commit.
+The acquire and release points remain core-owned protocol state and never cross
+into the application or plugin APIs. Hardware or clients without that protocol
+continue through implicit synchronization.
+
+Client implicit fences and explicit acquire points become Smithay commit
+blockers registered with calloop. An explicit point uses syncobj eventfd;
+otherwise the DMA-BUF's implicit readiness source is retained. Clearing either
+blocker reapplies the held commit in the normal host iteration, which drains
+the resulting surface changes and composition demand without polling or
+waiting for unrelated Wayland traffic.
+
 After readiness, each layer moves through staged, displayed, and retiring
 states. Immediately before Bevy renders, Weld promotes the newest referenced
 staged buffer, installs its imported texture under the stable GPU-image
@@ -214,6 +228,17 @@ surface layer: reattaching one `wl_buffer` or displaying it in multiple layers
 shares one acquire, and the image is released only when its final displayed use
 retires. Each protocol use still completes independently.
 
+An explicit release point follows that individual committed use. A superseded
+buffer that was never sampled signals immediately. A sampled use signals only
+after the release submission containing its final GPU read completes. If two
+commits reuse one imported image, the earlier use may therefore signal while a
+later use remains displayed; the later use retains its own unsignaled point.
+Destroying the `wl_buffer` resource suppresses only the eventual legacy release
+event and does not discard outstanding explicit release points. Rejected
+buffers, unsupported DMA-BUF cursor surfaces, and other never-sampled commits
+signal immediately so a client cannot be stranded on a point Weld does not
+own.
+
 Prepared surface-material bind groups are cached by material, stable imported
 image, sampling parameters, and resource generation. The cache retains the
 entries for every still-live member of a rotating client buffer pool and
@@ -224,13 +249,24 @@ succeed. Failure retains a compatible previously displayed image, or the
 transparent selector when no compatible image exists.
 
 A persistent completion worker waits for release-barrier `SubmissionIndex`
-values and wakes calloop; only the server thread then sends
-`wl_buffer.release`. There are no timers, status polling, per-frame threads, or
-Wayland resources in the worker. The first acquire uses `GENERAL` as the
-producer-owned layout, following the Wayland/Vulkan compositor convention for
-an initialized external image. Running this path with Vulkan validation layers
-is a release gate once those layers are available in the development
-environment.
+values and wakes calloop. The server thread then signals any explicit timeline
+point with a CPU syncobj ioctl and sends `wl_buffer.release` when the buffer's
+last use has completed. The GPU wait remains off the compositor thread; there
+are no timers, status polling, per-frame threads, or Wayland resources in the
+worker. Importing a native Vulkan completion fence directly into the release
+point is a possible refinement, not part of the current correctness contract.
+The first acquire uses `GENERAL` as the producer-owned layout, following the
+Wayland/Vulkan compositor convention for an initialized external image.
+Running this path with Vulkan validation layers is a release gate once those
+layers are available in the development environment.
+
+Every `PendingDmabufFrame` must either be staged into `DmabufManager` or passed
+to `release_unrendered`; it intentionally carries no protocol or channel type
+above core. It does not yet have a `Drop` fallback, so a future hardening pass
+may replace its opaque identity with an internal RAII completion token without
+changing the plugin-facing boundary. Violating this invariant also retains an
+explicit release point and its timeline import device, not only the legacy
+buffer release, so that hardening has value beyond client responsiveness.
 
 Wayland ARGB channels are premultiplied in their encoded representation while
 Bevy UI blends straight alpha. The surface material loads source texels from

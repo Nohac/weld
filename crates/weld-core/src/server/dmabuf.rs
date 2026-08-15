@@ -12,8 +12,11 @@ use smithay::{
     wayland::dmabuf::{
         DmabufFeedbackBuilder, DmabufGlobal, DmabufHandler, DmabufState, ImportNotifier,
     },
+    wayland::drm_syncobj::{
+        DrmSyncPoint, DrmSyncobjHandler, DrmSyncobjState, supports_syncobj_eventfd,
+    },
 };
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
 use crate::{
     dmabuf::{DmabufCapabilities, DmabufReleaseId},
@@ -22,6 +25,7 @@ use crate::{
 
 pub(super) struct DmabufProtocol {
     pub(super) state: DmabufState,
+    pub(super) syncobj_state: Option<DrmSyncobjState>,
     pub(super) _global: Option<DmabufGlobal>,
     formats: HashSet<Format>,
 }
@@ -44,11 +48,23 @@ impl DmabufProtocol {
         } else {
             (None, HashSet::new())
         };
+        let syncobj_state = capabilities
+            .and_then(|capabilities| capabilities.syncobj_import_device.clone())
+            .filter(supports_syncobj_eventfd)
+            .map(|device| {
+                info!("enabled linux-drm-syncobj explicit client synchronization");
+                DrmSyncobjState::new::<ServerState>(display, device)
+            });
         Ok(Self {
             state,
+            syncobj_state,
             _global: global,
             formats,
         })
+    }
+
+    pub(super) const fn explicit_sync_enabled(&self) -> bool {
+        self.syncobj_state.is_some()
     }
 
     fn accepts(&self, dmabuf: &Dmabuf) -> bool {
@@ -61,14 +77,21 @@ impl DmabufProtocol {
     }
 }
 
-struct ReleaseEntry {
-    id: DmabufReleaseId,
+struct BufferReleaseState {
     outstanding: usize,
+    resource_alive: bool,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+struct ReleaseCompletion<Key> {
+    key: Key,
+    final_use: bool,
+    release_resource: bool,
 }
 
 struct ReleaseTracker<Key> {
     next: Option<u64>,
-    by_key: HashMap<Key, ReleaseEntry>,
+    by_key: HashMap<Key, BufferReleaseState>,
     key_by_id: HashMap<DmabufReleaseId, Key>,
 }
 
@@ -87,34 +110,47 @@ where
     Key: Clone + Eq + Hash,
 {
     fn register(&mut self, key: Key) -> Option<DmabufReleaseId> {
-        if let Some(entry) = self.by_key.get_mut(&key) {
-            entry.outstanding = entry.outstanding.checked_add(1)?;
-            return Some(entry.id);
-        }
+        let outstanding = self
+            .by_key
+            .get(&key)
+            .map_or(Some(1), |entry| entry.outstanding.checked_add(1))?;
         let raw = self.next?;
         self.next = raw.checked_add(1);
         let id = DmabufReleaseId::new(raw);
         self.by_key
-            .insert(key.clone(), ReleaseEntry { id, outstanding: 1 });
+            .entry(key.clone())
+            .and_modify(|entry| entry.outstanding = outstanding)
+            .or_insert(BufferReleaseState {
+                outstanding,
+                resource_alive: true,
+            });
         self.key_by_id.insert(id, key);
         Some(id)
     }
 
-    fn complete(&mut self, id: DmabufReleaseId) -> Option<Key> {
-        let key = self.key_by_id.get(&id)?.clone();
+    fn complete(&mut self, id: DmabufReleaseId) -> Option<ReleaseCompletion<Key>> {
+        let key = self.key_by_id.remove(&id)?;
         let entry = self.by_key.get_mut(&key)?;
         if entry.outstanding > 1 {
             entry.outstanding -= 1;
-            return None;
+            return Some(ReleaseCompletion {
+                key,
+                final_use: false,
+                release_resource: false,
+            });
         }
+        let release_resource = entry.resource_alive;
         self.by_key.remove(&key);
-        self.key_by_id.remove(&id);
-        Some(key)
+        Some(ReleaseCompletion {
+            key,
+            final_use: true,
+            release_resource,
+        })
     }
 
     fn destroyed(&mut self, key: &Key) {
-        if let Some(entry) = self.by_key.remove(key) {
-            self.key_by_id.remove(&entry.id);
+        if let Some(entry) = self.by_key.get_mut(key) {
+            entry.resource_alive = false;
         }
     }
 }
@@ -123,29 +159,60 @@ where
 pub(super) struct DmabufReleaseStore {
     tracker: ReleaseTracker<ObjectId>,
     buffers: HashMap<ObjectId, WlBuffer>,
+    release_points: HashMap<DmabufReleaseId, DrmSyncPoint>,
 }
 
 impl DmabufReleaseStore {
-    pub(super) fn register(&mut self, buffer: WlBuffer) -> Option<DmabufReleaseId> {
+    pub(super) fn register(
+        &mut self,
+        buffer: WlBuffer,
+        release_point: Option<DrmSyncPoint>,
+    ) -> Option<DmabufReleaseId> {
         let key = buffer.id();
         let id = self.tracker.register(key.clone())?;
         self.buffers.entry(key).or_insert(buffer);
+        if let Some(release_point) = release_point {
+            self.release_points.insert(id, release_point);
+        }
         Some(id)
     }
 
     pub(super) fn complete(&mut self, id: DmabufReleaseId) {
-        if let Some(key) = self.tracker.complete(id)
-            && let Some(buffer) = self.buffers.remove(&key)
-        {
-            buffer.release();
-            debug!(?id, "released client DMA-BUF after GPU completion");
+        signal_release_point(
+            self.release_points.remove(&id),
+            "client DMA-BUF GPU completion",
+        );
+        let Some(completion) = self.tracker.complete(id) else {
+            return;
+        };
+        if completion.final_use {
+            let buffer = self.buffers.remove(&completion.key);
+            if completion.release_resource
+                && let Some(buffer) = buffer
+            {
+                buffer.release();
+            }
         }
+        debug!(
+            ?id,
+            final_use = completion.final_use,
+            "completed a client DMA-BUF use"
+        );
     }
 
     pub(super) fn destroyed(&mut self, destroyed: &WlBuffer) {
         let key = destroyed.id();
         self.tracker.destroyed(&key);
         self.buffers.remove(&key);
+    }
+}
+
+pub(super) fn signal_release_point(release_point: Option<DrmSyncPoint>, reason: &'static str) {
+    let Some(release_point) = release_point else {
+        return;
+    };
+    if let Err(error) = release_point.signal() {
+        warn!(%error, reason, "failed to signal a client DMA-BUF release point");
     }
 }
 
@@ -200,33 +267,73 @@ impl DmabufHandler for ServerState {
     }
 }
 
+impl DrmSyncobjHandler for ServerState {
+    fn drm_syncobj_state(&mut self) -> Option<&mut DrmSyncobjState> {
+        self.dmabuf_protocol.syncobj_state.as_mut()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::ReleaseTracker;
 
     #[test]
-    fn duplicate_buffer_use_releases_only_after_every_gpu_use_completes() {
+    fn duplicate_buffer_uses_have_independent_completion_identities() {
         let mut tracker = ReleaseTracker::default();
         let first = tracker
             .register(7_u32)
             .expect("identity should be available");
-        let second = tracker.register(7_u32).expect("identity should be reused");
+        let second = tracker
+            .register(7_u32)
+            .expect("second identity should be available");
 
-        assert_eq!(first, second);
-        assert_eq!(tracker.complete(first), None);
-        assert_eq!(tracker.complete(second), Some(7));
+        assert_ne!(first, second);
+        assert_eq!(
+            tracker.complete(first),
+            Some(super::ReleaseCompletion {
+                key: 7,
+                final_use: false,
+                release_resource: false,
+            })
+        );
+        assert_eq!(
+            tracker.complete(second),
+            Some(super::ReleaseCompletion {
+                key: 7,
+                final_use: true,
+                release_resource: true,
+            })
+        );
         assert_eq!(tracker.complete(second), None);
     }
 
     #[test]
-    fn destruction_cancels_pending_release_completion() {
+    fn destruction_preserves_pending_use_completion_without_resource_release() {
         let mut tracker = ReleaseTracker::default();
-        let release = tracker
+        let first = tracker
             .register(9_u32)
             .expect("identity should be available");
+        let second = tracker
+            .register(9_u32)
+            .expect("second identity should be available");
 
         tracker.destroyed(&9);
 
-        assert_eq!(tracker.complete(release), None);
+        assert_eq!(
+            tracker.complete(first),
+            Some(super::ReleaseCompletion {
+                key: 9,
+                final_use: false,
+                release_resource: false,
+            })
+        );
+        assert_eq!(
+            tracker.complete(second),
+            Some(super::ReleaseCompletion {
+                key: 9,
+                final_use: true,
+                release_resource: false,
+            })
+        );
     }
 }

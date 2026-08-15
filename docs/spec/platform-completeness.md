@@ -4,9 +4,10 @@
 
 Weld runs nested and directly on DRM, accepts multiple native Wayland
 xdg-toplevels and XDG popups, supports SHM and the advertised DMA-BUF subset,
-handles keyboard, pointer, scrolling, decorations, fractional client scaling,
-move/resize requests, screenshots, and structured tracing. The precise current
-surface and renderer limits are recorded in [Architecture](../architecture.md).
+capability-gates explicit DMA-BUF synchronization, handles keyboard, pointer,
+scrolling, decorations, fractional client scaling, move/resize requests,
+screenshots, and structured tracing. The precise current surface and renderer
+limits are recorded in [Architecture](../architecture.md).
 
 This is a development compositor, not yet a complete daily-driver platform.
 
@@ -26,9 +27,9 @@ Protocol support should be added in coherent user-facing slices. Important
 areas include data devices and clipboard, layer shell, activation, relative
 pointer and constraints, shortcut and idle inhibition, primary selection, text
 input, session lock, output management and power, capture, foreign toplevels,
-tablet input, explicit synchronization, color management, content type, and
-tearing control. This list is a prioritization input, not a claim that every
-protocol belongs in core or must land together.
+tablet input, color management, content type, and tearing control. This list is
+a prioritization input, not a claim that every protocol belongs in core or must
+land together.
 
 XWayland should eventually map legacy clients into the same application policy
 as native Wayland windows while retaining X11-specific focus, size hints,

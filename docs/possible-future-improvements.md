@@ -74,18 +74,28 @@ delay buffer release, and encourage redraw feedback near output boundaries.
 Preferred-scale changes should use hysteresis so small boundary movements do
 not repeatedly force the client to re-render.
 
-### Explicit client synchronization
+### Native explicit-sync release fences
 
-Add capability-gated `linux-drm-syncobj-v1` support through Smithay. Commits
-with a new buffer and acquire point should be blocked until the acquire point
-signals; completion should wake calloop, unblock the commit, drain the resulting
-surface effects, and request composition without waiting for unrelated Wayland
-traffic. Release points must signal only after Weld's final GPU use completes.
+Weld now capability-gates `linux-drm-syncobj-v1`, blocks commits on explicit
+acquire points, and signals each per-commit release point after the existing
+wgpu completion worker proves that use has retired. The current release signal
+is a CPU syncobj ioctl on the server thread after the off-thread wait; it is
+correct and does not block the compositor on GPU work.
 
-Explicit synchronization should complement the existing implicit-fence path,
-not silently replace it on unsupported clients or hardware. The advertised
-protocol and format/modifier set must match the synchronization path Weld can
-actually honor.
+A later optimization can export the Vulkan release submission as a native
+sync-file fence and import that fence directly into the client's release point.
+That would let the kernel carry the dependency without the CPU completion
+round-trip. It must preserve the implicit client path, per-use release
+identities, never-sampled immediate releases, and the lifetime pins held by the
+current completion work. It should be driven by measurements rather than
+treated as a prerequisite for multi-output presentation.
+
+Explicit acquire event sources should also gain bounded cleanup tied to their
+surface or client lifetime. A signaled point removes its own calloop source,
+but a broken or malicious client can currently leave an unsignaled eventfd
+registered after abandoning the surface. Fixing that requires explicit
+registration-token ownership; it should not be approximated with polling or a
+generic frame timeout.
 
 ### Multi-plane DMA-BUF import
 
@@ -174,11 +184,10 @@ proposal to replace the current direct-sampling path.
 
 ## Suggested investigation order
 
-1. Explicit synchronization, because it completes the client-buffer ownership
-   contract independently of the physical output design.
-2. Smithay-managed output targets plus one per-output presentation record,
-   proven first on one connector without changing plugin-facing composition.
-3. Multi-output hotplug, independent vblank routing, and fail-soft recovery.
-4. Multi-plane import with exact modifier probing and validation.
-5. Off-thread producer rings only when streaming or isolated rendering has a
+1. Multi-output hotplug, independent vblank routing, per-output presentation,
+   and fail-soft recovery.
+2. Native explicit-sync release fences if profiling shows the CPU completion
+   round-trip matters.
+3. Multi-plane import with exact modifier probing and validation.
+4. Off-thread producer rings only when streaming or isolated rendering has a
    concrete consumer.

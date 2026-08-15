@@ -18,6 +18,7 @@ use smithay::{
             is_sync_subsurface, with_states, with_surface_tree_upward,
         },
         dmabuf::get_dmabuf,
+        drm_syncobj::{DrmSyncPoint, DrmSyncobjCachedState},
         shell::xdg::SurfaceCachedState as XdgSurfaceCachedState,
     },
 };
@@ -30,7 +31,7 @@ use crate::surface::{
 
 use crate::dmabuf::PendingDmabufFrame;
 
-use super::dmabuf::DmabufReleaseStore;
+use super::dmabuf::{DmabufReleaseStore, signal_release_point};
 use super::shm::{
     SurfaceBufferMetadata, checked_buffer_scale, copy_shm_buffer, surface_content_view,
 };
@@ -100,6 +101,7 @@ struct TreeNode {
 struct CommittedNode {
     node: TreeNode,
     assignment: Option<BufferAssignment>,
+    release_point: Option<DrmSyncPoint>,
     buffer_scale: i32,
     buffer_transform: wl_output::Transform,
     input_region: Option<RegionAttributes>,
@@ -157,6 +159,10 @@ impl SurfaceTreeState {
                 }
                 let mut attributes = states.cached_state.get::<SurfaceAttributes>();
                 let current = attributes.current();
+                let mut syncobj = states.cached_state.get::<DrmSyncobjCachedState>();
+                let syncobj = syncobj.current();
+                syncobj.acquire_point = None;
+                let release_point = syncobj.release_point.take();
                 committed.push(CommittedNode {
                     node: TreeNode {
                         surface: surface.clone(),
@@ -165,6 +171,7 @@ impl SurfaceTreeState {
                         position,
                     },
                     assignment: current.buffer.take(),
+                    release_point,
                     buffer_scale: current.buffer_scale,
                     buffer_transform: current.buffer_transform,
                     input_region: current.input_region.clone(),
@@ -239,9 +246,11 @@ impl SurfaceTreeState {
     ) {
         let object_id = committed.node.object_id;
         if self.layer_for(&object_id).is_none() {
-            if let Some(BufferAssignment::NewBuffer(buffer)) = committed.assignment {
-                buffer.release();
-            }
+            release_without_sampling(
+                committed.assignment,
+                committed.release_point,
+                "surface layer identity exhaustion",
+            );
             warn!(?surface_id, surface = ?object_id, "could not allocate a surface layer id");
             return;
         }
@@ -258,6 +267,7 @@ impl SurfaceTreeState {
                     &buffer,
                     committed.buffer_scale,
                     committed.buffer_transform,
+                    committed.release_point,
                     releases,
                 );
                 cached.client_mapped = true;
@@ -633,9 +643,11 @@ fn import_buffer(
     buffer: &WlBuffer,
     buffer_scale: i32,
     buffer_transform: wl_output::Transform,
+    release_point: Option<DrmSyncPoint>,
     releases: &mut DmabufReleaseStore,
 ) -> anyhow::Result<ImportedBuffer> {
     if let Ok(dmabuf) = get_dmabuf(buffer).cloned() {
+        let registered_release_point = release_point.clone();
         let imported = (|| {
             let size = dmabuf.size();
             let width = u32::try_from(size.w).context("negative DMA-BUF width")?;
@@ -648,7 +660,7 @@ fn import_buffer(
             };
             let view = with_states(surface, |states| surface_content_view(states, metadata))?;
             let release = releases
-                .register(buffer.clone())
+                .register(buffer.clone(), registered_release_point)
                 .context("DMA-BUF release identity space is exhausted")?;
             Ok(ImportedBuffer {
                 metadata,
@@ -661,11 +673,16 @@ fn import_buffer(
             })
         })();
         if imported.is_err() {
+            signal_release_point(release_point, "rejected client DMA-BUF import");
             buffer.release();
         }
         return imported;
     }
 
+    signal_release_point(
+        release_point,
+        "non-DMA-BUF buffer carrying an explicit release point",
+    );
     let copied = match copy_shm_buffer(buffer) {
         Ok(copied) => copied,
         Err(error) => {
@@ -687,6 +704,39 @@ fn import_buffer(
         content: PendingSurfaceBufferContent::ShmPixels(copied.bgra_pixels),
         opaque: copied.opaque,
     })
+}
+
+pub(super) fn release_untracked_surface_tree(root: &WlSurface) {
+    with_surface_tree_upward(
+        root,
+        (),
+        |_, _, _| TraversalAction::DoChildren(()),
+        |_, states, _| {
+            let assignment = states
+                .cached_state
+                .get::<SurfaceAttributes>()
+                .current()
+                .buffer
+                .take();
+            let mut syncobj = states.cached_state.get::<DrmSyncobjCachedState>();
+            let syncobj = syncobj.current();
+            syncobj.acquire_point = None;
+            let release_point = syncobj.release_point.take();
+            release_without_sampling(assignment, release_point, "untracked surface commit");
+        },
+        |_, _, _| true,
+    );
+}
+
+fn release_without_sampling(
+    assignment: Option<BufferAssignment>,
+    release_point: Option<DrmSyncPoint>,
+    reason: &'static str,
+) {
+    if let Some(BufferAssignment::NewBuffer(buffer)) = assignment {
+        buffer.release();
+    }
+    signal_release_point(release_point, reason);
 }
 
 #[cfg(test)]

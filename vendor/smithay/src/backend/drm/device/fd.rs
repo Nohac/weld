@@ -56,6 +56,18 @@ impl AsRawFd for DrmDeviceFd {
 }
 
 impl DrmDeviceFd {
+    /// Create a new unprivileged `DrmDeviceFd` without attempting to acquire
+    /// DRM master.
+    ///
+    /// This constructor is intended for render nodes and other descriptors
+    /// used only for render or synchronization ioctls.
+    pub fn new_unprivileged(fd: DeviceFd) -> DrmDeviceFd {
+        DrmDeviceFd(Arc::new(InternalDrmDeviceFd {
+            fd,
+            privileged: false,
+        }))
+    }
+
     /// Create a new `DrmDeviceFd`.
     ///
     /// This function will try to acquire the master lock for the underlying drm device

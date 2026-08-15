@@ -18,9 +18,10 @@ use smithay::{
         buffer::BufferHandler,
         compositor::{
             CompositorClientState, CompositorHandler, CompositorState, SurfaceAttributes,
-            add_blocker, add_pre_commit_hook, with_states,
+            add_blocker, add_pre_commit_hook, get_role, with_states,
         },
         dmabuf::get_dmabuf,
+        drm_syncobj::DrmSyncobjCachedState,
         fractional_scale::FractionalScaleHandler,
         output::OutputHandler,
         shell::xdg::{
@@ -37,7 +38,9 @@ use crate::surface::{Extent, SurfaceId, WindowDecoration, WindowResizeEdge};
 use super::{
     ClientState, PendingSurfaceEvent, PendingSurfaceEventKind, ServerState,
     output::send_preferred_surface_scale,
-    surface_tree::{SurfaceTreeState, collect_surfaces, owning_root},
+    surface_tree::{
+        SurfaceTreeState, collect_surfaces, owning_root, release_untracked_surface_tree,
+    },
 };
 
 const CLIENT_WIDTH: i32 = 640;
@@ -320,12 +323,12 @@ impl CompositorHandler for ServerState {
     }
 
     fn new_surface(&mut self, surface: &WlSurface) {
-        if self.dmabuf_blocker_installer.is_none() {
+        if self.dmabuf_blocker_installer.is_none() && self.syncobj_blocker_installer.is_none() {
             return;
         }
         add_pre_commit_hook::<Self, _>(surface, |state, _, surface| {
-            let dmabuf = with_states(surface, |states| {
-                states
+            let (dmabuf, acquire_point) = with_states(surface, |states| {
+                let dmabuf = states
                     .cached_state
                     .get::<SurfaceAttributes>()
                     .pending()
@@ -336,17 +339,44 @@ impl CompositorHandler for ServerState {
                             get_dmabuf(buffer).cloned().ok()
                         }
                         _ => None,
-                    })
+                    });
+                let acquire_point = states
+                    .cached_state
+                    .get::<DrmSyncobjCachedState>()
+                    .pending()
+                    .acquire_point
+                    .clone();
+                (dmabuf, acquire_point)
             });
             let Some(dmabuf) = dmabuf else {
                 return;
             };
+            let Some(client) = surface.client() else {
+                return;
+            };
+            if let Some(acquire_point) = acquire_point {
+                match acquire_point.generate_blocker() {
+                    Ok((blocker, source)) => {
+                        let installed = state
+                            .syncobj_blocker_installer
+                            .as_ref()
+                            .is_some_and(|install| install(source, client.clone()));
+                        if installed {
+                            add_blocker(surface, blocker);
+                            return;
+                        }
+                        warn!(surface = ?surface.id(), "could not install an explicit-sync acquire blocker");
+                    }
+                    Err(error) => warn!(
+                        surface = ?surface.id(),
+                        %error,
+                        "could not create an explicit-sync acquire blocker"
+                    ),
+                }
+            }
             let Ok((blocker, source)) =
                 dmabuf.generate_blocker(smithay::reexports::calloop::Interest::READ)
             else {
-                return;
-            };
-            let Some(client) = surface.client() else {
                 return;
             };
             let installed = state
@@ -376,6 +406,9 @@ impl CompositorHandler for ServerState {
         let root = owning_root(surface);
         let Some(surface_id) = self.toplevels.id_for_surface(&root) else {
             if !self.commit_popup(&root) {
+                if get_role(&root).is_some() {
+                    release_untracked_surface_tree(&root);
+                }
                 debug!(surface = ?surface.id(), "ignoring a surface outside a tracked xdg surface tree");
             }
             return;

@@ -3,8 +3,12 @@
 use anyhow::{Context, Result};
 use ash::{ext, vk};
 use smithay::{
-    backend::allocator::{Format, Fourcc, Modifier},
-    reexports::rustix::fs::{Dev, makedev},
+    backend::{
+        allocator::{Format, Fourcc, Modifier},
+        drm::{DrmDeviceFd, DrmNode},
+    },
+    reexports::rustix::fs::{Dev, Mode, OFlags, makedev, open},
+    utils::DeviceFd,
 };
 use tracing::{info, warn};
 
@@ -25,6 +29,7 @@ const PROFILING_FEATURES: wgpu::Features = wgpu::Features::TIMESTAMP_QUERY
 pub struct DmabufCapabilities {
     pub(crate) main_device: Dev,
     pub(crate) formats: Vec<Format>,
+    pub(crate) syncobj_import_device: Option<DrmDeviceFd>,
 }
 
 pub fn request_weld_device(
@@ -159,10 +164,33 @@ fn discover_capabilities(adapter: &wgpu::Adapter) -> Result<Option<DmabufCapabil
     if formats.is_empty() {
         return Ok(None);
     }
+    let syncobj_import_device = match open_syncobj_import_device(main_device) {
+        Ok(device) => Some(device),
+        Err(error) => {
+            warn!(%error, "could not open the Vulkan render node for explicit synchronization");
+            None
+        }
+    };
     Ok(Some(DmabufCapabilities {
         main_device,
         formats,
+        syncobj_import_device,
     }))
+}
+
+fn open_syncobj_import_device(main_device: Dev) -> Result<DrmDeviceFd> {
+    let node = DrmNode::from_dev_id(main_device)
+        .context("Vulkan reported an invalid DRM render-node device id")?;
+    let path = node
+        .dev_path()
+        .context("could not resolve the Vulkan DRM render-node path")?;
+    let fd = open(
+        &path,
+        OFlags::RDWR | OFlags::CLOEXEC | OFlags::NOCTTY | OFlags::NONBLOCK,
+        Mode::empty(),
+    )
+    .with_context(|| format!("could not open DRM render node {}", path.display()))?;
+    Ok(DrmDeviceFd::new_unprivileged(DeviceFd::from(fd)))
 }
 
 fn render_node(

@@ -42,6 +42,7 @@ use smithay::{
     wayland::{
         compositor::{CompositorClientState, CompositorState},
         cursor_shape::CursorShapeManagerState,
+        drm_syncobj::DrmSyncPointSource,
         fractional_scale::FractionalScaleManagerState,
         output::OutputManagerState,
         pointer_gestures::PointerGesturesState,
@@ -119,6 +120,7 @@ pub struct ServerState {
     cursor_surfaces: CursorSurfaceStore,
     pending_cursor_image: Option<crate::cursor::CursorImage>,
     dmabuf_blocker_installer: Option<Box<dyn Fn(DmabufSource, Client) -> bool>>,
+    syncobj_blocker_installer: Option<Box<dyn Fn(DrmSyncPointSource, Client) -> bool>>,
 }
 
 pub(crate) struct ServerOptions<'a> {
@@ -249,6 +251,23 @@ impl ServerState {
                     .is_ok()
             }) as Box<dyn Fn(DmabufSource, Client) -> bool>
         });
+        let syncobj_blocker_installer = dmabuf_protocol.explicit_sync_enabled().then(|| {
+            let blocker_handle = loop_handle.clone();
+            Box::new(move |source: DrmSyncPointSource, client: Client| {
+                blocker_handle
+                    .insert_source(source, move |_, _, loop_data| {
+                        let state = server(loop_data);
+                        let display_handle = state.display_handle.clone();
+                        if let Some(client_state) = client.get_data::<ClientState>() {
+                            client_state
+                                .compositor_state
+                                .blocker_cleared(state, &display_handle);
+                        }
+                        Ok(())
+                    })
+                    .is_ok()
+            }) as Box<dyn Fn(DrmSyncPointSource, Client) -> bool>
+        });
 
         Ok(Self {
             display_handle,
@@ -295,6 +314,7 @@ impl ServerState {
                 crate::cursor::CursorIcon::Default,
             )),
             dmabuf_blocker_installer,
+            syncobj_blocker_installer,
         })
     }
 
