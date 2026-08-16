@@ -14,7 +14,7 @@ use bevy::{
         PickingSystems,
         pointer::{PointerId, PointerInteraction, PointerLocation},
     },
-    ui::{ComputedNode, UiGlobalTransform, UiScale},
+    ui::{ComputedNode, ComputedUiTargetCamera, UiGlobalTransform},
 };
 use leafwing_input_manager::plugin::InputManagerSystem;
 
@@ -23,6 +23,7 @@ use super::{
     raw::{ButtonState, LinuxButtonCode, RawSeatEvent, RawSeatEventKind},
     state::{InputUpdateTime, PendingSeatInput, PointerPositionState},
 };
+use crate::output::{OutputPosition, RendersOutput};
 use crate::surface::SurfaceInputNode;
 use weld_core::input::{InputTransform, SeatInputEffect, SeatInputEffectKind, SurfaceInputTarget};
 
@@ -62,8 +63,14 @@ pub(crate) fn take_input_effects(world: &mut World) -> Vec<SeatInputEffect> {
 
 fn resolve_input_effects(
     pointers: Query<(&PointerId, &PointerInteraction, &PointerLocation)>,
-    picked_nodes: Query<(&SurfaceInputNode, &ComputedNode, &UiGlobalTransform)>,
-    ui_scale: Res<UiScale>,
+    picked_nodes: Query<(
+        &SurfaceInputNode,
+        &ComputedNode,
+        &UiGlobalTransform,
+        &ComputedUiTargetCamera,
+    )>,
+    cameras: Query<&RendersOutput>,
+    output_positions: Query<&OutputPosition>,
     update_time: Res<InputUpdateTime>,
     resources: InputRoutingResources,
 ) {
@@ -81,7 +88,7 @@ fn resolve_input_effects(
     if !routing.pressed_buttons.is_empty() {
         return;
     }
-    let target = picked_surface_target(&pointers, &picked_nodes, ui_scale.0);
+    let target = picked_surface_target(&pointers, &picked_nodes, &cameras, &output_positions);
     let current = routing
         .pointer
         .host_position
@@ -148,8 +155,14 @@ fn replay_input_batch(
 
 fn picked_surface_target(
     pointers: &Query<(&PointerId, &PointerInteraction, &PointerLocation)>,
-    picked_nodes: &Query<(&SurfaceInputNode, &ComputedNode, &UiGlobalTransform)>,
-    ui_scale: f32,
+    picked_nodes: &Query<(
+        &SurfaceInputNode,
+        &ComputedNode,
+        &UiGlobalTransform,
+        &ComputedUiTargetCamera,
+    )>,
+    cameras: &Query<&RendersOutput>,
+    output_positions: &Query<&OutputPosition>,
 ) -> Option<SurfaceInputTarget> {
     let (_, interaction, location) = pointers
         .iter()
@@ -159,8 +172,11 @@ fn picked_surface_target(
     // to a client surface below it would leak raw input through decorations and
     // would also hand cursor ownership back to that client during shell grabs.
     frontmost_surface_target(interaction.iter().map(|(entity, _)| {
-        let (surface, node, transform) = picked_nodes.get(*entity).ok()?;
-        surface_input_target(*surface, node, transform, ui_scale)
+        let (surface, node, transform, target_camera) = picked_nodes.get(*entity).ok()?;
+        let camera = target_camera.get()?;
+        let output = cameras.get(camera).ok()?.0;
+        let output_position = output_positions.get(output).ok()?.0;
+        surface_input_target(*surface, node, transform, output_position)
     }))
 }
 
@@ -174,7 +190,7 @@ fn surface_input_target(
     surface: SurfaceInputNode,
     node: &ComputedNode,
     transform: &UiGlobalTransform,
-    ui_scale: f32,
+    output_position: bevy::math::Vec2,
 ) -> Option<SurfaceInputTarget> {
     let inverse = transform.try_inverse()?;
     Some(SurfaceInputTarget {
@@ -185,7 +201,7 @@ fn surface_input_target(
             node.size(),
             node.inverse_scale_factor(),
             surface.local_origin,
-            ui_scale,
+            output_position,
         ),
     })
 }
@@ -195,12 +211,13 @@ fn compositor_to_surface_transform(
     physical_size: bevy::math::Vec2,
     logical_per_physical: f32,
     local_origin: bevy::math::Vec2,
-    ui_scale: f32,
+    output_position: bevy::math::Vec2,
 ) -> InputTransform {
-    let matrix = inverse.matrix2 * (ui_scale * logical_per_physical);
+    let matrix = inverse.matrix2;
     let logical_size = physical_size * logical_per_physical;
     let translation =
-        inverse.translation * logical_per_physical + logical_size * 0.5 + local_origin;
+        inverse.translation * logical_per_physical + logical_size * 0.5 + local_origin
+            - matrix * output_position;
     InputTransform {
         xx: f64::from(matrix.x_axis.x),
         xy: f64::from(matrix.y_axis.x),
@@ -251,37 +268,41 @@ mod tests {
     }
 
     #[test]
-    fn affine_mapping_inverts_translation_scale_and_rotation() {
+    fn affine_mapping_converts_compositor_global_logical_to_surface_local() {
         let physical_size = Vec2::new(240.0, 120.0);
-        let logical_per_physical = 0.5;
         let local_origin = Vec2::new(7.0, 11.0);
-        let ui_scale = 1.5;
-        for global in [
-            Affine2::IDENTITY,
-            Affine2::from_translation(Vec2::new(80.0, -25.0)),
-            Affine2::from_scale_angle_translation(
-                Vec2::new(1.25, 0.75),
-                FRAC_PI_2,
-                Vec2::new(320.0, 180.0),
-            ),
-        ] {
-            let local_centered = Vec2::new(24.0, -18.0);
-            let compositor_position = global.transform_point2(local_centered) / ui_scale;
-            let transform = compositor_to_surface_transform(
-                global.inverse(),
-                physical_size,
-                logical_per_physical,
-                local_origin,
-                ui_scale,
-            );
-            let actual = transform.transform(super::super::raw::InputPosition::new(
-                f64::from(compositor_position.x),
-                f64::from(compositor_position.y),
-            ));
-            let expected = local_centered * logical_per_physical
-                + physical_size * logical_per_physical * 0.5
-                + local_origin;
-            assert_position_close(actual, expected);
+        for logical_per_physical in [1.0, 0.8] {
+            for output_position in [Vec2::ZERO, Vec2::new(0.0, 1_080.0)] {
+                for global in [
+                    Affine2::IDENTITY,
+                    Affine2::from_translation(Vec2::new(80.0, -25.0)),
+                    Affine2::from_scale_angle_translation(
+                        Vec2::new(1.25, 0.75),
+                        FRAC_PI_2,
+                        Vec2::new(320.0, 180.0),
+                    ),
+                ] {
+                    let local_centered = Vec2::new(24.0, -18.0);
+                    let target_physical = global.transform_point2(local_centered);
+                    let compositor_global =
+                        output_position + target_physical * logical_per_physical;
+                    let transform = compositor_to_surface_transform(
+                        global.inverse(),
+                        physical_size,
+                        logical_per_physical,
+                        local_origin,
+                        output_position,
+                    );
+                    let actual = transform.transform(super::super::raw::InputPosition::new(
+                        f64::from(compositor_global.x),
+                        f64::from(compositor_global.y),
+                    ));
+                    let expected = local_centered * logical_per_physical
+                        + physical_size * logical_per_physical * 0.5
+                        + local_origin;
+                    assert_position_close(actual, expected);
+                }
+            }
         }
     }
 

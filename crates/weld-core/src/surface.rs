@@ -130,7 +130,7 @@ pub enum WindowInteractionRequestKind {
 }
 
 /// Protocol-neutral request emitted by application policy for the host.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum SurfaceAction {
     Close {
         surface: SurfaceId,
@@ -141,6 +141,11 @@ pub enum SurfaceAction {
     Resize {
         surface: SurfaceId,
         logical_size: Extent,
+    },
+    SetOutputs {
+        surface: SurfaceId,
+        outputs: Vec<crate::OutputId>,
+        preferred: Option<crate::OutputId>,
     },
 }
 

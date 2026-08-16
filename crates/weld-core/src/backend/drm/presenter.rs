@@ -2,11 +2,7 @@
 
 use std::{
     collections::{HashMap, hash_map::Entry},
-    sync::{
-        Arc,
-        atomic::{AtomicBool, AtomicU64, Ordering},
-        mpsc,
-    },
+    sync::{Arc, mpsc},
     thread::{self, JoinHandle},
 };
 
@@ -28,6 +24,7 @@ use tracing::{debug, warn};
 
 use crate::{
     host::CompositionTargetView,
+    output::OutputId,
     renderer::{CursorOverlay, CursorOverlayRenderer},
     surface::Extent,
 };
@@ -61,10 +58,6 @@ impl PresenterLifecycle {
             state: PresenterState::Starting,
             recovery_attempts_remaining: TRANSIENT_RECOVERY_ATTEMPTS,
         }
-    }
-
-    const fn is_stopped(&self) -> bool {
-        matches!(self.state, PresenterState::Stopped)
     }
 
     fn worker_became_idle(&mut self) -> bool {
@@ -118,9 +111,9 @@ impl PresenterLifecycle {
 
 #[derive(Debug)]
 pub(super) enum PresenterEvent {
-    Ready { epoch: u64 },
+    WorkerReady,
     Frame(PresenterFrameEvent),
-    OutputUnavailable(String),
+    OutputUnavailable { output: OutputId, message: String },
     DeviceLost(String),
     UncapturedError(String),
     Stopped,
@@ -146,6 +139,7 @@ enum PresenterFrameEventKind {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct FrameTicket {
+    output: OutputId,
     generation: u64,
     epoch: u64,
     frame_id: u64,
@@ -175,11 +169,12 @@ impl FrameTracker {
         }
     }
 
-    fn begin(&mut self, generation: u64, epoch: u64) -> Option<FrameTicket> {
+    fn begin(&mut self, output: OutputId, generation: u64, epoch: u64) -> Option<FrameTicket> {
         if self.active.is_some() {
             return None;
         }
         let ticket = FrameTicket {
+            output,
             generation,
             epoch,
             frame_id: self.next_frame_id,
@@ -273,7 +268,6 @@ struct CompletionWork {
 
 enum PresenterCommand {
     Wait(CompletionWork),
-    Suspend,
     Shutdown,
 }
 
@@ -284,12 +278,87 @@ pub(super) enum PresenterTargetAvailability {
     Unavailable,
 }
 
-pub(super) struct PresenterHandle {
+pub(super) struct PresenterWorker {
     commands: mpsc::Sender<PresenterCommand>,
     events: CalloopSender<PresenterEvent>,
     worker: Option<JoinHandle<()>>,
-    epoch: Arc<AtomicU64>,
-    active: Arc<AtomicBool>,
+    shutdown_requested: bool,
+}
+
+impl PresenterWorker {
+    pub(super) fn spawn(gpu: &DrmGpu, events: CalloopSender<PresenterEvent>) -> Result<Self> {
+        let uncaptured_events = events.clone();
+        gpu.device.on_uncaptured_error(Arc::new(move |error| {
+            let _ = uncaptured_events.send(PresenterEvent::UncapturedError(error.to_string()));
+        }));
+        let device_lost_events = events.clone();
+        gpu.device.set_device_lost_callback(move |reason, message| {
+            let _ = device_lost_events
+                .send(PresenterEvent::DeviceLost(format!("{reason:?}: {message}")));
+        });
+
+        let (commands, command_receiver) = mpsc::channel();
+        let worker_device = gpu.device.clone();
+        let worker_events = events.clone();
+        let worker = thread::Builder::new()
+            .name("weld-drm-presenter".to_owned())
+            .spawn(move || {
+                let stopped_events = worker_events.clone();
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    run_worker(worker_device, command_receiver, worker_events);
+                }));
+                if result.is_err() {
+                    let _ = stopped_events.send(PresenterEvent::DeviceLost(
+                        "GBM/KMS presenter worker panicked".to_owned(),
+                    ));
+                }
+                let _ = stopped_events.send(PresenterEvent::Stopped);
+            })
+            .context("failed to spawn the GBM/KMS presenter worker")?;
+
+        Ok(Self {
+            commands,
+            events,
+            worker: Some(worker),
+            shutdown_requested: false,
+        })
+    }
+
+    pub(super) fn begin_shutdown(&mut self) {
+        if self.shutdown_requested {
+            return;
+        }
+        self.shutdown_requested = true;
+        let _ = self.commands.send(PresenterCommand::Shutdown);
+    }
+
+    pub(super) fn join_if_finished(&mut self) {
+        if self.worker.as_ref().is_some_and(JoinHandle::is_finished)
+            && let Some(worker) = self.worker.take()
+            && worker.join().is_err()
+        {
+            warn!("GBM/KMS presenter worker panicked during shutdown");
+        }
+    }
+
+    pub(super) fn finished(&self) -> bool {
+        self.worker.as_ref().is_none_or(JoinHandle::is_finished)
+    }
+}
+
+impl Drop for PresenterWorker {
+    fn drop(&mut self) {
+        self.begin_shutdown();
+        self.join_if_finished();
+    }
+}
+
+pub(super) struct PresenterHandle {
+    commands: mpsc::Sender<PresenterCommand>,
+    events: CalloopSender<PresenterEvent>,
+    output: OutputId,
+    epoch: u64,
+    active: bool,
     crtc: crtc::Handle,
     scanout: ScanoutSurface,
     frames: FrameTracker,
@@ -298,16 +367,16 @@ pub(super) struct PresenterHandle {
     queue: wgpu::Queue,
     imports: ScanoutImportCache,
     cursor_renderer: CursorOverlayRenderer,
-    shutdown_requested: bool,
 }
 
 impl PresenterHandle {
-    pub(super) fn spawn(
-        gpu: DrmGpu,
+    pub(super) fn new(
+        gpu: &DrmGpu,
         drm_surface: DrmSurface,
         drm_fd: DrmDeviceFd,
+        output: OutputId,
         crtc: crtc::Handle,
-        events: CalloopSender<PresenterEvent>,
+        worker: &PresenterWorker,
     ) -> Result<Self> {
         let gbm = GbmDevice::new(drm_fd.clone()).context("failed to create GBM device")?;
         let allocator = GbmAllocator::new(gbm, GbmBufferFlags::RENDERING | GbmBufferFlags::SCANOUT);
@@ -333,66 +402,25 @@ impl PresenterHandle {
         let imports = ScanoutImportCache::new(&gpu.device)?;
         let cursor_renderer = CursorOverlayRenderer::new(&gpu.device, &gpu.queue, SCANOUT_FORMAT);
 
-        let (commands, command_receiver) = mpsc::channel();
-        let epoch = Arc::new(AtomicU64::new(1));
-        let active = Arc::new(AtomicBool::new(true));
-        let worker_epoch = Arc::clone(&epoch);
-        let worker_active = Arc::clone(&active);
-        let worker_device = gpu.device.clone();
-
-        let uncaptured_events = events.clone();
-        gpu.device.on_uncaptured_error(Arc::new(move |error| {
-            let _ = uncaptured_events.send(PresenterEvent::UncapturedError(error.to_string()));
-        }));
-        let device_lost_events = events.clone();
-        gpu.device.set_device_lost_callback(move |reason, message| {
-            let _ = device_lost_events
-                .send(PresenterEvent::DeviceLost(format!("{reason:?}: {message}")));
-        });
-
-        let worker_events = events.clone();
-        let worker = thread::Builder::new()
-            .name("weld-drm-presenter".to_owned())
-            .spawn(move || {
-                let stopped_events = worker_events.clone();
-                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    run_worker(
-                        worker_device,
-                        command_receiver,
-                        worker_events,
-                        worker_epoch,
-                        worker_active,
-                    );
-                }));
-                if result.is_err() {
-                    let _ = stopped_events.send(PresenterEvent::OutputUnavailable(
-                        "GBM/KMS presenter worker panicked".to_owned(),
-                    ));
-                }
-                let _ = stopped_events.send(PresenterEvent::Stopped);
-            })
-            .context("failed to spawn the GBM/KMS presenter worker")?;
-
         Ok(Self {
-            commands,
-            events,
-            worker: Some(worker),
-            epoch,
-            active,
+            commands: worker.commands.clone(),
+            events: worker.events.clone(),
+            output,
+            epoch: 1,
+            active: true,
             crtc,
             scanout,
             frames: FrameTracker::new(),
             lifecycle: PresenterLifecycle::new(),
-            device: gpu.device,
-            queue: gpu.queue,
+            device: gpu.device.clone(),
+            queue: gpu.queue.clone(),
             imports,
             cursor_renderer,
-            shutdown_requested: false,
         })
     }
 
     pub(super) fn target_availability(&self) -> PresenterTargetAvailability {
-        if !self.active.load(Ordering::Acquire) {
+        if !self.active {
             return PresenterTargetAvailability::Unavailable;
         }
         match self.lifecycle.state {
@@ -424,7 +452,7 @@ impl PresenterHandle {
     fn try_acquire_frame(&mut self) -> Result<AcquiredFrame> {
         let ticket = self
             .frames
-            .begin(PRESENTER_GENERATION, self.epoch.load(Ordering::Acquire))
+            .begin(self.output, PRESENTER_GENERATION, self.epoch)
             .context("physical frame became busy while acquiring its target")?;
         let acquired = (|| {
             let (scanout, _age) = self
@@ -518,14 +546,13 @@ impl PresenterHandle {
 
     pub(super) fn suspend(&mut self) {
         self.lifecycle.suspend();
-        self.active.store(false, Ordering::Release);
-        self.epoch.fetch_add(1, Ordering::AcqRel);
+        self.active = false;
+        self.epoch = self.epoch.saturating_add(1);
         self.frames.suspend();
-        let _ = self.commands.send(PresenterCommand::Suspend);
     }
 
     pub(super) fn activate_after_session(&mut self) -> Result<()> {
-        self.active.store(true, Ordering::Release);
+        self.active = true;
         if !self
             .lifecycle
             .begin_activation(self.frames.has_rendering_frame())
@@ -541,7 +568,7 @@ impl PresenterHandle {
             .clear_pending_scanout()
             .inspect_err(|_| self.lifecycle.disable())
             .context("failed to clear stale GBM scanout state")?;
-        let epoch = self.epoch.load(Ordering::Acquire);
+        let epoch = self.epoch;
         self.lifecycle.mark_ready();
         debug!(epoch, "GBM/KMS presenter activated");
         Ok(())
@@ -549,26 +576,26 @@ impl PresenterHandle {
 
     pub(super) fn handle_event(&mut self, event: &PresenterEvent) {
         match event {
-            PresenterEvent::Ready { epoch }
-                if *epoch == self.epoch.load(Ordering::Acquire)
-                    && self.active.load(Ordering::Acquire) =>
-            {
+            PresenterEvent::WorkerReady if self.active => {
                 self.lifecycle.mark_ready();
             }
-            PresenterEvent::Frame(frame) => self.handle_frame_event(*frame),
+            PresenterEvent::Frame(frame) if frame.ticket.output == self.output => {
+                self.handle_frame_event(*frame);
+            }
             PresenterEvent::DeviceLost(_) => {
                 self.lifecycle.disable();
-                self.active.store(false, Ordering::Release);
-                self.epoch.fetch_add(1, Ordering::AcqRel);
+                self.active = false;
+                self.epoch = self.epoch.saturating_add(1);
                 self.frames.suspend();
             }
             PresenterEvent::Stopped => {
                 self.lifecycle.stop();
                 self.frames.clear();
             }
-            PresenterEvent::OutputUnavailable(_)
+            PresenterEvent::OutputUnavailable { .. }
             | PresenterEvent::UncapturedError(_)
-            | PresenterEvent::Ready { .. } => {}
+            | PresenterEvent::WorkerReady
+            | PresenterEvent::Frame(_) => {}
         }
     }
 
@@ -592,33 +619,16 @@ impl PresenterHandle {
         }
     }
 
-    pub(super) const fn stopped(&self) -> bool {
-        self.lifecycle.is_stopped()
-    }
-
-    pub(super) fn begin_shutdown(&mut self) {
-        if self.shutdown_requested {
-            return;
-        }
-        self.shutdown_requested = true;
+    pub(super) fn stop(&mut self) {
         self.lifecycle.suspend();
-        self.active.store(false, Ordering::Release);
-        self.epoch.fetch_add(1, Ordering::AcqRel);
+        self.active = false;
+        self.epoch = self.epoch.saturating_add(1);
         self.frames.clear();
-        let _ = self.commands.send(PresenterCommand::Shutdown);
-    }
-
-    pub(super) fn join_if_finished(&mut self) {
-        if (self.stopped() || self.worker.as_ref().is_some_and(JoinHandle::is_finished))
-            && let Some(worker) = self.worker.take()
-            && worker.join().is_err()
-        {
-            warn!("GBM/KMS presenter worker panicked during shutdown");
-        }
+        self.lifecycle.stop();
     }
 
     fn handle_frame_event(&mut self, event: PresenterFrameEvent) {
-        if event.ticket.epoch != self.epoch.load(Ordering::Acquire) {
+        if event.ticket.epoch != self.epoch {
             if self.frames.release_rendering(event.ticket) {
                 debug!(ticket = ?event.ticket, "retired GPU work from an older VT epoch");
                 self.finish_deferred_activation();
@@ -677,9 +687,12 @@ impl PresenterHandle {
     }
 
     fn report_unavailable(&mut self, message: String) {
-        let _ = self.events.send(PresenterEvent::OutputUnavailable(message));
+        let _ = self.events.send(PresenterEvent::OutputUnavailable {
+            output: self.output,
+            message,
+        });
         self.frames.drop_awaiting_vblank();
-        if !self.active.load(Ordering::Acquire)
+        if !self.active
             || self.frames.has_rendering_frame()
             || !self.lifecycle.begin_transient_recovery()
         {
@@ -697,14 +710,10 @@ impl PresenterHandle {
 
     fn report_terminal_unavailable(&mut self, message: String) {
         self.lifecycle.disable();
-        let _ = self.events.send(PresenterEvent::OutputUnavailable(message));
-    }
-}
-
-impl Drop for PresenterHandle {
-    fn drop(&mut self) {
-        self.begin_shutdown();
-        self.join_if_finished();
+        let _ = self.events.send(PresenterEvent::OutputUnavailable {
+            output: self.output,
+            message,
+        });
     }
 }
 
@@ -712,17 +721,13 @@ fn run_worker(
     device: wgpu::Device,
     commands: mpsc::Receiver<PresenterCommand>,
     events: CalloopSender<PresenterEvent>,
-    epoch: Arc<AtomicU64>,
-    active: Arc<AtomicBool>,
 ) {
     #[cfg(feature = "profiling-tracy")]
     if let Some(client) = tracing_tracy::client::Client::running() {
         client.set_thread_name("weld-drm-presenter");
     }
 
-    let _ = events.send(PresenterEvent::Ready {
-        epoch: epoch.load(Ordering::Acquire),
-    });
+    let _ = events.send(PresenterEvent::WorkerReady);
 
     while let Ok(command) = commands.recv() {
         match command {
@@ -732,19 +737,12 @@ fn run_worker(
                     "drm_wait_for_frame"
                 )
                 .entered();
-                let mut kind = wait_for_completion(&device, &work);
-                if matches!(kind, PresenterFrameEventKind::Prepared)
-                    && (!active.load(Ordering::Acquire)
-                        || epoch.load(Ordering::Acquire) != work.ticket.epoch)
-                {
-                    kind = PresenterFrameEventKind::Released(FrameOutcome::Interrupted);
-                }
+                let kind = wait_for_completion(&device, &work);
                 let _ = events.send(PresenterEvent::Frame(PresenterFrameEvent {
                     ticket: work.ticket,
                     kind,
                 }));
             }
-            PresenterCommand::Suspend => {}
             PresenterCommand::Shutdown => break,
         }
     }
@@ -1118,18 +1116,22 @@ mod tests {
     #[test]
     fn a_second_frame_cannot_start_until_the_active_frame_retires() {
         let mut frames = frames();
-        let first = frames.begin(1, 1).expect("first frame should start");
+        let first = frames
+            .begin(OutputId::new(1), 1, 1)
+            .expect("first frame should start");
 
-        assert!(frames.begin(1, 1).is_none());
+        assert!(frames.begin(OutputId::new(1), 1, 1).is_none());
         assert!(frames.mark_awaiting_vblank(first));
         assert!(frames.release_vblank(first));
-        assert!(frames.begin(1, 1).is_some());
+        assert!(frames.begin(OutputId::new(1), 1, 1).is_some());
     }
 
     #[test]
     fn wrong_phase_cannot_release_active_frame() {
         let mut frames = frames();
-        let frame = frames.begin(1, 1).expect("frame should start");
+        let frame = frames
+            .begin(OutputId::new(1), 1, 1)
+            .expect("frame should start");
 
         assert!(!frames.release_vblank(frame));
         assert!(frames.release_rendering(frame));
@@ -1138,14 +1140,18 @@ mod tests {
     #[test]
     fn suspend_keeps_a_worker_owned_target_until_rendering_finishes() {
         let mut frames = frames();
-        let rendering = frames.begin(1, 1).expect("frame should start");
+        let rendering = frames
+            .begin(OutputId::new(1), 1, 1)
+            .expect("frame should start");
 
         frames.suspend();
 
         assert!(frames.is_rendering(rendering));
         assert!(frames.release_rendering(rendering));
 
-        let presented = frames.begin(1, 2).expect("frame should restart");
+        let presented = frames
+            .begin(OutputId::new(1), 1, 2)
+            .expect("frame should restart");
         assert!(frames.mark_awaiting_vblank(presented));
         frames.suspend();
         assert!(frames.active.is_none());
@@ -1154,9 +1160,13 @@ mod tests {
     #[test]
     fn stale_worker_or_vblank_ticket_cannot_release_current_frame() {
         let mut frames = frames();
-        let old = frames.begin(1, 4).expect("old frame should start");
+        let old = frames
+            .begin(OutputId::new(1), 1, 4)
+            .expect("old frame should start");
         frames.clear();
-        let current = frames.begin(1, 6).expect("current frame should start");
+        let current = frames
+            .begin(OutputId::new(1), 1, 6)
+            .expect("current frame should start");
 
         assert!(!frames.release_rendering(old));
         assert!(!frames.release_vblank(old));

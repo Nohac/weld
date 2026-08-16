@@ -172,7 +172,7 @@ pub struct SurfaceNode {
 }
 
 /// Protocol-neutral request emitted by ECS policy for the host to apply.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum SurfaceAction {
     Close {
         surface: SurfaceId,
@@ -183,6 +183,11 @@ pub enum SurfaceAction {
     Resize {
         surface: SurfaceId,
         logical_size: bevy::math::UVec2,
+    },
+    SetOutputs {
+        surface: SurfaceId,
+        outputs: Vec<crate::output::OutputId>,
+        preferred: Option<crate::output::OutputId>,
     },
 }
 

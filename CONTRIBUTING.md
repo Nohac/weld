@@ -166,8 +166,16 @@ Use the compositor shortcuts to launch clients or stop Weld:
 - `Super+F`: Firefox
 - `Super+B`: Blender
 - `Super+=` / `Super+-` (DRM only): increase or decrease output scale by 0.25
+- `Super+Shift+D` (DRM only): match the primary output's physical scale to the first measured external output
+- `Super+Shift+O`: toggle output-topology diagnostics on the primary output
 - `Super+Shift+Escape`: exit Weld
 - `Ctrl+Alt+F1` through `Ctrl+Alt+F10` (DRM only): switch virtual terminal
+
+The physical-scale match uses mode and EDID diagonal DPI without quarter-step
+rounding. A later `Super+=` or `Super+-` adjustment snaps to the next value on
+the quarter-step grid. Clients using `wp_fractional_scale_v1` quantize their
+preferred scale to 1/120, so Weld's logical density match is exact while a
+client's internal render scale may be a close approximation.
 
 `SIGINT` and `SIGTERM` also request an orderly shutdown, including when sent
 from another VT. A real TTY run is required to validate a particular seat,

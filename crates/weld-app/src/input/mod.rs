@@ -21,11 +21,19 @@ use bevy::{
     camera::NormalizedRenderTarget,
     ecs::schedule::SystemSet,
 };
+use weld_core::OutputConfiguration;
+
+#[derive(Clone)]
+pub(crate) struct InputOutputTarget {
+    pub(crate) configuration: OutputConfiguration,
+    pub(crate) target: NormalizedRenderTarget,
+}
 
 pub use projection::TouchpadGesture;
 pub(crate) use projection::enqueue_raw_input;
+pub(crate) use projection::update_output_configurations;
 pub(crate) use routing::take_input_effects;
-pub use shortcuts::GlobalShortcutPlugin;
+pub use shortcuts::{GlobalShortcutAction, GlobalShortcutPlugin};
 pub(crate) use shortcuts::{filter_global_shortcut_event, take_host_commands};
 pub(crate) use state::set_input_update_time;
 pub use virtual_terminal::VirtualTerminalShortcutPlugin;
@@ -43,7 +51,7 @@ pub(crate) enum InputSystems {
 }
 
 pub(crate) struct InputBridgePlugin {
-    target: NormalizedRenderTarget,
+    targets: Vec<InputOutputTarget>,
 }
 
 impl InputBridgePlugin {
@@ -52,15 +60,15 @@ impl InputBridgePlugin {
     /// Raw input is buffered until the next refresh-paced application frame.
     /// Client delivery remains independent of that frame through the target
     /// most recently published by picking.
-    pub(crate) const fn new(target: NormalizedRenderTarget) -> Self {
-        Self { target }
+    pub(crate) fn new(targets: Vec<InputOutputTarget>) -> Self {
+        Self { targets }
     }
 }
 
 impl Plugin for InputBridgePlugin {
     fn build(&self, app: &mut App) {
         state::register(app);
-        projection::register(app, self.target.clone());
+        projection::register(app, self.targets.clone());
         routing::register(app);
     }
 }

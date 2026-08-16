@@ -33,7 +33,10 @@ use smithay::{
 };
 use tracing::{debug, info, warn};
 
-use crate::surface::{Extent, SurfaceId, WindowDecoration, WindowResizeEdge};
+use crate::{
+    OutputId,
+    surface::{Extent, SurfaceId, WindowDecoration, WindowResizeEdge},
+};
 
 use super::{
     ClientState, PendingSurfaceEvent, PendingSurfaceEventKind, ServerState,
@@ -50,6 +53,22 @@ pub(super) struct ToplevelState {
     pub(super) surface: ToplevelSurface,
     pub(super) decoration: WindowDecoration,
     pub(super) tree: SurfaceTreeState,
+    pub(super) outputs: SurfaceOutputAssignment,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) struct SurfaceOutputAssignment {
+    memberships: Vec<OutputId>,
+    preferred: OutputId,
+}
+
+impl SurfaceOutputAssignment {
+    fn primary(output: OutputId) -> Self {
+        Self {
+            memberships: vec![output],
+            preferred: output,
+        }
+    }
 }
 
 pub(super) struct IndexedStore<K, V> {
@@ -204,21 +223,135 @@ impl ServerState {
     }
 
     pub(super) fn send_all_surface_scales(&self) {
-        let surfaces = self
+        for toplevel in self
             .toplevels
             .values()
-            .filter(|toplevel| toplevel.surface.alive())
-            .flat_map(|toplevel| collect_surfaces(toplevel.surface.wl_surface()))
-            .chain(
-                self.popups
-                    .values()
-                    .filter(|popup| popup.surface.alive())
-                    .flat_map(|popup| collect_surfaces(popup.surface.wl_surface())),
-            )
+            .filter(|state| state.surface.alive())
+        {
+            self.send_surface_tree_scale(toplevel.surface.wl_surface(), &toplevel.outputs);
+        }
+        for popup in self.popups.values().filter(|state| state.surface.alive()) {
+            let Some(owner) = popup.owner.and_then(|owner| self.toplevels.get(owner)) else {
+                continue;
+            };
+            self.send_surface_tree_scale(popup.surface.wl_surface(), &owner.outputs);
+        }
+    }
+
+    pub(super) fn set_toplevel_outputs(
+        &mut self,
+        surface_id: SurfaceId,
+        memberships: &[OutputId],
+        preferred: Option<OutputId>,
+    ) {
+        let Some(assignment) = self.resolve_output_assignment(memberships, preferred) else {
+            warn!(?surface_id, "ignored an empty or unknown output assignment");
+            return;
+        };
+        let Some(toplevel) = self.toplevels.get_mut(surface_id) else {
+            return;
+        };
+        toplevel.outputs = assignment.clone();
+        let root = toplevel.surface.wl_surface().clone();
+        self.apply_surface_tree_outputs(&root, &assignment);
+
+        let popup_roots = self
+            .popups
+            .values()
+            .filter(|popup| popup.owner == Some(surface_id) && popup.surface.alive())
+            .map(|popup| popup.surface.wl_surface().clone())
+            .collect::<Vec<_>>();
+        for popup in popup_roots {
+            self.apply_surface_tree_outputs(&popup, &assignment);
+        }
+    }
+
+    pub(super) fn apply_popup_output_assignment(&self, surface_id: SurfaceId) {
+        let Some(popup) = self.popups.get(surface_id) else {
+            return;
+        };
+        let Some(owner) = popup.owner.and_then(|owner| self.toplevels.get(owner)) else {
+            return;
+        };
+        self.apply_surface_tree_outputs(popup.surface.wl_surface(), &owner.outputs);
+    }
+
+    fn resolve_output_assignment(
+        &self,
+        memberships: &[OutputId],
+        preferred: Option<OutputId>,
+    ) -> Option<SurfaceOutputAssignment> {
+        let mut memberships = memberships
+            .iter()
+            .copied()
+            .filter(|output| self.outputs.contains_key(output))
+            .collect::<Vec<_>>();
+        memberships.sort_unstable();
+        memberships.dedup();
+        let preferred = select_preferred_output(&memberships, preferred, |output| {
+            self.outputs
+                .get(&output)
+                .map(|output| output.native.current_scale().fractional_scale())
+        })?;
+        Some(SurfaceOutputAssignment {
+            memberships,
+            preferred,
+        })
+    }
+
+    fn apply_surface_tree_outputs(&self, root: &WlSurface, assignment: &SurfaceOutputAssignment) {
+        let surfaces = collect_surfaces(root)
+            .into_iter()
             .filter(Resource::is_alive)
             .collect::<Vec<_>>();
-        for surface in surfaces {
-            send_preferred_surface_scale(&self.output, &surface);
+        for surface in &surfaces {
+            for (output_id, output) in &self.outputs {
+                if assignment.memberships.contains(output_id) {
+                    output.native.enter(surface);
+                } else {
+                    output.native.leave(surface);
+                }
+            }
+        }
+        self.send_surface_tree_scale(root, assignment);
+    }
+
+    fn apply_surface_outputs(&self, surface: &WlSurface, assignment: &SurfaceOutputAssignment) {
+        for (output_id, output) in &self.outputs {
+            if assignment.memberships.contains(output_id) {
+                output.native.enter(surface);
+            } else {
+                output.native.leave(surface);
+            }
+        }
+        if let Some(preferred) = self.outputs.get(&assignment.preferred) {
+            send_preferred_surface_scale(&preferred.native, surface);
+        }
+    }
+
+    fn output_assignment_for_root(&self, root: &WlSurface) -> Option<&SurfaceOutputAssignment> {
+        if let Some(surface) = self.toplevels.id_for_surface(root) {
+            return self.toplevels.get(surface).map(|state| &state.outputs);
+        }
+        let popup = self
+            .popups
+            .id_for_surface(root)
+            .and_then(|surface| self.popups.get(surface))?;
+        popup
+            .owner
+            .and_then(|owner| self.toplevels.get(owner))
+            .map(|state| &state.outputs)
+    }
+
+    fn send_surface_tree_scale(&self, root: &WlSurface, assignment: &SurfaceOutputAssignment) {
+        let Some(preferred) = self.outputs.get(&assignment.preferred) else {
+            return;
+        };
+        for surface in collect_surfaces(root)
+            .into_iter()
+            .filter(Resource::is_alive)
+        {
+            send_preferred_surface_scale(&preferred.native, &surface);
         }
     }
 
@@ -286,7 +419,31 @@ impl ServerState {
             surface: surface_id,
             kind: PendingSurfaceEventKind::TreeSnapshot(snapshot),
         });
+        if let Some(assignment) = self
+            .toplevels
+            .get(surface_id)
+            .map(|state| state.outputs.clone())
+        {
+            self.apply_surface_tree_outputs(root, &assignment);
+        }
     }
+}
+
+fn select_preferred_output(
+    memberships: &[OutputId],
+    preferred: Option<OutputId>,
+    mut scale: impl FnMut(OutputId) -> Option<f64>,
+) -> Option<OutputId> {
+    preferred
+        .filter(|preferred| memberships.contains(preferred))
+        .or_else(|| {
+            memberships
+                .iter()
+                .copied()
+                .filter_map(|output| scale(output).map(|scale| (output, scale)))
+                .max_by(|left, right| left.1.total_cmp(&right.1))
+                .map(|(output, _)| output)
+        })
 }
 
 impl BufferHandler for ServerState {
@@ -306,7 +463,12 @@ impl ShmHandler for ServerState {
 
 impl FractionalScaleHandler for ServerState {
     fn new_fractional_scale(&mut self, surface: WlSurface) {
-        send_preferred_surface_scale(&self.output, &surface);
+        let root = owning_root(&surface);
+        if let Some(assignment) = self.output_assignment_for_root(&root).cloned() {
+            self.apply_surface_outputs(&surface, &assignment);
+        } else {
+            send_preferred_surface_scale(self.primary_output(), &surface);
+        }
     }
 }
 
@@ -391,9 +553,13 @@ impl CompositorHandler for ServerState {
         });
     }
 
-    fn new_subsurface(&mut self, surface: &WlSurface, _parent: &WlSurface) {
-        self.output.enter(surface);
-        send_preferred_surface_scale(&self.output, surface);
+    fn new_subsurface(&mut self, surface: &WlSurface, parent: &WlSurface) {
+        let root = owning_root(parent);
+        if let Some(assignment) = self.output_assignment_for_root(&root).cloned() {
+            self.apply_surface_outputs(surface, &assignment);
+        } else {
+            self.enter_primary_output(surface);
+        }
     }
 
     fn commit(&mut self, surface: &WlSurface) {
@@ -426,7 +592,7 @@ impl CompositorHandler for ServerState {
 
     fn destroyed(&mut self, surface: &WlSurface) {
         self.remove_cursor_surface(surface);
-        self.output.leave(surface);
+        self.leave_all_outputs(surface);
         let root = owning_root(surface);
         let Some(surface_id) = self.toplevels.id_for_surface(&root) else {
             self.remove_popup_surface(&root, surface);
@@ -459,13 +625,13 @@ impl XdgShellHandler for ServerState {
         surface.with_pending_state(|state| {
             state.size = Some(Size::<i32, Logical>::from((CLIENT_WIDTH, CLIENT_HEIGHT)));
         });
-        self.output.enter(surface.wl_surface());
-        send_preferred_surface_scale(&self.output, surface.wl_surface());
+        self.enter_primary_output(surface.wl_surface());
         let rejection_surface = surface.clone();
         let state = ToplevelState {
             surface,
             decoration: WindowDecoration::ClientSide,
             tree: SurfaceTreeState::default(),
+            outputs: SurfaceOutputAssignment::primary(self.primary_output),
         };
         if !self.toplevels.insert(id, state) {
             warn!(?id, "refused a duplicate xdg-toplevel registration");
@@ -521,7 +687,7 @@ impl XdgShellHandler for ServerState {
             return;
         };
         self.clear_input_focus_for_surface(wl_surface, self.event_time());
-        self.output.leave(wl_surface);
+        self.leave_all_outputs(wl_surface);
         if self.focused_toplevel == Some(id) {
             self.focused_toplevel = None;
         }
@@ -635,6 +801,32 @@ mod tests {
         );
         assert_eq!(next, None);
         assert_eq!(allocate_surface_id(&mut next), None);
+    }
+
+    #[test]
+    fn preferred_output_policy_preserves_explicit_membership_and_uses_highest_scale_fallback() {
+        let first = OutputId::new(1);
+        let second = OutputId::new(2);
+        let memberships = [first, second];
+
+        assert_eq!(
+            select_preferred_output(&memberships, Some(first), |output| {
+                Some(if output == first { 1.0 } else { 1.5 })
+            }),
+            Some(first)
+        );
+        assert_eq!(
+            select_preferred_output(&memberships, None, |output| {
+                Some(if output == first { 1.0 } else { 1.5 })
+            }),
+            Some(second)
+        );
+        assert_eq!(
+            select_preferred_output(&memberships, Some(OutputId::new(3)), |output| {
+                Some(if output == first { 1.0 } else { 1.5 })
+            }),
+            Some(second)
+        );
     }
 
     #[test]

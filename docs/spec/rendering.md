@@ -36,10 +36,11 @@ Bevy transforms, nested clipping, opacity, rounded corners, borders, shadows,
 text, images, hit testing, and compositor-owned UI. Plugins work with Weld and
 Bevy resources, never native image handles or synchronization primitives.
 
-Each physical output should ultimately have its own composition target and
-camera rather than one giant cross-monitor texture. Output-independent policy
-keeps logical entities stable; presentation retargets their roots when they
-move between outputs.
+Each physical output has its own composition target and camera rather than one
+giant cross-monitor texture. Output-independent policy keeps logical entities
+stable; presentation creates one camera-targeted projection for every output a
+window intersects. The projections share the same current client buffer while
+Bevy renders compositor UI, SSD, clipping, and shadows at each target's scale.
 
 ## Performance and display work — Direction
 

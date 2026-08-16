@@ -59,8 +59,8 @@ pub mod prelude {
             TouchpadPinch, TouchpadSwipe,
         },
         output::{
-            OutputCompositionCamera, OutputGeometry, OutputId, OutputPosition, PrimaryOutput,
-            RendersOutput, WeldOutput,
+            OutputCompositionCamera, OutputFootprintProvenance, OutputGeometry, OutputId,
+            OutputInfo, OutputPlacement, OutputPosition, PrimaryOutput, RendersOutput, WeldOutput,
         },
         surface::{
             ClientDecorated, ClientPopup, ClientSurface, ClientToplevel, MappedSurface,

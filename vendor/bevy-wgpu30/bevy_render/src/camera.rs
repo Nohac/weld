@@ -295,7 +295,7 @@ impl NormalizedRenderTargetExt for NormalizedRenderTarget {
                 .get(id)
                 .map(|tex| RenderTargetInfo {
                     physical_size: tex.size,
-                    scale_factor: 1.0,
+                    scale_factor: tex.scale_factor,
                 })
                 .ok_or(MissingRenderTargetInfoError::TextureView { texture_view: *id }),
             NormalizedRenderTarget::None { width, height } => Ok(RenderTargetInfo {

@@ -10,17 +10,17 @@ mod shm;
 mod surface_tree;
 mod toplevel;
 
-pub(crate) use output::{OutputDescriptor, OutputMetrics};
+pub(crate) use output::{OutputDescriptor, OutputMetrics, ServerOutputDefinition};
 pub use surface_tree::{PendingSurfaceBufferContent, PendingSurfaceTreeSnapshot};
 
 use std::{
-    collections::{HashSet, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
     ffi::OsString,
     sync::Arc,
     time::Instant,
 };
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use smithay::{
     backend::allocator::dmabuf::DmabufSource,
     desktop::{PopupGrab, PopupManager},
@@ -56,6 +56,7 @@ use smithay::{
 use tracing::{debug, warn};
 
 use crate::{
+    OutputId,
     dmabuf::{DmabufCapabilities, DmabufReleaseId, DmabufSourceCache},
     input::{InputPosition, SurfaceInputTarget},
     surface::{
@@ -93,8 +94,8 @@ pub struct ServerState {
     seat_state: SeatState<Self>,
     data_device_state: DataDeviceState,
     seat: Seat<Self>,
-    output: Output,
-    output_metrics: OutputMetrics,
+    outputs: HashMap<OutputId, ServerOutput>,
+    primary_output: OutputId,
     toplevels: ToplevelStore,
     popups: PopupStore,
     popup_manager: PopupManager,
@@ -126,10 +127,14 @@ pub struct ServerState {
 pub(crate) struct ServerOptions<'a> {
     pub(crate) started_at: Instant,
     pub(crate) seat_name: &'a str,
-    pub(crate) output_descriptor: OutputDescriptor,
-    pub(crate) output_metrics: OutputMetrics,
+    pub(crate) outputs: Vec<ServerOutputDefinition>,
     pub(crate) dmabuf_capabilities: Option<&'a DmabufCapabilities>,
     pub(crate) dmabuf_sources: DmabufSourceCache,
+}
+
+struct ServerOutput {
+    native: Output,
+    metrics: OutputMetrics,
 }
 
 impl ServerState {
@@ -143,8 +148,7 @@ impl ServerState {
         let ServerOptions {
             started_at,
             seat_name,
-            output_descriptor,
-            output_metrics,
+            outputs,
             dmabuf_capabilities,
             dmabuf_sources,
         } = options;
@@ -168,19 +172,42 @@ impl ServerState {
             .context("failed to initialize the compositor keyboard keymap")?;
         seat.add_pointer();
 
-        let output = Output::new(
-            output_descriptor.name,
-            output_descriptor.physical_properties,
-        );
-        let output_mode = output_metrics.mode();
-        output.create_global::<Self>(&display_handle);
-        output.change_current_state(
-            Some(output_mode),
-            Some(Transform::Normal),
-            Some(output_metrics.scale()),
-            Some((0, 0).into()),
-        );
-        output.set_preferred(output_mode);
+        let primary_output = outputs
+            .iter()
+            .find(|output| output.primary)
+            .map(|output| output.id)
+            .context("server output layout has no primary output")?;
+        if outputs.iter().filter(|output| output.primary).count() != 1 {
+            bail!("server output layout must contain exactly one primary output");
+        }
+        let mut installed_outputs = HashMap::with_capacity(outputs.len());
+        for definition in outputs {
+            let output = Output::new(
+                definition.descriptor.name,
+                definition.descriptor.physical_properties,
+            );
+            let output_mode = definition.metrics.mode();
+            output.create_global::<Self>(&display_handle);
+            output.change_current_state(
+                Some(output_mode),
+                Some(Transform::Normal),
+                Some(definition.metrics.scale()),
+                Some(definition.logical_position.into()),
+            );
+            output.set_preferred(output_mode);
+            if installed_outputs
+                .insert(
+                    definition.id,
+                    ServerOutput {
+                        native: output,
+                        metrics: definition.metrics,
+                    },
+                )
+                .is_some()
+            {
+                bail!("server output layout contains duplicate output IDs");
+            }
+        }
 
         let listening_socket = ListeningSocketSource::with_name(WELD_SOCKET_NAME)
             .with_context(|| {
@@ -287,8 +314,8 @@ impl ServerState {
             seat_state,
             data_device_state,
             seat,
-            output,
-            output_metrics,
+            outputs: installed_outputs,
+            primary_output,
             toplevels: ToplevelStore::default(),
             popups: PopupStore::default(),
             popup_manager: PopupManager::default(),
@@ -319,12 +346,48 @@ impl ServerState {
     }
 
     pub(crate) fn update_output_metrics(&mut self, metrics: OutputMetrics) {
-        if self.output_metrics == metrics {
+        let Some(output) = self.outputs.get_mut(&self.primary_output) else {
+            return;
+        };
+        if output.metrics == metrics {
             return;
         }
-        install_output_metrics(&self.output, self.output_metrics, metrics);
-        self.output_metrics = metrics;
+        install_output_metrics(&output.native, output.metrics, metrics);
+        output.metrics = metrics;
         self.send_all_surface_scales();
+    }
+
+    pub(crate) fn update_output_positions(&mut self, positions: &[(OutputId, (i32, i32))]) {
+        for (id, position) in positions {
+            let Some(output) = self.outputs.get(id) else {
+                warn!(output = ?id, "cannot position an output missing from the Wayland server");
+                continue;
+            };
+            output
+                .native
+                .change_current_state(None, None, None, Some((*position).into()));
+        }
+    }
+
+    fn primary_output(&self) -> &Output {
+        &self.outputs[&self.primary_output].native
+    }
+
+    fn enter_primary_output(
+        &self,
+        surface: &smithay::reexports::wayland_server::protocol::wl_surface::WlSurface,
+    ) {
+        self.primary_output().enter(surface);
+        output::send_preferred_surface_scale(self.primary_output(), surface);
+    }
+
+    fn leave_all_outputs(
+        &self,
+        surface: &smithay::reexports::wayland_server::protocol::wl_surface::WlSurface,
+    ) {
+        for output in self.outputs.values() {
+            output.native.leave(surface);
+        }
     }
 
     pub fn take_surface_events(&mut self) -> impl Iterator<Item = PendingSurfaceEvent> + '_ {
@@ -364,6 +427,13 @@ impl ServerState {
                 surface,
                 logical_size,
             } => self.pending_resizes.queue(surface, logical_size),
+            SurfaceAction::SetOutputs {
+                surface,
+                outputs,
+                preferred,
+            } => {
+                self.set_toplevel_outputs(surface, &outputs, preferred);
+            }
         }
     }
 

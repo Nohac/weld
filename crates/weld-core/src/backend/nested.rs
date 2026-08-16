@@ -14,14 +14,17 @@ use crate::runtime::{
     ChildProcesses, FrameState, HostCommand, HostCommandEffect, LoopData, PendingCapture,
     iteration_work, server_mut,
 };
-use crate::server::{OutputDescriptor, OutputMetrics, ServerOptions, ServerState};
+use crate::server::{
+    OutputDescriptor, OutputMetrics, ServerOptions, ServerOutputDefinition, ServerState,
+};
 use crate::{
-    OutputScale,
+    OutputConfiguration, OutputHead, OutputId, OutputScale,
     cursor::CursorImage,
     host::{
-        CompositionDemand, CompositionDestination, CompositionFrame, PreparedHost, RenderContext,
-        RunOptions,
+        CompositionDemand, CompositionDestination, CompositionFrame, CompositionOutputRequest,
+        PreparedHost, RenderContext, RunOptions,
     },
+    surface::LogicalPoint,
 };
 use anyhow::{Context, Result, anyhow, bail};
 use calloop::channel;
@@ -88,14 +91,22 @@ pub(crate) fn prepare(options: RunOptions, signals: Signals) -> Result<PreparedH
     let mut renderer = NestedRenderer::new(window, display_handle, initial_size)?;
     let (dmabuf_release_sender, dmabuf_release_source) = channel::channel();
     let initial_extent = crate::surface::Extent::new(initial_size.width, initial_size.height);
+    let nested_output = OutputConfiguration::new(
+        OutputId::new(1),
+        initial_extent,
+        OutputScale::new(initial_scale_factor)?,
+        LogicalPoint::ZERO,
+        true,
+        None,
+    )?;
     let context = RenderContext {
         instance: renderer.instance().clone(),
         adapter: renderer.adapter().clone(),
         device: renderer.device().clone(),
         queue: renderer.queue().clone(),
         dmabuf: crate::dmabuf::DmabufContext::new(dmabuf_release_sender, renderer.dmabuf_sources()),
-        extent: initial_extent,
-        scale_factor: initial_scale_factor,
+        output_heads: vec![OutputHead::new(OutputId::new(1), "weld-nested", None)],
+        outputs: vec![nested_output],
         composition_format: wgpu::TextureFormat::Rgba8UnormSrgb,
     };
 
@@ -115,8 +126,13 @@ pub(crate) fn prepare(options: RunOptions, signals: Signals) -> Result<PreparedH
             ServerOptions {
                 started_at,
                 seat_name: "weld-seat0",
-                output_descriptor: OutputDescriptor::nested(),
-                output_metrics,
+                outputs: vec![ServerOutputDefinition {
+                    id: OutputId::new(1),
+                    descriptor: OutputDescriptor::nested(),
+                    metrics: output_metrics,
+                    logical_position: (0, 0),
+                    primary: true,
+                }],
                 dmabuf_capabilities: renderer.dmabuf_capabilities(),
                 dmabuf_sources: renderer.dmabuf_sources(),
             },
@@ -239,10 +255,15 @@ pub(crate) fn prepare(options: RunOptions, signals: Signals) -> Result<PreparedH
                         }
                         output_metrics = candidate;
                         loop_data.server.update_output_metrics(output_metrics);
-                        shell.set_output_geometry(
+                        let configuration = OutputConfiguration::new(
+                            OutputId::new(1),
                             crate::surface::Extent::new(physical_size.width, physical_size.height),
-                            scale_factor,
-                        );
+                            OutputScale::new(scale_factor)?,
+                            LogicalPoint::ZERO,
+                            true,
+                            None,
+                        )?;
+                        shell.update_output_topology(&[configuration]);
                         frame_state.request_composition();
                     }
                     Err(error) => warn!(
@@ -354,8 +375,15 @@ pub(crate) fn prepare(options: RunOptions, signals: Signals) -> Result<PreparedH
                 }
                 if work.advance_main {
                     loop_data.server.flush_pending_resizes();
-                    completed_composition =
-                        Some(shell.render_composition(CompositionDestination::Owned)?);
+                    let mut compositions =
+                        shell.render_outputs(vec![CompositionOutputRequest {
+                            output: OutputId::new(1),
+                            destination: CompositionDestination::Owned,
+                        }])?;
+                    let composition = compositions
+                        .pop()
+                        .context("nested composition returned no output frame")?;
+                    completed_composition = Some(composition.frame);
                     pending_presentation_id = Some(loop_data.server.stage_frame_callbacks());
                     frame_state.composition_rendered(update_now);
                     request_next_composition = bevy_requested_redraw;
@@ -468,6 +496,10 @@ fn apply_host_command(
                 ?adjustment,
                 "ignored output-scale shortcut because nested scale is host-owned"
             );
+            Ok(false)
+        }
+        HostCommandEffect::MatchOutputPhysicalScale => {
+            warn!("ignored physical-scale match because nested scale is host-owned");
             Ok(false)
         }
     }

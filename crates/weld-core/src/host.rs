@@ -1,15 +1,16 @@
 //! Application-host contract driven by Weld's native backends.
 
-use std::{ffi::OsString, path::PathBuf, str::FromStr};
+use std::{ffi::OsString, path::PathBuf};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use calloop::signals::{Signal, Signals};
 use tracing::warn;
 
 use crate::{
     dmabuf::DmabufContext,
     input::{RawSeatEvent, SeatInputEffect},
-    runtime::{HostCommand, OutputScaleAdjustment},
+    output::{OutputConfiguration, OutputHead, OutputId, OutputScale},
+    runtime::HostCommand,
     server::PendingSurfaceEvent,
     surface::{Extent, SurfaceAction},
 };
@@ -21,57 +22,6 @@ pub(crate) struct RunOptions {
     pub(crate) screenshot: Option<PathBuf>,
     pub(crate) remote_debug_enabled: bool,
     pub(crate) output_scale: OutputScale,
-}
-
-/// Valid logical scale applied to a physical compositor output.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct OutputScale(f64);
-
-impl OutputScale {
-    const STEP: f64 = 0.25;
-
-    /// Validates a finite, positive output scale.
-    pub fn new(value: f64) -> Result<Self> {
-        if !value.is_finite() || value <= 0.0 {
-            bail!("output scale must be finite and positive");
-        }
-        Ok(Self(value))
-    }
-
-    /// Returns the validated scale factor.
-    pub const fn value(self) -> f64 {
-        self.0
-    }
-
-    /// Returns the next quarter-step scale in the requested direction.
-    pub fn adjust(self, adjustment: OutputScaleAdjustment) -> Option<Self> {
-        let next = match adjustment {
-            OutputScaleAdjustment::Increase => ((self.0 / Self::STEP).floor() + 1.0) * Self::STEP,
-            OutputScaleAdjustment::Decrease if self.0 <= Self::STEP => return None,
-            OutputScaleAdjustment::Decrease => {
-                (((self.0 / Self::STEP).ceil() - 1.0) * Self::STEP).max(Self::STEP)
-            }
-        };
-        Self::new(next).ok().filter(|next| *next != self)
-    }
-}
-
-impl Default for OutputScale {
-    fn default() -> Self {
-        Self(1.0)
-    }
-}
-
-impl FromStr for OutputScale {
-    type Err = anyhow::Error;
-
-    fn from_str(value: &str) -> Result<Self, Self::Err> {
-        Self::new(
-            value
-                .parse::<f64>()
-                .with_context(|| format!("invalid output scale {value:?}"))?,
-        )
-    }
 }
 
 /// Native host selected before an application is constructed.
@@ -196,8 +146,8 @@ pub struct RenderContext {
     pub device: wgpu::Device,
     pub queue: wgpu::Queue,
     pub dmabuf: DmabufContext,
-    pub extent: Extent,
-    pub scale_factor: f64,
+    pub output_heads: Vec<OutputHead>,
+    pub outputs: Vec<OutputConfiguration>,
     pub composition_format: wgpu::TextureFormat,
 }
 
@@ -274,12 +224,12 @@ pub trait CompositionHost {
     /// Services the restricted remote-control schedule without advancing the
     /// application world.
     fn service_remote_debug(&mut self);
-    fn render_composition(
+    fn render_outputs(
         &mut self,
-        destination: CompositionDestination,
-    ) -> Result<CompositionFrame>;
-    /// Register output geometry before the next main advance.
-    fn set_output_geometry(&mut self, extent: Extent, scale_factor: f64);
+        requests: Vec<CompositionOutputRequest>,
+    ) -> Result<Vec<CompositionOutputFrame>>;
+    /// Reconciles enabled output geometry before the next main advance.
+    fn update_output_topology(&mut self, outputs: &[OutputConfiguration]);
     fn should_exit(&self) -> bool;
     fn take_input_effects(&mut self) -> Vec<SeatInputEffect>;
     fn take_cursor_update(&mut self) -> crate::cursor::CursorHostUpdate;
@@ -326,6 +276,18 @@ impl CompositionTargetView {
 pub enum CompositionDestination {
     Owned,
     External(CompositionTargetView),
+}
+
+/// Output and destination selected for one member of an atomic composition.
+pub struct CompositionOutputRequest {
+    pub output: OutputId,
+    pub destination: CompositionDestination,
+}
+
+/// Output identity paired with its completed composition.
+pub struct CompositionOutputFrame {
+    pub output: OutputId,
+    pub frame: CompositionFrame,
 }
 
 /// Completed application composition and any storage retained for readback.

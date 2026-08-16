@@ -13,6 +13,8 @@ pub struct ManualTextureView {
     pub texture_view: TextureView,
     pub size: UVec2,
     pub view_format: TextureFormat,
+    /// Logical-to-physical scale reported to cameras targeting this view.
+    pub scale_factor: f32,
 }
 
 impl ManualTextureView {
@@ -21,6 +23,7 @@ impl ManualTextureView {
             texture_view,
             size,
             view_format: TextureFormat::Rgba8UnormSrgb,
+            scale_factor: 1.0,
         }
     }
 }

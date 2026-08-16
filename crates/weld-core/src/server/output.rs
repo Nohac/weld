@@ -11,11 +11,20 @@ use smithay::{
     },
 };
 
-use crate::OutputScale;
+use crate::{OutputId, OutputScale};
 
 pub(crate) struct OutputDescriptor {
     pub(crate) name: String,
     pub(crate) physical_properties: PhysicalProperties,
+}
+
+/// One Wayland output global installed when the compositor server starts.
+pub(crate) struct ServerOutputDefinition {
+    pub(crate) id: OutputId,
+    pub(crate) descriptor: OutputDescriptor,
+    pub(crate) metrics: OutputMetrics,
+    pub(crate) logical_position: (i32, i32),
+    pub(crate) primary: bool,
 }
 
 impl OutputDescriptor {

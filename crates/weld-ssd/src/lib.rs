@@ -1,5 +1,7 @@
 //! Opinionated server-side decorations built from Weld window primitives.
 
+use std::collections::HashSet;
+
 const PROFILE_TARGET: &str = "weld_profile";
 
 use bevy::{
@@ -7,6 +9,7 @@ use bevy::{
     color::Color,
     ecs::{
         component::Component,
+        entity::Entity,
         observer::On,
         query::{With, Without},
         schedule::IntoScheduleConfigs,
@@ -22,18 +25,22 @@ use bevy::{
     prelude::{
         AlignItems, BackgroundColor, BorderColor, BorderRadius, BoxShadow, Button, Children,
         FlexDirection, GlobalZIndex, JustifyContent, Node, Overflow, PositionType, Rot2, Scene,
-        SceneList, UiRect, UiTransform, ZIndex, percent, px,
+        SceneList, UiRect, UiTargetCamera, UiTransform, ZIndex, percent, px,
     },
     scene::{CommandsSceneExt, bsn, bsn_list, on},
     window::RequestRedraw,
 };
-use weld_app::surface::{
-    ClientToplevel, MappedSurface, ServerDecorated, SurfaceId, SurfaceView, ToplevelResizeEdge,
+use weld_app::{
+    output::{OutputCompositionCamera, PrimaryOutput, WeldOutput},
+    surface::{
+        ClientToplevel, MappedSurface, ServerDecorated, SurfaceId, SurfaceView, ToplevelResizeEdge,
+    },
 };
 use weld_window::{
     FocusedWindow, PresentationInsets, PresentationOffset, PresentsWindow,
     PrimaryWindowPresentation, WindowGeometryAnchor, WindowIntent, WindowIntentKind,
-    WindowOccupant, WindowSystems, WindowZOrder,
+    WindowOccupant, WindowOutput, WindowOutputIntersections, WindowProjection, WindowSystems,
+    WindowZOrder,
 };
 use weld_window_ui::{WindowMoveHandle, WindowResizeHandle, surface_content_with_node};
 
@@ -71,6 +78,10 @@ impl Plugin for SsdPlugin {
         )
         .add_systems(
             PreUpdate,
+            reconcile_ssd_projections.in_set(WindowSystems::UiReconcile),
+        )
+        .add_systems(
+            PreUpdate,
             sync_focus_style.in_set(WindowSystems::UiReconcile),
         )
         .add_systems(
@@ -82,13 +93,13 @@ impl Plugin for SsdPlugin {
 
 fn revoke_ssd_presentations(
     mut commands: Commands,
-    roots: Query<(bevy::ecs::entity::Entity, &PresentsWindow), With<SsdPresentation>>,
+    roots: Query<(bevy::ecs::entity::Entity, &WindowProjection), With<SsdPresentation>>,
     windows: Query<&WindowOccupant>,
     occupants: Query<(), With<ServerDecorated>>,
 ) {
-    for (root, presentation) in &roots {
+    for (root, projection) in &roots {
         let still_server_decorated = windows
-            .get(presentation.0)
+            .get(projection.window())
             .ok()
             .is_some_and(|occupant| occupants.contains(occupant.entity()));
         if !still_server_decorated {
@@ -97,10 +108,106 @@ fn revoke_ssd_presentations(
     }
 }
 
+fn reconcile_ssd_projections(
+    mut commands: Commands,
+    windows: Query<(
+        bevy::ecs::entity::Entity,
+        &PrimaryWindowPresentation,
+        &WindowOccupant,
+        &WindowZOrder,
+        &WindowOutputIntersections,
+    )>,
+    occupants: Query<(
+        &ClientToplevel,
+        Option<&MappedSurface>,
+        Option<&ServerDecorated>,
+    )>,
+    outputs: Query<&OutputCompositionCamera>,
+    roots: Query<(bevy::ecs::entity::Entity, &WindowProjection), With<SsdPresentation>>,
+) {
+    let mut retained = HashSet::new();
+    for (window, primary, _, _, _) in &windows {
+        if let Ok((_, projection)) = roots.get(primary.entity()) {
+            retained.insert((window, projection.output()));
+        }
+    }
+
+    let mut secondary_roots = roots
+        .iter()
+        .filter(
+            |(root, projection)| match windows.get(projection.window()) {
+                Ok((_, primary, _, _, _)) => *root != primary.entity(),
+                Err(_) => true,
+            },
+        )
+        .collect::<Vec<_>>();
+    secondary_roots.sort_unstable_by_key(|(root, _)| root.to_bits());
+    for (root, projection) in secondary_roots {
+        let Ok((_, _, _, _, intersections)) = windows.get(projection.window()) else {
+            commands.entity(root).despawn();
+            continue;
+        };
+        if !intersections.contains(projection.output())
+            || !retained.insert((projection.window(), projection.output()))
+        {
+            commands.entity(root).despawn();
+        }
+    }
+
+    for (window, _, occupant, z_order, intersections) in &windows {
+        let Ok((toplevel, Some(_), Some(_))) = occupants.get(occupant.entity()) else {
+            continue;
+        };
+        for output in intersections.iter() {
+            if !retained.insert((window, output)) {
+                continue;
+            }
+            let Ok(camera) = outputs.get(output) else {
+                continue;
+            };
+            let Some(camera) = camera.entity() else {
+                continue;
+            };
+            commands
+                .spawn_scene(scene(window, toplevel.surface))
+                .insert((
+                    WindowProjection::new(window, output),
+                    UiTargetCamera(camera),
+                    SsdPresentation,
+                    PresentationOffset::default(),
+                    PresentationInsets::new(
+                        BORDER_WIDTH,
+                        HEADER_HEIGHT + BORDER_WIDTH,
+                        BORDER_WIDTH,
+                        BORDER_WIDTH,
+                    ),
+                    WindowGeometryAnchor(Vec2::new(0.0, HEADER_HEIGHT)),
+                    GlobalZIndex(z_order.0),
+                ));
+        }
+    }
+}
+
+type OutputCameraQuery<'w, 's> = Query<
+    'w,
+    's,
+    (
+        Entity,
+        Option<&'static OutputCompositionCamera>,
+        Option<&'static PrimaryOutput>,
+    ),
+    With<WeldOutput>,
+>;
+
 fn present_ssd_windows(
     mut commands: Commands,
     windows: Query<
-        (bevy::ecs::entity::Entity, &WindowOccupant, &WindowZOrder),
+        (
+            bevy::ecs::entity::Entity,
+            &WindowOccupant,
+            &WindowZOrder,
+            Option<&WindowOutput>,
+        ),
         Without<PrimaryWindowPresentation>,
     >,
     occupants: Query<(
@@ -108,17 +215,32 @@ fn present_ssd_windows(
         Option<&MappedSurface>,
         Option<&ServerDecorated>,
     )>,
+    outputs: OutputCameraQuery,
 ) {
     let _presentation_span =
         tracing::trace_span!(target: PROFILE_TARGET, "weld_ssd_present_windows").entered();
-    for (window, occupant, z_order) in &windows {
+    for (window, occupant, z_order, output) in &windows {
         let Ok((toplevel, Some(_), Some(_))) = occupants.get(occupant.entity()) else {
             continue;
         };
-        commands
+        let output = output.map(|output| output.0).or_else(|| {
+            outputs
+                .iter()
+                .find_map(|(output, _, primary)| primary.is_some().then_some(output))
+        });
+        let Some(output) = output else {
+            continue;
+        };
+        let camera = outputs
+            .get(output)
+            .ok()
+            .and_then(|(_, camera, _)| camera)
+            .and_then(OutputCompositionCamera::entity);
+        let root = commands
             .spawn_scene(scene(window, toplevel.surface))
             .insert((
                 PresentsWindow(window),
+                WindowProjection::new(window, output),
                 SsdPresentation,
                 PresentationOffset::default(),
                 PresentationInsets::new(
@@ -129,18 +251,22 @@ fn present_ssd_windows(
                 ),
                 WindowGeometryAnchor(Vec2::new(0.0, HEADER_HEIGHT)),
                 GlobalZIndex(z_order.0),
-            ));
+            ))
+            .id();
+        if let Some(camera) = camera {
+            commands.entity(root).insert(UiTargetCamera(camera));
+        }
     }
 }
 
 fn sync_focus_style(
     focus: Res<FocusedWindow>,
-    mut roots: Query<(&PresentsWindow, &mut BorderColor), With<SsdPresentation>>,
+    mut roots: Query<(&WindowProjection, &mut BorderColor), With<SsdPresentation>>,
     mut redraw: bevy::ecs::message::MessageWriter<RequestRedraw>,
 ) {
     let mut changed = false;
-    for (presentation, mut border) in &mut roots {
-        let expected = BorderColor::all(if focus.entity() == Some(presentation.0) {
+    for (projection, mut border) in &mut roots {
+        let expected = BorderColor::all(if focus.entity() == Some(projection.window()) {
             FOCUSED_BORDER
         } else {
             UNFOCUSED_BORDER
@@ -413,8 +539,8 @@ mod tests {
     use weld_float::FloatPlugin;
     use weld_window::{
         FocusedWindow, OccupiesWindow, PresentationInsets, PresentationOffset,
-        PrimaryWindowPresentation, WindowGeometry, WindowGeometryAnchor, WindowInteractionSession,
-        WindowPlugin, WindowVisibility, WindowZOrder,
+        PrimaryWindowPresentation, WindowGeometry, WindowGeometryAnchor, WindowInteractionKind,
+        WindowInteractionSession, WindowPlugin, WindowVisibility, WindowZOrder,
     };
     use weld_window_ui::{
         PrimarySurfacePresentation, WindowMoveHandle, WindowResizeHandle, WindowUiPlugin,
@@ -1240,6 +1366,90 @@ mod tests {
             take_surface_actions(app.world_mut()).contains(&SurfaceAction::Focus {
                 surface: Some(first),
             })
+        );
+    }
+
+    #[test]
+    fn rehoming_keeps_one_ssd_projection_per_output() {
+        let mut app = test_app();
+        let surface = SurfaceId::new(91);
+        enqueue_surface_event(
+            app.world_mut(),
+            HostSurfaceEvent {
+                surface,
+                kind: HostSurfaceEventKind::Created {
+                    decoration: WindowDecoration::ServerSide,
+                },
+            },
+        );
+        enqueue_surface_event(app.world_mut(), frame(surface, 300, 60));
+        app.update();
+
+        let window = app
+            .world_mut()
+            .query::<(&ClientToplevel, &OccupiesWindow)>()
+            .single(app.world())
+            .expect("mapped surface should occupy a window")
+            .1
+            .0;
+        let primary_root = app
+            .world()
+            .get::<PrimaryWindowPresentation>(window)
+            .expect("SSD should claim the window")
+            .entity();
+        let primary_output = app
+            .world()
+            .get::<WindowProjection>(primary_root)
+            .expect("primary presentation should target an output")
+            .output();
+        let external = app
+            .world_mut()
+            .spawn((
+                WeldOutput {
+                    id: OutputId::new(2),
+                },
+                OutputGeometry::from_physical(UVec2::new(1_000, 800), 1.0),
+                OutputPosition(Vec2::new(0.0, -800.0)),
+            ))
+            .id();
+        app.world_mut().entity_mut(window).insert((
+            WindowOutput(external),
+            WindowInteractionSession {
+                kind: WindowInteractionKind::Move,
+            },
+        ));
+        let mut geometry = app
+            .world_mut()
+            .get_mut::<WindowGeometry>(window)
+            .expect("window should have geometry");
+        geometry.position = Vec2::new(100.0, 750.0);
+        geometry.size = Vec2::new(300.0, 60.0);
+        let secondary_root = app
+            .world_mut()
+            .spawn((SsdPresentation, WindowProjection::new(window, external)))
+            .id();
+
+        app.update();
+
+        let external_roots = app
+            .world_mut()
+            .query::<(
+                bevy::ecs::entity::Entity,
+                &WindowProjection,
+                &SsdPresentation,
+            )>()
+            .iter(app.world())
+            .filter(|(_, projection, _)| {
+                projection.window() == window && projection.output() == external
+            })
+            .map(|(root, _, _)| root)
+            .collect::<Vec<_>>();
+        assert_eq!(external_roots, [secondary_root]);
+        assert_eq!(
+            app.world()
+                .get::<WindowProjection>(primary_root)
+                .map(|projection| projection.output()),
+            Some(primary_output)
         );
     }
 }

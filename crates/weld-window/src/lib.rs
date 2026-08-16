@@ -27,9 +27,10 @@ use bevy::{
         ButtonState,
         mouse::{MouseButton, MouseButtonInput},
     },
-    math::{UVec2, Vec2},
+    math::{Rect, UVec2, Vec2},
     picking::PickingSystems,
 };
+use weld_app::output::{OutputGeometry, OutputPosition, WeldOutput};
 use weld_app::surface::{
     ClientDecorated, ClientToplevel, MappedSurface, SurfaceAction, SurfaceActionQueue,
     SurfaceCommitRevisions, SurfaceId, SurfaceSystems, ToplevelInteractionRequest,
@@ -58,7 +59,9 @@ impl WindowId {
     WindowZOrder,
     WindowVacancy,
     AppliedPresentationInsets,
-    ClientResizeState
+    ClientResizeState,
+    WindowOutputIntersections,
+    WindowPreferredOutput
 )]
 pub struct ManagedWindow {
     pub id: WindowId,
@@ -111,6 +114,37 @@ impl OutputWindows {
     }
 }
 
+/// Enabled outputs whose logical rectangles overlap a managed window.
+///
+/// This is derived from [`WindowGeometry`], [`WindowOutput`], and Weld's
+/// output topology. Window-management plugins author geometry and a home
+/// output; they do not maintain this list themselves.
+#[derive(Component, Clone, Debug, Default, Eq, PartialEq)]
+pub struct WindowOutputIntersections(Vec<Entity>);
+
+impl WindowOutputIntersections {
+    pub fn iter(&self) -> impl Iterator<Item = Entity> + '_ {
+        self.0.iter().copied()
+    }
+
+    pub fn contains(&self, output: Entity) -> bool {
+        self.0.contains(&output)
+    }
+}
+
+/// Output whose scale is currently preferred for the client surface.
+///
+/// This is separately stabilized from exact output intersections so a window
+/// straddling an edge does not repeatedly reconfigure for tiny movements.
+#[derive(Component, Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct WindowPreferredOutput(Option<Entity>);
+
+impl WindowPreferredOutput {
+    pub const fn entity(self) -> Option<Entity> {
+        self.0
+    }
+}
+
 /// Attaches a client-toplevel entity to a managed window.
 #[derive(Component, Clone, Copy, Debug, Eq, PartialEq)]
 #[relationship(relationship_target = WindowOccupant)]
@@ -160,6 +194,31 @@ pub struct PrimaryWindowPresentation(Entity);
 impl PrimaryWindowPresentation {
     pub fn entity(&self) -> Entity {
         self.0
+    }
+}
+
+/// One output-specific visual projection of a managed window.
+///
+/// The primary presentation also carries this component. Additional
+/// projections may render the same window on other intersected outputs
+/// without becoming authoritative for size, insets, or client policy.
+#[derive(Component, Clone, Copy, Debug, Eq, PartialEq)]
+pub struct WindowProjection {
+    window: Entity,
+    output: Entity,
+}
+
+impl WindowProjection {
+    pub const fn new(window: Entity, output: Entity) -> Self {
+        Self { window, output }
+    }
+
+    pub const fn window(self) -> Entity {
+        self.window
+    }
+
+    pub const fn output(self) -> Entity {
+        self.output
     }
 }
 
@@ -283,9 +342,115 @@ pub enum WindowSystems {
     PresentationMetrics,
     Interaction,
     Management,
+    OutputAssignment,
     UiReconcile,
     InteractionFinalize,
     FinalReconcile,
+}
+
+fn derive_window_output_intersections(
+    outputs: Query<(Entity, &OutputGeometry, &OutputPosition), With<WeldOutput>>,
+    mut windows: Query<(
+        &WindowGeometry,
+        &WindowOutput,
+        &mut WindowOutputIntersections,
+        &mut WindowPreferredOutput,
+    )>,
+) {
+    const SCALE_SWITCH_PENETRATION: f32 = 8.0;
+    for (geometry, home, mut intersections, mut preferred) in &mut windows {
+        let Ok((_, _, home_position)) = outputs.get(home.0) else {
+            intersections.0.clear();
+            preferred.0 = None;
+            continue;
+        };
+        let window_min = home_position.0 + geometry.position;
+        let window = Rect::from_corners(window_min, window_min + geometry.size.max(Vec2::ZERO));
+        let mut candidates = outputs
+            .iter()
+            .filter_map(|(output, output_geometry, output_position)| {
+                let output_rect = Rect::from_corners(
+                    output_position.0,
+                    output_position.0 + output_geometry.logical_size(),
+                );
+                let intersection = window.intersect(output_rect);
+                (!intersection.is_empty()).then_some((
+                    output,
+                    output_geometry.scale_factor(),
+                    intersection,
+                ))
+            })
+            .collect::<Vec<_>>();
+        let best = candidates.iter().max_by(|left, right| {
+            left.1
+                .total_cmp(&right.1)
+                .then_with(|| right.0.cmp(&left.0))
+        });
+        let current = preferred
+            .0
+            .and_then(|current| candidates.iter().find(|candidate| candidate.0 == current));
+        // Entering a higher-scale output requires deliberate penetration. The
+        // current output remains preferred until it no longer intersects at
+        // all, so the return threshold is intentionally asymmetric.
+        let next_preferred = match (current, best) {
+            (Some(current), Some(best))
+                if best.0 != current.0
+                    && best.1 > current.1
+                    && best.2.size().min_element() >= SCALE_SWITCH_PENETRATION =>
+            {
+                Some(best.0)
+            }
+            (Some(current), _) => Some(current.0),
+            (None, Some(best)) => Some(best.0),
+            (None, None) => None,
+        };
+        if preferred.0 != next_preferred {
+            preferred.0 = next_preferred;
+        }
+        let mut next = candidates
+            .drain(..)
+            .map(|(output, _, _)| output)
+            .collect::<Vec<_>>();
+        next.sort_unstable();
+        if intersections.0 != next {
+            intersections.0 = next;
+        }
+    }
+}
+
+fn publish_window_output_memberships(
+    windows: Query<(
+        &WindowOccupant,
+        Ref<WindowOutputIntersections>,
+        Ref<WindowPreferredOutput>,
+    )>,
+    occupants: Query<&ClientToplevel>,
+    outputs: Query<&WeldOutput>,
+    mut actions: ResMut<SurfaceActionQueue>,
+) {
+    for (occupant, intersections, preferred) in &windows {
+        if !intersections.is_changed() && !preferred.is_changed() {
+            continue;
+        }
+        let Ok(toplevel) = occupants.get(occupant.entity()) else {
+            continue;
+        };
+        let mut memberships = intersections
+            .iter()
+            .filter_map(|output| outputs.get(output).ok().map(|output| output.id))
+            .collect::<Vec<_>>();
+        memberships.sort_unstable();
+        if memberships.is_empty() {
+            continue;
+        }
+        actions.push(SurfaceAction::SetOutputs {
+            surface: toplevel.surface,
+            outputs: memberships,
+            preferred: preferred
+                .entity()
+                .and_then(|output| outputs.get(output).ok().map(|output| output.id)),
+        });
+    }
 }
 
 /// Installs the UI-independent managed-window domain.
@@ -309,6 +474,7 @@ impl Plugin for WindowPlugin {
                     WindowSystems::PresentationMetrics,
                     WindowSystems::Interaction,
                     WindowSystems::Management,
+                    WindowSystems::OutputAssignment,
                     WindowSystems::UiReconcile,
                 )
                     .chain()
@@ -382,6 +548,12 @@ impl Plugin for WindowPlugin {
                     (reconcile_window_sizes, remove_unretained_vacancies)
                         .chain()
                         .in_set(WindowSystems::UiReconcile),
+                    (
+                        derive_window_output_intersections,
+                        publish_window_output_memberships,
+                    )
+                        .chain()
+                        .in_set(WindowSystems::OutputAssignment),
                     (
                         (synchronize_registry, reconcile_window_sizes).chain(),
                         reconcile_client_focus,
@@ -824,6 +996,7 @@ mod tests {
         math::Vec2,
         picking::PickingSystems,
     };
+    use weld_app::output::{OutputGeometry, OutputId, OutputPosition, PrimaryOutput, WeldOutput};
     use weld_app::surface::{
         ClientDecorated, ClientToplevel, MappedSurface, SurfaceAction, SurfaceActionQueue,
         SurfaceId, ToplevelInteractionRequest, take_surface_actions,
@@ -922,6 +1095,56 @@ mod tests {
                 .map(WindowOccupant::entity),
             Some(surface)
         );
+    }
+
+    #[test]
+    fn output_intersections_follow_global_mixed_dpi_geometry() {
+        let mut app = test_app();
+        let external = app
+            .world_mut()
+            .spawn((
+                WeldOutput {
+                    id: OutputId::new(2),
+                },
+                OutputGeometry::from_physical(UVec2::new(1_920, 1_080), 1.0),
+                OutputPosition(Vec2::ZERO),
+            ))
+            .id();
+        let laptop = app
+            .world_mut()
+            .spawn((
+                WeldOutput {
+                    id: OutputId::new(1),
+                },
+                OutputGeometry::from_physical(UVec2::new(2_240, 1_400), 1.25),
+                OutputPosition(Vec2::new(0.0, 1_080.0)),
+                PrimaryOutput,
+            ))
+            .id();
+        let window = app
+            .world_mut()
+            .spawn((
+                ManagedWindow {
+                    id: WindowId::new(90),
+                },
+                WindowVacancy::Retain,
+                WindowOutput(laptop),
+                WindowGeometry {
+                    position: Vec2::new(100.0, -100.0),
+                    size: Vec2::new(300.0, 200.0),
+                },
+            ))
+            .id();
+
+        app.update();
+
+        let intersections = app
+            .world()
+            .get::<WindowOutputIntersections>(window)
+            .expect("managed windows should derive output intersections");
+        assert!(intersections.contains(external));
+        assert!(intersections.contains(laptop));
+        assert_eq!(intersections.iter().count(), 2);
     }
 
     #[test]

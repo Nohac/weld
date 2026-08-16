@@ -20,7 +20,6 @@ use crate::surface::{LogicalPoint, PopupDescriptor, SurfaceId};
 
 use super::{
     PendingSurfaceEvent, PendingSurfaceEventKind, ServerState,
-    output::send_preferred_surface_scale,
     surface_tree::SurfaceTreeState,
     toplevel::{IndexedStore, allocate_surface_id},
 };
@@ -28,6 +27,9 @@ use super::{
 pub(super) struct PopupState {
     pub(super) surface: PopupSurface,
     pub(super) tree: SurfaceTreeState,
+    // Popups deliberately inherit their root toplevel's assignment in this
+    // first multi-output slice, even when popup geometry crosses an output.
+    pub(super) owner: Option<SurfaceId>,
     published: Option<PopupDescriptor>,
 }
 
@@ -69,20 +71,23 @@ impl ServerState {
             return;
         };
         let kind = PopupKind::Xdg(surface.clone());
+        let owner = find_popup_root_surface(&kind)
+            .ok()
+            .and_then(|root| self.toplevels.id_for_surface(&root));
         if let Err(error) = self.popup_manager.track_popup(kind) {
             warn!(%error, "refused an xdg-popup that could not be tracked");
             surface.send_popup_done();
             return;
         }
 
-        self.output.enter(surface.wl_surface());
-        send_preferred_surface_scale(&self.output, surface.wl_surface());
+        self.enter_primary_output(surface.wl_surface());
         let rejection_surface = surface.clone();
         if !self.popups.insert(
             id,
             PopupState {
                 surface,
                 tree: SurfaceTreeState::default(),
+                owner,
                 published: None,
             },
         ) {
@@ -90,6 +95,7 @@ impl ServerState {
             rejection_surface.send_popup_done();
             return;
         }
+        self.apply_popup_output_assignment(id);
         info!(surface_id = id.raw(), "created a nested xdg-popup");
     }
 
@@ -157,7 +163,7 @@ impl ServerState {
             return;
         };
         self.clear_input_focus_for_surface(wl_surface, self.event_time());
-        self.output.leave(wl_surface);
+        self.leave_all_outputs(wl_surface);
         self.presentation_requested = true;
         self.pending_surface_events.push_back(PendingSurfaceEvent {
             surface: id,
@@ -274,10 +280,13 @@ impl ServerState {
             let Some(state) = self.popups.get_mut(surface) else {
                 continue;
             };
+            state.owner = Some(owner);
             if state.published == Some(popup) {
+                self.apply_popup_output_assignment(surface);
                 continue;
             }
             state.published = Some(popup);
+            self.apply_popup_output_assignment(surface);
             self.pending_surface_events.push_back(PendingSurfaceEvent {
                 surface,
                 kind: PendingSurfaceEventKind::PopupConfigured(popup),

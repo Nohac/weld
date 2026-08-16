@@ -16,10 +16,10 @@ use crate::input::{
     PointerGesture, PointerGestureKind, RawScrollFrame, RawScrollPhase, RawScrollSource,
     RawSeatEvent, RawSeatEventKind, TouchpadHold, TouchpadPinch, TouchpadSwipe,
 };
+use crate::output::OutputTopology;
 
 pub struct LibinputAdapter {
-    logical_width: f64,
-    logical_height: f64,
+    topology: OutputTopology,
     pointer: InputPosition,
     finger_axes: ActiveScrollAxes,
     active_gesture: ActiveGesture,
@@ -33,11 +33,11 @@ struct ActiveScrollAxes {
 }
 
 impl LibinputAdapter {
-    pub fn new(logical_width: f64, logical_height: f64) -> Self {
+    pub fn new(topology: OutputTopology) -> Self {
+        let pointer = topology.primary_position(0.5, 0.5);
         Self {
-            logical_width,
-            logical_height,
-            pointer: InputPosition::new(logical_width / 2.0, logical_height / 2.0),
+            topology,
+            pointer,
             finger_axes: ActiveScrollAxes::default(),
             active_gesture: ActiveGesture::default(),
             last_event_time_msec: 0,
@@ -79,10 +79,14 @@ impl LibinputAdapter {
                 }))
             }
             InputEvent::PointerMotion { event, .. } => {
-                self.pointer = self.clamp(InputPosition::new(
-                    self.pointer.x + event.delta_x(),
-                    self.pointer.y + event.delta_y(),
-                ));
+                // This transforms compositor pointer placement only. A future
+                // relative-pointer protocol must retain the original libinput
+                // accelerated and unaccelerated deltas and bypass this output
+                // topology projection.
+                self.pointer = self.topology.move_pointer(
+                    self.pointer,
+                    InputDelta::new(event.delta_x(), event.delta_y()),
+                );
                 single_event(Some(RawSeatEvent::new(
                     RawSeatEventKind::PointerMotion {
                         position: self.pointer,
@@ -91,9 +95,14 @@ impl LibinputAdapter {
                 )))
             }
             InputEvent::PointerMotionAbsolute { event, .. } => {
-                self.pointer = self.clamp(InputPosition::new(
-                    event.x_transformed(self.logical_width as i32),
-                    event.y_transformed(self.logical_height as i32),
+                let Some(primary) = self.topology.primary_configuration() else {
+                    return empty_batch();
+                };
+                let logical_width = primary.logical_width().round().clamp(1.0, i32::MAX as f64);
+                let logical_height = primary.logical_height().round().clamp(1.0, i32::MAX as f64);
+                self.pointer = self.topology.constrain(InputPosition::new(
+                    f64::from(primary.position().x) + event.x_transformed(logical_width as i32),
+                    f64::from(primary.position().y) + event.y_transformed(logical_height as i32),
                 ));
                 single_event(Some(RawSeatEvent::new(
                     RawSeatEventKind::PointerMotion {
@@ -221,40 +230,39 @@ impl LibinputAdapter {
         self.last_event_time_msec
     }
 
-    /// Updates logical bounds after a scale-only output change.
+    /// Replaces logical projection and physical adjacency after an atomic layout change.
     ///
     /// The physical mode is unchanged, so preserving the pointer's normalized
     /// location also preserves its physical display location. A motion event is
     /// always returned for changed bounds so compositor focus is recomputed
     /// even when rounding leaves the logical coordinates unchanged.
-    pub fn update_output_bounds(
-        &mut self,
-        logical_width: f64,
-        logical_height: f64,
-    ) -> Option<RawSeatEvent> {
-        if self.logical_width == logical_width && self.logical_height == logical_height {
+    pub fn update_output_topology(&mut self, topology: OutputTopology) -> Option<RawSeatEvent> {
+        if self.topology.layout() == topology.layout() {
             return None;
         }
-        let position = InputPosition::new(
-            self.pointer.x * logical_width / self.logical_width,
-            self.pointer.y * logical_height / self.logical_height,
-        );
-        self.logical_width = logical_width;
-        self.logical_height = logical_height;
-        self.pointer = self.clamp(position);
+        let active = self.topology.output_at(self.pointer);
+        let position = active
+            .and_then(|output| {
+                let previous = self.topology.configuration(output)?;
+                let next = topology.configuration(output)?;
+                let normalized_x =
+                    (self.pointer.x - f64::from(previous.position().x)) / previous.logical_width();
+                let normalized_y =
+                    (self.pointer.y - f64::from(previous.position().y)) / previous.logical_height();
+                Some(InputPosition::new(
+                    f64::from(next.position().x) + normalized_x * next.logical_width(),
+                    f64::from(next.position().y) + normalized_y * next.logical_height(),
+                ))
+            })
+            .unwrap_or(self.pointer);
+        self.topology = topology;
+        self.pointer = self.topology.constrain(position);
         Some(RawSeatEvent::new(
             RawSeatEventKind::PointerMotion {
                 position: self.pointer,
             },
             self.last_event_time_msec,
         ))
-    }
-
-    fn clamp(&self, position: InputPosition) -> InputPosition {
-        InputPosition::new(
-            position.x.clamp(0.0, (self.logical_width - 1.0).max(0.0)),
-            position.y.clamp(0.0, (self.logical_height - 1.0).max(0.0)),
-        )
     }
 
     fn scroll_frame(
@@ -442,10 +450,31 @@ mod tests {
         RawScrollSource, RawSeatEvent, RawSeatEventKind, TouchpadHold, TouchpadPinch,
         TouchpadSwipe,
     };
+    use crate::{
+        output::{OutputConfiguration, OutputId, OutputLayout, OutputScale, OutputTopology},
+        surface::{Extent, LogicalPoint},
+    };
+
+    fn topology(width: u32, height: u32, scale: f64) -> OutputTopology {
+        let configuration = OutputConfiguration::new(
+            OutputId::new(1),
+            Extent::new(width, height),
+            OutputScale::new(scale).expect("valid scale"),
+            LogicalPoint::ZERO,
+            true,
+            None,
+        )
+        .expect("valid output");
+        OutputTopology::new(OutputLayout::new(1, vec![configuration]).expect("valid layout"))
+    }
+
+    fn adapter(width: u32, height: u32) -> LibinputAdapter {
+        LibinputAdapter::new(topology(width, height, 1.0))
+    }
 
     #[test]
     fn standalone_pointer_starts_centered_and_stays_inside_the_output() {
-        let adapter = LibinputAdapter::new(1920.0, 1080.0);
+        let adapter = adapter(1920, 1080);
         assert_eq!(
             adapter.initial_event(),
             RawSeatEvent::new(
@@ -456,19 +485,21 @@ mod tests {
             )
         );
         assert_eq!(
-            adapter.clamp(InputPosition::new(-20.0, 5000.0)),
-            InputPosition::new(0.0, 1079.0)
+            adapter
+                .topology
+                .constrain(InputPosition::new(-20.0, 5000.0)),
+            InputPosition::new(0.0, 1079.99609375)
         );
     }
 
     #[test]
     fn scale_only_bounds_change_preserves_physical_pointer_location_and_time() {
-        let mut adapter = LibinputAdapter::new(1920.0, 1080.0);
+        let mut adapter = adapter(1920, 1080);
         adapter.pointer = InputPosition::new(1440.0, 810.0);
         adapter.last_event_time_msec = 42;
 
         assert_eq!(
-            adapter.update_output_bounds(1280.0, 720.0),
+            adapter.update_output_topology(topology(1280, 720, 1.0)),
             Some(RawSeatEvent::new(
                 RawSeatEventKind::PointerMotion {
                     position: InputPosition::new(960.0, 540.0),
@@ -476,12 +507,15 @@ mod tests {
                 42,
             ))
         );
-        assert_eq!(adapter.update_output_bounds(1280.0, 720.0), None);
+        assert_eq!(
+            adapter.update_output_topology(topology(1280, 720, 1.0)),
+            None
+        );
     }
 
     #[test]
     fn standalone_finger_scroll_stops_only_the_reported_axis() {
-        let mut adapter = LibinputAdapter::new(1920.0, 1080.0);
+        let mut adapter = adapter(1920, 1080);
         let started =
             adapter.scroll_frame(RawScrollSource::Finger, Some(4.0), Some(6.0), None, None);
         assert_eq!(started.phase, RawScrollPhase::Started);
@@ -574,7 +608,7 @@ mod tests {
 
     #[test]
     fn focus_loss_cancels_active_gesture_and_finger_scroll_with_libinput_time() {
-        let mut adapter = LibinputAdapter::new(1920.0, 1080.0);
+        let mut adapter = adapter(1920, 1080);
         adapter.active_gesture.0 = Some(PointerGestureKind::Swipe);
         adapter.finger_axes.horizontal = true;
         adapter.finger_axes.vertical = true;

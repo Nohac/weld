@@ -19,7 +19,7 @@ use smithay::{
 use smithay_drm_extras::drm_scanner::{DrmScanEvent, DrmScanner};
 
 use crate::{
-    OutputScale,
+    OutputHead, OutputId, OutputPhysicalSize, OutputScale,
     server::{OutputDescriptor, OutputMetrics},
 };
 
@@ -31,10 +31,15 @@ pub(super) struct DrmDeviceDiscovery {
 }
 
 pub(super) struct DrmOutputDiscovery {
-    pub(super) scanner: DrmScanner,
+    pub(super) id: OutputId,
     pub(super) connector: connector::Info,
     pub(super) crtc: crtc::Handle,
     pub(super) mode: Mode,
+}
+
+pub(super) struct DrmOutputsDiscovery {
+    pub(super) scanner: DrmScanner,
+    pub(super) outputs: Vec<DrmOutputDiscovery>,
 }
 
 impl DrmDeviceDiscovery {
@@ -69,37 +74,52 @@ impl DrmDeviceDiscovery {
     }
 }
 
-pub(super) fn discover_output(
+pub(super) fn discover_outputs(
     drm: &impl smithay::reexports::drm::control::Device,
-) -> Result<DrmOutputDiscovery> {
+) -> Result<DrmOutputsDiscovery> {
     let mut scanner = DrmScanner::new();
-    let (connector, crtc) = scanner
+    let mut outputs = scanner
         .scan_connectors(drm)?
         .into_iter()
-        .find_map(|event| match event {
+        .filter_map(|event| match event {
             DrmScanEvent::Connected {
                 connector,
                 crtc: Some(crtc),
             } if !connector.modes().is_empty() => Some((connector, crtc)),
             _ => None,
         })
-        .context("no connected DRM connector with a usable CRTC and mode")?;
-    let mode = preferred_mode(&connector)?;
-    Ok(DrmOutputDiscovery {
-        scanner,
-        connector,
-        crtc,
-        mode,
-    })
+        .collect::<Vec<_>>();
+    outputs.sort_by_key(|(connector, _)| {
+        let name = connector_name(connector);
+        (!is_internal_output(&name), name)
+    });
+    if outputs.is_empty() {
+        anyhow::bail!("no connected DRM connector with a usable CRTC and mode");
+    }
+    let outputs = outputs
+        .into_iter()
+        .enumerate()
+        .map(|(index, (connector, crtc))| {
+            Ok(DrmOutputDiscovery {
+                id: OutputId::new(index as u64 + 1),
+                mode: preferred_mode(&connector)?,
+                connector,
+                crtc,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    Ok(DrmOutputsDiscovery { scanner, outputs })
 }
 
 pub(super) fn output_description(
+    id: OutputId,
     connector: &connector::Info,
     mode: Mode,
     scale: OutputScale,
-) -> Result<(OutputDescriptor, OutputMetrics)> {
+) -> Result<(OutputDescriptor, OutputHead, OutputMetrics)> {
     let name = connector_name(connector);
     let (physical_width, physical_height) = connector.size().unwrap_or((0, 0));
+    let physical_size = OutputPhysicalSize::new(physical_width, physical_height);
     let wl_mode = SmithayOutputMode::from(mode);
     let metrics = OutputMetrics::new(
         u32::try_from(wl_mode.size.w).context("negative DRM mode width")?,
@@ -108,7 +128,7 @@ pub(super) fn output_description(
     )?
     .with_refresh_millihertz(wl_mode.refresh)?;
     let descriptor = OutputDescriptor {
-        name,
+        name: name.clone(),
         physical_properties: PhysicalProperties {
             size: (
                 i32::try_from(physical_width).context("physical output width exceeds i32")?,
@@ -121,7 +141,11 @@ pub(super) fn output_description(
             serial_number: "Unknown".to_owned(),
         },
     };
-    Ok((descriptor, metrics))
+    Ok((
+        descriptor,
+        OutputHead::new(id, name, physical_size),
+        metrics,
+    ))
 }
 
 pub(super) fn preferred_mode(connector: &connector::Info) -> Result<Mode> {
@@ -140,4 +164,8 @@ pub(super) fn connector_name(connector: &connector::Info) -> String {
         connector.interface().as_str(),
         connector.interface_id()
     )
+}
+
+fn is_internal_output(name: &str) -> bool {
+    name.starts_with("eDP-") || name.starts_with("LVDS-") || name.starts_with("DSI-")
 }

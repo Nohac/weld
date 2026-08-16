@@ -24,9 +24,34 @@ direct composition instead of copying the retained image into scanout. The
 staged work and remaining follow-ups are tracked in the
 [DRM rendering improvement plan](drm-rendering-improvement-plan.md).
 
-The initial target is modern Vulkan hardware, one GPU, and one output. This
-does not establish singleton presenter or output APIs that would prevent later
-multi-output or multi-GPU work.
+The current target is modern Vulkan hardware and one GPU with multiple startup
+outputs. Each output owns its connector, CRTC, Smithay GBM surface, imported
+scanout cache, Bevy target/camera, and recoverable presenter state. One shared
+wgpu-completion worker reports output-tagged frame tickets. Device loss fans
+out to every presenter, while connector and KMS errors remain output scoped
+where the underlying device is still usable. Multi-GPU remains future work.
+
+All physically available outputs currently compose as one correctness-first
+batch paced by the slowest refresh in that set. A busy target blocks the batch;
+an unavailable target instead renders to its retained owned texture while the
+remaining outputs continue scanning out. The backend runs all Bevy output
+cameras, then submits each acquired physical frame to its owning CRTC. During
+VT loss or a capture, the same cameras target their retained owned textures.
+Startup-known connector recovery is supported independently; adding an unknown
+output or replacing a mode requires restart until dynamic layout transactions
+own native surface construction and retirement. Runtime scale shortcuts
+currently adjust only the internal primary output. The temporary placement
+policy centers a vertical stack of non-primary outputs above that primary in
+both logical and physical spaces. Changing scale transactionally recalculates
+the complete logical layout but preserves measured physical footprints.
+Physical millimeter overlap controls pointer portals, and crossings map into
+the destination's local logical edge. Missing EDID dimensions use a
+mode-derived 96-DPI footprint; overlapping physical footprints reject the
+layout, which the centered startup policy avoids by construction. Smithay
+continues to receive logical positions, with integer `wl_output` locations as
+the nearest protocol approximation. `Super+Shift+D` matches primary and
+reference diagonal logical density when both footprints are measured; the
+calculation assumes EDID and active-mode aspect ratios agree.
 
 Weld temporarily patches its Bevy 0.19 rendering crates to wgpu 30. Version 30
 adds the initial resource state to `Device::create_texture_from_hal`; the

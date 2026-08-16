@@ -64,6 +64,7 @@ pub enum HostCommand {
         arguments: Vec<OsString>,
     },
     AdjustOutputScale(OutputScaleAdjustment),
+    MatchOutputPhysicalScale,
     Exit,
 }
 
@@ -72,6 +73,7 @@ pub(crate) enum HostCommandEffect {
     Continue,
     Exit,
     AdjustOutputScale(OutputScaleAdjustment),
+    MatchOutputPhysicalScale,
 }
 
 #[derive(Default)]
@@ -102,6 +104,9 @@ impl ChildProcesses {
             }
             HostCommand::AdjustOutputScale(adjustment) => {
                 Ok(HostCommandEffect::AdjustOutputScale(adjustment))
+            }
+            HostCommand::MatchOutputPhysicalScale => {
+                Ok(HostCommandEffect::MatchOutputPhysicalScale)
             }
             HostCommand::Exit => Ok(HostCommandEffect::Exit),
         }

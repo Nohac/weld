@@ -136,7 +136,7 @@ impl WeldAppBuilder {
         configure_rendering(&mut app, context);
         app.add_plugins((
             DebugProtocolPlugin,
-            WeldAppPlugin::new(context.extent, context.scale_factor),
+            WeldAppPlugin::new(context.outputs.clone(), context.output_heads.clone())?,
         ));
 
         Ok(WeldApp {

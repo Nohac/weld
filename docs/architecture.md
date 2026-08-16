@@ -60,9 +60,11 @@ inspect it without requiring a separate Weld plugin trait. The low-level
 application hosts; backend module entry points are implementation details.
 
 `weld-app` represents application-visible outputs as `WeldOutput` entities.
-`OutputGeometry` carries physical size and logical scale, while the separate
-`OutputPosition` locates the output in compositor-wide logical topology without
-changing output-local layout. One entity is currently marked `PrimaryOutput`.
+`OutputGeometry` carries pixel size and logical scale. `OutputPosition` locates
+the output in compositor-wide logical space, while the separate
+`OutputPlacement` carries its scale-independent physical footprint in
+millimeters and records whether those dimensions were measured or assumed.
+One entity is currently marked `PrimaryOutput`.
 The shell's composition camera relates to it through `RendersOutput` and
 `OutputCompositionCamera`, giving plugins a Bevy entity to use with
 `UiTargetCamera` without exposing a native texture or wgpu handle.
@@ -70,31 +72,96 @@ The shell's composition camera relates to it through `RendersOutput` and
 Plugins may continue to spawn ordinary UI roots without selecting a camera.
 Weld marks the primary output's composition camera as Bevy's
 `IsDefaultUiCamera`, so normal UI targets the current compositor output
-automatically. Future output-specific roots can select another output's camera
-with `UiTargetCamera`; exactly one composition camera remains the default for
-otherwise untargeted plugin UI.
+automatically. Output-specific roots select another output's camera with
+`UiTargetCamera`; exactly one composition camera remains the default for
+otherwise untargeted plugin UI. Weld's narrow Bevy patch also propagates the
+scale of each manual texture-view target into that camera, leaving global
+`UiScale` at `1.0`.
 
 Managed windows carry a `WindowOutput` relationship, and `WindowGeometry` is
 expressed in that output's local logical coordinates. `weld-float` assigns new
 unassigned windows to the primary output, preserves explicit assignments, and
-places or clamps each window against only its assigned `OutputGeometry`.
-Changing `OutputPosition` therefore does not disturb local window layout.
+places each newly managed window within its assigned `OutputGeometry`.
+Thereafter geometry remains manager-owned and is not clamped after movement,
+output resize, scale change, or orphan adoption. A window may therefore remain
+partly or entirely outside an output until explicit recovery policy exists.
+Changing `OutputPosition` does not disturb local window layout.
+`WindowOutputIntersections` is derived from globalized window and output
+rectangles after management runs. The primary CSD or SSD root remains the
+authoritative presentation and keeps its entity and original camera target
+when the window is re-homed. An output-targeted secondary projection of that
+scene and its popups is maintained for every other intersection. This keeps
+active pointer targets stable and prevents a re-home from temporarily placing
+two copies on one camera. A floating window is re-homed when its center enters
+another output; its local geometry is converted so the global position does
+not jump. Intersection derivation currently scans managed windows each
+application update; change-filtered topology invalidation is a later
+optimization.
+
+Exact intersection membership is forwarded to Smithay as `wl_output.enter`
+and `wl_output.leave`. Client preferred scale follows the highest-scale
+intersection, with an eight-logical-pixel penetration threshold before moving
+from an existing lower-scale output to a newly intersected higher-scale output.
+Popups currently inherit their root toplevel's membership and preferred output;
+independent popup geometry policy is deferred.
+All projections sample the same current client buffer, so mixed-DPI output does
+not retain temporally different surface versions.
+
 If an assigned output entity disappears, `weld-float` preserves the durable
-window and its stacking, reassigns it to the primary output, and defers any
-required clamp until an active move or resize interaction has ended.
+window and its stacking, reassigns it to the primary output, and leaves its
+local geometry unchanged even during an active move or resize interaction.
 When no unique primary output exists, floating admission waits rather than
 inventing an origin or silently claiming the window.
 
-This is an application-policy foundation, not native multi-output support.
-`CompositionHost::set_output_geometry` still carries no output identity, core's
-`OutputDescriptor` is not yet correlated with application-side `OutputId`, and
-the host currently supplies one renderable primary output, one composition
-target, and one input projection. Native discovery, hotplug, per-output input,
-and multiple presentation targets remain future host work. Mixed-DPI rendering
-also remains constrained by Bevy 0.19: manual texture-view targets report a
-camera scale of `1.0`, while `UiScale` is global. Weld records scale per output
-but applies that global render scale only to the current primary output rather
-than simulating incorrect per-camera scale behavior.
+Core owns a process-stable `OutputId`, immutable `OutputHead` connector facts,
+dependency-free logical geometry, a revisioned validated `OutputLayout`, and
+collision-aware `OutputTopology`. An output head carries its connector name and
+optional EDID physical dimensions separately from mutable logical layout. A
+measured footprint is authoritative for output adjacency and pointer portals;
+missing dimensions use an explicit mode-derived 96-DPI footprint so all
+outputs remain in one millimeter coordinate space. EDID can still be inaccurate.
+The DRM backend discovers every usable startup connector, creates one Smithay
+GBM/KMS surface and presenter per output, and gives `weld-app` one retained
+target, manual view, camera, and input projection per output. The initial
+layout policy centers a vertical stack of non-primary outputs above the primary
+panel. The logical stack is centered independently for Smithay and application
+coordinates. The physical stack determines collision and portal overlap;
+relative motion is converted from the active output's logical coordinates into
+millimeters, then collision, edge sliding, portal traversal, and remaining
+motion are resolved entirely against the physical footprints. The final point
+is projected into the destination output's compositor-global logical space.
+Footprints use measured EDID dimensions when available and an explicit
+mode-derived 96-DPI fallback otherwise; both paths are finite, positive, and
+scale-independent. Output rectangles are half-open, and an inward physical
+epsilon keeps the logical result on one unambiguous side of a seam.
+Smithay advertises the nearest integer logical
+`wl_output` location, which may differ by up to half a logical pixel on either
+axis. Client content remains expressed in output-local coordinates. The policy
+is deliberately hardcoded until configuration owns placement.
+
+Physically available compositions currently form one atomic batch: every busy
+target in that set blocks the batch, Bevy renders all output cameras, DMA-BUF
+lifetimes and frame callbacks are bracketed once, and each physical result is
+submitted to its matching CRTC. An unavailable output renders to its retained
+owned target while the remaining outputs continue scanning out. This is
+correctness-first and temporarily paces the physical batch at the slowest
+available output.
+Screenshots capture only the primary retained target. Known startup outputs can
+disconnect and reconnect independently, while a newly discovered connector or
+live mode replacement requires restart. Output configuration is modeled as a
+whole-layout transaction so a future `wlr-output-management-unstable-v1` or
+other layout-protocol adapter need not mutate partially applied backend state.
+Runtime scale shortcuts currently adjust only the internal primary output. A
+scale change rebuilds and validates the complete centered logical layout while
+preserving physical placement, then publishes the transaction to Smithay,
+native input, Bevy, and cursor composition. `Super+Shift+D` derives an exact
+primary scale from measured diagonal DPI relative to the first measured
+non-primary output; values outside 0.5 through 4.0 are rejected. Diagonal DPI
+assumes the EDID aspect matches the active mode, so rotated outputs or unusual
+pixel geometry may require explicit policy. The standard distribution can
+display both coordinate spaces with `Super+Shift+O`; the diagnostic consumes
+the same `OutputGeometry`, `OutputPosition`, and `OutputPlacement` components
+that plugins receive.
 
 `weld-app` re-exports its exact supported Bevy version as `weld_app::bevy` so
 plugins can share Weld's ECS, application, and rendering types without an
@@ -469,6 +536,10 @@ state, and enforcement of the client's committed size constraints. Repeated
 interactive-resize sizes are latest-value coalesced at the Smithay server
 boundary and configured at most once per composition tick; pointer motion,
 buttons, axes, gestures, and keyboard input reach clients without that pacing.
+Physical output traversal changes only the compositor's absolute pointer
+position. A future relative-pointer implementation must preserve the original
+libinput accelerated and unaccelerated deltas and must not derive them from the
+physical topology projection.
 Click activation is observed on the next application frame, after Smithay may
 already have established the ordinary implicit click grab. Core records the
 positive owner of that ordinary grab so the matching activation may apply

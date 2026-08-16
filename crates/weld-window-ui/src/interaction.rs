@@ -8,20 +8,20 @@ use bevy::{
         message::MessageWriter,
         observer::On,
         query::{Added, Without},
-        system::{Commands, Query, Res, SystemParam},
+        system::{Commands, Query, SystemParam},
     },
     picking::{
         events::{Cancel, Drag, Pointer, Press},
         pointer::PointerButton,
     },
-    ui::{ComputedNode, UiScale},
+    ui::ComputedNode,
     window::{CursorIcon, RequestRedraw, SystemCursorIcon},
 };
 use weld_app::cursor::CursorRequest;
 use weld_app::surface::ToplevelResizeEdge;
 use weld_window::{
-    PresentsWindow, WindowCommand, WindowCommandKind, WindowIntent, WindowIntentKind,
-    WindowInteractionKind, WindowInteractionSession,
+    WindowCommand, WindowCommandKind, WindowIntent, WindowIntentKind, WindowInteractionKind,
+    WindowInteractionSession, WindowProjection,
 };
 
 /// Marks a UI entity whose primary-button drag moves its managed window.
@@ -91,7 +91,7 @@ impl WindowResizeFrame {
 pub(crate) fn activate_window(
     mut press: On<Pointer<Press>>,
     mut commands: Commands,
-    presentations: Query<&PresentsWindow>,
+    presentations: Query<&WindowProjection>,
     parents: Query<&ChildOf>,
     mut redraw: bevy::ecs::message::MessageWriter<RequestRedraw>,
 ) {
@@ -113,7 +113,7 @@ pub(crate) fn begin_move_handle(
     press: On<Pointer<Press>>,
     mut commands: Commands,
     handles: Query<(), bevy::ecs::query::With<WindowMoveHandle>>,
-    presentations: Query<&PresentsWindow>,
+    presentations: Query<&WindowProjection>,
     parents: Query<&ChildOf>,
     interactions: Query<&WindowInteractionSession>,
 ) {
@@ -139,7 +139,7 @@ pub(crate) fn begin_resize_frame(
     press: On<Pointer<Press>>,
     mut commands: Commands,
     frames: Query<(&WindowResizeFrame, &ComputedNode)>,
-    presentations: Query<&PresentsWindow>,
+    presentations: Query<&WindowProjection>,
     interactions: Query<&WindowInteractionSession>,
 ) {
     if press.button != PointerButton::Primary || press.original_event_target() != press.entity {
@@ -151,7 +151,7 @@ pub(crate) fn begin_resize_frame(
     let Ok(presentation) = presentations.get(press.entity) else {
         return;
     };
-    if interactions.contains(presentation.0) {
+    if interactions.contains(presentation.window()) {
         return;
     }
     let Some(position) = press.hit.position.map(|position| position.truncate()) else {
@@ -161,7 +161,7 @@ pub(crate) fn begin_resize_frame(
         return;
     };
     commands.trigger(WindowCommand {
-        window: presentation.0,
+        window: presentation.window(),
         kind: WindowCommandKind::BeginInteraction(WindowInteractionKind::Resize(edges)),
     });
 }
@@ -170,7 +170,7 @@ pub(crate) fn begin_resize_handle(
     press: On<Pointer<Press>>,
     mut commands: Commands,
     handles: Query<&WindowResizeHandle>,
-    presentations: Query<&PresentsWindow>,
+    presentations: Query<&WindowProjection>,
     parents: Query<&ChildOf>,
     interactions: Query<&WindowInteractionSession>,
 ) {
@@ -195,8 +195,7 @@ pub(crate) fn begin_resize_handle(
 #[derive(SystemParam)]
 pub(crate) struct DragWindowParams<'w, 's> {
     commands: Commands<'w, 's>,
-    ui_scale: Res<'w, UiScale>,
-    presentations: Query<'w, 's, &'static PresentsWindow>,
+    presentations: Query<'w, 's, &'static WindowProjection>,
     parents: Query<'w, 's, &'static ChildOf>,
     interactions: Query<'w, 's, &'static WindowInteractionSession>,
     handles: Query<'w, 's, (), bevy::ecs::query::With<WindowMoveHandle>>,
@@ -206,7 +205,6 @@ pub(crate) struct DragWindowParams<'w, 's> {
 pub(crate) fn drag_window(mut drag: On<Pointer<Drag>>, params: DragWindowParams) {
     let DragWindowParams {
         mut commands,
-        ui_scale,
         presentations,
         parents,
         interactions,
@@ -219,7 +217,7 @@ pub(crate) fn drag_window(mut drag: On<Pointer<Drag>>, params: DragWindowParams)
     let Some(window) = presented_window(drag.entity, &presentations, &parents) else {
         return;
     };
-    let Some(delta) = logical_drag_delta(drag.delta, ui_scale.0) else {
+    let Some(delta) = logical_drag_delta(drag.delta) else {
         return;
     };
     let kind = match interactions.get(window) {
@@ -248,7 +246,7 @@ pub(crate) fn drag_window(mut drag: On<Pointer<Drag>>, params: DragWindowParams)
 pub(crate) fn cancel_drag(
     cancel: On<Pointer<Cancel>>,
     mut commands: Commands,
-    presentations: Query<&PresentsWindow>,
+    presentations: Query<&WindowProjection>,
     parents: Query<&ChildOf>,
     interactions: Query<&WindowInteractionSession>,
     mut redraw: bevy::ecs::message::MessageWriter<RequestRedraw>,
@@ -267,19 +265,19 @@ pub(crate) fn cancel_drag(
 
 fn presented_window(
     mut entity: bevy::ecs::entity::Entity,
-    presentations: &Query<&PresentsWindow>,
+    presentations: &Query<&WindowProjection>,
     parents: &Query<&ChildOf>,
 ) -> Option<bevy::ecs::entity::Entity> {
     loop {
-        if let Ok(presentation) = presentations.get(entity) {
-            return Some(presentation.0);
+        if let Ok(projection) = presentations.get(entity) {
+            return Some(projection.window());
         }
         entity = parents.get(entity).ok()?.parent();
     }
 }
 
-fn logical_drag_delta(delta: bevy::math::Vec2, scale: f32) -> Option<bevy::math::Vec2> {
-    (scale.is_finite() && scale > 0.0).then_some(delta / scale)
+fn logical_drag_delta(delta: bevy::math::Vec2) -> Option<bevy::math::Vec2> {
+    delta.is_finite().then_some(delta)
 }
 
 fn resize_edge_at(
@@ -358,8 +356,8 @@ mod tests {
         app::App,
         camera::{ManualTextureViewHandle, NormalizedRenderTarget},
         ecs::{
-            hierarchy::ChildOf, message::MessageCursor, observer::On, resource::Resource,
-            system::ResMut,
+            entity::Entity, hierarchy::ChildOf, message::MessageCursor, observer::On,
+            resource::Resource, system::ResMut,
         },
         math::{Vec2, Vec3},
         picking::{
@@ -368,13 +366,13 @@ mod tests {
             pointer::{Location, PointerButton, PointerId},
         },
         sprite::BorderRect,
-        ui::{ComputedNode, UiScale},
+        ui::ComputedNode,
         window::RequestRedraw,
     };
     use weld_app::surface::ToplevelResizeEdge;
     use weld_window::{
-        PresentsWindow, WindowCommand, WindowCommandKind, WindowIntent, WindowIntentKind,
-        WindowInteractionKind, WindowInteractionSession,
+        WindowCommand, WindowCommandKind, WindowIntent, WindowIntentKind, WindowInteractionKind,
+        WindowInteractionSession, WindowProjection,
     };
 
     use super::{
@@ -397,13 +395,12 @@ mod tests {
     }
 
     #[test]
-    fn drag_delta_converts_physical_ui_motion_to_logical_units() {
+    fn drag_delta_is_already_expressed_in_logical_units() {
         assert_eq!(
-            logical_drag_delta(Vec2::new(18.0, 12.0), 1.5),
-            Some(Vec2::new(12.0, 8.0))
+            logical_drag_delta(Vec2::new(18.0, 12.0)),
+            Some(Vec2::new(18.0, 12.0))
         );
-        assert_eq!(logical_drag_delta(Vec2::ONE, 0.0), None);
-        assert_eq!(logical_drag_delta(Vec2::ONE, f32::NAN), None);
+        assert_eq!(logical_drag_delta(Vec2::splat(f32::NAN)), None);
     }
 
     fn resize_node(inverse_scale_factor: f32) -> ComputedNode {
@@ -454,7 +451,7 @@ mod tests {
         let root = app
             .world_mut()
             .spawn((
-                PresentsWindow(window),
+                WindowProjection::new(window, Entity::PLACEHOLDER),
                 WindowResizeFrame::new(12.0),
                 resize_node(1.0),
             ))
@@ -511,7 +508,10 @@ mod tests {
             .add_observer(begin_resize_handle)
             .add_observer(record_command);
         let window = app.world_mut().spawn_empty().id();
-        let root = app.world_mut().spawn(PresentsWindow(window)).id();
+        let root = app
+            .world_mut()
+            .spawn(WindowProjection::new(window, Entity::PLACEHOLDER))
+            .id();
         let camera = app.world_mut().spawn_empty().id();
         let location = Location {
             target: NormalizedRenderTarget::TextureView(ManualTextureViewHandle(1)),
@@ -608,7 +608,10 @@ mod tests {
             .add_observer(activate_window)
             .add_observer(record_intent);
         let window = app.world_mut().spawn_empty().id();
-        let root = app.world_mut().spawn(PresentsWindow(window)).id();
+        let root = app
+            .world_mut()
+            .spawn(WindowProjection::new(window, Entity::PLACEHOLDER))
+            .id();
         let camera = app.world_mut().spawn_empty().id();
         let mut redraws = MessageCursor::<RequestRedraw>::default();
 
@@ -645,14 +648,16 @@ mod tests {
     #[test]
     fn direct_handle_drag_starts_or_routes_by_the_existing_session() {
         let mut app = App::new();
-        app.insert_resource(UiScale(1.0))
-            .add_message::<RequestRedraw>()
+        app.add_message::<RequestRedraw>()
             .init_resource::<RecordedInteractions>()
             .add_observer(drag_window)
             .add_observer(record_command)
             .add_observer(record_intent);
         let window = app.world_mut().spawn_empty().id();
-        let root = app.world_mut().spawn(PresentsWindow(window)).id();
+        let root = app
+            .world_mut()
+            .spawn(WindowProjection::new(window, Entity::PLACEHOLDER))
+            .id();
         let handle = app
             .world_mut()
             .spawn((WindowMoveHandle, ChildOf(root)))

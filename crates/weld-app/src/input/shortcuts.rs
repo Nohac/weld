@@ -4,7 +4,11 @@ use std::collections::{HashSet, VecDeque};
 
 use bevy::{
     app::{App, Plugin},
-    ecs::{resource::Resource, world::World},
+    ecs::{
+        message::{Message, Messages},
+        resource::Resource,
+        world::World,
+    },
     input::keyboard::KeyCode,
     prelude::Reflect,
 };
@@ -27,13 +31,23 @@ pub(super) enum GlobalAction {
     Blender,
     IncreaseScale,
     DecreaseScale,
+    MatchPhysicalScale,
+    ToggleOutputTopology,
     Exit,
+}
+
+/// Application-owned action produced by a consumed global shortcut.
+#[derive(Clone, Copy, Debug, Eq, Message, PartialEq)]
+pub enum GlobalShortcutAction {
+    ToggleOutputTopology,
 }
 
 #[derive(Clone, Copy)]
 enum GlobalShortcutCommand {
     Launch(&'static str),
     AdjustOutputScale(OutputScaleAdjustment),
+    MatchPhysicalScale,
+    Application(GlobalShortcutAction),
     Exit,
 }
 
@@ -57,21 +71,35 @@ impl GlobalShortcutDefinition {
         }
     }
 
-    fn host_command(self) -> HostCommand {
+    fn host_command(self) -> Option<HostCommand> {
         match self.command {
-            GlobalShortcutCommand::Launch(program) => HostCommand::Launch {
+            GlobalShortcutCommand::Launch(program) => Some(HostCommand::Launch {
                 program: program.into(),
                 arguments: Vec::new(),
-            },
+            }),
             GlobalShortcutCommand::AdjustOutputScale(adjustment) => {
-                HostCommand::AdjustOutputScale(adjustment)
+                Some(HostCommand::AdjustOutputScale(adjustment))
             }
-            GlobalShortcutCommand::Exit => HostCommand::Exit,
+            GlobalShortcutCommand::MatchPhysicalScale => {
+                Some(HostCommand::MatchOutputPhysicalScale)
+            }
+            GlobalShortcutCommand::Application(_) => None,
+            GlobalShortcutCommand::Exit => Some(HostCommand::Exit),
+        }
+    }
+
+    fn application_action(self) -> Option<GlobalShortcutAction> {
+        match self.command {
+            GlobalShortcutCommand::Application(action) => Some(action),
+            GlobalShortcutCommand::Launch(_)
+            | GlobalShortcutCommand::AdjustOutputScale(_)
+            | GlobalShortcutCommand::MatchPhysicalScale
+            | GlobalShortcutCommand::Exit => None,
         }
     }
 }
 
-const GLOBAL_SHORTCUTS: [GlobalShortcutDefinition; 6] = [
+const GLOBAL_SHORTCUTS: [GlobalShortcutDefinition; 8] = [
     GlobalShortcutDefinition {
         action: GlobalAction::Terminal,
         trigger: LinuxKeycode(28),
@@ -113,6 +141,22 @@ const GLOBAL_SHORTCUTS: [GlobalShortcutDefinition; 6] = [
         command: GlobalShortcutCommand::AdjustOutputScale(OutputScaleAdjustment::Decrease),
     },
     GlobalShortcutDefinition {
+        action: GlobalAction::MatchPhysicalScale,
+        trigger: LinuxKeycode(32),
+        trigger_key: KeyCode::KeyD,
+        shift: true,
+        drm_only: true,
+        command: GlobalShortcutCommand::MatchPhysicalScale,
+    },
+    GlobalShortcutDefinition {
+        action: GlobalAction::ToggleOutputTopology,
+        trigger: LinuxKeycode(24),
+        trigger_key: KeyCode::KeyO,
+        shift: true,
+        drm_only: false,
+        command: GlobalShortcutCommand::Application(GlobalShortcutAction::ToggleOutputTopology),
+    },
+    GlobalShortcutDefinition {
         action: GlobalAction::Exit,
         trigger: LinuxKeycode(1),
         trigger_key: KeyCode::Escape,
@@ -142,6 +186,7 @@ impl Plugin for GlobalShortcutPlugin {
             .collect::<Vec<_>>();
         let input_map = global_shortcut_map(&shortcuts);
         app.add_plugins(InputManagerPlugin::<GlobalAction>::default())
+            .add_message::<GlobalShortcutAction>()
             .init_resource::<GlobalHostCommands>()
             .insert_resource(RawGlobalShortcutState {
                 shortcuts: shortcuts.clone(),
@@ -197,19 +242,25 @@ pub(crate) fn filter_global_shortcut_event(world: &mut World, event: &RawSeatEve
                         && (!shortcut.shift || shift_pressed)
                 })
                 .copied()
-                .map(GlobalShortcutDefinition::host_command)
         }
     };
 
     let consumed = world
         .get_resource::<ConsumedShortcutKeys>()
         .is_some_and(|consumed| consumed.0.contains(keycode));
-    if let Some(command) = command {
+    if let Some(shortcut) = command {
         if let Some(mut consumed) = world.get_resource_mut::<ConsumedShortcutKeys>() {
             consumed.0.insert(*keycode);
         }
-        if let Some(mut commands) = world.get_resource_mut::<GlobalHostCommands>() {
+        if let Some(command) = shortcut.host_command()
+            && let Some(mut commands) = world.get_resource_mut::<GlobalHostCommands>()
+        {
             commands.0.push_back(command);
+        }
+        if let Some(action) = shortcut.application_action()
+            && let Some(mut actions) = world.get_resource_mut::<Messages<GlobalShortcutAction>>()
+        {
+            actions.write(action);
         }
         true
     } else {

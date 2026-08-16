@@ -20,7 +20,6 @@ use bevy::{
     },
     math::Vec2,
     picking::pointer::{Location, PointerAction, PointerId, PointerInput},
-    ui::UiScale,
 };
 use bevy_winit::converters::{convert_logical_key, convert_physical_key_code};
 use leafwing_input_manager::plugin::CentralInputStorePlugin;
@@ -28,6 +27,7 @@ use tracing::warn;
 use winit::{keyboard::PhysicalKey, platform::scancode::PhysicalKeyExtScancode};
 
 use super::{
+    InputOutputTarget,
     raw::{
         ButtonState, InputPosition, LinuxButtonCode, LinuxKeycode, PointerGesture, RawScrollFrame,
         RawScrollPhase, RawSeatEvent, RawSeatEventKind,
@@ -39,15 +39,15 @@ use super::{
 // Bevy input state systems and Leafwing intentionally ignore this field.
 const INPUT_WINDOW: bevy::ecs::entity::Entity = bevy::ecs::entity::Entity::PLACEHOLDER;
 
-pub(super) fn register(app: &mut App, target: NormalizedRenderTarget) {
+pub(super) fn register(app: &mut App, targets: Vec<InputOutputTarget>) {
     if !app.is_plugin_added::<CentralInputStorePlugin>() {
         app.add_plugins(CentralInputStorePlugin);
     }
-    app.insert_resource(InputTarget(target))
+    app.insert_resource(InputTargets(targets))
         .add_message::<TouchpadGesture>()
-        .init_resource::<UiScale>()
         .init_resource::<RawInputIngress>()
         .init_resource::<ProjectedMouseButtons>()
+        .init_resource::<CapturedPointerTarget>()
         .add_systems(First, project_raw_input.after(MessageUpdateSystems));
 }
 
@@ -65,13 +65,98 @@ impl TouchpadGesture {
 }
 
 #[derive(Resource)]
-struct InputTarget(NormalizedRenderTarget);
+struct InputTargets(Vec<InputOutputTarget>);
+
+impl InputTargets {
+    fn project(&self, position: InputPosition) -> Option<(&NormalizedRenderTarget, Vec2)> {
+        let index = self.output_at(position)?;
+        self.project_to(index, position)
+    }
+
+    fn output_at(&self, position: InputPosition) -> Option<usize> {
+        self.0.iter().position(|output| {
+            output
+                .configuration
+                .logical_rect()
+                .contains(position.x, position.y)
+        })
+    }
+
+    fn project_to(
+        &self,
+        index: usize,
+        position: InputPosition,
+    ) -> Option<(&NormalizedRenderTarget, Vec2)> {
+        let output = self.0.get(index)?;
+        let origin = output.configuration.position();
+        Some((
+            &output.target,
+            Vec2::new(position.x as f32 - origin.x, position.y as f32 - origin.y),
+        ))
+    }
+
+    fn fallback(&self) -> Option<&NormalizedRenderTarget> {
+        self.0
+            .iter()
+            .find(|output| output.configuration.is_primary())
+            .or_else(|| self.0.first())
+            .map(|output| &output.target)
+    }
+
+    fn update_configurations(&mut self, configurations: &[weld_core::OutputConfiguration]) {
+        for target in &mut self.0 {
+            if let Some(configuration) = configurations
+                .iter()
+                .find(|configuration| configuration.id() == target.configuration.id())
+            {
+                target.configuration = *configuration;
+            }
+        }
+    }
+}
 
 #[derive(Resource, Default)]
 struct RawInputIngress(VecDeque<RawSeatEvent>);
 
 #[derive(Resource, Default)]
 struct ProjectedMouseButtons(HashSet<LinuxButtonCode>);
+
+#[derive(Resource, Default)]
+struct CapturedPointerTarget {
+    output: Option<usize>,
+    buttons: HashSet<LinuxButtonCode>,
+}
+
+impl CapturedPointerTarget {
+    fn project<'a>(
+        &self,
+        targets: &'a InputTargets,
+        position: InputPosition,
+    ) -> Option<(&'a NormalizedRenderTarget, Vec2)> {
+        self.output
+            .and_then(|output| targets.project_to(output, position))
+            .or_else(|| targets.project(position))
+    }
+
+    fn press(&mut self, targets: &InputTargets, position: InputPosition, button: LinuxButtonCode) {
+        if self.buttons.is_empty() {
+            self.output = targets.output_at(position);
+        }
+        self.buttons.insert(button);
+    }
+
+    fn release(&mut self, button: LinuxButtonCode) {
+        self.buttons.remove(&button);
+        if self.buttons.is_empty() {
+            self.output = None;
+        }
+    }
+
+    fn clear(&mut self) {
+        self.buttons.clear();
+        self.output = None;
+    }
+}
 
 #[derive(SystemParam)]
 struct ProjectionMessages<'w> {
@@ -92,16 +177,24 @@ pub(crate) fn enqueue_raw_input(world: &mut World, event: RawSeatEvent) {
     ingress.0.push_back(event);
 }
 
+pub(crate) fn update_output_configurations(
+    world: &mut World,
+    configurations: &[weld_core::OutputConfiguration],
+) {
+    if let Some(mut targets) = world.get_resource_mut::<InputTargets>() {
+        targets.update_configurations(configurations);
+    }
+}
+
 fn project_raw_input(
-    target: Res<InputTarget>,
-    ui_scale: Res<UiScale>,
+    targets: Res<InputTargets>,
     mut ingress: ResMut<RawInputIngress>,
     mut pending: ResMut<PendingSeatInput>,
     mut projected_pointer: ResMut<ProjectedPointerState>,
     mut projected_buttons: ResMut<ProjectedMouseButtons>,
+    mut captured_target: ResMut<CapturedPointerTarget>,
     mut messages: ProjectionMessages,
 ) {
-    let ui_scale = ui_scale.0;
     for raw_event in ingress.0.drain(..) {
         pending.0.push_back(raw_event.clone());
         match raw_event.event {
@@ -110,32 +203,36 @@ fn project_raw_input(
                 projected_pointer.0.apply(position);
                 if let Some(previous) = previous {
                     // Nested mode approximates raw device motion with absolute
-                    // cursor deltas. Leafwing consumes these compositor-logical
-                    // units, while Bevy picking below needs UiScale-adjusted
-                    // physical units for Weld's scale-1 manual target. A
-                    // libinput backend can provide true device deltas.
+                    // cursor deltas. Leafwing consumes compositor-logical
+                    // units, while Bevy picking receives coordinates local to
+                    // the selected output target. A libinput backend can
+                    // provide true device deltas.
                     messages.mouse_motion.write(MouseMotion {
                         delta: input_vec2(position) - input_vec2(previous),
                     });
                 }
-                messages.pointer_input.write(pointer_motion(
-                    &target.0,
-                    position,
-                    previous.map_or(Vec2::ZERO, |previous| {
-                        input_vec2(position) - input_vec2(previous)
-                    }),
-                    ui_scale,
-                ));
+                if let Some((target, local_position)) = captured_target.project(&targets, position)
+                {
+                    messages.pointer_input.write(pointer_motion(
+                        target,
+                        local_position,
+                        previous.map_or(Vec2::ZERO, |previous| {
+                            input_vec2(position) - input_vec2(previous)
+                        }),
+                    ));
+                }
             }
             RawSeatEventKind::PointerLeft { position } => {
                 projected_pointer.0.apply(position);
                 projected_pointer.0.clear_host();
-                messages.pointer_input.write(pointer_motion(
-                    &target.0,
-                    InputPosition::new(-1.0, -1.0),
-                    Vec2::ZERO,
-                    ui_scale,
-                ));
+                captured_target.clear();
+                if let Some(target) = targets.fallback() {
+                    messages.pointer_input.write(pointer_motion(
+                        target,
+                        Vec2::new(-1.0, -1.0),
+                        Vec2::ZERO,
+                    ));
+                }
             }
             RawSeatEventKind::PointerButton {
                 position,
@@ -148,11 +245,21 @@ fn project_raw_input(
                 if let Some(action) = pointer_button_action(button, state)
                     && let Some(position) = projected_pointer.0.host_position
                 {
-                    messages.pointer_input.write(PointerInput::new(
-                        PointerId::Mouse,
-                        pointer_location(&target.0, position, ui_scale),
-                        action,
-                    ));
+                    if state == ButtonState::Pressed {
+                        captured_target.press(&targets, position, button);
+                    }
+                    if let Some((target, local_position)) =
+                        captured_target.project(&targets, position)
+                    {
+                        messages.pointer_input.write(PointerInput::new(
+                            PointerId::Mouse,
+                            pointer_location(target, local_position),
+                            action,
+                        ));
+                    }
+                    if state == ButtonState::Released {
+                        captured_target.release(button);
+                    }
                 }
                 let linux_button = button;
                 if let Some(button) = bevy_mouse_button(linux_button) {
@@ -175,7 +282,10 @@ fn project_raw_input(
                 if let Some(position) = position {
                     projected_pointer.0.apply(position);
                 }
-                if let Some(position) = projected_pointer.0.host_position {
+                if let Some(position) = projected_pointer.0.host_position
+                    && let Some((target, local_position)) =
+                        captured_target.project(&targets, position)
+                {
                     let (unit, x, y, phase) = bevy_scroll(axis);
                     messages.mouse_wheel.write(MouseWheel {
                         unit,
@@ -186,7 +296,7 @@ fn project_raw_input(
                     });
                     messages.pointer_input.write(PointerInput::new(
                         PointerId::Mouse,
-                        pointer_location(&target.0, position, ui_scale),
+                        pointer_location(target, local_position),
                         PointerAction::Scroll { unit, x, y, phase },
                     ));
                 }
@@ -198,6 +308,7 @@ fn project_raw_input(
             }
             RawSeatEventKind::HostFocusLost => {
                 projected_pointer.0.clear_host();
+                captured_target.clear();
                 let mut held_buttons = projected_buttons.0.drain().collect::<Vec<_>>();
                 held_buttons.sort_unstable_by_key(|button| button.0);
                 for button in held_buttons.into_iter().filter_map(bevy_mouse_button) {
@@ -208,17 +319,20 @@ fn project_raw_input(
                     });
                 }
                 messages.keyboard_focus_lost.write(KeyboardFocusLost);
-                messages.pointer_input.write(PointerInput::new(
-                    PointerId::Mouse,
-                    pointer_location(&target.0, projected_pointer.0.last_known_position, ui_scale),
-                    PointerAction::Cancel,
-                ));
-                messages.pointer_input.write(pointer_motion(
-                    &target.0,
-                    InputPosition::new(-1.0, -1.0),
-                    Vec2::ZERO,
-                    ui_scale,
-                ));
+                if let Some((target, local_position)) =
+                    targets.project(projected_pointer.0.last_known_position)
+                {
+                    messages.pointer_input.write(PointerInput::new(
+                        PointerId::Mouse,
+                        pointer_location(target, local_position),
+                        PointerAction::Cancel,
+                    ));
+                    messages.pointer_input.write(pointer_motion(
+                        target,
+                        Vec2::new(-1.0, -1.0),
+                        Vec2::ZERO,
+                    ));
+                }
             }
             RawSeatEventKind::Keyboard {
                 keycode,
@@ -241,31 +355,18 @@ fn project_raw_input(
     }
 }
 
-fn pointer_motion(
-    target: &NormalizedRenderTarget,
-    position: InputPosition,
-    delta: Vec2,
-    ui_scale: f32,
-) -> PointerInput {
+fn pointer_motion(target: &NormalizedRenderTarget, position: Vec2, delta: Vec2) -> PointerInput {
     PointerInput::new(
         PointerId::Mouse,
-        pointer_location(target, position, ui_scale),
-        PointerAction::Move {
-            delta: delta * ui_scale,
-        },
+        pointer_location(target, position),
+        PointerAction::Move { delta },
     )
 }
 
-fn pointer_location(
-    target: &NormalizedRenderTarget,
-    position: InputPosition,
-    ui_scale: f32,
-) -> Location {
+fn pointer_location(target: &NormalizedRenderTarget, position: Vec2) -> Location {
     Location {
         target: target.clone(),
-        // Bevy picking converts only the render target scale. Weld's manual
-        // target has scale 1, so UiScale must be applied explicitly here.
-        position: input_vec2(position) * ui_scale,
+        position,
     }
 }
 
@@ -341,16 +442,122 @@ mod tests {
         input::{mouse::MouseScrollUnit, touch::TouchPhase},
         math::Vec2,
     };
+    use weld_core::{
+        OutputConfiguration, OutputId, OutputScale,
+        surface::{Extent, LogicalPoint},
+    };
 
-    use super::{bevy_scroll, pointer_location};
-    use crate::input::raw::{InputPosition, RawScrollFrame, RawScrollPhase};
+    use super::{CapturedPointerTarget, InputTargets, bevy_scroll, pointer_location};
+    use crate::input::{
+        InputOutputTarget,
+        raw::{InputPosition, LinuxButtonCode, RawScrollFrame, RawScrollPhase},
+    };
 
     #[test]
-    fn compositor_logical_pointer_positions_are_scaled_for_bevy_picking() {
+    fn bevy_picking_locations_remain_output_logical() {
         let target = NormalizedRenderTarget::TextureView(ManualTextureViewHandle(1));
-        let location = pointer_location(&target, InputPosition::new(80.0, 40.0), 1.25);
+        let location = pointer_location(&target, Vec2::new(80.0, 40.0));
 
-        assert_eq!(location.position, Vec2::new(100.0, 50.0));
+        assert_eq!(location.position, Vec2::new(80.0, 40.0));
+    }
+
+    #[test]
+    fn held_pointer_target_keeps_cross_output_drag_coordinates_continuous() {
+        let external_target = NormalizedRenderTarget::TextureView(ManualTextureViewHandle(1));
+        let laptop_target = NormalizedRenderTarget::TextureView(ManualTextureViewHandle(2));
+        let targets = InputTargets(vec![
+            InputOutputTarget {
+                configuration: OutputConfiguration::new(
+                    OutputId::new(1),
+                    Extent::new(1920, 1080),
+                    OutputScale::new(1.0).expect("test scale should be valid"),
+                    LogicalPoint::new(0.0, 0.0),
+                    false,
+                    None,
+                )
+                .expect("external output should be valid"),
+                target: external_target,
+            },
+            InputOutputTarget {
+                configuration: OutputConfiguration::new(
+                    OutputId::new(2),
+                    Extent::new(1920, 1200),
+                    OutputScale::new(1.25).expect("test scale should be valid"),
+                    LogicalPoint::new(0.0, 1080.0),
+                    true,
+                    None,
+                )
+                .expect("laptop output should be valid"),
+                target: laptop_target.clone(),
+            },
+        ]);
+        let mut capture = CapturedPointerTarget::default();
+        let press = InputPosition::new(100.0, 1085.0);
+        capture.press(&targets, press, LinuxButtonCode(0x110));
+
+        let (press_target, press_local) = capture
+            .project(&targets, press)
+            .expect("pressed pointer should project");
+        let (moved_target, moved_local) = capture
+            .project(&targets, InputPosition::new(100.0, 1075.0))
+            .expect("captured pointer should project beyond its output");
+
+        assert_eq!(press_target, &laptop_target);
+        assert_eq!(moved_target, &laptop_target);
+        assert_eq!(moved_local - press_local, Vec2::new(0.0, -10.0));
+    }
+
+    #[test]
+    fn live_output_reflow_updates_projected_local_coordinates_in_place() {
+        let external_target = NormalizedRenderTarget::TextureView(ManualTextureViewHandle(1));
+        let laptop_target = NormalizedRenderTarget::TextureView(ManualTextureViewHandle(2));
+        let external = OutputConfiguration::new(
+            OutputId::new(1),
+            Extent::new(1_920, 1_080),
+            OutputScale::new(1.0).expect("test scale should be valid"),
+            LogicalPoint::ZERO,
+            false,
+            None,
+        )
+        .expect("external output should be valid");
+        let laptop = OutputConfiguration::new(
+            OutputId::new(2),
+            Extent::new(2_240, 1_400),
+            OutputScale::new(1.25).expect("test scale should be valid"),
+            LogicalPoint::new(64.0, 1_080.0),
+            true,
+            None,
+        )
+        .expect("laptop output should be valid");
+        let mut targets = InputTargets(vec![
+            InputOutputTarget {
+                configuration: external,
+                target: external_target,
+            },
+            InputOutputTarget {
+                configuration: laptop,
+                target: laptop_target.clone(),
+            },
+        ]);
+        let mut capture = CapturedPointerTarget::default();
+        capture.press(
+            &targets,
+            InputPosition::new(164.0, 1_180.0),
+            LinuxButtonCode(0x110),
+        );
+        let reflowed_laptop = laptop
+            .with_scale(OutputScale::new(1.5).expect("test scale should be valid"))
+            .and_then(|output| output.with_position(LogicalPoint::new(213.333_34, 1_080.0)))
+            .expect("reflowed laptop should remain valid");
+
+        targets.update_configurations(&[external, reflowed_laptop]);
+        let (target, local) = capture
+            .project(&targets, InputPosition::new(313.333_34, 1_180.0))
+            .expect("captured pointer should use the reflowed laptop geometry");
+
+        assert_eq!(target, &laptop_target);
+        assert!((local.x - 100.0).abs() < 0.001);
+        assert_eq!(local.y, 100.0);
     }
 
     #[test]
