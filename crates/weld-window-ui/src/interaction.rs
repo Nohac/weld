@@ -8,10 +8,10 @@ use bevy::{
         message::MessageWriter,
         observer::On,
         query::{Added, Without},
-        system::{Commands, Query, SystemParam},
+        system::{Commands, Query},
     },
     picking::{
-        events::{Cancel, Drag, Pointer, Press},
+        events::{Pointer, Press},
         pointer::PointerButton,
     },
     ui::ComputedNode,
@@ -192,77 +192,6 @@ pub(crate) fn begin_resize_handle(
     });
 }
 
-#[derive(SystemParam)]
-pub(crate) struct DragWindowParams<'w, 's> {
-    commands: Commands<'w, 's>,
-    presentations: Query<'w, 's, &'static WindowProjection>,
-    parents: Query<'w, 's, &'static ChildOf>,
-    interactions: Query<'w, 's, &'static WindowInteractionSession>,
-    handles: Query<'w, 's, (), bevy::ecs::query::With<WindowMoveHandle>>,
-    redraw: bevy::ecs::message::MessageWriter<'w, RequestRedraw>,
-}
-
-pub(crate) fn drag_window(mut drag: On<Pointer<Drag>>, params: DragWindowParams) {
-    let DragWindowParams {
-        mut commands,
-        presentations,
-        parents,
-        interactions,
-        handles,
-        mut redraw,
-    } = params;
-    if drag.button != PointerButton::Primary {
-        return;
-    }
-    let Some(window) = presented_window(drag.entity, &presentations, &parents) else {
-        return;
-    };
-    let Some(delta) = logical_drag_delta(drag.delta) else {
-        return;
-    };
-    let kind = match interactions.get(window) {
-        Ok(interaction) => match interaction.kind {
-            WindowInteractionKind::Move => WindowIntentKind::MoveBy(delta),
-            WindowInteractionKind::Resize(_) => WindowIntentKind::ResizeBy(delta),
-        },
-        Err(_) if handles.contains(drag.entity) && drag.original_event_target() == drag.entity => {
-            commands.trigger(WindowCommand {
-                window,
-                kind: WindowCommandKind::BeginInteraction(WindowInteractionKind::Move),
-            });
-            WindowIntentKind::MoveBy(delta)
-        }
-        _ => return,
-    };
-    drag.propagate(false);
-    commands.trigger(WindowIntent { window, kind });
-    redraw.write(RequestRedraw);
-}
-
-/// Best-effort fallback for Bevy pointer cancellation.
-///
-/// The event target is hover-derived, so host focus loss also projects held
-/// button releases through the window domain's authoritative release path.
-pub(crate) fn cancel_drag(
-    cancel: On<Pointer<Cancel>>,
-    mut commands: Commands,
-    presentations: Query<&WindowProjection>,
-    parents: Query<&ChildOf>,
-    interactions: Query<&WindowInteractionSession>,
-    mut redraw: bevy::ecs::message::MessageWriter<RequestRedraw>,
-) {
-    let Some(window) = presented_window(cancel.entity, &presentations, &parents) else {
-        return;
-    };
-    if interactions.get(window).is_ok() {
-        commands.trigger(WindowCommand {
-            window,
-            kind: WindowCommandKind::EndInteraction,
-        });
-        redraw.write(RequestRedraw);
-    }
-}
-
 fn presented_window(
     mut entity: bevy::ecs::entity::Entity,
     presentations: &Query<&WindowProjection>,
@@ -274,10 +203,6 @@ fn presented_window(
         }
         entity = parents.get(entity).ok()?.parent();
     }
-}
-
-fn logical_drag_delta(delta: bevy::math::Vec2) -> Option<bevy::math::Vec2> {
-    delta.is_finite().then_some(delta)
 }
 
 fn resize_edge_at(
@@ -362,7 +287,7 @@ mod tests {
         math::{Vec2, Vec3},
         picking::{
             backend::HitData,
-            events::{Drag, Pointer, Press},
+            events::{Pointer, Press},
             pointer::{Location, PointerButton, PointerId},
         },
         sprite::BorderRect,
@@ -376,8 +301,8 @@ mod tests {
     };
 
     use super::{
-        WindowMoveHandle, WindowResizeFrame, WindowResizeHandle, activate_window,
-        begin_resize_frame, begin_resize_handle, drag_window, logical_drag_delta, resize_edge_at,
+        WindowResizeFrame, WindowResizeHandle, activate_window, begin_resize_frame,
+        begin_resize_handle, resize_edge_at,
     };
 
     #[derive(Resource, Default)]
@@ -392,15 +317,6 @@ mod tests {
 
     fn record_intent(intent: On<WindowIntent>, mut recorded: ResMut<RecordedInteractions>) {
         recorded.intents.push(intent.kind);
-    }
-
-    #[test]
-    fn drag_delta_is_already_expressed_in_logical_units() {
-        assert_eq!(
-            logical_drag_delta(Vec2::new(18.0, 12.0)),
-            Some(Vec2::new(18.0, 12.0))
-        );
-        assert_eq!(logical_drag_delta(Vec2::splat(f32::NAN)), None);
     }
 
     fn resize_node(inverse_scale_factor: f32) -> ComputedNode {
@@ -633,96 +549,6 @@ mod tests {
         assert_eq!(
             app.world().resource::<RecordedInteractions>().intents,
             vec![WindowIntentKind::Activate]
-        );
-        assert_eq!(
-            redraws
-                .read(
-                    app.world()
-                        .resource::<bevy::ecs::message::Messages<RequestRedraw>>()
-                )
-                .count(),
-            1
-        );
-    }
-
-    #[test]
-    fn direct_handle_drag_starts_or_routes_by_the_existing_session() {
-        let mut app = App::new();
-        app.add_message::<RequestRedraw>()
-            .init_resource::<RecordedInteractions>()
-            .add_observer(drag_window)
-            .add_observer(record_command)
-            .add_observer(record_intent);
-        let window = app.world_mut().spawn_empty().id();
-        let root = app
-            .world_mut()
-            .spawn(WindowProjection::new(window, Entity::PLACEHOLDER))
-            .id();
-        let handle = app
-            .world_mut()
-            .spawn((WindowMoveHandle, ChildOf(root)))
-            .id();
-        let location = Location {
-            target: NormalizedRenderTarget::TextureView(ManualTextureViewHandle(1)),
-            position: Vec2::ZERO,
-        };
-        let mut redraws = MessageCursor::<RequestRedraw>::default();
-        let drag = || {
-            Pointer::new(
-                PointerId::Mouse,
-                location.clone(),
-                Drag {
-                    button: PointerButton::Primary,
-                    distance: Vec2::new(12.0, 8.0),
-                    delta: Vec2::new(12.0, 8.0),
-                },
-                handle,
-            )
-        };
-
-        app.world_mut().trigger(drag());
-        app.update();
-        assert_eq!(
-            app.world().resource::<RecordedInteractions>().commands,
-            vec![WindowCommandKind::BeginInteraction(
-                WindowInteractionKind::Move
-            )]
-        );
-        assert_eq!(
-            app.world().resource::<RecordedInteractions>().intents,
-            vec![WindowIntentKind::MoveBy(Vec2::new(12.0, 8.0))]
-        );
-        assert_eq!(
-            redraws
-                .read(
-                    app.world()
-                        .resource::<bevy::ecs::message::Messages<RequestRedraw>>()
-                )
-                .count(),
-            1
-        );
-
-        app.world_mut()
-            .resource_mut::<RecordedInteractions>()
-            .commands
-            .clear();
-        app.world_mut()
-            .resource_mut::<RecordedInteractions>()
-            .intents
-            .clear();
-        app.world_mut()
-            .entity_mut(window)
-            .insert(WindowInteractionSession {
-                kind: WindowInteractionKind::Resize(weld_app::surface::ToplevelResizeEdge::TopLeft),
-            });
-        app.world_mut().trigger(drag());
-        app.update();
-
-        let recorded = app.world().resource::<RecordedInteractions>();
-        assert!(recorded.commands.is_empty());
-        assert_eq!(
-            recorded.intents,
-            [WindowIntentKind::ResizeBy(Vec2::new(12.0, 8.0))]
         );
         assert_eq!(
             redraws

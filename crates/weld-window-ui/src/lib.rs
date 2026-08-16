@@ -71,8 +71,6 @@ impl Plugin for WindowUiPlugin {
             .add_observer(interaction::begin_move_handle)
             .add_observer(interaction::begin_resize_frame)
             .add_observer(interaction::begin_resize_handle)
-            .add_observer(interaction::drag_window)
-            .add_observer(interaction::cancel_drag)
             .configure_sets(
                 PreUpdate,
                 WindowSystems::InteractionFinalize.before(CursorSystems::Resolve),

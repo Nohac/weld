@@ -641,6 +641,10 @@ mod tests {
     use bevy::{
         app::{App, PreUpdate},
         ecs::{resource::Resource, schedule::IntoScheduleConfigs, system::Commands},
+        input::{
+            ButtonState,
+            mouse::{MouseButton, MouseButtonInput, MouseMotion},
+        },
         math::UVec2,
         picking::PickingSystems,
     };
@@ -963,12 +967,27 @@ mod tests {
         app.world_mut()
             .get_mut::<WindowGeometry>(window)
             .expect("managed window should retain geometry")
-            .position = Vec2::new(100.0, -300.0);
+            .position = Vec2::new(100.0, -50.0);
         app.world_mut()
             .entity_mut(window)
             .insert(WindowInteractionSession {
                 kind: WindowInteractionKind::Move,
             });
+        app.world_mut().write_message(MouseButtonInput {
+            button: MouseButton::Left,
+            state: ButtonState::Pressed,
+            window: Entity::PLACEHOLDER,
+        });
+        app.update();
+        assert_eq!(
+            app.world().get::<WindowOutput>(window),
+            Some(&WindowOutput(laptop))
+        );
+
+        app.world_mut().write_message(MouseMotion {
+            delta: Vec2::new(0.0, -250.0),
+        });
+        app.update();
 
         app.update();
 
@@ -982,6 +1001,11 @@ mod tests {
                 .expect("re-homed window should retain geometry")
                 .position,
             Vec2::new(100.0, 780.0),
+        );
+        assert!(
+            app.world()
+                .get::<WindowInteractionSession>(window)
+                .is_some()
         );
     }
 

@@ -463,7 +463,11 @@ clip boundary or moving between Bevy layers becomes authoritative on the next
 composition frame; motion within the published client layer uses the retained
 affine mapping at raw input pace. A held pointer button suppresses
 frame-published pointer-focus replacement; Smithay grabs themselves remain
-authoritative over event delivery.
+authoritative over event delivery. Bevy pointer projection stays in the press
+output's coordinate space while any button remains held so generic drag deltas
+stay continuous across render targets. The final release is delivered in that
+captured space, then the unchanged pointer position is immediately republished
+on its current output so stationary picking does not retain the old target.
 
 Standalone input preserves each libinput device's default acceleration profile
 and speed. The eventual input-settings API must preserve global, device-type,
@@ -523,13 +527,16 @@ ECS instead of reimplementing that protocol policy.
 
 Validated pointer `xdg_toplevel.move` and `xdg_toplevel.resize` requests cross
 the Smithay boundary as protocol-neutral ECS messages. `weld-window` validates
-the occupant and owns the UI-neutral interaction session, which exists only
-for the lifetime of the live primary-pointer interaction. Physical primary
-button release ends every active session from standard Bevy input regardless
-of the pointer's current hover target. Protocol end and pointer cancellation
-use the same idempotent domain command. `weld-window-ui` translates pointer
-motion into window intents and derives its cursor override from the live
-session, while `weld-float` owns placement and interactive-resize policy.
+the occupant and owns the single UI-neutral interaction session. Presentation
+picking selects a managed window once on primary press; thereafter
+`weld-window` translates frame-paced pointer motion into window intents without
+consulting hover state or the presentation entity. Output re-homing, projection
+replacement, and temporary occupant unmapping therefore cannot interrupt the
+grab. Physical primary-button release ends the session regardless of the
+pointer's current hover target, and Smithay's release-derived protocol end uses
+the same idempotent domain command. `weld-window-ui` derives its cursor override
+from the live session, while `weld-float` owns placement and
+interactive-resize policy.
 Protocol move and resize are currently primary-button-only; equivalent touch
 interaction remains future work. Smithay owns the pointer grab, configure
 state, and enforcement of the client's committed size constraints. Repeated

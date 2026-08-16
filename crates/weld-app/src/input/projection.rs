@@ -145,11 +145,13 @@ impl CapturedPointerTarget {
         self.buttons.insert(button);
     }
 
-    fn release(&mut self, button: LinuxButtonCode) {
-        self.buttons.remove(&button);
-        if self.buttons.is_empty() {
+    fn release(&mut self, button: LinuxButtonCode) -> bool {
+        let removed = self.buttons.remove(&button);
+        if removed && self.buttons.is_empty() {
             self.output = None;
+            return true;
         }
+        false
     }
 
     fn clear(&mut self) {
@@ -242,23 +244,18 @@ fn project_raw_input(
                 if let Some(position) = position {
                     projected_pointer.0.apply(position);
                 }
-                if let Some(action) = pointer_button_action(button, state)
-                    && let Some(position) = projected_pointer.0.host_position
-                {
-                    if state == ButtonState::Pressed {
-                        captured_target.press(&targets, position, button);
-                    }
-                    if let Some((target, local_position)) =
-                        captured_target.project(&targets, position)
+                if let Some(position) = projected_pointer.0.host_position {
+                    for input in project_pointer_button(
+                        &mut captured_target,
+                        &targets,
+                        position,
+                        button,
+                        state,
+                    )
+                    .into_iter()
+                    .flatten()
                     {
-                        messages.pointer_input.write(PointerInput::new(
-                            PointerId::Mouse,
-                            pointer_location(target, local_position),
-                            action,
-                        ));
-                    }
-                    if state == ButtonState::Released {
-                        captured_target.release(button);
+                        messages.pointer_input.write(input);
                     }
                 }
                 let linux_button = button;
@@ -385,6 +382,29 @@ fn pointer_button_action(button: LinuxButtonCode, state: ButtonState) -> Option<
     })
 }
 
+fn project_pointer_button(
+    capture: &mut CapturedPointerTarget,
+    targets: &InputTargets,
+    position: InputPosition,
+    button: LinuxButtonCode,
+    state: ButtonState,
+) -> [Option<PointerInput>; 2] {
+    let Some(action) = pointer_button_action(button, state) else {
+        return [None, None];
+    };
+    if state == ButtonState::Pressed {
+        capture.press(targets, position, button);
+    }
+    let action = capture.project(targets, position).map(|(target, local)| {
+        PointerInput::new(PointerId::Mouse, pointer_location(target, local), action)
+    });
+    let handoff = (state == ButtonState::Released && capture.release(button))
+        .then(|| targets.project(position))
+        .flatten()
+        .map(|(target, local)| pointer_motion(target, local, Vec2::ZERO));
+    [action, handoff]
+}
+
 const fn bevy_button_state(state: ButtonState) -> BevyButtonState {
     match state {
         ButtonState::Pressed => BevyButtonState::Pressed,
@@ -441,30 +461,24 @@ mod tests {
         camera::{ManualTextureViewHandle, NormalizedRenderTarget},
         input::{mouse::MouseScrollUnit, touch::TouchPhase},
         math::Vec2,
+        picking::pointer::{PointerAction, PointerButton},
     };
     use weld_core::{
         OutputConfiguration, OutputId, OutputScale,
         surface::{Extent, LogicalPoint},
     };
 
-    use super::{CapturedPointerTarget, InputTargets, bevy_scroll, pointer_location};
+    use super::{
+        CapturedPointerTarget, InputTargets, bevy_scroll, pointer_location, project_pointer_button,
+    };
     use crate::input::{
         InputOutputTarget,
-        raw::{InputPosition, LinuxButtonCode, RawScrollFrame, RawScrollPhase},
+        raw::{ButtonState, InputPosition, LinuxButtonCode, RawScrollFrame, RawScrollPhase},
     };
 
-    #[test]
-    fn bevy_picking_locations_remain_output_logical() {
-        let target = NormalizedRenderTarget::TextureView(ManualTextureViewHandle(1));
-        let location = pointer_location(&target, Vec2::new(80.0, 40.0));
-
-        assert_eq!(location.position, Vec2::new(80.0, 40.0));
-    }
-
-    #[test]
-    fn held_pointer_target_keeps_cross_output_drag_coordinates_continuous() {
-        let external_target = NormalizedRenderTarget::TextureView(ManualTextureViewHandle(1));
-        let laptop_target = NormalizedRenderTarget::TextureView(ManualTextureViewHandle(2));
+    fn stacked_targets() -> (InputTargets, NormalizedRenderTarget, NormalizedRenderTarget) {
+        let external = NormalizedRenderTarget::TextureView(ManualTextureViewHandle(1));
+        let laptop = NormalizedRenderTarget::TextureView(ManualTextureViewHandle(2));
         let targets = InputTargets(vec![
             InputOutputTarget {
                 configuration: OutputConfiguration::new(
@@ -476,7 +490,7 @@ mod tests {
                     None,
                 )
                 .expect("external output should be valid"),
-                target: external_target,
+                target: external.clone(),
             },
             InputOutputTarget {
                 configuration: OutputConfiguration::new(
@@ -488,9 +502,23 @@ mod tests {
                     None,
                 )
                 .expect("laptop output should be valid"),
-                target: laptop_target.clone(),
+                target: laptop.clone(),
             },
         ]);
+        (targets, external, laptop)
+    }
+
+    #[test]
+    fn bevy_picking_locations_remain_output_logical() {
+        let target = NormalizedRenderTarget::TextureView(ManualTextureViewHandle(1));
+        let location = pointer_location(&target, Vec2::new(80.0, 40.0));
+
+        assert_eq!(location.position, Vec2::new(80.0, 40.0));
+    }
+
+    #[test]
+    fn held_pointer_target_keeps_cross_output_drag_coordinates_continuous() {
+        let (targets, _, laptop_target) = stacked_targets();
         let mut capture = CapturedPointerTarget::default();
         let press = InputPosition::new(100.0, 1085.0);
         capture.press(&targets, press, LinuxButtonCode(0x110));
@@ -505,6 +533,93 @@ mod tests {
         assert_eq!(press_target, &laptop_target);
         assert_eq!(moved_target, &laptop_target);
         assert_eq!(moved_local - press_local, Vec2::new(0.0, -10.0));
+    }
+
+    #[test]
+    fn final_release_hands_the_stationary_pointer_to_its_current_output() {
+        let (targets, external_target, laptop_target) = stacked_targets();
+        let mut capture = CapturedPointerTarget::default();
+        let primary = LinuxButtonCode(0x110);
+        let press = InputPosition::new(100.0, 1085.0);
+        let release = InputPosition::new(100.0, 1075.0);
+        project_pointer_button(&mut capture, &targets, press, primary, ButtonState::Pressed);
+
+        let [release_input, handoff_input] = project_pointer_button(
+            &mut capture,
+            &targets,
+            release,
+            primary,
+            ButtonState::Released,
+        );
+        let release_input = release_input.expect("release should use the captured target");
+        let handoff_input = handoff_input.expect("final release should republish the pointer");
+
+        assert_eq!(release_input.location.target, laptop_target);
+        assert!(matches!(
+            release_input.action,
+            PointerAction::Release(PointerButton::Primary)
+        ));
+        assert_eq!(handoff_input.location.target, external_target);
+        assert_eq!(handoff_input.location.position, Vec2::new(100.0, 1075.0));
+        assert!(matches!(
+            handoff_input.action,
+            PointerAction::Move { delta } if delta == Vec2::ZERO
+        ));
+    }
+
+    #[test]
+    fn pointer_target_handoff_waits_for_the_final_held_button() {
+        let (targets, external_target, laptop_target) = stacked_targets();
+        let mut capture = CapturedPointerTarget::default();
+        let primary = LinuxButtonCode(0x110);
+        let secondary = LinuxButtonCode(0x111);
+        let press = InputPosition::new(100.0, 1085.0);
+        let release = InputPosition::new(100.0, 1075.0);
+        project_pointer_button(&mut capture, &targets, press, primary, ButtonState::Pressed);
+        project_pointer_button(
+            &mut capture,
+            &targets,
+            press,
+            secondary,
+            ButtonState::Pressed,
+        );
+
+        let [primary_release, early_handoff] = project_pointer_button(
+            &mut capture,
+            &targets,
+            release,
+            primary,
+            ButtonState::Released,
+        );
+        assert_eq!(
+            primary_release
+                .expect("primary release should retain capture")
+                .location
+                .target,
+            laptop_target
+        );
+        assert!(early_handoff.is_none());
+
+        let [secondary_release, final_handoff] = project_pointer_button(
+            &mut capture,
+            &targets,
+            release,
+            secondary,
+            ButtonState::Released,
+        );
+        assert!(matches!(
+            secondary_release
+                .expect("secondary release should use the captured target")
+                .action,
+            PointerAction::Release(PointerButton::Secondary)
+        ));
+        assert_eq!(
+            final_handoff
+                .expect("final release should hand off the pointer")
+                .location
+                .target,
+            external_target
+        );
     }
 
     #[test]

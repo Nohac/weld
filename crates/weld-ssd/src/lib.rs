@@ -516,10 +516,14 @@ mod tests {
         asset::{AssetApp, AssetPlugin, Assets},
         camera::{ManualTextureViewHandle, NormalizedRenderTarget},
         image::Image,
+        input::{
+            ButtonState,
+            mouse::{MouseButton, MouseButtonInput, MouseMotion},
+        },
         math::{UVec2, Vec2},
         picking::{
             backend::HitData,
-            events::{Click, Drag, Pointer, Press},
+            events::{Click, Pointer, Press},
             pointer::{Location, PointerId},
         },
         scene::ScenePlugin,
@@ -575,6 +579,18 @@ mod tests {
             PrimaryOutput,
         ));
         app
+    }
+
+    fn write_primary_button(app: &mut App, state: ButtonState) {
+        app.world_mut().write_message(MouseButtonInput {
+            button: MouseButton::Left,
+            state,
+            window: bevy::ecs::entity::Entity::PLACEHOLDER,
+        });
+    }
+
+    fn write_mouse_motion(app: &mut App, delta: Vec2) {
+        app.world_mut().write_message(MouseMotion { delta });
     }
 
     fn frame(surface: SurfaceId, width: u32, height: u32) -> HostSurfaceEvent {
@@ -784,16 +800,9 @@ mod tests {
             },
             move_handle,
         ));
-        app.world_mut().trigger(Pointer::new(
-            PointerId::Mouse,
-            location.clone(),
-            Drag {
-                button: PointerButton::Primary,
-                distance: Vec2::new(12.0, 8.0),
-                delta: Vec2::new(12.0, 8.0),
-            },
-            move_handle,
-        ));
+        write_primary_button(&mut app, ButtonState::Pressed);
+        app.update();
+        write_mouse_motion(&mut app, Vec2::new(12.0, 8.0));
         app.update();
         assert!(
             app.world()
@@ -807,6 +816,8 @@ mod tests {
                 .position,
             initial_position + Vec2::new(12.0, 8.0)
         );
+        write_primary_button(&mut app, ButtonState::Released);
+        app.update();
 
         app.world_mut().trigger(Pointer::new(
             PointerId::Mouse,
@@ -886,6 +897,7 @@ mod tests {
             },
             resize_handle,
         ));
+        write_primary_button(&mut app, ButtonState::Pressed);
         app.update();
         assert!(matches!(
             app.world().get::<WindowInteractionSession>(window),
@@ -895,16 +907,7 @@ mod tests {
             })
         ));
 
-        app.world_mut().trigger(Pointer::new(
-            PointerId::Mouse,
-            location,
-            Drag {
-                button: PointerButton::Primary,
-                distance: Vec2::new(20.0, 0.0),
-                delta: Vec2::new(20.0, 0.0),
-            },
-            resize_handle,
-        ));
+        write_mouse_motion(&mut app, Vec2::new(20.0, 0.0));
         app.update();
 
         assert_eq!(
@@ -937,7 +940,7 @@ mod tests {
         );
         enqueue_surface_event(app.world_mut(), frame(surface, 320, 240));
         app.update();
-        let (window, content) = {
+        let window = {
             let mut toplevels = app
                 .world_mut()
                 .query::<(&ClientToplevel, &OccupiesWindow)>();
@@ -945,12 +948,11 @@ mod tests {
                 .single(app.world())
                 .expect("mapped toplevel should be admitted");
             let window = occupancy.0;
-            let content = app
-                .world_mut()
+            app.world_mut()
                 .query_filtered::<bevy::ecs::entity::Entity, With<SurfaceNode>>()
                 .single(app.world())
                 .expect("client presentation should mount its surface");
-            (window, content)
+            window
         };
         let initial = *app
             .world()
@@ -958,6 +960,7 @@ mod tests {
             .expect("floating manager should initialize geometry");
         take_surface_actions(app.world_mut());
 
+        write_primary_button(&mut app, ButtonState::Pressed);
         enqueue_surface_event(
             app.world_mut(),
             HostSurfaceEvent {
@@ -978,32 +981,8 @@ mod tests {
             })
         ));
 
-        app.world_mut().trigger(Pointer::new(
-            PointerId::Mouse,
-            Location {
-                target: NormalizedRenderTarget::TextureView(ManualTextureViewHandle(1)),
-                position: Vec2::ZERO,
-            },
-            Drag {
-                button: PointerButton::Primary,
-                distance: Vec2::new(10.0, 0.0),
-                delta: Vec2::new(10.0, 0.0),
-            },
-            content,
-        ));
-        app.world_mut().trigger(Pointer::new(
-            PointerId::Mouse,
-            Location {
-                target: NormalizedRenderTarget::TextureView(ManualTextureViewHandle(1)),
-                position: Vec2::ZERO,
-            },
-            Drag {
-                button: PointerButton::Primary,
-                distance: Vec2::new(20.0, 0.0),
-                delta: Vec2::new(10.0, 0.0),
-            },
-            content,
-        ));
+        write_mouse_motion(&mut app, Vec2::new(10.0, 0.0));
+        write_mouse_motion(&mut app, Vec2::new(10.0, 0.0));
         app.update();
 
         assert_eq!(
