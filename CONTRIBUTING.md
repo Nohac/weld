@@ -165,6 +165,8 @@ Use the compositor shortcuts to launch clients or stop Weld:
 - `Super+Enter`: foot
 - `Super+F`: Firefox
 - `Super+B`: Blender
+- `Super+LMB`: move the floating window under the pointer
+- `Super+RMB`: resize the floating window under the pointer from its nearest corner
 - `Super+=` / `Super+-` (DRM only): increase or decrease output scale by 0.25
 - `Super+Shift+D` (DRM only): match the primary output's physical scale to the first measured external output
 - `Super+Shift+O`: toggle output-topology diagnostics on the primary output

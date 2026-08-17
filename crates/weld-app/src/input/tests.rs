@@ -17,7 +17,7 @@ use winit::keyboard::Key;
 use super::{
     GlobalShortcutAction, GlobalShortcutPlugin, InputBridgePlugin, InputOutputTarget,
     TouchpadGesture, VirtualTerminalShortcutPlugin, enqueue_raw_input,
-    filter_global_shortcut_event, filter_virtual_terminal_event,
+    filter_global_shortcut_event, filter_pointer_shortcut_event, filter_virtual_terminal_event,
     raw::{
         ButtonState, InputDelta, InputPosition, LinuxButtonCode, LinuxKeycode, PointerGesture,
         RawSeatEvent, RawSeatEventKind, TouchpadPinch,
@@ -93,7 +93,8 @@ fn shortcut_test_app(backend: ActiveBackend) -> App {
 
 fn enqueue_host_input(app: &mut App, event: RawSeatEvent) -> bool {
     let consumed = filter_global_shortcut_event(app.world_mut(), &event)
-        | filter_virtual_terminal_event(app.world_mut(), &event);
+        | filter_virtual_terminal_event(app.world_mut(), &event)
+        | filter_pointer_shortcut_event(app.world_mut(), &event);
     enqueue_raw_input(app.world_mut(), event);
     !consumed
 }

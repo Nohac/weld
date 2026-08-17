@@ -20,6 +20,7 @@ use leafwing_input_manager::plugin::InputManagerSystem;
 
 use super::{
     InputSystems,
+    pointer_shortcuts::PublishedPointerTarget,
     raw::{ButtonState, LinuxButtonCode, RawSeatEvent, RawSeatEventKind},
     state::{InputUpdateTime, PendingSeatInput, PointerPositionState},
 };
@@ -78,6 +79,7 @@ fn resolve_input_effects(
         mut pending,
         mut effects,
         mut routing,
+        mut published_target,
     } = resources;
 
     replay_input_batch(&mut routing, pending.0.drain(..));
@@ -88,7 +90,12 @@ fn resolve_input_effects(
     if !routing.pressed_buttons.is_empty() {
         return;
     }
-    let target = picked_surface_target(&pointers, &picked_nodes, &cameras, &output_positions);
+    let picked = picked_pointer_target(&pointers, &picked_nodes, &cameras, &output_positions);
+    published_target.0 = routing
+        .pointer
+        .host_position
+        .and_then(|_| picked.map(|picked| picked.entity));
+    let target = picked.and_then(|picked| picked.surface);
     let current = routing
         .pointer
         .host_position
@@ -109,6 +116,7 @@ struct InputRoutingResources<'w> {
     pending: ResMut<'w, PendingSeatInput>,
     effects: ResMut<'w, InputEffects>,
     routing: ResMut<'w, PointerRoutingState>,
+    published_target: ResMut<'w, PublishedPointerTarget>,
 }
 
 fn replay_input_batch(
@@ -153,7 +161,13 @@ fn replay_input_batch(
     }
 }
 
-fn picked_surface_target(
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct PickedPointerTarget {
+    entity: bevy::ecs::entity::Entity,
+    surface: Option<SurfaceInputTarget>,
+}
+
+fn picked_pointer_target(
     pointers: &Query<(&PointerId, &PointerInteraction, &PointerLocation)>,
     picked_nodes: &Query<(
         &SurfaceInputNode,
@@ -163,7 +177,7 @@ fn picked_surface_target(
     )>,
     cameras: &Query<&RendersOutput>,
     output_positions: &Query<&OutputPosition>,
-) -> Option<SurfaceInputTarget> {
+) -> Option<PickedPointerTarget> {
     let (_, interaction, location) = pointers
         .iter()
         .find(|(pointer, _, _)| **pointer == PointerId::Mouse)?;
@@ -171,19 +185,18 @@ fn picked_surface_target(
     // The frontmost hit is authoritative. Falling through compositor-owned UI
     // to a client surface below it would leak raw input through decorations and
     // would also hand cursor ownership back to that client during shell grabs.
-    frontmost_surface_target(interaction.iter().map(|(entity, _)| {
+    let (entity, _) = interaction.iter().next()?;
+    let surface = (|| {
         let (surface, node, transform, target_camera) = picked_nodes.get(*entity).ok()?;
         let camera = target_camera.get()?;
         let output = cameras.get(camera).ok()?.0;
         let output_position = output_positions.get(output).ok()?.0;
         surface_input_target(*surface, node, transform, output_position)
-    }))
-}
-
-fn frontmost_surface_target(
-    candidates: impl IntoIterator<Item = Option<SurfaceInputTarget>>,
-) -> Option<SurfaceInputTarget> {
-    candidates.into_iter().next().flatten()
+    })();
+    Some(PickedPointerTarget {
+        entity: *entity,
+        surface,
+    })
 }
 
 fn surface_input_target(
@@ -304,14 +317,6 @@ mod tests {
                 }
             }
         }
-    }
-
-    #[test]
-    fn frontmost_shell_hit_blocks_a_surface_below() {
-        assert_eq!(
-            frontmost_surface_target([None, Some(target(InputTransform::IDENTITY))]),
-            None
-        );
     }
 
     #[test]

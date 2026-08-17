@@ -6,6 +6,7 @@
 //! retains that target and forwards unconsumed raw events to Smithay at input
 //! pace. Smithay resources never enter the application world.
 
+mod pointer_shortcuts;
 mod projection;
 mod routing;
 mod shortcuts;
@@ -29,6 +30,11 @@ pub(crate) struct InputOutputTarget {
     pub(crate) target: NormalizedRenderTarget,
 }
 
+pub(crate) use pointer_shortcuts::filter_pointer_shortcut_event;
+pub use pointer_shortcuts::{
+    PointerShortcut, PointerShortcutAppExt, PointerShortcutId, PointerShortcutModifiers,
+    PointerShortcutPressed,
+};
 pub use projection::TouchpadGesture;
 pub(crate) use projection::enqueue_raw_input;
 pub(crate) use projection::update_output_configurations;

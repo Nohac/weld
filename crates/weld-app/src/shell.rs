@@ -42,8 +42,8 @@ use crate::debug::{complete_capture, take_capture_request};
 use crate::dmabuf::DmabufImporter;
 use crate::input::{
     InputBridgePlugin, InputOutputTarget, enqueue_raw_input, filter_global_shortcut_event,
-    filter_virtual_terminal_event, set_input_update_time, take_host_commands, take_input_effects,
-    take_virtual_terminal_switch_request,
+    filter_pointer_shortcut_event, filter_virtual_terminal_event, set_input_update_time,
+    take_host_commands, take_input_effects, take_virtual_terminal_switch_request,
 };
 use crate::output::{
     OutputGeometry, OutputId, OutputInfo, OutputPlacement, OutputPosition, PrimaryOutput,
@@ -675,7 +675,8 @@ impl AppShell {
 
     pub fn enqueue_input_event(&mut self, event: RawSeatEvent) -> bool {
         let consumed = filter_global_shortcut_event(self.app.world_mut(), &event)
-            | filter_virtual_terminal_event(self.app.world_mut(), &event);
+            | filter_virtual_terminal_event(self.app.world_mut(), &event)
+            | filter_pointer_shortcut_event(self.app.world_mut(), &event);
         enqueue_raw_input(self.app.world_mut(), event);
         !consumed
     }

@@ -10,24 +10,19 @@ use bevy::{
     ecs::{
         component::Component,
         entity::Entity,
-        observer::On,
         query::{With, Without},
         schedule::IntoScheduleConfigs,
         system::{Commands, Query, Res},
         template::template,
     },
     math::Vec2,
-    picking::{
-        Pickable,
-        events::{Click, Pointer},
-        pointer::PointerButton,
-    },
+    picking::Pickable,
     prelude::{
         AlignItems, BackgroundColor, BorderColor, BorderRadius, BoxShadow, Button, Children,
         FlexDirection, GlobalZIndex, JustifyContent, Node, Overflow, PositionType, Rot2, Scene,
         SceneList, UiRect, UiTargetCamera, UiTransform, ZIndex, percent, px,
     },
-    scene::{CommandsSceneExt, bsn, bsn_list, on},
+    scene::{CommandsSceneExt, bsn, bsn_list},
     window::RequestRedraw,
 };
 use weld_app::{
@@ -38,11 +33,11 @@ use weld_app::{
 };
 use weld_window::{
     FocusedWindow, PresentationInsets, PresentationOffset, PresentsWindow,
-    PrimaryWindowPresentation, WindowGeometryAnchor, WindowIntent, WindowIntentKind,
-    WindowOccupant, WindowOutput, WindowOutputIntersections, WindowProjection, WindowSystems,
-    WindowZOrder,
+    PrimaryWindowPresentation, WindowCloseHandle, WindowGeometryAnchor, WindowMoveHandle,
+    WindowOccupant, WindowOutput, WindowOutputIntersections, WindowProjection, WindowResizeHandle,
+    WindowSystems, WindowZOrder,
 };
-use weld_window_ui::{WindowMoveHandle, WindowResizeHandle, surface_content_with_node};
+use weld_window_ui::surface_content_with_node;
 
 const BORDER_WIDTH: f32 = 3.0;
 const OUTER_BORDER_RADIUS: f32 = 9.0;
@@ -168,22 +163,20 @@ fn reconcile_ssd_projections(
             let Some(camera) = camera.entity() else {
                 continue;
             };
-            commands
-                .spawn_scene(scene(window, toplevel.surface))
-                .insert((
-                    WindowProjection::new(window, output),
-                    UiTargetCamera(camera),
-                    SsdPresentation,
-                    PresentationOffset::default(),
-                    PresentationInsets::new(
-                        BORDER_WIDTH,
-                        HEADER_HEIGHT + BORDER_WIDTH,
-                        BORDER_WIDTH,
-                        BORDER_WIDTH,
-                    ),
-                    WindowGeometryAnchor(Vec2::new(0.0, HEADER_HEIGHT)),
-                    GlobalZIndex(z_order.0),
-                ));
+            commands.spawn_scene(scene(toplevel.surface)).insert((
+                WindowProjection::new(window, output),
+                UiTargetCamera(camera),
+                SsdPresentation,
+                PresentationOffset::default(),
+                PresentationInsets::new(
+                    BORDER_WIDTH,
+                    HEADER_HEIGHT + BORDER_WIDTH,
+                    BORDER_WIDTH,
+                    BORDER_WIDTH,
+                ),
+                WindowGeometryAnchor(Vec2::new(0.0, HEADER_HEIGHT)),
+                GlobalZIndex(z_order.0),
+            ));
         }
     }
 }
@@ -237,7 +230,7 @@ fn present_ssd_windows(
             .and_then(|(_, camera, _)| camera)
             .and_then(OutputCompositionCamera::entity);
         let root = commands
-            .spawn_scene(scene(window, toplevel.surface))
+            .spawn_scene(scene(toplevel.surface))
             .insert((
                 PresentsWindow(window),
                 WindowProjection::new(window, output),
@@ -281,7 +274,7 @@ fn sync_focus_style(
     }
 }
 
-fn scene(window: bevy::ecs::entity::Entity, surface: SurfaceId) -> impl Scene {
+fn scene(surface: SurfaceId) -> impl Scene {
     let content = surface_content_with_node(
         surface,
         SurfaceView::WindowGeometry,
@@ -329,6 +322,7 @@ fn scene(window: bevy::ecs::entity::Entity, surface: SurfaceId) -> impl Scene {
                         BackgroundColor(Color::srgb(0.14, 0.17, 0.22))
                         Children [(
                             Button
+                            WindowCloseHandle
                             Node {
                                 width: px(CLOSE_BUTTON_SIZE),
                                 height: px(CLOSE_BUTTON_SIZE),
@@ -338,7 +332,6 @@ fn scene(window: bevy::ecs::entity::Entity, surface: SurfaceId) -> impl Scene {
                                 border_radius: BorderRadius::MAX,
                             }
                             BackgroundColor(Color::srgb(0.54, 0.16, 0.18))
-                            on(close_window(window))
                             Children [(
                                 Pickable::IGNORE
                                 Node {
@@ -484,21 +477,6 @@ fn resize_handle(edge: ToplevelResizeEdge, node: Node) -> impl Scene {
     }
 }
 
-fn close_window(
-    window: bevy::ecs::entity::Entity,
-) -> impl FnMut(On<Pointer<Click>>, Commands) + Clone {
-    move |mut click: On<Pointer<Click>>, mut commands: Commands| {
-        if click.button != PointerButton::Primary {
-            return;
-        }
-        click.propagate(false);
-        commands.trigger(WindowIntent {
-            window,
-            kind: WindowIntentKind::CloseRequested,
-        });
-    }
-}
-
 fn window_shadow() -> BoxShadow {
     BoxShadow::new(
         Color::srgba(0.0, 0.0, 0.0, 0.55),
@@ -524,7 +502,7 @@ mod tests {
         picking::{
             backend::HitData,
             events::{Click, Pointer, Press},
-            pointer::{Location, PointerId},
+            pointer::{Location, PointerButton, PointerId},
         },
         scene::ScenePlugin,
         ui::{Display, UiScale, Val, widget::Button},
@@ -544,11 +522,10 @@ mod tests {
     use weld_window::{
         FocusedWindow, OccupiesWindow, PresentationInsets, PresentationOffset,
         PrimaryWindowPresentation, WindowGeometry, WindowGeometryAnchor, WindowInteractionKind,
-        WindowInteractionSession, WindowPlugin, WindowVisibility, WindowZOrder,
+        WindowInteractionSession, WindowMoveHandle, WindowPlugin, WindowResizeHandle,
+        WindowVisibility, WindowZOrder,
     };
-    use weld_window_ui::{
-        PrimarySurfacePresentation, WindowMoveHandle, WindowResizeHandle, WindowUiPlugin,
-    };
+    use weld_window_ui::{PrimarySurfacePresentation, WindowUiPlugin};
 
     use super::*;
 

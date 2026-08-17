@@ -526,20 +526,61 @@ exclusive zones, and configure state, then project its committed results into
 ECS instead of reimplementing that protocol policy.
 
 Validated pointer `xdg_toplevel.move` and `xdg_toplevel.resize` requests cross
-the Smithay boundary as protocol-neutral ECS messages. `weld-window` validates
-the occupant and owns the single UI-neutral interaction session. Presentation
-picking selects a managed window once on primary press; thereafter
-`weld-window` translates frame-paced pointer motion into window intents without
-consulting hover state or the presentation entity. Output re-homing, projection
-replacement, and temporary occupant unmapping therefore cannot interrupt the
-grab. Physical primary-button release ends the session regardless of the
-pointer's current hover target, and Smithay's release-derived protocol end uses
-the same idempotent domain command. `weld-window-ui` derives its cursor override
-from the live session, while `weld-float` owns placement and
-interactive-resize policy.
-Protocol move and resize are currently primary-button-only; equivalent touch
-interaction remains future work. Smithay owns the pointer grab, configure
-state, and enforcement of the client's committed size constraints. Repeated
+the Smithay boundary as protocol-neutral ECS messages. The active window
+manager consumes those requests directly, resolves their occupant, verifies
+manager ownership, and decides whether to create or end an interaction.
+`weld-float` records protocol-controlled lifetime separately from
+pointer-controlled lifetime; Smithay's release-derived protocol end is the
+only input fact that terminates a protocol-controlled session.
+
+Presentation crates do not choose window actions. `weld-window` defines
+passive `WindowMoveHandle`, `WindowResizeHandle`, and `WindowCloseHandle`
+components. SSD and other presentations place those headless affordances on
+their Bevy entities, while the active manager installs the pointer observers
+that interpret them. `weld-float` currently binds primary press to activation,
+move handles, and resize handles, and primary click to close handles. A
+different manager can consume the same affordances with different policy.
+This follows Bevy's headless-widget and styled-presentation split without
+depending on Feathers. `weld-window-ui` retains presentation feedback such as
+resize cursor icons, but it emits no move, resize, focus, or close policy.
+
+After accepting an interaction, a manager uses the neutral
+`WindowCommand::BeginInteraction` and `WindowCommand::EndInteraction` commands
+to publish the single queryable `WindowInteractionSession`. Begin commands are
+manager-private by convention; the window primitive validates occupant state
+and maintains exclusivity but does not read buttons or motion. `weld-float`
+owns the selected input controller, translates frame-paced mouse motion into
+the public manager intents `MoveBy` and `ResizeBy`, and ends pointer-controlled
+sessions on the button it selected. Those intents are not mouse-specific:
+keyboard, touch, gamepad, remote, and scripted systems can provide deltas to
+the owning manager through the same boundary. Output re-homing, projection
+replacement, and temporary occupant unmapping therefore cannot interrupt an
+active interaction.
+
+`weld-float` registers `Super+LMB` as move and `Super+RMB` as resize. Raw
+ingress is the sole chord evaluator: it consumes a matching press and paired
+release before client delivery, then retains the frontmost picked Bevy entity
+and compositor-logical press position in `PointerShortcutPressed` for the next
+application frame. Float policy resolves that entity through its
+`WindowProjection`, activates an owned window, and starts the selected action.
+Modifier resize follows Sway's quadrant rule, choosing one horizontal and one
+vertical edge relative to the window's global center. The initiating button is
+float policy, not part of the window primitive, so another manager may bind
+left, right, middle, or another supported button differently.
+
+Captured motion remains in the Bevy input batch but is withheld before Smithay
+sees it; this is a narrow shortcut filter, not yet a native shell pointer grab,
+and the next forwarded positioned event resynchronizes Smithay's seat
+position. A client already holding another button may defer that
+resynchronization until its grab ends. This applies to pickable descendants
+such as client input nodes and SSD chrome; ignored roots, client-excluded input
+regions, and CSD shadow overflow do not become shortcut targets. A consumed
+shortcut over background, an overlay, or a window owned by another manager is
+a shell-owned dead click and is not replayed to a client. The picked entity is
+process-local application state and never crosses into Smithay or `weld-core`.
+Equivalent touch interaction remains future work. Smithay owns protocol grab
+validation, configure state, and enforcement of the client's committed size
+constraints. Repeated
 interactive-resize sizes are latest-value coalesced at the Smithay server
 boundary and configured at most once per composition tick; pointer motion,
 buttons, axes, gestures, and keyboard input reach clients without that pacing.

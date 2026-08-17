@@ -49,6 +49,7 @@ pub(super) fn register(app: &mut App, targets: Vec<InputOutputTarget>) {
         .init_resource::<ProjectedMouseButtons>()
         .init_resource::<CapturedPointerTarget>()
         .add_systems(First, project_raw_input.after(MessageUpdateSystems));
+    super::pointer_shortcuts::register(app);
 }
 
 /// One full-fidelity touchpad gesture transition available to Weld plugins.

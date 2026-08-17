@@ -9,7 +9,6 @@ mod interaction;
 mod mount;
 mod popup;
 
-pub use interaction::{WindowMoveHandle, WindowResizeFrame, WindowResizeHandle};
 pub use mount::{surface_content, surface_content_with_node};
 
 use bevy::{
@@ -67,10 +66,6 @@ pub struct WindowUiPlugin;
 impl Plugin for WindowUiPlugin {
     fn build(&self, app: &mut App) {
         app.add_message::<CursorRequest>()
-            .add_observer(interaction::activate_window)
-            .add_observer(interaction::begin_move_handle)
-            .add_observer(interaction::begin_resize_frame)
-            .add_observer(interaction::begin_resize_handle)
             .configure_sets(
                 PreUpdate,
                 WindowSystems::InteractionFinalize.before(CursorSystems::Resolve),

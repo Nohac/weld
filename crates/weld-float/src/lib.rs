@@ -1,31 +1,53 @@
 //! Conventional floating window-management policy for Weld.
 
-use std::{collections::hash_map::RandomState, hash::BuildHasher};
+use std::{
+    collections::{HashMap, HashSet, hash_map::RandomState},
+    hash::BuildHasher,
+};
 
 use bevy::{
     app::{App, Plugin, PreUpdate},
     ecs::{
+        change_detection::{DetectChanges, Ref},
         component::Component,
         entity::Entity,
+        message::{MessageReader, MessageWriter},
         observer::On,
         query::{With, Without},
+        relationship::Relationship,
         resource::Resource,
-        schedule::IntoScheduleConfigs,
-        system::{Commands, Query, Res, ResMut, SystemParam},
+        schedule::{ApplyDeferred, IntoScheduleConfigs},
+        system::{Commands, Local, Query, Res, ResMut, SystemParam},
+    },
+    input::{
+        ButtonState,
+        mouse::{MouseButton, MouseButtonInput, MouseMotion},
     },
     math::{Rect, Vec2},
+    picking::{
+        events::{Click, Pointer, Press},
+        pointer::PointerButton,
+    },
+    window::RequestRedraw,
 };
 use weld_app::{
+    input::{
+        PointerShortcut, PointerShortcutAppExt, PointerShortcutId, PointerShortcutModifiers,
+        PointerShortcutPressed,
+    },
     layer::{WINDOW_Z_INDEX_MAX, WINDOW_Z_INDEX_MIN},
     output::{OutputGeometry, OutputPosition, PrimaryOutput, WeldOutput},
-    surface::{MappedSurface, SurfaceCommitRevisions, ToplevelResizeEdge},
+    surface::{
+        ClientDecorated, ClientToplevel, MappedSurface, SurfaceCommitRevisions,
+        ToplevelInteractionRequest, ToplevelInteractionRequestKind, ToplevelResizeEdge,
+    },
 };
 use weld_window::{
-    ClientResizeState, FocusedWindow, ManagedBy, ManagedWindow, PresentationInsets,
-    PrimaryWindowPresentation, WindowCommand, WindowCommandKind, WindowGeometry, WindowIntent,
-    WindowIntentKind, WindowInteractionKind, WindowInteractionSession, WindowOccupant,
-    WindowOutput, WindowSystems, WindowVacancy, WindowVisibility, WindowZOrder,
-    rounded_client_size,
+    ClientResizeState, FocusedWindow, ManagedBy, ManagedWindow, OccupiesWindow, PresentationInsets,
+    PrimaryWindowPresentation, WindowCloseHandle, WindowCommand, WindowCommandKind, WindowGeometry,
+    WindowIntent, WindowIntentKind, WindowInteractionKind, WindowInteractionSession,
+    WindowMoveHandle, WindowOccupant, WindowOutput, WindowProjectionLookup, WindowResizeHandle,
+    WindowSystems, WindowVacancy, WindowVisibility, WindowZOrder, rounded_client_size,
 };
 
 /// The default freeform window manager.
@@ -34,10 +56,33 @@ pub struct FloatPlugin;
 impl Plugin for FloatPlugin {
     fn build(&self, app: &mut App) {
         let manager = app.world_mut().spawn(FloatManager).id();
+        let move_shortcut = app.register_pointer_shortcut(PointerShortcut::new(
+            MouseButton::Left,
+            PointerShortcutModifiers::super_key(),
+        ));
+        let resize_shortcut = app.register_pointer_shortcut(PointerShortcut::new(
+            MouseButton::Right,
+            PointerShortcutModifiers::super_key(),
+        ));
         app.insert_resource(DefaultFloatManager(manager))
+            .insert_resource(FloatPointerShortcuts {
+                move_window: move_shortcut,
+                resize_window: resize_shortcut,
+            })
+            .init_resource::<FloatShortcutCapture>()
             .init_resource::<PlacementRandom>()
             .init_resource::<WindowStack>()
+            .add_message::<MouseButtonInput>()
+            .add_message::<MouseMotion>()
             .add_observer(handle_window_intent)
+            .add_observer(activate_window)
+            .add_observer(begin_move_handle)
+            .add_observer(begin_resize_handle)
+            .add_observer(close_window)
+            .add_systems(
+                PreUpdate,
+                handle_protocol_interactions.in_set(WindowSystems::Interaction),
+            )
             .add_systems(
                 PreUpdate,
                 (
@@ -58,9 +103,26 @@ impl Plugin for FloatPlugin {
             )
             .add_systems(
                 PreUpdate,
+                begin_pointer_shortcut_interactions
+                    .before(initialize_windows)
+                    .in_set(WindowSystems::Management),
+            )
+            .add_systems(
+                PreUpdate,
                 rehome_windows_by_center
                     .after(reconcile_anchored_resize)
                     .in_set(WindowSystems::Management),
+            )
+            .add_systems(
+                PreUpdate,
+                (
+                    drive_pointer_interactions,
+                    ApplyDeferred,
+                    end_pointer_interactions,
+                    ApplyDeferred,
+                )
+                    .chain()
+                    .in_set(WindowSystems::InteractionFinalize),
             );
     }
 }
@@ -70,6 +132,21 @@ struct FloatManager;
 
 #[derive(Resource)]
 struct DefaultFloatManager(Entity);
+
+#[derive(Resource)]
+struct FloatPointerShortcuts {
+    move_window: PointerShortcutId,
+    resize_window: PointerShortcutId,
+}
+
+#[derive(Resource, Default)]
+struct FloatShortcutCapture(HashSet<MouseButton>);
+
+#[derive(Component, Clone, Copy, Debug, Eq, PartialEq)]
+enum FloatInteractionControl {
+    Pointer(MouseButton),
+    Protocol,
+}
 
 #[derive(Resource)]
 struct PlacementRandom(RandomState);
@@ -297,6 +374,9 @@ fn handle_window_intent(intent: On<WindowIntent>, params: HandleWindowIntentPara
         revisions,
     } = params;
     let window = intent.window;
+    if matches!(intent.kind, WindowIntentKind::InteractionEnded(_)) {
+        commands.entity(window).remove::<FloatInteractionControl>();
+    }
     if intent.kind == WindowIntentKind::Activate {
         let float_managed = windows
             .get(window)
@@ -386,6 +466,429 @@ fn handle_window_intent(intent: On<WindowIntent>, params: HandleWindowIntentPara
             } else {
                 commands.entity(window).remove::<ResizeAnchor>();
             }
+        }
+    }
+}
+
+#[derive(SystemParam)]
+struct FloatPointerTargets<'w, 's> {
+    manager: Res<'w, DefaultFloatManager>,
+    projections: WindowProjectionLookup<'w, 's>,
+    windows: Query<
+        'w,
+        's,
+        (
+            &'static ManagedBy,
+            Option<&'static WindowInteractionSession>,
+        ),
+    >,
+}
+
+impl FloatPointerTargets<'_, '_> {
+    fn available_window_for(&self, target: Entity) -> Option<Entity> {
+        let window = self.projections.window_for(target)?;
+        self.windows
+            .get(window)
+            .ok()
+            .filter(|(managed_by, interaction)| {
+                managed_by.0 == self.manager.0 && interaction.is_none()
+            })
+            .map(|_| window)
+    }
+
+    fn owned_window_for(&self, target: Entity) -> Option<Entity> {
+        let window = self.projections.window_for(target)?;
+        self.windows
+            .get(window)
+            .ok()
+            .filter(|(managed_by, _)| managed_by.0 == self.manager.0)
+            .map(|_| window)
+    }
+}
+
+fn activate_window(
+    mut press: On<Pointer<Press>>,
+    capture: Res<FloatShortcutCapture>,
+    targets: FloatPointerTargets,
+    mut commands: Commands,
+    mut redraw: MessageWriter<RequestRedraw>,
+) {
+    if press.button != PointerButton::Primary || capture.0.contains(&MouseButton::Left) {
+        return;
+    }
+    let Some(window) = targets.owned_window_for(press.entity) else {
+        return;
+    };
+    press.propagate(false);
+    commands.trigger(WindowIntent {
+        window,
+        kind: WindowIntentKind::Activate,
+    });
+    redraw.write(RequestRedraw);
+}
+
+fn begin_move_handle(
+    press: On<Pointer<Press>>,
+    capture: Res<FloatShortcutCapture>,
+    handles: Query<(), With<WindowMoveHandle>>,
+    targets: FloatPointerTargets,
+    mut commands: Commands,
+) {
+    if press.button != PointerButton::Primary
+        || capture.0.contains(&MouseButton::Left)
+        || !handles.contains(press.entity)
+        || press.original_event_target() != press.entity
+    {
+        return;
+    }
+    let Some(window) = targets.available_window_for(press.entity) else {
+        return;
+    };
+    begin_float_interaction(
+        &mut commands,
+        window,
+        WindowInteractionKind::Move,
+        FloatInteractionControl::Pointer(MouseButton::Left),
+    );
+}
+
+fn begin_resize_handle(
+    press: On<Pointer<Press>>,
+    capture: Res<FloatShortcutCapture>,
+    handles: Query<&WindowResizeHandle>,
+    targets: FloatPointerTargets,
+    mut commands: Commands,
+) {
+    if press.button != PointerButton::Primary
+        || capture.0.contains(&MouseButton::Left)
+        || press.original_event_target() != press.entity
+    {
+        return;
+    }
+    let Ok(handle) = handles.get(press.entity) else {
+        return;
+    };
+    let Some(window) = targets.available_window_for(press.entity) else {
+        return;
+    };
+    begin_float_interaction(
+        &mut commands,
+        window,
+        WindowInteractionKind::Resize(handle.0),
+        FloatInteractionControl::Pointer(MouseButton::Left),
+    );
+}
+
+fn close_window(
+    mut click: On<Pointer<Click>>,
+    capture: Res<FloatShortcutCapture>,
+    handles: Query<(), With<WindowCloseHandle>>,
+    targets: FloatPointerTargets,
+    mut commands: Commands,
+) {
+    if click.button != PointerButton::Primary
+        || capture.0.contains(&MouseButton::Left)
+        || !handles.contains(click.entity)
+        || click.original_event_target() != click.entity
+    {
+        return;
+    }
+    let Some(window) = targets.owned_window_for(click.entity) else {
+        return;
+    };
+    click.propagate(false);
+    commands.trigger(WindowIntent {
+        window,
+        kind: WindowIntentKind::CloseRequested,
+    });
+}
+
+fn handle_protocol_interactions(
+    mut requests: MessageReader<ToplevelInteractionRequest>,
+    manager: Res<DefaultFloatManager>,
+    surfaces: Query<(
+        &ClientToplevel,
+        &OccupiesWindow,
+        Option<&MappedSurface>,
+        Option<&ClientDecorated>,
+    )>,
+    windows: Query<(
+        &ManagedBy,
+        Option<&WindowInteractionSession>,
+        Option<&FloatInteractionControl>,
+    )>,
+    mut commands: Commands,
+) {
+    for request in requests.read().copied() {
+        let Some((_, occupancy, Some(_), Some(_))) = surfaces
+            .iter()
+            .find(|(toplevel, _, _, _)| toplevel.surface == request.surface)
+        else {
+            continue;
+        };
+        let window = occupancy.get();
+        let Ok((managed_by, interaction, control)) = windows.get(window) else {
+            continue;
+        };
+        if managed_by.0 != manager.0 {
+            continue;
+        }
+        match request.kind {
+            ToplevelInteractionRequestKind::Move if interaction.is_none() => {
+                begin_float_interaction(
+                    &mut commands,
+                    window,
+                    WindowInteractionKind::Move,
+                    FloatInteractionControl::Protocol,
+                );
+            }
+            ToplevelInteractionRequestKind::Resize { edges } if interaction.is_none() => {
+                begin_float_interaction(
+                    &mut commands,
+                    window,
+                    WindowInteractionKind::Resize(edges),
+                    FloatInteractionControl::Protocol,
+                );
+            }
+            ToplevelInteractionRequestKind::End
+                if interaction.is_some() && control == Some(&FloatInteractionControl::Protocol) =>
+            {
+                commands.trigger(WindowCommand {
+                    window,
+                    kind: WindowCommandKind::EndInteraction,
+                });
+            }
+            ToplevelInteractionRequestKind::Move
+            | ToplevelInteractionRequestKind::Resize { .. }
+            | ToplevelInteractionRequestKind::End => {}
+        }
+    }
+}
+
+#[derive(SystemParam)]
+struct PointerShortcutInteractionParams<'w, 's> {
+    presses: MessageReader<'w, 's, PointerShortcutPressed>,
+    button_inputs: MessageReader<'w, 's, MouseButtonInput>,
+    shortcuts: Res<'w, FloatPointerShortcuts>,
+    capture: ResMut<'w, FloatShortcutCapture>,
+    manager: Res<'w, DefaultFloatManager>,
+    projections: WindowProjectionLookup<'w, 's>,
+    windows: Query<
+        'w,
+        's,
+        (
+            &'static ManagedBy,
+            &'static WindowGeometry,
+            &'static WindowOutput,
+            Option<&'static WindowInteractionSession>,
+        ),
+    >,
+    output_positions: Query<'w, 's, &'static OutputPosition, With<WeldOutput>>,
+    commands: Commands<'w, 's>,
+}
+
+fn begin_pointer_shortcut_interactions(params: PointerShortcutInteractionParams) {
+    let PointerShortcutInteractionParams {
+        mut presses,
+        mut button_inputs,
+        shortcuts,
+        mut capture,
+        manager,
+        projections,
+        windows,
+        output_positions,
+        mut commands,
+    } = params;
+    let final_button_states = button_inputs
+        .read()
+        .map(|input| (input.button, input.state))
+        .collect::<HashMap<_, _>>();
+    for press in presses.read().copied() {
+        let (button, shortcut_kind) = if press.shortcut() == shortcuts.move_window {
+            (MouseButton::Left, None)
+        } else if press.shortcut() == shortcuts.resize_window {
+            (MouseButton::Right, Some(press.position()))
+        } else {
+            continue;
+        };
+        // A registered shell chord is consumed even when it lands on the
+        // background or on a window managed by another policy.
+        capture.0.insert(button);
+        if final_button_states.get(&button) == Some(&ButtonState::Released) {
+            continue;
+        }
+        let Some(window) = press
+            .target()
+            .and_then(|target| projections.window_for(target))
+        else {
+            continue;
+        };
+        let Ok((managed_by, geometry, output, interaction)) = windows.get(window) else {
+            continue;
+        };
+        if managed_by.0 != manager.0 || interaction.is_some() {
+            continue;
+        }
+        let kind = if let Some(position) = shortcut_kind {
+            let Some(position) = position else {
+                continue;
+            };
+            let Ok(output_position) = output_positions.get(output.0) else {
+                continue;
+            };
+            let Some(edge) = resize_edge_from_position(position, *geometry, output_position.0)
+            else {
+                continue;
+            };
+            WindowInteractionKind::Resize(edge)
+        } else {
+            WindowInteractionKind::Move
+        };
+        commands.trigger(WindowIntent {
+            window,
+            kind: WindowIntentKind::Activate,
+        });
+        begin_float_interaction(
+            &mut commands,
+            window,
+            kind,
+            FloatInteractionControl::Pointer(button),
+        );
+    }
+}
+
+fn begin_float_interaction(
+    commands: &mut Commands,
+    window: Entity,
+    kind: WindowInteractionKind,
+    control: FloatInteractionControl,
+) {
+    commands.entity(window).insert(control);
+    commands.trigger(WindowCommand {
+        window,
+        kind: WindowCommandKind::BeginInteraction(kind),
+    });
+}
+
+fn resize_edge_from_position(
+    position: Vec2,
+    geometry: WindowGeometry,
+    output_position: Vec2,
+) -> Option<ToplevelResizeEdge> {
+    if !position.is_finite()
+        || !geometry.position.is_finite()
+        || !geometry.size.is_finite()
+        || geometry.size.cmple(Vec2::ZERO).any()
+        || !output_position.is_finite()
+    {
+        return None;
+    }
+    let center = output_position + geometry.position + geometry.size * 0.5;
+    Some(match (position.x > center.x, position.y > center.y) {
+        (false, false) => ToplevelResizeEdge::TopLeft,
+        (true, false) => ToplevelResizeEdge::TopRight,
+        (false, true) => ToplevelResizeEdge::BottomLeft,
+        (true, true) => ToplevelResizeEdge::BottomRight,
+    })
+}
+
+/// Projects frame-paced mouse motion into float-manager intents.
+///
+/// Pointer controls ignore the update that created them, preventing motion
+/// that preceded the press from entering the new session. Protocol controls
+/// have already passed Smithay's live-grab validation and may consume motion
+/// from their creation update. Other input plugins can drive the same public
+/// move and resize intents without going through this mouse adapter.
+fn drive_pointer_interactions(
+    mut motions: MessageReader<MouseMotion>,
+    mut button_inputs: MessageReader<MouseButtonInput>,
+    mut held_buttons: Local<HashSet<MouseButton>>,
+    sessions: Query<(Entity, &WindowInteractionSession, &FloatInteractionControl)>,
+    mut commands: Commands,
+    mut redraw: MessageWriter<RequestRedraw>,
+) {
+    let held_before = held_buttons.clone();
+    for input in button_inputs.read() {
+        match input.state {
+            ButtonState::Pressed => {
+                held_buttons.insert(input.button);
+            }
+            ButtonState::Released => {
+                held_buttons.remove(&input.button);
+            }
+        }
+    }
+    let delta = motions
+        .read()
+        .filter_map(|motion| motion.delta.is_finite().then_some(motion.delta))
+        .sum::<Vec2>();
+    if delta == Vec2::ZERO {
+        return;
+    }
+
+    let mut moved = false;
+    for (window, session, control) in &sessions {
+        let accepts_motion = match control {
+            FloatInteractionControl::Pointer(button) => held_before.contains(button),
+            FloatInteractionControl::Protocol => true,
+        };
+        if !accepts_motion {
+            continue;
+        }
+        let kind = match session.kind {
+            WindowInteractionKind::Move => WindowIntentKind::MoveBy(delta),
+            WindowInteractionKind::Resize(_) => WindowIntentKind::ResizeBy(delta),
+        };
+        commands.trigger(WindowIntent { window, kind });
+        moved = true;
+    }
+    if moved {
+        redraw.write(RequestRedraw);
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct ButtonBatchState {
+    saw_release: bool,
+    final_state: Option<ButtonState>,
+}
+
+fn end_pointer_interactions(
+    mut button_inputs: MessageReader<MouseButtonInput>,
+    mut capture: ResMut<FloatShortcutCapture>,
+    sessions: Query<(
+        Entity,
+        Ref<WindowInteractionSession>,
+        &FloatInteractionControl,
+    )>,
+    mut commands: Commands,
+) {
+    let mut states = HashMap::<MouseButton, ButtonBatchState>::new();
+    for input in button_inputs.read() {
+        let state = states.entry(input.button).or_default();
+        state.saw_release |= input.state == ButtonState::Released;
+        state.final_state = Some(input.state);
+        if input.state == ButtonState::Released {
+            capture.0.remove(&input.button);
+        }
+    }
+    for (window, session, control) in &sessions {
+        let FloatInteractionControl::Pointer(button) = control else {
+            continue;
+        };
+        let Some(state) = states.get(button) else {
+            continue;
+        };
+        let should_end = match state.final_state {
+            Some(ButtonState::Released) => true,
+            Some(ButtonState::Pressed) if state.saw_release => !session.is_added(),
+            Some(ButtonState::Pressed) | None => false,
+        };
+        if should_end {
+            commands.entity(window).trigger(|window| WindowCommand {
+                window,
+                kind: WindowCommandKind::EndInteraction,
+            });
         }
     }
 }
@@ -640,7 +1143,9 @@ fn hash_unit(hash: u64) -> f32 {
 mod tests {
     use bevy::{
         app::{App, PreUpdate},
-        ecs::{resource::Resource, schedule::IntoScheduleConfigs, system::Commands},
+        ecs::{
+            hierarchy::ChildOf, resource::Resource, schedule::IntoScheduleConfigs, system::Commands,
+        },
         input::{
             ButtonState,
             mouse::{MouseButton, MouseButtonInput, MouseMotion},
@@ -649,6 +1154,7 @@ mod tests {
         picking::PickingSystems,
     };
     use weld_app::{
+        input::PointerShortcutPressed,
         output::{OutputGeometry, OutputId, OutputPosition, PrimaryOutput, WeldOutput},
         surface::{
             ClientDecorated, ClientToplevel, MappedSurface, SurfaceAction, SurfaceActionQueue,
@@ -658,7 +1164,8 @@ mod tests {
     use weld_window::{
         FocusedWindow, ManagedWindow, OccupiesWindow, WindowCommand, WindowCommandKind,
         WindowGeometry, WindowIntent, WindowIntentKind, WindowInteractionKind,
-        WindowInteractionSession, WindowOutput, WindowPlugin, WindowVacancy, WindowZOrder,
+        WindowInteractionSession, WindowOutput, WindowPlugin, WindowProjection, WindowVacancy,
+        WindowZOrder,
     };
 
     use super::*;
@@ -699,6 +1206,384 @@ mod tests {
             output.insert(PrimaryOutput);
         }
         output.id()
+    }
+
+    fn float_test_app() -> App {
+        let mut app = App::new();
+        app.add_plugins((WindowPlugin, FloatPlugin))
+            .init_resource::<SurfaceActionQueue>()
+            .init_resource::<SurfaceCommitRevisions>()
+            .add_message::<ToplevelInteractionRequest>();
+        spawn_output(&mut app, 1, UVec2::new(800, 600), 1.0, true);
+        app
+    }
+
+    fn admit_float_window(app: &mut App, id: u64) -> Entity {
+        let surface = app
+            .world_mut()
+            .spawn((
+                ClientToplevel {
+                    surface: SurfaceId::new(id),
+                },
+                ClientDecorated,
+                MappedSurface {
+                    logical_size: Vec2::new(320.0, 240.0),
+                    visual_offset: Vec2::ZERO,
+                    visual_size: Vec2::new(320.0, 240.0),
+                    opaque: true,
+                },
+            ))
+            .id();
+        app.update();
+        app.world()
+            .get::<OccupiesWindow>(surface)
+            .expect("mapped toplevel should be admitted")
+            .0
+    }
+
+    #[test]
+    fn float_manager_owns_protocol_interaction_lifetime() {
+        let mut app = float_test_app();
+        let window = admit_float_window(&mut app, 200);
+        let surface = app
+            .world()
+            .get::<WindowOccupant>(window)
+            .expect("admitted window should retain its occupant")
+            .entity();
+        let surface_id = app
+            .world()
+            .get::<ClientToplevel>(surface)
+            .expect("occupant should remain a toplevel")
+            .surface;
+
+        app.world_mut().write_message(ToplevelInteractionRequest {
+            surface: surface_id,
+            kind: ToplevelInteractionRequestKind::Move,
+        });
+        app.update();
+        assert_eq!(
+            app.world().get::<WindowInteractionSession>(window),
+            Some(&WindowInteractionSession {
+                kind: WindowInteractionKind::Move,
+            })
+        );
+        assert_eq!(
+            app.world().get::<FloatInteractionControl>(window),
+            Some(&FloatInteractionControl::Protocol)
+        );
+
+        app.world_mut().write_message(ToplevelInteractionRequest {
+            surface: surface_id,
+            kind: ToplevelInteractionRequestKind::End,
+        });
+        app.update();
+        assert!(
+            app.world()
+                .get::<WindowInteractionSession>(window)
+                .is_none()
+        );
+        assert!(app.world().get::<FloatInteractionControl>(window).is_none());
+
+        let foreign_manager = app.world_mut().spawn_empty().id();
+        app.world_mut()
+            .entity_mut(window)
+            .insert(ManagedBy(foreign_manager));
+        app.world_mut().write_message(ToplevelInteractionRequest {
+            surface: surface_id,
+            kind: ToplevelInteractionRequestKind::Move,
+        });
+        app.update();
+
+        assert!(
+            app.world()
+                .get::<WindowInteractionSession>(window)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn float_pointer_shortcut_moves_the_retained_picked_window() {
+        let mut app = float_test_app();
+        let window = admit_float_window(&mut app, 201);
+        let root = app
+            .world_mut()
+            .spawn(WindowProjection::new(window, Entity::PLACEHOLDER))
+            .id();
+        let picked_child = app.world_mut().spawn(ChildOf(root)).id();
+        let shortcut = app.world().resource::<FloatPointerShortcuts>().move_window;
+
+        app.world_mut().write_message(PointerShortcutPressed::new(
+            shortcut,
+            Some(picked_child),
+            None,
+        ));
+        app.update();
+
+        assert_eq!(
+            app.world().get::<WindowInteractionSession>(window),
+            Some(&WindowInteractionSession {
+                kind: WindowInteractionKind::Move,
+            })
+        );
+        assert_eq!(
+            app.world().get::<FloatInteractionControl>(window),
+            Some(&FloatInteractionControl::Pointer(MouseButton::Left))
+        );
+        assert_eq!(
+            app.world().resource::<FocusedWindow>().entity(),
+            Some(window)
+        );
+    }
+
+    #[test]
+    fn float_pointer_shortcut_ignores_a_despawned_picked_entity() {
+        let mut app = float_test_app();
+        let window = admit_float_window(&mut app, 202);
+        let root = app
+            .world_mut()
+            .spawn(WindowProjection::new(window, Entity::PLACEHOLDER))
+            .id();
+        let picked_child = app.world_mut().spawn(ChildOf(root)).id();
+        let shortcut = app.world().resource::<FloatPointerShortcuts>().move_window;
+        assert!(app.world_mut().despawn(picked_child));
+
+        app.world_mut().write_message(PointerShortcutPressed::new(
+            shortcut,
+            Some(picked_child),
+            None,
+        ));
+        app.update();
+
+        assert!(
+            app.world()
+                .get::<WindowInteractionSession>(window)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn modifier_resize_selects_the_pointer_quadrant() {
+        let geometry = WindowGeometry {
+            position: Vec2::new(100.0, 50.0),
+            size: Vec2::new(200.0, 100.0),
+        };
+        let output = Vec2::new(1_000.0, 500.0);
+
+        assert_eq!(
+            resize_edge_from_position(Vec2::new(1_150.0, 575.0), geometry, output),
+            Some(ToplevelResizeEdge::TopLeft)
+        );
+        assert_eq!(
+            resize_edge_from_position(Vec2::new(1_250.0, 575.0), geometry, output),
+            Some(ToplevelResizeEdge::TopRight)
+        );
+        assert_eq!(
+            resize_edge_from_position(Vec2::new(1_150.0, 625.0), geometry, output),
+            Some(ToplevelResizeEdge::BottomLeft)
+        );
+        assert_eq!(
+            resize_edge_from_position(Vec2::new(1_250.0, 625.0), geometry, output),
+            Some(ToplevelResizeEdge::BottomRight)
+        );
+        assert_eq!(
+            resize_edge_from_position(Vec2::new(1_200.0, 600.0), geometry, output),
+            Some(ToplevelResizeEdge::TopLeft)
+        );
+    }
+
+    #[test]
+    fn super_right_resize_uses_the_right_button_until_release() {
+        let mut app = float_test_app();
+        let window = admit_float_window(&mut app, 203);
+        let output = app
+            .world()
+            .get::<WindowOutput>(window)
+            .expect("admitted window should have an output")
+            .0;
+        app.world_mut()
+            .get_mut::<OutputPosition>(output)
+            .expect("assigned output should have a position")
+            .0 = Vec2::new(1_000.0, 500.0);
+        *app.world_mut()
+            .get_mut::<WindowGeometry>(window)
+            .expect("admitted window should retain geometry") = WindowGeometry {
+            position: Vec2::new(100.0, 50.0),
+            size: Vec2::new(320.0, 240.0),
+        };
+        let root = app
+            .world_mut()
+            .spawn(WindowProjection::new(window, output))
+            .id();
+        let picked_child = app.world_mut().spawn(ChildOf(root)).id();
+        let shortcut = app
+            .world()
+            .resource::<FloatPointerShortcuts>()
+            .resize_window;
+        app.world_mut().write_message(MouseButtonInput {
+            button: MouseButton::Right,
+            state: ButtonState::Pressed,
+            window: Entity::PLACEHOLDER,
+        });
+        app.world_mut().write_message(PointerShortcutPressed::new(
+            shortcut,
+            Some(picked_child),
+            Some(Vec2::new(1_400.0, 750.0)),
+        ));
+        app.update();
+
+        assert_eq!(
+            app.world().get::<WindowInteractionSession>(window),
+            Some(&WindowInteractionSession {
+                kind: WindowInteractionKind::Resize(ToplevelResizeEdge::BottomRight),
+            })
+        );
+        assert_eq!(
+            app.world().get::<FloatInteractionControl>(window),
+            Some(&FloatInteractionControl::Pointer(MouseButton::Right))
+        );
+        assert_eq!(
+            app.world().resource::<FocusedWindow>().entity(),
+            Some(window)
+        );
+
+        app.world_mut().write_message(MouseMotion {
+            delta: Vec2::new(20.0, 10.0),
+        });
+        app.update();
+        assert_eq!(
+            app.world()
+                .get::<WindowGeometry>(window)
+                .expect("resizing window should retain geometry")
+                .size,
+            Vec2::new(340.0, 250.0)
+        );
+
+        app.world_mut().write_message(MouseButtonInput {
+            button: MouseButton::Left,
+            state: ButtonState::Released,
+            window: Entity::PLACEHOLDER,
+        });
+        app.update();
+        assert!(
+            app.world()
+                .get::<WindowInteractionSession>(window)
+                .is_some()
+        );
+
+        app.world_mut().write_message(MouseButtonInput {
+            button: MouseButton::Right,
+            state: ButtonState::Released,
+            window: Entity::PLACEHOLDER,
+        });
+        app.update();
+        assert!(
+            app.world()
+                .get::<WindowInteractionSession>(window)
+                .is_none()
+        );
+        assert!(app.world().get::<FloatInteractionControl>(window).is_none());
+    }
+
+    #[test]
+    fn shortcut_left_resize_preserves_the_opposite_corner_after_commit() {
+        let mut app = float_test_app();
+        let window = admit_float_window(&mut app, 204);
+        let output = app
+            .world()
+            .get::<WindowOutput>(window)
+            .expect("admitted window should have an output")
+            .0;
+        let initial = WindowGeometry {
+            position: Vec2::new(100.0, 50.0),
+            size: Vec2::new(320.0, 240.0),
+        };
+        *app.world_mut()
+            .get_mut::<WindowGeometry>(window)
+            .expect("admitted window should retain geometry") = initial;
+        let root = app
+            .world_mut()
+            .spawn(WindowProjection::new(window, output))
+            .id();
+        let picked_child = app.world_mut().spawn(ChildOf(root)).id();
+        let shortcut = app
+            .world()
+            .resource::<FloatPointerShortcuts>()
+            .resize_window;
+
+        app.world_mut().write_message(MouseButtonInput {
+            button: MouseButton::Right,
+            state: ButtonState::Pressed,
+            window: Entity::PLACEHOLDER,
+        });
+        app.world_mut().write_message(PointerShortcutPressed::new(
+            shortcut,
+            Some(picked_child),
+            Some(Vec2::new(110.0, 60.0)),
+        ));
+        app.update();
+        app.world_mut().write_message(MouseMotion {
+            delta: Vec2::new(20.0, 10.0),
+        });
+        app.update();
+
+        let occupant = app
+            .world()
+            .get::<WindowOccupant>(window)
+            .expect("admitted window should retain its occupant")
+            .entity();
+        let mut mapped = app
+            .world_mut()
+            .get_mut::<MappedSurface>(occupant)
+            .expect("occupant should remain mapped");
+        mapped.logical_size = Vec2::new(300.0, 230.0);
+        mapped.visual_size = mapped.logical_size;
+        app.update();
+
+        let geometry = app
+            .world()
+            .get::<WindowGeometry>(window)
+            .expect("committed resize should retain geometry");
+        assert!(
+            (geometry.position + geometry.size).distance(initial.position + initial.size) < 0.001,
+            "shortcut resize should preserve the selected opposite corner"
+        );
+    }
+
+    #[test]
+    fn same_frame_shortcut_press_and_release_does_not_leave_a_session() {
+        let mut app = float_test_app();
+        let window = admit_float_window(&mut app, 205);
+        let output = app
+            .world()
+            .get::<WindowOutput>(window)
+            .expect("admitted window should have an output")
+            .0;
+        let root = app
+            .world_mut()
+            .spawn(WindowProjection::new(window, output))
+            .id();
+        let shortcut = app.world().resource::<FloatPointerShortcuts>().move_window;
+        app.world_mut().write_message(MouseButtonInput {
+            button: MouseButton::Left,
+            state: ButtonState::Pressed,
+            window: Entity::PLACEHOLDER,
+        });
+        app.world_mut()
+            .write_message(PointerShortcutPressed::new(shortcut, Some(root), None));
+        app.world_mut().write_message(MouseButtonInput {
+            button: MouseButton::Left,
+            state: ButtonState::Released,
+            window: Entity::PLACEHOLDER,
+        });
+
+        app.update();
+
+        assert!(
+            app.world()
+                .get::<WindowInteractionSession>(window)
+                .is_none()
+        );
+        assert!(app.world().get::<FloatInteractionControl>(window).is_none());
     }
 
     #[test]
@@ -897,11 +1782,12 @@ mod tests {
             .get_mut::<WindowGeometry>(window)
             .expect("window should retain geometry")
             .position = Vec2::new(900.0, 700.0);
-        app.world_mut()
-            .entity_mut(window)
-            .insert(WindowInteractionSession {
+        app.world_mut().entity_mut(window).insert((
+            WindowInteractionSession {
                 kind: WindowInteractionKind::Move,
-            });
+            },
+            FloatInteractionControl::Pointer(MouseButton::Left),
+        ));
 
         assert!(app.world_mut().despawn(secondary));
         app.update();
@@ -968,11 +1854,12 @@ mod tests {
             .get_mut::<WindowGeometry>(window)
             .expect("managed window should retain geometry")
             .position = Vec2::new(100.0, -50.0);
-        app.world_mut()
-            .entity_mut(window)
-            .insert(WindowInteractionSession {
+        app.world_mut().entity_mut(window).insert((
+            WindowInteractionSession {
                 kind: WindowInteractionKind::Move,
-            });
+            },
+            FloatInteractionControl::Pointer(MouseButton::Left),
+        ));
         app.world_mut().write_message(MouseButtonInput {
             button: MouseButton::Left,
             state: ButtonState::Pressed,
