@@ -34,7 +34,8 @@ use weld_app::{
 use weld_window::{
     OccupiesWindow, PresentationInsets, PresentationOffset, PresentsWindow,
     PrimaryWindowPresentation, WindowGeometry, WindowGeometryAnchor, WindowOccupant, WindowOutput,
-    WindowOutputIntersections, WindowProjection, WindowSystems, WindowVisibility, WindowZOrder,
+    WindowOutputIntersections, WindowProjection, WindowSystems, WindowVacancy, WindowVisibility,
+    WindowZOrder,
 };
 
 /// Attaches a UI root to the client-surface entity it presents.
@@ -302,14 +303,21 @@ fn sync_client_presentation_metrics(
     }
 }
 
+type WindowRootStateQuery<'w, 's> = Query<
+    'w,
+    's,
+    (
+        &'static WindowGeometry,
+        &'static WindowOutput,
+        &'static WindowVisibility,
+        &'static WindowZOrder,
+        &'static WindowVacancy,
+        Option<&'static WindowOccupant>,
+    ),
+>;
+
 fn sync_window_roots(
-    windows: Query<(
-        &WindowGeometry,
-        &WindowOutput,
-        &WindowVisibility,
-        &WindowZOrder,
-        Option<&WindowOccupant>,
-    )>,
+    windows: WindowRootStateQuery,
     occupants: Query<Option<&MappedSurface>>,
     mut roots: Query<(
         &WindowProjection,
@@ -322,7 +330,8 @@ fn sync_window_roots(
 ) {
     let mut changed = false;
     for (projection, offset, mut z_index, mut node) in &mut roots {
-        let Ok((geometry, home, visibility, window_z, occupant)) = windows.get(projection.window())
+        let Ok((geometry, home, visibility, window_z, vacancy, occupant)) =
+            windows.get(projection.window())
         else {
             continue;
         };
@@ -332,10 +341,12 @@ fn sync_window_roots(
         ) else {
             continue;
         };
-        let mapped = occupant
-            .and_then(|occupant| occupants.get(occupant.entity()).ok())
-            .is_some_and(|mapped| mapped.is_some());
-        let visible = *visibility == WindowVisibility::Visible && mapped;
+        let presentable = occupant.map_or(*vacancy == WindowVacancy::Retain, |occupant| {
+            occupants
+                .get(occupant.entity())
+                .is_ok_and(|mapped| mapped.is_some())
+        });
+        let visible = *visibility == WindowVisibility::Visible && presentable;
         let display = if visible {
             Display::Flex
         } else {

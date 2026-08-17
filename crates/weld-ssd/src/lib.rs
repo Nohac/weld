@@ -35,7 +35,7 @@ use weld_window::{
     FocusedWindow, PresentationInsets, PresentationOffset, PresentsWindow,
     PrimaryWindowPresentation, WindowCloseHandle, WindowGeometryAnchor, WindowMoveHandle,
     WindowOccupant, WindowOutput, WindowOutputIntersections, WindowProjection, WindowResizeHandle,
-    WindowSystems, WindowZOrder,
+    WindowSystems, WindowVacancy, WindowZOrder,
 };
 use weld_window_ui::surface_content_with_node;
 
@@ -55,6 +55,9 @@ const UNFOCUSED_BORDER: Color = Color::srgb(0.28, 0.34, 0.42);
 #[derive(Component, Clone, Copy, Debug)]
 struct SsdPresentation;
 
+#[derive(Component, Clone, Copy, Debug)]
+struct VacantSsdPresentation;
+
 #[derive(Component, Clone, Copy, Debug, Default)]
 struct WindowBody;
 
@@ -73,7 +76,9 @@ impl Plugin for SsdPlugin {
         )
         .add_systems(
             PreUpdate,
-            reconcile_ssd_projections.in_set(WindowSystems::UiReconcile),
+            (reconcile_ssd_projections, sync_vacant_ssd_size)
+                .chain()
+                .in_set(WindowSystems::UiReconcile),
         )
         .add_systems(
             PreUpdate,
@@ -81,37 +86,58 @@ impl Plugin for SsdPlugin {
         )
         .add_systems(
             PreUpdate,
-            sync_focus_style.in_set(WindowSystems::FinalReconcile),
+            (sync_focus_style, sync_vacant_ssd_size)
+                .chain()
+                .in_set(WindowSystems::FinalReconcile),
         );
     }
 }
 
 fn revoke_ssd_presentations(
     mut commands: Commands,
-    roots: Query<(bevy::ecs::entity::Entity, &WindowProjection), With<SsdPresentation>>,
-    windows: Query<&WindowOccupant>,
+    roots: Query<
+        (
+            bevy::ecs::entity::Entity,
+            &WindowProjection,
+            Option<&VacantSsdPresentation>,
+        ),
+        With<SsdPresentation>,
+    >,
+    windows: Query<(Option<&WindowOccupant>, &WindowVacancy)>,
     occupants: Query<(), With<ServerDecorated>>,
 ) {
-    for (root, projection) in &roots {
-        let still_server_decorated = windows
-            .get(projection.window())
-            .ok()
-            .is_some_and(|occupant| occupants.contains(occupant.entity()));
+    for (root, projection, vacant_presentation) in &roots {
+        let still_server_decorated =
+            windows
+                .get(projection.window())
+                .is_ok_and(|(occupant, vacancy)| match occupant {
+                    Some(occupant) => {
+                        vacant_presentation.is_none() && occupants.contains(occupant.entity())
+                    }
+                    None => vacant_presentation.is_some() && *vacancy == WindowVacancy::Retain,
+                });
         if !still_server_decorated {
             commands.entity(root).despawn();
         }
     }
 }
 
+type ProjectedSsdWindows<'w, 's> = Query<
+    'w,
+    's,
+    (
+        Entity,
+        &'static PrimaryWindowPresentation,
+        Option<&'static WindowOccupant>,
+        &'static WindowVacancy,
+        &'static WindowZOrder,
+        &'static WindowOutputIntersections,
+    ),
+>;
+
 fn reconcile_ssd_projections(
     mut commands: Commands,
-    windows: Query<(
-        bevy::ecs::entity::Entity,
-        &PrimaryWindowPresentation,
-        &WindowOccupant,
-        &WindowZOrder,
-        &WindowOutputIntersections,
-    )>,
+    windows: ProjectedSsdWindows,
     occupants: Query<(
         &ClientToplevel,
         Option<&MappedSurface>,
@@ -121,7 +147,7 @@ fn reconcile_ssd_projections(
     roots: Query<(bevy::ecs::entity::Entity, &WindowProjection), With<SsdPresentation>>,
 ) {
     let mut retained = HashSet::new();
-    for (window, primary, _, _, _) in &windows {
+    for (window, primary, _, _, _, _) in &windows {
         if let Ok((_, projection)) = roots.get(primary.entity()) {
             retained.insert((window, projection.output()));
         }
@@ -131,14 +157,14 @@ fn reconcile_ssd_projections(
         .iter()
         .filter(
             |(root, projection)| match windows.get(projection.window()) {
-                Ok((_, primary, _, _, _)) => *root != primary.entity(),
+                Ok((_, primary, _, _, _, _)) => *root != primary.entity(),
                 Err(_) => true,
             },
         )
         .collect::<Vec<_>>();
     secondary_roots.sort_unstable_by_key(|(root, _)| root.to_bits());
     for (root, projection) in secondary_roots {
-        let Ok((_, _, _, _, intersections)) = windows.get(projection.window()) else {
+        let Ok((_, _, _, _, _, intersections)) = windows.get(projection.window()) else {
             commands.entity(root).despawn();
             continue;
         };
@@ -149,9 +175,16 @@ fn reconcile_ssd_projections(
         }
     }
 
-    for (window, _, occupant, z_order, intersections) in &windows {
-        let Ok((toplevel, Some(_), Some(_))) = occupants.get(occupant.entity()) else {
-            continue;
+    for (window, _, occupant, vacancy, z_order, intersections) in &windows {
+        let content = match occupant {
+            Some(occupant) => {
+                let Ok((toplevel, Some(_), Some(_))) = occupants.get(occupant.entity()) else {
+                    continue;
+                };
+                SsdContent::Surface(toplevel.surface)
+            }
+            None if *vacancy == WindowVacancy::Retain => SsdContent::Vacant,
+            None => continue,
         };
         for output in intersections.iter() {
             if !retained.insert((window, output)) {
@@ -163,7 +196,9 @@ fn reconcile_ssd_projections(
             let Some(camera) = camera.entity() else {
                 continue;
             };
-            commands.spawn_scene(scene(toplevel.surface)).insert((
+            let root = spawn_ssd_scene(&mut commands, content);
+            let mut root_commands = commands.entity(root);
+            root_commands.insert((
                 WindowProjection::new(window, output),
                 UiTargetCamera(camera),
                 SsdPresentation,
@@ -177,6 +212,9 @@ fn reconcile_ssd_projections(
                 WindowGeometryAnchor(Vec2::new(0.0, HEADER_HEIGHT)),
                 GlobalZIndex(z_order.0),
             ));
+            if content == SsdContent::Vacant {
+                root_commands.insert(VacantSsdPresentation);
+            }
         }
     }
 }
@@ -192,17 +230,22 @@ type OutputCameraQuery<'w, 's> = Query<
     With<WeldOutput>,
 >;
 
+type UnpresentedSsdWindows<'w, 's> = Query<
+    'w,
+    's,
+    (
+        Entity,
+        Option<&'static WindowOccupant>,
+        &'static WindowVacancy,
+        &'static WindowZOrder,
+        Option<&'static WindowOutput>,
+    ),
+    Without<PrimaryWindowPresentation>,
+>;
+
 fn present_ssd_windows(
     mut commands: Commands,
-    windows: Query<
-        (
-            bevy::ecs::entity::Entity,
-            &WindowOccupant,
-            &WindowZOrder,
-            Option<&WindowOutput>,
-        ),
-        Without<PrimaryWindowPresentation>,
-    >,
+    windows: UnpresentedSsdWindows,
     occupants: Query<(
         &ClientToplevel,
         Option<&MappedSurface>,
@@ -212,9 +255,16 @@ fn present_ssd_windows(
 ) {
     let _presentation_span =
         tracing::trace_span!(target: PROFILE_TARGET, "weld_ssd_present_windows").entered();
-    for (window, occupant, z_order, output) in &windows {
-        let Ok((toplevel, Some(_), Some(_))) = occupants.get(occupant.entity()) else {
-            continue;
+    for (window, occupant, vacancy, z_order, output) in &windows {
+        let content = match occupant {
+            Some(occupant) => {
+                let Ok((toplevel, Some(_), Some(_))) = occupants.get(occupant.entity()) else {
+                    continue;
+                };
+                SsdContent::Surface(toplevel.surface)
+            }
+            None if *vacancy == WindowVacancy::Retain => SsdContent::Vacant,
+            None => continue,
         };
         let output = output.map(|output| output.0).or_else(|| {
             outputs
@@ -229,23 +279,24 @@ fn present_ssd_windows(
             .ok()
             .and_then(|(_, camera, _)| camera)
             .and_then(OutputCompositionCamera::entity);
-        let root = commands
-            .spawn_scene(scene(toplevel.surface))
-            .insert((
-                PresentsWindow(window),
-                WindowProjection::new(window, output),
-                SsdPresentation,
-                PresentationOffset::default(),
-                PresentationInsets::new(
-                    BORDER_WIDTH,
-                    HEADER_HEIGHT + BORDER_WIDTH,
-                    BORDER_WIDTH,
-                    BORDER_WIDTH,
-                ),
-                WindowGeometryAnchor(Vec2::new(0.0, HEADER_HEIGHT)),
-                GlobalZIndex(z_order.0),
-            ))
-            .id();
+        let root = spawn_ssd_scene(&mut commands, content);
+        commands.entity(root).insert((
+            PresentsWindow(window),
+            WindowProjection::new(window, output),
+            SsdPresentation,
+            PresentationOffset::default(),
+            PresentationInsets::new(
+                BORDER_WIDTH,
+                HEADER_HEIGHT + BORDER_WIDTH,
+                BORDER_WIDTH,
+                BORDER_WIDTH,
+            ),
+            WindowGeometryAnchor(Vec2::new(0.0, HEADER_HEIGHT)),
+            GlobalZIndex(z_order.0),
+        ));
+        if content == SsdContent::Vacant {
+            commands.entity(root).insert(VacantSsdPresentation);
+        }
         if let Some(camera) = camera {
             commands.entity(root).insert(UiTargetCamera(camera));
         }
@@ -274,6 +325,19 @@ fn sync_focus_style(
     }
 }
 
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum SsdContent {
+    Surface(SurfaceId),
+    Vacant,
+}
+
+fn spawn_ssd_scene(commands: &mut Commands, content: SsdContent) -> Entity {
+    match content {
+        SsdContent::Surface(surface) => commands.spawn_scene(scene(surface)).id(),
+        SsdContent::Vacant => commands.spawn_scene(vacant_scene()).id(),
+    }
+}
+
 fn scene(surface: SurfaceId) -> impl Scene {
     let content = surface_content_with_node(
         surface,
@@ -284,6 +348,20 @@ fn scene(surface: SurfaceId) -> impl Scene {
             ..Default::default()
         },
     );
+    window_scene(content)
+}
+
+fn vacant_scene() -> impl Scene {
+    let content = bsn_list! {
+        (
+            Node { width: percent(100), height: percent(100) }
+            BackgroundColor(Color::srgb(0.10, 0.12, 0.16))
+        )
+    };
+    window_scene(content)
+}
+
+fn window_scene(content: impl SceneList) -> impl Scene {
     let resize_handles = resize_handles();
     bsn! {
         Node {
@@ -373,6 +451,19 @@ fn scene(surface: SurfaceId) -> impl Scene {
             ),
             {resize_handles},
         ]
+    }
+}
+
+fn sync_vacant_ssd_size(
+    windows: Query<&weld_window::WindowGeometry>,
+    mut roots: Query<(&WindowProjection, &mut Node), With<VacantSsdPresentation>>,
+) {
+    for (projection, mut node) in &mut roots {
+        let Ok(geometry) = windows.get(projection.window()) else {
+            continue;
+        };
+        node.width = px(geometry.size.x);
+        node.height = px(geometry.size.y);
     }
 }
 

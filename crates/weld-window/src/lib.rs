@@ -814,13 +814,7 @@ fn apply_window_command(command: On<WindowCommand>, params: ApplyWindowCommandPa
             }
         }
         WindowCommandKind::BeginInteraction(kind) => {
-            let Ok((_, occupant)) = windows.get(window) else {
-                return;
-            };
-            let mapped = occupant
-                .and_then(|occupant| occupants.get(occupant.entity()).ok())
-                .is_some_and(|(_, mapped)| mapped.is_some());
-            if mapped {
+            if windows.contains(window) {
                 commands.queue(move |world: &mut bevy::ecs::world::World| {
                     begin_window_interaction(world, window, kind);
                 });
@@ -1213,5 +1207,32 @@ mod tests {
             })
         );
         assert!(app.world().resource::<EndedInteractions>().0.is_empty());
+    }
+
+    #[test]
+    fn retained_vacant_window_can_begin_an_interaction() {
+        let mut app = test_app();
+        let window = app
+            .world_mut()
+            .spawn((
+                ManagedWindow {
+                    id: WindowId::new(22),
+                },
+                WindowVacancy::Retain,
+            ))
+            .id();
+
+        app.world_mut().trigger(WindowCommand {
+            window,
+            kind: WindowCommandKind::BeginInteraction(WindowInteractionKind::Move),
+        });
+        app.update();
+
+        assert_eq!(
+            app.world().get::<WindowInteractionSession>(window),
+            Some(&WindowInteractionSession {
+                kind: WindowInteractionKind::Move,
+            })
+        );
     }
 }
