@@ -232,6 +232,82 @@ Smithay protocol dispatch, client forwarding, KMS acquisition, and physical
 presentation. If its host-boundary timings are cheap while a live compositor
 is expensive, use Tracy to investigate those backend stages.
 
+## Whole-process CPU flamegraphs
+
+Use the perf suite when Tracy zones and source inspection do not explain live
+CPU utilization:
+
+```text
+scripts/profiling/pointer-motion-perf-suite
+```
+
+Run it from a real TTY. It builds the `perf` Cargo profile once, then records
+three equal-duration DRM sessions: a still pointer, rapid pointer motion, and a
+second still pointer. Each prompt appears before Weld takes over the TTY and
+uses an eight-second countdown. Continue the requested action through the
+three-second loss probe and the main capture, until Weld exits. Options such as
+`--duration`, `--frequency`, `--mmap-pages`, and `--stack-bytes` apply
+identically to all three runs.
+
+The `perf` profile inherits release code generation, does not enable Tracy, and
+adds full DWARF information. `run-perf` rejects a binary linked to
+`libbevy_dylib`, checks free space before building, and samples `cpu-clock:u` at
+a fixed frequency. This event makes userspace sample counts proportional to
+userspace CPU time without depending on CPU frequency. The script also records
+`task-clock` plus `/proc` user and system CPU ticks. It uses a fixed perf ring
+size for every suite member and refuses comparisons when perf reports lost or
+throttled samples, a capture has no samples, task-clock disagrees with the
+process CPU ticks, or the two still baselines differ by more than ten percent
+in task-clock or sample count. The actual task-clock event name and perf stderr
+remain in the artifact set so a NixOS permission fallback is visible.
+
+The suite writes artifacts below a timestamped directory in
+`target/perf-traces/`; standalone `run-perf` calls use timestamped flat files
+there unless `--output-base` selects another location. The primary files are:
+
+- `rapid.svg`: the full rapid-pointer userspace flamegraph;
+- `rapid.report.txt`: flat self-time by thread, shared object, and symbol;
+- `rapid.children.txt`: inclusive call-tree costs;
+- `rapid.stat.txt` and `rapid.cpu.txt`: total task time and user/system split;
+- `comparison.txt`: raw per-run sample, task-clock, user-time, and system-time
+  values plus the baseline drift decision;
+- `still-to-rapid.ratio.txt` and `still-to-rapid.delta-abs.txt`: perf symbol
+  comparisons; and
+- `still-to-rapid.diff.svg`: an absolute-sample differential flamegraph. It is
+  generated without `difffolded.pl -n`, because the captures have equal
+  duration and frequency. Frame width follows the rapid profile, while warmer
+  colors indicate growth from still to rapid and cooler colors indicate a
+  reduction.
+
+Read `comparison.txt` before the flamegraph. Percentage-only symbol columns do
+not reveal a uniform increase in CPU work; raw sample counts and task-clock do.
+If rapid motion increases task-clock primarily through `stime`, the userspace
+flamegraph is the wrong instrument. Kernel stacks then require an explicit,
+temporary policy change to `kernel.perf_event_paranoid=1`; the scripts never
+change that setting. Ask before changing the NixOS sysctl or invoking `sudo`.
+
+The scripts resolve `perf` and the Brendan Gregg FlameGraph tools from the
+current Nix registry with `nix build --no-link` when they are not already in
+`PATH`. The first run may therefore need network access. Metadata records the
+exact kernel, perf version, sysctls, event, frequency, ring size, stack size,
+thread count, and tool paths. Sampling still has overhead, and the fixed
+still-motion-still order can have thermal bias; the second still run is the
+guard against treating that drift as pointer cost.
+
+Keep `target/perf/weldwm` and its dependency artifacts until analysis is
+complete. Rebuilding that profile or running `cargo clean` can remove the
+symbol files referenced by `perf.data`. The general runner can profile another
+manual workload with:
+
+```text
+scripts/profiling/run-perf \
+  --name WORKLOAD \
+  --instructions 'Describe one repeatable action for the complete run.'
+```
+
+If an abnormal SIGKILL leaves the VT in graphics mode, switch to another VT and
+back with `chvt`, or reboot if the display session cannot be recovered.
+
 ## Automated trace reports
 
 Rank individual ECS systems or other Tracy zones without opening the GUI:

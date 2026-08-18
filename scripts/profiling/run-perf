@@ -1,0 +1,587 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+usage() {
+    cat <<'EOF'
+Usage: run-perf --name NAME --instructions TEXT [OPTIONS] [-- CLIENT...]
+
+Build an optimized symbolized Weld, sample its userspace CPU stacks with perf,
+generate a complete SVG flamegraph, and stop Weld and its clients cleanly.
+
+Options:
+  --name NAME          Artifact stem and scenario label (required)
+  --instructions TEXT Manual action for the complete Weld run (required)
+  --backend BACKEND    drm or nested (default: drm)
+  --warmup SECONDS     Time before the three-second loss probe (default: 2)
+  --duration SECONDS   Main capture duration (default: 20)
+  --frequency HZ       cpu-clock sample frequency (default: 499)
+  --mmap-pages PAGES   Perf ring pages, fixed for comparisons (default: 64)
+  --stack-bytes BYTES  DWARF stack dump size (default: 16384)
+  --output-base PATH   Artifact path without an extension
+  --no-build           Reuse target/perf/weldwm after validating it
+  --force              Replace an explicitly selected artifact set
+  -h, --help           Show this help
+
+Run DRM scenarios from a real TTY. The script records Weld and threads or
+children inherited by perf, but not unrelated desktop processes.
+EOF
+}
+
+fail() {
+    printf 'run-perf: %s\n' "$*" >&2
+    exit 2
+}
+
+fail_quality() {
+    printf 'run-perf: %s\n' "$*" >&2
+    exit 3
+}
+
+require_value() {
+    if (( $# < 2 )); then
+        fail "$1 requires a value"
+    fi
+}
+
+script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+repository_root="$(cd -- "${script_dir}/../.." && pwd)"
+name=""
+instructions=""
+backend="drm"
+warmup_seconds=2
+duration_seconds=20
+frequency=499
+mmap_pages=64
+stack_bytes=16384
+output_base=""
+build_binary=true
+force=false
+readonly PREFLIGHT_SECONDS=3
+readonly PERF_ABORT_GRACE_TENTHS=600
+readonly MINIMUM_FREE_KIB=$((40 * 1024 * 1024))
+
+while (( $# > 0 )); do
+    case "$1" in
+        --name)
+            require_value "$@"
+            name="$2"
+            shift 2
+            ;;
+        --instructions)
+            require_value "$@"
+            instructions="$2"
+            shift 2
+            ;;
+        --backend)
+            require_value "$@"
+            backend="$2"
+            shift 2
+            ;;
+        --warmup)
+            require_value "$@"
+            warmup_seconds="$2"
+            shift 2
+            ;;
+        --duration)
+            require_value "$@"
+            duration_seconds="$2"
+            shift 2
+            ;;
+        --frequency)
+            require_value "$@"
+            frequency="$2"
+            shift 2
+            ;;
+        --mmap-pages)
+            require_value "$@"
+            mmap_pages="$2"
+            shift 2
+            ;;
+        --stack-bytes)
+            require_value "$@"
+            stack_bytes="$2"
+            shift 2
+            ;;
+        --output-base)
+            require_value "$@"
+            output_base="$2"
+            shift 2
+            ;;
+        --no-build)
+            build_binary=false
+            shift
+            ;;
+        --force)
+            force=true
+            shift
+            ;;
+        -h|--help)
+            usage
+            exit 0
+            ;;
+        --)
+            shift
+            break
+            ;;
+        *)
+            fail "unknown option: $1"
+            ;;
+    esac
+done
+
+client=("$@")
+
+if (( BASH_VERSINFO[0] < 5 || (BASH_VERSINFO[0] == 5 && BASH_VERSINFO[1] < 1) )); then
+    fail "Bash 5.1 or newer is required"
+fi
+[[ -n "${name}" ]] || fail "--name is required"
+[[ "${name}" =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]*$ ]] || fail "--name is not filename-safe"
+[[ -n "${instructions}" ]] || fail "--instructions is required"
+[[ "${backend}" == "drm" || "${backend}" == "nested" ]] || fail "--backend must be drm or nested"
+for value_name in warmup_seconds duration_seconds frequency mmap_pages stack_bytes; do
+    value="${!value_name}"
+    [[ "${value}" =~ ^[0-9]+$ ]] || fail "${value_name} must be a non-negative integer"
+done
+(( duration_seconds > 0 )) || fail "--duration must be positive"
+(( frequency > 0 )) || fail "--frequency must be positive"
+(( mmap_pages > 0 && (mmap_pages & (mmap_pages - 1)) == 0 )) || \
+    fail "--mmap-pages must be a positive power of two"
+(( stack_bytes >= 8192 && stack_bytes <= 65528 )) || \
+    fail "--stack-bytes must be from 8192 through 65528"
+if [[ "${backend}" == "drm" && ( ! -t 0 || ! -t 1 ) ]]; then
+    fail "DRM profiling must run interactively from a real TTY"
+fi
+
+for command in awk cargo df env find getconf ldd nix ps rg setsid uname wc; do
+    command -v "${command}" >/dev/null 2>&1 || fail "required command not found: ${command}"
+done
+
+resolve_tools() {
+    perf_bin="$(command -v perf || true)"
+    stackcollapse_bin="$(command -v stackcollapse-perf.pl || true)"
+    flamegraph_bin="$(command -v flamegraph.pl || true)"
+    difffolded_bin="$(command -v difffolded.pl || true)"
+    if [[ -z "${perf_bin}" ]]; then
+        perf_store="$(nix build --no-link --print-out-paths nixpkgs#linuxPackages.perf)"
+        perf_bin="${perf_store}/bin/perf"
+    fi
+    if [[ -z "${stackcollapse_bin}" || -z "${flamegraph_bin}" || -z "${difffolded_bin}" ]]; then
+        flamegraph_store="$(nix build --no-link --print-out-paths nixpkgs#flamegraph)"
+        stackcollapse_bin="${flamegraph_store}/bin/stackcollapse-perf.pl"
+        flamegraph_bin="${flamegraph_store}/bin/flamegraph.pl"
+        difffolded_bin="${flamegraph_store}/bin/difffolded.pl"
+    fi
+    for tool in "${perf_bin}" "${stackcollapse_bin}" "${flamegraph_bin}" "${difffolded_bin}"; do
+        [[ -x "${tool}" ]] || fail "profiling tool is not executable: ${tool}"
+    done
+}
+
+resolve_tools
+
+timestamp="$(date +%Y%m%d-%H%M%S)"
+if [[ -z "${output_base}" ]]; then
+    output_base="target/perf-traces/${name}-${backend}-${timestamp}"
+fi
+if [[ "${output_base}" != /* ]]; then
+    output_base="${repository_root}/${output_base}"
+fi
+mkdir -p -- "$(dirname -- "${output_base}")" "${repository_root}/target/profiling"
+
+artifacts=(
+    "${output_base}.data"
+    "${output_base}.perf-script"
+    "${output_base}.folded"
+    "${output_base}.svg"
+    "${output_base}.report.txt"
+    "${output_base}.children.txt"
+    "${output_base}.stat.txt"
+    "${output_base}.stat.stderr"
+    "${output_base}.cpu.txt"
+    "${output_base}.quality.txt"
+    "${output_base}.metadata.txt"
+    "${output_base}.instructions.txt"
+    "${output_base}.weld.log"
+    "${output_base}.record.stderr"
+    "${output_base}.preflight.data"
+    "${output_base}.preflight.stats.txt"
+    "${output_base}.preflight.stderr"
+    "${output_base}.preflight.perf-script"
+    "${output_base}.preflight.folded"
+)
+if [[ "${force}" != true ]]; then
+    for artifact in "${artifacts[@]}"; do
+        [[ ! -e "${artifact}" ]] || fail "artifact exists; pass --force: ${artifact}"
+    done
+fi
+if [[ "${force}" == true ]]; then
+    rm -f -- "${artifacts[@]}"
+fi
+
+available_kib="$(df -Pk "${repository_root}" | awk 'NR == 2 { print $4 }')"
+[[ "${available_kib}" =~ ^[0-9]+$ ]] || fail "could not determine available disk space"
+(( available_kib >= MINIMUM_FREE_KIB )) || \
+    fail "at least 40 GiB free is required for debug symbols and perf data"
+
+cd -- "${repository_root}"
+if [[ "${build_binary}" == true ]]; then
+    printf 'Building optimized symbolized Weld before taking over the TTY...\n' >&2
+    cargo build --profile perf -p weldwm
+fi
+weld_binary="${repository_root}/target/perf/weldwm"
+[[ -x "${weld_binary}" ]] || fail "missing ${weld_binary}; omit --no-build"
+if ldd "${weld_binary}" | rg -q 'libbevy_dylib'; then
+    fail "the perf binary unexpectedly links libbevy_dylib"
+fi
+
+perf_version="$(${perf_bin} --version)"
+kernel_version="$(uname -r)"
+perf_event_paranoid="$(< /proc/sys/kernel/perf_event_paranoid)"
+perf_event_mlock_kb="$(< /proc/sys/kernel/perf_event_mlock_kb)"
+perf_cpu_time_max_percent="$(< /proc/sys/kernel/perf_cpu_time_max_percent)"
+clock_ticks="$(getconf CLK_TCK)"
+
+cat >"${output_base}.metadata.txt" <<EOF
+scenario=${name}
+backend=${backend}
+perf_version=${perf_version}
+kernel_version=${kernel_version}
+perf_event_paranoid=${perf_event_paranoid}
+perf_event_mlock_kb=${perf_event_mlock_kb}
+perf_cpu_time_max_percent=${perf_cpu_time_max_percent}
+event=cpu-clock:u
+frequency_hz=${frequency}
+mmap_pages=${mmap_pages}
+stack_bytes=${stack_bytes}
+warmup_seconds=${warmup_seconds}
+preflight_seconds=${PREFLIGHT_SECONDS}
+duration_seconds=${duration_seconds}
+clock_ticks_per_second=${clock_ticks}
+perf_bin=${perf_bin}
+stackcollapse_bin=${stackcollapse_bin}
+flamegraph_bin=${flamegraph_bin}
+difffolded_bin=${difffolded_bin}
+weld_binary=${weld_binary}
+EOF
+
+cat >"${output_base}.instructions.txt" <<EOF
+Scenario: ${name}
+Backend: ${backend}
+Output base: ${output_base}
+
+Manual action for the entire time Weld owns the TTY:
+${instructions}
+
+Timeline after Weld becomes visible:
+  T+0 through T+${warmup_seconds}: startup warmup.
+  Next ${PREFLIGHT_SECONDS} seconds: capture-quality probe; continue the action.
+  The probe is checked before the main capture.
+  Next ${duration_seconds} seconds: main capture; continue the action.
+  Weld then exits and artifacts are generated on the original TTY.
+
+The quality check may add a short gap between probe and main capture. Continue
+the same action until Weld exits. Do not switch VTs during the capture.
+EOF
+
+printf '%s\n' "$(cat -- "${output_base}.instructions.txt")"
+
+session_pid_file="$(mktemp "${repository_root}/target/profiling/weld-perf-session.XXXXXX")"
+weld_wait_pid=""
+weld_session_pid=""
+weld_process_group=""
+perf_pid=""
+stat_pid=""
+
+child_has_exited() {
+    local child_pid="$1"
+    local process_state
+    if [[ -z "${child_pid}" ]] || ! kill -0 "${child_pid}" 2>/dev/null; then
+        return 0
+    fi
+    process_state="$(ps -o stat= -p "${child_pid}" 2>/dev/null | tr -d '[:space:]' || true)"
+    [[ -z "${process_state}" || "${process_state}" == Z* ]]
+}
+
+wait_for_child_exit() {
+    local child_pid="$1"
+    local attempts="${2:-50}"
+    for (( attempt = 0; attempt < attempts; attempt += 1 )); do
+        if child_has_exited "${child_pid}"; then
+            return 0
+        fi
+        sleep 0.1
+    done
+    return 1
+}
+
+load_process_group() {
+    local reported_pid
+    local detected_group
+    for _ in {1..100}; do
+        if [[ -s "${session_pid_file}" ]]; then
+            read -r reported_pid <"${session_pid_file}" || true
+            if [[ "${reported_pid}" =~ ^[1-9][0-9]*$ ]]; then
+                detected_group="$(ps -o pgid= -p "${reported_pid}" 2>/dev/null | tr -d '[:space:]' || true)"
+                if [[ "${detected_group}" == "${reported_pid}" ]]; then
+                    weld_session_pid="${reported_pid}"
+                    weld_process_group="${detected_group}"
+                    return 0
+                fi
+            fi
+        fi
+        sleep 0.05
+    done
+    return 1
+}
+
+stop_weld_group() {
+    if [[ -z "${weld_process_group}" ]] || ! kill -0 -- "-${weld_process_group}" 2>/dev/null; then
+        return
+    fi
+    kill -TERM -- "-${weld_process_group}" 2>/dev/null || true
+    if ! wait_for_child_exit "${weld_session_pid}" 100; then
+        kill -KILL -- "-${weld_process_group}" 2>/dev/null || true
+    fi
+}
+
+stop_perf() {
+    if [[ -z "${perf_pid}" ]] || child_has_exited "${perf_pid}"; then
+        return
+    fi
+    kill -INT "${perf_pid}" 2>/dev/null || true
+    if ! wait_for_child_exit "${perf_pid}" "${PERF_ABORT_GRACE_TENTHS}"; then
+        kill -KILL "${perf_pid}" 2>/dev/null || true
+        wait_for_child_exit "${perf_pid}" 50 || true
+    fi
+}
+
+cleanup() {
+    trap '' INT TERM
+    trap - EXIT
+    stop_perf
+    if [[ -n "${stat_pid}" ]] && ! child_has_exited "${stat_pid}"; then
+        kill -INT "${stat_pid}" 2>/dev/null || true
+        wait_for_child_exit "${stat_pid}" 50 || true
+    fi
+    stop_weld_group
+    if [[ -n "${weld_wait_pid}" ]]; then
+        wait "${weld_wait_pid}" 2>/dev/null || true
+    fi
+    rm -f -- "${session_pid_file}"
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+weld_command=("${weld_binary}" --backend "${backend}")
+if (( ${#client[@]} > 0 )); then
+    weld_command+=(-- "${client[@]}")
+fi
+setsid --fork --wait bash -c \
+    'printf "%s\n" "$$" >"$1"; shift; exec "$@"' \
+    _ "${session_pid_file}" "${weld_command[@]}" \
+    >"${output_base}.weld.log" 2>&1 &
+weld_wait_pid=$!
+load_process_group || fail "could not identify Weld's process group"
+
+sleep "${warmup_seconds}"
+child_has_exited "${weld_session_pid}" && fail "Weld exited during warmup"
+thread_count="$(find "/proc/${weld_session_pid}/task" -mindepth 1 -maxdepth 1 -type d | wc -l)"
+printf 'weld_pid=%s\nthread_count_at_attach=%s\n' \
+    "${weld_session_pid}" "${thread_count}" >>"${output_base}.metadata.txt"
+
+record_perf() {
+    local data_path="$1"
+    local stderr_path="$2"
+    local seconds="$3"
+    "${perf_bin}" record \
+        -e cpu-clock:u \
+        -F "${frequency}" \
+        -m "${mmap_pages}" \
+        --call-graph "dwarf,${stack_bytes}" \
+        -p "${weld_session_pid}" \
+        -o "${data_path}" \
+        -- sleep "${seconds}" \
+        2>"${stderr_path}" &
+    perf_pid=$!
+    set +e
+    wait "${perf_pid}"
+    status=$?
+    set -e
+    perf_pid=""
+    return "${status}"
+}
+
+quality_gate() {
+    local data_path="$1"
+    local stderr_path="$2"
+    local stats_path="$3"
+    "${perf_bin}" report --stdio --stats -i "${data_path}" >"${stats_path}" 2>&1
+    if rg -qi 'LOST|LOST_SAMPLES|THROTTLE|UNTHROTTLE' "${stats_path}" \
+        || rg -qi 'samples lost|throttl' "${stderr_path}"; then
+        return 1
+    fi
+    return 0
+}
+
+if ! record_perf \
+    "${output_base}.preflight.data" \
+    "${output_base}.preflight.stderr" \
+    "${PREFLIGHT_SECONDS}"; then
+    fail "perf preflight failed; inspect ${output_base}.preflight.stderr"
+fi
+if ! quality_gate \
+    "${output_base}.preflight.data" \
+    "${output_base}.preflight.stderr" \
+    "${output_base}.preflight.stats.txt"; then
+    fail "perf preflight lost or throttled samples; lower frequency or mmap pressure"
+fi
+"${perf_bin}" script --inline -i "${output_base}.preflight.data" \
+    >"${output_base}.preflight.perf-script" \
+    2>>"${output_base}.preflight.stderr"
+"${stackcollapse_bin}" "${output_base}.preflight.perf-script" \
+    >"${output_base}.preflight.folded" \
+    2>>"${output_base}.preflight.stderr"
+if ! awk '
+    {
+        total += 1
+        separators = gsub(/;/, ";")
+        if (separators >= 2) {
+            deep += 1
+        }
+    }
+    END {
+        if (total == 0 || deep == 0) {
+            exit 1
+        }
+        if (total >= 5 && deep / total < 0.2) {
+            exit 1
+        }
+    }
+' "${output_base}.preflight.folded"; then
+    fail "perf preflight did not produce usable multi-frame DWARF stacks"
+fi
+child_has_exited "${weld_session_pid}" && fail "Weld exited during perf preflight"
+
+read_proc_cpu() {
+    local pid="$1"
+    local stat_line
+    local fields
+    stat_line="$(< "/proc/${pid}/stat")"
+    read -r -a fields <<<"${stat_line#*) }"
+    printf '%s %s\n' "${fields[11]}" "${fields[12]}"
+}
+
+read -r before_utime before_stime < <(read_proc_cpu "${weld_session_pid}")
+"${perf_bin}" stat -x ';' \
+    -o "${output_base}.stat.txt" \
+    -e task-clock,context-switches,cpu-migrations,page-faults \
+    -p "${weld_session_pid}" \
+    -- sleep "${duration_seconds}" \
+    2>"${output_base}.stat.stderr" &
+stat_pid=$!
+if ! record_perf "${output_base}.data" "${output_base}.record.stderr" "${duration_seconds}"; then
+    fail "perf record failed; inspect ${output_base}.record.stderr"
+fi
+set +e
+wait "${stat_pid}"
+stat_status=$?
+set -e
+stat_pid=""
+(( stat_status == 0 )) || fail "perf stat failed with status ${stat_status}"
+read -r after_utime after_stime < <(read_proc_cpu "${weld_session_pid}")
+utime_ticks=$((after_utime - before_utime))
+stime_ticks=$((after_stime - before_stime))
+task_clock_msec="$(awk -F';' '$3 ~ /^task-clock/ { print $1; exit }' \
+    "${output_base}.stat.txt")"
+task_clock_event="$(awk -F';' '$3 ~ /^task-clock/ { print $3; exit }' \
+    "${output_base}.stat.txt")"
+[[ "${task_clock_msec}" =~ ^[0-9]+([.][0-9]+)?$ ]] || \
+    fail "perf stat did not report a numeric task-clock"
+[[ -n "${task_clock_event}" ]] || fail "perf stat did not report its task-clock event name"
+cpu_accounting_valid="$(awk \
+    -v user_ticks="${utime_ticks}" \
+    -v system_ticks="${stime_ticks}" \
+    -v hz="${clock_ticks}" \
+    -v task_msec="${task_clock_msec}" '
+    BEGIN {
+        proc_msec = 1000 * (user_ticks + system_ticks) / hz
+        mean = (proc_msec + task_msec) / 2
+        difference = proc_msec > task_msec ? proc_msec - task_msec : task_msec - proc_msec
+        tolerance = mean * 0.1
+        if (tolerance < 20) {
+            tolerance = 20
+        }
+        print difference <= tolerance ? "true" : "false"
+    }
+')"
+printf 'task_clock_event=%s\n' "${task_clock_event}" >>"${output_base}.metadata.txt"
+awk \
+    -v user_ticks="${utime_ticks}" \
+    -v system_ticks="${stime_ticks}" \
+    -v hz="${clock_ticks}" \
+    -v task_event="${task_clock_event}" \
+    -v task_msec="${task_clock_msec}" \
+    -v accounting_valid="${cpu_accounting_valid}" '
+    BEGIN {
+        printf "utime_ticks=%d\nstime_ticks=%d\nutime_seconds=%.6f\nstime_seconds=%.6f\ntotal_cpu_seconds=%.6f\ntask_clock_event=%s\ntask_clock_msec=%.6f\ncpu_accounting_valid=%s\n",
+            user_ticks, system_ticks, user_ticks / hz, system_ticks / hz,
+            (user_ticks + system_ticks) / hz, task_event, task_msec, accounting_valid
+    }
+' >"${output_base}.cpu.txt"
+
+stop_weld_group
+set +e
+wait "${weld_wait_pid}"
+weld_status=$?
+set -e
+weld_wait_pid=""
+
+"${perf_bin}" script --inline -i "${output_base}.data" >"${output_base}.perf-script"
+"${stackcollapse_bin}" "${output_base}.perf-script" >"${output_base}.folded"
+"${flamegraph_bin}" \
+    --title "Weld ${name} userspace CPU" \
+    --countname samples \
+    "${output_base}.folded" >"${output_base}.svg"
+"${perf_bin}" report --stdio --no-children --sort comm,dso,symbol --percent-limit 0.1 \
+    -i "${output_base}.data" >"${output_base}.report.txt"
+"${perf_bin}" report --stdio --children --sort comm,dso,symbol --percent-limit 0.1 \
+    -i "${output_base}.data" >"${output_base}.children.txt"
+
+quality_valid=true
+if ! quality_gate \
+    "${output_base}.data" \
+    "${output_base}.record.stderr" \
+    "${output_base}.quality.txt.tmp"; then
+    quality_valid=false
+fi
+sample_count="$(awk '$1 == "SAMPLE" && $2 == "events:" { print $3; exit }' \
+    "${output_base}.quality.txt.tmp")"
+sample_count="${sample_count:-0}"
+if [[ ! "${sample_count}" =~ ^[0-9]+$ ]] || (( sample_count == 0 )); then
+    quality_valid=false
+fi
+sampling_valid="${quality_valid}"
+if [[ "${cpu_accounting_valid}" != true ]]; then
+    quality_valid=false
+fi
+{
+    printf 'valid=%s\n' "${quality_valid}"
+    printf 'sampling_valid=%s\n' "${sampling_valid}"
+    printf 'cpu_accounting_valid=%s\n' "${cpu_accounting_valid}"
+    printf 'sample_count=%s\n' "${sample_count}"
+    cat "${output_base}.quality.txt.tmp"
+} >"${output_base}.quality.txt"
+rm -f -- "${output_base}.quality.txt.tmp"
+
+trap - EXIT INT TERM
+rm -f -- "${session_pid_file}"
+if (( weld_status != 0 )); then
+    printf 'Weld teardown returned status %s; artifacts were retained.\n' "${weld_status}" >&2
+fi
+if [[ "${quality_valid}" != true ]]; then
+    fail_quality "capture quality failed; inspect ${output_base}.quality.txt and CPU accounting"
+fi
+
+printf '\nSaved perf data: %s.data\nFlamegraph: %s.svg\nFlat report: %s.report.txt\n' \
+    "${output_base}" "${output_base}" "${output_base}"

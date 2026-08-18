@@ -38,10 +38,12 @@ pub use pointer_shortcuts::{
     PointerShortcutPressed,
 };
 pub use projection::TouchpadGesture;
+pub(crate) use projection::enqueue_application_input_batch;
 #[cfg(test)]
 pub(crate) use projection::enqueue_raw_input;
+#[cfg(feature = "test-support")]
+pub(crate) use projection::enqueue_raw_input_batch;
 pub(crate) use projection::update_output_configurations;
-pub(crate) use projection::{enqueue_application_input_batch, enqueue_raw_input_batch};
 pub(crate) use routing::take_input_effects;
 pub use shortcuts::{GlobalShortcutAction, GlobalShortcutPlugin};
 pub(crate) use shortcuts::{filter_global_shortcut_event, take_host_commands};

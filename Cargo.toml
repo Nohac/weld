@@ -87,6 +87,13 @@ opt-level = 3
 [profile.release]
 panic = "unwind"
 
+# Whole-process sampling profile: release codegen with full DWARF information
+# for perf call-chain and inline-frame symbolization.
+[profile.perf]
+inherits = "release"
+debug = 2
+strip = "none"
+
 # Temporary Bevy 0.19 compatibility layer. Remove this entire section when
 # Weld adopts a Bevy release that natively depends on wgpu 30 or newer.
 [patch.crates-io]

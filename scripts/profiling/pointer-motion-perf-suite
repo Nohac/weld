@@ -1,0 +1,256 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+usage() {
+    cat <<'EOF'
+Usage: pointer-motion-perf-suite [OPTIONS]
+
+Capture equal-duration still, rapid-motion, and still-again DRM profiles. The
+suite generates full flamegraphs for every run and comparison artifacts only
+when all captures are lossless and the two still baselines drift by at most 10%.
+
+Options:
+  --warmup SECONDS     Startup time before each loss probe (default: 2)
+  --duration SECONDS   Main capture time for each run (default: 20)
+  --frequency HZ       cpu-clock sample frequency (default: 499)
+  --mmap-pages PAGES   Perf ring pages for every run (default: 64)
+  --stack-bytes BYTES  DWARF stack size for every run (default: 16384)
+  --output-dir PATH    Explicit artifact directory
+  --force              Replace an explicitly selected output directory
+  -h, --help           Show this help
+
+Run this script from a real TTY. Do not switch VTs during a capture.
+EOF
+}
+
+fail() {
+    printf 'pointer-motion-perf-suite: %s\n' "$*" >&2
+    exit 2
+}
+
+script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+repository_root="$(cd -- "${script_dir}/../.." && pwd)"
+warmup=2
+duration=20
+frequency=499
+mmap_pages=64
+stack_bytes=16384
+output_dir=""
+force=false
+readonly PROMPT_SECONDS=8
+readonly DRIFT_LIMIT_PERCENT=10
+
+while (( $# > 0 )); do
+    case "$1" in
+        --warmup|--duration|--frequency|--mmap-pages|--stack-bytes|--output-dir)
+            (( $# >= 2 )) || fail "$1 requires a value"
+            case "$1" in
+                --warmup) warmup="$2" ;;
+                --duration) duration="$2" ;;
+                --frequency) frequency="$2" ;;
+                --mmap-pages) mmap_pages="$2" ;;
+                --stack-bytes) stack_bytes="$2" ;;
+                --output-dir) output_dir="$2" ;;
+            esac
+            shift 2
+            ;;
+        --force)
+            force=true
+            shift
+            ;;
+        -h|--help)
+            usage
+            exit 0
+            ;;
+        *)
+            fail "unknown option: $1"
+            ;;
+    esac
+done
+
+[[ -t 0 && -t 1 ]] || fail "this suite must run interactively from a real TTY"
+timestamp="$(date +%Y%m%d-%H%M%S)"
+if [[ -z "${output_dir}" ]]; then
+    output_dir="${repository_root}/target/perf-traces/pointer-motion-${timestamp}"
+elif [[ "${output_dir}" != /* ]]; then
+    output_dir="${repository_root}/${output_dir}"
+fi
+if [[ -e "${output_dir}" && "${force}" != true ]]; then
+    fail "output directory exists; pass --force to replace it"
+fi
+mkdir -p -- "${output_dir}"
+if [[ "${force}" == true ]]; then
+    rm -f -- \
+        "${output_dir}/comparison.txt" \
+        "${output_dir}/still-to-rapid.ratio.txt" \
+        "${output_dir}/still-to-rapid.delta-abs.txt" \
+        "${output_dir}/still-drift.ratio.txt" \
+        "${output_dir}/still-to-rapid.diff.folded" \
+        "${output_dir}/still-to-rapid.diff.svg"
+fi
+
+printf 'Building the optimized symbolized binary before the suite starts...\n' >&2
+cd -- "${repository_root}"
+cargo build --profile perf -p weldwm
+
+runner_options=(
+    --backend drm
+    --warmup "${warmup}"
+    --duration "${duration}"
+    --frequency "${frequency}"
+    --mmap-pages "${mmap_pages}"
+    --stack-bytes "${stack_bytes}"
+    --no-build
+)
+if [[ "${force}" == true ]]; then
+    runner_options+=(--force)
+fi
+
+run_profile() {
+    local number="$1"
+    local label="$2"
+    local action="$3"
+    printf '\nNext profile %s of 3: %s\n' "${number}" "${label}"
+    printf 'Starting in %s seconds. Follow the action until Weld exits.\n' "${PROMPT_SECONDS}"
+    sleep "${PROMPT_SECONDS}"
+    set +e
+    "${script_dir}/run-perf" \
+        --name "pointer-${label}" \
+        --instructions "${action}" \
+        --output-base "${output_dir}/${label}" \
+        "${runner_options[@]}"
+    status=$?
+    set -e
+    case "${status}" in
+        0|3) return 0 ;;
+        *) return "${status}" ;;
+    esac
+}
+
+run_profile 1 still-before \
+    'Leave the pointer completely still over the empty Weld desktop.'
+run_profile 2 rapid \
+    'Move the pointer rapidly and continuously over the empty Weld desktop.'
+run_profile 3 still-after \
+    'Leave the pointer completely still over the empty Weld desktop.'
+
+resolve_tool() {
+    local command_name="$1"
+    local package="$2"
+    local resolved
+    resolved="$(command -v "${command_name}" || true)"
+    if [[ -z "${resolved}" ]]; then
+        store_path="$(nix build --no-link --print-out-paths "${package}")"
+        resolved="${store_path}/bin/${command_name}"
+    fi
+    [[ -x "${resolved}" ]] || fail "comparison tool unavailable: ${command_name}"
+    printf '%s\n' "${resolved}"
+}
+
+perf_bin="$(resolve_tool perf nixpkgs#linuxPackages.perf)"
+difffolded_bin="$(resolve_tool difffolded.pl nixpkgs#flamegraph)"
+flamegraph_bin="$(resolve_tool flamegraph.pl nixpkgs#flamegraph)"
+
+quality_ok=true
+for label in still-before rapid still-after; do
+    if ! rg -q '^valid=true$' "${output_dir}/${label}.quality.txt"; then
+        quality_ok=false
+    fi
+done
+
+metric() {
+    local file="$1"
+    local key="$2"
+    awk -F= -v key="${key}" '$1 == key { print $2; exit }' "${file}"
+}
+
+task_clock() {
+    awk -F';' '$3 ~ /^task-clock/ { print $1; exit }' "$1"
+}
+
+still_before_clock="$(task_clock "${output_dir}/still-before.stat.txt")"
+still_after_clock="$(task_clock "${output_dir}/still-after.stat.txt")"
+still_before_samples="$(metric "${output_dir}/still-before.quality.txt" sample_count)"
+still_after_samples="$(metric "${output_dir}/still-after.quality.txt" sample_count)"
+for value in \
+    "${still_before_clock}" \
+    "${still_after_clock}" \
+    "${still_before_samples}" \
+    "${still_after_samples}"; do
+    [[ "${value}" =~ ^[0-9]+([.][0-9]+)?$ ]] || fail "comparison metric is not numeric: ${value}"
+done
+task_clock_drift="$(awk -v first="${still_before_clock}" -v second="${still_after_clock}" '
+    BEGIN {
+        mean = (first + second) / 2
+        difference = first > second ? first - second : second - first
+        printf "%.3f", mean == 0 ? (difference == 0 ? 0 : 100) : 100 * difference / mean
+    }
+')"
+sample_drift="$(awk -v first="${still_before_samples}" -v second="${still_after_samples}" '
+    BEGIN {
+        mean = (first + second) / 2
+        difference = first > second ? first - second : second - first
+        printf "%.3f", mean == 0 ? (difference == 0 ? 0 : 100) : 100 * difference / mean
+    }
+')"
+drift_ok="$(awk -v task="${task_clock_drift}" -v samples="${sample_drift}" \
+    -v limit="${DRIFT_LIMIT_PERCENT}" 'BEGIN { print task <= limit && samples <= limit ? "true" : "false" }')"
+
+summary="${output_dir}/comparison.txt"
+{
+    printf 'event=cpu-clock:u\n'
+    printf 'duration_seconds=%s\n' "${duration}"
+    printf 'frequency_hz=%s\n' "${frequency}"
+    printf 'mmap_pages=%s\n' "${mmap_pages}"
+    printf 'stack_bytes=%s\n' "${stack_bytes}"
+    printf 'quality_ok=%s\n' "${quality_ok}"
+    printf 'still_task_clock_drift_percent=%s\n' "${task_clock_drift}"
+    printf 'still_sample_drift_percent=%s\n' "${sample_drift}"
+    printf 'drift_limit_percent=%s\n' "${DRIFT_LIMIT_PERCENT}"
+    printf 'drift_ok=%s\n\n' "${drift_ok}"
+    for label in still-before rapid still-after; do
+        printf '[%s]\n' "${label}"
+        printf 'task_clock_msec=%s\n' "$(task_clock "${output_dir}/${label}.stat.txt")"
+        printf 'sample_count=%s\n' "$(metric "${output_dir}/${label}.quality.txt" sample_count)"
+        cat "${output_dir}/${label}.cpu.txt"
+        printf '\n'
+    done
+    printf 'Sample counts and task-clock are time-proportional. Do not infer CPU time\n'
+    printf 'from percentage-only symbol columns. Kernel stacks are not captured.\n'
+} >"${summary}"
+
+if [[ "${quality_ok}" == true ]]; then
+    "${perf_bin}" diff -c ratio \
+        "${output_dir}/still-before.data" "${output_dir}/still-after.data" \
+        >"${output_dir}/still-drift.ratio.txt"
+fi
+
+comparison_valid=true
+if [[ "${quality_ok}" == true && "${drift_ok}" == true ]]; then
+    "${perf_bin}" diff -c ratio \
+        "${output_dir}/still-before.data" "${output_dir}/rapid.data" \
+        >"${output_dir}/still-to-rapid.ratio.txt"
+    "${perf_bin}" diff -c delta-abs \
+        "${output_dir}/still-before.data" "${output_dir}/rapid.data" \
+        >"${output_dir}/still-to-rapid.delta-abs.txt"
+    "${difffolded_bin}" \
+        "${output_dir}/still-before.folded" "${output_dir}/rapid.folded" \
+        >"${output_dir}/still-to-rapid.diff.folded"
+    "${flamegraph_bin}" \
+        --title 'Weld rapid pointer minus still, absolute samples' \
+        --countname samples \
+        "${output_dir}/still-to-rapid.diff.folded" \
+        >"${output_dir}/still-to-rapid.diff.svg"
+else
+    comparison_valid=false
+    printf '\nComparison artifacts refused because capture quality or baseline drift failed.\n' \
+        >>"${summary}"
+    printf 'Comparison artifacts were refused; inspect %s.\n' "${summary}" >&2
+fi
+
+printf '\nPerf suite complete.\nSummary: %s\nRapid flamegraph: %s\n' \
+    "${summary}" "${output_dir}/rapid.svg"
+if [[ "${comparison_valid}" != true ]]; then
+    exit 3
+fi
