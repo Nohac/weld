@@ -5,7 +5,7 @@ use weld_app::{benchmark, input::GlobalShortcutPlugin};
 use weld_core::{
     OutputId,
     host::{CompositionDestination, CompositionOutputRequest},
-    input::{InputPosition, RawSeatEvent, RawSeatEventKind},
+    input::{ButtonState, InputPosition, LinuxButtonCode, RawSeatEvent, RawSeatEventKind},
     server::{
         PendingSurfaceBufferContent, PendingSurfaceBufferUpdate, PendingSurfaceEvent,
         PendingSurfaceEventKind, PendingSurfaceTreeSnapshot,
@@ -26,24 +26,51 @@ const CLIENT_SURFACE: SurfaceId = SurfaceId::new(1);
 const CLIENT_LAYER: SurfaceLayerId = SurfaceLayerId::new(1);
 const CLIENT_WIDTH: u32 = 900;
 const CLIENT_HEIGHT: u32 = 600;
+const BENCHMARK_BUTTON: LinuxButtonCode = LinuxButtonCode(0x117);
+
+#[derive(Clone, Copy)]
+enum InputWorkload {
+    None,
+    MotionBurst,
+    Interleaved,
+}
+
+impl InputWorkload {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::MotionBurst => "motion-burst",
+            Self::Interleaved => "interleaved",
+        }
+    }
+
+    fn events(self) -> Vec<RawSeatEvent> {
+        match self {
+            Self::None => Vec::new(),
+            Self::MotionBurst => pointer_events(16),
+            Self::Interleaved => interleaved_pointer_events(8),
+        }
+    }
+}
 
 fn main() -> Result<()> {
     let frames = environment_usize("WELD_RENDER_BENCH_FRAMES", 600);
     let warmup_frames = environment_usize("WELD_RENDER_BENCH_WARMUP", 30);
-    for (mapped_client, retained_client_commit, events_per_frame) in [
-        (false, false, 0),
-        (false, false, 16),
-        (true, false, 0),
-        (true, false, 16),
-        (true, true, 0),
-        (true, true, 16),
+    for (mapped_client, retained_client_commit, input) in [
+        (false, false, InputWorkload::None),
+        (false, false, InputWorkload::MotionBurst),
+        (true, false, InputWorkload::None),
+        (true, false, InputWorkload::MotionBurst),
+        (true, false, InputWorkload::Interleaved),
+        (true, true, InputWorkload::None),
+        (true, true, InputWorkload::MotionBurst),
     ] {
         run_case(
             frames,
             warmup_frames,
             mapped_client,
             retained_client_commit,
-            events_per_frame,
+            input,
         )?;
     }
     Ok(())
@@ -54,20 +81,23 @@ fn run_case(
     warmup_frames: usize,
     mapped_client: bool,
     retained_client_commit: bool,
-    events_per_frame: usize,
+    input: InputWorkload,
 ) -> Result<()> {
     let (mut shell, adapter) = benchmark::rendering_shell(configure_shell)?;
     if mapped_client {
         map_synthetic_client(&mut shell);
     }
-    let events = pointer_events(events_per_frame);
+    let events = input.events();
+    let requests = output_request();
+    let mut compositions = Vec::with_capacity(requests.len());
     for frame in 0..warmup_frames {
         enqueue_events(&mut shell, &events);
         if retained_client_commit {
             enqueue_retained_commit(&mut shell);
         }
         shell.advance_main(frame as u32);
-        drop(shell.render_outputs(output_request())?);
+        shell.render_outputs(&requests, &mut compositions)?;
+        compositions.clear();
     }
     shell.wait_for_gpu_for_benchmark()?;
 
@@ -85,20 +115,22 @@ fn run_case(
             shell.advance_main(frame as u32);
         });
         render_submit += elapsed_result(|| {
-            drop(shell.render_outputs(output_request())?);
+            shell.render_outputs(&requests, &mut compositions)?;
+            compositions.clear();
             Ok(())
         })?;
         gpu_completion += elapsed_result(|| shell.wait_for_gpu_for_benchmark())?;
     }
 
     println!(
-        "adapter={:?} backend={:?} device={:?} mapped-client={} retained-client-commit={} pointer-events/frame={} frames={} input-ingress={:.3} surface-ingress={:.3} main={:.3} render-submit={:.3} gpu-wait={:.3} total={:.3} us/frame",
+        "adapter={:?} backend={:?} device={:?} mapped-client={} retained-client-commit={} input={} events/frame={} frames={} input-ingress={:.3} surface-ingress={:.3} main={:.3} render-submit={:.3} gpu-wait={:.3} total={:.3} us/frame",
         adapter.name,
         adapter.backend,
         adapter.device_type,
         mapped_client,
         retained_client_commit,
-        events_per_frame,
+        input.label(),
+        events.len(),
         frames,
         micros_per_frame(ingress, frames),
         micros_per_frame(surface_commit, frames),
@@ -204,14 +236,42 @@ fn pointer_events(count: usize) -> Vec<RawSeatEvent> {
         .collect()
 }
 
+fn interleaved_pointer_events(motions: usize) -> Vec<RawSeatEvent> {
+    let mut events = Vec::with_capacity(motions.saturating_mul(2));
+    for index in 0..motions {
+        events.push(RawSeatEvent::new(
+            RawSeatEventKind::PointerMotion {
+                position: InputPosition::new(
+                    400.0 + index as f64 * 0.25,
+                    300.0 + index as f64 * 0.125,
+                ),
+            },
+            u32::try_from(index.saturating_mul(2)).unwrap_or(u32::MAX),
+        ));
+        events.push(RawSeatEvent::new(
+            RawSeatEventKind::PointerButton {
+                position: None,
+                button: BENCHMARK_BUTTON,
+                state: if index % 2 == 0 {
+                    ButtonState::Pressed
+                } else {
+                    ButtonState::Released
+                },
+            },
+            u32::try_from(index.saturating_mul(2).saturating_add(1)).unwrap_or(u32::MAX),
+        ));
+    }
+    events
+}
+
 fn enqueue_events(shell: &mut benchmark::AppShell, events: &[RawSeatEvent]) {
     for event in events {
         std::hint::black_box(shell.enqueue_input_event(event.clone()));
     }
 }
 
-fn output_request() -> Vec<CompositionOutputRequest> {
-    vec![CompositionOutputRequest {
+fn output_request() -> [CompositionOutputRequest; 1] {
+    [CompositionOutputRequest {
         output: OUTPUT,
         destination: CompositionDestination::Owned,
     }]

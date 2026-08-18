@@ -224,10 +224,15 @@ pub trait CompositionHost {
     /// Services the restricted remote-control schedule without advancing the
     /// application world.
     fn service_remote_debug(&mut self);
+    /// Fills `frames` with the completed outputs.
+    ///
+    /// The buffer is cleared before rendering, retains its allocation between
+    /// calls, and contains a complete composition only when this returns `Ok`.
     fn render_outputs(
         &mut self,
-        requests: Vec<CompositionOutputRequest>,
-    ) -> Result<Vec<CompositionOutputFrame>>;
+        requests: &[CompositionOutputRequest],
+        frames: &mut Vec<CompositionOutputFrame>,
+    ) -> Result<()>;
     /// Reconciles enabled output geometry before the next main advance.
     fn update_output_topology(&mut self, outputs: &[OutputConfiguration]);
     fn should_exit(&self) -> bool;
@@ -273,6 +278,7 @@ impl CompositionTargetView {
 
 /// Selects whether the application renders into its retained target or a
 /// backend-leased external target for this composition.
+#[derive(Clone)]
 pub enum CompositionDestination {
     Owned,
     External(CompositionTargetView),

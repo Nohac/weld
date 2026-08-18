@@ -168,6 +168,11 @@ pub(crate) fn prepare(options: RunOptions, signals: Signals) -> Result<PreparedH
             .map(|path| PendingCapture::startup(path, child_requested));
         let mut frame_state = FrameState::default();
         let mut completed_composition: Option<CompositionFrame> = None;
+        let composition_requests = [CompositionOutputRequest {
+            output: OutputId::new(1),
+            destination: CompositionDestination::Owned,
+        }];
+        let mut composition_frames = Vec::with_capacity(composition_requests.len());
         let mut next_remote_service = Instant::now();
         let mut pending_presentation_id = None;
 
@@ -382,14 +387,11 @@ pub(crate) fn prepare(options: RunOptions, signals: Signals) -> Result<PreparedH
                 }
                 loop_data.server.flush_pending_resizes();
                 if work.render_composition {
-                    let mut compositions =
-                        shell.render_outputs(vec![CompositionOutputRequest {
-                            output: OutputId::new(1),
-                            destination: CompositionDestination::Owned,
-                        }])?;
-                    let composition = compositions
+                    shell.render_outputs(&composition_requests, &mut composition_frames)?;
+                    let composition = composition_frames
                         .pop()
                         .context("nested composition returned no output frame")?;
+                    debug_assert!(composition_frames.is_empty());
                     completed_composition = Some(composition.frame);
                     pending_presentation_id = Some(loop_data.server.stage_frame_callbacks());
                     frame_state.composition_rendered(update_now);

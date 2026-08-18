@@ -1,7 +1,7 @@
 //! Standalone libseat, udev, libinput, and Smithay GBM/KMS backend.
 
 use std::{
-    collections::{BTreeSet, HashMap},
+    collections::HashMap,
     ops::{Deref, DerefMut},
     path::PathBuf,
     time::{Duration, Instant},
@@ -114,6 +114,7 @@ struct OutputMonitor {
     device_id: Dev,
     device_path: PathBuf,
     outputs: HashMap<connector::Handle, MonitoredOutput>,
+    physical_ids: Vec<OutputId>,
     event_source_healthy: bool,
 }
 
@@ -137,18 +138,15 @@ struct PreparedDrmOutput {
 }
 
 impl Presenters {
-    fn presentable_outputs(&self, connected: &BTreeSet<OutputId>) -> BTreeSet<OutputId> {
-        select_presentable_outputs(connected, |output| {
-            self.handles
-                .get(&output)
-                .map(PresenterHandle::target_availability)
-        })
+    fn refresh_presentable(&self, connected: &[OutputId], output: &mut Vec<OutputId>) {
+        refresh_presentable_output_ids(output, connected, |id| {
+            self.handles.get(id).is_some_and(|presenter| {
+                presenter.target_availability() != PresenterTargetAvailability::Unavailable
+            })
+        });
     }
 
-    fn target_availability(&self, outputs: &BTreeSet<OutputId>) -> PresenterTargetAvailability {
-        if outputs.is_empty() {
-            return PresenterTargetAvailability::Unavailable;
-        }
+    fn target_availability(&self, outputs: &[OutputId]) -> PresenterTargetAvailability {
         batch_target_availability(
             outputs
                 .iter()
@@ -159,25 +157,27 @@ impl Presenters {
 
     fn acquire_frames(
         &mut self,
-        outputs: &BTreeSet<OutputId>,
-    ) -> Option<Vec<(OutputId, AcquiredFrame)>> {
+        outputs: &[OutputId],
+        frames: &mut Vec<(OutputId, AcquiredFrame)>,
+    ) -> bool {
+        debug_assert!(frames.is_empty());
+        frames.clear();
         if self.target_availability(outputs) != PresenterTargetAvailability::Ready {
-            return None;
+            return false;
         }
-        let mut frames = Vec::with_capacity(outputs.len());
         for output in outputs.iter().copied() {
-            let frame = self.handles.get_mut(&output)?.acquire_frame();
+            let Some(presenter) = self.handles.get_mut(&output) else {
+                self.abort_frames(frames);
+                return false;
+            };
+            let frame = presenter.acquire_frame();
             let Some(frame) = frame else {
-                for (acquired_output, acquired) in frames {
-                    if let Some(presenter) = self.handles.get_mut(&acquired_output) {
-                        presenter.abort_frame(acquired);
-                    }
-                }
-                return None;
+                self.abort_frames(frames);
+                return false;
             };
             frames.push((output, frame));
         }
-        Some(frames)
+        true
     }
 
     fn suspend(&mut self) {
@@ -186,7 +186,7 @@ impl Presenters {
         }
     }
 
-    fn activate_after_session(&mut self, outputs: &BTreeSet<OutputId>) {
+    fn activate_after_session(&mut self, outputs: &[OutputId]) {
         for output in outputs {
             let Some(presenter) = self.handles.get_mut(output) else {
                 continue;
@@ -211,13 +211,13 @@ impl Presenters {
 
     fn finish_frames(
         &mut self,
-        frames: Vec<(OutputId, AcquiredFrame)>,
+        frames: &mut Vec<(OutputId, AcquiredFrame)>,
         cursors: &HashMap<OutputId, CursorOverlay>,
     ) -> Result<()> {
-        let mut frames = frames.into_iter();
-        while let Some((output, frame)) = frames.next() {
+        let mut pending = frames.drain(..);
+        while let Some((output, frame)) = pending.next() {
             let Some(presenter) = self.handles.get_mut(&output) else {
-                self.abort_frames(frames.collect());
+                self.abort_frame_iter(pending.by_ref());
                 anyhow::bail!("presenter for output {output:?} disappeared");
             };
             let cursor = cursors
@@ -226,14 +226,18 @@ impl Presenters {
                 .unwrap_or_else(CursorOverlay::hidden);
             if let Err(error) = presenter.finish_frame(&frame, &cursor) {
                 presenter.abort_frame(frame);
-                self.abort_frames(frames.collect());
+                self.abort_frame_iter(pending.by_ref());
                 return Err(error).with_context(|| format!("failed to finalize output {output:?}"));
             }
         }
         Ok(())
     }
 
-    fn abort_frames(&mut self, frames: Vec<(OutputId, AcquiredFrame)>) {
+    fn abort_frames(&mut self, frames: &mut Vec<(OutputId, AcquiredFrame)>) {
+        self.abort_frame_iter(frames.drain(..));
+    }
+
+    fn abort_frame_iter(&mut self, frames: impl IntoIterator<Item = (OutputId, AcquiredFrame)>) {
         for (output, frame) in frames {
             if let Some(presenter) = self.handles.get_mut(&output) {
                 presenter.abort_frame(frame);
@@ -248,19 +252,13 @@ impl Presenters {
     }
 }
 
-fn select_presentable_outputs(
-    connected: &BTreeSet<OutputId>,
-    mut availability: impl FnMut(OutputId) -> Option<PresenterTargetAvailability>,
-) -> BTreeSet<OutputId> {
-    connected
-        .iter()
-        .copied()
-        .filter(|output| {
-            availability(*output).is_some_and(|availability| {
-                availability != PresenterTargetAvailability::Unavailable
-            })
-        })
-        .collect()
+fn refresh_presentable_output_ids(
+    output: &mut Vec<OutputId>,
+    connected: &[OutputId],
+    mut is_presentable: impl FnMut(&OutputId) -> bool,
+) {
+    output.clear();
+    output.extend(connected.iter().copied().filter(|id| is_presentable(id)));
 }
 
 fn batch_target_availability(
@@ -588,16 +586,20 @@ fn apply_primary_output_scale(
 }
 
 impl OutputMonitor {
-    fn physical_outputs(&self, session_active: bool) -> BTreeSet<OutputId> {
-        physical_output_ids(
-            session_active,
-            self.event_source_healthy,
-            self.outputs.values(),
-        )
+    fn physical_outputs(&self, session_active: bool) -> &[OutputId] {
+        if session_active && self.event_source_healthy {
+            &self.physical_ids
+        } else {
+            &[]
+        }
     }
 
     fn physical_available(&self, session_active: bool) -> bool {
         !self.physical_outputs(session_active).is_empty()
+    }
+
+    fn rebuild_physical_outputs(&mut self) {
+        refresh_physical_output_ids(&mut self.physical_ids, self.outputs.values());
     }
 
     fn handle(
@@ -640,7 +642,8 @@ impl OutputMonitor {
                                 if let Err(error) = drm.reset_state() {
                                     error!(%error, "failed to reset DRM state after connector recovery");
                                 } else {
-                                    presenters.activate_after_session(&BTreeSet::from([output_id]));
+                                    presenters
+                                        .activate_after_session(std::slice::from_ref(&output_id));
                                     info!(
                                         output = ?output_id,
                                         "active DRM connector reconnected; GBM/KMS presentation restored"
@@ -685,22 +688,22 @@ impl OutputMonitor {
             }
             UdevEvent::Changed { .. } | UdevEvent::Removed { .. } => {}
         }
+        self.rebuild_physical_outputs();
     }
 }
 
-fn physical_output_ids<'a>(
-    session_active: bool,
-    event_source_healthy: bool,
+fn refresh_physical_output_ids<'a>(
+    output: &mut Vec<OutputId>,
     outputs: impl IntoIterator<Item = &'a MonitoredOutput>,
-) -> BTreeSet<OutputId> {
-    if !session_active || !event_source_healthy {
-        return BTreeSet::new();
-    }
-    outputs
-        .into_iter()
-        .filter(|output| output.connected && output.mode_compatible)
-        .map(|output| output.id)
-        .collect()
+) {
+    output.clear();
+    output.extend(
+        outputs
+            .into_iter()
+            .filter(|output| output.connected && output.mode_compatible)
+            .map(|output| output.id),
+    );
+    output.sort_unstable();
 }
 
 pub(crate) fn prepare(options: RunOptions, signals: Signals) -> Result<PreparedHost> {
@@ -963,13 +966,16 @@ pub(crate) fn prepare(options: RunOptions, signals: Signals) -> Result<PreparedH
         let mut presenters = Presenters {
             handles: presenter_handles,
         };
+        let output_count = monitored_outputs.len();
         let mut output_monitor = OutputMonitor {
             scanner,
             device_id,
             device_path,
             outputs: monitored_outputs,
+            physical_ids: Vec::with_capacity(output_count),
             event_source_healthy: true,
         };
+        output_monitor.rebuild_physical_outputs();
         let mut children = ChildProcesses::default();
         let child_requested = children.spawn_requested(&loop_data.server, &options.client)?;
         let mut pending_capture = options
@@ -984,6 +990,10 @@ pub(crate) fn prepare(options: RunOptions, signals: Signals) -> Result<PreparedH
             output_configurations.clone(),
             Instant::now(),
         );
+        let mut presentable_ids = Vec::with_capacity(output_configurations.len());
+        let mut acquired_frames = Vec::with_capacity(output_configurations.len());
+        let mut composition_requests = Vec::with_capacity(output_configurations.len());
+        let mut composition_frames = Vec::with_capacity(output_configurations.len());
         let mut session_active = true;
         info!(
             socket = ?loop_data.server.socket_name,
@@ -993,16 +1003,19 @@ pub(crate) fn prepare(options: RunOptions, signals: Signals) -> Result<PreparedH
         let mut exit_requested = false;
         while !exit_requested {
             let now = Instant::now();
-            let connected_outputs = output_monitor.physical_outputs(session_active);
-            let presentable_outputs = presenters.presentable_outputs(&connected_outputs);
-            let physical_output_available = !presentable_outputs.is_empty();
+            let (physical_output_available, composition_blocked) = {
+                let physical_outputs = output_monitor.physical_outputs(session_active);
+                presenters.refresh_presentable(physical_outputs, &mut presentable_ids);
+                let physical_output_available = !presentable_ids.is_empty();
+                let composition_blocked = physical_output_available
+                    && presenters.target_availability(&presentable_ids)
+                        == PresenterTargetAvailability::Busy;
+                (physical_output_available, composition_blocked)
+            };
             let capture_ready = pending_capture
                 .as_ref()
                 .is_some_and(|capture| !capture.wait_for_client || shell.has_surface_frame());
-            let composition_blocked = physical_output_available
-                && !capture_ready
-                && presenters.target_availability(&presentable_outputs)
-                    == PresenterTargetAvailability::Busy;
+            let composition_blocked = composition_blocked && !capture_ready;
             let timeout = dispatch_timeout(DispatchTimeoutContext {
                 frame_state: &frame_state,
                 capture: pending_capture.as_ref(),
@@ -1081,7 +1094,7 @@ pub(crate) fn prepare(options: RunOptions, signals: Signals) -> Result<PreparedH
                                 match drm_device.activate(true) {
                                     Ok(()) if output_monitor.physical_available(session_active) => {
                                         presenters.activate_after_session(
-                                            &output_monitor.physical_outputs(session_active),
+                                            output_monitor.physical_outputs(session_active),
                                         );
                                         frame_state.request_composition();
                                     }
@@ -1120,16 +1133,23 @@ pub(crate) fn prepare(options: RunOptions, signals: Signals) -> Result<PreparedH
                         DrmRuntimeEvent::Presenter(event) => {
                             event_counts[4] += 1;
                             log_presenter_event(&event);
-                            let connected_outputs = output_monitor.physical_outputs(session_active);
-                            let presentable_outputs =
-                                presenters.presentable_outputs(&connected_outputs);
-                            let availability = presenters.target_availability(&presentable_outputs);
+                            let availability = {
+                                let physical_outputs =
+                                    output_monitor.physical_outputs(session_active);
+                                presenters
+                                    .refresh_presentable(physical_outputs, &mut presentable_ids);
+                                presenters.target_availability(&presentable_ids)
+                            };
                             presenters.handle_event(&event);
-                            let presentable_outputs =
-                                presenters.presentable_outputs(&connected_outputs);
+                            let next_availability = {
+                                let physical_outputs =
+                                    output_monitor.physical_outputs(session_active);
+                                presenters
+                                    .refresh_presentable(physical_outputs, &mut presentable_ids);
+                                presenters.target_availability(&presentable_ids)
+                            };
                             if availability != PresenterTargetAvailability::Ready
-                                && presenters.target_availability(&presentable_outputs)
-                                    == PresenterTargetAvailability::Ready
+                                && next_availability == PresenterTargetAvailability::Ready
                             {
                                 frame_state.request_composition();
                             }
@@ -1210,16 +1230,18 @@ pub(crate) fn prepare(options: RunOptions, signals: Signals) -> Result<PreparedH
                 next_remote_service = now + REMOTE_DEBUG_MAINTENANCE_INTERVAL;
             }
 
-            let connected_outputs = output_monitor.physical_outputs(session_active);
-            let presentable_outputs = presenters.presentable_outputs(&connected_outputs);
-            let physical_output_available = !presentable_outputs.is_empty();
+            let composition_blocked = {
+                let physical_outputs = output_monitor.physical_outputs(session_active);
+                presenters.refresh_presentable(physical_outputs, &mut presentable_ids);
+                let physical_output_available = !presentable_ids.is_empty();
+                physical_output_available
+                    && presenters.target_availability(&presentable_ids)
+                        == PresenterTargetAvailability::Busy
+            };
             let capture_ready = pending_capture
                 .as_ref()
                 .is_some_and(|capture| !capture.wait_for_client || shell.has_surface_frame());
-            let composition_blocked = physical_output_available
-                && !capture_ready
-                && presenters.target_availability(&presentable_outputs)
-                    == PresenterTargetAvailability::Busy;
+            let composition_blocked = composition_blocked && !capture_ready;
             let mut work = iteration_work(
                 frame_state.update_due(now),
                 frame_state.composition_due(now) && !composition_blocked,
@@ -1300,7 +1322,7 @@ pub(crate) fn prepare(options: RunOptions, signals: Signals) -> Result<PreparedH
                                 match drm_device.activate(true) {
                                     Ok(()) => {
                                         presenters.activate_after_session(
-                                            &output_monitor.physical_outputs(session_active),
+                                            output_monitor.physical_outputs(session_active),
                                         );
                                         frame_state.request_composition();
                                     }
@@ -1325,85 +1347,86 @@ pub(crate) fn prepare(options: RunOptions, signals: Signals) -> Result<PreparedH
                 loop_data.server.flush_pending_resizes();
             }
             if work.render_composition {
-                let connected_outputs = output_monitor.physical_outputs(session_active);
-                let presentable_outputs = presenters.presentable_outputs(&connected_outputs);
-                let physical_output_available = !presentable_outputs.is_empty();
+                let physical_outputs = output_monitor.physical_outputs(session_active);
+                presenters.refresh_presentable(physical_outputs, &mut presentable_ids);
+                let physical_output_available = !presentable_ids.is_empty();
                 let capture_ready = pending_capture
                     .as_ref()
                     .is_some_and(|capture| !capture.wait_for_client || shell.has_surface_frame());
-                let acquired_frames = (physical_output_available && !capture_ready)
-                    .then(|| presenters.acquire_frames(&presentable_outputs))
-                    .flatten();
-                let requests = output_configurations
-                    .iter()
-                    .map(|output| {
-                        let destination = acquired_frames
-                            .as_ref()
-                            .and_then(|frames| {
-                                frames.iter().find(|(id, _)| *id == output.id()).map(
-                                    |(_, frame)| {
-                                        CompositionDestination::External(frame.target().clone())
-                                    },
-                                )
-                            })
-                            .unwrap_or(CompositionDestination::Owned);
-                        CompositionOutputRequest {
-                            output: output.id(),
-                            destination,
-                        }
-                    })
-                    .collect();
-                let compositions = match shell.render_outputs(requests) {
-                    Ok(compositions) => compositions,
-                    Err(error) => {
-                        if let Some(frames) = acquired_frames {
-                            presenters.abort_frames(frames);
-                        }
-                        return Err(error).context("Bevy composition failed");
-                    }
+                let acquired = if physical_output_available && !capture_ready {
+                    presenters.acquire_frames(&presentable_ids, &mut acquired_frames)
+                } else {
+                    debug_assert!(acquired_frames.is_empty());
+                    acquired_frames.clear();
+                    false
                 };
+                composition_requests.clear();
+                composition_requests.extend(output_configurations.iter().map(|output| {
+                    let destination = acquired_frames
+                        .iter()
+                        .find(|(id, _)| *id == output.id())
+                        .map(|(_, frame)| CompositionDestination::External(frame.target().clone()))
+                        .unwrap_or(CompositionDestination::Owned);
+                    CompositionOutputRequest {
+                        output: output.id(),
+                        destination,
+                    }
+                }));
+                if let Err(error) =
+                    shell.render_outputs(&composition_requests, &mut composition_frames)
+                {
+                    composition_frames.clear();
+                    presenters.abort_frames(&mut acquired_frames);
+                    return Err(error).context("Bevy composition failed");
+                }
                 let callback_batch = loop_data.server.stage_frame_callbacks();
                 loop_data.server.complete_frame_callbacks(callback_batch);
                 frame_state.composition_rendered(now);
 
-                if capture_ready && let Some(capture) = pending_capture.take() {
-                    let _capture_span = tracing::trace_span!(
-                        target: crate::PROFILE_TARGET,
-                        "capture_readback_encode"
-                    )
-                    .entered();
-                    let composition = compositions
-                        .iter()
-                        .find(|composition| composition.output == primary_output_id)
-                        .map(|composition| &composition.frame)
-                        .context("composition omitted the primary output")?;
-                    let result = composition
-                        .owned_texture()
-                        .context("capture composition did not retain owned storage")
-                        .and_then(|texture| {
-                            read_composition_rgba(
-                                &capture_device,
-                                &capture_queue,
-                                texture,
-                                composition.target().extent().width,
-                                composition.target().extent().height,
-                                composition.target().format(),
-                            )
-                        })
-                        .and_then(|pixels| {
-                            write_png(
-                                &capture.path,
-                                composition.target().extent().width,
-                                composition.target().extent().height,
-                                &pixels,
-                            )
-                        })
-                        .map_err(|error| error.to_string());
-                    exit_requested |= complete_capture(shell.as_mut(), capture, result)?;
-                }
+                let completed_capture = if capture_ready {
+                    pending_capture.take().map(|capture| {
+                        let _capture_span = tracing::trace_span!(
+                            target: crate::PROFILE_TARGET,
+                            "capture_readback_encode"
+                        )
+                        .entered();
+                        let result = composition_frames
+                            .iter()
+                            .find(|composition| composition.output == primary_output_id)
+                            .map(|composition| &composition.frame)
+                            .context("composition omitted the primary output")
+                            .and_then(|composition| {
+                                composition
+                                    .owned_texture()
+                                    .context("capture composition did not retain owned storage")
+                                    .and_then(|texture| {
+                                        read_composition_rgba(
+                                            &capture_device,
+                                            &capture_queue,
+                                            texture,
+                                            composition.target().extent().width,
+                                            composition.target().extent().height,
+                                            composition.target().format(),
+                                        )
+                                    })
+                                    .and_then(|pixels| {
+                                        write_png(
+                                            &capture.path,
+                                            composition.target().extent().width,
+                                            composition.target().extent().height,
+                                            &pixels,
+                                        )
+                                    })
+                            })
+                            .map_err(|error| error.to_string());
+                        (capture, result)
+                    })
+                } else {
+                    None
+                };
 
-                if let Some(frames) = acquired_frames {
-                    match presenters.finish_frames(frames, &cursor.overlays) {
+                if acquired {
+                    match presenters.finish_frames(&mut acquired_frames, &cursor.overlays) {
                         Ok(()) => frame_state.presented(),
                         Err(error) => {
                             error!(%error, "failed to finalize a physical output batch");
@@ -1411,12 +1434,18 @@ pub(crate) fn prepare(options: RunOptions, signals: Signals) -> Result<PreparedH
                         }
                     }
                 } else if physical_output_available
-                    && presenters.target_availability(&presentable_outputs)
+                    && presenters.target_availability(&presentable_ids)
                         != PresenterTargetAvailability::Unavailable
                 {
                     // Captures and transient presenter outages render into the
                     // retained target. The next frame must refresh scanout.
                     frame_state.request_composition();
+                }
+                debug_assert!(acquired_frames.is_empty());
+                composition_frames.clear();
+
+                if let Some((capture, result)) = completed_capture {
+                    exit_requested |= complete_capture(shell.as_mut(), capture, result)?;
                 }
             } else if work.advance_main {
                 frame_state.application_advanced(now);
@@ -1647,17 +1676,14 @@ mod tests {
         DispatchTimeoutContext, FrameState, MonitoredOutput, OutputConfiguration, OutputId,
         OutputLayout, OutputScale, OutputTopology, PresenterTargetAvailability,
         REMOTE_DEBUG_MAINTENANCE_INTERVAL, batch_target_availability, center_primary_below_others,
-        dispatch_timeout, physical_output_ids, select_presentable_outputs,
+        dispatch_timeout, refresh_physical_output_ids, refresh_presentable_output_ids,
     };
     use crate::{
         input::{InputDelta, InputPosition},
         output::OutputPhysicalSize,
         surface::{Extent, LogicalPoint},
     };
-    use std::{
-        collections::BTreeSet,
-        time::{Duration, Instant},
-    };
+    use std::time::{Duration, Instant};
 
     fn output(id: u64, width: u32, height: u32, scale: f64, primary: bool) -> OutputConfiguration {
         OutputConfiguration::new(
@@ -1850,36 +1876,46 @@ mod tests {
     }
 
     #[test]
-    fn one_disconnected_output_leaves_the_other_physically_available() {
+    fn physical_output_cache_is_sorted_and_excludes_disconnected_outputs() {
         let outputs = [
+            MonitoredOutput {
+                id: OutputId::new(2),
+                connected: true,
+                mode_compatible: true,
+            },
+            MonitoredOutput {
+                id: OutputId::new(3),
+                connected: false,
+                mode_compatible: true,
+            },
             MonitoredOutput {
                 id: OutputId::new(1),
                 connected: true,
                 mode_compatible: true,
             },
-            MonitoredOutput {
-                id: OutputId::new(2),
-                connected: false,
-                mode_compatible: true,
-            },
         ];
 
-        assert_eq!(
-            physical_output_ids(true, true, outputs.iter()),
-            BTreeSet::from([OutputId::new(1)])
-        );
+        let mut physical = vec![OutputId::new(99)];
+        refresh_physical_output_ids(&mut physical, outputs.iter());
+
+        assert_eq!(physical, vec![OutputId::new(1), OutputId::new(2)]);
     }
 
     #[test]
     fn unavailable_presenters_are_excluded_but_busy_presenters_block_the_batch() {
-        let connected = BTreeSet::from([OutputId::new(1), OutputId::new(2)]);
-        let presentable = select_presentable_outputs(&connected, |output| match output {
-            output if output == OutputId::new(1) => Some(PresenterTargetAvailability::Ready),
-            output if output == OutputId::new(2) => Some(PresenterTargetAvailability::Unavailable),
-            _ => None,
+        let connected = [OutputId::new(1), OutputId::new(2)];
+        let mut presentable = vec![OutputId::new(99)];
+        refresh_presentable_output_ids(&mut presentable, &connected, |output| match *output {
+            output if output == OutputId::new(1) => true,
+            output if output == OutputId::new(2) => false,
+            _ => false,
         });
 
-        assert_eq!(presentable, BTreeSet::from([OutputId::new(1)]));
+        assert_eq!(presentable, vec![OutputId::new(1)]);
+        assert_eq!(
+            batch_target_availability([]),
+            PresenterTargetAvailability::Unavailable
+        );
         assert_eq!(
             batch_target_availability([
                 PresenterTargetAvailability::Ready,

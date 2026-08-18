@@ -382,15 +382,18 @@ impl AppShell {
     ///
     /// Construction pins Weld to Bevy's current non-pipelined [`RenderApp`].
     /// Main-world trackers are cleared only after extraction has observed the
-    /// refresh-paced application frame.
+    /// refresh-paced application frame. `frames` retains its allocation across
+    /// calls and contains a complete composition only when this returns `Ok`.
     pub fn render_outputs(
         &mut self,
-        requests: Vec<CompositionOutputRequest>,
-    ) -> Result<Vec<CompositionOutputFrame>> {
+        requests: &[CompositionOutputRequest],
+        frames: &mut Vec<CompositionOutputFrame>,
+    ) -> Result<()> {
         let _composition_span =
             tracing::trace_span!(target: crate::PROFILE_TARGET, "weld_render_composition")
                 .entered();
 
+        frames.clear();
         if requests.is_empty() {
             bail!("composition contains no output requests");
         }
@@ -403,10 +406,11 @@ impl AppShell {
             };
             camera.is_active = false;
         }
-        let mut seen = HashSet::with_capacity(requests.len());
-        let mut frames = Vec::with_capacity(requests.len());
-        for request in requests {
-            if !seen.insert(request.output) {
+        for (index, request) in requests.iter().enumerate() {
+            if requests[..index]
+                .iter()
+                .any(|previous| previous.output == request.output)
+            {
                 bail!(
                     "composition requested output {:?} more than once",
                     request.output
@@ -415,9 +419,11 @@ impl AppShell {
             let output = self.outputs.get(&request.output).with_context(|| {
                 format!("composition requested unknown output {:?}", request.output)
             })?;
-            let frame = match request.destination {
+            let frame = match &request.destination {
                 CompositionDestination::Owned => output.owned_target.frame(),
-                CompositionDestination::External(target) => CompositionFrame::external(target),
+                CompositionDestination::External(target) => {
+                    CompositionFrame::external(target.clone())
+                }
             };
             insert_manual_view(
                 &mut self.app,
@@ -465,7 +471,7 @@ impl AppShell {
                 importer.finish_render(&mut self.app)?;
             }
         }
-        Ok(frames)
+        Ok(())
     }
 
     pub fn should_exit(&self) -> bool {
@@ -818,9 +824,10 @@ impl CompositionHost for AppShell {
 
     fn render_outputs(
         &mut self,
-        requests: Vec<CompositionOutputRequest>,
-    ) -> Result<Vec<CompositionOutputFrame>> {
-        AppShell::render_outputs(self, requests)
+        requests: &[CompositionOutputRequest],
+        frames: &mut Vec<CompositionOutputFrame>,
+    ) -> Result<()> {
+        AppShell::render_outputs(self, requests, frames)
     }
 
     fn update_output_topology(&mut self, outputs: &[OutputConfiguration]) {

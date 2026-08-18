@@ -207,14 +207,17 @@ for end-to-end DRM profiling.
 `shell_render` constructs the real [`AppShell`](../crates/weld-app/src/shell.rs)
 against a headless Vulkan device and drives the same host contract as a native
 backend: input ingress, main-world advance, Bevy extraction, and composition
-submission. Its cases compare zero and sixteen synthetic pointer motions across
-an empty scene, a mapped synthetic client without new commits, and the same
-client sending retained commits. This separates the cost of rendering client
-content from the cost of crossing the surface-commit bridge. The initial client
-image uses SHM once; measured commits retain that image and therefore do not
-include per-frame pixel copying. Each case reports input ingress, surface
-ingress, the main schedule, CPU-side render submission, and the subsequent GPU
-completion wait separately.
+submission. Its cases compare no input and a burst of sixteen synthetic pointer
+motions across an empty scene, a mapped synthetic client without new commits,
+and the same client sending retained commits. The mapped-client case without
+retained commits also includes an interleaved workload where `BTN_TASK`
+transitions act as ordering
+barriers without producing Bevy pointer or mouse-button messages. This keeps a
+non-coalescible input baseline alongside the motion-coalescing workload. The
+initial client image uses SHM once; measured commits retain that image and
+therefore do not include per-frame pixel copying. Each case reports input
+ingress, surface ingress, the main schedule, CPU-side render submission, and
+the subsequent GPU completion wait separately.
 
 Set `WELD_RENDER_BENCH_FRAMES` and `WELD_RENDER_BENCH_WARMUP` to override the
 default 600 measured and 30 warm-up frames. The benchmark always forces one
