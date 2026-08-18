@@ -1,6 +1,6 @@
 # Input performance
 
-**Status: Verified evidence and agreed optimization direction.** This note
+**Status: Initial allocation pass implemented; live DRM validation pending.** This note
 separates device-paced input delivery from refresh-paced application work and
 physical presentation. It records the current implementation and measurements;
 it is not a claim that the remaining costs are acceptable.
@@ -54,13 +54,20 @@ Bevy message vectors retain capacity after growth, and cloning a pointer event
 does not clone heap-owned data. Keyboard logical-key payloads can own data, but
 they are not part of the high-rate pointer path.
 
-High-rate input nevertheless causes allocation indirectly because every host
-wake reruns output selection. The DRM loop currently constructs fresh
-`BTreeSet`s for physical and presentable outputs before dispatch and repeats
-both collections after dispatch. That is approximately four small set
-allocations per wake, or roughly 3,000 constructions per second in the measured
-fast-mouse trace. Presenter handling and composition add temporary output,
-request, frame, and duplicate-detection collections.
+The first allocation pass removed the source-audited hot-loop churn. Physical
+output IDs are cached until connector or mode state changes. Presenter
+readiness is rebuilt into retained scratch storage immediately before each use,
+and acquired frames, composition requests, and completed output frames reuse
+loop-owned buffers. Composition duplicate validation uses the normally tiny
+borrowed output slice without allocating a temporary set.
+
+The application-facing input path uses a growable `VecDeque` with capacity for
+an ordinary 64-event burst. Consecutive absolute pointer motions replace the
+queue tail, while buttons, axes, gestures, keys, focus changes, and pointer
+leave events remain lossless ordering barriers. The projection schedule borrows
+each event while producing Bevy messages, then moves the same event into the
+retained routing queue instead of cloning it. Immediate Smithay forwarding is
+unchanged and still sees every unconsumed raw event.
 
 This is source-audited churn, not an allocator profile. Measure an
 uninstrumented release with a sampling or allocation profiler before assigning
@@ -68,16 +75,15 @@ it a CPU percentage.
 
 ## Optimization order
 
-1. Cache connected and presentable output lists. Update them only when udev,
-   session, or presenter lifecycle state changes, and pass borrowed slices
-   through the hot loop.
-2. Retain scratch storage for composition requests, acquired frames, and
-   validation instead of constructing collections for each frame.
-3. Reserve ordinary input bursts and coalesce only consecutive Bevy-facing
-   pointer motions. Preserve every discrete transition and all immediate
-   client delivery.
-4. Borrow an event while projecting it and then move it into retained state,
-   avoiding clones whose payload may own data.
+1. Done: cache physical output IDs and reuse caller-owned readiness storage,
+   while evaluating session and presenter lifecycle state at each use.
+2. Done: retain scratch storage for composition requests, acquired frames, and
+   completed output frames; validate the borrowed output slice without a set.
+3. Done: reserve ordinary input bursts and coalesce only consecutive
+   Bevy-facing pointer motions. Preserve every discrete transition and all
+   immediate client delivery.
+4. Done: borrow an event while projecting it and then move it into retained
+   state, avoiding clones whose payload may own data.
 5. Put the compositor-normalized cursor image on a DRM cursor plane when the
    hardware accepts it. Position-only changes then update plane state without
    leasing or repainting the primary scene. Keep GPU cursor composition as a

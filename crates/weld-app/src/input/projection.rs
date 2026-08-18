@@ -28,6 +28,7 @@ use winit::{keyboard::PhysicalKey, platform::scancode::PhysicalKeyExtScancode};
 
 use super::{
     InputOutputTarget,
+    ingress::{ApplicationInputBuffer, INPUT_BURST_CAPACITY},
     raw::{
         ButtonState, InputPosition, LinuxButtonCode, LinuxKeycode, PointerGesture, RawScrollFrame,
         RawScrollPhase, RawSeatEvent, RawSeatEventKind,
@@ -116,8 +117,14 @@ impl InputTargets {
     }
 }
 
-#[derive(Resource, Default)]
+#[derive(Resource)]
 struct RawInputIngress(VecDeque<RawSeatEvent>);
+
+impl Default for RawInputIngress {
+    fn default() -> Self {
+        Self(VecDeque::with_capacity(INPUT_BURST_CAPACITY))
+    }
+}
 
 #[derive(Resource, Default)]
 struct ProjectedMouseButtons(HashSet<LinuxButtonCode>);
@@ -186,6 +193,13 @@ pub(crate) fn enqueue_raw_input_batch(world: &mut World, events: &mut VecDeque<R
     ingress.0.append(events);
 }
 
+pub(crate) fn enqueue_application_input_batch(
+    world: &mut World,
+    events: &mut ApplicationInputBuffer,
+) {
+    enqueue_raw_input_batch(world, events.events_mut());
+}
+
 pub(crate) fn update_output_configurations(
     world: &mut World,
     configurations: &[weld_core::OutputConfiguration],
@@ -204,10 +218,10 @@ fn project_raw_input(
     mut captured_target: ResMut<CapturedPointerTarget>,
     mut messages: ProjectionMessages,
 ) {
-    for raw_event in ingress.0.drain(..) {
-        pending.0.push_back(raw_event.clone());
-        match raw_event.event {
+    while let Some(raw_event) = ingress.0.pop_front() {
+        match &raw_event.event {
             RawSeatEventKind::PointerMotion { position } => {
+                let position = *position;
                 let previous = projected_pointer.0.host_position;
                 projected_pointer.0.apply(position);
                 if let Some(previous) = previous {
@@ -232,6 +246,7 @@ fn project_raw_input(
                 }
             }
             RawSeatEventKind::PointerLeft { position } => {
+                let position = *position;
                 projected_pointer.0.apply(position);
                 projected_pointer.0.clear_host();
                 captured_target.clear();
@@ -248,7 +263,7 @@ fn project_raw_input(
                 button,
                 state,
             } => {
-                if let Some(position) = position {
+                if let Some(position) = *position {
                     projected_pointer.0.apply(position);
                 }
                 if let Some(position) = projected_pointer.0.host_position {
@@ -256,8 +271,8 @@ fn project_raw_input(
                         &mut captured_target,
                         &targets,
                         position,
-                        button,
-                        state,
+                        *button,
+                        *state,
                     )
                     .into_iter()
                     .flatten()
@@ -265,9 +280,9 @@ fn project_raw_input(
                         messages.pointer_input.write(input);
                     }
                 }
-                let linux_button = button;
+                let linux_button = *button;
                 if let Some(button) = bevy_mouse_button(linux_button) {
-                    match state {
+                    match *state {
                         ButtonState::Pressed => {
                             projected_buttons.0.insert(linux_button);
                         }
@@ -277,20 +292,20 @@ fn project_raw_input(
                     }
                     messages.mouse_button_input.write(MouseButtonInput {
                         button,
-                        state: bevy_button_state(state),
+                        state: bevy_button_state(*state),
                         window: INPUT_WINDOW,
                     });
                 }
             }
             RawSeatEventKind::PointerAxis { position, axis } => {
-                if let Some(position) = position {
+                if let Some(position) = *position {
                     projected_pointer.0.apply(position);
                 }
                 if let Some(position) = projected_pointer.0.host_position
                     && let Some((target, local_position)) =
                         captured_target.project(&targets, position)
                 {
-                    let (unit, x, y, phase) = bevy_scroll(axis);
+                    let (unit, x, y, phase) = bevy_scroll(*axis);
                     messages.mouse_wheel.write(MouseWheel {
                         unit,
                         x,
@@ -308,7 +323,7 @@ fn project_raw_input(
             RawSeatEventKind::PointerGesture { gesture } => {
                 messages
                     .touchpad_gesture
-                    .write(TouchpadGesture::new(gesture, raw_event.time));
+                    .write(TouchpadGesture::new(*gesture, raw_event.time));
             }
             RawSeatEventKind::HostFocusLost => {
                 projected_pointer.0.clear_host();
@@ -344,18 +359,19 @@ fn project_raw_input(
                 state,
             } => {
                 messages.keyboard_input.write(KeyboardInput {
-                    key_code: bevy_keycode(keycode),
+                    key_code: bevy_keycode(*keycode),
                     logical_key: logical_key
                         .as_ref()
                         .map(convert_logical_key)
                         .unwrap_or(Key::Unidentified(NativeKey::Unidentified)),
-                    state: bevy_button_state(state),
+                    state: bevy_button_state(*state),
                     text: None,
                     repeat: false,
                     window: INPUT_WINDOW,
                 });
             }
         }
+        pending.0.push_back(raw_event);
     }
 }
 

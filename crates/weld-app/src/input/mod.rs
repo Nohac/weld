@@ -6,6 +6,7 @@
 //! retains that target and forwards unconsumed raw events to Smithay at input
 //! pace. Smithay resources never enter the application world.
 
+mod ingress;
 mod pointer_shortcuts;
 mod projection;
 mod routing;
@@ -30,6 +31,7 @@ pub(crate) struct InputOutputTarget {
     pub(crate) target: NormalizedRenderTarget,
 }
 
+pub(crate) use ingress::ApplicationInputBuffer;
 pub(crate) use pointer_shortcuts::filter_pointer_shortcut_event;
 pub use pointer_shortcuts::{
     PointerShortcut, PointerShortcutAppExt, PointerShortcutId, PointerShortcutModifiers,
@@ -38,8 +40,8 @@ pub use pointer_shortcuts::{
 pub use projection::TouchpadGesture;
 #[cfg(test)]
 pub(crate) use projection::enqueue_raw_input;
-pub(crate) use projection::enqueue_raw_input_batch;
 pub(crate) use projection::update_output_configurations;
+pub(crate) use projection::{enqueue_application_input_batch, enqueue_raw_input_batch};
 pub(crate) use routing::take_input_effects;
 pub use shortcuts::{GlobalShortcutAction, GlobalShortcutPlugin};
 pub(crate) use shortcuts::{filter_global_shortcut_event, take_host_commands};

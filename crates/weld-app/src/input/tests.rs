@@ -7,7 +7,11 @@ use bevy::{
         resource::Resource,
         system::ResMut,
     },
-    input::{InputPlugin, keyboard::KeyCode, mouse::MouseButton},
+    input::{
+        InputPlugin,
+        keyboard::KeyCode,
+        mouse::{MouseButton, MouseMotion},
+    },
     picking::pointer::PointerInput,
     prelude::{MinimalPlugins, Reflect},
 };
@@ -15,9 +19,11 @@ use leafwing_input_manager::prelude::{ActionState, Actionlike, InputManagerPlugi
 use winit::keyboard::Key;
 
 use super::{
-    GlobalShortcutAction, GlobalShortcutPlugin, InputBridgePlugin, InputOutputTarget,
-    TouchpadGesture, VirtualTerminalShortcutPlugin, enqueue_raw_input,
-    filter_global_shortcut_event, filter_pointer_shortcut_event, filter_virtual_terminal_event,
+    ApplicationInputBuffer, GlobalShortcutAction, GlobalShortcutPlugin, InputBridgePlugin,
+    InputOutputTarget, PointerShortcut, PointerShortcutAppExt, PointerShortcutModifiers,
+    TouchpadGesture, VirtualTerminalShortcutPlugin, enqueue_application_input_batch,
+    enqueue_raw_input, filter_global_shortcut_event, filter_pointer_shortcut_event,
+    filter_virtual_terminal_event,
     raw::{
         ButtonState, InputDelta, InputPosition, LinuxButtonCode, LinuxKeycode, PointerGesture,
         RawSeatEvent, RawSeatEventKind, TouchpadPinch,
@@ -136,6 +142,120 @@ fn raw_keyboard_input_reaches_leafwing_on_the_next_frame() {
     assert!(action_state.pressed(&TestAction::Activate));
     assert!(action_state.just_pressed(&TestAction::Activate));
     assert!(take_input_effects(app.world_mut()).is_empty());
+}
+
+#[test]
+fn coalesced_pointer_motion_reports_the_aggregate_frame_delta() {
+    let (mut app, _) = projection_test_app();
+    let mut cursor = MessageCursor::<MouseMotion>::default();
+    enqueue_raw_input(
+        app.world_mut(),
+        RawSeatEvent::new(
+            RawSeatEventKind::PointerMotion {
+                position: InputPosition::new(10.0, 20.0),
+            },
+            1,
+        ),
+    );
+    app.update();
+    assert_eq!(
+        cursor
+            .read(app.world().resource::<Messages<MouseMotion>>())
+            .count(),
+        0
+    );
+
+    let mut input = ApplicationInputBuffer::default();
+    assert!(input.enqueue(
+        app.world_mut(),
+        RawSeatEvent::new(
+            RawSeatEventKind::PointerMotion {
+                position: InputPosition::new(20.0, 25.0),
+            },
+            2,
+        )
+    ));
+    assert!(input.enqueue(
+        app.world_mut(),
+        RawSeatEvent::new(
+            RawSeatEventKind::PointerMotion {
+                position: InputPosition::new(35.0, 50.0),
+            },
+            3,
+        )
+    ));
+    enqueue_application_input_batch(app.world_mut(), &mut input);
+    app.update();
+
+    let motions = cursor
+        .read(app.world().resource::<Messages<MouseMotion>>())
+        .copied()
+        .collect::<Vec<_>>();
+    assert_eq!(motions.len(), 1);
+    assert_eq!(motions[0].delta, bevy::math::Vec2::new(25.0, 30.0));
+}
+
+#[test]
+fn application_buffer_retains_less_motion_without_changing_forward_decisions() {
+    let mut app = shortcut_test_app(ActiveBackend::Nested);
+    let mut input = ApplicationInputBuffer::default();
+    let forwarded = (0..8)
+        .filter(|time| {
+            input.enqueue(
+                app.world_mut(),
+                RawSeatEvent::new(
+                    RawSeatEventKind::PointerMotion {
+                        position: InputPosition::new(f64::from(*time), 20.0),
+                    },
+                    *time,
+                ),
+            )
+        })
+        .count();
+
+    assert_eq!(forwarded, 8);
+    assert_eq!(input.len(), 1);
+
+    app.register_pointer_shortcut(PointerShortcut::new(
+        MouseButton::Left,
+        PointerShortcutModifiers::default(),
+    ));
+    let mut captured = ApplicationInputBuffer::default();
+    let events = [
+        RawSeatEvent::new(
+            RawSeatEventKind::PointerButton {
+                position: Some(InputPosition::new(10.0, 20.0)),
+                button: LinuxButtonCode(0x110),
+                state: ButtonState::Pressed,
+            },
+            10,
+        ),
+        RawSeatEvent::new(
+            RawSeatEventKind::PointerMotion {
+                position: InputPosition::new(20.0, 20.0),
+            },
+            11,
+        ),
+        RawSeatEvent::new(
+            RawSeatEventKind::PointerMotion {
+                position: InputPosition::new(30.0, 20.0),
+            },
+            12,
+        ),
+        RawSeatEvent::new(
+            RawSeatEventKind::PointerButton {
+                position: Some(InputPosition::new(30.0, 20.0)),
+                button: LinuxButtonCode(0x110),
+                state: ButtonState::Released,
+            },
+            13,
+        ),
+    ];
+    assert_eq!(
+        events.map(|event| captured.enqueue(app.world_mut(), event)),
+        [false, false, false, false]
+    );
+    assert_eq!(captured.len(), 3);
 }
 
 #[test]

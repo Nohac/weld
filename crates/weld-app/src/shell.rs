@@ -1,7 +1,7 @@
 //! Bevy-owned compositor scene rendered into a Weld-owned wgpu texture.
 
 use std::{
-    collections::{HashMap, HashSet, VecDeque},
+    collections::{HashMap, HashSet},
     sync::Arc,
 };
 
@@ -41,9 +41,9 @@ use crate::cursor::{CursorHostTracker, CursorPlugin, take_cursor_update};
 use crate::debug::{complete_capture, take_capture_request};
 use crate::dmabuf::DmabufImporter;
 use crate::input::{
-    InputBridgePlugin, InputOutputTarget, enqueue_raw_input_batch, filter_global_shortcut_event,
-    filter_pointer_shortcut_event, filter_virtual_terminal_event, set_input_update_time,
-    take_host_commands, take_input_effects, take_virtual_terminal_switch_request,
+    ApplicationInputBuffer, InputBridgePlugin, InputOutputTarget, enqueue_application_input_batch,
+    set_input_update_time, take_host_commands, take_input_effects,
+    take_virtual_terminal_switch_request,
 };
 use crate::output::{
     OutputGeometry, OutputId, OutputInfo, OutputPlacement, OutputPosition, PrimaryOutput,
@@ -60,9 +60,7 @@ use weld_core::host::{
     CaptureRequest, CompositionDestination, CompositionFrame, CompositionOutputFrame,
     CompositionOutputRequest, CompositionTargetView, RenderContext,
 };
-use weld_core::input::{
-    ButtonState, LinuxButtonCode, RawSeatEvent, RawSeatEventKind, SeatInputEffect,
-};
+use weld_core::input::{RawSeatEvent, SeatInputEffect};
 use weld_core::runtime::HostCommand;
 use weld_core::server::{
     PendingSurfaceBufferContent, PendingSurfaceEvent, PendingSurfaceEventKind,
@@ -84,8 +82,7 @@ pub struct AppShell {
     dmabuf: DmabufContext,
     surface_demand: SurfaceCompositionDemand,
     cursor: CursorHostTracker,
-    pending_input: VecDeque<RawSeatEvent>,
-    captured_pointer_shortcuts: HashSet<LinuxButtonCode>,
+    pending_input: ApplicationInputBuffer,
 }
 
 struct AppOutput {
@@ -359,8 +356,7 @@ impl AppShell {
             dmabuf: context.dmabuf,
             surface_demand: SurfaceCompositionDemand::default(),
             cursor: CursorHostTracker::default(),
-            pending_input: VecDeque::new(),
-            captured_pointer_shortcuts: HashSet::new(),
+            pending_input: ApplicationInputBuffer::default(),
         })
     }
 
@@ -369,7 +365,7 @@ impl AppShell {
         let _advance_span =
             tracing::trace_span!(target: crate::PROFILE_TARGET, "weld_app_advance_composition")
                 .entered();
-        enqueue_raw_input_batch(self.app.world_mut(), &mut self.pending_input);
+        enqueue_application_input_batch(self.app.world_mut(), &mut self.pending_input);
         set_input_update_time(self.app.world_mut(), input_time);
         advance_main_app(&mut self.app, &mut self.redraw_requests)
     }
@@ -687,29 +683,7 @@ impl AppShell {
     }
 
     pub fn enqueue_input_event(&mut self, event: RawSeatEvent) -> bool {
-        let pointer_consumed = match event.event {
-            RawSeatEventKind::PointerMotion { .. } => !self.captured_pointer_shortcuts.is_empty(),
-            _ => filter_pointer_shortcut_event(self.app.world_mut(), &event),
-        };
-        match event.event {
-            RawSeatEventKind::PointerButton { button, state, .. } if pointer_consumed => {
-                match state {
-                    ButtonState::Pressed => {
-                        self.captured_pointer_shortcuts.insert(button);
-                    }
-                    ButtonState::Released => {
-                        self.captured_pointer_shortcuts.remove(&button);
-                    }
-                }
-            }
-            RawSeatEventKind::HostFocusLost => self.captured_pointer_shortcuts.clear(),
-            _ => {}
-        }
-        let consumed = filter_global_shortcut_event(self.app.world_mut(), &event)
-            | filter_virtual_terminal_event(self.app.world_mut(), &event)
-            | pointer_consumed;
-        self.pending_input.push_back(event);
-        !consumed
+        self.pending_input.enqueue(self.app.world_mut(), event)
     }
 
     pub fn take_input_effects(&mut self) -> Vec<SeatInputEffect> {

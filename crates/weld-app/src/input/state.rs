@@ -7,7 +7,10 @@ use bevy::{
     ecs::{resource::Resource, world::World},
 };
 
-use super::raw::{InputPosition, LinuxKeycode, RawSeatEvent};
+use super::{
+    ingress::INPUT_BURST_CAPACITY,
+    raw::{InputPosition, LinuxKeycode, RawSeatEvent},
+};
 
 pub(super) fn register(app: &mut App) {
     app.init_resource::<PendingSeatInput>()
@@ -16,8 +19,14 @@ pub(super) fn register(app: &mut App) {
         .init_resource::<ConsumedShortcutKeys>();
 }
 
-#[derive(Resource, Default)]
+#[derive(Resource)]
 pub(super) struct PendingSeatInput(pub(super) VecDeque<RawSeatEvent>);
+
+impl Default for PendingSeatInput {
+    fn default() -> Self {
+        Self(VecDeque::with_capacity(INPUT_BURST_CAPACITY))
+    }
+}
 
 /// Projection and frame-paced focus publication deliberately own separate
 /// instances: the former advances in First, while the latter replays lossless
