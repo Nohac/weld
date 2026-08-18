@@ -173,6 +173,17 @@ impl DmabufContext {
     pub fn release_unrendered(&self, frame: PendingDmabufFrame) {
         let _ = self.release_sender.send(frame.release);
     }
+
+    /// Creates a DMA-BUF capability with no live protocol release consumer.
+    ///
+    /// This exists for feature-gated headless render benchmarks, which exercise
+    /// the production Bevy/wgpu bridge without constructing a Wayland backend.
+    #[cfg(feature = "test-support")]
+    #[doc(hidden)]
+    pub fn for_headless_benchmark(device: &wgpu::Device) -> Self {
+        let (release_sender, _release_source) = calloop::channel::channel();
+        Self::new(release_sender, DmabufSourceCache::new(device))
+    }
 }
 
 /// Owns direct client-image promotion, retirement, and GPU completion.

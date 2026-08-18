@@ -5487,6 +5487,7 @@ dependencies = [
  "bevy",
  "bevy_winit",
  "leafwing-input-manager",
+ "pollster",
  "tracing",
  "weld-core",
  "wgpu",

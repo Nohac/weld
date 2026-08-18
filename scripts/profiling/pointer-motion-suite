@@ -1,0 +1,84 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+usage() {
+    cat <<'EOF'
+Usage: pointer-motion-suite [run-scenario options]
+
+Run the four standard pointer-motion traces in order:
+
+  1. Empty desktop with the pointer still
+  2. Empty desktop with slow continuous motion
+  3. Empty desktop with rapid continuous motion
+  4. Focused foot client with rapid continuous motion
+
+Each action is announced eight seconds before Weld starts. Common options such
+as --backend, --warmup, --duration, --tracy-port, and --force are forwarded to
+every trace. Per-run --rate, --focused-client, custom clients, and explicit
+output paths are not supported by the suite.
+EOF
+}
+
+fail() {
+    printf 'pointer-motion-suite: %s\n' "$*" >&2
+    exit 2
+}
+
+runner_arguments=()
+while (( $# > 0 )); do
+    case "$1" in
+        -h|--help)
+            usage
+            exit 0
+            ;;
+        --rate|--rate=*|--focused-client)
+            fail "$1 is selected by the suite"
+            ;;
+        --output|--output=*|--screenshot-output|--screenshot-output=*)
+            fail "$1 would reuse one output path across multiple traces"
+            ;;
+        --)
+            fail "custom clients are not supported"
+            ;;
+        *)
+            runner_arguments+=("$1")
+            shift
+            ;;
+    esac
+done
+
+script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+readonly scenario_count=4
+readonly prompt_delay_seconds=8
+
+run_scenario() {
+    local number="$1"
+    local description="$2"
+    local rate="$3"
+    local focused="$4"
+
+    printf '\nNext scenario %d of %d: %s\n' \
+        "${number}" "${scenario_count}" "${description}"
+    printf 'Starting in %d seconds. Continue the action until Weld exits.\n' \
+        "${prompt_delay_seconds}"
+    sleep "${prompt_delay_seconds}"
+
+    if [[ "${focused}" == true ]]; then
+        "${script_dir}/pointer-motion" \
+            --rate "${rate}" \
+            --focused-client \
+            "${runner_arguments[@]}"
+    else
+        "${script_dir}/pointer-motion" \
+            --rate "${rate}" \
+            "${runner_arguments[@]}"
+    fi
+}
+
+run_scenario 1 'leave the pointer completely still over the empty desktop' still false
+run_scenario 2 'move the pointer slowly and continuously over the empty desktop' slow false
+run_scenario 3 'move the pointer rapidly and continuously over the empty desktop' rapid false
+run_scenario 4 'move the pointer rapidly and continuously inside foot' rapid true
+
+printf '\nAll %d pointer-motion scenarios completed.\n' "${scenario_count}"

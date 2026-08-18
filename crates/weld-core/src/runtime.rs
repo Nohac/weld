@@ -163,6 +163,7 @@ pub(crate) fn configure_client_command(command: &mut Command, socket_name: &OsSt
 
 #[derive(Debug)]
 pub(crate) struct FrameState {
+    update_dirty: bool,
     composition_dirty: bool,
     settle_compositions_remaining: u8,
     present_needed: bool,
@@ -173,6 +174,7 @@ pub(crate) struct FrameState {
 impl Default for FrameState {
     fn default() -> Self {
         Self {
+            update_dirty: true,
             composition_dirty: true,
             // Bevy's own winit runner forces five startup updates because
             // plugin startup, layout, extraction, and GPU asset preparation
@@ -197,6 +199,11 @@ impl FrameState {
     }
 
     #[cfg(test)]
+    pub(crate) const fn update_dirty(&self) -> bool {
+        self.update_dirty
+    }
+
+    #[cfg(test)]
     pub(crate) const fn composition_dirty(&self) -> bool {
         self.composition_dirty
     }
@@ -215,7 +222,12 @@ impl FrameState {
         self.present_needed && !self.composition_dirty
     }
 
+    pub(crate) fn request_update(&mut self) {
+        self.update_dirty = true;
+    }
+
     pub(crate) fn request_composition(&mut self) {
+        self.update_dirty = true;
         self.composition_dirty = true;
     }
 
@@ -224,6 +236,7 @@ impl FrameState {
     /// Structural changes such as newly mapped surface trees can span main
     /// schedules, render extraction, asset preparation, and the GPU queue.
     pub(crate) fn request_settled_composition(&mut self) {
+        self.update_dirty = true;
         self.composition_dirty = true;
         self.settle_compositions_remaining = BEVY_SETTLE_COMPOSITIONS;
     }
@@ -232,12 +245,16 @@ impl FrameState {
         self.present_needed = true;
     }
 
+    pub(crate) fn update_due(&self, now: Instant) -> bool {
+        self.update_dirty && self.next_composition.is_none_or(|deadline| deadline <= now)
+    }
+
     pub(crate) fn composition_due(&self, now: Instant) -> bool {
         self.composition_pending() && self.next_composition.is_none_or(|deadline| deadline <= now)
     }
 
     pub(crate) fn composition_timeout(&self, now: Instant) -> Duration {
-        if !self.composition_pending() {
+        if !self.work_pending() {
             return self.frame_interval;
         }
         self.next_composition
@@ -247,7 +264,7 @@ impl FrameState {
     }
 
     pub(crate) fn composition_demand_timeout(&self, now: Instant) -> Option<Duration> {
-        self.composition_pending().then(|| {
+        self.work_pending().then(|| {
             self.next_composition
                 .map(|deadline| deadline.saturating_duration_since(now))
                 .unwrap_or(Duration::ZERO)
@@ -255,7 +272,13 @@ impl FrameState {
         })
     }
 
+    pub(crate) fn application_advanced(&mut self, now: Instant) {
+        self.update_dirty = false;
+        self.next_composition = Some(now + self.frame_interval);
+    }
+
     pub(crate) fn composition_rendered(&mut self, now: Instant) {
+        self.update_dirty = false;
         self.composition_dirty = false;
         self.settle_compositions_remaining = self.settle_compositions_remaining.saturating_sub(1);
         self.present_needed = true;
@@ -269,16 +292,22 @@ impl FrameState {
     const fn composition_pending(&self) -> bool {
         self.composition_dirty || self.settle_compositions_remaining > 0
     }
+
+    const fn work_pending(&self) -> bool {
+        self.update_dirty || self.composition_pending()
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct IterationWork {
     pub(crate) advance_main: bool,
+    pub(crate) render_composition: bool,
 }
 
-pub(crate) const fn iteration_work(composition_due: bool) -> IterationWork {
+pub(crate) const fn iteration_work(update_due: bool, composition_due: bool) -> IterationWork {
     IterationWork {
-        advance_main: composition_due,
+        advance_main: update_due || composition_due,
+        render_composition: composition_due,
     }
 }
 

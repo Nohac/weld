@@ -35,6 +35,9 @@ terminal. Prefer simple level and target directives in `RUST_LOG` while
 profiling, since span- or field-based directives require more dynamic callsite
 filtering. On devices without the required timestamp-query features, CPU and
 ECS spans remain available but the GPU `RenderQueue` timeline is omitted.
+Bevy's Tracy feature also enables the `profiling` crate's tracing backend by
+feature unification. Existing Smithay, wgpu, and related dependency annotations
+therefore appear in the same capture without Weld enabling another profiler.
 
 Weld's custom zones are ordinary `tracing` callsites rather than Tracy-specific
 code. They are always compiled, but normal `info` logging statically disables
@@ -48,6 +51,10 @@ Weld's profiling zones follow the host boundary. Backend-specific
 callback dispatch. Host input and surface ingress zones cover batches crossing
 into the app, `*_apply_ecs_results` covers effects crossing back to Smithay,
 and `host_launch_client` covers both startup and shortcut-requested launches.
+`drm_host_input_event` is deliberately per event because DRM runtime events are
+interleaved in one queue; `nested_host_input_ingress` remains batch-scoped.
+`drm_libinput_convert_event` runs inside Smithay's `process_events` zone and
+separates Weld conversion and queueing from native libinput dispatch.
 
 For launch and mapping diagnosis, follow `host_launch_client`,
 `host_accept_wayland_client`, `drm_host_surface_ingress`,
@@ -83,6 +90,11 @@ process group:
 scripts/profiling/three-firefox-videos
 scripts/profiling/shortcut-launch --duration 30
 scripts/profiling/shortcut-launch-with-initial-foot
+scripts/profiling/pointer-motion-suite
+scripts/profiling/pointer-motion --rate still
+scripts/profiling/pointer-motion --rate slow
+scripts/profiling/pointer-motion --rate rapid
+scripts/profiling/pointer-motion --rate rapid --focused-client
 ```
 
 Use each script's `--help` for backend, warmup, output, and scenario-specific
@@ -98,7 +110,135 @@ offscreen Bevy handoff. Remote debugging wakes the main world at a bounded
 maintenance interval and on other host traffic, but does not itself request
 continuous composition.
 
+Each pointer-motion run uses one fixed action, because instructions printed by
+the launching terminal are hidden while Weld owns the VT. Once Weld is visible,
+perform the selected action continuously until it exits. The empty `still` run
+establishes the idle floor. Compare empty `slow` with empty `rapid` to separate
+fixed libinput wake cost from per-event cost, then compare empty `rapid` with
+focused `rapid` to isolate focused-client protocol delivery.
+
+`pointer-motion-suite` runs those four comparisons automatically. It announces
+each fixed action and waits eight seconds before Weld takes over the VT, then
+continues to the next action after Weld and its trace collector exit.
+
+Pointer overlay changes currently request a full Bevy composition, clamped to
+the output refresh interval. Both nonzero motion rates should therefore
+saturate composition at the refresh rate, making `slow` versus `rapid` the
+useful input-path comparison. `still` versus `rapid` also includes the cost of
+roughly one composition per refresh and must not be attributed entirely to
+input. Seeing `weld_app_advance_composition` and render zones in both motion
+traces is expected.
+
+The controlled touchpad and external-mouse results, allocation audit, and
+agreed optimization order are recorded in
+[Input performance](input-performance.md).
+
+In the Tracy UI, use self-time and zone counts rather than the inclusive time
+of `drm_calloop_wait_and_dispatch`, which includes time asleep inside
+`calloop.dispatch`. The libinput callback fires within that wait zone, so its
+child and self times remain meaningful.
+
+Several dependency sources use the zone name `process_events`. Include source
+columns when separating Smithay's libinput, DMA-BUF, and libseat sources:
+
+```text
+tracy-csvexport -s $'\t' -f process_events TRACE | cut -f1-4,6-7
+tracy-csvexport -s $'\t' -e -f process_events TRACE | cut -f1-4,6-7
+scripts/profiling/report-trace TRACE --self --filter drm_libinput_convert_event
+scripts/profiling/report-trace TRACE --self --filter drm_host_input_event
+scripts/profiling/report-trace TRACE --self --filter drm_runtime_event_drain
+scripts/profiling/report-trace TRACE --self --filter drm_flush_wayland_clients
+scripts/profiling/report-trace TRACE --self --filter weld_app_advance_composition
+```
+
+For each motion trace, divide `drm_libinput_convert_event` count by the
+libinput-source `process_events` count to estimate events per wake. Two nonzero
+motion rates distinguish fixed wake cost from per-event cost; the still trace
+only establishes the idle floor. A historical, uncontrolled video trace
+reported 24.619 microseconds of libinput `process_events` time per wake at about
+38 wakes per second. That old zone had no recorded child, so its inclusive and
+self times were both 57.955 milliseconds. For contrast, the same trace's
+DMA-BUF `process_events` zone measured 74.431 milliseconds inclusive and
+25.970 milliseconds self. Compare the historical libinput value with the new
+inclusive value, not the new self value. With the current instrumentation, the
+new inclusive value also equals its self time plus the total inclusive time of
+`drm_libinput_convert_event`, because that conversion span is its only recorded
+child. Recheck that identity if another child span is added later.
+
+`drm_host_input_event` is now a child of `drm_runtime_event_drain`. When
+comparing against traces captured before that span existed, compare the drain's
+inclusive time, or add its self time to its child time; comparing self time
+alone would manufacture an apparent improvement.
+
+The controlled traces showed why the historical mean must not be extrapolated.
+Rapid touchpad motion produced roughly 130 to 146 wakes per second at 34 to 39
+microseconds per wake. The external mouse produced about 744 wakes and 925
+converted events per second, but its mean libinput wake cost fell to about 9
+microseconds. Device event shape and batching materially change the per-wake
+cost. Use an uninstrumented sampling or allocation profiler before assigning a
+production CPU percentage to these Tracy timings.
+
 The fixed mapping-settle budget is a temporary integration margin. Bevy does
 not currently expose a reliable signal that all deferred main-world, layout,
 asset, extraction, and render-world work for a newly mapped surface has
 converged. Replace the fixed budget when such a signal is available.
+
+## Headless main-schedule benchmarks
+
+Three `test-support`-gated Cargo benchmarks isolate application and rendering
+work without a native backend. They are excluded from ordinary Weld builds.
+
+```text
+cargo bench -p weld-app --features test-support --bench input_pipeline
+cargo bench -p weldwm --features test-support --bench shell_main
+scripts/profiling/render-bench
+```
+
+`input_pipeline` separates raw batch ingress and the `First`, `PreUpdate`,
+`Update`, `PostUpdate`, and `Last` schedules. `shell_main` adds Weld's normal
+window, presentation, SSD, float, and shortcut plugins, then compares zero,
+one, and three retained windows. Set `WELD_BENCH_FRAMES` to change the default
+10,000 measured updates.
+
+These are wall-clock microbenchmarks in Cargo's optimized bench profile. Use
+them for relative comparisons and subsystem elimination, not as a replacement
+for end-to-end DRM profiling.
+
+`shell_render` constructs the real [`AppShell`](../crates/weld-app/src/shell.rs)
+against a headless Vulkan device and drives the same host contract as a native
+backend: input ingress, main-world advance, Bevy extraction, and composition
+submission. Its cases compare zero and sixteen synthetic pointer motions across
+an empty scene, a mapped synthetic client without new commits, and the same
+client sending retained commits. This separates the cost of rendering client
+content from the cost of crossing the surface-commit bridge. The initial client
+image uses SHM once; measured commits retain that image and therefore do not
+include per-frame pixel copying. Each case reports input ingress, surface
+ingress, the main schedule, CPU-side render submission, and the subsequent GPU
+completion wait separately.
+
+Set `WELD_RENDER_BENCH_FRAMES` and `WELD_RENDER_BENCH_WARMUP` to override the
+default 600 measured and 30 warm-up frames. The benchmark always forces one
+composition per measured iteration so input and retained-commit cases remain
+directly comparable; this does not claim that those events should request a
+composition in normal operation.
+
+Check the printed adapter and device type before interpreting results. A
+`device=Cpu` adapter such as llvmpipe validates the bridge but does not measure
+hardware rendering. This benchmark also deliberately stops above calloop,
+Smithay protocol dispatch, client forwarding, KMS acquisition, and physical
+presentation. If its host-boundary timings are cheap while a live compositor
+is expensive, use Tracy to investigate those backend stages.
+
+## Automated trace reports
+
+Rank individual ECS systems or other Tracy zones without opening the GUI:
+
+```text
+scripts/profiling/report-trace target/traces/capture.tracy
+scripts/profiling/report-trace target/traces/capture.tracy --count 40 --self
+scripts/profiling/report-trace target/traces/capture.tracy --filter weld_
+```
+
+The default report selects Bevy `system{...}` zones and ranks inclusive total
+time. `--self` removes nested-zone time, which is useful for wrapper systems
+such as Bevy's main-schedule runner.

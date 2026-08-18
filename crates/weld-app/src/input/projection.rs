@@ -172,12 +172,18 @@ struct ProjectionMessages<'w> {
     touchpad_gesture: MessageWriter<'w, TouchpadGesture>,
 }
 
+#[cfg(test)]
 pub(crate) fn enqueue_raw_input(world: &mut World, event: RawSeatEvent) {
+    let mut events = VecDeque::from([event]);
+    enqueue_raw_input_batch(world, &mut events);
+}
+
+pub(crate) fn enqueue_raw_input_batch(world: &mut World, events: &mut VecDeque<RawSeatEvent>) {
     let Some(mut ingress) = world.get_resource_mut::<RawInputIngress>() else {
         warn!("discarded host input because the Bevy input bridge is unavailable");
         return;
     };
-    ingress.0.push_back(event);
+    ingress.0.append(events);
 }
 
 pub(crate) fn update_output_configurations(

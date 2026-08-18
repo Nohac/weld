@@ -1,0 +1,89 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+usage() {
+    cat <<'EOF'
+Usage: report-trace TRACE [--count COUNT] [--filter TEXT] [--self]
+
+Print the most expensive matching Tracy zones as a compact table. The default
+filter selects Bevy ECS system zones and ranks them by inclusive total time.
+
+Options:
+  --count COUNT  Number of zones to show (default: 25)
+  --filter TEXT  Tracy zone-name filter (default: system{)
+  --self         Rank and report self time instead of inclusive time
+  -h, --help     Show this help
+EOF
+}
+
+fail() {
+    printf 'report-trace: %s\n' "$*" >&2
+    exit 2
+}
+
+trace=""
+count=25
+filter='system{'
+self_time=false
+
+while (( $# > 0 )); do
+    case "$1" in
+        --count)
+            (( $# >= 2 )) || fail "--count requires a value"
+            count="$2"
+            shift 2
+            ;;
+        --filter)
+            (( $# >= 2 )) || fail "--filter requires a value"
+            filter="$2"
+            shift 2
+            ;;
+        --self)
+            self_time=true
+            shift
+            ;;
+        -h|--help)
+            usage
+            exit 0
+            ;;
+        -*)
+            fail "unknown option: $1"
+            ;;
+        *)
+            [[ -z "${trace}" ]] || fail "only one trace may be selected"
+            trace="$1"
+            shift
+            ;;
+    esac
+done
+
+[[ -n "${trace}" ]] || fail "TRACE is required"
+[[ -f "${trace}" ]] || fail "trace does not exist: ${trace}"
+[[ "${count}" =~ ^[1-9][0-9]*$ ]] || fail "--count must be a positive integer"
+command -v tracy-csvexport >/dev/null 2>&1 || fail \
+    "tracy-csvexport was not found; enter the Weld development shell"
+
+export_path="$(mktemp)"
+sorted_path="$(mktemp)"
+trap 'rm -f -- "${export_path}" "${sorted_path}"' EXIT
+
+export_options=(-s $'\t' -f "${filter}")
+if [[ "${self_time}" == true ]]; then
+    export_options+=(-e)
+fi
+tracy-csvexport "${export_options[@]}" "${trace}" >"${export_path}"
+
+{
+    head -n 1 "${export_path}"
+    tail -n +2 "${export_path}" | sort -t $'\t' -k4,4nr
+} >"${sorted_path}"
+
+printf 'total_ms\tmean_us\tcount\tzone\n'
+tail -n +2 "${sorted_path}" |
+    sed $'s/\033\\[[0-9;]*[mK]//g' |
+    awk -F $'\t' -v count="${count}" '
+        NR <= count {
+            printf "%.3f\t%.3f\t%s\t%s\n", $4 / 1000000, $7 / 1000, $6, $1
+        }
+    '

@@ -11,7 +11,9 @@ mod surface_tree;
 mod toplevel;
 
 pub(crate) use output::{OutputDescriptor, OutputMetrics, ServerOutputDefinition};
-pub use surface_tree::{PendingSurfaceBufferContent, PendingSurfaceTreeSnapshot};
+pub use surface_tree::{
+    PendingSurfaceBufferContent, PendingSurfaceBufferUpdate, PendingSurfaceTreeSnapshot,
+};
 
 use std::{
     collections::{HashMap, HashSet, VecDeque},

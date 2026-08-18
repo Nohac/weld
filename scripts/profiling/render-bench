@@ -1,0 +1,62 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+usage() {
+    cat <<'EOF'
+Usage: render-bench [--frames COUNT] [--warmup COUNT]
+
+Run Weld's headless AppShell rendering benchmark with synthetic client commits
+and pointer input.
+
+Options:
+  --frames COUNT  Measured frames per case (default: 600)
+  --warmup COUNT  Warm-up frames per case (default: 30)
+  -h, --help      Show this help
+
+The output identifies the selected adapter. Results from a CPU adapter such as
+llvmpipe validate the benchmark path but do not represent GPU performance.
+EOF
+}
+
+frames="${WELD_RENDER_BENCH_FRAMES:-600}"
+warmup="${WELD_RENDER_BENCH_WARMUP:-30}"
+
+while (($# > 0)); do
+    case "$1" in
+        --frames)
+            frames="${2:?--frames requires a value}"
+            shift 2
+            ;;
+        --warmup)
+            warmup="${2:?--warmup requires a value}"
+            shift 2
+            ;;
+        -h|--help)
+            usage
+            exit 0
+            ;;
+        *)
+            printf 'Unknown option: %s\n' "$1" >&2
+            usage >&2
+            exit 2
+            ;;
+    esac
+done
+
+if [[ ! "${frames}" =~ ^[1-9][0-9]*$ ]]; then
+    printf 'Frame count must be a positive integer: %s\n' "${frames}" >&2
+    exit 2
+fi
+if [[ ! "${warmup}" =~ ^[1-9][0-9]*$ ]]; then
+    printf 'Warm-up count must be a positive integer: %s\n' "${warmup}" >&2
+    exit 2
+fi
+
+script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+repository_root="$(cd -- "${script_dir}/../.." && pwd)"
+cd "${repository_root}"
+
+export WELD_RENDER_BENCH_FRAMES="${frames}"
+export WELD_RENDER_BENCH_WARMUP="${warmup}"
+exec cargo bench -p weldwm --features test-support --bench shell_render

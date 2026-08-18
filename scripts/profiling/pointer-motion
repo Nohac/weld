@@ -1,0 +1,102 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+usage() {
+    cat <<'EOF'
+Usage: pointer-motion --rate RATE [--focused-client] [run-scenario options]
+
+Capture the native DRM input path at one pointer-motion rate for the entire
+run. RATE must be one of:
+
+  still   leave the pointer completely still
+  slow    move the pointer slowly and continuously
+  rapid   move the pointer rapidly and continuously
+
+Without --focused-client, Weld starts without a client and measures empty
+background input. With --focused-client, foot starts as the initial client;
+keep the pointer within its content so the trace also includes focused Wayland
+delivery.
+
+The default capture duration is 12 seconds. Common options include --backend,
+--warmup, --duration, --tracy-port, --output, and --force. A later explicit
+option overrides the scenario default. This scenario owns client selection;
+custom client arguments are not supported. Focused mode requires foot.
+EOF
+}
+
+focused_client=false
+rate=""
+runner_arguments=()
+while (( $# > 0 )); do
+    case "$1" in
+        --rate)
+            if (( $# < 2 )); then
+                printf '%s\n' 'pointer-motion: --rate requires still, slow, or rapid' >&2
+                exit 2
+            fi
+            rate="$2"
+            shift 2
+            ;;
+        --focused-client)
+            focused_client=true
+            shift
+            ;;
+        -h|--help)
+            usage
+            exit 0
+            ;;
+        --)
+            printf '%s\n' 'pointer-motion: custom clients are not supported; use --focused-client for foot' >&2
+            exit 2
+            ;;
+        *)
+            runner_arguments+=("$1")
+            shift
+            ;;
+    esac
+done
+
+case "${rate}" in
+    still)
+        action="leave the pointer completely still"
+        ;;
+    slow)
+        action="move the pointer slowly and continuously"
+        ;;
+    rapid)
+        action="move the pointer rapidly and continuously"
+        ;;
+    "")
+        printf '%s\n' 'pointer-motion: --rate is required; choose still, slow, or rapid' >&2
+        exit 2
+        ;;
+    *)
+        printf 'pointer-motion: invalid rate %s; choose still, slow, or rapid\n' "${rate}" >&2
+        exit 2
+        ;;
+esac
+
+script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+if [[ "${focused_client}" == true ]]; then
+    command -v foot >/dev/null 2>&1 || {
+        printf '%s\n' 'pointer-motion: foot is required for --focused-client' >&2
+        exit 127
+    }
+    instructions="Once Weld is visible, ${action} within the foot content until Weld exits."
+    exec "${script_dir}/run-scenario" \
+        --name "pointer-motion-focused-${rate}" \
+        --instructions "${instructions}" \
+        --backend drm \
+        --duration 12 \
+        "${runner_arguments[@]}" \
+        -- foot
+fi
+
+instructions="Once Weld is visible, ${action} over the empty background until Weld exits."
+exec "${script_dir}/run-scenario" \
+    --name "pointer-motion-empty-${rate}" \
+    --instructions "${instructions}" \
+    --backend drm \
+    --duration 12 \
+    "${runner_arguments[@]}"

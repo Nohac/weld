@@ -10,6 +10,7 @@ profiling-tracy = [
   "dep:tracing-tracy",
   "weld-core/profiling-tracy",
 ]
+test-support = ["weld-app/test-support"]
 
 [workspace]
 members = [
@@ -101,3 +102,13 @@ bevy_render = { path = "vendor/bevy-wgpu30/bevy_render" }
 bevy_shader = { path = "vendor/bevy-wgpu30/bevy_shader" }
 bevy_sprite = { path = "vendor/bevy-wgpu30/bevy_sprite" }
 bevy_text = { path = "vendor/bevy-wgpu30/bevy_text" }
+
+[[bench]]
+name = "shell_main"
+harness = false
+required-features = ["test-support"]
+
+[[bench]]
+name = "shell_render"
+harness = false
+required-features = ["test-support"]

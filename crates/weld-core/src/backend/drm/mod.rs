@@ -844,6 +844,11 @@ pub(crate) fn prepare(options: RunOptions, signals: Signals) -> Result<PreparedH
     calloop
         .handle()
         .insert_source(input_backend, |event, _, data| {
+            let _conversion_span = tracing::trace_span!(
+                target: crate::PROFILE_TARGET,
+                "drm_libinput_convert_event"
+            )
+            .entered();
             for event in data.backend_state.convert(event).into_iter().flatten() {
                 data.events.push_back(DrmRuntimeEvent::Input(event));
             }
@@ -1030,6 +1035,11 @@ pub(crate) fn prepare(options: RunOptions, signals: Signals) -> Result<PreparedH
                 while let Some(event) = loop_data.events.pop_front() {
                     match event {
                         DrmRuntimeEvent::Input(event) => {
+                            let _input_span = tracing::trace_span!(
+                                target: crate::PROFILE_TARGET,
+                                "drm_host_input_event"
+                            )
+                            .entered();
                             event_counts[0] += 1;
                             input_pending = true;
                             cursor_position_changed |= cursor.observe_input(&event);
@@ -1167,7 +1177,7 @@ pub(crate) fn prepare(options: RunOptions, signals: Signals) -> Result<PreparedH
             }
 
             if input_pending {
-                frame_state.request_composition();
+                frame_state.request_update();
             }
 
             if loop_data.server.has_surface_events() {
@@ -1210,10 +1220,17 @@ pub(crate) fn prepare(options: RunOptions, signals: Signals) -> Result<PreparedH
                 && !capture_ready
                 && presenters.target_availability(&presentable_outputs)
                     == PresenterTargetAvailability::Busy;
-            let work = iteration_work(frame_state.composition_due(now) && !composition_blocked);
+            let mut work = iteration_work(
+                frame_state.update_due(now),
+                frame_state.composition_due(now) && !composition_blocked,
+            );
             let mut bevy_requested_redraw = false;
             if work.advance_main {
                 bevy_requested_redraw = shell.advance_main(started_at.elapsed().as_millis() as u32);
+                if bevy_requested_redraw {
+                    frame_state.request_composition();
+                    work.render_composition = !composition_blocked;
+                }
                 let surface_actions = shell.take_surface_actions();
                 let input_effects = shell.take_input_effects();
                 let host_commands = shell.take_host_commands();
@@ -1306,6 +1323,8 @@ pub(crate) fn prepare(options: RunOptions, signals: Signals) -> Result<PreparedH
 
             if work.advance_main {
                 loop_data.server.flush_pending_resizes();
+            }
+            if work.render_composition {
                 let connected_outputs = output_monitor.physical_outputs(session_active);
                 let presentable_outputs = presenters.presentable_outputs(&connected_outputs);
                 let physical_output_available = !presentable_outputs.is_empty();
@@ -1399,6 +1418,8 @@ pub(crate) fn prepare(options: RunOptions, signals: Signals) -> Result<PreparedH
                     // retained target. The next frame must refresh scanout.
                     frame_state.request_composition();
                 }
+            } else if work.advance_main {
+                frame_state.application_advanced(now);
             }
 
             if pending_capture.is_none()

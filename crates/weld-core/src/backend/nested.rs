@@ -201,7 +201,7 @@ pub(crate) fn prepare(options: RunOptions, signals: Signals) -> Result<PreparedH
                 frame_state.request_present();
             }
             if input_pending {
-                frame_state.request_composition();
+                frame_state.request_update();
                 let _input_span = tracing::trace_span!(
                     target: crate::PROFILE_TARGET,
                     "nested_host_input_ingress"
@@ -318,12 +318,19 @@ pub(crate) fn prepare(options: RunOptions, signals: Signals) -> Result<PreparedH
                     update_now + crate::runtime::REMOTE_DEBUG_MAINTENANCE_INTERVAL;
             }
 
-            let work = iteration_work(frame_state.composition_due(update_now));
+            let mut work = iteration_work(
+                frame_state.update_due(update_now),
+                frame_state.composition_due(update_now),
+            );
             let mut request_next_composition = false;
             let mut command_exit_requested = false;
             if work.advance_main {
                 let bevy_requested_redraw =
                     shell.advance_main(started_at.elapsed().as_millis() as u32);
+                if bevy_requested_redraw {
+                    frame_state.request_composition();
+                    work.render_composition = true;
+                }
                 let surface_actions = shell.take_surface_actions();
                 let input_effects = shell.take_input_effects();
                 let host_commands = shell.take_host_commands();
@@ -373,8 +380,8 @@ pub(crate) fn prepare(options: RunOptions, signals: Signals) -> Result<PreparedH
                 if command_exit_requested {
                     break;
                 }
-                if work.advance_main {
-                    loop_data.server.flush_pending_resizes();
+                loop_data.server.flush_pending_resizes();
+                if work.render_composition {
                     let mut compositions =
                         shell.render_outputs(vec![CompositionOutputRequest {
                             output: OutputId::new(1),
@@ -387,6 +394,8 @@ pub(crate) fn prepare(options: RunOptions, signals: Signals) -> Result<PreparedH
                     pending_presentation_id = Some(loop_data.server.stage_frame_callbacks());
                     frame_state.composition_rendered(update_now);
                     request_next_composition = bevy_requested_redraw;
+                } else {
+                    frame_state.application_advanced(update_now);
                 }
             }
 
@@ -725,12 +734,26 @@ mod tests {
     }
 
     #[test]
-    fn iteration_work_pairs_every_composition_with_one_main_advance() {
-        assert_eq!(iteration_work(true), IterationWork { advance_main: true });
+    fn iteration_work_distinguishes_updates_from_compositions() {
         assert_eq!(
-            iteration_work(false),
+            iteration_work(true, false),
+            IterationWork {
+                advance_main: true,
+                render_composition: false,
+            }
+        );
+        assert_eq!(
+            iteration_work(false, true),
+            IterationWork {
+                advance_main: true,
+                render_composition: true,
+            }
+        );
+        assert_eq!(
+            iteration_work(false, false),
             IterationWork {
                 advance_main: false,
+                render_composition: false,
             }
         );
     }
@@ -754,6 +777,25 @@ mod tests {
 
         assert!(!frame.composition_dirty());
         assert!(frame.present_needed());
+    }
+
+    #[test]
+    fn application_update_demand_does_not_dirty_the_cached_composition() {
+        let now = Instant::now();
+        let mut frame = FrameState::default();
+        finish_initial_settle(&mut frame, now);
+        frame.presented();
+
+        frame.request_update();
+
+        assert!(frame.update_dirty());
+        assert!(!frame.composition_dirty());
+        assert!(!frame.update_due(now + FRAME_INTERVAL / 2));
+        assert!(frame.update_due(now + FRAME_INTERVAL));
+
+        frame.application_advanced(now + FRAME_INTERVAL);
+        assert!(!frame.update_dirty());
+        assert!(!frame.composition_dirty());
     }
 
     #[test]

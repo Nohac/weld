@@ -36,7 +36,9 @@ pub use pointer_shortcuts::{
     PointerShortcutPressed,
 };
 pub use projection::TouchpadGesture;
+#[cfg(test)]
 pub(crate) use projection::enqueue_raw_input;
+pub(crate) use projection::enqueue_raw_input_batch;
 pub(crate) use projection::update_output_configurations;
 pub(crate) use routing::take_input_effects;
 pub use shortcuts::{GlobalShortcutAction, GlobalShortcutPlugin};

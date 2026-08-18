@@ -5,7 +5,7 @@ edition.workspace = true
 publish.workspace = true
 
 [features]
-test-support = ["weld-core/test-support"]
+test-support = ["dep:pollster", "weld-core/test-support"]
 
 [dependencies]
 anyhow.workspace = true
@@ -13,6 +13,7 @@ bevy.workspace = true
 # Converter functions only. Weld owns the outer event loop.
 bevy_winit.workspace = true
 leafwing-input-manager = { workspace = true, features = ["keyboard", "mouse", "picking"] }
+pollster = { workspace = true, optional = true }
 tracing.workspace = true
 weld-core = { path = "../weld-core" }
 wgpu = { workspace = true, features = ["naga-ir", "vulkan", "wgsl"] }
@@ -20,3 +21,8 @@ winit = { workspace = true, features = ["rwh_06"] }
 
 [dev-dependencies]
 weld-core = { path = "../weld-core", features = ["test-support"] }
+
+[[bench]]
+name = "input_pipeline"
+harness = false
+required-features = ["test-support"]

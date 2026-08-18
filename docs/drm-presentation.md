@@ -53,6 +53,10 @@ the nearest protocol approximation. `Super+Shift+D` matches primary and
 reference diagonal logical density when both footprints are measured; the
 calculation assumes EDID and active-mode aspect ratios agree.
 
+Mixed-scale movement, interactive-resize performance, and the temporary
+pointer-topology policy are tracked in
+[Multi-output validation](multi-output-validation.md).
+
 Weld temporarily patches its Bevy 0.19 rendering crates to wgpu 30. Version 30
 adds the initial resource state to `Device::create_texture_from_hal`; the
 linux-dmabuf importer uses it to adopt an initialized external Vulkan image
@@ -361,7 +365,9 @@ old full-output blit but also removes the previous overlap where Bevy rendered
 into a second offscreen target while the worker prepared the first. Cursor
 motion requests one refresh-capped composition rather than re-presenting a
 retained scene independently; a KMS cursor plane remains the route to decouple
-cursor latency from Bevy composition.
+cursor latency from Bevy composition. The measured input and presentation
+evidence and the allocation-free hot-path direction are recorded in
+[Input performance](input-performance.md).
 
 When no physical target is usable, composition selects the retained texture and
 continues demand-driven. A screenshot also selects that target and reads it
