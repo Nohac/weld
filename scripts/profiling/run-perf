@@ -20,6 +20,8 @@ Options:
   --stack-bytes BYTES  DWARF stack dump size (default: 16384)
   --output-base PATH   Artifact path without an extension
   --no-build           Reuse target/perf/weldwm after validating it
+  --no-print-instructions
+                       Do not repeat instructions printed by a wrapper
   --force              Replace an explicitly selected artifact set
   -h, --help           Show this help
 
@@ -56,6 +58,7 @@ mmap_pages=64
 stack_bytes=16384
 output_base=""
 build_binary=true
+print_instructions=true
 force=false
 readonly PREFLIGHT_SECONDS=3
 readonly PERF_ABORT_GRACE_TENTHS=600
@@ -110,6 +113,10 @@ while (( $# > 0 )); do
             ;;
         --no-build)
             build_binary=false
+            shift
+            ;;
+        --no-print-instructions)
+            print_instructions=false
             shift
             ;;
         --force)
@@ -283,7 +290,9 @@ The quality check may add a short gap between probe and main capture. Continue
 the same action until Weld exits. Do not switch VTs during the capture.
 EOF
 
-printf '%s\n' "$(cat -- "${output_base}.instructions.txt")"
+if [[ "${print_instructions}" == true ]]; then
+    printf '%s\n' "$(cat -- "${output_base}.instructions.txt")"
+fi
 
 session_pid_file="$(mktemp "${repository_root}/target/profiling/weld-perf-session.XXXXXX")"
 weld_wait_pid=""
@@ -424,44 +433,13 @@ quality_gate() {
     return 0
 }
 
-if ! record_perf \
-    "${output_base}.preflight.data" \
-    "${output_base}.preflight.stderr" \
-    "${PREFLIGHT_SECONDS}"; then
-    fail "perf preflight failed; inspect ${output_base}.preflight.stderr"
-fi
-if ! quality_gate \
-    "${output_base}.preflight.data" \
-    "${output_base}.preflight.stderr" \
-    "${output_base}.preflight.stats.txt"; then
-    fail "perf preflight lost or throttled samples; lower frequency or mmap pressure"
-fi
-"${perf_bin}" script --inline -i "${output_base}.preflight.data" \
-    >"${output_base}.preflight.perf-script" \
-    2>>"${output_base}.preflight.stderr"
-"${stackcollapse_bin}" "${output_base}.preflight.perf-script" \
-    >"${output_base}.preflight.folded" \
-    2>>"${output_base}.preflight.stderr"
-if ! awk '
-    {
-        total += 1
-        separators = gsub(/;/, ";")
-        if (separators >= 2) {
-            deep += 1
-        }
-    }
-    END {
-        if (total == 0 || deep == 0) {
-            exit 1
-        }
-        if (total >= 5 && deep / total < 0.2) {
-            exit 1
-        }
-    }
-' "${output_base}.preflight.folded"; then
-    fail "perf preflight did not produce usable multi-frame DWARF stacks"
-fi
-child_has_exited "${weld_session_pid}" && fail "Weld exited during perf preflight"
+sample_count_from_stats() {
+    local stats_path="$1"
+    local sample_count
+    sample_count="$(awk '$1 == "SAMPLE" && $2 == "events:" { print $3; exit }' \
+        "${stats_path}")"
+    printf '%s\n' "${sample_count:-0}"
+}
 
 read_proc_cpu() {
     local pid="$1"
@@ -471,6 +449,78 @@ read_proc_cpu() {
     read -r -a fields <<<"${stat_line#*) }"
     printf '%s %s\n' "${fields[11]}" "${fields[12]}"
 }
+
+expected_user_samples() {
+    local user_ticks="$1"
+    awk -v ticks="${user_ticks}" -v hz="${clock_ticks}" -v rate="${frequency}" \
+        'BEGIN { printf "%.3f", ticks * rate / hz }'
+}
+
+stack_depth_valid() {
+    local folded_path="$1"
+    awk '
+        {
+            total += 1
+            separators = gsub(/;/, ";")
+            if (separators >= 2) {
+                deep += 1
+            }
+        }
+        END {
+            if (total == 0 || deep == 0) {
+                exit 1
+            }
+            if (total >= 5 && deep / total < 0.2) {
+                exit 1
+            }
+        }
+    ' "${folded_path}"
+}
+
+read -r preflight_before_utime preflight_before_stime < <(read_proc_cpu "${weld_session_pid}")
+if ! record_perf \
+    "${output_base}.preflight.data" \
+    "${output_base}.preflight.stderr" \
+    "${PREFLIGHT_SECONDS}"; then
+    fail "perf preflight failed; inspect ${output_base}.preflight.stderr"
+fi
+read -r preflight_after_utime preflight_after_stime < <(read_proc_cpu "${weld_session_pid}")
+if ! quality_gate \
+    "${output_base}.preflight.data" \
+    "${output_base}.preflight.stderr" \
+    "${output_base}.preflight.stats.txt"; then
+    fail "perf preflight lost or throttled samples; lower frequency or mmap pressure"
+fi
+preflight_sample_count="$(sample_count_from_stats "${output_base}.preflight.stats.txt")"
+[[ "${preflight_sample_count}" =~ ^[0-9]+$ ]] || \
+    fail "perf preflight did not report a numeric sample count"
+preflight_utime_ticks=$((preflight_after_utime - preflight_before_utime))
+preflight_stime_ticks=$((preflight_after_stime - preflight_before_stime))
+preflight_expected_samples="$(expected_user_samples "${preflight_utime_ticks}")"
+preflight_unwind_check=not_applicable
+if (( preflight_sample_count == 0 )); then
+    if awk -v expected="${preflight_expected_samples}" 'BEGIN { exit expected >= 20 ? 0 : 1 }'; then
+        fail "perf preflight recorded no samples despite ${preflight_expected_samples} expected userspace samples"
+    fi
+else
+    "${perf_bin}" script --inline -i "${output_base}.preflight.data" \
+        >"${output_base}.preflight.perf-script" \
+        2>>"${output_base}.preflight.stderr"
+    "${stackcollapse_bin}" "${output_base}.preflight.perf-script" \
+        >"${output_base}.preflight.folded" \
+        2>>"${output_base}.preflight.stderr"
+    if ! stack_depth_valid "${output_base}.preflight.folded"; then
+        fail "perf preflight did not produce usable multi-frame DWARF stacks"
+    fi
+    preflight_unwind_check=passed
+fi
+printf 'preflight_sample_count=%s\npreflight_utime_ticks=%s\npreflight_stime_ticks=%s\npreflight_expected_user_samples=%s\npreflight_unwind_check=%s\n' \
+    "${preflight_sample_count}" \
+    "${preflight_utime_ticks}" \
+    "${preflight_stime_ticks}" \
+    "${preflight_expected_samples}" \
+    "${preflight_unwind_check}" >>"${output_base}.metadata.txt"
+child_has_exited "${weld_session_pid}" && fail "Weld exited during perf preflight"
 
 read -r before_utime before_stime < <(read_proc_cpu "${weld_session_pid}")
 "${perf_bin}" stat -x ';' \
@@ -492,13 +542,23 @@ stat_pid=""
 read -r after_utime after_stime < <(read_proc_cpu "${weld_session_pid}")
 utime_ticks=$((after_utime - before_utime))
 stime_ticks=$((after_stime - before_stime))
-task_clock_msec="$(awk -F';' '$3 ~ /^task-clock/ { print $1; exit }' \
+task_clock_raw="$(awk -F';' '$3 ~ /^task-clock/ { print $1; exit }' \
     "${output_base}.stat.txt")"
 task_clock_event="$(awk -F';' '$3 ~ /^task-clock/ { print $3; exit }' \
     "${output_base}.stat.txt")"
-[[ "${task_clock_msec}" =~ ^[0-9]+([.][0-9]+)?$ ]] || \
-    fail "perf stat did not report a numeric task-clock"
 [[ -n "${task_clock_event}" ]] || fail "perf stat did not report its task-clock event name"
+task_clock_status=counted
+if [[ "${task_clock_raw}" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+    task_clock_msec="${task_clock_raw}"
+elif [[ "${task_clock_raw}" == '<not counted>' ]]; then
+    if (( utime_ticks != 0 || stime_ticks != 0 )); then
+        fail "perf stat did not count task-clock despite nonzero process CPU time"
+    fi
+    task_clock_msec=0
+    task_clock_status=not_counted_idle
+else
+    fail "perf stat reported an unsupported task-clock value: ${task_clock_raw}"
+fi
 cpu_accounting_valid="$(awk \
     -v user_ticks="${utime_ticks}" \
     -v system_ticks="${stime_ticks}" \
@@ -515,18 +575,23 @@ cpu_accounting_valid="$(awk \
         print difference <= tolerance ? "true" : "false"
     }
 ')"
-printf 'task_clock_event=%s\n' "${task_clock_event}" >>"${output_base}.metadata.txt"
+printf 'task_clock_event=%s\ntask_clock_raw=%s\ntask_clock_status=%s\n' \
+    "${task_clock_event}" "${task_clock_raw}" "${task_clock_status}" \
+    >>"${output_base}.metadata.txt"
 awk \
     -v user_ticks="${utime_ticks}" \
     -v system_ticks="${stime_ticks}" \
     -v hz="${clock_ticks}" \
     -v task_event="${task_clock_event}" \
+    -v task_raw="${task_clock_raw}" \
+    -v task_status="${task_clock_status}" \
     -v task_msec="${task_clock_msec}" \
     -v accounting_valid="${cpu_accounting_valid}" '
     BEGIN {
-        printf "utime_ticks=%d\nstime_ticks=%d\nutime_seconds=%.6f\nstime_seconds=%.6f\ntotal_cpu_seconds=%.6f\ntask_clock_event=%s\ntask_clock_msec=%.6f\ncpu_accounting_valid=%s\n",
+        printf "utime_ticks=%d\nstime_ticks=%d\nutime_seconds=%.6f\nstime_seconds=%.6f\ntotal_cpu_seconds=%.6f\ntask_clock_event=%s\ntask_clock_raw=%s\ntask_clock_status=%s\ntask_clock_msec=%.6f\ncpu_accounting_valid=%s\n",
             user_ticks, system_ticks, user_ticks / hz, system_ticks / hz,
-            (user_ticks + system_ticks) / hz, task_event, task_msec, accounting_valid
+            (user_ticks + system_ticks) / hz, task_event, task_raw, task_status,
+            task_msec, accounting_valid
     }
 ' >"${output_base}.cpu.txt"
 
@@ -537,31 +602,48 @@ weld_status=$?
 set -e
 weld_wait_pid=""
 
-"${perf_bin}" script --inline -i "${output_base}.data" >"${output_base}.perf-script"
-"${stackcollapse_bin}" "${output_base}.perf-script" >"${output_base}.folded"
-"${flamegraph_bin}" \
-    --title "Weld ${name} userspace CPU" \
-    --countname samples \
-    "${output_base}.folded" >"${output_base}.svg"
-"${perf_bin}" report --stdio --no-children --sort comm,dso,symbol --percent-limit 0.1 \
-    -i "${output_base}.data" >"${output_base}.report.txt"
-"${perf_bin}" report --stdio --children --sort comm,dso,symbol --percent-limit 0.1 \
-    -i "${output_base}.data" >"${output_base}.children.txt"
-
-quality_valid=true
+sampling_valid=true
 if ! quality_gate \
     "${output_base}.data" \
     "${output_base}.record.stderr" \
     "${output_base}.quality.txt.tmp"; then
-    quality_valid=false
+    sampling_valid=false
 fi
-sample_count="$(awk '$1 == "SAMPLE" && $2 == "events:" { print $3; exit }' \
-    "${output_base}.quality.txt.tmp")"
-sample_count="${sample_count:-0}"
-if [[ ! "${sample_count}" =~ ^[0-9]+$ ]] || (( sample_count == 0 )); then
-    quality_valid=false
+sample_count="$(sample_count_from_stats "${output_base}.quality.txt.tmp")"
+if [[ ! "${sample_count}" =~ ^[0-9]+$ ]]; then
+    sample_count=0
+    sampling_valid=false
 fi
-sampling_valid="${quality_valid}"
+expected_samples="$(expected_user_samples "${utime_ticks}")"
+flamegraph_available=false
+report_available=false
+unwind_check=not_applicable
+if (( sample_count == 0 )); then
+    if awk -v expected="${expected_samples}" 'BEGIN { exit expected >= 20 ? 0 : 1 }'; then
+        sampling_valid=false
+    fi
+else
+    "${perf_bin}" script --inline -i "${output_base}.data" >"${output_base}.perf-script"
+    "${stackcollapse_bin}" "${output_base}.perf-script" >"${output_base}.folded"
+    "${perf_bin}" report --stdio --no-children --sort comm,dso,symbol --percent-limit 0.1 \
+        -i "${output_base}.data" >"${output_base}.report.txt"
+    "${perf_bin}" report --stdio --children --sort comm,dso,symbol --percent-limit 0.1 \
+        -i "${output_base}.data" >"${output_base}.children.txt"
+    report_available=true
+    if stack_depth_valid "${output_base}.folded"; then
+        unwind_check=passed
+        flamegraph_available=true
+        "${flamegraph_bin}" \
+            --title "Weld ${name} userspace CPU" \
+            --countname samples \
+            "${output_base}.folded" >"${output_base}.svg"
+    else
+        unwind_check=failed
+        sampling_valid=false
+    fi
+fi
+
+quality_valid="${sampling_valid}"
 if [[ "${cpu_accounting_valid}" != true ]]; then
     quality_valid=false
 fi
@@ -570,6 +652,10 @@ fi
     printf 'sampling_valid=%s\n' "${sampling_valid}"
     printf 'cpu_accounting_valid=%s\n' "${cpu_accounting_valid}"
     printf 'sample_count=%s\n' "${sample_count}"
+    printf 'expected_user_samples=%s\n' "${expected_samples}"
+    printf 'flamegraph_available=%s\n' "${flamegraph_available}"
+    printf 'report_available=%s\n' "${report_available}"
+    printf 'unwind_check=%s\n' "${unwind_check}"
     cat "${output_base}.quality.txt.tmp"
 } >"${output_base}.quality.txt"
 rm -f -- "${output_base}.quality.txt.tmp"
@@ -583,5 +669,14 @@ if [[ "${quality_valid}" != true ]]; then
     fail_quality "capture quality failed; inspect ${output_base}.quality.txt and CPU accounting"
 fi
 
-printf '\nSaved perf data: %s.data\nFlamegraph: %s.svg\nFlat report: %s.report.txt\n' \
-    "${output_base}" "${output_base}" "${output_base}"
+printf '\nSaved perf data: %s.data\n' "${output_base}"
+if [[ "${report_available}" == true ]]; then
+    printf 'Flat report: %s.report.txt\n' "${output_base}"
+else
+    printf 'Flat report: unavailable because the capture contained no userspace samples.\n'
+fi
+if [[ "${flamegraph_available}" == true ]]; then
+    printf 'Flamegraph: %s.svg\n' "${output_base}"
+else
+    printf 'Flamegraph: unavailable because the capture contained no userspace samples.\n'
+fi

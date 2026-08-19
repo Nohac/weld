@@ -244,8 +244,9 @@ scripts/profiling/pointer-motion-perf-suite
 Run it from a real TTY. It builds the `perf` Cargo profile once, then records
 three equal-duration DRM sessions: a still pointer, rapid pointer motion, and a
 second still pointer. Each prompt appears before Weld takes over the TTY and
-uses an eight-second countdown. Continue the requested action through the
-three-second loss probe and the main capture, until Weld exits. Options such as
+shows the exact action and timing before its eight-second countdown. Continue
+the requested action through the three-second loss probe and the main capture,
+until Weld exits. Options such as
 `--duration`, `--frequency`, `--mmap-pages`, and `--stack-bytes` apply
 identically to all three runs.
 
@@ -258,8 +259,27 @@ userspace CPU time without depending on CPU frequency. The script also records
 size for every suite member and refuses comparisons when perf reports lost or
 throttled samples, a capture has no samples, task-clock disagrees with the
 process CPU ticks, or the two still baselines differ by more than ten percent
-in task-clock or sample count. The actual task-clock event name and perf stderr
-remain in the artifact set so a NixOS permission fallback is visible.
+in task-clock or sample count. Task-clock drift also has a 50 ms absolute floor
+for scheduling and startup noise, while sample drift has a 20-sample floor
+matching the sampler-correlation threshold. These floors keep tiny nonzero idle
+measurements from becoming meaningless large percentages. The actual
+task-clock event name and perf stderr remain in the artifact set so a NixOS
+permission fallback is visible.
+
+A settled compositor can legitimately accumulate no userspace samples. Weld
+therefore corroborates an empty capture against `/proc` user CPU ticks: zero
+samples are accepted only when the measured user time predicts fewer than 20
+samples at the selected frequency. Such a run retains task-clock and
+user/system accounting but has `flamegraph_available=false`. A nonempty capture
+must contain meaningful multi-frame DWARF stacks before its SVG is accepted.
+Symbol and differential comparisons require sampled still and rapid captures;
+raw CPU accounting remains comparable when an idle baseline has no flamegraph.
+On the verified two-output DRM baseline, the empty compositor accumulated zero
+samples and zero process CPU ticks over the capture and perf reported
+`task-clock` as `<not counted>`. Weld records that as corroborated idle with a
+normalized zero task-clock. The CPU cost under investigation is therefore
+motion- or client-driven; the still runs are controls, while the rapid run is
+the substantive flamegraph.
 
 The suite writes artifacts below a timestamped directory in
 `target/perf-traces/`; standalone `run-perf` calls use timestamped flat files

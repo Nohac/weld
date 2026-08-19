@@ -39,7 +39,10 @@ stack_bytes=16384
 output_dir=""
 force=false
 readonly PROMPT_SECONDS=8
+readonly PREFLIGHT_SECONDS=3
 readonly DRIFT_LIMIT_PERCENT=10
+readonly TASK_CLOCK_DRIFT_FLOOR_MSEC=50
+readonly SAMPLE_DRIFT_FLOOR=20
 
 while (( $# > 0 )); do
     case "$1" in
@@ -102,6 +105,7 @@ runner_options=(
     --mmap-pages "${mmap_pages}"
     --stack-bytes "${stack_bytes}"
     --no-build
+    --no-print-instructions
 )
 if [[ "${force}" == true ]]; then
     runner_options+=(--force)
@@ -112,7 +116,12 @@ run_profile() {
     local label="$2"
     local action="$3"
     printf '\nNext profile %s of 3: %s\n' "${number}" "${label}"
-    printf 'Starting in %s seconds. Follow the action until Weld exits.\n' "${PROMPT_SECONDS}"
+    printf 'Instructions: %s\n' "${action}"
+    printf 'Timing after Weld appears: %s seconds warmup, %s seconds preflight, %s seconds capture.\n' \
+        "${warmup}" "${PREFLIGHT_SECONDS}" "${duration}"
+    printf 'Output: %s/%s.*\n' "${output_dir}" "${label}"
+    printf 'Starting in %s seconds. Continue the action until Weld exits.\n' \
+        "${PROMPT_SECONDS}"
     sleep "${PROMPT_SECONDS}"
     set +e
     "${script_dir}/run-perf" \
@@ -165,19 +174,17 @@ metric() {
     awk -F= -v key="${key}" '$1 == key { print $2; exit }' "${file}"
 }
 
-task_clock() {
-    awk -F';' '$3 ~ /^task-clock/ { print $1; exit }' "$1"
-}
-
-still_before_clock="$(task_clock "${output_dir}/still-before.stat.txt")"
-still_after_clock="$(task_clock "${output_dir}/still-after.stat.txt")"
+still_before_clock="$(metric "${output_dir}/still-before.cpu.txt" task_clock_msec)"
+still_after_clock="$(metric "${output_dir}/still-after.cpu.txt" task_clock_msec)"
 still_before_samples="$(metric "${output_dir}/still-before.quality.txt" sample_count)"
 still_after_samples="$(metric "${output_dir}/still-after.quality.txt" sample_count)"
+rapid_samples="$(metric "${output_dir}/rapid.quality.txt" sample_count)"
 for value in \
     "${still_before_clock}" \
     "${still_after_clock}" \
     "${still_before_samples}" \
-    "${still_after_samples}"; do
+    "${still_after_samples}" \
+    "${rapid_samples}"; do
     [[ "${value}" =~ ^[0-9]+([.][0-9]+)?$ ]] || fail "comparison metric is not numeric: ${value}"
 done
 task_clock_drift="$(awk -v first="${still_before_clock}" -v second="${still_after_clock}" '
@@ -187,15 +194,43 @@ task_clock_drift="$(awk -v first="${still_before_clock}" -v second="${still_afte
         printf "%.3f", mean == 0 ? (difference == 0 ? 0 : 100) : 100 * difference / mean
     }
 ')"
-sample_drift="$(awk -v first="${still_before_samples}" -v second="${still_after_samples}" '
-    BEGIN {
-        mean = (first + second) / 2
-        difference = first > second ? first - second : second - first
-        printf "%.3f", mean == 0 ? (difference == 0 ? 0 : 100) : 100 * difference / mean
-    }
-')"
-drift_ok="$(awk -v task="${task_clock_drift}" -v samples="${sample_drift}" \
-    -v limit="${DRIFT_LIMIT_PERCENT}" 'BEGIN { print task <= limit && samples <= limit ? "true" : "false" }')"
+task_clock_difference="$(awk -v first="${still_before_clock}" -v second="${still_after_clock}" \
+    'BEGIN { difference = first > second ? first - second : second - first; printf "%.3f", difference }')"
+sample_drift=not_applicable
+sample_drift_ok=true
+sample_difference=$((still_before_samples > still_after_samples \
+    ? still_before_samples - still_after_samples \
+    : still_after_samples - still_before_samples))
+if (( still_before_samples > 0 && still_after_samples > 0 )); then
+    sample_drift="$(awk -v first="${still_before_samples}" -v second="${still_after_samples}" '
+        BEGIN {
+            mean = (first + second) / 2
+            difference = first > second ? first - second : second - first
+            printf "%.3f", 100 * difference / mean
+        }
+    ')"
+    sample_drift_ok="$(awk \
+        -v drift="${sample_drift}" \
+        -v difference="${sample_difference}" \
+        -v limit="${DRIFT_LIMIT_PERCENT}" \
+        -v floor="${SAMPLE_DRIFT_FLOOR}" \
+        'BEGIN { print drift <= limit || difference <= floor ? "true" : "false" }')"
+fi
+task_clock_drift_ok="$(awk \
+    -v drift="${task_clock_drift}" \
+    -v difference="${task_clock_difference}" \
+    -v limit="${DRIFT_LIMIT_PERCENT}" \
+    -v floor="${TASK_CLOCK_DRIFT_FLOOR_MSEC}" \
+    'BEGIN { print drift <= limit || difference <= floor ? "true" : "false" }')"
+drift_ok=false
+if [[ "${task_clock_drift_ok}" == true && "${sample_drift_ok}" == true ]]; then
+    drift_ok=true
+fi
+symbol_comparison_available=false
+if [[ "${quality_ok}" == true && "${drift_ok}" == true ]] \
+    && (( still_before_samples > 0 && rapid_samples > 0 )); then
+    symbol_comparison_available=true
+fi
 
 summary="${output_dir}/comparison.txt"
 {
@@ -206,13 +241,19 @@ summary="${output_dir}/comparison.txt"
     printf 'stack_bytes=%s\n' "${stack_bytes}"
     printf 'quality_ok=%s\n' "${quality_ok}"
     printf 'still_task_clock_drift_percent=%s\n' "${task_clock_drift}"
+    printf 'still_task_clock_difference_msec=%s\n' "${task_clock_difference}"
+    printf 'task_clock_drift_floor_msec=%s\n' "${TASK_CLOCK_DRIFT_FLOOR_MSEC}"
     printf 'still_sample_drift_percent=%s\n' "${sample_drift}"
+    printf 'still_sample_difference=%s\n' "${sample_difference}"
+    printf 'sample_drift_floor=%s\n' "${SAMPLE_DRIFT_FLOOR}"
     printf 'drift_limit_percent=%s\n' "${DRIFT_LIMIT_PERCENT}"
-    printf 'drift_ok=%s\n\n' "${drift_ok}"
+    printf 'drift_ok=%s\n' "${drift_ok}"
+    printf 'symbol_comparison_available=%s\n\n' "${symbol_comparison_available}"
     for label in still-before rapid still-after; do
         printf '[%s]\n' "${label}"
-        printf 'task_clock_msec=%s\n' "$(task_clock "${output_dir}/${label}.stat.txt")"
         printf 'sample_count=%s\n' "$(metric "${output_dir}/${label}.quality.txt" sample_count)"
+        printf 'flamegraph_available=%s\n' \
+            "$(metric "${output_dir}/${label}.quality.txt" flamegraph_available)"
         cat "${output_dir}/${label}.cpu.txt"
         printf '\n'
     done
@@ -220,14 +261,15 @@ summary="${output_dir}/comparison.txt"
     printf 'from percentage-only symbol columns. Kernel stacks are not captured.\n'
 } >"${summary}"
 
-if [[ "${quality_ok}" == true ]]; then
+if [[ "${quality_ok}" == true ]] \
+    && (( still_before_samples > 0 && still_after_samples > 0 )); then
     "${perf_bin}" diff -c ratio \
         "${output_dir}/still-before.data" "${output_dir}/still-after.data" \
         >"${output_dir}/still-drift.ratio.txt"
 fi
 
 comparison_valid=true
-if [[ "${quality_ok}" == true && "${drift_ok}" == true ]]; then
+if [[ "${symbol_comparison_available}" == true ]]; then
     "${perf_bin}" diff -c ratio \
         "${output_dir}/still-before.data" "${output_dir}/rapid.data" \
         >"${output_dir}/still-to-rapid.ratio.txt"
@@ -242,15 +284,22 @@ if [[ "${quality_ok}" == true && "${drift_ok}" == true ]]; then
         --countname samples \
         "${output_dir}/still-to-rapid.diff.folded" \
         >"${output_dir}/still-to-rapid.diff.svg"
-else
+elif [[ "${quality_ok}" != true || "${drift_ok}" != true ]]; then
     comparison_valid=false
     printf '\nComparison artifacts refused because capture quality or baseline drift failed.\n' \
         >>"${summary}"
     printf 'Comparison artifacts were refused; inspect %s.\n' "${summary}" >&2
+else
+    printf '\nSymbol comparison unavailable because the still baseline or rapid capture had no userspace samples.\n' \
+        >>"${summary}"
 fi
 
-printf '\nPerf suite complete.\nSummary: %s\nRapid flamegraph: %s\n' \
-    "${summary}" "${output_dir}/rapid.svg"
+printf '\nPerf suite complete.\nSummary: %s\n' "${summary}"
+if [[ "$(metric "${output_dir}/rapid.quality.txt" flamegraph_available)" == true ]]; then
+    printf 'Rapid flamegraph: %s\n' "${output_dir}/rapid.svg"
+else
+    printf 'Rapid flamegraph: unavailable because rapid motion produced no userspace samples.\n'
+fi
 if [[ "${comparison_valid}" != true ]]; then
     exit 3
 fi
