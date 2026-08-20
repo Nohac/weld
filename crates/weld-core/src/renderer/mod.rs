@@ -23,7 +23,9 @@ mod composite;
 mod cursor;
 
 pub(crate) use composite::CompositionBlitter;
-pub(crate) use cursor::{CursorOverlay, CursorOverlayRenderer, GpuCursor};
+pub(crate) use cursor::{
+    CursorOverlay, CursorOverlayRenderer, CursorPlaneImage, CursorPlaneSnapshot, GpuCursor,
+};
 
 const CAPTURE_GPU_TIMEOUT: Duration = Duration::from_secs(5);
 

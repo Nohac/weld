@@ -22,7 +22,6 @@ use bevy::{
     picking::pointer::{Location, PointerAction, PointerId, PointerInput},
 };
 use bevy_winit::converters::{convert_logical_key, convert_physical_key_code};
-use leafwing_input_manager::plugin::CentralInputStorePlugin;
 use tracing::warn;
 use winit::{keyboard::PhysicalKey, platform::scancode::PhysicalKeyExtScancode};
 
@@ -41,9 +40,8 @@ use super::{
 const INPUT_WINDOW: bevy::ecs::entity::Entity = bevy::ecs::entity::Entity::PLACEHOLDER;
 
 pub(super) fn register(app: &mut App, targets: Vec<InputOutputTarget>) {
-    if !app.is_plugin_added::<CentralInputStorePlugin>() {
-        app.add_plugins(CentralInputStorePlugin);
-    }
+    // Leafwing's client InputManagerPlugin installs its central store on demand.
+    // Server-mode users must install that store themselves if they need projection.
     app.insert_resource(InputTargets(targets))
         .add_message::<TouchpadGesture>()
         .init_resource::<RawInputIngress>()

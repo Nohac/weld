@@ -9,12 +9,6 @@ use bevy::{
         resource::Resource,
         world::World,
     },
-    input::keyboard::KeyCode,
-    prelude::Reflect,
-};
-use leafwing_input_manager::{
-    plugin::InputManagerPlugin,
-    prelude::{Actionlike, ButtonlikeChord, InputMap, ModifierKey},
 };
 
 use super::{
@@ -23,18 +17,6 @@ use super::{
 };
 use crate::{ActiveBackend, WeldAppExt};
 use weld_core::runtime::{HostCommand, OutputScaleAdjustment};
-
-#[derive(Actionlike, Clone, Copy, Debug, Eq, Hash, PartialEq, Reflect)]
-pub(super) enum GlobalAction {
-    Terminal,
-    Firefox,
-    Blender,
-    IncreaseScale,
-    DecreaseScale,
-    MatchPhysicalScale,
-    ToggleOutputTopology,
-    Exit,
-}
 
 /// Application-owned action produced by a consumed global shortcut.
 #[derive(Clone, Copy, Debug, Eq, Message, PartialEq)]
@@ -53,24 +35,13 @@ enum GlobalShortcutCommand {
 
 #[derive(Clone, Copy)]
 struct GlobalShortcutDefinition {
-    action: GlobalAction,
     trigger: LinuxKeycode,
-    trigger_key: KeyCode,
     shift: bool,
     drm_only: bool,
     command: GlobalShortcutCommand,
 }
 
 impl GlobalShortcutDefinition {
-    fn binding(self) -> ButtonlikeChord {
-        let binding = ButtonlikeChord::modified(ModifierKey::Super, self.trigger_key);
-        if self.shift {
-            binding.with(ModifierKey::Shift)
-        } else {
-            binding
-        }
-    }
-
     fn host_command(self) -> Option<HostCommand> {
         match self.command {
             GlobalShortcutCommand::Launch(program) => Some(HostCommand::Launch {
@@ -101,65 +72,49 @@ impl GlobalShortcutDefinition {
 
 const GLOBAL_SHORTCUTS: [GlobalShortcutDefinition; 8] = [
     GlobalShortcutDefinition {
-        action: GlobalAction::Terminal,
         trigger: LinuxKeycode(28),
-        trigger_key: KeyCode::Enter,
         shift: false,
         drm_only: false,
         command: GlobalShortcutCommand::Launch("foot"),
     },
     GlobalShortcutDefinition {
-        action: GlobalAction::Firefox,
         trigger: LinuxKeycode(33),
-        trigger_key: KeyCode::KeyF,
         shift: false,
         drm_only: false,
         command: GlobalShortcutCommand::Launch("firefox"),
     },
     GlobalShortcutDefinition {
-        action: GlobalAction::Blender,
         trigger: LinuxKeycode(48),
-        trigger_key: KeyCode::KeyB,
         shift: false,
         drm_only: false,
         command: GlobalShortcutCommand::Launch("blender"),
     },
     GlobalShortcutDefinition {
-        action: GlobalAction::IncreaseScale,
         trigger: LinuxKeycode(13),
-        trigger_key: KeyCode::Equal,
         shift: false,
         drm_only: true,
         command: GlobalShortcutCommand::AdjustOutputScale(OutputScaleAdjustment::Increase),
     },
     GlobalShortcutDefinition {
-        action: GlobalAction::DecreaseScale,
         trigger: LinuxKeycode(12),
-        trigger_key: KeyCode::Minus,
         shift: false,
         drm_only: true,
         command: GlobalShortcutCommand::AdjustOutputScale(OutputScaleAdjustment::Decrease),
     },
     GlobalShortcutDefinition {
-        action: GlobalAction::MatchPhysicalScale,
         trigger: LinuxKeycode(32),
-        trigger_key: KeyCode::KeyD,
         shift: true,
         drm_only: true,
         command: GlobalShortcutCommand::MatchPhysicalScale,
     },
     GlobalShortcutDefinition {
-        action: GlobalAction::ToggleOutputTopology,
         trigger: LinuxKeycode(24),
-        trigger_key: KeyCode::KeyO,
         shift: true,
         drm_only: false,
         command: GlobalShortcutCommand::Application(GlobalShortcutAction::ToggleOutputTopology),
     },
     GlobalShortcutDefinition {
-        action: GlobalAction::Exit,
         trigger: LinuxKeycode(1),
-        trigger_key: KeyCode::Escape,
         shift: true,
         drm_only: false,
         command: GlobalShortcutCommand::Exit,
@@ -184,24 +139,13 @@ impl Plugin for GlobalShortcutPlugin {
             .into_iter()
             .filter(|shortcut| !shortcut.drm_only || backend == Some(ActiveBackend::Drm))
             .collect::<Vec<_>>();
-        let input_map = global_shortcut_map(&shortcuts);
-        app.add_plugins(InputManagerPlugin::<GlobalAction>::default())
-            .add_message::<GlobalShortcutAction>()
+        app.add_message::<GlobalShortcutAction>()
             .init_resource::<GlobalHostCommands>()
             .insert_resource(RawGlobalShortcutState {
-                shortcuts: shortcuts.clone(),
+                shortcuts,
                 pressed: HashSet::new(),
             });
-        app.world_mut().spawn(input_map);
     }
-}
-
-fn global_shortcut_map(shortcuts: &[GlobalShortcutDefinition]) -> InputMap<GlobalAction> {
-    let mut input_map = InputMap::default();
-    for shortcut in shortcuts {
-        input_map.insert(shortcut.action, shortcut.binding());
-    }
-    input_map
 }
 
 pub(crate) fn filter_global_shortcut_event(world: &mut World, event: &RawSeatEvent) -> bool {

@@ -13,9 +13,10 @@ Smithay owns the DRM device, connector/CRTC state, GBM swapchain, page flips,
 and vblank retirement. Weld uses `GbmBufferedSurface` as the scanout allocator
 and KMS sink, but does not use Smithay render elements or a Smithay renderer.
 wgpu imports each leased scanout DMA-BUF, Bevy renders the full scene directly
-into it, and a scissored pass overlays the compositor cursor before ownership
-returns to KMS. There is no intermediate full-output texture or scene blit on
-the active physical path.
+into it, and the kernel hardware cursor normally presents independently. A
+scissored wgpu pass remains the explicit fallback for unsupported or oversized
+cursors. There is no intermediate full-output texture or scene blit on the
+active physical path.
 
 `weld-app` retains an owned texture behind the same stable Bevy camera handle.
 That texture becomes the destination while the VT/output is inactive or a
@@ -354,20 +355,66 @@ For a physical frame, core acquires the leased image first and passes its view
 as an external destination. The shared wgpu queue then orders the raw Vulkan
 acquire, Bevy's render submissions, the scissored cursor pass, and the raw
 foreign release. The output camera performs an opaque full-target clear before
-the cursor pass uses `LoadOp::Load`; changing that camera to a non-writing clear
-mode would violate the initialization contract for a fresh imported buffer.
+the fallback cursor pass uses `LoadOp::Load`; changing that camera to a
+non-writing clear mode would violate the initialization contract for a fresh
+imported buffer.
 The completion worker waits only for the final release submission. Tickets
 carry presenter generation, session epoch, and frame identity so late results
 cannot release newer work.
 
 Direct composition is serialized behind scanout availability. This removes the
 old full-output blit but also removes the previous overlap where Bevy rendered
-into a second offscreen target while the worker prepared the first. Cursor
-motion requests one refresh-capped composition rather than re-presenting a
-retained scene independently; a KMS cursor plane remains the route to decouple
-cursor latency from Bevy composition. The measured input and presentation
-evidence and the allocation-free hot-path direction are recorded in
-[Input performance](input-performance.md).
+into a second offscreen target while the worker prepared the first. The
+measured input and presentation evidence and the allocation-free hot-path
+direction are recorded in [Input performance](input-performance.md).
+
+### Hardware cursor fast path
+
+DRM cursor motion normally bypasses Bevy composition. Weld resolves the same
+theme, client cursor, output scale, crop, natural physical size, and hotspot as
+the GPU path, then pads that raster into the device-reported fixed cursor
+extent. Image changes use `DRM_IOCTL_MODE_CURSOR2`; position-only changes use
+`DRM_IOCTL_MODE_CURSOR`. Moving uses the hotspot-subtracted physical origin,
+while `CURSOR2` also receives the true hotspot for virtualized drivers. A
+GPU-to-hardware transition requests one cursor-free composition to erase any
+cursor baked into the current primary buffer. Later hardware position changes
+do not request Bevy work. A runtime fallback can briefly hide or duplicate the
+cursor while the replacing GPU composition reaches scanout; it does not leave
+both presentation modes active after that transition frame.
+
+The CPU raster premultiplies encoded BGRA bytes before resampling, matching the
+alpha-interpolation order of the GPU shader. The shader performs that operation
+after its sRGB texture decode, so antialiased edge values need not be byte-exact
+between the encoded-space hardware buffer and linear-space wgpu fallback.
+
+These cursor ioctls are a compatibility fast path, not the final KMS ownership
+model. The kernel API is deprecated in favor of cursor planes. Drivers with
+asynchronous cursor-plane updates, including the expected modern AMD and Intel
+paths, can apply them independently of the primary page flip. A driver without
+that support may fall back to a blocking atomic update and stall the host loop
+for as much as one refresh interval; use the pointer-motion perf suite to
+measure the actual driver path. Allocation, ioctl, size, session, or cursor
+support failures select the existing wgpu overlay explicitly rather than
+silently losing the cursor. GBM mapping for `CURSOR | WRITE` allocations is
+also driver-dependent. The startup resource message is only a capability hint;
+`hardware cursor is active` proves that buffer mapping, image attachment, and
+the first move all succeeded at least once. A later oversized cursor can still
+use the GPU overlay for that state. A `GPU cursor fallback` or
+`hardware cursor failed` message identifies a fallback path. Check the result
+after the DRM validation run:
+
+```sh
+rg 'hardware cursor is active|hardware cursor failed|GPU cursor fallback' \
+  target/validation/gbm-kms.log
+```
+
+The intended replacement is a unified atomic commit builder that submits the
+primary and cursor planes together when a scene frame exists and submits a
+cursor-only commit when it does not. Weld's current custom
+`GbmBufferedSurface` presenter cannot add cursor state to the primary swapchain
+commit. Adding a second independent atomic page-flip stream would introduce
+vblank arbitration, starvation, and ambiguous late events across VT epochs, so
+it is deliberately not used as an intermediate design.
 
 When no physical target is usable, composition selects the retained texture and
 continues demand-driven. A screenshot also selects that target and reads it

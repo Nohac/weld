@@ -290,12 +290,6 @@ fn global_shortcut_is_consumed_before_the_frame_and_still_buffered() {
     );
 
     app.update();
-    let action = app
-        .world_mut()
-        .query::<&ActionState<super::shortcuts::GlobalAction>>()
-        .single(app.world())
-        .expect("global shortcut should retain its Leafwing mapping");
-    assert!(action.pressed(&super::shortcuts::GlobalAction::Firefox));
     assert!(take_input_effects(app.world_mut()).is_empty());
 
     let trigger_release = RawSeatEvent::new(

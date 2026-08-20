@@ -277,7 +277,160 @@ impl PartialEq for CursorOverlay {
 
 pub(crate) struct CursorEvaluation {
     pub(crate) overlay: CursorOverlay,
+    pub(crate) plane: CursorPlaneSnapshot,
     pub(crate) next_animation: Option<Instant>,
+}
+
+/// Backend-neutral cursor pixels and physical geometry for a KMS cursor plane.
+#[derive(Clone, Debug)]
+pub(crate) struct CursorPlaneSnapshot {
+    image: Option<CursorPlaneImage>,
+    origin_x: i32,
+    origin_y: i32,
+    hotspot_x: i32,
+    hotspot_y: i32,
+}
+
+impl CursorPlaneSnapshot {
+    pub(crate) const fn hidden() -> Self {
+        Self {
+            image: None,
+            origin_x: 0,
+            origin_y: 0,
+            hotspot_x: 0,
+            hotspot_y: 0,
+        }
+    }
+
+    pub(crate) const fn image(&self) -> Option<&CursorPlaneImage> {
+        self.image.as_ref()
+    }
+
+    pub(crate) const fn origin(&self) -> (i32, i32) {
+        (self.origin_x, self.origin_y)
+    }
+
+    pub(crate) const fn hotspot(&self) -> (i32, i32) {
+        (self.hotspot_x, self.hotspot_y)
+    }
+
+    fn visible(
+        pixels: Arc<[u8]>,
+        texture_width: u32,
+        texture_height: u32,
+        geometry: CursorGeometry,
+        pointer_x: f64,
+        pointer_y: f64,
+        output_scale: f64,
+    ) -> Option<Self> {
+        let width = rounded_extent(geometry.width)?;
+        let height = rounded_extent(geometry.height)?;
+        Some(Self {
+            image: Some(CursorPlaneImage::new(
+                pixels,
+                texture_width,
+                texture_height,
+                geometry,
+                width,
+                height,
+            )),
+            origin_x: geometry.origin_x.round() as i32,
+            origin_y: geometry.origin_y.round() as i32,
+            hotspot_x: (pointer_x * output_scale - f64::from(geometry.origin_x)).round() as i32,
+            hotspot_y: (pointer_y * output_scale - f64::from(geometry.origin_y)).round() as i32,
+        })
+    }
+}
+
+impl Default for CursorPlaneSnapshot {
+    fn default() -> Self {
+        Self::hidden()
+    }
+}
+
+impl PartialEq for CursorPlaneSnapshot {
+    fn eq(&self, other: &Self) -> bool {
+        self.origin_x == other.origin_x
+            && self.origin_y == other.origin_y
+            && self.hotspot_x == other.hotspot_x
+            && self.hotspot_y == other.hotspot_y
+            && match (&self.image, &other.image) {
+                (Some(left), Some(right)) => left == right,
+                (None, None) => true,
+                _ => false,
+            }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct CursorPlaneImage {
+    pixels: Arc<[u8]>,
+    texture_width: u32,
+    texture_height: u32,
+    source_x: f32,
+    source_y: f32,
+    source_width: f32,
+    source_height: f32,
+    width: u32,
+    height: u32,
+}
+
+impl CursorPlaneImage {
+    pub(crate) fn new(
+        pixels: Arc<[u8]>,
+        texture_width: u32,
+        texture_height: u32,
+        geometry: CursorGeometry,
+        width: u32,
+        height: u32,
+    ) -> Self {
+        Self {
+            pixels,
+            texture_width,
+            texture_height,
+            source_x: geometry.source_x,
+            source_y: geometry.source_y,
+            source_width: geometry.source_width,
+            source_height: geometry.source_height,
+            width,
+            height,
+        }
+    }
+
+    pub(crate) fn pixels(&self) -> &Arc<[u8]> {
+        &self.pixels
+    }
+
+    pub(crate) const fn texture_extent(&self) -> (u32, u32) {
+        (self.texture_width, self.texture_height)
+    }
+
+    pub(crate) const fn source(&self) -> (f32, f32, f32, f32) {
+        (
+            self.source_x,
+            self.source_y,
+            self.source_width,
+            self.source_height,
+        )
+    }
+
+    pub(crate) const fn extent(&self) -> (u32, u32) {
+        (self.width, self.height)
+    }
+}
+
+impl PartialEq for CursorPlaneImage {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.pixels, &other.pixels)
+            && self.texture_width == other.texture_width
+            && self.texture_height == other.texture_height
+            && self.source_x == other.source_x
+            && self.source_y == other.source_y
+            && self.source_width == other.source_width
+            && self.source_height == other.source_height
+            && self.width == other.width
+            && self.height == other.height
+    }
 }
 
 pub(crate) struct GpuCursor {
@@ -393,6 +546,16 @@ impl GpuCursor {
                 selected.frame.height,
                 geometry,
             ),
+            plane: CursorPlaneSnapshot::visible(
+                Arc::clone(&selected.frame.pixels),
+                selected.frame.width,
+                selected.frame.height,
+                geometry,
+                position.x,
+                position.y,
+                self.output_scale,
+            )
+            .unwrap_or_else(CursorPlaneSnapshot::hidden),
             next_animation: selected
                 .next_frame_after
                 .and_then(|delay| now.checked_add(delay)),
@@ -424,6 +587,16 @@ impl GpuCursor {
         );
         CursorEvaluation {
             overlay: CursorOverlay::visible(texture, image.width, image.height, geometry),
+            plane: CursorPlaneSnapshot::visible(
+                Arc::clone(&image.pixels),
+                image.width,
+                image.height,
+                geometry,
+                position.x,
+                position.y,
+                self.output_scale,
+            )
+            .unwrap_or_else(CursorPlaneSnapshot::hidden),
             next_animation: None,
         }
     }
@@ -507,12 +680,24 @@ impl GpuCursor {
 fn hidden_evaluation() -> CursorEvaluation {
     CursorEvaluation {
         overlay: CursorOverlay::hidden(),
+        plane: CursorPlaneSnapshot::hidden(),
         next_animation: None,
     }
 }
 
+fn rounded_extent(value: f32) -> Option<u32> {
+    value
+        .is_finite()
+        .then(|| value.round())
+        .filter(|value| *value >= 1.0 && *value <= u32::MAX as f32)
+        .map(|value| value as u32)
+}
+
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
+    use super::{CursorGeometry, CursorPlaneSnapshot};
     use wgpu::naga::{
         front::wgsl::parse_str,
         valid::{Capabilities, ValidationFlags, Validator},
@@ -524,5 +709,32 @@ mod tests {
         Validator::new(ValidationFlags::all(), Capabilities::all())
             .validate(&module)
             .expect("valid WGSL module");
+    }
+
+    #[test]
+    fn hardware_snapshot_preserves_origin_hotspot_and_natural_extent() {
+        let snapshot = CursorPlaneSnapshot::visible(
+            Arc::from([0, 0, 0, 255]),
+            1,
+            1,
+            CursorGeometry {
+                origin_x: 23.4,
+                origin_y: 11.6,
+                width: 30.4,
+                height: 29.6,
+                source_x: 0.0,
+                source_y: 0.0,
+                source_width: 1.0,
+                source_height: 1.0,
+            },
+            20.0,
+            10.0,
+            1.5,
+        )
+        .expect("valid hardware cursor snapshot");
+
+        assert_eq!(snapshot.origin(), (23, 12));
+        assert_eq!(snapshot.hotspot(), (7, 3));
+        assert_eq!(snapshot.image().map(|image| image.extent()), Some((30, 30)));
     }
 }

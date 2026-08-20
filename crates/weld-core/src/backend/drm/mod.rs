@@ -48,7 +48,7 @@ use crate::{
         OutputConfiguration, OutputFootprintProvenance, OutputHead, OutputId, OutputLayout,
         OutputTopology,
     },
-    renderer::{CursorOverlay, GpuCursor, read_composition_rgba, write_png},
+    renderer::{CursorOverlay, CursorPlaneSnapshot, GpuCursor, read_composition_rgba, write_png},
     runtime::{
         ChildProcesses, FRAME_INTERVAL, FrameState, HostCommand, HostCommandEffect, LoopData,
         PendingCapture, REMOTE_DEBUG_MAINTENANCE_INTERVAL, iteration_work, server_mut,
@@ -58,6 +58,7 @@ use crate::{
 
 mod discovery;
 mod gpu;
+mod hardware_cursor;
 mod presenter;
 
 use discovery::{DrmDeviceDiscovery, connector_name, discover_outputs, output_description};
@@ -203,28 +204,42 @@ impl Presenters {
         }
     }
 
-    fn frame_submitted(&mut self, crtc: smithay::reexports::drm::control::crtc::Handle) {
+    fn frame_submitted(&mut self, crtc: smithay::reexports::drm::control::crtc::Handle) -> bool {
+        let mut composition_required = false;
         for presenter in self.handles.values_mut() {
-            presenter.frame_submitted(crtc);
+            composition_required |= presenter.frame_submitted(crtc);
         }
+        composition_required
     }
 
-    fn finish_frames(
+    fn update_cursors(
         &mut self,
-        frames: &mut Vec<(OutputId, AcquiredFrame)>,
-        cursors: &HashMap<OutputId, CursorOverlay>,
-    ) -> Result<()> {
+        planes: &HashMap<OutputId, CursorPlaneSnapshot>,
+        overlays: &HashMap<OutputId, CursorOverlay>,
+    ) -> bool {
+        let mut composition_required = false;
+        for (output, presenter) in &mut self.handles {
+            let plane = planes
+                .get(output)
+                .cloned()
+                .unwrap_or_else(CursorPlaneSnapshot::hidden);
+            let overlay = overlays
+                .get(output)
+                .cloned()
+                .unwrap_or_else(CursorOverlay::hidden);
+            composition_required |= presenter.update_cursor(plane, overlay);
+        }
+        composition_required
+    }
+
+    fn finish_frames(&mut self, frames: &mut Vec<(OutputId, AcquiredFrame)>) -> Result<()> {
         let mut pending = frames.drain(..);
         while let Some((output, frame)) = pending.next() {
             let Some(presenter) = self.handles.get_mut(&output) else {
                 self.abort_frame_iter(pending.by_ref());
                 anyhow::bail!("presenter for output {output:?} disappeared");
             };
-            let cursor = cursors
-                .get(&output)
-                .cloned()
-                .unwrap_or_else(CursorOverlay::hidden);
-            if let Err(error) = presenter.finish_frame(&frame, &cursor) {
+            if let Err(error) = presenter.finish_frame(&frame) {
                 presenter.abort_frame(frame);
                 self.abort_frame_iter(pending.by_ref());
                 return Err(error).with_context(|| format!("failed to finalize output {output:?}"));
@@ -299,6 +314,7 @@ struct DrmHostCommandContext<'a> {
 struct DrmCursor {
     gpus: HashMap<OutputId, GpuCursor>,
     overlays: HashMap<OutputId, CursorOverlay>,
+    planes: HashMap<OutputId, CursorPlaneSnapshot>,
     outputs: Vec<OutputConfiguration>,
     animation_deadline: Option<Instant>,
     position: Option<InputPosition>,
@@ -330,9 +346,14 @@ impl DrmCursor {
             .iter()
             .map(|output| (output.id(), CursorOverlay::hidden()))
             .collect();
+        let planes = outputs
+            .iter()
+            .map(|output| (output.id(), CursorPlaneSnapshot::hidden()))
+            .collect();
         Self {
             gpus,
             overlays,
+            planes,
             outputs,
             animation_deadline: None,
             position: None,
@@ -379,7 +400,12 @@ impl DrmCursor {
         }
     }
 
-    fn refresh(&mut self, server: &mut ServerState, frame_state: &mut FrameState, now: Instant) {
+    fn refresh(
+        &mut self,
+        server: &mut ServerState,
+        presenters: &mut Presenters,
+        now: Instant,
+    ) -> bool {
         if let Some(image) = server.take_cursor_image() {
             for gpu in self.gpus.values_mut() {
                 gpu.set_image(image.clone(), now);
@@ -390,10 +416,9 @@ impl DrmCursor {
             let Some(gpu) = self.gpus.get_mut(&output.id()) else {
                 continue;
             };
-            let position = self.position.map(|position| InputPosition {
-                x: position.x - f64::from(output.position().x),
-                y: position.y - f64::from(output.position().y),
-            });
+            let position = self
+                .position
+                .and_then(|position| output_local_cursor_position(*output, position));
             gpu.set_position(position);
             gpu.set_output_scale(output.scale().value());
             let evaluated = gpu.evaluate(now);
@@ -406,12 +431,24 @@ impl DrmCursor {
                 .overlays
                 .entry(output.id())
                 .or_insert_with(CursorOverlay::hidden);
-            if evaluated.overlay != *overlay {
-                *overlay = evaluated.overlay;
-                frame_state.request_composition();
-            }
+            *overlay = evaluated.overlay;
+            self.planes.insert(output.id(), evaluated.plane);
         }
+        presenters.update_cursors(&self.planes, &self.overlays)
     }
+}
+
+fn output_local_cursor_position(
+    output: OutputConfiguration,
+    position: InputPosition,
+) -> Option<InputPosition> {
+    output
+        .logical_rect()
+        .contains(position.x, position.y)
+        .then(|| InputPosition {
+            x: position.x - f64::from(output.position().x),
+            y: position.y - f64::from(output.position().y),
+        })
 }
 
 fn apply_host_command(
@@ -944,6 +981,7 @@ pub(crate) fn prepare(options: RunOptions, signals: Signals) -> Result<PreparedH
         let mut presenter_worker = PresenterWorker::spawn(&gpu, presenter_events)?;
         let mut presenter_handles = HashMap::with_capacity(prepared_outputs.len());
         let mut monitored_outputs = HashMap::with_capacity(prepared_outputs.len());
+        let cursor_extent = drm_device.cursor_size();
         for output in prepared_outputs {
             let presenter = PresenterHandle::new(
                 &gpu,
@@ -951,6 +989,7 @@ pub(crate) fn prepare(options: RunOptions, signals: Signals) -> Result<PreparedH
                 drm.clone(),
                 output.id,
                 output.crtc,
+                (cursor_extent.w, cursor_extent.h),
                 &presenter_worker,
             )?;
             presenter_handles.insert(output.id, presenter);
@@ -1121,7 +1160,9 @@ pub(crate) fn prepare(options: RunOptions, signals: Signals) -> Result<PreparedH
                         }
                         DrmRuntimeEvent::Drm(DrmEvent::VBlank(crtc)) => {
                             event_counts[3] += 1;
-                            presenters.frame_submitted(crtc);
+                            if presenters.frame_submitted(crtc) {
+                                frame_state.request_composition();
+                            }
                         }
                         DrmRuntimeEvent::Drm(DrmEvent::Error(error)) => {
                             event_counts[3] += 1;
@@ -1192,8 +1233,10 @@ pub(crate) fn prepare(options: RunOptions, signals: Signals) -> Result<PreparedH
                 break;
             }
 
-            if cursor_position_changed {
-                cursor.refresh(&mut loop_data.server, &mut frame_state, Instant::now());
+            if cursor_position_changed
+                && cursor.refresh(&mut loop_data.server, &mut presenters, Instant::now())
+            {
+                frame_state.request_composition();
             }
 
             if input_pending {
@@ -1341,7 +1384,9 @@ pub(crate) fn prepare(options: RunOptions, signals: Signals) -> Result<PreparedH
                 }
             }
 
-            cursor.refresh(&mut loop_data.server, &mut frame_state, now);
+            if cursor.refresh(&mut loop_data.server, &mut presenters, now) {
+                frame_state.request_composition();
+            }
 
             if work.advance_main {
                 loop_data.server.flush_pending_resizes();
@@ -1426,7 +1471,7 @@ pub(crate) fn prepare(options: RunOptions, signals: Signals) -> Result<PreparedH
                 };
 
                 if acquired {
-                    match presenters.finish_frames(&mut acquired_frames, &cursor.overlays) {
+                    match presenters.finish_frames(&mut acquired_frames) {
                         Ok(()) => frame_state.presented(),
                         Err(error) => {
                             error!(%error, "failed to finalize a physical output batch");
@@ -1676,7 +1721,8 @@ mod tests {
         DispatchTimeoutContext, FrameState, MonitoredOutput, OutputConfiguration, OutputId,
         OutputLayout, OutputScale, OutputTopology, PresenterTargetAvailability,
         REMOTE_DEBUG_MAINTENANCE_INTERVAL, batch_target_availability, center_primary_below_others,
-        dispatch_timeout, refresh_physical_output_ids, refresh_presentable_output_ids,
+        dispatch_timeout, output_local_cursor_position, refresh_physical_output_ids,
+        refresh_presentable_output_ids,
     };
     use crate::{
         input::{InputDelta, InputPosition},
@@ -1923,6 +1969,36 @@ mod tests {
             ]),
             PresenterTargetAvailability::Busy
         );
+    }
+
+    #[test]
+    fn cursor_position_maps_to_at_most_one_output() {
+        let first = output(1, 100, 100, 1.0, true);
+        let second = output(2, 100, 100, 1.0, false)
+            .with_position(LogicalPoint::new(120.0, 0.0))
+            .expect("valid disjoint output position");
+        let outputs = [first, second];
+
+        for position in [
+            InputPosition::new(10.0, 10.0),
+            InputPosition::new(125.0, 10.0),
+            InputPosition::new(110.0, 10.0),
+        ] {
+            assert!(
+                outputs
+                    .iter()
+                    .filter_map(|output| output_local_cursor_position(*output, position))
+                    .count()
+                    <= 1
+            );
+        }
+        assert_eq!(
+            output_local_cursor_position(second, InputPosition::new(125.0, 10.0)),
+            Some(InputPosition::new(5.0, 10.0))
+        );
+        assert!(outputs.iter().all(|output| {
+            output_local_cursor_position(*output, InputPosition::new(110.0, 10.0)).is_none()
+        }));
     }
 
     #[test]

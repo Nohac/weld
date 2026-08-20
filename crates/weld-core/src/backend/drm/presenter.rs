@@ -25,11 +25,11 @@ use tracing::{debug, warn};
 use crate::{
     host::CompositionTargetView,
     output::OutputId,
-    renderer::{CursorOverlay, CursorOverlayRenderer},
+    renderer::{CursorOverlay, CursorOverlayRenderer, CursorPlaneSnapshot},
     surface::Extent,
 };
 
-use super::gpu::DrmGpu;
+use super::{gpu::DrmGpu, hardware_cursor::HardwareCursor};
 
 const PRESENTER_GENERATION: u64 = 1;
 const TRANSIENT_RECOVERY_ATTEMPTS: u8 = 3;
@@ -367,6 +367,9 @@ pub(super) struct PresenterHandle {
     queue: wgpu::Queue,
     imports: ScanoutImportCache,
     cursor_renderer: CursorOverlayRenderer,
+    hardware_cursor: Option<HardwareCursor>,
+    desired_cursor_overlay: CursorOverlay,
+    effective_cursor_overlay: CursorOverlay,
 }
 
 impl PresenterHandle {
@@ -376,6 +379,7 @@ impl PresenterHandle {
         drm_fd: DrmDeviceFd,
         output: OutputId,
         crtc: crtc::Handle,
+        cursor_extent: (u32, u32),
         worker: &PresenterWorker,
     ) -> Result<Self> {
         let gbm = GbmDevice::new(drm_fd.clone()).context("failed to create GBM device")?;
@@ -401,6 +405,7 @@ impl PresenterHandle {
 
         let imports = ScanoutImportCache::new(&gpu.device)?;
         let cursor_renderer = CursorOverlayRenderer::new(&gpu.device, &gpu.queue, SCANOUT_FORMAT);
+        let hardware_cursor = HardwareCursor::new(drm_fd, crtc, cursor_extent);
 
         Ok(Self {
             commands: worker.commands.clone(),
@@ -416,6 +421,9 @@ impl PresenterHandle {
             queue: gpu.queue.clone(),
             imports,
             cursor_renderer,
+            hardware_cursor,
+            desired_cursor_overlay: CursorOverlay::hidden(),
+            effective_cursor_overlay: CursorOverlay::hidden(),
         })
     }
 
@@ -472,11 +480,7 @@ impl PresenterHandle {
         acquired
     }
 
-    pub(super) fn finish_frame(
-        &mut self,
-        frame: &AcquiredFrame,
-        cursor: &CursorOverlay,
-    ) -> Result<()> {
+    pub(super) fn finish_frame(&mut self, frame: &AcquiredFrame) -> Result<()> {
         let release = barrier_command(
             &self.device,
             &self.imports.raw_device,
@@ -494,7 +498,7 @@ impl PresenterHandle {
             &mut cursor_encoder,
             frame.target.view(),
             frame.target.extent(),
-            cursor,
+            &self.effective_cursor_overlay,
         );
         let submission = self.queue.submit([cursor_encoder.finish(), release]);
         self.queue_completion(CompletionWork {
@@ -503,6 +507,43 @@ impl PresenterHandle {
             present: true,
         });
         Ok(())
+    }
+
+    pub(super) fn update_cursor(
+        &mut self,
+        plane: CursorPlaneSnapshot,
+        overlay: CursorOverlay,
+    ) -> bool {
+        self.desired_cursor_overlay = overlay;
+        if let Some(cursor) = self.hardware_cursor.as_mut() {
+            cursor.set_desired(plane);
+            cursor.apply();
+        }
+        self.refresh_effective_cursor()
+    }
+
+    fn retry_hardware_cursor(&mut self) -> bool {
+        if let Some(cursor) = self.hardware_cursor.as_mut() {
+            cursor.apply();
+        }
+        self.refresh_effective_cursor()
+    }
+
+    fn refresh_effective_cursor(&mut self) -> bool {
+        let next = if self
+            .hardware_cursor
+            .as_ref()
+            .is_some_and(HardwareCursor::attached)
+        {
+            CursorOverlay::hidden()
+        } else {
+            self.desired_cursor_overlay.clone()
+        };
+        if next == self.effective_cursor_overlay {
+            return false;
+        }
+        self.effective_cursor_overlay = next;
+        true
     }
 
     pub(super) fn abort_frame(&mut self, frame: AcquiredFrame) {
@@ -545,6 +586,9 @@ impl PresenterHandle {
     }
 
     pub(super) fn suspend(&mut self) {
+        if let Some(cursor) = self.hardware_cursor.as_mut() {
+            cursor.suspend();
+        }
         self.lifecycle.suspend();
         self.active = false;
         self.epoch = self.epoch.saturating_add(1);
@@ -568,6 +612,9 @@ impl PresenterHandle {
             .clear_pending_scanout()
             .inspect_err(|_| self.lifecycle.disable())
             .context("failed to clear stale GBM scanout state")?;
+        if let Some(cursor) = self.hardware_cursor.as_mut() {
+            cursor.surface_was_cleared();
+        }
         let epoch = self.epoch;
         self.lifecycle.mark_ready();
         debug!(epoch, "GBM/KMS presenter activated");
@@ -599,10 +646,10 @@ impl PresenterHandle {
         }
     }
 
-    pub(super) fn frame_submitted(&mut self, event_crtc: crtc::Handle) {
+    pub(super) fn frame_submitted(&mut self, event_crtc: crtc::Handle) -> bool {
         if event_crtc != self.crtc {
             debug!(?event_crtc, expected = ?self.crtc, "ignored vblank for another CRTC");
-            return;
+            return false;
         }
         match self.scanout.frame_submitted() {
             Ok(Some(ticket)) => {
@@ -617,9 +664,13 @@ impl PresenterHandle {
                 "failed to retire GBM/KMS frame after vblank: {error}"
             )),
         }
+        self.retry_hardware_cursor()
     }
 
     pub(super) fn stop(&mut self) {
+        if let Some(cursor) = self.hardware_cursor.as_mut() {
+            cursor.suspend();
+        }
         self.lifecycle.suspend();
         self.active = false;
         self.epoch = self.epoch.saturating_add(1);
@@ -700,6 +751,9 @@ impl PresenterHandle {
         }
         match self.scanout.clear_pending_scanout() {
             Ok(()) => {
+                if let Some(cursor) = self.hardware_cursor.as_mut() {
+                    cursor.surface_was_cleared();
+                }
                 self.lifecycle.mark_ready();
             }
             Err(error) => self.report_terminal_unavailable(format!(
