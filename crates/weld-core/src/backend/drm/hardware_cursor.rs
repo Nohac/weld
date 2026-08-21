@@ -32,6 +32,22 @@ enum CursorFailure {
     Permanent(String),
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum HardwareCursorOutcome {
+    Unchanged,
+    Moved,
+    Cleared,
+    Deferred,
+    FallbackExtent,
+    Disabled,
+}
+
+impl HardwareCursorOutcome {
+    pub(super) const fn is_fallback(self) -> bool {
+        matches!(self, Self::FallbackExtent | Self::Disabled)
+    }
+}
+
 /// One output's optional kernel hardware-cursor state.
 pub(super) struct HardwareCursor {
     drm: DrmDeviceFd,
@@ -104,25 +120,41 @@ impl HardwareCursor {
         self.desired = desired;
     }
 
-    pub(super) fn apply(&mut self) {
+    pub(super) fn apply(&mut self) -> HardwareCursorOutcome {
         if self.applied.as_ref() == Some(&self.desired) {
-            return;
+            return HardwareCursorOutcome::Unchanged;
         }
-        if self.disabled || self.desired.image().is_none() {
+        if self.disabled {
+            let was_attached = self.attached;
             self.clear();
-            return;
+            return if was_attached && !self.attached {
+                HardwareCursorOutcome::Disabled
+            } else {
+                HardwareCursorOutcome::Unchanged
+            };
         }
-        if let Err(error) = self.apply_visible() {
-            match error {
+        if self.desired.image().is_none() {
+            self.clear();
+            return HardwareCursorOutcome::Cleared;
+        }
+        match self.apply_visible() {
+            Ok(outcome) => outcome,
+            Err(error) => match error {
                 CursorFailure::Temporary(message) => {
                     debug!(%message, "hardware cursor update deferred");
+                    HardwareCursorOutcome::Deferred
                 }
                 CursorFailure::Permanent(message) => {
                     warn!(%message, "hardware cursor failed; using GPU cursor fallback");
                     self.disabled = true;
                     self.clear();
+                    if self.attached {
+                        HardwareCursorOutcome::Deferred
+                    } else {
+                        HardwareCursorOutcome::Disabled
+                    }
                 }
-            }
+            },
         }
     }
 
@@ -137,7 +169,7 @@ impl HardwareCursor {
         self.applied = None;
     }
 
-    fn apply_visible(&mut self) -> std::result::Result<(), CursorFailure> {
+    fn apply_visible(&mut self) -> std::result::Result<HardwareCursorOutcome, CursorFailure> {
         let image =
             self.desired.image().cloned().ok_or_else(|| {
                 CursorFailure::Permanent("visible cursor lost its image".to_owned())
@@ -152,7 +184,11 @@ impl HardwareCursor {
                 "cursor exceeds the hardware extent; using GPU cursor fallback"
             );
             self.clear();
-            return Ok(());
+            return Ok(if self.attached {
+                HardwareCursorOutcome::Deferred
+            } else {
+                HardwareCursorOutcome::FallbackExtent
+            });
         }
 
         let buffer_changed = requires_buffer_install(
@@ -204,7 +240,7 @@ impl HardwareCursor {
             info!(?self.crtc, "hardware cursor is active");
             self.activation_logged = true;
         }
-        Ok(())
+        Ok(HardwareCursorOutcome::Moved)
     }
 
     fn clear(&mut self) {
@@ -413,7 +449,7 @@ mod tests {
 
     use crate::{cursor::CursorGeometry, renderer::CursorPlaneImage};
 
-    use super::{rasterize_cursor, requires_buffer_install};
+    use super::{HardwareCursorOutcome, rasterize_cursor, requires_buffer_install};
 
     fn image(
         pixels: &[u8],
@@ -469,6 +505,14 @@ mod tests {
 
         assert!(!requires_buffer_install(true, Some(&image), &image));
         assert!(requires_buffer_install(false, Some(&image), &image));
+    }
+
+    #[test]
+    fn only_visible_terminal_failures_count_as_cursor_fallbacks() {
+        assert!(HardwareCursorOutcome::FallbackExtent.is_fallback());
+        assert!(HardwareCursorOutcome::Disabled.is_fallback());
+        assert!(!HardwareCursorOutcome::Deferred.is_fallback());
+        assert!(!HardwareCursorOutcome::Cleared.is_fallback());
     }
 
     #[test]

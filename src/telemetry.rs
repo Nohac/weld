@@ -1,5 +1,7 @@
 //! Process-wide logging and optional Tracy setup.
 
+use std::io::{self, IsTerminal as _};
+
 use anyhow::{Result, anyhow};
 
 #[cfg(feature = "profiling-tracy")]
@@ -19,6 +21,7 @@ pub(crate) fn initialize() -> Result<()> {
 fn initialize_subscriber(filter: tracing_subscriber::EnvFilter) -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(filter)
+        .with_ansi(io::stdout().is_terminal())
         .try_init()
         .map_err(|error| anyhow!("failed to initialize tracing: {error}"))
 }
@@ -35,7 +38,9 @@ fn initialize_subscriber(filter: tracing_subscriber::EnvFilter) -> Result<()> {
     let formatted_filter = filter.and(FilterFn::new(|metadata| {
         metadata.fields().field("tracy.frame_mark").is_none()
     }));
-    let formatted_logs = tracing_subscriber::fmt::layer().with_filter(formatted_filter);
+    let formatted_logs = tracing_subscriber::fmt::layer()
+        .with_ansi(io::stdout().is_terminal())
+        .with_filter(formatted_filter);
     let tracy_filter = Targets::new()
         .with_default(LevelFilter::INFO)
         .with_target(PROFILE_TARGET, LevelFilter::TRACE);

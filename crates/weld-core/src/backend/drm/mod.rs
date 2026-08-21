@@ -53,18 +53,23 @@ use crate::{
         ChildProcesses, FRAME_INTERVAL, FrameState, HostCommand, HostCommandEffect, LoopData,
         PendingCapture, REMOTE_DEBUG_MAINTENANCE_INTERVAL, iteration_work, server_mut,
     },
-    server::{OutputMetrics, ServerOptions, ServerOutputDefinition, ServerState},
+    server::{
+        OutputMetrics, PendingSurfaceEventKind, ServerOptions, ServerOutputDefinition, ServerState,
+    },
 };
 
 mod discovery;
 mod gpu;
 mod hardware_cursor;
+mod metrics;
 mod presenter;
 
 use discovery::{DrmDeviceDiscovery, connector_name, discover_outputs, output_description};
 use gpu::DrmGpu;
+use metrics::DrmRuntimeMetrics;
 use presenter::{
-    AcquiredFrame, PresenterEvent, PresenterHandle, PresenterTargetAvailability, PresenterWorker,
+    AcquiredFrame, CursorUpdateOutcome, PresenterEvent, PresenterHandle,
+    PresenterTargetAvailability, PresenterWorker,
 };
 
 const PRESENTER_SHUTDOWN_DEADLINE: Duration = Duration::from_millis(250);
@@ -204,20 +209,23 @@ impl Presenters {
         }
     }
 
-    fn frame_submitted(&mut self, crtc: smithay::reexports::drm::control::crtc::Handle) -> bool {
-        let mut composition_required = false;
+    fn frame_submitted(
+        &mut self,
+        crtc: smithay::reexports::drm::control::crtc::Handle,
+    ) -> CursorUpdateOutcome {
+        let mut outcome = CursorUpdateOutcome::default();
         for presenter in self.handles.values_mut() {
-            composition_required |= presenter.frame_submitted(crtc);
+            outcome.merge(presenter.frame_submitted(crtc));
         }
-        composition_required
+        outcome
     }
 
     fn update_cursors(
         &mut self,
         planes: &HashMap<OutputId, CursorPlaneSnapshot>,
         overlays: &HashMap<OutputId, CursorOverlay>,
-    ) -> bool {
-        let mut composition_required = false;
+    ) -> CursorUpdateOutcome {
+        let mut outcome = CursorUpdateOutcome::default();
         for (output, presenter) in &mut self.handles {
             let plane = planes
                 .get(output)
@@ -227,9 +235,9 @@ impl Presenters {
                 .get(output)
                 .cloned()
                 .unwrap_or_else(CursorOverlay::hidden);
-            composition_required |= presenter.update_cursor(plane, overlay);
+            outcome.merge(presenter.update_cursor(plane, overlay));
         }
-        composition_required
+        outcome
     }
 
     fn finish_frames(&mut self, frames: &mut Vec<(OutputId, AcquiredFrame)>) -> Result<()> {
@@ -405,7 +413,7 @@ impl DrmCursor {
         server: &mut ServerState,
         presenters: &mut Presenters,
         now: Instant,
-    ) -> bool {
+    ) -> CursorUpdateOutcome {
         if let Some(image) = server.take_cursor_image() {
             for gpu in self.gpus.values_mut() {
                 gpu.set_image(image.clone(), now);
@@ -1022,6 +1030,7 @@ pub(crate) fn prepare(options: RunOptions, signals: Signals) -> Result<PreparedH
             .map(|path| PendingCapture::startup(path, child_requested));
         let remote_debug_enabled = options.remote_debug_enabled;
         let mut frame_state = FrameState::default().with_refresh_millihertz(refresh_millihertz);
+        let mut runtime_metrics = DrmRuntimeMetrics::from_environment(Instant::now());
         let mut next_remote_service = Instant::now();
         let mut cursor = DrmCursor::new(
             &capture_device,
@@ -1074,9 +1083,11 @@ pub(crate) fn prepare(options: RunOptions, signals: Signals) -> Result<PreparedH
                     .dispatch(timeout, &mut loop_data)
                     .context("DRM calloop dispatch failed")?;
             }
+            runtime_metrics.record_loop_iteration();
 
             let mut input_pending = false;
             let mut cursor_position_changed = false;
+            let mut forwarded_client_events = 0_usize;
             if !loop_data.events.is_empty() {
                 let _events_span = tracing::trace_span!(
                     target: crate::PROFILE_TARGET,
@@ -1097,6 +1108,7 @@ pub(crate) fn prepare(options: RunOptions, signals: Signals) -> Result<PreparedH
                             cursor_position_changed |= cursor.observe_input(&event);
                             if shell.enqueue_input_event(event.clone()) {
                                 loop_data.server.forward_raw_input(event);
+                                forwarded_client_events += 1;
                             }
                         }
                         DrmRuntimeEvent::Session(SessionEvent::PauseSession) => {
@@ -1160,7 +1172,9 @@ pub(crate) fn prepare(options: RunOptions, signals: Signals) -> Result<PreparedH
                         }
                         DrmRuntimeEvent::Drm(DrmEvent::VBlank(crtc)) => {
                             event_counts[3] += 1;
-                            if presenters.frame_submitted(crtc) {
+                            let cursor_outcome = presenters.frame_submitted(crtc);
+                            runtime_metrics.record_vblank_cursor_retry(cursor_outcome);
+                            if cursor_outcome.composition_required {
                                 frame_state.request_composition();
                             }
                         }
@@ -1218,6 +1232,7 @@ pub(crate) fn prepare(options: RunOptions, signals: Signals) -> Result<PreparedH
                         }
                     }
                 }
+                runtime_metrics.record_input_batch(event_counts[0], forwarded_client_events);
                 tracing::trace!(
                     target: crate::PROFILE_TARGET,
                     input = event_counts[0],
@@ -1233,10 +1248,13 @@ pub(crate) fn prepare(options: RunOptions, signals: Signals) -> Result<PreparedH
                 break;
             }
 
-            if cursor_position_changed
-                && cursor.refresh(&mut loop_data.server, &mut presenters, Instant::now())
-            {
-                frame_state.request_composition();
+            if cursor_position_changed {
+                let outcome =
+                    cursor.refresh(&mut loop_data.server, &mut presenters, Instant::now());
+                runtime_metrics.record_motion_cursor_refresh(outcome);
+                if outcome.composition_required {
+                    frame_state.request_composition();
+                }
             }
 
             if input_pending {
@@ -1250,13 +1268,19 @@ pub(crate) fn prepare(options: RunOptions, signals: Signals) -> Result<PreparedH
                 )
                 .entered();
                 let mut event_count = 0_usize;
+                let mut commit_count = 0_usize;
                 for event in loop_data.server.take_surface_events() {
+                    commit_count += usize::from(matches!(
+                        &event.kind,
+                        PendingSurfaceEventKind::TreeSnapshot(_)
+                    ));
                     match shell.enqueue_surface_event(event) {
                         CompositionDemand::Ordinary => frame_state.request_composition(),
                         CompositionDemand::Settle => frame_state.request_settled_composition(),
                     }
                     event_count += 1;
                 }
+                runtime_metrics.record_surface_batch(event_count, commit_count);
                 tracing::trace!(
                     target: crate::PROFILE_TARGET,
                     event_count,
@@ -1292,6 +1316,7 @@ pub(crate) fn prepare(options: RunOptions, signals: Signals) -> Result<PreparedH
             let mut bevy_requested_redraw = false;
             if work.advance_main {
                 bevy_requested_redraw = shell.advance_main(started_at.elapsed().as_millis() as u32);
+                runtime_metrics.record_main_update(bevy_requested_redraw);
                 if bevy_requested_redraw {
                     frame_state.request_composition();
                     work.render_composition = !composition_blocked;
@@ -1384,7 +1409,9 @@ pub(crate) fn prepare(options: RunOptions, signals: Signals) -> Result<PreparedH
                 }
             }
 
-            if cursor.refresh(&mut loop_data.server, &mut presenters, now) {
+            let cursor_outcome = cursor.refresh(&mut loop_data.server, &mut presenters, now);
+            runtime_metrics.record_sync_cursor_refresh(cursor_outcome);
+            if cursor_outcome.composition_required {
                 frame_state.request_composition();
             }
 
@@ -1424,6 +1451,7 @@ pub(crate) fn prepare(options: RunOptions, signals: Signals) -> Result<PreparedH
                     presenters.abort_frames(&mut acquired_frames);
                     return Err(error).context("Bevy composition failed");
                 }
+                runtime_metrics.record_composition();
                 let callback_batch = loop_data.server.stage_frame_callbacks();
                 loop_data.server.complete_frame_callbacks(callback_batch);
                 frame_state.composition_rendered(now);
@@ -1471,8 +1499,12 @@ pub(crate) fn prepare(options: RunOptions, signals: Signals) -> Result<PreparedH
                 };
 
                 if acquired {
+                    let acquired_output_count = acquired_frames.len();
                     match presenters.finish_frames(&mut acquired_frames) {
-                        Ok(()) => frame_state.presented(),
+                        Ok(()) => {
+                            runtime_metrics.record_presentation(acquired_output_count);
+                            frame_state.presented();
+                        }
                         Err(error) => {
                             error!(%error, "failed to finalize a physical output batch");
                             frame_state.request_composition();
@@ -1525,6 +1557,7 @@ pub(crate) fn prepare(options: RunOptions, signals: Signals) -> Result<PreparedH
                 loop_data.server.flush_clients();
             }
             children.reap();
+            runtime_metrics.report_if_due(Instant::now());
         }
 
         shutdown_presenter(

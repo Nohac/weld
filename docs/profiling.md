@@ -44,6 +44,49 @@ code. They are always compiled, but normal `info` logging statically disables
 their `weld_profile` trace target at each callsite. Profiling still adds
 instrumentation and is not intended for ordinary development builds.
 
+## DRM runtime counters
+
+For a low-overhead rate check without a Tracy build, enable the standalone DRM
+host's interval counters:
+
+```text
+WELD_DRM_METRICS=1 cargo run --release
+```
+
+The host emits one structured `weld_metrics` info event after each elapsed
+second in which ordinary backend activity wakes it, plus a final partial
+interval during shutdown. Metrics do not install a timer and therefore do not
+wake an otherwise idle compositor. `interval_ms` is the actual duration covered
+by each report; divide counts by it when comparing rates.
+
+The fields distinguish work at each pacing boundary:
+
+- `loop_iterations` counts completed outer DRM host iterations.
+- `input_batches` counts host dispatch iterations containing at least one raw
+  input event. It is not an internal kernel or libinput wake count.
+- `raw_input_events` and `forwarded_client_events` compare converted input with
+  immediate delivery attempts to the focused client.
+- `surface_events` counts events crossing into the application, while
+  `surface_commits` counts their `TreeSnapshot` subset as Weld's observable
+  proxy for client commits.
+- `main_updates` counts Bevy main-world advances, and `redraw_promotions`
+  counts advances whose `RequestRedraw` messages promoted them to composition.
+- `compositions`, `presentation_batches`, and `output_presentations` separate
+  Bevy rendering from accepted physical presentation submissions and
+  multi-output fanout.
+- `cursor_motion_refreshes`, `cursor_sync_refreshes`, and
+  `cursor_vblank_retries` identify the driver of cursor work. Their matching
+  `*_compositions` fields count refreshes that required the GPU cursor overlay
+  to be recomposed.
+- `hardware_cursor_moves` counts successful DRM cursor-move ioctls.
+  `hardware_cursor_fallbacks` counts new oversized-cursor or permanent-failure
+  outcomes, excluding ordinary hiding, VT suspension, and temporary deferral.
+
+The interval counters aggregate the same host boundaries exposed in Tracy by
+`DRM runtime event batch`, `host surface batch`, and `ECS result batch`. Use the
+counters to establish rates first, then use those zones or the Bevy system
+report to attribute the cost inside a busy boundary.
+
 ## Reading Weld zones
 
 Weld's profiling zones follow the host boundary. Backend-specific

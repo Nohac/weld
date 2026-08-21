@@ -29,13 +29,56 @@ use crate::{
     surface::Extent,
 };
 
-use super::{gpu::DrmGpu, hardware_cursor::HardwareCursor};
+use super::{
+    gpu::DrmGpu,
+    hardware_cursor::{HardwareCursor, HardwareCursorOutcome},
+};
 
 const PRESENTER_GENERATION: u64 = 1;
 const TRANSIENT_RECOVERY_ATTEMPTS: u8 = 3;
 const SCANOUT_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Bgra8UnormSrgb;
 
 type ScanoutSurface = GbmBufferedSurface<GbmAllocator<DrmDeviceFd>, FrameTicket>;
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(super) struct CursorUpdateOutcome {
+    pub(super) composition_required: bool,
+    pub(super) hardware_moves: u64,
+    pub(super) fallback_activations: u64,
+    pub(super) vblank_retries: u64,
+}
+
+impl CursorUpdateOutcome {
+    fn from_hardware(
+        outcome: HardwareCursorOutcome,
+        composition_required: bool,
+        fallback_activated: bool,
+    ) -> Self {
+        Self {
+            composition_required,
+            hardware_moves: u64::from(outcome == HardwareCursorOutcome::Moved),
+            fallback_activations: u64::from(fallback_activated),
+            vblank_retries: 0,
+        }
+    }
+
+    pub(super) fn merge(&mut self, other: Self) {
+        self.composition_required |= other.composition_required;
+        self.hardware_moves += other.hardware_moves;
+        self.fallback_activations += other.fallback_activations;
+        self.vblank_retries += other.vblank_retries;
+    }
+}
+
+fn update_cursor_fallback_state(active: &mut bool, outcome: HardwareCursorOutcome) -> bool {
+    let activated = outcome.is_fallback() && !*active;
+    match outcome {
+        HardwareCursorOutcome::Moved | HardwareCursorOutcome::Cleared => *active = false,
+        HardwareCursorOutcome::FallbackExtent | HardwareCursorOutcome::Disabled => *active = true,
+        HardwareCursorOutcome::Unchanged | HardwareCursorOutcome::Deferred => {}
+    }
+    activated
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum PresenterState {
@@ -368,6 +411,7 @@ pub(super) struct PresenterHandle {
     imports: ScanoutImportCache,
     cursor_renderer: CursorOverlayRenderer,
     hardware_cursor: Option<HardwareCursor>,
+    cursor_fallback_active: bool,
     desired_cursor_overlay: CursorOverlay,
     effective_cursor_overlay: CursorOverlay,
 }
@@ -422,6 +466,7 @@ impl PresenterHandle {
             imports,
             cursor_renderer,
             hardware_cursor,
+            cursor_fallback_active: false,
             desired_cursor_overlay: CursorOverlay::hidden(),
             effective_cursor_overlay: CursorOverlay::hidden(),
         })
@@ -513,20 +558,35 @@ impl PresenterHandle {
         &mut self,
         plane: CursorPlaneSnapshot,
         overlay: CursorOverlay,
-    ) -> bool {
+    ) -> CursorUpdateOutcome {
         self.desired_cursor_overlay = overlay;
-        if let Some(cursor) = self.hardware_cursor.as_mut() {
+        let hardware = if let Some(cursor) = self.hardware_cursor.as_mut() {
             cursor.set_desired(plane);
-            cursor.apply();
-        }
-        self.refresh_effective_cursor()
+            cursor.apply()
+        } else {
+            HardwareCursorOutcome::Unchanged
+        };
+        let composition_required = self.refresh_effective_cursor();
+        self.cursor_update_outcome(hardware, composition_required)
     }
 
-    fn retry_hardware_cursor(&mut self) -> bool {
-        if let Some(cursor) = self.hardware_cursor.as_mut() {
-            cursor.apply();
-        }
-        self.refresh_effective_cursor()
+    fn retry_hardware_cursor(&mut self) -> CursorUpdateOutcome {
+        let hardware = self
+            .hardware_cursor
+            .as_mut()
+            .map_or(HardwareCursorOutcome::Unchanged, HardwareCursor::apply);
+        let composition_required = self.refresh_effective_cursor();
+        self.cursor_update_outcome(hardware, composition_required)
+    }
+
+    fn cursor_update_outcome(
+        &mut self,
+        hardware: HardwareCursorOutcome,
+        composition_required: bool,
+    ) -> CursorUpdateOutcome {
+        let fallback_activated =
+            update_cursor_fallback_state(&mut self.cursor_fallback_active, hardware);
+        CursorUpdateOutcome::from_hardware(hardware, composition_required, fallback_activated)
     }
 
     fn refresh_effective_cursor(&mut self) -> bool {
@@ -646,10 +706,10 @@ impl PresenterHandle {
         }
     }
 
-    pub(super) fn frame_submitted(&mut self, event_crtc: crtc::Handle) -> bool {
+    pub(super) fn frame_submitted(&mut self, event_crtc: crtc::Handle) -> CursorUpdateOutcome {
         if event_crtc != self.crtc {
             debug!(?event_crtc, expected = ?self.crtc, "ignored vblank for another CRTC");
-            return false;
+            return CursorUpdateOutcome::default();
         }
         match self.scanout.frame_submitted() {
             Ok(Some(ticket)) => {
@@ -664,7 +724,9 @@ impl PresenterHandle {
                 "failed to retire GBM/KMS frame after vblank: {error}"
             )),
         }
-        self.retry_hardware_cursor()
+        let mut outcome = self.retry_hardware_cursor();
+        outcome.vblank_retries = 1;
+        outcome
     }
 
     pub(super) fn stop(&mut self) {
@@ -1134,6 +1196,32 @@ mod tests {
 
     fn frames() -> FrameTracker {
         FrameTracker::new()
+    }
+
+    #[test]
+    fn cursor_fallback_counts_only_the_transition_into_fallback() {
+        let mut active = false;
+
+        assert!(update_cursor_fallback_state(
+            &mut active,
+            HardwareCursorOutcome::FallbackExtent
+        ));
+        assert!(!update_cursor_fallback_state(
+            &mut active,
+            HardwareCursorOutcome::FallbackExtent
+        ));
+        assert!(!update_cursor_fallback_state(
+            &mut active,
+            HardwareCursorOutcome::Deferred
+        ));
+        assert!(!update_cursor_fallback_state(
+            &mut active,
+            HardwareCursorOutcome::Moved
+        ));
+        assert!(update_cursor_fallback_state(
+            &mut active,
+            HardwareCursorOutcome::Disabled
+        ));
     }
 
     #[test]
