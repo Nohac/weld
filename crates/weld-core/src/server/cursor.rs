@@ -93,6 +93,10 @@ impl ServerState {
         self.pending_cursor_image.take()
     }
 
+    pub(crate) const fn cursor_image_pending(&self) -> bool {
+        self.pending_cursor_image.is_some()
+    }
+
     pub(super) fn set_client_cursor_image(&mut self, image: CursorImageStatus) {
         if let CursorImageStatus::Surface(surface) = &image {
             self.refresh_cursor_surface(surface);

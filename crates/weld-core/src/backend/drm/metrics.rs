@@ -27,9 +27,9 @@ struct IntervalCounters {
     cursor_motion_compositions: u64,
     cursor_sync_refreshes: u64,
     cursor_sync_compositions: u64,
-    cursor_vblank_retries: u64,
+    cursor_vblank_retirements: u64,
     cursor_vblank_compositions: u64,
-    hardware_cursor_moves: u64,
+    hardware_cursor_commits: u64,
     hardware_cursor_fallbacks: u64,
 }
 
@@ -39,7 +39,7 @@ impl IntervalCounters {
     }
 
     fn record_cursor_outcome(&mut self, outcome: CursorUpdateOutcome) {
-        self.hardware_cursor_moves += outcome.hardware_moves;
+        self.hardware_cursor_commits += outcome.hardware_commits;
         self.hardware_cursor_fallbacks += outcome.fallback_activations;
     }
 }
@@ -122,12 +122,19 @@ impl DrmRuntimeMetrics {
         self.counters.record_cursor_outcome(outcome);
     }
 
-    pub(super) fn record_vblank_cursor_retry(&mut self, outcome: CursorUpdateOutcome) {
-        if !self.enabled || outcome.vblank_retries == 0 {
+    pub(super) fn record_vblank_cursor_retirement(&mut self, outcome: CursorUpdateOutcome) {
+        if !self.enabled {
             return;
         }
-        self.counters.cursor_vblank_retries += outcome.vblank_retries;
+        self.counters.cursor_vblank_retirements += outcome.vblank_retirements;
         self.counters.cursor_vblank_compositions += u64::from(outcome.composition_required);
+        self.counters.record_cursor_outcome(outcome);
+    }
+
+    pub(super) fn record_presenter_cursor_outcome(&mut self, outcome: CursorUpdateOutcome) {
+        if !self.enabled {
+            return;
+        }
         self.counters.record_cursor_outcome(outcome);
     }
 
@@ -164,9 +171,9 @@ impl DrmRuntimeMetrics {
             cursor_motion_compositions = counters.cursor_motion_compositions,
             cursor_sync_refreshes = counters.cursor_sync_refreshes,
             cursor_sync_compositions = counters.cursor_sync_compositions,
-            cursor_vblank_retries = counters.cursor_vblank_retries,
+            cursor_vblank_retirements = counters.cursor_vblank_retirements,
             cursor_vblank_compositions = counters.cursor_vblank_compositions,
-            hardware_cursor_moves = counters.hardware_cursor_moves,
+            hardware_cursor_commits = counters.hardware_cursor_commits,
             hardware_cursor_fallbacks = counters.hardware_cursor_fallbacks,
             "DRM runtime metrics"
         );

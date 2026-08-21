@@ -203,10 +203,12 @@ impl Presenters {
         }
     }
 
-    fn handle_event(&mut self, event: &PresenterEvent) {
+    fn handle_event(&mut self, event: &PresenterEvent) -> CursorUpdateOutcome {
+        let mut outcome = CursorUpdateOutcome::default();
         for presenter in self.handles.values_mut() {
-            presenter.handle_event(event);
+            outcome.merge(presenter.handle_event(event));
         }
+        outcome
     }
 
     fn frame_submitted(
@@ -392,6 +394,11 @@ impl DrmCursor {
         }
     }
 
+    fn animation_due(&self, now: Instant) -> bool {
+        self.animation_deadline
+            .is_some_and(|deadline| deadline <= now)
+    }
+
     fn apply_host_update(
         &mut self,
         server: &mut ServerState,
@@ -444,6 +451,21 @@ impl DrmCursor {
         }
         presenters.update_cursors(&self.planes, &self.overlays)
     }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct CursorSyncContext {
+    main_advanced: bool,
+    lifecycle_event: bool,
+    cursor_image_pending: bool,
+    animation_due: bool,
+}
+
+const fn cursor_sync_required(context: CursorSyncContext) -> bool {
+    context.main_advanced
+        || context.lifecycle_event
+        || context.cursor_image_pending
+        || context.animation_due
 }
 
 fn output_local_cursor_position(
@@ -1088,13 +1110,13 @@ pub(crate) fn prepare(options: RunOptions, signals: Signals) -> Result<PreparedH
             let mut input_pending = false;
             let mut cursor_position_changed = false;
             let mut forwarded_client_events = 0_usize;
+            let mut event_counts = [0_usize; 6];
             if !loop_data.events.is_empty() {
                 let _events_span = tracing::trace_span!(
                     target: crate::PROFILE_TARGET,
                     "drm_runtime_event_drain"
                 )
                 .entered();
-                let mut event_counts = [0_usize; 6];
                 while let Some(event) = loop_data.events.pop_front() {
                     match event {
                         DrmRuntimeEvent::Input(event) => {
@@ -1173,7 +1195,7 @@ pub(crate) fn prepare(options: RunOptions, signals: Signals) -> Result<PreparedH
                         DrmRuntimeEvent::Drm(DrmEvent::VBlank(crtc)) => {
                             event_counts[3] += 1;
                             let cursor_outcome = presenters.frame_submitted(crtc);
-                            runtime_metrics.record_vblank_cursor_retry(cursor_outcome);
+                            runtime_metrics.record_vblank_cursor_retirement(cursor_outcome);
                             if cursor_outcome.composition_required {
                                 frame_state.request_composition();
                             }
@@ -1195,7 +1217,11 @@ pub(crate) fn prepare(options: RunOptions, signals: Signals) -> Result<PreparedH
                                     .refresh_presentable(physical_outputs, &mut presentable_ids);
                                 presenters.target_availability(&presentable_ids)
                             };
-                            presenters.handle_event(&event);
+                            let cursor_outcome = presenters.handle_event(&event);
+                            runtime_metrics.record_presenter_cursor_outcome(cursor_outcome);
+                            if cursor_outcome.composition_required {
+                                frame_state.request_composition();
+                            }
                             let next_availability = {
                                 let physical_outputs =
                                     output_monitor.physical_outputs(session_active);
@@ -1409,10 +1435,18 @@ pub(crate) fn prepare(options: RunOptions, signals: Signals) -> Result<PreparedH
                 }
             }
 
-            let cursor_outcome = cursor.refresh(&mut loop_data.server, &mut presenters, now);
-            runtime_metrics.record_sync_cursor_refresh(cursor_outcome);
-            if cursor_outcome.composition_required {
-                frame_state.request_composition();
+            let cursor_sync = cursor_sync_required(CursorSyncContext {
+                main_advanced: work.advance_main,
+                lifecycle_event: event_counts[1..].iter().any(|count| *count > 0),
+                cursor_image_pending: loop_data.server.cursor_image_pending(),
+                animation_due: cursor.animation_due(now),
+            });
+            if cursor_sync {
+                let cursor_outcome = cursor.refresh(&mut loop_data.server, &mut presenters, now);
+                runtime_metrics.record_sync_cursor_refresh(cursor_outcome);
+                if cursor_outcome.composition_required {
+                    frame_state.request_composition();
+                }
             }
 
             if work.advance_main {
@@ -1660,7 +1694,7 @@ fn shutdown_presenter(
             if let DrmRuntimeEvent::Presenter(event) = event {
                 stopped |= matches!(&event, PresenterEvent::Stopped);
                 log_presenter_event(&event);
-                presenters.handle_event(&event);
+                let _ = presenters.handle_event(&event);
             }
         }
     }
@@ -1751,11 +1785,11 @@ fn complete_capture(
 #[cfg(test)]
 mod tests {
     use super::{
-        DispatchTimeoutContext, FrameState, MonitoredOutput, OutputConfiguration, OutputId,
-        OutputLayout, OutputScale, OutputTopology, PresenterTargetAvailability,
-        REMOTE_DEBUG_MAINTENANCE_INTERVAL, batch_target_availability, center_primary_below_others,
-        dispatch_timeout, output_local_cursor_position, refresh_physical_output_ids,
-        refresh_presentable_output_ids,
+        CursorSyncContext, DispatchTimeoutContext, FrameState, MonitoredOutput,
+        OutputConfiguration, OutputId, OutputLayout, OutputScale, OutputTopology,
+        PresenterTargetAvailability, REMOTE_DEBUG_MAINTENANCE_INTERVAL, batch_target_availability,
+        center_primary_below_others, cursor_sync_required, dispatch_timeout,
+        output_local_cursor_position, refresh_physical_output_ids, refresh_presentable_output_ids,
     };
     use crate::{
         input::{InputDelta, InputPosition},
@@ -1774,6 +1808,34 @@ mod tests {
             None,
         )
         .expect("valid output")
+    }
+
+    #[test]
+    fn cursor_sync_runs_only_for_a_real_synchronization_reason() {
+        let quiet = CursorSyncContext {
+            main_advanced: false,
+            lifecycle_event: false,
+            cursor_image_pending: false,
+            animation_due: false,
+        };
+        assert!(!cursor_sync_required(quiet));
+
+        assert!(cursor_sync_required(CursorSyncContext {
+            main_advanced: true,
+            ..quiet
+        }));
+        assert!(cursor_sync_required(CursorSyncContext {
+            lifecycle_event: true,
+            ..quiet
+        }));
+        assert!(cursor_sync_required(CursorSyncContext {
+            cursor_image_pending: true,
+            ..quiet
+        }));
+        assert!(cursor_sync_required(CursorSyncContext {
+            animation_due: true,
+            ..quiet
+        }));
     }
 
     fn measured_output(

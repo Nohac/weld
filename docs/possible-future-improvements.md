@@ -29,8 +29,8 @@ Weld now lets DRM/GBM allocate scanout buffers and binds each leased image
 directly to Bevy's stable output target while the physical output is active.
 The retained application texture takes over when that output is inactive or a
 capture requires owned storage. Remaining investigations include independent
-multi-output targets, native completion fences, damage clips, hardware cursor
-planes, simultaneous streaming consumers, VRR, HDR, overlay promotion, and
+multi-output targets, native completion fences, damage clips, simultaneous
+streaming consumers, VRR, HDR, overlay promotion, and
 fullscreen client direct scanout.
 
 The current Vulkan ownership and modifier path still needs validation across

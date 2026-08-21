@@ -287,8 +287,6 @@ pub(crate) struct CursorPlaneSnapshot {
     image: Option<CursorPlaneImage>,
     origin_x: i32,
     origin_y: i32,
-    hotspot_x: i32,
-    hotspot_y: i32,
 }
 
 impl CursorPlaneSnapshot {
@@ -297,8 +295,6 @@ impl CursorPlaneSnapshot {
             image: None,
             origin_x: 0,
             origin_y: 0,
-            hotspot_x: 0,
-            hotspot_y: 0,
         }
     }
 
@@ -310,18 +306,11 @@ impl CursorPlaneSnapshot {
         (self.origin_x, self.origin_y)
     }
 
-    pub(crate) const fn hotspot(&self) -> (i32, i32) {
-        (self.hotspot_x, self.hotspot_y)
-    }
-
     fn visible(
         pixels: Arc<[u8]>,
         texture_width: u32,
         texture_height: u32,
         geometry: CursorGeometry,
-        pointer_x: f64,
-        pointer_y: f64,
-        output_scale: f64,
     ) -> Option<Self> {
         let width = rounded_extent(geometry.width)?;
         let height = rounded_extent(geometry.height)?;
@@ -336,8 +325,6 @@ impl CursorPlaneSnapshot {
             )),
             origin_x: geometry.origin_x.round() as i32,
             origin_y: geometry.origin_y.round() as i32,
-            hotspot_x: (pointer_x * output_scale - f64::from(geometry.origin_x)).round() as i32,
-            hotspot_y: (pointer_y * output_scale - f64::from(geometry.origin_y)).round() as i32,
         })
     }
 }
@@ -352,8 +339,6 @@ impl PartialEq for CursorPlaneSnapshot {
     fn eq(&self, other: &Self) -> bool {
         self.origin_x == other.origin_x
             && self.origin_y == other.origin_y
-            && self.hotspot_x == other.hotspot_x
-            && self.hotspot_y == other.hotspot_y
             && match (&self.image, &other.image) {
                 (Some(left), Some(right)) => left == right,
                 (None, None) => true,
@@ -551,9 +536,6 @@ impl GpuCursor {
                 selected.frame.width,
                 selected.frame.height,
                 geometry,
-                position.x,
-                position.y,
-                self.output_scale,
             )
             .unwrap_or_else(CursorPlaneSnapshot::hidden),
             next_animation: selected
@@ -592,9 +574,6 @@ impl GpuCursor {
                 image.width,
                 image.height,
                 geometry,
-                position.x,
-                position.y,
-                self.output_scale,
             )
             .unwrap_or_else(CursorPlaneSnapshot::hidden),
             next_animation: None,
@@ -712,7 +691,7 @@ mod tests {
     }
 
     #[test]
-    fn hardware_snapshot_preserves_origin_hotspot_and_natural_extent() {
+    fn hardware_snapshot_rounds_kms_origin_and_natural_extent() {
         let snapshot = CursorPlaneSnapshot::visible(
             Arc::from([0, 0, 0, 255]),
             1,
@@ -727,14 +706,10 @@ mod tests {
                 source_width: 1.0,
                 source_height: 1.0,
             },
-            20.0,
-            10.0,
-            1.5,
         )
         .expect("valid hardware cursor snapshot");
 
         assert_eq!(snapshot.origin(), (23, 12));
-        assert_eq!(snapshot.hotspot(), (7, 3));
         assert_eq!(snapshot.image().map(|image| image.extent()), Some((30, 30)));
     }
 }

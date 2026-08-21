@@ -129,8 +129,8 @@ stops Bevy composition or disconnects clients.
 - Propagate output damage into KMS damage clips.
 - Give each physical output its own state machine, composition target, camera,
   and vblank cadence.
-- Add VRR, hardware cursor planes, overlay promotion, and direct scanout as
-  independently capability-gated optimizations.
+- Add VRR, overlay promotion, and direct scanout as independently
+  capability-gated optimizations. Atomic hardware cursor planes are implemented.
 - Recreate output surfaces and their import caches for live mode changes rather
   than requiring restart.
 

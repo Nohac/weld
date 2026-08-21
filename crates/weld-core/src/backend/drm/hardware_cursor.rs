@@ -1,6 +1,4 @@
-//! Kernel hardware-cursor presentation behind Weld's GPU fallback boundary.
-
-use std::{collections::VecDeque, io};
+//! Cursor-plane buffer preparation behind Weld's GPU fallback boundary.
 
 use anyhow::{Context, Result, bail};
 use smithay::{
@@ -11,58 +9,33 @@ use smithay::{
         },
         drm::DrmDeviceFd,
     },
-    reexports::{
-        drm::control::{Device as _, crtc},
-        rustix::io::Errno,
-    },
+    reexports::drm::control::crtc,
 };
 use tracing::{debug, info, warn};
 
 use crate::renderer::{CursorPlaneImage, CursorPlaneSnapshot};
 
-const RETIRED_CURSOR_BUFFERS: usize = 2;
-
-struct CursorBuffer {
-    image: CursorPlaneImage,
-    buffer: GbmBuffer,
-}
-
-enum CursorFailure {
-    Temporary(String),
-    Permanent(String),
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum HardwareCursorOutcome {
+#[derive(Debug)]
+pub(super) enum PreparedCursorUpdate {
     Unchanged,
-    Moved,
-    Cleared,
-    Deferred,
+    Set {
+        buffer: Option<GbmBuffer>,
+        location: (i32, i32),
+    },
+    Move {
+        location: (i32, i32),
+    },
     FallbackExtent,
     Disabled,
 }
 
-impl HardwareCursorOutcome {
-    pub(super) const fn is_fallback(self) -> bool {
-        matches!(self, Self::FallbackExtent | Self::Disabled)
-    }
-}
-
-/// One output's optional kernel hardware-cursor state.
+/// Prepares GBM cursor buffers while Smithay owns their KMS lifetime.
 pub(super) struct HardwareCursor {
-    drm: DrmDeviceFd,
-    crtc: crtc::Handle,
     allocator: GbmAllocator<DrmDeviceFd>,
     extent: (u32, u32),
-    desired: CursorPlaneSnapshot,
     applied: Option<CursorPlaneSnapshot>,
-    current: Option<CursorBuffer>,
-    current_hotspot: Option<(i32, i32)>,
-    prepared: Option<CursorBuffer>,
-    retired: VecDeque<CursorBuffer>,
-    attached: bool,
+    prepared: Option<CursorPlaneSnapshot>,
     disabled: bool,
-    activation_logged: bool,
 }
 
 impl HardwareCursor {
@@ -85,95 +58,47 @@ impl HardwareCursor {
             "kernel hardware cursor resources are available"
         );
         Some(Self {
-            drm: drm.clone(),
-            crtc,
             allocator: GbmAllocator::new(gbm, GbmBufferFlags::CURSOR | GbmBufferFlags::WRITE),
             extent,
-            desired: CursorPlaneSnapshot::hidden(),
             applied: None,
-            current: None,
-            current_hotspot: None,
             prepared: None,
-            retired: VecDeque::with_capacity(RETIRED_CURSOR_BUFFERS),
-            attached: false,
             disabled: false,
-            activation_logged: false,
         })
     }
 
-    pub(super) const fn attached(&self) -> bool {
-        self.attached
+    pub(super) fn disable(&mut self) {
+        self.disabled = true;
+        self.prepared = None;
     }
 
-    pub(super) fn set_desired(&mut self, desired: CursorPlaneSnapshot) {
-        if self.desired == desired {
-            return;
+    pub(super) fn accept_prepared(&mut self) {
+        if let Some(prepared) = self.prepared.take() {
+            self.applied = Some(prepared);
         }
-        let same_prepared_image = self
-            .prepared
-            .as_ref()
-            .zip(desired.image())
-            .is_some_and(|(prepared, desired)| prepared.image == *desired);
-        if !same_prepared_image {
+    }
+
+    pub(super) fn reject_prepared(&mut self) {
+        self.prepared = None;
+    }
+
+    pub(super) fn prepare(&mut self, desired: CursorPlaneSnapshot) -> PreparedCursorUpdate {
+        if self.applied.as_ref() == Some(&desired) {
             self.prepared = None;
-        }
-        self.desired = desired;
-    }
-
-    pub(super) fn apply(&mut self) -> HardwareCursorOutcome {
-        if self.applied.as_ref() == Some(&self.desired) {
-            return HardwareCursorOutcome::Unchanged;
+            return PreparedCursorUpdate::Unchanged;
         }
         if self.disabled {
-            let was_attached = self.attached;
-            self.clear();
-            return if was_attached && !self.attached {
-                HardwareCursorOutcome::Disabled
-            } else {
-                HardwareCursorOutcome::Unchanged
+            self.prepared = None;
+            return PreparedCursorUpdate::Disabled;
+        }
+
+        let location = desired.origin();
+        self.prepared = Some(desired.clone());
+        let Some(image) = desired.image().cloned() else {
+            return PreparedCursorUpdate::Set {
+                buffer: None,
+                location,
             };
-        }
-        if self.desired.image().is_none() {
-            self.clear();
-            return HardwareCursorOutcome::Cleared;
-        }
-        match self.apply_visible() {
-            Ok(outcome) => outcome,
-            Err(error) => match error {
-                CursorFailure::Temporary(message) => {
-                    debug!(%message, "hardware cursor update deferred");
-                    HardwareCursorOutcome::Deferred
-                }
-                CursorFailure::Permanent(message) => {
-                    warn!(%message, "hardware cursor failed; using GPU cursor fallback");
-                    self.disabled = true;
-                    self.clear();
-                    if self.attached {
-                        HardwareCursorOutcome::Deferred
-                    } else {
-                        HardwareCursorOutcome::Disabled
-                    }
-                }
-            },
-        }
-    }
-
-    pub(super) fn surface_was_cleared(&mut self) {
-        self.attached = false;
-        self.applied = None;
-    }
-
-    pub(super) fn suspend(&mut self) {
-        self.clear();
-        self.attached = false;
-        self.applied = None;
-    }
-
-    fn apply_visible(&mut self) -> std::result::Result<HardwareCursorOutcome, CursorFailure> {
-        let image =
-            self.desired.image().cloned().ok_or_else(|| {
-                CursorFailure::Permanent("visible cursor lost its image".to_owned())
-            })?;
+        };
         let (width, height) = image.extent();
         if width > self.extent.0 || height > self.extent.1 {
             debug!(
@@ -183,87 +108,32 @@ impl HardwareCursor {
                 maximum_height = self.extent.1,
                 "cursor exceeds the hardware extent; using GPU cursor fallback"
             );
-            self.clear();
-            return Ok(if self.attached {
-                HardwareCursorOutcome::Deferred
-            } else {
-                HardwareCursorOutcome::FallbackExtent
-            });
+            return PreparedCursorUpdate::FallbackExtent;
         }
 
         let buffer_changed = requires_buffer_install(
-            self.attached,
-            self.current.as_ref().map(|current| &current.image),
+            self.applied.as_ref().and_then(CursorPlaneSnapshot::image),
             &image,
         );
-        let cursor_changed = buffer_changed || self.current_hotspot != Some(self.desired.hotspot());
-        if buffer_changed
-            && !self
-                .prepared
-                .as_ref()
-                .is_some_and(|prepared| prepared.image == image)
-        {
-            self.prepared = Some(
-                self.prepare_buffer(image)
-                    .map_err(|error| CursorFailure::Permanent(error.to_string()))?,
-            );
-        }
-        if cursor_changed {
-            let buffer = if buffer_changed {
-                self.prepared.as_ref().map(|prepared| &prepared.buffer)
-            } else {
-                self.current.as_ref().map(|current| &current.buffer)
-            }
-            .ok_or_else(|| {
-                CursorFailure::Permanent("cursor buffer disappeared before attachment".to_owned())
-            })?;
-            set_cursor(&self.drm, self.crtc, Some(buffer), self.desired.hotspot())
-                .map_err(classify_cursor_error)?;
-            if buffer_changed {
-                let next = self.prepared.take().ok_or_else(|| {
-                    CursorFailure::Permanent("attached cursor buffer disappeared".to_owned())
-                })?;
-                if let Some(previous) = self.current.replace(next) {
-                    self.retired.push_back(previous);
-                    while self.retired.len() > RETIRED_CURSOR_BUFFERS {
-                        self.retired.pop_front();
-                    }
-                }
-            }
-            self.current_hotspot = Some(self.desired.hotspot());
-            self.attached = true;
+        if !buffer_changed {
+            return PreparedCursorUpdate::Move { location };
         }
 
-        move_cursor(&self.drm, self.crtc, self.desired.origin()).map_err(classify_cursor_error)?;
-        self.applied = Some(self.desired.clone());
-        if !self.activation_logged {
-            info!(?self.crtc, "hardware cursor is active");
-            self.activation_logged = true;
-        }
-        Ok(HardwareCursorOutcome::Moved)
-    }
-
-    fn clear(&mut self) {
-        if !self.attached {
-            return;
-        }
-        match set_cursor(&self.drm, self.crtc, None, (0, 0)) {
-            Ok(()) => {
-                self.attached = false;
-                self.applied = None;
-            }
-            Err(error) => match classify_cursor_error(error) {
-                CursorFailure::Temporary(message) => {
-                    debug!(%message, "hardware cursor clear deferred");
-                }
-                CursorFailure::Permanent(message) => {
-                    warn!(%message, "could not clear the hardware cursor");
-                }
+        match self.prepare_buffer(&image) {
+            Ok(buffer) => PreparedCursorUpdate::Set {
+                buffer: Some(buffer),
+                location,
             },
+            Err(error) => {
+                warn!(%error, "hardware cursor buffer preparation failed; using GPU cursor fallback");
+                self.disabled = true;
+                self.prepared = None;
+                PreparedCursorUpdate::Disabled
+            }
         }
     }
 
-    fn prepare_buffer(&mut self, image: CursorPlaneImage) -> Result<CursorBuffer> {
+    fn prepare_buffer(&mut self, image: &CursorPlaneImage) -> Result<GbmBuffer> {
         let mut buffer = self
             .allocator
             .create_buffer(
@@ -273,7 +143,7 @@ impl HardwareCursor {
                 &[Modifier::Linear],
             )
             .context("failed to allocate a linear GBM cursor buffer")?;
-        let pixels = rasterize_cursor(&image, self.extent)?;
+        let pixels = rasterize_cursor(image, self.extent)?;
         let width = self.extent.0;
         let height = self.extent.1;
         let source_stride = usize::try_from(width)
@@ -301,50 +171,15 @@ impl HardwareCursor {
             })
             .context("failed to map the GBM cursor buffer")?;
         write_result?;
-        Ok(CursorBuffer { image, buffer })
-    }
-}
-
-#[expect(
-    deprecated,
-    reason = "Weld's current presenter has no unified atomic primary-plus-cursor commit builder"
-)]
-fn set_cursor(
-    drm: &DrmDeviceFd,
-    crtc: crtc::Handle,
-    buffer: Option<&GbmBuffer>,
-    hotspot: (i32, i32),
-) -> io::Result<()> {
-    drm.set_cursor2(crtc, buffer, hotspot)
-}
-
-#[expect(
-    deprecated,
-    reason = "Weld's current presenter has no unified atomic primary-plus-cursor commit builder"
-)]
-fn move_cursor(drm: &DrmDeviceFd, crtc: crtc::Handle, position: (i32, i32)) -> io::Result<()> {
-    drm.move_cursor(crtc, position)
-}
-
-fn classify_cursor_error(error: io::Error) -> CursorFailure {
-    let message = error.to_string();
-    if matches!(
-        error.kind(),
-        io::ErrorKind::PermissionDenied | io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
-    ) || Errno::from_io_error(&error) == Some(Errno::BUSY)
-    {
-        CursorFailure::Temporary(message)
-    } else {
-        CursorFailure::Permanent(message)
+        Ok(buffer)
     }
 }
 
 fn requires_buffer_install(
-    attached: bool,
     current_image: Option<&CursorPlaneImage>,
     desired_image: &CursorPlaneImage,
 ) -> bool {
-    !attached || current_image != Some(desired_image)
+    current_image != Some(desired_image)
 }
 
 fn rasterize_cursor(image: &CursorPlaneImage, plane_extent: (u32, u32)) -> Result<Vec<u8>> {
@@ -449,7 +284,7 @@ mod tests {
 
     use crate::{cursor::CursorGeometry, renderer::CursorPlaneImage};
 
-    use super::{HardwareCursorOutcome, rasterize_cursor, requires_buffer_install};
+    use super::{rasterize_cursor, requires_buffer_install};
 
     fn image(
         pixels: &[u8],
@@ -503,16 +338,8 @@ mod tests {
     fn position_only_updates_reuse_the_installed_cursor_buffer() {
         let image = image(&[0, 0, 0, 255], (1, 1), (0.0, 0.0, 1.0, 1.0), (1, 1));
 
-        assert!(!requires_buffer_install(true, Some(&image), &image));
-        assert!(requires_buffer_install(false, Some(&image), &image));
-    }
-
-    #[test]
-    fn only_visible_terminal_failures_count_as_cursor_fallbacks() {
-        assert!(HardwareCursorOutcome::FallbackExtent.is_fallback());
-        assert!(HardwareCursorOutcome::Disabled.is_fallback());
-        assert!(!HardwareCursorOutcome::Deferred.is_fallback());
-        assert!(!HardwareCursorOutcome::Cleared.is_fallback());
+        assert!(!requires_buffer_install(Some(&image), &image));
+        assert!(requires_buffer_install(None, &image));
     }
 
     #[test]

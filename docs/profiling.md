@@ -75,10 +75,16 @@ The fields distinguish work at each pacing boundary:
   Bevy rendering from accepted physical presentation submissions and
   multi-output fanout.
 - `cursor_motion_refreshes`, `cursor_sync_refreshes`, and
-  `cursor_vblank_retries` identify the driver of cursor work. Their matching
+  `cursor_vblank_retirements` identify the driver of cursor work. Their matching
   `*_compositions` fields count refreshes that required the GPU cursor overlay
-  to be recomposed.
-- `hardware_cursor_moves` counts successful DRM cursor-move ioctls.
+  to be recomposed. The synchronization pass is demand-driven by a main-world
+  advance, backend lifecycle event, pending cursor image, or due animation; it
+  does not poll on every input-driven host iteration. A temporarily deferred
+  cursor-only atomic commit retires on vblank; a transiently deferred cursor
+  update retries on later cursor work or VT recovery.
+- `hardware_cursor_commits` counts successful Smithay atomic submissions that
+  include changed cursor-plane state, whether cursor-only or merged into a
+  primary frame. Compare it with the refresh counters to measure coalescing.
   `hardware_cursor_fallbacks` counts new oversized-cursor or permanent-failure
   outcomes, excluding ordinary hiding, VT suspension, and temporary deferral.
 

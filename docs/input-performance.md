@@ -1,6 +1,6 @@
 # Input performance
 
-**Status: Initial allocation pass implemented; live DRM validation pending.** This note
+**Status: Allocation and atomic cursor-plane passes implemented; live DRM validation pending.** This note
 separates device-paced input delivery from refresh-paced application work and
 physical presentation. It records the current implementation and measurements;
 it is not a claim that the remaining costs are acceptable.
@@ -41,10 +41,32 @@ The two-output trace instead showed one application advance producing two
 output passes, completion waits, and KMS submissions, while busy batch targets
 prevented every advance from becoming a physical composition.
 
-An idle pointer produces only startup compositions and then lets the host loop
-sleep. Continuous motion marks composition dirty repeatedly, but the dirty bit
-coalesces those requests to the output cadence. Weld does not render one scene
-per raw device event.
+Those Tracy captures predate the active hardware-cursor path: continuous motion
+then dirtied composition, with the dirty bit coalescing requests to the output
+cadence. An idle pointer still produces only startup compositions and then lets
+the host loop sleep. Weld does not render one scene per raw device event.
+
+A later uninstrumented release run with the DRM runtime counters observed a
+two-output rapid external-mouse interval at about 983 raw events, 980
+input-bearing dispatches, 1,042 host-loop iterations, exactly 60 application
+updates, 0.2 compositions, and 984 successful legacy hardware-cursor moves per second.
+The hardware cursor remained active with no fallback, while the post-ECS cursor
+synchronization pass still ran once per host-loop iteration. This is one TTY
+observation of rates, not CPU attribution. The conditional cursor-sync slice
+targets that redundant second evaluation only. The subsequent atomic cursor
+slice replaces those per-event ioctls with one Smithay-owned KMS transaction in
+flight per output. Cursor updates overwrite desired state while that transaction
+is pending, and the newest state is merged into a queued primary frame or sent
+as a cursor-only atomic commit.
+
+The initial atomic policy favors pointer latency: when no completed primary
+frame is queued, a cursor-only commit may start while wgpu is still rendering a
+leased primary target. A primary frame that completes immediately afterward can
+therefore wait up to one refresh interval for that cursor commit to retire.
+Measure composition-to-scanout latency alongside cursor commit rates. If this
+cost is visible, defer behind genuinely active rendering with a bounded
+one-refresh escape rather than allowing an abandoned lease to freeze cursor
+submission.
 
 ## Current allocation audit
 
@@ -84,7 +106,9 @@ it a CPU percentage.
    immediate client delivery.
 4. Done: borrow an event while projecting it and then move it into retained
    state, avoiding clones whose payload may own data.
-5. Put the compositor-normalized cursor image on a DRM cursor plane when the
+   The next measured slice also makes the post-ECS cursor synchronization pass
+   demand-driven instead of running on every input-driven host iteration.
+5. Done: put the compositor-normalized cursor image on a DRM cursor plane when the
    hardware accepts it. Position-only changes then update plane state without
    leasing or repainting the primary scene. Keep GPU cursor composition as a
    capability fallback.

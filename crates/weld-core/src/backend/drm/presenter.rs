@@ -16,11 +16,14 @@ use smithay::{
             dmabuf::Dmabuf,
             gbm::{GbmAllocator, GbmBufferFlags, GbmDevice},
         },
-        drm::{DrmDeviceFd, DrmError, DrmSurface, GbmBufferedSurface, GbmBufferedSurfaceError},
+        drm::{
+            DrmDeviceFd, DrmError, DrmSurface, GbmBufferedSurface, GbmBufferedSurfaceError,
+            GbmBufferedSurfaceSubmission,
+        },
     },
     reexports::{drm::control::crtc, rustix::fs::fstat},
 };
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
 use crate::{
     host::CompositionTargetView,
@@ -31,7 +34,7 @@ use crate::{
 
 use super::{
     gpu::DrmGpu,
-    hardware_cursor::{HardwareCursor, HardwareCursorOutcome},
+    hardware_cursor::{HardwareCursor, PreparedCursorUpdate},
 };
 
 const PRESENTER_GENERATION: u64 = 1;
@@ -43,41 +46,46 @@ type ScanoutSurface = GbmBufferedSurface<GbmAllocator<DrmDeviceFd>, FrameTicket>
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(super) struct CursorUpdateOutcome {
     pub(super) composition_required: bool,
-    pub(super) hardware_moves: u64,
+    pub(super) hardware_commits: u64,
     pub(super) fallback_activations: u64,
-    pub(super) vblank_retries: u64,
+    pub(super) vblank_retirements: u64,
 }
 
 impl CursorUpdateOutcome {
     fn from_hardware(
-        outcome: HardwareCursorOutcome,
+        hardware_commits: u64,
         composition_required: bool,
         fallback_activated: bool,
     ) -> Self {
         Self {
             composition_required,
-            hardware_moves: u64::from(outcome == HardwareCursorOutcome::Moved),
+            hardware_commits,
             fallback_activations: u64::from(fallback_activated),
-            vblank_retries: 0,
+            vblank_retirements: 0,
         }
     }
 
     pub(super) fn merge(&mut self, other: Self) {
         self.composition_required |= other.composition_required;
-        self.hardware_moves += other.hardware_moves;
+        self.hardware_commits += other.hardware_commits;
         self.fallback_activations += other.fallback_activations;
-        self.vblank_retries += other.vblank_retries;
+        self.vblank_retirements += other.vblank_retirements;
     }
 }
 
-fn update_cursor_fallback_state(active: &mut bool, outcome: HardwareCursorOutcome) -> bool {
-    let activated = outcome.is_fallback() && !*active;
-    match outcome {
-        HardwareCursorOutcome::Moved | HardwareCursorOutcome::Cleared => *active = false,
-        HardwareCursorOutcome::FallbackExtent | HardwareCursorOutcome::Disabled => *active = true,
-        HardwareCursorOutcome::Unchanged | HardwareCursorOutcome::Deferred => {}
-    }
+fn update_cursor_fallback_state(active: &mut bool, fallback: bool) -> bool {
+    let activated = fallback && !*active;
+    *active = fallback;
     activated
+}
+
+const fn cursor_fallback_required(
+    wants_visible: bool,
+    plane_available: bool,
+    plane_attached: bool,
+    visible_request_retained: bool,
+) -> bool {
+    wants_visible && !(plane_attached || (plane_available && visible_request_retained))
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -411,6 +419,7 @@ pub(super) struct PresenterHandle {
     imports: ScanoutImportCache,
     cursor_renderer: CursorOverlayRenderer,
     hardware_cursor: Option<HardwareCursor>,
+    hardware_cursor_activation_logged: bool,
     cursor_fallback_active: bool,
     desired_cursor_overlay: CursorOverlay,
     effective_cursor_overlay: CursorOverlay,
@@ -449,7 +458,16 @@ impl PresenterHandle {
 
         let imports = ScanoutImportCache::new(&gpu.device)?;
         let cursor_renderer = CursorOverlayRenderer::new(&gpu.device, &gpu.queue, SCANOUT_FORMAT);
-        let hardware_cursor = HardwareCursor::new(drm_fd, crtc, cursor_extent);
+        let hardware_cursor = scanout
+            .cursor_plane_available()
+            .then(|| HardwareCursor::new(drm_fd, crtc, cursor_extent))
+            .flatten();
+        if hardware_cursor.is_none() {
+            debug!(
+                ?crtc,
+                "atomic hardware cursor is unavailable; using GPU cursor fallback"
+            );
+        }
 
         Ok(Self {
             commands: worker.commands.clone(),
@@ -466,6 +484,7 @@ impl PresenterHandle {
             imports,
             cursor_renderer,
             hardware_cursor,
+            hardware_cursor_activation_logged: false,
             cursor_fallback_active: false,
             desired_cursor_overlay: CursorOverlay::hidden(),
             effective_cursor_overlay: CursorOverlay::hidden(),
@@ -560,44 +579,71 @@ impl PresenterHandle {
         overlay: CursorOverlay,
     ) -> CursorUpdateOutcome {
         self.desired_cursor_overlay = overlay;
-        let hardware = if let Some(cursor) = self.hardware_cursor.as_mut() {
-            cursor.set_desired(plane);
-            cursor.apply()
-        } else {
-            HardwareCursorOutcome::Unchanged
-        };
-        let composition_required = self.refresh_effective_cursor();
-        self.cursor_update_outcome(hardware, composition_required)
-    }
-
-    fn retry_hardware_cursor(&mut self) -> CursorUpdateOutcome {
-        let hardware = self
+        let update = self
             .hardware_cursor
             .as_mut()
-            .map_or(HardwareCursorOutcome::Unchanged, HardwareCursor::apply);
-        let composition_required = self.refresh_effective_cursor();
-        self.cursor_update_outcome(hardware, composition_required)
+            .map_or(PreparedCursorUpdate::Disabled, |cursor| {
+                cursor.prepare(plane)
+            });
+        let result = match update {
+            PreparedCursorUpdate::Unchanged => Ok(self.scanout.cursor_plane_available()),
+            PreparedCursorUpdate::Set { buffer, location } => {
+                self.scanout.set_cursor(buffer, location)
+            }
+            PreparedCursorUpdate::Move { location } => self.scanout.move_cursor(location),
+            PreparedCursorUpdate::FallbackExtent | PreparedCursorUpdate::Disabled => {
+                self.scanout.set_cursor(None, (0, 0))
+            }
+        };
+        let accepted = matches!(&result, Ok(true));
+        if let Some(cursor) = self.hardware_cursor.as_mut() {
+            if accepted {
+                cursor.accept_prepared();
+            } else {
+                cursor.reject_prepared();
+            }
+        }
+        if let Err(error) = result {
+            self.report_unavailable(format!("failed to update atomic cursor plane: {error}"));
+        }
+        self.refresh_scanout_cursor_state()
     }
 
-    fn cursor_update_outcome(
-        &mut self,
-        hardware: HardwareCursorOutcome,
-        composition_required: bool,
-    ) -> CursorUpdateOutcome {
+    fn refresh_scanout_cursor_state(&mut self) -> CursorUpdateOutcome {
+        let available = self.scanout.cursor_plane_available();
+        if !available && let Some(cursor) = self.hardware_cursor.as_mut() {
+            cursor.disable();
+        }
+        let attached = self.scanout.cursor_plane_attached();
+        if attached && !self.hardware_cursor_activation_logged {
+            info!(?self.crtc, "hardware cursor is active");
+            self.hardware_cursor_activation_logged = true;
+        }
+        let wants_visible = self.desired_cursor_overlay.texture_view().is_some();
+        let fallback = cursor_fallback_required(
+            wants_visible,
+            available,
+            attached,
+            self.scanout.cursor_plane_requested_visible(),
+        );
         let fallback_activated =
-            update_cursor_fallback_state(&mut self.cursor_fallback_active, hardware);
-        CursorUpdateOutcome::from_hardware(hardware, composition_required, fallback_activated)
+            update_cursor_fallback_state(&mut self.cursor_fallback_active, fallback);
+        if fallback_activated {
+            warn!(?self.crtc, "hardware cursor failed; using GPU cursor fallback");
+        }
+        let composition_required = self.refresh_effective_cursor();
+        CursorUpdateOutcome::from_hardware(
+            self.scanout.take_cursor_commit_count(),
+            composition_required,
+            fallback_activated,
+        )
     }
 
     fn refresh_effective_cursor(&mut self) -> bool {
-        let next = if self
-            .hardware_cursor
-            .as_ref()
-            .is_some_and(HardwareCursor::attached)
-        {
-            CursorOverlay::hidden()
-        } else {
+        let next = if self.cursor_fallback_active {
             self.desired_cursor_overlay.clone()
+        } else {
+            CursorOverlay::hidden()
         };
         if next == self.effective_cursor_overlay {
             return false;
@@ -646,9 +692,6 @@ impl PresenterHandle {
     }
 
     pub(super) fn suspend(&mut self) {
-        if let Some(cursor) = self.hardware_cursor.as_mut() {
-            cursor.suspend();
-        }
         self.lifecycle.suspend();
         self.active = false;
         self.epoch = self.epoch.saturating_add(1);
@@ -672,16 +715,13 @@ impl PresenterHandle {
             .clear_pending_scanout()
             .inspect_err(|_| self.lifecycle.disable())
             .context("failed to clear stale GBM scanout state")?;
-        if let Some(cursor) = self.hardware_cursor.as_mut() {
-            cursor.surface_was_cleared();
-        }
         let epoch = self.epoch;
         self.lifecycle.mark_ready();
         debug!(epoch, "GBM/KMS presenter activated");
         Ok(())
     }
 
-    pub(super) fn handle_event(&mut self, event: &PresenterEvent) {
+    pub(super) fn handle_event(&mut self, event: &PresenterEvent) -> CursorUpdateOutcome {
         match event {
             PresenterEvent::WorkerReady if self.active => {
                 self.lifecycle.mark_ready();
@@ -704,6 +744,7 @@ impl PresenterHandle {
             | PresenterEvent::WorkerReady
             | PresenterEvent::Frame(_) => {}
         }
+        self.refresh_scanout_cursor_state()
     }
 
     pub(super) fn frame_submitted(&mut self, event_crtc: crtc::Handle) -> CursorUpdateOutcome {
@@ -711,27 +752,34 @@ impl PresenterHandle {
             debug!(?event_crtc, expected = ?self.crtc, "ignored vblank for another CRTC");
             return CursorUpdateOutcome::default();
         }
-        match self.scanout.frame_submitted() {
-            Ok(Some(ticket)) => {
+        let mut retired_cursor_state = false;
+        match self.scanout.frame_submitted_with_state() {
+            Ok(Some(GbmBufferedSurfaceSubmission::Buffer(ticket))) => {
                 if !self.frames.release_vblank(ticket) {
                     debug!(?ticket, "ignored stale GBM/KMS vblank ticket");
                 } else {
                     self.lifecycle.reset_recovery_budget();
                 }
             }
+            Ok(Some(GbmBufferedSurfaceSubmission::StateOnly)) => {
+                retired_cursor_state = true;
+                self.lifecycle.reset_recovery_budget();
+            }
             Ok(None) => debug!(?event_crtc, "ignored vblank without a pending Weld frame"),
             Err(error) => self.report_unavailable(format!(
                 "failed to retire GBM/KMS frame after vblank: {error}"
             )),
         }
-        let mut outcome = self.retry_hardware_cursor();
-        outcome.vblank_retries = 1;
+        let mut outcome = self.refresh_scanout_cursor_state();
+        outcome.vblank_retirements = u64::from(retired_cursor_state);
         outcome
     }
 
     pub(super) fn stop(&mut self) {
-        if let Some(cursor) = self.hardware_cursor.as_mut() {
-            cursor.suspend();
+        if self.active
+            && let Err(error) = self.scanout.clear_output_for_shutdown()
+        {
+            warn!(?self.crtc, %error, "failed to clear KMS planes during shutdown");
         }
         self.lifecycle.suspend();
         self.active = false;
@@ -813,9 +861,6 @@ impl PresenterHandle {
         }
         match self.scanout.clear_pending_scanout() {
             Ok(()) => {
-                if let Some(cursor) = self.hardware_cursor.as_mut() {
-                    cursor.surface_was_cleared();
-                }
                 self.lifecycle.mark_ready();
             }
             Err(error) => self.report_terminal_unavailable(format!(
@@ -1202,26 +1247,20 @@ mod tests {
     fn cursor_fallback_counts_only_the_transition_into_fallback() {
         let mut active = false;
 
-        assert!(update_cursor_fallback_state(
-            &mut active,
-            HardwareCursorOutcome::FallbackExtent
-        ));
-        assert!(!update_cursor_fallback_state(
-            &mut active,
-            HardwareCursorOutcome::FallbackExtent
-        ));
-        assert!(!update_cursor_fallback_state(
-            &mut active,
-            HardwareCursorOutcome::Deferred
-        ));
-        assert!(!update_cursor_fallback_state(
-            &mut active,
-            HardwareCursorOutcome::Moved
-        ));
-        assert!(update_cursor_fallback_state(
-            &mut active,
-            HardwareCursorOutcome::Disabled
-        ));
+        assert!(update_cursor_fallback_state(&mut active, true));
+        assert!(!update_cursor_fallback_state(&mut active, true));
+        assert!(!update_cursor_fallback_state(&mut active, false));
+        assert!(update_cursor_fallback_state(&mut active, true));
+    }
+
+    #[test]
+    fn cursor_fallback_distinguishes_queued_state_from_unavailability() {
+        assert!(!cursor_fallback_required(false, false, false, false));
+        assert!(!cursor_fallback_required(true, true, true, false));
+        assert!(!cursor_fallback_required(true, true, false, true));
+        assert!(cursor_fallback_required(true, true, false, false));
+        assert!(cursor_fallback_required(true, false, false, false));
+        assert!(!cursor_fallback_required(true, false, true, false));
     }
 
     #[test]

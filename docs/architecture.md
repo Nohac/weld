@@ -371,8 +371,13 @@ composition texture and binds its output camera to a stable Bevy
 GBM scanout image, acquires Vulkan foreign ownership, and supplies that view as
 the application's destination for one composition. Replacing the view behind
 the stable handle is invisible to cameras, UI targeting, picking, and plugins.
-Bevy renders the full scene directly into scanout; core follows with only the
-scissored cursor overlay and foreign release before KMS receives the buffer.
+Bevy renders the full scene directly into scanout; core follows with the
+scissored cursor overlay only when hardware presentation is unavailable, then
+releases foreign ownership before KMS receives the buffer. `GbmBufferedSurface`
+owns the atomic cursor plane alongside the primary swapchain. Weld publishes a
+prepared GBM cursor image and physical origin; Smithay retains its framebuffer,
+coalesces desired positions behind one in-flight transaction, merges cursor
+state into primary submissions, and retires cursor-only commits on vblank.
 
 When the VT/output is inactive or a capture requires retained storage, core
 selects the application-owned target instead. DRM gives both targets the same
@@ -398,10 +403,10 @@ but remains a stopgap until Bevy exposes a reliable signal for pending deferred
 or render-world work. Remote debugging services only Bevy's `RemoteLast`
 schedule at a bounded maintenance rate between application frames and does not
 itself create composition demand. The DRM cursor is presentation metadata
-rather than a Bevy UI node. Raw motion requests one refresh-capped application
-composition so Bevy/Leafwing state, picking, hover, and cursor policy advance
-without running at device-event pace; after Bevy writes the leased output,
-core overlays the newest cursor into the same image. `weld-core`
+rather than a Bevy UI node. Raw motion updates Smithay's desired cursor-plane
+position immediately without requesting Bevy composition. It still requests
+one refresh-capped application update so Bevy/Leafwing state, picking, hover,
+and cursor policy advance without running at device-event pace. `weld-core`
 owns the Bevy-free cursor model, Smithay cursor-surface lifecycle, Xcursor
 discovery, immutable GPU uploads, and final composition geometry. `weld-app`
 exposes the reloadable `CursorSettings` ECS resource; replacing that resource
@@ -425,8 +430,7 @@ to the compositor's configured logical size. This intentionally prevents a
 client-provided bitmap from changing the user's cursor size. Client DMA-BUF
 cursor surfaces are not imported yet: Weld releases them, warns, and displays
 the configured default shape rather than creating a second ad hoc DMA-BUF
-ownership path. Scalable cursor-theme assets and hardware cursor planes are
-also future work.
+ownership path. Scalable cursor-theme assets remain future work.
 
 The cursor pass samples pixels as sRGB, premultiplies each linear texel
 before interpolation, and composites them over Bevy's premultiplied output.
@@ -452,9 +456,10 @@ client input target and compositor-to-surface affine mapping published by the
 most recent application frame. The same ordered event is retained losslessly
 for the next Bevy/Leafwing projection. Input therefore requests at most one
 application update at the output refresh cadence rather than running the Bevy
-schedule at device-event pace. A software cursor can still trail a hardware
-cursor plane by up to the display/presentation latency; hardware-plane support
-remains the path to eliminating that final bound.
+schedule at device-event pace. Atomic cursor position changes do not repaint
+the primary scene and coalesce to KMS page-flip cadence. Legacy DRM surfaces,
+oversized images, unsupported plane formats or sizes, and virtualized drivers
+which hide cursor planes use the explicit GPU fallback.
 
 Bevy remains authoritative for root/layer selection and shell interaction.
 Smithay re-evaluates the selected surface tree's current input regions and

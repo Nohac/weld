@@ -12,11 +12,13 @@ synchronization live in
 Standalone DRM uses Smithay's GBM/KMS surface as its physical output sink, but
 keeps composition in wgpu and does not use a Smithay renderer. While the output
 is active, Weld binds a leased GBM buffer to the stable Bevy target and renders
-the scene directly into scanout. A cursor-only pass follows on the same image;
-there is no full-output composition blit. While the VT/output is inactive, or a
-capture needs retained storage, the same camera handle instead resolves to an
-application-owned texture. Nested and DRM operation, VT recovery, output loss,
-and the retained historical WSI probe are documented in
+the scene directly into scanout. Smithay normally presents the cursor through
+an atomic hardware plane without repainting that image; a cursor-only wgpu pass
+is retained as the explicit capability fallback. There is no full-output
+composition blit. While the VT/output is inactive, or a capture needs retained
+storage, the same camera handle instead resolves to an application-owned
+texture. Nested and DRM operation, VT recovery, output loss, and the retained
+historical WSI probe are documented in
 [Direct DRM presentation](../drm-presentation.md).
 
 ## Frame demand — Implemented

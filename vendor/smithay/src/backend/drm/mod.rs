@@ -97,7 +97,7 @@ pub use error::AccessError as DrmAccessError;
 pub use error::Error as DrmError;
 use indexmap::IndexSet;
 #[cfg(feature = "backend_gbm")]
-pub use surface::gbm::{Error as GbmBufferedSurfaceError, GbmBufferedSurface};
+pub use surface::gbm::{Error as GbmBufferedSurfaceError, GbmBufferedSurface, GbmBufferedSurfaceSubmission};
 pub use surface::{DrmSurface, PlaneConfig, PlaneDamageClips, PlaneState, VrrSupport};
 
 use drm::{
