@@ -1,0 +1,84 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+fail() {
+    printf 'run-weld-drm: %s\n' "$*" >&2
+    exit 2
+}
+
+script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+repository_root="$(cd -- "${script_dir}/.." && pwd)"
+log_path="${WELD_DRM_LOG:-${repository_root}/target/validation/weld-drm.log}"
+run_seconds=""
+
+case "${1:-}" in
+    --seconds)
+        [[ $# -ge 2 ]] || fail "--seconds requires a positive integer"
+        run_seconds="$2"
+        shift 2
+        ;;
+    --seconds=*)
+        run_seconds="${1#--seconds=}"
+        shift
+        ;;
+esac
+
+if [[ -n "${run_seconds}" && ! "${run_seconds}" =~ ^[1-9][0-9]*$ ]]; then
+    fail "--seconds requires a positive integer"
+fi
+
+[[ -t 0 && -t 1 ]] || fail "this compositor must run interactively from a real TTY"
+command -v cargo >/dev/null 2>&1 || fail "cargo is not available"
+if [[ -n "${run_seconds}" ]]; then
+    command -v pgrep >/dev/null 2>&1 || fail "pgrep is not available"
+fi
+mkdir -p -- "$(dirname -- "${log_path}")"
+
+if [[ "${WELD_DRM_PACING_TRACE:-0}" == "1" ]]; then
+    export RUST_LOG="${RUST_LOG:-info},weld_drm_pacing=trace"
+else
+    export RUST_LOG="${RUST_LOG:-info}"
+fi
+export WGPU_VALIDATION="${WGPU_VALIDATION:-1}"
+if [[ "${WELD_DRM_VALIDATE:-0}" == "1" ]]; then
+    export VK_INSTANCE_LAYERS=VK_LAYER_KHRONOS_validation
+    export VK_LOADER_LAYERS_ENABLE=VK_LAYER_KHRONOS_validation
+    export VK_LAYER_VALIDATE_SYNC=1
+fi
+
+cd -- "${repository_root}"
+printf 'Writing Weld DRM output to %s\n' "${log_path}" >&2
+set +e
+if [[ -n "${run_seconds}" ]]; then
+    cargo run -- --backend drm "$@" > >(tee "${log_path}") 2>&1 &
+    cargo_pid=$!
+    (
+        weld_pid=""
+        while kill -0 "${cargo_pid}" 2>/dev/null; do
+            weld_pid="$(pgrep -P "${cargo_pid}" -x weldwm | sed -n '1p' || true)"
+            [[ -n "${weld_pid}" ]] && break
+            sleep 0.1
+        done
+        [[ -n "${weld_pid}" ]] || exit 0
+        printf 'Weld will stop automatically after %s seconds\n' "${run_seconds}" >&2
+        sleep "${run_seconds}"
+        kill -TERM "${weld_pid}" 2>/dev/null || exit 0
+        for _ in {1..50}; do
+            kill -0 "${weld_pid}" 2>/dev/null || exit 0
+            sleep 0.1
+        done
+        printf 'Weld did not stop after SIGTERM; sending SIGKILL\n' >&2
+        kill -KILL "${weld_pid}" 2>/dev/null || true
+    ) &
+    watchdog_pid=$!
+    wait "${cargo_pid}"
+    status=$?
+    kill "${watchdog_pid}" 2>/dev/null || true
+    wait "${watchdog_pid}" 2>/dev/null || true
+else
+    cargo run -- --backend drm "$@" 2>&1 | tee "${log_path}"
+    status=${PIPESTATUS[0]}
+fi
+set -e
+exit "${status}"

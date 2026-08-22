@@ -13,12 +13,14 @@ use smithay::{
 
 use crate::{OutputId, OutputScale};
 
+#[derive(Clone)]
 pub(crate) struct OutputDescriptor {
     pub(crate) name: String,
     pub(crate) physical_properties: PhysicalProperties,
 }
 
 /// One Wayland output global installed when the compositor server starts.
+#[derive(Clone)]
 pub(crate) struct ServerOutputDefinition {
     pub(crate) id: OutputId,
     pub(crate) descriptor: OutputDescriptor,
@@ -69,6 +71,14 @@ impl OutputMetrics {
         };
         metrics.validate_logical_size()?;
         Ok(metrics)
+    }
+
+    pub(crate) fn with_refresh_millihertz(mut self, refresh_millihertz: i32) -> Result<Self> {
+        if refresh_millihertz <= 0 {
+            bail!("output refresh must be positive");
+        }
+        self.refresh_millihertz = refresh_millihertz;
+        Ok(self)
     }
 
     fn validate_logical_size(self) -> Result<()> {
@@ -142,5 +152,18 @@ mod tests {
         assert!(OutputMetrics::new(0, 800, OutputScale::default()).is_err());
         let excessive_scale = OutputScale::new(1_000.0).expect("valid positive scale");
         assert!(OutputMetrics::new(800, 600, excessive_scale).is_err());
+    }
+
+    #[test]
+    fn explicit_refresh_preserves_physical_mode() {
+        let metrics = OutputMetrics::new(2560, 1600, OutputScale::default())
+            .expect("valid metrics")
+            .with_refresh_millihertz(120_000)
+            .expect("valid refresh");
+
+        assert_eq!(metrics.physical_width(), 2560);
+        assert_eq!(metrics.physical_height(), 1600);
+        assert_eq!(metrics.mode().refresh, 120_000);
+        assert_eq!(metrics.scale_factor(), 1.0);
     }
 }

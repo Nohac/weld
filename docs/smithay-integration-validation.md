@@ -119,22 +119,33 @@ public boundary with its Vulkan renderer. Adding an external-primary-buffer
 API to Smithay or retaining Weld's low-level `GbmBufferedSurface` presenter
 would duplicate machinery already behind that seam.
 
-Production should additionally use Smithay facilities that the focused probe
-does not exercise:
+The first production adapter now uses the validated `DrmOutputManager` seam for
+one connector. Its renderer imports the leased allocation, invokes Bevy when
+Smithay draws Weld's opaque composition element, then releases ownership before
+queueing. The host retires Smithay slots only from the matching CRTC vblank,
+switches to an owned target while inactive, and calls
+`DrmOutputManager::activate(true)` on return.
 
-- pass the real Smithay `Output` as `OutputModeSource::Auto`, so mode, scale,
-  and transform changes remain one output state;
+The adapter also supplies a normalized `MemoryRenderBuffer` cursor element and
+enables only `ALLOW_CURSOR_PLANE_SCANOUT`. Smithay owns cursor-plane selection,
+repositioning, and atomic commits; Weld reuses its existing wgpu composition
+blitter when the element is ineligible. Real-TTY acceptance verified cold
+startup, client presentation and input, hardware cursor assignment, timed
+shutdown, and a VT round trip that reopened and reconfigured all 21 detected
+input devices. A pacing trace also verified that physical retirement now
+anchors composition to vblank instead of a drifting interval deadline.
+
+Production should additionally use Smithay facilities that the focused probe
+and first adapter do not exercise:
+
 - maintain `DrmOutputRenderElements` for device-wide operations that may need
   to recompose another output;
-- consume per-CRTC page-flip metadata for pacing and presentation feedback,
-  falling back to the local monotonic clock when DRM reports zero time;
+- publish per-CRTC page-flip time through presentation feedback, falling back
+  to the local monotonic clock when DRM reports zero time;
 - expose accurate element commit and damage state to Smithay's output damage
   tracker as Bevy gains retained rendering support;
 - use `FrameFlags::DEFAULT` only when eligible plane elements are supplied;
   the probe uses `FrameFlags::empty()` and validates primary composition only;
-- provide a `Kind::Cursor` element backed by stable memory and a GBM cursor
-  device so Smithay can retain, reposition, and commit the hardware cursor
-  plane; add an explicit GPU-composition fallback for unsupported hardware;
 - expose eligible unadorned client buffers as separate elements when direct
   scanout or overlay promotion can bypass the Bevy scene without duplicating
   the client;

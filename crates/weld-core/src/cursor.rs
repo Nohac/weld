@@ -96,10 +96,6 @@ impl CursorHostUpdate {
 }
 
 #[derive(Clone, Debug)]
-#[expect(
-    dead_code,
-    reason = "the Wayland server retains client cursor pixels for the replacement native presentation adapter"
-)]
 pub(crate) struct ClientCursorImage {
     pub(crate) pixels: Arc<[u8]>,
     pub(crate) width: u32,
@@ -113,10 +109,6 @@ pub(crate) struct ClientCursorImage {
 pub(crate) enum CursorImage {
     Hidden,
     Named(CursorIcon),
-    #[expect(
-        dead_code,
-        reason = "client cursor pixels are consumed by the replacement native presentation adapter"
-    )]
     Surface(ClientCursorImage),
 }
 

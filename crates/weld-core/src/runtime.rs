@@ -159,6 +159,12 @@ pub(crate) struct FrameState {
 
 impl Default for FrameState {
     fn default() -> Self {
+        Self::with_interval(FRAME_INTERVAL)
+    }
+}
+
+impl FrameState {
+    pub(crate) fn with_interval(frame_interval: Duration) -> Self {
         Self {
             update_dirty: true,
             composition_dirty: true,
@@ -168,12 +174,9 @@ impl Default for FrameState {
             settle_compositions_remaining: BEVY_SETTLE_COMPOSITIONS,
             present_needed: true,
             next_composition: None,
-            frame_interval: FRAME_INTERVAL,
+            frame_interval,
         }
     }
-}
-
-impl FrameState {
     #[cfg(test)]
     pub(crate) const fn update_dirty(&self) -> bool {
         self.update_dirty
@@ -256,6 +259,12 @@ impl FrameState {
         self.present_needed = false;
     }
 
+    /// Retires a physical frame and makes its vblank the next pacing origin.
+    pub(crate) fn physical_frame_retired(&mut self) {
+        self.present_needed = false;
+        self.next_composition = None;
+    }
+
     const fn composition_pending(&self) -> bool {
         self.composition_dirty || self.settle_compositions_remaining > 0
     }
@@ -306,5 +315,44 @@ impl PendingCapture {
 
     pub(crate) const fn is_startup(&self) -> bool {
         self.remote_request_id.is_none()
+    }
+}
+
+#[cfg(test)]
+mod frame_state_tests {
+    use std::time::{Duration, Instant};
+
+    use super::FrameState;
+
+    #[test]
+    fn physical_retirement_makes_pending_composition_immediately_due() {
+        let interval = Duration::from_millis(16);
+        let rendered_at = Instant::now();
+        let mut state = FrameState::with_interval(interval);
+        state.composition_rendered(rendered_at);
+        state.request_composition();
+        let vblank_at = rendered_at + Duration::from_millis(4);
+
+        assert!(!state.composition_due(vblank_at));
+        state.physical_frame_retired();
+
+        assert!(state.composition_due(vblank_at));
+        assert!(!state.present_needed());
+    }
+
+    #[test]
+    fn physical_retirement_keeps_an_idle_frame_state_asleep() {
+        let interval = Duration::from_millis(16);
+        let now = Instant::now();
+        let mut state = FrameState::with_interval(interval);
+        for _ in 0..5 {
+            state.composition_rendered(now);
+        }
+        state.presented();
+
+        state.physical_frame_retired();
+
+        assert!(!state.work_pending());
+        assert_eq!(state.composition_timeout(now), interval);
     }
 }

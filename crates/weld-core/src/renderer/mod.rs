@@ -18,6 +18,7 @@ use winit::event_loop::OwnedDisplayHandle;
 use winit::{dpi::PhysicalSize, window::Window};
 
 use crate::dmabuf::{DmabufCapabilities, DmabufSourceCache, request_weld_device};
+use crate::host::CompositionFrame;
 
 mod composite;
 
@@ -217,41 +218,16 @@ impl NestedRenderer {
                     &composition_bind_group,
                 );
 
-                let unpadded_bytes_per_row = self.surface_config.width * 4;
-                let padded_bytes_per_row =
-                    unpadded_bytes_per_row.next_multiple_of(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT);
-                let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
-                    label: Some("weld screenshot readback"),
-                    size: u64::from(padded_bytes_per_row) * u64::from(self.surface_config.height),
-                    usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-                    mapped_at_creation: false,
-                });
-                encoder.copy_texture_to_buffer(
-                    wgpu::TexelCopyTextureInfo {
-                        texture: &texture,
-                        mip_level: 0,
-                        origin: wgpu::Origin3d::ZERO,
-                        aspect: wgpu::TextureAspect::All,
-                    },
-                    wgpu::TexelCopyBufferInfo {
-                        buffer: &buffer,
-                        layout: wgpu::TexelCopyBufferLayout {
-                            offset: 0,
-                            bytes_per_row: Some(padded_bytes_per_row),
-                            rows_per_image: Some(self.surface_config.height),
-                        },
-                    },
-                    wgpu::Extent3d {
-                        width: self.surface_config.width,
-                        height: self.surface_config.height,
-                        depth_or_array_layers: 1,
-                    },
+                let mut capture = encode_capture_readback(
+                    &self.device,
+                    &mut encoder,
+                    &texture,
+                    self.surface_config.width,
+                    self.surface_config.height,
+                    self.surface_config.format,
                 );
-                CaptureReadback {
-                    _texture: texture,
-                    buffer,
-                    padded_bytes_per_row,
-                }
+                capture.retained_texture = Some(texture);
+                capture
             });
 
             let submission = self.queue.submit([encoder.finish()]);
@@ -260,7 +236,7 @@ impl NestedRenderer {
         };
 
         let capture_result = capture.zip(capture_path).map(|(capture, path)| {
-            self.save_capture(capture, submission, path)
+            save_capture_readback(&self.device, capture, submission, path)
                 .map_err(|error| error.to_string())
         });
 
@@ -271,54 +247,6 @@ impl NestedRenderer {
             presented: true,
             capture: capture_result,
         })
-    }
-
-    fn save_capture(
-        &self,
-        capture: CaptureReadback,
-        submission: wgpu::SubmissionIndex,
-        path: &Path,
-    ) -> Result<()> {
-        let _capture_span = tracing::trace_span!(
-            target: crate::PROFILE_TARGET,
-            "capture_readback_encode"
-        )
-        .entered();
-
-        let slice = capture.buffer.slice(..);
-        let (sender, receiver) = mpsc::sync_channel(1);
-        slice.map_async(wgpu::MapMode::Read, move |result| {
-            let _ = sender.send(result);
-        });
-        self.device
-            .poll(wgpu::PollType::Wait {
-                submission_index: Some(submission),
-                timeout: Some(CAPTURE_GPU_TIMEOUT),
-            })
-            .context("GPU screenshot readback did not complete")?;
-        receiver
-            .recv_timeout(CAPTURE_GPU_TIMEOUT)
-            .context("GPU screenshot mapping callback did not complete")?
-            .context("GPU screenshot buffer mapping failed")?;
-
-        let mapped = slice
-            .get_mapped_range()
-            .context("GPU screenshot mapped range is unavailable")?;
-        let pixels = decode_capture_rows(
-            &mapped,
-            self.surface_config.width,
-            self.surface_config.height,
-            capture.padded_bytes_per_row,
-            self.surface_config.format,
-        )?;
-        drop(mapped);
-        capture.buffer.unmap();
-        write_png(
-            path,
-            self.surface_config.width,
-            self.surface_config.height,
-            &pixels,
-        )
     }
 
     fn recreate_surface(&mut self) -> Result<()> {
@@ -342,9 +270,129 @@ impl FrameResult {
 }
 
 struct CaptureReadback {
-    _texture: wgpu::Texture,
+    retained_texture: Option<wgpu::Texture>,
     buffer: wgpu::Buffer,
     padded_bytes_per_row: u32,
+    width: u32,
+    height: u32,
+    format: wgpu::TextureFormat,
+}
+
+pub(crate) fn capture_owned_frame(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    frame: &CompositionFrame,
+    path: &Path,
+) -> Result<()> {
+    let texture = frame
+        .owned_texture()
+        .context("capture requires an owned composition texture")?;
+    let target = frame.target();
+    let extent = target.extent();
+    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("Weld owned composition readback"),
+    });
+    let capture = encode_capture_readback(
+        device,
+        &mut encoder,
+        texture,
+        extent.width,
+        extent.height,
+        target.format(),
+    );
+    let submission = queue.submit([encoder.finish()]);
+    save_capture_readback(device, capture, submission, path)
+}
+
+fn encode_capture_readback(
+    device: &wgpu::Device,
+    encoder: &mut wgpu::CommandEncoder,
+    texture: &wgpu::Texture,
+    width: u32,
+    height: u32,
+    format: wgpu::TextureFormat,
+) -> CaptureReadback {
+    let unpadded_bytes_per_row = width * 4;
+    let padded_bytes_per_row =
+        unpadded_bytes_per_row.next_multiple_of(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT);
+    let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("Weld composition readback"),
+        size: u64::from(padded_bytes_per_row) * u64::from(height),
+        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+        mapped_at_creation: false,
+    });
+    encoder.copy_texture_to_buffer(
+        wgpu::TexelCopyTextureInfo {
+            texture,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        wgpu::TexelCopyBufferInfo {
+            buffer: &buffer,
+            layout: wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(padded_bytes_per_row),
+                rows_per_image: Some(height),
+            },
+        },
+        wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
+    );
+    CaptureReadback {
+        retained_texture: None,
+        buffer,
+        padded_bytes_per_row,
+        width,
+        height,
+        format,
+    }
+}
+
+fn save_capture_readback(
+    device: &wgpu::Device,
+    capture: CaptureReadback,
+    submission: wgpu::SubmissionIndex,
+    path: &Path,
+) -> Result<()> {
+    let _capture_span = tracing::trace_span!(
+        target: crate::PROFILE_TARGET,
+        "capture_readback_encode"
+    )
+    .entered();
+    let CaptureReadback {
+        retained_texture: _retained_texture,
+        buffer,
+        padded_bytes_per_row,
+        width,
+        height,
+        format,
+    } = capture;
+    let slice = buffer.slice(..);
+    let (sender, receiver) = mpsc::sync_channel(1);
+    slice.map_async(wgpu::MapMode::Read, move |result| {
+        let _ = sender.send(result);
+    });
+    device
+        .poll(wgpu::PollType::Wait {
+            submission_index: Some(submission),
+            timeout: Some(CAPTURE_GPU_TIMEOUT),
+        })
+        .context("composition readback did not complete")?;
+    receiver
+        .recv_timeout(CAPTURE_GPU_TIMEOUT)
+        .context("composition mapping callback did not complete")?
+        .context("composition buffer mapping failed")?;
+    let mapped = slice
+        .get_mapped_range()
+        .context("composition mapped range is unavailable")?;
+    let pixels = decode_capture_rows(&mapped, width, height, padded_bytes_per_row, format)?;
+    drop(mapped);
+    buffer.unmap();
+    write_png(path, width, height, &pixels)
 }
 
 fn decode_capture_rows(

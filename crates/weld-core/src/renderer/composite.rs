@@ -130,6 +130,43 @@ impl CompositionBlitter {
         pass.set_bind_group(0, composition, &[]);
         pass.draw(0..3, 0..1);
     }
+
+    pub(crate) fn encode_overlay(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        label: &'static str,
+        target: &wgpu::TextureView,
+        composition: &wgpu::BindGroup,
+        viewport: (f32, f32, f32, f32),
+        scissors: impl IntoIterator<Item = (u32, u32, u32, u32)>,
+    ) {
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some(label),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: target,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Load,
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        pass.set_pipeline(&self.pipeline);
+        pass.set_bind_group(0, composition, &[]);
+        pass.set_viewport(viewport.0, viewport.1, viewport.2, viewport.3, 0.0, 1.0);
+        for (x, y, width, height) in scissors {
+            if width == 0 || height == 0 {
+                continue;
+            }
+            pass.set_scissor_rect(x, y, width, height);
+            pass.draw(0..3, 0..1);
+        }
+    }
 }
 
 #[cfg(test)]

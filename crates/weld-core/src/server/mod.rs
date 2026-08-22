@@ -359,6 +359,10 @@ impl ServerState {
         self.send_all_surface_scales();
     }
 
+    pub(crate) fn native_output(&self, id: OutputId) -> Option<Output> {
+        self.outputs.get(&id).map(|output| output.native.clone())
+    }
+
     fn primary_output(&self) -> &Output {
         &self.outputs[&self.primary_output].native
     }

@@ -1,8 +1,8 @@
 # Input performance findings
 
-This note preserves conclusions from profiling Weld's removed low-level DRM
-presenter. It is historical evidence for the Smithay-first rebuild, not a
-description of the clean-room baseline's runnable backends.
+This note preserves conclusions from Weld's removed low-level DRM presenter
+and the subsequent Smithay-first replacement. Historical measurements remain
+useful when they explain constraints retained by the current backend.
 
 ## Required behavior
 
@@ -63,3 +63,26 @@ recreating the old instrumentation:
 The old DRM-specific profiling suites were removed with their backend. Generic
 Tracy, render benchmarks, and whole-process profiling remain documented in
 [Profiling Weld](profiling.md).
+
+## Smithay-first validation
+
+The first production trace on the replacement backend exposed a free-running
+composition timer drifting against physical vblank. Of 4,195 measured
+retirement intervals, 738 skipped exactly one refresh, including sustained
+33.3 ms runs on the 60 Hz panel. Frames admitted more than roughly 11 to 12 ms
+after vblank routinely missed the next flip even though blocking GPU waits
+averaged only 1.38 ms.
+
+The physical backend now uses Smithay's retired DRM frame as its pacing clock.
+In the follow-up trace, 3,194 of 3,262 measured retirements completed on the
+next refresh and 3,176 submissions were admitted within 1 ms of vblank. The
+previous sustained 30 Hz state did not recur, and Smithay assigned every
+recorded cursor update to the hardware cursor plane. Remaining isolated gaps
+coincided with application or trace-output stalls rather than a late periodic
+deadline.
+
+On the tested AMD Radeon 880M system, an uninstrumented release build stabilized
+at roughly 3.5 to 4 percent Weld CPU during rapid pointer motion and roughly 10
+to 11 percent while Firefox played two 4K60 YouTube videos. These figures are a
+useful baseline, not a performance guarantee; native completion fences, partial
+scene damage, and further whole-process profiling remain future improvements.

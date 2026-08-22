@@ -1,81 +1,64 @@
 # DRM output adapter plan
 
-This plan starts at Weld's clean-room baseline. It replaces the removed custom
-GBM/KMS presenter with a small adapter around the public Smithay boundary proven
-by `smithay_drm_compositor_probe`.
+## Status
 
-## Ownership
+The first single-output adapter is implemented and awaiting real-TTY
+validation. It replaced the removed custom GBM/KMS presenter with Smithay's
+`DrmOutputManager` and a narrow wgpu renderer. See
+[Direct DRM presentation](drm-presentation.md) for the exact current contract.
 
-Smithay owns:
+Implemented in this slice:
 
-- session, device, connector, CRTC, mode, and page-flip lifecycle;
-- primary swapchains, framebuffer export, plane assignment, and damage state;
-- device-wide output coordination and activation recovery; and
-- hardware cursor and direct-scanout eligibility when Weld supplies suitable
-  render elements.
+- one preferred desktop connector on the primary DRM GPU;
+- Smithay-owned mode, swapchain, planes, commits, page flips, pause, and
+  activation;
+- direct Bevy rendering into an explicit-modifier Smithay lease;
+- owned composition during inactive sessions and one-shot capture;
+- one-frame admission with deferred demand across vblank;
+- Smithay cursor-plane selection with a shared wgpu fallback; and
+- refresh-derived pacing and logical runtime scale updates.
 
-Weld owns:
+The initial blocking GPU completion wait is a correctness baseline, not the
+desired steady-state synchronization mechanism.
 
-- Wayland protocol state and client-buffer lifetime;
-- Bevy application updates, scene composition, and window policy;
-- selection between physical, retained, capture, headless, and streaming
-  targets; and
-- the narrow Vulkan/wgpu import and synchronization implementation required by
-  Smithay's renderer traits.
+## Next architecture slice: multiple outputs
 
-Smithay desktop helpers must not become a second source of truth beside Weld's
-managed-window entities.
+Smithay leases one output target inside each `DrmOutput::render_frame` call,
+while `AppShell::render_outputs` currently activates a set of output cameras
+and runs one RenderApp pass. The next design must reconcile those lifetimes
+without retaining Smithay frames across unrelated callbacks, rendering the
+same camera twice, or making one output's failure block the rest.
 
-## Initial implementation slice
+That slice should:
 
-1. Extract the proven DMA-BUF binding and foreign-ownership code from the probe
-   into a production renderer adapter without broadening its responsibility.
-2. Construct one `DrmOutputManager` and `DrmOutput` per discovered physical
-   output using Smithay's session and udev integration.
-3. Bind the Smithay-leased primary image to the stable manual texture-view
-   target used by the matching Bevy output camera.
-4. Drive application composition only when that output has demand and Smithay
-   can accept a frame, then submit through `DrmOutput::render_frame`.
-5. Retire physical work from the matching page-flip event and feed presentation
-   metadata back to the Wayland server.
-6. On session pause, stop physical queueing and select the owned target. On
-   activation, call Smithay's activation path and request a fresh full frame.
-7. Keep failures local to the physical output whenever clients and retained
-   composition can continue safely.
+1. Represent enabled connector changes as an atomic Weld output-layout
+   transaction.
+2. Establish how all required Smithay leases are acquired before the one Bevy
+   RenderApp pass, or deliberately prove that independent per-output passes
+   preserve extraction and client-buffer ownership.
+3. Keep one frame-admission state per output and retire it only from the
+   matching CRTC vblank.
+4. Preserve the existing output entities, mixed-scale camera targets, window
+   intersections, and physical pointer topology.
+5. Handle connector removal without disconnecting clients or destroying owned
+   headless consumers.
 
-The adapter may initially wait for wgpu completion as the probe does. That wait
-must stay outside protocol dispatch if it can block materially. Native fence
-export should replace it without changing ownership.
+The historical mixed-scale observations remain in
+[Multi-output validation](multi-output-validation.md).
 
-## Follow-up capabilities
+## Subsequent capabilities
 
-- expose a stable cursor render element so Smithay can use a hardware cursor
-  plane, with GPU composition as an explicit capability fallback;
-- publish real damage and element commit state as Bevy gains retained rendering;
-- expose eligible unadorned client buffers for direct scanout or overlay
-  promotion without bypassing Weld policy;
-- coordinate multiple outputs and mixed scales without rendering two copies on
-  the same camera;
-- add live connector and mode changes as whole-layout transactions;
-- select VRR policy independently per output; and
-- keep rendering into owned targets when physical presentation is suspended or
-  intentionally detached for streaming.
+- Export a native completion fence instead of waiting for wgpu.
+- Publish real element damage as Bevy retained rendering matures.
+- Expose eligible unadorned client buffers for primary direct scanout or
+  overlay promotion without bypassing Weld policy.
+- Add dynamic connector and mode changes.
+- Add `wp_presentation`, VRR policy, HDR, color management, rotation, and
+  cross-GPU transfer.
 
-## Acceptance
+## Acceptance status
 
-Automated checks cover the protocol-neutral and nested boundaries. A physical
-adapter is accepted only after real-TTY validation proves:
-
-- cold startup and orderly shutdown;
-- foot and Firefox rendering and input;
-- explicit-modifier direct rendering with no CPU pixel copy or full-frame blit;
-- repeated VT pause and activation with a fresh frame after return;
-- continued retained or headless composition while the VT is inactive;
-- connector removal and restoration without a compositor crash;
-- Vulkan validation with no image-layout, lifetime, or synchronization errors;
-  and
-- explicit evidence on each driver family before claiming AMD, Intel, or
-  NVIDIA support.
-
-Until this adapter exists, `HostBackend::Drm` must fail explicitly and the
-Smithay compositor probe remains the physical-output reference.
+Automated workspace checks cover the protocol-neutral policies and compile the
+complete backend. Hardware acceptance remains pending and requires the real-TTY
+matrix recorded in [Direct DRM presentation](drm-presentation.md). Do not claim
+AMD, Intel, or NVIDIA support until each driver family has explicit evidence.

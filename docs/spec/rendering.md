@@ -9,16 +9,18 @@ texture; SHM pixels are copied into Bevy images. Detailed ownership and
 synchronization live in
 [Architecture](../architecture.md).
 
-Standalone DRM uses Smithay's GBM/KMS surface as its physical output sink, but
-keeps composition in wgpu and does not use a Smithay renderer. While the output
-is active, Weld binds a leased GBM buffer to the stable Bevy target and renders
-the scene directly into scanout. Smithay normally presents the cursor through
-an atomic hardware plane without repainting that image; a cursor-only wgpu pass
-is retained as the explicit capability fallback. There is no full-output
-composition blit. While the VT/output is inactive, or a capture needs retained
-storage, the same camera handle instead resolves to an application-owned
-texture. Nested and DRM operation, VT recovery, output loss, and the retained
-historical WSI probe are documented in
+Standalone DRM currently enables one preferred physical connector. Smithay
+owns its GBM/KMS output compositor, while Weld implements the minimal renderer
+traits that make a leased primary buffer a Bevy target. While active, Bevy
+renders directly into scanout. Smithay may present the cursor through its GBM
+cursor plane; the existing wgpu composition blitter is the explicit fallback.
+There is no full-output composition blit. While the VT/output is inactive, or
+a capture needs retained storage, the same camera handle instead resolves to
+an application-owned texture. Real-TTY acceptance has verified cold startup,
+client presentation and input, hardware cursor assignment, VT recovery, timed
+shutdown, and vblank-paced composition on the initial AMD test system. Nested
+and DRM operation, remaining limitations, and the retained historical WSI
+probe are documented in
 [Direct DRM presentation](../drm-presentation.md).
 
 ## Frame demand — Implemented

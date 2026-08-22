@@ -167,11 +167,29 @@ text console is restored after exit. Output defaults to
 Use the Smithay output-compositor probe when changing the production DRM
 boundary:
 
-```text
 scripts/run-smithay-drm-compositor-probe
 ```
 
-Both probes require a real TTY. See
+Run the production single-output backend from a real TTY with:
+
+```text
+scripts/run-weld-drm
+scripts/run-weld-drm --seconds 30 foot
+WELD_DRM_VALIDATE=1 scripts/run-weld-drm foot
+WELD_DRM_PACING_TRACE=1 scripts/run-weld-drm foot
+```
+
+`--seconds` starts its watchdog after compilation and sends Weld `SIGTERM` when
+the interval expires, allowing its normal DRM shutdown to restore the console.
+The first command exercises ordinary validation. The environment flag enables
+the Khronos validation layer and synchronization validation for a focused GPU
+correctness run. `WELD_DRM_PACING_TRACE=1` records one diagnostic event per
+queued frame and vblank, including cursor-plane assignment, vblank sequence
+deltas, composition state, and GPU wait time. Compare behavior with a normal
+run because writing the trace can itself perturb frame timing. Output defaults
+to `target/validation/weld-drm.log`.
+
+The probes and production DRM backend require a real TTY. See
 [Direct DRM presentation](docs/drm-presentation.md) and
 [Smithay integration validation](docs/smithay-integration-validation.md) for
 their scopes and acceptance evidence.

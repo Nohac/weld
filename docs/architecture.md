@@ -123,17 +123,15 @@ outputs remain in one millimeter coordinate space. EDID can still be inaccurate.
 The output domain is independent of a physical presenter. Logical layout,
 physical footprints, collision portals, scale selection, output intersection,
 and camera targeting remain Weld policy that a native adapter consumes. The
-nested host currently supplies one output. The production DRM adapter is
-intentionally absent at this clean-room baseline; selecting it fails explicitly
-instead of retaining the removed low-level presenter or silently choosing the
-nested host.
+nested host supplies one host-window output. The standalone DRM host currently
+selects one preferred desktop connector, preferring an internal panel, and
+leaves additional connectors and hotplug for the multi-output slice.
 
-The validated replacement boundary uses Smithay's `DrmOutputManager` and
-`DrmCompositor` for connector, CRTC, mode, swapchain, plane, page-flip, and
-activation lifecycle. Weld will implement only the renderer seam that binds a
-Smithay-leased DMA-BUF to the matching Bevy output target. The focused
-`smithay_drm_compositor_probe` proves this direction without making Smithay's
-desktop window model authoritative. See
+The DRM adapter uses Smithay's `DrmOutputManager` and `DrmCompositor` for CRTC,
+mode, swapchain, plane, atomic commit, page-flip, pause, and activation
+lifecycle. Weld implements only the renderer seam that binds a Smithay-leased
+explicit-modifier DMA-BUF to the matching Bevy output target. It does not use
+Smithay's desktop window model or restore the removed low-level presenter. See
 [Direct DRM presentation](drm-presentation.md) and the
 [DRM output adapter plan](drm-rendering-improvement-plan.md).
 
@@ -342,8 +340,10 @@ keeps a stable manual texture-view handle so a future physical adapter can
 substitute a Smithay-leased output allocation without retargeting cameras, UI,
 picking, or plugins. An owned target remains necessary for capture, headless
 operation, streaming, and composition while a physical session is inactive.
-The removed DRM presenter is not a fallback. Detailed replacement sequencing
-is tracked in the [DRM output adapter plan](drm-rendering-improvement-plan.md).
+The removed DRM presenter is not a fallback. The DRM host substitutes a
+Smithay-leased view while active and the same output's owned view while
+inactive or capturing. Detailed follow-up sequencing is tracked in the
+[DRM output adapter plan](drm-rendering-improvement-plan.md).
 
 Demand-driven composition and client frame callbacks remain independent of
 physical output availability. Startup, first client mapping, and structural
@@ -356,17 +356,18 @@ continuous renderer.
 lifecycle, and normalized client cursor pixels. `weld-app` exposes reloadable
 `CursorSettings`, interprets Bevy's standard `CursorIcon`, and accepts transient
 `CursorRequest` overrides. Nested mode delegates final cursor presentation to
-the host window system. Cursor theme rasterization, hardware-plane submission,
-and GPU fallback were presentation details of the removed DRM adapter and will
-be chosen anew at the Smithay output boundary.
+the host window system. DRM mode normalizes named and client cursor images into
+Smithay `MemoryRenderBuffer` elements. Smithay chooses its GBM cursor plane;
+the existing composition blitter supplies the GPU fallback. Cursor-only motion
+does not dirty the Bevy scene.
 
 Raw input is forwarded to the focused client in order and retained for the next
 refresh-paced application update. That contract lets client delivery run at
 device-event pace without running Bevy schedules at the device polling rate.
 The standalone libinput adapter preserves accelerated and unaccelerated motion,
 scroll phases, gestures, clickfinger policy, and timestamps as protocol-neutral
-events; the future DRM host will connect it to Smithay's session and seat
-lifecycle without owning KMS presentation policy.
+events. The DRM host connects it to Smithay's session and seat lifecycle while
+the output compositor remains authoritative for KMS presentation.
 Bevy remains authoritative for root/layer selection and shell interaction.
 Smithay re-evaluates the selected surface tree's current input regions and
 subsurface ordering for every raw pointer event. Crossing an application-owned

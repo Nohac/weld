@@ -5514,6 +5514,7 @@ dependencies = [
  "wgpu",
  "winit",
  "x11-dl",
+ "xcursor",
 ]
 
 [[package]]

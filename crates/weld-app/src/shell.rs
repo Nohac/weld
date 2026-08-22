@@ -101,6 +101,34 @@ struct OwnedCompositionTarget {
     target: CompositionTargetView,
 }
 
+#[derive(Clone, Copy)]
+struct CompositionTargetContract {
+    extent: Extent,
+    format: wgpu::TextureFormat,
+}
+
+fn validate_external_target(
+    output: OutputId,
+    expected: CompositionTargetContract,
+    actual: CompositionTargetContract,
+) -> Result<()> {
+    if actual.extent != expected.extent {
+        bail!(
+            "external composition target for {output:?} has extent {:?}, expected {:?}",
+            actual.extent,
+            expected.extent
+        );
+    }
+    if actual.format != expected.format {
+        bail!(
+            "external composition target for {output:?} has format {:?}, expected {:?}",
+            actual.format,
+            expected.format
+        );
+    }
+    Ok(())
+}
+
 impl OwnedCompositionTarget {
     fn new(device: &wgpu::Device, extent: Extent, format: wgpu::TextureFormat) -> Self {
         let texture = device.create_texture(&wgpu::TextureDescriptor {
@@ -418,6 +446,17 @@ impl AppShell {
             let frame = match &request.destination {
                 CompositionDestination::Owned => output.owned_target.frame(),
                 CompositionDestination::External(target) => {
+                    validate_external_target(
+                        request.output,
+                        CompositionTargetContract {
+                            extent: output.configuration.extent(),
+                            format: output.owned_target.target.format(),
+                        },
+                        CompositionTargetContract {
+                            extent: target.extent(),
+                            format: target.format(),
+                        },
+                    )?;
                     CompositionFrame::external(target.clone())
                 }
             };
@@ -1041,14 +1080,15 @@ mod tests {
     };
 
     use super::{
-        App, ManualTextureViewHandle, Messages, OutputGeometry, PRIMARY_OUTPUT_ID, RedrawRequests,
-        SurfaceCompositionDemand, UVec2, WeldOutput, advance_main_app, disconnect_render_time,
-        render_composition_app, spawn_compositor_camera,
+        App, CompositionTargetContract, ManualTextureViewHandle, Messages, OutputGeometry,
+        PRIMARY_OUTPUT_ID, RedrawRequests, SurfaceCompositionDemand, UVec2, WeldOutput,
+        advance_main_app, disconnect_render_time, render_composition_app, spawn_compositor_camera,
+        validate_external_target,
     };
     use weld_core::{
         CompositionDemand,
         server::{PendingSurfaceEvent, PendingSurfaceEventKind, PendingSurfaceTreeSnapshot},
-        surface::SurfaceId,
+        surface::{Extent, SurfaceId},
     };
 
     #[derive(Resource, Default)]
@@ -1061,6 +1101,34 @@ mod tests {
 
     fn count_render(mut count: ResMut<RenderCount>) {
         count.0 += 1;
+    }
+
+    #[test]
+    fn external_target_contract_rejects_extent_and_format_mismatches() {
+        let expected = CompositionTargetContract {
+            extent: Extent::new(1920, 1080),
+            format: wgpu::TextureFormat::Bgra8UnormSrgb,
+        };
+        assert!(
+            validate_external_target(PRIMARY_OUTPUT_ID, expected, expected).is_ok(),
+            "matching external targets must remain usable"
+        );
+
+        let wrong_extent = CompositionTargetContract {
+            extent: Extent::new(1280, 720),
+            ..expected
+        };
+        let extent_error = validate_external_target(PRIMARY_OUTPUT_ID, expected, wrong_extent)
+            .expect_err("mismatched extent must be rejected");
+        assert!(extent_error.to_string().contains("has extent"));
+
+        let wrong_format = CompositionTargetContract {
+            format: wgpu::TextureFormat::Rgba8UnormSrgb,
+            ..expected
+        };
+        let format_error = validate_external_target(PRIMARY_OUTPUT_ID, expected, wrong_format)
+            .expect_err("mismatched format must be rejected");
+        assert!(format_error.to_string().contains("has format"));
     }
 
     fn test_app() -> (App, RedrawRequests) {

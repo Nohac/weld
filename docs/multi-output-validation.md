@@ -1,9 +1,10 @@
 # Multi-output validation
 
-**Status: Observed issues and agreed follow-up.** This note records behavior
-seen during development on a mixed-scale two-output DRM setup. Observations are
-kept separate from possible causes until profiling or instrumentation verifies
-them.
+**Status: Historical observations for the next DRM slice.** The current
+Smithay-first production adapter deliberately enables one connector. This note
+records behavior seen with the removed mixed-scale two-output adapter so the
+issues are not lost when multi-output returns. Observations remain separate
+from possible causes until the new adapter can measure them.
 
 ## Scale-boundary movement
 

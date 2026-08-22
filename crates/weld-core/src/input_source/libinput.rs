@@ -230,6 +230,10 @@ impl LibinputAdapter {
         self.last_event_time_msec
     }
 
+    pub const fn pointer_position(&self) -> InputPosition {
+        self.pointer
+    }
+
     /// Replaces logical projection and physical adjacency after an atomic layout change.
     ///
     /// The physical mode is unchanged, so preserving the pointer's normalized

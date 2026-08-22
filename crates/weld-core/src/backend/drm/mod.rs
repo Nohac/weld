@@ -4,13 +4,23 @@
 //! around Smithay's output compositor. Keeping this boundary explicit prevents
 //! automatic backend selection from silently falling back to a different host.
 
-use anyhow::{Result, bail};
+use anyhow::Result;
 use calloop::signals::Signals;
 
 use crate::host::{PreparedHost, RunOptions};
 
-pub(crate) fn prepare(_options: RunOptions, _signals: Signals) -> Result<PreparedHost> {
-    bail!(
-        "the standalone DRM backend is temporarily unavailable while it is rebuilt around Smithay's output compositor; use --backend nested for the working host or scripts/run-smithay-drm-compositor-probe to validate the DRM boundary"
-    )
+mod cursor;
+mod device;
+mod host;
+mod output;
+mod renderer;
+mod vulkan;
+
+pub(crate) fn prepare(options: RunOptions, signals: Signals) -> Result<PreparedHost> {
+    let bootstrap = device::prepare(&options)?;
+    let context = bootstrap.render_context;
+    let runtime = bootstrap.runtime;
+    Ok(PreparedHost::new(context, move |application| {
+        host::run(runtime, options, signals, application)
+    }))
 }

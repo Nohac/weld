@@ -56,6 +56,7 @@ tracing-tracy = "0.11.4"
 wgpu = { version = "30", default-features = false }
 winit = { version = "0.30.13", default-features = false }
 x11-dl = "2.21.0"
+xcursor = "0.3.11"
 
 [dependencies]
 anyhow.workspace = true

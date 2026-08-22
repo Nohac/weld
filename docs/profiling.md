@@ -4,9 +4,9 @@ Weld uses `tracing` throughout its host and Bevy boundaries. The optional
 `profiling-tracy` feature connects those spans to Tracy without scattering
 feature gates through call sites.
 
-The clean-room baseline has a runnable nested backend. Standalone DRM scenarios
-resume when the Smithay output adapter is implemented; the focused DRM probes
-are validation tools rather than general profiling hosts.
+Weld has runnable nested and Smithay-first standalone DRM backends. Focused DRM
+probes remain lower-boundary validation tools rather than general profiling
+hosts.
 
 ## Tracy capture
 
@@ -95,5 +95,13 @@ scripts/run-smithay-drm-compositor-probe
 ```
 
 Its Vulkan validation log proves correctness of the narrow output seam; it does
-not measure production compositor performance. Reintroduce DRM profiling
-scenarios only after the production adapter exists and exposes stable zones.
+not measure production compositor performance. Use the production pacing trace
+for the complete host:
+
+```text
+WELD_DRM_PACING_TRACE=1 scripts/run-weld-drm --seconds 60 foot
+```
+
+The trace reports hardware cursor assignment, Bevy composition, GPU wait,
+vblank phase, and DRM sequence deltas. Log output can perturb timing, so compare
+its conclusions with an uninstrumented release run.
