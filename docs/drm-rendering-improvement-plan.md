@@ -6,6 +6,11 @@ ideas in [Possible future improvements](possible-future-improvements.md) into
 testable slices. Only behavior recorded as implemented in
 [Architecture](architecture.md) should be treated as current.
 
+The later [Smithay integration validation](smithay-integration-validation.md)
+found that this implemented low-level GBM path duplicates responsibilities
+already owned by `DrmOutputManager` and `DrmCompositor`. That note defines the
+target ownership seam and the proof required before replacing this path.
+
 ## Boundary
 
 Physical presentation remains one consumer of Weld's composition, not the
@@ -126,13 +131,13 @@ stops Bevy composition or disconnects clients.
   worker.
 - Define simultaneous local-display and streaming consumers without restoring
   an unconditional full-output blit or rendering the scene twice by accident.
-- Propagate output damage into KMS damage clips.
-- Give each physical output its own state machine, composition target, camera,
-  and vblank cadence.
-- Add VRR, overlay promotion, and direct scanout as independently
-  capability-gated optimizations. Atomic hardware cursor planes are implemented.
-- Recreate output surfaces and their import caches for live mode changes rather
-  than requiring restart.
+- Bind Bevy's physical target to a Smithay-owned `DrmOutput` DMA-BUF. Smithay's
+  output compositor then subsumes KMS damage clips, per-output swapchain and
+  vblank state, planes, modifier fallback, live mode changes, direct scanout,
+  and cross-output bandwidth coordination. Weld still owns one camera and
+  composition target per physical output.
+- Add VRR policy as an independently capability-gated optimization over that
+  per-output lifecycle.
 
 ## Acceptance
 

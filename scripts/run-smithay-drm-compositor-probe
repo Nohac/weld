@@ -1,0 +1,65 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+fail() {
+    printf 'run-smithay-drm-compositor-probe: %s\n' "$*" >&2
+    exit 2
+}
+
+script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+repository_root="$(cd -- "${script_dir}/.." && pwd)"
+probe_log="${WELD_SMITHAY_DRM_PROBE_LOG:-${repository_root}/target/validation/smithay-drm-compositor-probe.log}"
+
+if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+    cd -- "${repository_root}"
+    exec cargo run -p weld-core --example smithay_drm_compositor_probe -- --help
+fi
+
+[[ -t 0 && -t 1 ]] || fail "this probe must run interactively from a real TTY"
+for command in cargo rg tail vulkaninfo; do
+    command -v "${command}" >/dev/null 2>&1 || fail "required command not found: ${command}"
+done
+
+mkdir -p -- "$(dirname -- "${probe_log}")"
+
+export VK_INSTANCE_LAYERS=VK_LAYER_KHRONOS_validation
+export VK_LOADER_LAYERS_ENABLE=VK_LAYER_KHRONOS_validation
+export VK_LAYER_VALIDATE_SYNC=1
+export VK_LOADER_DEBUG=layer
+export WGPU_VALIDATION="${WGPU_VALIDATION:-1}"
+export RUST_LOG="${RUST_LOG:-info}"
+
+cd -- "${repository_root}"
+layer_probe_log="${probe_log}.layer-probe"
+if ! vulkaninfo --summary > "${layer_probe_log}" 2>&1; then
+    tail -n 80 "${layer_probe_log}" >&2
+    fail "the Vulkan validation preflight could not initialize Vulkan"
+fi
+if ! rg -q 'Insert instance layer.*VK_LAYER_KHRONOS_validation|VK_LAYER_KHRONOS_validation.*Insert instance layer' \
+    "${layer_probe_log}"; then
+    tail -n 80 "${layer_probe_log}" >&2
+    fail "the Vulkan loader cannot load VK_LAYER_KHRONOS_validation"
+fi
+
+echo "Writing Smithay DRM compositor probe output to ${probe_log}" >&2
+set +e
+cargo run -p weld-core --example smithay_drm_compositor_probe -- "$@" 2>&1 | tee "${probe_log}"
+probe_status=${PIPESTATUS[0]}
+set -e
+
+if ! rg -q 'Insert instance layer.*VK_LAYER_KHRONOS_validation|VK_LAYER_KHRONOS_validation.*Insert instance layer' \
+    "${probe_log}"; then
+    tail -n 80 "${probe_log}" >&2
+    fail "the probe log does not prove that VK_LAYER_KHRONOS_validation loaded"
+fi
+if rg -q 'Validation Error|VUID-|SYNC-HAZARD|ERROR[^\n]*[Vv]alidation' "${probe_log}"; then
+    tail -n 80 "${probe_log}" >&2
+    fail "Vulkan validation reported an error; inspect ${probe_log}"
+fi
+if (( probe_status != 0 )); then
+    tail -n 80 "${probe_log}" >&2
+    fail "the probe exited with status ${probe_status}; inspect ${probe_log}"
+fi
+
+printf 'Smithay DRM compositor probe completed without reported Vulkan errors.\n'
