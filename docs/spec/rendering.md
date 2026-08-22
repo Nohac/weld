@@ -56,8 +56,9 @@ Bevy renders compositor UI, SSD, clipping, and shadows at each target's scale.
   as explicit capability-driven paths.
 
 The repository's existing measurements are diagnostic observations, not
-performance promises. Reproduction notes live under the deferred baseline in
-[Direct DRM presentation](../drm-presentation.md#deferred-performance-baseline).
+performance promises. Historical findings and current tooling live in
+[Input performance](../input-performance.md) and
+[Profiling Weld](../profiling.md).
 
 ## Open work — Exploration
 

@@ -15,7 +15,7 @@ interaction is optional and should be kept consistent between comparison runs.
 Options:
   --url URL             Video URL (or set WELD_PROFILE_VIDEO_URL)
   --fresh               Use disposable cold Firefox profiles
-  --backend BACKEND     drm or nested (default: drm)
+  --backend BACKEND     nested or drm (default: nested)
   --tracy-port PORT     Weld and collector TCP port (default: 18086)
   --warmup SECONDS      Setup time before capture connects (default: 2)
   --duration SECONDS    Live capture duration (default: 40)

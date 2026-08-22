@@ -359,18 +359,6 @@ impl ServerState {
         self.send_all_surface_scales();
     }
 
-    pub(crate) fn update_output_positions(&mut self, positions: &[(OutputId, (i32, i32))]) {
-        for (id, position) in positions {
-            let Some(output) = self.outputs.get(id) else {
-                warn!(output = ?id, "cannot position an output missing from the Wayland server");
-                continue;
-            };
-            output
-                .native
-                .change_current_state(None, None, None, Some((*position).into()));
-        }
-    }
-
     fn primary_output(&self) -> &Output {
         &self.outputs[&self.primary_output].native
     }

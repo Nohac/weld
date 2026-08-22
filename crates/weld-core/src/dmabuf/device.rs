@@ -87,29 +87,6 @@ pub fn request_weld_device(
     Ok((device, queue, Some(capabilities)))
 }
 
-/// Exact single-plane DRM formats that the selected Vulkan adapter can import
-/// as sRGB color attachments for the physical scanout blit.
-pub(crate) fn renderable_scanout_formats(adapter: &wgpu::Adapter) -> Result<Vec<Format>> {
-    let raw_adapter = unsafe { adapter.as_hal::<wgpu::hal::api::Vulkan>() }
-        .context("scanout adapter is not backed by Vulkan")?;
-    let instance = raw_adapter.shared_instance().raw_instance();
-    let physical_device = raw_adapter.raw_physical_device();
-    let modifiers = modifiers_for_usage(
-        instance,
-        physical_device,
-        vk::Format::B8G8R8A8_SRGB,
-        vk::FormatFeatureFlags::COLOR_ATTACHMENT,
-        vk::ImageUsageFlags::COLOR_ATTACHMENT,
-    )?;
-    Ok(modifiers
-        .into_iter()
-        .map(|modifier| Format {
-            code: Fourcc::Argb8888,
-            modifier: Modifier::from(modifier),
-        })
-        .collect())
-}
-
 fn required_device_features(adapter: &wgpu::Adapter, required: wgpu::Features) -> wgpu::Features {
     #[cfg(feature = "profiling-tracy")]
     let required = required.union(adapter.features().intersection(PROFILING_FEATURES));

@@ -122,7 +122,7 @@ pub(crate) fn prepare(options: RunOptions, signals: Signals) -> Result<PreparedH
             &calloop.handle(),
             display,
             dmabuf_release_source,
-            server_mut::<NestedEvent, ()>,
+            server_mut::<NestedEvent>,
             ServerOptions {
                 started_at,
                 seat_name: "weld-seat0",

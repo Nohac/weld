@@ -7,8 +7,8 @@ project intent and future direction without presenting it as current behavior.
 Weld is a workspace of reusable layers and one standard distribution:
 
 - `weld-core` owns Smithay, Wayland protocol state, native input sources,
-  backend event loops, DMA-BUF ownership, and final wgpu presentation. It has
-  no Bevy dependency.
+  backend event loops, DMA-BUF ownership, and native presentation adapters. It
+  has no Bevy dependency.
 - `weld-app` owns the Bevy application and render bridge, the plugin-facing
   application model, input projection, surface entities, and composition into
   a core-owned texture. Plugin APIs use Weld and Bevy types rather than
@@ -120,48 +120,22 @@ optional EDID physical dimensions separately from mutable logical layout. A
 measured footprint is authoritative for output adjacency and pointer portals;
 missing dimensions use an explicit mode-derived 96-DPI footprint so all
 outputs remain in one millimeter coordinate space. EDID can still be inaccurate.
-The DRM backend discovers every usable startup connector, creates one Smithay
-GBM/KMS surface and presenter per output, and gives `weld-app` one retained
-target, manual view, camera, and input projection per output. The initial
-layout policy centers a vertical stack of non-primary outputs above the primary
-panel. The logical stack is centered independently for Smithay and application
-coordinates. The physical stack determines collision and portal overlap;
-relative motion is converted from the active output's logical coordinates into
-millimeters, then collision, edge sliding, portal traversal, and remaining
-motion are resolved entirely against the physical footprints. The final point
-is projected into the destination output's compositor-global logical space.
-Footprints use measured EDID dimensions when available and an explicit
-mode-derived 96-DPI fallback otherwise; both paths are finite, positive, and
-scale-independent. Output rectangles are half-open, and an inward physical
-epsilon keeps the logical result on one unambiguous side of a seam.
-Smithay advertises the nearest integer logical
-`wl_output` location, which may differ by up to half a logical pixel on either
-axis. Client content remains expressed in output-local coordinates. The policy
-is deliberately hardcoded until configuration owns placement.
+The output domain is independent of a physical presenter. Logical layout,
+physical footprints, collision portals, scale selection, output intersection,
+and camera targeting remain Weld policy that a native adapter consumes. The
+nested host currently supplies one output. The production DRM adapter is
+intentionally absent at this clean-room baseline; selecting it fails explicitly
+instead of retaining the removed low-level presenter or silently choosing the
+nested host.
 
-Physically available compositions currently form one atomic batch: every busy
-target in that set blocks the batch, Bevy renders all output cameras, DMA-BUF
-lifetimes and frame callbacks are bracketed once, and each physical result is
-submitted to its matching CRTC. An unavailable output renders to its retained
-owned target while the remaining outputs continue scanning out. This is
-correctness-first and temporarily paces the physical batch at the slowest
-available output.
-Screenshots capture only the primary retained target. Known startup outputs can
-disconnect and reconnect independently, while a newly discovered connector or
-live mode replacement requires restart. Output configuration is modeled as a
-whole-layout transaction so a future `wlr-output-management-unstable-v1` or
-other layout-protocol adapter need not mutate partially applied backend state.
-Runtime scale shortcuts currently adjust only the internal primary output. A
-scale change rebuilds and validates the complete centered logical layout while
-preserving physical placement, then publishes the transaction to Smithay,
-native input, Bevy, and cursor composition. `Super+Shift+D` derives an exact
-primary scale from measured diagonal DPI relative to the first measured
-non-primary output; values outside 0.5 through 4.0 are rejected. Diagonal DPI
-assumes the EDID aspect matches the active mode, so rotated outputs or unusual
-pixel geometry may require explicit policy. The standard distribution can
-display both coordinate spaces with `Super+Shift+O`; the diagnostic consumes
-the same `OutputGeometry`, `OutputPosition`, and `OutputPlacement` components
-that plugins receive.
+The validated replacement boundary uses Smithay's `DrmOutputManager` and
+`DrmCompositor` for connector, CRTC, mode, swapchain, plane, page-flip, and
+activation lifecycle. Weld will implement only the renderer seam that binds a
+Smithay-leased DMA-BUF to the matching Bevy output target. The focused
+`smithay_drm_compositor_probe` proves this direction without making Smithay's
+desktop window model authoritative. See
+[Direct DRM presentation](drm-presentation.md) and the
+[DRM output adapter plan](drm-rendering-improvement-plan.md).
 
 `weld-app` re-exports its exact supported Bevy version as `weld_app::bevy` so
 plugins can share Weld's ECS, application, and rendering types without an
@@ -193,12 +167,13 @@ The `test-support` feature exposes those records only so downstream policy
 crates can exercise complete lifecycle behavior; distributions and plugins
 must not enable it in production.
 
-Weld owns the outer winit window or DRM session, Smithay server, event-loop
-orchestration, and final wgpu presentation. Bevy supplies its app schedule,
-renderer, UI primitives, and BSN scene composition, rendering both client
-surfaces and shell UI into a Weld-owned texture through Bevy's manual
-render-device path. Do not enable Bevy's window runner or expand its features
-without a concrete need.
+Weld owns the outer host, Smithay server, event-loop orchestration, and native
+presentation boundary. Bevy supplies its app schedule, renderer, UI primitives,
+and BSN scene composition, rendering both client surfaces and shell UI through
+Bevy's manual render-device path. The nested adapter presents a Weld-owned
+texture through winit. A physical adapter will bind Smithay-owned output
+allocations at the same application boundary. Do not enable Bevy's window
+runner or expand its features without a concrete need.
 
 Bevy's public APIs remain pinned to 0.19, while the active rendering crates are
 temporarily patched under `vendor/bevy-wgpu30` to use wgpu 30 as one coherent
@@ -361,106 +336,37 @@ occupant. Presenters claim the managed window independently, so client content
 composes with ordinary Bevy UI without making presentation-root identity or
 surface lifetime authoritative for window policy. Smithay remains responsible
 for Wayland protocol state and applies focus or close actions chosen by ECS
-policy; it does not own window placement, stacking, or decoration. The final
-project-owned wgpu pass presents or captures Bevy's
-completed texture directly in both backends. Standalone DRM uses Smithay's
-`GbmBufferedSurface` for GBM allocation and KMS page flips, without adopting a
-Smithay renderer or render-element graph. `weld-app` owns one retained
-composition texture and binds its output camera to a stable Bevy
-`ManualTextureViewHandle`. For an active DRM output, core leases and imports a
-GBM scanout image, acquires Vulkan foreign ownership, and supplies that view as
-the application's destination for one composition. Replacing the view behind
-the stable handle is invisible to cameras, UI targeting, picking, and plugins.
-Bevy renders the full scene directly into scanout; core follows with the
-scissored cursor overlay only when hardware presentation is unavailable, then
-releases foreign ownership before KMS receives the buffer. `GbmBufferedSurface`
-owns the atomic cursor plane alongside the primary swapchain. Weld publishes a
-prepared GBM cursor image and physical origin; Smithay retains its framebuffer,
-coalesces desired positions behind one in-flight transaction, merges cursor
-state into primary submissions, and retires cursor-only commits on vblank.
+policy; it does not own window placement, stacking, or decoration. The nested
+final wgpu pass presents or captures Bevy's completed texture. The application
+keeps a stable manual texture-view handle so a future physical adapter can
+substitute a Smithay-leased output allocation without retargeting cameras, UI,
+picking, or plugins. An owned target remains necessary for capture, headless
+operation, streaming, and composition while a physical session is inactive.
+The removed DRM presenter is not a fallback. Detailed replacement sequencing
+is tracked in the [DRM output adapter plan](drm-rendering-improvement-plan.md).
 
-When the VT/output is inactive or a capture requires retained storage, core
-selects the application-owned target instead. DRM gives both targets the same
-`Bgra8UnormSrgb` format so a switch does not re-specialize Bevy's UI and sprite
-pipelines. The application owns render-target allocation and scene binding;
-core owns backend leases, synchronization, back-pressure, and presentation.
-Direct composition waits for the prior scanout frame to retire rather than
-rendering ahead into a second core-owned texture. New demand remains coalesced
-in host frame state, with a bounded recovery wakeup if a presenter event is
-lost. The old Vulkan Display WSI probe remains a self-contained hardware
-diagnostic and is not part of production presentation. Detailed sequencing is
-tracked in the [DRM rendering improvement plan](drm-rendering-improvement-plan.md).
+Demand-driven composition and client frame callbacks remain independent of
+physical output availability. Startup, first client mapping, and structural
+shell changes use a bounded settling sequence because Bevy main-world, layout,
+extraction, asset preparation, and render work need not converge in one pass.
+Ordinary client commits request one composition and do not turn Weld into a
+continuous renderer.
 
-Physical output availability does not gate demand-driven composition or client
-frame callbacks. Startup, first client mapping, and structural shell changes
-start a bounded settling sequence because Bevy's main schedule, layout, render
-extraction, asset preparation, and GPU submission need not converge in one
-pass. Ordinary client buffer commits request one composition and never extend
-an in-flight settling sequence. Each completed intermediate composition is
-eligible for immediate presentation. The fixed budget mirrors Bevy winit's
-finite startup-update margin without turning Weld into a continuous renderer,
-but remains a stopgap until Bevy exposes a reliable signal for pending deferred
-or render-world work. Remote debugging services only Bevy's `RemoteLast`
-schedule at a bounded maintenance rate between application frames and does not
-itself create composition demand. The DRM cursor is presentation metadata
-rather than a Bevy UI node. Raw motion updates Smithay's desired cursor-plane
-position immediately without requesting Bevy composition. It still requests
-one refresh-capped application update so Bevy/Leafwing state, picking, hover,
-and cursor policy advance without running at device-event pace. `weld-core`
-owns the Bevy-free cursor model, Smithay cursor-surface lifecycle, Xcursor
-discovery, immutable GPU uploads, and final composition geometry. `weld-app`
-exposes the reloadable `CursorSettings` ECS resource; replacing that resource
-changes the theme or logical nominal size without exposing Smithay or wgpu to
-plugins. Weld also interprets Bevy's standard `CursorIcon` component on the
-hovered UI entity or its ancestors. Systems that need a transient global
-override publish `CursorRequest` each update before `CursorSystems::Resolve`.
-`weld-window-ui` uses those primitives to install directional shapes on resize
-handles and retain the corresponding shape during an active resize. Client
-cursor requests remain authoritative only while Smithay owns pointer focus;
-Weld UI intent takes over as soon as the pointer returns to shell chrome.
+`weld-core` owns backend-neutral cursor configuration, Smithay cursor-surface
+lifecycle, and normalized client cursor pixels. `weld-app` exposes reloadable
+`CursorSettings`, interprets Bevy's standard `CursorIcon`, and accepts transient
+`CursorRequest` overrides. Nested mode delegates final cursor presentation to
+the host window system. Cursor theme rasterization, hardware-plane submission,
+and GPU fallback were presentation details of the removed DRM adapter and will
+be chosen anew at the Smithay output boundary.
 
-Standalone mode advertises `wp_cursor_shape_manager_v1` and honors hidden,
-named, and legacy client-surface cursor requests. Named shapes resolve through
-the configured raster Xcursor theme, including theme inheritance and animation.
-The DRM dispatch deadline includes the next animation frame only while the
-session and output are available, so an idle, paused, or disconnected cursor
-does not introduce polling. SHM cursor surfaces are copied at the Smithay
-boundary, unpremultiplied in their encoded BGRA representation, and normalized
-to the compositor's configured logical size. This intentionally prevents a
-client-provided bitmap from changing the user's cursor size. Client DMA-BUF
-cursor surfaces are not imported yet: Weld releases them, warns, and displays
-the configured default shape rather than creating a second ad hoc DMA-BUF
-ownership path. Scalable cursor-theme assets remain future work.
-
-The cursor pass samples pixels as sRGB, premultiplies each linear texel
-before interpolation, and composites them over Bevy's premultiplied output.
-Pixel-aligned 1:1 cursors use a single texture load; scaled or subpixel cursors
-use four linear-space taps. The pass uses `LoadOp::Load`, premultiplied alpha,
-and a scissor clamped to the cursor bounds; Bevy's opaque full-output clear is
-the required initialization before that load. Published cursor textures are
-immutable across queued GPU work. Nested mode continues to use the host
-window-system cursor and its scene-only final blit. `CursorSettings` theme and
-size changes are therefore
-inert in nested mode, although Bevy `CursorIcon` and `CursorRequest` shape and
-visibility changes still reach the host cursor. Screenshots and remote captures
-read the owned Bevy composition and therefore exclude the cursor. The output
-camera now supplies the same opaque background previously added by the DRM
-blit, so DRM captures no longer preserve an accidental transparent background.
-Cursor exclusion remains deliberate so future streaming can carry cursor
-metadata independently.
-
-Standalone input additionally publishes the newest raw compositor-logical
-pointer position before application picking completes. Core also forwards
-every unconsumed raw event through Smithay immediately, using the
-client input target and compositor-to-surface affine mapping published by the
-most recent application frame. The same ordered event is retained losslessly
-for the next Bevy/Leafwing projection. Input therefore requests at most one
-application update at the output refresh cadence rather than running the Bevy
-schedule at device-event pace. Atomic cursor position changes do not repaint
-the primary scene and coalesce to KMS page-flip cadence. Legacy DRM surfaces,
-oversized images, unsupported plane formats or sizes, and virtualized drivers
-which hide cursor planes use the explicit GPU fallback.
-
+Raw input is forwarded to the focused client in order and retained for the next
+refresh-paced application update. That contract lets client delivery run at
+device-event pace without running Bevy schedules at the device polling rate.
+The standalone libinput adapter preserves accelerated and unaccelerated motion,
+scroll phases, gestures, clickfinger policy, and timestamps as protocol-neutral
+events; the future DRM host will connect it to Smithay's session and seat
+lifecycle without owning KMS presentation policy.
 Bevy remains authoritative for root/layer selection and shell interaction.
 Smithay re-evaluates the selected surface tree's current input regions and
 subsurface ordering for every raw pointer event. Crossing an application-owned
@@ -474,43 +380,13 @@ stay continuous across render targets. The final release is delivered in that
 captured space, then the unchanged pointer position is immediately republished
 on its current output so stationary picking does not retain the old target.
 
-Standalone input preserves each libinput device's default acceleration profile
-and speed. The eventual input-settings API must preserve global, device-type,
-and device-specific locality as described by
-[reloadable configuration](spec/plugins-and-configuration.md#reloadable-configuration--direction).
-Nested mode continues to use motion already transformed by the parent
-compositor.
-
-Standalone DRM configures clickfinger on devices that advertise it and fixes
-the clickfinger map to one/two/three-finger left/right/middle clicks. It does
-the same for tap-to-click on devices that advertise tapping. Tap-and-drag,
-drag-lock, and disable-while-typing remain at their libinput defaults. This
-hardcoded device policy is an initial default; the eventual input-settings
-resource must make it reloadable. The explicit clickfinger map raises Weld's
-system libinput requirement to 1.26.
-Libinput swipe, pinch, and hold transitions retain their begin/update/end
-lifecycle, finger counts, cancellation, translation, cumulative pinch scale,
-rotation, and timestamps through the ECS input bridge. Plugins receive the
-backend-neutral `TouchpadGesture` message, and the same ordered transition is
-forwarded immediately to the focused client through `wp_pointer_gestures_v1`.
-The buffered event also requests a refresh-paced application frame. Gesture
-consumption is not implemented yet: a plugin and the focused client currently
-both observe the gesture.
-Losing the DRM session emits cancelled gesture and finger-scroll transitions
-using the last libinput timestamp before clearing focus, so switching virtual
-terminals cannot leave a client gesture active. Device-removal cancellation is
-deferred until raw input carries device identity; cancelling the whole logical
-seat when an unrelated device disappears would be incorrect. A later gesture
-begin repairs any stale tracked sequence before forwarding the new begin.
-Nested Linux gesture forwarding remains unavailable because Winit does not
-expose the parent Wayland compositor's pointer-gesture stream; Weld does not
-reinterpret ordinary finger scrolling as pinch or swipe input.
-
-DRM reconciliation motion outside the raw input stream still uses Weld process
-uptime rather than libinput's monotonic clock. Unifying those pre-existing
-timestamp domains remains separate input-clock work; synthesized gesture and
-scroll cancellation itself stays in the libinput domain.
-
+The libinput adapter preserves each device's default acceleration profile and
+speed, configures supported tap and clickfinger behavior, and retains swipe,
+pinch, hold, scroll, cancellation, and timestamps in backend-neutral events.
+The eventual input-settings API must preserve global, device-type, and
+device-specific locality. Nested mode continues to use motion transformed by
+the parent compositor, and Winit does not expose the parent Wayland gesture
+stream.
 Weld advertises `xdg-decoration` and answers decoration
 objects with server-side mode. Creating a decoration object opts a client into
 Weld's server-side frame; clients that do not bind the global retain their own

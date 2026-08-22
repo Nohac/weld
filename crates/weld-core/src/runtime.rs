@@ -19,10 +19,9 @@ pub(crate) const BEVY_SETTLE_COMPOSITIONS: u8 = 5;
 
 /// Data borrowed by calloop callbacks without making Smithay the owner of
 /// backend events or process policy.
-pub(crate) struct LoopData<Event, BackendState = ()> {
+pub(crate) struct LoopData<Event> {
     pub(crate) server: ServerState,
     pub(crate) events: VecDeque<Event>,
-    pub(crate) backend_state: BackendState,
 }
 
 impl<Event> LoopData<Event> {
@@ -30,24 +29,11 @@ impl<Event> LoopData<Event> {
         Self {
             server,
             events: VecDeque::new(),
-            backend_state: (),
         }
     }
 }
 
-impl<Event, BackendState> LoopData<Event, BackendState> {
-    pub(crate) fn with_state(server: ServerState, backend_state: BackendState) -> Self {
-        Self {
-            server,
-            events: VecDeque::new(),
-            backend_state,
-        }
-    }
-}
-
-pub(crate) fn server_mut<Event, BackendState>(
-    data: &mut LoopData<Event, BackendState>,
-) -> &mut ServerState {
+pub(crate) fn server_mut<Event>(data: &mut LoopData<Event>) -> &mut ServerState {
     &mut data.server
 }
 
@@ -188,16 +174,6 @@ impl Default for FrameState {
 }
 
 impl FrameState {
-    pub(crate) fn with_refresh_millihertz(mut self, refresh_millihertz: u32) -> Self {
-        if refresh_millihertz > 0 {
-            self.frame_interval = Duration::from_nanos(
-                (1_000_000_000_000_u64 / u64::from(refresh_millihertz))
-                    .clamp(1_000_000, 100_000_000),
-            );
-        }
-        self
-    }
-
     #[cfg(test)]
     pub(crate) const fn update_dirty(&self) -> bool {
         self.update_dirty
@@ -261,15 +237,6 @@ impl FrameState {
             .map(|deadline| deadline.saturating_duration_since(now))
             .unwrap_or(Duration::ZERO)
             .min(self.frame_interval)
-    }
-
-    pub(crate) fn composition_demand_timeout(&self, now: Instant) -> Option<Duration> {
-        self.work_pending().then(|| {
-            self.next_composition
-                .map(|deadline| deadline.saturating_duration_since(now))
-                .unwrap_or(Duration::ZERO)
-                .min(self.frame_interval)
-        })
     }
 
     pub(crate) fn application_advanced(&mut self, now: Instant) {
@@ -339,28 +306,5 @@ impl PendingCapture {
 
     pub(crate) const fn is_startup(&self) -> bool {
         self.remote_request_id.is_none()
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn output_refresh_drives_pacing_with_defensive_bounds() {
-        let now = Instant::now();
-        let mut high_refresh = FrameState::default().with_refresh_millihertz(120_000);
-        high_refresh.composition_rendered(now);
-        assert_eq!(
-            high_refresh.composition_timeout(now),
-            Duration::from_nanos(8_333_333)
-        );
-
-        let mut implausibly_slow = FrameState::default().with_refresh_millihertz(1);
-        implausibly_slow.composition_rendered(now);
-        assert_eq!(
-            implausibly_slow.composition_timeout(now),
-            Duration::from_millis(100)
-        );
     }
 }

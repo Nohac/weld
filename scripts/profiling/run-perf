@@ -12,7 +12,7 @@ generate a complete SVG flamegraph, and stop Weld and its clients cleanly.
 Options:
   --name NAME          Artifact stem and scenario label (required)
   --instructions TEXT Manual action for the complete Weld run (required)
-  --backend BACKEND    drm or nested (default: drm)
+  --backend BACKEND    nested or drm (default: nested; DRM is unavailable at the clean-room baseline)
   --warmup SECONDS     Time before the three-second loss probe (default: 2)
   --duration SECONDS   Main capture duration (default: 20)
   --frequency HZ       cpu-clock sample frequency (default: 499)
@@ -25,8 +25,8 @@ Options:
   --force              Replace an explicitly selected artifact set
   -h, --help           Show this help
 
-Run DRM scenarios from a real TTY. The script records Weld and threads or
-children inherited by perf, but not unrelated desktop processes.
+The script records Weld and threads or children inherited by perf, but not
+unrelated desktop processes.
 EOF
 }
 
@@ -50,7 +50,7 @@ script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 repository_root="$(cd -- "${script_dir}/../.." && pwd)"
 name=""
 instructions=""
-backend="drm"
+backend="nested"
 warmup_seconds=2
 duration_seconds=20
 frequency=499

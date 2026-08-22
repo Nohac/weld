@@ -85,22 +85,20 @@ Run Weld inside a development shell whose glibc is compatible with the running
 NixOS graphics drivers. The shared Rust shell is located at
 `/home/jonas/Dotfiles/nixos/envs/rust`; reload it after its lock file changes.
 
-Launch Weld without a client:
+Launch Weld's nested development host without a client:
 
 ```text
-cargo run
+cargo run -- --backend nested
 ```
 
-Backend selection defaults to `auto`. A usable Wayland or X11 host selects the
-nested backend, while a bare Linux virtual terminal selects standalone DRM.
-Ambiguous environments fall back to the safer nested startup path. Use
-`--backend nested` or `--backend drm` to override detection while debugging.
+Backend selection defaults to `auto`. Use an explicit backend when validating
+host-specific behavior so the environment cannot change the target silently.
 
 Pass a program and arguments to launch it against Weld's private Wayland
 socket. The verified smoke test uses foot:
 
 ```text
-cargo run -- foot
+cargo run -- --backend nested -- foot
 ```
 
 To open another application in an already-running Weld instance, use the
@@ -113,6 +111,16 @@ scripts/run-app foot
 
 The launcher forces common toolkits onto their native Wayland backends and
 disables X11 fallback.
+
+The standard distribution provides these backend-neutral shortcuts:
+
+- `Super+Enter`: launch foot
+- `Super+F`: launch Firefox
+- `Super+B`: launch Blender
+- `Super+LMB`: move the floating window under the pointer
+- `Super+RMB`: resize the floating window under the pointer from its nearest corner
+- `Super+Shift+O`: toggle output-topology diagnostics
+- `Super+Shift+Escape`: exit Weld
 
 Weld options precede an explicit `--` when a client is also present. Capture a
 settled client-plus-shell composition and exit with:
@@ -140,52 +148,10 @@ requirement for ordinary changes.
 
 When auto selects the nested target, it runs until its host window is closed.
 
-### Standalone DRM backend
+### DRM probes
 
-Run the standalone backend from an active TTY with a working logind or
-seatd/libseat provider:
-
-```text
-cargo run
-cargo run -- foot
-```
-
-On a bare virtual terminal these commands select DRM automatically. The
-equivalent explicit override is `cargo run -- --backend drm -- foot`.
-Set the standalone output scale with `cargo run -- --scale 2 -- foot`.
-Fractional values are supported; nested mode follows its host compositor and
-warns when an explicit scale is ignored.
-
-Standalone input requires system libinput 1.26 or newer so Weld can set an
-explicit one/two/three-finger left/right/middle clickfinger map. The shared
-Rust development shell provides a compatible version.
-
-Use the compositor shortcuts to launch clients or stop Weld:
-
-- `Super+Enter`: foot
-- `Super+F`: Firefox
-- `Super+B`: Blender
-- `Super+LMB`: move the floating window under the pointer
-- `Super+RMB`: resize the floating window under the pointer from its nearest corner
-- `Super+=` / `Super+-` (DRM only): increase or decrease output scale by 0.25
-- `Super+Shift+D` (DRM only): match the primary output's physical scale to the first measured external output
-- `Super+Shift+O`: toggle output-topology diagnostics on the primary output
-- `Super+Shift+Escape`: exit Weld
-- `Ctrl+Alt+F1` through `Ctrl+Alt+F10` (DRM only): switch virtual terminal
-
-The physical-scale match uses mode and EDID diagonal DPI without quarter-step
-rounding. A later `Super+=` or `Super+-` adjustment snaps to the next value on
-the quarter-step grid. Clients using `wp_fractional_scale_v1` quantize their
-preferred scale to 1/120, so Weld's logical density match is exact while a
-client's internal render scale may be a close approximation.
-
-`SIGINT` and `SIGTERM` also request an orderly shutdown, including when sent
-from another VT. A real TTY run is required to validate a particular seat,
-GPU, and display stack.
-
-Use the standalone direct-wgpu probe as a historical diagnostic for Vulkan
-Display discovery, presentation, and VT recovery independently from Weld's
-production GBM/KMS backend:
+Use the direct-wgpu probe as a historical diagnostic for Vulkan Display
+discovery, presentation, and VT recovery:
 
 ```text
 scripts/run-drm-wsi-probe --seconds 30
@@ -198,15 +164,17 @@ that the destination VT's graphical compositor remains usable and that the
 text console is restored after exit. Output defaults to
 `/tmp/weld-drm-wsi-probe.log`; set `WELD_DRM_WSI_PROBE_LOG` to override it.
 
-See [Direct DRM presentation](docs/drm-presentation.md) for the probe evidence,
-ownership boundaries, and production integration constraints.
-
-Validate the production GBM/KMS path, including proof that the Vulkan
-validation layer loaded, from a bare TTY with:
+Use the Smithay output-compositor probe when changing the production DRM
+boundary:
 
 ```text
-scripts/run-gbm-kms-validation
+scripts/run-smithay-drm-compositor-probe
 ```
+
+Both probes require a real TTY. See
+[Direct DRM presentation](docs/drm-presentation.md) and
+[Smithay integration validation](docs/smithay-integration-validation.md) for
+their scopes and acceptance evidence.
 
 For dependency changes, edit only the intended dependency. If an existing
 lockfile entry must move, use `cargo update -p <package> --precise <version>`;
@@ -218,6 +186,12 @@ Add coverage when it validates a stable behavior, protects a contract, or
 reproduces a regression. Prefer deterministic ECS and policy tests over tests
 that require a display server or GPU. Use a nested or headless host for broader
 integration tests once one exists.
+
+Test Weld-owned business logic and the contracts at integration boundaries.
+Do not add tests that reassert Smithay behavior, or tests whose implementation
+is mostly a thin call through Smithay APIs. Validate those dependencies through
+focused integration probes on real hardware when needed, and keep unit tests
+for policy, translation, lifecycle, and invariants that Weld itself owns.
 
 Keep exploratory coverage proportional. Avoid broad suites around provisional
 wiring before its behavior has settled.

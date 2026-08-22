@@ -1,163 +1,81 @@
-# DRM rendering improvement plan
+# DRM output adapter plan
 
-This is an active implementation plan for replacing Weld's production Vulkan
-Display WSI presenter with a Smithay GBM/KMS output sink. It refines the DRM
-ideas in [Possible future improvements](possible-future-improvements.md) into
-testable slices. Only behavior recorded as implemented in
-[Architecture](architecture.md) should be treated as current.
+This plan starts at Weld's clean-room baseline. It replaces the removed custom
+GBM/KMS presenter with a small adapter around the public Smithay boundary proven
+by `smithay_drm_compositor_probe`.
 
-The later [Smithay integration validation](smithay-integration-validation.md)
-found that this implemented low-level GBM path duplicates responsibilities
-already owned by `DrmOutputManager` and `DrmCompositor`. That note defines the
-target ownership seam and the proof required before replacing this path.
+## Ownership
 
-## Boundary
+Smithay owns:
 
-Physical presentation remains one consumer of Weld's composition, not the
-owner of the application scene. `weld-app` owns a retained composition texture
-and one stable Bevy manual-view handle. The backend may replace the concrete
-view behind that handle for each render without retargeting cameras, UI,
-picking, or plugins.
+- session, device, connector, CRTC, mode, and page-flip lifecycle;
+- primary swapchains, framebuffer export, plane assignment, and damage state;
+- device-wide output coordination and activation recovery; and
+- hardware cursor and direct-scanout eligibility when Weld supplies suitable
+  render elements.
 
-An active physical output uses this path:
+Weld owns:
 
-```text
-Smithay leases a GBM scanout DMA-BUF
-    -> Vulkan foreign-queue acquire
-    -> Bevy renders directly into that view
-    -> scissored compositor-cursor pass
-    -> Vulkan foreign-queue release
-    -> KMS
-```
+- Wayland protocol state and client-buffer lifetime;
+- Bevy application updates, scene composition, and window policy;
+- selection between physical, retained, capture, headless, and streaming
+  targets; and
+- the narrow Vulkan/wgpu import and synchronization implementation required by
+  Smithay's renderer traits.
 
-When the VT or output is inactive, Bevy instead renders through the same handle
-into the retained application texture. Client callbacks, ECS state, capture,
-and future headless consumers therefore remain live without a scanout buffer.
-A capture also selects the owned target for that frame, then requests a fresh
-direct composition when physical presentation is available. DRM uses BGRA for
-both targets so switching does not re-specialize Bevy pipelines.
+Smithay desktop helpers must not become a second source of truth beside Weld's
+managed-window entities.
 
-## Implemented GBM/KMS and direct-target slices
+## Initial implementation slice
 
-Smithay owns the DRM device, connector/CRTC state, GBM swapchain, page flips,
-and vblank retirement. Weld does not adopt Smithay render elements or a Smithay
-renderer: [`GbmBufferedSurface`](https://smithay.github.io/smithay/smithay/backend/drm/struct.GbmBufferedSurface.html)
-leases the next scanout DMA-BUF and accepts the completed buffer for KMS.
-The selected buffer must have an explicit modifier present in the intersection
-of KMS scanout and Vulkan sRGB color-attachment support. Weld fails during
-presenter construction when Smithay's implicit-modifier compatibility fallback
-is the only option, because the wgpu import path cannot safely infer its layout.
+1. Extract the proven DMA-BUF binding and foreign-ownership code from the probe
+   into a production renderer adapter without broadening its responsibility.
+2. Construct one `DrmOutputManager` and `DrmOutput` per discovered physical
+   output using Smithay's session and udev integration.
+3. Bind the Smithay-leased primary image to the stable manual texture-view
+   target used by the matching Bevy output camera.
+4. Drive application composition only when that output has demand and Smithay
+   can accept a frame, then submit through `DrmOutput::render_frame`.
+5. Retire physical work from the matching page-flip event and feed presentation
+   metadata back to the Wayland server.
+6. On session pause, stop physical queueing and select the owned target. On
+   activation, call Smithay's activation path and request a fresh full frame.
+7. Keep failures local to the physical output whenever clients and retained
+   composition can continue safely.
 
-The calloop thread owns Smithay, KMS, the scanout import cache, and command
-submission. A dedicated worker owns only the potentially blocking GPU
-completion wait:
+The adapter may initially wait for wgpu completion as the probe does. That wait
+must stay outside protocol dispatch if it can block materially. Native fence
+export should replace it without changing ownership.
 
-1. The host leases one buffer only while no physical frame is active.
-2. The host imports and acquires that allocation as `Bgra8UnormSrgb`, then
-   hands its view to the application host.
-3. Bevy records and submits its complete output directly into the scanout
-   image. Weld follows it with the cursor pass and foreign release on the same
-   wgpu queue.
-4. The worker waits for the final `SubmissionIndex` and wakes calloop with a
-   prepared-frame event.
-5. The host queues the completed buffer without a fence because the wait has
-   already established completion.
-6. Only a vblank from the buffer's CRTC retires the scanout frame and permits
-   another direct composition.
+## Follow-up capabilities
 
-The frame lifecycle is an explicit state machine. One active frame is either
-rendering or awaiting vblank. New application demand remains coalesced in the
-host `FrameState` while that target is busy. Tickets include presenter
-generation, VT epoch, and frame identity so late worker or vblank events cannot
-release newer ownership.
-
-Direct rendering deliberately serializes Bevy composition behind scanout
-availability. The former two-target path could render a newer offscreen frame
-while the worker blitted the previous one; the direct path removes that
-full-output bandwidth at the cost of waiting for GPU completion and vblank
-before leasing the next target. Pending state remains coalesced, and a bounded
-frame-interval wakeup prevents a lost presenter event from turning that
-back-pressure into a permanent sleep or a zero-timeout spin.
-
-### Vulkan ownership
-
-Output buffers use an allocation-derived cache key: plane-zero DMA-BUF device
-and inode plus size, FourCC, modifier, stride, and offset. Smithay may create a
-new `Dmabuf` wrapper for every export, so wrapper identity is not a stable cache
-key. The cache belongs to one GBM surface/swapchain generation. Clearing stale
-presentation after a VT switch preserves its slots and cache; resetting the
-swapchain, changing mode, resizing, or replacing the surface must drop the
-matching import cache.
-
-Each scanout image is tracked by wgpu as a color target while actual ownership
-alternates with KMS. The shared wgpu queue orders these operations:
-
-1. A raw-HAL-only submission acquires the image from foreign ownership and
-   places it in `COLOR_ATTACHMENT_OPTIMAL`. First use begins from `UNDEFINED`.
-2. Bevy submits its ordinary render graph, including the full-target output
-   clear and store.
-3. An ordinary cursor pass loads the initialized image and touches only its
-   clamped scissor rectangle.
-4. A raw-HAL-only submission returns the image to `GENERAL` and foreign
-   ownership.
-
-wgpu forbids mixing its ordinary and raw encoding APIs on one encoder. Separate
-ordered submissions preserve that rule without a raw queue submission or a
-wgpu source patch. The worker waits for the release submission's
-`SubmissionIndex` before KMS receives the buffer. A native sync-file fence
-should be investigated later so KMS can accept the commit before rendering
-completes.
-
-### Session recovery
-
-On VT pause, Weld advances the presenter epoch and marks the physical sink
-inactive before pausing the Smithay DRM device. Composition remains live. On
-activation after an observed pause, Weld activates the device with a full state
-reset, clears Smithay's stale pending/queued GBM leases, and requests a fresh
-direct composition. The following queue operation performs the required
-modeset. This avoids presenting stale owned-target contents or depending on a
-page-flip event that may have been lost while another VT owned the display.
-
-Transient allocation, import, commit, and vblank-retirement failures trigger a
-bounded, event-driven scanout reset. A successfully retired vblank or explicit
-session activation restores the retry budget. Exhaustion leaves only the
-physical sink unavailable; a failed DRM event source is terminal for that
-backend run because page flips can no longer be retired safely. Neither case
-stops Bevy composition or disconnects clients.
-
-## Deferred follow-ups
-
-- Export a native completion fence instead of waiting on the presentation
-  worker.
-- Define simultaneous local-display and streaming consumers without restoring
-  an unconditional full-output blit or rendering the scene twice by accident.
-- Bind Bevy's physical target to a Smithay-owned `DrmOutput` DMA-BUF. Smithay's
-  output compositor then subsumes KMS damage clips, per-output swapchain and
-  vblank state, planes, modifier fallback, live mode changes, direct scanout,
-  and cross-output bandwidth coordination. Weld still owns one camera and
-  composition target per physical output.
-- Add VRR policy as an independently capability-gated optimization over that
-  per-output lifecycle.
+- expose a stable cursor render element so Smithay can use a hardware cursor
+  plane, with GPU composition as an explicit capability fallback;
+- publish real damage and element commit state as Bevy gains retained rendering;
+- expose eligible unadorned client buffers for direct scanout or overlay
+  promotion without bypassing Weld policy;
+- coordinate multiple outputs and mixed scales without rendering two copies on
+  the same camera;
+- add live connector and mode changes as whole-layout transactions;
+- select VRR policy independently per output; and
+- keep rendering into owned targets when physical presentation is suspended or
+  intentionally detached for streaming.
 
 ## Acceptance
 
-Build and policy checks cannot validate external-image ownership. The path is
-accepted only after a real-TTY run proves:
+Automated checks cover the protocol-neutral and nested boundaries. A physical
+adapter is accepted only after real-TTY validation proves:
 
-- cold GBM/KMS startup and clean shutdown;
+- cold startup and orderly shutdown;
 - foot and Firefox rendering and input;
-- continued demand-driven client/headless composition into the owned target
-  while another VT is
-  active;
-- return to the Weld VT with a fresh direct composition presented;
-- repeated VT cycles without a stuck pending frame;
-- validation-layer output proving `VK_LAYER_KHRONOS_validation` and
-  synchronization validation actually loaded and reported no image-layout,
-  ownership, lifetime, or synchronization error;
-- explicit scanout format/modifier discovery on each supported AMD, Intel, and
-  NVIDIA driver family before claiming compatibility with it.
+- explicit-modifier direct rendering with no CPU pixel copy or full-frame blit;
+- repeated VT pause and activation with a fresh frame after return;
+- continued retained or headless composition while the VT is inactive;
+- connector removal and restoration without a compositor crash;
+- Vulkan validation with no image-layout, lifetime, or synchronization errors;
+  and
+- explicit evidence on each driver family before claiming AMD, Intel, or
+  NVIDIA support.
 
-Use `scripts/run-gbm-kms-validation` for validation-layer runs. The existing
-Display WSI probe remains an independent driver diagnostic and historical
-comparison until the GBM/KMS path is fully validated across supported driver
-families.
+Until this adapter exists, `HostBackend::Drm` must fail explicitly and the
+Smithay compositor probe remains the physical-output reference.

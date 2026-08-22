@@ -1,18 +1,17 @@
 # Smithay integration validation
 
 This note records what Weld has verified in its pinned Smithay revision and the
-small experiment used to choose the physical-output boundary. It is evidence
-for a later refactor, not an instruction to migrate every subsystem at once.
-The current production path remains described in
-[DRM rendering improvement plan](drm-rendering-improvement-plan.md).
+small experiment used to choose the physical-output boundary. The old
+production presenter has since been removed; the replacement sequence is
+tracked in the [DRM output adapter plan](drm-rendering-improvement-plan.md).
 
 ## Finding
 
-Weld currently uses Smithay below its intended DRM composition boundary. It
-builds directly on `GbmBufferedSurface`, then owns swapchain leasing, KMS queue
-and retirement policy, cursor-plane commits, retry state, and global frame
-scheduling. Smithay's `DrmOutputManager` and `DrmCompositor` already coordinate
-these responsibilities per CRTC and across the device.
+Weld's removed presenter used Smithay below its intended DRM composition
+boundary. It built directly on `GbmBufferedSurface`, then owned swapchain
+leasing, KMS queue and retirement policy, cursor-plane commits, retry state,
+and global frame scheduling. Smithay's `DrmOutputManager` and `DrmCompositor`
+already coordinate these responsibilities per CRTC and across the device.
 
 Smithay does not require ownership of Weld's scene. `DrmOutput::render_frame`
 leases its selected primary DMA-BUF and passes it to the renderer through
@@ -60,11 +59,11 @@ layout, so accepting Smithay's implicit-modifier compatibility fallback would
 not prove this boundary. The foreign release must also be GPU-complete before
 the probe returns a signaled Smithay synchronization point.
 
-The probe contains no client renderer, Bevy scene, cursor, multi-output
-policy, direct scanout candidate, or production fence export. Weld's current
-presenter already proves that Bevy can render into an imported GBM image. This
-experiment proves the inverse ownership direction: Smithay may own the output
-allocation and KMS lifecycle without taking ownership of Bevy composition.
+The probe contains no client renderer, Bevy scene, cursor, multi-output policy,
+direct scanout candidate, or production fence export. The removed presenter
+proved that Bevy can render into an imported GBM image. This experiment proves
+the inverse ownership direction: Smithay may own the output allocation and KMS
+lifecycle without taking ownership of Bevy composition.
 Its blocking GPU wait is intentionally diagnostic; production should export a
 native completion fence instead.
 
@@ -88,10 +87,9 @@ local monotonic clock for presentation feedback. Weld must preserve that
 fallback instead of publishing time zero.
 
 The probe keeps its Vulkan capability query, foreign-ownership barrier, and
-import cache local. This intentionally duplicates a small amount of proven
-interop code so validation does not refactor the production presenter before
-the ownership seam succeeds on a real TTY. Those copies become deletion or
-extraction candidates only during the later production migration.
+import cache local. This intentionally isolates a small amount of proven
+interop code until it can move into the new production adapter without also
+carrying over the removed presenter.
 
 `DrmCompositor` caches one exported `Dmabuf` in each swapchain slot. The probe
 therefore keys wgpu imports by Smithay's `WeakDmabuf` identity and evicts an
@@ -108,11 +106,10 @@ buffer age and does not validate partial-damage rendering.
 
 Initiating a VT switch must stop physical queueing before calling `change_vt`.
 DRM access may be revoked before calloop delivers `PauseSession`, while a final
-page flip can still retire in that interval. Production Weld additionally
-suspends its presenters and pauses the DRM device synchronously before the
-request, then tolerates the repeated pause notification. The focused probe
-closes its queueing gate immediately and leaves the single device pause to its
-`PauseSession` handler.
+page flip can still retire in that interval. The focused probe closes its
+queueing gate immediately and leaves the single device pause to its
+`PauseSession` handler. The new production adapter must preserve that ordering
+while tolerating repeated pause notification.
 
 ## Production use of Smithay
 
@@ -137,7 +134,7 @@ does not exercise:
   the probe uses `FrameFlags::empty()` and validates primary composition only;
 - provide a `Kind::Cursor` element backed by stable memory and a GBM cursor
   device so Smithay can retain, reposition, and commit the hardware cursor
-  plane; keep Weld's GPU cursor as the capability fallback;
+  plane; add an explicit GPU-composition fallback for unsupported hardware;
 - expose eligible unadorned client buffers as separate elements when direct
   scanout or overlay promotion can bypass the Bevy scene without duplicating
   the client;
@@ -155,10 +152,10 @@ window and plugin policy, and selection between physical, retained, capture,
 headless, and streaming targets. These are compositor-product concerns rather
 than DRM output mechanics.
 
-## What the target seam subsumes
+## Clean-room removal
 
-Adopting this seam would let Weld remove rather than preserve parallel output
-machinery:
+The clean-room baseline removed the parallel output machinery that this seam
+subsumes:
 
 - the custom `GbmBufferedSurface` presenter and global physical-frame tracker;
 - manual primary-buffer queueing and state-only vblank retirement;
@@ -167,15 +164,12 @@ machinery:
   surface;
 - retry and reset state that duplicates `DrmOutputManager` lifecycle behavior.
 
-The vendored `GbmBufferedSurface::clear_pending_scanout` patch and its atomic
-cursor, cursor-deferral, and state-only-vblank patches are therefore deletion
-candidates with that production path. The cursor-deferral work is currently an
-uncommitted, state-dependent local change and must not be removed before the
-production migration. `DrmDeviceFd::new_unprivileged` is orthogonal: render
-nodes still need it for explicit-sync imports without DRM-master behavior.
+The vendored `GbmBufferedSurface::clear_pending_scanout`, atomic cursor,
+cursor-deferral, and state-only-vblank patches were removed with that path.
+`DrmDeviceFd::new_unprivileged` is orthogonal and remains: render nodes still
+need it for explicit-sync imports without DRM-master behavior.
 
-The next pass may aggressively delete these candidates, but it must retain a
-small core for Wayland surface lifecycle, DMA-BUF-to-Bevy textures, output
-target binding, page-flip-driven scheduling, window primitives, and protocol
-dispatch. Headless composition remains an independent target selected by Weld,
-not a fallback owned by KMS.
+The retained core owns Wayland surface lifecycle, DMA-BUF-to-Bevy textures,
+output and window primitives, input translation, and protocol dispatch.
+Headless composition remains an independent target selected by Weld, not a
+fallback owned by KMS.
