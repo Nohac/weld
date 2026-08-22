@@ -5489,6 +5489,7 @@ dependencies = [
  "leafwing-input-manager",
  "pollster",
  "tracing",
+ "weld-app",
  "weld-core",
  "wgpu",
  "winit",

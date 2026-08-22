@@ -304,6 +304,33 @@ pub(crate) fn capture_owned_frame(
     save_capture_readback(device, capture, submission, path)
 }
 
+#[cfg(feature = "test-support")]
+#[doc(hidden)]
+pub fn read_owned_frame_rgba(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    frame: &CompositionFrame,
+) -> Result<Vec<u8>> {
+    let texture = frame
+        .owned_texture()
+        .context("readback requires an owned composition texture")?;
+    let target = frame.target();
+    let extent = target.extent();
+    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("Weld test composition readback"),
+    });
+    let capture = encode_capture_readback(
+        device,
+        &mut encoder,
+        texture,
+        extent.width,
+        extent.height,
+        target.format(),
+    );
+    let submission = queue.submit([encoder.finish()]);
+    read_capture_readback(device, capture, submission)
+}
+
 fn encode_capture_readback(
     device: &wgpu::Device,
     encoder: &mut wgpu::CommandEncoder,
@@ -363,6 +390,17 @@ fn save_capture_readback(
         "capture_readback_encode"
     )
     .entered();
+    let width = capture.width;
+    let height = capture.height;
+    let pixels = read_capture_readback(device, capture, submission)?;
+    write_png(path, width, height, &pixels)
+}
+
+fn read_capture_readback(
+    device: &wgpu::Device,
+    capture: CaptureReadback,
+    submission: wgpu::SubmissionIndex,
+) -> Result<Vec<u8>> {
     let CaptureReadback {
         retained_texture: _retained_texture,
         buffer,
@@ -392,7 +430,7 @@ fn save_capture_readback(
     let pixels = decode_capture_rows(&mapped, width, height, padded_bytes_per_row, format)?;
     drop(mapped);
     buffer.unmap();
-    write_png(path, width, height, &pixels)
+    Ok(pixels)
 }
 
 fn decode_capture_rows(

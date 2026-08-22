@@ -234,6 +234,10 @@ impl LibinputAdapter {
         self.pointer
     }
 
+    pub fn output_at_pointer(&self) -> Option<crate::OutputId> {
+        self.topology.output_at(self.pointer)
+    }
+
     /// Replaces logical projection and physical adjacency after an atomic layout change.
     ///
     /// The physical mode is unchanged, so preserving the pointer's normalized

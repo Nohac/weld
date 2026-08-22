@@ -120,6 +120,185 @@ struct ImportedScanout {
     used: bool,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+enum RenderBatchMode {
+    #[default]
+    Closed,
+    Open,
+}
+
+#[derive(Default)]
+struct RenderBatch {
+    mode: RenderBatchMode,
+    requests: Vec<CompositionOutputRequest>,
+    frames: Vec<CompositionOutputFrame>,
+    pending: Vec<PendingFrame>,
+    composition_drawn: HashMap<OutputId, bool>,
+    last_gpu_wait: Duration,
+}
+
+struct PendingFrame {
+    output: OutputId,
+    encoder: Option<wgpu::CommandEncoder>,
+    image: vk::Image,
+    composition_drawn: bool,
+}
+
+pub(super) enum BatchFinish {
+    Complete,
+    CompositionFailed(anyhow::Error),
+}
+
+impl RenderBatch {
+    fn open(&mut self) -> Result<()> {
+        if self.mode != RenderBatchMode::Closed || !self.pending.is_empty() {
+            bail!("a DRM render batch is already open");
+        }
+        self.requests.clear();
+        self.frames.clear();
+        self.composition_drawn.clear();
+        self.last_gpu_wait = Duration::ZERO;
+        self.mode = RenderBatchMode::Open;
+        Ok(())
+    }
+
+    fn register_composition(
+        &mut self,
+        output: OutputId,
+        target: wgpu::TextureView,
+        extent: Extent,
+    ) -> Result<()> {
+        if self.mode != RenderBatchMode::Open {
+            bail!("Bevy composition requires an open DRM render batch");
+        }
+        if self.requests.iter().any(|request| request.output == output) {
+            bail!("DRM render batch requested output {output:?} more than once");
+        }
+        self.requests.push(CompositionOutputRequest {
+            output,
+            destination: CompositionDestination::External(CompositionTargetView::new(
+                target,
+                extent,
+                SCANOUT_FORMAT,
+            )),
+        });
+        Ok(())
+    }
+
+    fn defer(&mut self, frame: PendingFrame) -> Result<()> {
+        if self.mode != RenderBatchMode::Open {
+            bail!("cannot defer a DRM frame outside a render batch");
+        }
+        self.pending.push(frame);
+        Ok(())
+    }
+
+    fn finish(
+        &mut self,
+        host: &mut dyn CompositionHost,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        raw_device: &ash::Device,
+        queue_family: u32,
+    ) -> Result<BatchFinish> {
+        if self.mode != RenderBatchMode::Open {
+            bail!("cannot finish a closed DRM render batch");
+        }
+        let render_result = if self.requests.is_empty() {
+            Ok(())
+        } else {
+            host.render_outputs(&self.requests, &mut self.frames)
+                .and_then(|()| validate_composition_frames(&self.requests, &self.frames))
+        };
+        let release_result = self.submit_pending(device, queue, raw_device, queue_family);
+        self.close();
+        match (render_result, release_result) {
+            (_, Err(error)) => Err(error),
+            (Err(error), Ok(())) => Ok(BatchFinish::CompositionFailed(error)),
+            (Ok(()), Ok(())) => Ok(BatchFinish::Complete),
+        }
+    }
+
+    fn abort(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        raw_device: &ash::Device,
+        queue_family: u32,
+    ) -> Result<()> {
+        if self.mode == RenderBatchMode::Closed && self.pending.is_empty() {
+            return Ok(());
+        }
+        let result = self.submit_pending(device, queue, raw_device, queue_family);
+        self.close();
+        result
+    }
+
+    fn submit_pending(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        raw_device: &ash::Device,
+        queue_family: u32,
+    ) -> Result<()> {
+        if self.pending.is_empty() {
+            return Ok(());
+        }
+        let mut commands = Vec::with_capacity(self.pending.len() * 2);
+        for pending in self.pending.drain(..) {
+            if let Some(encoder) = pending.encoder {
+                commands.push(encoder.finish());
+            }
+            // SAFETY: the scanout import remains cached through this batch and
+            // all rendering and release barriers use the same wgpu queue.
+            let release = unsafe {
+                foreign_image_barrier_command(
+                    device,
+                    raw_device,
+                    queue_family,
+                    pending.image,
+                    true,
+                    ForeignImageBarrier::Release,
+                )
+            }?;
+            commands.push(release);
+            self.composition_drawn
+                .insert(pending.output, pending.composition_drawn);
+        }
+        let submission = queue.submit(commands);
+        let wait_started = Instant::now();
+        device
+            .poll(wgpu::PollType::Wait {
+                submission_index: Some(submission),
+                timeout: None,
+            })
+            .map(|_| ())?;
+        self.last_gpu_wait = wait_started.elapsed();
+        Ok(())
+    }
+
+    fn close(&mut self) {
+        self.mode = RenderBatchMode::Closed;
+        self.requests.clear();
+        self.frames.clear();
+    }
+}
+
+fn validate_composition_frames(
+    requests: &[CompositionOutputRequest],
+    frames: &[CompositionOutputFrame],
+) -> Result<()> {
+    if frames.len() != requests.len() {
+        bail!("Bevy returned the wrong number of DRM compositions");
+    }
+    for (request, frame) in requests.iter().zip(frames) {
+        if frame.output != request.output || frame.frame.owned_texture().is_some() {
+            bail!("Bevy returned the wrong DRM composition destination");
+        }
+    }
+    Ok(())
+}
+
 pub(super) struct DrmRenderState {
     device: wgpu::Device,
     queue: wgpu::Queue,
@@ -130,9 +309,9 @@ pub(super) struct DrmRenderState {
     formats: Vec<Format>,
     imports: HashMap<WeakDmabuf, ImportedScanout>,
     blitter: CompositionBlitter,
-    composition_frames: Vec<CompositionOutputFrame>,
+    batch: RenderBatch,
     last_gpu_wait: Duration,
-    last_composition_drawn: bool,
+    composition_drawn: HashMap<OutputId, bool>,
 }
 
 impl fmt::Debug for DrmRenderState {
@@ -172,24 +351,48 @@ impl DrmRenderState {
             formats,
             imports: HashMap::new(),
             blitter,
-            composition_frames: Vec::with_capacity(1),
+            batch: RenderBatch::default(),
             last_gpu_wait: Duration::ZERO,
-            last_composition_drawn: false,
+            composition_drawn: HashMap::new(),
         })
     }
 
-    pub(super) fn renderer<'a>(
-        &'a mut self,
-        output: OutputId,
-        host: Option<&'a mut dyn CompositionHost>,
-    ) -> DrmRenderer<'a> {
+    pub(super) fn renderer(&mut self, output: OutputId) -> DrmRenderer<'_> {
         self.imports.retain(|dmabuf, _| !dmabuf.is_gone());
-        self.last_gpu_wait = Duration::ZERO;
-        self.last_composition_drawn = false;
         DrmRenderer {
             state: self,
             output,
+        }
+    }
+
+    pub(super) fn begin_batch(&mut self) -> Result<()> {
+        self.last_gpu_wait = Duration::ZERO;
+        self.composition_drawn.clear();
+        self.batch.open()
+    }
+
+    pub(super) fn finish_batch(&mut self, host: &mut dyn CompositionHost) -> Result<BatchFinish> {
+        let result = self.batch.finish(
             host,
+            &self.device,
+            &self.queue,
+            &self.raw_device,
+            self.queue_family,
+        );
+        self.last_gpu_wait = self.batch.last_gpu_wait;
+        self.composition_drawn
+            .extend(self.batch.composition_drawn.drain());
+        result
+    }
+
+    pub(super) fn abort_batch(&mut self) {
+        if let Err(error) = self.batch.abort(
+            &self.device,
+            &self.queue,
+            &self.raw_device,
+            self.queue_family,
+        ) {
+            tracing::warn!(%error, "failed to release an aborted DRM render batch");
         }
     }
 
@@ -205,15 +408,17 @@ impl DrmRenderState {
         self.last_gpu_wait
     }
 
-    pub(super) const fn last_composition_drawn(&self) -> bool {
-        self.last_composition_drawn
+    pub(super) fn composition_drawn(&self, output: OutputId) -> bool {
+        self.composition_drawn
+            .get(&output)
+            .copied()
+            .unwrap_or(false)
     }
 }
 
 pub(super) struct DrmRenderer<'a> {
     state: &'a mut DrmRenderState,
     output: OutputId,
-    host: Option<&'a mut dyn CompositionHost>,
 }
 
 impl fmt::Debug for DrmRenderer<'_> {
@@ -254,7 +459,7 @@ impl<'host> RendererSuper for DrmRenderer<'host> {
     type TextureId = DrmTexture;
     type Framebuffer<'buffer> = DrmFramebuffer;
     type Frame<'frame, 'buffer>
-        = DrmFrame<'frame, 'host>
+        = DrmFrame<'frame>
     where
         'buffer: 'frame,
         Self: 'frame;
@@ -331,10 +536,8 @@ impl<'host> Renderer for DrmRenderer<'host> {
             image: framebuffer.image,
             output_size,
             output: self.output,
-            host: self.host.as_deref_mut(),
-            composition_frames: &mut self.state.composition_frames,
+            batch: &mut self.state.batch,
             last_gpu_wait: &mut self.state.last_gpu_wait,
-            last_composition_drawn: &mut self.state.last_composition_drawn,
             encoder: Some(self.state.device.create_command_encoder(
                 &wgpu::CommandEncoderDescriptor {
                     label: Some("Weld DRM overlay encoder"),
@@ -452,7 +655,7 @@ impl<'host> ImportMem for DrmRenderer<'host> {
     }
 }
 
-pub(super) struct DrmFrame<'frame, 'host> {
+pub(super) struct DrmFrame<'frame> {
     device: &'frame wgpu::Device,
     queue: &'frame wgpu::Queue,
     raw_device: &'frame ash::Device,
@@ -463,17 +666,15 @@ pub(super) struct DrmFrame<'frame, 'host> {
     image: vk::Image,
     output_size: Size<i32, Physical>,
     output: OutputId,
-    host: Option<&'frame mut (dyn CompositionHost + 'host)>,
-    composition_frames: &'frame mut Vec<CompositionOutputFrame>,
+    batch: &'frame mut RenderBatch,
     last_gpu_wait: &'frame mut Duration,
-    last_composition_drawn: &'frame mut bool,
     encoder: Option<wgpu::CommandEncoder>,
     pre_composition_commands: bool,
     composition_drawn: bool,
     released: bool,
 }
 
-impl DrmFrame<'_, '_> {
+impl DrmFrame<'_> {
     fn release_command(&self) -> Result<wgpu::CommandBuffer, DrmRenderError> {
         // SAFETY: the scanout cache retains this image, and release is submitted
         // on the same queue after every command that can access the image.
@@ -512,6 +713,21 @@ impl DrmFrame<'_, '_> {
         Ok(())
     }
 
+    fn finish_or_defer(&mut self) -> Result<(), DrmRenderError> {
+        if self.batch.mode == RenderBatchMode::Closed {
+            return self.submit_and_wait();
+        }
+        let pending = PendingFrame {
+            output: self.output,
+            encoder: self.encoder.take(),
+            image: self.image,
+            composition_drawn: self.composition_drawn,
+        };
+        self.batch.defer(pending).map_err(DrmRenderError::message)?;
+        self.released = true;
+        Ok(())
+    }
+
     fn render_composition(
         &mut self,
         output: OutputId,
@@ -540,32 +756,10 @@ impl DrmFrame<'_, '_> {
             ));
             self.pre_composition_commands = false;
         }
-        let host = self
-            .host
-            .as_deref_mut()
-            .ok_or_else(|| DrmRenderError::message("Bevy composition is unavailable"))?;
-        let request = [CompositionOutputRequest {
-            output,
-            destination: CompositionDestination::External(CompositionTargetView::new(
-                self.target.clone(),
-                extent,
-                SCANOUT_FORMAT,
-            )),
-        }];
-        host.render_outputs(&request, self.composition_frames)
+        self.batch
+            .register_composition(output, self.target.clone(), extent)
             .map_err(DrmRenderError::message)?;
-        let [frame] = self.composition_frames.as_slice() else {
-            return Err(DrmRenderError::message(
-                "Bevy did not return exactly one DRM composition",
-            ));
-        };
-        if frame.output != output || frame.frame.owned_texture().is_some() {
-            return Err(DrmRenderError::message(
-                "Bevy returned the wrong DRM composition destination",
-            ));
-        }
         self.composition_drawn = true;
-        *self.last_composition_drawn = true;
         Ok(())
     }
 
@@ -606,17 +800,17 @@ impl DrmFrame<'_, '_> {
     }
 }
 
-impl Drop for DrmFrame<'_, '_> {
+impl Drop for DrmFrame<'_> {
     fn drop(&mut self) {
         if !self.released
-            && let Err(error) = self.submit_and_wait()
+            && let Err(error) = self.finish_or_defer()
         {
             tracing::warn!(%error, "failed to release an aborted DRM frame");
         }
     }
 }
 
-impl Frame for DrmFrame<'_, '_> {
+impl Frame for DrmFrame<'_> {
     type Error = DrmRenderError;
     type TextureId = DrmTexture;
 
@@ -731,7 +925,7 @@ impl Frame for DrmFrame<'_, '_> {
     }
 
     fn finish(mut self) -> Result<SyncPoint, Self::Error> {
-        self.submit_and_wait()?;
+        self.finish_or_defer()?;
         Ok(SyncPoint::signaled())
     }
 }

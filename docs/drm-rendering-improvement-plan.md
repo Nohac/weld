@@ -2,46 +2,46 @@
 
 ## Status
 
-The first single-output adapter is implemented and awaiting real-TTY
-validation. It replaced the removed custom GBM/KMS presenter with Smithay's
-`DrmOutputManager` and a narrow wgpu renderer. See
+The Smithay-first startup multi-output adapter is implemented and awaiting
+real-TTY multi-output validation. It replaced the removed custom GBM/KMS
+presenter with Smithay's `DrmOutputManager` and a narrow wgpu renderer. See
 [Direct DRM presentation](drm-presentation.md) for the exact current contract.
 
-Implemented in this slice:
+Implemented across the current slices:
 
-- one preferred desktop connector on the primary DRM GPU;
+- every usable startup desktop connector on the primary DRM GPU;
 - Smithay-owned mode, swapchain, planes, commits, page flips, pause, and
   activation;
 - direct Bevy rendering into an explicit-modifier Smithay lease;
 - owned composition during inactive sessions and one-shot capture;
-- one-frame admission with deferred demand across vblank;
+- per-output frame admission with deferred demand across matching vblanks;
 - Smithay cursor-plane selection with a shared wgpu fallback; and
-- refresh-derived pacing and logical runtime scale updates.
+- refresh-derived independent pacing, aligned-output Bevy batching, and
+  complete logical runtime scale updates.
 
 The initial blocking GPU completion wait is a correctness baseline, not the
 desired steady-state synchronization mechanism.
 
-## Next architecture slice: multiple outputs
+## Implemented multi-output architecture
 
 Smithay leases one output target inside each `DrmOutput::render_frame` call,
-while `AppShell::render_outputs` currently activates a set of output cameras
-and runs one RenderApp pass. The next design must reconcile those lifetimes
-without retaining Smithay frames across unrelated callbacks, rendering the
-same camera twice, or making one output's failure block the rest.
+while `AppShell::render_outputs` activates a selected set of output cameras and
+runs one RenderApp pass. Weld's renderer batch records the external targets
+during Smithay preparation, invokes Bevy once after all due targets are known,
+then submits cursor fallback and foreign-release commands before queueing each
+output independently.
 
-That slice should:
+The current contract:
 
-1. Represent enabled connector changes as an atomic Weld output-layout
-   transaction.
-2. Establish how all required Smithay leases are acquired before the one Bevy
-   RenderApp pass, or deliberately prove that independent per-output passes
-   preserve extraction and client-buffer ownership.
-3. Keep one frame-admission state per output and retire it only from the
+1. Discovers an atomic startup layout; dynamic connector transactions remain
+   deferred.
+2. Acquires all due Smithay leases before one Bevy RenderApp pass.
+3. Keeps one frame-admission state per output and retires it only from the
    matching CRTC vblank.
-4. Preserve the existing output entities, mixed-scale camera targets, window
-   intersections, and physical pointer topology.
-5. Handle connector removal without disconnecting clients or destroying owned
-   headless consumers.
+4. Preserves output entities, mixed-scale camera targets, window
+   intersections, and logical pointer portals.
+5. Quarantines an individual output render or queue failure while treating
+   session inactivity as device-wide.
 
 The historical mixed-scale observations remain in
 [Multi-output validation](multi-output-validation.md).

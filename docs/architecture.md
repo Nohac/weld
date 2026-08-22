@@ -116,21 +116,26 @@ inventing an origin or silently claiming the window.
 Core owns a process-stable `OutputId`, immutable `OutputHead` connector facts,
 dependency-free logical geometry, a revisioned validated `OutputLayout`, and
 collision-aware `OutputTopology`. An output head carries its connector name and
-optional EDID physical dimensions separately from mutable logical layout. A
-measured footprint is authoritative for output adjacency and pointer portals;
-missing dimensions use an explicit mode-derived 96-DPI footprint so all
-outputs remain in one millimeter coordinate space. EDID can still be inaccurate.
+optional EDID physical dimensions separately from mutable logical layout.
+Pointer collision and portals follow shared edges in the logical layout.
+Measured footprints remain available for diagnostics and calibrated layout;
+missing dimensions use an explicit mode-derived 96-DPI footprint. EDID can
+still be inaccurate.
 The output domain is independent of a physical presenter. Logical layout,
 physical footprints, collision portals, scale selection, output intersection,
 and camera targeting remain Weld policy that a native adapter consumes. The
-nested host supplies one host-window output. The standalone DRM host currently
-selects one preferred desktop connector, preferring an internal panel, and
-leaves additional connectors and hotplug for the multi-output slice.
+nested host supplies one host-window output. The standalone DRM host enables
+all usable desktop connectors on the selected GPU at startup, chooses the first
+internal panel by stable name as primary, and centers that primary below the
+other outputs. Dynamic connector hotplug remains deferred.
 
 The DRM adapter uses Smithay's `DrmOutputManager` and `DrmCompositor` for CRTC,
 mode, swapchain, plane, atomic commit, page-flip, pause, and activation
-lifecycle. Weld implements only the renderer seam that binds a Smithay-leased
-explicit-modifier DMA-BUF to the matching Bevy output target. It does not use
+lifecycle. One physical-desktop owner retains the manager and every output
+compositor. Weld implements only the renderer seam that binds each
+Smithay-leased explicit-modifier DMA-BUF to its matching Bevy output target.
+Outputs whose deadlines align share one Bevy RenderApp pass; other outputs
+remain independently paced. It does not use
 Smithay's desktop window model or restore the removed low-level presenter. See
 [Direct DRM presentation](drm-presentation.md) and the
 [DRM output adapter plan](drm-rendering-improvement-plan.md).
@@ -357,9 +362,11 @@ lifecycle, and normalized client cursor pixels. `weld-app` exposes reloadable
 `CursorSettings`, interprets Bevy's standard `CursorIcon`, and accepts transient
 `CursorRequest` overrides. Nested mode delegates final cursor presentation to
 the host window system. DRM mode normalizes named and client cursor images into
-Smithay `MemoryRenderBuffer` elements. Smithay chooses its GBM cursor plane;
-the existing composition blitter supplies the GPU fallback. Cursor-only motion
-does not dirty the Bevy scene.
+per-output Smithay `MemoryRenderBuffer` elements. The global pointer is
+projected into each output's local coordinates, so a cursor visual intersecting
+a seam can be considered on both outputs. Smithay chooses each GBM cursor
+plane; the existing composition blitter supplies the GPU fallback. Cursor-only
+motion does not dirty the Bevy scene.
 
 Raw input is forwarded to the focused client in order and retained for the next
 refresh-paced application update. That contract lets client delivery run at

@@ -1080,16 +1080,32 @@ mod tests {
     };
 
     use super::{
-        App, CompositionTargetContract, ManualTextureViewHandle, Messages, OutputGeometry,
-        PRIMARY_OUTPUT_ID, RedrawRequests, SurfaceCompositionDemand, UVec2, WeldOutput,
-        advance_main_app, disconnect_render_time, render_composition_app, spawn_compositor_camera,
-        validate_external_target,
+        App, AppShell, CompositionTargetContract, ManualTextureViewHandle, Messages,
+        OutputGeometry, PRIMARY_OUTPUT_ID, RedrawRequests, SurfaceCompositionDemand, UVec2,
+        WeldOutput, advance_main_app, disconnect_render_time, render_composition_app,
+        spawn_compositor_camera, validate_external_target,
     };
     use weld_core::{
         CompositionDemand,
         server::{PendingSurfaceEvent, PendingSurfaceEventKind, PendingSurfaceTreeSnapshot},
         surface::{Extent, SurfaceId},
     };
+
+    #[cfg(feature = "test-support")]
+    use bevy::ui::UiTargetCamera;
+    #[cfg(feature = "test-support")]
+    use weld_core::{
+        OutputConfiguration, OutputId, OutputScale,
+        host::{CompositionDestination, CompositionOutputRequest},
+        server::{PendingSurfaceBufferContent, PendingSurfaceBufferUpdate},
+        surface::{
+            LogicalPoint, SurfaceContentView, SurfaceLayerId, SurfaceLayerPlacement,
+            SurfaceWindowGeometry, WindowDecoration,
+        },
+    };
+
+    #[cfg(feature = "test-support")]
+    use crate::surface::{SurfaceNode, SurfaceView};
 
     #[derive(Resource, Default)]
     struct RenderCount(u32);
@@ -1278,5 +1294,191 @@ mod tests {
                 .and_then(ComputedUiTargetCamera::get),
             Some(camera),
         );
+    }
+
+    #[cfg(feature = "test-support")]
+    #[test]
+    fn sequential_output_passes_preserve_surface_material_updates() {
+        let first = OutputId::new(1);
+        let second = OutputId::new(2);
+        let configurations = vec![
+            diagnostic_output(first, LogicalPoint::ZERO, true, 0.0),
+            diagnostic_output(second, LogicalPoint::new(64.0, 0.0), false, 20.0),
+        ];
+        let (mut shell, _, device, queue) =
+            match crate::benchmark::rendering_shell_with_outputs(configurations, |_| {}) {
+                Ok(shell) => shell,
+                Err(error) if error.to_string().contains("no Vulkan adapter is available") => {
+                    eprintln!("skipped Vulkan surface composition diagnostic: {error}");
+                    return;
+                }
+                Err(error) => panic!("headless two-output shell should initialize: {error}"),
+            };
+        let first_surface = SurfaceId::new(1);
+        let second_surface = SurfaceId::new(2);
+        install_diagnostic_surface(&mut shell, first_surface, [0, 0, 255, 255]);
+        install_diagnostic_surface(&mut shell, second_surface, [0, 255, 0, 255]);
+        let first_camera = shell.outputs[&first].camera;
+        let second_camera = shell.outputs[&second].camera;
+        shell.app.world_mut().spawn((
+            SurfaceNode {
+                surface: first_surface,
+                view: SurfaceView::FullSurface,
+            },
+            UiTargetCamera(first_camera),
+        ));
+        shell.app.world_mut().spawn((
+            SurfaceNode {
+                surface: second_surface,
+                view: SurfaceView::FullSurface,
+            },
+            UiTargetCamera(second_camera),
+        ));
+
+        for time in 1..=5 {
+            shell.advance_main(time);
+            let mut frames = Vec::new();
+            shell
+                .render_outputs(&[owned_request(first), owned_request(second)], &mut frames)
+                .expect("initial surface assets should settle");
+        }
+        assert_surface_pixel(
+            render_owned_output(&mut shell, &device, &queue, first),
+            [255, 0, 0, 255],
+        );
+        assert_surface_pixel(
+            render_owned_output(&mut shell, &device, &queue, second),
+            [0, 255, 0, 255],
+        );
+
+        update_diagnostic_surface(&mut shell, first_surface, [255, 0, 0, 255]);
+        update_diagnostic_surface(&mut shell, second_surface, [0, 255, 255, 255]);
+        shell.advance_main(6);
+        assert_surface_pixel(
+            render_owned_output(&mut shell, &device, &queue, first),
+            [0, 0, 255, 255],
+        );
+        assert_surface_pixel(
+            render_owned_output(&mut shell, &device, &queue, second),
+            [255, 255, 0, 255],
+        );
+
+        update_diagnostic_surface(&mut shell, first_surface, [255, 0, 255, 255]);
+        update_diagnostic_surface(&mut shell, second_surface, [255, 255, 0, 255]);
+        shell.advance_main(7);
+        assert_surface_pixel(
+            render_owned_output(&mut shell, &device, &queue, second),
+            [0, 255, 255, 255],
+        );
+        assert_surface_pixel(
+            render_owned_output(&mut shell, &device, &queue, first),
+            [255, 0, 255, 255],
+        );
+    }
+
+    #[cfg(feature = "test-support")]
+    fn diagnostic_output(
+        id: OutputId,
+        position: LogicalPoint,
+        primary: bool,
+        physical_x: f64,
+    ) -> OutputConfiguration {
+        OutputConfiguration::new(
+            id,
+            Extent::new(64, 64),
+            OutputScale::default(),
+            position,
+            primary,
+            None,
+        )
+        .and_then(|output| output.with_footprint_position(physical_x, 0.0))
+        .expect("diagnostic output should be valid")
+    }
+
+    #[cfg(feature = "test-support")]
+    fn install_diagnostic_surface(shell: &mut AppShell, surface: SurfaceId, bgra: [u8; 4]) {
+        shell.enqueue_surface_event(PendingSurfaceEvent {
+            surface,
+            kind: PendingSurfaceEventKind::Created {
+                decoration: WindowDecoration::ClientSide,
+            },
+        });
+        update_diagnostic_surface(shell, surface, bgra);
+    }
+
+    #[cfg(feature = "test-support")]
+    fn update_diagnostic_surface(shell: &mut AppShell, surface: SurfaceId, bgra: [u8; 4]) {
+        const SIZE: u32 = 32;
+        let view = SurfaceContentView {
+            source_x: 0.0,
+            source_y: 0.0,
+            source_width: SIZE as f32,
+            source_height: SIZE as f32,
+            logical_width: SIZE as f32,
+            logical_height: SIZE as f32,
+        };
+        let layer = SurfaceLayerId::new(1);
+        shell.enqueue_surface_event(PendingSurfaceEvent {
+            surface,
+            kind: PendingSurfaceEventKind::TreeSnapshot(PendingSurfaceTreeSnapshot {
+                client_mapped: true,
+                root: Some(SurfaceLayerPlacement {
+                    layer,
+                    position: LogicalPoint::ZERO,
+                    view,
+                }),
+                window_geometry: Some(SurfaceWindowGeometry {
+                    origin: LogicalPoint::ZERO,
+                    view,
+                }),
+                overlays: Vec::new(),
+                inputs: Vec::new(),
+                buffers: vec![PendingSurfaceBufferUpdate {
+                    layer,
+                    width: SIZE,
+                    height: SIZE,
+                    content: PendingSurfaceBufferContent::ShmPixels(
+                        bgra.into_iter()
+                            .cycle()
+                            .take((SIZE * SIZE * 4) as usize)
+                            .collect(),
+                    ),
+                    opaque: true,
+                }],
+            }),
+        });
+    }
+
+    #[cfg(feature = "test-support")]
+    fn owned_request(output: OutputId) -> CompositionOutputRequest {
+        CompositionOutputRequest {
+            output,
+            destination: CompositionDestination::Owned,
+        }
+    }
+
+    #[cfg(feature = "test-support")]
+    fn render_owned_output(
+        shell: &mut AppShell,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        output: OutputId,
+    ) -> Vec<u8> {
+        let mut frames = Vec::new();
+        shell
+            .render_outputs(&[owned_request(output)], &mut frames)
+            .expect("diagnostic output should render");
+        let frame = frames
+            .first()
+            .expect("diagnostic render should return one frame");
+        weld_core::renderer::read_owned_frame_rgba(device, queue, &frame.frame)
+            .expect("diagnostic output should be readable")
+    }
+
+    #[cfg(feature = "test-support")]
+    fn assert_surface_pixel(pixels: Vec<u8>, expected: [u8; 4]) {
+        const TARGET_WIDTH: usize = 64;
+        let offset = (16 * TARGET_WIDTH + 16) * 4;
+        assert_eq!(&pixels[offset..offset + 4], expected.as_slice());
     }
 }

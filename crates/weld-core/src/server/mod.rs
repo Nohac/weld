@@ -137,6 +137,7 @@ pub(crate) struct ServerOptions<'a> {
 struct ServerOutput {
     native: Output,
     metrics: OutputMetrics,
+    logical_position: (i32, i32),
 }
 
 impl ServerState {
@@ -203,6 +204,7 @@ impl ServerState {
                     ServerOutput {
                         native: output,
                         metrics: definition.metrics,
+                        logical_position: definition.logical_position,
                     },
                 )
                 .is_some()
@@ -347,16 +349,33 @@ impl ServerState {
         })
     }
 
-    pub(crate) fn update_output_metrics(&mut self, metrics: OutputMetrics) {
-        let Some(output) = self.outputs.get_mut(&self.primary_output) else {
+    pub(crate) fn update_output_metrics(
+        &mut self,
+        id: OutputId,
+        metrics: OutputMetrics,
+        logical_position: (i32, i32),
+    ) {
+        let Some(output) = self.outputs.get_mut(&id) else {
             return;
         };
-        if output.metrics == metrics {
+        let metrics_changed = output.metrics != metrics;
+        let position_changed = output.logical_position != logical_position;
+        if !metrics_changed && !position_changed {
             return;
         }
-        install_output_metrics(&output.native, output.metrics, metrics);
-        output.metrics = metrics;
-        self.send_all_surface_scales();
+        if metrics_changed {
+            install_output_metrics(&output.native, output.metrics, metrics);
+            output.metrics = metrics;
+        }
+        if position_changed {
+            output
+                .native
+                .change_current_state(None, None, None, Some(logical_position.into()));
+            output.logical_position = logical_position;
+        }
+        if metrics_changed {
+            self.send_all_surface_scales();
+        }
     }
 
     pub(crate) fn native_output(&self, id: OutputId) -> Option<Output> {

@@ -31,7 +31,7 @@ use crate::{
 };
 
 use super::{
-    output::{SelectedOutput, select_output},
+    output::{SelectedOutput, select_outputs},
     renderer::DrmRenderState,
     vulkan::{adapter_matches_device, renderable_scanout_formats},
 };
@@ -59,7 +59,7 @@ pub(super) struct DrmRuntimeBootstrap {
     pub(super) drm_notifier: DrmDeviceNotifier,
     pub(super) output_manager: OutputManager,
     pub(super) render_state: DrmRenderState,
-    pub(super) selected_output: SelectedOutput,
+    pub(super) selected_outputs: Vec<SelectedOutput>,
     pub(super) dmabuf_capabilities: Option<DmabufCapabilities>,
     pub(super) dmabuf_sources: DmabufSourceCache,
     pub(super) dmabuf_release_source: Channel<DmabufReleaseId>,
@@ -77,7 +77,7 @@ pub(super) fn prepare(options: &RunOptions) -> Result<DrmBootstrap> {
         )
         .with_context(|| format!("failed to open DRM device {}", device_path.display()))?;
     let drm_fd = DrmDeviceFd::new(DeviceFd::from(fd));
-    let selected_output = select_output(&drm_fd, options.output_scale)?;
+    let selected_outputs = select_outputs(&drm_fd, options.output_scale)?;
 
     let mut descriptor = wgpu::InstanceDescriptor::new_without_display_handle_from_env();
     descriptor.backends = wgpu::Backends::VULKAN;
@@ -117,8 +117,14 @@ pub(super) fn prepare(options: &RunOptions) -> Result<DrmBootstrap> {
         device,
         queue,
         dmabuf: crate::dmabuf::DmabufContext::new(release_sender, dmabuf_sources.clone()),
-        output_heads: vec![selected_output.head.clone()],
-        outputs: vec![selected_output.configuration],
+        output_heads: selected_outputs
+            .iter()
+            .map(|output| output.head.clone())
+            .collect(),
+        outputs: selected_outputs
+            .iter()
+            .map(|output| output.configuration)
+            .collect(),
         composition_format: wgpu::TextureFormat::Bgra8UnormSrgb,
     };
     Ok(DrmBootstrap {
@@ -129,7 +135,7 @@ pub(super) fn prepare(options: &RunOptions) -> Result<DrmBootstrap> {
             drm_notifier,
             output_manager,
             render_state,
-            selected_output,
+            selected_outputs,
             dmabuf_capabilities,
             dmabuf_sources,
             dmabuf_release_source,

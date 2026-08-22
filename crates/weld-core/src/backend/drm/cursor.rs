@@ -1,6 +1,6 @@
 //! Cursor-theme and client-image normalization for Smithay render elements.
 
-use std::{collections::HashMap, fs, sync::Arc};
+use std::{cell::RefCell, collections::HashMap, fs, rc::Rc, sync::Arc};
 
 use anyhow::{Context, Result, bail};
 use smithay::{
@@ -36,17 +36,33 @@ struct ThemeIcon {
     icon: CursorIcon,
 }
 
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct NormalizedThemeIcon {
+    icon: ThemeIcon,
+    logical_size: u32,
+    scale_bits: u64,
+}
+
+#[derive(Debug, Default)]
+struct CursorResourceCache {
+    theme_images: HashMap<ThemeIcon, Arc<[Image]>>,
+    normalized_named: HashMap<NormalizedThemeIcon, NormalizedCursor>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub(super) struct CursorResources(Rc<RefCell<CursorResourceCache>>);
+
 #[derive(Debug)]
 pub(super) struct CursorState {
     configuration: CursorConfiguration,
     image: CursorImage,
     position: InputPosition,
     scale: f64,
-    theme_images: HashMap<ThemeIcon, Arc<[Image]>>,
+    resources: CursorResources,
     normalized: Option<NormalizedCursor>,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 struct NormalizedCursor {
     buffer: MemoryRenderBuffer,
     source: Rectangle<f64, Logical>,
@@ -56,13 +72,17 @@ struct NormalizedCursor {
 }
 
 impl CursorState {
-    pub(super) fn new(configuration: CursorConfiguration, scale: f64) -> Result<Self> {
+    pub(super) fn new(
+        configuration: CursorConfiguration,
+        scale: f64,
+        resources: CursorResources,
+    ) -> Result<Self> {
         let mut state = Self {
             configuration,
             image: CursorImage::Named(CursorIcon::Default),
             position: InputPosition::default(),
             scale,
-            theme_images: HashMap::new(),
+            resources,
             normalized: None,
         };
         state.rebuild()?;
@@ -133,21 +153,47 @@ impl CursorState {
     }
 
     fn normalize_named(&mut self, icon: CursorIcon) -> Result<NormalizedCursor> {
-        let key = ThemeIcon {
+        let icon_key = ThemeIcon {
             theme: self.configuration.theme().to_owned(),
             icon,
         };
-        let images = if let Some(images) = self.theme_images.get(&key) {
-            Arc::clone(images)
+        let logical_size = self.configuration.size();
+        let normalized_key = NormalizedThemeIcon {
+            icon: icon_key.clone(),
+            logical_size,
+            scale_bits: self.scale.to_bits(),
+        };
+        if let Some(cursor) = self
+            .resources
+            .0
+            .borrow()
+            .normalized_named
+            .get(&normalized_key)
+            .cloned()
+        {
+            return Ok(cursor);
+        }
+        let cached_images = self
+            .resources
+            .0
+            .borrow()
+            .theme_images
+            .get(&icon_key)
+            .cloned();
+        let images = if let Some(images) = cached_images {
+            images
         } else {
-            let images = load_theme_images(&key).unwrap_or_else(|error| {
-                warn!(theme = %key.theme, icon = key.icon.name(), %error, "using the built-in cursor image");
+            let images = load_theme_images(&icon_key).unwrap_or_else(|error| {
+                warn!(theme = %icon_key.theme, icon = icon_key.icon.name(), %error, "using the built-in cursor image");
                 Arc::from([fallback_image()])
             });
-            self.theme_images.insert(key, Arc::clone(&images));
+            self.resources
+                .0
+                .borrow_mut()
+                .theme_images
+                .insert(icon_key, Arc::clone(&images));
             images
         };
-        let logical_size = self.configuration.size();
         let physical_size = scaled_extent(logical_size as f64, self.scale)?;
         let image = images
             .iter()
@@ -165,7 +211,7 @@ impl CursorState {
             scale_coordinate(image.xhot, image.width, physical_size),
             scale_coordinate(image.yhot, image.height, physical_size),
         ));
-        normalized_cursor(
+        let normalized = normalized_cursor(
             pixels,
             physical_size,
             physical_size,
@@ -173,7 +219,15 @@ impl CursorState {
             logical_size as f64,
             hotspot,
             self.scale,
-        )
+        )?;
+        // Named cursor entries remain small in ordinary use: cursor icons are
+        // finite and runtime output scale changes use quarter-step values.
+        self.resources
+            .0
+            .borrow_mut()
+            .normalized_named
+            .insert(normalized_key, normalized.clone());
+        Ok(normalized)
     }
 }
 

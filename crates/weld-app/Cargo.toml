@@ -20,6 +20,7 @@ wgpu = { workspace = true, features = ["naga-ir", "vulkan", "wgsl"] }
 winit = { workspace = true, features = ["rwh_06"] }
 
 [dev-dependencies]
+weld-app = { path = ".", features = ["test-support"] }
 weld-core = { path = "../weld-core", features = ["test-support"] }
 
 [[bench]]

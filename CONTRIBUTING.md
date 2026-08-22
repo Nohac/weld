@@ -170,7 +170,7 @@ boundary:
 scripts/run-smithay-drm-compositor-probe
 ```
 
-Run the production single-output backend from a real TTY with:
+Run the production startup-output backend from a real TTY with:
 
 ```text
 scripts/run-weld-drm

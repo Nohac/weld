@@ -1,10 +1,9 @@
 # Multi-output validation
 
-**Status: Historical observations for the next DRM slice.** The current
-Smithay-first production adapter deliberately enables one connector. This note
-records behavior seen with the removed mixed-scale two-output adapter so the
-issues are not lost when multi-output returns. Observations remain separate
-from possible causes until the new adapter can measure them.
+**Status: Active validation notes.** The Smithay-first production adapter now
+enables all usable desktop connectors present at startup. These observations
+originated with the removed mixed-scale adapter and remain the focused hardware
+checks for the new shared output manager.
 
 ## Scale-boundary movement
 
@@ -52,10 +51,30 @@ describe the intended physical relationship. With independently chosen output
 scales, the physical portal layout can feel inconsistent with the logical
 desktop in which windows and applications are manipulated.
 
-The agreed short-term policy is to use logical output rectangles for pointer
-collision, edge sliding, and portals. The implementation still uses physical
-footprints at the time of writing; changing it is a separate slice. Preserve
-measured physical metadata, topology diagnostics, and the physical scale-match
-shortcut so a later calibrated physical-layout mode remains possible. Output
-configuration should eventually make logical and physically calibrated pointer
-topologies explicit choices rather than deriving an unexpected hybrid.
+The implemented short-term policy uses logical output rectangles for pointer
+collision, edge sliding, and portals. Measured physical metadata, topology
+diagnostics, and the physical scale-match shortcut remain available so a later
+calibrated physical-layout mode remains possible. Output configuration should
+eventually make logical and physically calibrated pointer topologies explicit
+choices rather than deriving an unexpected hybrid.
+
+## Cursor seam projection
+
+The DRM adapter projects one global cursor position into every output's local
+coordinate space and supplies a cursor element to each due output. This allows
+Smithay to present the visual on both outputs when its bounds intersect a seam,
+instead of moving one global hardware plane abruptly between CRTCs. Hardware
+validation must confirm whether each driver clips partially intersecting cursor
+planes or correctly selects the GPU fallback. Requesting presentation only for
+the old and new intersected output sets is a later optimization; the first
+multi-output pass conservatively reconsiders every enabled output.
+
+## Frame callback output selection
+
+Client frame callbacks become eligible only after the paced application
+composition has ingested their surface commits. The first physical output batch
+prepared after that point carries the global callback batch; callback progress
+does not wait for independently phased outputs to become due together. With
+mixed refresh rates, a surface visible only on a slower output may therefore
+receive its callback from a faster output's vblank. Per-surface callback routing
+to a preferred output remains a later refinement.

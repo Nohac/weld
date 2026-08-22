@@ -1,20 +1,15 @@
 //! Standalone calloop host around Smithay's DRM output compositor.
 
-use std::time::Instant;
+use std::{collections::HashMap, time::Instant};
 
 use anyhow::{Context, Result, anyhow, bail};
 use calloop::signals::Signals;
 use input::Libinput;
 use smithay::{
     backend::{
-        drm::{
-            DrmError, DrmEvent, DrmEventMetadata,
-            compositor::{FrameError, FrameFlags, PrimaryPlaneElement, RenderFrameError},
-            output::DrmOutputRenderElements,
-        },
+        drm::{DrmEvent, DrmEventMetadata},
         input::InputEvent,
         libinput::{LibinputInputBackend, LibinputSessionInterface},
-        renderer::element::Element,
         session::{Event as SessionEvent, Session},
     },
     reexports::{calloop::EventLoop, wayland_server::Display},
@@ -23,11 +18,7 @@ use tracing::{info, warn};
 
 use crate::{
     CompositionDemand, OutputConfiguration, OutputLayout, OutputScale, OutputTopology,
-    cursor::CursorConfiguration,
-    host::{
-        CompositionDestination, CompositionFrame, CompositionHost, CompositionOutputRequest,
-        RunOptions,
-    },
+    host::{CompositionDestination, CompositionHost, CompositionOutputRequest, RunOptions},
     input::{RawSeatEvent, RawSeatEventKind, source::libinput::LibinputAdapter},
     runtime::{
         ChildProcesses, FrameState, HostCommandEffect, IterationWork, LoopData, PendingCapture,
@@ -37,9 +28,9 @@ use crate::{
 };
 
 use super::{
-    cursor::CursorState,
-    device::{DrmRuntimeBootstrap, OutputManager, PhysicalOutput, SubmittedFrame},
-    renderer::{CompositionElement, DrmRenderState, DrmRenderer, OutputElement},
+    device::DrmRuntimeBootstrap,
+    presentation::{PhysicalDesktop, PhysicalRenderOutcome},
+    schedule::PresentationSchedule,
 };
 
 enum HostEvent {
@@ -67,27 +58,21 @@ enum CompositionRoute {
     },
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum FrameAdmission {
-    Idle,
-    Queued {
-        presentation_id: Option<u64>,
-        deferred_present: bool,
-    },
-}
+#[derive(Default)]
+struct FrameCallbackReadiness(bool);
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct RetiredFrame {
-    presentation_id: Option<u64>,
-    deferred_present: bool,
-}
+impl FrameCallbackReadiness {
+    fn composition_rendered(&mut self, presentation_requested: bool) {
+        self.0 |= presentation_requested;
+    }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum PhysicalRenderOutcome {
-    Queued,
-    Empty,
-    Inactive,
-    Busy,
+    const fn can_stage(&self) -> bool {
+        self.0
+    }
+
+    fn reconcile(&mut self, presentation_requested: bool) {
+        self.0 &= presentation_requested;
+    }
 }
 
 const fn composition_route(target: SessionTarget, capture_ready: bool) -> CompositionRoute {
@@ -111,298 +96,35 @@ fn apply_physical_outcome(
     frame_state: &mut FrameState,
     target: &mut SessionTarget,
 ) {
-    match outcome {
-        PhysicalRenderOutcome::Queued => {
-            if work.render_composition {
-                // This deadline remains a no-vblank fallback. Physical frame
-                // retirement replaces it with the DRM vblank clock.
-                frame_state.composition_rendered(now);
-            }
-        }
-        PhysicalRenderOutcome::Empty => {
-            if work.render_composition {
-                frame_state.composition_rendered(now);
-            }
-            frame_state.presented();
-        }
-        PhysicalRenderOutcome::Inactive => {
-            *target = SessionTarget::InactiveOwned;
-            if work.advance_main {
-                frame_state.application_advanced(now);
-            }
-            frame_state.request_composition();
-        }
-        PhysicalRenderOutcome::Busy if work.advance_main => {
+    if outcome.inactive {
+        *target = SessionTarget::InactiveOwned;
+        if work.advance_main {
             frame_state.application_advanced(now);
         }
-        PhysicalRenderOutcome::Busy => {}
+        frame_state.request_composition();
+    } else if !outcome.queued.is_empty() {
+        if work.render_composition {
+            // This deadline remains a no-vblank fallback. Physical frame
+            // retirement replaces it with the DRM vblank clock.
+            frame_state.composition_rendered(now);
+        }
+    } else if !outcome.retry.is_empty() || !outcome.busy.is_empty() {
+        if work.advance_main {
+            frame_state.application_advanced(now);
+        }
+    } else {
+        if work.render_composition {
+            frame_state.composition_rendered(now);
+        }
+        frame_state.presented();
     }
 }
 
-impl FrameAdmission {
-    const fn is_idle(self) -> bool {
-        matches!(self, Self::Idle)
-    }
-
-    fn queue(&mut self, presentation_id: Option<u64>) {
-        *self = Self::Queued {
-            presentation_id,
-            deferred_present: false,
-        };
-    }
-
-    fn defer_present(&mut self) {
-        if let Self::Queued {
-            deferred_present, ..
-        } = self
-        {
-            *deferred_present = true;
-        }
-    }
-
-    fn retire(&mut self) -> Option<RetiredFrame> {
-        let Self::Queued {
-            presentation_id,
-            deferred_present,
-        } = std::mem::replace(self, Self::Idle)
-        else {
-            return None;
-        };
-        Some(RetiredFrame {
-            presentation_id,
-            deferred_present,
-        })
-    }
-}
-
-struct PhysicalPresenter {
-    output_id: crate::OutputId,
-    manager: OutputManager,
-    output: PhysicalOutput,
-    render_state: DrmRenderState,
-    composition: CompositionElement,
-    cursor: CursorState,
-    admission: FrameAdmission,
-}
-
-impl PhysicalPresenter {
-    fn new(
-        mut manager: OutputManager,
-        mut render_state: DrmRenderState,
-        selected: &super::output::SelectedOutput,
-        server: &ServerState,
-    ) -> Result<Self> {
-        let native_output = server
-            .native_output(selected.id)
-            .context("Wayland server did not install the selected DRM output")?;
-        let output = {
-            let mut renderer = render_state.renderer(selected.id, None);
-            let render_elements: DrmOutputRenderElements<
-                DrmRenderer<'_>,
-                OutputElement<DrmRenderer<'_>>,
-            > = DrmOutputRenderElements::default();
-            manager
-                .lock()
-                .initialize_output(
-                    selected.crtc,
-                    selected.mode,
-                    &[selected.connector.handle()],
-                    &native_output,
-                    None,
-                    &mut renderer,
-                    &render_elements,
-                )
-                .context("Smithay failed to initialize the selected DRM output")?
-        };
-        Ok(Self {
-            output_id: selected.id,
-            manager,
-            output,
-            render_state,
-            composition: CompositionElement::new(selected.id, selected.configuration.extent())?,
-            cursor: CursorState::new(
-                CursorConfiguration::default(),
-                selected.configuration.scale().value(),
-            )?,
-            admission: FrameAdmission::Idle,
-        })
-    }
-
-    fn request_composition(&mut self) {
-        self.composition.mark_dirty();
-    }
-
-    fn set_cursor_position(&mut self, position: crate::input::InputPosition) {
-        self.cursor.set_position(position);
-    }
-
-    fn set_cursor_image(&mut self, image: crate::cursor::CursorImage) -> Result<()> {
-        self.cursor.set_image(image)
-    }
-
-    fn set_cursor_configuration(&mut self, configuration: CursorConfiguration) -> Result<()> {
-        self.cursor.set_configuration(configuration)
-    }
-
-    fn set_scale(&mut self, scale: OutputScale) -> Result<()> {
-        self.cursor.set_scale(scale.value())
-    }
-
-    fn render(
-        &mut self,
-        host: &mut dyn CompositionHost,
-        server: &mut ServerState,
-        vblank_phase: Option<std::time::Duration>,
-    ) -> Result<PhysicalRenderOutcome> {
-        if !self.admission.is_idle() {
-            self.admission.defer_present();
-            return Ok(PhysicalRenderOutcome::Busy);
-        }
-        let (empty, hardware_cursor, composition_state, needs_sync) = {
-            let mut renderer = self.render_state.renderer(self.output_id, Some(host));
-            let cursor = self.cursor.render_element(&mut renderer)?;
-            let mut elements: Vec<OutputElement<DrmRenderer<'_>>> = Vec::with_capacity(2);
-            if let Some(cursor) = cursor {
-                elements.push(OutputElement::from(cursor));
-            }
-            elements.push(OutputElement::from(self.composition.clone()));
-            let result = match self.output.render_frame(
-                &mut renderer,
-                &elements,
-                smithay::backend::renderer::Color32F::BLACK,
-                FrameFlags::ALLOW_CURSOR_PLANE_SCANOUT,
-            ) {
-                Ok(result) => result,
-                Err(RenderFrameError::PrepareFrame(FrameError::DrmError(
-                    DrmError::DeviceInactive,
-                ))) => return Ok(PhysicalRenderOutcome::Inactive),
-                Err(error) => {
-                    return Err(anyhow!(
-                        "Smithay failed to render the physical output: {error:?}"
-                    ));
-                }
-            };
-            let hardware_cursor = result.cursor_element.is_some();
-            let composition_state = tracing::enabled!(
-                target: "weld_drm_pacing",
-                tracing::Level::TRACE
-            )
-            .then(|| {
-                result
-                    .states
-                    .element_render_state(self.composition.id().clone())
-            })
-            .flatten();
-            let needs_sync = result.needs_sync();
-            if needs_sync && let PrimaryPlaneElement::Swapchain(primary) = &result.primary_element {
-                primary
-                    .sync
-                    .wait()
-                    .context("physical render synchronization was interrupted")?;
-            }
-            (
-                result.is_empty,
-                hardware_cursor,
-                composition_state,
-                needs_sync,
-            )
-        };
-        let gpu_wait = self.render_state.last_gpu_wait();
-        let composition_drawn = self.render_state.last_composition_drawn();
-        if empty {
-            if server.presentation_requested() {
-                let presentation_id = server.stage_frame_callbacks();
-                server.complete_frame_callbacks(presentation_id);
-            }
-            return Ok(PhysicalRenderOutcome::Empty);
-        }
-        let presentation_id = server
-            .presentation_requested()
-            .then(|| server.stage_frame_callbacks());
-        match self.output.queue_frame(SubmittedFrame { presentation_id }) {
-            Ok(()) => {
-                self.admission.queue(presentation_id);
-                tracing::trace!(
-                    target: "weld_drm_pacing",
-                    hardware_cursor,
-                    composition_drawn,
-                    ?composition_state,
-                    needs_sync,
-                    gpu_wait_micros = gpu_wait.as_micros(),
-                    vblank_phase_micros = vblank_phase.map(|phase| phase.as_micros()),
-                    "queued physical frame"
-                );
-                Ok(PhysicalRenderOutcome::Queued)
-            }
-            Err(FrameError::EmptyFrame) => {
-                if let Some(presentation_id) = presentation_id {
-                    server.complete_frame_callbacks(presentation_id);
-                }
-                Ok(PhysicalRenderOutcome::Empty)
-            }
-            Err(FrameError::DrmError(DrmError::DeviceInactive)) => {
-                if let Some(presentation_id) = presentation_id {
-                    server.complete_frame_callbacks(presentation_id);
-                }
-                Ok(PhysicalRenderOutcome::Inactive)
-            }
-            Err(error) => Err(error).context("Smithay failed to queue the physical output"),
-        }
-    }
-
-    fn retire(&mut self, server: &mut ServerState) -> Result<Option<bool>> {
-        let submitted = self
-            .output
-            .frame_submitted()
-            .context("Smithay failed to retire the physical output frame")?;
-        let Some(submitted) = submitted else {
-            return Ok(None);
-        };
-        let admission = self.admission.retire().unwrap_or(RetiredFrame {
-            presentation_id: None,
-            deferred_present: false,
-        });
-        if submitted.presentation_id != admission.presentation_id {
-            warn!(
-                queued = ?admission.presentation_id,
-                submitted = ?submitted.presentation_id,
-                "physical frame callback identity diverged"
-            );
-        }
-        if let Some(presentation_id) = submitted.presentation_id.or(admission.presentation_id) {
-            server.complete_frame_callbacks(presentation_id);
-        }
-        Ok(Some(admission.deferred_present))
-    }
-
-    fn pause(&mut self) {
-        self.manager.pause();
-    }
-
-    fn activate(&mut self, server: &mut ServerState) -> Result<()> {
-        self.manager
-            .lock()
-            .activate(true)
-            .context("failed to reactivate the Smithay DRM output manager")?;
-        if let Some(presentation_id) = self
-            .admission
-            .retire()
-            .and_then(|frame| frame.presentation_id)
-        {
-            server.complete_frame_callbacks(presentation_id);
-        }
-        self.request_composition();
-        Ok(())
-    }
-
-    fn capture_owned(&self, frame: &CompositionFrame, path: &std::path::Path) -> Result<()> {
-        crate::renderer::capture_owned_frame(
-            self.render_state.device(),
-            self.render_state.queue(),
-            frame,
-            path,
-        )
-    }
+fn primary_output_index(
+    outputs: impl IntoIterator<Item = crate::OutputId>,
+    primary: crate::OutputId,
+) -> Option<usize> {
+    outputs.into_iter().position(|output| output == primary)
 }
 
 pub(super) fn run(
@@ -417,7 +139,7 @@ pub(super) fn run(
         drm_notifier,
         output_manager,
         render_state,
-        selected_output,
+        selected_outputs,
         dmabuf_capabilities,
         dmabuf_sources,
         dmabuf_release_source,
@@ -434,16 +156,19 @@ pub(super) fn run(
         ServerOptions {
             started_at,
             seat_name: "weld-seat0",
-            outputs: vec![selected_output.definition.clone()],
+            outputs: selected_outputs
+                .iter()
+                .map(|output| output.definition.clone())
+                .collect(),
             dmabuf_capabilities: dmabuf_capabilities.as_ref(),
             dmabuf_sources,
         },
     )?;
     let mut loop_data = LoopData::new(server);
-    let mut presenter = PhysicalPresenter::new(
+    let mut desktop = PhysicalDesktop::new(
         output_manager,
         render_state,
-        &selected_output,
+        &selected_outputs,
         &loop_data.server,
     )?;
 
@@ -483,41 +208,60 @@ pub(super) fn run(
         )
         .map_err(|_| anyhow!("failed to register libinput"))?;
 
-    let topology = OutputTopology::new(OutputLayout::new(1, vec![selected_output.configuration])?);
+    let mut current_configurations = selected_outputs
+        .iter()
+        .map(|output| output.configuration)
+        .collect::<Vec<_>>();
+    let topology = OutputTopology::new(OutputLayout::new(1, current_configurations.clone())?);
     let mut input = LibinputAdapter::new(topology);
     let initial_input = input.initial_event();
     let _ = application.enqueue_input_event(initial_input.clone());
     loop_data.server.forward_raw_input(initial_input);
-    presenter.set_cursor_position(input.pointer_position());
+    desktop.set_cursor_position(input.pointer_position());
 
     let mut children = ChildProcesses::default();
     let child_requested = children.spawn_requested(&loop_data.server, &options.client)?;
     let mut pending_capture = options
         .screenshot
         .map(|path| PendingCapture::startup(path, child_requested));
-    let mut frame_state = FrameState::with_interval(selected_output.frame_interval);
-    let mut current_configuration = selected_output.configuration;
+    let fastest_interval = selected_outputs
+        .iter()
+        .map(|output| output.frame_interval)
+        .min()
+        .context("DRM startup contains no output frame interval")?;
+    let mut frame_state = FrameState::with_interval(fastest_interval);
+    let mut presentation_schedule = PresentationSchedule::new(
+        selected_outputs
+            .iter()
+            .map(|output| (output.id, output.frame_interval)),
+    );
     let mut output_layout_revision = 1_u64;
     let mut target = if session.is_active() {
         SessionTarget::ActivePhysical
     } else {
         SessionTarget::InactiveOwned
     };
-    let owned_request = [CompositionOutputRequest {
-        output: selected_output.id,
-        destination: CompositionDestination::Owned,
-    }];
-    let mut owned_frames = Vec::with_capacity(1);
+    let owned_request = selected_outputs
+        .iter()
+        .map(|output| CompositionOutputRequest {
+            output: output.id,
+            destination: CompositionDestination::Owned,
+        })
+        .collect::<Vec<_>>();
+    let mut owned_frames = Vec::with_capacity(selected_outputs.len());
     let mut input_pending = false;
     let mut next_input_update = Instant::now();
     let mut next_remote_service = Instant::now();
     let mut last_vblank_at = None;
-    let mut last_vblank_sequence = None;
+    let mut output_vblank_at = HashMap::new();
+    let mut output_vblank_sequence = HashMap::new();
+    let mut frame_callbacks = FrameCallbackReadiness::default();
     let mut exit_requested = false;
 
     info!(
         socket = ?loop_data.server.socket_name,
-        output = %selected_output.head.name(),
+        outputs = selected_outputs.len(),
+        primary = %selected_outputs[0].head.name(),
         "Weld DRM compositor is ready"
     );
     while !exit_requested {
@@ -525,8 +269,14 @@ pub(super) fn run(
         if input_pending && now >= next_input_update {
             frame_state.request_update();
         }
+        let mut timeout = frame_state.composition_timeout(now);
+        if target == SessionTarget::ActivePhysical
+            && let Some(presentation_timeout) = presentation_schedule.timeout(now)
+        {
+            timeout = timeout.min(presentation_timeout);
+        }
         calloop
-            .dispatch(Some(frame_state.composition_timeout(now)), &mut loop_data)
+            .dispatch(Some(timeout), &mut loop_data)
             .context("Smithay DRM calloop dispatch failed")?;
         while let Some(event) = loop_data.events.pop_front() {
             match event {
@@ -544,60 +294,68 @@ pub(super) fn run(
                     let _ = application.enqueue_input_event(focus_lost.clone());
                     loop_data.server.forward_raw_input(focus_lost);
                     libinput_context.suspend();
-                    presenter.pause();
+                    desktop.pause();
                 }
                 HostEvent::Session(SessionEvent::ActivateSession) => {
                     libinput_context
                         .resume()
                         .map_err(|_| anyhow!("failed to resume libinput after VT activation"))?;
-                    presenter.activate(&mut loop_data.server)?;
+                    desktop.activate(&mut loop_data.server)?;
+                    presentation_schedule.activate_all();
                     target = SessionTarget::ActivePhysical;
                     frame_state.request_composition();
                 }
                 HostEvent::Drm {
                     event: DrmEvent::VBlank(crtc),
                     metadata,
-                } if crtc == selected_output.crtc => {
+                } => {
                     let vblank_at = Instant::now();
                     let sequence = metadata.map(|event| event.sequence);
-                    let sequence_delta = sequence
-                        .zip(last_vblank_sequence)
-                        .map(|(current, previous)| current.wrapping_sub(previous));
-                    let wall_interval = last_vblank_at
-                        .map(|previous| vblank_at.saturating_duration_since(previous));
-                    let retired = presenter.retire(&mut loop_data.server)?;
-                    if let Some(deferred_present) = retired {
+                    let retired = desktop.retire(crtc, &mut loop_data.server)?;
+                    if let Some((output, retired)) = retired {
+                        let sequence_delta = sequence
+                            .zip(output_vblank_sequence.get(&output).copied())
+                            .map(|(current, previous)| current.wrapping_sub(previous));
+                        let wall_interval = output_vblank_at
+                            .get(&output)
+                            .map(|previous| vblank_at.saturating_duration_since(*previous));
+                        presentation_schedule.retired(output, retired.deferred_present);
                         match target {
                             SessionTarget::ActivePhysical => {
                                 frame_state.physical_frame_retired();
                                 if input_pending {
                                     frame_state.request_update();
-                                    next_input_update = vblank_at + selected_output.frame_interval;
+                                    next_input_update = vblank_at + fastest_interval;
                                 }
                             }
                             SessionTarget::InactiveOwned => frame_state.presented(),
                         }
-                        if deferred_present {
+                        if retired.deferred_present {
                             frame_state.request_present();
                         }
+                        tracing::trace!(
+                            target: "weld_drm_pacing",
+                            ?output,
+                            ?sequence,
+                            ?sequence_delta,
+                            wall_interval_micros = ?wall_interval.map(|interval| interval.as_micros()),
+                            deferred_present = retired.deferred_present,
+                            "retired physical frame"
+                        );
+                        output_vblank_at.insert(output, vblank_at);
+                        if let Some(sequence) = sequence {
+                            output_vblank_sequence.insert(output, sequence);
+                        }
+                    } else {
+                        tracing::trace!(
+                            target: "weld_drm_pacing",
+                            ?crtc,
+                            ?sequence,
+                            "ignored vblank for an unknown or stale CRTC"
+                        );
                     }
-                    tracing::trace!(
-                        target: "weld_drm_pacing",
-                        ?sequence,
-                        ?sequence_delta,
-                        wall_interval_micros = ?wall_interval.map(|interval| interval.as_micros()),
-                        deferred_present = ?retired,
-                        "retired physical frame"
-                    );
                     last_vblank_at = Some(vblank_at);
-                    if sequence.is_some() {
-                        last_vblank_sequence = sequence;
-                    }
                 }
-                HostEvent::Drm {
-                    event: DrmEvent::VBlank(_),
-                    ..
-                } => {}
                 HostEvent::Drm {
                     event: DrmEvent::Error(error),
                     ..
@@ -605,7 +363,8 @@ pub(super) fn run(
                 HostEvent::Input(event) => {
                     for event in input.convert(event).into_iter().flatten() {
                         if matches!(event.event, RawSeatEventKind::PointerMotion { .. }) {
-                            presenter.set_cursor_position(input.pointer_position());
+                            desktop.set_cursor_position(input.pointer_position());
+                            presentation_schedule.request_present_all();
                             frame_state.request_present();
                         }
                         if application.enqueue_input_event(event.clone()) {
@@ -619,15 +378,25 @@ pub(super) fn run(
 
         if loop_data.server.has_surface_events() {
             for event in loop_data.server.take_surface_events() {
-                match application.enqueue_surface_event(event) {
-                    CompositionDemand::Ordinary => frame_state.request_composition(),
-                    CompositionDemand::Settle => frame_state.request_settled_composition(),
+                let demand = application.enqueue_surface_event(event);
+                match demand {
+                    CompositionDemand::Ordinary => {
+                        frame_state.request_composition();
+                        presentation_schedule.request_composition_all();
+                    }
+                    CompositionDemand::Settle => {
+                        frame_state.request_settled_composition();
+                        presentation_schedule.request_composition_all();
+                    }
                 }
             }
         }
         if loop_data.server.presentation_requested() {
             match target {
-                SessionTarget::ActivePhysical => frame_state.request_present(),
+                SessionTarget::ActivePhysical => {
+                    frame_state.request_present();
+                    presentation_schedule.request_present_all();
+                }
                 SessionTarget::InactiveOwned => frame_state.request_composition(),
             }
         }
@@ -647,9 +416,9 @@ pub(super) fn run(
             input_pending = false;
             next_input_update = match target {
                 SessionTarget::ActivePhysical => last_vblank_at
-                    .map(|vblank| vblank + selected_output.frame_interval)
-                    .unwrap_or(now + selected_output.frame_interval),
-                SessionTarget::InactiveOwned => now + selected_output.frame_interval,
+                    .map(|vblank| vblank + fastest_interval)
+                    .unwrap_or(now + fastest_interval),
+                SessionTarget::InactiveOwned => now + fastest_interval,
             };
             for action in application.take_surface_actions() {
                 loop_data.server.apply_surface_action(action);
@@ -662,36 +431,94 @@ pub(super) fn run(
                     HostCommandEffect::Continue => {}
                     HostCommandEffect::Exit => exit_requested = true,
                     HostCommandEffect::AdjustOutputScale(adjustment) => {
-                        if let Some(scale) = current_configuration.scale().adjust(adjustment) {
+                        let output = input.output_at_pointer().or_else(|| {
+                            current_configurations
+                                .iter()
+                                .find(|output| output.is_primary())
+                                .map(|output| output.id())
+                        });
+                        let scale = output.and_then(|output| {
+                            current_configurations
+                                .iter()
+                                .find(|configuration| configuration.id() == output)
+                                .and_then(|configuration| configuration.scale().adjust(adjustment))
+                                .map(|scale| (output, scale))
+                        });
+                        if let Some((output, scale)) = scale {
                             output_layout_revision = output_layout_revision.saturating_add(1);
                             OutputScaleUpdate {
-                                selected: &selected_output,
-                                current: &mut current_configuration,
+                                selected: &selected_outputs,
+                                current: &mut current_configurations,
                                 layout_revision: output_layout_revision,
-                                presenter: &mut presenter,
+                                desktop: &mut desktop,
                                 server: &mut loop_data.server,
                                 application: application.as_mut(),
                                 input: &mut input,
                             }
-                            .apply(scale)?;
+                            .apply(output, scale)?;
                             frame_state.request_composition();
+                            presentation_schedule.request_composition_all();
                         }
                     }
                     HostCommandEffect::MatchOutputPhysicalScale => {
-                        warn!("physical scale matching needs another measured output");
+                        let target = input
+                            .output_at_pointer()
+                            .and_then(|id| {
+                                current_configurations
+                                    .iter()
+                                    .copied()
+                                    .find(|output| output.id() == id)
+                            })
+                            .or_else(|| {
+                                current_configurations
+                                    .iter()
+                                    .copied()
+                                    .find(|output| output.is_primary())
+                            });
+                        let matched = target.and_then(|target| {
+                            current_configurations
+                                .iter()
+                                .copied()
+                                .filter(|reference| reference.id() != target.id())
+                                .find_map(|reference| {
+                                    super::output::scale_matching_physical_density(
+                                        target, reference,
+                                    )
+                                    .map(|scale| (target.id(), scale))
+                                })
+                        });
+                        if let Some((output, scale)) = matched {
+                            output_layout_revision = output_layout_revision.saturating_add(1);
+                            OutputScaleUpdate {
+                                selected: &selected_outputs,
+                                current: &mut current_configurations,
+                                layout_revision: output_layout_revision,
+                                desktop: &mut desktop,
+                                server: &mut loop_data.server,
+                                application: application.as_mut(),
+                                input: &mut input,
+                            }
+                            .apply(output, scale)?;
+                            frame_state.request_composition();
+                            presentation_schedule.request_composition_all();
+                        } else {
+                            warn!("physical scale matching needs two measured outputs");
+                        }
                     }
                 }
             }
             let cursor_update = application.take_cursor_update();
             if let Some(configuration) = cursor_update.configuration {
-                presenter.set_cursor_configuration(configuration)?;
+                desktop.set_cursor_configuration(configuration)?;
+                presentation_schedule.request_present_all();
                 frame_state.request_present();
             }
             if let Some(appearance) = cursor_update.appearance {
                 loop_data.server.set_shell_cursor(appearance);
             }
             if let Some(image) = loop_data.server.take_cursor_image() {
-                presenter.set_cursor_image(image)?;
+                desktop.set_cursor_image(image)?;
+                presentation_schedule.request_present_all();
                 frame_state.request_present();
             }
             if let Some(vt) = application.take_virtual_terminal_switch_request() {
@@ -711,15 +538,20 @@ pub(super) fn run(
             .is_some_and(|capture| !capture.wait_for_client || application.has_surface_frame());
         let mut capture_forced_owned = false;
         if work.render_composition {
+            frame_callbacks.composition_rendered(loop_data.server.presentation_requested());
             match composition_route(target, capture_ready) {
                 CompositionRoute::Owned {
                     complete_callbacks,
                     capture,
                 } => {
                     application.render_outputs(&owned_request, &mut owned_frames)?;
-                    let frame = owned_frames
-                        .pop()
-                        .context("owned DRM composition returned no frame")?;
+                    let primary = selected_outputs[0].id;
+                    let frame_index = primary_output_index(
+                        owned_frames.iter().map(|frame| frame.output),
+                        primary,
+                    )
+                    .context("owned DRM composition returned no primary frame")?;
+                    let frame = &owned_frames[frame_index];
                     if complete_callbacks && loop_data.server.presentation_requested() {
                         let presentation_id = loop_data.server.stage_frame_callbacks();
                         loop_data.server.complete_frame_callbacks(presentation_id);
@@ -728,34 +560,56 @@ pub(super) fn run(
                         let capture = pending_capture
                             .take()
                             .context("ready capture request disappeared")?;
-                        let result = presenter
+                        let result = desktop
                             .capture_owned(&frame.frame, &capture.path)
                             .map_err(|error| error.to_string());
                         match capture.remote_request_id {
                             Some(request_id) => application.complete_capture(request_id, result),
                             None => {
                                 result.map_err(anyhow::Error::msg)?;
-                                presenter.pause();
+                                desktop.pause();
                                 return Ok(());
                             }
                         }
                         capture_forced_owned = target == SessionTarget::ActivePhysical;
                     }
                 }
-                CompositionRoute::Physical => presenter.request_composition(),
+                CompositionRoute::Physical => {
+                    desktop.request_all_compositions();
+                    presentation_schedule.request_composition_all();
+                }
             }
         }
+        let due_outputs = presentation_schedule.due_outputs(now);
         let physical_due = target == SessionTarget::ActivePhysical
             && !capture_forced_owned
-            && (work.render_composition || frame_state.presentation_due());
+            && !due_outputs.is_empty();
         if capture_forced_owned {
             frame_state.composition_rendered(now);
             frame_state.presented();
             frame_state.request_composition();
         } else if physical_due {
-            let vblank_phase = last_vblank_at.map(|vblank| now.saturating_duration_since(vblank));
-            let outcome =
-                presenter.render(application.as_mut(), &mut loop_data.server, vblank_phase)?;
+            let stage_callbacks = frame_callbacks.can_stage();
+            let vblank_phases = due_outputs
+                .iter()
+                .filter_map(|output| {
+                    output_vblank_at
+                        .get(output)
+                        .map(|vblank| (*output, now.saturating_duration_since(*vblank)))
+                })
+                .collect::<HashMap<_, _>>();
+            let outcome = desktop.render(
+                &due_outputs,
+                application.as_mut(),
+                &mut loop_data.server,
+                &vblank_phases,
+                stage_callbacks,
+            )?;
+            let unavailable_outputs = desktop.unavailable_output_ids().collect::<Vec<_>>();
+            presentation_schedule.unavailable(&unavailable_outputs);
+            presentation_schedule.queued(&outcome.queued);
+            presentation_schedule.completed_without_queue(&outcome.empty, now);
+            presentation_schedule.retry_after_interval(&outcome.retry, now);
             apply_physical_outcome(outcome, work, now, &mut frame_state, &mut target);
         } else if work.render_composition {
             frame_state.composition_rendered(now);
@@ -763,9 +617,11 @@ pub(super) fn run(
         } else if work.advance_main {
             frame_state.application_advanced(now);
         }
+        frame_callbacks.reconcile(loop_data.server.presentation_requested());
 
         if bevy_requested_redraw {
             frame_state.request_composition();
+            presentation_schedule.request_composition_all();
         }
         if pending_capture.is_none()
             && let Some(request) = application.take_capture_request()
@@ -790,45 +646,60 @@ pub(super) fn run(
         children.reap();
         loop_data.server.flush_clients();
     }
-    presenter.pause();
+    desktop.pause();
     Ok(())
 }
 
 struct OutputScaleUpdate<'a> {
-    selected: &'a super::output::SelectedOutput,
-    current: &'a mut OutputConfiguration,
+    selected: &'a [super::output::SelectedOutput],
+    current: &'a mut Vec<OutputConfiguration>,
     layout_revision: u64,
-    presenter: &'a mut PhysicalPresenter,
+    desktop: &'a mut PhysicalDesktop,
     server: &'a mut ServerState,
     application: &'a mut dyn CompositionHost,
     input: &'a mut LibinputAdapter,
 }
 
 impl OutputScaleUpdate<'_> {
-    fn apply(self, scale: OutputScale) -> Result<()> {
-        let configuration = OutputConfiguration::new(
-            self.selected.id,
-            self.current.extent(),
-            scale,
-            self.current.position(),
-            true,
-            self.selected.head.physical_size(),
-        )?;
-        let metrics = super::output::metrics_for_configuration(configuration, self.selected.mode)?;
-        self.server.update_output_metrics(metrics);
-        self.application.update_output_topology(&[configuration]);
+    fn apply(self, output_id: crate::OutputId, scale: OutputScale) -> Result<()> {
+        let output = self
+            .current
+            .iter_mut()
+            .find(|output| output.id() == output_id)
+            .context("scaled output is not configured")?;
+        *output = output.with_scale(scale)?;
+        super::output::center_primary_below_others(self.current)?;
+        for configuration in self.current.iter().copied() {
+            let selected = self
+                .selected
+                .iter()
+                .find(|selected| selected.id == configuration.id())
+                .context("configured output is not backed by DRM")?;
+            let metrics = super::output::metrics_for_configuration(configuration, selected.mode)?;
+            self.server.update_output_metrics(
+                configuration.id(),
+                metrics,
+                (
+                    super::output::logical_coordinate(configuration.position().x)?,
+                    super::output::logical_coordinate(configuration.position().y)?,
+                ),
+            );
+            self.desktop
+                .update_configuration(configuration.id(), configuration)?;
+        }
+        self.application.update_output_topology(self.current);
         let topology = OutputTopology::new(OutputLayout::new(
             self.layout_revision,
-            vec![configuration],
+            self.current.clone(),
         )?);
         if let Some(event) = self.input.update_output_topology(topology) {
             let _ = self.application.enqueue_input_event(event.clone());
             self.server.forward_raw_input(event);
         }
-        self.presenter
+        self.desktop
             .set_cursor_position(self.input.pointer_position());
-        *self.current = configuration;
-        self.presenter.set_scale(scale)
+        self.desktop.request_all_compositions();
+        Ok(())
     }
 }
 
@@ -839,20 +710,9 @@ mod tests {
     use crate::runtime::{FrameState, IterationWork};
 
     use super::{
-        CompositionRoute, FrameAdmission, PhysicalRenderOutcome, SessionTarget,
-        apply_physical_outcome, composition_route,
+        CompositionRoute, FrameCallbackReadiness, PhysicalRenderOutcome, SessionTarget,
+        apply_physical_outcome, composition_route, primary_output_index,
     };
-
-    #[test]
-    fn queued_admission_is_released_exactly_once() {
-        let mut admission = FrameAdmission::Idle;
-        admission.queue(Some(7));
-        admission.defer_present();
-        let retired = admission.retire().expect("queued frame should retire");
-        assert_eq!(retired.presentation_id, Some(7));
-        assert!(retired.deferred_present);
-        assert_eq!(admission.retire(), None);
-    }
 
     #[test]
     fn composition_route_keeps_physical_presentation_except_for_owned_work() {
@@ -877,11 +737,36 @@ mod tests {
     }
 
     #[test]
+    fn primary_capture_selection_does_not_depend_on_frame_order() {
+        let primary = crate::OutputId::new(1);
+        let outputs = [crate::OutputId::new(2), primary];
+        assert_eq!(primary_output_index(outputs, primary), Some(1));
+    }
+
+    #[test]
+    fn frame_callbacks_wait_for_composition_and_remain_ready_until_staged() {
+        let mut readiness = FrameCallbackReadiness::default();
+        readiness.reconcile(true);
+        assert!(!readiness.can_stage());
+
+        readiness.composition_rendered(true);
+        assert!(readiness.can_stage());
+        readiness.reconcile(true);
+        assert!(readiness.can_stage());
+
+        readiness.reconcile(false);
+        assert!(!readiness.can_stage());
+    }
+
+    #[test]
     fn busy_physical_output_paces_main_without_discarding_composition() {
         let mut frame_state = FrameState::with_interval(Duration::from_millis(16));
         let mut target = SessionTarget::ActivePhysical;
         apply_physical_outcome(
-            PhysicalRenderOutcome::Busy,
+            PhysicalRenderOutcome {
+                busy: vec![crate::OutputId::new(1)],
+                ..Default::default()
+            },
             IterationWork {
                 advance_main: true,
                 render_composition: true,
@@ -902,7 +787,10 @@ mod tests {
         let mut frame_state = FrameState::with_interval(Duration::from_millis(16));
         let mut target = SessionTarget::ActivePhysical;
         apply_physical_outcome(
-            PhysicalRenderOutcome::Inactive,
+            PhysicalRenderOutcome {
+                inactive: true,
+                ..Default::default()
+            },
             IterationWork {
                 advance_main: true,
                 render_composition: true,

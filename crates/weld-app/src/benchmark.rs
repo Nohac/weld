@@ -239,24 +239,39 @@ pub fn production_app() -> App {
 /// Everything from host input ingress through Bevy extraction and composition
 /// submission is the same path used by the nested and DRM backends.
 pub fn rendering_shell(configure: impl FnOnce(&mut App)) -> Result<(AppShell, wgpu::AdapterInfo)> {
-    let context = headless_render_context()?;
-    let adapter_info = context.adapter.get_info();
-    let configuration = context
-        .outputs
-        .first()
-        .copied()
-        .context("benchmark render context contains no output")?;
-    let mut app = App::new();
-    configure_rendering(&mut app, &context);
-    app.add_plugins(WeldAppPlugin::new(
-        vec![configuration],
-        vec![OutputHead::new(configuration.id(), "benchmark", None)],
-    )?);
-    configure(&mut app);
-    Ok((AppShell::new(app, context)?, adapter_info))
+    let (shell, adapter, _, _) =
+        rendering_shell_with_outputs(vec![output_configuration()], configure)?;
+    Ok((shell, adapter))
 }
 
-fn headless_render_context() -> Result<RenderContext> {
+/// Construct the real render bridge with caller-provided output geometry.
+#[doc(hidden)]
+pub fn rendering_shell_with_outputs(
+    configurations: Vec<OutputConfiguration>,
+    configure: impl FnOnce(&mut App),
+) -> Result<(AppShell, wgpu::AdapterInfo, wgpu::Device, wgpu::Queue)> {
+    let context = headless_render_context(configurations.clone())?;
+    let adapter_info = context.adapter.get_info();
+    let device = context.device.clone();
+    let queue = context.queue.clone();
+    let heads = configurations
+        .iter()
+        .map(|configuration| {
+            OutputHead::new(
+                configuration.id(),
+                format!("benchmark-{}", configuration.id().raw()),
+                None,
+            )
+        })
+        .collect();
+    let mut app = App::new();
+    configure_rendering(&mut app, &context);
+    app.add_plugins(WeldAppPlugin::new(configurations, heads)?);
+    configure(&mut app);
+    Ok((AppShell::new(app, context)?, adapter_info, device, queue))
+}
+
+fn headless_render_context(outputs: Vec<OutputConfiguration>) -> Result<RenderContext> {
     let mut instance_descriptor = wgpu::InstanceDescriptor::new_without_display_handle();
     instance_descriptor.backends = wgpu::Backends::VULKAN;
     let instance = wgpu::Instance::new(instance_descriptor);
@@ -273,7 +288,6 @@ fn headless_render_context() -> Result<RenderContext> {
     };
     let (device, queue) = pollster::block_on(adapter.request_device(&descriptor))
         .context("failed to create the headless render benchmark device")?;
-    let configuration = output_configuration();
     let dmabuf = DmabufContext::for_headless_benchmark(&device);
     Ok(RenderContext {
         instance,
@@ -281,8 +295,17 @@ fn headless_render_context() -> Result<RenderContext> {
         device,
         queue,
         dmabuf,
-        output_heads: vec![OutputHead::new(configuration.id(), "benchmark", None)],
-        outputs: vec![configuration],
+        output_heads: outputs
+            .iter()
+            .map(|configuration| {
+                OutputHead::new(
+                    configuration.id(),
+                    format!("benchmark-{}", configuration.id().raw()),
+                    None,
+                )
+            })
+            .collect(),
+        outputs,
         composition_format: wgpu::TextureFormat::Bgra8UnormSrgb,
     })
 }

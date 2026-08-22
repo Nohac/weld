@@ -1,4 +1,4 @@
-//! Native output identity, validated logical layouts, and physical pointer topology.
+//! Native output identity, validated logical layouts, and pointer topology.
 
 use std::str::FromStr;
 
@@ -12,42 +12,7 @@ use crate::{
 };
 
 const LOGICAL_EDGE_EPSILON: f64 = 1.0 / 256.0;
-const PHYSICAL_EDGE_EPSILON_MILLIMETERS: f64 = 1.0 / 1024.0;
 const ASSUMED_PIXELS_PER_INCH: f64 = 96.0;
-
-#[derive(Clone, Copy, Debug)]
-struct PhysicalPoint {
-    x_millimeters: f64,
-    y_millimeters: f64,
-}
-
-impl PhysicalPoint {
-    const fn new(x_millimeters: f64, y_millimeters: f64) -> Self {
-        Self {
-            x_millimeters,
-            y_millimeters,
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug)]
-struct PhysicalDelta {
-    x_millimeters: f64,
-    y_millimeters: f64,
-}
-
-impl PhysicalDelta {
-    const fn new(x_millimeters: f64, y_millimeters: f64) -> Self {
-        Self {
-            x_millimeters,
-            y_millimeters,
-        }
-    }
-
-    fn is_negligible(self) -> bool {
-        self.x_millimeters.abs() <= f64::EPSILON && self.y_millimeters.abs() <= f64::EPSILON
-    }
-}
 
 /// Stable identity for one output during a Weld process lifetime.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -148,26 +113,6 @@ impl OutputFootprint {
             && self.max_x() > other.x_millimeters
             && self.y_millimeters < other.max_y()
             && self.max_y() > other.y_millimeters
-    }
-
-    fn contains(self, point: PhysicalPoint) -> bool {
-        point.x_millimeters >= self.x_millimeters
-            && point.x_millimeters < self.max_x()
-            && point.y_millimeters >= self.y_millimeters
-            && point.y_millimeters < self.max_y()
-    }
-
-    fn clamp(self, point: PhysicalPoint) -> PhysicalPoint {
-        PhysicalPoint::new(
-            point.x_millimeters.clamp(
-                self.x_millimeters,
-                (self.max_x() - PHYSICAL_EDGE_EPSILON_MILLIMETERS).max(self.x_millimeters),
-            ),
-            point.y_millimeters.clamp(
-                self.y_millimeters,
-                (self.max_y() - PHYSICAL_EDGE_EPSILON_MILLIMETERS).max(self.y_millimeters),
-            ),
-        )
     }
 
     fn with_position(self, x_millimeters: f64, y_millimeters: f64) -> Result<Self> {
@@ -502,11 +447,10 @@ fn validate_configurations(configurations: &[OutputConfiguration]) -> Result<()>
     Ok(())
 }
 
-/// Output topology that resolves relative pointer motion against physical footprints.
+/// Output topology that resolves pointer motion against global logical rectangles.
 ///
-/// Public pointer positions remain compositor-global logical coordinates. Each
-/// relative move is projected into the active output's millimeter footprint,
-/// resolved there, and projected back after collision and portal traversal.
+/// Physical footprints remain output metadata for diagnostics and future
+/// calibrated layouts, but do not affect ordinary pointer collision.
 #[derive(Clone, Debug)]
 pub struct OutputTopology {
     layout: OutputLayout,
@@ -572,44 +516,38 @@ impl OutputTopology {
         else {
             return logical_position;
         };
-        let mut position = active.logical_to_physical(logical_position);
-        let mut remaining = active.logical_delta_to_physical(delta);
+        let mut position = logical_position;
+        let mut remaining = delta;
         let maximum_transitions = self.regions.len().saturating_mul(4).saturating_add(4);
 
         for _ in 0..maximum_transitions {
-            if remaining.is_negligible() {
+            if input_delta_is_negligible(remaining) {
                 break;
             }
-            let candidate = PhysicalPoint::new(
-                position.x_millimeters + remaining.x_millimeters,
-                position.y_millimeters + remaining.y_millimeters,
-            );
-            if active.footprint.contains(candidate) {
-                return active.physical_to_logical(candidate);
+            let candidate = InputPosition::new(position.x + remaining.x, position.y + remaining.y);
+            if active.contains(candidate) {
+                return candidate;
             }
 
             let vertical_time = boundary_time(
-                position.x_millimeters,
-                remaining.x_millimeters,
-                active.footprint.x_millimeters,
-                active.footprint.max_x(),
+                position.x,
+                remaining.x,
+                active.logical.min_x(),
+                active.logical.max_x(),
             );
             let horizontal_time = boundary_time(
-                position.y_millimeters,
-                remaining.y_millimeters,
-                active.footprint.y_millimeters,
-                active.footprint.max_y(),
+                position.y,
+                remaining.y,
+                active.logical.min_y(),
+                active.logical.max_y(),
             );
             let time = vertical_time.min(horizontal_time).clamp(0.0, 1.0);
-            position = PhysicalPoint::new(
-                position.x_millimeters + remaining.x_millimeters * time,
-                position.y_millimeters + remaining.y_millimeters * time,
+            position = InputPosition::new(
+                position.x + remaining.x * time,
+                position.y + remaining.y * time,
             );
-            remaining = PhysicalDelta::new(
-                remaining.x_millimeters * (1.0 - time),
-                remaining.y_millimeters * (1.0 - time),
-            );
-            if remaining.is_negligible() {
+            remaining = InputDelta::new(remaining.x * (1.0 - time), remaining.y * (1.0 - time));
+            if input_delta_is_negligible(remaining) {
                 break;
             }
 
@@ -617,58 +555,50 @@ impl OutputTopology {
             let hit_horizontal = (horizontal_time - time).abs() <= f64::EPSILON;
 
             if hit_vertical {
-                if let Some(next) =
-                    self.vertical_neighbor(active, position, remaining.x_millimeters)
-                {
-                    position = next.enter_vertical(position, remaining.x_millimeters);
+                if let Some(next) = self.vertical_neighbor(active, position, remaining.x) {
+                    position = next.enter_vertical(position, remaining.x);
                     active = next;
                 } else if let Some((next, slide)) =
                     self.vertical_portal_in_path(active, position, remaining)
                 {
-                    position.y_millimeters += remaining.y_millimeters * slide;
-                    remaining = PhysicalDelta::new(
-                        remaining.x_millimeters * (1.0 - slide),
-                        remaining.y_millimeters * (1.0 - slide),
-                    );
-                    position = next.enter_vertical(position, remaining.x_millimeters);
+                    position.y += remaining.y * slide;
+                    remaining =
+                        InputDelta::new(remaining.x * (1.0 - slide), remaining.y * (1.0 - slide));
+                    position = next.enter_vertical(position, remaining.x);
                     active = next;
                 } else {
-                    position.x_millimeters = if remaining.x_millimeters >= 0.0 {
-                        active.footprint.max_x() - PHYSICAL_EDGE_EPSILON_MILLIMETERS
+                    position.x = if remaining.x >= 0.0 {
+                        active.logical.max_x() - LOGICAL_EDGE_EPSILON
                     } else {
-                        active.footprint.x_millimeters
+                        active.logical.min_x()
                     };
-                    remaining.x_millimeters = 0.0;
+                    remaining.x = 0.0;
                 }
                 continue;
             }
             if hit_horizontal {
-                if let Some(next) =
-                    self.horizontal_neighbor(active, position, remaining.y_millimeters)
-                {
-                    position = next.enter_horizontal(position, remaining.y_millimeters);
+                if let Some(next) = self.horizontal_neighbor(active, position, remaining.y) {
+                    position = next.enter_horizontal(position, remaining.y);
                     active = next;
                 } else if let Some((next, slide)) =
                     self.horizontal_portal_in_path(active, position, remaining)
                 {
-                    position.x_millimeters += remaining.x_millimeters * slide;
-                    remaining = PhysicalDelta::new(
-                        remaining.x_millimeters * (1.0 - slide),
-                        remaining.y_millimeters * (1.0 - slide),
-                    );
-                    position = next.enter_horizontal(position, remaining.y_millimeters);
+                    position.x += remaining.x * slide;
+                    remaining =
+                        InputDelta::new(remaining.x * (1.0 - slide), remaining.y * (1.0 - slide));
+                    position = next.enter_horizontal(position, remaining.y);
                     active = next;
                 } else {
-                    position.y_millimeters = if remaining.y_millimeters >= 0.0 {
-                        active.footprint.max_y() - PHYSICAL_EDGE_EPSILON_MILLIMETERS
+                    position.y = if remaining.y >= 0.0 {
+                        active.logical.max_y() - LOGICAL_EDGE_EPSILON
                     } else {
-                        active.footprint.y_millimeters
+                        active.logical.min_y()
                     };
-                    remaining.y_millimeters = 0.0;
+                    remaining.y = 0.0;
                 }
             }
         }
-        active.physical_to_logical(active.footprint.clamp(position))
+        active.clamp(position)
     }
 
     fn region_at(&self, position: InputPosition) -> Option<OutputRegion> {
@@ -681,63 +611,63 @@ impl OutputTopology {
     fn vertical_neighbor(
         &self,
         current: OutputRegion,
-        position: PhysicalPoint,
+        position: InputPosition,
         direction: f64,
     ) -> Option<OutputRegion> {
         self.regions.iter().copied().find(|candidate| {
             let touches = if direction >= 0.0 {
-                physically_equal(current.footprint.max_x(), candidate.footprint.x_millimeters)
+                logically_equal(current.logical.max_x(), candidate.logical.min_x())
             } else {
-                physically_equal(current.footprint.x_millimeters, candidate.footprint.max_x())
+                logically_equal(current.logical.min_x(), candidate.logical.max_x())
             };
             touches
-                && position.y_millimeters >= candidate.footprint.y_millimeters
-                && position.y_millimeters < candidate.footprint.max_y()
+                && position.y >= candidate.logical.min_y()
+                && position.y < candidate.logical.max_y()
         })
     }
 
     fn horizontal_neighbor(
         &self,
         current: OutputRegion,
-        position: PhysicalPoint,
+        position: InputPosition,
         direction: f64,
     ) -> Option<OutputRegion> {
         self.regions.iter().copied().find(|candidate| {
             let touches = if direction >= 0.0 {
-                physically_equal(current.footprint.max_y(), candidate.footprint.y_millimeters)
+                logically_equal(current.logical.max_y(), candidate.logical.min_y())
             } else {
-                physically_equal(current.footprint.y_millimeters, candidate.footprint.max_y())
+                logically_equal(current.logical.min_y(), candidate.logical.max_y())
             };
             touches
-                && position.x_millimeters >= candidate.footprint.x_millimeters
-                && position.x_millimeters < candidate.footprint.max_x()
+                && position.x >= candidate.logical.min_x()
+                && position.x < candidate.logical.max_x()
         })
     }
 
     fn vertical_portal_in_path(
         &self,
         current: OutputRegion,
-        position: PhysicalPoint,
-        remaining: PhysicalDelta,
+        position: InputPosition,
+        remaining: InputDelta,
     ) -> Option<(OutputRegion, f64)> {
         self.regions
             .iter()
             .copied()
             .filter(|candidate| {
-                if remaining.x_millimeters >= 0.0 {
-                    physically_equal(current.footprint.max_x(), candidate.footprint.x_millimeters)
+                if remaining.x >= 0.0 {
+                    logically_equal(current.logical.max_x(), candidate.logical.min_x())
                 } else {
-                    physically_equal(current.footprint.x_millimeters, candidate.footprint.max_x())
+                    logically_equal(current.logical.min_x(), candidate.logical.max_x())
                 }
             })
             .filter_map(|candidate| {
                 let (minimum, maximum) = current.vertical_portal(candidate)?;
                 interval_entry_fraction(
-                    position.y_millimeters,
-                    remaining.y_millimeters,
+                    position.y,
+                    remaining.y,
                     minimum,
                     maximum,
-                    PHYSICAL_EDGE_EPSILON_MILLIMETERS,
+                    LOGICAL_EDGE_EPSILON,
                 )
                 .map(|fraction| (candidate, fraction))
             })
@@ -747,27 +677,27 @@ impl OutputTopology {
     fn horizontal_portal_in_path(
         &self,
         current: OutputRegion,
-        position: PhysicalPoint,
-        remaining: PhysicalDelta,
+        position: InputPosition,
+        remaining: InputDelta,
     ) -> Option<(OutputRegion, f64)> {
         self.regions
             .iter()
             .copied()
             .filter(|candidate| {
-                if remaining.y_millimeters >= 0.0 {
-                    physically_equal(current.footprint.max_y(), candidate.footprint.y_millimeters)
+                if remaining.y >= 0.0 {
+                    logically_equal(current.logical.max_y(), candidate.logical.min_y())
                 } else {
-                    physically_equal(current.footprint.y_millimeters, candidate.footprint.max_y())
+                    logically_equal(current.logical.min_y(), candidate.logical.max_y())
                 }
             })
             .filter_map(|candidate| {
                 let (minimum, maximum) = current.horizontal_portal(candidate)?;
                 interval_entry_fraction(
-                    position.x_millimeters,
-                    remaining.x_millimeters,
+                    position.x,
+                    remaining.x,
                     minimum,
                     maximum,
-                    PHYSICAL_EDGE_EPSILON_MILLIMETERS,
+                    LOGICAL_EDGE_EPSILON,
                 )
                 .map(|fraction| (candidate, fraction))
             })
@@ -779,7 +709,6 @@ impl OutputTopology {
 struct OutputRegion {
     output: OutputId,
     logical: LogicalRect,
-    footprint: OutputFootprint,
 }
 
 impl OutputRegion {
@@ -794,72 +723,35 @@ impl OutputRegion {
         InputPosition::new(x, y)
     }
 
-    fn logical_to_physical(self, position: InputPosition) -> PhysicalPoint {
-        PhysicalPoint::new(
-            self.footprint.x_millimeters
-                + (position.x - self.logical.min_x()) / self.logical.width()
-                    * self.footprint.width_millimeters,
-            self.footprint.y_millimeters
-                + (position.y - self.logical.min_y()) / self.logical.height()
-                    * self.footprint.height_millimeters,
-        )
-    }
-
-    fn logical_delta_to_physical(self, delta: InputDelta) -> PhysicalDelta {
-        PhysicalDelta::new(
-            delta.x / self.logical.width() * self.footprint.width_millimeters,
-            delta.y / self.logical.height() * self.footprint.height_millimeters,
-        )
-    }
-
-    fn physical_to_logical(self, position: PhysicalPoint) -> InputPosition {
-        self.clamp(InputPosition::new(
+    fn enter_vertical(self, position: InputPosition, direction: f64) -> InputPosition {
+        let mut position = self.clamp(position);
+        position.x = if direction >= 0.0 {
             self.logical.min_x()
-                + (position.x_millimeters - self.footprint.x_millimeters)
-                    / self.footprint.width_millimeters
-                    * self.logical.width(),
-            self.logical.min_y()
-                + (position.y_millimeters - self.footprint.y_millimeters)
-                    / self.footprint.height_millimeters
-                    * self.logical.height(),
-        ))
-    }
-
-    fn enter_vertical(self, position: PhysicalPoint, direction: f64) -> PhysicalPoint {
-        let mut position = self.footprint.clamp(position);
-        position.x_millimeters = if direction >= 0.0 {
-            self.footprint.x_millimeters
         } else {
-            self.footprint.max_x() - PHYSICAL_EDGE_EPSILON_MILLIMETERS
+            self.logical.max_x() - LOGICAL_EDGE_EPSILON
         };
         position
     }
 
-    fn enter_horizontal(self, position: PhysicalPoint, direction: f64) -> PhysicalPoint {
-        let mut position = self.footprint.clamp(position);
-        position.y_millimeters = if direction >= 0.0 {
-            self.footprint.y_millimeters
+    fn enter_horizontal(self, position: InputPosition, direction: f64) -> InputPosition {
+        let mut position = self.clamp(position);
+        position.y = if direction >= 0.0 {
+            self.logical.min_y()
         } else {
-            self.footprint.max_y() - PHYSICAL_EDGE_EPSILON_MILLIMETERS
+            self.logical.max_y() - LOGICAL_EDGE_EPSILON
         };
         position
     }
 
     fn vertical_portal(self, other: Self) -> Option<(f64, f64)> {
-        let minimum = self
-            .footprint
-            .y_millimeters
-            .max(other.footprint.y_millimeters);
-        let maximum = self.footprint.max_y().min(other.footprint.max_y());
+        let minimum = self.logical.min_y().max(other.logical.min_y());
+        let maximum = self.logical.max_y().min(other.logical.max_y());
         (minimum < maximum).then_some((minimum, maximum))
     }
 
     fn horizontal_portal(self, other: Self) -> Option<(f64, f64)> {
-        let minimum = self
-            .footprint
-            .x_millimeters
-            .max(other.footprint.x_millimeters);
-        let maximum = self.footprint.max_x().min(other.footprint.max_x());
+        let minimum = self.logical.min_x().max(other.logical.min_x());
+        let maximum = self.logical.max_x().min(other.logical.max_x());
         (minimum < maximum).then_some((minimum, maximum))
     }
 }
@@ -876,9 +768,12 @@ impl From<OutputConfiguration> for OutputRegion {
                 configuration.logical_width(),
                 configuration.logical_height(),
             ),
-            footprint: configuration.footprint,
         }
     }
+}
+
+fn input_delta_is_negligible(delta: InputDelta) -> bool {
+    delta.x.abs() <= f64::EPSILON && delta.y.abs() <= f64::EPSILON
 }
 
 fn interval_entry_fraction(
@@ -912,8 +807,8 @@ fn boundary_time(position: f64, delta: f64, minimum: f64, maximum: f64) -> f64 {
     }
 }
 
-fn physically_equal(left: f64, right: f64) -> bool {
-    (left - right).abs() <= PHYSICAL_EDGE_EPSILON_MILLIMETERS
+fn logically_equal(left: f64, right: f64) -> bool {
+    (left - right).abs() <= LOGICAL_EDGE_EPSILON
 }
 
 fn squared_distance(left: InputPosition, right: InputPosition) -> f64 {
@@ -1017,7 +912,7 @@ mod tests {
     }
 
     #[test]
-    fn remaining_motion_keeps_its_physical_distance_across_mixed_scale_outputs() {
+    fn remaining_motion_stays_in_global_logical_coordinates_across_mixed_scale_outputs() {
         let physical_size = OutputPhysicalSize::new(100, 100);
         let upper = OutputConfiguration::new(
             OutputId::new(1),
@@ -1044,13 +939,13 @@ mod tests {
         );
 
         let moved = topology.move_pointer(
-            InputPosition::new(500.0, 900.0),
+            InputPosition::new(250.0, 900.0),
             InputDelta::new(0.0, 200.0),
         );
 
         assert_eq!(topology.output_at(moved), Some(OutputId::new(2)));
         assert!((moved.x - 250.0).abs() < 0.01);
-        assert!((moved.y - 1_050.0).abs() < 0.01);
+        assert!((moved.y - 1_100.0).abs() < 0.01);
     }
 
     #[test]

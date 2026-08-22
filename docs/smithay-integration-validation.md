@@ -119,12 +119,12 @@ public boundary with its Vulkan renderer. Adding an external-primary-buffer
 API to Smithay or retaining Weld's low-level `GbmBufferedSurface` presenter
 would duplicate machinery already behind that seam.
 
-The first production adapter now uses the validated `DrmOutputManager` seam for
-one connector. Its renderer imports the leased allocation, invokes Bevy when
-Smithay draws Weld's opaque composition element, then releases ownership before
-queueing. The host retires Smithay slots only from the matching CRTC vblank,
-switches to an owned target while inactive, and calls
-`DrmOutputManager::activate(true)` on return.
+The production adapter uses one validated `DrmOutputManager` seam for every
+usable startup connector. Its renderer imports each due leased allocation,
+invokes Bevy once for the complete due-output subset, then releases ownership
+before queueing each output. The host retires Smithay slots only from their
+matching CRTC vblanks, switches all outputs to owned targets while inactive,
+and calls `DrmOutputManager::activate(true)` on return.
 
 The adapter also supplies a normalized `MemoryRenderBuffer` cursor element and
 enables only `ALLOW_CURSOR_PLANE_SCANOUT`. Smithay owns cursor-plane selection,

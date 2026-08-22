@@ -259,7 +259,11 @@ pub(crate) fn prepare(options: RunOptions, signals: Signals) -> Result<PreparedH
                             renderer.resize(physical_size);
                         }
                         output_metrics = candidate;
-                        loop_data.server.update_output_metrics(output_metrics);
+                        loop_data.server.update_output_metrics(
+                            OutputId::new(1),
+                            output_metrics,
+                            (0, 0),
+                        );
                         let configuration = OutputConfiguration::new(
                             OutputId::new(1),
                             crate::surface::Extent::new(physical_size.width, physical_size.height),
