@@ -45,7 +45,10 @@ pub(crate) use projection::enqueue_raw_input;
 pub(crate) use projection::enqueue_raw_input_batch;
 pub(crate) use projection::update_output_configurations;
 pub(crate) use routing::take_input_effects;
-pub use shortcuts::{GlobalShortcutAction, GlobalShortcutPlugin};
+pub use shortcuts::{
+    GlobalShortcut, GlobalShortcutAppExt, GlobalShortcutId, GlobalShortcutModifiers,
+    GlobalShortcutPlugin, GlobalShortcutPressed,
+};
 pub(crate) use shortcuts::{filter_global_shortcut_event, take_host_commands};
 pub(crate) use state::set_input_update_time;
 pub use virtual_terminal::VirtualTerminalShortcutPlugin;

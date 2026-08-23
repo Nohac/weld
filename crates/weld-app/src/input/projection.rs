@@ -448,7 +448,7 @@ fn bevy_mouse_button(button: LinuxButtonCode) -> Option<MouseButton> {
     }
 }
 
-fn bevy_keycode(keycode: LinuxKeycode) -> KeyCode {
+pub(super) fn bevy_keycode(keycode: LinuxKeycode) -> KeyCode {
     convert_physical_key_code(PhysicalKey::from_scancode(keycode.0))
 }
 

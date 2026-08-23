@@ -479,6 +479,7 @@ pub enum PendingSurfaceEventKind {
     Created { decoration: WindowDecoration },
     TreeSnapshot(surface_tree::PendingSurfaceTreeSnapshot),
     DecorationChanged { decoration: WindowDecoration },
+    ToplevelParentChanged { parent: Option<SurfaceId> },
     PopupConfigured(PopupDescriptor),
     WindowInteraction(WindowInteractionRequestKind),
     Destroyed,

@@ -11,7 +11,6 @@ use std::collections::HashMap;
 use bevy::{
     app::{App, Plugin, PreUpdate},
     ecs::{
-        change_detection::{DetectChanges, Ref},
         component::Component,
         entity::Entity,
         event::EntityEvent,
@@ -26,10 +25,10 @@ use bevy::{
     picking::PickingSystems,
     window::RequestRedraw,
 };
-use weld_app::output::{OutputGeometry, OutputPosition, WeldOutput};
+use weld_app::output::{OutputGeometry, OutputId, OutputPosition, WeldOutput};
 use weld_app::surface::{
-    ClientToplevel, MappedSurface, SurfaceAction, SurfaceActionQueue, SurfaceCommitRevisions,
-    SurfaceId, SurfaceSystems, ToplevelResizeEdge,
+    ClientToplevel, ClientToplevelParent, MappedSurface, SurfaceAction, SurfaceActionQueue,
+    SurfaceCommitRevisions, SurfaceId, SurfaceSystems, ToplevelResizeEdge,
 };
 
 /// Stable process-independent identity for a managed window.
@@ -156,6 +155,214 @@ impl WindowOccupant {
     }
 }
 
+/// Selects the managed window whose direct occupant supplies this window's
+/// client-facing presentation and policy.
+///
+/// Without this component a window uses its own [`WindowOccupant`].
+/// [`Self::suppress`] disables client-facing policy while preserving direct
+/// occupancy. [`Self::proxy`] borrows another window's direct occupant for one
+/// hop without transferring authority or allowing proxy chains.
+#[derive(Component, Clone, Copy, Debug, Eq, PartialEq)]
+pub struct WindowClientBinding(Option<Entity>);
+
+impl WindowClientBinding {
+    pub const fn suppress() -> Self {
+        Self(None)
+    }
+
+    pub const fn proxy(source: Entity) -> Self {
+        Self(Some(source))
+    }
+
+    pub const fn source(self) -> Option<Entity> {
+        self.0
+    }
+}
+
+/// One uniquely resolved, currently mapped client policy endpoint.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ResolvedWindowClient {
+    entity: Entity,
+    toplevel: ClientToplevel,
+    mapped: MappedSurface,
+}
+
+impl ResolvedWindowClient {
+    pub const fn entity(self) -> Entity {
+        self.entity
+    }
+
+    pub const fn surface(self) -> SurfaceId {
+        self.toplevel.surface
+    }
+
+    pub const fn mapped(self) -> MappedSurface {
+        self.mapped
+    }
+}
+
+type WindowClientBindingQuery<'a> = (
+    Entity,
+    Option<&'a WindowOccupant>,
+    Option<&'a WindowClientBinding>,
+);
+
+/// Resolves authoritative occupancy into one active client-policy window.
+///
+/// Direct occupancy wins unless suppressed. Exactly one proxy may borrow a
+/// suppressed source's direct occupant; duplicate, dangling, self, or chained
+/// proxies resolve to no client.
+#[derive(SystemParam)]
+pub struct WindowClientResolver<'w, 's> {
+    windows: Query<'w, 's, WindowClientBindingQuery<'static>, With<ManagedWindow>>,
+    clients: Query<'w, 's, (&'static ClientToplevel, Option<&'static MappedSurface>)>,
+}
+
+impl WindowClientResolver<'_, '_> {
+    fn candidate(&self, window: Entity) -> Option<Entity> {
+        let (_, occupant, binding) = self.windows.get(window).ok()?;
+        match binding {
+            None => occupant.map(WindowOccupant::entity),
+            Some(binding) => {
+                let source = binding.source()?;
+                if source == window {
+                    return None;
+                }
+                let (_, source_occupant, source_binding) = self.windows.get(source).ok()?;
+                source_binding
+                    .is_some_and(|binding| binding.source().is_none())
+                    .then(|| source_occupant.map(WindowOccupant::entity))
+                    .flatten()
+            }
+        }
+    }
+
+    pub fn client_entity(&self, window: Entity) -> Option<Entity> {
+        let client = self.candidate(window)?;
+        let (_, _, binding) = self.windows.get(window).ok()?;
+        if binding.is_none() {
+            return Some(client);
+        }
+        let mut matches = self
+            .windows
+            .iter()
+            .filter(|(candidate, _, binding)| {
+                binding.is_some() && self.candidate(*candidate) == Some(client)
+            })
+            .map(|(candidate, _, _)| candidate);
+        matches.next()?;
+        matches.next().is_none().then_some(client)
+    }
+
+    pub fn mapped_client(&self, window: Entity) -> Option<ResolvedWindowClient> {
+        let entity = self.client_entity(window)?;
+        let (toplevel, mapped) = self.clients.get(entity).ok()?;
+        Some(ResolvedWindowClient {
+            entity,
+            toplevel: *toplevel,
+            mapped: *mapped?,
+        })
+    }
+
+    pub fn window_for_surface(&self, surface: SurfaceId) -> Option<Entity> {
+        // The initial window set is expected to stay small, so keeping this
+        // resolver index-free makes binding transitions atomic with ordinary
+        // component changes. Profile the popup projection systems and
+        // `handle_protocol_interactions` before replacing this scan with an
+        // index: those are the per-popup/request call sites that can amplify it.
+        let mut matches = self.windows.iter().filter_map(|(window, _, _)| {
+            self.mapped_client(window)
+                .filter(|client| client.surface() == surface)
+                .map(|_| window)
+        });
+        let window = matches.next()?;
+        matches.next().is_none().then_some(window)
+    }
+}
+
+/// Currently managed members of one client-declared toplevel family.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ResolvedWindowFamily {
+    root: SurfaceId,
+    windows: Vec<Entity>,
+}
+
+impl ResolvedWindowFamily {
+    pub const fn root(&self) -> SurfaceId {
+        self.root
+    }
+
+    pub fn windows(&self) -> &[Entity] {
+        &self.windows
+    }
+}
+
+type WindowFamilyQuery<'a> = (Entity, &'a WindowOccupant);
+type ClientFamilyQuery<'a> = (&'a ClientToplevel, Option<&'a ClientToplevelParent>);
+
+/// Resolves direct authoritative occupancy into xdg-toplevel families.
+///
+/// Proxy presentations are deliberately excluded. An unresolved parent keeps
+/// the family pending until that parent is known; malformed cycles resolve to
+/// no family.
+#[derive(SystemParam)]
+pub struct WindowFamilyResolver<'w, 's> {
+    windows: Query<'w, 's, WindowFamilyQuery<'static>, With<ManagedWindow>>,
+    clients: Query<'w, 's, ClientFamilyQuery<'static>>,
+}
+
+impl WindowFamilyResolver<'_, '_> {
+    pub fn family(&self, window: Entity) -> Option<ResolvedWindowFamily> {
+        let surface = self.surface_for_window(window)?;
+        let root = self.root_for_surface(surface)?;
+        Some(self.family_for_root(root))
+    }
+
+    pub fn family_for_root(&self, root: SurfaceId) -> ResolvedWindowFamily {
+        let mut windows = self
+            .windows
+            .iter()
+            .filter_map(|(window, occupant)| {
+                let (toplevel, _) = self.clients.get(occupant.entity()).ok()?;
+                (self.root_for_surface(toplevel.surface) == Some(root)).then_some(window)
+            })
+            .collect::<Vec<_>>();
+        windows.sort_unstable_by_key(|window| window.to_bits());
+        ResolvedWindowFamily { root, windows }
+    }
+
+    pub fn root_for_window(&self, window: Entity) -> Option<SurfaceId> {
+        self.root_for_surface(self.surface_for_window(window)?)
+    }
+
+    fn surface_for_window(&self, window: Entity) -> Option<SurfaceId> {
+        let (_, occupant) = self.windows.get(window).ok()?;
+        self.clients
+            .get(occupant.entity())
+            .ok()
+            .map(|(toplevel, _)| toplevel.surface)
+    }
+
+    fn root_for_surface(&self, surface: SurfaceId) -> Option<SurfaceId> {
+        let mut current = surface;
+        let mut visited = Vec::new();
+        loop {
+            if visited.contains(&current) {
+                return None;
+            }
+            visited.push(current);
+            let (_, parent) = self
+                .clients
+                .iter()
+                .find(|(toplevel, _)| toplevel.surface == current)?;
+            let Some(parent) = parent else {
+                return Some(current);
+            };
+            current = parent.surface;
+        }
+    }
+}
+
 /// Assigns a window to a manager entity.
 #[derive(Component, Clone, Copy, Debug, Eq, PartialEq)]
 #[relationship(relationship_target = ManagedWindows)]
@@ -189,6 +396,29 @@ pub struct PrimaryWindowPresentation(Entity);
 impl PrimaryWindowPresentation {
     pub fn entity(&self) -> Entity {
         self.0
+    }
+}
+
+/// Reserves a window's primary presentation for an optional presenter.
+///
+/// Default presentation plugins yield while this component is present. The
+/// owner is process-local coordination state; stable external identity remains
+/// the responsibility of the owning plugin. While overridden, the owner must
+/// either preserve the last applied [`PresentationInsets`] or take
+/// responsibility for maintaining [`WindowGeometry`] consistently with the
+/// insets on any root it supplies.
+#[derive(Component, Clone, Copy, Debug, Eq, PartialEq)]
+pub struct WindowPresentationOverride {
+    owner: Entity,
+}
+
+impl WindowPresentationOverride {
+    pub const fn new(owner: Entity) -> Self {
+        Self { owner }
+    }
+
+    pub const fn owner(self) -> Entity {
+        self.owner
     }
 }
 
@@ -350,11 +580,24 @@ pub struct WindowInteractionSession {
 #[derive(Resource, Default)]
 pub struct WindowRegistry {
     by_id: HashMap<WindowId, Entity>,
+    next_id: u64,
 }
 
 impl WindowRegistry {
     pub fn entity(&self, id: WindowId) -> Option<Entity> {
         self.by_id.get(&id).copied()
+    }
+
+    /// Allocates a unique managed-window component for a compositor-owned
+    /// window that the caller will spawn during this application frame.
+    pub fn allocate(&mut self) -> ManagedWindow {
+        loop {
+            let id = WindowId(self.next_id);
+            self.next_id = self.next_id.saturating_add(1);
+            if self.entity(id).is_none() {
+                return ManagedWindow { id };
+            }
+        }
     }
 }
 
@@ -443,21 +686,33 @@ fn derive_window_output_intersections(
     }
 }
 
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+struct PublishedOutputMembership {
+    outputs: Vec<OutputId>,
+    preferred: Option<OutputId>,
+}
+
+#[derive(Resource, Default)]
+struct PublishedOutputMemberships {
+    active: HashMap<SurfaceId, PublishedOutputMembership>,
+    scratch: HashMap<SurfaceId, PublishedOutputMembership>,
+    mapped_surfaces: Vec<SurfaceId>,
+    changed_surfaces: Vec<SurfaceId>,
+}
+
 fn publish_window_output_memberships(
-    windows: Query<(
-        &WindowOccupant,
-        Ref<WindowOutputIntersections>,
-        Ref<WindowPreferredOutput>,
-    )>,
-    occupants: Query<&ClientToplevel>,
+    windows: Query<(Entity, &WindowOutputIntersections, &WindowPreferredOutput)>,
+    clients: WindowClientResolver,
+    mapped_toplevels: Query<(&ClientToplevel, Option<&MappedSurface>)>,
     outputs: Query<&WeldOutput>,
+    mut published: ResMut<PublishedOutputMemberships>,
     mut actions: ResMut<SurfaceActionQueue>,
 ) {
-    for (occupant, intersections, preferred) in &windows {
-        if !intersections.is_changed() && !preferred.is_changed() {
-            continue;
-        }
-        let Ok(toplevel) = occupants.get(occupant.entity()) else {
+    published.scratch.clear();
+    published.mapped_surfaces.clear();
+    published.changed_surfaces.clear();
+    for (window, intersections, preferred) in &windows {
+        let Some(client) = clients.mapped_client(window) else {
             continue;
         };
         let mut memberships = intersections
@@ -465,17 +720,74 @@ fn publish_window_output_memberships(
             .filter_map(|output| outputs.get(output).ok().map(|output| output.id))
             .collect::<Vec<_>>();
         memberships.sort_unstable();
+        let preferred = preferred
+            .entity()
+            .and_then(|output| outputs.get(output).ok().map(|output| output.id))
+            .filter(|preferred| memberships.contains(preferred));
         if memberships.is_empty() {
             continue;
         }
+        published.scratch.insert(
+            client.surface(),
+            PublishedOutputMembership {
+                outputs: memberships,
+                preferred,
+            },
+        );
+    }
+    for (toplevel, mapped) in &mapped_toplevels {
+        if mapped.is_some() {
+            published.mapped_surfaces.push(toplevel.surface);
+        }
+    }
+
+    published
+        .mapped_surfaces
+        .sort_unstable_by_key(|surface| surface.raw());
+    published.mapped_surfaces.dedup();
+    for index in 0..published.mapped_surfaces.len() {
+        let surface = published.mapped_surfaces[index];
+        if published.scratch.contains_key(&surface) {
+            continue;
+        }
+        if let Some(previous) = published.active.get(&surface).cloned() {
+            published.scratch.insert(surface, previous);
+        }
+    }
+
+    let PublishedOutputMemberships {
+        active,
+        scratch,
+        changed_surfaces,
+        ..
+    } = &mut *published;
+    changed_surfaces.extend(
+        scratch
+            .iter()
+            .filter(|(surface, membership)| active.get(surface) != Some(*membership))
+            .map(|(surface, _)| *surface),
+    );
+    published
+        .changed_surfaces
+        .sort_unstable_by_key(|surface| surface.raw());
+    for index in 0..published.changed_surfaces.len() {
+        let surface = published.changed_surfaces[index];
+        let membership = &published.scratch[&surface];
         actions.push(SurfaceAction::SetOutputs {
-            surface: toplevel.surface,
-            outputs: memberships,
-            preferred: preferred
-                .entity()
-                .and_then(|output| outputs.get(output).ok().map(|output| output.id)),
+            surface,
+            outputs: membership.outputs.clone(),
+            preferred: membership.preferred,
         });
     }
+
+    // Empty assignments cannot yet express leave-all: weld-core rejects them.
+    // Retain the last published assignment for mapped surfaces until core owns
+    // that protocol transition, matching the behavior before this cache.
+    let PublishedOutputMemberships {
+        active, scratch, ..
+    } = &mut *published;
+    std::mem::swap(active, scratch);
+    scratch.clear();
 }
 
 /// Installs the UI-independent managed-window domain.
@@ -483,11 +795,11 @@ pub struct WindowPlugin;
 
 impl Plugin for WindowPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<NextWindowId>()
-            .init_resource::<WindowRegistry>()
+        app.init_resource::<WindowRegistry>()
             .init_resource::<FocusedWindow>()
             .init_resource::<AppliedClientFocus>()
             .init_resource::<SurfaceCommitRevisions>()
+            .init_resource::<PublishedOutputMemberships>()
             .add_message::<RequestRedraw>()
             .add_observer(apply_window_command)
             .configure_sets(
@@ -577,21 +889,6 @@ impl Plugin for WindowPlugin {
     }
 }
 
-#[derive(Resource, Default)]
-struct NextWindowId(u64);
-
-impl NextWindowId {
-    fn allocate(&mut self, registry: &WindowRegistry) -> WindowId {
-        loop {
-            let id = WindowId(self.0);
-            self.0 = self.0.saturating_add(1);
-            if registry.entity(id).is_none() {
-                return id;
-            }
-        }
-    }
-}
-
 #[derive(Component, Clone, Copy, Debug, Default, PartialEq)]
 struct AppliedPresentationInsets(PresentationInsets);
 
@@ -647,6 +944,15 @@ impl ClientResizeState {
         }
     }
 
+    fn clear_client(&mut self) {
+        if self.surface.is_none() {
+            return;
+        }
+        self.surface = None;
+        self.requested_size = UVec2::ZERO;
+        self.pending = None;
+    }
+
     fn request(&mut self, surface: SurfaceId, requested_size: UVec2, after_revision: u64) {
         self.surface = Some(surface);
         self.requested_size = requested_size;
@@ -665,7 +971,6 @@ struct AppliedClientFocus {
 
 fn admit_mapped_toplevels(
     mut commands: Commands,
-    mut next_id: ResMut<NextWindowId>,
     mut registry: ResMut<WindowRegistry>,
     surfaces: Query<(Entity, &ClientToplevel, &MappedSurface), Without<OccupiesWindow>>,
 ) {
@@ -675,11 +980,12 @@ fn admit_mapped_toplevels(
     let mut unclaimed = surfaces.iter().collect::<Vec<_>>();
     unclaimed.sort_unstable_by_key(|(_, toplevel, _)| toplevel.surface.raw());
     for (surface_entity, toplevel, mapped) in unclaimed {
-        let id = next_id.allocate(&registry);
+        let managed = registry.allocate();
+        let id = managed.id;
         let client_size = rounded_client_size(mapped.logical_size);
         let window = commands
             .spawn((
-                ManagedWindow { id },
+                managed,
                 WindowGeometry {
                     position: Vec2::ZERO,
                     size: mapped.logical_size,
@@ -707,10 +1013,14 @@ fn reconcile_presentation_insets(
         &mut WindowGeometry,
         &mut AppliedPresentationInsets,
         Option<&PrimaryWindowPresentation>,
+        Option<&WindowPresentationOverride>,
     )>,
     roots: Query<&PresentationInsets>,
 ) {
-    for (mut geometry, mut applied, presentation) in &mut windows {
+    for (mut geometry, mut applied, presentation, presentation_override) in &mut windows {
+        if presentation_override.is_some() {
+            continue;
+        }
         let current = presentation
             .and_then(|presentation| roots.get(presentation.entity()).ok())
             .copied()
@@ -725,24 +1035,24 @@ fn reconcile_presentation_insets(
 
 fn reconcile_window_sizes(
     mut windows: Query<(
+        Entity,
         &WindowGeometry,
         &mut ClientResizeState,
-        Option<&WindowOccupant>,
         Option<&PrimaryWindowPresentation>,
     )>,
     roots: Query<&PresentationInsets>,
-    occupants: Query<(&ClientToplevel, Option<&MappedSurface>)>,
+    clients: WindowClientResolver,
     revisions: Res<SurfaceCommitRevisions>,
     mut actions: ResMut<SurfaceActionQueue>,
 ) {
-    for (geometry, mut resize, occupant, presentation) in &mut windows {
-        let Some((toplevel, Some(_))) =
-            occupant.and_then(|occupant| occupants.get(occupant.entity()).ok())
-        else {
+    for (window, geometry, mut resize, presentation) in &mut windows {
+        let Some(client) = clients.mapped_client(window) else {
+            resize.clear_client();
             continue;
         };
-        let revision = revisions.revision(toplevel.surface);
-        resize.observe_commit(toplevel.surface, revision);
+        let surface = client.surface();
+        let revision = revisions.revision(surface);
+        resize.observe_commit(surface, revision);
         let insets = presentation
             .and_then(|presentation| roots.get(presentation.entity()).ok())
             .copied()
@@ -751,9 +1061,9 @@ fn reconcile_window_sizes(
         if requested == resize.requested_size {
             continue;
         }
-        resize.request(toplevel.surface, requested, revision);
+        resize.request(surface, requested, revision);
         actions.push(SurfaceAction::Resize {
-            surface: toplevel.surface,
+            surface,
             logical_size: requested,
         });
     }
@@ -784,7 +1094,7 @@ fn synchronize_registry(
 struct ApplyWindowCommandParams<'w, 's> {
     commands: Commands<'w, 's>,
     windows: Query<'w, 's, (&'static ManagedWindow, Option<&'static WindowOccupant>)>,
-    occupants: Query<'w, 's, (&'static ClientToplevel, Option<&'static MappedSurface>)>,
+    clients: WindowClientResolver<'w, 's>,
     focus: ResMut<'w, FocusedWindow>,
     applied_focus: ResMut<'w, AppliedClientFocus>,
     actions: ResMut<'w, SurfaceActionQueue>,
@@ -794,7 +1104,7 @@ fn apply_window_command(command: On<WindowCommand>, params: ApplyWindowCommandPa
     let ApplyWindowCommandParams {
         mut commands,
         windows,
-        occupants,
+        clients,
         mut focus,
         mut applied_focus,
         mut actions,
@@ -821,14 +1131,9 @@ fn apply_window_command(command: On<WindowCommand>, params: ApplyWindowCommandPa
             }
         }
         WindowCommandKind::CloseOccupant => {
-            let Ok((_, occupant)) = windows.get(window) else {
-                return;
-            };
-            if let Some((toplevel, _)) =
-                occupant.and_then(|occupant| occupants.get(occupant.entity()).ok())
-            {
+            if let Some(client) = clients.mapped_client(window) {
                 actions.push(SurfaceAction::Close {
-                    surface: toplevel.surface,
+                    surface: client.surface(),
                 });
             }
         }
@@ -897,16 +1202,15 @@ fn end_window_interaction(world: &mut bevy::ecs::world::World, window: Entity) {
 fn reconcile_client_focus(
     focus: Res<FocusedWindow>,
     mut applied: ResMut<AppliedClientFocus>,
-    windows: Query<(&WindowVisibility, Option<&WindowOccupant>)>,
-    occupants: Query<(&ClientToplevel, Option<&MappedSurface>)>,
+    windows: Query<&WindowVisibility>,
+    clients: WindowClientResolver,
     mut actions: ResMut<SurfaceActionQueue>,
 ) {
     let surface = focus.0.and_then(|window| {
-        let (WindowVisibility::Visible, Some(occupant)) = windows.get(window).ok()? else {
+        let WindowVisibility::Visible = windows.get(window).ok()? else {
             return None;
         };
-        let (toplevel, mapped) = occupants.get(occupant.entity()).ok()?;
-        mapped.map(|_| toplevel.surface)
+        clients.mapped_client(window).map(|client| client.surface())
     });
     if surface == applied.surface && !applied.reassert {
         return;
@@ -929,13 +1233,17 @@ pub fn rounded_client_size(size: Vec2) -> UVec2 {
 mod tests {
     use bevy::{
         app::App,
-        ecs::{observer::On, resource::Resource, system::ResMut},
+        ecs::{
+            observer::On,
+            resource::Resource,
+            system::{ResMut, SystemState},
+        },
         math::Vec2,
     };
     use weld_app::output::{OutputGeometry, OutputId, OutputPosition, PrimaryOutput, WeldOutput};
     use weld_app::surface::{
-        ClientDecorated, ClientToplevel, MappedSurface, SurfaceAction, SurfaceActionQueue,
-        SurfaceId, take_surface_actions,
+        ClientDecorated, ClientToplevel, ClientToplevelParent, MappedSurface, SurfaceAction,
+        SurfaceActionQueue, SurfaceId, take_surface_actions,
     };
 
     use super::*;
@@ -971,6 +1279,176 @@ mod tests {
                 },
             ))
             .id()
+    }
+
+    #[test]
+    fn client_binding_rejects_ambiguous_and_cyclic_proxies() {
+        let mut app = test_app();
+        let surface = SurfaceId::new(88);
+        let client = mapped_toplevel(&mut app, surface);
+        let source = app
+            .world_mut()
+            .spawn(ManagedWindow {
+                id: WindowId::new(1),
+            })
+            .id();
+        app.world_mut()
+            .entity_mut(client)
+            .insert(OccupiesWindow(source));
+        app.world_mut()
+            .entity_mut(source)
+            .insert(WindowClientBinding::suppress());
+        let first = app
+            .world_mut()
+            .spawn((
+                ManagedWindow {
+                    id: WindowId::new(2),
+                },
+                WindowClientBinding::proxy(source),
+            ))
+            .id();
+        let second = app
+            .world_mut()
+            .spawn((
+                ManagedWindow {
+                    id: WindowId::new(3),
+                },
+                WindowClientBinding::proxy(source),
+            ))
+            .id();
+
+        let mut state = SystemState::<WindowClientResolver>::new(app.world_mut());
+        let resolver = state
+            .get(app.world())
+            .expect("resolver parameters should be available");
+        assert_eq!(resolver.client_entity(first), None);
+        assert_eq!(resolver.client_entity(second), None);
+        assert_eq!(resolver.window_for_surface(surface), None);
+
+        app.world_mut().entity_mut(second).despawn();
+        let resolver = state
+            .get(app.world())
+            .expect("resolver parameters should remain available");
+        assert_eq!(resolver.client_entity(first), Some(client));
+        assert_eq!(resolver.window_for_surface(surface), Some(first));
+
+        let cycle = app
+            .world_mut()
+            .spawn(ManagedWindow {
+                id: WindowId::new(4),
+            })
+            .id();
+        app.world_mut()
+            .entity_mut(first)
+            .insert(WindowClientBinding::proxy(cycle));
+        app.world_mut()
+            .entity_mut(cycle)
+            .insert(WindowClientBinding::proxy(first));
+        let resolver = state
+            .get(app.world())
+            .expect("resolver parameters should remain available");
+        assert_eq!(resolver.client_entity(first), None);
+        assert_eq!(resolver.client_entity(cycle), None);
+    }
+
+    #[test]
+    fn window_family_resolves_parent_descendants_and_rejects_cycles() {
+        let mut app = test_app();
+        let root_client = mapped_toplevel(&mut app, SurfaceId::new(81));
+        let child_client = mapped_toplevel(&mut app, SurfaceId::new(82));
+        let grandchild_client = mapped_toplevel(&mut app, SurfaceId::new(83));
+        app.world_mut()
+            .entity_mut(child_client)
+            .insert(ClientToplevelParent {
+                surface: SurfaceId::new(81),
+            });
+        app.world_mut()
+            .entity_mut(grandchild_client)
+            .insert(ClientToplevelParent {
+                surface: SurfaceId::new(82),
+            });
+        app.update();
+        let root = app
+            .world()
+            .get::<OccupiesWindow>(root_client)
+            .expect("root window")
+            .0;
+        let child = app
+            .world()
+            .get::<OccupiesWindow>(child_client)
+            .expect("child window")
+            .0;
+        let grandchild = app
+            .world()
+            .get::<OccupiesWindow>(grandchild_client)
+            .expect("grandchild window")
+            .0;
+
+        let mut state = SystemState::<WindowFamilyResolver>::new(app.world_mut());
+        let family = state
+            .get(app.world())
+            .expect("family resolver should be available")
+            .family(child)
+            .expect("child should resolve through its declared parent");
+        assert_eq!(family.root(), SurfaceId::new(81));
+        let mut expected = vec![root, child, grandchild];
+        expected.sort_unstable_by_key(|window| window.to_bits());
+        assert_eq!(family.windows(), expected);
+
+        app.world_mut()
+            .entity_mut(root_client)
+            .insert(ClientToplevelParent {
+                surface: SurfaceId::new(83),
+            });
+        assert!(
+            state
+                .get(app.world())
+                .expect("family resolver should remain available")
+                .family(child)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn unresolved_toplevel_parent_becomes_a_family_when_the_parent_appears() {
+        let mut app = test_app();
+        let child_client = mapped_toplevel(&mut app, SurfaceId::new(85));
+        app.world_mut()
+            .entity_mut(child_client)
+            .insert(ClientToplevelParent {
+                surface: SurfaceId::new(84),
+            });
+        app.update();
+        let child = app
+            .world()
+            .get::<OccupiesWindow>(child_client)
+            .expect("child window")
+            .0;
+        let mut state = SystemState::<WindowFamilyResolver>::new(app.world_mut());
+        assert!(
+            state
+                .get(app.world())
+                .expect("family resolver should be available")
+                .family(child)
+                .is_none()
+        );
+
+        let parent_client = mapped_toplevel(&mut app, SurfaceId::new(84));
+        app.update();
+        let parent = app
+            .world()
+            .get::<OccupiesWindow>(parent_client)
+            .expect("parent window")
+            .0;
+        let family = state
+            .get(app.world())
+            .expect("family resolver should remain available")
+            .family(child)
+            .expect("family should resolve after parent registration");
+        assert_eq!(family.root(), SurfaceId::new(84));
+        let mut expected = vec![parent, child];
+        expected.sort_unstable_by_key(|window| window.to_bits());
+        assert_eq!(family.windows(), expected);
     }
 
     #[test]
@@ -1021,6 +1499,20 @@ mod tests {
                 .get::<WindowOccupant>(occupancy.0)
                 .map(WindowOccupant::entity),
             Some(surface)
+        );
+    }
+
+    #[test]
+    fn mapped_toplevel_without_an_output_does_not_publish_an_empty_assignment() {
+        let mut app = test_app();
+        mapped_toplevel(&mut app, SurfaceId::new(73));
+
+        app.update();
+
+        assert!(
+            take_surface_actions(app.world_mut())
+                .into_iter()
+                .all(|action| !matches!(action, SurfaceAction::SetOutputs { .. }))
         );
     }
 
@@ -1124,6 +1616,41 @@ mod tests {
             take_surface_actions(app.world_mut())
                 .into_iter()
                 .all(|action| !matches!(action, SurfaceAction::Resize { .. }))
+        );
+
+        let root = app
+            .world()
+            .get::<PrimaryWindowPresentation>(window)
+            .expect("ordinary presentation should remain authoritative")
+            .entity();
+        let override_owner = app.world_mut().spawn_empty().id();
+        app.world_mut()
+            .entity_mut(window)
+            .insert(WindowPresentationOverride::new(override_owner));
+        app.world_mut().entity_mut(root).despawn();
+        app.update();
+        assert_eq!(
+            app.world()
+                .get::<WindowGeometry>(window)
+                .expect("an override without a root should preserve outer geometry")
+                .size,
+            Vec2::new(326.0, 276.0)
+        );
+
+        app.world_mut()
+            .entity_mut(window)
+            .remove::<WindowPresentationOverride>();
+        app.world_mut().spawn((
+            PresentsWindow(window),
+            PresentationInsets::new(3.0, 33.0, 3.0, 3.0),
+        ));
+        app.update();
+        assert_eq!(
+            app.world()
+                .get::<WindowGeometry>(window)
+                .expect("restoring equivalent insets should apply no geometry delta")
+                .size,
+            Vec2::new(326.0, 276.0)
         );
 
         app.world_mut()

@@ -192,6 +192,7 @@ impl SurfaceCompositionDemand {
                 CompositionDemand::Settle
             }
             PendingSurfaceEventKind::DecorationChanged { .. }
+            | PendingSurfaceEventKind::ToplevelParentChanged { .. }
             | PendingSurfaceEventKind::PopupConfigured(_) => CompositionDemand::Settle,
         }
     }
@@ -621,6 +622,13 @@ impl AppShell {
                     kind: HostSurfaceEventKind::DecorationChanged {
                         decoration: app_decoration(decoration),
                     },
+                },
+            ),
+            PendingSurfaceEventKind::ToplevelParentChanged { parent } => enqueue_surface_event(
+                self.app.world_mut(),
+                HostSurfaceEvent {
+                    surface,
+                    kind: HostSurfaceEventKind::ToplevelParentChanged { parent },
                 },
             ),
             PendingSurfaceEventKind::PopupConfigured(popup) => enqueue_surface_event(

@@ -22,7 +22,10 @@ use bevy::{
     ui::widget::{Text, TextShadow},
 };
 use weld_app::{
-    input::GlobalShortcutAction,
+    input::{
+        GlobalShortcut, GlobalShortcutAppExt, GlobalShortcutId, GlobalShortcutModifiers,
+        GlobalShortcutPressed,
+    },
     output::{
         OutputCompositionCamera, OutputFootprintProvenance, OutputGeometry, OutputInfo,
         OutputPlacement, OutputPosition, PrimaryOutput, WeldOutput,
@@ -33,11 +36,19 @@ pub(crate) struct DistributionOverlayPlugin;
 
 impl Plugin for DistributionOverlayPlugin {
     fn build(&self, app: &mut App) {
+        let toggle = app.register_global_shortcut(GlobalShortcut::new(
+            bevy::input::keyboard::KeyCode::KeyO,
+            GlobalShortcutModifiers::super_shift(),
+        ));
         app.init_resource::<OutputTopologyOverlayState>()
+            .insert_resource(OutputTopologyShortcut(toggle))
             .add_systems(Startup, spawn_distribution_overlay)
             .add_systems(Update, update_output_topology_overlay);
     }
 }
+
+#[derive(Resource)]
+struct OutputTopologyShortcut(GlobalShortcutId);
 
 #[derive(Resource, Default)]
 struct OutputTopologyOverlayState {
@@ -100,7 +111,8 @@ fn spawn_distribution_overlay(mut commands: Commands) {
 
 fn update_output_topology_overlay(
     mut commands: Commands,
-    mut actions: MessageReader<GlobalShortcutAction>,
+    mut actions: MessageReader<GlobalShortcutPressed>,
+    shortcut: bevy::ecs::system::Res<OutputTopologyShortcut>,
     mut state: ResMut<OutputTopologyOverlayState>,
     roots: Query<Entity, With<OutputTopologyOverlay>>,
     outputs: Query<OutputTopologyQueryItem<'_>>,
@@ -108,7 +120,7 @@ fn update_output_topology_overlay(
 ) {
     let toggles = actions
         .read()
-        .filter(|action| matches!(action, GlobalShortcutAction::ToggleOutputTopology))
+        .filter(|action| action.shortcut() == shortcut.0)
         .count();
     if toggles % 2 == 1 {
         state.visible = !state.visible;

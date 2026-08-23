@@ -1,5 +1,49 @@
 # Remote window hoisting
 
+## Local loopback lifecycle — Implemented
+
+The optional `weld-hoist` plugin implements the first source-side lifecycle
+proof. `Super+H` replaces the focused occupied managed window's ordinary local
+presentation with a hoist-owned placeholder and Reclaim control while keeping
+the real client occupant alive. A second managed window becomes the effective
+client-policy endpoint while borrowing that occupant: it uses ordinary CSD or
+SSD, presents the same GPU-imported surface and its popups, routes input and
+client move/resize interactions, and supplies its own output membership,
+preferred scale, and configure size. Moving or resizing the source placeholder
+does not affect the client. Reclaim or receiver loss restores policy and
+presentation on the same source frame without changing its occupant or
+geometry. Explicit reclaim first hides and retargets the receiver to the
+placeholder's output and inner size, then waits for the resulting client
+configure to settle before revealing the source again. A bounded fallback
+prevents an unresponsive client from trapping the source in that transition.
+
+This is a same-process loopback and deliberately has no serialization,
+networking, codec, peer identity, or authorization. It directly samples the
+source image rather than publishing a transport frame. Related independent
+xdg-toplevels are grouped by their client-declared parent chain. Existing and
+later mapped descendants join an active local family as independent
+source/receiver pairs; popups and subsurfaces continue following their owning
+toplevel's surface tree. Reclaim from any member freezes admission, stages the
+captured members, and restores the family together. A member that leaves the
+declared parent chain is staged back independently. Unmapping a source removes
+that member, while loss of the family root restores the remaining family.
+
+Family members already present when hoisting begins each retain a source
+placeholder because each occupied host layout. Related toplevels first created
+afterward are receiver-only and create no new source placeholder. If a captured
+client toplevel is destroyed remotely, its retained slot becomes a "Window
+closed remotely" tombstone with Dismiss but no Reclaim action. Reclaiming other
+live members leaves that tombstone intact. A protocol unmap is not treated as
+destruction: it ends that member's hoist session and allows an eventual remap
+to use ordinary local presentation.
+
+This implemented relation is deliberately narrower than application or
+process inference. Unparented windows from the same executable or app ID do
+not automatically join. A newly mapped related dialog can be presented locally
+for one frame before window admission and follow-family policy observe it; that
+prototype transition remains to be tightened. No remote transport, complete
+transient policy, or non-xdg family inference is implemented.
+
 ## Scope — Direction
 
 Hoisting relocates the interactive presentation of windows, not their
@@ -35,7 +79,33 @@ configure state, and lifecycle transitions. A destination may either mirror
 the remote workspace structure or meld remote windows into local workspaces;
 that placement policy is not yet selected.
 
-No remote transport, encoder, decoder, or hoisting state is implemented yet.
+No remote transport, encoder, or decoder is implemented yet.
+
+## Endpoint policy projection — Direction
+
+A transport does not copy native monitor objects or make destination state
+authoritative at the source. It carries stable-ID preferences and observations
+that the source validates and projects into its own window policy. A
+destination presentation may contribute logical content size, scale and output
+characteristics, refresh and color capabilities, decoration support, focus,
+and visibility. The source remains authoritative for client lifetime,
+configure sequencing, buffer ownership, admission, reclaim, and the accepted
+result of those preferences.
+
+The transported presentation is a role-preserving surface family rather than
+an undifferentiated image. A toplevel owns its subsurface tree and popups;
+related transient toplevels retain separate identities and relationships.
+Menus and tooltips therefore follow the destination presentation without
+becoming freely managed windows. Input is addressed to those stable surface
+identities and transformed from destination-local coordinates at the source.
+Media revisions, damage, synchronization, and popup/tree state use the same
+identity graph but remain logically separate from ordered control and input
+flows.
+
+The current `WindowClientBinding` is only the same-process ECS projection of
+one selected policy endpoint. It must not be serialized or exposed as the
+network API; Bevy entities, Smithay objects, native graphics handles, and wgpu
+internals stay behind endpoint adapters.
 
 ## Endpoint roles and portability — Direction
 
@@ -131,10 +201,12 @@ In the managed-frame model, the source frame retains its real client occupant
 while its local presentation changes to the remote/reclaim state. It is not a
 vacant frame, and reclaim restores local presentation on the same frame.
 
-Each independently transported window retains its own placeholder and reclaim
-state. UI may visually aggregate those placeholders for a workspace or desktop
-session only if the underlying per-window identities, layout positions, and
-reclaim actions remain recoverable.
+Each window that occupied source layout when transport began retains its own
+placeholder and reclaim state. Later follow-family or follow-scope admissions
+need not manufacture source slots they never occupied. UI may visually
+aggregate preserved placeholders for a workspace or desktop session only if
+the underlying per-window identities, layout positions, and reclaim actions
+remain recoverable.
 
 The placeholders continue participating in layout so hoisting does not
 collapse the source workspace. Reclaim, destination departure, authorization
@@ -193,6 +265,15 @@ Linux VA-API is another candidate. Neither is a selected dependency. The
 eventual abstraction must expose codec, profile, pixel-format, modifier,
 alpha, and concurrent-session capabilities, and permit a software fallback
 without silently moving a supposedly hardware path onto the compositor thread.
+
+For simple opaque single-surface content, an encoder should first attempt to
+import and retain the exact client DMA-BUF when its format, modifier, and
+synchronization are supported. A family requiring composition, alpha, effects,
+or RGB-to-encoder-format conversion should render into an encoder-importable
+DMA-BUF on the GPU. Avoiding a full-frame CPU pixel copy is a requirement;
+literal zero GPU copies is an opportunistic fast path. SHM clients are the
+explicit source-memory exception because their submitted pixels already reside
+in CPU memory.
 
 ## Launcher federation — Direction
 

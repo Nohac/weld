@@ -14,7 +14,6 @@ use bevy::{
         message::{MessageReader, MessageWriter},
         observer::On,
         query::{With, Without},
-        relationship::Relationship,
         resource::Resource,
         schedule::{ApplyDeferred, IntoScheduleConfigs},
         system::{Commands, Local, Query, Res, ResMut, SystemParam},
@@ -43,11 +42,12 @@ use weld_app::{
     },
 };
 use weld_window::{
-    ClientResizeState, FocusedWindow, ManagedBy, ManagedWindow, OccupiesWindow, PresentationInsets,
-    PrimaryWindowPresentation, WindowCloseHandle, WindowCommand, WindowCommandKind, WindowGeometry,
-    WindowIntent, WindowIntentKind, WindowInteractionKind, WindowInteractionSession,
-    WindowMoveHandle, WindowOccupant, WindowOutput, WindowProjectionLookup, WindowResizeHandle,
-    WindowSystems, WindowVacancy, WindowVisibility, WindowZOrder, rounded_client_size,
+    ClientResizeState, FocusedWindow, ManagedBy, ManagedWindow, PresentationInsets,
+    PrimaryWindowPresentation, WindowClientBinding, WindowClientResolver, WindowCloseHandle,
+    WindowCommand, WindowCommandKind, WindowGeometry, WindowIntent, WindowIntentKind,
+    WindowInteractionKind, WindowInteractionSession, WindowMoveHandle, WindowOccupant,
+    WindowOutput, WindowProjectionLookup, WindowResizeHandle, WindowSystems, WindowVacancy,
+    WindowVisibility, WindowZOrder, rounded_client_size,
 };
 
 /// The default freeform window manager.
@@ -352,8 +352,7 @@ struct HandleWindowIntentParams<'w, 's> {
     windows: FloatWindowQuery<'w, 's>,
     insets: Query<'w, 's, &'static PresentationInsets>,
     presentations: Query<'w, 's, &'static PrimaryWindowPresentation>,
-    window_occupants: Query<'w, 's, &'static WindowOccupant>,
-    occupants: Query<'w, 's, &'static weld_app::surface::ClientToplevel>,
+    clients: WindowClientResolver<'w, 's>,
     resize_states: Query<'w, 's, &'static ClientResizeState>,
     anchors: Query<'w, 's, &'static mut ResizeAnchor>,
     revisions: Res<'w, SurfaceCommitRevisions>,
@@ -367,8 +366,7 @@ fn handle_window_intent(intent: On<WindowIntent>, params: HandleWindowIntentPara
         mut windows,
         insets,
         presentations,
-        window_occupants,
-        occupants,
+        clients,
         resize_states,
         mut anchors,
         revisions,
@@ -439,10 +437,7 @@ fn handle_window_intent(intent: On<WindowIntent>, params: HandleWindowIntentPara
             if !edges.has_left() && !edges.has_top() {
                 return;
             }
-            let mapped_occupant = window_occupants
-                .get(window)
-                .ok()
-                .and_then(|occupant| occupants.get(occupant.entity()).ok());
+            let mapped_client = clients.mapped_client(window);
             let presentation_insets = presentations
                 .get(window)
                 .ok()
@@ -451,12 +446,12 @@ fn handle_window_intent(intent: On<WindowIntent>, params: HandleWindowIntentPara
                 .unwrap_or_default();
             let desired_client_size =
                 rounded_client_size((geometry.size - presentation_insets.extent()).max(Vec2::ONE));
-            let pending_after_revision = mapped_occupant.and_then(|toplevel| {
+            let pending_after_revision = mapped_client.and_then(|client| {
                 let resize = resize_states.get(window).ok()?;
                 if resize.requested_size() != desired_client_size {
-                    Some(revisions.revision(toplevel.surface))
+                    Some(revisions.revision(client.surface()))
                 } else {
-                    resize.pending_after_revision(toplevel.surface)
+                    resize.pending_after_revision(client.surface())
                 }
             });
             if let (Some(after_revision), Ok(mut anchor)) =
@@ -608,10 +603,10 @@ fn handle_protocol_interactions(
     manager: Res<DefaultFloatManager>,
     surfaces: Query<(
         &ClientToplevel,
-        &OccupiesWindow,
         Option<&MappedSurface>,
         Option<&ClientDecorated>,
     )>,
+    clients: WindowClientResolver,
     windows: Query<(
         &ManagedBy,
         Option<&WindowInteractionSession>,
@@ -620,13 +615,15 @@ fn handle_protocol_interactions(
     mut commands: Commands,
 ) {
     for request in requests.read().copied() {
-        let Some((_, occupancy, Some(_), Some(_))) = surfaces
+        let Some((_, Some(_), Some(_))) = surfaces
             .iter()
-            .find(|(toplevel, _, _, _)| toplevel.surface == request.surface)
+            .find(|(toplevel, _, _)| toplevel.surface == request.surface)
         else {
             continue;
         };
-        let window = occupancy.get();
+        let Some(window) = clients.window_for_surface(request.surface) else {
+            continue;
+        };
         let Ok((managed_by, interaction, control)) = windows.get(window) else {
             continue;
         };
@@ -932,7 +929,7 @@ type AnchoredResizeQuery<'w, 's> = Query<
         Entity,
         &'static mut WindowGeometry,
         &'static ManagedBy,
-        Option<&'static WindowOccupant>,
+        &'static WindowVisibility,
         Option<&'static WindowInteractionSession>,
         &'static ResizeAnchor,
         Option<&'static PrimaryWindowPresentation>,
@@ -944,13 +941,13 @@ fn reconcile_anchored_resize(
     manager: Res<DefaultFloatManager>,
     revisions: Res<SurfaceCommitRevisions>,
     mut windows: AnchoredResizeQuery,
-    occupants: Query<(&weld_app::surface::ClientToplevel, &MappedSurface)>,
+    clients: WindowClientResolver,
     insets: Query<&PresentationInsets>,
 ) {
-    for (window, mut geometry, managed_by, occupant, interaction, anchor, presentation) in
+    for (window, mut geometry, managed_by, visibility, interaction, anchor, presentation) in
         &mut windows
     {
-        if managed_by.0 != manager.0 {
+        if managed_by.0 != manager.0 || *visibility == WindowVisibility::Hidden {
             commands.entity(window).remove::<ResizeAnchor>();
             continue;
         }
@@ -965,11 +962,7 @@ fn reconcile_anchored_resize(
             commands.entity(window).remove::<ResizeAnchor>();
             continue;
         }
-        let Some(occupant) = occupant else {
-            commands.entity(window).remove::<ResizeAnchor>();
-            continue;
-        };
-        let Ok((toplevel, mapped)) = occupants.get(occupant.entity()) else {
+        let Some(client) = clients.mapped_client(window) else {
             commands.entity(window).remove::<ResizeAnchor>();
             continue;
         };
@@ -978,7 +971,7 @@ fn reconcile_anchored_resize(
             .copied()
             .unwrap_or_default()
             .extent();
-        let committed_outer_size = mapped.logical_size + inset_extent;
+        let committed_outer_size = client.mapped().logical_size + inset_extent;
         if anchor.edges.has_left() {
             geometry.position.x = anchor.fixed.x - committed_outer_size.x;
         }
@@ -986,7 +979,7 @@ fn reconcile_anchored_resize(
             geometry.position.y = anchor.fixed.y - committed_outer_size.y;
         }
         if let Some(expected) = anchor.end_after_revision {
-            let revision = revisions.revision(toplevel.surface);
+            let revision = revisions.revision(client.surface());
             if revision > expected {
                 commands.entity(window).remove::<ResizeAnchor>();
             }
@@ -1003,7 +996,7 @@ type FocusWindowQuery<'w, 's> = Query<
         &'static ManagedBy,
         &'static WindowVisibility,
         &'static WindowVacancy,
-        Option<&'static WindowOccupant>,
+        Option<&'static WindowClientBinding>,
     ),
 >;
 
@@ -1012,18 +1005,12 @@ fn reconcile_focus(
     manager: Res<DefaultFloatManager>,
     focus: Res<FocusedWindow>,
     windows: FocusWindowQuery,
-    occupants: Query<Option<&MappedSurface>>,
+    clients: WindowClientResolver,
 ) {
-    let mapped =
-        |window: Entity, visibility: &WindowVisibility, occupant: Option<&WindowOccupant>| {
-            if *visibility != WindowVisibility::Visible {
-                return None;
-            }
-            occupant
-                .and_then(|occupant| occupants.get(occupant.entity()).ok())
-                .is_some_and(|mapped| mapped.is_some())
-                .then_some(window)
-        };
+    let mapped = |window: Entity, visibility: &WindowVisibility| {
+        (*visibility == WindowVisibility::Visible && clients.mapped_client(window).is_some())
+            .then_some(window)
+    };
     if focus.entity().is_some_and(|window| {
         windows
             .get(window)
@@ -1036,17 +1023,18 @@ fn reconcile_focus(
         windows
             .get(window)
             .ok()
-            .is_none_or(|(_, _, _, visibility, vacancy, occupant)| {
-                mapped(window, visibility, occupant).is_none()
-                    && !(*vacancy == WindowVacancy::Retain && occupant.is_none())
+            .is_none_or(|(_, _, _, visibility, vacancy, binding)| {
+                mapped(window, visibility).is_none()
+                    && !(*vacancy == WindowVacancy::Retain
+                        || binding.is_some_and(|binding| binding.source().is_none()))
             })
     }) || focus.entity().is_none()
     {
         let next = windows
             .iter()
-            .filter_map(|(window, z_order, managed_by, visibility, _, occupant)| {
+            .filter_map(|(window, z_order, managed_by, visibility, _, _)| {
                 (managed_by.0 == manager.0)
-                    .then(|| mapped(window, visibility, occupant))
+                    .then(|| mapped(window, visibility))
                     .flatten()
                     .map(|window| (window, z_order.0))
             })
@@ -2171,15 +2159,21 @@ mod tests {
             Some(0)
         );
 
+        app.world_mut()
+            .entity_mut(window)
+            .insert(WindowVisibility::Hidden);
+        app.update();
+        assert!(app.world().get::<ResizeAnchor>(window).is_none());
+        app.world_mut()
+            .entity_mut(window)
+            .insert(WindowVisibility::Visible);
+
         app.world_mut().trigger(WindowCommand {
             window,
             kind: WindowCommandKind::BeginInteraction(WindowInteractionKind::Resize(
                 ToplevelResizeEdge::Top,
             )),
         });
-        app.update();
-        assert!(app.world().get::<ResizeAnchor>(window).is_none());
-
         app.update();
         assert!(matches!(
             app.world().get::<ResizeAnchor>(window),

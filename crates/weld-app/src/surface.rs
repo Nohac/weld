@@ -96,6 +96,12 @@ pub struct ClientToplevel {
     pub surface: SurfaceId,
 }
 
+/// Parent toplevel declared by the client for dialog and family policy.
+#[derive(Component, Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ClientToplevelParent {
+    pub surface: SurfaceId,
+}
+
 /// Generic identity shared by every buffer-bearing client surface role.
 #[derive(Component, Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ClientSurface {
@@ -408,6 +414,7 @@ pub enum HostSurfaceEventKind {
     Created { decoration: WindowDecoration },
     TreeSnapshot(SurfaceTreeSnapshot),
     DecorationChanged { decoration: WindowDecoration },
+    ToplevelParentChanged { parent: Option<SurfaceId> },
     PopupConfigured(ClientPopup),
     WindowInteraction(ToplevelInteractionRequestKind),
     Destroyed,
@@ -711,6 +718,9 @@ fn apply_host_surface_events(world: &mut World) {
             HostSurfaceEventKind::DecorationChanged { decoration } => {
                 set_window_decoration(world, &mut registry, surface, decoration);
             }
+            HostSurfaceEventKind::ToplevelParentChanged { parent } => {
+                set_toplevel_parent(world, &registry, surface, parent);
+            }
             HostSurfaceEventKind::PopupConfigured(popup) => {
                 if ensure_popup_entity(world, &mut registry, surface, popup).is_some() {
                     apply_pending_snapshot(world, &mut registry, surface);
@@ -726,6 +736,28 @@ fn apply_host_surface_events(world: &mut World) {
     }
 
     world.insert_resource(registry);
+}
+
+fn set_toplevel_parent(
+    world: &mut World,
+    registry: &SurfaceRegistry,
+    surface: SurfaceId,
+    parent: Option<SurfaceId>,
+) {
+    let Some(entry) = registry.entries.get(&surface) else {
+        return;
+    };
+    let Ok(mut entity) = world.get_entity_mut(entry.entity) else {
+        return;
+    };
+    if !entity.contains::<ClientToplevel>() {
+        return;
+    }
+    if let Some(parent) = parent {
+        entity.insert(ClientToplevelParent { surface: parent });
+    } else {
+        entity.remove::<ClientToplevelParent>();
+    }
 }
 
 fn ensure_window_entity(
@@ -1655,6 +1687,70 @@ mod tests {
                     decoration: WindowDecoration::ClientSide,
                 },
             },
+        );
+    }
+
+    #[test]
+    fn toplevel_parent_ingress_tracks_runtime_relationship_changes() {
+        let mut app = test_app();
+        let child = SurfaceId::new(4);
+        let first_parent = SurfaceId::new(2);
+        let second_parent = SurfaceId::new(3);
+        register_window(&mut app, first_parent);
+        register_window(&mut app, second_parent);
+        register_window(&mut app, child);
+        enqueue_surface_event(
+            app.world_mut(),
+            HostSurfaceEvent {
+                surface: child,
+                kind: HostSurfaceEventKind::ToplevelParentChanged {
+                    parent: Some(first_parent),
+                },
+            },
+        );
+        app.update();
+        let child_entity = app
+            .world_mut()
+            .query::<(Entity, &ClientToplevel)>()
+            .iter(app.world())
+            .find_map(|(entity, toplevel)| (toplevel.surface == child).then_some(entity))
+            .expect("child toplevel should exist");
+        assert_eq!(
+            app.world().get::<ClientToplevelParent>(child_entity),
+            Some(&ClientToplevelParent {
+                surface: first_parent,
+            })
+        );
+
+        enqueue_surface_event(
+            app.world_mut(),
+            HostSurfaceEvent {
+                surface: child,
+                kind: HostSurfaceEventKind::ToplevelParentChanged {
+                    parent: Some(second_parent),
+                },
+            },
+        );
+        app.update();
+        assert_eq!(
+            app.world().get::<ClientToplevelParent>(child_entity),
+            Some(&ClientToplevelParent {
+                surface: second_parent,
+            })
+        );
+
+        enqueue_surface_event(
+            app.world_mut(),
+            HostSurfaceEvent {
+                surface: child,
+                kind: HostSurfaceEventKind::ToplevelParentChanged { parent: None },
+            },
+        );
+        app.update();
+        assert!(
+            app.world()
+                .get::<ClientToplevelParent>(child_entity)
+                .is_none()
         );
     }
 

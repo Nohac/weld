@@ -17,6 +17,7 @@ members = [
   "crates/weld-app",
   "crates/weld-core",
   "crates/weld-float",
+  "crates/weld-hoist",
   "crates/weld-ssd",
   "crates/weld-window",
   "crates/weld-window-ui",
@@ -69,6 +70,7 @@ weld-window = { path = "crates/weld-window" }
 weld-window-ui = { path = "crates/weld-window-ui" }
 weld-ssd = { path = "crates/weld-ssd" }
 weld-float = { path = "crates/weld-float" }
+weld-hoist = { path = "crates/weld-hoist" }
 tracing.workspace = true
 tracing-subscriber.workspace = true
 tracing-tracy = { workspace = true, optional = true }

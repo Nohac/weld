@@ -26,6 +26,9 @@ Weld is a workspace of reusable layers and one standard distribution:
   shell or window manager can replace.
 - `weld-float` supplies conventional freeform placement, focus, stacking,
   movement, and interactive-resize policy without owning UI entities.
+- `weld-hoist` owns the current same-process hoist session, source placeholder,
+  reclaim lifecycle, and loopback receiver. It does not own a network
+  transport, media codec, or the receiver's ordinary window presentation.
 - `weldwm` is the standard distribution. It requests a backend, configures the
   `WeldApp` returned by the builder with plugins and shortcuts, and supplies
   the executable. It is one possible assembly of the reusable crates, not the
@@ -36,9 +39,9 @@ depends on `weld-app`; the UI and floating-policy crates depend on the window
 domain rather than on each other; and the distribution composes the complete
 set. Core must not depend on Bevy, and the application or policy crates must
 not depend directly on Smithay. A custom distribution can retain
-`weld-window` while replacing `weld-window-ui`, `weld-ssd`, `weld-float`, or
-all three, or build a different application host while retaining the native
-backend and protocol machinery.
+`weld-window` while replacing `weld-window-ui`, `weld-ssd`, `weld-float`,
+`weld-hoist`, or any combination of them, or build a different application
+host while retaining the native backend and protocol machinery.
 
 The presentation split follows Bevy UI's separation of raw UI infrastructure,
 unstyled reusable behavior, and opinionated Feathers scenes without depending
@@ -405,6 +408,67 @@ backing assets remain intact. Presentation insets adjust outer desired geometry
 by their delta, preserving desired client content size without configuring a
 client solely because chrome changed. The presentation root's entity identity
 is intentionally not stable.
+
+`WindowPresentationOverride` lets an optional presenter reserve one managed
+window without teaching the default CSD or SSD plugins about that feature.
+Those presenters revoke and suppress all of their primary, secondary, and
+popup projections while an override is present. The owner may supply an
+ordinary `PresentsWindow` tree or deliberately keep the window locally
+unpresented while preserving its applied inset and outer-geometry contract.
+
+Authoritative occupancy and active client policy are separate.
+`WindowClientBinding` is absent for an ordinary window, suppresses client
+policy on a replacement frame, or proxies another managed window's direct
+occupant for one hop. `WindowClientResolver` applies that binding consistently
+to presentation, popup ownership, focus, configure/resize, close, output
+membership, preferred scale, and protocol move/resize. A direct occupant wins
+unless suppressed; duplicate, dangling, cyclic, or chained proxies resolve to
+no endpoint. Proxying never transfers `OccupiesWindow`, stable identity,
+detach authority, or reclaim authority.
+
+`weld-hoist` uses those contracts for a local loopback proof. `Super+H`
+replaces the focused occupied window with a hoist-owned Reclaim scene and
+suppresses its client policy while retaining its real occupant. It creates a
+floating receiver bound to that source. The receiver uses the ordinary CSD or
+SSD presenter, samples the same imported client image, owns popup attachment,
+focus, configure/resize, CSD interactions, output membership, and preferred
+scale, and follows later decoration changes. Reclaim or receiver loss removes
+the receiver and binding while retaining the source window, geometry, and
+occupant. Explicit reclaim is staged: the receiver is hidden, adopts the
+source frame's output and requested inner size, and remains the policy endpoint
+until that client configure settles or a bounded recovery deadline expires.
+Only then does ordinary presentation return to the source. Adopting the remote
+geometry directly would be simpler, but would discard the source frame's
+layout reservation. The hidden receiver is intentionally deactivated and its
+popups are hidden during this short transition; source focus and popup
+presentation resume after handoff. Unexpected receiver destruction cannot use
+the staging endpoint and therefore restores the source immediately.
+
+`WindowClientBinding` is an in-process projection of that endpoint choice, not
+a wire contract. A remote adapter must use stable Weld identities and separate
+source-authoritative lifecycle from destination-supplied presentation
+preferences, surface-family relationships, input, and media. This direct
+same-process image sharing is not a media or wire contract: related
+transient-toplevel relocation, cross-process transport, encoding, and remote
+authorization are not implemented.
+
+Core translates Smithay's `xdg_toplevel.set_parent` state into stable
+`SurfaceId` parent metadata; no Wayland object crosses into the application
+model. `WindowFamilyResolver` follows direct authoritative occupants through
+that metadata and excludes proxy receivers. The local hoist plugin groups one
+source/receiver session per independent toplevel under a shared family ID,
+admits existing and later parent descendants while active, and reclaims the
+captured family atomically. Members present when hoisting begins retain their
+source layout slots and receive individual Reclaim placeholders. Members first
+admitted while the family is already active are receiver-only because they
+never occupied pre-hoist source layout. Destroying a captured member remotely
+keeps its slot as a dismissible closed tombstone without a Reclaim action;
+ordinary protocol unmap instead ends that member session so a later remap can
+return through default presentation. Popups and subsurfaces remain within
+their owning surface tree. A re-parented member is staged back to its source
+rather than remaining disclosed through a family it has left. SSD treats any
+generic proxy binding as a relocated presentation and uses focused and
+unfocused red border shades without querying hoist-owned state.
 
 Enabling Smithay's `desktop` feature for focused protocol utilities does not
 make its `Window` or `Space` types authoritative for ordinary application

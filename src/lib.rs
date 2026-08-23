@@ -12,6 +12,7 @@ use weld_app::{
     input::{GlobalShortcutPlugin, VirtualTerminalShortcutPlugin},
 };
 use weld_float::FloatPlugin;
+use weld_hoist::HoistPlugin;
 use weld_ssd::SsdPlugin;
 use weld_window::WindowPlugin;
 use weld_window_ui::WindowUiPlugin;
@@ -33,6 +34,7 @@ pub fn run(arguments: AppArguments) -> Result<()> {
         WindowUiPlugin,
         SsdPlugin,
         FloatPlugin,
+        HoistPlugin,
         GlobalShortcutPlugin,
         VirtualTerminalShortcutPlugin,
         DistributionOverlayPlugin,

@@ -651,6 +651,20 @@ impl XdgShellHandler for ServerState {
         self.register_popup(surface, positioner);
     }
 
+    fn parent_changed(&mut self, surface: ToplevelSurface) {
+        let Some(surface_id) = self.toplevels.id_for_surface(surface.wl_surface()) else {
+            return;
+        };
+        let parent = surface
+            .parent()
+            .as_ref()
+            .and_then(|parent| self.toplevels.id_for_surface(parent));
+        self.pending_surface_events.push_back(PendingSurfaceEvent {
+            surface: surface_id,
+            kind: PendingSurfaceEventKind::ToplevelParentChanged { parent },
+        });
+    }
+
     fn move_request(&mut self, surface: ToplevelSurface, seat: wl_seat::WlSeat, serial: Serial) {
         self.begin_pointer_move(surface, seat, serial);
     }

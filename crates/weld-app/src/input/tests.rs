@@ -19,11 +19,11 @@ use leafwing_input_manager::prelude::{ActionState, Actionlike, InputManagerPlugi
 use winit::keyboard::Key;
 
 use super::{
-    ApplicationInputBuffer, GlobalShortcutAction, GlobalShortcutPlugin, InputBridgePlugin,
-    InputOutputTarget, PointerShortcut, PointerShortcutAppExt, PointerShortcutModifiers,
-    TouchpadGesture, VirtualTerminalShortcutPlugin, enqueue_application_input_batch,
-    enqueue_raw_input, filter_global_shortcut_event, filter_pointer_shortcut_event,
-    filter_virtual_terminal_event,
+    ApplicationInputBuffer, GlobalShortcut, GlobalShortcutAppExt, GlobalShortcutModifiers,
+    GlobalShortcutPlugin, GlobalShortcutPressed, InputBridgePlugin, InputOutputTarget,
+    PointerShortcut, PointerShortcutAppExt, PointerShortcutModifiers, TouchpadGesture,
+    VirtualTerminalShortcutPlugin, enqueue_application_input_batch, enqueue_raw_input,
+    filter_global_shortcut_event, filter_pointer_shortcut_event, filter_virtual_terminal_event,
     raw::{
         ButtonState, InputDelta, InputPosition, LinuxButtonCode, LinuxKeycode, PointerGesture,
         RawSeatEvent, RawSeatEventKind, TouchpadPinch,
@@ -416,6 +416,10 @@ fn physical_scale_match_shortcut_is_enabled_only_for_drm() {
 #[test]
 fn application_global_shortcut_is_consumed_without_becoming_a_host_command() {
     let mut app = shortcut_test_app(ActiveBackend::Nested);
+    let shortcut = app.register_global_shortcut(GlobalShortcut::new(
+        KeyCode::KeyO,
+        GlobalShortcutModifiers::super_shift(),
+    ));
     for (keycode, time, forwarded) in [(125, 10, true), (42, 11, true), (24, 12, false)] {
         assert_eq!(
             enqueue_host_input(
@@ -433,13 +437,51 @@ fn application_global_shortcut_is_consumed_without_becoming_a_host_command() {
         );
     }
     assert!(take_host_commands(app.world_mut()).is_empty());
-    let mut cursor = MessageCursor::<GlobalShortcutAction>::default();
+    let mut cursor = MessageCursor::<GlobalShortcutPressed>::default();
     assert_eq!(
         cursor
-            .read(app.world().resource::<Messages<GlobalShortcutAction>>())
-            .copied()
+            .read(app.world().resource::<Messages<GlobalShortcutPressed>>())
+            .map(|pressed| pressed.shortcut())
             .collect::<Vec<_>>(),
-        [GlobalShortcutAction::ToggleOutputTopology]
+        [shortcut]
+    );
+}
+
+#[test]
+fn application_shortcut_registration_survives_later_global_plugin_setup() {
+    let mut app = App::new();
+    app.insert_resource(ActiveBackend::Nested)
+        .add_plugins(MinimalPlugins)
+        .add_plugins(InputPlugin)
+        .add_message::<PointerInput>()
+        .add_plugins(InputBridgePlugin::new(input_targets()));
+    let shortcut = app.register_global_shortcut(GlobalShortcut::new(
+        KeyCode::KeyH,
+        GlobalShortcutModifiers::super_key(),
+    ));
+    app.add_plugins(GlobalShortcutPlugin);
+
+    for keycode in [125, 35] {
+        enqueue_host_input(
+            &mut app,
+            RawSeatEvent::new(
+                RawSeatEventKind::Keyboard {
+                    keycode: LinuxKeycode(keycode),
+                    logical_key: None,
+                    state: ButtonState::Pressed,
+                },
+                keycode,
+            ),
+        );
+    }
+
+    let mut cursor = MessageCursor::<GlobalShortcutPressed>::default();
+    assert_eq!(
+        cursor
+            .read(app.world().resource::<Messages<GlobalShortcutPressed>>())
+            .map(|pressed| pressed.shortcut())
+            .collect::<Vec<_>>(),
+        [shortcut]
     );
 }
 

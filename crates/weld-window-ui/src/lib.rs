@@ -32,10 +32,10 @@ use weld_app::{
     surface::{ClientDecorated, ClientPopup, ClientSurface, ClientToplevel, MappedSurface},
 };
 use weld_window::{
-    OccupiesWindow, PresentationInsets, PresentationOffset, PresentsWindow,
-    PrimaryWindowPresentation, WindowGeometry, WindowGeometryAnchor, WindowOccupant, WindowOutput,
-    WindowOutputIntersections, WindowProjection, WindowSystems, WindowVacancy, WindowVisibility,
-    WindowZOrder,
+    ManagedWindow, PresentationInsets, PresentationOffset, PresentsWindow,
+    PrimaryWindowPresentation, WindowClientResolver, WindowGeometry, WindowGeometryAnchor,
+    WindowOccupant, WindowOutput, WindowOutputIntersections, WindowPresentationOverride,
+    WindowProjection, WindowSystems, WindowVacancy, WindowVisibility, WindowZOrder,
 };
 
 /// Attaches a UI root to the client-surface entity it presents.
@@ -114,35 +114,48 @@ impl Plugin for WindowUiPlugin {
 fn revoke_client_presentations(
     mut commands: Commands,
     roots: Query<(Entity, &WindowProjection), With<client::ClientWindowPresentation>>,
-    windows: Query<&WindowOccupant>,
+    windows: Query<Option<&WindowPresentationOverride>, With<ManagedWindow>>,
+    clients: WindowClientResolver,
     occupants: Query<(), With<ClientDecorated>>,
 ) {
     for (root, projection) in &roots {
         let still_client_decorated = windows
             .get(projection.window())
-            .ok()
-            .is_some_and(|occupant| occupants.contains(occupant.entity()));
+            .is_ok_and(|presentation_override| presentation_override.is_none())
+            && clients
+                .client_entity(projection.window())
+                .is_some_and(|client| occupants.contains(client));
         if !still_client_decorated {
             commands.entity(root).despawn();
         }
     }
 }
 
+type ProjectedClientWindows<'w, 's> = Query<
+    'w,
+    's,
+    (
+        Entity,
+        &'static PrimaryWindowPresentation,
+        &'static WindowZOrder,
+        &'static WindowOutputIntersections,
+        Option<&'static WindowPresentationOverride>,
+    ),
+>;
+
 fn reconcile_client_window_projections(
     mut commands: Commands,
-    windows: Query<(
-        Entity,
-        &PrimaryWindowPresentation,
-        &WindowOccupant,
-        &WindowZOrder,
-        &WindowOutputIntersections,
-    )>,
+    windows: ProjectedClientWindows,
+    clients: WindowClientResolver,
     occupants: Query<(&ClientToplevel, &MappedSurface, Option<&ClientDecorated>)>,
     outputs: Query<&OutputCompositionCamera>,
     roots: Query<(Entity, &WindowProjection), With<client::ClientWindowPresentation>>,
 ) {
     let mut retained = HashSet::new();
-    for (window, primary, _, _, _) in &windows {
+    for (window, primary, _, _, presentation_override) in &windows {
+        if presentation_override.is_some() {
+            continue;
+        }
         if let Ok((_, projection)) = roots.get(primary.entity()) {
             retained.insert((window, projection.output()));
         }
@@ -152,26 +165,36 @@ fn reconcile_client_window_projections(
         .iter()
         .filter(
             |(root, projection)| match windows.get(projection.window()) {
-                Ok((_, primary, _, _, _)) => *root != primary.entity(),
+                Ok((_, primary, _, _, presentation_override)) => {
+                    presentation_override.is_some() || *root != primary.entity()
+                }
                 Err(_) => true,
             },
         )
         .collect::<Vec<_>>();
     secondary_roots.sort_unstable_by_key(|(root, _)| root.to_bits());
     for (root, projection) in secondary_roots {
-        let Ok((_, _, _, _, intersections)) = windows.get(projection.window()) else {
+        let Ok((_, _, _, intersections, presentation_override)) = windows.get(projection.window())
+        else {
             commands.entity(root).despawn();
             continue;
         };
-        if !intersections.contains(projection.output())
+        if presentation_override.is_some()
+            || !intersections.contains(projection.output())
             || !retained.insert((projection.window(), projection.output()))
         {
             commands.entity(root).despawn();
         }
     }
 
-    for (window, _, occupant, z_order, intersections) in &windows {
-        let Ok((toplevel, mapped, Some(_))) = occupants.get(occupant.entity()) else {
+    for (window, _, z_order, intersections, presentation_override) in &windows {
+        if presentation_override.is_some() {
+            continue;
+        }
+        let Some(client) = clients.client_entity(window) else {
+            continue;
+        };
+        let Ok((toplevel, mapped, Some(_))) = occupants.get(client) else {
             continue;
         };
         for output in intersections.iter() {
@@ -210,25 +233,31 @@ type OutputCameraQuery<'w, 's> = Query<
     With<WeldOutput>,
 >;
 
+type UnpresentedClientWindows<'w, 's> = Query<
+    'w,
+    's,
+    (Entity, &'static WindowZOrder, Option<&'static WindowOutput>),
+    (
+        Without<PrimaryWindowPresentation>,
+        Without<WindowPresentationOverride>,
+    ),
+>;
+
 fn present_client_windows(
     mut commands: Commands,
-    windows: Query<
-        (
-            Entity,
-            &WindowOccupant,
-            &WindowZOrder,
-            Option<&WindowOutput>,
-        ),
-        Without<PrimaryWindowPresentation>,
-    >,
+    windows: UnpresentedClientWindows,
+    clients: WindowClientResolver,
     occupants: Query<(&ClientToplevel, &MappedSurface, Option<&ClientDecorated>)>,
     outputs: OutputCameraQuery,
 ) {
     let _presentation_span =
         tracing::trace_span!(target: PROFILE_TARGET, "weld_window_present_client_windows")
             .entered();
-    for (window, occupant, z_order, output) in &windows {
-        let Ok((toplevel, mapped, Some(_))) = occupants.get(occupant.entity()) else {
+    for (window, z_order, output) in &windows {
+        let Some(client) = clients.client_entity(window) else {
+            continue;
+        };
+        let Ok((toplevel, mapped, Some(_))) = occupants.get(client) else {
             continue;
         };
         let output = output.map(|output| output.0).or_else(|| {
@@ -277,15 +306,13 @@ type ClientMetricRoots<'w, 's> = Query<
 
 fn sync_client_presentation_metrics(
     mut commands: Commands,
-    windows: Query<&WindowOccupant>,
-    occupants: Query<&MappedSurface>,
+    clients: WindowClientResolver,
     mut roots: ClientMetricRoots,
 ) {
     for (root, presentation, mut offset, mut anchor, shadow) in &mut roots {
-        let Some(mapped) = windows
-            .get(presentation.0)
-            .ok()
-            .and_then(|occupant| occupants.get(occupant.entity()).ok())
+        let Some(mapped) = clients
+            .mapped_client(presentation.0)
+            .map(|client| client.mapped())
         else {
             continue;
         };
@@ -376,22 +403,20 @@ fn present_popups(
         (Entity, &ClientSurface, &ClientPopup, &MappedSurface),
         Without<PrimarySurfacePresentation>,
     >,
-    toplevels: Query<(&ClientToplevel, &OccupiesWindow)>,
+    clients: WindowClientResolver,
     windows: Query<(
         &PrimaryWindowPresentation,
         &WindowVisibility,
-        Option<&WindowOccupant>,
+        Option<&WindowPresentationOverride>,
     )>,
     anchors: Query<&WindowGeometryAnchor>,
     window_projections: Query<&WindowProjection>,
 ) {
     for (source, client_surface, popup, mapped) in &popups {
-        let Some(window) = toplevels.iter().find_map(|(toplevel, occupancy)| {
-            (toplevel.surface == popup.owner).then_some(occupancy.0)
-        }) else {
+        let Some(window) = clients.window_for_surface(popup.owner) else {
             continue;
         };
-        let Ok((presentation, WindowVisibility::Visible, Some(_))) = windows.get(window) else {
+        let Ok((presentation, WindowVisibility::Visible, None)) = windows.get(window) else {
             continue;
         };
         let Ok(anchor) = anchors.get(presentation.entity()) else {
@@ -438,11 +463,11 @@ fn sync_popup_presentations(
         Option<&MappedSurface>,
         &PrimarySurfacePresentation,
     )>,
-    toplevels: Query<(&ClientToplevel, &OccupiesWindow)>,
+    clients: WindowClientResolver,
     windows: Query<(
         &PrimaryWindowPresentation,
         &WindowVisibility,
-        Option<&WindowOccupant>,
+        Option<&WindowPresentationOverride>,
     )>,
     anchors: Query<&WindowGeometryAnchor>,
     mut roots: PopupRoots,
@@ -455,13 +480,11 @@ fn sync_popup_presentations(
         if primary.entity() != root {
             continue;
         }
-        let Some(window) = toplevels.iter().find_map(|(toplevel, occupancy)| {
-            (toplevel.surface == popup.owner).then_some(occupancy.0)
-        }) else {
+        let Some(window) = clients.window_for_surface(popup.owner) else {
             node.display = Display::None;
             continue;
         };
-        let Ok((presentation, WindowVisibility::Visible, Some(_))) = windows.get(window) else {
+        let Ok((presentation, WindowVisibility::Visible, None)) = windows.get(window) else {
             node.display = Display::None;
             continue;
         };
@@ -498,8 +521,8 @@ type PopupProjectionRoots<'w, 's> = Query<
 fn reconcile_popup_projections(
     mut commands: Commands,
     popups: Query<(Entity, &ClientSurface, &ClientPopup, Option<&MappedSurface>)>,
-    toplevels: Query<(&ClientToplevel, &OccupiesWindow)>,
-    windows: Query<(&WindowVisibility, Option<&WindowOccupant>)>,
+    clients: WindowClientResolver,
+    windows: Query<(&WindowVisibility, Option<&WindowPresentationOverride>)>,
     window_roots: Query<(Entity, &WindowProjection, &WindowGeometryAnchor)>,
     mut roots: PopupProjectionRoots,
 ) {
@@ -514,12 +537,21 @@ fn reconcile_popup_projections(
             commands.entity(root).despawn();
             continue;
         };
-        let visible = windows
+        let visible = windows.get(projection.window).ok().is_some_and(
+            |(visibility, presentation_override)| {
+                *visibility == WindowVisibility::Visible
+                    && clients.mapped_client(projection.window).is_some()
+                    && presentation_override.is_none()
+            },
+        );
+        if windows
             .get(projection.window)
             .ok()
-            .is_some_and(|(visibility, occupant)| {
-                *visibility == WindowVisibility::Visible && occupant.is_some()
-            });
+            .is_some_and(|(_, presentation_override)| presentation_override.is_some())
+        {
+            commands.entity(root).despawn();
+            continue;
+        }
         if parent.is_none_or(|parent| parent.parent() != window_root) {
             commands.entity(root).insert(ChildOf(window_root));
         }
@@ -536,11 +568,16 @@ fn reconcile_popup_projections(
         let Some(mapped) = mapped else {
             continue;
         };
-        let Some(window) = toplevels.iter().find_map(|(toplevel, occupancy)| {
-            (toplevel.surface == popup.owner).then_some(occupancy.0)
-        }) else {
+        let Some(window) = clients.window_for_surface(popup.owner) else {
             continue;
         };
+        if windows
+            .get(window)
+            .ok()
+            .is_some_and(|(_, presentation_override)| presentation_override.is_some())
+        {
+            continue;
+        }
         for (window_root, projection, anchor) in window_roots
             .iter()
             .filter(|(_, projection, _)| projection.window() == window)

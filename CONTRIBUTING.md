@@ -117,6 +117,7 @@ The standard distribution provides these backend-neutral shortcuts:
 - `Super+Enter`: launch foot
 - `Super+F`: launch Firefox
 - `Super+B`: launch Blender
+- `Super+H`: hoist or locally preview the focused occupied window
 - `Super+LMB`: move the floating window under the pointer
 - `Super+RMB`: resize the floating window under the pointer from its nearest corner
 - `Super+Shift+O`: toggle output-topology diagnostics

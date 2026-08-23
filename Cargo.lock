@@ -5528,6 +5528,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "weld-hoist"
+version = "0.1.0"
+dependencies = [
+ "bevy",
+ "weld-app",
+ "weld-float",
+ "weld-ssd",
+ "weld-window",
+ "weld-window-ui",
+]
+
+[[package]]
 name = "weld-ssd"
 version = "0.1.0"
 dependencies = [
@@ -5572,6 +5584,7 @@ dependencies = [
  "weld-app",
  "weld-core",
  "weld-float",
+ "weld-hoist",
  "weld-ssd",
  "weld-window",
  "weld-window-ui",

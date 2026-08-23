@@ -33,9 +33,10 @@ use weld_app::{
 };
 use weld_window::{
     FocusedWindow, PresentationInsets, PresentationOffset, PresentsWindow,
-    PrimaryWindowPresentation, WindowCloseHandle, WindowGeometryAnchor, WindowMoveHandle,
-    WindowOccupant, WindowOutput, WindowOutputIntersections, WindowProjection, WindowResizeHandle,
-    WindowSystems, WindowVacancy, WindowZOrder,
+    PrimaryWindowPresentation, WindowClientBinding, WindowClientResolver, WindowCloseHandle,
+    WindowGeometryAnchor, WindowMoveHandle, WindowOutput, WindowOutputIntersections,
+    WindowPresentationOverride, WindowProjection, WindowResizeHandle, WindowSystems, WindowVacancy,
+    WindowZOrder,
 };
 use weld_window_ui::surface_content_with_node;
 
@@ -51,6 +52,8 @@ const RESIZE_HALO_EXTENT: f32 = RESIZE_GRAB_EXTENT - BORDER_WIDTH;
 const RESIZE_HANDLE_INSET: f32 = -(RESIZE_HALO_EXTENT + BORDER_WIDTH);
 const FOCUSED_BORDER: Color = Color::srgb(0.35, 0.58, 0.88);
 const UNFOCUSED_BORDER: Color = Color::srgb(0.28, 0.34, 0.42);
+const PROXIED_FOCUSED_BORDER: Color = Color::srgb(0.92, 0.18, 0.16);
+const PROXIED_UNFOCUSED_BORDER: Color = Color::srgb(0.58, 0.12, 0.12);
 
 #[derive(Component, Clone, Copy, Debug)]
 struct SsdPresentation;
@@ -103,18 +106,20 @@ fn revoke_ssd_presentations(
         ),
         With<SsdPresentation>,
     >,
-    windows: Query<(Option<&WindowOccupant>, &WindowVacancy)>,
+    windows: Query<(&WindowVacancy, Option<&WindowPresentationOverride>)>,
+    clients: WindowClientResolver,
     occupants: Query<(), With<ServerDecorated>>,
 ) {
     for (root, projection, vacant_presentation) in &roots {
         let still_server_decorated =
             windows
                 .get(projection.window())
-                .is_ok_and(|(occupant, vacancy)| match occupant {
-                    Some(occupant) => {
-                        vacant_presentation.is_none() && occupants.contains(occupant.entity())
-                    }
-                    None => vacant_presentation.is_some() && *vacancy == WindowVacancy::Retain,
+                .is_ok_and(|(vacancy, presentation_override)| {
+                    presentation_override.is_none()
+                        && clients.client_entity(projection.window()).map_or(
+                            vacant_presentation.is_some() && *vacancy == WindowVacancy::Retain,
+                            |client| vacant_presentation.is_none() && occupants.contains(client),
+                        )
                 });
         if !still_server_decorated {
             commands.entity(root).despawn();
@@ -128,16 +133,17 @@ type ProjectedSsdWindows<'w, 's> = Query<
     (
         Entity,
         &'static PrimaryWindowPresentation,
-        Option<&'static WindowOccupant>,
         &'static WindowVacancy,
         &'static WindowZOrder,
         &'static WindowOutputIntersections,
+        Option<&'static WindowPresentationOverride>,
     ),
 >;
 
 fn reconcile_ssd_projections(
     mut commands: Commands,
     windows: ProjectedSsdWindows,
+    clients: WindowClientResolver,
     occupants: Query<(
         &ClientToplevel,
         Option<&MappedSurface>,
@@ -147,7 +153,10 @@ fn reconcile_ssd_projections(
     roots: Query<(bevy::ecs::entity::Entity, &WindowProjection), With<SsdPresentation>>,
 ) {
     let mut retained = HashSet::new();
-    for (window, primary, _, _, _, _) in &windows {
+    for (window, primary, _, _, _, presentation_override) in &windows {
+        if presentation_override.is_some() {
+            continue;
+        }
         if let Ok((_, projection)) = roots.get(primary.entity()) {
             retained.insert((window, projection.output()));
         }
@@ -157,28 +166,36 @@ fn reconcile_ssd_projections(
         .iter()
         .filter(
             |(root, projection)| match windows.get(projection.window()) {
-                Ok((_, primary, _, _, _, _)) => *root != primary.entity(),
+                Ok((_, primary, _, _, _, presentation_override)) => {
+                    presentation_override.is_some() || *root != primary.entity()
+                }
                 Err(_) => true,
             },
         )
         .collect::<Vec<_>>();
     secondary_roots.sort_unstable_by_key(|(root, _)| root.to_bits());
     for (root, projection) in secondary_roots {
-        let Ok((_, _, _, _, _, intersections)) = windows.get(projection.window()) else {
+        let Ok((_, _, _, _, intersections, presentation_override)) =
+            windows.get(projection.window())
+        else {
             commands.entity(root).despawn();
             continue;
         };
-        if !intersections.contains(projection.output())
+        if presentation_override.is_some()
+            || !intersections.contains(projection.output())
             || !retained.insert((projection.window(), projection.output()))
         {
             commands.entity(root).despawn();
         }
     }
 
-    for (window, _, occupant, vacancy, z_order, intersections) in &windows {
-        let content = match occupant {
-            Some(occupant) => {
-                let Ok((toplevel, Some(_), Some(_))) = occupants.get(occupant.entity()) else {
+    for (window, _, vacancy, z_order, intersections, presentation_override) in &windows {
+        if presentation_override.is_some() {
+            continue;
+        }
+        let content = match clients.client_entity(window) {
+            Some(client) => {
+                let Ok((toplevel, Some(_), Some(_))) = occupants.get(client) else {
                     continue;
                 };
                 SsdContent::Surface(toplevel.surface)
@@ -235,17 +252,20 @@ type UnpresentedSsdWindows<'w, 's> = Query<
     's,
     (
         Entity,
-        Option<&'static WindowOccupant>,
         &'static WindowVacancy,
         &'static WindowZOrder,
         Option<&'static WindowOutput>,
     ),
-    Without<PrimaryWindowPresentation>,
+    (
+        Without<PrimaryWindowPresentation>,
+        Without<WindowPresentationOverride>,
+    ),
 >;
 
 fn present_ssd_windows(
     mut commands: Commands,
     windows: UnpresentedSsdWindows,
+    clients: WindowClientResolver,
     occupants: Query<(
         &ClientToplevel,
         Option<&MappedSurface>,
@@ -255,10 +275,10 @@ fn present_ssd_windows(
 ) {
     let _presentation_span =
         tracing::trace_span!(target: PROFILE_TARGET, "weld_ssd_present_windows").entered();
-    for (window, occupant, vacancy, z_order, output) in &windows {
-        let content = match occupant {
-            Some(occupant) => {
-                let Ok((toplevel, Some(_), Some(_))) = occupants.get(occupant.entity()) else {
+    for (window, vacancy, z_order, output) in &windows {
+        let content = match clients.client_entity(window) {
+            Some(client) => {
+                let Ok((toplevel, Some(_), Some(_))) = occupants.get(client) else {
                     continue;
                 };
                 SsdContent::Surface(toplevel.surface)
@@ -305,16 +325,25 @@ fn present_ssd_windows(
 
 fn sync_focus_style(
     focus: Res<FocusedWindow>,
+    windows: Query<Option<&WindowClientBinding>>,
     mut roots: Query<(&WindowProjection, &mut BorderColor), With<SsdPresentation>>,
     mut redraw: bevy::ecs::message::MessageWriter<RequestRedraw>,
 ) {
     let mut changed = false;
     for (projection, mut border) in &mut roots {
-        let expected = BorderColor::all(if focus.entity() == Some(projection.window()) {
-            FOCUSED_BORDER
-        } else {
-            UNFOCUSED_BORDER
-        });
+        let focused = focus.entity() == Some(projection.window());
+        let proxied = windows
+            .get(projection.window())
+            .ok()
+            .flatten()
+            .is_some_and(|binding| binding.source().is_some());
+        let color = match (proxied, focused) {
+            (true, true) => PROXIED_FOCUSED_BORDER,
+            (true, false) => PROXIED_UNFOCUSED_BORDER,
+            (false, true) => FOCUSED_BORDER,
+            (false, false) => UNFOCUSED_BORDER,
+        };
+        let expected = BorderColor::all(color);
         if *border != expected {
             *border = expected;
             changed = true;
