@@ -41,6 +41,16 @@ composition target, and camera ownership. Multi-seat work should retain seat
 identity from raw input through focus and delivery. Neither capability should
 be simulated by global singleton state once its implementation begins.
 
+Weld currently creates Smithay's data-device state and updates its focus, but
+does not accept client drag-and-drop requests: the unoverridden Smithay handler
+cancels each requested drag. This is a known functional regression for clients
+such as Firefox, where tab reordering and detaching a tab into a new window can
+use the Wayland drag-and-drop grab. Completing local pointer and touch DnD,
+including drag-icon presentation and action negotiation, is required before
+data-device support can be considered usable. The implementation should use
+Smithay's existing DnD grabs rather than reproducing their serial, focus, offer,
+and action state machine in Weld.
+
 ## Resilience — Direction
 
 Client failure, malformed requests, output hotplug or sleep, VT deactivation,

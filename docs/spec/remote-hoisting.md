@@ -245,9 +245,57 @@ revocation, or unrecoverable connection loss restores local presentation. A
 short reconnect policy may preserve the remote placement, but source recovery
 must not depend on the destination remaining available.
 
+A placeholder should retain stable descriptive metadata, including the last
+known window title, so it remains identifiable after relocation or remote
+closure. A future **Peek** action may temporarily reveal the current remote
+presentation or a bounded live preview without reclaiming the window, changing
+placement, or transferring input ownership. Peek availability, cadence, and
+input behavior must remain explicit policy rather than an implicit transport
+side effect.
+
 The destination may request a new logical content size. The source translates
 that request into a client configure and streams the eventual committed size;
 interactive destination resize may temporarily scale the most recent frame.
+
+## Drag-and-drop and transferred data — Direction
+
+Wayland drag-and-drop is compositor-mediated rather than a private exchange
+between two clients. The source client starts a data-device drag with offered
+MIME types and actions, the compositor maintains the input grab and target
+focus, the destination accepts an offer, and the selected payload is written
+through a file descriptor. Weld must preserve that lifecycle independently
+from the bytes carried by a selected MIME type.
+
+The same-process loopback does not need a remote filesystem abstraction. Once
+ordinary local DnD is implemented, input and focus for a relocated presentation
+can route back to its authoritative Wayland surface while Smithay retains the
+local offer and file-descriptor transfer. Dragging between a local presentation
+and a loopback-hoisted presentation should therefore remain an ordinary local
+compositor operation. A drag icon is an owned surface role and must follow the
+active presentation without becoming a managed window.
+
+A network hoist cannot forward a Unix file descriptor. It needs a neutral DnD
+control flow for drag start, offered MIME types and actions, target enter and
+leave, acceptance, drop, cancellation, and completion, plus a separate bounded
+byte stream for the MIME payload. Native Wayland and Smithay objects remain in
+the source adapter; the transport carries stable seat, session, window, and
+surface identities. DnD, clipboard, and general file transfer may share data
+streaming machinery, but remain separately authorized capabilities.
+
+Some MIME payloads are already portable bytes, such as plain text or an image.
+`text/uri-list` commonly names files in the source machine's filesystem and is
+not portable merely because its text can be relayed. A remote implementation
+must choose explicit policy per offer: stage or upload files and rewrite the
+offered URIs for the destination, grant access through an authorized shared
+mount or portal-like mechanism, or reject the offer. Copy is the safe initial
+file action. Move must not be advertised until completion, partial failure,
+conflict, cancellation, and source deletion semantics are defined end to end.
+
+This boundary belongs below presentation: `weld-client` should be able to
+express neutral DnD roles and lifecycle, the Smithay adapter in `weld-core`
+should own native grabs and descriptors, and a future hoist transport should
+relay control and payload streams. Presentation plugins may render a drag icon
+or transfer status, but do not own offers, filesystem policy, or transport.
 
 ## Adaptive media — Direction
 
@@ -396,6 +444,8 @@ silently exposing applications that a peer was not authorized to discover.
 - Hardware support and session budgets for AV1, VP9, H.264, and paired alpha
   payloads on representative Intel, AMD, NVIDIA, and mobile devices.
 - Per-application PipeWire audio and clipboard semantics.
+- Remote drag-and-drop negotiation, payload relay, file staging, and URI
+  namespace policy.
 - Congestion and fairness policy for several simultaneous windows.
 - Workspace identity, filtering, mirroring, and local/remote layout meld rules.
 - Destination handoff and whether one hoist may move between peers without a
