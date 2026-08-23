@@ -5496,6 +5496,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "weld-client"
+version = "0.1.0"
+
+[[package]]
 name = "weld-core"
 version = "0.1.0"
 dependencies = [
