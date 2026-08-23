@@ -38,6 +38,13 @@ pub struct ClientSourceDescriptor {
     pub provenance: ClientProvenance,
 }
 
+/// Declares that a same-process relay preserves an upstream access payload.
+///
+/// Application importers must still validate the concrete payload type. This
+/// marker is intended only for trusted loopback adapters.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct PassthroughClientImporter;
+
 impl ClientSourceDescriptor {
     pub const fn new(id: ClientSourceId, provenance: ClientProvenance) -> Self {
         Self { id, provenance }

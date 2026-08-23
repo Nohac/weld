@@ -454,6 +454,12 @@ pub(super) fn run(
                 clients.publish_pointer_route(route);
             }
             loop_data.server.apply_pending_client_work();
+            for command in application.take_adapter_commands() {
+                if !clients.apply_command(command) {
+                    warn!("ignored a command for an unregistered client source");
+                }
+            }
+            loop_data.server.apply_pending_client_work();
             for command in application.take_host_commands() {
                 match children.apply(&loop_data.server, command)? {
                     HostCommandEffect::Continue => {}

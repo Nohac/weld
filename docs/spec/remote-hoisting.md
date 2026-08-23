@@ -44,6 +44,35 @@ for one frame before window admission and follow-family policy observe it; that
 prototype transition remains to be tightened. No remote transport, complete
 transient policy, or non-xdg family inference is implemented.
 
+## Hoisting layers and crate boundaries — Direction
+
+The local proof now separates its neutral relay, Weld application integration,
+and placeholder scene. The present crates establish dependency direction, but
+they do not yet define the remote wire or media protocol:
+
+- `weld-hoist-core` owns the runtime-independent hoist identities and current
+  same-process loopback adapter. It must remain free of Bevy, Smithay, wgpu,
+  codec, and network dependencies as the stable session, preference, lifecycle,
+  control, input, media, and transport contracts are developed.
+- `weld-hoist` is the Weld application integration. It projects the core
+  domain into `weld-app` and managed-window components, translates between
+  stable client identities and live entities, and owns window-family admission
+  and reclaim orchestration. It is the optional Bevy plugin, not the owner of
+  the wire protocol, client buffers, or placeholder visuals.
+- `weld-hoist-ui` is the optional BSN presentation plugin. It supplies source
+  placeholders, reclaim and dismiss controls, connection status, and other
+  user-facing scenes by attaching children to managed windows through the
+  public hoist state and actions. SSD must not own or special-case those
+  controls.
+
+Transport and codec implementations remain replaceable adapters around
+`weld-hoist-core`; concrete crates should be introduced only when their
+dependencies and runtime boundaries are known. A headless source can therefore
+combine `weld-core`, `weld-hoist-core`, and selected transport and media
+adapters without constructing Bevy or `weld-hoist-ui`. A browser, mobile, or
+native destination can implement the stable protocol without linking any Weld
+crate.
+
 ## Scope — Direction
 
 Hoisting relocates the interactive presentation of windows, not their
@@ -102,10 +131,12 @@ Media revisions, damage, synchronization, and popup/tree state use the same
 identity graph but remain logically separate from ordered control and input
 flows.
 
-The current `WindowClientBinding` is only the same-process ECS projection of
-one selected policy endpoint. It must not be serialized or exposed as the
-network API; Bevy entities, Smithay objects, native graphics handles, and wgpu
-internals stay behind endpoint adapters.
+The local loopback is expressed as an ordinary `weld-client` adapter with a
+Relocated source namespace and runtime route aliases back to the authoritative
+source. That adapter is only an in-process validation of the endpoint model;
+its commands and erased buffer access are not a wire API. Bevy entities,
+Smithay objects, native graphics handles, and wgpu internals stay behind
+endpoint adapters.
 
 ## Endpoint roles and portability — Direction
 
@@ -275,6 +306,46 @@ literal zero GPU copies is an opportunistic fast path. SHM clients are the
 explicit source-memory exception because their submitted pixels already reside
 in CPU memory.
 
+### GPU-resident network handoff — Exploration
+
+The longest useful fast path keeps large frame data outside CPU memory:
+
+```text
+client DMA-BUF -> hardware codec -> device-resident encoded payload -> NIC
+```
+
+The first edge can directly import a compatible client buffer or consume a
+GPU-composited encoder buffer. The final edge is a separate capability: an
+encoder and network adapter must agree on device-visible output memory,
+synchronization, packetization, and ownership. Linux
+[DMA-BUF](https://docs.kernel.org/driver-api/dma-buf.html) supplies cross-device
+buffer sharing and fence primitives, but it is not itself a network transport.
+
+[NVIDIA DOCA GPUNetIO](https://docs.nvidia.com/doca/sdk/doca-gpunetio/) is
+evidence that a GPU can control compatible NIC queues and transmit from GPU
+memory without a CPU staging copy. Its preferred GPU-memory mapping uses
+DMA-BUF, but the documented path requires a supported NVIDIA GPU software
+stack and a ConnectX or BlueField NIC. It is therefore a hardware-specific
+candidate rather than Weld's baseline network abstraction. Equivalent paths
+for Intel, AMD, other NICs, and mobile devices remain to be researched.
+
+This optimization must be capability-negotiated in independent stages:
+
+- importing or composing the source into encoder-compatible device memory;
+- hardware encoding without raw-frame CPU readback;
+- retaining the encoded payload in device- or NIC-visible memory; and
+- framing, encrypting, and transmitting it without moving that payload through
+  ordinary CPU memory.
+
+The media and transport contracts must expose each stage rather than advertise
+one ambiguous `zero_copy` flag. An ordinary secure transport such as Iroh may
+initially require the much smaller compressed bitstream in CPU-visible memory;
+that remains an acceptable fallback because it avoids the expensive raw-frame
+readback. A GPU-network fast path must preserve the same authenticated and
+encrypted wire protocol and must not bypass authorization merely to avoid a
+copy. Exact DMA-BUF lifetime and fence ownership remain mandatory until every
+encoder and network consumer has finished with a frame.
+
 ## Launcher federation — Direction
 
 An authenticated protocol should let a launcher combine local applications
@@ -319,6 +390,9 @@ silently exposing applications that a peer was not authorized to discover.
 
 - Iroh discovery and relay behavior across realistic networks.
 - GPU capture and encoder interop without unnecessary full-frame copies.
+- Device-resident encoded output and GPU-to-NIC transmission, including
+  GPUNetIO-class hardware constraints and compatibility with authenticated,
+  encrypted transport framing.
 - Hardware support and session budgets for AV1, VP9, H.264, and paired alpha
   payloads on representative Intel, AMD, NVIDIA, and mobile devices.
 - Per-application PipeWire audio and clipboard semantics.

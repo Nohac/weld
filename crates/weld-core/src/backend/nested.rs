@@ -369,10 +369,12 @@ pub(crate) fn prepare(options: RunOptions, signals: Signals) -> Result<PreparedH
                     }
                     let client_requests = shell.take_client_requests();
                     let pointer_routes = shell.take_pointer_route_updates();
+                    let adapter_commands = shell.take_adapter_commands();
                     let host_commands = shell.take_host_commands();
                     let cursor_update = shell.take_cursor_update();
                     if !client_requests.is_empty()
                         || !pointer_routes.is_empty()
+                        || !adapter_commands.is_empty()
                         || !host_commands.is_empty()
                     {
                         let _results_span = tracing::trace_span!(
@@ -384,6 +386,7 @@ pub(crate) fn prepare(options: RunOptions, signals: Signals) -> Result<PreparedH
                             target: crate::PROFILE_TARGET,
                             client_requests = client_requests.len(),
                             pointer_routes = pointer_routes.len(),
+                            adapter_commands = adapter_commands.len(),
                             host_commands = host_commands.len(),
                             "ECS result batch"
                         );
@@ -398,6 +401,12 @@ pub(crate) fn prepare(options: RunOptions, signals: Signals) -> Result<PreparedH
                         loop_data.server.apply_pending_client_work();
                         for route in pointer_routes {
                             clients.publish_pointer_route(route);
+                        }
+                        loop_data.server.apply_pending_client_work();
+                        for command in adapter_commands {
+                            if !clients.apply_command(command) {
+                                warn!("ignored a command for an unregistered client source");
+                            }
                         }
                         loop_data.server.apply_pending_client_work();
                         for command in host_commands {

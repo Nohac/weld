@@ -156,29 +156,9 @@ impl WindowOccupant {
     }
 }
 
-/// Selects the managed window whose direct occupant supplies this window's
-/// client-facing presentation and policy.
-///
-/// Without this component a window uses its own [`WindowOccupant`].
-/// [`Self::suppress`] disables client-facing policy while preserving direct
-/// occupancy. [`Self::proxy`] borrows another window's direct occupant for one
-/// hop without transferring authority or allowing proxy chains.
-#[derive(Component, Clone, Copy, Debug, Eq, PartialEq)]
-pub struct WindowClientBinding(Option<Entity>);
-
-impl WindowClientBinding {
-    pub const fn suppress() -> Self {
-        Self(None)
-    }
-
-    pub const fn proxy(source: Entity) -> Self {
-        Self(Some(source))
-    }
-
-    pub const fn source(self) -> Option<Entity> {
-        self.0
-    }
-}
+/// Prevents default window admission while another policy owns placement.
+#[derive(Component, Clone, Copy, Debug, Default)]
+pub struct WindowAdmissionHold;
 
 /// One uniquely resolved, currently mapped client policy endpoint.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -211,20 +191,10 @@ impl ResolvedWindowClient {
     }
 }
 
-type WindowClientBindingQuery<'a> = (
-    Entity,
-    Option<&'a WindowOccupant>,
-    Option<&'a WindowClientBinding>,
-);
-
 /// Resolves authoritative occupancy into one active client-policy window.
-///
-/// Direct occupancy wins unless suppressed. Exactly one proxy may borrow a
-/// suppressed source's direct occupant; duplicate, dangling, self, or chained
-/// proxies resolve to no client.
 #[derive(SystemParam)]
 pub struct WindowClientResolver<'w, 's> {
-    windows: Query<'w, 's, WindowClientBindingQuery<'static>, With<ManagedWindow>>,
+    windows: Query<'w, 's, (Entity, &'static WindowOccupant), With<ManagedWindow>>,
     clients: Query<
         'w,
         's,
@@ -238,38 +208,14 @@ pub struct WindowClientResolver<'w, 's> {
 
 impl WindowClientResolver<'_, '_> {
     fn candidate(&self, window: Entity) -> Option<Entity> {
-        let (_, occupant, binding) = self.windows.get(window).ok()?;
-        match binding {
-            None => occupant.map(WindowOccupant::entity),
-            Some(binding) => {
-                let source = binding.source()?;
-                if source == window {
-                    return None;
-                }
-                let (_, source_occupant, source_binding) = self.windows.get(source).ok()?;
-                source_binding
-                    .is_some_and(|binding| binding.source().is_none())
-                    .then(|| source_occupant.map(WindowOccupant::entity))
-                    .flatten()
-            }
-        }
+        self.windows
+            .get(window)
+            .ok()
+            .map(|(_, occupant)| occupant.entity())
     }
 
     pub fn client_entity(&self, window: Entity) -> Option<Entity> {
-        let client = self.candidate(window)?;
-        let (_, _, binding) = self.windows.get(window).ok()?;
-        if binding.is_none() {
-            return Some(client);
-        }
-        let mut matches = self
-            .windows
-            .iter()
-            .filter(|(candidate, _, binding)| {
-                binding.is_some() && self.candidate(*candidate) == Some(client)
-            })
-            .map(|(candidate, _, _)| candidate);
-        matches.next()?;
-        matches.next().is_none().then_some(client)
+        self.candidate(window)
     }
 
     pub fn mapped_client(&self, window: Entity) -> Option<ResolvedWindowClient> {
@@ -289,7 +235,7 @@ impl WindowClientResolver<'_, '_> {
         // component changes. Profile the popup projection systems and
         // `handle_protocol_interactions` before replacing this scan with an
         // index: those are the per-popup/request call sites that can amplify it.
-        let mut matches = self.windows.iter().filter_map(|(window, _, _)| {
+        let mut matches = self.windows.iter().filter_map(|(window, _)| {
             self.mapped_client(window)
                 .filter(|client| client.surface() == surface)
                 .map(|_| window)
@@ -354,6 +300,10 @@ impl WindowFamilyResolver<'_, '_> {
         self.root_for_surface(self.surface_for_window(window)?)
     }
 
+    pub fn root_for_surface(&self, surface: SurfaceId) -> Option<SurfaceId> {
+        self.resolve_root_for_surface(surface)
+    }
+
     fn surface_for_window(&self, window: Entity) -> Option<SurfaceId> {
         let (_, occupant) = self.windows.get(window).ok()?;
         self.clients
@@ -362,7 +312,7 @@ impl WindowFamilyResolver<'_, '_> {
             .map(|(toplevel, _)| toplevel.surface)
     }
 
-    fn root_for_surface(&self, surface: SurfaceId) -> Option<SurfaceId> {
+    fn resolve_root_for_surface(&self, surface: SurfaceId) -> Option<SurfaceId> {
         let mut current = surface;
         let mut visited = Vec::new();
         loop {
@@ -984,10 +934,17 @@ struct AppliedClientFocus {
     reassert: bool,
 }
 
+type UnclaimedToplevels<'w, 's> = Query<
+    'w,
+    's,
+    (Entity, &'static ClientToplevel, &'static MappedSurface),
+    (Without<OccupiesWindow>, Without<WindowAdmissionHold>),
+>;
+
 fn admit_mapped_toplevels(
     mut commands: Commands,
     mut registry: ResMut<WindowRegistry>,
-    surfaces: Query<(Entity, &ClientToplevel, &MappedSurface), Without<OccupiesWindow>>,
+    surfaces: UnclaimedToplevels,
 ) {
     let _admission_span =
         tracing::trace_span!(target: PROFILE_TARGET, "weld_window_admit_mapped_toplevels")
@@ -1301,73 +1258,21 @@ mod tests {
     }
 
     #[test]
-    fn client_binding_rejects_ambiguous_and_cyclic_proxies() {
+    fn admission_hold_keeps_a_mapped_client_unclaimed_until_released() {
         let mut app = test_app();
-        let surface = SurfaceId::for_test(88);
-        let client = mapped_toplevel(&mut app, surface);
-        let source = app
-            .world_mut()
-            .spawn(ManagedWindow {
-                id: WindowId::new(1),
-            })
-            .id();
+        let client = mapped_toplevel(&mut app, SurfaceId::for_test(88));
         app.world_mut()
             .entity_mut(client)
-            .insert(OccupiesWindow(source));
-        app.world_mut()
-            .entity_mut(source)
-            .insert(WindowClientBinding::suppress());
-        let first = app
-            .world_mut()
-            .spawn((
-                ManagedWindow {
-                    id: WindowId::new(2),
-                },
-                WindowClientBinding::proxy(source),
-            ))
-            .id();
-        let second = app
-            .world_mut()
-            .spawn((
-                ManagedWindow {
-                    id: WindowId::new(3),
-                },
-                WindowClientBinding::proxy(source),
-            ))
-            .id();
+            .insert(WindowAdmissionHold);
 
-        let mut state = SystemState::<WindowClientResolver>::new(app.world_mut());
-        let resolver = state
-            .get(app.world())
-            .expect("resolver parameters should be available");
-        assert_eq!(resolver.client_entity(first), None);
-        assert_eq!(resolver.client_entity(second), None);
-        assert_eq!(resolver.window_for_surface(surface), None);
+        app.update();
+        assert!(app.world().get::<OccupiesWindow>(client).is_none());
 
-        app.world_mut().entity_mut(second).despawn();
-        let resolver = state
-            .get(app.world())
-            .expect("resolver parameters should remain available");
-        assert_eq!(resolver.client_entity(first), Some(client));
-        assert_eq!(resolver.window_for_surface(surface), Some(first));
-
-        let cycle = app
-            .world_mut()
-            .spawn(ManagedWindow {
-                id: WindowId::new(4),
-            })
-            .id();
         app.world_mut()
-            .entity_mut(first)
-            .insert(WindowClientBinding::proxy(cycle));
-        app.world_mut()
-            .entity_mut(cycle)
-            .insert(WindowClientBinding::proxy(first));
-        let resolver = state
-            .get(app.world())
-            .expect("resolver parameters should remain available");
-        assert_eq!(resolver.client_entity(first), None);
-        assert_eq!(resolver.client_entity(cycle), None);
+            .entity_mut(client)
+            .remove::<WindowAdmissionHold>();
+        app.update();
+        assert!(app.world().get::<OccupiesWindow>(client).is_some());
     }
 
     #[test]

@@ -34,10 +34,9 @@ use weld_app::{
 };
 use weld_window::{
     FocusedWindow, PresentationInsets, PresentationOffset, PresentsWindow,
-    PrimaryWindowPresentation, WindowClientBinding, WindowClientResolver, WindowCloseHandle,
-    WindowGeometryAnchor, WindowMoveHandle, WindowOutput, WindowOutputIntersections,
-    WindowPresentationOverride, WindowProjection, WindowResizeHandle, WindowSystems, WindowVacancy,
-    WindowZOrder,
+    PrimaryWindowPresentation, WindowClientResolver, WindowCloseHandle, WindowGeometryAnchor,
+    WindowMoveHandle, WindowOutput, WindowOutputIntersections, WindowPresentationOverride,
+    WindowProjection, WindowResizeHandle, WindowSystems, WindowVacancy, WindowZOrder,
 };
 use weld_window_ui::surface_content_with_node;
 
@@ -53,8 +52,8 @@ const RESIZE_HALO_EXTENT: f32 = RESIZE_GRAB_EXTENT - BORDER_WIDTH;
 const RESIZE_HANDLE_INSET: f32 = -(RESIZE_HALO_EXTENT + BORDER_WIDTH);
 const FOCUSED_BORDER: Color = Color::srgb(0.35, 0.58, 0.88);
 const UNFOCUSED_BORDER: Color = Color::srgb(0.28, 0.34, 0.42);
-const PROXIED_FOCUSED_BORDER: Color = Color::srgb(0.92, 0.18, 0.16);
-const PROXIED_UNFOCUSED_BORDER: Color = Color::srgb(0.58, 0.12, 0.12);
+const RELOCATED_FOCUSED_BORDER: Color = Color::srgb(0.92, 0.18, 0.16);
+const RELOCATED_UNFOCUSED_BORDER: Color = Color::srgb(0.58, 0.12, 0.12);
 
 #[derive(Component, Clone, Copy, Debug)]
 struct SsdPresentation;
@@ -326,7 +325,6 @@ fn present_ssd_windows(
 
 fn sync_focus_style(
     focus: Res<FocusedWindow>,
-    windows: Query<Option<&WindowClientBinding>>,
     clients: WindowClientResolver,
     mut roots: Query<(&WindowProjection, &mut BorderColor), With<SsdPresentation>>,
     mut redraw: bevy::ecs::message::MessageWriter<RequestRedraw>,
@@ -334,15 +332,10 @@ fn sync_focus_style(
     let mut changed = false;
     for (projection, mut border) in &mut roots {
         let focused = focus.entity() == Some(projection.window());
-        let proxied = clients
+        let relocated = clients
             .mapped_client(projection.window())
-            .is_some_and(|client| client.provenance() == ClientProvenance::Relocated)
-            || windows
-                .get(projection.window())
-                .ok()
-                .flatten()
-                .is_some_and(|binding| binding.source().is_some());
-        let color = ssd_border_color(proxied, focused);
+            .is_some_and(|client| client.provenance() == ClientProvenance::Relocated);
+        let color = ssd_border_color(relocated, focused);
         let expected = BorderColor::all(color);
         if *border != expected {
             *border = expected;
@@ -356,8 +349,8 @@ fn sync_focus_style(
 
 fn ssd_border_color(relocated: bool, focused: bool) -> Color {
     match (relocated, focused) {
-        (true, true) => PROXIED_FOCUSED_BORDER,
-        (true, false) => PROXIED_UNFOCUSED_BORDER,
+        (true, true) => RELOCATED_FOCUSED_BORDER,
+        (true, false) => RELOCATED_UNFOCUSED_BORDER,
         (false, true) => FOCUSED_BORDER,
         (false, false) => UNFOCUSED_BORDER,
     }
@@ -644,9 +637,10 @@ mod tests {
             SurfaceBufferUpdate, SurfaceContentView, SurfaceId, SurfaceLayerId,
             SurfaceLayerPlacement, SurfaceNode, SurfacePlugin, SurfaceTreeSnapshot,
             SurfaceWindowGeometry, ToplevelInteractionRequestKind, ToplevelResizeEdge,
-            WindowDecoration, enqueue_surface_event, take_surface_actions,
+            WindowDecoration, enqueue_surface_event, register_client_source, take_surface_actions,
         },
     };
+    use weld_client::{ClientId, ClientSourceDescriptor, ClientSourceId};
     use weld_float::FloatPlugin;
     use weld_window::{
         FocusedWindow, OccupiesWindow, PresentationInsets, PresentationOffset,
@@ -689,10 +683,43 @@ mod tests {
 
     #[test]
     fn relocated_provenance_uses_the_hoist_accent_in_both_focus_states() {
-        assert_eq!(ssd_border_color(true, true), PROXIED_FOCUSED_BORDER);
-        assert_eq!(ssd_border_color(true, false), PROXIED_UNFOCUSED_BORDER);
-        assert_eq!(ssd_border_color(false, true), FOCUSED_BORDER);
-        assert_eq!(ssd_border_color(false, false), UNFOCUSED_BORDER);
+        let mut app = test_app();
+        let source = ClientSourceId::new(1);
+        assert!(register_client_source(
+            app.world_mut(),
+            ClientSourceDescriptor::new(source, ClientProvenance::Relocated),
+        ));
+        let relocated = SurfaceId::new(ClientId::new(source, 1), 1);
+        enqueue_surface_event(
+            app.world_mut(),
+            role(relocated, WindowDecoration::ServerSide),
+        );
+        enqueue_surface_event(app.world_mut(), frame(relocated, 320, 240));
+        app.update();
+        let relocated_window = app
+            .world_mut()
+            .query::<(&ClientToplevel, &OccupiesWindow)>()
+            .single(app.world())
+            .map(|(_, occupancy)| occupancy.0)
+            .expect("relocated window");
+        let root = app
+            .world()
+            .get::<PrimaryWindowPresentation>(relocated_window)
+            .expect("relocated SSD")
+            .entity();
+        assert_eq!(
+            app.world().get::<BorderColor>(root),
+            Some(&BorderColor::all(RELOCATED_FOCUSED_BORDER))
+        );
+
+        let local = SurfaceId::for_test(2);
+        enqueue_surface_event(app.world_mut(), role(local, WindowDecoration::ServerSide));
+        enqueue_surface_event(app.world_mut(), frame(local, 320, 240));
+        app.update();
+        assert_eq!(
+            app.world().get::<BorderColor>(root),
+            Some(&BorderColor::all(RELOCATED_UNFOCUSED_BORDER))
+        );
     }
 
     fn write_primary_button(app: &mut App, state: ButtonState) {

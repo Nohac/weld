@@ -89,7 +89,7 @@ pub struct SurfaceInputPlacement {
 }
 
 /// Content transition for one layer in a complete retained tree commit.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub enum SurfaceBufferChange {
     Retained {
         metadata: ClientBufferMetadata,
@@ -110,14 +110,18 @@ impl SurfaceBufferChange {
     }
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct SurfaceBufferUpdate {
     pub layer: SurfaceLayerId,
     pub change: SurfaceBufferChange,
 }
 
 /// Complete current surface-tree geometry plus changed buffer uses.
-#[derive(Debug)]
+/// One atomic surface commit.
+///
+/// Cloning a commit retains every embedded [`ClientBufferLease`] and therefore
+/// extends those committed buffer uses until all clones are dropped.
+#[derive(Clone, Debug)]
 pub struct ClientSurfaceCommit {
     pub revision: ClientCommitRevision,
     pub mapped: bool,
@@ -129,7 +133,7 @@ pub struct ClientSurfaceCommit {
 }
 
 impl ClientSurfaceCommit {
-    fn carry_unobserved_content_from(&mut self, previous: &mut Self) {
+    pub fn carry_unobserved_content_from(&mut self, previous: &mut Self) {
         let mut pending = previous
             .buffers
             .iter_mut()
@@ -187,13 +191,13 @@ impl WindowResizeEdge {
     }
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct ClientSurfaceEvent {
     pub surface: ClientSurfaceId,
     pub kind: ClientSurfaceEventKind,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub enum ClientSurfaceEventKind {
     Role(ClientSurfaceRole),
     Commit(ClientSurfaceCommit),

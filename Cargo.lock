@@ -5541,9 +5541,27 @@ dependencies = [
  "weld-app",
  "weld-client",
  "weld-float",
+ "weld-hoist-core",
+ "weld-hoist-ui",
  "weld-ssd",
  "weld-window",
  "weld-window-ui",
+]
+
+[[package]]
+name = "weld-hoist-core"
+version = "0.1.0"
+dependencies = [
+ "weld-client",
+]
+
+[[package]]
+name = "weld-hoist-ui"
+version = "0.1.0"
+dependencies = [
+ "bevy",
+ "weld-app",
+ "weld-window",
 ]
 
 [[package]]

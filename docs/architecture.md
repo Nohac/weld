@@ -6,6 +6,9 @@ project intent and future direction without presenting it as current behavior.
 
 Weld is a workspace of reusable layers and one standard distribution:
 
+- `weld-client` defines the runtime-independent client adapter, surface,
+  buffer-lease, request, and input contracts. It has no Smithay, Bevy, wgpu,
+  codec, or transport dependency.
 - `weld-core` owns Smithay, Wayland protocol state, native input sources,
   backend event loops, DMA-BUF ownership, and native presentation adapters. It
   has no Bevy dependency.
@@ -26,19 +29,23 @@ Weld is a workspace of reusable layers and one standard distribution:
   shell or window manager can replace.
 - `weld-float` supplies conventional freeform placement, focus, stacking,
   movement, and interactive-resize policy without owning UI entities.
-- `weld-hoist` owns the current same-process hoist session, source placeholder,
-  reclaim lifecycle, and loopback receiver. It does not own a network
-  transport, media codec, or the receiver's ordinary window presentation.
+- `weld-hoist-core` owns transport-independent hoist identities and the
+  Bevy-free loopback client adapter.
+- `weld-hoist-ui` owns source placeholders, reclaim and closed-tombstone UI.
+- `weld-hoist` owns Bevy window-family admission and reclaim orchestration. It
+  does not own client buffers, ordinary receiver presentation, a network
+  transport, or a media codec.
 - `weldwm` is the standard distribution. It requests a backend, configures the
   `WeldApp` returned by the builder with plugins and shortcuts, and supplies
   the executable. It is one possible assembly of the reusable crates, not the
   owner of their implementation.
 
-Dependencies point inward: `weld-app` depends on `weld-core`; `weld-window`
-depends on `weld-app`; the UI and floating-policy crates depend on the window
-domain rather than on each other; and the distribution composes the complete
-set. Core must not depend on Bevy, and the application or policy crates must
-not depend directly on Smithay. A custom distribution can retain
+Dependencies point inward: `weld-core` implements the local Smithay adapter
+through `weld-client`; `weld-app` depends on both; `weld-window` depends on
+`weld-app`; the UI and floating-policy crates depend on the window domain
+rather than on each other; and the distribution composes the complete set.
+Core and hoist core must not depend on Bevy, and application or policy crates
+must not depend directly on Smithay. A custom distribution can retain
 `weld-window` while replacing `weld-window-ui`, `weld-ssd`, `weld-float`,
 `weld-hoist`, or any combination of them, or build a different application
 host while retaining the native backend and protocol machinery.
@@ -197,10 +204,12 @@ sampled directly by the private material behind `SurfaceNode`; the path has no
 CPU pixel copy, GPU normalization blit, or intermediate surface texture.
 
 The boundary has three distinct representations. Smithay emits a core-owned
-surface snapshot whose changed layer is retained content, owned SHM pixels, or
-a validated DMA-BUF plus an opaque release identity. `AppShell` translates
-that snapshot and asks the core-owned DMA-BUF manager to resolve an external
-image into a Bevy handle. Application plugins receive only retained content,
+neutral `ClientSurfaceCommit` whose changed layer is retained, removed, or a
+replacement `ClientBufferLease`. A lease contains adapter-private access and
+completes only after its final consumer drops it. `AppShell` resolves every
+lease before ECS ingress and asks the core-owned DMA-BUF manager to resolve a
+Wayland external image into a Bevy handle. Application plugins receive only
+retained content,
 pixels, or a Bevy `Handle<Image>` with project-owned sampling metadata; they
 never handle Smithay protocol objects, file descriptors, Vulkan images, or
 wgpu resources. Adjacent application snapshots coalesce while carrying the
@@ -220,11 +229,16 @@ extent, composition format, and DMA-BUF resources before Bevy is constructed.
 That ordering prevents Bevy from selecting a second device. Preparation yields
 a render context and a same-thread, one-shot runtime; the context is consumed
 while constructing `AppShell` and is not retained across output resizes. The
-resulting `CompositionHost` is a Bevy-free core contract: backends deliver
-protocol-neutral surface and seat changes, advance application policy, request
-composition into an owned or backend-leased target, and collect protocol
-actions. `AppShell` is the standard Bevy implementation and owns the retained
-offscreen target, but the core does not require it.
+resulting `CompositionHost` is a Bevy-free core contract. Each backend owns one
+`ClientRuntime` above every registered adapter. It drains neutral events,
+routes unconsumed device-paced input without a Bevy tick, applies neutral
+requests and ordered adapter commands, advances application policy, and
+requests composition into an owned or backend-leased target. The local
+Smithay adapter shares reusable same-thread queues with `ServerState`, so
+Smithay remains the concrete protocol dispatch state while input and requests
+are applied in the same calloop turn. `AppShell` is the standard Bevy
+implementation and owns the retained offscreen target, but core does not
+require it.
 
 Linux-dmabuf is advertised at protocol version 6 only when the selected Vulkan
 adapter exposes a DRM render node, external DMA-BUF memory, foreign queue-family
@@ -416,47 +430,45 @@ popup projections while an override is present. The owner may supply an
 ordinary `PresentsWindow` tree or deliberately keep the window locally
 unpresented while preserving its applied inset and outer-geometry contract.
 
-Authoritative occupancy and active client policy are separate.
-`WindowClientBinding` is absent for an ordinary window, suppresses client
-policy on a replacement frame, or proxies another managed window's direct
-occupant for one hop. `WindowClientResolver` applies that binding consistently
-to presentation, popup ownership, focus, configure/resize, close, output
-membership, preferred scale, and protocol move/resize. A direct occupant wins
-unless suppressed; duplicate, dangling, cyclic, or chained proxies resolve to
-no endpoint. Proxying never transfers `OccupiesWindow`, stable identity,
-detach authority, or reclaim authority.
+Ordinary client policy follows direct `OccupiesWindow` relationships only.
+`WindowClientResolver` consistently uses that occupant for presentation,
+focus, configure/resize, close, output membership, preferred scale, and
+protocol move/resize. `WindowAdmissionHold` lets another policy temporarily
+keep a mapped client out of default admission without inventing a proxy
+occupant or transport-specific branch in the window primitive.
 
-`weld-hoist` uses those contracts for a local loopback proof. `Super+H`
-replaces the focused occupied window with a hoist-owned Reclaim scene and
-suppresses its client policy while retaining its real occupant. It creates a
-floating receiver bound to that source. The receiver uses the ordinary CSD or
-SSD presenter, samples the same imported client image, owns popup attachment,
-focus, configure/resize, CSD interactions, output membership, and preferred
-scale, and follows later decoration changes. Reclaim or receiver loss removes
-the receiver and binding while retaining the source window, geometry, and
-occupant. Explicit reclaim is staged: the receiver is hidden, adopts the
-source frame's output and requested inner size, and remains the policy endpoint
-until that client configure settles or a bounded recovery deadline expires.
-Only then does ordinary presentation return to the source. Adopting the remote
-geometry directly would be simpler, but would discard the source frame's
-layout reservation. The hidden receiver is intentionally deactivated and its
-popups are hidden during this short transition; source focus and popup
-presentation resume after handoff. Unexpected receiver destruction cannot use
-the staging endpoint and therefore restores the source immediately.
+`weld-hoist-core` implements the current same-process loopback as a real
+`weld-client` adapter. The adapter observes local source events, retains their
+current atomic role and commit state, and republishes selected surfaces under
+an independent Relocated source namespace. Buffer replacements reuse the
+upstream lease's erased access payload; completing the destination lease drops
+one upstream consumer. Runtime route aliases rewrite destination input, focus,
+close, resize, and output requests back to the source surface. Owner-related
+popups are mapped automatically. Relay-generated events are published in the
+same runtime drain but are not recursively observed, preventing relay cycles.
 
-`WindowClientBinding` is an in-process projection of that endpoint choice, not
-a wire contract. A remote adapter must use stable Weld identities and separate
-source-authoritative lifecycle from destination-supplied presentation
-preferences, surface-family relationships, input, and media. This direct
-same-process image sharing is not a media or wire contract: related
-transient-toplevel relocation, cross-process transport, encoding, and remote
-authorization are not implemented.
+`Super+H` asks `weld-hoist` to detach and admission-hold the original client.
+Members already present keep their durable source windows as hoist-owned
+Reclaim placeholders; later family members have no source slot to preserve.
+The relocated toplevel enters `weld-window` through ordinary admission and
+occupies an independent managed window. It therefore uses normal CSD or SSD,
+focus, scaling, output membership, resize, CSD interactions, and popup
+presentation. SSD's red hoist styling follows generic Relocated provenance,
+not a hoist-specific window flag.
+
+Explicit reclaim hides and configures the relocated receiver to the preserved
+slot's client size, waits for settlement or a bounded recovery deadline, then
+emits an ordered adapter `Unmap` command. The original client is reattached
+only after the relocated surface's Destroyed event has removed the receiver.
+Remote close leaves a preserved slot as a dismissible closed tombstone. This
+loopback adapter is not a media or wire contract: cross-process transport,
+encoding, authorization, and remote discovery remain future work.
 
 Core translates Smithay's `xdg_toplevel.set_parent` state into stable
 `SurfaceId` parent metadata; no Wayland object crosses into the application
 model. `WindowFamilyResolver` follows direct authoritative occupants through
-that metadata and excludes proxy receivers. The local hoist plugin groups one
-source/receiver session per independent toplevel under a shared family ID,
+that metadata. The local hoist plugin groups one source/destination session
+per independent toplevel under a shared family ID,
 admits existing and later parent descendants while active, and reclaims the
 captured family atomically. Members present when hoisting begins retain their
 source layout slots and receive individual Reclaim placeholders. Members first
@@ -465,10 +477,11 @@ never occupied pre-hoist source layout. Destroying a captured member remotely
 keeps its slot as a dismissible closed tombstone without a Reclaim action;
 ordinary protocol unmap instead ends that member session so a later remap can
 return through default presentation. Popups and subsurfaces remain within
-their owning surface tree. A re-parented member is staged back to its source
-rather than remaining disclosed through a family it has left. SSD treats any
-generic proxy binding as a relocated presentation and uses focused and
-unfocused red border shades without querying hoist-owned state.
+their owning surface tree. If a toplevel is re-parented out of its admitted
+family, that member alone is unmapped from the destination and restored
+locally; the remaining family stays hoisted. SSD uses focused and unfocused
+red border shades from generic Relocated provenance without querying
+hoist-owned state.
 
 Enabling Smithay's `desktop` feature for focused protocol utilities does not
 make its `Window` or `Space` types authoritative for ordinary application

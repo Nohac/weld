@@ -1,0 +1,8 @@
+[package]
+name = "weld-hoist-core"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+weld-client = { path = "../weld-client" }

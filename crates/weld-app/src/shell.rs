@@ -38,6 +38,7 @@ use bevy::{
     window::{ExitCondition, RequestRedraw, WindowPlugin},
 };
 
+use crate::client::ClientAdapterCommandQueue;
 use crate::cursor::{CursorHostTracker, CursorPlugin, take_cursor_update};
 use crate::debug::{complete_capture, take_capture_request};
 use crate::dmabuf::DmabufImporter;
@@ -293,6 +294,7 @@ impl Plugin for WeldAppPlugin {
             })
             .collect();
         app.insert_resource(self.views.clone());
+        app.init_resource::<ClientAdapterCommandQueue>();
         app.add_plugins((
             CursorPlugin,
             crate::surface::SurfacePlugin,
@@ -356,6 +358,9 @@ impl AppShell {
             if importer
                 .importer
                 .is::<weld_core::server::WaylandClientImporter>()
+                || importer
+                    .importer
+                    .is::<weld_client::PassthroughClientImporter>()
             {
                 client_importers.insert(source);
             } else {
@@ -807,6 +812,14 @@ impl AppShell {
         requests
     }
 
+    pub fn take_adapter_commands(&mut self) -> Vec<weld_client::ClientAdapterCommandEnvelope> {
+        self.app
+            .world_mut()
+            .get_resource_mut::<ClientAdapterCommandQueue>()
+            .map(|mut commands| commands.take().into_iter().collect())
+            .unwrap_or_default()
+    }
+
     pub fn complete_dmabuf_uses(&mut self, releases: &[DmabufReleaseId]) {
         if let Some(importer) = &mut self.dmabuf_importer {
             importer.complete_gpu_uses(releases);
@@ -934,6 +947,10 @@ impl CompositionHost for AppShell {
 
     fn take_client_requests(&mut self) -> Vec<ClientRequest> {
         AppShell::take_client_requests(self)
+    }
+
+    fn take_adapter_commands(&mut self) -> Vec<weld_client::ClientAdapterCommandEnvelope> {
+        AppShell::take_adapter_commands(self)
     }
 
     fn complete_dmabuf_uses(&mut self, releases: &[DmabufReleaseId]) {

@@ -2,7 +2,7 @@
 
 use std::{
     any::Any,
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, HashMap, HashSet},
     fmt,
 };
 
@@ -24,6 +24,19 @@ pub trait ClientAdapter {
     fn apply_input(&mut self, event: ClientInputEvent);
     fn apply_command(&mut self, command: ClientAdapterCommandEnvelope);
     fn host_focus_lost(&mut self, time: u32);
+
+    /// Observes one validated event from another local-provenance adapter.
+    /// Relocated events are not observed recursively.
+    fn observe_event(&mut self, _event: &crate::ClientSurfaceEvent) {}
+
+    /// Publishes input/request route aliases created by observed events.
+    fn drain_route_alias_updates(&mut self, _updates: &mut Vec<ClientRouteAliasUpdate>) {}
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ClientRouteAliasUpdate {
+    pub destination: ClientSurfaceId,
+    pub source: Option<ClientSurfaceId>,
 }
 
 /// Source-addressed local command whose payload is understood only by its adapter.
@@ -267,8 +280,13 @@ impl PressedButtons {
 pub struct ClientRuntime {
     adapters: BTreeMap<ClientSourceId, ClientRuntimeAdapter>,
     scratch_events: ClientEventQueue,
+    generated_events: ClientEventQueue,
     scratch_destroyed: Vec<ClientSurfaceId>,
+    scratch_alias_updates: Vec<ClientRouteAliasUpdate>,
+    sourced_alias_updates: Vec<(ClientSourceId, ClientRouteAliasUpdate)>,
+    observed_adapters: Vec<ClientSourceId>,
     aliases: HashMap<ClientSurfaceId, ClientSurfaceId>,
+    retired_aliases: HashSet<ClientSurfaceId>,
     pointer_route: Option<ClientPointerRoute>,
     pending_pointer_route: Option<Option<ClientPointerRoute>>,
     keyboard_route: Option<ClientKeyboardRoute>,
@@ -299,11 +317,14 @@ impl ClientRuntime {
     pub fn set_route_alias(&mut self, destination: ClientSurfaceId, source: ClientSurfaceId) {
         if destination != source {
             self.aliases.insert(destination, source);
+            self.retired_aliases.remove(&destination);
         }
     }
 
     pub fn remove_route_alias(&mut self, destination: ClientSurfaceId) {
-        self.aliases.remove(&destination);
+        if self.aliases.remove(&destination).is_some() {
+            self.retired_aliases.insert(destination);
+        }
     }
 
     pub fn set_pointer_route(&mut self, route: Option<ClientPointerRoute>) {
@@ -369,14 +390,14 @@ impl ClientRuntime {
         events: &mut ClientEventQueue,
         invalid: &mut Vec<ClientRuntimeEventError>,
     ) {
+        // Retirement rejects aliases removed during this drain. Destroyed-event
+        // route cleanup below is the durable protection after the next drain.
+        self.retired_aliases.clear();
         for (source, adapter) in &mut self.adapters {
             adapter.driver.drain_events(&mut self.scratch_events);
             while let Some(event) = self.scratch_events.pop_front() {
                 if event.surface.source() == *source {
-                    if matches!(&event.kind, crate::ClientSurfaceEventKind::Destroyed) {
-                        self.scratch_destroyed.push(event.surface);
-                    }
-                    events.push(event);
+                    self.generated_events.push(event);
                 } else {
                     invalid.push(ClientRuntimeEventError {
                         registered_source: *source,
@@ -385,6 +406,76 @@ impl ClientRuntime {
                 }
             }
         }
+        while let Some(event) = self.generated_events.pop_front() {
+            let event_source = event.surface.source();
+            let relayable = self.adapters.get(&event_source).is_some_and(|adapter| {
+                adapter.descriptor.provenance == crate::ClientProvenance::Local
+            });
+            if relayable {
+                for (source, adapter) in &mut self.adapters {
+                    if *source != event_source {
+                        adapter.driver.observe_event(&event);
+                        if !self.observed_adapters.contains(source) {
+                            self.observed_adapters.push(*source);
+                        }
+                    }
+                }
+            }
+            if matches!(&event.kind, crate::ClientSurfaceEventKind::Destroyed) {
+                self.scratch_destroyed.push(event.surface);
+            }
+            events.push(event);
+        }
+        for index in 0..self.scratch_destroyed.len() {
+            let surface = self.scratch_destroyed[index];
+            self.forget_surface(surface);
+        }
+        self.scratch_destroyed.clear();
+
+        for (source, adapter) in &mut self.adapters {
+            adapter
+                .driver
+                .drain_route_alias_updates(&mut self.scratch_alias_updates);
+            for update in self.scratch_alias_updates.drain(..) {
+                self.sourced_alias_updates.push((*source, update));
+            }
+        }
+        for index in 0..self.sourced_alias_updates.len() {
+            let (source, update) = self.sourced_alias_updates[index];
+            if update.destination.source() != source {
+                continue;
+            }
+            match update.source {
+                Some(target) if self.adapters.contains_key(&target.source()) => {
+                    self.set_route_alias(update.destination, target);
+                }
+                Some(_) => {}
+                None => self.remove_route_alias(update.destination),
+            }
+        }
+        self.sourced_alias_updates.clear();
+
+        for index in 0..self.observed_adapters.len() {
+            let source = self.observed_adapters[index];
+            let Some(adapter) = self.adapters.get_mut(&source) else {
+                continue;
+            };
+            adapter.driver.drain_events(&mut self.scratch_events);
+            while let Some(event) = self.scratch_events.pop_front() {
+                if event.surface.source() == source {
+                    if matches!(&event.kind, crate::ClientSurfaceEventKind::Destroyed) {
+                        self.scratch_destroyed.push(event.surface);
+                    }
+                    events.push(event);
+                } else {
+                    invalid.push(ClientRuntimeEventError {
+                        registered_source: source,
+                        event_surface: event.surface,
+                    });
+                }
+            }
+        }
+        self.observed_adapters.clear();
         for index in 0..self.scratch_destroyed.len() {
             let surface = self.scratch_destroyed[index];
             self.forget_surface(surface);
@@ -410,16 +501,12 @@ impl ClientRuntime {
                 }));
             return true;
         }
+        let Some(request) = self.resolve_request(request) else {
+            return false;
+        };
         let Some(source) = request.source() else {
             return false;
         };
-        if let ClientRequest::Focus(focus) = &request
-            && focus
-                .surface
-                .is_some_and(|surface| surface.source() != focus.source)
-        {
-            return false;
-        }
         if !self.adapters.contains_key(&source) {
             return false;
         }
@@ -805,10 +892,34 @@ impl ClientRuntime {
         Ok(Some(route))
     }
 
+    fn resolve_request(&self, request: ClientRequest) -> Option<ClientRequest> {
+        match request {
+            ClientRequest::Surface(mut request) => {
+                request.surface = self.resolve_alias(request.surface).ok()?;
+                Some(ClientRequest::Surface(request))
+            }
+            ClientRequest::Focus(mut request) => {
+                if let Some(surface) = request.surface {
+                    if surface.source() != request.source {
+                        return None;
+                    }
+                    let surface = self.resolve_alias(surface).ok()?;
+                    request.source = surface.source();
+                    request.surface = Some(surface);
+                }
+                Some(ClientRequest::Focus(request))
+            }
+            ClientRequest::ClearFocus => Some(ClientRequest::ClearFocus),
+        }
+    }
+
     fn resolve_alias(
         &self,
         surface: ClientSurfaceId,
     ) -> Result<ClientSurfaceId, ClientInputDispatchResult> {
+        if self.retired_aliases.contains(&surface) {
+            return Err(ClientInputDispatchResult::NoRoute);
+        }
         let mut current = surface;
         for _ in 0..=self.aliases.len() {
             let Some(next) = self.aliases.get(&current).copied() else {
@@ -837,8 +948,15 @@ impl ClientRuntime {
         let finger_scroll_destroyed = self
             .finger_scroll_capture
             .is_some_and(|capture| self.route_resolves_to(capture.route, surface));
-        self.aliases
-            .retain(|destination, source| *destination != surface && *source != surface);
+        let aliases = &mut self.aliases;
+        let retired = &mut self.retired_aliases;
+        aliases.retain(|destination, source| {
+            let retain = *destination != surface && *source != surface;
+            if !retain {
+                retired.insert(*destination);
+            }
+            retain
+        });
         if pointer_destroyed {
             self.pointer_route = None;
         }

@@ -7,11 +7,13 @@ publish.workspace = true
 [dependencies]
 bevy.workspace = true
 weld-app = { path = "../weld-app" }
+weld-hoist-core = { path = "../weld-hoist-core" }
+weld-hoist-ui = { path = "../weld-hoist-ui" }
 weld-window = { path = "../weld-window" }
-weld-window-ui = { path = "../weld-window-ui" }
 
 [dev-dependencies]
 weld-app = { path = "../weld-app", features = ["test-support"] }
 weld-client = { path = "../weld-client" }
 weld-float = { path = "../weld-float" }
 weld-ssd = { path = "../weld-ssd" }
+weld-window-ui = { path = "../weld-window-ui" }

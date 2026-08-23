@@ -1,11 +1,6 @@
-//! Same-process window-hoisting lifecycle and loopback presentation.
-//!
-//! The loopback receiver deliberately shares the source surface's existing GPU
-//! image. It validates managed-window relocation and reclaim without defining a
-//! transport or media contract.
+//! Window-family orchestration over transport-independent hoist endpoints.
 
 mod lifecycle;
-mod presentation;
 
 #[cfg(test)]
 mod tests;
@@ -28,31 +23,23 @@ use weld_app::{
     input::{GlobalShortcut, GlobalShortcutAppExt, GlobalShortcutId, GlobalShortcutModifiers},
     surface::SurfaceId,
 };
-use weld_window::{
-    PresentationInsets, PresentationOffset, WindowGeometryAnchor, WindowSystems, WindowVacancy,
+use weld_hoist_core::LoopbackEndpoint;
+use weld_window::{WindowSystems, WindowVacancy};
+
+pub use weld_hoist_core::{
+    HoistFamilyId, HoistSessionId, HoistSessionPhase, HoistSourceMode, ReclaimScope,
+    loopback_registration,
+};
+pub use weld_hoist_ui::{
+    DismissHoistTombstone, HoistPlaceholder, HoistPlaceholderMetrics, HoistPlaceholderState,
+    ReclaimHoist,
 };
 
-/// Stable identity for a source-owned hoist session.
-#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub struct HoistSessionId(u64);
+const RECLAIM_CONFIGURE_TIMEOUT: Duration = Duration::from_secs(2);
 
-impl HoistSessionId {
-    pub const fn raw(self) -> u64 {
-        self.0
-    }
-}
+#[derive(Resource, Clone, Copy, Debug)]
+pub struct HoistTransport(pub LoopbackEndpoint);
 
-/// Stable identity shared by related toplevels in one hoist operation.
-#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub struct HoistFamilyId(u64);
-
-impl HoistFamilyId {
-    pub const fn raw(self) -> u64 {
-        self.0
-    }
-}
-
-/// Marks a source window whose ordinary local presentation is replaced.
 #[derive(Component, Clone, Copy, Debug, Eq, PartialEq)]
 pub struct HoistedWindow {
     session: Entity,
@@ -64,7 +51,6 @@ impl HoistedWindow {
     }
 }
 
-/// Marks the managed window consuming a same-process loopback presentation.
 #[derive(Component, Clone, Copy, Debug, Eq, PartialEq)]
 pub struct LoopbackReceiver {
     session: Entity,
@@ -77,19 +63,11 @@ impl LoopbackReceiver {
 }
 
 #[derive(Clone, Copy, Debug)]
-struct PresentationMetrics {
-    insets: PresentationInsets,
-    offset: PresentationOffset,
-    anchor: WindowGeometryAnchor,
-}
-
-const RECLAIM_CONFIGURE_TIMEOUT: Duration = Duration::from_secs(2);
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum HoistSessionPhase {
+enum SessionState {
+    Mapping,
     Active,
     Closed,
-    Ending,
+    Unmapping,
     Reclaiming {
         scope: ReclaimScope,
         target_size: UVec2,
@@ -99,39 +77,25 @@ enum HoistSessionPhase {
     },
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum ReclaimScope {
-    Member,
-    Family,
-}
-
-#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
-enum HoistSourceMode {
-    PreservedSlot,
-    Followed,
-}
-
 #[derive(Component, Clone, Copy, Debug)]
 pub struct HoistSession {
     id: HoistSessionId,
     family: HoistFamilyId,
     family_root: SurfaceId,
-    source: Entity,
-    receiver: Entity,
+    source_window: Option<Entity>,
+    source_client: Entity,
+    receiver: Option<Entity>,
     surface: SurfaceId,
+    destination: SurfaceId,
     source_mode: HoistSourceMode,
     original_vacancy: WindowVacancy,
-    placeholder_metrics: PresentationMetrics,
-    phase: HoistSessionPhase,
+    placeholder_metrics: HoistPlaceholderMetrics,
+    state: SessionState,
 }
 
 impl HoistSession {
     pub const fn id(&self) -> HoistSessionId {
         self.id
-    }
-
-    pub const fn source(&self) -> Entity {
-        self.source
     }
 
     pub const fn family(&self) -> HoistFamilyId {
@@ -142,34 +106,55 @@ impl HoistSession {
         self.family_root
     }
 
-    pub const fn receiver(&self) -> Entity {
+    pub const fn source(&self) -> Option<Entity> {
+        self.source_window
+    }
+
+    pub const fn receiver(&self) -> Option<Entity> {
         self.receiver
     }
 
     pub const fn surface(&self) -> SurfaceId {
         self.surface
     }
-}
 
-#[derive(Resource, Default)]
-struct NextHoistSessionId(u64);
+    pub const fn destination(&self) -> SurfaceId {
+        self.destination
+    }
 
-impl NextHoistSessionId {
-    fn allocate(&mut self) -> HoistSessionId {
-        let id = HoistSessionId(self.0);
-        self.0 = self.0.saturating_add(1);
-        id
+    pub const fn source_mode(&self) -> HoistSourceMode {
+        self.source_mode
+    }
+
+    pub const fn phase(&self) -> HoistSessionPhase {
+        match self.state {
+            SessionState::Mapping | SessionState::Active => HoistSessionPhase::Active,
+            SessionState::Closed => HoistSessionPhase::Closed,
+            SessionState::Unmapping => HoistSessionPhase::Ending,
+            SessionState::Reclaiming { .. } => HoistSessionPhase::Reclaiming,
+        }
     }
 }
 
 #[derive(Resource, Default)]
-struct NextHoistFamilyId(u64);
+struct NextHoistSessionId(Option<u64>);
+
+impl NextHoistSessionId {
+    fn allocate(&mut self) -> Option<HoistSessionId> {
+        let raw = self.0.unwrap_or(1);
+        self.0 = raw.checked_add(1);
+        Some(HoistSessionId::new(raw))
+    }
+}
+
+#[derive(Resource, Default)]
+struct NextHoistFamilyId(Option<u64>);
 
 impl NextHoistFamilyId {
-    fn allocate(&mut self) -> HoistFamilyId {
-        let id = HoistFamilyId(self.0);
-        self.0 = self.0.saturating_add(1);
-        id
+    fn allocate(&mut self) -> Option<HoistFamilyId> {
+        let raw = self.0.unwrap_or(1);
+        self.0 = raw.checked_add(1);
+        Some(HoistFamilyId::new(raw))
     }
 }
 
@@ -185,7 +170,6 @@ struct PlannedHoist {
 struct HoistFamilyAssignments {
     active: HashMap<SurfaceId, HoistFamilyId>,
     blocked: HashSet<SurfaceId>,
-    blocked_roots: Vec<SurfaceId>,
     roots: Vec<(SurfaceId, HoistFamilyId)>,
     planned: Vec<PlannedHoist>,
 }
@@ -193,24 +177,11 @@ struct HoistFamilyAssignments {
 #[derive(Resource)]
 struct HoistShortcut(GlobalShortcutId);
 
-/// Requests a local hoist for one managed source window.
 #[derive(Clone, Copy, Debug, Message)]
 pub struct HoistWindow {
     pub window: Entity,
 }
 
-/// Requests that the source reclaim one local loopback session.
-#[derive(Clone, Copy, Debug, Message)]
-pub struct ReclaimHoist {
-    pub session: Entity,
-}
-
-#[derive(Clone, Copy, Debug, Message)]
-struct DismissHoistTombstone {
-    session: Entity,
-}
-
-/// Installs the source-side local hoisting prototype.
 pub struct HoistPlugin;
 
 impl Plugin for HoistPlugin {
@@ -219,42 +190,22 @@ impl Plugin for HoistPlugin {
             KeyCode::KeyH,
             GlobalShortcutModifiers::super_key(),
         ));
-        app.insert_resource(HoistShortcut(shortcut))
+        app.add_plugins(weld_hoist_ui::HoistUiPlugin)
+            .insert_resource(HoistShortcut(shortcut))
             .init_resource::<NextHoistSessionId>()
             .init_resource::<NextHoistFamilyId>()
             .init_resource::<HoistFamilyAssignments>()
             .add_message::<HoistWindow>()
-            .add_message::<ReclaimHoist>()
-            .add_message::<DismissHoistTombstone>()
-            .add_observer(presentation::request_reclaim)
-            .add_observer(presentation::request_tombstone_dismissal)
             .add_systems(
                 PreUpdate,
                 (
-                    lifecycle::maintain_sessions,
                     lifecycle::request_focused_hoist,
                     lifecycle::begin_requested_hoists,
+                    lifecycle::bind_loopback_receivers,
+                    lifecycle::maintain_sessions,
                 )
                     .chain()
                     .in_set(WindowSystems::Admission),
-            )
-            .add_systems(
-                PreUpdate,
-                presentation::revoke_hoist_presentations.in_set(WindowSystems::PresentationRevoke),
-            )
-            .add_systems(
-                PreUpdate,
-                presentation::present_hoist_windows.in_set(WindowSystems::PresentationClaim),
-            )
-            .add_systems(
-                PreUpdate,
-                presentation::reconcile_hoist_projections.in_set(WindowSystems::UiReconcile),
-            )
-            .add_systems(
-                PreUpdate,
-                presentation::sync_hoist_root_sizes
-                    .after(WindowSystems::InteractionFinalize)
-                    .before(WindowSystems::FinalReconcile),
             )
             .add_systems(
                 PreUpdate,

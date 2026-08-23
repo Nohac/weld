@@ -15,7 +15,8 @@ mod surface;
 pub use adapter::{
     ClientAdapter, ClientAdapterCommandEnvelope, ClientAdapterRegistration,
     ClientAdapterRegistrationParts, ClientImporterRegistration, ClientInputDispatchResult,
-    ClientRuntime, ClientRuntimeAdapter, ClientRuntimeEventError, ClientRuntimeRegistrationError,
+    ClientRouteAliasUpdate, ClientRuntime, ClientRuntimeAdapter, ClientRuntimeEventError,
+    ClientRuntimeRegistrationError,
 };
 pub use buffer::{
     ClientBufferId, ClientBufferLease, ClientBufferLeaseSourceMismatch, ClientBufferMetadata,
@@ -24,7 +25,7 @@ pub use buffer::{
 pub use geometry::{Extent, LogicalPoint, LogicalSize};
 pub use id::{
     ClientId, ClientOutputId, ClientProvenance, ClientSourceDescriptor, ClientSourceId,
-    ClientSurfaceId, SurfaceLayerId,
+    ClientSurfaceId, PassthroughClientImporter, SurfaceLayerId,
 };
 pub use input::{
     ButtonState, ClientInputEvent, ClientInputTarget, ClientKeyboardRoute, ClientPointerRoute,

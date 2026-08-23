@@ -12,7 +12,7 @@ use weld_app::{
     input::{GlobalShortcutPlugin, VirtualTerminalShortcutPlugin},
 };
 use weld_float::FloatPlugin;
-use weld_hoist::HoistPlugin;
+use weld_hoist::{HoistPlugin, HoistTransport, loopback_registration};
 use weld_ssd::SsdPlugin;
 use weld_window::WindowPlugin;
 use weld_window_ui::WindowUiPlugin;
@@ -29,6 +29,12 @@ pub fn run(arguments: AppArguments) -> Result<()> {
         .remote_debug(arguments.remote_debug)
         .scale(arguments.scale)
         .build()?;
+    let (hoist_adapter, hoist_endpoint) = loopback_registration(
+        weld_core::WAYLAND_CLIENT_SOURCE,
+        weld_client::ClientSourceId::new(1),
+    );
+    app.add_client_adapter(hoist_adapter)
+        .insert_resource(HoistTransport(hoist_endpoint));
     app.add_plugins((
         WindowPlugin,
         WindowUiPlugin,

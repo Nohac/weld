@@ -159,6 +159,32 @@ impl ClientBufferLease {
     pub fn same_use(&self, other: &Self) -> bool {
         Rc::ptr_eq(&self.completion, &other.completion)
     }
+
+    /// Relays this committed use into another adapter namespace.
+    ///
+    /// The destination reuses the erased native-access payload, while its
+    /// completion owns this upstream lease. Completing the destination use
+    /// therefore releases exactly one upstream consumer.
+    pub fn relay(
+        self,
+        buffer: ClientBufferId,
+        use_id: ClientBufferUseId,
+    ) -> Result<Self, ClientBufferLeaseSourceMismatch> {
+        if buffer.source() != use_id.source() {
+            return Err(ClientBufferLeaseSourceMismatch { buffer, use_id });
+        }
+        let metadata = self.metadata;
+        let access = self.access.clone();
+        Ok(Self {
+            buffer,
+            metadata,
+            access,
+            completion: Rc::new(Completion {
+                use_id,
+                notify: Some(Box::new(move |_| drop(self))),
+            }),
+        })
+    }
 }
 
 impl fmt::Debug for ClientBufferLease {

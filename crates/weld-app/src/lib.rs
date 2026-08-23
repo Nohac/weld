@@ -6,6 +6,7 @@ pub(crate) const PROFILE_TARGET: &str = "weld_profile";
 #[doc(hidden)]
 pub mod benchmark;
 mod builder;
+pub mod client;
 pub mod cursor;
 pub mod debug;
 mod dmabuf;
@@ -58,6 +59,7 @@ pub use weld_core::OutputScale;
 pub mod prelude {
     pub use crate::{
         ActiveBackend, Backend, OutputScale, WeldApp, WeldAppBuilder, WeldAppExt,
+        client::ClientAdapterCommandQueue,
         cursor::{CursorIcon, CursorRequest, CursorSettings, CursorSystems, SystemCursorIcon},
         input::{
             InputDelta, PointerGesture, PointerGestureKind, PointerShortcut, PointerShortcutAppExt,

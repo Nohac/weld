@@ -43,11 +43,11 @@ use weld_app::{
 };
 use weld_window::{
     ClientResizeState, FocusedWindow, ManagedBy, ManagedWindow, PresentationInsets,
-    PrimaryWindowPresentation, WindowClientBinding, WindowClientResolver, WindowCloseHandle,
-    WindowCommand, WindowCommandKind, WindowGeometry, WindowIntent, WindowIntentKind,
-    WindowInteractionKind, WindowInteractionSession, WindowMoveHandle, WindowOccupant,
-    WindowOutput, WindowProjectionLookup, WindowResizeHandle, WindowSystems, WindowVacancy,
-    WindowVisibility, WindowZOrder, rounded_client_size,
+    PrimaryWindowPresentation, WindowClientResolver, WindowCloseHandle, WindowCommand,
+    WindowCommandKind, WindowGeometry, WindowIntent, WindowIntentKind, WindowInteractionKind,
+    WindowInteractionSession, WindowMoveHandle, WindowOccupant, WindowOutput,
+    WindowProjectionLookup, WindowResizeHandle, WindowSystems, WindowVacancy, WindowVisibility,
+    WindowZOrder, rounded_client_size,
 };
 
 /// The default freeform window manager.
@@ -996,7 +996,6 @@ type FocusWindowQuery<'w, 's> = Query<
         &'static ManagedBy,
         &'static WindowVisibility,
         &'static WindowVacancy,
-        Option<&'static WindowClientBinding>,
     ),
 >;
 
@@ -1015,7 +1014,7 @@ fn reconcile_focus(
         windows
             .get(window)
             .ok()
-            .is_some_and(|(_, _, managed_by, _, _, _)| managed_by.0 != manager.0)
+            .is_some_and(|(_, _, managed_by, _, _)| managed_by.0 != manager.0)
     }) {
         return;
     }
@@ -1023,16 +1022,14 @@ fn reconcile_focus(
         windows
             .get(window)
             .ok()
-            .is_none_or(|(_, _, _, visibility, vacancy, binding)| {
-                mapped(window, visibility).is_none()
-                    && !(*vacancy == WindowVacancy::Retain
-                        || binding.is_some_and(|binding| binding.source().is_none()))
+            .is_none_or(|(_, _, _, visibility, vacancy)| {
+                mapped(window, visibility).is_none() && *vacancy != WindowVacancy::Retain
             })
     }) || focus.entity().is_none()
     {
         let next = windows
             .iter()
-            .filter_map(|(window, z_order, managed_by, visibility, _, _)| {
+            .filter_map(|(window, z_order, managed_by, visibility, _)| {
                 (managed_by.0 == manager.0)
                     .then(|| mapped(window, visibility))
                     .flatten()

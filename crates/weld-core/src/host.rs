@@ -258,6 +258,7 @@ pub trait CompositionHost {
     fn take_host_commands(&mut self) -> Vec<HostCommand>;
     fn take_virtual_terminal_switch_request(&mut self) -> Option<i32>;
     fn take_client_requests(&mut self) -> Vec<ClientRequest>;
+    fn take_adapter_commands(&mut self) -> Vec<weld_client::ClientAdapterCommandEnvelope>;
     fn complete_dmabuf_uses(&mut self, releases: &[crate::dmabuf::DmabufReleaseId]);
     fn has_surface_frame(&self) -> bool;
     fn take_capture_request(&mut self) -> Option<CaptureRequest>;

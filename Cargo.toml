@@ -19,6 +19,8 @@ members = [
   "crates/weld-core",
   "crates/weld-float",
   "crates/weld-hoist",
+  "crates/weld-hoist-core",
+  "crates/weld-hoist-ui",
   "crates/weld-ssd",
   "crates/weld-window",
   "crates/weld-window-ui",
