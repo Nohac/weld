@@ -38,11 +38,11 @@ use bevy::{
 };
 use tracing::warn;
 use weld_client::ClientSourceDescriptor;
+pub use weld_client::{ClientId, ClientSurfaceId as SurfaceId, SurfaceLayerId};
 pub use weld_client::{
     ClientProvenance, ClientSourceId, ToplevelInteractionRequestKind, WindowDecoration,
     WindowResizeEdge as ToplevelResizeEdge,
 };
-pub use weld_client::{ClientSurfaceId as SurfaceId, SurfaceLayerId};
 use weld_core::dmabuf::ImportId;
 
 #[path = "surface/binding.rs"]

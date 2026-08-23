@@ -447,14 +447,20 @@ close, resize, and output requests back to the source surface. Owner-related
 popups are mapped automatically. Relay-generated events are published in the
 same runtime drain but are not recursively observed, preventing relay cycles.
 
-`Super+H` asks `weld-hoist` to detach and admission-hold the original client.
-Members already present keep their durable source windows as hoist-owned
-Reclaim placeholders; later family members have no source slot to preserve.
-The relocated toplevel enters `weld-window` through ordinary admission and
-occupies an independent managed window. It therefore uses normal CSD or SSD,
-focus, scaling, output membership, resize, CSD interactions, and popup
-presentation. SSD's red hoist styling follows generic Relocated provenance,
-not a hoist-specific window flag.
+`Super+H` asks `weld-hoist` to detach and admission-hold every mapped toplevel
+from the focused surface's stable `ClientId`. That identity represents one
+adapter-namespaced Wayland client connection; it is not a process ID, app ID,
+window class, or title. Same-client affinity covers independent application
+windows that omit `xdg_toplevel.set_parent`, while explicit parent metadata
+still describes the stronger toplevel-family relationship. Members already
+present keep their durable source windows as hoist-owned Reclaim placeholders;
+later same-client toplevels admitted through automatic following have no
+source slot to preserve, while a direct request preserves the requesting
+window's existing slot. The relocated toplevel enters `weld-window` through
+ordinary admission and occupies an independent managed window. It therefore
+uses normal CSD or SSD, focus, scaling, output membership, resize, CSD
+interactions, and popup presentation. SSD's red hoist styling follows generic
+Relocated provenance, not a hoist-specific window flag.
 
 Explicit reclaim hides and configures the relocated receiver to the preserved
 slot's client size, waits for settlement or a bounded recovery deadline, then
@@ -468,19 +474,33 @@ Core translates Smithay's `xdg_toplevel.set_parent` state into stable
 `SurfaceId` parent metadata; no Wayland object crosses into the application
 model. `WindowFamilyResolver` follows direct authoritative occupants through
 that metadata. The local hoist plugin groups one source/destination session
-per independent toplevel under a shared family ID,
-admits existing and later parent descendants while active, and reclaims the
-captured family atomically. Members present when hoisting begins retain their
-source layout slots and receive individual Reclaim placeholders. Members first
-admitted while the family is already active are receiver-only because they
-never occupied pre-hoist source layout. Destroying a captured member remotely
-keeps its slot as a dismissible closed tombstone without a Reclaim action;
-ordinary protocol unmap instead ends that member session so a later remap can
-return through default presentation. Popups and subsurfaces remain within
-their owning surface tree. If a toplevel is re-parented out of its admitted
-family, that member alone is unmapped from the destination and restored
-locally; the remaining family stays hoisted. SSD uses focused and unfocused
-red border shades from generic Relocated provenance without querying
+per independent toplevel under one same-client family ID and reclaims every
+admitted toplevel in that group atomically. Members present when hoisting
+begins retain their source layout slots and receive individual Reclaim
+placeholders. Members first admitted through automatic following while the
+client group is already active are receiver-only because they never occupied
+pre-hoist source layout. Reclaiming or unmapping members temporarily block
+further admission for that client. Closed tombstones retain their original
+layout slots but do not block admission or keep a client group active. A newly
+opened same-client replacement may therefore be followed without adopting or
+removing the old tombstone's slot. If no live session remains, a direct request
+may start a fresh family while old tombstones remain independently dismissible.
+If another member keeps the group active, locally opened windows are followed
+after transition blocking settles, except members explicitly detached from
+that family by reparenting, protocol unmap, or receiver loss; ending the final
+member ends the group instead. A direct `Super+H` request opts a detached member
+back into an unblocked active group while preserving its local slot. A later
+family may also admit it normally because detach state is scoped to one
+`HoistFamilyId`. Destroying a captured member remotely keeps its slot as a
+dismissible closed tombstone without a Reclaim action; ordinary protocol unmap
+instead ends that member session so a later remap can return through default
+presentation. Popups and subsurfaces remain within their owning surface tree.
+An independent same-client peer that later joins the declared parent tree is
+promoted to an explicit family member. If that member is subsequently
+re-parented out, it alone is unmapped from the destination and restored
+locally and remains detached from automatic following for the lifetime of that
+family; the remaining client group stays hoisted. SSD uses focused and
+unfocused red border shades from generic Relocated provenance without querying
 hoist-owned state.
 
 Enabling Smithay's `desktop` feature for focused protocol utilities does not

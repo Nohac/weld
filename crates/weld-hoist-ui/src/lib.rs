@@ -20,9 +20,9 @@ use bevy::{
         pointer::PointerButton,
     },
     prelude::{
-        AccessibleLabel, AlignItems, BackgroundColor, BorderRadius, Button, Children, Color,
-        FlexDirection, GlobalZIndex, JustifyContent, Node, Overflow, PositionType, Scene,
-        UiTargetCamera, px,
+        AccessibleLabel, AlignItems, BackgroundColor, BorderColor, BorderRadius, BoxShadow, Button,
+        Children, Color, FlexDirection, GlobalZIndex, JustifyContent, Node, Overflow, PositionType,
+        Scene, UiRect, UiTargetCamera, px,
     },
     scene::{CommandsSceneExt, bsn},
     text::{FontSourceTemplate, TextFont},
@@ -322,8 +322,18 @@ fn placeholder_scene(
             align_items: AlignItems::Center,
             justify_content: JustifyContent::Center,
             overflow: Overflow::clip(),
+            border: UiRect::all(px(2)),
+            border_radius: BorderRadius::all(px(10)),
         }
         BackgroundColor(Color::srgb(0.08, 0.10, 0.14))
+        BorderColor::all(Color::srgb(0.28, 0.34, 0.44))
+        BoxShadow::new(
+            Color::srgba(0.0, 0.0, 0.0, 0.55),
+            px(0),
+            px(10),
+            px(2),
+            px(22),
+        )
         Children [
             (
                 Pickable::IGNORE

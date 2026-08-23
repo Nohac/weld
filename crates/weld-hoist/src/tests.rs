@@ -3,6 +3,7 @@ use std::time::{Duration, Instant};
 use bevy::{
     app::App,
     asset::{AssetApp, AssetPlugin, Assets},
+    ecs::message::Messages,
     image::Image,
     math::{UVec2, Vec2},
     scene::ScenePlugin,
@@ -77,7 +78,11 @@ fn test_app() -> (App, weld_hoist_core::LoopbackEndpoint) {
 }
 
 fn surface(source: ClientSourceId, local: u64) -> SurfaceId {
-    SurfaceId::new(ClientId::new(source, 1), local)
+    surface_for_client(source, 1, local)
+}
+
+fn surface_for_client(source: ClientSourceId, client_local: u64, local: u64) -> SurfaceId {
+    SurfaceId::new(ClientId::new(source, client_local), local)
 }
 
 fn map_surface(
@@ -392,6 +397,236 @@ fn initial_family_members_preserve_slots_and_later_members_follow_without_placeh
 }
 
 #[test]
+fn independent_same_client_toplevels_follow_without_absorbing_other_clients() {
+    let (mut app, _) = test_app();
+    let root_surface = surface_for_client(LOCAL_SOURCE, 10, 60);
+    let peer_surface = surface_for_client(LOCAL_SOURCE, 10, 61);
+    let outsider_surface = surface_for_client(LOCAL_SOURCE, 11, 62);
+    let root_client = map_surface(&mut app, root_surface, None, WindowDecoration::ServerSide);
+    let peer_client = map_surface(&mut app, peer_surface, None, WindowDecoration::ServerSide);
+    let outsider_client = map_surface(
+        &mut app,
+        outsider_surface,
+        None,
+        WindowDecoration::ServerSide,
+    );
+    let root_window = window_for_client(&mut app, root_client);
+    let peer_window = window_for_client(&mut app, peer_client);
+    let outsider_window = window_for_client(&mut app, outsider_client);
+
+    app.world_mut().write_message(HoistWindow {
+        window: root_window,
+    });
+    app.update();
+
+    assert!(app.world().get::<HoistPlaceholder>(root_window).is_some());
+    assert!(app.world().get::<HoistPlaceholder>(peer_window).is_some());
+    assert!(
+        app.world()
+            .get::<HoistPlaceholder>(outsider_window)
+            .is_none()
+    );
+    assert!(app.world().get::<OccupiesWindow>(outsider_client).is_some());
+    assert_eq!(
+        app.world_mut()
+            .query::<&HoistSession>()
+            .iter(app.world())
+            .count(),
+        2
+    );
+
+    let later_surface = surface_for_client(LOCAL_SOURCE, 10, 63);
+    let later_client = map_surface(&mut app, later_surface, None, WindowDecoration::ServerSide);
+    let later_window = window_for_client(&mut app, later_client);
+    app.update();
+
+    assert!(
+        app.world()
+            .get::<WindowAdmissionHold>(later_client)
+            .is_some()
+    );
+    assert!(!app.world().entities().contains(later_window));
+    assert_eq!(
+        app.world_mut()
+            .query::<&HoistSession>()
+            .iter(app.world())
+            .count(),
+        3
+    );
+}
+
+#[test]
+fn closed_tombstone_does_not_block_following_a_replacement_peer() {
+    let (mut app, _) = test_app();
+    let root_surface = surface_for_client(LOCAL_SOURCE, 12, 64);
+    let closed_surface = surface_for_client(LOCAL_SOURCE, 12, 65);
+    let root_client = map_surface(&mut app, root_surface, None, WindowDecoration::ServerSide);
+    let closed_client = map_surface(&mut app, closed_surface, None, WindowDecoration::ServerSide);
+    let root_window = window_for_client(&mut app, root_client);
+    let closed_window = window_for_client(&mut app, closed_client);
+    app.world_mut().write_message(HoistWindow {
+        window: root_window,
+    });
+    app.update();
+    let closed_session = app
+        .world_mut()
+        .query::<(bevy::ecs::entity::Entity, &HoistSession)>()
+        .iter(app.world())
+        .find_map(|(entity, session)| (session.surface() == closed_surface).then_some(entity))
+        .expect("closed member session");
+    destroy_surface(&mut app, closed_surface);
+    app.update();
+    assert_eq!(
+        app.world()
+            .get::<HoistPlaceholder>(closed_window)
+            .map(|placeholder| placeholder.state),
+        Some(crate::HoistPlaceholderState::Closed)
+    );
+
+    let later_surface = surface_for_client(LOCAL_SOURCE, 12, 66);
+    let later_client = map_surface(&mut app, later_surface, None, WindowDecoration::ServerSide);
+    let later_window = window_for_client(&mut app, later_client);
+    app.update();
+    assert!(
+        app.world()
+            .get::<WindowAdmissionHold>(later_client)
+            .is_some()
+    );
+    assert!(!app.world().entities().contains(later_window));
+    let replacement_session = app
+        .world_mut()
+        .query::<(bevy::ecs::entity::Entity, &HoistSession)>()
+        .iter(app.world())
+        .find_map(|(entity, session)| (session.surface() == later_surface).then_some(entity))
+        .expect("replacement peer session");
+    assert!(app.world().entities().contains(closed_session));
+    assert!(app.world().entities().contains(closed_window));
+
+    app.world_mut().write_message(DismissHoistTombstone {
+        session: closed_session,
+    });
+    app.update();
+    assert!(
+        app.world()
+            .get::<WindowAdmissionHold>(later_client)
+            .is_some()
+    );
+    assert!(app.world().entities().contains(replacement_session));
+}
+
+#[test]
+fn reclaim_is_atomic_for_independent_same_client_peers_and_allows_a_new_family() {
+    let (mut app, endpoint) = test_app();
+    let root_surface = surface_for_client(LOCAL_SOURCE, 13, 67);
+    let peer_surface = surface_for_client(LOCAL_SOURCE, 13, 68);
+    let root_client = map_surface(&mut app, root_surface, None, WindowDecoration::ServerSide);
+    let peer_client = map_surface(&mut app, peer_surface, None, WindowDecoration::ServerSide);
+    let root_window = window_for_client(&mut app, root_client);
+    let peer_window = window_for_client(&mut app, peer_client);
+    app.world_mut().write_message(HoistWindow {
+        window: root_window,
+    });
+    app.update();
+
+    let root_destination = endpoint.destination(root_surface);
+    let peer_destination = endpoint.destination(peer_surface);
+    let _root_destination_client = map_surface(
+        &mut app,
+        root_destination,
+        None,
+        WindowDecoration::ServerSide,
+    );
+    let _peer_destination_client = map_surface(
+        &mut app,
+        peer_destination,
+        None,
+        WindowDecoration::ServerSide,
+    );
+    app.update();
+    let sessions = app
+        .world_mut()
+        .query::<(bevy::ecs::entity::Entity, &HoistSession)>()
+        .iter(app.world())
+        .map(|(entity, session)| (entity, session.family()))
+        .collect::<Vec<_>>();
+    assert_eq!(sessions.len(), 2);
+    assert_eq!(sessions[0].1, sessions[1].1);
+
+    app.world_mut().write_message(ReclaimHoist {
+        session: sessions[0].0,
+    });
+    app.update();
+    let blocked_surface = surface_for_client(LOCAL_SOURCE, 13, 69);
+    let blocked_client = map_surface(
+        &mut app,
+        blocked_surface,
+        None,
+        WindowDecoration::ServerSide,
+    );
+    let blocked_window = window_for_client(&mut app, blocked_client);
+    app.update();
+    assert!(app.world().get::<OccupiesWindow>(blocked_client).is_some());
+    assert!(app.world().entities().contains(blocked_window));
+    for (entity, _) in &sessions {
+        if let Some(mut session) = app.world_mut().get_mut::<HoistSession>(*entity)
+            && let SessionState::Reclaiming {
+                scope,
+                target_size,
+                resize_required,
+                resize_request_observed,
+                ..
+            } = session.state
+        {
+            session.state = SessionState::Reclaiming {
+                scope,
+                target_size,
+                resize_required,
+                resize_request_observed,
+                deadline: Instant::now() - Duration::from_millis(1),
+            };
+        }
+    }
+    app.update();
+    assert!(sessions.iter().all(|(entity, _)| {
+        matches!(
+            app.world()
+                .get::<HoistSession>(*entity)
+                .map(|session| session.state),
+            Some(SessionState::Unmapping)
+        )
+    }));
+
+    destroy_surface(&mut app, root_destination);
+    destroy_surface(&mut app, peer_destination);
+    app.update();
+    app.update();
+    assert_eq!(
+        app.world()
+            .get::<OccupiesWindow>(root_client)
+            .map(|occupancy| occupancy.0),
+        Some(root_window)
+    );
+    assert_eq!(
+        app.world()
+            .get::<OccupiesWindow>(peer_client)
+            .map(|occupancy| occupancy.0),
+        Some(peer_window)
+    );
+
+    app.world_mut().write_message(HoistWindow {
+        window: root_window,
+    });
+    app.update();
+    assert!(app.world().get::<HoistPlaceholder>(root_window).is_some());
+    assert!(app.world().get::<HoistPlaceholder>(peer_window).is_some());
+    assert!(
+        app.world()
+            .get::<HoistPlaceholder>(blocked_window)
+            .is_some()
+    );
+}
+
+#[test]
 fn protocol_unmap_ends_the_relocation_without_marking_the_source_closed() {
     let (mut app, _) = test_app();
     let source_surface = surface(LOCAL_SOURCE, 20);
@@ -443,6 +678,14 @@ fn protocol_unmap_ends_the_relocation_without_marking_the_source_closed() {
             .get::<OccupiesWindow>(source_client)
             .map(|occupancy| occupancy.0),
         Some(source_window)
+    );
+    app.update();
+    assert_eq!(
+        app.world_mut()
+            .query::<&HoistSession>()
+            .iter(app.world())
+            .count(),
+        0
     );
     assert!(app.world().get::<HoistPlaceholder>(source_window).is_none());
 }
@@ -529,6 +772,14 @@ fn reclaim_waits_for_the_placeholder_sized_client_commit() {
             .get::<OccupiesWindow>(source_client)
             .map(|occupancy| occupancy.0),
         Some(source_window)
+    );
+    app.update();
+    assert_eq!(
+        app.world_mut()
+            .query::<&HoistSession>()
+            .iter(app.world())
+            .count(),
+        0
     );
 }
 
@@ -620,6 +871,14 @@ fn receiver_loss_uses_ordered_unmap_before_restoring_the_source() {
             .get::<OccupiesWindow>(source_client)
             .map(|occupancy| occupancy.0),
         Some(source_window)
+    );
+    app.update();
+    assert_eq!(
+        app.world_mut()
+            .query::<&HoistSession>()
+            .iter(app.world())
+            .count(),
+        0
     );
 }
 
@@ -754,12 +1013,7 @@ fn reparented_member_restores_without_ending_the_original_family() {
     let root_surface = surface(LOCAL_SOURCE, 40);
     let child_surface = surface(LOCAL_SOURCE, 41);
     let root_client = map_surface(&mut app, root_surface, None, WindowDecoration::ServerSide);
-    let child_client = map_surface(
-        &mut app,
-        child_surface,
-        Some(root_surface),
-        WindowDecoration::ServerSide,
-    );
+    let child_client = map_surface(&mut app, child_surface, None, WindowDecoration::ServerSide);
     let root_window = window_for_client(&mut app, root_client);
     let child_window = window_for_client(&mut app, child_client);
     app.world_mut().write_message(HoistWindow {
@@ -777,19 +1031,35 @@ fn reparented_member_restores_without_ending_the_original_family() {
     let _child_destination_client = map_surface(
         &mut app,
         child_destination,
-        Some(root_destination),
+        None,
         WindowDecoration::ServerSide,
     );
     app.update();
 
-    set_parent(&mut app, child_surface, None);
-    app.update();
     let child_session = app
         .world_mut()
         .query::<(bevy::ecs::entity::Entity, &HoistSession)>()
         .iter(app.world())
         .find_map(|(entity, session)| (session.surface() == child_surface).then_some(entity))
         .expect("child session");
+    assert!(matches!(
+        app.world()
+            .get::<HoistSession>(child_session)
+            .map(|session| session.membership),
+        Some(crate::HoistMembership::ClientPeer { .. })
+    ));
+
+    set_parent(&mut app, child_surface, Some(root_surface));
+    app.update();
+    assert!(matches!(
+        app.world()
+            .get::<HoistSession>(child_session)
+            .map(|session| session.membership),
+        Some(crate::HoistMembership::DeclaredFamily { group_root }) if group_root == root_surface
+    ));
+
+    set_parent(&mut app, child_surface, None);
+    app.update();
     assert!(matches!(
         app.world()
             .get::<HoistSession>(child_session)
@@ -813,6 +1083,35 @@ fn reparented_member_restores_without_ending_the_original_family() {
             .iter(app.world())
             .any(|session| session.surface() == root_surface)
     );
+
+    app.update();
+    assert_eq!(
+        app.world()
+            .get::<OccupiesWindow>(child_client)
+            .map(|occupancy| occupancy.0),
+        Some(child_window)
+    );
+    assert!(
+        !app.world_mut()
+            .query::<&HoistSession>()
+            .iter(app.world())
+            .any(|session| session.surface() == child_surface)
+    );
+
+    app.world_mut().write_message(HoistWindow {
+        window: child_window,
+    });
+    app.update();
+    assert!(app.world().get::<OccupiesWindow>(child_client).is_none());
+    assert!(app.world().entities().contains(child_window));
+    assert!(app.world().get::<HoistPlaceholder>(child_window).is_some());
+    let reopted = app
+        .world_mut()
+        .query::<&HoistSession>()
+        .iter(app.world())
+        .find(|session| session.surface() == child_surface)
+        .expect("re-opted session");
+    assert_eq!(reopted.source_mode(), crate::HoistSourceMode::PreservedSlot);
 }
 
 #[test]
@@ -863,6 +1162,22 @@ fn root_unmap_keeps_the_surviving_family_placeholder() {
             .any(|session| session.surface() == child_surface)
     );
     assert!(app.world().entities().contains(child_window));
+
+    commit_surface(&mut app, root_surface, UVec2::new(320, 240));
+    app.update();
+    app.update();
+    assert!(app.world().get::<OccupiesWindow>(root_client).is_some());
+    assert!(
+        app.world()
+            .get::<WindowAdmissionHold>(root_client)
+            .is_none()
+    );
+    assert!(
+        !app.world_mut()
+            .query::<&HoistSession>()
+            .iter(app.world())
+            .any(|session| session.surface() == root_surface)
+    );
 }
 
 #[test]
@@ -897,8 +1212,12 @@ fn destroyed_preserved_source_becomes_a_dismissible_tombstone() {
     destroy_surface(&mut app, endpoint.destination(source_surface));
     app.update();
     app.world_mut()
+        .resource_mut::<Messages<RequestRedraw>>()
+        .clear();
+    app.world_mut()
         .write_message(DismissHoistTombstone { session });
     app.update();
+    assert!(!app.world().resource::<Messages<RequestRedraw>>().is_empty());
     assert!(!app.world().entities().contains(session));
     assert!(!app.world().entities().contains(source_window));
 }

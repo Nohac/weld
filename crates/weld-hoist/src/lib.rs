@@ -21,7 +21,7 @@ use bevy::{
 };
 use weld_app::{
     input::{GlobalShortcut, GlobalShortcutAppExt, GlobalShortcutId, GlobalShortcutModifiers},
-    surface::SurfaceId,
+    surface::{ClientId, SurfaceId},
 };
 use weld_hoist_core::LoopbackEndpoint;
 use weld_window::{WindowSystems, WindowVacancy};
@@ -81,7 +81,8 @@ enum SessionState {
 pub struct HoistSession {
     id: HoistSessionId,
     family: HoistFamilyId,
-    family_root: SurfaceId,
+    client: ClientId,
+    membership: HoistMembership,
     source_window: Option<Entity>,
     source_client: Entity,
     receiver: Option<Entity>,
@@ -90,6 +91,7 @@ pub struct HoistSession {
     source_mode: HoistSourceMode,
     original_vacancy: WindowVacancy,
     placeholder_metrics: HoistPlaceholderMetrics,
+    detach_on_restore: bool,
     state: SessionState,
 }
 
@@ -102,8 +104,8 @@ impl HoistSession {
         self.family
     }
 
-    pub const fn family_root(&self) -> SurfaceId {
-        self.family_root
+    pub const fn group_root(&self) -> SurfaceId {
+        self.membership.group_root()
     }
 
     pub const fn source(&self) -> Option<Entity> {
@@ -136,6 +138,25 @@ impl HoistSession {
     }
 }
 
+#[derive(Component, Clone, Copy, Debug)]
+struct HoistDetached {
+    family: HoistFamilyId,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum HoistMembership {
+    DeclaredFamily { group_root: SurfaceId },
+    ClientPeer { group_root: SurfaceId },
+}
+
+impl HoistMembership {
+    const fn group_root(self) -> SurfaceId {
+        match self {
+            Self::DeclaredFamily { group_root } | Self::ClientPeer { group_root } => group_root,
+        }
+    }
+}
+
 #[derive(Resource, Default)]
 struct NextHoistSessionId(Option<u64>);
 
@@ -162,15 +183,22 @@ impl NextHoistFamilyId {
 struct PlannedHoist {
     source: Entity,
     family: HoistFamilyId,
-    family_root: SurfaceId,
+    client: ClientId,
+    membership: HoistMembership,
     source_mode: HoistSourceMode,
+}
+
+#[derive(Clone, Copy)]
+struct ActiveHoistFamily {
+    id: HoistFamilyId,
+    root: SurfaceId,
 }
 
 #[derive(Resource, Default)]
 struct HoistFamilyAssignments {
-    active: HashMap<SurfaceId, HoistFamilyId>,
-    blocked: HashSet<SurfaceId>,
-    roots: Vec<(SurfaceId, HoistFamilyId)>,
+    active: HashMap<ClientId, ActiveHoistFamily>,
+    blocked: HashSet<ClientId>,
+    clients: Vec<(ClientId, ActiveHoistFamily)>,
     planned: Vec<PlannedHoist>,
 }
 

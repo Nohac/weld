@@ -10,11 +10,12 @@ use bevy::{
         system::{Commands, Local, ParamSet, Query, Res, ResMut, SystemParam},
     },
     math::Vec2,
+    window::RequestRedraw,
 };
 use weld_app::{
     client::ClientAdapterCommandQueue,
     input::GlobalShortcutPressed,
-    surface::{ClientSource, ClientToplevel, MappedSurface},
+    surface::{ClientId, ClientSource, ClientToplevel, MappedSurface},
 };
 use weld_hoist_core::{HoistFamilyId, HoistSourceMode, ReclaimScope};
 use weld_hoist_ui::{
@@ -29,9 +30,9 @@ use weld_window::{
 };
 
 use crate::{
-    HoistFamilyAssignments, HoistSession, HoistShortcut, HoistTransport, HoistWindow,
-    HoistedWindow, LoopbackReceiver, NextHoistFamilyId, NextHoistSessionId, PlannedHoist,
-    RECLAIM_CONFIGURE_TIMEOUT, SessionState,
+    ActiveHoistFamily, HoistDetached, HoistFamilyAssignments, HoistMembership, HoistSession,
+    HoistShortcut, HoistTransport, HoistWindow, HoistedWindow, LoopbackReceiver, NextHoistFamilyId,
+    NextHoistSessionId, PlannedHoist, RECLAIM_CONFIGURE_TIMEOUT, SessionState,
 };
 
 pub(super) fn request_focused_hoist(
@@ -59,7 +60,15 @@ pub(super) struct BeginHoistParams<'w, 's> {
     transport: Res<'w, HoistTransport>,
     adapter_commands: ResMut<'w, ClientAdapterCommandQueue>,
     windows: HoistableWindows<'w, 's>,
-    clients: Query<'w, 's, (&'static ClientToplevel, &'static MappedSurface)>,
+    clients: Query<
+        'w,
+        's,
+        (
+            &'static ClientToplevel,
+            &'static MappedSurface,
+            Option<&'static HoistDetached>,
+        ),
+    >,
     presentation_insets: Query<'w, 's, &'static PresentationInsets>,
     sessions: Query<'w, 's, &'static HoistSession>,
     families: WindowFamilyResolver<'w, 's>,
@@ -69,6 +78,7 @@ type HoistableWindows<'w, 's> = Query<
     'w,
     's,
     (
+        Entity,
         &'static WindowGeometry,
         &'static WindowOccupant,
         Option<&'static WindowOutput>,
@@ -87,84 +97,86 @@ pub(super) fn begin_requested_hoists(mut params: BeginHoistParams) {
         .collect::<Vec<_>>();
     params.assignments.active.clear();
     params.assignments.blocked.clear();
-    params.assignments.roots.clear();
+    params.assignments.clients.clear();
     params.assignments.planned.clear();
 
     for session in &params.sessions {
         match session.state {
             SessionState::Mapping | SessionState::Active => {
-                params
-                    .assignments
-                    .active
-                    .insert(session.family_root, session.family);
+                params.assignments.active.insert(
+                    session.client,
+                    ActiveHoistFamily {
+                        id: session.family,
+                        root: session.membership.group_root(),
+                    },
+                );
             }
-            SessionState::Closed | SessionState::Reclaiming { .. } | SessionState::Unmapping => {
-                params.assignments.blocked.insert(session.family_root);
+            SessionState::Reclaiming { .. } | SessionState::Unmapping => {
+                params.assignments.blocked.insert(session.client);
             }
+            SessionState::Closed => {}
         }
     }
     let blocked = params.assignments.blocked.clone();
     params
         .assignments
         .active
-        .retain(|root, _| !blocked.contains(root));
+        .retain(|client, _| !blocked.contains(client));
 
     for window in requested {
-        let Some(family) = params.families.family(window) else {
+        let Ok((_, _, occupant, _, _, _, _)) = params.windows.get(window) else {
             continue;
         };
-        let root = family.root();
-        if params.assignments.blocked.contains(&root) {
+        let Ok((toplevel, _, _)) = params.clients.get(occupant.entity()) else {
+            continue;
+        };
+        let Some(root) = params.families.root_for_window(window) else {
+            continue;
+        };
+        let client = toplevel.surface.client();
+        if params.assignments.blocked.contains(&client) {
             continue;
         }
-        let (family_id, source_mode) = match params.assignments.active.get(&root).copied() {
+        let (family, source_mode) = match params.assignments.active.get(&client).copied() {
             Some(family) => (family, HoistSourceMode::Followed),
             None => {
-                let Some(family) = params.next_family.allocate() else {
+                let Some(id) = params.next_family.allocate() else {
                     continue;
                 };
-                params.assignments.active.insert(root, family);
+                let family = ActiveHoistFamily { id, root };
+                params.assignments.active.insert(client, family);
                 (family, HoistSourceMode::PreservedSlot)
             }
         };
         params
-            .assignments
-            .planned
-            .extend(family.windows().iter().copied().map(|source| PlannedHoist {
-                source,
-                family: family_id,
-                family_root: root,
-                source_mode,
-            }));
+            .commands
+            .entity(occupant.entity())
+            .remove::<HoistDetached>();
+        let planned = plan_client_windows(
+            &params,
+            client,
+            family,
+            source_mode,
+            Some(occupant.entity()),
+        );
+        params.assignments.planned.extend(planned);
     }
 
-    let roots = params
+    let clients = params
         .assignments
         .active
         .iter()
-        .map(|(root, family)| (*root, *family))
+        .map(|(client, family)| (*client, *family))
         .collect::<Vec<_>>();
-    params.assignments.roots.extend(roots);
+    params.assignments.clients.extend(clients);
     params
         .assignments
-        .roots
-        .sort_unstable_by_key(|(root, _)| *root);
-    for index in 0..params.assignments.roots.len() {
-        let (root, family) = params.assignments.roots[index];
-        params.assignments.planned.extend(
-            params
-                .families
-                .family_for_root(root)
-                .windows()
-                .iter()
-                .copied()
-                .map(|source| PlannedHoist {
-                    source,
-                    family,
-                    family_root: root,
-                    source_mode: HoistSourceMode::Followed,
-                }),
-        );
+        .clients
+        .sort_unstable_by_key(|(client, _)| *client);
+    for index in 0..params.assignments.clients.len() {
+        let (client, family) = params.assignments.clients[index];
+        let planned = plan_client_windows(&params, client, family, HoistSourceMode::Followed, None);
+        params.assignments.planned.extend(planned);
     }
     params
         .assignments
@@ -180,8 +192,51 @@ pub(super) fn begin_requested_hoists(mut params: BeginHoistParams) {
     }
 }
 
+fn plan_client_windows(
+    params: &BeginHoistParams,
+    client: ClientId,
+    family: ActiveHoistFamily,
+    source_mode: HoistSourceMode,
+    requested_client: Option<Entity>,
+) -> Vec<PlannedHoist> {
+    params
+        .windows
+        .iter()
+        .filter_map(|(source, _, occupant, _, _, _, _)| {
+            let (toplevel, _, detached) = params.clients.get(occupant.entity()).ok()?;
+            if detached.is_some_and(|detached| detached.family == family.id)
+                && requested_client != Some(occupant.entity())
+            {
+                return None;
+            }
+            // A direct request must sort before the automatic Followed plan so
+            // deduplication preserves the requesting window's existing slot.
+            let source_mode = if requested_client == Some(occupant.entity()) {
+                HoistSourceMode::PreservedSlot
+            } else {
+                source_mode
+            };
+            (toplevel.surface.client() == client).then(|| PlannedHoist {
+                source,
+                family: family.id,
+                client,
+                membership: if params.families.root_for_window(source) == Some(family.root) {
+                    HoistMembership::DeclaredFamily {
+                        group_root: family.root,
+                    }
+                } else {
+                    HoistMembership::ClientPeer {
+                        group_root: family.root,
+                    }
+                },
+                source_mode,
+            })
+        })
+        .collect()
+}
+
 fn begin_hoist(params: &mut BeginHoistParams, planned: PlannedHoist) {
-    let Ok((_, occupant, _, presentation, already_hoisted, vacancy)) =
+    let Ok((_, _, occupant, _, presentation, already_hoisted, vacancy)) =
         params.windows.get(planned.source)
     else {
         return;
@@ -190,7 +245,7 @@ fn begin_hoist(params: &mut BeginHoistParams, planned: PlannedHoist) {
         return;
     }
     let source_client = occupant.entity();
-    let Ok((toplevel, _)) = params.clients.get(source_client) else {
+    let Ok((toplevel, _, _)) = params.clients.get(source_client) else {
         return;
     };
     let Some(id) = params.next_session.allocate() else {
@@ -214,6 +269,7 @@ fn begin_hoist(params: &mut BeginHoistParams, planned: PlannedHoist) {
     params
         .commands
         .entity(source_client)
+        .remove::<HoistDetached>()
         .insert(WindowAdmissionHold)
         .remove::<OccupiesWindow>();
     let source_window = match planned.source_mode {
@@ -238,7 +294,8 @@ fn begin_hoist(params: &mut BeginHoistParams, planned: PlannedHoist) {
     params.commands.entity(session).insert(HoistSession {
         id,
         family: planned.family,
-        family_root: planned.family_root,
+        client: planned.client,
+        membership: planned.membership,
         source_window,
         source_client,
         receiver: None,
@@ -247,6 +304,7 @@ fn begin_hoist(params: &mut BeginHoistParams, planned: PlannedHoist) {
         source_mode: planned.source_mode,
         original_vacancy: *vacancy,
         placeholder_metrics: metrics,
+        detach_on_restore: false,
         state: SessionState::Mapping,
     });
 }
@@ -344,6 +402,7 @@ pub(super) struct MaintainParams<'w, 's> {
     families: WindowFamilyResolver<'w, 's>,
     transport: Res<'w, HoistTransport>,
     adapter_commands: ResMut<'w, ClientAdapterCommandQueue>,
+    redraw: MessageWriter<'w, RequestRedraw>,
     scratch: Local<'s, MaintainScratch>,
 }
 
@@ -372,6 +431,7 @@ pub(super) fn maintain_sessions(mut params: MaintainParams) {
                     params.commands.entity(source).despawn();
                 }
                 params.commands.entity(entity).despawn();
+                params.redraw.write(RequestRedraw);
             }
             continue;
         }
@@ -396,19 +456,27 @@ pub(super) fn maintain_sessions(mut params: MaintainParams) {
             params
                 .adapter_commands
                 .push(params.transport.0.unmap(session.surface));
+            session.detach_on_restore = true;
             session.state = SessionState::Unmapping;
             continue;
         }
-        if params
-            .families
-            .root_for_surface(session.surface)
-            .is_some_and(|root| root != session.family_root)
-            && !matches!(session.state, SessionState::Unmapping)
-        {
-            params
-                .adapter_commands
-                .push(params.transport.0.unmap(session.surface));
-            session.state = SessionState::Unmapping;
+        if let Some(current_root) = params.families.root_for_surface(session.surface) {
+            match session.membership {
+                HoistMembership::ClientPeer { group_root } if current_root == group_root => {
+                    session.membership = HoistMembership::DeclaredFamily { group_root };
+                }
+                HoistMembership::DeclaredFamily { group_root }
+                    if current_root != group_root
+                        && !matches!(session.state, SessionState::Unmapping) =>
+                {
+                    params
+                        .adapter_commands
+                        .push(params.transport.0.unmap(session.surface));
+                    session.detach_on_restore = true;
+                    session.state = SessionState::Unmapping;
+                }
+                HoistMembership::DeclaredFamily { .. } | HoistMembership::ClientPeer { .. } => {}
+            }
         }
         if matches!(session.state, SessionState::Unmapping) {
             let destination_alive = session
@@ -430,6 +498,7 @@ pub(super) fn maintain_sessions(mut params: MaintainParams) {
             params
                 .adapter_commands
                 .push(params.transport.0.unmap(session.surface));
+            session.detach_on_restore = true;
             session.state = SessionState::Unmapping;
             continue;
         }
@@ -555,6 +624,11 @@ pub(super) fn complete_reclaims(
 fn restore_source(commands: &mut Commands, session_entity: Entity, session: &HoistSession) {
     let mut client = commands.entity(session.source_client);
     client.remove::<WindowAdmissionHold>();
+    if session.detach_on_restore {
+        client.insert(HoistDetached {
+            family: session.family,
+        });
+    }
     if let Some(source) = session.source_window {
         client.insert(OccupiesWindow(source));
         commands

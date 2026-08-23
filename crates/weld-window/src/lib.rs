@@ -269,7 +269,9 @@ type ClientFamilyQuery<'a> = (&'a ClientToplevel, Option<&'a ClientToplevelParen
 ///
 /// Proxy presentations are deliberately excluded. An unresolved parent keeps
 /// the family pending until that parent is known; malformed cycles resolve to
-/// no family.
+/// no family. Custom window-management policy may use this explicit hierarchy
+/// even when a distribution groups some workflows through broader client
+/// affinity.
 #[derive(SystemParam)]
 pub struct WindowFamilyResolver<'w, 's> {
     windows: Query<'w, 's, WindowFamilyQuery<'static>, With<ManagedWindow>>,
