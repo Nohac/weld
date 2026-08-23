@@ -26,7 +26,7 @@ use smithay::{
 };
 
 use crate::{
-    dmabuf::{DmabufCapabilities, DmabufReleaseId, DmabufSourceCache, request_weld_device},
+    dmabuf::{DmabufCapabilities, DmabufEvent, DmabufSourceCache, request_weld_device},
     host::{RenderContext, RunOptions},
 };
 
@@ -62,7 +62,7 @@ pub(super) struct DrmRuntimeBootstrap {
     pub(super) selected_outputs: Vec<SelectedOutput>,
     pub(super) dmabuf_capabilities: Option<DmabufCapabilities>,
     pub(super) dmabuf_sources: DmabufSourceCache,
-    pub(super) dmabuf_release_source: Channel<DmabufReleaseId>,
+    pub(super) dmabuf_release_source: Channel<DmabufEvent>,
 }
 
 pub(super) fn prepare(options: &RunOptions) -> Result<DrmBootstrap> {

@@ -8,9 +8,10 @@ use std::{
 
 use crate::{
     ButtonState, ClientEventQueue, ClientInputEvent, ClientInputTarget, ClientKeyboardRoute,
-    ClientPointerRoute, ClientRequest, ClientSourceDescriptor, ClientSourceId, ClientSurfaceId,
-    InputEventKind, LinuxButtonCode, PointerGesture, PointerGestureKind, RawScrollFrame,
-    RawScrollPhase, RawScrollSource, RuntimeInputEvent, RuntimeInputEventKind,
+    ClientPointerRoute, ClientPointerRouteUpdate, ClientRequest, ClientSourceDescriptor,
+    ClientSourceId, ClientSurfaceId, InputEventKind, LinuxButtonCode, PointerGesture,
+    PointerGestureKind, RawScrollFrame, RawScrollPhase, RawScrollSource, RuntimeInputEvent,
+    RuntimeInputEventKind,
 };
 
 /// One client source driven by the native runtime.
@@ -266,6 +267,7 @@ impl PressedButtons {
 pub struct ClientRuntime {
     adapters: BTreeMap<ClientSourceId, ClientRuntimeAdapter>,
     scratch_events: ClientEventQueue,
+    scratch_destroyed: Vec<ClientSurfaceId>,
     aliases: HashMap<ClientSurfaceId, ClientSurfaceId>,
     pointer_route: Option<ClientPointerRoute>,
     pending_pointer_route: Option<Option<ClientPointerRoute>>,
@@ -274,6 +276,7 @@ pub struct ClientRuntime {
     gesture_capture: Option<GestureCapture>,
     finger_scroll_capture: Option<FingerScrollCapture>,
     pressed_buttons: PressedButtons,
+    pointer_position: Option<crate::InputPosition>,
 }
 
 impl ClientRuntime {
@@ -311,6 +314,52 @@ impl ClientRuntime {
         }
     }
 
+    /// Publishes application pointer policy and settles adapter focus immediately.
+    pub fn publish_pointer_route(
+        &mut self,
+        update: ClientPointerRouteUpdate,
+    ) -> ClientInputDispatchResult {
+        let ClientPointerRouteUpdate {
+            route,
+            position,
+            time,
+        } = update;
+        match route {
+            Some(route) => {
+                let capturing = matches!(self.pointer_capture, PointerCapture::Active { .. });
+                let previous = match self.captured_or_current_pointer_route() {
+                    Ok(route) => route,
+                    Err(error) => return error,
+                };
+                let next = match self.resolved_pointer_route(Some(route)) {
+                    Ok(route) => route,
+                    Err(error) => return error,
+                };
+                if !capturing
+                    && previous.zip(next).is_some_and(|(previous, next)| {
+                        previous.surface.source() != next.surface.source()
+                    })
+                {
+                    let _ = self.dispatch_pointer_to(
+                        previous,
+                        InputEventKind::PointerLeft { position },
+                        Some(position),
+                        time,
+                    );
+                }
+                self.set_pointer_route(Some(route));
+                self.dispatch_unconsumed_input(RuntimeInputEvent::new(
+                    RuntimeInputEventKind::Input(InputEventKind::PointerMotion { position }),
+                    time,
+                ))
+            }
+            None => self.dispatch_unconsumed_input(RuntimeInputEvent::new(
+                RuntimeInputEventKind::Input(InputEventKind::PointerLeft { position }),
+                time,
+            )),
+        }
+    }
+
     pub fn set_keyboard_route(&mut self, route: Option<ClientKeyboardRoute>) {
         self.keyboard_route = route;
     }
@@ -320,15 +369,13 @@ impl ClientRuntime {
         events: &mut ClientEventQueue,
         invalid: &mut Vec<ClientRuntimeEventError>,
     ) {
-        let Self {
-            adapters,
-            scratch_events,
-            ..
-        } = self;
-        for (source, adapter) in adapters {
-            adapter.driver.drain_events(scratch_events);
-            while let Some(event) = scratch_events.pop_front() {
+        for (source, adapter) in &mut self.adapters {
+            adapter.driver.drain_events(&mut self.scratch_events);
+            while let Some(event) = self.scratch_events.pop_front() {
                 if event.surface.source() == *source {
+                    if matches!(&event.kind, crate::ClientSurfaceEventKind::Destroyed) {
+                        self.scratch_destroyed.push(event.surface);
+                    }
                     events.push(event);
                 } else {
                     invalid.push(ClientRuntimeEventError {
@@ -338,13 +385,73 @@ impl ClientRuntime {
                 }
             }
         }
+        for index in 0..self.scratch_destroyed.len() {
+            let surface = self.scratch_destroyed[index];
+            self.forget_surface(surface);
+        }
+        self.scratch_destroyed.clear();
     }
 
     pub fn apply_request(&mut self, request: ClientRequest) -> bool {
-        let Some(adapter) = self.adapters.get_mut(&request.source()) else {
+        if matches!(&request, ClientRequest::ClearFocus) {
+            let Some(route) = self.keyboard_route else {
+                return true;
+            };
+            let source = route.surface.source();
+            let Some(adapter) = self.adapters.get_mut(&source) else {
+                return false;
+            };
+            self.keyboard_route = None;
+            adapter
+                .driver
+                .apply_request(ClientRequest::Focus(crate::ClientFocusRequest {
+                    source,
+                    surface: None,
+                }));
+            return true;
+        }
+        let Some(source) = request.source() else {
             return false;
         };
-        adapter.driver.apply_request(request);
+        if let ClientRequest::Focus(focus) = &request
+            && focus
+                .surface
+                .is_some_and(|surface| surface.source() != focus.source)
+        {
+            return false;
+        }
+        if !self.adapters.contains_key(&source) {
+            return false;
+        }
+        if let ClientRequest::Focus(focus) = request {
+            if let Some(previous) = self.keyboard_route
+                && previous.surface.source() != source
+                && let Some(adapter) = self.adapters.get_mut(&previous.surface.source())
+            {
+                adapter
+                    .driver
+                    .apply_request(ClientRequest::Focus(crate::ClientFocusRequest {
+                        source: previous.surface.source(),
+                        surface: None,
+                    }));
+            }
+            let Some(adapter) = self.adapters.get_mut(&source) else {
+                return false;
+            };
+            adapter.driver.apply_request(ClientRequest::Focus(focus));
+            if focus.surface.is_some()
+                || self
+                    .keyboard_route
+                    .is_some_and(|route| route.surface.source() == source)
+            {
+                self.keyboard_route = focus.surface.map(|surface| ClientKeyboardRoute { surface });
+            }
+        } else {
+            let Some(adapter) = self.adapters.get_mut(&source) else {
+                return false;
+            };
+            adapter.driver.apply_request(request);
+        }
         true
     }
 
@@ -363,13 +470,16 @@ impl ClientRuntime {
     ) -> ClientInputDispatchResult {
         let RuntimeInputEvent { event, time } = event;
         match event {
-            RuntimeInputEventKind::Input(InputEventKind::PointerMotion { position }) => self
-                .dispatch_pointer(
+            RuntimeInputEventKind::Input(InputEventKind::PointerMotion { position }) => {
+                self.pointer_position = Some(position);
+                self.dispatch_pointer(
                     InputEventKind::PointerMotion { position },
                     Some(position),
                     time,
-                ),
+                )
+            }
             RuntimeInputEventKind::Input(InputEventKind::PointerLeft { position }) => {
+                self.pointer_position = Some(position);
                 let result = self.dispatch_pointer(
                     InputEventKind::PointerLeft { position },
                     Some(position),
@@ -387,6 +497,10 @@ impl ClientRuntime {
                 button,
                 state,
             }) => {
+                if let Some(position) = position {
+                    self.pointer_position = Some(position);
+                }
+                let position = position.or(self.pointer_position);
                 if !PressedButtons::supports(button) {
                     return ClientInputDispatchResult::UnsupportedButton;
                 }
@@ -426,6 +540,10 @@ impl ClientRuntime {
                 result
             }
             RuntimeInputEventKind::Input(InputEventKind::PointerAxis { position, axis }) => {
+                if let Some(position) = position {
+                    self.pointer_position = Some(position);
+                }
+                let position = position.or(self.pointer_position);
                 self.dispatch_axis(position, axis, time)
             }
             RuntimeInputEventKind::Input(InputEventKind::PointerGesture { gesture }) => {
@@ -443,6 +561,7 @@ impl ClientRuntime {
                         target: ClientInputTarget::Keyboard {
                             surface: route.surface,
                         },
+                        host_position: None,
                         event: InputEventKind::Keyboard { keycode, state },
                         time,
                     },
@@ -466,6 +585,7 @@ impl ClientRuntime {
         self.gesture_capture = None;
         self.finger_scroll_capture = None;
         self.pressed_buttons.clear();
+        self.pointer_position = None;
         if delivered {
             ClientInputDispatchResult::Delivered
         } else {
@@ -517,6 +637,7 @@ impl ClientRuntime {
                     surface: route.surface,
                     layer: route.layer,
                 },
+                host_position: position,
                 event,
                 time,
             },
@@ -697,6 +818,60 @@ impl ClientRuntime {
         }
         Err(ClientInputDispatchResult::AliasCycle)
     }
+
+    fn forget_surface(&mut self, surface: ClientSurfaceId) {
+        let pointer_destroyed = self.route_resolves_to(self.pointer_route, surface);
+        let pending_destroyed = self
+            .pending_pointer_route
+            .is_some_and(|route| self.route_resolves_to(route, surface));
+        let keyboard_destroyed = self.keyboard_route.is_some_and(|route| {
+            route.surface == surface || self.resolve_alias(route.surface) == Ok(surface)
+        });
+        let capture_destroyed = matches!(
+            self.pointer_capture,
+            PointerCapture::Active { route } if self.route_resolves_to(route, surface)
+        );
+        let gesture_destroyed = self
+            .gesture_capture
+            .is_some_and(|capture| self.route_resolves_to(capture.route, surface));
+        let finger_scroll_destroyed = self
+            .finger_scroll_capture
+            .is_some_and(|capture| self.route_resolves_to(capture.route, surface));
+        self.aliases
+            .retain(|destination, source| *destination != surface && *source != surface);
+        if pointer_destroyed {
+            self.pointer_route = None;
+        }
+        if pending_destroyed {
+            self.pending_pointer_route = Some(None);
+        }
+        if keyboard_destroyed {
+            self.keyboard_route = None;
+        }
+        if capture_destroyed {
+            self.pointer_capture = PointerCapture::Idle;
+            self.pressed_buttons.clear();
+            if let Some(route) = self.pending_pointer_route.take() {
+                self.pointer_route = route;
+            }
+        }
+        if gesture_destroyed {
+            self.gesture_capture = None;
+        }
+        if finger_scroll_destroyed {
+            self.finger_scroll_capture = None;
+        }
+    }
+
+    fn route_resolves_to(
+        &self,
+        route: Option<ClientPointerRoute>,
+        surface: ClientSurfaceId,
+    ) -> bool {
+        route.is_some_and(|route| {
+            route.surface == surface || self.resolve_alias(route.surface) == Ok(surface)
+        })
+    }
 }
 
 #[cfg(test)]
@@ -758,6 +933,231 @@ mod tests {
     #[test]
     fn source_namespaces_keep_equal_local_ids_distinct() {
         assert_ne!(surface(1, 4, 9), surface(2, 4, 9));
+    }
+
+    #[test]
+    fn focus_switch_clears_the_old_adapter_and_unknown_focus_keeps_the_route() {
+        let mut runtime = ClientRuntime::default();
+        let first = register(&mut runtime, 1);
+        let second = register(&mut runtime, 2);
+        let first_surface = surface(1, 1, 1);
+        let second_surface = surface(2, 1, 1);
+
+        assert!(
+            !runtime.apply_request(ClientRequest::Focus(crate::ClientFocusRequest {
+                source: ClientSourceId::new(1),
+                surface: Some(second_surface),
+            }))
+        );
+        assert!(first.borrow().requests.is_empty());
+
+        assert!(
+            runtime.apply_request(ClientRequest::Focus(crate::ClientFocusRequest {
+                source: ClientSourceId::new(1),
+                surface: Some(first_surface),
+            }))
+        );
+        assert!(
+            !runtime.apply_request(ClientRequest::Focus(crate::ClientFocusRequest {
+                source: ClientSourceId::new(3),
+                surface: Some(surface(3, 1, 1)),
+            }))
+        );
+        assert_eq!(
+            runtime.dispatch_unconsumed_input(RuntimeInputEvent::new(
+                RuntimeInputEventKind::Input(InputEventKind::Keyboard {
+                    keycode: LinuxKeycode(1),
+                    state: ButtonState::Pressed,
+                }),
+                1,
+            )),
+            ClientInputDispatchResult::Delivered
+        );
+        assert_eq!(first.borrow().inputs.len(), 1);
+
+        assert!(
+            runtime.apply_request(ClientRequest::Focus(crate::ClientFocusRequest {
+                source: ClientSourceId::new(2),
+                surface: Some(second_surface),
+            }))
+        );
+        assert_eq!(
+            first.borrow().requests.last(),
+            Some(&ClientRequest::Focus(crate::ClientFocusRequest {
+                source: ClientSourceId::new(1),
+                surface: None,
+            }))
+        );
+        assert_eq!(
+            second.borrow().requests.last(),
+            Some(&ClientRequest::Focus(crate::ClientFocusRequest {
+                source: ClientSourceId::new(2),
+                surface: Some(second_surface),
+            }))
+        );
+        assert!(runtime.apply_request(ClientRequest::ClearFocus));
+        assert_eq!(
+            second.borrow().requests.last(),
+            Some(&ClientRequest::Focus(crate::ClientFocusRequest {
+                source: ClientSourceId::new(2),
+                surface: None,
+            }))
+        );
+    }
+
+    #[test]
+    fn pointer_route_switch_notifies_the_previous_adapter_before_the_next() {
+        let mut runtime = ClientRuntime::default();
+        let first = register(&mut runtime, 1);
+        let second = register(&mut runtime, 2);
+        let position = InputPosition::new(4.0, 5.0);
+        let route = |surface| ClientPointerRoute {
+            surface,
+            layer: SurfaceLayerId::new(1),
+            transform: InputTransform::IDENTITY,
+        };
+
+        runtime.publish_pointer_route(ClientPointerRouteUpdate {
+            route: Some(route(surface(1, 1, 1))),
+            position,
+            time: 1,
+        });
+        runtime.publish_pointer_route(ClientPointerRouteUpdate {
+            route: Some(route(surface(2, 1, 1))),
+            position,
+            time: 2,
+        });
+
+        assert!(matches!(
+            first.borrow().inputs.last().map(|input| &input.event),
+            Some(InputEventKind::PointerLeft { .. })
+        ));
+        assert!(matches!(
+            second.borrow().inputs.last().map(|input| &input.event),
+            Some(InputEventKind::PointerMotion { .. })
+        ));
+    }
+
+    #[test]
+    fn active_pointer_capture_defers_cross_source_handoff_without_sending_leave() {
+        let mut runtime = ClientRuntime::default();
+        let first = register(&mut runtime, 1);
+        let second = register(&mut runtime, 2);
+        let position = InputPosition::new(4.0, 5.0);
+        let route = |surface| ClientPointerRoute {
+            surface,
+            layer: SurfaceLayerId::new(1),
+            transform: InputTransform::IDENTITY,
+        };
+        runtime.set_pointer_route(Some(route(surface(1, 1, 1))));
+        runtime.dispatch_unconsumed_input(RuntimeInputEvent::new(
+            RuntimeInputEventKind::Input(InputEventKind::PointerButton {
+                position: Some(position),
+                button: LinuxButtonCode(1),
+                state: ButtonState::Pressed,
+            }),
+            1,
+        ));
+
+        runtime.publish_pointer_route(ClientPointerRouteUpdate {
+            route: Some(route(surface(2, 1, 1))),
+            position,
+            time: 2,
+        });
+        assert!(
+            first
+                .borrow()
+                .inputs
+                .iter()
+                .all(|input| !matches!(input.event, InputEventKind::PointerLeft { .. }))
+        );
+        assert!(second.borrow().inputs.is_empty());
+
+        runtime.dispatch_unconsumed_input(RuntimeInputEvent::new(
+            RuntimeInputEventKind::Input(InputEventKind::PointerButton {
+                position: Some(position),
+                button: LinuxButtonCode(1),
+                state: ButtonState::Released,
+            }),
+            3,
+        ));
+        assert_eq!(
+            runtime.dispatch_unconsumed_input(RuntimeInputEvent::new(
+                RuntimeInputEventKind::Input(InputEventKind::PointerMotion { position }),
+                4,
+            )),
+            ClientInputDispatchResult::Delivered
+        );
+        assert_eq!(second.borrow().inputs.len(), 1);
+    }
+
+    struct OneEventAdapter(Option<ClientSurfaceEvent>);
+
+    impl ClientAdapter for OneEventAdapter {
+        fn drain_events(&mut self, events: &mut ClientEventQueue) {
+            if let Some(event) = self.0.take() {
+                events.push(event);
+            }
+        }
+
+        fn apply_request(&mut self, _request: ClientRequest) {}
+        fn apply_input(&mut self, _event: ClientInputEvent) {}
+        fn apply_command(&mut self, _command: ClientAdapterCommandEnvelope) {}
+        fn host_focus_lost(&mut self, _time: u32) {}
+    }
+
+    #[test]
+    fn destroyed_surface_is_removed_from_retained_input_routes() {
+        let source = ClientSourceId::new(1);
+        let destroyed = surface(1, 1, 1);
+        let mut runtime = ClientRuntime::default();
+        runtime
+            .register(ClientRuntimeAdapter::new(
+                ClientSourceDescriptor::new(source, ClientProvenance::Local),
+                OneEventAdapter(Some(ClientSurfaceEvent {
+                    surface: destroyed,
+                    kind: ClientSurfaceEventKind::Destroyed,
+                })),
+            ))
+            .expect("unique source");
+        runtime.set_pointer_route(Some(ClientPointerRoute {
+            surface: destroyed,
+            layer: SurfaceLayerId::new(1),
+            transform: InputTransform::IDENTITY,
+        }));
+        runtime.set_keyboard_route(Some(ClientKeyboardRoute { surface: destroyed }));
+        let mut events = ClientEventQueue::default();
+        let mut invalid = Vec::new();
+
+        runtime.drain_events(&mut events, &mut invalid);
+
+        assert!(invalid.is_empty());
+        assert!(matches!(
+            events.pop_front(),
+            Some(ClientSurfaceEvent {
+                kind: ClientSurfaceEventKind::Destroyed,
+                ..
+            })
+        ));
+        assert_eq!(
+            runtime.dispatch_unconsumed_input(RuntimeInputEvent::new(
+                RuntimeInputEventKind::Input(InputEventKind::PointerMotion {
+                    position: InputPosition::new(1.0, 1.0),
+                }),
+                1,
+            )),
+            ClientInputDispatchResult::NoRoute
+        );
+        assert_eq!(
+            runtime.dispatch_unconsumed_input(RuntimeInputEvent::new(
+                RuntimeInputEventKind::Input(InputEventKind::Keyboard {
+                    keycode: LinuxKeycode(1),
+                    state: ButtonState::Pressed,
+                }),
+                2,
+            )),
+            ClientInputDispatchResult::NoRoute
+        );
     }
 
     #[test]

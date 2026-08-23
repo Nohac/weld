@@ -15,6 +15,7 @@ use smithay::{
     reexports::{calloop::EventLoop, wayland_server::Display},
 };
 use tracing::{info, warn};
+use weld_client::{ClientEventQueue, ClientRuntime, ClientRuntimeAdapter};
 
 use crate::{
     CompositionDemand, OutputConfiguration, OutputLayout, OutputScale, OutputTopology,
@@ -132,6 +133,8 @@ pub(super) fn run(
     options: RunOptions,
     signals: Signals,
     mut application: Box<dyn CompositionHost>,
+    client_bridge: crate::server::WaylandClientBridge,
+    adapters: Vec<ClientRuntimeAdapter>,
 ) -> Result<()> {
     let DrmRuntimeBootstrap {
         mut session,
@@ -145,6 +148,12 @@ pub(super) fn run(
         dmabuf_release_source,
     } = bootstrap;
     let started_at = Instant::now();
+    let mut clients = ClientRuntime::default();
+    for adapter in adapters {
+        clients.register(adapter).map_err(anyhow::Error::new)?;
+    }
+    let mut client_events = ClientEventQueue::default();
+    let mut invalid_client_events = Vec::new();
     let mut calloop: EventLoop<'static, LoopData<HostEvent>> =
         EventLoop::try_new().context("failed to create the DRM calloop event loop")?;
     let display = Display::<ServerState>::new().context("failed to create the Wayland display")?;
@@ -152,6 +161,7 @@ pub(super) fn run(
         &calloop.handle(),
         display,
         dmabuf_release_source,
+        client_bridge,
         server_mut::<HostEvent>,
         ServerOptions {
             started_at,
@@ -215,8 +225,10 @@ pub(super) fn run(
     let topology = OutputTopology::new(OutputLayout::new(1, current_configurations.clone())?);
     let mut input = LibinputAdapter::new(topology);
     let initial_input = input.initial_event();
-    let _ = application.enqueue_input_event(initial_input.clone());
-    loop_data.server.forward_raw_input(initial_input);
+    if application.enqueue_input_event(initial_input.clone()) {
+        clients.dispatch_unconsumed_input(initial_input.into_runtime());
+        loop_data.server.apply_pending_client_work();
+    }
     desktop.set_cursor_position(input.pointer_position());
 
     let mut children = ChildProcesses::default();
@@ -284,15 +296,18 @@ pub(super) fn run(
                 HostEvent::Session(SessionEvent::PauseSession) => {
                     target = SessionTarget::InactiveOwned;
                     for event in input.cancel_active_input().into_iter().flatten() {
-                        let _ = application.enqueue_input_event(event.clone());
-                        loop_data.server.forward_raw_input(event);
+                        if application.enqueue_input_event(event.clone()) {
+                            clients.dispatch_unconsumed_input(event.into_runtime());
+                            loop_data.server.apply_pending_client_work();
+                        }
                     }
                     let focus_lost = RawSeatEvent::new(
                         RawSeatEventKind::HostFocusLost,
                         input.last_event_time_msec(),
                     );
                     let _ = application.enqueue_input_event(focus_lost.clone());
-                    loop_data.server.forward_raw_input(focus_lost);
+                    clients.dispatch_unconsumed_input(focus_lost.into_runtime());
+                    loop_data.server.apply_pending_client_work();
                     libinput_context.suspend();
                     desktop.pause();
                 }
@@ -368,7 +383,8 @@ pub(super) fn run(
                             frame_state.request_present();
                         }
                         if application.enqueue_input_event(event.clone()) {
-                            loop_data.server.forward_raw_input(event);
+                            clients.dispatch_unconsumed_input(event.into_runtime());
+                            loop_data.server.apply_pending_client_work();
                         }
                         input_pending = true;
                     }
@@ -376,9 +392,17 @@ pub(super) fn run(
             }
         }
 
-        if loop_data.server.has_surface_events() {
-            for event in loop_data.server.take_surface_events() {
-                let demand = application.enqueue_surface_event(event);
+        let completed_dmabuf_uses = loop_data.server.take_completed_dmabuf_uses();
+        if !completed_dmabuf_uses.is_empty() {
+            application.complete_dmabuf_uses(&completed_dmabuf_uses);
+        }
+        clients.drain_events(&mut client_events, &mut invalid_client_events);
+        for invalid in invalid_client_events.drain(..) {
+            warn!(%invalid, "client adapter published an invalid event");
+        }
+        if !client_events.is_empty() {
+            while let Some(event) = client_events.pop_front() {
+                let demand = application.enqueue_client_event(event);
                 match demand {
                     CompositionDemand::Ordinary => {
                         frame_state.request_composition();
@@ -420,12 +444,16 @@ pub(super) fn run(
                     .unwrap_or(now + fastest_interval),
                 SessionTarget::InactiveOwned => now + fastest_interval,
             };
-            for action in application.take_surface_actions() {
-                loop_data.server.apply_surface_action(action);
+            for request in application.take_client_requests() {
+                if !clients.apply_request(request) {
+                    warn!("ignored a request for an unregistered client source");
+                }
             }
-            for effect in application.take_input_effects() {
-                loop_data.server.apply_input_effect(effect);
+            loop_data.server.apply_pending_client_work();
+            for route in application.take_pointer_route_updates() {
+                clients.publish_pointer_route(route);
             }
+            loop_data.server.apply_pending_client_work();
             for command in application.take_host_commands() {
                 match children.apply(&loop_data.server, command)? {
                     HostCommandEffect::Continue => {}
@@ -454,6 +482,7 @@ pub(super) fn run(
                                 server: &mut loop_data.server,
                                 application: application.as_mut(),
                                 input: &mut input,
+                                clients: &mut clients,
                             }
                             .apply(output, scale)?;
                             frame_state.request_composition();
@@ -497,6 +526,7 @@ pub(super) fn run(
                                 server: &mut loop_data.server,
                                 application: application.as_mut(),
                                 input: &mut input,
+                                clients: &mut clients,
                             }
                             .apply(output, scale)?;
                             frame_state.request_composition();
@@ -658,6 +688,7 @@ struct OutputScaleUpdate<'a> {
     server: &'a mut ServerState,
     application: &'a mut dyn CompositionHost,
     input: &'a mut LibinputAdapter,
+    clients: &'a mut ClientRuntime,
 }
 
 impl OutputScaleUpdate<'_> {
@@ -692,9 +723,11 @@ impl OutputScaleUpdate<'_> {
             self.layout_revision,
             self.current.clone(),
         )?);
-        if let Some(event) = self.input.update_output_topology(topology) {
-            let _ = self.application.enqueue_input_event(event.clone());
-            self.server.forward_raw_input(event);
+        if let Some(event) = self.input.update_output_topology(topology)
+            && self.application.enqueue_input_event(event.clone())
+        {
+            self.clients.dispatch_unconsumed_input(event.into_runtime());
+            self.server.apply_pending_client_work();
         }
         self.desktop
             .set_cursor_position(self.input.pointer_position());

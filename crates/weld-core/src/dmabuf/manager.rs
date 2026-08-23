@@ -13,9 +13,13 @@ use calloop::channel::Sender as CalloopSender;
 use tracing::{debug, error, warn};
 
 use super::{
-    DmabufReleaseId, DmabufSourceCache, ImportId, ImportedDmabufSource, PendingDmabufFrame,
+    DmabufEvent, DmabufReleaseId, DmabufSourceCache, ImportId, ImportedDmabufSource,
+    PendingDmabufFrame, WaylandBufferAccess,
 };
 use crate::surface::{SurfaceId, SurfaceLayerId};
+use weld_client::{
+    ClientBufferId, ClientBufferLease, ClientBufferMetadata, ClientBufferUseId, ClientSourceId,
+};
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 struct SurfaceLayerKey {
@@ -27,12 +31,14 @@ struct StagedImage {
     id: ImportId,
     source: Rc<ImportedDmabufSource>,
     release: DmabufReleaseId,
+    lease: ClientBufferLease,
 }
 
 struct DisplayedImage {
     id: ImportId,
     source: Rc<ImportedDmabufSource>,
     release: DmabufReleaseId,
+    lease: ClientBufferLease,
 }
 
 #[derive(Default)]
@@ -108,6 +114,23 @@ struct CompletionWork {
     _textures: Vec<wgpu::Texture>,
 }
 
+#[derive(Default)]
+struct PendingGpuLeases(HashMap<DmabufReleaseId, ClientBufferLease>);
+
+impl PendingGpuLeases {
+    fn retain(&mut self, release: DmabufReleaseId, lease: ClientBufferLease) {
+        self.0.insert(release, lease);
+    }
+
+    fn complete(&mut self, release: DmabufReleaseId) {
+        self.0.remove(&release);
+    }
+
+    fn clear(&mut self) {
+        self.0.clear();
+    }
+}
+
 enum CompletionCommand {
     Wait(CompletionWork),
     Shutdown,
@@ -142,13 +165,13 @@ pub trait ImportedImageRegistry {
 /// application crate.
 #[derive(Clone)]
 pub struct DmabufContext {
-    release_sender: CalloopSender<DmabufReleaseId>,
+    release_sender: CalloopSender<DmabufEvent>,
     sources: DmabufSourceCache,
 }
 
 impl DmabufContext {
     pub(crate) const fn new(
-        release_sender: CalloopSender<DmabufReleaseId>,
+        release_sender: CalloopSender<DmabufEvent>,
         sources: DmabufSourceCache,
     ) -> Self {
         Self {
@@ -171,7 +194,36 @@ impl DmabufContext {
     }
 
     pub fn release_unrendered(&self, frame: PendingDmabufFrame) {
-        let _ = self.release_sender.send(frame.release);
+        let _ = self
+            .release_sender
+            .send(DmabufEvent::LeaseCompleted(frame.release));
+    }
+
+    pub(crate) fn lease_dmabuf(
+        &self,
+        source: ClientSourceId,
+        use_local: u64,
+        metadata: ClientBufferMetadata,
+        frame: PendingDmabufFrame,
+    ) -> anyhow::Result<ClientBufferLease> {
+        let release = frame.release;
+        let Some(imported) = self.sources.get(&frame.dmabuf) else {
+            let _ = self
+                .release_sender
+                .send(DmabufEvent::LeaseCompleted(release));
+            anyhow::bail!("committed DMA-BUF was not imported during protocol creation");
+        };
+        let release_sender = self.release_sender.clone();
+        ClientBufferLease::new(
+            ClientBufferId::new(source, imported.id.raw()),
+            ClientBufferUseId::new(source, use_local),
+            metadata,
+            Rc::new(WaylandBufferAccess::Dmabuf(frame)),
+            move |_| {
+                let _ = release_sender.send(DmabufEvent::LeaseCompleted(release));
+            },
+        )
+        .map_err(anyhow::Error::new)
     }
 
     /// Creates a DMA-BUF capability with no live protocol release consumer.
@@ -198,7 +250,7 @@ pub struct DmabufManager {
     retiring: Vec<DisplayedImage>,
     known_sources: HashMap<ImportId, Rc<ImportedDmabufSource>>,
     acquired_sources: AcquiredSources,
-    release_sender: CalloopSender<DmabufReleaseId>,
+    pending_leases: PendingGpuLeases,
     completion_sender: mpsc::Sender<CompletionCommand>,
     completion_thread: Option<JoinHandle<()>>,
 }
@@ -207,7 +259,7 @@ impl DmabufManager {
     fn new(
         device: &wgpu::Device,
         queue: &wgpu::Queue,
-        release_sender: CalloopSender<DmabufReleaseId>,
+        release_sender: CalloopSender<DmabufEvent>,
         sources: DmabufSourceCache,
     ) -> Result<Option<Self>> {
         if !device
@@ -249,7 +301,7 @@ impl DmabufManager {
             retiring: Vec::new(),
             known_sources: HashMap::new(),
             acquired_sources: AcquiredSources::default(),
-            release_sender,
+            pending_leases: PendingGpuLeases::default(),
             completion_sender,
             completion_thread: Some(completion_thread),
         }))
@@ -260,13 +312,16 @@ impl DmabufManager {
         &mut self,
         surface: SurfaceId,
         layer: SurfaceLayerId,
-        frame: PendingDmabufFrame,
+        lease: ClientBufferLease,
     ) -> Result<StagedImport> {
-        let result = self.stage_inner(surface, layer, &frame);
-        if result.is_err() {
-            let _ = self.release_sender.send(frame.release);
-        }
-        result
+        let frame = lease
+            .access::<WaylandBufferAccess>()
+            .and_then(|access| match access {
+                WaylandBufferAccess::Dmabuf(frame) => Some(frame),
+                WaylandBufferAccess::Shm(_) => None,
+            })
+            .context("client-buffer lease does not contain DMA-BUF access")?;
+        self.stage_inner(surface, layer, frame, lease.clone())
     }
 
     fn stage_inner(
@@ -274,6 +329,7 @@ impl DmabufManager {
         surface: SurfaceId,
         layer: SurfaceLayerId,
         frame: &PendingDmabufFrame,
+        lease: ClientBufferLease,
     ) -> Result<StagedImport> {
         let source = self
             .sources
@@ -289,6 +345,7 @@ impl DmabufManager {
             id,
             source,
             release: frame.release,
+            lease,
         }) {
             // Its owned placeholder may still be referenced by a queued ECS
             // snapshot. Keep it until the next main-world advance has drained
@@ -316,7 +373,7 @@ impl DmabufManager {
         registry: &mut impl ImportedImageRegistry,
     ) -> Result<Vec<ImportId>> {
         let superseded = std::mem::take(&mut self.superseded);
-        self.release_never_acquired(superseded);
+        Self::drop_unacquired_leases(superseded);
         self.prune_dead_sources(registry);
 
         let staged = self
@@ -336,7 +393,7 @@ impl DmabufManager {
             .into_iter()
             .map(|(_, image)| image)
             .collect::<Vec<_>>();
-        self.release_never_acquired(discarded);
+        Self::drop_unacquired_leases(discarded);
         self.prune_dead_sources(registry);
         if referenced.is_empty() {
             return Ok(Vec::new());
@@ -358,7 +415,7 @@ impl DmabufManager {
                     .into_iter()
                     .map(|(_, image)| image)
                     .collect::<Vec<_>>();
-                self.release_never_acquired(failed);
+                Self::drop_unacquired_leases(failed);
                 self.prune_dead_sources(registry);
                 return Err(error).context("could not acquire the complete staged DMA-BUF batch");
             }
@@ -382,7 +439,7 @@ impl DmabufManager {
                 .into_iter()
                 .map(|(_, image)| image)
                 .collect::<Vec<_>>();
-            self.release_never_acquired(failed);
+            Self::drop_unacquired_leases(failed);
             self.prune_dead_sources(registry);
             return Err(error).context("could not install the complete staged DMA-BUF batch");
         }
@@ -403,6 +460,7 @@ impl DmabufManager {
                 id: staged.id,
                 source: staged.source,
                 release: staged.release,
+                lease: staged.lease,
             }) {
                 self.retiring.push(displayed);
             }
@@ -432,18 +490,19 @@ impl DmabufManager {
                 .map(|image| image.source.texture.clone())
                 .collect(),
         };
+        for image in retiring {
+            self.pending_leases.retain(image.release, image.lease);
+        }
         self.queue_completion(work);
         self.prune_dead_sources(registry);
         Ok(())
     }
 
-    fn release_never_acquired(&self, images: Vec<StagedImage>) {
-        for image in images {
-            let _ = self.release_sender.send(image.release);
-        }
+    fn drop_unacquired_leases(images: Vec<StagedImage>) {
+        drop(images);
     }
 
-    fn queue_completion(&self, work: CompletionWork) {
+    fn queue_completion(&mut self, work: CompletionWork) {
         if let Err(mpsc::SendError(CompletionCommand::Wait(work))) =
             self.completion_sender.send(CompletionCommand::Wait(work))
         {
@@ -455,8 +514,14 @@ impl DmabufManager {
                 warn!(%error, "DMA-BUF fallback completion wait failed");
             }
             for release in work.releases {
-                let _ = self.release_sender.send(release);
+                self.pending_leases.complete(release);
             }
+        }
+    }
+
+    pub fn complete_gpu_uses(&mut self, releases: &[DmabufReleaseId]) {
+        for release in releases {
+            self.pending_leases.complete(*release);
         }
     }
 
@@ -633,7 +698,7 @@ impl DmabufManager {
             displayed.extend(images.displayed);
         }
         for image in staged {
-            let _ = self.release_sender.send(image.release);
+            drop(image);
         }
         if let Err(error) = self
             .acquired_sources
@@ -655,14 +720,18 @@ impl DmabufManager {
         };
         let submission = self.queue.submit(command);
         self.acquired_sources.clear();
-        self.queue_completion(CompletionWork {
+        let work = CompletionWork {
             submission,
             releases: displayed.iter().map(|image| image.release).collect(),
             _textures: displayed
-                .drain(..)
+                .iter()
                 .map(|image| image.source.texture.clone())
                 .collect(),
-        });
+        };
+        for image in displayed {
+            self.pending_leases.retain(image.release, image.lease);
+        }
+        self.queue_completion(work);
     }
 }
 
@@ -675,12 +744,13 @@ impl Drop for DmabufManager {
         {
             error!("DMA-BUF completion worker panicked during shutdown");
         }
+        self.pending_leases.clear();
     }
 }
 
 fn completion_loop(
     device: wgpu::Device,
-    release_sender: CalloopSender<DmabufReleaseId>,
+    release_sender: CalloopSender<DmabufEvent>,
     receiver: mpsc::Receiver<CompletionCommand>,
 ) {
     while let Ok(command) = receiver.recv() {
@@ -695,7 +765,10 @@ fn completion_loop(
             warn!(%error, releases = ?work.releases, "DMA-BUF GPU completion wait failed; releasing client buffers during recovery");
         }
         for release in work.releases {
-            if release_sender.send(release).is_err() {
+            if release_sender
+                .send(DmabufEvent::GpuUseCompleted(release))
+                .is_err()
+            {
                 return;
             }
         }
@@ -704,9 +777,15 @@ fn completion_loop(
 
 #[cfg(test)]
 mod tests {
-    use ash::vk::Handle;
+    use std::{cell::Cell, rc::Rc};
 
-    use super::AcquiredSources;
+    use ash::vk::Handle;
+    use weld_client::{
+        ClientBufferId, ClientBufferLease, ClientBufferMetadata, ClientBufferUseId, ClientSourceId,
+        Extent,
+    };
+
+    use super::{AcquiredSources, DmabufReleaseId, PendingGpuLeases};
 
     fn image(raw: u64) -> ash::vk::Image {
         ash::vk::Image::from_raw(raw)
@@ -751,5 +830,30 @@ mod tests {
 
         assert!(acquired.plan_retirements([source, source]).is_err());
         assert!(acquired.contains(source));
+    }
+
+    #[test]
+    fn gpu_completion_drops_only_the_manager_consumer_of_a_shared_lease() {
+        let completed = Rc::new(Cell::new(0));
+        let completed_for_callback = completed.clone();
+        let source = ClientSourceId::new(1);
+        let lease = ClientBufferLease::new(
+            ClientBufferId::new(source, 1),
+            ClientBufferUseId::new(source, 1),
+            ClientBufferMetadata::new(Extent::new(1, 1), false),
+            Rc::new(()),
+            move |_| completed_for_callback.set(completed_for_callback.get() + 1),
+        )
+        .expect("matching source");
+        let exporter = lease.clone();
+        let mut pending = PendingGpuLeases::default();
+        let release = DmabufReleaseId::new(1);
+        pending.retain(release, lease);
+
+        pending.complete(release);
+        assert_eq!(completed.get(), 0);
+
+        drop(exporter);
+        assert_eq!(completed.get(), 1);
     }
 }

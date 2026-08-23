@@ -268,7 +268,19 @@ pub fn rendering_shell_with_outputs(
     configure_rendering(&mut app, &context);
     app.add_plugins(WeldAppPlugin::new(configurations, heads)?);
     configure(&mut app);
-    Ok((AppShell::new(app, context)?, adapter_info, device, queue))
+    let importer = weld_client::ClientImporterRegistration {
+        descriptor: weld_client::ClientSourceDescriptor::new(
+            weld_core::WAYLAND_CLIENT_SOURCE,
+            weld_client::ClientProvenance::Local,
+        ),
+        importer: Box::new(weld_core::server::WaylandClientImporter),
+    };
+    Ok((
+        AppShell::new(app, context, vec![importer])?,
+        adapter_info,
+        device,
+        queue,
+    ))
 }
 
 fn headless_render_context(outputs: Vec<OutputConfiguration>) -> Result<RenderContext> {

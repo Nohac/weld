@@ -5,15 +5,16 @@ use std::{ffi::OsString, path::PathBuf};
 use anyhow::{Context, Result};
 use calloop::signals::{Signal, Signals};
 use tracing::warn;
+use weld_client::{ClientAdapterRegistration, ClientRuntimeAdapter};
 
 use crate::{
     dmabuf::DmabufContext,
-    input::{RawSeatEvent, SeatInputEffect},
+    input::RawSeatEvent,
     output::{OutputConfiguration, OutputHead, OutputId, OutputScale},
     runtime::HostCommand,
-    server::PendingSurfaceEvent,
-    surface::{Extent, SurfaceAction},
+    surface::Extent,
 };
+use weld_client::{ClientPointerRouteUpdate, ClientRequest, ClientSurfaceEvent};
 
 /// Distribution options consumed by either host backend.
 #[derive(Default)]
@@ -151,7 +152,8 @@ pub struct RenderContext {
     pub composition_format: wgpu::TextureFormat,
 }
 
-type RunPreparedHost = Box<dyn FnOnce(Box<dyn CompositionHost>) -> Result<()>>;
+type RunPreparedHost =
+    Box<dyn FnOnce(Box<dyn CompositionHost>, Vec<ClientRuntimeAdapter>) -> Result<()>>;
 
 /// Native event-loop state ready to drive one application host.
 pub struct PreparedRuntime {
@@ -159,15 +161,21 @@ pub struct PreparedRuntime {
 }
 
 impl PreparedRuntime {
-    pub(crate) fn new(run: impl FnOnce(Box<dyn CompositionHost>) -> Result<()> + 'static) -> Self {
+    pub(crate) fn new(
+        run: impl FnOnce(Box<dyn CompositionHost>, Vec<ClientRuntimeAdapter>) -> Result<()> + 'static,
+    ) -> Self {
         Self { run: Box::new(run) }
     }
 
     /// Drives the prepared native event loop with one application host.
     ///
     /// This must run on the thread that prepared the host.
-    pub fn run(self, host: impl CompositionHost + 'static) -> Result<()> {
-        (self.run)(Box::new(host))
+    pub fn run(
+        self,
+        host: impl CompositionHost + 'static,
+        adapters: Vec<ClientRuntimeAdapter>,
+    ) -> Result<()> {
+        (self.run)(Box::new(host), adapters)
     }
 }
 
@@ -175,16 +183,19 @@ impl PreparedRuntime {
 pub struct PreparedHost {
     context: RenderContext,
     runtime: PreparedRuntime,
+    client_adapters: Vec<ClientAdapterRegistration>,
 }
 
 impl PreparedHost {
     pub(crate) fn new(
         context: RenderContext,
-        run: impl FnOnce(Box<dyn CompositionHost>) -> Result<()> + 'static,
+        client_adapters: Vec<ClientAdapterRegistration>,
+        run: impl FnOnce(Box<dyn CompositionHost>, Vec<ClientRuntimeAdapter>) -> Result<()> + 'static,
     ) -> Self {
         Self {
             context,
             runtime: PreparedRuntime::new(run),
+            client_adapters,
         }
     }
 
@@ -194,8 +205,14 @@ impl PreparedHost {
     }
 
     /// Separates the GPU context from the one-shot native runtime.
-    pub fn into_parts(self) -> (RenderContext, PreparedRuntime) {
-        (self.context, self.runtime)
+    pub fn into_parts(
+        self,
+    ) -> (
+        RenderContext,
+        PreparedRuntime,
+        Vec<ClientAdapterRegistration>,
+    ) {
+        (self.context, self.runtime, self.client_adapters)
     }
 }
 
@@ -216,7 +233,7 @@ pub enum CompositionDemand {
 
 /// Bevy-independent interface through which a backend drives application policy and composition.
 pub trait CompositionHost {
-    fn enqueue_surface_event(&mut self, event: PendingSurfaceEvent) -> CompositionDemand;
+    fn enqueue_client_event(&mut self, event: ClientSurfaceEvent) -> CompositionDemand;
     /// Buffers an input event for the next application frame and returns
     /// whether core should also forward it to the focused client immediately.
     fn enqueue_input_event(&mut self, event: RawSeatEvent) -> bool;
@@ -236,11 +253,12 @@ pub trait CompositionHost {
     /// Reconciles enabled output geometry before the next main advance.
     fn update_output_topology(&mut self, outputs: &[OutputConfiguration]);
     fn should_exit(&self) -> bool;
-    fn take_input_effects(&mut self) -> Vec<SeatInputEffect>;
+    fn take_pointer_route_updates(&mut self) -> Vec<ClientPointerRouteUpdate>;
     fn take_cursor_update(&mut self) -> crate::cursor::CursorHostUpdate;
     fn take_host_commands(&mut self) -> Vec<HostCommand>;
     fn take_virtual_terminal_switch_request(&mut self) -> Option<i32>;
-    fn take_surface_actions(&mut self) -> Vec<SurfaceAction>;
+    fn take_client_requests(&mut self) -> Vec<ClientRequest>;
+    fn complete_dmabuf_uses(&mut self, releases: &[crate::dmabuf::DmabufReleaseId]);
     fn has_surface_frame(&self) -> bool;
     fn take_capture_request(&mut self) -> Option<CaptureRequest>;
     fn complete_capture(&mut self, request_id: u64, result: Result<(), String>);

@@ -261,13 +261,16 @@ pub struct ClientFocusRequest {
 pub enum ClientRequest {
     Surface(ClientSurfaceRequest),
     Focus(ClientFocusRequest),
+    /// Clears the runtime's currently routed keyboard focus, regardless of source.
+    ClearFocus,
 }
 
 impl ClientRequest {
-    pub const fn source(&self) -> ClientSourceId {
+    pub const fn source(&self) -> Option<ClientSourceId> {
         match self {
-            Self::Surface(request) => request.surface.source(),
-            Self::Focus(request) => request.source,
+            Self::Surface(request) => Some(request.surface.source()),
+            Self::Focus(request) => Some(request.source),
+            Self::ClearFocus => None,
         }
     }
 }

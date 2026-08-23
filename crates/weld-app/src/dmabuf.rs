@@ -17,7 +17,7 @@ use bevy::{
 use tracing::warn;
 use weld_core::{
     dmabuf::{
-        DmabufContext, DmabufManager, ImportId, ImportedImageRegistry, PendingDmabufFrame,
+        DmabufContext, DmabufManager, DmabufReleaseId, ImportId, ImportedImageRegistry,
         PromotionImage,
     },
     surface::{SurfaceId, SurfaceLayerId},
@@ -52,10 +52,10 @@ impl DmabufImporter {
         app: &mut App,
         surface: SurfaceId,
         layer: SurfaceLayerId,
-        frame: PendingDmabufFrame,
+        lease: weld_client::ClientBufferLease,
         opaque: bool,
     ) -> Result<SurfaceRenderImage> {
-        let staged = self.manager.stage(surface, layer, frame)?;
+        let staged = self.manager.stage(surface, layer, lease)?;
         let handle = if let Some(handle) = self.handles.get(&staged.id) {
             handle.clone()
         } else {
@@ -143,6 +143,10 @@ impl DmabufImporter {
 
     pub(crate) fn remove_layer(&mut self, surface: SurfaceId, layer: SurfaceLayerId) {
         self.manager.remove_layer(surface, layer);
+    }
+
+    pub(crate) fn complete_gpu_uses(&mut self, releases: &[DmabufReleaseId]) {
+        self.manager.complete_gpu_uses(releases);
     }
 }
 

@@ -22,7 +22,21 @@ pub(crate) fn prepare(options: RunOptions, signals: Signals) -> Result<PreparedH
     let bootstrap = device::prepare(&options)?;
     let context = bootstrap.render_context;
     let runtime = bootstrap.runtime;
-    Ok(PreparedHost::new(context, move |application| {
-        host::run(runtime, options, signals, application)
-    }))
+    let client_bridge = crate::server::WaylandClientBridge::default();
+    let client_registration =
+        crate::server::client_registration(client_bridge.clone(), context.dmabuf.clone());
+    Ok(PreparedHost::new(
+        context,
+        vec![client_registration],
+        move |application, adapters| {
+            host::run(
+                runtime,
+                options,
+                signals,
+                application,
+                client_bridge,
+                adapters,
+            )
+        },
+    ))
 }

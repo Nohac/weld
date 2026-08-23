@@ -5539,6 +5539,7 @@ version = "0.1.0"
 dependencies = [
  "bevy",
  "weld-app",
+ "weld-client",
  "weld-float",
  "weld-ssd",
  "weld-window",
@@ -5552,6 +5553,7 @@ dependencies = [
  "bevy",
  "tracing",
  "weld-app",
+ "weld-client",
  "weld-float",
  "weld-window",
  "weld-window-ui",
@@ -5564,7 +5566,6 @@ dependencies = [
  "bevy",
  "tracing",
  "weld-app",
- "weld-client",
 ]
 
 [[package]]

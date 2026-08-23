@@ -145,8 +145,13 @@ pub fn register_client_source(world: &mut World, descriptor: ClientSourceDescrip
     let Some(mut sources) = world.get_resource_mut::<ClientSources>() else {
         return false;
     };
-    sources.0.insert(descriptor.id, descriptor);
-    true
+    match sources.0.get(&descriptor.id) {
+        Some(existing) => *existing == descriptor,
+        None => {
+            sources.0.insert(descriptor.id, descriptor);
+            true
+        }
+    }
 }
 
 fn registered_client_source(world: &World, surface: SurfaceId) -> Option<ClientSource> {
@@ -414,11 +419,9 @@ pub struct HostSurfaceEvent {
 #[derive(Debug)]
 #[doc(hidden)]
 pub enum HostSurfaceEventKind {
-    Created { decoration: WindowDecoration },
-    TreeSnapshot(SurfaceTreeSnapshot),
-    ToplevelParentChanged { parent: Option<SurfaceId> },
-    PopupConfigured(ClientPopup),
-    WindowInteraction(ToplevelInteractionRequestKind),
+    Role(weld_client::ClientSurfaceRole),
+    Commit(SurfaceTreeSnapshot),
+    Interaction(ToplevelInteractionRequestKind),
     Destroyed,
 }
 
@@ -484,10 +487,10 @@ impl SurfaceEventQueue {
     pub(crate) fn push(&mut self, event: HostSurfaceEvent) {
         let HostSurfaceEvent { surface, kind } = event;
         let kind = match kind {
-            HostSurfaceEventKind::TreeSnapshot(mut snapshot) => {
+            HostSurfaceEventKind::Commit(mut snapshot) => {
                 if let Some(HostSurfaceEvent {
                     surface: previous_surface,
-                    kind: HostSurfaceEventKind::TreeSnapshot(previous),
+                    kind: HostSurfaceEventKind::Commit(previous),
                 }) = self.0.back_mut()
                     && surface == *previous_surface
                 {
@@ -495,7 +498,7 @@ impl SurfaceEventQueue {
                     *previous = snapshot;
                     return;
                 }
-                HostSurfaceEventKind::TreeSnapshot(snapshot)
+                HostSurfaceEventKind::Commit(snapshot)
             }
             kind => kind,
         };
@@ -703,30 +706,35 @@ fn apply_host_surface_events(world: &mut World) {
 
     for HostSurfaceEvent { surface, kind } in events {
         match kind {
-            HostSurfaceEventKind::Created { decoration } => {
-                if let Some(entity) =
-                    ensure_window_entity(world, &mut registry, surface, decoration)
-                {
-                    set_decoration_marker(world, entity, decoration);
-                    apply_pending_snapshot(world, &mut registry, surface);
+            HostSurfaceEventKind::Role(role) => match role {
+                weld_client::ClientSurfaceRole::Toplevel(toplevel) => {
+                    if let Some(entity) =
+                        ensure_window_entity(world, &mut registry, surface, toplevel.decoration)
+                    {
+                        set_decoration_marker(world, entity, toplevel.decoration);
+                        set_toplevel_parent(world, &registry, surface, toplevel.parent);
+                        apply_pending_snapshot(world, &mut registry, surface);
+                    }
                 }
-            }
-            HostSurfaceEventKind::TreeSnapshot(snapshot) => {
+                weld_client::ClientSurfaceRole::Popup(popup) => {
+                    let popup = ClientPopup {
+                        owner: popup.owner,
+                        position: Vec2::new(popup.position.x, popup.position.y),
+                        stack_index: popup.stack_index,
+                    };
+                    if ensure_popup_entity(world, &mut registry, surface, popup).is_some() {
+                        apply_pending_snapshot(world, &mut registry, surface);
+                    }
+                }
+            },
+            HostSurfaceEventKind::Commit(snapshot) => {
                 if registry.entries.contains_key(&surface) {
                     apply_surface_tree_snapshot(world, &mut registry, surface, snapshot);
                 } else {
                     queue_pending_snapshot(&mut registry, surface, snapshot);
                 }
             }
-            HostSurfaceEventKind::ToplevelParentChanged { parent } => {
-                set_toplevel_parent(world, &registry, surface, parent);
-            }
-            HostSurfaceEventKind::PopupConfigured(popup) => {
-                if ensure_popup_entity(world, &mut registry, surface, popup).is_some() {
-                    apply_pending_snapshot(world, &mut registry, surface);
-                }
-            }
-            HostSurfaceEventKind::WindowInteraction(kind) => {
+            HostSurfaceEventKind::Interaction(kind) => {
                 world.write_message(ToplevelInteractionRequest { surface, kind });
             }
             HostSurfaceEventKind::Destroyed => {
@@ -1112,7 +1120,7 @@ fn apply_surface_tree_snapshot(
         if content_changed || mapping_changed {
             tracing::trace!(
                 target: crate::PROFILE_TARGET,
-                surface = surface.raw(),
+                surface = surface.local(),
                 logical_width = logical_size.x,
                 logical_height = logical_size.y,
                 visual_offset_x = visual_offset.x,
@@ -1132,7 +1140,7 @@ fn apply_surface_tree_snapshot(
         if was_mapped {
             tracing::trace!(
                 target: crate::PROFILE_TARGET,
-                surface = surface.raw(),
+                surface = surface.local(),
                 "unmapped structural surface state in ECS"
             );
         }
@@ -1284,7 +1292,7 @@ fn sync_surface_nodes(params: SyncSurfaceNodesParams) {
             node.height = logical_height;
             tracing::trace!(
                 target: crate::PROFILE_TARGET,
-                surface = surface_node.surface.raw(),
+                surface = surface_node.surface.local(),
                 width = root_view.logical_width,
                 height = root_view.logical_height,
                 "made surface content node visible"
@@ -1654,7 +1662,7 @@ mod tests {
     fn snapshot_event(surface: SurfaceId, snapshot: SurfaceTreeSnapshot) -> HostSurfaceEvent {
         HostSurfaceEvent {
             surface,
-            kind: HostSurfaceEventKind::TreeSnapshot(snapshot),
+            kind: HostSurfaceEventKind::Commit(snapshot),
         }
     }
 
@@ -1663,9 +1671,12 @@ mod tests {
             app.world_mut(),
             HostSurfaceEvent {
                 surface,
-                kind: HostSurfaceEventKind::Created {
-                    decoration: WindowDecoration::ClientSide,
-                },
+                kind: HostSurfaceEventKind::Role(weld_client::ClientSurfaceRole::Toplevel(
+                    weld_client::ToplevelState {
+                        parent: None,
+                        decoration: WindowDecoration::ClientSide,
+                    },
+                )),
             },
         );
     }
@@ -1686,11 +1697,13 @@ mod tests {
             app.world_mut(),
             HostSurfaceEvent {
                 surface: popup,
-                kind: HostSurfaceEventKind::PopupConfigured(ClientPopup {
-                    owner: toplevel,
-                    position: Vec2::ZERO,
-                    stack_index: 1,
-                }),
+                kind: HostSurfaceEventKind::Role(weld_client::ClientSurfaceRole::Popup(
+                    weld_client::PopupState {
+                        owner: toplevel,
+                        position: weld_client::LogicalPoint::new(0.0, 0.0),
+                        stack_index: 1,
+                    },
+                )),
             },
         );
 
@@ -1719,9 +1732,12 @@ mod tests {
             app.world_mut(),
             HostSurfaceEvent {
                 surface: child,
-                kind: HostSurfaceEventKind::ToplevelParentChanged {
-                    parent: Some(first_parent),
-                },
+                kind: HostSurfaceEventKind::Role(weld_client::ClientSurfaceRole::Toplevel(
+                    weld_client::ToplevelState {
+                        parent: Some(first_parent),
+                        decoration: WindowDecoration::ClientSide,
+                    },
+                )),
             },
         );
         app.update();
@@ -1742,9 +1758,12 @@ mod tests {
             app.world_mut(),
             HostSurfaceEvent {
                 surface: child,
-                kind: HostSurfaceEventKind::ToplevelParentChanged {
-                    parent: Some(second_parent),
-                },
+                kind: HostSurfaceEventKind::Role(weld_client::ClientSurfaceRole::Toplevel(
+                    weld_client::ToplevelState {
+                        parent: Some(second_parent),
+                        decoration: WindowDecoration::ClientSide,
+                    },
+                )),
             },
         );
         app.update();
@@ -1759,7 +1778,12 @@ mod tests {
             app.world_mut(),
             HostSurfaceEvent {
                 surface: child,
-                kind: HostSurfaceEventKind::ToplevelParentChanged { parent: None },
+                kind: HostSurfaceEventKind::Role(weld_client::ClientSurfaceRole::Toplevel(
+                    weld_client::ToplevelState {
+                        parent: None,
+                        decoration: WindowDecoration::ClientSide,
+                    },
+                )),
             },
         );
         app.update();
@@ -1819,11 +1843,13 @@ mod tests {
             app.world_mut(),
             HostSurfaceEvent {
                 surface,
-                kind: HostSurfaceEventKind::PopupConfigured(ClientPopup {
-                    owner: SurfaceId::for_test(1),
-                    position: Vec2::new(10.0, 20.0),
-                    stack_index: 1,
-                }),
+                kind: HostSurfaceEventKind::Role(weld_client::ClientSurfaceRole::Popup(
+                    weld_client::PopupState {
+                        owner: SurfaceId::for_test(1),
+                        position: weld_client::LogicalPoint::new(10.0, 20.0),
+                        stack_index: 1,
+                    },
+                )),
             },
         );
         app.update();
@@ -1907,7 +1933,7 @@ mod tests {
         events.push(snapshot_event(surface, next));
 
         let Some(HostSurfaceEvent {
-            kind: HostSurfaceEventKind::TreeSnapshot(snapshot),
+            kind: HostSurfaceEventKind::Commit(snapshot),
             ..
         }) = events.0.front()
         else {
@@ -1942,7 +1968,7 @@ mod tests {
         events.push(snapshot_event(surface, root_snapshot(None)));
 
         let Some(HostSurfaceEvent {
-            kind: HostSurfaceEventKind::TreeSnapshot(snapshot),
+            kind: HostSurfaceEventKind::Commit(snapshot),
             ..
         }) = events.0.front()
         else {

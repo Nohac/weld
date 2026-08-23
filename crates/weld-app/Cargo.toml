@@ -5,7 +5,7 @@ edition.workspace = true
 publish.workspace = true
 
 [features]
-test-support = ["dep:pollster", "weld-core/test-support"]
+test-support = ["dep:pollster", "weld-client/test-support", "weld-core/test-support"]
 
 [dependencies]
 anyhow.workspace = true

@@ -13,4 +13,5 @@ weld-window-ui = { path = "../weld-window-ui" }
 
 [dev-dependencies]
 weld-app = { path = "../weld-app", features = ["test-support"] }
+weld-client = { path = "../weld-client" }
 weld-float = { path = "../weld-float" }

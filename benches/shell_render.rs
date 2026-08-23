@@ -1,16 +1,19 @@
-use std::time::{Duration, Instant};
+use std::{
+    rc::Rc,
+    time::{Duration, Instant},
+};
 
 use anyhow::Result;
 use weld_app::{benchmark, input::GlobalShortcutPlugin};
-use weld_client::{ClientSurfaceRole, ToplevelState};
+use weld_client::{
+    ClientBufferId, ClientBufferLease, ClientBufferMetadata, ClientBufferUseId,
+    ClientCommitRevision, ClientSurfaceCommit, ClientSurfaceEvent, ClientSurfaceEventKind,
+    ClientSurfaceRole, SurfaceBufferChange, SurfaceBufferUpdate, ToplevelState,
+};
 use weld_core::{
     OutputId,
     host::{CompositionDestination, CompositionOutputRequest},
     input::{ButtonState, InputPosition, LinuxButtonCode, RawSeatEvent, RawSeatEventKind},
-    server::{
-        PendingSurfaceBufferContent, PendingSurfaceBufferUpdate, PendingSurfaceEvent,
-        PendingSurfaceEventKind, PendingSurfaceTreeSnapshot,
-    },
     surface::{
         LogicalPoint, LogicalSize, SurfaceContentView, SurfaceId, SurfaceInputPlacement,
         SurfaceInputRect, SurfaceLayerId, SurfaceLayerPlacement, SurfaceWindowGeometry,
@@ -157,30 +160,32 @@ fn configure_shell(app: &mut bevy::app::App) {
 }
 
 fn map_synthetic_client(shell: &mut benchmark::AppShell) {
-    std::hint::black_box(shell.enqueue_surface_event(PendingSurfaceEvent {
+    std::hint::black_box(shell.enqueue_client_event(ClientSurfaceEvent {
         surface: CLIENT_SURFACE,
-        kind: PendingSurfaceEventKind::Role(ClientSurfaceRole::Toplevel(ToplevelState {
+        kind: ClientSurfaceEventKind::Role(ClientSurfaceRole::Toplevel(ToplevelState {
             parent: None,
             decoration: WindowDecoration::ServerSide,
         })),
     }));
-    std::hint::black_box(shell.enqueue_surface_event(surface_snapshot(
-        PendingSurfaceBufferContent::ShmPixels(vec![
-            0;
-            CLIENT_WIDTH as usize
-                * CLIENT_HEIGHT as usize
-                * 4
-        ]),
-    )));
-}
-
-fn enqueue_retained_commit(shell: &mut benchmark::AppShell) {
     std::hint::black_box(
-        shell.enqueue_surface_event(surface_snapshot(PendingSurfaceBufferContent::Retained)),
+        shell.enqueue_client_event(surface_snapshot(SyntheticContent::Pixels(vec![
+            0;
+            CLIENT_WIDTH as usize * CLIENT_HEIGHT as usize
+                * 4
+        ]))),
     );
 }
 
-fn surface_snapshot(content: PendingSurfaceBufferContent) -> PendingSurfaceEvent {
+fn enqueue_retained_commit(shell: &mut benchmark::AppShell) {
+    std::hint::black_box(shell.enqueue_client_event(surface_snapshot(SyntheticContent::Retained)));
+}
+
+enum SyntheticContent {
+    Retained,
+    Pixels(Vec<u8>),
+}
+
+fn surface_snapshot(content: SyntheticContent) -> ClientSurfaceEvent {
     let view = SurfaceContentView {
         source_x: 0.0,
         source_y: 0.0,
@@ -189,10 +194,29 @@ fn surface_snapshot(content: PendingSurfaceBufferContent) -> PendingSurfaceEvent
         logical_width: CLIENT_WIDTH as f32,
         logical_height: CLIENT_HEIGHT as f32,
     };
-    PendingSurfaceEvent {
+    let metadata =
+        ClientBufferMetadata::new(weld_client::Extent::new(CLIENT_WIDTH, CLIENT_HEIGHT), true);
+    let change = match content {
+        SyntheticContent::Retained => SurfaceBufferChange::Retained { metadata },
+        SyntheticContent::Pixels(bgra_pixels) => SurfaceBufferChange::Replaced {
+            metadata,
+            buffer: ClientBufferLease::new(
+                ClientBufferId::new(weld_core::WAYLAND_CLIENT_SOURCE, 1),
+                ClientBufferUseId::new(weld_core::WAYLAND_CLIENT_SOURCE, 1),
+                metadata,
+                Rc::new(weld_core::dmabuf::WaylandBufferAccess::Shm(
+                    weld_core::dmabuf::WaylandShmBuffer { bgra_pixels },
+                )),
+                |_| {},
+            )
+            .expect("matching benchmark buffer source"),
+        },
+    };
+    ClientSurfaceEvent {
         surface: CLIENT_SURFACE,
-        kind: PendingSurfaceEventKind::TreeSnapshot(PendingSurfaceTreeSnapshot {
-            client_mapped: true,
+        kind: ClientSurfaceEventKind::Commit(ClientSurfaceCommit {
+            revision: ClientCommitRevision::new(1),
+            mapped: true,
             root: Some(SurfaceLayerPlacement {
                 layer: CLIENT_LAYER,
                 position: LogicalPoint::ZERO,
@@ -211,12 +235,9 @@ fn surface_snapshot(content: PendingSurfaceBufferContent) -> PendingSurfaceEvent
                     size: LogicalSize::new(CLIENT_WIDTH as f32, CLIENT_HEIGHT as f32),
                 }],
             }],
-            buffers: vec![PendingSurfaceBufferUpdate {
+            buffers: vec![SurfaceBufferUpdate {
                 layer: CLIENT_LAYER,
-                width: CLIENT_WIDTH,
-                height: CLIENT_HEIGHT,
-                content,
-                opaque: true,
+                change,
             }],
         }),
     }

@@ -205,6 +205,14 @@ pub struct ClientKeyboardRoute {
     pub surface: ClientSurfaceId,
 }
 
+/// Frame-published pointer target reconciled at an application boundary.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ClientPointerRouteUpdate {
+    pub route: Option<ClientPointerRoute>,
+    pub position: InputPosition,
+    pub time: u32,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ClientInputTarget {
     Pointer {
@@ -232,6 +240,8 @@ impl ClientInputTarget {
 #[derive(Clone, Debug, PartialEq)]
 pub struct ClientInputEvent {
     pub target: ClientInputTarget,
+    /// Compositor-global pointer position before route transformation.
+    pub host_position: Option<InputPosition>,
     pub event: InputEventKind,
     pub time: u32,
 }

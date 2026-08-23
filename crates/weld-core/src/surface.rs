@@ -7,23 +7,3 @@ pub use weld_client::{
     ToplevelInteractionRequestKind as WindowInteractionRequestKind, WindowDecoration,
     WindowResizeEdge,
 };
-
-/// Protocol-neutral request emitted by application policy for the native host.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum SurfaceAction {
-    Close {
-        surface: SurfaceId,
-    },
-    Focus {
-        surface: Option<SurfaceId>,
-    },
-    Resize {
-        surface: SurfaceId,
-        logical_size: Extent,
-    },
-    SetOutputs {
-        surface: SurfaceId,
-        outputs: Vec<crate::OutputId>,
-        preferred: Option<crate::OutputId>,
-    },
-}

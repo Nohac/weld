@@ -102,7 +102,7 @@ impl ServerState {
             return;
         }
         self.apply_popup_output_assignment(id);
-        info!(surface_id = id.raw(), "created a nested xdg-popup");
+        info!(surface_id = id.local(), "created a nested xdg-popup");
     }
 
     /// Handle a commit whose subsurface root has the xdg-popup role.

@@ -23,6 +23,45 @@ impl RawSeatEvent {
     pub const fn new(event: RawSeatEventKind, time: u32) -> Self {
         Self { event, time }
     }
+
+    pub fn into_runtime(self) -> weld_client::RuntimeInputEvent {
+        let event = match self.event {
+            RawSeatEventKind::PointerMotion { position } => {
+                weld_client::InputEventKind::PointerMotion { position }
+            }
+            RawSeatEventKind::PointerLeft { position } => {
+                weld_client::InputEventKind::PointerLeft { position }
+            }
+            RawSeatEventKind::PointerButton {
+                position,
+                button,
+                state,
+            } => weld_client::InputEventKind::PointerButton {
+                position,
+                button,
+                state,
+            },
+            RawSeatEventKind::PointerAxis { position, axis } => {
+                weld_client::InputEventKind::PointerAxis { position, axis }
+            }
+            RawSeatEventKind::PointerGesture { gesture } => {
+                weld_client::InputEventKind::PointerGesture { gesture }
+            }
+            RawSeatEventKind::Keyboard { keycode, state, .. } => {
+                weld_client::InputEventKind::Keyboard { keycode, state }
+            }
+            RawSeatEventKind::HostFocusLost => {
+                return weld_client::RuntimeInputEvent::new(
+                    weld_client::RuntimeInputEventKind::HostFocusLost,
+                    self.time,
+                );
+            }
+        };
+        weld_client::RuntimeInputEvent::new(
+            weld_client::RuntimeInputEventKind::Input(event),
+            self.time,
+        )
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]

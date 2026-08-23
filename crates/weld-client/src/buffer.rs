@@ -147,6 +147,15 @@ impl ClientBufferLease {
         self.access.downcast_ref()
     }
 
+    /// Clones the adapter-private access payload without changing completion ownership.
+    ///
+    /// Importers use this to retain native access independently from the
+    /// committed-use lease. The returned payload does not keep the use alive;
+    /// consumers that outlive the import call must also retain a lease clone.
+    pub fn access_rc<T: Any>(&self) -> Option<Rc<T>> {
+        self.access.clone().downcast().ok()
+    }
+
     pub fn same_use(&self, other: &Self) -> bool {
         Rc::ptr_eq(&self.completion, &other.completion)
     }

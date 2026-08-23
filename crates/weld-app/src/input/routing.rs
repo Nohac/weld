@@ -26,7 +26,7 @@ use super::{
 };
 use crate::output::{OutputPosition, RendersOutput};
 use crate::surface::SurfaceInputNode;
-use weld_core::input::{InputTransform, SeatInputEffect, SeatInputEffectKind, SurfaceInputTarget};
+use weld_client::{ClientPointerRoute, ClientPointerRouteUpdate, InputTransform};
 
 pub(super) fn register(app: &mut App) {
     app.init_resource::<InputEffects>()
@@ -41,11 +41,11 @@ pub(super) fn register(app: &mut App) {
 }
 
 #[derive(Resource, Default)]
-struct InputEffects(VecDeque<SeatInputEffect>);
+struct InputEffects(VecDeque<ClientPointerRouteUpdate>);
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct ResolvedPointer {
-    target: Option<SurfaceInputTarget>,
+    target: Option<ClientPointerRoute>,
 }
 
 #[derive(Resource, Default)]
@@ -55,7 +55,7 @@ struct PointerRoutingState {
     pressed_buttons: HashSet<LinuxButtonCode>,
 }
 
-pub(crate) fn take_input_effects(world: &mut World) -> Vec<SeatInputEffect> {
+pub(crate) fn take_input_effects(world: &mut World) -> Vec<ClientPointerRouteUpdate> {
     world
         .get_resource_mut::<InputEffects>()
         .map(|mut effects| effects.0.drain(..).collect())
@@ -164,7 +164,7 @@ fn replay_input_batch(
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct PickedPointerTarget {
     entity: bevy::ecs::entity::Entity,
-    surface: Option<SurfaceInputTarget>,
+    surface: Option<ClientPointerRoute>,
 }
 
 fn picked_pointer_target(
@@ -204,9 +204,9 @@ fn surface_input_target(
     node: &ComputedNode,
     transform: &UiGlobalTransform,
     output_position: bevy::math::Vec2,
-) -> Option<SurfaceInputTarget> {
+) -> Option<ClientPointerRoute> {
     let inverse = transform.try_inverse()?;
-    Some(SurfaceInputTarget {
+    Some(ClientPointerRoute {
         surface: surface.surface,
         layer: surface.layer,
         transform: compositor_to_surface_transform(
@@ -246,15 +246,11 @@ fn publish_pointer_focus(
     current: Option<ResolvedPointer>,
     position: super::raw::InputPosition,
     time: u32,
-) -> Option<SeatInputEffect> {
-    (previous != current).then(|| {
-        SeatInputEffect::new(
-            SeatInputEffectKind::PointerFocus {
-                position,
-                target: current.and_then(|pointer| pointer.target),
-            },
-            time,
-        )
+) -> Option<ClientPointerRouteUpdate> {
+    (previous != current).then(|| ClientPointerRouteUpdate {
+        route: current.and_then(|pointer| pointer.target),
+        position,
+        time,
     })
 }
 
@@ -267,8 +263,8 @@ mod tests {
     use super::*;
     use crate::surface::{SurfaceId, SurfaceLayerId};
 
-    fn target(transform: InputTransform) -> SurfaceInputTarget {
-        SurfaceInputTarget {
+    fn target(transform: InputTransform) -> ClientPointerRoute {
+        ClientPointerRoute {
             surface: SurfaceId::for_test(1),
             layer: SurfaceLayerId::new(2),
             transform,

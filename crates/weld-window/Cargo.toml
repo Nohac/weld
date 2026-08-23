@@ -8,7 +8,6 @@ publish.workspace = true
 bevy.workspace = true
 tracing.workspace = true
 weld-app = { path = "../weld-app" }
-weld-client = { path = "../weld-client" }
 
 [dev-dependencies]
 weld-app = { path = "../weld-app", features = ["test-support"] }

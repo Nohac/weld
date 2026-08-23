@@ -55,9 +55,8 @@ pub use virtual_terminal::VirtualTerminalShortcutPlugin;
 pub(crate) use virtual_terminal::{
     filter_virtual_terminal_event, take_virtual_terminal_switch_request,
 };
-pub use weld_core::input::{
-    InputDelta, PointerGesture, PointerGestureKind, SeatInputEffect, SeatInputEffectKind,
-    SurfaceHit, TouchpadHold, TouchpadPinch, TouchpadSwipe,
+pub use weld_client::{
+    InputDelta, PointerGesture, PointerGestureKind, TouchpadHold, TouchpadPinch, TouchpadSwipe,
 };
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq, SystemSet)]

@@ -17,6 +17,7 @@ use bevy::{
     },
 };
 use tracing::info;
+use weld_client::ClientAdapterRegistration;
 use weld_core::{HostBackend, HostBuilder, OutputScale, PreparedHost};
 
 use crate::{
@@ -144,6 +145,7 @@ impl WeldAppBuilder {
             prepared,
             backend,
             remote_debug: self.remote_debug,
+            client_adapters: Vec::new(),
         })
     }
 }
@@ -154,6 +156,7 @@ pub struct WeldApp {
     prepared: PreparedHost,
     backend: ActiveBackend,
     remote_debug: Option<String>,
+    client_adapters: Vec<ClientAdapterRegistration>,
 }
 
 impl WeldApp {
@@ -189,6 +192,12 @@ impl WeldApp {
         self
     }
 
+    /// Registers another client source before the native runtime starts.
+    pub fn add_client_adapter(&mut self, adapter: ClientAdapterRegistration) -> &mut Self {
+        self.client_adapters.push(adapter);
+        self
+    }
+
     /// Borrows the underlying Bevy application.
     pub const fn app(&self) -> &App {
         &self.app
@@ -209,9 +218,18 @@ impl WeldApp {
             configure_remote_debug(&mut self.app, &address)
                 .context("failed to configure remote debugging")?;
         }
-        let (context, runtime) = self.prepared.into_parts();
-        let shell = AppShell::new(self.app, context)?;
-        runtime.run(shell)
+        let (context, runtime, mut client_adapters) = self.prepared.into_parts();
+        client_adapters.append(&mut self.client_adapters);
+        let parts = client_adapters
+            .into_iter()
+            .map(ClientAdapterRegistration::into_parts)
+            .collect::<Vec<_>>();
+        let (runtime_adapters, importers): (Vec<_>, Vec<_>) = parts
+            .into_iter()
+            .map(|parts| (parts.runtime, parts.importer))
+            .unzip();
+        let shell = AppShell::new(self.app, context, importers)?;
+        runtime.run(shell, runtime_adapters)
     }
 }
 

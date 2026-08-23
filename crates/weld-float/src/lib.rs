@@ -284,7 +284,7 @@ fn initialize_windows(
         };
         let placement_key = occupant
             .and_then(|occupant| occupants.get(occupant.entity()).ok())
-            .map_or(window.id.raw(), |toplevel| toplevel.surface.raw());
+            .map_or(window.id.raw(), |toplevel| toplevel.surface.local());
         let position = random_placement(
             output_geometry.logical_size(),
             geometry.size,

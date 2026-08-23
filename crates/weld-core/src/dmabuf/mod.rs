@@ -12,6 +12,19 @@ pub(crate) use source::{DmabufSourceCache, ImportedDmabufSource};
 
 use smithay::backend::allocator::dmabuf::Dmabuf;
 
+/// Smithay-owned access payload resolved by Weld's built-in application importer.
+#[derive(Debug)]
+pub enum WaylandBufferAccess {
+    Shm(WaylandShmBuffer),
+    Dmabuf(PendingDmabufFrame),
+}
+
+/// One already-copied SHM buffer retained until application import.
+#[derive(Debug)]
+pub struct WaylandShmBuffer {
+    pub bgra_pixels: Vec<u8>,
+}
+
 /// Stable identity of one imported live Wayland buffer.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct ImportId(u64);
@@ -23,6 +36,10 @@ impl ImportId {
 
     pub(crate) const fn next(self) -> Option<u64> {
         self.0.checked_add(1)
+    }
+
+    pub(crate) const fn raw(self) -> u64 {
+        self.0
     }
 
     #[cfg(feature = "test-support")]
@@ -40,6 +57,12 @@ impl DmabufReleaseId {
     pub const fn new(raw: u64) -> Self {
         Self(raw)
     }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum DmabufEvent {
+    GpuUseCompleted(DmabufReleaseId),
+    LeaseCompleted(DmabufReleaseId),
 }
 
 /// A validated client DMA-BUF crossing from Smithay into the shell renderer.

@@ -2,6 +2,7 @@
 
 use std::{
     collections::{HashMap, HashSet},
+    rc::Rc,
     sync::Arc,
 };
 
@@ -50,26 +51,26 @@ use crate::output::{
     RendersOutput, WeldOutput,
 };
 use crate::surface::{
-    ClientPopup, HostSurfaceEvent, HostSurfaceEventKind, SurfaceAction, SurfaceBufferContent,
+    HostSurfaceEvent, HostSurfaceEventKind, SurfaceAction, SurfaceBufferContent,
     SurfaceBufferUpdate, SurfaceContentView, SurfaceInputPlacement, SurfaceInputRect,
-    SurfaceLayerPlacement, SurfaceTreeSnapshot, SurfaceWindowGeometry,
-    ToplevelInteractionRequestKind, ToplevelResizeEdge, WindowDecoration, enqueue_surface_event,
+    SurfaceLayerPlacement, SurfaceTreeSnapshot, SurfaceWindowGeometry, enqueue_surface_event,
     has_surface_frame, publish_surface_bindings, take_surface_actions,
 };
-use weld_client::ClientSurfaceRole;
+use weld_client::{
+    ClientFocusRequest, ClientImporterRegistration, ClientOutputId, ClientRequest, ClientSourceId,
+    ClientSurfaceEvent, ClientSurfaceEventKind, ClientSurfaceRequest, ClientSurfaceRequestKind,
+    SurfaceBufferChange,
+};
 use weld_core::host::{
     CaptureRequest, CompositionDestination, CompositionFrame, CompositionOutputFrame,
     CompositionOutputRequest, CompositionTargetView, RenderContext,
 };
-use weld_core::input::{RawSeatEvent, SeatInputEffect};
+use weld_core::input::RawSeatEvent;
 use weld_core::runtime::HostCommand;
-use weld_core::server::{
-    PendingSurfaceBufferContent, PendingSurfaceEvent, PendingSurfaceEventKind,
-    PendingSurfaceTreeSnapshot,
-};
-use weld_core::surface::{Extent, SurfaceAction as CoreSurfaceAction};
+use weld_core::surface::Extent;
 use weld_core::{
-    CompositionDemand, CompositionHost, OutputConfiguration, OutputHead, dmabuf::DmabufContext,
+    CompositionDemand, CompositionHost, OutputConfiguration, OutputHead,
+    dmabuf::{DmabufReleaseId, WaylandBufferAccess},
 };
 
 #[cfg(test)]
@@ -80,10 +81,10 @@ pub struct AppShell {
     outputs: HashMap<OutputId, AppOutput>,
     redraw_requests: RedrawRequests,
     dmabuf_importer: Option<DmabufImporter>,
-    dmabuf: DmabufContext,
     surface_demand: SurfaceCompositionDemand,
     cursor: CursorHostTracker,
     pending_input: ApplicationInputBuffer,
+    client_importers: HashSet<ClientSourceId>,
 }
 
 struct AppOutput {
@@ -106,6 +107,30 @@ struct OwnedCompositionTarget {
 struct CompositionTargetContract {
     extent: Extent,
     format: wgpu::TextureFormat,
+}
+
+enum ClientBufferAccessResolution {
+    Wayland(Rc<WaylandBufferAccess>),
+    Unregistered,
+    SourceMismatch,
+    Unsupported,
+}
+
+fn resolve_client_buffer_access(
+    importers: &HashSet<ClientSourceId>,
+    surface: crate::surface::SurfaceId,
+    lease: &weld_client::ClientBufferLease,
+) -> ClientBufferAccessResolution {
+    if !importers.contains(&surface.source()) {
+        return ClientBufferAccessResolution::Unregistered;
+    }
+    if lease.buffer().source() != surface.source() {
+        return ClientBufferAccessResolution::SourceMismatch;
+    }
+    lease
+        .access_rc::<WaylandBufferAccess>()
+        .map(ClientBufferAccessResolution::Wayland)
+        .unwrap_or(ClientBufferAccessResolution::Unsupported)
 }
 
 fn validate_external_target(
@@ -166,29 +191,29 @@ struct SurfaceCompositionDemand {
 }
 
 impl SurfaceCompositionDemand {
-    fn classify(&mut self, event: &PendingSurfaceEvent) -> CompositionDemand {
+    fn classify(&mut self, event: &ClientSurfaceEvent) -> CompositionDemand {
         let surface = event.surface;
         match &event.kind {
-            PendingSurfaceEventKind::TreeSnapshot(snapshot) if snapshot.client_mapped => {
+            ClientSurfaceEventKind::Commit(snapshot) if snapshot.mapped => {
                 if self.mapped_surfaces.insert(surface) {
                     CompositionDemand::Settle
                 } else {
                     CompositionDemand::Ordinary
                 }
             }
-            PendingSurfaceEventKind::TreeSnapshot(_) => {
+            ClientSurfaceEventKind::Commit(_) => {
                 if self.mapped_surfaces.remove(&surface) {
                     CompositionDemand::Settle
                 } else {
                     CompositionDemand::Ordinary
                 }
             }
-            PendingSurfaceEventKind::Destroyed => {
+            ClientSurfaceEventKind::Destroyed => {
                 self.mapped_surfaces.remove(&surface);
                 CompositionDemand::Settle
             }
-            PendingSurfaceEventKind::WindowInteraction(_) => CompositionDemand::Ordinary,
-            PendingSurfaceEventKind::Role(_) => CompositionDemand::Settle,
+            ClientSurfaceEventKind::Interaction(_) => CompositionDemand::Ordinary,
+            ClientSurfaceEventKind::Role(_) => CompositionDemand::Settle,
         }
     }
 }
@@ -311,9 +336,35 @@ pub fn configure_rendering(app: &mut App, context: &RenderContext) {
 }
 
 impl AppShell {
-    pub fn new(mut app: App, context: RenderContext) -> Result<Self> {
+    pub fn new(
+        mut app: App,
+        context: RenderContext,
+        importers: Vec<ClientImporterRegistration>,
+    ) -> Result<Self> {
         let _startup_span =
             tracing::trace_span!(target: crate::PROFILE_TARGET, "weld_app_shell_startup").entered();
+
+        let mut client_importers = HashSet::new();
+        for importer in importers {
+            let source = importer.descriptor.id;
+            if !crate::surface::register_client_source(app.world_mut(), importer.descriptor) {
+                bail!(
+                    "client source {} is registered more than once",
+                    source.raw()
+                );
+            }
+            if importer
+                .importer
+                .is::<weld_core::server::WaylandClientImporter>()
+            {
+                client_importers.insert(source);
+            } else {
+                tracing::warn!(
+                    source = source.raw(),
+                    "registered client source has no supported buffer importer"
+                );
+            }
+        }
 
         app.finish();
         app.cleanup();
@@ -377,10 +428,10 @@ impl AppShell {
             outputs,
             redraw_requests,
             dmabuf_importer,
-            dmabuf: context.dmabuf,
             surface_demand: SurfaceCompositionDemand::default(),
             cursor: CursorHostTracker::default(),
             pending_input: ApplicationInputBuffer::default(),
+            client_importers,
         })
     }
 
@@ -563,26 +614,26 @@ impl AppShell {
         }
     }
 
-    pub fn enqueue_surface_event(&mut self, event: PendingSurfaceEvent) -> CompositionDemand {
+    pub fn enqueue_client_event(&mut self, event: ClientSurfaceEvent) -> CompositionDemand {
         let demand = self.surface_demand.classify(&event);
-        let PendingSurfaceEvent { surface, kind } = event;
+        let ClientSurfaceEvent { surface, kind } = event;
         match kind {
-            PendingSurfaceEventKind::TreeSnapshot(snapshot) => {
+            ClientSurfaceEventKind::Commit(commit) => {
                 let _ingress_span = tracing::trace_span!(
                     target: crate::PROFILE_TARGET,
                     "weld_surface_snapshot_ingress"
                 )
                 .entered();
-                let snapshot = self.prepare_surface_snapshot(surface, snapshot);
+                let snapshot = self.prepare_surface_commit(surface, commit);
                 enqueue_surface_event(
                     self.app.world_mut(),
                     HostSurfaceEvent {
                         surface,
-                        kind: HostSurfaceEventKind::TreeSnapshot(snapshot),
+                        kind: HostSurfaceEventKind::Commit(snapshot),
                     },
                 );
             }
-            PendingSurfaceEventKind::Destroyed => {
+            ClientSurfaceEventKind::Destroyed => {
                 if let Some(importer) = &mut self.dmabuf_importer {
                     importer.remove_surface(surface);
                 }
@@ -594,118 +645,132 @@ impl AppShell {
                     },
                 );
             }
-            PendingSurfaceEventKind::Role(role) => match role {
-                ClientSurfaceRole::Toplevel(toplevel) => {
-                    enqueue_surface_event(
-                        self.app.world_mut(),
-                        HostSurfaceEvent {
-                            surface,
-                            kind: HostSurfaceEventKind::Created {
-                                decoration: app_decoration(toplevel.decoration),
-                            },
-                        },
-                    );
-                    enqueue_surface_event(
-                        self.app.world_mut(),
-                        HostSurfaceEvent {
-                            surface,
-                            kind: HostSurfaceEventKind::ToplevelParentChanged {
-                                parent: toplevel.parent,
-                            },
-                        },
-                    );
-                }
-                ClientSurfaceRole::Popup(popup) => enqueue_surface_event(
-                    self.app.world_mut(),
-                    HostSurfaceEvent {
-                        surface,
-                        kind: HostSurfaceEventKind::PopupConfigured(ClientPopup {
-                            owner: popup.owner,
-                            position: bevy::math::Vec2::new(popup.position.x, popup.position.y),
-                            stack_index: popup.stack_index,
-                        }),
-                    },
-                ),
-            },
-            PendingSurfaceEventKind::WindowInteraction(request) => enqueue_surface_event(
+            ClientSurfaceEventKind::Role(role) => enqueue_surface_event(
                 self.app.world_mut(),
                 HostSurfaceEvent {
                     surface,
-                    kind: HostSurfaceEventKind::WindowInteraction(app_interaction(request)),
+                    kind: HostSurfaceEventKind::Role(role),
+                },
+            ),
+            ClientSurfaceEventKind::Interaction(request) => enqueue_surface_event(
+                self.app.world_mut(),
+                HostSurfaceEvent {
+                    surface,
+                    kind: HostSurfaceEventKind::Interaction(request),
                 },
             ),
         }
         demand
     }
 
-    fn prepare_surface_snapshot(
+    fn prepare_surface_commit(
         &mut self,
         surface: crate::surface::SurfaceId,
-        snapshot: PendingSurfaceTreeSnapshot,
+        commit: weld_client::ClientSurfaceCommit,
     ) -> SurfaceTreeSnapshot {
-        let PendingSurfaceTreeSnapshot {
-            client_mapped,
+        let weld_client::ClientSurfaceCommit {
+            revision: _,
+            mapped,
             root,
             window_geometry,
             overlays,
             inputs,
             buffers,
-        } = snapshot;
-        let retained = buffers.iter().map(|buffer| buffer.layer).collect();
+        } = commit;
+        let retained = buffers
+            .iter()
+            .filter(|buffer| !matches!(buffer.change, SurfaceBufferChange::Removed))
+            .map(|buffer| buffer.layer)
+            .collect();
         if let Some(importer) = &mut self.dmabuf_importer {
             importer.retain_surface_layers(surface, &retained);
         }
         let buffers = buffers
             .into_iter()
-            .map(|buffer| {
-                let content = match buffer.content {
-                    PendingSurfaceBufferContent::Retained => SurfaceBufferContent::Retained,
-                    PendingSurfaceBufferContent::ShmPixels(pixels) => {
-                        if let Some(importer) = &mut self.dmabuf_importer {
-                            importer.remove_layer(surface, buffer.layer);
+            .filter_map(|buffer| {
+                let metadata = buffer.change.metadata()?;
+                let content = match buffer.change {
+                    SurfaceBufferChange::Retained { .. } => SurfaceBufferContent::Retained,
+                    SurfaceBufferChange::Removed => return None,
+                    SurfaceBufferChange::Replaced { buffer: lease, .. } => {
+                        match resolve_client_buffer_access(
+                            &self.client_importers,
+                            surface,
+                            &lease,
+                        ) {
+                            ClientBufferAccessResolution::Wayland(access)
+                                if matches!(access.as_ref(), WaylandBufferAccess::Shm(_)) =>
+                            {
+                                if let Some(importer) = &mut self.dmabuf_importer {
+                                    importer.remove_layer(surface, buffer.layer);
+                                }
+                                drop(lease);
+                                let pixels = match std::rc::Rc::try_unwrap(access) {
+                                    Ok(WaylandBufferAccess::Shm(buffer)) => buffer.bgra_pixels,
+                                    Ok(WaylandBufferAccess::Dmabuf(_)) => return None,
+                                    Err(access) => match access.as_ref() {
+                                        WaylandBufferAccess::Shm(buffer) => buffer.bgra_pixels.clone(),
+                                        WaylandBufferAccess::Dmabuf(_) => return None,
+                                    },
+                                };
+                                SurfaceBufferContent::Pixels(pixels)
+                            }
+                            ClientBufferAccessResolution::Wayland(access)
+                                if matches!(access.as_ref(), WaylandBufferAccess::Dmabuf(_)) =>
+                            {
+                                let imported = if let Some(importer) = &mut self.dmabuf_importer {
+                                    importer
+                                        .import(
+                                            &mut self.app,
+                                            surface,
+                                            buffer.layer,
+                                            lease,
+                                            metadata.opaque,
+                                        )
+                                        .map_err(|error| {
+                                            tracing::warn!(
+                                                %error,
+                                                ?surface,
+                                                layer = ?buffer.layer,
+                                                "failed to import a committed DMA-BUF"
+                                            );
+                                        })
+                                        .ok()
+                                } else {
+                                    tracing::warn!(?surface, layer = ?buffer.layer, "received a DMA-BUF without an importer");
+                                    None
+                                };
+                                imported
+                                    .map(SurfaceBufferContent::RenderImage)
+                                    .unwrap_or(SurfaceBufferContent::Retained)
+                            }
+                            ClientBufferAccessResolution::Unregistered => {
+                                tracing::warn!(?surface, layer = ?buffer.layer, "dropped a client-buffer lease without a registered importer");
+                                SurfaceBufferContent::Retained
+                            }
+                            ClientBufferAccessResolution::SourceMismatch => {
+                                tracing::warn!(?surface, layer = ?buffer.layer, "dropped a client-buffer lease from another source");
+                                SurfaceBufferContent::Retained
+                            }
+                            ClientBufferAccessResolution::Unsupported
+                            | ClientBufferAccessResolution::Wayland(_) => {
+                                tracing::warn!(?surface, layer = ?buffer.layer, "client-buffer lease carried unsupported access");
+                                SurfaceBufferContent::Retained
+                            }
                         }
-                        SurfaceBufferContent::Pixels(pixels)
-                    }
-                    PendingSurfaceBufferContent::ImportedDmabuf(frame) => {
-                        let imported = if let Some(importer) = &mut self.dmabuf_importer {
-                            importer
-                                .import(
-                                    &mut self.app,
-                                    surface,
-                                    buffer.layer,
-                                    frame,
-                                    buffer.opaque,
-                                )
-                                .map_err(|error| {
-                                    tracing::warn!(
-                                        %error,
-                                        ?surface,
-                                        layer = ?buffer.layer,
-                                        "failed to import a committed DMA-BUF"
-                                    );
-                                })
-                                .ok()
-                        } else {
-                            self.dmabuf.release_unrendered(frame);
-                            tracing::warn!(?surface, layer = ?buffer.layer, "received a DMA-BUF without an importer");
-                            None
-                        };
-                        imported
-                            .map(SurfaceBufferContent::RenderImage)
-                            .unwrap_or(SurfaceBufferContent::Retained)
                     }
                 };
-                SurfaceBufferUpdate {
+                Some(SurfaceBufferUpdate {
                     layer: buffer.layer,
-                    width: buffer.width,
-                    height: buffer.height,
+                    width: metadata.extent.width,
+                    height: metadata.extent.height,
                     content,
-                    opaque: buffer.opaque,
-                }
+                    opaque: metadata.opaque,
+                })
             })
             .collect();
         SurfaceTreeSnapshot {
-            client_mapped,
+            client_mapped: mapped,
             root: root.map(app_layer_placement),
             window_geometry: window_geometry.map(app_window_geometry),
             overlays: overlays.into_iter().map(app_layer_placement).collect(),
@@ -718,7 +783,7 @@ impl AppShell {
         self.pending_input.enqueue(self.app.world_mut(), event)
     }
 
-    pub fn take_input_effects(&mut self) -> Vec<SeatInputEffect> {
+    pub fn take_pointer_route_updates(&mut self) -> Vec<weld_client::ClientPointerRouteUpdate> {
         take_input_effects(self.app.world_mut())
     }
 
@@ -734,11 +799,18 @@ impl AppShell {
         take_virtual_terminal_switch_request(self.app.world_mut())
     }
 
-    pub fn take_surface_actions(&mut self) -> Vec<CoreSurfaceAction> {
-        take_surface_actions(self.app.world_mut())
-            .into_iter()
-            .map(core_surface_action)
-            .collect()
+    pub fn take_client_requests(&mut self) -> Vec<ClientRequest> {
+        let mut requests = Vec::new();
+        for action in take_surface_actions(self.app.world_mut()) {
+            requests.push(client_request(action));
+        }
+        requests
+    }
+
+    pub fn complete_dmabuf_uses(&mut self, releases: &[DmabufReleaseId]) {
+        if let Some(importer) = &mut self.dmabuf_importer {
+            importer.complete_gpu_uses(releases);
+        }
     }
 
     pub fn has_surface_frame(&self) -> bool {
@@ -812,8 +884,8 @@ fn spawn_compositor_camera(
 }
 
 impl CompositionHost for AppShell {
-    fn enqueue_surface_event(&mut self, event: PendingSurfaceEvent) -> CompositionDemand {
-        AppShell::enqueue_surface_event(self, event)
+    fn enqueue_client_event(&mut self, event: ClientSurfaceEvent) -> CompositionDemand {
+        AppShell::enqueue_client_event(self, event)
     }
 
     fn enqueue_input_event(&mut self, event: RawSeatEvent) -> bool {
@@ -844,8 +916,8 @@ impl CompositionHost for AppShell {
         AppShell::should_exit(self)
     }
 
-    fn take_input_effects(&mut self) -> Vec<SeatInputEffect> {
-        AppShell::take_input_effects(self)
+    fn take_pointer_route_updates(&mut self) -> Vec<weld_client::ClientPointerRouteUpdate> {
+        AppShell::take_pointer_route_updates(self)
     }
 
     fn take_cursor_update(&mut self) -> weld_core::cursor::CursorHostUpdate {
@@ -860,8 +932,12 @@ impl CompositionHost for AppShell {
         AppShell::take_virtual_terminal_switch_request(self)
     }
 
-    fn take_surface_actions(&mut self) -> Vec<CoreSurfaceAction> {
-        AppShell::take_surface_actions(self)
+    fn take_client_requests(&mut self) -> Vec<ClientRequest> {
+        AppShell::take_client_requests(self)
+    }
+
+    fn complete_dmabuf_uses(&mut self, releases: &[DmabufReleaseId]) {
+        AppShell::complete_dmabuf_uses(self, releases);
     }
 
     fn has_surface_frame(&self) -> bool {
@@ -874,44 +950,6 @@ impl CompositionHost for AppShell {
 
     fn complete_capture(&mut self, request_id: u64, result: Result<(), String>) {
         AppShell::complete_capture(self, request_id, result);
-    }
-}
-
-fn app_decoration(decoration: weld_core::surface::WindowDecoration) -> WindowDecoration {
-    match decoration {
-        weld_core::surface::WindowDecoration::ClientSide => WindowDecoration::ClientSide,
-        weld_core::surface::WindowDecoration::ServerSide => WindowDecoration::ServerSide,
-    }
-}
-
-fn app_interaction(
-    interaction: weld_core::surface::WindowInteractionRequestKind,
-) -> ToplevelInteractionRequestKind {
-    match interaction {
-        weld_core::surface::WindowInteractionRequestKind::Move => {
-            ToplevelInteractionRequestKind::Move
-        }
-        weld_core::surface::WindowInteractionRequestKind::Resize { edges } => {
-            ToplevelInteractionRequestKind::Resize {
-                edges: match edges {
-                    weld_core::surface::WindowResizeEdge::Top => ToplevelResizeEdge::Top,
-                    weld_core::surface::WindowResizeEdge::Bottom => ToplevelResizeEdge::Bottom,
-                    weld_core::surface::WindowResizeEdge::Left => ToplevelResizeEdge::Left,
-                    weld_core::surface::WindowResizeEdge::Right => ToplevelResizeEdge::Right,
-                    weld_core::surface::WindowResizeEdge::TopLeft => ToplevelResizeEdge::TopLeft,
-                    weld_core::surface::WindowResizeEdge::BottomLeft => {
-                        ToplevelResizeEdge::BottomLeft
-                    }
-                    weld_core::surface::WindowResizeEdge::TopRight => ToplevelResizeEdge::TopRight,
-                    weld_core::surface::WindowResizeEdge::BottomRight => {
-                        ToplevelResizeEdge::BottomRight
-                    }
-                },
-            }
-        }
-        weld_core::surface::WindowInteractionRequestKind::End => {
-            ToplevelInteractionRequestKind::End
-        }
     }
 }
 
@@ -962,26 +1000,42 @@ fn app_input_placement(
     }
 }
 
-fn core_surface_action(action: SurfaceAction) -> CoreSurfaceAction {
+fn client_request(action: SurfaceAction) -> ClientRequest {
     match action {
-        SurfaceAction::Close { surface } => CoreSurfaceAction::Close { surface },
-        SurfaceAction::Focus { surface } => CoreSurfaceAction::Focus { surface },
+        SurfaceAction::Close { surface } => ClientRequest::Surface(ClientSurfaceRequest {
+            surface,
+            kind: ClientSurfaceRequestKind::Close,
+        }),
+        SurfaceAction::Focus {
+            surface: Some(surface),
+        } => ClientRequest::Focus(ClientFocusRequest {
+            source: surface.source(),
+            surface: Some(surface),
+        }),
+        SurfaceAction::Focus { surface: None } => ClientRequest::ClearFocus,
         SurfaceAction::Resize {
             surface,
             logical_size,
-        } => CoreSurfaceAction::Resize {
+        } => ClientRequest::Surface(ClientSurfaceRequest {
             surface,
-            logical_size: Extent::new(logical_size.x, logical_size.y),
-        },
+            kind: ClientSurfaceRequestKind::Configure {
+                logical_size: Extent::new(logical_size.x, logical_size.y),
+            },
+        }),
         SurfaceAction::SetOutputs {
             surface,
             outputs,
             preferred,
-        } => CoreSurfaceAction::SetOutputs {
+        } => ClientRequest::Surface(ClientSurfaceRequest {
             surface,
-            outputs,
-            preferred,
-        },
+            kind: ClientSurfaceRequestKind::SetOutputs {
+                outputs: outputs
+                    .into_iter()
+                    .map(|output| ClientOutputId::new(output.raw()))
+                    .collect(),
+                preferred: preferred.map(|output| ClientOutputId::new(output.raw())),
+            },
+        }),
     }
 }
 
@@ -1073,14 +1127,17 @@ mod tests {
     };
 
     use super::{
-        App, AppShell, CompositionTargetContract, ManualTextureViewHandle, Messages,
-        OutputGeometry, PRIMARY_OUTPUT_ID, RedrawRequests, SurfaceCompositionDemand, UVec2,
-        WeldOutput, advance_main_app, disconnect_render_time, render_composition_app,
-        spawn_compositor_camera, validate_external_target,
+        App, AppShell, ClientBufferAccessResolution, CompositionTargetContract,
+        ManualTextureViewHandle, Messages, OutputGeometry, PRIMARY_OUTPUT_ID, RedrawRequests,
+        SurfaceCompositionDemand, UVec2, WeldOutput, advance_main_app, disconnect_render_time,
+        render_composition_app, resolve_client_buffer_access, spawn_compositor_camera,
+        validate_external_target,
+    };
+    use weld_client::{
+        ClientCommitRevision, ClientSurfaceCommit, ClientSurfaceEvent, ClientSurfaceEventKind,
     };
     use weld_core::{
         CompositionDemand,
-        server::{PendingSurfaceEvent, PendingSurfaceEventKind, PendingSurfaceTreeSnapshot},
         surface::{Extent, SurfaceId},
     };
 
@@ -1090,7 +1147,6 @@ mod tests {
     use weld_core::{
         OutputConfiguration, OutputId, OutputScale,
         host::{CompositionDestination, CompositionOutputRequest},
-        server::{PendingSurfaceBufferContent, PendingSurfaceBufferUpdate},
         surface::{
             LogicalPoint, SurfaceContentView, SurfaceLayerId, SurfaceLayerPlacement,
             SurfaceWindowGeometry, WindowDecoration,
@@ -1140,6 +1196,59 @@ mod tests {
         assert!(format_error.to_string().contains("has format"));
     }
 
+    #[test]
+    fn client_buffer_access_rejects_unknown_sources_and_payloads_before_ecs() {
+        use std::{cell::Cell, collections::HashSet, rc::Rc};
+
+        use weld_client::{
+            ClientBufferId, ClientBufferLease, ClientBufferMetadata, ClientBufferUseId,
+            ClientSourceId,
+        };
+
+        let surface = SurfaceId::for_test(1);
+        let registered = HashSet::from([surface.source()]);
+        let completed = Rc::new(Cell::new(0));
+        let lease = |source: ClientSourceId, payload: Rc<String>| {
+            let completed = completed.clone();
+            ClientBufferLease::new(
+                ClientBufferId::new(source, 1),
+                ClientBufferUseId::new(source, 1),
+                ClientBufferMetadata::new(Extent::new(1, 1), false),
+                payload,
+                move |_| completed.set(completed.get() + 1),
+            )
+            .expect("matching lease source")
+        };
+
+        let unsupported = lease(surface.source(), Rc::new(String::from("unsupported")));
+        assert!(matches!(
+            resolve_client_buffer_access(&registered, surface, &unsupported),
+            ClientBufferAccessResolution::Unsupported
+        ));
+        drop(unsupported);
+
+        let foreign_source = ClientSourceId::new(9);
+        let foreign = lease(foreign_source, Rc::new(String::from("foreign")));
+        assert!(matches!(
+            resolve_client_buffer_access(&registered, surface, &foreign),
+            ClientBufferAccessResolution::SourceMismatch
+        ));
+        drop(foreign);
+
+        let foreign_surface =
+            weld_client::ClientSurfaceId::new(weld_client::ClientId::new(foreign_source, 1), 1);
+        let unregistered = lease(foreign_source, Rc::new(String::from("unregistered")));
+        assert!(matches!(
+            resolve_client_buffer_access(&registered, foreign_surface, &unregistered),
+            ClientBufferAccessResolution::Unregistered
+        ));
+        drop(unregistered);
+        assert_eq!(completed.get(), 3);
+
+        fn assert_send<T: Send>() {}
+        assert_send::<crate::surface::HostSurfaceEvent>();
+    }
+
     fn test_app() -> (App, RedrawRequests) {
         let mut app = App::new();
         app.add_plugins(WindowPlugin {
@@ -1152,11 +1261,12 @@ mod tests {
         (app, requests)
     }
 
-    fn snapshot_event(surface: SurfaceId, client_mapped: bool) -> PendingSurfaceEvent {
-        PendingSurfaceEvent {
+    fn snapshot_event(surface: SurfaceId, client_mapped: bool) -> ClientSurfaceEvent {
+        ClientSurfaceEvent {
             surface,
-            kind: PendingSurfaceEventKind::TreeSnapshot(PendingSurfaceTreeSnapshot {
-                client_mapped,
+            kind: ClientSurfaceEventKind::Commit(ClientSurfaceCommit {
+                revision: ClientCommitRevision::new(1),
+                mapped: client_mapped,
                 root: None,
                 window_geometry: None,
                 overlays: Vec::new(),
@@ -1390,9 +1500,9 @@ mod tests {
 
     #[cfg(feature = "test-support")]
     fn install_diagnostic_surface(shell: &mut AppShell, surface: SurfaceId, bgra: [u8; 4]) {
-        shell.enqueue_surface_event(PendingSurfaceEvent {
+        shell.enqueue_client_event(ClientSurfaceEvent {
             surface,
-            kind: PendingSurfaceEventKind::Role(weld_client::ClientSurfaceRole::Toplevel(
+            kind: ClientSurfaceEventKind::Role(weld_client::ClientSurfaceRole::Toplevel(
                 weld_client::ToplevelState {
                     parent: None,
                     decoration: WindowDecoration::ClientSide,
@@ -1414,10 +1524,29 @@ mod tests {
             logical_height: SIZE as f32,
         };
         let layer = SurfaceLayerId::new(1);
-        shell.enqueue_surface_event(PendingSurfaceEvent {
+        let pixels = bgra
+            .into_iter()
+            .cycle()
+            .take((SIZE * SIZE * 4) as usize)
+            .collect();
+        let metadata = weld_client::ClientBufferMetadata::new(Extent::new(SIZE, SIZE), true);
+        let lease = weld_client::ClientBufferLease::new(
+            weld_client::ClientBufferId::new(weld_core::WAYLAND_CLIENT_SOURCE, 1),
+            weld_client::ClientBufferUseId::new(weld_core::WAYLAND_CLIENT_SOURCE, 1),
+            metadata,
+            std::rc::Rc::new(weld_core::dmabuf::WaylandBufferAccess::Shm(
+                weld_core::dmabuf::WaylandShmBuffer {
+                    bgra_pixels: pixels,
+                },
+            )),
+            |_| {},
+        )
+        .expect("matching diagnostic buffer source");
+        shell.enqueue_client_event(ClientSurfaceEvent {
             surface,
-            kind: PendingSurfaceEventKind::TreeSnapshot(PendingSurfaceTreeSnapshot {
-                client_mapped: true,
+            kind: ClientSurfaceEventKind::Commit(ClientSurfaceCommit {
+                revision: ClientCommitRevision::new(1),
+                mapped: true,
                 root: Some(SurfaceLayerPlacement {
                     layer,
                     position: LogicalPoint::ZERO,
@@ -1429,17 +1558,12 @@ mod tests {
                 }),
                 overlays: Vec::new(),
                 inputs: Vec::new(),
-                buffers: vec![PendingSurfaceBufferUpdate {
+                buffers: vec![weld_client::SurfaceBufferUpdate {
                     layer,
-                    width: SIZE,
-                    height: SIZE,
-                    content: PendingSurfaceBufferContent::ShmPixels(
-                        bgra.into_iter()
-                            .cycle()
-                            .take((SIZE * SIZE * 4) as usize)
-                            .collect(),
-                    ),
-                    opaque: true,
+                    change: weld_client::SurfaceBufferChange::Replaced {
+                        metadata,
+                        buffer: lease,
+                    },
                 }],
             }),
         });

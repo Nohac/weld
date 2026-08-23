@@ -660,7 +660,7 @@ impl XdgShellHandler for ServerState {
                 decoration: WindowDecoration::ClientSide,
             })),
         });
-        info!(surface_id = id.raw(), "created a nested xdg-toplevel");
+        info!(surface_id = id.local(), "created a nested xdg-toplevel");
     }
 
     fn new_popup(&mut self, surface: PopupSurface, positioner: PositionerState) {

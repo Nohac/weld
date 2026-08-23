@@ -1,5 +1,6 @@
 //! Smithay Wayland-server boundary shared by host backends.
 
+mod adapter;
 mod cursor;
 mod dmabuf;
 mod output;
@@ -10,6 +11,10 @@ mod shm;
 mod surface_tree;
 mod toplevel;
 
+pub use adapter::WaylandClientImporter;
+pub(crate) use adapter::{
+    WaylandClientBridge, WaylandClientWork, registration as client_registration,
+};
 pub(crate) use output::{OutputDescriptor, OutputMetrics, ServerOutputDefinition};
 pub use surface_tree::{
     PendingSurfaceBufferContent, PendingSurfaceBufferUpdate, PendingSurfaceTreeSnapshot,
@@ -56,13 +61,13 @@ use smithay::{
     },
 };
 use tracing::{debug, warn};
-use weld_client::{ClientId, ClientSurfaceRole};
+use weld_client::{ClientId, ClientRequest, ClientSurfaceRequestKind, ClientSurfaceRole};
 
 use crate::{
     OutputId,
-    dmabuf::{DmabufCapabilities, DmabufReleaseId, DmabufSourceCache},
-    input::{InputPosition, SurfaceInputTarget},
-    surface::{Extent, SurfaceAction, SurfaceId, WindowInteractionRequestKind},
+    dmabuf::{DmabufCapabilities, DmabufEvent, DmabufReleaseId, DmabufSourceCache},
+    input::InputPosition,
+    surface::{Extent, SurfaceId, WindowInteractionRequestKind},
 };
 use cursor::CursorSurfaceStore;
 use dmabuf::{DmabufProtocol, DmabufReleaseStore};
@@ -87,6 +92,7 @@ pub struct ServerState {
     shm_state: ShmState,
     dmabuf_protocol: DmabufProtocol,
     dmabuf_releases: DmabufReleaseStore,
+    completed_dmabuf_uses: Vec<DmabufReleaseId>,
     dmabuf_sources: DmabufSourceCache,
     _viewporter_state: ViewporterState,
     _fractional_scale_manager_state: FractionalScaleManagerState,
@@ -103,7 +109,7 @@ pub struct ServerState {
     focused_toplevel: Option<SurfaceId>,
     pending_focus: Option<Option<SurfaceId>>,
     pending_resizes: PendingResizeRequests,
-    pending_surface_events: VecDeque<PendingSurfaceEvent>,
+    pending_surface_events: WaylandClientBridge,
     presentation_requested: bool,
     next_presentation_id: u64,
     staged_frame_callbacks: VecDeque<(u64, Vec<WlCallback>)>,
@@ -111,7 +117,6 @@ pub struct ServerState {
     next_client_id: Option<u64>,
     started_at: Instant,
     pointer_position: InputPosition,
-    pointer_input_target: Option<SurfaceInputTarget>,
     ordinary_implicit_grab: Option<OrdinaryImplicitGrab>,
     // This mirrors delivered presses only so host focus loss can synthesize
     // matching releases; ECS pointer routing remains the policy authority.
@@ -143,7 +148,8 @@ impl ServerState {
     pub(crate) fn new<LoopData: 'static>(
         loop_handle: &LoopHandle<'static, LoopData>,
         display: Display<Self>,
-        dmabuf_release_source: Channel<DmabufReleaseId>,
+        dmabuf_release_source: Channel<DmabufEvent>,
+        client_bridge: WaylandClientBridge,
         server: fn(&mut LoopData) -> &mut Self,
         options: ServerOptions<'_>,
     ) -> Result<Self> {
@@ -262,8 +268,15 @@ impl ServerState {
 
         loop_handle
             .insert_source(dmabuf_release_source, move |event, _, state| {
-                if let ChannelEvent::Msg(release) = event {
-                    server(state).complete_dmabuf_release(release);
+                if let ChannelEvent::Msg(event) = event {
+                    match event {
+                        DmabufEvent::GpuUseCompleted(release) => {
+                            server(state).completed_dmabuf_uses.push(release);
+                        }
+                        DmabufEvent::LeaseCompleted(release) => {
+                            server(state).complete_dmabuf_release(release);
+                        }
+                    }
                 }
             })
             .map_err(|_| anyhow::anyhow!("failed to register DMA-BUF completion results"))?;
@@ -314,6 +327,7 @@ impl ServerState {
             shm_state,
             dmabuf_protocol,
             dmabuf_releases: DmabufReleaseStore::default(),
+            completed_dmabuf_uses: Vec::new(),
             dmabuf_sources,
             _viewporter_state: viewporter_state,
             _fractional_scale_manager_state: fractional_scale_manager_state,
@@ -330,7 +344,7 @@ impl ServerState {
             focused_toplevel: None,
             pending_focus: None,
             pending_resizes: PendingResizeRequests::default(),
-            pending_surface_events: VecDeque::new(),
+            pending_surface_events: client_bridge,
             presentation_requested: false,
             next_presentation_id: 1,
             staged_frame_callbacks: VecDeque::new(),
@@ -338,7 +352,6 @@ impl ServerState {
             next_client_id: Some(1),
             started_at,
             pointer_position: InputPosition::default(),
-            pointer_input_target: None,
             ordinary_implicit_grab: None,
             pressed_pointer_buttons: HashSet::new(),
             cursor_status: CursorImageStatus::default_named(),
@@ -407,16 +420,12 @@ impl ServerState {
         }
     }
 
-    pub fn take_surface_events(&mut self) -> impl Iterator<Item = PendingSurfaceEvent> + '_ {
-        self.pending_surface_events.drain(..)
-    }
-
-    pub(crate) fn has_surface_events(&self) -> bool {
-        !self.pending_surface_events.is_empty()
-    }
-
     pub(crate) fn complete_dmabuf_release(&mut self, release: DmabufReleaseId) {
         self.dmabuf_releases.complete(release);
+    }
+
+    pub(crate) fn take_completed_dmabuf_uses(&mut self) -> Vec<DmabufReleaseId> {
+        std::mem::take(&mut self.completed_dmabuf_uses)
     }
 
     pub const fn presentation_requested(&self) -> bool {
@@ -433,24 +442,44 @@ impl ServerState {
         }
     }
 
-    pub fn apply_surface_action(&mut self, action: SurfaceAction) {
-        match action {
-            SurfaceAction::Close { surface } => {
-                self.pending_resizes.discard(surface);
-                self.close_toplevel(surface);
+    pub(crate) fn apply_pending_client_work(&mut self) {
+        while let Some(work) = self.pending_surface_events.pop_work() {
+            match work {
+                WaylandClientWork::Request(request) => self.apply_client_request(request),
+                WaylandClientWork::Input(event) => self.apply_client_input(event),
+                WaylandClientWork::HostFocusLost(time) => self.release_host_input(time),
             }
-            SurfaceAction::Focus { surface } => self.focus_toplevel(surface),
-            SurfaceAction::Resize {
-                surface,
-                logical_size,
-            } => self.pending_resizes.queue(surface, logical_size),
-            SurfaceAction::SetOutputs {
-                surface,
-                outputs,
-                preferred,
-            } => {
-                self.set_toplevel_outputs(surface, &outputs, preferred);
+        }
+    }
+
+    fn apply_client_request(&mut self, request: ClientRequest) {
+        match request {
+            ClientRequest::Surface(request) => match request.kind {
+                ClientSurfaceRequestKind::Close => {
+                    self.pending_resizes.discard(request.surface);
+                    self.close_toplevel(request.surface);
+                }
+                ClientSurfaceRequestKind::Configure { logical_size } => {
+                    self.pending_resizes.queue(request.surface, logical_size);
+                }
+                ClientSurfaceRequestKind::SetOutputs { outputs, preferred } => {
+                    let outputs = outputs
+                        .into_iter()
+                        .map(|output| OutputId::new(output.raw()))
+                        .collect::<Vec<_>>();
+                    self.set_toplevel_outputs(
+                        request.surface,
+                        &outputs,
+                        preferred.map(|output| OutputId::new(output.raw())),
+                    );
+                }
+            },
+            ClientRequest::Focus(request) => {
+                if request.source == crate::WAYLAND_CLIENT_SOURCE {
+                    self.focus_toplevel(request.surface);
+                }
             }
+            ClientRequest::ClearFocus => {}
         }
     }
 

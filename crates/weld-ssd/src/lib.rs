@@ -717,6 +717,18 @@ mod tests {
         )
     }
 
+    fn role(surface: SurfaceId, decoration: WindowDecoration) -> HostSurfaceEvent {
+        HostSurfaceEvent {
+            surface,
+            kind: HostSurfaceEventKind::Role(weld_client::ClientSurfaceRole::Toplevel(
+                weld_client::ToplevelState {
+                    parent: None,
+                    decoration,
+                },
+            )),
+        }
+    }
+
     fn frame_with_geometry(
         surface: SurfaceId,
         width: u32,
@@ -742,7 +754,7 @@ mod tests {
         };
         HostSurfaceEvent {
             surface,
-            kind: HostSurfaceEventKind::TreeSnapshot(SurfaceTreeSnapshot {
+            kind: HostSurfaceEventKind::Commit(SurfaceTreeSnapshot {
                 client_mapped: true,
                 root: Some(SurfaceLayerPlacement {
                     layer: SurfaceLayerId::new(1),
@@ -775,7 +787,7 @@ mod tests {
     fn unmapped(surface: SurfaceId) -> HostSurfaceEvent {
         HostSurfaceEvent {
             surface,
-            kind: HostSurfaceEventKind::TreeSnapshot(SurfaceTreeSnapshot {
+            kind: HostSurfaceEventKind::Commit(SurfaceTreeSnapshot {
                 client_mapped: false,
                 root: None,
                 window_geometry: None,
@@ -790,15 +802,7 @@ mod tests {
     fn decoration_swap_preserves_content_size_and_close_targets_the_occupant() {
         let mut app = test_app();
         let surface = SurfaceId::for_test(41);
-        enqueue_surface_event(
-            app.world_mut(),
-            HostSurfaceEvent {
-                surface,
-                kind: HostSurfaceEventKind::Created {
-                    decoration: WindowDecoration::ClientSide,
-                },
-            },
-        );
+        enqueue_surface_event(app.world_mut(), role(surface, WindowDecoration::ClientSide));
         enqueue_surface_event(app.world_mut(), frame(surface, 320, 240));
         app.update();
 
@@ -826,15 +830,7 @@ mod tests {
         );
         take_surface_actions(app.world_mut());
 
-        enqueue_surface_event(
-            app.world_mut(),
-            HostSurfaceEvent {
-                surface,
-                kind: HostSurfaceEventKind::Created {
-                    decoration: WindowDecoration::ServerSide,
-                },
-            },
-        );
+        enqueue_surface_event(app.world_mut(), role(surface, WindowDecoration::ServerSide));
         app.update();
 
         let ssd_root = app
@@ -953,15 +949,7 @@ mod tests {
     fn ssd_content_clips_and_outward_handle_starts_resize() {
         let mut app = test_app();
         let surface = SurfaceId::for_test(49);
-        enqueue_surface_event(
-            app.world_mut(),
-            HostSurfaceEvent {
-                surface,
-                kind: HostSurfaceEventKind::Created {
-                    decoration: WindowDecoration::ServerSide,
-                },
-            },
-        );
+        enqueue_surface_event(app.world_mut(), role(surface, WindowDecoration::ServerSide));
         enqueue_surface_event(app.world_mut(), frame(surface, 320, 240));
         app.update();
 
@@ -1043,15 +1031,7 @@ mod tests {
     fn client_resize_updates_desired_geometry_and_preserves_the_left_anchor() {
         let mut app = test_app();
         let surface = SurfaceId::for_test(42);
-        enqueue_surface_event(
-            app.world_mut(),
-            HostSurfaceEvent {
-                surface,
-                kind: HostSurfaceEventKind::Created {
-                    decoration: WindowDecoration::ClientSide,
-                },
-            },
-        );
+        enqueue_surface_event(app.world_mut(), role(surface, WindowDecoration::ClientSide));
         enqueue_surface_event(app.world_mut(), frame(surface, 320, 240));
         app.update();
         let window = {
@@ -1079,11 +1059,9 @@ mod tests {
             app.world_mut(),
             HostSurfaceEvent {
                 surface,
-                kind: HostSurfaceEventKind::WindowInteraction(
-                    ToplevelInteractionRequestKind::Resize {
-                        edges: ToplevelResizeEdge::Left,
-                    },
-                ),
+                kind: HostSurfaceEventKind::Interaction(ToplevelInteractionRequestKind::Resize {
+                    edges: ToplevelResizeEdge::Left,
+                }),
             },
         );
         app.update();
@@ -1134,7 +1112,7 @@ mod tests {
             app.world_mut(),
             HostSurfaceEvent {
                 surface,
-                kind: HostSurfaceEventKind::WindowInteraction(ToplevelInteractionRequestKind::End),
+                kind: HostSurfaceEventKind::Interaction(ToplevelInteractionRequestKind::End),
             },
         );
         app.update();
@@ -1152,15 +1130,7 @@ mod tests {
         let mut app = test_app();
         let owner = SurfaceId::for_test(43);
         let popup = SurfaceId::for_test(44);
-        enqueue_surface_event(
-            app.world_mut(),
-            HostSurfaceEvent {
-                surface: owner,
-                kind: HostSurfaceEventKind::Created {
-                    decoration: WindowDecoration::ClientSide,
-                },
-            },
-        );
+        enqueue_surface_event(app.world_mut(), role(owner, WindowDecoration::ClientSide));
         enqueue_surface_event(
             app.world_mut(),
             frame_with_geometry(owner, 360, 276, Vec2::new(20.0, 18.0), UVec2::new(320, 240)),
@@ -1169,11 +1139,13 @@ mod tests {
             app.world_mut(),
             HostSurfaceEvent {
                 surface: popup,
-                kind: HostSurfaceEventKind::PopupConfigured(ClientPopup {
-                    owner,
-                    position: Vec2::new(102.0, 52.0),
-                    stack_index: 1,
-                }),
+                kind: HostSurfaceEventKind::Role(weld_client::ClientSurfaceRole::Popup(
+                    weld_client::PopupState {
+                        owner,
+                        position: weld_client::LogicalPoint::new(102.0, 52.0),
+                        stack_index: 1,
+                    },
+                )),
             },
         );
         enqueue_surface_event(
@@ -1227,15 +1199,7 @@ mod tests {
             Some(first_window_root)
         );
 
-        enqueue_surface_event(
-            app.world_mut(),
-            HostSurfaceEvent {
-                surface: owner,
-                kind: HostSurfaceEventKind::Created {
-                    decoration: WindowDecoration::ServerSide,
-                },
-            },
-        );
+        enqueue_surface_event(app.world_mut(), role(owner, WindowDecoration::ServerSide));
         app.update();
 
         let second_window_root = app
@@ -1295,15 +1259,7 @@ mod tests {
     fn committed_client_extent_changes_without_overwriting_desired_geometry() {
         let mut app = test_app();
         let surface = SurfaceId::for_test(45);
-        enqueue_surface_event(
-            app.world_mut(),
-            HostSurfaceEvent {
-                surface,
-                kind: HostSurfaceEventKind::Created {
-                    decoration: WindowDecoration::ClientSide,
-                },
-            },
-        );
+        enqueue_surface_event(app.world_mut(), role(surface, WindowDecoration::ClientSide));
         enqueue_surface_event(app.world_mut(), frame(surface, 320, 240));
         app.update();
         let window = app
@@ -1351,15 +1307,7 @@ mod tests {
     fn unmap_hides_a_window_and_surface_destruction_removes_the_default_frame() {
         let mut app = test_app();
         let surface = SurfaceId::for_test(46);
-        enqueue_surface_event(
-            app.world_mut(),
-            HostSurfaceEvent {
-                surface,
-                kind: HostSurfaceEventKind::Created {
-                    decoration: WindowDecoration::ClientSide,
-                },
-            },
-        );
+        enqueue_surface_event(app.world_mut(), role(surface, WindowDecoration::ClientSide));
         enqueue_surface_event(app.world_mut(), frame(surface, 320, 240));
         app.update();
         let window = app
@@ -1403,15 +1351,7 @@ mod tests {
         let first = SurfaceId::for_test(47);
         let second = SurfaceId::for_test(48);
         for surface in [first, second] {
-            enqueue_surface_event(
-                app.world_mut(),
-                HostSurfaceEvent {
-                    surface,
-                    kind: HostSurfaceEventKind::Created {
-                        decoration: WindowDecoration::ClientSide,
-                    },
-                },
-            );
+            enqueue_surface_event(app.world_mut(), role(surface, WindowDecoration::ClientSide));
             enqueue_surface_event(app.world_mut(), frame(surface, 320, 240));
         }
         app.update();
@@ -1466,15 +1406,7 @@ mod tests {
     fn rehoming_keeps_one_ssd_projection_per_output() {
         let mut app = test_app();
         let surface = SurfaceId::for_test(91);
-        enqueue_surface_event(
-            app.world_mut(),
-            HostSurfaceEvent {
-                surface,
-                kind: HostSurfaceEventKind::Created {
-                    decoration: WindowDecoration::ServerSide,
-                },
-            },
-        );
+        enqueue_surface_event(app.world_mut(), role(surface, WindowDecoration::ServerSide));
         enqueue_surface_event(app.world_mut(), frame(surface, 300, 60));
         app.update();
 

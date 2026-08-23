@@ -86,7 +86,12 @@ fn set_toplevel_parent(app: &mut App, child: SurfaceId, parent: Option<SurfaceId
         app.world_mut(),
         HostSurfaceEvent {
             surface: child,
-            kind: HostSurfaceEventKind::ToplevelParentChanged { parent },
+            kind: HostSurfaceEventKind::Role(weld_client::ClientSurfaceRole::Toplevel(
+                weld_client::ToplevelState {
+                    parent,
+                    decoration: WindowDecoration::ServerSide,
+                },
+            )),
         },
     );
     app.update();
@@ -111,7 +116,12 @@ fn map_surface(
         app.world_mut(),
         HostSurfaceEvent {
             surface,
-            kind: HostSurfaceEventKind::Created { decoration },
+            kind: HostSurfaceEventKind::Role(weld_client::ClientSurfaceRole::Toplevel(
+                weld_client::ToplevelState {
+                    parent: None,
+                    decoration,
+                },
+            )),
         },
     );
     enqueue_surface_event(
@@ -150,7 +160,7 @@ fn frame_event(
     };
     HostSurfaceEvent {
         surface,
-        kind: HostSurfaceEventKind::TreeSnapshot(SurfaceTreeSnapshot {
+        kind: HostSurfaceEventKind::Commit(SurfaceTreeSnapshot {
             client_mapped: true,
             root: Some(SurfaceLayerPlacement {
                 layer: SurfaceLayerId::new(1),
@@ -370,11 +380,13 @@ fn csd_shortcut_keeps_placeholder_at_geometry_origin_and_receiver_at_visual_orig
         app.world_mut(),
         HostSurfaceEvent {
             surface: popup,
-            kind: HostSurfaceEventKind::PopupConfigured(ClientPopup {
-                owner: surface,
-                position: Vec2::new(80.0, 40.0),
-                stack_index: 1,
-            }),
+            kind: HostSurfaceEventKind::Role(weld_client::ClientSurfaceRole::Popup(
+                weld_client::PopupState {
+                    owner: surface,
+                    position: weld_client::LogicalPoint::new(80.0, 40.0),
+                    stack_index: 1,
+                },
+            )),
         },
     );
     enqueue_surface_event(
@@ -923,7 +935,7 @@ fn unmapping_root_during_family_reclaim_keeps_the_surviving_placeholder() {
         app.world_mut(),
         HostSurfaceEvent {
             surface: root_surface,
-            kind: HostSurfaceEventKind::TreeSnapshot(SurfaceTreeSnapshot {
+            kind: HostSurfaceEventKind::Commit(SurfaceTreeSnapshot {
                 client_mapped: false,
                 root: None,
                 window_geometry: None,
@@ -1063,7 +1075,7 @@ fn unmapping_the_source_ends_the_local_session() {
         app.world_mut(),
         HostSurfaceEvent {
             surface,
-            kind: HostSurfaceEventKind::TreeSnapshot(SurfaceTreeSnapshot {
+            kind: HostSurfaceEventKind::Commit(SurfaceTreeSnapshot {
                 client_mapped: false,
                 root: None,
                 window_geometry: None,
