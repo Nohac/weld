@@ -32,6 +32,7 @@ use smithay::{
     },
 };
 use tracing::{debug, info, warn};
+use weld_client::{ClientId, ClientSurfaceRole, ToplevelState as ClientToplevelState};
 
 use crate::{
     OutputId,
@@ -52,6 +53,7 @@ const CLIENT_HEIGHT: i32 = 480;
 pub(super) struct ToplevelState {
     pub(super) surface: ToplevelSurface,
     pub(super) decoration: WindowDecoration,
+    pub(super) parent: Option<SurfaceId>,
     pub(super) tree: SurfaceTreeState,
     pub(super) outputs: SurfaceOutputAssignment,
 }
@@ -147,12 +149,18 @@ impl ToplevelStore {
     }
 }
 
-pub(super) fn allocate_surface_id(next: &mut Option<u64>) -> Option<SurfaceId> {
+pub(super) fn allocate_surface_id(next: &mut Option<u64>, client: ClientId) -> Option<SurfaceId> {
     // SurfaceId values are process-unique and never wrap or reuse. Exhaustion
     // is terminal for new toplevel registration.
     let raw = (*next)?;
     *next = raw.checked_add(1);
-    Some(SurfaceId::new(raw))
+    Some(SurfaceId::new(client, raw))
+}
+
+pub(super) fn client_id_for_surface(surface: &WlSurface) -> Option<ClientId> {
+    surface
+        .client()
+        .and_then(|client| client.get_data::<ClientState>().map(|state| state.id))
 }
 
 impl ServerState {
@@ -216,9 +224,10 @@ impl ServerState {
         toplevel.decoration = WindowDecoration::ServerSide;
         self.pending_surface_events.push_back(PendingSurfaceEvent {
             surface: surface_id,
-            kind: PendingSurfaceEventKind::DecorationChanged {
+            kind: PendingSurfaceEventKind::Role(ClientSurfaceRole::Toplevel(ClientToplevelState {
+                parent: toplevel.parent,
                 decoration: WindowDecoration::ServerSide,
-            },
+            })),
         });
     }
 
@@ -617,7 +626,12 @@ impl XdgShellHandler for ServerState {
     }
 
     fn new_toplevel(&mut self, surface: ToplevelSurface) {
-        let Some(id) = allocate_surface_id(&mut self.next_surface_id) else {
+        let Some(client) = client_id_for_surface(surface.wl_surface()) else {
+            warn!("refused an xdg-toplevel without a registered client identity");
+            surface.send_close();
+            return;
+        };
+        let Some(id) = allocate_surface_id(&mut self.next_surface_id, client) else {
             warn!("refused an xdg-toplevel because SurfaceId space is exhausted");
             surface.send_close();
             return;
@@ -630,6 +644,7 @@ impl XdgShellHandler for ServerState {
         let state = ToplevelState {
             surface,
             decoration: WindowDecoration::ClientSide,
+            parent: None,
             tree: SurfaceTreeState::default(),
             outputs: SurfaceOutputAssignment::primary(self.primary_output),
         };
@@ -640,9 +655,10 @@ impl XdgShellHandler for ServerState {
         }
         self.pending_surface_events.push_back(PendingSurfaceEvent {
             surface: id,
-            kind: PendingSurfaceEventKind::Created {
+            kind: PendingSurfaceEventKind::Role(ClientSurfaceRole::Toplevel(ClientToplevelState {
+                parent: None,
                 decoration: WindowDecoration::ClientSide,
-            },
+            })),
         });
         info!(surface_id = id.raw(), "created a nested xdg-toplevel");
     }
@@ -659,9 +675,19 @@ impl XdgShellHandler for ServerState {
             .parent()
             .as_ref()
             .and_then(|parent| self.toplevels.id_for_surface(parent));
+        if let Some(toplevel) = self.toplevels.get_mut(surface_id) {
+            toplevel.parent = parent;
+        }
+        let decoration = self
+            .toplevels
+            .get(surface_id)
+            .map_or(WindowDecoration::ClientSide, |toplevel| toplevel.decoration);
         self.pending_surface_events.push_back(PendingSurfaceEvent {
             surface: surface_id,
-            kind: PendingSurfaceEventKind::ToplevelParentChanged { parent },
+            kind: PendingSurfaceEventKind::Role(ClientSurfaceRole::Toplevel(ClientToplevelState {
+                parent,
+                decoration,
+            })),
         });
     }
 
@@ -785,8 +811,8 @@ mod tests {
     #[test]
     fn indexed_store_keeps_multiple_values_and_removes_only_the_target() {
         let mut store = IndexedStore::<u32, &'static str>::default();
-        let first = SurfaceId::new(1);
-        let second = SurfaceId::new(2);
+        let first = SurfaceId::for_test(1);
+        let second = SurfaceId::for_test(2);
         assert!(store.insert(first, 10, "first"));
         assert!(store.insert(second, 20, "second"));
         assert_eq!(store.id_for_key(&10), Some(first));
@@ -800,21 +826,33 @@ mod tests {
     #[test]
     fn indexed_store_rejects_duplicate_ids_and_keys() {
         let mut store = IndexedStore::<u32, &'static str>::default();
-        let first = SurfaceId::new(1);
+        let first = SurfaceId::for_test(1);
         assert!(store.insert(first, 10, "first"));
         assert!(!store.insert(first, 20, "duplicate id"));
-        assert!(!store.insert(SurfaceId::new(2), 10, "duplicate key"));
+        assert!(!store.insert(SurfaceId::for_test(2), 10, "duplicate key"));
     }
 
     #[test]
     fn surface_ids_exhaust_without_wrapping() {
         let mut next = Some(u64::MAX);
+        let client = ClientId::new(weld_client::ClientSourceId::new(0), 0);
         assert_eq!(
-            allocate_surface_id(&mut next),
-            Some(SurfaceId::new(u64::MAX))
+            allocate_surface_id(&mut next, client),
+            Some(SurfaceId::for_test(u64::MAX))
         );
         assert_eq!(next, None);
-        assert_eq!(allocate_surface_id(&mut next), None);
+        assert_eq!(allocate_surface_id(&mut next, client), None);
+    }
+
+    #[test]
+    fn allocated_surface_identity_retains_its_wayland_client() {
+        let client = ClientId::new(weld_client::ClientSourceId::new(0), 42);
+        let mut next = Some(7);
+
+        let surface = allocate_surface_id(&mut next, client).expect("available identity");
+
+        assert_eq!(surface.client(), client);
+        assert_eq!(surface.local(), 7);
     }
 
     #[test]

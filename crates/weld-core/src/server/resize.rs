@@ -32,8 +32,8 @@ mod tests {
     #[test]
     fn keeps_only_the_latest_size_for_each_surface() {
         let mut requests = PendingResizeRequests::default();
-        let first = SurfaceId::new(1);
-        let second = SurfaceId::new(2);
+        let first = SurfaceId::for_test(1);
+        let second = SurfaceId::for_test(2);
 
         requests.queue(first, Extent::new(640, 480));
         requests.queue(second, Extent::new(800, 600));
@@ -46,8 +46,8 @@ mod tests {
     #[test]
     fn drain_clears_all_pending_requests() {
         let mut requests = PendingResizeRequests::default();
-        requests.queue(SurfaceId::new(1), Extent::new(640, 480));
-        requests.queue(SurfaceId::new(2), Extent::new(800, 600));
+        requests.queue(SurfaceId::for_test(1), Extent::new(640, 480));
+        requests.queue(SurfaceId::for_test(2), Extent::new(800, 600));
 
         assert_eq!(requests.drain().count(), 2);
         assert_eq!(requests.drain().count(), 0);

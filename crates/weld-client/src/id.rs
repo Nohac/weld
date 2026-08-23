@@ -88,6 +88,17 @@ impl ClientSurfaceId {
     pub const fn local(self) -> u64 {
         self.local
     }
+
+    /// Adapter-local surface value, retained as a convenience for diagnostics.
+    pub const fn raw(self) -> u64 {
+        self.local
+    }
+
+    /// Constructs a deterministic identity for policy tests without an adapter.
+    #[doc(hidden)]
+    pub const fn for_test(local: u64) -> Self {
+        Self::new(ClientId::new(ClientSourceId::new(0), 0), local)
+    }
 }
 
 local_id!(

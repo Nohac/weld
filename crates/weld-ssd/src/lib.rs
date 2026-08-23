@@ -28,7 +28,8 @@ use bevy::{
 use weld_app::{
     output::{OutputCompositionCamera, PrimaryOutput, WeldOutput},
     surface::{
-        ClientToplevel, MappedSurface, ServerDecorated, SurfaceId, SurfaceView, ToplevelResizeEdge,
+        ClientProvenance, ClientToplevel, MappedSurface, ServerDecorated, SurfaceId, SurfaceView,
+        ToplevelResizeEdge,
     },
 };
 use weld_window::{
@@ -326,23 +327,22 @@ fn present_ssd_windows(
 fn sync_focus_style(
     focus: Res<FocusedWindow>,
     windows: Query<Option<&WindowClientBinding>>,
+    clients: WindowClientResolver,
     mut roots: Query<(&WindowProjection, &mut BorderColor), With<SsdPresentation>>,
     mut redraw: bevy::ecs::message::MessageWriter<RequestRedraw>,
 ) {
     let mut changed = false;
     for (projection, mut border) in &mut roots {
         let focused = focus.entity() == Some(projection.window());
-        let proxied = windows
-            .get(projection.window())
-            .ok()
-            .flatten()
-            .is_some_and(|binding| binding.source().is_some());
-        let color = match (proxied, focused) {
-            (true, true) => PROXIED_FOCUSED_BORDER,
-            (true, false) => PROXIED_UNFOCUSED_BORDER,
-            (false, true) => FOCUSED_BORDER,
-            (false, false) => UNFOCUSED_BORDER,
-        };
+        let proxied = clients
+            .mapped_client(projection.window())
+            .is_some_and(|client| client.provenance() == ClientProvenance::Relocated)
+            || windows
+                .get(projection.window())
+                .ok()
+                .flatten()
+                .is_some_and(|binding| binding.source().is_some());
+        let color = ssd_border_color(proxied, focused);
         let expected = BorderColor::all(color);
         if *border != expected {
             *border = expected;
@@ -351,6 +351,15 @@ fn sync_focus_style(
     }
     if changed {
         redraw.write(RequestRedraw);
+    }
+}
+
+fn ssd_border_color(relocated: bool, focused: bool) -> Color {
+    match (relocated, focused) {
+        (true, true) => PROXIED_FOCUSED_BORDER,
+        (true, false) => PROXIED_UNFOCUSED_BORDER,
+        (false, true) => FOCUSED_BORDER,
+        (false, false) => UNFOCUSED_BORDER,
     }
 }
 
@@ -678,6 +687,14 @@ mod tests {
         app
     }
 
+    #[test]
+    fn relocated_provenance_uses_the_hoist_accent_in_both_focus_states() {
+        assert_eq!(ssd_border_color(true, true), PROXIED_FOCUSED_BORDER);
+        assert_eq!(ssd_border_color(true, false), PROXIED_UNFOCUSED_BORDER);
+        assert_eq!(ssd_border_color(false, true), FOCUSED_BORDER);
+        assert_eq!(ssd_border_color(false, false), UNFOCUSED_BORDER);
+    }
+
     fn write_primary_button(app: &mut App, state: ButtonState) {
         app.world_mut().write_message(MouseButtonInput {
             button: MouseButton::Left,
@@ -772,7 +789,7 @@ mod tests {
     #[test]
     fn decoration_swap_preserves_content_size_and_close_targets_the_occupant() {
         let mut app = test_app();
-        let surface = SurfaceId::new(41);
+        let surface = SurfaceId::for_test(41);
         enqueue_surface_event(
             app.world_mut(),
             HostSurfaceEvent {
@@ -813,7 +830,7 @@ mod tests {
             app.world_mut(),
             HostSurfaceEvent {
                 surface,
-                kind: HostSurfaceEventKind::DecorationChanged {
+                kind: HostSurfaceEventKind::Created {
                     decoration: WindowDecoration::ServerSide,
                 },
             },
@@ -935,7 +952,7 @@ mod tests {
     #[test]
     fn ssd_content_clips_and_outward_handle_starts_resize() {
         let mut app = test_app();
-        let surface = SurfaceId::new(49);
+        let surface = SurfaceId::for_test(49);
         enqueue_surface_event(
             app.world_mut(),
             HostSurfaceEvent {
@@ -1025,7 +1042,7 @@ mod tests {
     #[test]
     fn client_resize_updates_desired_geometry_and_preserves_the_left_anchor() {
         let mut app = test_app();
-        let surface = SurfaceId::new(42);
+        let surface = SurfaceId::for_test(42);
         enqueue_surface_event(
             app.world_mut(),
             HostSurfaceEvent {
@@ -1133,8 +1150,8 @@ mod tests {
     #[test]
     fn popup_reparents_when_the_owner_changes_presentation() {
         let mut app = test_app();
-        let owner = SurfaceId::new(43);
-        let popup = SurfaceId::new(44);
+        let owner = SurfaceId::for_test(43);
+        let popup = SurfaceId::for_test(44);
         enqueue_surface_event(
             app.world_mut(),
             HostSurfaceEvent {
@@ -1214,7 +1231,7 @@ mod tests {
             app.world_mut(),
             HostSurfaceEvent {
                 surface: owner,
-                kind: HostSurfaceEventKind::DecorationChanged {
+                kind: HostSurfaceEventKind::Created {
                     decoration: WindowDecoration::ServerSide,
                 },
             },
@@ -1277,7 +1294,7 @@ mod tests {
     #[test]
     fn committed_client_extent_changes_without_overwriting_desired_geometry() {
         let mut app = test_app();
-        let surface = SurfaceId::new(45);
+        let surface = SurfaceId::for_test(45);
         enqueue_surface_event(
             app.world_mut(),
             HostSurfaceEvent {
@@ -1333,7 +1350,7 @@ mod tests {
     #[test]
     fn unmap_hides_a_window_and_surface_destruction_removes_the_default_frame() {
         let mut app = test_app();
-        let surface = SurfaceId::new(46);
+        let surface = SurfaceId::for_test(46);
         enqueue_surface_event(
             app.world_mut(),
             HostSurfaceEvent {
@@ -1383,8 +1400,8 @@ mod tests {
     #[test]
     fn multiple_windows_keep_independent_roots_and_focus_falls_back_on_destroy() {
         let mut app = test_app();
-        let first = SurfaceId::new(47);
-        let second = SurfaceId::new(48);
+        let first = SurfaceId::for_test(47);
+        let second = SurfaceId::for_test(48);
         for surface in [first, second] {
             enqueue_surface_event(
                 app.world_mut(),
@@ -1448,7 +1465,7 @@ mod tests {
     #[test]
     fn rehoming_keeps_one_ssd_projection_per_output() {
         let mut app = test_app();
-        let surface = SurfaceId::new(91);
+        let surface = SurfaceId::for_test(91);
         enqueue_surface_event(
             app.world_mut(),
             HostSurfaceEvent {

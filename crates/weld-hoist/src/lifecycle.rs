@@ -154,7 +154,7 @@ pub(super) fn begin_requested_hoists(mut params: BeginHoistParams) {
     params
         .assignments
         .roots
-        .sort_unstable_by_key(|(root, _)| root.raw());
+        .sort_unstable_by_key(|(root, _)| *root);
     for index in 0..params.assignments.roots.len() {
         let (root, family_id) = params.assignments.roots[index];
         let family = params.families.family_for_root(root);

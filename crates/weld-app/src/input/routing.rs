@@ -269,7 +269,7 @@ mod tests {
 
     fn target(transform: InputTransform) -> SurfaceInputTarget {
         SurfaceInputTarget {
-            surface: SurfaceId::new(1),
+            surface: SurfaceId::for_test(1),
             layer: SurfaceLayerId::new(2),
             transform,
         }

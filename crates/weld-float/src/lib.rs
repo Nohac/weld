@@ -1145,8 +1145,9 @@ mod tests {
         input::PointerShortcutPressed,
         output::{OutputGeometry, OutputId, OutputPosition, PrimaryOutput, WeldOutput},
         surface::{
-            ClientDecorated, ClientToplevel, MappedSurface, SurfaceAction, SurfaceActionQueue,
-            SurfaceCommitRevisions, SurfaceId, ToplevelInteractionRequest, take_surface_actions,
+            ClientDecorated, ClientProvenance, ClientSource, ClientToplevel, MappedSurface,
+            SurfaceAction, SurfaceActionQueue, SurfaceCommitRevisions, SurfaceId,
+            ToplevelInteractionRequest, take_surface_actions,
         },
     };
     use weld_window::{
@@ -1207,11 +1208,16 @@ mod tests {
     }
 
     fn admit_float_window(app: &mut App, id: u64) -> Entity {
+        let surface_id = SurfaceId::for_test(id);
         let surface = app
             .world_mut()
             .spawn((
+                ClientSource {
+                    id: surface_id.source(),
+                    provenance: ClientProvenance::Local,
+                },
                 ClientToplevel {
-                    surface: SurfaceId::new(id),
+                    surface: surface_id,
                 },
                 ClientDecorated,
                 MappedSurface {
@@ -1972,11 +1978,15 @@ mod tests {
                 activate_on_picking_last.in_set(PickingSystems::Last),
             );
         spawn_output(&mut app, 1, UVec2::new(800, 600), 1.0, true);
-        let first_surface = SurfaceId::new(81);
-        let second_surface = SurfaceId::new(82);
+        let first_surface = SurfaceId::for_test(81);
+        let second_surface = SurfaceId::for_test(82);
         let first_occupant = app
             .world_mut()
             .spawn((
+                ClientSource {
+                    id: first_surface.source(),
+                    provenance: ClientProvenance::Local,
+                },
                 ClientToplevel {
                     surface: first_surface,
                 },
@@ -1992,6 +2002,10 @@ mod tests {
         let second_occupant = app
             .world_mut()
             .spawn((
+                ClientSource {
+                    id: second_surface.source(),
+                    provenance: ClientProvenance::Local,
+                },
                 ClientToplevel {
                     surface: second_surface,
                 },
@@ -2053,8 +2067,12 @@ mod tests {
         let occupant = app
             .world_mut()
             .spawn((
+                ClientSource {
+                    id: SurfaceId::for_test(91).source(),
+                    provenance: ClientProvenance::Local,
+                },
                 ClientToplevel {
-                    surface: SurfaceId::new(91),
+                    surface: SurfaceId::for_test(91),
                 },
                 ClientDecorated,
                 MappedSurface {
@@ -2110,8 +2128,12 @@ mod tests {
         let occupant = app
             .world_mut()
             .spawn((
+                ClientSource {
+                    id: SurfaceId::for_test(92).source(),
+                    provenance: ClientProvenance::Local,
+                },
                 ClientToplevel {
-                    surface: SurfaceId::new(92),
+                    surface: SurfaceId::for_test(92),
                 },
                 ClientDecorated,
                 MappedSurface {

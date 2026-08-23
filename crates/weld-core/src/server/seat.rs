@@ -940,8 +940,8 @@ mod tests {
 
     #[test]
     fn only_positive_ordinary_click_state_bypasses_grab_focus_protection() {
-        let first = SurfaceId::new(1);
-        let second = SurfaceId::new(2);
+        let first = SurfaceId::for_test(1);
+        let second = SurfaceId::for_test(2);
 
         assert!(focus_request_remains_protected(true, None, Some(first)));
         assert!(focus_request_remains_protected(true, None, None));
@@ -973,7 +973,7 @@ mod tests {
     fn shell_cursor_remains_owned_during_a_shell_implicit_grab() {
         let shell_grab = Some(OrdinaryImplicitGrab { owner: None });
         let client_grab = Some(OrdinaryImplicitGrab {
-            owner: Some(SurfaceId::new(1)),
+            owner: Some(SurfaceId::for_test(1)),
         });
 
         assert!(shell_owns_cursor(true, true, shell_grab));
@@ -983,7 +983,7 @@ mod tests {
 
     #[test]
     fn focus_requests_apply_immediately_without_a_grab() {
-        let surface = SurfaceId::new(1);
+        let surface = SurfaceId::for_test(1);
         let mut pending = Some(None);
 
         assert_eq!(
@@ -995,8 +995,8 @@ mod tests {
 
     #[test]
     fn grabbed_focus_requests_queue_with_last_request_winning() {
-        let first = SurfaceId::new(1);
-        let second = SurfaceId::new(2);
+        let first = SurfaceId::for_test(1);
+        let second = SurfaceId::for_test(2);
         let mut pending = None;
 
         assert_eq!(
@@ -1013,7 +1013,7 @@ mod tests {
 
     #[test]
     fn queued_focus_applies_once_after_the_grab_ends() {
-        let surface = SurfaceId::new(1);
+        let surface = SurfaceId::for_test(1);
         let mut pending = Some(Some(surface));
 
         assert_eq!(
@@ -1034,7 +1034,7 @@ mod tests {
 
     #[test]
     fn host_focus_loss_discards_a_queued_focus_request() {
-        let mut pending = Some(Some(SurfaceId::new(1)));
+        let mut pending = Some(Some(SurfaceId::for_test(1)));
 
         assert_eq!(
             transition_pending_focus(&mut pending, false, FocusTransition::HostFocusLost,),

@@ -93,13 +93,8 @@ pub(crate) fn publish_surface_bindings(app: &mut App, mut valid_images: HashSet<
                 displayed.encoding,
                 displayed.y_inverted,
             )
-        } else if buffer.encoding == SurfaceImageEncoding::LinearStraight {
-            (
-                buffer.image.id(),
-                buffer.generation,
-                SurfaceImageEncoding::LinearStraight,
-                false,
-            )
+        } else if buffer.encoding != SurfaceImageEncoding::Unbound {
+            (buffer.image.id(), buffer.generation, buffer.encoding, false)
         } else {
             (buffer.image.id(), 0, SurfaceImageEncoding::Unbound, false)
         };

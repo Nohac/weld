@@ -37,8 +37,13 @@ use bevy::{
     },
 };
 use tracing::warn;
+use weld_client::ClientSourceDescriptor;
+pub use weld_client::{
+    ClientProvenance, ClientSourceId, ToplevelInteractionRequestKind, WindowDecoration,
+    WindowResizeEdge as ToplevelResizeEdge,
+};
+pub use weld_client::{ClientSurfaceId as SurfaceId, SurfaceLayerId};
 use weld_core::dmabuf::ImportId;
-pub use weld_core::surface::{SurfaceId, SurfaceLayerId};
 
 #[path = "surface/binding.rs"]
 mod binding;
@@ -108,6 +113,51 @@ pub struct ClientSurface {
     pub surface: SurfaceId,
 }
 
+/// Adapter identity and descriptive origin projected onto every client surface.
+#[derive(Component, Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ClientSource {
+    pub id: ClientSourceId,
+    pub provenance: ClientProvenance,
+}
+
+impl From<ClientSourceDescriptor> for ClientSource {
+    fn from(descriptor: ClientSourceDescriptor) -> Self {
+        Self {
+            id: descriptor.id,
+            provenance: descriptor.provenance,
+        }
+    }
+}
+
+#[derive(Resource)]
+struct ClientSources(HashMap<ClientSourceId, ClientSourceDescriptor>);
+
+impl Default for ClientSources {
+    fn default() -> Self {
+        let wayland =
+            ClientSourceDescriptor::new(weld_core::WAYLAND_CLIENT_SOURCE, ClientProvenance::Local);
+        Self(HashMap::from([(wayland.id, wayland)]))
+    }
+}
+
+/// Registers provenance before events from one client adapter are ingested.
+pub fn register_client_source(world: &mut World, descriptor: ClientSourceDescriptor) -> bool {
+    let Some(mut sources) = world.get_resource_mut::<ClientSources>() else {
+        return false;
+    };
+    sources.0.insert(descriptor.id, descriptor);
+    true
+}
+
+fn registered_client_source(world: &World, surface: SurfaceId) -> Option<ClientSource> {
+    world
+        .get_resource::<ClientSources>()?
+        .0
+        .get(&surface.source())
+        .copied()
+        .map(Into::into)
+}
+
 /// Protocol-owned popup placement relative to its owning window geometry.
 ///
 /// Unlike [`ClientToplevel`], this role has no shell-owned placement, decoration,
@@ -118,14 +168,6 @@ pub struct ClientPopup {
     pub owner: SurfaceId,
     pub position: Vec2,
     pub stack_index: i32,
-}
-
-/// Which side owns the visible frame and titlebar for an application window.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub enum WindowDecoration {
-    #[default]
-    ClientSide,
-    ServerSide,
 }
 
 /// A window whose client owns its frame, titlebar, and resize handles.
@@ -197,49 +239,11 @@ pub enum SurfaceAction {
     },
 }
 
-/// Edge or corner selected by a client for an interactive resize.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ToplevelResizeEdge {
-    Top,
-    Bottom,
-    Left,
-    Right,
-    TopLeft,
-    BottomLeft,
-    TopRight,
-    BottomRight,
-}
-
-impl ToplevelResizeEdge {
-    pub const fn has_left(self) -> bool {
-        matches!(self, Self::Left | Self::TopLeft | Self::BottomLeft)
-    }
-
-    pub const fn has_right(self) -> bool {
-        matches!(self, Self::Right | Self::TopRight | Self::BottomRight)
-    }
-
-    pub const fn has_top(self) -> bool {
-        matches!(self, Self::Top | Self::TopLeft | Self::TopRight)
-    }
-
-    pub const fn has_bottom(self) -> bool {
-        matches!(self, Self::Bottom | Self::BottomLeft | Self::BottomRight)
-    }
-}
-
 /// Validated client request for compositor-owned pointer interaction.
 #[derive(Clone, Copy, Debug, Eq, Message, PartialEq)]
 pub struct ToplevelInteractionRequest {
     pub surface: SurfaceId,
     pub kind: ToplevelInteractionRequestKind,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ToplevelInteractionRequestKind {
-    Move,
-    Resize { edges: ToplevelResizeEdge },
-    End,
 }
 
 #[derive(Resource, Default)]
@@ -294,7 +298,6 @@ pub struct SurfaceRenderImage {
 #[doc(hidden)]
 pub enum SurfaceImageEncoding {
     Unbound,
-    LinearStraight,
     EncodedPremultiplied,
     EncodedOpaque,
 }
@@ -413,7 +416,6 @@ pub struct HostSurfaceEvent {
 pub enum HostSurfaceEventKind {
     Created { decoration: WindowDecoration },
     TreeSnapshot(SurfaceTreeSnapshot),
-    DecorationChanged { decoration: WindowDecoration },
     ToplevelParentChanged { parent: Option<SurfaceId> },
     PopupConfigured(ClientPopup),
     WindowInteraction(ToplevelInteractionRequestKind),
@@ -442,7 +444,8 @@ impl Plugin for SurfacePlugin {
             Shader::from_wgsl
         );
         app.add_plugins(UiMaterialPlugin::<SurfaceUiMaterial>::default());
-        app.init_resource::<SurfaceEventQueue>()
+        app.init_resource::<ClientSources>()
+            .init_resource::<SurfaceEventQueue>()
             .init_resource::<SurfaceActionQueue>()
             .init_resource::<SurfaceRegistry>()
             .init_resource::<SurfaceCommitRevisions>()
@@ -715,9 +718,6 @@ fn apply_host_surface_events(world: &mut World) {
                     queue_pending_snapshot(&mut registry, surface, snapshot);
                 }
             }
-            HostSurfaceEventKind::DecorationChanged { decoration } => {
-                set_window_decoration(world, &mut registry, surface, decoration);
-            }
             HostSurfaceEventKind::ToplevelParentChanged { parent } => {
                 set_toplevel_parent(world, &registry, surface, parent);
             }
@@ -766,6 +766,13 @@ fn ensure_window_entity(
     surface: SurfaceId,
     decoration: WindowDecoration,
 ) -> Option<Entity> {
+    let Some(source) = registered_client_source(world, surface) else {
+        warn!(
+            ?surface,
+            "ignored a surface from an unregistered client source"
+        );
+        return None;
+    };
     if let Some(entry) = registry.entries.get(&surface)
         && world.get_entity(entry.entity).is_ok()
     {
@@ -779,13 +786,21 @@ fn ensure_window_entity(
         let Ok(mut entity) = world.get_entity_mut(entry.entity) else {
             return None;
         };
-        entity.insert((ClientSurface { surface }, ClientToplevel { surface }));
+        entity.insert((
+            source,
+            ClientSurface { surface },
+            ClientToplevel { surface },
+        ));
         return Some(entry.entity);
     }
     registry.entries.remove(&surface);
 
     let entity = world
-        .spawn((ClientSurface { surface }, ClientToplevel { surface }))
+        .spawn((
+            source,
+            ClientSurface { surface },
+            ClientToplevel { surface },
+        ))
         .id();
     set_decoration_marker(world, entity, decoration);
     registry.entries.insert(
@@ -805,6 +820,13 @@ fn ensure_popup_entity(
     surface: SurfaceId,
     popup: ClientPopup,
 ) -> Option<Entity> {
+    let Some(source) = registered_client_source(world, surface) else {
+        warn!(
+            ?surface,
+            "ignored a popup from an unregistered client source"
+        );
+        return None;
+    };
     if let Some(entry) = registry.entries.get(&surface)
         && world.get_entity(entry.entity).is_ok()
     {
@@ -818,12 +840,12 @@ fn ensure_popup_entity(
         let Ok(mut entity) = world.get_entity_mut(entry.entity) else {
             return None;
         };
-        entity.insert((ClientSurface { surface }, popup));
+        entity.insert((source, ClientSurface { surface }, popup));
         return Some(entry.entity);
     }
     registry.entries.remove(&surface);
 
-    let entity = world.spawn((ClientSurface { surface }, popup)).id();
+    let entity = world.spawn((source, ClientSurface { surface }, popup)).id();
     registry.entries.insert(
         surface,
         SurfaceEntry {
@@ -852,30 +874,6 @@ fn apply_pending_snapshot(world: &mut World, registry: &mut SurfaceRegistry, sur
     if let Some(snapshot) = registry.pending_snapshots.remove(&surface) {
         apply_surface_tree_snapshot(world, registry, surface, snapshot);
     }
-}
-
-fn set_window_decoration(
-    world: &mut World,
-    registry: &mut SurfaceRegistry,
-    surface: SurfaceId,
-    decoration: WindowDecoration,
-) {
-    let Some(entry) = registry.entries.get(&surface) else {
-        warn!(
-            ?surface,
-            "ignored a decoration update for an unknown surface"
-        );
-        return;
-    };
-    let entity = entry.entity;
-    if world.get::<ClientToplevel>(entity).is_none() {
-        warn!(
-            ?surface,
-            "ignored a window decoration update for a non-window surface"
-        );
-        return;
-    }
-    set_decoration_marker(world, entity, decoration);
 }
 
 fn set_decoration_marker(world: &mut World, entity: Entity, decoration: WindowDecoration) {
@@ -941,17 +939,15 @@ fn apply_surface_tree_snapshot(
                 depth_or_array_layers: 1,
             };
             let content = std::mem::replace(&mut buffer.content, SurfaceBufferContent::Retained);
-            if let SurfaceBufferContent::Pixels(mut pixels) = content {
+            if let SurfaceBufferContent::Pixels(pixels) = content {
                 let generation = entry
                     .buffers
                     .get(&buffer.layer)
                     .map_or(1, |asset| asset.generation.saturating_add(1));
-                if !buffer.opaque {
-                    unpremultiply_bgra(&mut pixels);
-                }
                 let image = if let Some(previous) = entry.buffers.get(&buffer.layer)
                     && let Some(mut image) = images.get_mut(&previous.image)
                     && image.asset_usage.contains(RenderAssetUsages::RENDER_WORLD)
+                    && image.texture_descriptor.format == TextureFormat::Bgra8Unorm
                 {
                     image.texture_descriptor.size = extent;
                     image.data = Some(pixels);
@@ -969,7 +965,11 @@ fn apply_surface_tree_snapshot(
                         image,
                         pixel_size,
                         opaque: buffer.opaque,
-                        encoding: SurfaceImageEncoding::LinearStraight,
+                        encoding: if buffer.opaque {
+                            SurfaceImageEncoding::EncodedOpaque
+                        } else {
+                            SurfaceImageEncoding::EncodedPremultiplied
+                        },
                         displayed_dmabuf: None,
                         displayed_pixel_size: None,
                         pending_dmabuf: None,
@@ -1498,8 +1498,8 @@ fn surface_material(
 ) -> SurfaceUiMaterial {
     let (source_encoding, y_inverted) = if let Some(displayed) = &buffer.displayed_dmabuf {
         (displayed.encoding, displayed.y_inverted)
-    } else if buffer.encoding == SurfaceImageEncoding::LinearStraight {
-        (SurfaceImageEncoding::LinearStraight, false)
+    } else if buffer.encoding != SurfaceImageEncoding::Unbound {
+        (buffer.encoding, false)
     } else {
         (SurfaceImageEncoding::Unbound, false)
     };
@@ -1522,7 +1522,6 @@ fn surface_material(
 const fn encoding_flag(encoding: SurfaceImageEncoding) -> u32 {
     match encoding {
         SurfaceImageEncoding::Unbound => 3,
-        SurfaceImageEncoding::LinearStraight => 0,
         SurfaceImageEncoding::EncodedPremultiplied => 1,
         SurfaceImageEncoding::EncodedOpaque => 2,
     }
@@ -1572,7 +1571,7 @@ fn surface_image(extent: Extent3d, pixels: Vec<u8>) -> Image {
         extent,
         TextureDimension::D2,
         pixels,
-        TextureFormat::Bgra8UnormSrgb,
+        TextureFormat::Bgra8Unorm,
         RenderAssetUsages::RENDER_WORLD,
     )
 }
@@ -1586,25 +1585,6 @@ fn transparent_surface_image() -> Image {
         },
         vec![0, 0, 0, 0],
     )
-}
-
-/// Converts encoded premultiplied BGRA channels to straight alpha in place.
-///
-/// Bevy UI uses straight-alpha blending. Dividing before the sRGB sampler
-/// decode preserves the current linear premultiplied result, at the cost of
-/// unavoidable quantization for very small alpha values.
-fn unpremultiply_bgra(pixels: &mut [u8]) {
-    for pixel in pixels.chunks_exact_mut(4) {
-        let alpha = u32::from(pixel[3]);
-        if alpha == 0 {
-            pixel[..3].fill(0);
-            continue;
-        }
-        for channel in &mut pixel[..3] {
-            let straight = (u32::from(*channel) * 255 + alpha / 2) / alpha;
-            *channel = straight.min(255) as u8;
-        }
-    }
 }
 
 #[cfg(test)]
@@ -1691,11 +1671,47 @@ mod tests {
     }
 
     #[test]
+    fn registered_source_provenance_reaches_toplevels_and_popups() {
+        let mut app = test_app();
+        let source = ClientSourceId::new(7);
+        assert!(register_client_source(
+            app.world_mut(),
+            ClientSourceDescriptor::new(source, ClientProvenance::Relocated)
+        ));
+        let client = weld_client::ClientId::new(source, 1);
+        let toplevel = SurfaceId::new(client, 1);
+        let popup = SurfaceId::new(client, 2);
+        register_window(&mut app, toplevel);
+        enqueue_surface_event(
+            app.world_mut(),
+            HostSurfaceEvent {
+                surface: popup,
+                kind: HostSurfaceEventKind::PopupConfigured(ClientPopup {
+                    owner: toplevel,
+                    position: Vec2::ZERO,
+                    stack_index: 1,
+                }),
+            },
+        );
+
+        app.update();
+
+        let sources = app
+            .world_mut()
+            .query::<(&ClientSurface, &ClientSource)>()
+            .iter(app.world())
+            .map(|(surface, source)| (surface.surface, *source))
+            .collect::<HashMap<_, _>>();
+        assert_eq!(sources[&toplevel].provenance, ClientProvenance::Relocated);
+        assert_eq!(sources[&popup].provenance, ClientProvenance::Relocated);
+    }
+
+    #[test]
     fn toplevel_parent_ingress_tracks_runtime_relationship_changes() {
         let mut app = test_app();
-        let child = SurfaceId::new(4);
-        let first_parent = SurfaceId::new(2);
-        let second_parent = SurfaceId::new(3);
+        let child = SurfaceId::for_test(4);
+        let first_parent = SurfaceId::for_test(2);
+        let second_parent = SurfaceId::for_test(3);
         register_window(&mut app, first_parent);
         register_window(&mut app, second_parent);
         register_window(&mut app, child);
@@ -1757,7 +1773,7 @@ mod tests {
     #[test]
     fn root_updates_reuse_the_bevy_image() {
         let mut app = test_app();
-        let surface = SurfaceId::new(7);
+        let surface = SurfaceId::for_test(7);
         register_window(&mut app, surface);
         enqueue_surface_event(
             app.world_mut(),
@@ -1789,7 +1805,7 @@ mod tests {
     #[test]
     fn a_snapshot_waits_for_its_popup_role_without_becoming_a_window() {
         let mut app = test_app();
-        let surface = SurfaceId::new(8);
+        let surface = SurfaceId::for_test(8);
         enqueue_surface_event(
             app.world_mut(),
             snapshot_event(surface, root_snapshot(Some([3, 2, 1, 255]))),
@@ -1804,7 +1820,7 @@ mod tests {
             HostSurfaceEvent {
                 surface,
                 kind: HostSurfaceEventKind::PopupConfigured(ClientPopup {
-                    owner: SurfaceId::new(1),
+                    owner: SurfaceId::for_test(1),
                     position: Vec2::new(10.0, 20.0),
                     stack_index: 1,
                 }),
@@ -1818,7 +1834,7 @@ mod tests {
         let (popup, mapped, decoration) = popups
             .single(app.world())
             .expect("the queued popup snapshot should map after role registration");
-        assert_eq!(popup.owner, SurfaceId::new(1));
+        assert_eq!(popup.owner, SurfaceId::for_test(1));
         assert_eq!(mapped.logical_size, Vec2::ONE);
         assert!(decoration.is_none());
     }
@@ -1826,7 +1842,7 @@ mod tests {
     #[test]
     fn protocol_unmap_retains_copied_buffers_for_remapping() {
         let mut app = test_app();
-        let surface = SurfaceId::new(11);
+        let surface = SurfaceId::for_test(11);
         register_window(&mut app, surface);
         enqueue_surface_event(
             app.world_mut(),
@@ -1878,7 +1894,7 @@ mod tests {
 
     #[test]
     fn coalescing_preserves_unseen_pixels_and_drops_removed_layers() {
-        let surface = SurfaceId::new(1);
+        let surface = SurfaceId::for_test(1);
         let mut events = SurfaceEventQueue::default();
         let mut first = root_snapshot(Some([1, 1, 1, 255]));
         first.buffers.push(buffer(2, Some([2, 2, 2, 255])));
@@ -1911,7 +1927,7 @@ mod tests {
 
     #[test]
     fn coalescing_preserves_an_unseen_imported_render_image() {
-        let surface = SurfaceId::new(1);
+        let surface = SurfaceId::for_test(1);
         let image = SurfaceRenderImage {
             import: ImportId::for_test(7),
             image: Handle::default(),
@@ -1958,7 +1974,7 @@ mod tests {
     #[test]
     fn a_pre_role_snapshot_keeps_its_dma_import_referenced() {
         let mut app = test_app();
-        let surface = SurfaceId::new(31);
+        let surface = SurfaceId::for_test(31);
         let import = ImportId::for_test(11);
         let mut snapshot = root_snapshot(None);
         snapshot.buffers[0].content = SurfaceBufferContent::RenderImage(SurfaceRenderImage {
@@ -1977,7 +1993,7 @@ mod tests {
     #[test]
     fn a_content_only_commit_advances_commit_state_without_changing_surface_components() {
         let mut app = test_app();
-        let surface = SurfaceId::new(32);
+        let surface = SurfaceId::for_test(32);
         register_window(&mut app, surface);
         enqueue_surface_event(
             app.world_mut(),
@@ -2039,7 +2055,7 @@ mod tests {
     #[test]
     fn overlays_reuse_entities_and_release_removed_assets() {
         let mut app = test_app();
-        let surface = SurfaceId::new(29);
+        let surface = SurfaceId::for_test(29);
         register_window(&mut app, surface);
         app.world_mut().spawn((
             SurfaceNode {
@@ -2103,9 +2119,33 @@ mod tests {
     }
 
     #[test]
-    fn converts_premultiplied_bgra_to_straight_alpha() {
-        let mut pixels = [25, 50, 75, 128, 9, 8, 7, 0, 3, 2, 1, 255];
-        unpremultiply_bgra(&mut pixels);
-        assert_eq!(pixels, [50, 100, 149, 128, 0, 0, 0, 0, 3, 2, 1, 255]);
+    fn encoded_premultiplied_path_preserves_previous_linear_color_with_more_precision() {
+        fn srgb_to_linear(channel: f32) -> f32 {
+            if channel <= 0.04045 {
+                channel / 12.92
+            } else {
+                ((channel + 0.055) / 1.055).powf(2.4)
+            }
+        }
+
+        fn old_linear(channel: u8, alpha: u8) -> f32 {
+            if alpha == 0 {
+                return 0.0;
+            }
+            let straight = (u32::from(channel) * 255 + u32::from(alpha) / 2) / u32::from(alpha);
+            srgb_to_linear(straight.min(255) as f32 / 255.0)
+        }
+
+        fn encoded_linear(channel: u8, alpha: u8) -> f32 {
+            if alpha == 0 {
+                return 0.0;
+            }
+            srgb_to_linear((f32::from(channel) / f32::from(alpha)).min(1.0))
+        }
+
+        assert_eq!(old_linear(17, 85), encoded_linear(17, 85));
+        for (channel, alpha) in [(25, 128), (50, 128), (75, 128), (1, 7), (1, 255)] {
+            assert!((old_linear(channel, alpha) - encoded_linear(channel, alpha)).abs() < 0.004);
+        }
     }
 }

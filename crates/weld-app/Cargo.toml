@@ -15,6 +15,7 @@ bevy_winit.workspace = true
 leafwing-input-manager = { workspace = true, features = ["keyboard", "mouse", "picking"] }
 pollster = { workspace = true, optional = true }
 tracing.workspace = true
+weld-client = { path = "../weld-client" }
 weld-core = { path = "../weld-core" }
 wgpu = { workspace = true, features = ["naga-ir", "vulkan", "wgsl"] }
 winit = { workspace = true, features = ["rwh_06"] }

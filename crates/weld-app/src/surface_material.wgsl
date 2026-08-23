@@ -11,7 +11,6 @@ var surface_texture: texture_2d<f32>;
 @group(1) @binding(1)
 var<uniform> parameters: SurfaceMaterialParameters;
 
-const LINEAR_STRAIGHT: u32 = 0u;
 const ENCODED_PREMULTIPLIED: u32 = 1u;
 const ENCODED_OPAQUE: u32 = 2u;
 const UNBOUND: u32 = 3u;
@@ -35,9 +34,6 @@ fn srgb_to_linear(encoded: vec3<f32>) -> vec3<f32> {
 fn normalized_texel(coordinate: vec2<i32>, dimensions: vec2<i32>) -> vec4<f32> {
     let clamped = clamp(coordinate, vec2<i32>(0), dimensions - vec2<i32>(1));
     let encoded = textureLoad(surface_texture, clamped, 0);
-    if parameters.flags.x == LINEAR_STRAIGHT {
-        return encoded;
-    }
     if parameters.flags.x == ENCODED_OPAQUE {
         return vec4<f32>(srgb_to_linear(encoded.rgb), 1.0);
     }

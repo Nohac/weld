@@ -2,6 +2,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use weld_app::{benchmark, input::GlobalShortcutPlugin};
+use weld_client::{ClientSurfaceRole, ToplevelState};
 use weld_core::{
     OutputId,
     host::{CompositionDestination, CompositionOutputRequest},
@@ -22,7 +23,7 @@ use weld_window::WindowPlugin;
 use weld_window_ui::WindowUiPlugin;
 
 const OUTPUT: OutputId = OutputId::new(1);
-const CLIENT_SURFACE: SurfaceId = SurfaceId::new(1);
+const CLIENT_SURFACE: SurfaceId = SurfaceId::for_test(1);
 const CLIENT_LAYER: SurfaceLayerId = SurfaceLayerId::new(1);
 const CLIENT_WIDTH: u32 = 900;
 const CLIENT_HEIGHT: u32 = 600;
@@ -158,9 +159,10 @@ fn configure_shell(app: &mut bevy::app::App) {
 fn map_synthetic_client(shell: &mut benchmark::AppShell) {
     std::hint::black_box(shell.enqueue_surface_event(PendingSurfaceEvent {
         surface: CLIENT_SURFACE,
-        kind: PendingSurfaceEventKind::Created {
+        kind: PendingSurfaceEventKind::Role(ClientSurfaceRole::Toplevel(ToplevelState {
+            parent: None,
             decoration: WindowDecoration::ServerSide,
-        },
+        })),
     }));
     std::hint::black_box(shell.enqueue_surface_event(surface_snapshot(
         PendingSurfaceBufferContent::ShmPixels(vec![

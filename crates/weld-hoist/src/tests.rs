@@ -190,7 +190,7 @@ fn projection_count(app: &mut App, window: Entity) -> usize {
 #[test]
 fn reclaim_waits_for_the_placeholder_sized_client_commit() {
     let mut app = test_app();
-    let surface = SurfaceId::new(41);
+    let surface = SurfaceId::for_test(41);
     let source = map_server_decorated_surface(&mut app, surface);
     let occupant = app
         .world()
@@ -351,7 +351,7 @@ fn reclaim_waits_for_the_placeholder_sized_client_commit() {
 #[test]
 fn csd_shortcut_keeps_placeholder_at_geometry_origin_and_receiver_at_visual_origin() {
     let mut app = test_app();
-    let surface = SurfaceId::new(61);
+    let surface = SurfaceId::for_test(61);
     let visual_offset = Vec2::new(-20.0, -18.0);
     let source = map_surface(
         &mut app,
@@ -365,7 +365,7 @@ fn csd_shortcut_keeps_placeholder_at_geometry_origin_and_receiver_at_visual_orig
         .world()
         .get::<WindowGeometry>(source)
         .expect("CSD source should have managed geometry");
-    let popup = SurfaceId::new(62);
+    let popup = SurfaceId::for_test(62);
     enqueue_surface_event(
         app.world_mut(),
         HostSurfaceEvent {
@@ -465,7 +465,7 @@ fn csd_shortcut_keeps_placeholder_at_geometry_origin_and_receiver_at_visual_orig
 #[test]
 fn removing_the_loopback_receiver_recovers_the_source() {
     let mut app = test_app();
-    let source = map_server_decorated_surface(&mut app, SurfaceId::new(52));
+    let source = map_server_decorated_surface(&mut app, SurfaceId::for_test(52));
     app.world_mut()
         .write_message(HoistWindow { window: source });
     app.update();
@@ -505,7 +505,7 @@ fn receiver_owns_output_membership_and_client_resize_until_reclaim() {
             OutputPosition(Vec2::new(1_000.0, 0.0)),
         ))
         .id();
-    let surface = SurfaceId::new(68);
+    let surface = SurfaceId::for_test(68);
     let source = map_server_decorated_surface(&mut app, surface);
     app.world_mut()
         .write_message(HoistWindow { window: source });
@@ -605,7 +605,7 @@ fn receiver_owns_output_membership_and_client_resize_until_reclaim() {
 #[test]
 fn reclaim_timeout_restores_the_source_when_the_client_does_not_commit() {
     let mut app = test_app();
-    let surface = SurfaceId::new(69);
+    let surface = SurfaceId::for_test(69);
     let source = map_server_decorated_surface(&mut app, surface);
     app.world_mut()
         .write_message(HoistWindow { window: source });
@@ -656,10 +656,10 @@ fn reclaim_timeout_restores_the_source_when_the_client_does_not_commit() {
 #[test]
 fn hoist_follows_existing_and_later_toplevel_family_members() {
     let mut app = test_app();
-    let root_surface = SurfaceId::new(90);
-    let child_surface = SurfaceId::new(91);
-    let later_surface = SurfaceId::new(92);
-    let mid_reclaim_surface = SurfaceId::new(93);
+    let root_surface = SurfaceId::for_test(90);
+    let child_surface = SurfaceId::for_test(91);
+    let later_surface = SurfaceId::for_test(92);
+    let mid_reclaim_surface = SurfaceId::for_test(93);
     let root = map_server_decorated_surface(&mut app, root_surface);
     let child = map_server_decorated_surface(&mut app, child_surface);
     set_toplevel_parent(&mut app, child_surface, Some(root_surface));
@@ -816,8 +816,8 @@ fn hoist_follows_existing_and_later_toplevel_family_members() {
 #[test]
 fn removing_a_parent_stages_only_that_family_member_for_restore() {
     let mut app = test_app();
-    let root_surface = SurfaceId::new(94);
-    let child_surface = SurfaceId::new(95);
+    let root_surface = SurfaceId::for_test(94);
+    let child_surface = SurfaceId::for_test(95);
     let root = map_server_decorated_surface(&mut app, root_surface);
     app.world_mut().write_message(HoistWindow { window: root });
     app.update();
@@ -901,8 +901,8 @@ fn removing_a_parent_stages_only_that_family_member_for_restore() {
 #[test]
 fn unmapping_root_during_family_reclaim_keeps_the_surviving_placeholder() {
     let mut app = test_app();
-    let root_surface = SurfaceId::new(96);
-    let child_surface = SurfaceId::new(97);
+    let root_surface = SurfaceId::for_test(96);
+    let child_surface = SurfaceId::for_test(97);
     let root = map_server_decorated_surface(&mut app, root_surface);
     let child = map_server_decorated_surface(&mut app, child_surface);
     set_toplevel_parent(&mut app, child_surface, Some(root_surface));
@@ -947,8 +947,8 @@ fn unmapping_root_during_family_reclaim_keeps_the_surviving_placeholder() {
 #[test]
 fn destroyed_preserved_member_becomes_a_dismissible_closed_tombstone() {
     let mut app = test_app();
-    let root_surface = SurfaceId::new(98);
-    let child_surface = SurfaceId::new(99);
+    let root_surface = SurfaceId::for_test(98);
+    let child_surface = SurfaceId::for_test(99);
     let root = map_server_decorated_surface(&mut app, root_surface);
     let child = map_server_decorated_surface(&mut app, child_surface);
     set_toplevel_parent(&mut app, child_surface, Some(root_surface));
@@ -1047,7 +1047,7 @@ fn destroyed_preserved_member_becomes_a_dismissible_closed_tombstone() {
 #[test]
 fn unmapping_the_source_ends_the_local_session() {
     let mut app = test_app();
-    let surface = SurfaceId::new(72);
+    let surface = SurfaceId::for_test(72);
     let source = map_server_decorated_surface(&mut app, surface);
     app.world_mut()
         .write_message(HoistWindow { window: source });

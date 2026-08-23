@@ -66,6 +66,7 @@ bevy.workspace = true
 bevy_dylib.workspace = true
 clap.workspace = true
 weld-app = { path = "crates/weld-app" }
+weld-client = { path = "crates/weld-client" }
 weld-core = { path = "crates/weld-core" }
 weld-window = { path = "crates/weld-window" }
 weld-window-ui = { path = "crates/weld-window-ui" }

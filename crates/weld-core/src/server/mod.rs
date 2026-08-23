@@ -36,7 +36,7 @@ use smithay::{
         },
         wayland_server::{
             Client, Display, DisplayHandle,
-            backend::{ClientData, ClientId, DisconnectReason},
+            backend::{ClientData, ClientId as WaylandClientId, DisconnectReason},
             protocol::wl_callback::WlCallback,
         },
     },
@@ -56,15 +56,13 @@ use smithay::{
     },
 };
 use tracing::{debug, warn};
+use weld_client::{ClientId, ClientSurfaceRole};
 
 use crate::{
     OutputId,
     dmabuf::{DmabufCapabilities, DmabufReleaseId, DmabufSourceCache},
     input::{InputPosition, SurfaceInputTarget},
-    surface::{
-        Extent, PopupDescriptor, SurfaceAction, SurfaceId, WindowDecoration,
-        WindowInteractionRequestKind,
-    },
+    surface::{Extent, SurfaceAction, SurfaceId, WindowInteractionRequestKind},
 };
 use cursor::CursorSurfaceStore;
 use dmabuf::{DmabufProtocol, DmabufReleaseStore};
@@ -110,6 +108,7 @@ pub struct ServerState {
     next_presentation_id: u64,
     staged_frame_callbacks: VecDeque<(u64, Vec<WlCallback>)>,
     next_surface_id: Option<u64>,
+    next_client_id: Option<u64>,
     started_at: Instant,
     pointer_position: InputPosition,
     pointer_input_target: Option<SurfaceInputTarget>,
@@ -228,9 +227,13 @@ impl ServerState {
                 )
                 .entered();
                 let state = server(state);
+                let Some(client_id) = state.allocate_client_id() else {
+                    warn!("rejected a Wayland client because ClientId space is exhausted");
+                    return;
+                };
                 match state
                     .display_handle
-                    .insert_client(client_stream, Arc::new(ClientState::default()))
+                    .insert_client(client_stream, Arc::new(ClientState::new(client_id)))
                 {
                     Ok(_) => tracing::trace!(
                         target: crate::PROFILE_TARGET,
@@ -332,6 +335,7 @@ impl ServerState {
             next_presentation_id: 1,
             staged_frame_callbacks: VecDeque::new(),
             next_surface_id: Some(1),
+            next_client_id: Some(1),
             started_at,
             pointer_position: InputPosition::default(),
             pointer_input_target: None,
@@ -465,6 +469,12 @@ impl ServerState {
     fn event_time(&self) -> u32 {
         self.started_at.elapsed().as_millis() as u32
     }
+
+    fn allocate_client_id(&mut self) -> Option<ClientId> {
+        let local = self.next_client_id?;
+        self.next_client_id = local.checked_add(1);
+        Some(ClientId::new(crate::WAYLAND_CLIENT_SOURCE, local))
+    }
 }
 
 /// Host-only ingress. Its tree snapshots may still own Smithay DMA-BUFs.
@@ -476,24 +486,30 @@ pub struct PendingSurfaceEvent {
 
 #[derive(Debug)]
 pub enum PendingSurfaceEventKind {
-    Created { decoration: WindowDecoration },
+    Role(ClientSurfaceRole),
     TreeSnapshot(surface_tree::PendingSurfaceTreeSnapshot),
-    DecorationChanged { decoration: WindowDecoration },
-    ToplevelParentChanged { parent: Option<SurfaceId> },
-    PopupConfigured(PopupDescriptor),
     WindowInteraction(WindowInteractionRequestKind),
     Destroyed,
 }
 
-#[derive(Default)]
 struct ClientState {
     compositor_state: CompositorClientState,
+    id: ClientId,
+}
+
+impl ClientState {
+    fn new(id: ClientId) -> Self {
+        Self {
+            compositor_state: CompositorClientState::default(),
+            id,
+        }
+    }
 }
 
 impl ClientData for ClientState {
-    fn initialized(&self, _client_id: ClientId) {}
+    fn initialized(&self, _client_id: WaylandClientId) {}
 
-    fn disconnected(&self, _client_id: ClientId, reason: DisconnectReason) {
+    fn disconnected(&self, _client_id: WaylandClientId, reason: DisconnectReason) {
         debug!(?reason, "Wayland client disconnected");
     }
 }

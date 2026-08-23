@@ -15,13 +15,14 @@ use smithay::{
     wayland::shell::xdg::{PopupSurface, PositionerState},
 };
 use tracing::{debug, info, warn};
+use weld_client::ClientSurfaceRole;
 
 use crate::surface::{LogicalPoint, PopupDescriptor, SurfaceId};
 
 use super::{
     PendingSurfaceEvent, PendingSurfaceEventKind, ServerState,
     surface_tree::SurfaceTreeState,
-    toplevel::{IndexedStore, allocate_surface_id},
+    toplevel::{IndexedStore, allocate_surface_id, client_id_for_surface},
 };
 
 pub(super) struct PopupState {
@@ -65,7 +66,12 @@ impl PopupStore {
 
 impl ServerState {
     pub(super) fn register_popup(&mut self, surface: PopupSurface, _positioner: PositionerState) {
-        let Some(id) = allocate_surface_id(&mut self.next_surface_id) else {
+        let Some(client) = client_id_for_surface(surface.wl_surface()) else {
+            warn!("refused an xdg-popup without a registered client identity");
+            surface.send_popup_done();
+            return;
+        };
+        let Some(id) = allocate_surface_id(&mut self.next_surface_id, client) else {
             warn!("refused an xdg-popup because SurfaceId space is exhausted");
             surface.send_popup_done();
             return;
@@ -289,7 +295,7 @@ impl ServerState {
             self.apply_popup_output_assignment(surface);
             self.pending_surface_events.push_back(PendingSurfaceEvent {
                 surface,
-                kind: PendingSurfaceEventKind::PopupConfigured(popup),
+                kind: PendingSurfaceEventKind::Role(ClientSurfaceRole::Popup(popup)),
             });
         }
     }

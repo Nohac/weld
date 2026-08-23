@@ -19,11 +19,12 @@ mod surface_impl;
 /// Plugin-facing application surface model.
 pub mod surface {
     pub use crate::surface_impl::{
-        ClientDecorated, ClientPopup, ClientSurface, ClientToplevel, ClientToplevelParent,
-        MappedSurface, ServerDecorated, SurfaceAction, SurfaceActionQueue, SurfaceCommitRevisions,
-        SurfaceId, SurfaceLayerId, SurfaceNode, SurfaceSystems, SurfaceView,
-        ToplevelInteractionRequest, ToplevelInteractionRequestKind, ToplevelResizeEdge,
-        WindowDecoration,
+        ClientDecorated, ClientPopup, ClientProvenance, ClientSource, ClientSourceId,
+        ClientSurface, ClientToplevel, ClientToplevelParent, MappedSurface, ServerDecorated,
+        SurfaceAction, SurfaceActionQueue, SurfaceCommitRevisions, SurfaceId, SurfaceLayerId,
+        SurfaceNode, SurfaceSystems, SurfaceView, ToplevelInteractionRequest,
+        ToplevelInteractionRequestKind, ToplevelResizeEdge, WindowDecoration,
+        register_client_source,
     };
 
     #[cfg(feature = "test-support")]

@@ -56,6 +56,7 @@ use crate::surface::{
     ToplevelInteractionRequestKind, ToplevelResizeEdge, WindowDecoration, enqueue_surface_event,
     has_surface_frame, publish_surface_bindings, take_surface_actions,
 };
+use weld_client::ClientSurfaceRole;
 use weld_core::host::{
     CaptureRequest, CompositionDestination, CompositionFrame, CompositionOutputFrame,
     CompositionOutputRequest, CompositionTargetView, RenderContext,
@@ -187,13 +188,7 @@ impl SurfaceCompositionDemand {
                 CompositionDemand::Settle
             }
             PendingSurfaceEventKind::WindowInteraction(_) => CompositionDemand::Ordinary,
-            PendingSurfaceEventKind::Created { .. } => {
-                self.mapped_surfaces.remove(&surface);
-                CompositionDemand::Settle
-            }
-            PendingSurfaceEventKind::DecorationChanged { .. }
-            | PendingSurfaceEventKind::ToplevelParentChanged { .. }
-            | PendingSurfaceEventKind::PopupConfigured(_) => CompositionDemand::Settle,
+            PendingSurfaceEventKind::Role(_) => CompositionDemand::Settle,
         }
     }
 }
@@ -599,49 +594,39 @@ impl AppShell {
                     },
                 );
             }
-            PendingSurfaceEventKind::Created { decoration } => {
-                let _created_span = tracing::trace_span!(
-                    target: crate::PROFILE_TARGET,
-                    "weld_surface_created_ingress"
-                )
-                .entered();
-                enqueue_surface_event(
+            PendingSurfaceEventKind::Role(role) => match role {
+                ClientSurfaceRole::Toplevel(toplevel) => {
+                    enqueue_surface_event(
+                        self.app.world_mut(),
+                        HostSurfaceEvent {
+                            surface,
+                            kind: HostSurfaceEventKind::Created {
+                                decoration: app_decoration(toplevel.decoration),
+                            },
+                        },
+                    );
+                    enqueue_surface_event(
+                        self.app.world_mut(),
+                        HostSurfaceEvent {
+                            surface,
+                            kind: HostSurfaceEventKind::ToplevelParentChanged {
+                                parent: toplevel.parent,
+                            },
+                        },
+                    );
+                }
+                ClientSurfaceRole::Popup(popup) => enqueue_surface_event(
                     self.app.world_mut(),
                     HostSurfaceEvent {
                         surface,
-                        kind: HostSurfaceEventKind::Created {
-                            decoration: app_decoration(decoration),
-                        },
+                        kind: HostSurfaceEventKind::PopupConfigured(ClientPopup {
+                            owner: popup.owner,
+                            position: bevy::math::Vec2::new(popup.position.x, popup.position.y),
+                            stack_index: popup.stack_index,
+                        }),
                     },
-                );
-            }
-            PendingSurfaceEventKind::DecorationChanged { decoration } => enqueue_surface_event(
-                self.app.world_mut(),
-                HostSurfaceEvent {
-                    surface,
-                    kind: HostSurfaceEventKind::DecorationChanged {
-                        decoration: app_decoration(decoration),
-                    },
-                },
-            ),
-            PendingSurfaceEventKind::ToplevelParentChanged { parent } => enqueue_surface_event(
-                self.app.world_mut(),
-                HostSurfaceEvent {
-                    surface,
-                    kind: HostSurfaceEventKind::ToplevelParentChanged { parent },
-                },
-            ),
-            PendingSurfaceEventKind::PopupConfigured(popup) => enqueue_surface_event(
-                self.app.world_mut(),
-                HostSurfaceEvent {
-                    surface,
-                    kind: HostSurfaceEventKind::PopupConfigured(ClientPopup {
-                        owner: popup.owner,
-                        position: bevy::math::Vec2::new(popup.position.x, popup.position.y),
-                        stack_index: popup.stack_index,
-                    }),
-                },
-            ),
+                ),
+            },
             PendingSurfaceEventKind::WindowInteraction(request) => enqueue_surface_event(
                 self.app.world_mut(),
                 HostSurfaceEvent {
@@ -1183,7 +1168,7 @@ mod tests {
 
     #[test]
     fn only_the_first_snapshot_of_a_mapping_requests_settling() {
-        let surface = SurfaceId::new(1);
+        let surface = SurfaceId::for_test(1);
         let mut demand = SurfaceCompositionDemand::default();
 
         assert_eq!(
@@ -1198,7 +1183,7 @@ mod tests {
 
     #[test]
     fn an_unmapped_surface_settles_again_when_it_is_remapped() {
-        let surface = SurfaceId::new(1);
+        let surface = SurfaceId::for_test(1);
         let mut demand = SurfaceCompositionDemand::default();
 
         assert_eq!(
@@ -1322,8 +1307,8 @@ mod tests {
                 }
                 Err(error) => panic!("headless two-output shell should initialize: {error}"),
             };
-        let first_surface = SurfaceId::new(1);
-        let second_surface = SurfaceId::new(2);
+        let first_surface = SurfaceId::for_test(1);
+        let second_surface = SurfaceId::for_test(2);
         install_diagnostic_surface(&mut shell, first_surface, [0, 0, 255, 255]);
         install_diagnostic_surface(&mut shell, second_surface, [0, 255, 0, 255]);
         let first_camera = shell.outputs[&first].camera;
@@ -1407,9 +1392,12 @@ mod tests {
     fn install_diagnostic_surface(shell: &mut AppShell, surface: SurfaceId, bgra: [u8; 4]) {
         shell.enqueue_surface_event(PendingSurfaceEvent {
             surface,
-            kind: PendingSurfaceEventKind::Created {
-                decoration: WindowDecoration::ClientSide,
-            },
+            kind: PendingSurfaceEventKind::Role(weld_client::ClientSurfaceRole::Toplevel(
+                weld_client::ToplevelState {
+                    parent: None,
+                    decoration: WindowDecoration::ClientSide,
+                },
+            )),
         });
         update_diagnostic_surface(shell, surface, bgra);
     }

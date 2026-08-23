@@ -2,6 +2,9 @@
 
 pub(crate) const PROFILE_TARGET: &str = "weld_profile";
 
+/// Stable source namespace of the built-in Smithay Wayland adapter.
+pub const WAYLAND_CLIENT_SOURCE: weld_client::ClientSourceId = weld_client::ClientSourceId::new(0);
+
 mod backend;
 pub mod cursor;
 pub mod dmabuf;

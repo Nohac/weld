@@ -27,8 +27,9 @@ use bevy::{
 };
 use weld_app::output::{OutputGeometry, OutputId, OutputPosition, WeldOutput};
 use weld_app::surface::{
-    ClientToplevel, ClientToplevelParent, MappedSurface, SurfaceAction, SurfaceActionQueue,
-    SurfaceCommitRevisions, SurfaceId, SurfaceSystems, ToplevelResizeEdge,
+    ClientProvenance, ClientSource, ClientSourceId, ClientToplevel, ClientToplevelParent,
+    MappedSurface, SurfaceAction, SurfaceActionQueue, SurfaceCommitRevisions, SurfaceId,
+    SurfaceSystems, ToplevelResizeEdge,
 };
 
 /// Stable process-independent identity for a managed window.
@@ -183,6 +184,7 @@ impl WindowClientBinding {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ResolvedWindowClient {
     entity: Entity,
+    source: ClientSource,
     toplevel: ClientToplevel,
     mapped: MappedSurface,
 }
@@ -194,6 +196,14 @@ impl ResolvedWindowClient {
 
     pub const fn surface(self) -> SurfaceId {
         self.toplevel.surface
+    }
+
+    pub const fn source(self) -> ClientSourceId {
+        self.source.id
+    }
+
+    pub const fn provenance(self) -> ClientProvenance {
+        self.source.provenance
     }
 
     pub const fn mapped(self) -> MappedSurface {
@@ -215,7 +225,15 @@ type WindowClientBindingQuery<'a> = (
 #[derive(SystemParam)]
 pub struct WindowClientResolver<'w, 's> {
     windows: Query<'w, 's, WindowClientBindingQuery<'static>, With<ManagedWindow>>,
-    clients: Query<'w, 's, (&'static ClientToplevel, Option<&'static MappedSurface>)>,
+    clients: Query<
+        'w,
+        's,
+        (
+            &'static ClientSource,
+            &'static ClientToplevel,
+            Option<&'static MappedSurface>,
+        ),
+    >,
 }
 
 impl WindowClientResolver<'_, '_> {
@@ -256,9 +274,10 @@ impl WindowClientResolver<'_, '_> {
 
     pub fn mapped_client(&self, window: Entity) -> Option<ResolvedWindowClient> {
         let entity = self.client_entity(window)?;
-        let (toplevel, mapped) = self.clients.get(entity).ok()?;
+        let (source, toplevel, mapped) = self.clients.get(entity).ok()?;
         Some(ResolvedWindowClient {
             entity,
+            source: *source,
             toplevel: *toplevel,
             mapped: *mapped?,
         })
@@ -741,9 +760,7 @@ fn publish_window_output_memberships(
         }
     }
 
-    published
-        .mapped_surfaces
-        .sort_unstable_by_key(|surface| surface.raw());
+    published.mapped_surfaces.sort_unstable();
     published.mapped_surfaces.dedup();
     for index in 0..published.mapped_surfaces.len() {
         let surface = published.mapped_surfaces[index];
@@ -767,9 +784,7 @@ fn publish_window_output_memberships(
             .filter(|(surface, membership)| active.get(surface) != Some(*membership))
             .map(|(surface, _)| *surface),
     );
-    published
-        .changed_surfaces
-        .sort_unstable_by_key(|surface| surface.raw());
+    published.changed_surfaces.sort_unstable();
     for index in 0..published.changed_surfaces.len() {
         let surface = published.changed_surfaces[index];
         let membership = &published.scratch[&surface];
@@ -978,7 +993,7 @@ fn admit_mapped_toplevels(
         tracing::trace_span!(target: PROFILE_TARGET, "weld_window_admit_mapped_toplevels")
             .entered();
     let mut unclaimed = surfaces.iter().collect::<Vec<_>>();
-    unclaimed.sort_unstable_by_key(|(_, toplevel, _)| toplevel.surface.raw());
+    unclaimed.sort_unstable_by_key(|(_, toplevel, _)| toplevel.surface);
     for (surface_entity, toplevel, mapped) in unclaimed {
         let managed = registry.allocate();
         let id = managed.id;
@@ -1269,6 +1284,10 @@ mod tests {
     fn mapped_toplevel(app: &mut App, surface: SurfaceId) -> Entity {
         app.world_mut()
             .spawn((
+                ClientSource {
+                    id: surface.source(),
+                    provenance: ClientProvenance::Local,
+                },
                 ClientToplevel { surface },
                 ClientDecorated,
                 MappedSurface {
@@ -1284,7 +1303,7 @@ mod tests {
     #[test]
     fn client_binding_rejects_ambiguous_and_cyclic_proxies() {
         let mut app = test_app();
-        let surface = SurfaceId::new(88);
+        let surface = SurfaceId::for_test(88);
         let client = mapped_toplevel(&mut app, surface);
         let source = app
             .world_mut()
@@ -1354,18 +1373,18 @@ mod tests {
     #[test]
     fn window_family_resolves_parent_descendants_and_rejects_cycles() {
         let mut app = test_app();
-        let root_client = mapped_toplevel(&mut app, SurfaceId::new(81));
-        let child_client = mapped_toplevel(&mut app, SurfaceId::new(82));
-        let grandchild_client = mapped_toplevel(&mut app, SurfaceId::new(83));
+        let root_client = mapped_toplevel(&mut app, SurfaceId::for_test(81));
+        let child_client = mapped_toplevel(&mut app, SurfaceId::for_test(82));
+        let grandchild_client = mapped_toplevel(&mut app, SurfaceId::for_test(83));
         app.world_mut()
             .entity_mut(child_client)
             .insert(ClientToplevelParent {
-                surface: SurfaceId::new(81),
+                surface: SurfaceId::for_test(81),
             });
         app.world_mut()
             .entity_mut(grandchild_client)
             .insert(ClientToplevelParent {
-                surface: SurfaceId::new(82),
+                surface: SurfaceId::for_test(82),
             });
         app.update();
         let root = app
@@ -1390,7 +1409,7 @@ mod tests {
             .expect("family resolver should be available")
             .family(child)
             .expect("child should resolve through its declared parent");
-        assert_eq!(family.root(), SurfaceId::new(81));
+        assert_eq!(family.root(), SurfaceId::for_test(81));
         let mut expected = vec![root, child, grandchild];
         expected.sort_unstable_by_key(|window| window.to_bits());
         assert_eq!(family.windows(), expected);
@@ -1398,7 +1417,7 @@ mod tests {
         app.world_mut()
             .entity_mut(root_client)
             .insert(ClientToplevelParent {
-                surface: SurfaceId::new(83),
+                surface: SurfaceId::for_test(83),
             });
         assert!(
             state
@@ -1412,11 +1431,11 @@ mod tests {
     #[test]
     fn unresolved_toplevel_parent_becomes_a_family_when_the_parent_appears() {
         let mut app = test_app();
-        let child_client = mapped_toplevel(&mut app, SurfaceId::new(85));
+        let child_client = mapped_toplevel(&mut app, SurfaceId::for_test(85));
         app.world_mut()
             .entity_mut(child_client)
             .insert(ClientToplevelParent {
-                surface: SurfaceId::new(84),
+                surface: SurfaceId::for_test(84),
             });
         app.update();
         let child = app
@@ -1433,7 +1452,7 @@ mod tests {
                 .is_none()
         );
 
-        let parent_client = mapped_toplevel(&mut app, SurfaceId::new(84));
+        let parent_client = mapped_toplevel(&mut app, SurfaceId::for_test(84));
         app.update();
         let parent = app
             .world()
@@ -1445,7 +1464,7 @@ mod tests {
             .expect("family resolver should remain available")
             .family(child)
             .expect("family should resolve after parent registration");
-        assert_eq!(family.root(), SurfaceId::new(84));
+        assert_eq!(family.root(), SurfaceId::for_test(84));
         let mut expected = vec![parent, child];
         expected.sort_unstable_by_key(|window| window.to_bits());
         assert_eq!(family.windows(), expected);
@@ -1453,7 +1472,7 @@ mod tests {
 
     #[test]
     fn resize_settles_on_a_new_commit_even_when_the_client_uses_another_size() {
-        let surface = SurfaceId::new(71);
+        let surface = SurfaceId::for_test(71);
         let mut resize = ClientResizeState::default();
         resize.request(surface, UVec2::new(503, 409), 12);
 
@@ -1465,7 +1484,7 @@ mod tests {
 
     #[test]
     fn resize_remains_pending_until_the_surface_revision_advances() {
-        let surface = SurfaceId::new(72);
+        let surface = SurfaceId::for_test(72);
         let mut resize = ClientResizeState::default();
         resize.request(surface, UVec2::new(503, 409), 12);
 
@@ -1477,7 +1496,7 @@ mod tests {
     #[test]
     fn admission_creates_a_distinct_durable_window_and_occupancy() {
         let mut app = test_app();
-        let surface = mapped_toplevel(&mut app, SurfaceId::new(7));
+        let surface = mapped_toplevel(&mut app, SurfaceId::for_test(7));
 
         app.update();
 
@@ -1505,7 +1524,7 @@ mod tests {
     #[test]
     fn mapped_toplevel_without_an_output_does_not_publish_an_empty_assignment() {
         let mut app = test_app();
-        mapped_toplevel(&mut app, SurfaceId::new(73));
+        mapped_toplevel(&mut app, SurfaceId::for_test(73));
 
         app.update();
 
@@ -1569,7 +1588,7 @@ mod tests {
     #[test]
     fn retained_window_survives_occupant_destruction() {
         let mut app = test_app();
-        let surface = mapped_toplevel(&mut app, SurfaceId::new(8));
+        let surface = mapped_toplevel(&mut app, SurfaceId::for_test(8));
         app.update();
         let window = app
             .world()
@@ -1590,7 +1609,7 @@ mod tests {
     #[test]
     fn presentation_insets_preserve_client_size_until_manager_resizes() {
         let mut app = test_app();
-        let surface = mapped_toplevel(&mut app, SurfaceId::new(9));
+        let surface = mapped_toplevel(&mut app, SurfaceId::for_test(9));
         app.update();
         let window = app
             .world()
@@ -1662,7 +1681,7 @@ mod tests {
 
         assert!(
             take_surface_actions(app.world_mut()).contains(&SurfaceAction::Resize {
-                surface: SurfaceId::new(9),
+                surface: SurfaceId::for_test(9),
                 logical_size: UVec2::new(330, 240),
             })
         );
@@ -1706,7 +1725,7 @@ mod tests {
     #[test]
     fn same_window_begin_does_not_replace_the_active_interaction() {
         let mut app = test_app();
-        let surface = mapped_toplevel(&mut app, SurfaceId::new(21));
+        let surface = mapped_toplevel(&mut app, SurfaceId::for_test(21));
         app.update();
         let window = app
             .world()
