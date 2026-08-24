@@ -4,7 +4,7 @@ use smithay::{
     backend::input::{Axis, AxisSource, ButtonState as SmithayButtonState, KeyState, Keycode},
     input::{
         Seat, SeatHandler,
-        dnd::DndGrabHandler,
+        dnd::{DnDGrab, DndGrabHandler, GrabType, Source},
         keyboard::{FilterResult, KeyboardSource},
         pointer::{
             AxisFrame, ButtonEvent, CursorImageStatus, Focus, GestureHoldBeginEvent,
@@ -857,7 +857,37 @@ impl DataDeviceHandler for ServerState {
 }
 
 impl DndGrabHandler for ServerState {}
-impl WaylandDndGrabHandler for ServerState {}
+impl WaylandDndGrabHandler for ServerState {
+    fn dnd_requested<S: Source>(
+        &mut self,
+        source: S,
+        _icon: Option<WlSurface>,
+        seat: Seat<Self>,
+        serial: smithay::utils::Serial,
+        grab_type: GrabType,
+    ) {
+        if grab_type == GrabType::Touch {
+            source.cancel();
+            return;
+        }
+        let Some(pointer) = seat.get_pointer() else {
+            warn!("cancelled pointer drag because the seat has no pointer");
+            source.cancel();
+            return;
+        };
+        let Some(start_data) = pointer.grab_start_data() else {
+            warn!("cancelled pointer drag without an active implicit grab");
+            source.cancel();
+            return;
+        };
+        pointer.set_grab(
+            self,
+            DnDGrab::new_pointer(&self.display_handle, start_data, source, seat),
+            serial,
+            Focus::Keep,
+        );
+    }
+}
 
 fn compositor_point(position: InputPosition) -> smithay::utils::Point<f64, Logical> {
     (position.x, position.y).into()

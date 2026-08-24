@@ -135,10 +135,8 @@ impl LibinputAdapter {
                             source,
                             event.amount(Axis::Horizontal),
                             event.amount(Axis::Vertical),
-                            event
-                                .amount_v120(Axis::Horizontal)
-                                .map(|value| value as i32),
-                            event.amount_v120(Axis::Vertical).map(|value| value as i32),
+                            event.amount_v120(Axis::Horizontal),
+                            event.amount_v120(Axis::Vertical),
                         ),
                     },
                     event.time_msec(),
@@ -278,8 +276,8 @@ impl LibinputAdapter {
         source: RawScrollSource,
         horizontal: Option<f64>,
         vertical: Option<f64>,
-        horizontal_v120: Option<i32>,
-        vertical_v120: Option<i32>,
+        horizontal_v120: Option<f64>,
+        vertical_v120: Option<f64>,
     ) -> RawScrollFrame {
         let was_active = self.finger_axes.horizontal || self.finger_axes.vertical;
         let horizontal_stop = source == RawScrollSource::Finger && horizontal == Some(0.0);
@@ -309,14 +307,25 @@ impl LibinputAdapter {
         RawScrollFrame {
             source,
             phase,
-            horizontal: horizontal.unwrap_or_default(),
-            vertical: vertical.unwrap_or_default(),
-            horizontal_v120,
-            vertical_v120,
+            horizontal: axis_amount(source, horizontal, horizontal_v120),
+            vertical: axis_amount(source, vertical, vertical_v120),
+            horizontal_v120: horizontal_v120.map(|value| value as i32),
+            vertical_v120: vertical_v120.map(|value| value as i32),
             horizontal_stop,
             vertical_stop,
         }
     }
+}
+
+fn axis_amount(source: RawScrollSource, amount: Option<f64>, v120: Option<f64>) -> f64 {
+    let amount = amount.unwrap_or_default();
+    if source == RawScrollSource::Wheel
+        && amount == 0.0
+        && let Some(v120) = v120.filter(|value| *value != 0.0)
+    {
+        return v120 * 15.0 / 120.0;
+    }
+    amount
 }
 
 #[derive(Default)]
@@ -539,6 +548,22 @@ mod tests {
         assert!(!vertical_stop.horizontal_stop);
         assert!(vertical_stop.vertical_stop);
         assert_eq!(vertical_stop.phase, RawScrollPhase::Ended);
+    }
+
+    #[test]
+    fn wheel_v120_always_has_an_ordinary_axis_distance() {
+        let frame = adapter(1920, 1080).scroll_frame(
+            RawScrollSource::Wheel,
+            Some(0.0),
+            Some(0.0),
+            Some(120.0),
+            Some(-240.0),
+        );
+
+        assert_eq!(frame.horizontal, 15.0);
+        assert_eq!(frame.vertical, -30.0);
+        assert_eq!(frame.horizontal_v120, Some(120));
+        assert_eq!(frame.vertical_v120, Some(-240));
     }
 
     #[test]
