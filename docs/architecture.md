@@ -31,6 +31,9 @@ Weld is a workspace of reusable layers and one standard distribution:
   movement, and interactive-resize policy without owning UI entities.
 - `weld-hoist-core` owns transport-independent hoist identities and the
   Bevy-free loopback client adapter.
+- `weld-hoist-local` owns the Linux-local Postcard/Unix-seqpacket binding,
+  SCM_RIGHTS DMA-BUF transfer, and source/destination `weld-client` adapters.
+  It depends on core's native import capability but has no Bevy dependency.
 - `weld-hoist-ui` owns source placeholders, reclaim and closed-tombstone UI.
 - `weld-hoist` owns Bevy window-family admission and reclaim orchestration. It
   does not own client buffers, ordinary receiver presentation, a network
@@ -208,9 +211,9 @@ neutral `ClientSurfaceCommit` whose changed layer is retained, removed, or a
 replacement `ClientBufferLease`. A lease contains adapter-private access and
 completes only after its final consumer drops it. `AppShell` resolves every
 lease before ECS ingress and asks the core-owned DMA-BUF manager to resolve a
-Wayland external image into a Bevy handle. Application plugins receive only
-retained content,
-pixels, or a Bevy `Handle<Image>` with project-owned sampling metadata; they
+Wayland or transported external DMA-BUF image into a Bevy handle. Application
+plugins receive only retained content, pixels, or a Bevy `Handle<Image>` with
+project-owned sampling metadata; they
 never handle Smithay protocol objects, file descriptors, Vulkan images, or
 wgpu resources. Adjacent application snapshots coalesce while carrying the
 newest unobserved content.
@@ -322,13 +325,16 @@ Wayland/Vulkan compositor convention for an initialized external image.
 Running this path with Vulkan validation layers is a release gate once those
 layers are available in the development environment.
 
-Every `PendingDmabufFrame` must either be staged into `DmabufManager` or passed
-to `release_unrendered`; it intentionally carries no protocol or channel type
-above core. It does not yet have a `Drop` fallback, so a future hardening pass
-may replace its opaque identity with an internal RAII completion token without
-changing the plugin-facing boundary. Violating this invariant also retains an
-explicit release point and its timeline import device, not only the legacy
-buffer release, so that hardening has value beyond client responsiveness.
+Every `PendingWaylandDmabufUse` must either become a lease through
+`DmabufContext::lease_dmabuf` or pass through `release_unrendered`. The
+`DmabufAccess` moved into the resulting lease contains no Wayland release
+identity. `DmabufManager` instead keys GPU consumption by the lease's neutral
+`ClientBufferUseId`, allowing local Wayland and transported leases to share the
+same renderer-completion path. The pending Wayland use does not yet have a
+`Drop` fallback, so a future core-internal hardening pass may replace its
+release duty with an RAII completion token. Violating this invariant retains
+an explicit release point and its timeline import device, not only the legacy
+buffer release.
 
 Wayland ARGB channels are premultiplied in their encoded representation while
 Bevy UI blends straight alpha. The surface material loads source texels from
@@ -462,13 +468,41 @@ uses normal CSD or SSD, focus, scaling, output membership, resize, CSD
 interactions, and popup presentation. SSD's red hoist styling follows generic
 Relocated provenance, not a hoist-specific window flag.
 
-Explicit reclaim hides and configures the relocated receiver to the preserved
+Loopback reclaim hides and configures the relocated receiver to the preserved
 slot's client size, waits for settlement or a bounded recovery deadline, then
 emits an ordered adapter `Unmap` command. The original client is reattached
 only after the relocated surface's Destroyed event has removed the receiver.
-Remote close leaves a preserved slot as a dismissible closed tombstone. This
-loopback adapter is not a media or wire contract: cross-process transport,
-encoding, authorization, and remote discovery remain future work.
+Remote close leaves a preserved slot as a dismissible closed tombstone.
+The loopback adapter remains useful as an in-process contract test. A separate
+`weld-hoist-local` adapter now carries the same client lifecycle between two
+sibling Weld processes. It does not turn the loopback representation into a
+wire contract or add a media codec, network transport, pairing, or discovery.
+
+The local binding uses Postcard records over an authenticated same-UID Unix
+`SOCK_SEQPACKET` connection. `SCM_RIGHTS` attaches DMA-BUF plane descriptors to
+the atomic commit that names them. The first use binds one allocation; later
+uses refer to its stable buffer identity without duplicating descriptors or
+reimporting the Vulkan image. Native `wl_buffer` destruction and final session
+unmap send explicit retirement, while committed-use leases independently
+return only after destination GPU consumption. Copied SHM buffers are rejected
+rather than crossing the process boundary through a hidden pixel-copy path.
+
+Destination requests and already-addressed input re-enter `ClientRuntime`
+immediately after transport ingress, outside Bevy's paced frame gate. Foreign
+output IDs never reach the source. Instead, destination output membership
+publishes a fractional `scale_120` preference that temporarily overrides the
+source surface tree's preferred scale while leaving its real output
+enter/leave state unchanged. Reclaim configures the authoritative source
+surface to its preserved placeholder size and waits for a newer source commit.
+Peer loss synthesizes exact releases for remotely held keys, buttons, gestures,
+and finger scrolling before restoring source presentation.
+
+The first supported topology is two sibling compositor processes. A source
+blocks for one startup peer and a destination connects before either runtime
+starts; dynamic admission and reconnect are not implemented. Nesting the
+destination as a client of the source is deliberately unsupported because it
+would create an input/focus feedback path. See [Local hoisting](local-hoisting.md)
+for commands, validation, and current constraints.
 
 Core translates Smithay's `xdg_toplevel.set_parent` state into stable
 `SurfaceId` parent metadata; no Wayland object crosses into the application

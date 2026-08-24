@@ -41,14 +41,17 @@ This implemented relation is deliberately narrower than application or
 process inference. Unparented windows from the same executable or app ID do
 not automatically join. A newly mapped related dialog can be presented locally
 for one frame before window admission and follow-family policy observe it; that
-prototype transition remains to be tightened. No remote transport, complete
-transient policy, or non-xdg family inference is implemented.
+prototype transition remains to be tightened. A same-machine sibling-process
+DMA-BUF transport now exists as an architectural validation binding, but no
+network transport, complete transient policy, or non-xdg family inference is
+implemented.
 
 ## Hoisting layers and crate boundaries — Direction
 
 The local proof now separates its neutral relay, Weld application integration,
-and placeholder scene. The present crates establish dependency direction, but
-they do not yet define the remote wire or media protocol:
+placeholder scene, and Linux-local process transport. The present crates
+establish dependency direction, but the local Postcard records are not yet the
+remote network or media protocol:
 
 - `weld-hoist-core` owns the runtime-independent hoist identities and current
   same-process loopback adapter. It must remain free of Bevy, Smithay, wgpu,
@@ -64,6 +67,11 @@ they do not yet define the remote wire or media protocol:
   user-facing scenes by attaching children to managed windows through the
   public hoist state and actions. SSD must not own or special-case those
   controls.
+- `weld-hoist-local` is the current same-machine validation binding. It uses
+  Unix sequenced packets and SCM_RIGHTS to relay native DMA-BUF allocations
+  between sibling Weld processes without a CPU pixel copy. It is deliberately
+  separate from `weld-hoist-core` and does not establish the future Iroh or
+  encoded-media framing.
 
 Transport and codec implementations remain replaceable adapters around
 `weld-hoist-core`; concrete crates should be introduced only when their
@@ -108,7 +116,10 @@ configure state, and lifecycle transitions. A destination may either mirror
 the remote workspace structure or meld remote windows into local workspaces;
 that placement policy is not yet selected.
 
-No remote transport, encoder, or decoder is implemented yet.
+No network transport, encoder, or decoder is implemented yet. The implemented
+local sibling-process binding proves the adapter, buffer-lifetime, input,
+configure, scale, reclaim, and failure-recovery boundaries without claiming to
+solve remote media delivery.
 
 ## Endpoint policy projection — Direction
 
