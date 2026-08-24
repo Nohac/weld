@@ -11,6 +11,8 @@ mod geometry;
 mod id;
 mod input;
 mod surface;
+#[cfg(feature = "serde")]
+mod wire;
 
 pub use adapter::{
     ClientAdapter, ClientAdapterCommandEnvelope, ClientAdapterRegistration,
@@ -40,4 +42,9 @@ pub use surface::{
     ClientSurfaceRole, PopupState, SurfaceBufferChange, SurfaceBufferUpdate, SurfaceContentView,
     SurfaceInputPlacement, SurfaceInputRect, SurfaceLayerPlacement, SurfaceWindowGeometry,
     ToplevelInteractionRequestKind, ToplevelState, WindowDecoration, WindowResizeEdge,
+};
+#[cfg(feature = "serde")]
+pub use wire::{
+    WireClientInputEvent, WireClientSurfaceCommit, WireClientSurfaceEvent,
+    WireClientSurfaceEventKind, WireSurfaceBufferChange, WireSurfaceBufferUpdate,
 };

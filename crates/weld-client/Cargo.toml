@@ -5,6 +5,8 @@ edition.workspace = true
 publish.workspace = true
 
 [features]
+serde = ["dep:serde"]
 test-support = []
 
 [dependencies]
+serde = { workspace = true, optional = true }

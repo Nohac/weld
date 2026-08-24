@@ -3,6 +3,7 @@
 macro_rules! local_id {
     ($(#[$meta:meta])* $name:ident) => {
         $(#[$meta])*
+        #[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
         #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
         pub struct $name(u64);
 
@@ -24,6 +25,7 @@ local_id!(
 );
 
 /// Describes where an adapter's clients originate without granting policy.
+#[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
 pub enum ClientProvenance {
     #[default]
@@ -32,6 +34,7 @@ pub enum ClientProvenance {
 }
 
 /// Immutable description published when one client adapter is registered.
+#[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ClientSourceDescriptor {
     pub id: ClientSourceId,
@@ -52,6 +55,7 @@ impl ClientSourceDescriptor {
 }
 
 /// Identity for one logical client within an adapter namespace.
+#[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct ClientId {
     source: ClientSourceId,
@@ -73,6 +77,7 @@ impl ClientId {
 }
 
 /// Identity for one toplevel or popup surface within a logical client.
+#[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct ClientSurfaceId {
     client: ClientId,

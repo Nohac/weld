@@ -10,6 +10,7 @@ use weld_client::{
     PassthroughClientImporter, PopupState, SurfaceBufferChange, ToplevelState,
 };
 
+#[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct HoistSessionId(u64);
 
@@ -23,6 +24,7 @@ impl HoistSessionId {
     }
 }
 
+#[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct HoistFamilyId(u64);
 

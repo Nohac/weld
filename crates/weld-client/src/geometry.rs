@@ -1,6 +1,7 @@
 //! Dependency-free logical geometry shared by client adapters.
 
 /// A point in compositor-logical coordinates.
+#[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct LogicalPoint {
     pub x: f32,
@@ -22,6 +23,7 @@ impl From<(f32, f32)> for LogicalPoint {
 }
 
 /// A size in compositor-logical coordinates.
+#[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct LogicalSize {
     pub width: f32,
@@ -35,6 +37,7 @@ impl LogicalSize {
 }
 
 /// An unsigned physical or logical extent.
+#[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct Extent {
     pub width: u32,

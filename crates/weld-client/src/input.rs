@@ -3,6 +3,7 @@
 use crate::{ClientSurfaceId, SurfaceLayerId};
 
 /// Press or release state shared by all input adapters.
+#[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ButtonState {
     Pressed,
@@ -10,6 +11,7 @@ pub enum ButtonState {
 }
 
 /// A position in Weld compositor or client-local coordinates.
+#[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct InputPosition {
     pub x: f64,
@@ -22,6 +24,7 @@ impl InputPosition {
     }
 }
 
+#[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct InputDelta {
     pub x: f64,
@@ -34,12 +37,15 @@ impl InputDelta {
     }
 }
 
+#[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct LinuxKeycode(pub u32);
 
+#[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct LinuxButtonCode(pub u32);
 
+#[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RawScrollSource {
     Wheel,
@@ -47,6 +53,7 @@ pub enum RawScrollSource {
     Continuous,
 }
 
+#[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RawScrollPhase {
     Started,
@@ -55,6 +62,7 @@ pub enum RawScrollPhase {
     Cancelled,
 }
 
+#[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct RawScrollFrame {
     pub source: RawScrollSource,
@@ -82,6 +90,7 @@ impl RawScrollFrame {
     }
 }
 
+#[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum PointerGesture {
     Swipe(TouchpadSwipe),
@@ -117,6 +126,7 @@ impl PointerGesture {
     }
 }
 
+#[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PointerGestureKind {
     Swipe,
@@ -134,6 +144,7 @@ impl PointerGestureKind {
     }
 }
 
+#[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum TouchpadSwipe {
     Begin { fingers: u32 },
@@ -141,6 +152,7 @@ pub enum TouchpadSwipe {
     End { cancelled: bool },
 }
 
+#[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum TouchpadPinch {
     Begin {
@@ -156,6 +168,7 @@ pub enum TouchpadPinch {
     },
 }
 
+#[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum TouchpadHold {
     Begin { fingers: u32 },
@@ -163,6 +176,7 @@ pub enum TouchpadHold {
 }
 
 /// Affine compositor-logical to client-layer-logical mapping.
+#[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct InputTransform {
     pub xx: f64,
@@ -192,6 +206,7 @@ impl InputTransform {
 }
 
 /// Frame-published pointer route retained by [`crate::ClientRuntime`].
+#[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ClientPointerRoute {
     pub surface: ClientSurfaceId,
@@ -200,6 +215,7 @@ pub struct ClientPointerRoute {
 }
 
 /// Keyboard route selected independently from pointer hover.
+#[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ClientKeyboardRoute {
     pub surface: ClientSurfaceId,
@@ -213,6 +229,7 @@ pub struct ClientPointerRouteUpdate {
     pub time: u32,
 }
 
+#[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ClientInputTarget {
     Pointer {
@@ -246,6 +263,7 @@ pub struct ClientInputEvent {
     pub time: u32,
 }
 
+#[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
 #[derive(Clone, Debug, PartialEq)]
 pub enum InputEventKind {
     PointerMotion {

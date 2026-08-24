@@ -5,6 +5,7 @@ use std::{any::Any, fmt, rc::Rc};
 use crate::{ClientSourceId, Extent};
 
 /// Stable identity for one reusable allocation owned by a client adapter.
+#[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct ClientBufferId {
     source: ClientSourceId,
@@ -26,6 +27,7 @@ impl ClientBufferId {
 }
 
 /// Stable identity for one committed use and its independent release duty.
+#[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct ClientBufferUseId {
     source: ClientSourceId,
@@ -46,6 +48,7 @@ impl ClientBufferUseId {
     }
 }
 
+#[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ClientBufferLeaseSourceMismatch {
     pub buffer: ClientBufferId,
@@ -66,6 +69,7 @@ impl fmt::Display for ClientBufferLeaseSourceMismatch {
 impl std::error::Error for ClientBufferLeaseSourceMismatch {}
 
 /// Adapter-independent metadata needed before resolving native buffer access.
+#[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ClientBufferMetadata {
     pub extent: Extent,

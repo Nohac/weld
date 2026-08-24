@@ -4,5 +4,9 @@ version.workspace = true
 edition.workspace = true
 publish.workspace = true
 
+[features]
+serde = ["dep:serde", "weld-client/serde"]
+
 [dependencies]
+serde = { workspace = true, optional = true }
 weld-client = { path = "../weld-client" }

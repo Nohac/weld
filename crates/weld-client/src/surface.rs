@@ -8,6 +8,7 @@ use crate::{
 };
 
 /// Monotonic commit observation used by configure-settlement policy.
+#[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct ClientCommitRevision(u64);
 
@@ -22,6 +23,7 @@ impl ClientCommitRevision {
 }
 
 /// Which side owns a toplevel's visible frame and titlebar.
+#[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum WindowDecoration {
     #[default]
@@ -30,6 +32,7 @@ pub enum WindowDecoration {
 }
 
 /// Current role state for an independently managed toplevel.
+#[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ToplevelState {
     pub parent: Option<ClientSurfaceId>,
@@ -37,6 +40,7 @@ pub struct ToplevelState {
 }
 
 /// Current protocol-owned popup placement relative to its owning toplevel.
+#[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PopupState {
     pub owner: ClientSurfaceId,
@@ -45,6 +49,7 @@ pub struct PopupState {
 }
 
 /// Complete current role of one independently identified client surface.
+#[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum ClientSurfaceRole {
     Toplevel(ToplevelState),
@@ -52,6 +57,7 @@ pub enum ClientSurfaceRole {
 }
 
 /// The displayed part of a client buffer and its logical extent.
+#[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SurfaceContentView {
     pub source_x: f32,
@@ -62,6 +68,7 @@ pub struct SurfaceContentView {
     pub logical_height: f32,
 }
 
+#[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SurfaceLayerPlacement {
     pub layer: SurfaceLayerId,
@@ -69,18 +76,21 @@ pub struct SurfaceLayerPlacement {
     pub view: SurfaceContentView,
 }
 
+#[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SurfaceWindowGeometry {
     pub origin: LogicalPoint,
     pub view: SurfaceContentView,
 }
 
+#[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SurfaceInputRect {
     pub position: LogicalPoint,
     pub size: LogicalSize,
 }
 
+#[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
 #[derive(Clone, Debug, PartialEq)]
 pub struct SurfaceInputPlacement {
     pub layer: SurfaceLayerId,
@@ -154,6 +164,7 @@ impl ClientSurfaceCommit {
 }
 
 /// Client-to-compositor request for an interactive move or resize.
+#[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ToplevelInteractionRequestKind {
     Move,
@@ -161,6 +172,7 @@ pub enum ToplevelInteractionRequestKind {
     End,
 }
 
+#[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum WindowResizeEdge {
     Top,
@@ -236,12 +248,14 @@ impl ClientEventQueue {
 }
 
 /// One surface-addressed compositor-to-client policy request.
+#[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ClientSurfaceRequest {
     pub surface: ClientSurfaceId,
     pub kind: ClientSurfaceRequestKind,
 }
 
+#[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ClientSurfaceRequestKind {
     Close,
@@ -255,12 +269,14 @@ pub enum ClientSurfaceRequestKind {
 }
 
 /// Source-addressed keyboard focus request; `None` clears that source's focus.
+#[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ClientFocusRequest {
     pub source: ClientSourceId,
     pub surface: Option<ClientSurfaceId>,
 }
 
+#[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ClientRequest {
     Surface(ClientSurfaceRequest),
