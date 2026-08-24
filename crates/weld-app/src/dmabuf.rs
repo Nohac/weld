@@ -16,10 +16,7 @@ use bevy::{
 };
 use tracing::warn;
 use weld_core::{
-    dmabuf::{
-        DmabufContext, DmabufManager, DmabufReleaseId, ImportId, ImportedImageRegistry,
-        PromotionImage,
-    },
+    dmabuf::{DmabufContext, DmabufManager, ImportId, ImportedImageRegistry, PromotionImage},
     surface::{SurfaceId, SurfaceLayerId},
 };
 
@@ -145,8 +142,8 @@ impl DmabufImporter {
         self.manager.remove_layer(surface, layer);
     }
 
-    pub(crate) fn complete_gpu_uses(&mut self, releases: &[DmabufReleaseId]) {
-        self.manager.complete_gpu_uses(releases);
+    pub(crate) fn complete_gpu_uses(&mut self, uses: &[weld_client::ClientBufferUseId]) {
+        self.manager.complete_gpu_uses(uses);
     }
 }
 

@@ -29,7 +29,7 @@ use crate::surface::{
     SurfaceInputRect, SurfaceLayerId, SurfaceLayerPlacement, SurfaceWindowGeometry,
 };
 
-use crate::dmabuf::PendingDmabufFrame;
+use crate::dmabuf::PendingWaylandDmabufUse;
 
 use super::dmabuf::{DmabufReleaseStore, signal_release_point};
 use super::shm::{
@@ -40,7 +40,7 @@ use super::shm::{
 pub enum PendingSurfaceBufferContent {
     Retained,
     ShmPixels(Vec<u8>),
-    ImportedDmabuf(PendingDmabufFrame),
+    ImportedDmabuf(PendingWaylandDmabufUse),
 }
 
 #[derive(Debug)]
@@ -665,7 +665,7 @@ fn import_buffer(
             Ok(ImportedBuffer {
                 metadata,
                 view,
-                content: PendingSurfaceBufferContent::ImportedDmabuf(PendingDmabufFrame::new(
+                content: PendingSurfaceBufferContent::ImportedDmabuf(PendingWaylandDmabufUse::new(
                     dmabuf.clone(),
                     release,
                 )),

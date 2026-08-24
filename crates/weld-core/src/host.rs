@@ -5,7 +5,7 @@ use std::{ffi::OsString, path::PathBuf};
 use anyhow::{Context, Result};
 use calloop::signals::{Signal, Signals};
 use tracing::warn;
-use weld_client::{ClientAdapterRegistration, ClientRuntimeAdapter};
+use weld_client::{ClientAdapterRegistration, ClientBufferUseId, ClientRuntimeAdapter};
 
 use crate::{
     dmabuf::DmabufContext,
@@ -259,7 +259,7 @@ pub trait CompositionHost {
     fn take_virtual_terminal_switch_request(&mut self) -> Option<i32>;
     fn take_client_requests(&mut self) -> Vec<ClientRequest>;
     fn take_adapter_commands(&mut self) -> Vec<weld_client::ClientAdapterCommandEnvelope>;
-    fn complete_dmabuf_uses(&mut self, releases: &[crate::dmabuf::DmabufReleaseId]);
+    fn complete_dmabuf_uses(&mut self, uses: &[ClientBufferUseId]);
     fn has_surface_frame(&self) -> bool;
     fn take_capture_request(&mut self) -> Option<CaptureRequest>;
     fn complete_capture(&mut self, request_id: u64, result: Result<(), String>);

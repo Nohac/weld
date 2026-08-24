@@ -17,7 +17,7 @@ use weld_client::{
 
 use crate::{
     WAYLAND_CLIENT_SOURCE,
-    dmabuf::{DmabufContext, WaylandBufferAccess, WaylandShmBuffer},
+    dmabuf::{DirectClientBufferAccess, DmabufContext, WaylandShmBuffer},
 };
 
 use super::{
@@ -152,7 +152,7 @@ impl WaylandClientAdapter {
                             ClientBufferId::new(WAYLAND_CLIENT_SOURCE, local),
                             ClientBufferUseId::new(WAYLAND_CLIENT_SOURCE, local),
                             metadata,
-                            Rc::new(WaylandBufferAccess::Shm(WaylandShmBuffer {
+                            Rc::new(DirectClientBufferAccess::Shm(WaylandShmBuffer {
                                 bgra_pixels,
                             })),
                             |_| {},

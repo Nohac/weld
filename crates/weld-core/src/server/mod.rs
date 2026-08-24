@@ -61,7 +61,9 @@ use smithay::{
     },
 };
 use tracing::{debug, warn};
-use weld_client::{ClientId, ClientRequest, ClientSurfaceRequestKind, ClientSurfaceRole};
+use weld_client::{
+    ClientBufferUseId, ClientId, ClientRequest, ClientSurfaceRequestKind, ClientSurfaceRole,
+};
 
 use crate::{
     OutputId,
@@ -92,7 +94,7 @@ pub struct ServerState {
     shm_state: ShmState,
     dmabuf_protocol: DmabufProtocol,
     dmabuf_releases: DmabufReleaseStore,
-    completed_dmabuf_uses: Vec<DmabufReleaseId>,
+    completed_dmabuf_uses: Vec<ClientBufferUseId>,
     dmabuf_sources: DmabufSourceCache,
     _viewporter_state: ViewporterState,
     _fractional_scale_manager_state: FractionalScaleManagerState,
@@ -270,8 +272,8 @@ impl ServerState {
             .insert_source(dmabuf_release_source, move |event, _, state| {
                 if let ChannelEvent::Msg(event) = event {
                     match event {
-                        DmabufEvent::GpuUseCompleted(release) => {
-                            server(state).completed_dmabuf_uses.push(release);
+                        DmabufEvent::GpuUseCompleted(use_id) => {
+                            server(state).completed_dmabuf_uses.push(use_id);
                         }
                         DmabufEvent::LeaseCompleted(release) => {
                             server(state).complete_dmabuf_release(release);
@@ -424,7 +426,7 @@ impl ServerState {
         self.dmabuf_releases.complete(release);
     }
 
-    pub(crate) fn take_completed_dmabuf_uses(&mut self) -> Vec<DmabufReleaseId> {
+    pub(crate) fn take_completed_dmabuf_uses(&mut self) -> Vec<ClientBufferUseId> {
         std::mem::take(&mut self.completed_dmabuf_uses)
     }
 

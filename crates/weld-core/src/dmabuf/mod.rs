@@ -11,12 +11,13 @@ pub use manager::{
 pub(crate) use source::{DmabufSourceCache, ImportedDmabufSource};
 
 use smithay::backend::allocator::dmabuf::Dmabuf;
+use weld_client::ClientBufferUseId;
 
-/// Smithay-owned access payload resolved by Weld's built-in application importer.
+/// Native access payload resolved by Weld's built-in application importer.
 #[derive(Debug)]
-pub enum WaylandBufferAccess {
+pub enum DirectClientBufferAccess {
     Shm(WaylandShmBuffer),
-    Dmabuf(PendingDmabufFrame),
+    Dmabuf(DmabufAccess),
 }
 
 /// One already-copied SHM buffer retained until application import.
@@ -61,19 +62,34 @@ impl DmabufReleaseId {
 
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum DmabufEvent {
-    GpuUseCompleted(DmabufReleaseId),
+    GpuUseCompleted(ClientBufferUseId),
     LeaseCompleted(DmabufReleaseId),
 }
 
-/// A validated client DMA-BUF crossing from Smithay into the shell renderer.
+/// A validated DMA-BUF crossing into the shell renderer.
 #[derive(Debug)]
-pub struct PendingDmabufFrame {
+pub struct DmabufAccess {
     dmabuf: Dmabuf,
+}
+
+impl DmabufAccess {
+    pub(crate) fn new(dmabuf: Dmabuf) -> Self {
+        Self { dmabuf }
+    }
+}
+
+/// One Wayland DMA-BUF use awaiting neutral lease construction.
+#[derive(Debug)]
+pub struct PendingWaylandDmabufUse {
+    access: DmabufAccess,
     release: DmabufReleaseId,
 }
 
-impl PendingDmabufFrame {
+impl PendingWaylandDmabufUse {
     pub(crate) fn new(dmabuf: Dmabuf, release: DmabufReleaseId) -> Self {
-        Self { dmabuf, release }
+        Self {
+            access: DmabufAccess::new(dmabuf),
+            release,
+        }
     }
 }

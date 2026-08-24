@@ -71,7 +71,7 @@ use weld_core::runtime::HostCommand;
 use weld_core::surface::Extent;
 use weld_core::{
     CompositionDemand, CompositionHost, OutputConfiguration, OutputHead,
-    dmabuf::{DmabufReleaseId, WaylandBufferAccess},
+    dmabuf::DirectClientBufferAccess,
 };
 
 #[cfg(test)]
@@ -111,7 +111,7 @@ struct CompositionTargetContract {
 }
 
 enum ClientBufferAccessResolution {
-    Wayland(Rc<WaylandBufferAccess>),
+    Direct(Rc<DirectClientBufferAccess>),
     Unregistered,
     SourceMismatch,
     Unsupported,
@@ -129,8 +129,8 @@ fn resolve_client_buffer_access(
         return ClientBufferAccessResolution::SourceMismatch;
     }
     lease
-        .access_rc::<WaylandBufferAccess>()
-        .map(ClientBufferAccessResolution::Wayland)
+        .access_rc::<DirectClientBufferAccess>()
+        .map(ClientBufferAccessResolution::Direct)
         .unwrap_or(ClientBufferAccessResolution::Unsupported)
 }
 
@@ -703,25 +703,25 @@ impl AppShell {
                             surface,
                             &lease,
                         ) {
-                            ClientBufferAccessResolution::Wayland(access)
-                                if matches!(access.as_ref(), WaylandBufferAccess::Shm(_)) =>
+                            ClientBufferAccessResolution::Direct(access)
+                                if matches!(access.as_ref(), DirectClientBufferAccess::Shm(_)) =>
                             {
                                 if let Some(importer) = &mut self.dmabuf_importer {
                                     importer.remove_layer(surface, buffer.layer);
                                 }
                                 drop(lease);
                                 let pixels = match std::rc::Rc::try_unwrap(access) {
-                                    Ok(WaylandBufferAccess::Shm(buffer)) => buffer.bgra_pixels,
-                                    Ok(WaylandBufferAccess::Dmabuf(_)) => return None,
+                                    Ok(DirectClientBufferAccess::Shm(buffer)) => buffer.bgra_pixels,
+                                    Ok(DirectClientBufferAccess::Dmabuf(_)) => return None,
                                     Err(access) => match access.as_ref() {
-                                        WaylandBufferAccess::Shm(buffer) => buffer.bgra_pixels.clone(),
-                                        WaylandBufferAccess::Dmabuf(_) => return None,
+                                        DirectClientBufferAccess::Shm(buffer) => buffer.bgra_pixels.clone(),
+                                        DirectClientBufferAccess::Dmabuf(_) => return None,
                                     },
                                 };
                                 SurfaceBufferContent::Pixels(pixels)
                             }
-                            ClientBufferAccessResolution::Wayland(access)
-                                if matches!(access.as_ref(), WaylandBufferAccess::Dmabuf(_)) =>
+                            ClientBufferAccessResolution::Direct(access)
+                                if matches!(access.as_ref(), DirectClientBufferAccess::Dmabuf(_)) =>
                             {
                                 let imported = if let Some(importer) = &mut self.dmabuf_importer {
                                     importer
@@ -758,7 +758,7 @@ impl AppShell {
                                 SurfaceBufferContent::Retained
                             }
                             ClientBufferAccessResolution::Unsupported
-                            | ClientBufferAccessResolution::Wayland(_) => {
+                            | ClientBufferAccessResolution::Direct(_) => {
                                 tracing::warn!(?surface, layer = ?buffer.layer, "client-buffer lease carried unsupported access");
                                 SurfaceBufferContent::Retained
                             }
@@ -820,9 +820,9 @@ impl AppShell {
             .unwrap_or_default()
     }
 
-    pub fn complete_dmabuf_uses(&mut self, releases: &[DmabufReleaseId]) {
+    pub fn complete_dmabuf_uses(&mut self, uses: &[weld_client::ClientBufferUseId]) {
         if let Some(importer) = &mut self.dmabuf_importer {
-            importer.complete_gpu_uses(releases);
+            importer.complete_gpu_uses(uses);
         }
     }
 
@@ -953,8 +953,8 @@ impl CompositionHost for AppShell {
         AppShell::take_adapter_commands(self)
     }
 
-    fn complete_dmabuf_uses(&mut self, releases: &[DmabufReleaseId]) {
-        AppShell::complete_dmabuf_uses(self, releases);
+    fn complete_dmabuf_uses(&mut self, uses: &[weld_client::ClientBufferUseId]) {
+        AppShell::complete_dmabuf_uses(self, uses);
     }
 
     fn has_surface_frame(&self) -> bool {
@@ -1551,7 +1551,7 @@ mod tests {
             weld_client::ClientBufferId::new(weld_core::WAYLAND_CLIENT_SOURCE, 1),
             weld_client::ClientBufferUseId::new(weld_core::WAYLAND_CLIENT_SOURCE, 1),
             metadata,
-            std::rc::Rc::new(weld_core::dmabuf::WaylandBufferAccess::Shm(
+            std::rc::Rc::new(weld_core::dmabuf::DirectClientBufferAccess::Shm(
                 weld_core::dmabuf::WaylandShmBuffer {
                     bgra_pixels: pixels,
                 },
