@@ -116,7 +116,11 @@ pub(super) fn prepare(options: &RunOptions) -> Result<DrmBootstrap> {
         adapter,
         device,
         queue,
-        dmabuf: crate::dmabuf::DmabufContext::new(release_sender, dmabuf_sources.clone()),
+        dmabuf: crate::dmabuf::DmabufContext::new(
+            release_sender,
+            dmabuf_sources.clone(),
+            dmabuf_capabilities.clone(),
+        ),
         output_heads: selected_outputs
             .iter()
             .map(|output| output.head.clone())

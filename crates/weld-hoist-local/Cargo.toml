@@ -5,10 +5,12 @@ edition.workspace = true
 publish.workspace = true
 
 [dependencies]
+anyhow.workspace = true
 calloop.workspace = true
 postcard.workspace = true
 rustix.workspace = true
 serde.workspace = true
 tracing.workspace = true
 weld-client = { path = "../weld-client", features = ["serde"] }
+weld-core = { path = "../weld-core" }
 weld-hoist-core = { path = "../weld-hoist-core", features = ["serde"] }

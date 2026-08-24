@@ -5596,12 +5596,14 @@ dependencies = [
 name = "weld-hoist-local"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "calloop 0.14.4",
  "postcard",
  "rustix 1.1.4",
  "serde",
  "tracing",
  "weld-client",
+ "weld-core",
  "weld-hoist-core",
 ]
 

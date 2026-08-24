@@ -79,7 +79,39 @@ struct WaylandClientAdapter {
     bridge: WaylandClientBridge,
     dmabuf: DmabufContext,
     revisions: HashMap<crate::surface::SurfaceId, u64>,
+    buffer_ids: WaylandBufferIds,
     next_buffer_use: Option<u64>,
+}
+
+struct WaylandBufferIds {
+    dmabufs: HashMap<crate::dmabuf::ImportId, u64>,
+    next: Option<u64>,
+}
+
+impl Default for WaylandBufferIds {
+    fn default() -> Self {
+        Self {
+            dmabufs: HashMap::new(),
+            next: Some(1),
+        }
+    }
+}
+
+impl WaylandBufferIds {
+    fn allocate(&mut self) -> Option<u64> {
+        let current = self.next?;
+        self.next = current.checked_add(1);
+        Some(current)
+    }
+
+    fn dmabuf(&mut self, import: crate::dmabuf::ImportId) -> Option<u64> {
+        if let Some(local) = self.dmabufs.get(&import) {
+            return Some(*local);
+        }
+        let local = self.allocate()?;
+        self.dmabufs.insert(import, local);
+        Some(local)
+    }
 }
 
 impl WaylandClientAdapter {
@@ -88,6 +120,7 @@ impl WaylandClientAdapter {
             bridge,
             dmabuf,
             revisions: HashMap::new(),
+            buffer_ids: WaylandBufferIds::default(),
             next_buffer_use: Some(1),
         }
     }
@@ -141,16 +174,23 @@ impl WaylandClientAdapter {
                         SurfaceBufferChange::Retained { metadata }
                     }
                     PendingSurfaceBufferContent::ShmPixels(bgra_pixels) => {
-                        let Some(local) = self.allocate_buffer_use() else {
+                        let Some(use_local) = self.allocate_buffer_use() else {
                             warn!(?surface, layer = ?buffer.layer, "discarded SHM content because client-buffer use identity space is exhausted");
                             return SurfaceBufferUpdate {
                                 layer: buffer.layer,
                                 change: SurfaceBufferChange::Retained { metadata },
                             };
                         };
+                        let Some(buffer_local) = self.buffer_ids.allocate() else {
+                            warn!(?surface, layer = ?buffer.layer, "discarded SHM content because client-buffer identity space is exhausted");
+                            return SurfaceBufferUpdate {
+                                layer: buffer.layer,
+                                change: SurfaceBufferChange::Retained { metadata },
+                            };
+                        };
                         let lease = ClientBufferLease::new(
-                            ClientBufferId::new(WAYLAND_CLIENT_SOURCE, local),
-                            ClientBufferUseId::new(WAYLAND_CLIENT_SOURCE, local),
+                            ClientBufferId::new(WAYLAND_CLIENT_SOURCE, buffer_local),
+                            ClientBufferUseId::new(WAYLAND_CLIENT_SOURCE, use_local),
                             metadata,
                             Rc::new(DirectClientBufferAccess::Shm(WaylandShmBuffer {
                                 bgra_pixels,
@@ -166,7 +206,23 @@ impl WaylandClientAdapter {
                         }
                     }
                     PendingSurfaceBufferContent::ImportedDmabuf(frame) => {
-                        let Some(local) = self.allocate_buffer_use() else {
+                        let Some(import_id) = self.dmabuf.import_id(&frame) else {
+                            self.dmabuf.release_unrendered(frame);
+                            warn!(?surface, layer = ?buffer.layer, "discarded DMA-BUF content because its protocol import is unavailable");
+                            return SurfaceBufferUpdate {
+                                layer: buffer.layer,
+                                change: SurfaceBufferChange::Retained { metadata },
+                            };
+                        };
+                        let Some(buffer_local) = self.buffer_ids.dmabuf(import_id) else {
+                            self.dmabuf.release_unrendered(frame);
+                            warn!(?surface, layer = ?buffer.layer, "discarded DMA-BUF content because client-buffer identity space is exhausted");
+                            return SurfaceBufferUpdate {
+                                layer: buffer.layer,
+                                change: SurfaceBufferChange::Retained { metadata },
+                            };
+                        };
+                        let Some(use_local) = self.allocate_buffer_use() else {
                             self.dmabuf.release_unrendered(frame);
                             warn!(?surface, layer = ?buffer.layer, "discarded DMA-BUF content because client-buffer use identity space is exhausted");
                             return SurfaceBufferUpdate {
@@ -176,7 +232,8 @@ impl WaylandClientAdapter {
                         };
                         match self.dmabuf.lease_dmabuf(
                             WAYLAND_CLIENT_SOURCE,
-                            local,
+                            buffer_local,
+                            use_local,
                             metadata,
                             frame,
                         ) {
@@ -256,7 +313,9 @@ impl ClientAdapter for WaylandClientAdapter {
 mod tests {
     use weld_client::{ClientSurfaceEventKind, ClientSurfaceRole, ToplevelState, WindowDecoration};
 
-    use super::{PendingSurfaceEvent, PendingSurfaceEventKind, translate_non_commit_event};
+    use super::{
+        PendingSurfaceEvent, PendingSurfaceEventKind, WaylandBufferIds, translate_non_commit_event,
+    };
     use crate::surface::SurfaceId;
 
     #[test]
@@ -278,5 +337,20 @@ mod tests {
             translated.kind,
             ClientSurfaceEventKind::Role(translated_role) if translated_role == role
         ));
+    }
+
+    #[test]
+    fn wayland_buffer_ids_share_one_namespace_and_reuse_dmabuf_allocations() {
+        let mut ids = WaylandBufferIds::default();
+        let shm = ids.allocate().expect("SHM buffer ID");
+        let dmabuf = ids
+            .dmabuf(crate::dmabuf::ImportId::for_test(1))
+            .expect("DMA-BUF buffer ID");
+
+        assert_ne!(shm, dmabuf);
+        assert_eq!(
+            ids.dmabuf(crate::dmabuf::ImportId::for_test(1)),
+            Some(dmabuf)
+        );
     }
 }

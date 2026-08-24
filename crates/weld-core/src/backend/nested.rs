@@ -105,7 +105,11 @@ pub(crate) fn prepare(options: RunOptions, signals: Signals) -> Result<PreparedH
         adapter: renderer.adapter().clone(),
         device: renderer.device().clone(),
         queue: renderer.queue().clone(),
-        dmabuf: crate::dmabuf::DmabufContext::new(dmabuf_release_sender, renderer.dmabuf_sources()),
+        dmabuf: crate::dmabuf::DmabufContext::new(
+            dmabuf_release_sender,
+            renderer.dmabuf_sources(),
+            renderer.dmabuf_capabilities().cloned(),
+        ),
         output_heads: vec![OutputHead::new(OutputId::new(1), "weld-nested", None)],
         outputs: vec![nested_output],
         composition_format: wgpu::TextureFormat::Rgba8UnormSrgb,

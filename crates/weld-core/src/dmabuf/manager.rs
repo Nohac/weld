@@ -10,11 +10,12 @@ use std::{
 use anyhow::{Context, Result, bail};
 use ash::vk;
 use calloop::channel::Sender as CalloopSender;
+use smithay::backend::allocator::Buffer;
 use tracing::{debug, error, warn};
 
 use super::{
-    DirectClientBufferAccess, DmabufAccess, DmabufEvent, DmabufSourceCache, ImportId,
-    ImportedDmabufSource, PendingWaylandDmabufUse,
+    DirectClientBufferAccess, DmabufAccess, DmabufCapabilities, DmabufEvent, DmabufSourceCache,
+    ExternalDmabuf, ImportId, ImportedDmabufSource, PendingWaylandDmabufUse,
 };
 use crate::surface::{SurfaceId, SurfaceLayerId};
 use weld_client::{
@@ -167,16 +168,19 @@ pub trait ImportedImageRegistry {
 pub struct DmabufContext {
     release_sender: CalloopSender<DmabufEvent>,
     sources: DmabufSourceCache,
+    capabilities: Option<DmabufCapabilities>,
 }
 
 impl DmabufContext {
     pub(crate) const fn new(
         release_sender: CalloopSender<DmabufEvent>,
         sources: DmabufSourceCache,
+        capabilities: Option<DmabufCapabilities>,
     ) -> Self {
         Self {
             release_sender,
             sources,
+            capabilities,
         }
     }
 
@@ -202,20 +206,21 @@ impl DmabufContext {
     pub(crate) fn lease_dmabuf(
         &self,
         source: ClientSourceId,
+        buffer_local: u64,
         use_local: u64,
         metadata: ClientBufferMetadata,
         pending: PendingWaylandDmabufUse,
     ) -> anyhow::Result<ClientBufferLease> {
         let PendingWaylandDmabufUse { access, release } = pending;
-        let Some(imported) = self.sources.get(&access.dmabuf) else {
+        if self.sources.get(&access.dmabuf).is_none() {
             let _ = self
                 .release_sender
                 .send(DmabufEvent::LeaseCompleted(release));
             anyhow::bail!("committed DMA-BUF was not imported during protocol creation");
-        };
+        }
         let release_sender = self.release_sender.clone();
         ClientBufferLease::new(
-            ClientBufferId::new(source, imported.id.raw()),
+            ClientBufferId::new(source, buffer_local),
             ClientBufferUseId::new(source, use_local),
             metadata,
             Rc::new(DirectClientBufferAccess::Dmabuf(access)),
@@ -226,6 +231,54 @@ impl DmabufContext {
         .map_err(anyhow::Error::new)
     }
 
+    pub(crate) fn import_id(&self, pending: &PendingWaylandDmabufUse) -> Option<ImportId> {
+        self.sources
+            .get(&pending.access.dmabuf)
+            .map(|imported| imported.id)
+    }
+
+    /// Imports one descriptor-owned DMA-BUF without granting it Wayland release ownership.
+    pub fn import_external(&self, external: ExternalDmabuf) -> Result<DmabufAccess> {
+        let dmabuf = external.into_smithay()?;
+        let capabilities = self
+            .capabilities
+            .as_ref()
+            .context("DMA-BUF import is unavailable on this renderer")?;
+        anyhow::ensure!(
+            capabilities.supports(dmabuf.format()),
+            "external DMA-BUF format/modifier was not advertised by this renderer"
+        );
+        self.sources.import(&dmabuf)?;
+        Ok(DmabufAccess::new(dmabuf))
+    }
+
+    /// Creates a client-buffer lease around an already imported external DMA-BUF.
+    pub fn lease_external(
+        &self,
+        buffer: ClientBufferId,
+        use_id: ClientBufferUseId,
+        metadata: ClientBufferMetadata,
+        access: DmabufAccess,
+        notify: impl FnOnce(ClientBufferUseId) + 'static,
+    ) -> Result<ClientBufferLease> {
+        self.sources
+            .get(&access.dmabuf)
+            .context("external DMA-BUF was not imported")?;
+        ClientBufferLease::new(
+            buffer,
+            use_id,
+            metadata,
+            Rc::new(DirectClientBufferAccess::Dmabuf(access)),
+            notify,
+        )
+        .map_err(anyhow::Error::new)
+    }
+
+    /// Removes a descriptor-owned DMA-BUF from the reusable import cache.
+    pub fn remove_external(&self, access: &DmabufAccess) {
+        self.sources.remove(&access.dmabuf);
+    }
+
     /// Creates a DMA-BUF capability with no live protocol release consumer.
     ///
     /// This exists for feature-gated headless render benchmarks, which exercise
@@ -234,7 +287,7 @@ impl DmabufContext {
     #[doc(hidden)]
     pub fn for_headless_benchmark(device: &wgpu::Device) -> Self {
         let (release_sender, _release_source) = calloop::channel::channel();
-        Self::new(release_sender, DmabufSourceCache::new(device))
+        Self::new(release_sender, DmabufSourceCache::new(device), None)
     }
 }
 

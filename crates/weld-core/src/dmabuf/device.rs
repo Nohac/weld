@@ -32,6 +32,12 @@ pub struct DmabufCapabilities {
     pub(crate) syncobj_import_device: Option<DrmDeviceFd>,
 }
 
+impl DmabufCapabilities {
+    pub(crate) fn supports(&self, format: Format) -> bool {
+        self.formats.contains(&format)
+    }
+}
+
 pub fn request_weld_device(
     adapter: &wgpu::Adapter,
     label: &'static str,
