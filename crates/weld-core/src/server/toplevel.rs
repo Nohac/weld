@@ -47,9 +47,6 @@ use super::{
     },
 };
 
-const CLIENT_WIDTH: i32 = 640;
-const CLIENT_HEIGHT: i32 = 480;
-
 pub(super) struct ToplevelState {
     pub(super) surface: ToplevelSurface,
     pub(super) decoration: WindowDecoration,
@@ -636,9 +633,6 @@ impl XdgShellHandler for ServerState {
             surface.send_close();
             return;
         };
-        surface.with_pending_state(|state| {
-            state.size = Some(Size::<i32, Logical>::from((CLIENT_WIDTH, CLIENT_HEIGHT)));
-        });
         self.enter_primary_output(surface.wl_surface());
         let rejection_surface = surface.clone();
         let state = ToplevelState {
