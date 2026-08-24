@@ -121,7 +121,7 @@ pub(crate) fn prepare(options: RunOptions, signals: Signals) -> Result<PreparedH
     Ok(PreparedHost::new(
         context,
         vec![client_registration],
-        move |application, adapters| {
+        move |application, adapters, wake_sources| {
             let mut shell = application;
             let mut clients = ClientRuntime::default();
             for adapter in adapters {
@@ -129,10 +129,12 @@ pub(crate) fn prepare(options: RunOptions, signals: Signals) -> Result<PreparedH
             }
             let mut client_events = ClientEventQueue::default();
             let mut invalid_client_events = Vec::new();
+            let mut invalid_client_effects = Vec::new();
 
             let mut calloop: CalloopEventLoop<'static, LoopData<NestedEvent>> =
                 CalloopEventLoop::try_new()
                     .context("failed to create the Smithay calloop event loop")?;
+            crate::host::register_client_wake_sources(&calloop.handle(), wake_sources)?;
             let display =
                 Display::<ServerState>::new().context("failed to create the Wayland display")?;
             let server = ServerState::new(
@@ -153,6 +155,7 @@ pub(crate) fn prepare(options: RunOptions, signals: Signals) -> Result<PreparedH
                     }],
                     dmabuf_capabilities: renderer.dmabuf_capabilities(),
                     dmabuf_sources: renderer.dmabuf_sources(),
+                    socket_name: options.socket_name.as_deref(),
                 },
             )?;
             let mut loop_data = LoopData::new(server);
@@ -327,6 +330,11 @@ pub(crate) fn prepare(options: RunOptions, signals: Signals) -> Result<PreparedH
                 for invalid in invalid_client_events.drain(..) {
                     warn!(%invalid, "client adapter published an invalid event");
                 }
+                clients.apply_pending_effects(&mut invalid_client_effects);
+                for invalid in invalid_client_effects.drain(..) {
+                    warn!(%invalid, "client adapter published an invalid effect");
+                }
+                loop_data.server.apply_pending_client_work();
                 if !client_events.is_empty() {
                     let _surface_span = tracing::trace_span!(
                         target: crate::PROFILE_TARGET,

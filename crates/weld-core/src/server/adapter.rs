@@ -28,6 +28,7 @@ use super::{
 #[derive(Default)]
 struct WaylandClientBridgeState {
     events: VecDeque<PendingSurfaceEvent>,
+    retired_dmabufs: VecDeque<crate::dmabuf::ImportId>,
     work: VecDeque<WaylandClientWork>,
 }
 
@@ -42,6 +43,14 @@ impl WaylandClientBridge {
 
     fn pop_event(&self) -> Option<PendingSurfaceEvent> {
         self.0.borrow_mut().events.pop_front()
+    }
+
+    pub(crate) fn retire_dmabuf(&self, import: crate::dmabuf::ImportId) {
+        self.0.borrow_mut().retired_dmabufs.push_back(import);
+    }
+
+    fn pop_retired_dmabuf(&self) -> Option<crate::dmabuf::ImportId> {
+        self.0.borrow_mut().retired_dmabufs.pop_front()
     }
 
     fn push_work(&self, work: WaylandClientWork) {
@@ -81,6 +90,7 @@ struct WaylandClientAdapter {
     revisions: HashMap<crate::surface::SurfaceId, u64>,
     buffer_ids: WaylandBufferIds,
     next_buffer_use: Option<u64>,
+    retired_buffers: Vec<ClientBufferId>,
 }
 
 struct WaylandBufferIds {
@@ -112,6 +122,10 @@ impl WaylandBufferIds {
         self.dmabufs.insert(import, local);
         Some(local)
     }
+
+    fn retire_dmabuf(&mut self, import: crate::dmabuf::ImportId) -> Option<u64> {
+        self.dmabufs.remove(&import)
+    }
 }
 
 impl WaylandClientAdapter {
@@ -122,6 +136,7 @@ impl WaylandClientAdapter {
             revisions: HashMap::new(),
             buffer_ids: WaylandBufferIds::default(),
             next_buffer_use: Some(1),
+            retired_buffers: Vec::new(),
         }
     }
 
@@ -284,6 +299,12 @@ fn translate_non_commit_event(event: PendingSurfaceEvent) -> Option<ClientSurfac
 
 impl ClientAdapter for WaylandClientAdapter {
     fn drain_events(&mut self, events: &mut ClientEventQueue) {
+        while let Some(import) = self.bridge.pop_retired_dmabuf() {
+            if let Some(local) = self.buffer_ids.retire_dmabuf(import) {
+                self.retired_buffers
+                    .push(ClientBufferId::new(WAYLAND_CLIENT_SOURCE, local));
+            }
+        }
         while let Some(event) = self.bridge.pop_event() {
             if let Some(event) = self.translate_event(event) {
                 events.push(event);
@@ -306,6 +327,10 @@ impl ClientAdapter for WaylandClientAdapter {
     fn host_focus_lost(&mut self, time: u32) {
         self.bridge
             .push_work(WaylandClientWork::HostFocusLost(time));
+    }
+
+    fn drain_retired_buffers(&mut self, buffers: &mut Vec<ClientBufferId>) {
+        buffers.append(&mut self.retired_buffers);
     }
 }
 
@@ -349,6 +374,14 @@ mod tests {
 
         assert_ne!(shm, dmabuf);
         assert_eq!(
+            ids.dmabuf(crate::dmabuf::ImportId::for_test(1)),
+            Some(dmabuf)
+        );
+        assert_eq!(
+            ids.retire_dmabuf(crate::dmabuf::ImportId::for_test(1)),
+            Some(dmabuf)
+        );
+        assert_ne!(
             ids.dmabuf(crate::dmabuf::ImportId::for_test(1)),
             Some(dmabuf)
         );

@@ -129,16 +129,15 @@ pub(super) fn install_output_metrics(
 }
 
 pub(super) fn send_preferred_surface_scale(output: &Output, surface: &WlSurface) {
-    let output_scale = output.current_scale();
+    send_surface_scale(output.current_scale().fractional_scale(), surface);
+}
+
+pub(super) fn send_surface_scale(scale: f64, surface: &WlSurface) {
+    let integer_scale = scale.ceil().min(f64::from(i32::MAX)) as i32;
     with_states(surface, |states| {
-        send_surface_state(
-            surface,
-            states,
-            output_scale.integer_scale(),
-            Transform::Normal,
-        );
+        send_surface_state(surface, states, integer_scale, Transform::Normal);
         with_fractional_scale(states, |fractional_scale| {
-            fractional_scale.set_preferred_scale(output_scale.fractional_scale());
+            fractional_scale.set_preferred_scale(scale);
         });
     });
 }

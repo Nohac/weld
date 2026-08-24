@@ -41,7 +41,7 @@ use crate::{
 
 use super::{
     ClientState, PendingSurfaceEvent, PendingSurfaceEventKind, ServerState,
-    output::send_preferred_surface_scale,
+    output::{send_preferred_surface_scale, send_surface_scale},
     surface_tree::{
         SurfaceTreeState, collect_surfaces, owning_root, release_untracked_surface_tree,
     },
@@ -53,6 +53,7 @@ pub(super) struct ToplevelState {
     pub(super) parent: Option<SurfaceId>,
     pub(super) tree: SurfaceTreeState,
     pub(super) outputs: SurfaceOutputAssignment,
+    pub(super) preferred_scale_120: Option<u32>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -234,13 +235,21 @@ impl ServerState {
             .values()
             .filter(|state| state.surface.alive())
         {
-            self.send_surface_tree_scale(toplevel.surface.wl_surface(), &toplevel.outputs);
+            self.send_surface_tree_scale(
+                toplevel.surface.wl_surface(),
+                &toplevel.outputs,
+                toplevel.preferred_scale_120,
+            );
         }
         for popup in self.popups.values().filter(|state| state.surface.alive()) {
             let Some(owner) = popup.owner.and_then(|owner| self.toplevels.get(owner)) else {
                 continue;
             };
-            self.send_surface_tree_scale(popup.surface.wl_surface(), &owner.outputs);
+            self.send_surface_tree_scale(
+                popup.surface.wl_surface(),
+                &owner.outputs,
+                owner.preferred_scale_120,
+            );
         }
     }
 
@@ -259,7 +268,8 @@ impl ServerState {
         };
         toplevel.outputs = assignment.clone();
         let root = toplevel.surface.wl_surface().clone();
-        self.apply_surface_tree_outputs(&root, &assignment);
+        let preferred_scale_120 = toplevel.preferred_scale_120;
+        self.apply_surface_tree_outputs(&root, &assignment, preferred_scale_120);
 
         let popup_roots = self
             .popups
@@ -268,7 +278,35 @@ impl ServerState {
             .map(|popup| popup.surface.wl_surface().clone())
             .collect::<Vec<_>>();
         for popup in popup_roots {
-            self.apply_surface_tree_outputs(&popup, &assignment);
+            self.apply_surface_tree_outputs(&popup, &assignment, preferred_scale_120);
+        }
+    }
+
+    pub(super) fn set_toplevel_preferred_scale(
+        &mut self,
+        surface_id: SurfaceId,
+        preferred_scale_120: Option<u32>,
+    ) {
+        if preferred_scale_120 == Some(0) {
+            warn!(?surface_id, "ignored a zero preferred surface scale");
+            return;
+        }
+        let Some(toplevel) = self.toplevels.get_mut(surface_id) else {
+            return;
+        };
+        toplevel.preferred_scale_120 = preferred_scale_120;
+        let root = toplevel.surface.wl_surface().clone();
+        let assignment = toplevel.outputs.clone();
+        self.send_surface_tree_scale(&root, &assignment, preferred_scale_120);
+
+        let popup_roots = self
+            .popups
+            .values()
+            .filter(|popup| popup.owner == Some(surface_id) && popup.surface.alive())
+            .map(|popup| popup.surface.wl_surface().clone())
+            .collect::<Vec<_>>();
+        for popup in popup_roots {
+            self.send_surface_tree_scale(&popup, &assignment, preferred_scale_120);
         }
     }
 
@@ -279,7 +317,11 @@ impl ServerState {
         let Some(owner) = popup.owner.and_then(|owner| self.toplevels.get(owner)) else {
             return;
         };
-        self.apply_surface_tree_outputs(popup.surface.wl_surface(), &owner.outputs);
+        self.apply_surface_tree_outputs(
+            popup.surface.wl_surface(),
+            &owner.outputs,
+            owner.preferred_scale_120,
+        );
     }
 
     fn resolve_output_assignment(
@@ -305,7 +347,12 @@ impl ServerState {
         })
     }
 
-    fn apply_surface_tree_outputs(&self, root: &WlSurface, assignment: &SurfaceOutputAssignment) {
+    fn apply_surface_tree_outputs(
+        &self,
+        root: &WlSurface,
+        assignment: &SurfaceOutputAssignment,
+        preferred_scale_120: Option<u32>,
+    ) {
         let surfaces = collect_surfaces(root)
             .into_iter()
             .filter(Resource::is_alive)
@@ -319,10 +366,15 @@ impl ServerState {
                 }
             }
         }
-        self.send_surface_tree_scale(root, assignment);
+        self.send_surface_tree_scale(root, assignment, preferred_scale_120);
     }
 
-    fn apply_surface_outputs(&self, surface: &WlSurface, assignment: &SurfaceOutputAssignment) {
+    fn apply_surface_outputs(
+        &self,
+        surface: &WlSurface,
+        assignment: &SurfaceOutputAssignment,
+        preferred_scale_120: Option<u32>,
+    ) {
         for (output_id, output) in &self.outputs {
             if assignment.memberships.contains(output_id) {
                 output.native.enter(surface);
@@ -330,7 +382,9 @@ impl ServerState {
                 output.native.leave(surface);
             }
         }
-        if let Some(preferred) = self.outputs.get(&assignment.preferred) {
+        if let Some(scale_120) = preferred_scale_120 {
+            send_surface_scale(f64::from(scale_120) / 120.0, surface);
+        } else if let Some(preferred) = self.outputs.get(&assignment.preferred) {
             send_preferred_surface_scale(&preferred.native, surface);
         }
     }
@@ -349,7 +403,38 @@ impl ServerState {
             .map(|state| &state.outputs)
     }
 
-    fn send_surface_tree_scale(&self, root: &WlSurface, assignment: &SurfaceOutputAssignment) {
+    fn scale_override_for_root(&self, root: &WlSurface) -> Option<u32> {
+        if let Some(surface) = self.toplevels.id_for_surface(root) {
+            return self
+                .toplevels
+                .get(surface)
+                .and_then(|state| state.preferred_scale_120);
+        }
+        let popup = self
+            .popups
+            .id_for_surface(root)
+            .and_then(|surface| self.popups.get(surface))?;
+        popup
+            .owner
+            .and_then(|owner| self.toplevels.get(owner))
+            .and_then(|state| state.preferred_scale_120)
+    }
+
+    fn send_surface_tree_scale(
+        &self,
+        root: &WlSurface,
+        assignment: &SurfaceOutputAssignment,
+        preferred_scale_120: Option<u32>,
+    ) {
+        if let Some(scale_120) = preferred_scale_120 {
+            for surface in collect_surfaces(root)
+                .into_iter()
+                .filter(Resource::is_alive)
+            {
+                send_surface_scale(f64::from(scale_120) / 120.0, &surface);
+            }
+            return;
+        }
         let Some(preferred) = self.outputs.get(&assignment.preferred) else {
             return;
         };
@@ -425,12 +510,12 @@ impl ServerState {
             surface: surface_id,
             kind: PendingSurfaceEventKind::TreeSnapshot(snapshot),
         });
-        if let Some(assignment) = self
+        if let Some((assignment, scale)) = self
             .toplevels
             .get(surface_id)
-            .map(|state| state.outputs.clone())
+            .map(|state| (state.outputs.clone(), state.preferred_scale_120))
         {
-            self.apply_surface_tree_outputs(root, &assignment);
+            self.apply_surface_tree_outputs(root, &assignment, scale);
         }
     }
 }
@@ -455,6 +540,9 @@ fn select_preferred_output(
 impl BufferHandler for ServerState {
     fn buffer_destroyed(&mut self, buffer: &wl_buffer::WlBuffer) {
         if let Ok(dmabuf) = get_dmabuf(buffer) {
+            if let Some(imported) = self.dmabuf_sources.get(dmabuf) {
+                self.pending_surface_events.retire_dmabuf(imported.id);
+            }
             self.dmabuf_sources.remove(dmabuf);
         }
         self.dmabuf_releases.destroyed(buffer);
@@ -471,7 +559,8 @@ impl FractionalScaleHandler for ServerState {
     fn new_fractional_scale(&mut self, surface: WlSurface) {
         let root = owning_root(&surface);
         if let Some(assignment) = self.output_assignment_for_root(&root).cloned() {
-            self.apply_surface_outputs(&surface, &assignment);
+            let scale = self.scale_override_for_root(&root);
+            self.apply_surface_outputs(&surface, &assignment, scale);
         } else {
             send_preferred_surface_scale(self.primary_output(), &surface);
         }
@@ -562,7 +651,8 @@ impl CompositorHandler for ServerState {
     fn new_subsurface(&mut self, surface: &WlSurface, parent: &WlSurface) {
         let root = owning_root(parent);
         if let Some(assignment) = self.output_assignment_for_root(&root).cloned() {
-            self.apply_surface_outputs(surface, &assignment);
+            let scale = self.scale_override_for_root(&root);
+            self.apply_surface_outputs(surface, &assignment, scale);
         } else {
             self.enter_primary_output(surface);
         }
@@ -641,6 +731,7 @@ impl XdgShellHandler for ServerState {
             parent: None,
             tree: SurfaceTreeState::default(),
             outputs: SurfaceOutputAssignment::primary(self.primary_output),
+            preferred_scale_120: None,
         };
         if !self.toplevels.insert(id, state) {
             warn!(?id, "refused a duplicate xdg-toplevel registration");

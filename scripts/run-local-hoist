@@ -1,0 +1,40 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+repository_root="$(cd -- "${script_dir}/.." && pwd)"
+socket_path="${WELD_HOIST_SOCKET:-${repository_root}/target/validation/weld-hoist.sock}"
+source_log="${repository_root}/target/validation/weld-hoist-source.log"
+destination_log="${repository_root}/target/validation/weld-hoist-destination.log"
+
+mkdir -p -- "$(dirname -- "${socket_path}")"
+rm -f -- "${socket_path}"
+
+cd -- "${repository_root}"
+printf 'Starting source. Focus its foot window and press Super+H to hoist it.\n'
+cargo run -- --backend nested --wayland-socket weld-hoist-source --hoist-listen "${socket_path}" foot \
+    > >(tee "${source_log}") 2>&1 &
+source_pid=$!
+
+cleanup() {
+    kill -TERM "${source_pid}" "${destination_pid:-}" 2>/dev/null || true
+    wait "${source_pid}" "${destination_pid:-}" 2>/dev/null || true
+    rm -f -- "${socket_path}"
+}
+trap cleanup EXIT INT TERM
+
+while [[ ! -S "${socket_path}" ]]; do
+    kill -0 "${source_pid}" 2>/dev/null || {
+        printf 'Source exited before creating %s\n' "${socket_path}" >&2
+        exit 1
+    }
+    sleep 0.05
+done
+
+cargo run -- --backend nested --wayland-socket weld-hoist-destination --hoist-connect "${socket_path}" \
+    > >(tee "${destination_log}") 2>&1 &
+destination_pid=$!
+
+printf 'Source log: %s\nDestination log: %s\n' "${source_log}" "${destination_log}"
+wait "${source_pid}" "${destination_pid}"

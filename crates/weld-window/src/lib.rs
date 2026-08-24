@@ -661,6 +661,7 @@ fn derive_window_output_intersections(
 struct PublishedOutputMembership {
     outputs: Vec<OutputId>,
     preferred: Option<OutputId>,
+    preferred_scale_120: Option<u32>,
 }
 
 #[derive(Resource, Default)]
@@ -675,7 +676,7 @@ fn publish_window_output_memberships(
     windows: Query<(Entity, &WindowOutputIntersections, &WindowPreferredOutput)>,
     clients: WindowClientResolver,
     mapped_toplevels: Query<(&ClientToplevel, Option<&MappedSurface>)>,
-    outputs: Query<&WeldOutput>,
+    outputs: Query<(&WeldOutput, &weld_app::output::OutputGeometry)>,
     mut published: ResMut<PublishedOutputMemberships>,
     mut actions: ResMut<SurfaceActionQueue>,
 ) {
@@ -688,13 +689,22 @@ fn publish_window_output_memberships(
         };
         let mut memberships = intersections
             .iter()
-            .filter_map(|output| outputs.get(output).ok().map(|output| output.id))
+            .filter_map(|output| outputs.get(output).ok().map(|(output, _)| output.id))
             .collect::<Vec<_>>();
         memberships.sort_unstable();
         let preferred = preferred
             .entity()
-            .and_then(|output| outputs.get(output).ok().map(|output| output.id))
+            .and_then(|output| outputs.get(output).ok().map(|(output, _)| output.id))
             .filter(|preferred| memberships.contains(preferred));
+        let preferred_scale_120 = preferred.and_then(|preferred| {
+            outputs.iter().find_map(|(output, geometry)| {
+                (output.id == preferred).then(|| {
+                    (geometry.scale_factor() * 120.0)
+                        .round()
+                        .clamp(1.0, u32::MAX as f32) as u32
+                })
+            })
+        });
         if memberships.is_empty() {
             continue;
         }
@@ -703,6 +713,7 @@ fn publish_window_output_memberships(
             PublishedOutputMembership {
                 outputs: memberships,
                 preferred,
+                preferred_scale_120,
             },
         );
     }
@@ -744,6 +755,7 @@ fn publish_window_output_memberships(
             surface,
             outputs: membership.outputs.clone(),
             preferred: membership.preferred,
+            preferred_scale_120: membership.preferred_scale_120,
         });
     }
 

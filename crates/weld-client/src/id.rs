@@ -48,6 +48,10 @@ pub struct ClientSourceDescriptor {
 #[derive(Clone, Copy, Debug, Default)]
 pub struct PassthroughClientImporter;
 
+/// Marks an adapter that publishes control effects but no client buffers.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ControlOnlyClientImporter;
+
 impl ClientSourceDescriptor {
     pub const fn new(id: ClientSourceId, provenance: ClientProvenance) -> Self {
         Self { id, provenance }

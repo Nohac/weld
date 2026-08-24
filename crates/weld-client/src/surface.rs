@@ -265,6 +265,10 @@ pub enum ClientSurfaceRequestKind {
     SetOutputs {
         outputs: Vec<ClientOutputId>,
         preferred: Option<ClientOutputId>,
+        preferred_scale_120: Option<u32>,
+    },
+    SetPreferredScale {
+        scale_120: Option<u32>,
     },
 }
 

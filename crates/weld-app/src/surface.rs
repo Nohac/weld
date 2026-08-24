@@ -241,6 +241,7 @@ pub enum SurfaceAction {
         surface: SurfaceId,
         outputs: Vec<crate::output::OutputId>,
         preferred: Option<crate::output::OutputId>,
+        preferred_scale_120: Option<u32>,
     },
 }
 

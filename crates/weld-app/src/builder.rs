@@ -18,7 +18,9 @@ use bevy::{
 };
 use tracing::info;
 use weld_client::ClientAdapterRegistration;
-use weld_core::{HostBackend, HostBuilder, OutputScale, PreparedHost};
+use weld_core::{
+    HostBackend, HostBuilder, OutputScale, PreparedHost, host::ClientRuntimeWakeSource,
+};
 
 use crate::{
     debug::{DebugProtocolPlugin, configure_remote_debug},
@@ -70,6 +72,7 @@ pub struct WeldAppBuilder {
     screenshot: Option<PathBuf>,
     remote_debug: Option<String>,
     scale: Option<OutputScale>,
+    socket_name: Option<String>,
 }
 
 impl WeldAppBuilder {
@@ -107,6 +110,12 @@ impl WeldAppBuilder {
         self
     }
 
+    /// Selects an explicit Wayland socket name for this compositor instance.
+    pub fn socket_name(mut self, socket_name: Option<String>) -> Self {
+        self.socket_name = socket_name;
+        self
+    }
+
     /// Open the selected native host and create its configurable Bevy application.
     ///
     /// An exceptional nested-host exit during the initial blocking window pump
@@ -129,6 +138,7 @@ impl WeldAppBuilder {
             .screenshot(self.screenshot)
             .remote_debug_enabled(self.remote_debug.is_some())
             .output_scale(self.scale)
+            .socket_name(self.socket_name)
             .prepare()?;
 
         let context = prepared.render_context();
@@ -146,6 +156,7 @@ impl WeldAppBuilder {
             backend,
             remote_debug: self.remote_debug,
             client_adapters: Vec::new(),
+            client_wake_sources: Vec::new(),
         })
     }
 }
@@ -157,6 +168,7 @@ pub struct WeldApp {
     backend: ActiveBackend,
     remote_debug: Option<String>,
     client_adapters: Vec<ClientAdapterRegistration>,
+    client_wake_sources: Vec<ClientRuntimeWakeSource>,
 }
 
 impl WeldApp {
@@ -198,6 +210,17 @@ impl WeldApp {
         self
     }
 
+    /// Registers adapter readiness with the native event loop.
+    pub fn add_client_wake_source(&mut self, source: ClientRuntimeWakeSource) -> &mut Self {
+        self.client_wake_sources.push(source);
+        self
+    }
+
+    /// Clones the native DMA-BUF import capability for an external client adapter.
+    pub fn dmabuf_context(&self) -> weld_core::dmabuf::DmabufContext {
+        self.prepared.render_context().dmabuf.clone()
+    }
+
     /// Borrows the underlying Bevy application.
     pub const fn app(&self) -> &App {
         &self.app
@@ -229,7 +252,7 @@ impl WeldApp {
             .map(|parts| (parts.runtime, parts.importer))
             .unzip();
         let shell = AppShell::new(self.app, context, importers)?;
-        runtime.run(shell, runtime_adapters)
+        runtime.run(shell, runtime_adapters, self.client_wake_sources)
     }
 }
 

@@ -31,7 +31,50 @@ pub trait ClientAdapter {
 
     /// Publishes input/request route aliases created by observed events.
     fn drain_route_alias_updates(&mut self, _updates: &mut Vec<ClientRouteAliasUpdate>) {}
+
+    /// Publishes already-addressed work received from an external adapter.
+    fn drain_effects(&mut self, _effects: &mut Vec<ClientAdapterEffect>) {}
+
+    /// Publishes adapter-owned allocations that can no longer be reused.
+    fn drain_retired_buffers(&mut self, _buffers: &mut Vec<crate::ClientBufferId>) {}
+
+    /// Observes retirement from another local-provenance adapter.
+    fn observe_retired_buffer(&mut self, _buffer: crate::ClientBufferId) {}
 }
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum ClientAdapterEffect {
+    Request(ClientRequest),
+    Input(ClientInputEvent),
+}
+
+impl ClientAdapterEffect {
+    pub const fn target_source(&self) -> Option<ClientSourceId> {
+        match self {
+            Self::Request(request) => request.source(),
+            Self::Input(event) => Some(event.target.surface().source()),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ClientRuntimeEffectError {
+    pub adapter: ClientSourceId,
+    pub target: Option<ClientSourceId>,
+}
+
+impl fmt::Display for ClientRuntimeEffectError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "client adapter {} targeted unavailable source {:?}",
+            self.adapter.raw(),
+            self.target.map(ClientSourceId::raw)
+        )
+    }
+}
+
+impl std::error::Error for ClientRuntimeEffectError {}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ClientRouteAliasUpdate {
@@ -285,6 +328,10 @@ pub struct ClientRuntime {
     scratch_alias_updates: Vec<ClientRouteAliasUpdate>,
     sourced_alias_updates: Vec<(ClientSourceId, ClientRouteAliasUpdate)>,
     observed_adapters: Vec<ClientSourceId>,
+    scratch_effects: Vec<ClientAdapterEffect>,
+    pending_effects: Vec<(ClientSourceId, ClientAdapterEffect)>,
+    scratch_retired_buffers: Vec<crate::ClientBufferId>,
+    retired_buffers: Vec<crate::ClientBufferId>,
     aliases: HashMap<ClientSurfaceId, ClientSurfaceId>,
     retired_aliases: HashSet<ClientSurfaceId>,
     pointer_route: Option<ClientPointerRoute>,
@@ -481,6 +528,57 @@ impl ClientRuntime {
             self.forget_surface(surface);
         }
         self.scratch_destroyed.clear();
+
+        for (source, adapter) in &mut self.adapters {
+            adapter.driver.drain_effects(&mut self.scratch_effects);
+            self.pending_effects.extend(
+                self.scratch_effects
+                    .drain(..)
+                    .map(|effect| (*source, effect)),
+            );
+        }
+
+        for (source, adapter) in &mut self.adapters {
+            adapter
+                .driver
+                .drain_retired_buffers(&mut self.scratch_retired_buffers);
+            self.retired_buffers.extend(
+                self.scratch_retired_buffers
+                    .drain(..)
+                    .filter(|buffer| buffer.source() == *source),
+            );
+        }
+        for buffer in self.retired_buffers.drain(..) {
+            for (source, adapter) in &mut self.adapters {
+                if *source != buffer.source() {
+                    adapter.driver.observe_retired_buffer(buffer);
+                }
+            }
+        }
+    }
+
+    /// Applies external adapter work immediately after one event drain.
+    pub fn apply_pending_effects(&mut self, invalid: &mut Vec<ClientRuntimeEffectError>) {
+        let effects = std::mem::take(&mut self.pending_effects);
+        for (adapter, effect) in effects {
+            let target = effect.target_source();
+            let applied = match effect {
+                ClientAdapterEffect::Request(request) => self.apply_request(request),
+                ClientAdapterEffect::Input(event) => self.apply_targeted_input(event),
+            };
+            if !applied {
+                invalid.push(ClientRuntimeEffectError { adapter, target });
+            }
+        }
+    }
+
+    fn apply_targeted_input(&mut self, event: ClientInputEvent) -> bool {
+        let source = event.target.surface().source();
+        let Some(adapter) = self.adapters.get_mut(&source) else {
+            return false;
+        };
+        adapter.driver.apply_input(event);
+        true
     }
 
     pub fn apply_request(&mut self, request: ClientRequest) -> bool {
@@ -1013,6 +1111,20 @@ mod tests {
 
     struct RecordingAdapter(Rc<RefCell<AdapterRecord>>);
 
+    struct EffectAdapter(Option<ClientAdapterEffect>);
+
+    impl ClientAdapter for EffectAdapter {
+        fn drain_events(&mut self, _events: &mut ClientEventQueue) {}
+        fn apply_request(&mut self, _request: ClientRequest) {}
+        fn apply_input(&mut self, _event: ClientInputEvent) {}
+        fn apply_command(&mut self, _command: ClientAdapterCommandEnvelope) {}
+        fn host_focus_lost(&mut self, _time: u32) {}
+
+        fn drain_effects(&mut self, effects: &mut Vec<ClientAdapterEffect>) {
+            effects.extend(self.0.take());
+        }
+    }
+
     impl ClientAdapter for RecordingAdapter {
         fn drain_events(&mut self, _events: &mut ClientEventQueue) {}
 
@@ -1051,6 +1163,40 @@ mod tests {
     #[test]
     fn source_namespaces_keep_equal_local_ids_distinct() {
         assert_ne!(surface(1, 4, 9), surface(2, 4, 9));
+    }
+
+    #[test]
+    fn adapter_effects_apply_targeted_input_without_runtime_capture() {
+        let mut runtime = ClientRuntime::default();
+        let target = register(&mut runtime, 2);
+        let target_surface = surface(2, 1, 1);
+        runtime
+            .register(ClientRuntimeAdapter::new(
+                ClientSourceDescriptor::new(ClientSourceId::new(1), ClientProvenance::Relocated),
+                EffectAdapter(Some(ClientAdapterEffect::Input(ClientInputEvent {
+                    target: ClientInputTarget::Keyboard {
+                        surface: target_surface,
+                    },
+                    host_position: None,
+                    event: InputEventKind::Keyboard {
+                        keycode: LinuxKeycode(4),
+                        state: ButtonState::Pressed,
+                    },
+                    time: 7,
+                }))),
+            ))
+            .expect("unique effect source");
+        let mut events = ClientEventQueue::default();
+        let mut invalid_events = Vec::new();
+        let mut invalid_effects = Vec::new();
+
+        runtime.drain_events(&mut events, &mut invalid_events);
+        runtime.apply_pending_effects(&mut invalid_effects);
+
+        assert!(invalid_events.is_empty());
+        assert!(invalid_effects.is_empty());
+        assert_eq!(target.borrow().inputs.len(), 1);
+        assert_eq!(target.borrow().inputs[0].target.surface(), target_surface);
     }
 
     #[test]

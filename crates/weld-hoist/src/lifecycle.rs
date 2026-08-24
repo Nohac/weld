@@ -15,7 +15,10 @@ use bevy::{
 use weld_app::{
     client::ClientAdapterCommandQueue,
     input::GlobalShortcutPressed,
-    surface::{ClientId, ClientSource, ClientToplevel, MappedSurface},
+    surface::{
+        ClientId, ClientSource, ClientToplevel, MappedSurface, SurfaceAction, SurfaceActionQueue,
+        SurfaceCommitRevisions,
+    },
 };
 use weld_hoist_core::{HoistFamilyId, HoistSourceMode, ReclaimScope};
 use weld_hoist_ui::{
@@ -265,7 +268,7 @@ fn begin_hoist(params: &mut BeginHoistParams, planned: PlannedHoist) {
     let destination = params.transport.0.destination(surface);
     params
         .adapter_commands
-        .push(params.transport.0.map(surface));
+        .push(params.transport.0.map(id, surface));
     params
         .commands
         .entity(source_client)
@@ -305,7 +308,11 @@ fn begin_hoist(params: &mut BeginHoistParams, planned: PlannedHoist) {
         original_vacancy: *vacancy,
         placeholder_metrics: metrics,
         detach_on_restore: false,
-        state: SessionState::Mapping,
+        state: if params.transport.0.has_local_receiver() {
+            SessionState::Mapping
+        } else {
+            SessionState::Active
+        },
     });
 }
 
@@ -321,6 +328,7 @@ type ReceiverWindows<'w, 's> = ParamSet<
 #[derive(SystemParam)]
 pub(super) struct BindReceiverParams<'w, 's> {
     commands: Commands<'w, 's>,
+    transport: Res<'w, HoistTransport>,
     sessions: Query<'w, 's, (Entity, &'static mut HoistSession)>,
     clients: Query<
         'w,
@@ -335,6 +343,9 @@ pub(super) struct BindReceiverParams<'w, 's> {
 }
 
 pub(super) fn bind_loopback_receivers(mut params: BindReceiverParams) {
+    if !params.transport.0.has_local_receiver() {
+        return;
+    }
     for (session_entity, mut session) in &mut params.sessions {
         if !matches!(session.state, SessionState::Mapping) {
             continue;
@@ -402,6 +413,8 @@ pub(super) struct MaintainParams<'w, 's> {
     families: WindowFamilyResolver<'w, 's>,
     transport: Res<'w, HoistTransport>,
     adapter_commands: ResMut<'w, ClientAdapterCommandQueue>,
+    actions: ResMut<'w, SurfaceActionQueue>,
+    revisions: Res<'w, SurfaceCommitRevisions>,
     redraw: MessageWriter<'w, RequestRedraw>,
     scratch: Local<'s, MaintainScratch>,
 }
@@ -425,6 +438,10 @@ pub(super) fn maintain_sessions(mut params: MaintainParams) {
     }
 
     for (entity, mut session) in &mut params.sessions {
+        if !params.transport.0.is_available() {
+            restore_source(&mut params.commands, entity, &session);
+            continue;
+        }
         if matches!(session.state, SessionState::Closed) {
             if params.scratch.dismissed.contains(&entity) {
                 if let Some(source) = session.source_window {
@@ -507,9 +524,6 @@ pub(super) fn maintain_sessions(mut params: MaintainParams) {
         {
             continue;
         }
-        let Some(receiver) = session.receiver else {
-            continue;
-        };
         let Some(source) = session.source_window else {
             params
                 .adapter_commands
@@ -520,12 +534,31 @@ pub(super) fn maintain_sessions(mut params: MaintainParams) {
         let Ok((source_geometry, source_output)) = params.windows.get(source) else {
             continue;
         };
-        let Ok((resize, _, presentation)) = params.receivers.get(receiver) else {
-            continue;
-        };
         let target_size = rounded_client_size(
             (source_geometry.size - session.placeholder_metrics.insets.extent()).max(Vec2::ONE),
         );
+        if !params.transport.0.has_local_receiver() {
+            let after_revision = params.revisions.revision(session.surface);
+            params.actions.push(SurfaceAction::Resize {
+                surface: session.surface,
+                logical_size: target_size,
+            });
+            session.state = SessionState::Reclaiming {
+                scope: ReclaimScope::Family,
+                target_size,
+                resize_required: true,
+                resize_request_observed: true,
+                remote_after_revision: Some(after_revision),
+                deadline: Instant::now() + RECLAIM_CONFIGURE_TIMEOUT,
+            };
+            continue;
+        }
+        let Some(receiver) = session.receiver else {
+            continue;
+        };
+        let Ok((resize, _, presentation)) = params.receivers.get(receiver) else {
+            continue;
+        };
         let resize_required = resize.requested_size() != target_size
             || resize.pending_after_revision(session.destination).is_some();
         let receiver_insets = presentation
@@ -547,6 +580,7 @@ pub(super) fn maintain_sessions(mut params: MaintainParams) {
             target_size,
             resize_required,
             resize_request_observed: false,
+            remote_after_revision: None,
             deadline: Instant::now() + RECLAIM_CONFIGURE_TIMEOUT,
         };
     }
@@ -560,6 +594,7 @@ pub(super) struct CompleteScratch {
 pub(super) fn complete_reclaims(
     mut sessions: Query<(Entity, &mut HoistSession)>,
     receivers: Query<&ClientResizeState, With<LoopbackReceiver>>,
+    revisions: Res<SurfaceCommitRevisions>,
     transport: Res<HoistTransport>,
     mut adapter_commands: ResMut<ClientAdapterCommandQueue>,
     mut scratch: Local<CompleteScratch>,
@@ -572,12 +607,15 @@ pub(super) fn complete_reclaims(
             target_size,
             resize_required,
             mut resize_request_observed,
+            remote_after_revision,
             deadline,
         } = session.state
         else {
             continue;
         };
-        let ready = if let Some(receiver) = session.receiver
+        let ready = if let Some(after_revision) = remote_after_revision {
+            revisions.revision(session.surface) > after_revision || now >= deadline
+        } else if let Some(receiver) = session.receiver
             && let Ok(resize) = receivers.get(receiver)
         {
             let pending = resize.pending_after_revision(session.destination).is_some();
@@ -596,6 +634,7 @@ pub(super) fn complete_reclaims(
             target_size,
             resize_required,
             resize_request_observed,
+            remote_after_revision,
             deadline,
         };
         if let Some((_, family_ready)) = scratch

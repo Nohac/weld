@@ -138,6 +138,7 @@ pub(crate) struct ServerOptions<'a> {
     pub(crate) outputs: Vec<ServerOutputDefinition>,
     pub(crate) dmabuf_capabilities: Option<&'a DmabufCapabilities>,
     pub(crate) dmabuf_sources: DmabufSourceCache,
+    pub(crate) socket_name: Option<&'a str>,
 }
 
 struct ServerOutput {
@@ -161,6 +162,7 @@ impl ServerState {
             outputs,
             dmabuf_capabilities,
             dmabuf_sources,
+            socket_name: requested_socket_name,
         } = options;
         let display_handle = display.handle();
         let compositor_state = CompositorState::new::<Self>(&display_handle);
@@ -220,10 +222,11 @@ impl ServerState {
             }
         }
 
-        let listening_socket = ListeningSocketSource::with_name(WELD_SOCKET_NAME)
+        let socket_name = requested_socket_name.unwrap_or(WELD_SOCKET_NAME);
+        let listening_socket = ListeningSocketSource::with_name(socket_name)
             .with_context(|| {
                 format!(
-                    "failed to bind Weld Wayland socket {WELD_SOCKET_NAME:?}; another Weld instance may already be running"
+                    "failed to bind Weld Wayland socket {socket_name:?}; another compositor may already be using it"
                 )
             })?;
         let socket_name = listening_socket.socket_name().to_os_string();
@@ -464,7 +467,9 @@ impl ServerState {
                 ClientSurfaceRequestKind::Configure { logical_size } => {
                     self.pending_resizes.queue(request.surface, logical_size);
                 }
-                ClientSurfaceRequestKind::SetOutputs { outputs, preferred } => {
+                ClientSurfaceRequestKind::SetOutputs {
+                    outputs, preferred, ..
+                } => {
                     let outputs = outputs
                         .into_iter()
                         .map(|output| OutputId::new(output.raw()))
@@ -474,6 +479,9 @@ impl ServerState {
                         &outputs,
                         preferred.map(|output| OutputId::new(output.raw())),
                     );
+                }
+                ClientSurfaceRequestKind::SetPreferredScale { scale_120 } => {
+                    self.set_toplevel_preferred_scale(request.surface, scale_120);
                 }
             },
             ClientRequest::Focus(request) => {

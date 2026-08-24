@@ -7,6 +7,7 @@ mod tests;
 
 use std::{
     collections::{HashMap, HashSet},
+    sync::Arc,
     time::{Duration, Instant},
 };
 
@@ -23,11 +24,10 @@ use weld_app::{
     input::{GlobalShortcut, GlobalShortcutAppExt, GlobalShortcutId, GlobalShortcutModifiers},
     surface::{ClientId, SurfaceId},
 };
-use weld_hoist_core::LoopbackEndpoint;
 use weld_window::{WindowSystems, WindowVacancy};
 
 pub use weld_hoist_core::{
-    HoistFamilyId, HoistSessionId, HoistSessionPhase, HoistSourceMode, ReclaimScope,
+    HoistEndpoint, HoistFamilyId, HoistSessionId, HoistSessionPhase, HoistSourceMode, ReclaimScope,
     loopback_registration,
 };
 pub use weld_hoist_ui::{
@@ -37,8 +37,14 @@ pub use weld_hoist_ui::{
 
 const RECLAIM_CONFIGURE_TIMEOUT: Duration = Duration::from_secs(2);
 
-#[derive(Resource, Clone, Copy, Debug)]
-pub struct HoistTransport(pub LoopbackEndpoint);
+#[derive(Resource, Clone)]
+pub struct HoistTransport(pub Arc<dyn HoistEndpoint>);
+
+impl HoistTransport {
+    pub fn new(endpoint: impl HoistEndpoint + 'static) -> Self {
+        Self(Arc::new(endpoint))
+    }
+}
 
 #[derive(Component, Clone, Copy, Debug, Eq, PartialEq)]
 pub struct HoistedWindow {
@@ -73,6 +79,7 @@ enum SessionState {
         target_size: UVec2,
         resize_required: bool,
         resize_request_observed: bool,
+        remote_after_revision: Option<u64>,
         deadline: Instant,
     },
 }

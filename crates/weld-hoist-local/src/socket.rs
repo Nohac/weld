@@ -1,11 +1,11 @@
 use std::{
-    cell::RefCell,
     collections::VecDeque,
     fmt,
     io::{IoSlice, IoSliceMut},
     mem::MaybeUninit,
     os::fd::{AsFd, BorrowedFd, OwnedFd},
     path::{Path, PathBuf},
+    sync::{Arc, Mutex, MutexGuard},
 };
 
 use calloop::{Interest, Mode, generic::Generic};
@@ -48,6 +48,7 @@ pub enum TransportError {
         expected: LocalPeerRole,
         actual: LocalPeerRole,
     },
+    Protocol(String),
     Disconnected,
 }
 
@@ -79,6 +80,9 @@ impl fmt::Display for TransportError {
                 formatter,
                 "local transport peer has role {actual:?}, expected {expected:?}"
             ),
+            Self::Protocol(message) => {
+                write!(formatter, "local transport protocol failed: {message}")
+            }
             Self::Disconnected => formatter.write_str("local transport peer disconnected"),
         }
     }
@@ -183,6 +187,20 @@ impl LocalPacketListener {
             Err(error) => Err(error.into()),
         }
     }
+
+    /// Waits for one startup peer without timer polling.
+    pub fn accept_blocking(&self) -> Result<LocalPacketConnection, TransportError> {
+        loop {
+            if let Some(connection) = self.accept()? {
+                return Ok(connection);
+            }
+            let mut descriptor = [rustix::event::PollFd::new(
+                &self.socket,
+                rustix::event::PollFlags::IN,
+            )];
+            rustix::event::poll(&mut descriptor, None)?;
+        }
+    }
 }
 
 impl AsFd for LocalPacketListener {
@@ -201,11 +219,14 @@ impl Drop for LocalPacketListener {
     }
 }
 
-pub struct LocalPacketConnection {
+#[derive(Clone)]
+pub struct LocalPacketConnection(Arc<LocalPacketConnectionInner>);
+
+struct LocalPacketConnectionInner {
     socket: OwnedFd,
     epoll: OwnedFd,
     local_role: LocalPeerRole,
-    state: RefCell<ConnectionState>,
+    state: Mutex<ConnectionState>,
 }
 
 #[derive(Default)]
@@ -213,10 +234,19 @@ struct ConnectionState {
     outgoing: VecDeque<LocalPacket>,
     received: VecDeque<LocalPacket>,
     disconnected: bool,
+    registered: bool,
+    failure: Option<TransportError>,
     receive_scratch: Vec<u8>,
 }
 
 impl LocalPacketConnection {
+    fn state(&self) -> MutexGuard<'_, ConnectionState> {
+        self.0
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
     pub fn connect(
         path: impl AsRef<Path>,
         local_role: LocalPeerRole,
@@ -253,15 +283,16 @@ impl LocalPacketConnection {
         ioctl_fionbio(&socket, true)?;
         let epoll = epoll::create(epoll::CreateFlags::CLOEXEC)?;
         epoll::add(&epoll, &socket, SOCKET_EVENT, receive_event_flags())?;
-        Ok(Self {
+        Ok(Self(Arc::new(LocalPacketConnectionInner {
             socket,
             epoll,
             local_role,
-            state: RefCell::new(ConnectionState {
+            state: Mutex::new(ConnectionState {
                 receive_scratch: vec![0_u8; MAX_PACKET_BYTES],
+                registered: true,
                 ..ConnectionState::default()
             }),
-        })
+        })))
     }
 
     /// Wraps the stable aggregate epoll descriptor for insertion into calloop.
@@ -274,13 +305,13 @@ impl LocalPacketConnection {
         message: &impl Serialize,
         file_descriptors: Vec<OwnedFd>,
     ) -> Result<(), TransportError> {
-        let mut state = self.state.borrow_mut();
+        let mut state = self.state();
         if state.disconnected {
             return Err(TransportError::Disconnected);
         }
         state.outgoing.push_back(LocalPacket::encode(
             &AuthenticatedPacket {
-                role: self.local_role,
+                role: self.0.local_role,
                 message,
             },
             file_descriptors,
@@ -294,7 +325,7 @@ impl LocalPacketConnection {
     pub fn pump(&self) -> Result<(), TransportError> {
         let mut events = Vec::with_capacity(4);
         epoll::wait(
-            &self.epoll,
+            &self.0.epoll,
             spare_capacity(&mut events),
             Some(&rustix::event::Timespec {
                 tv_sec: 0,
@@ -308,7 +339,7 @@ impl LocalPacketConnection {
                 continue;
             }
             if flags.intersects(epoll::EventFlags::ERR | epoll::EventFlags::HUP) {
-                self.state.borrow_mut().disconnected = true;
+                self.state().disconnected = true;
             }
             if flags.contains(epoll::EventFlags::IN) {
                 self.receive_ready()?;
@@ -317,8 +348,9 @@ impl LocalPacketConnection {
                 self.send_ready()?;
             }
         }
+        self.retire_disconnected_socket()?;
         self.update_interest()?;
-        let state = self.state.borrow();
+        let state = self.state();
         if state.disconnected && state.received.is_empty() {
             Err(TransportError::Disconnected)
         } else {
@@ -329,9 +361,15 @@ impl LocalPacketConnection {
     pub fn drain<T: DeserializeOwned>(
         &self,
     ) -> Result<Vec<ReceivedLocalPacket<T>>, TransportError> {
-        self.pump()?;
-        self.state
-            .borrow_mut()
+        let pump_result = self.pump();
+        let mut state = self.state();
+        if state.received.is_empty() {
+            if let Some(error) = state.failure.take() {
+                return Err(error);
+            }
+            pump_result?;
+        }
+        state
             .received
             .drain(..)
             .map(|packet| {
@@ -340,7 +378,7 @@ impl LocalPacketConnection {
                     file_descriptors,
                 } = packet;
                 let packet = postcard::from_bytes::<AuthenticatedPacket<T>>(&bytes)?;
-                let expected = self.local_role.peer();
+                let expected = self.0.local_role.peer();
                 if packet.role != expected {
                     return Err(TransportError::PeerRoleMismatch {
                         expected,
@@ -355,12 +393,25 @@ impl LocalPacketConnection {
             .collect()
     }
 
+    pub fn runtime_wake_source(&self) -> weld_core::host::ClientRuntimeWakeSource {
+        let descriptor = self.clone();
+        let connection = self.clone();
+        weld_core::host::ClientRuntimeWakeSource::new(descriptor, move || {
+            if let Err(error) = connection.pump()
+                && !matches!(error, TransportError::Disconnected)
+            {
+                connection.record_failure(error);
+            }
+            Ok(())
+        })
+    }
+
     pub fn is_disconnected(&self) -> bool {
-        self.state.borrow().disconnected
+        self.state().disconnected
     }
 
     fn send_ready(&self) -> Result<(), TransportError> {
-        let mut state = self.state.borrow_mut();
+        let mut state = self.state();
         while let Some(packet) = state.outgoing.front() {
             let borrowed = packet
                 .file_descriptors
@@ -376,7 +427,7 @@ impl LocalPacketConnection {
                 });
             }
             match sendmsg(
-                &self.socket,
+                &self.0.socket,
                 &[IoSlice::new(&packet.bytes)],
                 &mut control,
                 SendFlags::NOSIGNAL,
@@ -398,7 +449,7 @@ impl LocalPacketConnection {
     }
 
     fn receive_ready(&self) -> Result<(), TransportError> {
-        let mut state = self.state.borrow_mut();
+        let mut state = self.state();
         loop {
             let mut bytes = std::mem::take(&mut state.receive_scratch);
             let mut control_space =
@@ -407,7 +458,7 @@ impl LocalPacketConnection {
             let received = {
                 let mut iov = [IoSliceMut::new(&mut bytes)];
                 recvmsg(
-                    &self.socket,
+                    &self.0.socket,
                     &mut iov,
                     &mut control,
                     RecvFlags::CMSG_CLOEXEC,
@@ -454,18 +505,44 @@ impl LocalPacketConnection {
     }
 
     fn update_interest(&self) -> Result<(), TransportError> {
+        if !self.state().registered {
+            return Ok(());
+        }
         let mut flags = receive_event_flags();
-        if !self.state.borrow().outgoing.is_empty() {
+        if !self.state().outgoing.is_empty() {
             flags |= epoll::EventFlags::OUT;
         }
-        epoll::modify(&self.epoll, &self.socket, SOCKET_EVENT, flags)?;
+        epoll::modify(&self.0.epoll, &self.0.socket, SOCKET_EVENT, flags)?;
         Ok(())
+    }
+
+    fn retire_disconnected_socket(&self) -> Result<(), TransportError> {
+        let mut state = self.state();
+        if !state.disconnected || !state.registered {
+            return Ok(());
+        }
+        epoll::delete(&self.0.epoll, &self.0.socket)?;
+        state.registered = false;
+        Ok(())
+    }
+
+    pub(crate) fn record_failure(&self, error: TransportError) {
+        let mut state = self.state();
+        state.failure.get_or_insert(error);
+        state.disconnected = true;
+        let registered = state.registered;
+        state.registered = false;
+        drop(state);
+        if registered {
+            let _ = epoll::delete(&self.0.epoll, &self.0.socket);
+        }
+        let _ = rustix::net::shutdown(&self.0.socket, rustix::net::Shutdown::Both);
     }
 }
 
 impl AsFd for LocalPacketConnection {
     fn as_fd(&self) -> BorrowedFd<'_> {
-        self.epoll.as_fd()
+        self.0.epoll.as_fd()
     }
 }
 

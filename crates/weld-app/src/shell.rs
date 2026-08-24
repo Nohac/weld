@@ -361,8 +361,15 @@ impl AppShell {
                 || importer
                     .importer
                     .is::<weld_client::PassthroughClientImporter>()
+                || importer
+                    .importer
+                    .is::<weld_core::dmabuf::DirectClientBufferImporter>()
             {
                 client_importers.insert(source);
+            } else if importer
+                .importer
+                .is::<weld_client::ControlOnlyClientImporter>()
+            {
             } else {
                 tracing::warn!(
                     source = source.raw(),
@@ -1043,6 +1050,7 @@ fn client_request(action: SurfaceAction) -> ClientRequest {
             surface,
             outputs,
             preferred,
+            preferred_scale_120,
         } => ClientRequest::Surface(ClientSurfaceRequest {
             surface,
             kind: ClientSurfaceRequestKind::SetOutputs {
@@ -1051,6 +1059,7 @@ fn client_request(action: SurfaceAction) -> ClientRequest {
                     .map(|output| ClientOutputId::new(output.raw()))
                     .collect(),
                 preferred: preferred.map(|output| ClientOutputId::new(output.raw())),
+                preferred_scale_120,
             },
         }),
     }

@@ -28,7 +28,7 @@ pub(crate) fn prepare(options: RunOptions, signals: Signals) -> Result<PreparedH
     Ok(PreparedHost::new(
         context,
         vec![client_registration],
-        move |application, adapters| {
+        move |application, adapters, wake_sources| {
             host::run(
                 runtime,
                 options,
@@ -36,6 +36,7 @@ pub(crate) fn prepare(options: RunOptions, signals: Signals) -> Result<PreparedH
                 application,
                 client_bridge,
                 adapters,
+                wake_sources,
             )
         },
     ))

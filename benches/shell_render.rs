@@ -204,7 +204,7 @@ fn surface_snapshot(content: SyntheticContent) -> ClientSurfaceEvent {
                 ClientBufferId::new(weld_core::WAYLAND_CLIENT_SOURCE, 1),
                 ClientBufferUseId::new(weld_core::WAYLAND_CLIENT_SOURCE, 1),
                 metadata,
-                Rc::new(weld_core::dmabuf::WaylandBufferAccess::Shm(
+                Rc::new(weld_core::dmabuf::DirectClientBufferAccess::Shm(
                     weld_core::dmabuf::WaylandShmBuffer { bgra_pixels },
                 )),
                 |_| {},

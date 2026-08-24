@@ -52,7 +52,7 @@ fn test_app() -> (App, weld_hoist_core::LoopbackEndpoint) {
         .insert_resource(Assets::<Image>::default())
         .insert_resource(UiScale(1.0))
         .insert_resource(ClientAdapterCommandQueue::default())
-        .insert_resource(HoistTransport(endpoint))
+        .insert_resource(HoistTransport::new(endpoint))
         .add_message::<RequestRedraw>()
         .add_plugins((
             SurfacePlugin,
@@ -288,6 +288,7 @@ fn hoist_uses_an_independent_relocated_client_and_restores_after_ordered_unmap()
             target_size,
             resize_required,
             resize_request_observed,
+            remote_after_revision,
             ..
         } = session.state
     {
@@ -296,6 +297,7 @@ fn hoist_uses_an_independent_relocated_client_and_restores_after_ordered_unmap()
             target_size,
             resize_required,
             resize_request_observed,
+            remote_after_revision,
             deadline: Instant::now() - Duration::from_millis(1),
         };
     }
@@ -574,6 +576,7 @@ fn reclaim_is_atomic_for_independent_same_client_peers_and_allows_a_new_family()
                 target_size,
                 resize_required,
                 resize_request_observed,
+                remote_after_revision,
                 ..
             } = session.state
         {
@@ -582,6 +585,7 @@ fn reclaim_is_atomic_for_independent_same_client_peers_and_allows_a_new_family()
                 target_size,
                 resize_required,
                 resize_request_observed,
+                remote_after_revision,
                 deadline: Instant::now() - Duration::from_millis(1),
             };
         }
@@ -809,6 +813,7 @@ fn reclaim_timeout_proceeds_without_a_client_commit() {
             target_size,
             resize_required,
             resize_request_observed,
+            remote_after_revision,
             ..
         } = session.state
     {
@@ -817,6 +822,7 @@ fn reclaim_timeout_proceeds_without_a_client_commit() {
             target_size,
             resize_required,
             resize_request_observed,
+            remote_after_revision,
             deadline: Instant::now() - Duration::from_millis(1),
         };
     }
@@ -923,6 +929,7 @@ fn relocated_receiver_owns_output_and_resize_policy() {
                 surface,
                 outputs,
                 preferred: Some(preferred),
+                ..
             } if *surface == destination
                 && outputs == &[OutputId::new(2)]
                 && *preferred == OutputId::new(2)

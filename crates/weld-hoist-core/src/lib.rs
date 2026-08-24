@@ -60,8 +60,28 @@ pub enum ReclaimScope {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum HoistEndpointCommand {
-    Map { source: ClientSurfaceId },
-    Unmap { source: ClientSurfaceId },
+    Map {
+        session: HoistSessionId,
+        source: ClientSurfaceId,
+    },
+    Unmap {
+        source: ClientSurfaceId,
+    },
+}
+
+pub trait HoistEndpoint: Send + Sync {
+    fn is_available(&self) -> bool {
+        true
+    }
+
+    fn has_local_receiver(&self) -> bool {
+        true
+    }
+
+    fn destination(&self, source: ClientSurfaceId) -> ClientSurfaceId;
+    fn map(&self, session: HoistSessionId, source: ClientSurfaceId)
+    -> ClientAdapterCommandEnvelope;
+    fn unmap(&self, source: ClientSurfaceId) -> ClientAdapterCommandEnvelope;
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -74,8 +94,15 @@ impl LoopbackEndpoint {
         self.source
     }
 
-    pub fn map(self, source: ClientSurfaceId) -> ClientAdapterCommandEnvelope {
-        ClientAdapterCommandEnvelope::new(self.source, HoistEndpointCommand::Map { source })
+    pub fn map(
+        self,
+        session: HoistSessionId,
+        source: ClientSurfaceId,
+    ) -> ClientAdapterCommandEnvelope {
+        ClientAdapterCommandEnvelope::new(
+            self.source,
+            HoistEndpointCommand::Map { session, source },
+        )
     }
 
     pub fn unmap(self, source: ClientSurfaceId) -> ClientAdapterCommandEnvelope {
@@ -84,6 +111,24 @@ impl LoopbackEndpoint {
 
     pub const fn destination(self, source: ClientSurfaceId) -> ClientSurfaceId {
         relocated_surface(self.source, source)
+    }
+}
+
+impl HoistEndpoint for LoopbackEndpoint {
+    fn destination(&self, source: ClientSurfaceId) -> ClientSurfaceId {
+        (*self).destination(source)
+    }
+
+    fn map(
+        &self,
+        session: HoistSessionId,
+        source: ClientSurfaceId,
+    ) -> ClientAdapterCommandEnvelope {
+        (*self).map(session, source)
+    }
+
+    fn unmap(&self, source: ClientSurfaceId) -> ClientAdapterCommandEnvelope {
+        (*self).unmap(source)
     }
 }
 
@@ -344,7 +389,7 @@ impl ClientAdapter for LoopbackClientAdapter {
             return;
         };
         match *command {
-            HoistEndpointCommand::Map { source } => self.map(source),
+            HoistEndpointCommand::Map { source, .. } => self.map(source),
             HoistEndpointCommand::Unmap { source } => self.unmap(source),
         }
     }
@@ -437,7 +482,7 @@ mod tests {
                 decoration: WindowDecoration::ServerSide,
             })),
         });
-        assert!(runtime.apply_command(endpoint.map(source)));
+        assert!(runtime.apply_command(endpoint.map(HoistSessionId::new(1), source)));
         let mut events = ClientEventQueue::default();
         let mut invalid = Vec::new();
 
@@ -473,7 +518,7 @@ mod tests {
         let (mut runtime, upstream, endpoint) = runtime();
         let owner = source(ClientSourceId::new(0), 1);
         let popup = source(ClientSourceId::new(0), 2);
-        assert!(runtime.apply_command(endpoint.map(owner)));
+        assert!(runtime.apply_command(endpoint.map(HoistSessionId::new(1), owner)));
         upstream.borrow_mut().events.push(ClientSurfaceEvent {
             surface: owner,
             kind: ClientSurfaceEventKind::Role(ClientSurfaceRole::Toplevel(ToplevelState {
@@ -512,7 +557,7 @@ mod tests {
     fn mapped_toplevel_relays_client_interactions_to_the_destination_identity() {
         let (mut runtime, upstream, endpoint) = runtime();
         let source = source(ClientSourceId::new(0), 3);
-        assert!(runtime.apply_command(endpoint.map(source)));
+        assert!(runtime.apply_command(endpoint.map(HoistSessionId::new(1), source)));
         upstream.borrow_mut().events.push(ClientSurfaceEvent {
             surface: source,
             kind: ClientSurfaceEventKind::Interaction(ToplevelInteractionRequestKind::Move),
@@ -610,7 +655,7 @@ mod tests {
             .events
             .push(commit(2, SurfaceBufferChange::Retained { metadata }));
         runtime.drain_events(&mut events, &mut invalid);
-        assert!(runtime.apply_command(endpoint.map(surface)));
+        assert!(runtime.apply_command(endpoint.map(HoistSessionId::new(1), surface)));
         runtime.drain_events(&mut events, &mut invalid);
 
         let mut relayed_replacement = false;
@@ -631,7 +676,7 @@ mod tests {
     fn focus_alias_rewrites_surface_and_source() {
         let (mut runtime, upstream, endpoint) = runtime();
         let surface = source(ClientSourceId::new(0), 5);
-        assert!(runtime.apply_command(endpoint.map(surface)));
+        assert!(runtime.apply_command(endpoint.map(HoistSessionId::new(1), surface)));
         let mut events = ClientEventQueue::default();
         let mut invalid = Vec::new();
         runtime.drain_events(&mut events, &mut invalid);

@@ -24,6 +24,15 @@ pub struct LocalDmabuf {
     pub planes: Vec<LocalDmabufPlane>,
 }
 
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub enum LocalBuffer {
+    Imported(LocalDmabuf),
+    Reused {
+        buffer: ClientBufferId,
+        use_id: ClientBufferUseId,
+    },
+}
+
 /// One source-to-destination packet. The session is common to every message.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct LocalSourcePacket {
@@ -33,7 +42,8 @@ pub struct LocalSourcePacket {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub enum LocalSourceMessage {
-    Surface(WireClientSurfaceEvent<LocalDmabuf>),
+    Surface(WireClientSurfaceEvent<LocalBuffer>),
+    BufferRetired { buffer: ClientBufferId },
     Withdraw { surface: ClientSurfaceId },
     Ended,
 }

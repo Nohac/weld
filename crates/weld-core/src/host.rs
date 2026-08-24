@@ -1,6 +1,11 @@
 //! Application-host contract driven by Weld's native backends.
 
-use std::{ffi::OsString, path::PathBuf};
+use std::{
+    ffi::OsString,
+    io,
+    os::fd::{AsFd, BorrowedFd},
+    path::PathBuf,
+};
 
 use anyhow::{Context, Result};
 use calloop::signals::{Signal, Signals};
@@ -23,6 +28,7 @@ pub(crate) struct RunOptions {
     pub(crate) screenshot: Option<PathBuf>,
     pub(crate) remote_debug_enabled: bool,
     pub(crate) output_scale: OutputScale,
+    pub(crate) socket_name: Option<String>,
 }
 
 /// Native host selected before an application is constructed.
@@ -78,6 +84,12 @@ impl HostBuilder {
     /// Configures an explicit scale for standalone DRM output.
     pub fn output_scale(mut self, scale: Option<OutputScale>) -> Self {
         self.output_scale = scale;
+        self
+    }
+
+    /// Selects an explicit Wayland socket name for this compositor instance.
+    pub fn socket_name(mut self, socket_name: Option<String>) -> Self {
+        self.options.socket_name = socket_name;
         self
     }
 
@@ -152,8 +164,63 @@ pub struct RenderContext {
     pub composition_format: wgpu::TextureFormat,
 }
 
-type RunPreparedHost =
-    Box<dyn FnOnce(Box<dyn CompositionHost>, Vec<ClientRuntimeAdapter>) -> Result<()>>;
+type RunPreparedHost = Box<
+    dyn FnOnce(
+        Box<dyn CompositionHost>,
+        Vec<ClientRuntimeAdapter>,
+        Vec<ClientRuntimeWakeSource>,
+    ) -> Result<()>,
+>;
+
+/// One adapter-owned readiness source integrated into the native calloop.
+pub struct ClientRuntimeWakeSource {
+    descriptor: Box<dyn AsFd>,
+    prepare: Box<dyn Fn() -> io::Result<()>>,
+}
+
+impl ClientRuntimeWakeSource {
+    pub fn new(
+        descriptor: impl AsFd + 'static,
+        prepare: impl Fn() -> io::Result<()> + 'static,
+    ) -> Self {
+        Self {
+            descriptor: Box::new(descriptor),
+            prepare: Box::new(prepare),
+        }
+    }
+
+    fn prepare(&self) -> io::Result<()> {
+        (self.prepare)()
+    }
+}
+
+impl AsFd for ClientRuntimeWakeSource {
+    fn as_fd(&self) -> BorrowedFd<'_> {
+        self.descriptor.as_fd()
+    }
+}
+
+pub(crate) fn register_client_wake_sources<Data: 'static>(
+    handle: &calloop::LoopHandle<'static, Data>,
+    sources: Vec<ClientRuntimeWakeSource>,
+) -> Result<()> {
+    use calloop::{Interest, Mode, PostAction, generic::Generic};
+
+    for source in sources {
+        handle
+            .insert_source(
+                Generic::new(source, Interest::READ, Mode::Level),
+                |_, source, _| {
+                    source.prepare()?;
+                    Ok(PostAction::Continue)
+                },
+            )
+            .map_err(|error| {
+                anyhow::anyhow!("failed to register a client runtime wake source: {error}")
+            })?;
+    }
+    Ok(())
+}
 
 /// Native event-loop state ready to drive one application host.
 pub struct PreparedRuntime {
@@ -162,7 +229,12 @@ pub struct PreparedRuntime {
 
 impl PreparedRuntime {
     pub(crate) fn new(
-        run: impl FnOnce(Box<dyn CompositionHost>, Vec<ClientRuntimeAdapter>) -> Result<()> + 'static,
+        run: impl FnOnce(
+            Box<dyn CompositionHost>,
+            Vec<ClientRuntimeAdapter>,
+            Vec<ClientRuntimeWakeSource>,
+        ) -> Result<()>
+        + 'static,
     ) -> Self {
         Self { run: Box::new(run) }
     }
@@ -174,8 +246,9 @@ impl PreparedRuntime {
         self,
         host: impl CompositionHost + 'static,
         adapters: Vec<ClientRuntimeAdapter>,
+        wake_sources: Vec<ClientRuntimeWakeSource>,
     ) -> Result<()> {
-        (self.run)(Box::new(host), adapters)
+        (self.run)(Box::new(host), adapters, wake_sources)
     }
 }
 
@@ -190,7 +263,12 @@ impl PreparedHost {
     pub(crate) fn new(
         context: RenderContext,
         client_adapters: Vec<ClientAdapterRegistration>,
-        run: impl FnOnce(Box<dyn CompositionHost>, Vec<ClientRuntimeAdapter>) -> Result<()> + 'static,
+        run: impl FnOnce(
+            Box<dyn CompositionHost>,
+            Vec<ClientRuntimeAdapter>,
+            Vec<ClientRuntimeWakeSource>,
+        ) -> Result<()>
+        + 'static,
     ) -> Self {
         Self {
             context,

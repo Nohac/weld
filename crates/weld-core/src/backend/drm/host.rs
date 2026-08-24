@@ -135,6 +135,7 @@ pub(super) fn run(
     mut application: Box<dyn CompositionHost>,
     client_bridge: crate::server::WaylandClientBridge,
     adapters: Vec<ClientRuntimeAdapter>,
+    wake_sources: Vec<crate::host::ClientRuntimeWakeSource>,
 ) -> Result<()> {
     let DrmRuntimeBootstrap {
         mut session,
@@ -154,8 +155,10 @@ pub(super) fn run(
     }
     let mut client_events = ClientEventQueue::default();
     let mut invalid_client_events = Vec::new();
+    let mut invalid_client_effects = Vec::new();
     let mut calloop: EventLoop<'static, LoopData<HostEvent>> =
         EventLoop::try_new().context("failed to create the DRM calloop event loop")?;
+    crate::host::register_client_wake_sources(&calloop.handle(), wake_sources)?;
     let display = Display::<ServerState>::new().context("failed to create the Wayland display")?;
     let server = ServerState::new(
         &calloop.handle(),
@@ -172,6 +175,7 @@ pub(super) fn run(
                 .collect(),
             dmabuf_capabilities: dmabuf_capabilities.as_ref(),
             dmabuf_sources,
+            socket_name: options.socket_name.as_deref(),
         },
     )?;
     let mut loop_data = LoopData::new(server);
@@ -400,6 +404,11 @@ pub(super) fn run(
         for invalid in invalid_client_events.drain(..) {
             warn!(%invalid, "client adapter published an invalid event");
         }
+        clients.apply_pending_effects(&mut invalid_client_effects);
+        for invalid in invalid_client_effects.drain(..) {
+            warn!(%invalid, "client adapter published an invalid effect");
+        }
+        loop_data.server.apply_pending_client_work();
         if !client_events.is_empty() {
             while let Some(event) = client_events.pop_front() {
                 let demand = application.enqueue_client_event(event);

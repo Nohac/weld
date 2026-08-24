@@ -107,6 +107,10 @@ pub enum DirectClientBufferAccess {
     Dmabuf(DmabufAccess),
 }
 
+/// Marker for adapters whose leases contain [`DirectClientBufferAccess`].
+#[derive(Clone, Copy, Debug, Default)]
+pub struct DirectClientBufferImporter;
+
 /// One already-copied SHM buffer retained until application import.
 #[derive(Debug)]
 pub struct WaylandShmBuffer {

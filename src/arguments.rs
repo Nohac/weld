@@ -55,6 +55,18 @@ pub struct AppArguments {
     #[arg(long, value_name = "FACTOR")]
     pub(crate) scale: Option<OutputScale>,
 
+    /// Wayland socket name exposed by this compositor instance.
+    #[arg(long, value_name = "NAME")]
+    pub(crate) wayland_socket: Option<String>,
+
+    /// Accept one sibling Weld destination over a local Unix seqpacket socket.
+    #[arg(long, value_name = "PATH", conflicts_with = "hoist_connect")]
+    pub(crate) hoist_listen: Option<PathBuf>,
+
+    /// Import hoisted windows from a sibling Weld source.
+    #[arg(long, value_name = "PATH", conflicts_with = "hoist_listen")]
+    pub(crate) hoist_connect: Option<PathBuf>,
+
     /// Optional client program followed by its arguments.
     #[arg(value_name = "CLIENT_AND_ARGS", allow_hyphen_values = true)]
     pub(crate) client: Vec<OsString>,
