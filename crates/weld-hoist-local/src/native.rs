@@ -2,26 +2,57 @@ use std::os::fd::OwnedFd;
 
 use anyhow::{Context, Result, ensure};
 use weld_client::{ClientBufferId, ClientBufferLease, ClientBufferMetadata, ClientBufferUseId};
-use weld_core::dmabuf::{ExternalDmabuf, ExternalDmabufPlane, export_client_dmabuf};
+use weld_core::dmabuf::{
+    DirectClientBufferAccess, ExternalDmabuf, ExternalDmabufPlane, WaylandShmBuffer,
+    export_client_dmabuf, export_client_shm, import_client_shm,
+};
 
-use crate::{LocalDmabuf, LocalDmabufPlane};
+use crate::{LocalBuffer, LocalBufferContent, LocalDmabuf, LocalDmabufPlane, LocalShm};
 
-/// Wire metadata and the descriptor array attached to its containing packet.
-pub struct ExportedLocalDmabuf {
-    pub buffer: LocalDmabuf,
+/// Wire metadata and descriptors attached to one transported buffer use.
+pub struct ExportedLocalBuffer {
+    pub buffer: LocalBuffer,
     pub file_descriptors: Vec<OwnedFd>,
 }
 
-pub fn export_local_dmabuf(
+pub fn export_local_buffer(
     lease: &ClientBufferLease,
     first_descriptor: usize,
-) -> Result<ExportedLocalDmabuf> {
-    let external = export_client_dmabuf(lease)?;
-    ensure!(
-        external.extent == lease.metadata().extent,
-        "DMA-BUF extent differs from client-buffer metadata"
-    );
-    package_external_dmabuf(lease.buffer(), lease.use_id(), external, first_descriptor)
+    reuse_dmabuf: bool,
+) -> Result<ExportedLocalBuffer> {
+    let access = lease
+        .access::<DirectClientBufferAccess>()
+        .context("client-buffer lease does not contain direct native access")?;
+    match access {
+        DirectClientBufferAccess::Dmabuf(_) if reuse_dmabuf => Ok(ExportedLocalBuffer {
+            buffer: LocalBuffer {
+                buffer: lease.buffer(),
+                use_id: lease.use_id(),
+                content: LocalBufferContent::ReusedDmabuf,
+            },
+            file_descriptors: Vec::new(),
+        }),
+        DirectClientBufferAccess::Dmabuf(_) => {
+            let external = export_client_dmabuf(lease)?;
+            ensure!(
+                external.extent == lease.metadata().extent,
+                "DMA-BUF extent differs from client-buffer metadata"
+            );
+            package_external_dmabuf(lease.buffer(), lease.use_id(), external, first_descriptor)
+        }
+        DirectClientBufferAccess::Shm(_) => {
+            let descriptor_index =
+                u16::try_from(first_descriptor).context("local SHM descriptor index overflow")?;
+            Ok(ExportedLocalBuffer {
+                buffer: LocalBuffer {
+                    buffer: lease.buffer(),
+                    use_id: lease.use_id(),
+                    content: LocalBufferContent::Shm(LocalShm { descriptor_index }),
+                },
+                file_descriptors: vec![export_client_shm(lease)?],
+            })
+        }
+    }
 }
 
 fn package_external_dmabuf(
@@ -29,7 +60,7 @@ fn package_external_dmabuf(
     use_id: ClientBufferUseId,
     external: ExternalDmabuf,
     first_descriptor: usize,
-) -> Result<ExportedLocalDmabuf> {
+) -> Result<ExportedLocalBuffer> {
     let mut file_descriptors = Vec::with_capacity(external.planes.len());
     let mut planes = Vec::with_capacity(external.planes.len());
     for (index, plane) in external.planes.into_iter().enumerate() {
@@ -42,14 +73,16 @@ fn package_external_dmabuf(
             stride: plane.stride,
         });
     }
-    Ok(ExportedLocalDmabuf {
-        buffer: LocalDmabuf {
+    Ok(ExportedLocalBuffer {
+        buffer: LocalBuffer {
             buffer,
             use_id,
-            format: external.format,
-            modifier: external.modifier,
-            flags: external.flags,
-            planes,
+            content: LocalBufferContent::ImportedDmabuf(LocalDmabuf {
+                format: external.format,
+                modifier: external.modifier,
+                flags: external.flags,
+                planes,
+            }),
         },
         file_descriptors,
     })
@@ -64,7 +97,7 @@ pub fn import_local_dmabuf(
     buffer: LocalDmabuf,
     metadata: ClientBufferMetadata,
     file_descriptors: &mut [Option<OwnedFd>],
-) -> Result<(ClientBufferId, ClientBufferUseId, ExternalDmabuf)> {
+) -> Result<ExternalDmabuf> {
     ensure!(!buffer.planes.is_empty(), "local DMA-BUF has no planes");
     let mut planes = Vec::with_capacity(buffer.planes.len());
     for plane in buffer.planes {
@@ -79,17 +112,27 @@ pub fn import_local_dmabuf(
             stride: plane.stride,
         });
     }
-    Ok((
-        buffer.buffer,
-        buffer.use_id,
-        ExternalDmabuf {
-            extent: metadata.extent,
-            format: buffer.format,
-            modifier: buffer.modifier,
-            flags: buffer.flags,
-            planes,
-        },
-    ))
+    Ok(ExternalDmabuf {
+        extent: metadata.extent,
+        format: buffer.format,
+        modifier: buffer.modifier,
+        flags: buffer.flags,
+        planes,
+    })
+}
+
+/// Consumes one descriptor and validates its packed BGRA payload.
+pub fn import_local_shm(
+    buffer: LocalShm,
+    metadata: ClientBufferMetadata,
+    file_descriptors: &mut [Option<OwnedFd>],
+) -> Result<WaylandShmBuffer> {
+    let descriptor = file_descriptors
+        .get_mut(usize::from(buffer.descriptor_index))
+        .context("local SHM descriptor index is out of bounds")?
+        .take()
+        .context("local SHM descriptor index was reused")?;
+    import_client_shm(descriptor, metadata)
 }
 
 pub fn ensure_descriptors_consumed(file_descriptors: &[Option<OwnedFd>]) -> Result<()> {
@@ -112,10 +155,7 @@ mod tests {
     }
 
     fn local_dmabuf(indices: &[u16]) -> LocalDmabuf {
-        let source = ClientSourceId::new(1);
         LocalDmabuf {
-            buffer: ClientBufferId::new(source, 2),
-            use_id: ClientBufferUseId::new(source, 3),
             format: 4,
             modifier: 5,
             flags: 6,
@@ -173,11 +213,14 @@ mod tests {
 
         assert_eq!(exported.buffer.buffer, buffer);
         assert_eq!(exported.buffer.use_id, use_id);
-        assert_eq!(exported.buffer.format, 12);
-        assert_eq!(exported.buffer.modifier, 13);
-        assert_eq!(exported.buffer.flags, 14);
+        let LocalBufferContent::ImportedDmabuf(dmabuf) = exported.buffer.content else {
+            panic!("expected imported DMA-BUF");
+        };
+        assert_eq!(dmabuf.format, 12);
+        assert_eq!(dmabuf.modifier, 13);
+        assert_eq!(dmabuf.flags, 14);
         assert_eq!(
-            exported.buffer.planes,
+            dmabuf.planes,
             vec![LocalDmabufPlane {
                 descriptor_index: 2,
                 offset: 15,

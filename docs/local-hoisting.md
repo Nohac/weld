@@ -14,7 +14,7 @@ transported toplevels and popups through ordinary window admission.
 The local connection has these properties:
 
 - Unix `SOCK_SEQPACKET` preserves one Postcard record per message.
-- Linux `SCM_RIGHTS` carries DMA-BUF plane descriptors beside the commit that
+- Linux `SCM_RIGHTS` carries native-buffer descriptors beside the commit that
   describes them.
 - Both endpoints verify `SO_PEERCRED` against Weld's effective UID and validate
   the opposite Source/Destination role on every packet.
@@ -26,8 +26,14 @@ The local connection has these properties:
 - Per-commit release remains separate from allocation retirement. Source
   Wayland release occurs only after the destination's final renderer lease is
   dropped.
-- Copied SHM content is unsupported. The connection fails and source layout is
-  restored instead of silently copying pixels across processes.
+- DMA-BUF content keeps the bind-once descriptor path and does not copy pixels.
+  A client-provided SHM buffer uses a deliberately separate compatibility path:
+  its already-normalized packed BGRA pixels are copied through a sealed
+  anonymous file descriptor and validated at the destination. SHM never
+  enters the reusable DMA-BUF import cache.
+- The outbound packet and descriptor queue is bounded. A peer that stops
+  draining fails the local session cleanly instead of retaining unbounded
+  per-frame SHM descriptors.
 
 Destination input is already addressed to the transported surface and enters
 the source's client runtime without the destination's compositor-global
@@ -77,9 +83,9 @@ multiple Weld instances in one runtime directory.
 
 - Exactly one peer is admitted during startup; there is no live listener,
   reconnect, discovery, or multi-peer policy yet.
-- Both processes must run as the same UID and use GPUs capable of importing the
-  advertised DMA-BUF format/modifier pair. A cross-GPU codec path is future
-  work.
+- Both processes must run as the same UID. DMA-BUF clients require GPUs capable
+  of importing the advertised format/modifier pair; SHM clients use the
+  explicit CPU-copy path. A cross-GPU codec path is future work.
 - The supported topology is sibling compositors. Do not launch the destination
   inside the source's Wayland session.
 - The Postcard records are intentionally pre-1.0 and require matching Weld

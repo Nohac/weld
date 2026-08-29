@@ -13,12 +13,13 @@ pub use adapter::{
     LocalDestinationEndpoint, local_destination_registration, local_source_registration,
 };
 pub use native::{
-    ExportedLocalDmabuf, ensure_descriptors_consumed, export_local_dmabuf, import_local_dmabuf,
+    ExportedLocalBuffer, ensure_descriptors_consumed, export_local_buffer, import_local_dmabuf,
+    import_local_shm,
 };
 pub use socket::{
     LocalPacketConnection, LocalPacketListener, LocalPeerRole, ReceivedLocalPacket, TransportError,
 };
 pub use wire::{
-    LocalBuffer, LocalDestinationMessage, LocalDestinationPacket, LocalDmabuf, LocalDmabufPlane,
-    LocalSourceMessage, LocalSourcePacket,
+    LocalBuffer, LocalBufferContent, LocalDestinationMessage, LocalDestinationPacket, LocalDmabuf,
+    LocalDmabufPlane, LocalShm, LocalSourceMessage, LocalSourcePacket,
 };

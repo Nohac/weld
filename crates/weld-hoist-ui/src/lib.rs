@@ -111,6 +111,7 @@ fn request_action(
     handles: Query<&HoistActionHandle>,
     mut reclaims: MessageWriter<ReclaimHoist>,
     mut dismissals: MessageWriter<DismissHoistTombstone>,
+    mut redraw: MessageWriter<RequestRedraw>,
 ) {
     if click.button != PointerButton::Primary || click.original_event_target() != click.entity {
         return;
@@ -128,6 +129,7 @@ fn request_action(
             session: handle.session,
         });
     }
+    redraw.write(RequestRedraw);
 }
 
 fn revoke_presentations(
@@ -392,5 +394,56 @@ fn sync_root_sizes(
     }
     if changed {
         redraw.write(RequestRedraw);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use bevy::{
+        app::App,
+        camera::{ManualTextureViewHandle, NormalizedRenderTarget},
+        ecs::message::Messages,
+        math::Vec2,
+        picking::{
+            backend::HitData,
+            events::{Click, Pointer},
+            pointer::{Location, PointerButton, PointerId},
+        },
+    };
+
+    use super::*;
+
+    #[test]
+    fn accepted_hoist_action_requests_redraw() {
+        let mut app = App::new();
+        app.add_message::<RequestRedraw>()
+            .add_plugins(HoistUiPlugin);
+        let session = app.world_mut().spawn_empty().id();
+        let button = app
+            .world_mut()
+            .spawn(HoistActionHandle {
+                session,
+                reclaim: true,
+            })
+            .id();
+        let camera = app.world_mut().spawn_empty().id();
+
+        app.world_mut().trigger(Pointer::new(
+            PointerId::Mouse,
+            Location {
+                target: NormalizedRenderTarget::TextureView(ManualTextureViewHandle(1)),
+                position: Vec2::ZERO,
+            },
+            Click {
+                button: PointerButton::Primary,
+                hit: HitData::new(camera, 0.0, None, None),
+                duration: std::time::Duration::ZERO,
+                count: 1,
+            },
+            button,
+        ));
+
+        assert_eq!(app.world().resource::<Messages<ReclaimHoist>>().len(), 1);
+        assert_eq!(app.world().resource::<Messages<RequestRedraw>>().len(), 1);
     }
 }

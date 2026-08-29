@@ -10,9 +10,13 @@ pub use manager::{
 };
 pub(crate) use source::{DmabufSourceCache, ImportedDmabufSource};
 
-use smithay::backend::allocator::dmabuf::Dmabuf;
-use std::os::fd::OwnedFd;
-use weld_client::{ClientBufferLease, ClientBufferUseId, Extent};
+use smithay::{backend::allocator::dmabuf::Dmabuf, utils::SealedFile};
+use std::{
+    fs::File,
+    io::{Read, Seek},
+    os::fd::{AsFd, OwnedFd},
+};
+use weld_client::{ClientBufferLease, ClientBufferMetadata, ClientBufferUseId, Extent};
 
 /// One owned DMA-BUF plane crossing an adapter or process boundary.
 #[derive(Debug)]
@@ -98,6 +102,75 @@ pub fn export_client_dmabuf(lease: &ClientBufferLease) -> anyhow::Result<Externa
         flags: access.dmabuf.flags().bits(),
         planes,
     })
+}
+
+/// Copies one normalized SHM lease into a sealed descriptor for local transfer.
+///
+/// This is an explicit compatibility path for clients that submit SHM. DMA-BUF
+/// leases must continue through [`export_client_dmabuf`] so their pixels are not
+/// copied through CPU memory.
+pub fn export_client_shm(lease: &ClientBufferLease) -> anyhow::Result<OwnedFd> {
+    use anyhow::{Context, ensure};
+
+    let access = lease
+        .access::<DirectClientBufferAccess>()
+        .context("client-buffer lease does not contain direct native access")?;
+    let DirectClientBufferAccess::Shm(shm) = access else {
+        anyhow::bail!("client-buffer lease contains a DMA-BUF, not copied SHM pixels");
+    };
+    let expected = packed_bgra_len(lease.metadata())?;
+    ensure!(
+        shm.bgra_pixels.len() == expected,
+        "copied SHM pixel length differs from client-buffer metadata"
+    );
+    let sealed = SealedFile::with_data(c"weld-client-shm", &shm.bgra_pixels)
+        .context("failed to seal copied SHM pixels")?;
+    sealed
+        .as_fd()
+        .try_clone_to_owned()
+        .context("failed to duplicate sealed SHM descriptor")
+}
+
+/// Reads a sealed, tightly packed BGRA descriptor received from a local peer.
+pub fn import_client_shm(
+    file_descriptor: OwnedFd,
+    metadata: ClientBufferMetadata,
+) -> anyhow::Result<WaylandShmBuffer> {
+    use anyhow::{Context, ensure};
+    use smithay::reexports::rustix::fs::{SealFlags, fcntl_get_seals};
+
+    let expected = packed_bgra_len(metadata)?;
+    let mut file = File::from(file_descriptor);
+    let required_seals = SealFlags::SHRINK | SealFlags::GROW | SealFlags::WRITE;
+    let seals = fcntl_get_seals(&file).context("failed to inspect SHM descriptor seals")?;
+    ensure!(
+        seals.contains(required_seals),
+        "SHM descriptor is not sealed against size and content changes"
+    );
+    let actual = usize::try_from(
+        file.metadata()
+            .context("failed to inspect sealed SHM descriptor")?
+            .len(),
+    )
+    .context("sealed SHM descriptor length exceeds address space")?;
+    ensure!(
+        actual == expected,
+        "sealed SHM descriptor length {actual} differs from expected {expected}"
+    );
+    file.rewind()
+        .context("failed to rewind sealed SHM descriptor")?;
+    let mut bgra_pixels = vec![0; expected];
+    file.read_exact(&mut bgra_pixels)
+        .context("failed to read sealed SHM pixels")?;
+    Ok(WaylandShmBuffer { bgra_pixels })
+}
+
+fn packed_bgra_len(metadata: ClientBufferMetadata) -> anyhow::Result<usize> {
+    let pixels = u64::from(metadata.extent.width)
+        .checked_mul(u64::from(metadata.extent.height))
+        .and_then(|pixels| pixels.checked_mul(4))
+        .ok_or_else(|| anyhow::anyhow!("SHM pixel length overflow"))?;
+    usize::try_from(pixels).map_err(|_| anyhow::anyhow!("SHM pixel length exceeds address space"))
 }
 
 /// Native access payload resolved by Weld's built-in application importer.
@@ -203,5 +276,44 @@ mod tests {
         .expect("matching source");
 
         assert!(export_client_dmabuf(&lease).is_err());
+    }
+
+    #[test]
+    fn copied_shm_roundtrips_through_a_sealed_descriptor() {
+        let source = ClientSourceId::new(1);
+        let metadata = ClientBufferMetadata::new(Extent::new(2, 1), false);
+        let pixels = vec![1, 2, 3, 4, 5, 6, 7, 8];
+        let lease = ClientBufferLease::new(
+            ClientBufferId::new(source, 2),
+            ClientBufferUseId::new(source, 3),
+            metadata,
+            Rc::new(DirectClientBufferAccess::Shm(WaylandShmBuffer {
+                bgra_pixels: pixels.clone(),
+            })),
+            |_| {},
+        )
+        .expect("matching source");
+
+        let descriptor = export_client_shm(&lease).expect("sealed SHM export");
+        let imported = import_client_shm(descriptor, metadata).expect("sealed SHM import");
+
+        assert_eq!(imported.bgra_pixels, pixels);
+    }
+
+    #[test]
+    fn sealed_shm_length_must_match_buffer_metadata() {
+        let sealed = SealedFile::with_data(c"weld-shm-test", &[0; 4]).expect("sealed test data");
+        let descriptor = sealed
+            .as_fd()
+            .try_clone_to_owned()
+            .expect("test descriptor");
+
+        let error = import_client_shm(
+            descriptor,
+            ClientBufferMetadata::new(Extent::new(2, 1), false),
+        )
+        .expect_err("mismatched SHM length");
+
+        assert!(error.to_string().contains("differs from expected"));
     }
 }

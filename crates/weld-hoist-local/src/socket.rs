@@ -23,6 +23,8 @@ use serde::{Serialize, de::DeserializeOwned};
 
 const MAX_PACKET_BYTES: usize = 192 * 1024;
 const MAX_PACKET_FDS: usize = 16;
+const MAX_QUEUED_PACKETS: usize = 256;
+const MAX_QUEUED_FILE_DESCRIPTORS: usize = 128;
 const SOCKET_EVENT: epoll::EventData = epoll::EventData::new_u64(1);
 
 #[derive(Debug)]
@@ -34,6 +36,10 @@ pub enum TransportError {
     },
     TooManyFileDescriptors {
         count: usize,
+    },
+    SendQueueFull {
+        packets: usize,
+        file_descriptors: usize,
     },
     TruncatedPacket,
     PartialPacket {
@@ -66,6 +72,13 @@ impl fmt::Display for TransportError {
             Self::TooManyFileDescriptors { count } => write!(
                 formatter,
                 "local transport packet has too many file descriptors: {count}"
+            ),
+            Self::SendQueueFull {
+                packets,
+                file_descriptors,
+            } => write!(
+                formatter,
+                "local transport send queue is full: {packets} packets and {file_descriptors} file descriptors"
             ),
             Self::TruncatedPacket => formatter.write_str("local transport packet was truncated"),
             Self::PartialPacket { expected, sent } => write!(
@@ -232,6 +245,7 @@ struct LocalPacketConnectionInner {
 #[derive(Default)]
 struct ConnectionState {
     outgoing: VecDeque<LocalPacket>,
+    queued_file_descriptors: usize,
     received: VecDeque<LocalPacket>,
     disconnected: bool,
     registered: bool,
@@ -305,17 +319,40 @@ impl LocalPacketConnection {
         message: &impl Serialize,
         file_descriptors: Vec<OwnedFd>,
     ) -> Result<(), TransportError> {
-        let mut state = self.state();
-        if state.disconnected {
-            return Err(TransportError::Disconnected);
-        }
-        state.outgoing.push_back(LocalPacket::encode(
+        let packet = LocalPacket::encode(
             &AuthenticatedPacket {
                 role: self.0.local_role,
                 message,
             },
             file_descriptors,
-        )?);
+        )?;
+        let mut state = self.state();
+        if state.disconnected {
+            return Err(TransportError::Disconnected);
+        }
+        let queued_file_descriptors = state
+            .queued_file_descriptors
+            .checked_add(packet.file_descriptors.len())
+            .ok_or(TransportError::SendQueueFull {
+                packets: state.outgoing.len(),
+                file_descriptors: usize::MAX,
+            })?;
+        if state.outgoing.len() >= MAX_QUEUED_PACKETS
+            || queued_file_descriptors > MAX_QUEUED_FILE_DESCRIPTORS
+        {
+            let packets = state.outgoing.len();
+            drop(state);
+            self.record_failure(TransportError::SendQueueFull {
+                packets,
+                file_descriptors: queued_file_descriptors,
+            });
+            return Err(TransportError::SendQueueFull {
+                packets,
+                file_descriptors: queued_file_descriptors,
+            });
+        }
+        state.queued_file_descriptors = queued_file_descriptors;
+        state.outgoing.push_back(packet);
         drop(state);
         self.update_interest()?;
         Ok(())
@@ -433,6 +470,9 @@ impl LocalPacketConnection {
                 SendFlags::NOSIGNAL,
             ) {
                 Ok(sent) if sent == packet.bytes.len() => {
+                    state.queued_file_descriptors = state
+                        .queued_file_descriptors
+                        .saturating_sub(packet.file_descriptors.len());
                     state.outgoing.pop_front();
                 }
                 Ok(sent) => {
@@ -523,6 +563,8 @@ impl LocalPacketConnection {
         }
         epoll::delete(&self.0.epoll, &self.0.socket)?;
         state.registered = false;
+        state.outgoing.clear();
+        state.queued_file_descriptors = 0;
         Ok(())
     }
 
@@ -530,6 +572,8 @@ impl LocalPacketConnection {
         let mut state = self.state();
         state.failure.get_or_insert(error);
         state.disconnected = true;
+        state.outgoing.clear();
+        state.queued_file_descriptors = 0;
         let registered = state.registered;
         state.registered = false;
         drop(state);
@@ -659,5 +703,23 @@ mod tests {
                 actual: LocalPeerRole::Source,
             })
         ));
+    }
+
+    #[test]
+    fn descriptor_bearing_send_queue_is_bounded() {
+        let (sender, _receiver) = LocalPacketConnection::pair().expect("socket pair");
+        for sequence in 0..MAX_QUEUED_FILE_DESCRIPTORS {
+            let descriptor = std::fs::File::open("/dev/null").expect("test descriptor");
+            sender
+                .queue(&sequence, vec![descriptor.into()])
+                .expect("queue within descriptor bound");
+        }
+        let descriptor = std::fs::File::open("/dev/null").expect("test descriptor");
+
+        assert!(matches!(
+            sender.queue(&MAX_QUEUED_FILE_DESCRIPTORS, vec![descriptor.into()]),
+            Err(TransportError::SendQueueFull { .. })
+        ));
+        assert!(sender.is_disconnected());
     }
 }

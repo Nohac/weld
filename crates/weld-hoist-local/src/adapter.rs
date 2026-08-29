@@ -1,6 +1,7 @@
 use std::{
     collections::{HashMap, HashSet},
     os::fd::OwnedFd,
+    rc::Rc,
 };
 
 use tracing::{error, warn};
@@ -13,13 +14,15 @@ use weld_client::{
     InputPosition, LinuxButtonCode, LinuxKeycode, PointerGestureKind, RawScrollPhase,
     RawScrollSource, WireClientSurfaceEvent, WireClientSurfaceEventKind, WireSurfaceBufferChange,
 };
-use weld_core::dmabuf::{DirectClientBufferImporter, DmabufAccess, DmabufContext};
+use weld_core::dmabuf::{
+    DirectClientBufferAccess, DirectClientBufferImporter, DmabufAccess, DmabufContext,
+};
 use weld_hoist_core::{HoistEndpoint, HoistEndpointCommand, HoistSessionId, relocated_surface};
 
 use crate::{
-    LocalBuffer, LocalDestinationMessage, LocalDestinationPacket, LocalPacketConnection,
-    LocalSourceMessage, LocalSourcePacket, ensure_descriptors_consumed, export_local_dmabuf,
-    import_local_dmabuf,
+    LocalBuffer, LocalBufferContent, LocalDestinationMessage, LocalDestinationPacket,
+    LocalPacketConnection, LocalSourceMessage, LocalSourcePacket, ensure_descriptors_consumed,
+    export_local_buffer, import_local_dmabuf, import_local_shm,
 };
 
 #[derive(Clone)]
@@ -407,23 +410,24 @@ impl LocalSourceAdapter {
     }
 
     fn send_event(&mut self, session: HoistSessionId, event: ClientSurfaceEvent) {
+        if self.transport_failed || self.connection.is_disconnected() {
+            return;
+        }
         let mut file_descriptors = Vec::new();
         let mut added_buffer_sessions = Vec::new();
         let mut added_uses = Vec::new();
         let wire = WireClientSurfaceEvent::try_from_client(event, |lease| {
             let use_id = lease.use_id();
-            let imported = self.published_buffers.contains_key(&lease.buffer());
-            let buffer = if imported {
-                LocalBuffer::Reused {
-                    buffer: lease.buffer(),
-                    use_id: lease.use_id(),
-                }
-            } else {
-                let exported = export_local_dmabuf(&lease, file_descriptors.len())?;
-                file_descriptors.extend(exported.file_descriptors);
-                LocalBuffer::Imported(exported.buffer)
-            };
-            if self
+            let exported = export_local_buffer(
+                &lease,
+                file_descriptors.len(),
+                self.published_buffers.contains_key(&lease.buffer()),
+            )?;
+            file_descriptors.extend(exported.file_descriptors);
+            if matches!(
+                exported.buffer.content,
+                LocalBufferContent::ImportedDmabuf(_) | LocalBufferContent::ReusedDmabuf
+            ) && self
                 .published_buffers
                 .entry(lease.buffer())
                 .or_default()
@@ -433,7 +437,7 @@ impl LocalSourceAdapter {
             }
             self.pending_uses.insert(use_id, (session, lease));
             added_uses.push(use_id);
-            Ok::<_, anyhow::Error>(buffer)
+            Ok::<_, anyhow::Error>(exported.buffer)
         });
         match wire {
             Ok(event) => {
@@ -452,6 +456,7 @@ impl LocalSourceAdapter {
                 self.rollback_export(session, &added_buffer_sessions, &added_uses);
                 self.connection
                     .record_failure(crate::TransportError::Protocol(error.to_string()));
+                self.fail_transport();
             }
         }
     }
@@ -475,9 +480,14 @@ impl LocalSourceAdapter {
         }
     }
 
-    fn queue_source(&self, packet: LocalSourcePacket, file_descriptors: Vec<OwnedFd>) -> bool {
+    fn queue_source(&mut self, packet: LocalSourcePacket, file_descriptors: Vec<OwnedFd>) -> bool {
+        if self.transport_failed || self.connection.is_disconnected() {
+            return false;
+        }
         if let Err(error) = self.connection.queue(&packet, file_descriptors) {
             warn!(%error, "could not queue a local hoist source packet");
+            self.connection.record_failure(error);
+            self.fail_transport();
             return false;
         }
         true
@@ -639,7 +649,7 @@ impl ClientAdapter for LocalSourceAdapter {
     }
 }
 
-struct ImportedBuffer {
+struct ImportedDmabuf {
     local: u64,
     access: DmabufAccess,
 }
@@ -651,7 +661,7 @@ struct LocalDestinationAdapter {
     dmabuf: DmabufContext,
     events: ClientEventQueue,
     sessions: HashMap<ClientSurfaceId, HoistSessionId>,
-    buffers: HashMap<ClientBufferId, ImportedBuffer>,
+    buffers: HashMap<ClientBufferId, ImportedDmabuf>,
     next_buffer: Option<u64>,
     next_use: Option<u64>,
     keyboard_focus: Option<ClientSurfaceId>,
@@ -703,12 +713,18 @@ impl LocalDestinationAdapter {
         match packet.message {
             LocalSourceMessage::Surface(mut event) => {
                 let source_surface = event.surface;
-                let buffer_uses = wire_buffer_uses(&event);
+                let mut unreleased_uses = wire_buffer_uses(&event);
                 self.sessions.insert(source_surface, packet.session);
                 rewrite_wire_event(&mut event, self.descriptor.id);
                 let mut descriptors = file_descriptors.into_iter().map(Some).collect::<Vec<_>>();
                 let event = event.try_into_client(|buffer, metadata| {
-                    self.import_buffer(packet.session, buffer, metadata, &mut descriptors)
+                    let source_use = buffer.use_id;
+                    let imported =
+                        self.import_buffer(packet.session, buffer, metadata, &mut descriptors);
+                    if imported.is_ok() {
+                        unreleased_uses.retain(|use_id| *use_id != source_use);
+                    }
+                    imported
                 });
                 match event.and_then(|event| {
                     ensure_descriptors_consumed(&descriptors)?;
@@ -717,7 +733,7 @@ impl LocalDestinationAdapter {
                     Ok(event) => self.events.push(event),
                     Err(error) => {
                         warn!(%error, "rejected a local hoist surface packet");
-                        for use_id in buffer_uses {
+                        for use_id in unreleased_uses {
                             self.send_destination(
                                 packet.session,
                                 LocalDestinationMessage::BufferReleased { use_id },
@@ -743,58 +759,79 @@ impl LocalDestinationAdapter {
         metadata: ClientBufferMetadata,
         descriptors: &mut [Option<OwnedFd>],
     ) -> anyhow::Result<ClientBufferLease> {
-        let (source_buffer, source_use, access) = match buffer {
-            LocalBuffer::Imported(buffer) => {
-                let (source_buffer, source_use, external) =
-                    import_local_dmabuf(buffer, metadata, descriptors)?;
+        let LocalBuffer {
+            buffer: source_buffer,
+            use_id: source_use,
+            content,
+        } = buffer;
+        enum ImportedAccess {
+            Dmabuf(DmabufAccess),
+            Shm(weld_core::dmabuf::WaylandShmBuffer),
+        }
+        let access = match content {
+            LocalBufferContent::ImportedDmabuf(buffer) => {
+                let external = import_local_dmabuf(buffer, metadata, descriptors)?;
                 anyhow::ensure!(
                     !self.buffers.contains_key(&source_buffer),
                     "local DMA-BUF allocation was imported more than once"
                 );
-                (
-                    source_buffer,
-                    source_use,
-                    self.dmabuf.import_external(external)?,
-                )
+                ImportedAccess::Dmabuf(self.dmabuf.import_external(external)?)
             }
-            LocalBuffer::Reused { buffer, use_id } => {
+            LocalBufferContent::ReusedDmabuf => {
                 let imported = self
                     .buffers
-                    .get(&buffer)
+                    .get(&source_buffer)
                     .ok_or_else(|| anyhow::anyhow!("local DMA-BUF reuse precedes import"))?;
-                (buffer, use_id, imported.access.clone())
+                ImportedAccess::Dmabuf(imported.access.clone())
+            }
+            LocalBufferContent::Shm(buffer) => {
+                ImportedAccess::Shm(import_local_shm(buffer, metadata, descriptors)?)
             }
         };
-        let local = if let Some(imported) = self.buffers.get(&source_buffer) {
-            imported.local
-        } else {
-            let local = self.allocate_buffer()?;
-            self.buffers.insert(
-                source_buffer,
-                ImportedBuffer {
-                    local,
-                    access: access.clone(),
-                },
-            );
-            local
+        let local = match &access {
+            ImportedAccess::Dmabuf(access) => {
+                if let Some(imported) = self.buffers.get(&source_buffer) {
+                    imported.local
+                } else {
+                    let local = self.allocate_buffer()?;
+                    self.buffers.insert(
+                        source_buffer,
+                        ImportedDmabuf {
+                            local,
+                            access: access.clone(),
+                        },
+                    );
+                    local
+                }
+            }
+            ImportedAccess::Shm(_) => self.allocate_buffer()?,
         };
         let use_local = self.allocate_use()?;
         let connection = self.connection.clone();
-        self.dmabuf.lease_external(
-            ClientBufferId::new(self.descriptor.id, local),
-            ClientBufferUseId::new(self.descriptor.id, use_local),
-            metadata,
-            access,
-            move |_| {
-                let packet = LocalDestinationPacket {
-                    session,
-                    message: LocalDestinationMessage::BufferReleased { use_id: source_use },
-                };
-                if let Err(error) = connection.queue(&packet, Vec::new()) {
-                    warn!(%error, "could not release a local hoist buffer use");
-                }
-            },
-        )
+        let notify = move |_| {
+            let packet = LocalDestinationPacket {
+                session,
+                message: LocalDestinationMessage::BufferReleased { use_id: source_use },
+            };
+            if let Err(error) = connection.queue(&packet, Vec::new()) {
+                warn!(%error, "could not release a local hoist buffer use");
+            }
+        };
+        let buffer = ClientBufferId::new(self.descriptor.id, local);
+        let use_id = ClientBufferUseId::new(self.descriptor.id, use_local);
+        match access {
+            ImportedAccess::Dmabuf(access) => self
+                .dmabuf
+                .lease_external(buffer, use_id, metadata, access, notify),
+            ImportedAccess::Shm(shm) => ClientBufferLease::new(
+                buffer,
+                use_id,
+                metadata,
+                Rc::new(DirectClientBufferAccess::Shm(shm)),
+                notify,
+            )
+            .map_err(anyhow::Error::new),
+        }
     }
 
     fn allocate_buffer(&mut self) -> anyhow::Result<u64> {
@@ -964,10 +1001,7 @@ fn wire_buffer_uses(event: &WireClientSurfaceEvent<LocalBuffer>) -> Vec<ClientBu
         .buffers
         .iter()
         .filter_map(|update| match &update.change {
-            WireSurfaceBufferChange::Replaced { buffer, .. } => Some(match buffer {
-                LocalBuffer::Imported(buffer) => buffer.use_id,
-                LocalBuffer::Reused { use_id, .. } => *use_id,
-            }),
+            WireSurfaceBufferChange::Replaced { buffer, .. } => Some(buffer.use_id),
             WireSurfaceBufferChange::Retained { .. } | WireSurfaceBufferChange::Removed => None,
         })
         .collect()
@@ -1000,8 +1034,9 @@ fn rewrite_request_surface(request: &mut ClientRequest, source: ClientSurfaceId)
 mod tests {
     use super::*;
     use weld_client::{
-        ButtonState, ClientId, ClientSurfaceRequest, ClientSurfaceRole, InputPosition,
-        LinuxButtonCode, LinuxKeycode, PointerGesture, RawScrollFrame, ToplevelState,
+        ButtonState, ClientBufferMetadata, ClientCommitRevision, ClientId, ClientSurfaceRequest,
+        ClientSurfaceRole, Extent, InputPosition, LinuxButtonCode, LinuxKeycode, PointerGesture,
+        RawScrollFrame, SurfaceBufferChange, SurfaceBufferUpdate, SurfaceLayerId, ToplevelState,
         TouchpadSwipe, WindowDecoration,
     };
 
@@ -1064,6 +1099,75 @@ mod tests {
             [ClientAdapterEffect::Request(ClientRequest::Surface(request))]
                 if request.surface == surface
                     && request.kind == ClientSurfaceRequestKind::Close
+        ));
+    }
+
+    #[test]
+    fn source_transports_shm_without_publishing_a_reusable_allocation() {
+        let (source_connection, destination_connection) =
+            LocalPacketConnection::pair().expect("transport pair");
+        let source = ClientSourceId::new(0);
+        let session = HoistSessionId::new(3);
+        let surface = ClientSurfaceId::new(ClientId::new(source, 1), 2);
+        let metadata = ClientBufferMetadata::new(Extent::new(1, 1), false);
+        let lease = ClientBufferLease::new(
+            ClientBufferId::new(source, 4),
+            ClientBufferUseId::new(source, 5),
+            metadata,
+            Rc::new(DirectClientBufferAccess::Shm(
+                weld_core::dmabuf::WaylandShmBuffer {
+                    bgra_pixels: vec![1, 2, 3, 4],
+                },
+            )),
+            |_| {},
+        )
+        .expect("matching source");
+        let mut adapter = LocalSourceAdapter::new(source_connection.clone(), source);
+
+        adapter.send_event(
+            session,
+            ClientSurfaceEvent {
+                surface,
+                kind: ClientSurfaceEventKind::Commit(ClientSurfaceCommit {
+                    revision: ClientCommitRevision::new(1),
+                    mapped: true,
+                    root: None,
+                    window_geometry: None,
+                    overlays: Vec::new(),
+                    inputs: Vec::new(),
+                    buffers: vec![SurfaceBufferUpdate {
+                        layer: SurfaceLayerId::new(1),
+                        change: SurfaceBufferChange::Replaced {
+                            metadata,
+                            buffer: lease,
+                        },
+                    }],
+                }),
+            },
+        );
+        source_connection.pump().expect("source send");
+        let packets = destination_connection
+            .drain::<LocalSourcePacket>()
+            .expect("SHM packet");
+
+        assert!(adapter.published_buffers.is_empty());
+        assert_eq!(packets.len(), 1);
+        assert_eq!(packets[0].file_descriptors.len(), 1);
+        let LocalSourceMessage::Surface(event) = &packets[0].message.message else {
+            panic!("expected surface packet");
+        };
+        let WireClientSurfaceEventKind::Commit(commit) = &event.kind else {
+            panic!("expected surface commit");
+        };
+        assert!(matches!(
+            &commit.buffers[0].change,
+            WireSurfaceBufferChange::Replaced {
+                buffer: LocalBuffer {
+                    content: LocalBufferContent::Shm(_),
+                    ..
+                },
+                ..
+            }
         ));
     }
 

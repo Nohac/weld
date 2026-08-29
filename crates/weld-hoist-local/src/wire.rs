@@ -16,21 +16,31 @@ pub struct LocalDmabufPlane {
 /// Linux-local native-buffer metadata carried by a surface replacement.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct LocalDmabuf {
-    pub buffer: ClientBufferId,
-    pub use_id: ClientBufferUseId,
     pub format: u32,
     pub modifier: u64,
     pub flags: u32,
     pub planes: Vec<LocalDmabufPlane>,
 }
 
+/// One sealed descriptor containing tightly packed BGRA pixels.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub enum LocalBuffer {
-    Imported(LocalDmabuf),
-    Reused {
-        buffer: ClientBufferId,
-        use_id: ClientBufferUseId,
-    },
+pub struct LocalShm {
+    pub descriptor_index: u16,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub enum LocalBufferContent {
+    ImportedDmabuf(LocalDmabuf),
+    ReusedDmabuf,
+    Shm(LocalShm),
+}
+
+/// One committed buffer use and its transport-specific content binding.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct LocalBuffer {
+    pub buffer: ClientBufferId,
+    pub use_id: ClientBufferUseId,
+    pub content: LocalBufferContent,
 }
 
 /// One source-to-destination packet. The session is common to every message.

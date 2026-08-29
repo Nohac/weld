@@ -32,8 +32,9 @@ Weld is a workspace of reusable layers and one standard distribution:
 - `weld-hoist-core` owns transport-independent hoist identities and the
   Bevy-free loopback client adapter.
 - `weld-hoist-local` owns the Linux-local Postcard/Unix-seqpacket binding,
-  SCM_RIGHTS DMA-BUF transfer, and source/destination `weld-client` adapters.
-  It depends on core's native import capability but has no Bevy dependency.
+  SCM_RIGHTS native-buffer transfer, and source/destination `weld-client`
+  adapters. It depends on core's native import capability but has no Bevy
+  dependency.
 - `weld-hoist-ui` owns source placeholders, reclaim and closed-tombstone UI.
 - `weld-hoist` owns Bevy window-family admission and reclaim orchestration. It
   does not own client buffers, ordinary receiver presentation, a network
@@ -484,8 +485,14 @@ the atomic commit that names them. The first use binds one allocation; later
 uses refer to its stable buffer identity without duplicating descriptors or
 reimporting the Vulkan image. Native `wl_buffer` destruction and final session
 unmap send explicit retirement, while committed-use leases independently
-return only after destination GPU consumption. Copied SHM buffers are rejected
-rather than crossing the process boundary through a hidden pixel-copy path.
+return only after destination GPU consumption. This DMA-BUF path does not copy
+pixels. A client that submits SHM instead uses a separate, explicit
+compatibility path: core's already-normalized packed BGRA pixels are copied
+into a sealed anonymous file, its descriptor crosses in the same commit, and
+the destination validates and copies those pixels into its ordinary SHM lease.
+SHM allocations are neither advertised as DMA-BUF nor entered into the
+bind-once DMA-BUF cache. The send queue bounds descriptor ownership so a
+stalled peer cannot retain an unbounded number of per-commit SHM files.
 
 Destination requests and already-addressed input re-enter `ClientRuntime`
 immediately after transport ingress, outside Bevy's paced frame gate. Foreign
