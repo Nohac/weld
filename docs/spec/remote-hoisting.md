@@ -42,9 +42,10 @@ process inference. Unparented windows from the same executable or app ID do
 not automatically join. A newly mapped related dialog can be presented locally
 for one frame before window admission and follow-family policy observe it; that
 prototype transition remains to be tightened. A same-machine sibling-process
-DMA-BUF transport now exists as an architectural validation binding, but no
-network transport, complete transient policy, or non-xdg family inference is
-implemented.
+native-buffer transport now exists as an architectural validation binding. It
+retains DMA-BUF allocations without a pixel copy and carries already-copied SHM
+pixels through sealed descriptors. No network transport, complete transient
+policy, or non-xdg family inference is implemented.
 
 ## Hoisting layers and crate boundaries — Direction
 
@@ -68,10 +69,11 @@ remote network or media protocol:
   public hoist state and actions. SSD must not own or special-case those
   controls.
 - `weld-hoist-local` is the current same-machine validation binding. It uses
-  Unix sequenced packets and SCM_RIGHTS to relay native DMA-BUF allocations
-  between sibling Weld processes without a CPU pixel copy. It is deliberately
-  separate from `weld-hoist-core` and does not establish the future Iroh or
-  encoded-media framing.
+  Unix sequenced packets and SCM_RIGHTS to relay native buffers between sibling
+  Weld processes. DMA-BUF uses a bind-once descriptor path without a pixel
+  copy; SHM uses an explicit sealed-descriptor CPU-copy path. It is
+  deliberately separate from `weld-hoist-core` and does not establish the
+  future Iroh or encoded-media framing.
 
 Transport and codec implementations remain replaceable adapters around
 `weld-hoist-core`; concrete crates should be introduced only when their
@@ -201,12 +203,16 @@ separate presentation even when follow-family policy admits it.
 ## Transport binding and Iroh — Direction
 
 The hoisting protocol is independent of a particular transport API. Weld
-intends to evaluate [Iroh](https://docs.iroh.computer/) as the primary native
-peer-to-peer binding. Its cryptographic node identity and QUIC connectivity are
-attractive for encrypted connections without requiring users to manually
-configure static addresses, ports, domains, or a separate VPN. Actual
-discovery, relay, pairing, trust, and offline behavior must be validated
-against Iroh before the choice becomes an implemented dependency.
+intends to evaluate
+[Iroh 1.x](https://docs.iroh.computer/protocols/using-quic) as the primary
+native peer-to-peer binding. Its authenticated endpoint identity, encrypted
+QUIC connectivity, direct paths, and relay fallback are attractive for
+connections without requiring users to manually configure static addresses,
+ports, domains, or a separate VPN. Current upstream APIs also expose
+concurrent streams, datagrams, path changes, round-trip estimates, and
+connection statistics. Actual discovery, relay behavior, pairing, trust,
+mobile lifecycle, and offline recovery must be measured before Iroh becomes
+an implemented dependency.
 
 Browsers or constrained platforms may require another secure transport binding
 or a compatible gateway. Every binding must preserve protocol versioning,
@@ -218,18 +224,92 @@ explicitly disclosed and authorized. Pairing and hoist authority remain
 anchored to destination identity rather than being implicitly delegated to a
 gateway.
 
-One connection should multiplex logically independent flows:
+A logical peer session owns independent flows without exposing how a binding
+maps them onto physical connections. An Iroh binding should begin with one
+connection because streams are cheap and avoid stream-level head-of-line
+blocking. That mapping is not a protocol invariant: prioritization or multiple
+connections remain available if saturated media measurably harms control or
+input latency.
+
+The logical flows are:
 
 - **Control and state** — pairing, authorization, capabilities, window
   metadata, lifecycle, configure requests, errors, and reclaim transitions.
 - **Media** — encoded frames, timestamps, keyframe and damage metadata, and
   optional cursor metadata.
-- **Input** — low-latency pointer motion plus ordered button, key, modifier,
-  focus, and input-state transitions.
+- **Input** — reliable ordered pointer, button, key, modifier, focus, gesture,
+  and input-state transitions for the initial implementation.
 
 Logical separation is a protocol obligation even when a transport maps flows
-onto several QUIC streams, datagrams, or other primitives. Media congestion
-must not block input or lifecycle control.
+onto several QUIC streams, datagrams, connections, or other primitives. Media
+congestion must not block input or lifecycle control. A later measured
+optimization may send explicitly coalescible absolute pointer observations as
+datagrams. Keys, buttons, modifiers, relative locked-pointer deltas, focus,
+configure, and lifecycle transitions remain reliable and ordered.
+
+## Transport and media adapter boundary — Direction
+
+The stable hoist contract describes peer identity, authorization, capabilities,
+window and surface identity, lifecycle, preferences, input, and encoded media.
+It does not expose Iroh streams, MoQ objects, codec-library types, VA-API or
+MediaCodec handles, DMA-BUF descriptors, Smithay objects, Bevy entities, or
+wgpu resources. A transport binding owns connectivity, flow mapping, framing,
+and peer-loss reporting. A media adapter owns native-frame import, GPU color
+conversion, encode and decode, hardware session limits, and encoded-payload
+production. Either implementation can change without changing hoist policy.
+
+Raw-frame and encoded-payload lifetimes are separate. A source client-buffer
+lease remains live until every encoder or conversion operation has finished
+reading it and the relevant GPU completion has retired. It does not remain live
+until network delivery. The resulting encoded payload has independent ownership
+through transport, decode, and presentation. Destination acknowledgements may
+inform latency measurements, frame dropping, and keyframe policy, but never
+control source Wayland buffer release.
+
+All crossings into an asynchronous network or codec runtime are bounded and
+wake the compositor through an owned host mechanism. Neither calloop nor Bevy
+may wait for connection establishment, congestion, encoding, decoding, or a
+remote acknowledgement. Media queues retain the newest useful work, preserve
+required decoder recovery data, and discard superseded frames under pressure.
+Ordered control and input transitions must not be discarded by that policy.
+
+Codec capability negotiation covers at least codec, profile, bit depth, chroma
+sampling, color range and transfer, alpha mode, maximum extent and cadence,
+native import formats, and concurrent encode/decode session budgets. Admission
+selects a complete compatible profile rather than assuming that a codec name
+implies these properties.
+
+## Near-term Iroh and media validation — Exploration
+
+The next implementation should proceed as four narrow probes and tracer
+bullets. These are validation targets, not a commitment to every named library
+or a checklist for the finished remote product:
+
+1. Build a retained Iroh link probe between the laptop on Wi-Fi and an Android
+   phone using 5G. A one-time session ticket carries current addressing and
+   authorizes exactly the authenticated Iroh peer for that run. Record direct
+   versus relayed paths, round-trip time, throughput, path changes, reconnect
+   behavior, and latency for input-sized reliable messages.
+2. Build a local Linux media probe from one Weld client buffer through any
+   required GPU conversion, hardware encoding, hardware decoding, and
+   presentation. Prove source-buffer lease completion and account for every CPU
+   and GPU copy; raw full-frame CPU readback is a failed result.
+3. Connect the existing source and destination Weld processes over Iroh for one
+   opaque toplevel. Use hardware H.264 for the first tracer, Postcard for
+   control records, reliable ordered input, and bounded newest-frame media.
+   Preserve configure, scale, focus, popups where applicable, reclaim, and
+   clean peer-loss behavior through the existing hoist model.
+4. Replace the Weld destination with a minimal Android destination using Iroh
+   and MediaCodec. Present one opaque window with destination-owned decoration,
+   then validate touch or pointer input, keyboard input, resize or orientation
+   changes, reclaim, and loss recovery while the phone remains on 5G.
+
+Each phase records connection establishment time, selected path, round-trip
+time, throughput, encoder and decoder latency, queue depth, dropped frames,
+keyframes, source and destination copy paths, cadence, and input latency during
+saturated media. The tracer also verifies that calloop and Bevy never block on
+network or codec work. Initial measurements establish realistic acceptance
+thresholds; this specification does not invent them before evidence exists.
 
 ## Hoist and reclaim lifecycle — Direction
 
@@ -323,11 +403,15 @@ These are policies over actual visibility and damage, not fixed focus-only
 rules. A client is not forced to render at the monitor refresh rate; Weld
 encodes the newest valid content when a presentation opportunity needs it.
 
-AV1 is the preferred initial hardware encode/decode target and VP9 is the next
-target, with H.264 as the compatibility fallback. Selection must still use the
-actual low-latency capabilities and session limits of both peers. Opaque and
-alpha-capable profiles are negotiated separately, so a machine may prefer a
-different codec for each profile.
+AV1 is the preferred product target and VP9 is the next target, with H.264 as a
+compatibility fallback. The first cross-platform hardware tracer deliberately
+uses H.264 8-bit SDR 4:2:0 because Linux VA-API and Android MediaCodec
+currently provide the clearest demonstrated intersection. That tracer
+validates the pipeline; it does not make H.264 or 4:2:0 the preferred final
+window profile. Selection still uses the actual low-latency profiles, color
+capabilities, and session limits of both peers. Opaque and alpha-capable
+profiles are negotiated separately, so a machine may prefer a different codec
+for each profile.
 
 A codec name alone does not guarantee transport of transparent pixels. For an
 alpha-capable profile, Weld should carry color and alpha as independently
@@ -351,10 +435,18 @@ an optimization to validate later, not a baseline guarantee.
 
 [cros-codecs](https://docs.rs/cros-codecs/latest/cros_codecs/) is a possible
 hardware codec interop layer; [FFmpeg](https://ffmpeg.org/ffmpeg.html) with
-Linux VA-API is another candidate. Neither is a selected dependency. The
-eventual abstraction must expose codec, profile, pixel-format, modifier,
-alpha, and concurrent-session capabilities, and permit a software fallback
-without silently moving a supposedly hardware path onto the compositor thread.
+Linux VA-API is another candidate. The experimental
+[iroh-live](https://github.com/n0-computer/iroh-live) workspace is a serious
+reuse and architecture-reference candidate because it already combines Iroh,
+MoQ media, Linux VA-API, Android MediaCodec, and Android hardware-buffer
+presentation. Its `iroh-moq`, `moq-media`, and `rusty-codecs` layers should be
+evaluated independently rather than adopted as one indivisible stack. None of
+these is a selected dependency. Adoption requires accepting Weld-owned native
+frames and preserving per-window identities, alpha framing, independent
+logical flows, and source-authoritative lifecycle. The eventual abstraction
+must expose codec, profile, pixel format, modifier, alpha, and concurrent
+session capabilities, and permit a software fallback without silently moving
+a supposedly hardware path onto the compositor thread.
 
 For simple opaque single-surface content, an encoder should first attempt to
 import and retain the exact client DMA-BUF when its format, modifier, and
@@ -403,7 +495,8 @@ that remains an acceptable fallback because it avoids the expensive raw-frame
 readback. A GPU-network fast path must preserve the same authenticated and
 encrypted wire protocol and must not bypass authorization merely to avoid a
 copy. Exact DMA-BUF lifetime and fence ownership remain mandatory until every
-encoder and network consumer has finished with a frame.
+encoder or conversion consumer has finished reading the raw frame. Network
+delivery retains the independently owned encoded payload instead.
 
 ## Launcher federation — Direction
 
@@ -447,8 +540,12 @@ silently exposing applications that a peer was not authorized to discover.
 
 ## Open work — Exploration
 
-- Iroh discovery and relay behavior across realistic networks.
-- GPU capture and encoder interop without unnecessary full-frame copies.
+- Use the staged validation evidence to select production Iroh discovery,
+  relay, pairing, flow mapping, and reconnect policy.
+- Decide whether `iroh-live` components satisfy Weld's native-frame, window,
+  alpha, lifecycle, and security contracts or serve only as reference code.
+- Extend GPU capture and encoder interop beyond the initial opaque tracer
+  without unnecessary full-frame copies.
 - Device-resident encoded output and GPU-to-NIC transmission, including
   GPUNetIO-class hardware constraints and compatibility with authenticated,
   encrypted transport framing.
