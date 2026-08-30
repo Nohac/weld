@@ -1082,7 +1082,10 @@ mod tests {
                     message: LocalDestinationMessage::Request(ClientRequest::Surface(
                         ClientSurfaceRequest {
                             surface,
-                            kind: ClientSurfaceRequestKind::Close,
+                            kind: ClientSurfaceRequestKind::Configure {
+                                logical_size: Extent::new(800, 600),
+                                resizing: true,
+                            },
                         },
                     )),
                 },
@@ -1098,7 +1101,10 @@ mod tests {
             effects.as_slice(),
             [ClientAdapterEffect::Request(ClientRequest::Surface(request))]
                 if request.surface == surface
-                    && request.kind == ClientSurfaceRequestKind::Close
+                    && request.kind == (ClientSurfaceRequestKind::Configure {
+                        logical_size: Extent::new(800, 600),
+                        resizing: true,
+                    })
         ));
     }
 

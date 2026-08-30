@@ -335,6 +335,7 @@ pub(crate) fn prepare(options: RunOptions, signals: Signals) -> Result<PreparedH
                     warn!(%invalid, "client adapter published an invalid effect");
                 }
                 loop_data.server.apply_pending_client_work();
+                loop_data.server.flush_pending_resizes();
                 if !client_events.is_empty() {
                     let _surface_span = tracing::trace_span!(
                         target: crate::PROFILE_TARGET,

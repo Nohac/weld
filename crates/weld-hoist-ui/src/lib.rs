@@ -9,7 +9,7 @@ use bevy::{
         entity::Entity,
         message::{Message, MessageWriter},
         observer::On,
-        query::{With, Without},
+        query::With,
         schedule::IntoScheduleConfigs,
         system::{Commands, Query},
         template::template,
@@ -31,9 +31,8 @@ use bevy::{
 use weld_app::output::{OutputCompositionCamera, PrimaryOutput, WeldOutput};
 use weld_window::{
     ManagedWindow, PresentationInsets, PresentationOffset, PresentsWindow,
-    PrimaryWindowPresentation, WindowGeometry, WindowGeometryAnchor, WindowOutput,
-    WindowOutputIntersections, WindowPresentationOverride, WindowProjection, WindowSystems,
-    WindowZOrder,
+    PrimaryWindowPresentation, WindowGeometryAnchor, WindowOutput, WindowOutputIntersections,
+    WindowPresentationOverride, WindowProjection, WindowSystems, WindowZOrder,
 };
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -78,6 +77,8 @@ pub struct HoistPresentation {
     pub state: HoistPlaceholderState,
 }
 
+/// Hoist placeholder presentation for applications that also install the
+/// generic Weld window-UI projection plugin.
 pub struct HoistUiPlugin;
 
 impl Plugin for HoistUiPlugin {
@@ -96,12 +97,6 @@ impl Plugin for HoistUiPlugin {
             .add_systems(
                 PreUpdate,
                 reconcile_projections.in_set(WindowSystems::UiReconcile),
-            )
-            .add_systems(
-                PreUpdate,
-                sync_root_sizes
-                    .after(WindowSystems::InteractionFinalize)
-                    .before(WindowSystems::FinalReconcile),
             );
     }
 }
@@ -364,36 +359,6 @@ fn placeholder_scene(
                 )]
             ),
         ]
-    }
-}
-
-type HoistRoots<'w, 's> = Query<
-    'w,
-    's,
-    (&'static WindowProjection, &'static mut Node),
-    (With<HoistPresentation>, Without<ManagedWindow>),
->;
-
-fn sync_root_sizes(
-    windows: Query<&WindowGeometry>,
-    mut roots: HoistRoots,
-    mut redraw: MessageWriter<RequestRedraw>,
-) {
-    let mut changed = false;
-    for (projection, mut node) in &mut roots {
-        let Ok(geometry) = windows.get(projection.window()) else {
-            continue;
-        };
-        let width = px(geometry.size.x.max(1.0));
-        let height = px(geometry.size.y.max(1.0));
-        if node.width != width || node.height != height {
-            node.width = width;
-            node.height = height;
-            changed = true;
-        }
-    }
-    if changed {
-        redraw.write(RequestRedraw);
     }
 }
 

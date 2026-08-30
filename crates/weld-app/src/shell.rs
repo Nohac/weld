@@ -1040,10 +1040,12 @@ fn client_request(action: SurfaceAction) -> ClientRequest {
         SurfaceAction::Resize {
             surface,
             logical_size,
+            resizing,
         } => ClientRequest::Surface(ClientSurfaceRequest {
             surface,
             kind: ClientSurfaceRequestKind::Configure {
                 logical_size: Extent::new(logical_size.x, logical_size.y),
+                resizing,
             },
         }),
         SurfaceAction::SetOutputs {

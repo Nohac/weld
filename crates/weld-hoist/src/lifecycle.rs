@@ -542,6 +542,7 @@ pub(super) fn maintain_sessions(mut params: MaintainParams) {
             params.actions.push(SurfaceAction::Resize {
                 surface: session.surface,
                 logical_size: target_size,
+                resizing: false,
             });
             session.state = SessionState::Reclaiming {
                 scope: ReclaimScope::Family,

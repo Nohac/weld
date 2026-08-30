@@ -233,7 +233,6 @@ impl ServerState {
             self,
             WindowProtocolGrab {
                 start_data,
-                surface: surface.clone(),
                 surface_id,
                 resizing: matches!(interaction, PointerInteraction::Resize(_)),
             },
@@ -244,11 +243,7 @@ impl ServerState {
         // Installing a grab unsets any previous grab. Stage the new resize state
         // afterwards so replacing a grab cannot clear the state we just entered.
         if matches!(interaction, PointerInteraction::Resize(_)) {
-            let changed =
-                surface.with_pending_state(|state| state.states.set(xdg_toplevel::State::Resizing));
-            if changed && surface.is_initial_configure_sent() {
-                surface.send_pending_configure();
-            }
+            self.begin_protocol_resize(surface_id);
         }
         self.pending_surface_events.push_back(PendingSurfaceEvent {
             surface: surface_id,
@@ -610,7 +605,6 @@ enum PointerInteraction {
 
 struct WindowProtocolGrab {
     start_data: GrabStartData<ServerState>,
-    surface: ToplevelSurface,
     surface_id: SurfaceId,
     resizing: bool,
 }
@@ -739,19 +733,8 @@ impl PointerGrab<ServerState> for WindowProtocolGrab {
 
     fn unset(&mut self, data: &mut ServerState) {
         if self.resizing {
-            let pending_size = data.take_pending_resize(self.surface_id);
-            if self.surface.alive() {
-                let pending_size_changed = pending_size
-                    .is_some_and(|size| data.stage_toplevel_size(self.surface_id, size));
-                let resizing_state_changed = self
-                    .surface
-                    .with_pending_state(|state| state.states.unset(xdg_toplevel::State::Resizing));
-                if (pending_size_changed || resizing_state_changed)
-                    && self.surface.is_initial_configure_sent()
-                {
-                    self.surface.send_pending_configure();
-                }
-            }
+            let pending = data.take_pending_resize(self.surface_id);
+            data.finish_protocol_resize(self.surface_id, pending);
         }
         data.pending_surface_events.push_back(PendingSurfaceEvent {
             surface: self.surface_id,

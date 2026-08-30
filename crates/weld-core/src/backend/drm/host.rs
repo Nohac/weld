@@ -409,6 +409,7 @@ pub(super) fn run(
             warn!(%invalid, "client adapter published an invalid effect");
         }
         loop_data.server.apply_pending_client_work();
+        loop_data.server.flush_pending_resizes();
         if !client_events.is_empty() {
             while let Some(event) = client_events.pop_front() {
                 let demand = application.enqueue_client_event(event);

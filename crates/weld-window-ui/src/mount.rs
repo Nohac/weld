@@ -21,6 +21,7 @@ pub fn surface_content_with_node(
     mut node: Node,
 ) -> impl SceneList {
     node.display = Display::None;
+    node.flex_shrink = 0.0;
     bsn_list! {
         (
             template(move |_| Ok(SurfaceNode { surface, view }))

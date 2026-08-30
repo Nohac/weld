@@ -876,6 +876,7 @@ struct AppliedPresentationInsets(PresentationInsets);
 pub struct ClientResizeState {
     surface: Option<SurfaceId>,
     requested_size: UVec2,
+    requested_resizing: bool,
     pending: Option<PendingClientResize>,
 }
 
@@ -885,11 +886,18 @@ struct PendingClientResize {
     after_revision: u64,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct TerminalClientResize {
+    surface: SurfaceId,
+    logical_size: UVec2,
+}
+
 impl Default for ClientResizeState {
     fn default() -> Self {
         Self {
             surface: None,
             requested_size: UVec2::ONE,
+            requested_resizing: false,
             pending: None,
         }
     }
@@ -908,12 +916,18 @@ impl ClientResizeState {
             .map(|pending| pending.after_revision)
     }
 
-    fn observe_commit(&mut self, surface: SurfaceId, revision: u64) {
+    fn observe_commit(
+        &mut self,
+        surface: SurfaceId,
+        revision: u64,
+    ) -> Option<TerminalClientResize> {
         if self.surface != Some(surface) {
+            let terminal = self.clear_client();
             self.surface = Some(surface);
             self.requested_size = UVec2::ZERO;
+            self.requested_resizing = false;
             self.pending = None;
-            return;
+            return terminal;
         }
         if self
             .pending
@@ -921,20 +935,32 @@ impl ClientResizeState {
         {
             self.pending = None;
         }
+        None
     }
 
-    fn clear_client(&mut self) {
-        if self.surface.is_none() {
-            return;
-        }
+    fn clear_client(&mut self) -> Option<TerminalClientResize> {
+        let surface = self.surface?;
+        let terminal = self.requested_resizing.then_some(TerminalClientResize {
+            surface,
+            logical_size: self.requested_size,
+        });
         self.surface = None;
         self.requested_size = UVec2::ZERO;
+        self.requested_resizing = false;
         self.pending = None;
+        terminal
     }
 
-    fn request(&mut self, surface: SurfaceId, requested_size: UVec2, after_revision: u64) {
+    fn request(
+        &mut self,
+        surface: SurfaceId,
+        requested_size: UVec2,
+        resizing: bool,
+        after_revision: u64,
+    ) {
         self.surface = Some(surface);
         self.requested_size = requested_size;
+        self.requested_resizing = resizing;
         self.pending = Some(PendingClientResize {
             surface,
             after_revision,
@@ -983,6 +1009,7 @@ fn admit_mapped_toplevels(
                 ClientResizeState {
                     surface: Some(toplevel.surface),
                     requested_size: client_size,
+                    requested_resizing: false,
                     pending: None,
                 },
             ))
@@ -1019,38 +1046,64 @@ fn reconcile_presentation_insets(
     }
 }
 
-fn reconcile_window_sizes(
-    mut windows: Query<(
+type ResizeWindows<'w, 's> = Query<
+    'w,
+    's,
+    (
         Entity,
-        &WindowGeometry,
-        &mut ClientResizeState,
-        Option<&PrimaryWindowPresentation>,
-    )>,
+        &'static WindowGeometry,
+        &'static mut ClientResizeState,
+        Option<&'static PrimaryWindowPresentation>,
+        Option<&'static WindowInteractionSession>,
+    ),
+>;
+
+fn reconcile_window_sizes(
+    mut windows: ResizeWindows,
     roots: Query<&PresentationInsets>,
     clients: WindowClientResolver,
     revisions: Res<SurfaceCommitRevisions>,
     mut actions: ResMut<SurfaceActionQueue>,
 ) {
-    for (window, geometry, mut resize, presentation) in &mut windows {
+    for (window, geometry, mut resize, presentation, interaction) in &mut windows {
         let Some(client) = clients.mapped_client(window) else {
-            resize.clear_client();
+            if let Some(terminal) = resize.clear_client() {
+                actions.push(SurfaceAction::Resize {
+                    surface: terminal.surface,
+                    logical_size: terminal.logical_size,
+                    resizing: false,
+                });
+            }
             continue;
         };
         let surface = client.surface();
         let revision = revisions.revision(surface);
-        resize.observe_commit(surface, revision);
+        if let Some(terminal) = resize.observe_commit(surface, revision) {
+            actions.push(SurfaceAction::Resize {
+                surface: terminal.surface,
+                logical_size: terminal.logical_size,
+                resizing: false,
+            });
+        }
         let insets = presentation
             .and_then(|presentation| roots.get(presentation.entity()).ok())
             .copied()
             .unwrap_or_default();
         let requested = rounded_client_size((geometry.size - insets.extent()).max(Vec2::ONE));
-        if requested == resize.requested_size {
+        let resizing = matches!(
+            interaction,
+            Some(WindowInteractionSession {
+                kind: WindowInteractionKind::Resize(_),
+            })
+        );
+        if requested == resize.requested_size && resizing == resize.requested_resizing {
             continue;
         }
-        resize.request(surface, requested, revision);
+        resize.request(surface, requested, resizing, revision);
         actions.push(SurfaceAction::Resize {
             surface,
             logical_size: requested,
+            resizing,
         });
     }
 }
@@ -1393,9 +1446,9 @@ mod tests {
     fn resize_settles_on_a_new_commit_even_when_the_client_uses_another_size() {
         let surface = SurfaceId::for_test(71);
         let mut resize = ClientResizeState::default();
-        resize.request(surface, UVec2::new(503, 409), 12);
+        resize.request(surface, UVec2::new(503, 409), true, 12);
 
-        resize.observe_commit(surface, 13);
+        assert_eq!(resize.observe_commit(surface, 13), None);
 
         assert_eq!(resize.requested_size(), UVec2::new(503, 409));
         assert_eq!(resize.pending_after_revision(surface), None);
@@ -1405,11 +1458,49 @@ mod tests {
     fn resize_remains_pending_until_the_surface_revision_advances() {
         let surface = SurfaceId::for_test(72);
         let mut resize = ClientResizeState::default();
-        resize.request(surface, UVec2::new(503, 409), 12);
+        resize.request(surface, UVec2::new(503, 409), true, 12);
 
-        resize.observe_commit(surface, 12);
+        assert_eq!(resize.observe_commit(surface, 12), None);
 
         assert_eq!(resize.pending_after_revision(surface), Some(12));
+    }
+
+    #[test]
+    fn unmapping_during_resize_emits_a_terminal_client_configure() {
+        let mut app = test_app();
+        let surface = SurfaceId::for_test(74);
+        let client = mapped_toplevel(&mut app, surface);
+        app.update();
+        let window = app
+            .world()
+            .get::<OccupiesWindow>(client)
+            .expect("mapped client should occupy a window")
+            .0;
+        take_surface_actions(app.world_mut());
+
+        app.world_mut()
+            .entity_mut(window)
+            .insert(WindowInteractionSession {
+                kind: WindowInteractionKind::Resize(ToplevelResizeEdge::Right),
+            });
+        app.update();
+        assert!(
+            take_surface_actions(app.world_mut()).contains(&SurfaceAction::Resize {
+                surface,
+                logical_size: UVec2::new(320, 240),
+                resizing: true,
+            })
+        );
+
+        app.world_mut().entity_mut(client).remove::<MappedSurface>();
+        app.update();
+        assert!(
+            take_surface_actions(app.world_mut()).contains(&SurfaceAction::Resize {
+                surface,
+                logical_size: UVec2::new(320, 240),
+                resizing: false,
+            })
+        );
     }
 
     #[test]
@@ -1602,6 +1693,7 @@ mod tests {
             take_surface_actions(app.world_mut()).contains(&SurfaceAction::Resize {
                 surface: SurfaceId::for_test(9),
                 logical_size: UVec2::new(330, 240),
+                resizing: false,
             })
         );
     }

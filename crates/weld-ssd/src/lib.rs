@@ -79,9 +79,7 @@ impl Plugin for SsdPlugin {
         )
         .add_systems(
             PreUpdate,
-            (reconcile_ssd_projections, sync_vacant_ssd_size)
-                .chain()
-                .in_set(WindowSystems::UiReconcile),
+            reconcile_ssd_projections.in_set(WindowSystems::UiReconcile),
         )
         .add_systems(
             PreUpdate,
@@ -89,9 +87,7 @@ impl Plugin for SsdPlugin {
         )
         .add_systems(
             PreUpdate,
-            (sync_focus_style, sync_vacant_ssd_size)
-                .chain()
-                .in_set(WindowSystems::FinalReconcile),
+            sync_focus_style.in_set(WindowSystems::FinalReconcile),
         );
     }
 }
@@ -407,6 +403,10 @@ fn window_scene(content: impl SceneList) -> impl Scene {
             (
                 WindowBody
                 Node {
+                    width: percent(100),
+                    height: percent(100),
+                    min_width: px(0),
+                    min_height: px(0),
                     flex_direction: FlexDirection::Column,
                     border_radius: BorderRadius::all(px(INNER_BORDER_RADIUS)),
                     overflow: Overflow::clip(),
@@ -482,19 +482,6 @@ fn window_scene(content: impl SceneList) -> impl Scene {
             ),
             {resize_handles},
         ]
-    }
-}
-
-fn sync_vacant_ssd_size(
-    windows: Query<&weld_window::WindowGeometry>,
-    mut roots: Query<(&WindowProjection, &mut Node), With<VacantSsdPresentation>>,
-) {
-    for (projection, mut node) in &mut roots {
-        let Ok(geometry) = windows.get(projection.window()) else {
-            continue;
-        };
-        node.width = px(geometry.size.x);
-        node.height = px(geometry.size.y);
     }
 }
 
@@ -627,7 +614,7 @@ mod tests {
             pointer::{Location, PointerButton, PointerId},
         },
         scene::ScenePlugin,
-        ui::{Display, UiScale, Val, widget::Button},
+        ui::{Display, UiScale, widget::Button},
         window::RequestRedraw,
     };
     use weld_app::{
@@ -987,6 +974,11 @@ mod tests {
             .expect("server-decorated toplevel should be admitted")
             .1
             .0;
+        let root = app
+            .world()
+            .get::<PrimaryWindowPresentation>(window)
+            .expect("SSD should claim the window")
+            .entity();
         let (_, content_node) = app
             .world_mut()
             .query::<(&SurfaceNode, &Node)>()
@@ -1046,10 +1038,39 @@ mod tests {
                 .size,
             outer_size + Vec2::new(20.0, 0.0)
         );
+        let root_node = app
+            .world()
+            .get::<Node>(root)
+            .expect("SSD root should retain layout");
+        assert_eq!(
+            (root_node.width, root_node.height),
+            (px(outer_size.x + 20.0), px(outer_size.y))
+        );
+        let (_, content_node) = app
+            .world_mut()
+            .query::<(&SurfaceNode, &Node)>()
+            .single(app.world())
+            .expect("SSD should retain its last committed client surface");
+        assert_eq!(
+            (content_node.width, content_node.height),
+            (px(320.0), px(240.0))
+        );
+        assert_eq!(content_node.flex_shrink, 0.0);
         assert!(
             take_surface_actions(app.world_mut()).contains(&SurfaceAction::Resize {
                 surface,
                 logical_size: UVec2::new(340, 240),
+                resizing: true,
+            })
+        );
+
+        write_primary_button(&mut app, ButtonState::Released);
+        app.update();
+        assert!(
+            take_surface_actions(app.world_mut()).contains(&SurfaceAction::Resize {
+                surface,
+                logical_size: UVec2::new(340, 240),
+                resizing: false,
             })
         );
     }
@@ -1099,6 +1120,13 @@ mod tests {
                 ..
             })
         ));
+        assert!(
+            take_surface_actions(app.world_mut()).contains(&SurfaceAction::Resize {
+                surface,
+                logical_size: UVec2::new(320, 240),
+                resizing: true,
+            })
+        );
 
         write_mouse_motion(&mut app, Vec2::new(10.0, 0.0));
         write_mouse_motion(&mut app, Vec2::new(10.0, 0.0));
@@ -1120,6 +1148,7 @@ mod tests {
             vec![SurfaceAction::Resize {
                 surface,
                 logical_size: UVec2::new(300, 240),
+                resizing: true,
             }]
         );
 
@@ -1283,11 +1312,20 @@ mod tests {
     }
 
     #[test]
-    fn committed_client_extent_changes_without_overwriting_desired_geometry() {
+    fn committed_csd_overflow_changes_without_overwriting_desired_geometry() {
         let mut app = test_app();
         let surface = SurfaceId::for_test(45);
         enqueue_surface_event(app.world_mut(), role(surface, WindowDecoration::ClientSide));
-        enqueue_surface_event(app.world_mut(), frame(surface, 320, 240));
+        enqueue_surface_event(
+            app.world_mut(),
+            frame_with_geometry(
+                surface,
+                360,
+                278,
+                Vec2::new(20.0, 18.0),
+                UVec2::new(320, 240),
+            ),
+        );
         app.update();
         let window = app
             .world_mut()
@@ -1301,15 +1339,22 @@ mod tests {
             .get::<PrimaryWindowPresentation>(window)
             .expect("client window should have a presentation")
             .entity();
-        assert_eq!(
-            app.world()
-                .get::<Node>(root)
-                .expect("presentation should have layout")
-                .width,
-            Val::Auto
-        );
+        let root_node = app
+            .world()
+            .get::<Node>(root)
+            .expect("presentation should have layout");
+        assert_eq!((root_node.width, root_node.height), (px(320.0), px(240.0)));
 
-        enqueue_surface_event(app.world_mut(), frame(surface, 400, 280));
+        enqueue_surface_event(
+            app.world_mut(),
+            frame_with_geometry(
+                surface,
+                440,
+                318,
+                Vec2::new(20.0, 18.0),
+                UVec2::new(400, 280),
+            ),
+        );
         app.update();
 
         assert_eq!(
@@ -1326,8 +1371,14 @@ mod tests {
             .expect("presentation should retain its content node");
         assert_eq!(
             (surface_node.1.width, surface_node.1.height),
-            (px(400.0), px(280.0))
+            (px(440.0), px(318.0))
         );
+        assert_eq!(surface_node.1.flex_shrink, 0.0);
+        let root_node = app
+            .world()
+            .get::<Node>(root)
+            .expect("presentation should retain layout");
+        assert_eq!((root_node.width, root_node.height), (px(320.0), px(240.0)));
     }
 
     #[test]

@@ -69,13 +69,13 @@ use crate::{
     OutputId,
     dmabuf::{DmabufCapabilities, DmabufEvent, DmabufReleaseId, DmabufSourceCache},
     input::InputPosition,
-    surface::{Extent, SurfaceId, WindowInteractionRequestKind},
+    surface::{SurfaceId, WindowInteractionRequestKind},
 };
 use cursor::CursorSurfaceStore;
 use dmabuf::{DmabufProtocol, DmabufReleaseStore};
 use output::install_output_metrics;
 use popup::PopupStore;
-use resize::PendingResizeRequests;
+use resize::{PendingResize, PendingResizeRequests};
 use seat::OrdinaryImplicitGrab;
 use toplevel::ToplevelStore;
 
@@ -464,8 +464,17 @@ impl ServerState {
                     self.pending_resizes.discard(request.surface);
                     self.close_toplevel(request.surface);
                 }
-                ClientSurfaceRequestKind::Configure { logical_size } => {
-                    self.pending_resizes.queue(request.surface, logical_size);
+                ClientSurfaceRequestKind::Configure {
+                    logical_size,
+                    resizing,
+                } => {
+                    self.pending_resizes.queue(
+                        request.surface,
+                        PendingResize {
+                            logical_size,
+                            resizing,
+                        },
+                    );
                 }
                 ClientSurfaceRequestKind::SetOutputs {
                     outputs, preferred, ..
@@ -493,15 +502,15 @@ impl ServerState {
         }
     }
 
-    /// Applies at most one configure per surface at the current composition boundary.
+    /// Applies at most one pending configure per surface.
     pub(crate) fn flush_pending_resizes(&mut self) {
         let pending = self.pending_resizes.drain().collect::<Vec<_>>();
-        for (surface, logical_size) in pending {
-            self.resize_toplevel(surface, logical_size);
+        for (surface, request) in pending {
+            self.configure_toplevel(surface, request.logical_size, request.resizing);
         }
     }
 
-    fn take_pending_resize(&mut self, surface: SurfaceId) -> Option<Extent> {
+    fn take_pending_resize(&mut self, surface: SurfaceId) -> Option<PendingResize> {
         self.pending_resizes.take(surface)
     }
 

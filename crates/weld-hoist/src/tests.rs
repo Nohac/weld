@@ -722,6 +722,7 @@ fn reclaim_waits_for_the_placeholder_sized_client_commit() {
             SurfaceAction::Resize {
                 surface,
                 logical_size,
+                ..
             } if *surface == destination => Some(*logical_size),
             _ => None,
         })
@@ -746,6 +747,7 @@ fn reclaim_waits_for_the_placeholder_sized_client_commit() {
                 SurfaceAction::Resize {
                     surface,
                     logical_size: UVec2 { x: 320, y: 240 },
+                    resizing: false,
                 } if *surface == destination
             )
         }),

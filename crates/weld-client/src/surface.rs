@@ -261,6 +261,7 @@ pub enum ClientSurfaceRequestKind {
     Close,
     Configure {
         logical_size: Extent,
+        resizing: bool,
     },
     SetOutputs {
         outputs: Vec<ClientOutputId>,

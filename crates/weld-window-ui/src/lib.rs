@@ -381,10 +381,18 @@ fn sync_window_roots(
         };
         let position = home_position.0 + geometry.position - target_position.0
             + offset.copied().unwrap_or_default().0;
-        if node.display != display || node.left != px(position.x) || node.top != px(position.y) {
+        let size = geometry.size.max(Vec2::ONE);
+        if node.display != display
+            || node.left != px(position.x)
+            || node.top != px(position.y)
+            || node.width != px(size.x)
+            || node.height != px(size.y)
+        {
             node.display = display;
             node.left = px(position.x);
             node.top = px(position.y);
+            node.width = px(size.x);
+            node.height = px(size.y);
             changed = true;
         }
         if z_index.0 != window_z.0 {

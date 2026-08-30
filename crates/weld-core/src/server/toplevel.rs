@@ -42,6 +42,7 @@ use crate::{
 use super::{
     ClientState, PendingSurfaceEvent, PendingSurfaceEventKind, ServerState,
     output::{send_preferred_surface_scale, send_surface_scale},
+    resize::PendingResize,
     surface_tree::{
         SurfaceTreeState, collect_surfaces, owning_root, release_untracked_surface_tree,
     },
@@ -54,6 +55,34 @@ pub(super) struct ToplevelState {
     pub(super) tree: SurfaceTreeState,
     pub(super) outputs: SurfaceOutputAssignment,
     pub(super) preferred_scale_120: Option<u32>,
+    resize_sources: ToplevelResizeSources,
+}
+
+#[derive(Default)]
+struct ToplevelResizeSources {
+    protocol_grab: bool,
+    policy_request: bool,
+}
+
+impl ToplevelResizeSources {
+    const fn active(&self) -> bool {
+        self.protocol_grab || self.policy_request
+    }
+
+    fn set(&mut self, source: ResizeSource, active: bool) -> bool {
+        let was_active = self.active();
+        match source {
+            ResizeSource::ProtocolGrab => self.protocol_grab = active,
+            ResizeSource::PolicyRequest => self.policy_request = active,
+        }
+        was_active != self.active()
+    }
+}
+
+#[derive(Clone, Copy)]
+enum ResizeSource {
+    ProtocolGrab,
+    PolicyRequest,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -170,8 +199,65 @@ impl ServerState {
         toplevel.surface.send_close();
     }
 
-    pub(super) fn resize_toplevel(&mut self, surface: SurfaceId, requested: Extent) {
-        let changed = self.stage_toplevel_size(surface, requested);
+    pub(super) fn configure_toplevel(
+        &mut self,
+        surface: SurfaceId,
+        requested: Extent,
+        resizing: bool,
+    ) {
+        let size_changed = self.stage_toplevel_size(surface, requested);
+        let state_changed =
+            self.set_toplevel_resize_source(surface, ResizeSource::PolicyRequest, resizing);
+        self.send_pending_toplevel_configure(surface, size_changed || state_changed);
+    }
+
+    pub(super) fn begin_protocol_resize(&mut self, surface: SurfaceId) {
+        let changed = self.set_toplevel_resize_source(surface, ResizeSource::ProtocolGrab, true);
+        self.send_pending_toplevel_configure(surface, changed);
+    }
+
+    pub(super) fn finish_protocol_resize(
+        &mut self,
+        surface: SurfaceId,
+        pending: Option<PendingResize>,
+    ) {
+        let size_changed =
+            pending.is_some_and(|request| self.stage_toplevel_size(surface, request.logical_size));
+        let policy_changed = pending.is_some_and(|request| {
+            self.set_toplevel_resize_source(surface, ResizeSource::PolicyRequest, request.resizing)
+        });
+        let protocol_changed =
+            self.set_toplevel_resize_source(surface, ResizeSource::ProtocolGrab, false);
+        self.send_pending_toplevel_configure(
+            surface,
+            size_changed || policy_changed || protocol_changed,
+        );
+    }
+
+    fn set_toplevel_resize_source(
+        &mut self,
+        surface: SurfaceId,
+        source: ResizeSource,
+        active: bool,
+    ) -> bool {
+        let Some(toplevel) = self.toplevels.get_mut(surface) else {
+            return false;
+        };
+        let effective_state_changed = toplevel.resize_sources.set(source, active);
+        let is_active = toplevel.resize_sources.active();
+        if !effective_state_changed || !toplevel.surface.alive() {
+            return false;
+        }
+        toplevel.surface.with_pending_state(|state| {
+            if is_active {
+                state.states.set(xdg_toplevel::State::Resizing)
+            } else {
+                state.states.unset(xdg_toplevel::State::Resizing)
+            }
+        })
+    }
+
+    fn send_pending_toplevel_configure(&self, surface: SurfaceId, changed: bool) {
         let Some(toplevel) = self.toplevels.get(surface) else {
             return;
         };
@@ -732,6 +818,7 @@ impl XdgShellHandler for ServerState {
             tree: SurfaceTreeState::default(),
             outputs: SurfaceOutputAssignment::primary(self.primary_output),
             preferred_scale_120: None,
+            resize_sources: ToplevelResizeSources::default(),
         };
         if !self.toplevels.insert(id, state) {
             warn!(?id, "refused a duplicate xdg-toplevel registration");
@@ -892,6 +979,20 @@ impl OutputHandler for ServerState {}
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn resize_sources_keep_the_effective_state_active_until_all_sources_end() {
+        let mut sources = ToplevelResizeSources::default();
+
+        assert!(sources.set(ResizeSource::ProtocolGrab, true));
+        assert!(sources.active());
+        assert!(!sources.set(ResizeSource::PolicyRequest, true));
+        assert!(sources.active());
+        assert!(!sources.set(ResizeSource::ProtocolGrab, false));
+        assert!(sources.active());
+        assert!(sources.set(ResizeSource::PolicyRequest, false));
+        assert!(!sources.active());
+    }
 
     #[test]
     fn indexed_store_keeps_multiple_values_and_removes_only_the_target() {

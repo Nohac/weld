@@ -236,6 +236,7 @@ pub enum SurfaceAction {
     Resize {
         surface: SurfaceId,
         logical_size: bevy::math::UVec2,
+        resizing: bool,
     },
     SetOutputs {
         surface: SurfaceId,
