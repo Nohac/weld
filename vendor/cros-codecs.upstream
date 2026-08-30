@@ -1,0 +1,10 @@
+crate = "cros-codecs"
+version = "0.0.6"
+source = "https://crates.io/crates/cros-codecs/0.0.6"
+
+Weld raises the VA-API decoder placeholder context from 16x16 to 64x64 for
+radeonsi compatibility, uses Constrained Baseline for that placeholder,
+propagates initialization failure through the existing decoder error instead
+of panicking, and sets both constraint_set0_flag and constraint_set1_flag in a
+Baseline SPS to match the selected Constrained Baseline VA profile. Remove this
+path patch when an upstream release contains equivalent behavior.

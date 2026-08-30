@@ -4,9 +4,12 @@ mod device;
 mod manager;
 mod source;
 
-pub use device::{DmabufCapabilities, request_weld_device};
+pub use device::{
+    DmabufCapabilities, ExternalDmabufCapabilities, ExternalDmabufFormat, request_weld_device,
+};
 pub use manager::{
-    DmabufContext, DmabufManager, ImportedImageRegistry, PromotionImage, StagedImport,
+    DmabufContext, DmabufManager, ExternalDmabufImportProbe, ImportedImageRegistry, PromotionImage,
+    StagedImport,
 };
 pub(crate) use source::{DmabufSourceCache, ImportedDmabufSource};
 

@@ -12,6 +12,27 @@ use smithay::{
 };
 use tracing::{info, warn};
 
+/// One plain DRM format and modifier pair importable by Weld's wgpu device.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct ExternalDmabufFormat {
+    pub fourcc: u32,
+    pub modifier: u64,
+}
+
+/// Adapter-neutral view of Weld's external DMA-BUF import capabilities.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ExternalDmabufCapabilities {
+    pub render_node: std::path::PathBuf,
+    pub formats: Vec<ExternalDmabufFormat>,
+}
+
+impl ExternalDmabufCapabilities {
+    pub fn supports(&self, fourcc: u32, modifier: u64) -> bool {
+        self.formats
+            .contains(&ExternalDmabufFormat { fourcc, modifier })
+    }
+}
+
 const IMPORT_FORMATS: [(Fourcc, vk::Format); 4] = [
     (Fourcc::Argb8888, vk::Format::B8G8R8A8_UNORM),
     (Fourcc::Xrgb8888, vk::Format::B8G8R8A8_UNORM),
@@ -35,6 +56,27 @@ pub struct DmabufCapabilities {
 impl DmabufCapabilities {
     pub(crate) fn supports(&self, format: Format) -> bool {
         self.formats.contains(&format)
+    }
+
+    /// Returns plain values suitable for a codec or other native import adapter.
+    pub fn external_imports(&self) -> Result<ExternalDmabufCapabilities> {
+        let render_node = DrmNode::from_dev_id(self.main_device)
+            .context("Vulkan reported an invalid DRM render-node device id")?
+            .dev_path()
+            .context("could not resolve the Vulkan DRM render-node path")?
+            .to_path_buf();
+        let formats = self
+            .formats
+            .iter()
+            .map(|format| ExternalDmabufFormat {
+                fourcc: format.code as u32,
+                modifier: format.modifier.into(),
+            })
+            .collect();
+        Ok(ExternalDmabufCapabilities {
+            render_node,
+            formats,
+        })
     }
 }
 

@@ -22,6 +22,8 @@ members = [
   "crates/weld-hoist-core",
   "crates/weld-hoist-local",
   "crates/weld-hoist-ui",
+  "crates/weld-media",
+  "crates/weld-media-vaapi",
   "crates/weld-ssd",
   "crates/weld-window",
   "crates/weld-window-ui",
@@ -49,6 +51,7 @@ bevy_dylib = "=0.19.1"
 bevy_winit = { version = "=0.19.1", default-features = false }
 calloop = { version = "0.14.4", features = ["signals"] }
 clap = { version = "4.5", features = ["derive"] }
+cros-codecs = { version = "=0.0.6", features = ["vaapi"] }
 leafwing-input-manager = { version = "0.21.0", default-features = false }
 input = { version = "0.10.0", features = ["libinput_1_26"] }
 png = "0.18.1"
@@ -83,6 +86,12 @@ weld-hoist-local = { path = "crates/weld-hoist-local" }
 tracing.workspace = true
 tracing-subscriber.workspace = true
 tracing-tracy = { workspace = true, optional = true }
+
+[dev-dependencies]
+pollster.workspace = true
+weld-media = { path = "crates/weld-media" }
+weld-media-vaapi = { path = "crates/weld-media-vaapi", features = ["diagnostic"] }
+wgpu = { workspace = true, features = ["vulkan"] }
 
 # Keep Weld's code quick to rebuild while giving Bevy, Smithay, wgpu, and other
 # dependencies enough optimization for a usable compositor development build.
@@ -120,6 +129,8 @@ bevy_render = { path = "vendor/bevy-wgpu30/bevy_render" }
 bevy_shader = { path = "vendor/bevy-wgpu30/bevy_shader" }
 bevy_sprite = { path = "vendor/bevy-wgpu30/bevy_sprite" }
 bevy_text = { path = "vendor/bevy-wgpu30/bevy_text" }
+cros-libva = { path = "vendor/cros-libva" }
+cros-codecs = { path = "vendor/cros-codecs" }
 
 [[bench]]
 name = "shell_main"

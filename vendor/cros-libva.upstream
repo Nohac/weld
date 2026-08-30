@@ -1,0 +1,7 @@
+crate = "cros-libva"
+version = "0.0.12"
+source = "https://crates.io/crates/cros-libva/0.0.12"
+
+Weld adds libva 1.23 compatibility for the VP9 picture-parameter fields added
+by libva 2.23. Remove this path patch when cros-codecs accepts a compatible
+cros-libva release.

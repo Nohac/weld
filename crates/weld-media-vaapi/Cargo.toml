@@ -1,0 +1,13 @@
+[package]
+name = "weld-media-vaapi"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[features]
+diagnostic = []
+
+[dependencies]
+anyhow.workspace = true
+cros-codecs.workspace = true
+weld-media = { path = "../weld-media" }

@@ -9,7 +9,7 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 use ash::vk;
-use calloop::channel::Sender as CalloopSender;
+use calloop::channel::{Channel as CalloopChannel, Sender as CalloopSender};
 use smithay::backend::allocator::Buffer;
 use tracing::{debug, error, warn};
 
@@ -171,6 +171,22 @@ pub struct DmabufContext {
     capabilities: Option<DmabufCapabilities>,
 }
 
+/// Probe-only external importer whose private release channel remains alive.
+///
+/// The channel is deliberately not drained because a probe imports a bounded
+/// number of frames and then exits. Long-lived adapters must use the host-owned
+/// [`DmabufContext`] whose completion channel is drained by calloop.
+pub struct ExternalDmabufImportProbe {
+    context: DmabufContext,
+    _release_source: CalloopChannel<DmabufEvent>,
+}
+
+impl ExternalDmabufImportProbe {
+    pub fn context(&self) -> &DmabufContext {
+        &self.context
+    }
+}
+
 impl DmabufContext {
     pub(crate) const fn new(
         release_sender: CalloopSender<DmabufEvent>,
@@ -181,6 +197,22 @@ impl DmabufContext {
             release_sender,
             sources,
             capabilities,
+        }
+    }
+
+    /// Creates a bounded probe importer on an existing Weld wgpu device.
+    pub fn for_external_import_probe(
+        device: &wgpu::Device,
+        capabilities: DmabufCapabilities,
+    ) -> ExternalDmabufImportProbe {
+        let (release_sender, release_source) = calloop::channel::channel();
+        ExternalDmabufImportProbe {
+            context: Self::new(
+                release_sender,
+                DmabufSourceCache::new(device),
+                Some(capabilities),
+            ),
+            _release_source: release_source,
         }
     }
 

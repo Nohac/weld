@@ -39,6 +39,13 @@ Weld is a workspace of reusable layers and one standard distribution:
 - `weld-hoist` owns Bevy window-family admission and reclaim orchestration. It
   does not own client buffers, ordinary receiver presentation, a network
   transport, or a media codec.
+- `weld-media` owns transport- and platform-neutral media identities and
+  encoded payload contracts. It owns no native graphics API, codec backend,
+  transport, worker thread, Smithay, or Bevy object.
+- `weld-media-vaapi` owns Linux VA-API capability discovery and hardware media
+  stages behind `weld-media` contracts. Libva and cros-codecs types do not
+  cross that boundary; bounded worker ownership belongs here when the first
+  streaming path is connected.
 - `weldwm` is the standard distribution. It requests a backend, configures the
   `WeldApp` returned by the builder with plugins and shortcuts, and supplies
   the executable. It is one possible assembly of the reusable crates, not the
@@ -53,6 +60,30 @@ must not depend directly on Smithay. A custom distribution can retain
 `weld-window` while replacing `weld-window-ui`, `weld-ssd`, `weld-float`,
 `weld-hoist`, or any combination of them, or build a different application
 host while retaining the native backend and protocol machinery.
+
+The active cros-codecs release still selects cros-libva 0.0.12, which predates
+the VP9 picture-parameter fields added in libva 2.23. It also creates a 16x16
+placeholder decoder context that radeonsi rejects and panics on initialization
+failure. Weld temporarily patches these small crates under `vendor/`; the
+recorded patches must be removed when upstream releases contain equivalent
+behavior.
+
+cros-libva 0.0.12 does not expose a typed VPP pipeline-parameter buffer, so
+`weld-media-vaapi` contains a narrow raw-libva VPP submission boundary. Its
+unsafe calls use bindgen's exact ABI types, keep display, context, surfaces and
+parameter storage live through submission, and destroy the VA buffer through a
+single-owner guard. Replace this boundary with cros-libva's safe API when it
+gains the missing buffer type.
+
+The VA-API DMA-BUF adapter retains both identities required by PRIME 2: the
+top-level VA pixel fourcc and each composed layer's DRM fourcc. They are not
+interchangeable even when formats such as NV12 happen to use the same bytes.
+Mesa radeonsi currently returns a reserved type-zero NAL header for the first
+driver-generated H.264 slice through cros-codecs. Weld repairs that single
+header only for an identified Mesa radeonsi encoder, only after SPS and PPS in
+a forced keyframe; the same output from an unknown driver fails closed. Remove
+the repair when packed slice-header support or an upstream backend fix makes
+the driver output conforming.
 
 The presentation split follows Bevy UI's separation of raw UI infrastructure,
 unstyled reusable behavior, and opinionated Feathers scenes without depending
