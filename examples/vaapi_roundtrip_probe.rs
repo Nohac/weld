@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::{collections::HashSet, num::NonZeroU16};
 
 use anyhow::{Context, Result, ensure};
 use weld_client::{
@@ -9,13 +9,12 @@ use weld_core::dmabuf::{
     DmabufContext, ExternalDmabuf, ExternalDmabufPlane, ImportedImageRegistry, PromotionImage,
     request_weld_device,
 };
-use weld_media::{MediaFrameId, MediaStreamId, StreamGeneration};
-use weld_media_vaapi::{
-    H264Encoder, VaapiDmabuf, VppConverter, VppOutput, create_xrgb_probe_frame, decode_h264_frame,
-};
+use weld_media::{EncodedFrameKind, MediaFrameId, MediaStreamId, StreamGeneration};
+use weld_media_vaapi::{DecodedH264Frame, VaapiDevice, VaapiDmabuf, VppConverter, VppOutput};
 
 const WIDTH: u32 = 320;
 const HEIGHT: u32 = 192;
+const PERSISTENT_FRAME_COUNT: u64 = 34;
 const DRM_FORMAT_XRGB8888: u32 = u32::from_le_bytes(*b"XR24");
 
 fn main() -> Result<()> {
@@ -54,65 +53,131 @@ fn main() -> Result<()> {
         xrgb_modifiers.contains(&0),
         "diagnostic source requires a linear XRGB8888 modifier"
     );
-    let source_modifiers = vec![0];
-    let source = create_xrgb_probe_frame(&external.render_node, WIDTH, HEIGHT, source_modifiers)?;
-    print_frame("source-xrgb", &source)?;
-    validate_pixels(&sample_probe_frame(
-        &device,
-        &queue,
-        capabilities.clone(),
-        &source,
-        1,
-    )?)?;
-    let vpp = VppConverter::open(&external.render_node)?;
-    let encoder_input = vpp.convert(&source, VppOutput::Nv12)?;
-    print_frame("encoder-nv12", &encoder_input)?;
-    let pre_codec = vpp.convert(
-        &encoder_input,
-        VppOutput::Xrgb8888 {
-            modifiers: xrgb_modifiers.clone(),
-        },
+    let media = VaapiDevice::open(&external.render_node)?;
+    let vpp = media.vpp_converter()?;
+    let intra_period = NonZeroU16::new(16).context("nonzero intra period")?;
+    let mut encoder = media.h264_encoder(WIDTH, HEIGHT, 2_000_000, 60, intra_period)?;
+    let mut decoder = media.h264_decoder()?;
+    let stream = MediaStreamId::new(1);
+    let generation = StreamGeneration::new(1);
+    let mut validator = DecodedFrameValidator {
+        device: &device,
+        queue: &queue,
+        capabilities: capabilities.clone(),
+        vpp: &vpp,
+        xrgb_modifiers: &xrgb_modifiers,
+        next_sequence: 1,
+        validated_frames: 0,
+    };
+
+    for sequence in 0_u64..PERSISTENT_FRAME_COUNT {
+        let seed = u8::try_from(sequence * 3)?;
+        let source = media.create_xrgb_probe_frame(WIDTH, HEIGHT, vec![0], seed)?;
+        let encoder_input = vpp.convert(&source, VppOutput::Nv12)?;
+        let frame_id = MediaFrameId::new(stream, generation, sequence);
+        let encoded = encoder.encode(frame_id, sequence * 16_667, &encoder_input)?;
+        let expected_kind = if sequence % 16 == 0 {
+            EncodedFrameKind::Keyframe
+        } else {
+            EncodedFrameKind::Delta
+        };
+        ensure!(
+            encoded.kind == expected_kind,
+            "encoded frame kind differs from the low-delay cadence"
+        );
+        for decoded in decoder.decode(&encoded)? {
+            let decoded_sequence = decoded.timestamp_micros / 16_667;
+            let decoded_seed = u8::try_from(decoded_sequence * 3)?;
+            validator.validate(decoded, decoded_seed)?;
+        }
+        println!(
+            "frame={sequence} kind={:?} bytes={}",
+            encoded.kind,
+            encoded.payload.len()
+        );
+    }
+    for decoded in decoder.drain()? {
+        let decoded_sequence = decoded.timestamp_micros / 16_667;
+        let decoded_seed = u8::try_from(decoded_sequence * 3)?;
+        validator.validate(decoded, decoded_seed)?;
+    }
+    ensure!(
+        validator.validated_frames == PERSISTENT_FRAME_COUNT,
+        "persistent decoder did not return every submitted frame"
+    );
+    println!("decoder-allocations={}", decoder.allocation_count());
+
+    let recovery_generation = StreamGeneration::new(2);
+    let recovery_seed = 91;
+    let recovery_source = media.create_xrgb_probe_frame(WIDTH, HEIGHT, vec![0], recovery_seed)?;
+    let recovery_input = vpp.convert(&recovery_source, VppOutput::Nv12)?;
+    let mut recovery_encoder = media.h264_encoder(WIDTH, HEIGHT, 2_000_000, 60, intra_period)?;
+    let recovery = recovery_encoder.encode(
+        MediaFrameId::new(stream, recovery_generation, 0),
+        1_000_000,
+        &recovery_input,
     )?;
-    validate_pixels(&sample_probe_frame(
-        &device,
-        &queue,
-        capabilities.clone(),
-        &pre_codec,
-        2,
-    )?)?;
-
-    let encoder = H264Encoder::open(&external.render_node, WIDTH, HEIGHT, 2_000_000, 60)?;
-    let frame_id = MediaFrameId::new(MediaStreamId::new(1), StreamGeneration::new(1), 1);
-    let encoded = encoder.encode_one(frame_id, 0, &encoder_input)?;
-    println!("encoded-h264 bytes={}", encoded.payload.len());
-    let decoded = decode_h264_frame(&external.render_node, &encoded)?;
-    print_frame("decoded-nv12", &decoded)?;
-
-    let normalized = vpp.convert(
-        &decoded,
-        VppOutput::Xrgb8888 {
-            modifiers: xrgb_modifiers,
-        },
-    )?;
-    print_frame("normalized-xrgb", &normalized)?;
     ensure!(
-        normalized.fourcc == DRM_FORMAT_XRGB8888,
-        "VPP output is not XRGB8888"
+        recovery.kind == EncodedFrameKind::Keyframe,
+        "a new stream generation did not begin with a keyframe"
     );
+    let mut recovery_decoder = media.h264_decoder()?;
+    let mut recovered = recovery_decoder.decode(&recovery)?;
+    recovered.extend(recovery_decoder.drain()?);
     ensure!(
-        normalized.planes.len() == 1,
-        "VPP XRGB output is not single-plane"
+        recovered.len() == 1,
+        "recovery generation produced an unexpected frame count"
     );
-    let modifier = normalized.primary_modifier()?;
+    let recovered = recovered.pop().context("recovery frame is absent")?;
+    validator.validate(recovered, recovery_seed)?;
     ensure!(
-        external.supports(normalized.fourcc, modifier),
-        "VPP XRGB output modifier is not advertised by Weld"
+        validator.validated_frames == PERSISTENT_FRAME_COUNT + 1,
+        "recovery generation did not add exactly one decoded frame"
     );
-
-    let pixels = sample_probe_frame(&device, &queue, capabilities, &normalized, 3)?;
-    validate_pixels(&pixels)?;
-    println!("hardware-roundtrip-validated=true diagnostic-readback=true");
+    println!(
+        "hardware-roundtrip-validated=true persistent-frames={} total-validated={} recovery-generation=true diagnostic-readback=true",
+        PERSISTENT_FRAME_COUNT, validator.validated_frames,
+    );
     Ok(())
+}
+
+struct DecodedFrameValidator<'a> {
+    device: &'a wgpu::Device,
+    queue: &'a wgpu::Queue,
+    capabilities: weld_core::dmabuf::DmabufCapabilities,
+    vpp: &'a VppConverter,
+    xrgb_modifiers: &'a [u64],
+    next_sequence: u64,
+    validated_frames: u64,
+}
+
+impl DecodedFrameValidator<'_> {
+    fn validate(&mut self, decoded: DecodedH264Frame, seed: u8) -> Result<()> {
+        let normalized = self.vpp.convert(
+            &decoded.frame,
+            VppOutput::Xrgb8888 {
+                modifiers: self.xrgb_modifiers.to_vec(),
+            },
+        )?;
+        ensure!(
+            normalized.fourcc == DRM_FORMAT_XRGB8888,
+            "VPP output is not XRGB8888"
+        );
+        ensure!(
+            normalized.planes.len() == 1,
+            "VPP XRGB output is not single-plane"
+        );
+        let pixels = sample_probe_frame(
+            self.device,
+            self.queue,
+            self.capabilities.clone(),
+            &normalized,
+            self.next_sequence,
+        )?;
+        self.next_sequence += 1;
+        self.validated_frames += 1;
+        validate_pixels(&pixels, seed)
+    }
 }
 
 fn sample_probe_frame(
@@ -146,23 +211,6 @@ fn sample_probe_frame(
         .image
         .context("Weld did not promote the normalized XRGB frame")?;
     sample_image(device, queue, &promoted)
-}
-
-fn print_frame(label: &str, frame: &VaapiDmabuf) -> Result<()> {
-    println!(
-        "{label} fourcc={} extent={}x{} objects={} planes={} modifier={:#x}",
-        fourcc_name(frame.fourcc),
-        frame.width,
-        frame.height,
-        frame.objects.len(),
-        frame.planes.len(),
-        frame.primary_modifier()?
-    );
-    Ok(())
-}
-
-fn fourcc_name(fourcc: u32) -> String {
-    String::from_utf8_lossy(&fourcc.to_le_bytes()).into_owned()
 }
 
 fn to_weld_dmabuf(frame: &VaapiDmabuf) -> Result<ExternalDmabuf> {
@@ -414,7 +462,7 @@ fn fragment(input: VertexOutput) -> @location(0) vec4<f32> {
     Ok(pixels)
 }
 
-fn validate_pixels(pixels: &[u8]) -> Result<()> {
+fn validate_pixels(pixels: &[u8], seed: u8) -> Result<()> {
     const TOLERANCE: i16 = 48;
     let samples = [
         (0, 0),
@@ -428,9 +476,11 @@ fn validate_pixels(pixels: &[u8]) -> Result<()> {
         let actual = pixels
             .get(offset..offset + 4)
             .context("sampled image is truncated")?;
-        let horizontal = (x * 127) / WIDTH.saturating_sub(1).max(1);
-        let vertical = (y * 127) / HEIGHT.saturating_sub(1).max(1);
-        let value = u8::try_from(horizontal + vertical)?;
+        let horizontal = (x * 63) / WIDTH.saturating_sub(1).max(1);
+        let vertical = (y * 63) / HEIGHT.saturating_sub(1).max(1);
+        let value = u8::try_from(horizontal + vertical)?
+            .checked_add(seed)
+            .context("diagnostic gradient exceeds one byte")?;
         let expected = [value, value, value];
         ensure!(
             actual[..3]

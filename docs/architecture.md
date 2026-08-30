@@ -85,6 +85,23 @@ a forced keyframe; the same output from an unknown driver fails closed. Remove
 the repair when packed slice-header support or an upstream backend fix makes
 the driver output conforming.
 
+The hardware tracer now retains one VA display, H.264 encoder, decoder, and
+VPP converter across a sequence of access units. Weld mirrors the encoder's
+power-of-two low-delay intra period, which must be at least 16 because the
+current cros-codecs SPS builder derives its frame-number and POC widths with
+integer logarithms. Remove that restriction when upstream represents arbitrary
+valid periods. Weld validates I/P slice syntax independently from the
+driver-written NAL type and recreates both codec sessions when a new stream
+generation needs a recovery IDR. The synchronous tracer drains one
+encoder input at a time because this cros-codecs low-delay implementation does
+not make the next reference available until its previous output is drained.
+The persistent decoder preserves its DPB and may return a completed frame one
+access unit later; its final frame is drained only when that generation ends.
+It shares the same display for output allocation rather than reopening the DRM
+node per frame. A bounded off-thread worker, decoded-output reuse tied to
+destination GPU retirement, and local-hoist media transport are not yet
+connected.
+
 The presentation split follows Bevy UI's separation of raw UI infrastructure,
 unstyled reusable behavior, and opinionated Feathers scenes without depending
 on Feathers itself. `weld-app` supplies the raw client-surface rendering

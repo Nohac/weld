@@ -1,9 +1,4 @@
-use std::{
-    cell::RefCell,
-    fs::File,
-    path::{Path, PathBuf},
-    rc::Rc,
-};
+use std::{cell::RefCell, fs::File, num::NonZeroU16, rc::Rc};
 
 use anyhow::{Context, Result, bail, ensure};
 use cros_codecs::{
@@ -112,22 +107,54 @@ impl VideoFrame for EncodedInputFrame {
 pub struct H264Encoder {
     encoder: CrosH264Encoder,
     repair_radeonsi_slice_header: bool,
+    resolution: Resolution,
+    cadence: EncoderCadence,
+}
+
+struct EncoderCadence {
+    intra_period: NonZeroU16,
+    emitted_frames: u16,
+    /// True while one submission is in flight and permanently after it fails.
+    poisoned: bool,
+}
+
+impl EncoderCadence {
+    fn new(intra_period: NonZeroU16) -> Result<Self> {
+        let period = intra_period.get();
+        ensure!(
+            period >= 16 && period.is_power_of_two(),
+            "H.264 intra period must be a power of two of at least 16"
+        );
+        Ok(Self {
+            intra_period,
+            emitted_frames: 0,
+            poisoned: false,
+        })
+    }
+
+    fn begin(&mut self) -> Result<EncodedFrameKind> {
+        ensure!(!self.poisoned, "H.264 encoder session requires recreation");
+        let kind = frame_kind(self.emitted_frames, self.intra_period);
+        self.poisoned = true;
+        Ok(kind)
+    }
+
+    fn complete(&mut self) {
+        self.emitted_frames = (self.emitted_frames + 1) % self.intra_period.get();
+        self.poisoned = false;
+    }
 }
 
 impl H264Encoder {
-    pub fn open(
-        render_node: impl AsRef<Path>,
+    pub(crate) fn new(
+        display: Rc<Display>,
         width: u32,
         height: u32,
         bitrate: u64,
         frames_per_second: u32,
+        intra_period: NonZeroU16,
     ) -> Result<Self> {
-        let display = Display::open_drm_display(render_node.as_ref()).with_context(|| {
-            format!(
-                "could not open VA-API display {}",
-                render_node.as_ref().display()
-            )
-        })?;
+        let cadence = EncoderCadence::new(intra_period)?;
         let entrypoints = display
             .query_config_entrypoints(VAProfile::VAProfileH264ConstrainedBaseline)
             .context("could not query H.264 encoder entrypoints")?;
@@ -153,7 +180,9 @@ impl H264Encoder {
                 min_quality: 18,
                 max_quality: 36,
             },
-            pred_structure: PredictionStructure::LowDelay { limit: 60 },
+            pred_structure: PredictionStructure::LowDelay {
+                limit: intra_period.get(),
+            },
             ..Default::default()
         };
         let encoder = CrosH264Encoder::new_vaapi(
@@ -168,11 +197,13 @@ impl H264Encoder {
         Ok(Self {
             encoder,
             repair_radeonsi_slice_header,
+            resolution,
+            cadence,
         })
     }
 
-    pub fn encode_one(
-        mut self,
+    pub fn encode(
+        &mut self,
         frame: MediaFrameId,
         timestamp_micros: u64,
         input: &VaapiDmabuf,
@@ -180,48 +211,70 @@ impl H264Encoder {
         if input.fourcc != u32::from_le_bytes(*b"NV12") {
             bail!("H.264 encoder input is not NV12");
         }
+        ensure!(
+            input.width == self.resolution.width && input.height == self.resolution.height,
+            "H.264 encoder input extent differs from its stream generation"
+        );
+        let layout = frame_layout(input)?;
+        let input = EncodedInputFrame {
+            frame: input.try_clone()?,
+        };
+        let kind = self.cadence.begin()?;
         self.encoder
             .encode(
                 FrameMetadata {
                     timestamp: timestamp_micros,
-                    layout: frame_layout(input)?,
-                    force_keyframe: true,
+                    layout,
+                    force_keyframe: false,
                 },
-                EncodedInputFrame {
-                    frame: input.try_clone()?,
-                },
+                input,
             )
             .map_err(|error| anyhow::anyhow!("could not submit H.264 frame: {error}"))?;
         self.encoder
             .drain()
             .map_err(|error| anyhow::anyhow!("could not drain H.264 encoder: {error}"))?;
-        let mut payload = Vec::new();
-        while let Some(output) = self
+        let output = self
             .encoder
             .poll()
             .map_err(|error| anyhow::anyhow!("could not poll H.264 encoder: {error}"))?
-        {
-            payload.extend(normalize_annex_b(&output.bitstream));
-        }
-        repair_reserved_slice_headers(
-            &mut payload,
-            EncodedFrameKind::Keyframe,
-            self.repair_radeonsi_slice_header,
-        )?;
+            .context("H.264 encoder produced no access unit after draining")?;
+        ensure!(
+            output.metadata.timestamp == timestamp_micros,
+            "H.264 encoder returned an unexpected frame timestamp"
+        );
+        ensure!(
+            self.encoder
+                .poll()
+                .map_err(|error| anyhow::anyhow!("could not poll H.264 encoder: {error}"))?
+                .is_none(),
+            "H.264 encoder produced more than one access unit for one input"
+        );
+        let mut payload = normalize_annex_b(&output.bitstream);
+        validate_and_repair_slice_headers(&mut payload, kind, self.repair_radeonsi_slice_header)?;
         if payload.is_empty() {
             bail!("H.264 encoder produced no access unit");
         }
-        Ok(EncodedAccessUnit {
+        let access_unit = EncodedAccessUnit {
             frame,
             codec: WeldVideoCodec::H264,
-            kind: EncodedFrameKind::Keyframe,
+            kind,
             timestamp_micros,
             payload,
-        })
+        };
+        self.cadence.complete();
+        Ok(access_unit)
     }
 }
 
-fn repair_reserved_slice_headers(
+const fn frame_kind(emitted_frames: u16, intra_period: NonZeroU16) -> EncodedFrameKind {
+    if emitted_frames.is_multiple_of(intra_period.get()) {
+        EncodedFrameKind::Keyframe
+    } else {
+        EncodedFrameKind::Delta
+    }
+}
+
+fn validate_and_repair_slice_headers(
     bitstream: &mut [u8],
     kind: EncodedFrameKind,
     repair_radeonsi: bool,
@@ -230,21 +283,42 @@ fn repair_reserved_slice_headers(
     // Mesa radeonsi emits the correct slice bits but leaves the NAL type at
     // the reserved value zero. Repair only that invalid header; already-valid
     // driver output remains byte-for-byte unchanged.
-    let header = match kind {
+    let repaired_header = match kind {
         EncodedFrameKind::Keyframe => 0x65,
         EncodedFrameKind::Delta => 0x41,
     };
     let mut index = 0;
     let mut saw_sps = false;
     let mut saw_pps = false;
-    let mut repaired = 0;
+    let mut slice_count = 0;
     while index + 4 < bitstream.len() {
         if bitstream[index..].starts_with(&[0, 0, 0, 1]) {
             let nal_header = index + 4;
-            match bitstream[nal_header] & 0x1f {
+            let nal_type = bitstream[nal_header] & 0x1f;
+            match nal_type {
                 7 => saw_sps = true,
                 8 => saw_pps = true,
-                0 => {
+                0 | 1 | 5 => {
+                    let end =
+                        next_annex_b_start(bitstream, nal_header + 1).unwrap_or(bitstream.len());
+                    let slice_type = parse_slice_type(&bitstream[nal_header + 1..end])?;
+                    ensure!(
+                        slice_matches_kind(slice_type, kind),
+                        "H.264 slice type does not match the expected frame kind"
+                    );
+                    slice_count += 1;
+                    ensure!(slice_count == 1, "H.264 access unit has multiple slices");
+                    if nal_type != 0 {
+                        ensure!(
+                            matches!(
+                                (kind, nal_type),
+                                (EncodedFrameKind::Keyframe, 5) | (EncodedFrameKind::Delta, 1)
+                            ),
+                            "H.264 NAL type does not match the expected frame kind"
+                        );
+                        index = nal_header + 1;
+                        continue;
+                    }
                     ensure!(
                         repair_radeonsi,
                         "H.264 encoder emitted a reserved NAL type on an unknown driver"
@@ -253,12 +327,7 @@ fn repair_reserved_slice_headers(
                         kind != EncodedFrameKind::Keyframe || (saw_sps && saw_pps),
                         "reserved keyframe slice does not follow SPS and PPS"
                     );
-                    repaired += 1;
-                    ensure!(
-                        repaired == 1,
-                        "H.264 access unit has multiple reserved NAL types"
-                    );
-                    bitstream[nal_header] = header;
+                    bitstream[nal_header] = repaired_header;
                 }
                 _ => {}
             }
@@ -267,7 +336,84 @@ fn repair_reserved_slice_headers(
         }
         index += 1;
     }
+    ensure!(slice_count == 1, "H.264 access unit has no slice");
     Ok(())
+}
+
+fn next_annex_b_start(bitstream: &[u8], from: usize) -> Option<usize> {
+    // `normalize_annex_b` has already canonicalized every prefix to four bytes.
+    bitstream[from..]
+        .windows(3)
+        .position(|window| window == [0, 0, 1])
+        .map(|offset| from + offset.saturating_sub(1))
+}
+
+fn parse_slice_type(escaped_rbsp: &[u8]) -> Result<u32> {
+    let mut rbsp = Vec::with_capacity(escaped_rbsp.len());
+    let mut zeroes = 0_u8;
+    for byte in escaped_rbsp.iter().copied() {
+        if zeroes >= 2 && byte == 3 {
+            zeroes = 0;
+            continue;
+        }
+        rbsp.push(byte);
+        zeroes = if byte == 0 {
+            zeroes.saturating_add(1)
+        } else {
+            0
+        };
+    }
+    let mut reader = ExpGolombReader::new(&rbsp);
+    let _first_macroblock = reader.read_unsigned()?;
+    let slice_type = reader.read_unsigned()?;
+    ensure!(
+        slice_type <= 9,
+        "H.264 slice type is outside its defined range"
+    );
+    Ok(slice_type)
+}
+
+const fn slice_matches_kind(slice_type: u32, kind: EncodedFrameKind) -> bool {
+    match kind {
+        EncodedFrameKind::Keyframe => slice_type % 5 == 2,
+        EncodedFrameKind::Delta => slice_type.is_multiple_of(5),
+    }
+}
+
+struct ExpGolombReader<'a> {
+    bytes: &'a [u8],
+    bit: usize,
+}
+
+impl<'a> ExpGolombReader<'a> {
+    const fn new(bytes: &'a [u8]) -> Self {
+        Self { bytes, bit: 0 }
+    }
+
+    fn read_unsigned(&mut self) -> Result<u32> {
+        let mut leading_zeroes = 0_u32;
+        while !self.read_bit()? {
+            leading_zeroes = leading_zeroes
+                .checked_add(1)
+                .context("H.264 Exp-Golomb prefix overflow")?;
+            ensure!(leading_zeroes < 32, "H.264 Exp-Golomb value is too large");
+        }
+        let mut suffix = 0_u32;
+        for _ in 0..leading_zeroes {
+            suffix = (suffix << 1) | u32::from(self.read_bit()?);
+        }
+        Ok(((1_u32 << leading_zeroes) - 1) + suffix)
+    }
+
+    fn read_bit(&mut self) -> Result<bool> {
+        let byte = self
+            .bytes
+            .get(self.bit / 8)
+            .context("H.264 slice header ended unexpectedly")?;
+        let shift = 7 - (self.bit % 8);
+        self.bit += 1;
+        Ok((byte >> shift) & 1 != 0)
+    }
 }
 
 fn normalize_annex_b(bitstream: &[u8]) -> Vec<u8> {
@@ -331,105 +477,132 @@ fn frame_layout(frame: &VaapiDmabuf) -> Result<FrameLayout> {
     })
 }
 
-pub fn decode_h264_frame(
-    render_node: impl AsRef<Path>,
-    access_unit: &EncodedAccessUnit,
-) -> Result<VaapiDmabuf> {
-    if access_unit.codec != WeldVideoCodec::H264 {
-        bail!("VA-API H.264 decoder received another codec");
+pub struct H264Decoder {
+    display: Rc<Display>,
+    decoder: CrosH264Decoder,
+    stream_info: Option<StreamInfo>,
+    allocation_count: u64,
+}
+
+pub struct DecodedH264Frame {
+    pub timestamp_micros: u64,
+    pub frame: VaapiDmabuf,
+}
+
+impl H264Decoder {
+    pub(crate) fn new(display: Rc<Display>) -> Result<Self> {
+        let decoder = CrosH264Decoder::new_vaapi(display.clone(), BlockingMode::Blocking)
+            .map_err(|error| anyhow::anyhow!("could not create VA-API H.264 decoder: {error:?}"))?;
+        Ok(Self {
+            display,
+            decoder,
+            stream_info: None,
+            allocation_count: 0,
+        })
     }
-    let render_node = render_node.as_ref().to_path_buf();
-    let display = Display::open_drm_display(&render_node)
-        .with_context(|| format!("could not open VA-API display {}", render_node.display()))?;
-    let mut decoder = CrosH264Decoder::new_vaapi(display.clone(), BlockingMode::Blocking)
-        .map_err(|error| anyhow::anyhow!("could not create VA-API H.264 decoder: {error:?}"))?;
-    let mut stream_info = None;
-    let mut remaining = access_unit.payload.as_slice();
-    let mut decoded = None;
-    while !remaining.is_empty() || decoded.is_none() {
-        let mut made_progress = false;
-        let allocation_error = RefCell::new(None);
-        let allocation_info = stream_info.clone();
-        let allocation_node = render_node.clone();
-        let mut allocate = || {
-            let info = allocation_info.as_ref()?;
-            match allocate_decoder_frame(&allocation_node, info) {
-                Ok(frame) => Some(frame),
-                Err(error) => {
-                    *allocation_error.borrow_mut() = Some(error);
-                    None
-                }
-            }
-        };
-        match decoder.decode(access_unit.timestamp_micros, remaining, &mut allocate) {
-            Ok(consumed) => {
-                if consumed == 0 && remaining.is_empty() {
-                    break;
-                }
-                made_progress = consumed > 0;
-                remaining = &remaining[consumed..];
-            }
-            Err(DecodeError::CheckEvents) => {}
-            Err(DecodeError::NotEnoughOutputBuffers(_)) => {
-                if let Some(error) = allocation_error.into_inner() {
-                    return Err(error).context("could not allocate decoder output");
-                }
-            }
-            Err(error) => bail!("could not decode H.264 access unit: {error}"),
+
+    pub const fn allocation_count(&self) -> u64 {
+        self.allocation_count
+    }
+
+    pub fn decode(&mut self, access_unit: &EncodedAccessUnit) -> Result<Vec<DecodedH264Frame>> {
+        if access_unit.codec != WeldVideoCodec::H264 {
+            bail!("VA-API H.264 decoder received another codec");
         }
-        while let Some(event) = decoder.next_event() {
+        let mut remaining = access_unit.payload.as_slice();
+        let mut decoded = Vec::new();
+        while !remaining.is_empty() {
+            let mut made_progress = false;
+            let allocation_error = RefCell::new(None);
+            let allocation_info = self.stream_info.clone();
+            let display = self.display.clone();
+            let decode_result = {
+                let allocation_count = &mut self.allocation_count;
+                let mut allocate = || {
+                    let info = allocation_info.as_ref()?;
+                    match allocate_decoder_frame(&display, info) {
+                        Ok(frame) => {
+                            *allocation_count = allocation_count.saturating_add(1);
+                            Some(frame)
+                        }
+                        Err(error) => {
+                            *allocation_error.borrow_mut() = Some(error);
+                            None
+                        }
+                    }
+                };
+                self.decoder
+                    .decode(access_unit.timestamp_micros, remaining, &mut allocate)
+            };
+            match decode_result {
+                Ok(consumed) => {
+                    made_progress = consumed > 0;
+                    remaining = &remaining[consumed..];
+                }
+                Err(DecodeError::CheckEvents) => {}
+                Err(DecodeError::NotEnoughOutputBuffers(_)) => {
+                    if let Some(error) = allocation_error.into_inner() {
+                        return Err(error).context("could not allocate decoder output");
+                    }
+                }
+                Err(error) => bail!("could not decode H.264 access unit: {error}"),
+            }
+            let (events, event_progress) = self.collect_events()?;
+            made_progress |= event_progress;
+            decoded.extend(events);
+            ensure!(made_progress, "H.264 decoder made no progress");
+        }
+        Ok(decoded)
+    }
+
+    pub fn drain(&mut self) -> Result<Vec<DecodedH264Frame>> {
+        self.decoder
+            .flush()
+            .context("could not flush the H.264 decoder")?;
+        self.collect_events().map(|(frames, _)| frames)
+    }
+
+    fn collect_events(&mut self) -> Result<(Vec<DecodedH264Frame>, bool)> {
+        let mut decoded = Vec::new();
+        let mut made_progress = false;
+        while let Some(event) = self.decoder.next_event() {
             made_progress = true;
             match event {
                 DecoderEvent::FormatChanged => {
-                    stream_info = decoder.stream_info().cloned();
+                    self.stream_info = self.decoder.stream_info().cloned();
                 }
                 DecoderEvent::FrameReady(handle) => {
                     handle
                         .sync()
                         .context("could not synchronize decoded frame")?;
-                    decoded = Some(handle.video_frame());
+                    let timestamp_micros = handle.timestamp();
+                    let frame = handle.video_frame();
+                    let surface = frame
+                        .to_native_handle(&self.display)
+                        .map_err(anyhow::Error::msg)
+                        .context("could not import decoded frame for export")?;
+                    surface
+                        .sync()
+                        .context("could not synchronize decoded VA surface")?;
+                    decoded.push(DecodedH264Frame {
+                        timestamp_micros,
+                        frame: VaapiDmabuf::from_prime(
+                            surface
+                                .export_prime()
+                                .context("could not export decoded NV12 DMA-BUF")?,
+                        )?,
+                    });
                 }
             }
         }
-        if remaining.is_empty() {
-            if decoded.is_none() {
-                decoder
-                    .flush()
-                    .context("could not flush the H.264 decoder")?;
-                while let Some(event) = decoder.next_event() {
-                    if let DecoderEvent::FrameReady(handle) = event {
-                        handle
-                            .sync()
-                            .context("could not synchronize decoded frame")?;
-                        decoded = Some(handle.video_frame());
-                    }
-                }
-            }
-            break;
-        }
-        ensure!(made_progress, "H.264 decoder made no progress");
+        Ok((decoded, made_progress))
     }
-    let frame = decoded.context("H.264 decoder produced no frame")?;
-    let surface = frame
-        .to_native_handle(&display)
-        .map_err(anyhow::Error::msg)
-        .context("could not import decoded frame for export")?;
-    surface
-        .sync()
-        .context("could not synchronize decoded VA surface")?;
-    VaapiDmabuf::from_prime(
-        surface
-            .export_prime()
-            .context("could not export decoded NV12 DMA-BUF")?,
-    )
 }
 
 fn allocate_decoder_frame(
-    render_node: &PathBuf,
+    display: &Rc<Display>,
     info: &StreamInfo,
 ) -> Result<GenericDmaVideoFrame> {
-    let display = Display::open_drm_display(render_node)
-        .with_context(|| format!("could not open decoder allocator {}", render_node.display()))?;
     let mut surfaces = display
         .create_surfaces(
             VA_RT_FORMAT_YUV420,
@@ -489,7 +662,11 @@ fn allocate_decoder_frame(
 mod tests {
     use weld_media::EncodedFrameKind;
 
-    use super::{normalize_annex_b, repair_reserved_slice_headers};
+    use super::{
+        EncoderCadence, ExpGolombReader, frame_kind, normalize_annex_b, parse_slice_type,
+        slice_matches_kind, validate_and_repair_slice_headers,
+    };
+    use std::num::NonZeroU16;
 
     #[test]
     fn canonicalizes_start_codes_and_removes_inter_unit_padding() {
@@ -506,7 +683,7 @@ mod tests {
             0, 0, 0, 1, 0x67, 0x11, 0, 0, 0, 1, 0x68, 0x22, 0, 0, 0, 1, 0, 0x88, 0x82,
         ];
         let mut encoded = encoded.to_vec();
-        repair_reserved_slice_headers(&mut encoded, EncodedFrameKind::Keyframe, true)
+        validate_and_repair_slice_headers(&mut encoded, EncodedFrameKind::Keyframe, true)
             .expect("known radeonsi keyframe repair");
         assert_eq!(
             encoded,
@@ -520,7 +697,73 @@ mod tests {
     fn rejects_a_reserved_slice_header_from_an_unknown_driver() {
         let mut encoded = [0, 0, 0, 1, 0];
         assert!(
-            repair_reserved_slice_headers(&mut encoded, EncodedFrameKind::Keyframe, false).is_err()
+            validate_and_repair_slice_headers(&mut encoded, EncodedFrameKind::Keyframe, false)
+                .is_err()
         );
+    }
+
+    #[test]
+    fn generic_frame_kind_policy_wraps_at_any_nonzero_period() {
+        let kinds = (0..10)
+            .map(|frame| frame_kind(frame, NonZeroU16::new(4).expect("nonzero period")))
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            kinds,
+            [
+                EncodedFrameKind::Keyframe,
+                EncodedFrameKind::Delta,
+                EncodedFrameKind::Delta,
+                EncodedFrameKind::Delta,
+                EncodedFrameKind::Keyframe,
+                EncodedFrameKind::Delta,
+                EncodedFrameKind::Delta,
+                EncodedFrameKind::Delta,
+                EncodedFrameKind::Keyframe,
+                EncodedFrameKind::Delta,
+            ]
+        );
+    }
+
+    #[test]
+    fn encoder_cadence_validates_configuration_and_poisoning() {
+        for period in [4, 8, 24] {
+            assert!(EncoderCadence::new(NonZeroU16::new(period).expect("nonzero period")).is_err());
+        }
+        assert!(EncoderCadence::new(NonZeroU16::new(16).expect("nonzero period")).is_ok());
+        assert!(EncoderCadence::new(NonZeroU16::new(32).expect("nonzero period")).is_ok());
+
+        let mut cadence = EncoderCadence::new(NonZeroU16::new(16).expect("nonzero period"))
+            .expect("valid cadence");
+        assert_eq!(
+            cadence.begin().expect("fresh cadence"),
+            EncodedFrameKind::Keyframe
+        );
+        assert!(cadence.begin().is_err());
+        cadence.complete();
+        assert_eq!(
+            cadence.begin().expect("completed cadence"),
+            EncodedFrameKind::Delta
+        );
+        let recreated = EncoderCadence::new(NonZeroU16::new(16).expect("nonzero period"))
+            .expect("valid cadence");
+        assert_eq!(
+            frame_kind(recreated.emitted_frames, recreated.intra_period),
+            EncodedFrameKind::Keyframe
+        );
+    }
+
+    #[test]
+    fn parses_h264_slice_types_independently_of_the_nal_header() {
+        assert_eq!(parse_slice_type(&[0xb0]).expect("I slice"), 2);
+        assert_eq!(parse_slice_type(&[0xc0]).expect("P slice"), 0);
+        assert!(slice_matches_kind(2, EncodedFrameKind::Keyframe));
+        assert!(slice_matches_kind(0, EncodedFrameKind::Delta));
+        assert!(!slice_matches_kind(0, EncodedFrameKind::Keyframe));
+    }
+
+    #[test]
+    fn exp_golomb_reader_rejects_truncated_values() {
+        assert!(ExpGolombReader::new(&[0]).read_unsigned().is_err());
     }
 }

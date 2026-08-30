@@ -1,7 +1,6 @@
 use std::{
     any::Any,
     ffi::{CStr, c_void},
-    path::Path,
     ptr,
     rc::Rc,
 };
@@ -34,13 +33,7 @@ pub struct VppConverter {
 }
 
 impl VppConverter {
-    pub fn open(render_node: impl AsRef<Path>) -> Result<Self> {
-        let display = Display::open_drm_display(render_node.as_ref()).with_context(|| {
-            format!(
-                "could not open VA-API display {}",
-                render_node.as_ref().display()
-            )
-        })?;
+    pub(crate) fn new(display: Rc<Display>) -> Result<Self> {
         let config = display
             .create_config(
                 Vec::new(),
@@ -257,18 +250,13 @@ fn check_status(status: VAStatus) -> Result<()> {
 }
 
 #[cfg(feature = "diagnostic")]
-pub fn create_xrgb_probe_frame(
-    render_node: impl AsRef<Path>,
+pub(crate) fn create_xrgb_probe_frame(
+    display: Rc<Display>,
     width: u32,
     height: u32,
     modifiers: Vec<u64>,
+    seed: u8,
 ) -> Result<VaapiDmabuf> {
-    let display = Display::open_drm_display(render_node.as_ref()).with_context(|| {
-        format!(
-            "could not open VA-API display {}",
-            render_node.as_ref().display()
-        )
-    })?;
     let mut surfaces = display
         .create_surfaces(
             VA_RT_FORMAT_RGB32,
@@ -304,9 +292,11 @@ pub fn create_xrgb_probe_frame(
     for y in 0..height {
         for x in 0..width {
             let pixel = offset + y * pitch + x * 4;
-            let horizontal = (x * 127) / width.saturating_sub(1).max(1);
-            let vertical = (y * 127) / height.saturating_sub(1).max(1);
-            let value = u8::try_from(horizontal + vertical)?;
+            let horizontal = (x * 63) / width.saturating_sub(1).max(1);
+            let vertical = (y * 63) / height.saturating_sub(1).max(1);
+            let value = u8::try_from(horizontal + vertical)?
+                .checked_add(seed)
+                .context("diagnostic gradient exceeds one byte")?;
             bytes[pixel..pixel + 4].copy_from_slice(&[value, value, value, 255]);
         }
     }
