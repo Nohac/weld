@@ -36,6 +36,47 @@ active physical output and export selected application windows to thin clients.
 Local administration, authentication, resource limits, recovery, and explicit
 stream ownership matter more than a full local shell.
 
+### Mobile client
+
+A phone and tablet assembly could combine the
+[identity
+wallet](identity-and-meshes.md#device-wallet-and-pairing--exploration),
+remote application discovery, and one or more destination presentations. The
+first native-shell experiment should use
+[the Dioxus project](https://github.com/DioxusLabs/dioxus) with its Native
+renderer and [Blitz](https://github.com/DioxusLabs/blitz). Dioxus Native remains
+an experimental candidate rather than a protocol or library boundary.
+
+The experimental [iroh-live](https://github.com/n0-computer/iroh-live)
+workspace's Dioxus and Android adapters are evidence that Dioxus WGPU
+presentation and Android hardware-buffer presentation are separately feasible.
+Weld should validate their integration rather than assume they already provide
+one unified path.
+
+The assembly should hide its UI and media integration behind a
+destination-owned view that presents one remote window's decoded media and
+forwards input against stable protocol identities. A custom WGPU paint source
+is the preferred Blitz experiment. A native Android EGL surface embedded in
+the shell remains a valid hardware path, and the Dioxus web renderer is an
+acceptable fallback if it can present encoded video without per-frame
+raw-pixel CPU readback. Changing among those paths must not affect pairing,
+mesh authorization, hoist lifecycle, or the wire contract.
+
+Phone layout should not imitate a desktop indiscriminately. A small display may
+present one remote toplevel at a time with a task switcher while preserving
+related dialogs, popups, and other window-family identities. Tablets,
+foldables, and external displays may offer a freeform or desktop-like canvas.
+The destination owns safe-area handling, orientation, Android navigation, and
+shell gestures while projecting its available logical extent and scale to the
+source. Target modes and quality disclosure follow
+[Remote presentation targets and quality](remote-presentation.md).
+
+Touch translation, native touch, IME, selection, and shell-owned navigation
+follow the Direction-level
+[presentation-target input
+contract](remote-presentation.md#presentation-target-model--direction)
+rather than being defined by the mobile assembly.
+
 ### Master desktop
 
 The comprehensive desktop assembly could provide default window policy, bars,

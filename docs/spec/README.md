@@ -34,7 +34,11 @@ exploratory rather than an additional roadmap.
 | [Window management](window-management.md) | ECS frames, persistence, floating and tiling policy, and compatibility |
 | [Rendering](rendering.md) | Composition, buffer import, frame pacing, and display features |
 | [Plugins and configuration](plugins-and-configuration.md) | Extension API, reloadable policy, configuration, and IPC |
-| [Remote hoisting](remote-hoisting.md) | Individual and grouped window hoisting, adaptive media, reclaim, and security |
+| [Identity and meshes](identity-and-meshes.md) | Device trust, mesh membership, resource grants, wallet administration, and recovery |
+| [Remote hoisting](remote-hoisting.md) | Window-family admission, placeholders, reclaim, launcher federation, and source recovery |
+| [Remote protocol](remote-protocol.md) | Handshake, capabilities, transport bindings, surface modes, codecs, and media streams |
+| [Remote presentation](remote-presentation.md) | Destination targets, geometry, extent, scaling, quality disclosure, and enhancement |
+| [Remote budgeting](remote-budgeting.md) | Media-device admission, reservations, prioritization, resize scheduling, and fairness |
 | [Gaming sandbox](gaming-sandbox.md) | Gamescope-inspired isolation, virtual outputs, launchers, and game input |
 | [Distributions](distributions.md) | Reusable crates and proposed Weld assemblies |
 | [Platform completeness](platform-completeness.md) | Protocol coverage, XWayland, resilience, diagnostics, and validation |

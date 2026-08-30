@@ -39,6 +39,8 @@ Weld aims to:
   extending their format, output, and presentation capabilities;
 - support nested, physical-display, and eventually headless or streaming
   presentation without changing application policy;
+- support user-controlled trust meshes whose explicit resource grants can span
+  several devices without requiring one always-online coordinator;
 - make components replaceable while retaining safe defaults; and
 - expose stable Weld identities at persistence, IPC, and network boundaries
   instead of Bevy entities or Smithay objects.
@@ -54,7 +56,9 @@ Weld does not initially aim to:
   graphics objects;
 - build the complete remote product before the local compositor is reliable;
 - flatten a workspace or desktop into screen-scraped video when window-level
-  transport can preserve its structure; or
+  transport can preserve its structure;
+- treat remote mesh membership as an operating-system account, Wayland seat,
+  or implicit local multi-user session; or
 - implement every optional Wayland protocol or visual effect before the
   underlying lifecycle and presentation paths are sound.
 
