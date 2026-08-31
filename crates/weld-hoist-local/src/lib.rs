@@ -13,18 +13,20 @@ mod native;
 mod socket;
 mod wire;
 
+#[cfg(feature = "encoded-vaapi")]
+pub use adapter::{
+    EncodedSourceRegistrationOptions, encoded_destination_registration, encoded_source_registration,
+};
 pub use adapter::{
     LocalDestinationEndpoint, encoded_destination_registration_with_backend,
     encoded_source_registration_with_backend, local_destination_registration,
     local_source_registration,
 };
-#[cfg(feature = "encoded-vaapi")]
-pub use adapter::{encoded_destination_registration, encoded_source_registration};
 pub use bootstrap::{LocalTransportConnections, bootstrap_destination, bootstrap_source};
 pub use codec::{
     LocalDecodeBackend, LocalDecodeCompletion, LocalDecodeRequest, LocalDecodedFrame,
     LocalEncodeBackend, LocalEncodeCompletion, LocalEncodeInput, LocalEncodeRequest,
-    LocalSubmitError,
+    LocalH264Profile, LocalSubmitError,
 };
 pub(crate) use media::import_access_unit;
 pub use native::{

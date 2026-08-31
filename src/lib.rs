@@ -14,8 +14,8 @@ use weld_app::{
 use weld_float::FloatPlugin;
 use weld_hoist::{HoistPlugin, HoistTransport, loopback_registration};
 use weld_hoist_local::{
-    LocalPacketConnection, LocalPacketListener, LocalPeerRole, LocalSurfaceMode,
-    bootstrap_destination, bootstrap_source, encoded_destination_registration,
+    EncodedSourceRegistrationOptions, LocalPacketConnection, LocalPacketListener, LocalPeerRole,
+    LocalSurfaceMode, bootstrap_destination, bootstrap_source, encoded_destination_registration,
     encoded_source_registration, local_destination_registration, local_source_registration,
 };
 use weld_ssd::SsdPlugin;
@@ -26,6 +26,12 @@ pub use arguments::{AppArguments, BackendKind};
 
 pub fn run(arguments: AppArguments) -> Result<()> {
     telemetry::initialize()?;
+    if (arguments.hoist_h264_profile.is_some() || arguments.hoist_h264_dump_dir.is_some())
+        && arguments.hoist_surface_mode != Some(arguments::HoistSurfaceMode::EncodedH264Opaque)
+    {
+        anyhow::bail!("H.264 diagnostics require --hoist-surface-mode encoded-h264-opaque");
+    }
+    let h264_profile = arguments.hoist_h264_profile.unwrap_or_default();
 
     enum PendingLocalTransport {
         Source(LocalPacketListener),
@@ -97,14 +103,19 @@ pub fn run(arguments: AppArguments) -> Result<()> {
                         .insert_resource(HoistTransport::new(endpoint));
                 }
                 (LocalSurfaceMode::EncodedH264Opaque, Some(media)) => {
+                    tracing::info!(?h264_profile, "selected local hoist H.264 profile");
                     let capabilities = required_external_capabilities(&app)?;
                     let (adapter, endpoint, wakes) = encoded_source_registration(
                         transport.control,
                         media,
-                        weld_core::WAYLAND_CLIENT_SOURCE,
-                        adapter_source,
-                        adapter_source,
-                        &capabilities,
+                        EncodedSourceRegistrationOptions {
+                            upstream_source: weld_core::WAYLAND_CLIENT_SOURCE,
+                            adapter_source,
+                            destination_source: adapter_source,
+                            capabilities: &capabilities,
+                            profile: h264_profile.into(),
+                            dump_directory: arguments.hoist_h264_dump_dir,
+                        },
                     )?;
                     for wake in wakes {
                         app.add_client_wake_source(wake);

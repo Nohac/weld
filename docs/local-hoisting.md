@@ -83,9 +83,57 @@ Median/p95 hardware decode completion was 6.4/10.4 ms (15.1 ms maximum), and
 median/p95 destination-credit round trip was 8.7/15.2 ms. That run rules out
 multi-layer multiplication and insufficient decoder throughput as the primary
 cause of its visible smearing. The fixed 16 Mbps, NV12 4:2:0 H.264 quality and
-reference policy remains the next diagnostic target; the tracer should compare
-high-bitrate and all-keyframe modes before attributing the damage to a codec or
-switching to AV1.
+reference policy remains the next diagnostic target. A manual standard versus
+QP-16..28 comparison produced virtually identical average payloads (33,486 and
+33,475 bytes), so CBR probably kept the operating QP inside both ranges. The
+visual difference cannot be attributed to the tighter QP bounds. `high-bitrate`
+now changes only CBR from 16 to 64 Mbps, while corrected `all-idr` uses the
+standard QP 18..36 range and changes only reference/session behavior as closely
+as current cros-codecs permits. Independent mode recreates the encoder session
+for every frame because current cros-codecs cannot otherwise emit a conforming
+IDR with SPS/PPS. That resets rate control, so its timing and bitrate are not a
+controlled comparison.
+
+Weld locally patches cros-codecs to size VA coded buffers from the coded extent
+(`3 * width * height + 64 KiB`) instead of treating bits per second as a byte
+allocation. This follows [FFmpeg's VA encoder](https://github.com/FFmpeg/FFmpeg/blob/master/libavcodec/vaapi_encode.c)
+and avoids a 128 MB buffer allocation for every 64 Mbps frame. The patch also
+rejects VA overflow and bad-bitstream status and traces the driver-reported
+average QP. Remove it when upstream cros-codecs provides a resolution-bounded
+coded buffer and equivalent status handling.
+
+[FFmpeg explicitly queries and supplies VA encoder quality levels](https://github.com/FFmpeg/FFmpeg/blob/master/libavcodec/vaapi_encode.c),
+which cros-codecs does not yet do. Mesa 26.1 also contains several
+[radeonsi/VCN encode-preset fixes](https://docs.mesa3d.org/relnotes/26.1.0.html).
+Explicit quality-level support is the next isolated encoder diagnostic if
+bitrate is not binding; it is not mixed into this comparison. Automatic
+per-device round-trip validation remains deferred to the capability-negotiation
+pass, where peers should advertise only profiles that survive validation.
+
+The August 31 artifact investigation also found a separate visible-versus-coded
+extent contract hidden by the cros-codecs H.264 API. Its SPS builder rounds a
+visible extent to 16x16 macroblocks and records the crop, while `new_vaapi`
+accepts an independent coded size used for VA surface allocation. The API docs
+do not state that the latter must contain the rounded SPS extent, and Weld had
+passed the visible extent to both. A 944x484 Blender surface therefore declared
+a 944x496 coded picture while the driver received only a 944x484 surface, which
+matches the displaced horizontal bands in the recorded source bitstream.
+
+`weld-media-vaapi` now owns this adaptation explicitly. The H.264 encoder is
+configured with the exact visible extent, its VA surfaces are rounded up to
+16x16 macroblocks, and VPP copies the visible source one-to-one into the
+top-left of an opaque-black padded NV12 surface without scaling. Stream
+generations rotate on exact visible extent changes so SPS crop metadata cannot
+drift from a reused encoder session. On radeonsi, black padding affects a few
+pixels at the bottom or right edge through in-loop deblocking. Replicated edge
+pixels remain a future quality improvement; this narrow border defect is
+separate from the large stale macroblock bands under investigation.
+
+H.264 4:2:0 cropping is expressed in two-pixel chroma units. An odd transported
+extent therefore decodes to the next even display extent; Weld crops that
+decoded surface back to the exact transported width and height instead of
+resampling it. The extra coded pixel never becomes part of the destination
+window geometry.
 
 Destination input is already addressed to the transported surface and enters
 the source's client runtime without the destination's compositor-global
@@ -113,14 +161,50 @@ descriptor baseline or choose another source client with:
 scripts/run-local-hoist --native
 scripts/run-local-hoist firefox
 scripts/run-local-hoist --trace-media blender
+scripts/run-local-hoist --trace-media --high-bitrate blender
+scripts/run-local-hoist --trace-media --all-idr blender
+scripts/run-local-hoist --trace-media --high-bitrate --dump-h264 blender
 ```
 
 `--trace-media` keeps ordinary dependencies at `info` while enabling structured
-source-batch, destination-decode, coalescing, and credit timing for the encoded
-boundary. For example, 60 surface-tree commits per second with two changed
+source-batch, destination-decode, coalescing, credit timing, VA segment status,
+and average QP for the encoded boundary. For example, 60 surface-tree commits
+per second with two changed
 layers requests 120 sequential codec frames per second in the current tracer;
 the trace records both the commit and layer counts so that multiplication is
 visible separately from per-frame decode time.
+
+`--dump-h264` creates a timestamped directory printed by the script and records
+each source stream generation independently. This keeps evidence from earlier
+runs out of the current comparison. Inspect the relevant Blender stream with
+software decoding so the destination VA decoder is not reused:
+
+```sh
+ffplay -hwaccel none -f h264 PRINTED_DUMP_DIRECTORY/stream-1-generation-1.h264
+```
+
+Use the filename emitted by the source log; Blender can advance generations
+when its extent changes. Ghosting in this file places the defect before local
+transport, in source-buffer readiness, VPP, or encoding. A clean file places
+it after transport, in destination decoding, VPP, DMA-BUF import, or final
+composition.
+
+The same directory contains sampled stage snapshots under `stages/`. Through
+sequence 300, every thirtieth encoded frame writes matching
+`stream-N-generation-N-sequence-N-source.ppm` and `-normalized.ppm` files.
+`source` is the client DMA-BUF after VA import; `normalized` is the padded NV12
+encoder input converted back to XRGB and cropped to visible geometry. Clean
+matching snapshots followed by a corrupt software-decoded H.264 frame isolate
+the fault to encoding. Stage capture performs extra synchronous VPP work and
+file writes in the encoder worker, so timing and credit traces from dump runs
+must not be used as ordinary performance measurements.
+
+The eventual one-frame-per-surface-tree path must not use a repacked atlas on
+every commit. It requires sticky macroblock-aligned slots with gutters,
+bucketed extents, area-aware quality budgeting, a nonfatal codec-ceiling
+policy, shared decoded-image lifetime in Bevy, and both batched and sequential
+same-target VA-API composition. That work is architectural and is not assumed
+to fix the current H.264 smearing by itself.
 
 Validate the following before treating a change to this boundary as complete:
 
@@ -161,5 +245,9 @@ multiple Weld instances in one runtime directory.
   builds. Compatibility negotiation is deferred until the protocol stabilizes.
 - Encoded mode is opaque H.264 only. It has no AV1, VP9, alpha plane, software
   codec fallback, cross-device capability negotiation, or decoded-output pool.
+- Decoder generation retirement is queued when transported layers rotate or
+  disappear and is applied by the worker before its next decode command; an
+  idle worker can therefore retain the last retired VA session until new work
+  arrives.
 - There is no network transport, clipboard/DnD transfer, or filesystem path
   mediation in this binding.

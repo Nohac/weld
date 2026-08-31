@@ -1,6 +1,9 @@
 use std::{
     any::Any,
     ffi::{CStr, c_void},
+    fs::File,
+    io::{BufWriter, Write},
+    path::Path,
     ptr,
     rc::Rc,
 };
@@ -31,6 +34,13 @@ pub enum VppOutput {
 pub struct VppConverter {
     display: Rc<Display>,
     config: Config,
+}
+
+#[derive(Clone, Copy)]
+struct VppGeometry {
+    source: (u32, u32),
+    output: (u32, u32),
+    output_region: (u32, u32),
 }
 
 impl VppConverter {
@@ -66,6 +76,51 @@ impl VppConverter {
         output_height: u32,
         output: VppOutput,
     ) -> Result<VaapiDmabuf> {
+        self.convert_regions(
+            input,
+            VppGeometry {
+                source: (source_width, source_height),
+                output: (output_width, output_height),
+                output_region: (output_width, output_height),
+            },
+            output,
+        )
+    }
+
+    /// Pads a visible source region into a larger output without scaling it.
+    pub fn convert_padded(
+        &self,
+        input: &VaapiDmabuf,
+        source_width: u32,
+        source_height: u32,
+        output_width: u32,
+        output_height: u32,
+        output: VppOutput,
+    ) -> Result<VaapiDmabuf> {
+        ensure!(
+            source_width <= output_width && source_height <= output_height,
+            "VPP padded output is smaller than its visible source"
+        );
+        self.convert_regions(
+            input,
+            VppGeometry {
+                source: (source_width, source_height),
+                output: (output_width, output_height),
+                output_region: (source_width, source_height),
+            },
+            output,
+        )
+    }
+
+    fn convert_regions(
+        &self,
+        input: &VaapiDmabuf,
+        geometry: VppGeometry,
+        output: VppOutput,
+    ) -> Result<VaapiDmabuf> {
+        let (source_width, source_height) = geometry.source;
+        let (output_width, output_height) = geometry.output;
+        let (output_region_width, output_region_height) = geometry.output_region;
         ensure!(
             source_width > 0
                 && source_height > 0
@@ -76,6 +131,13 @@ impl VppConverter {
         ensure!(
             output_width > 0 && output_height > 0,
             "VPP output has zero extent"
+        );
+        ensure!(
+            output_region_width > 0
+                && output_region_height > 0
+                && output_region_width <= output_width
+                && output_region_height <= output_height,
+            "VPP output region is outside the output frame"
         );
         let (input_rt_format, input_va_format) = surface_format(input.fourcc)
             .context("VPP input format is not supported by the hardware tracer")?;
@@ -110,6 +172,7 @@ impl VppConverter {
                     input_surface,
                     output_surface,
                     (source_width, source_height),
+                    (output_region_width, output_region_height),
                     VA_COLOR_SRGB,
                     VA_COLOR_BT709,
                 )
@@ -134,6 +197,7 @@ impl VppConverter {
                     input_surface,
                     output_surface,
                     (source_width, source_height),
+                    (output_region_width, output_region_height),
                     VA_COLOR_BT709,
                     VA_COLOR_SRGB,
                 )
@@ -211,11 +275,86 @@ impl VppConverter {
         )
     }
 
+    /// Writes a diagnostic RGB snapshot after importing the supplied DMA-BUF through VA-API.
+    pub fn write_xrgb_ppm(
+        &self,
+        input: &VaapiDmabuf,
+        visible_width: u32,
+        visible_height: u32,
+        path: &Path,
+    ) -> Result<()> {
+        let xrgb = self.convert_scaled(
+            input,
+            visible_width,
+            visible_height,
+            visible_width,
+            visible_height,
+            VppOutput::Xrgb8888 { modifiers: vec![0] },
+        )?;
+        let surface = self
+            .display
+            .create_surfaces(
+                VA_RT_FORMAT_RGB32,
+                Some(VA_FOURCC_BGRX),
+                xrgb.width,
+                xrgb.height,
+                Some(UsageHint::USAGE_HINT_VPP_READ),
+                vec![xrgb.import_descriptor()?],
+            )
+            .context("could not import diagnostic XRGB DMA-BUF")?
+            .pop()
+            .context("VA-API did not create a diagnostic XRGB surface")?;
+        surface
+            .sync()
+            .context("could not synchronize diagnostic XRGB surface")?;
+        let image_format = self
+            .display
+            .query_image_formats()
+            .context("could not query VA image formats")?
+            .into_iter()
+            .find(|format| format.fourcc == VA_FOURCC_BGRX)
+            .context("VA-API does not expose a BGRX image format")?;
+        let image = cros_codecs::libva::Image::create_from(
+            &surface,
+            image_format,
+            (visible_width, visible_height),
+            (visible_width, visible_height),
+        )
+        .context("could not map diagnostic XRGB pixels")?;
+        let description = *image.image();
+        let bytes = image.as_ref();
+        let offset = usize::try_from(description.offsets[0])?;
+        let pitch = usize::try_from(description.pitches[0])?;
+        let width = usize::try_from(visible_width)?;
+        let height = usize::try_from(visible_height)?;
+        let file = File::create(path)
+            .with_context(|| format!("could not create diagnostic frame {}", path.display()))?;
+        let mut output = BufWriter::new(file);
+        write!(output, "P6\n{visible_width} {visible_height}\n255\n")?;
+        for y in 0..height {
+            let row = offset
+                .checked_add(y.checked_mul(pitch).context("diagnostic row overflow")?)
+                .context("diagnostic row offset overflow")?;
+            for x in 0..width {
+                let pixel = row
+                    .checked_add(x.checked_mul(4).context("diagnostic pixel overflow")?)
+                    .context("diagnostic pixel offset overflow")?;
+                let bgra = bytes
+                    .get(pixel..pixel + 4)
+                    .context("diagnostic XRGB image is truncated")?;
+                output.write_all(&[bgra[2], bgra[1], bgra[0]])?;
+            }
+        }
+        output.flush()?;
+        Ok(())
+    }
+
     fn process<I, O>(
         &self,
         input: Surface<I>,
         output: Vec<Surface<O>>,
         source_size: (u32, u32),
+        output_region_size: (u32, u32),
         input_color_standard: u32,
         output_color_standard: u32,
     ) -> Result<VaapiDmabuf>
@@ -246,9 +385,9 @@ impl VppConverter {
         let output_region = VARectangle {
             x: 0,
             y: 0,
-            width: u16::try_from(output_surface.size().0)
+            width: u16::try_from(output_region_size.0)
                 .context("VPP output width exceeds VA rectangle range")?,
-            height: u16::try_from(output_surface.size().1)
+            height: u16::try_from(output_region_size.1)
                 .context("VPP output height exceeds VA rectangle range")?,
         };
         let mut parameters = VAProcPipelineParameterBuffer {

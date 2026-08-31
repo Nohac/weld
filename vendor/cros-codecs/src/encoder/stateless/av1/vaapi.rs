@@ -494,7 +494,7 @@ where
         &mut self,
         request: BackendRequest<Self::Picture, Self::Reconstructed>,
     ) -> StatelessBackendResult<(Self::ReconPromise, Self::CodedPromise)> {
-        let coded_buf = self.new_coded_buffer(&request.tunings.rate_control)?;
+        let coded_buf = self.new_coded_buffer()?;
         let recon = self.new_scratch_picture()?;
 
         let seq_param = Self::build_seq_param(&request)?;

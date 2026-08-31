@@ -12,7 +12,9 @@ mod worker;
 
 pub use device::VaapiDevice;
 pub use dmabuf::{VaapiDmabuf, VaapiDmabufObject, VaapiDmabufPlane};
-pub use h264::{DecodedH264Frame, H264Decoder, H264Encoder};
+pub use h264::{
+    DecodedH264Frame, H264Decoder, H264Encoder, H264EncoderSettings, H264ReferenceMode,
+};
 pub use probe::{H264EncodeEntrypoint, VaapiCapabilities, VaapiProbeError, probe_vaapi_device};
 pub use vpp::{VppConverter, VppOutput};
 pub use worker::{

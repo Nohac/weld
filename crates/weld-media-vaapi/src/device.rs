@@ -1,9 +1,9 @@
-use std::{num::NonZeroU16, path::Path, rc::Rc};
+use std::{path::Path, rc::Rc};
 
 use anyhow::{Context, Result};
 use cros_codecs::libva::Display;
 
-use crate::{H264Decoder, H264Encoder, VppConverter};
+use crate::{H264Decoder, H264Encoder, H264EncoderSettings, VppConverter};
 
 /// One VA-API display shared by codec and video-processing sessions.
 pub struct VaapiDevice {
@@ -29,18 +29,9 @@ impl VaapiDevice {
         &self,
         width: u32,
         height: u32,
-        bitrate: u64,
-        frames_per_second: u32,
-        intra_period: NonZeroU16,
+        settings: H264EncoderSettings,
     ) -> Result<H264Encoder> {
-        H264Encoder::new(
-            self.display.clone(),
-            width,
-            height,
-            bitrate,
-            frames_per_second,
-            intra_period,
-        )
+        H264Encoder::new(self.display.clone(), width, height, settings)
     }
 
     pub fn h264_decoder(&self) -> Result<H264Decoder> {

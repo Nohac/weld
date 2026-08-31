@@ -356,7 +356,7 @@ where
         &mut self,
         request: Request<'_, H>,
     ) -> StatelessBackendResult<(Self::ReconPromise, Self::CodedPromise)> {
-        let coded_buf = self.new_coded_buffer(&request.tunings.rate_control)?;
+        let coded_buf = self.new_coded_buffer()?;
         let recon = self.new_scratch_picture()?;
 
         // Use bitrate from RateControl or ask driver to ignore

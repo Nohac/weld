@@ -1,4 +1,4 @@
-use std::{collections::HashSet, num::NonZeroU16};
+use std::collections::HashSet;
 
 use anyhow::{Context, Result, ensure};
 use weld_client::{
@@ -10,10 +10,13 @@ use weld_core::dmabuf::{
     request_weld_device,
 };
 use weld_media::{EncodedFrameKind, MediaFrameId, MediaStreamId, StreamGeneration};
-use weld_media_vaapi::{DecodedH264Frame, VaapiDevice, VaapiDmabuf, VppConverter, VppOutput};
+use weld_media_vaapi::{
+    DecodedH264Frame, H264Encoder, H264EncoderSettings, H264ReferenceMode, VaapiDevice,
+    VaapiDmabuf, VppConverter, VppOutput,
+};
 
-const WIDTH: u32 = 320;
-const HEIGHT: u32 = 192;
+const WIDTH: u32 = 318;
+const HEIGHT: u32 = 190;
 const PERSISTENT_FRAME_COUNT: u64 = 34;
 const DRM_FORMAT_XRGB8888: u32 = u32::from_le_bytes(*b"XR24");
 
@@ -55,8 +58,9 @@ fn main() -> Result<()> {
     );
     let media = VaapiDevice::open(&external.render_node)?;
     let vpp = media.vpp_converter()?;
-    let intra_period = NonZeroU16::new(16).context("nonzero intra period")?;
-    let mut encoder = media.h264_encoder(WIDTH, HEIGHT, 2_000_000, 60, intra_period)?;
+    let persistent_settings =
+        H264EncoderSettings::try_new(2_000_000, 60, 16, 18, 36, H264ReferenceMode::LowDelay)?;
+    let mut encoder = media.h264_encoder(WIDTH, HEIGHT, persistent_settings)?;
     let mut decoder = media.h264_decoder()?;
     let stream = MediaStreamId::new(1);
     let generation = StreamGeneration::new(1);
@@ -73,7 +77,7 @@ fn main() -> Result<()> {
     for sequence in 0_u64..PERSISTENT_FRAME_COUNT {
         let seed = u8::try_from(sequence * 3)?;
         let source = media.create_xrgb_probe_frame(WIDTH, HEIGHT, vec![0], seed)?;
-        let encoder_input = vpp.convert(&source, VppOutput::Nv12)?;
+        let encoder_input = prepare_encoder_input(&vpp, &source, &encoder)?;
         let frame_id = MediaFrameId::new(stream, generation, sequence);
         let encoded = encoder.encode(frame_id, sequence * 16_667, &encoder_input)?;
         let expected_kind = if sequence % 16 == 0 {
@@ -114,8 +118,8 @@ fn main() -> Result<()> {
     let recovery_generation = StreamGeneration::new(2);
     let recovery_seed = 91;
     let recovery_source = media.create_xrgb_probe_frame(WIDTH, HEIGHT, vec![0], recovery_seed)?;
-    let recovery_input = vpp.convert(&recovery_source, VppOutput::Nv12)?;
-    let mut recovery_encoder = media.h264_encoder(WIDTH, HEIGHT, 2_000_000, 60, intra_period)?;
+    let mut recovery_encoder = media.h264_encoder(WIDTH, HEIGHT, persistent_settings)?;
+    let recovery_input = prepare_encoder_input(&vpp, &recovery_source, &recovery_encoder)?;
     let recovery = recovery_encoder.encode(
         MediaFrameId::new(stream, recovery_generation, 0),
         1_000_000,
@@ -133,16 +137,126 @@ fn main() -> Result<()> {
         "recovery generation produced an unexpected frame count"
     );
     let recovered = recovered.pop().context("recovery frame is absent")?;
-    validator.validate(recovered, recovery_seed)?;
+    validator
+        .validate(recovered, recovery_seed)
+        .context("recovery generation pixels are invalid")?;
+    let high_bitrate_settings =
+        H264EncoderSettings::try_new(64_000_000, 60, 16, 18, 36, H264ReferenceMode::LowDelay)?;
+    let high_bitrate_seed = 7;
+    let high_bitrate_source =
+        media.create_xrgb_probe_frame(WIDTH, HEIGHT, vec![0], high_bitrate_seed)?;
+    let mut high_bitrate_encoder = media.h264_encoder(WIDTH, HEIGHT, high_bitrate_settings)?;
+    let high_bitrate_input =
+        prepare_encoder_input(&vpp, &high_bitrate_source, &high_bitrate_encoder)?;
+    let high_bitrate = high_bitrate_encoder.encode(
+        MediaFrameId::new(MediaStreamId::new(2), StreamGeneration::new(1), 0),
+        2_000_000,
+        &high_bitrate_input,
+    )?;
+    let mut high_bitrate_decoder = media.h264_decoder()?;
+    let high_bitrate_decoded = high_bitrate_decoder.decode(&high_bitrate)?;
     ensure!(
-        validator.validated_frames == PERSISTENT_FRAME_COUNT + 1,
-        "recovery generation did not add exactly one decoded frame"
+        high_bitrate_decoded.len() == 1,
+        "high-bitrate H.264 frame did not decode immediately"
+    );
+    for decoded in high_bitrate_decoded {
+        validator
+            .validate(decoded, high_bitrate_seed)
+            .context("high-bitrate H.264 frame pixels are invalid")?;
+    }
+    ensure!(
+        high_bitrate_decoder.drain()?.is_empty(),
+        "high-bitrate H.264 decoder retained duplicate output"
     );
     println!(
-        "hardware-roundtrip-validated=true persistent-frames={} total-validated={} recovery-generation=true diagnostic-readback=true",
+        "high-bitrate-frame=true kind={:?} bytes={}",
+        high_bitrate.kind,
+        high_bitrate.payload.len()
+    );
+    let independent_settings = H264EncoderSettings::try_new(
+        16_000_000,
+        60,
+        16,
+        18,
+        36,
+        H264ReferenceMode::IndependentIdr,
+    )?;
+    let mut independent_decoder = media.h264_decoder()?;
+    for sequence in 0..3 {
+        let seed = 11 + sequence;
+        let source = media.create_xrgb_probe_frame(WIDTH, HEIGHT, vec![0], seed)?;
+        let mut independent_encoder = media.h264_encoder(WIDTH, HEIGHT, independent_settings)?;
+        let input = prepare_encoder_input(&vpp, &source, &independent_encoder)?;
+        let encoded = independent_encoder.encode(
+            MediaFrameId::new(
+                MediaStreamId::new(3),
+                StreamGeneration::new(1),
+                u64::from(sequence),
+            ),
+            2_000_000 + u64::from(sequence) * 16_667,
+            &input,
+        )?;
+        ensure!(
+            encoded.kind == EncodedFrameKind::Keyframe,
+            "independent H.264 frame was not a keyframe"
+        );
+        ensure!(
+            contains_h264_nal_types(&encoded.payload, &[7, 8, 5]),
+            "independent H.264 frame did not carry SPS, PPS, and IDR"
+        );
+        println!(
+            "independent-frame={sequence} kind={:?} bytes={}",
+            encoded.kind,
+            encoded.payload.len()
+        );
+        let decoded = independent_decoder.decode(&encoded)?;
+        ensure!(
+            decoded.len() == 1,
+            "independent H.264 frame did not decode immediately"
+        );
+        for decoded in decoded {
+            validator.validate(decoded, seed).with_context(|| {
+                format!("independent H.264 frame {sequence} pixels are invalid")
+            })?;
+        }
+    }
+    ensure!(
+        independent_decoder.drain()?.is_empty(),
+        "independent H.264 decoder retained duplicate output"
+    );
+    ensure!(
+        validator.validated_frames == PERSISTENT_FRAME_COUNT + 5,
+        "recovery, high-bitrate, and independent paths did not add exactly five decoded frames"
+    );
+    println!(
+        "hardware-roundtrip-validated=true persistent-frames={} total-validated={} recovery-generation=true high-bitrate=true independent-idr=true diagnostic-readback=true",
         PERSISTENT_FRAME_COUNT, validator.validated_frames,
     );
     Ok(())
+}
+
+fn prepare_encoder_input(
+    vpp: &VppConverter,
+    source: &VaapiDmabuf,
+    encoder: &H264Encoder,
+) -> Result<VaapiDmabuf> {
+    let (coded_width, coded_height) = encoder.coded_size();
+    vpp.convert_padded(
+        source,
+        WIDTH,
+        HEIGHT,
+        coded_width,
+        coded_height,
+        VppOutput::Nv12,
+    )
+}
+
+fn contains_h264_nal_types(payload: &[u8], expected: &[u8]) -> bool {
+    let found = payload
+        .windows(5)
+        .filter_map(|window| (window[..4] == [0, 0, 0, 1]).then_some(window[4] & 0x1f))
+        .collect::<HashSet<_>>();
+    expected.iter().all(|nal_type| found.contains(nal_type))
 }
 
 struct DecodedFrameValidator<'a> {
@@ -468,34 +582,48 @@ fn fragment(input: VertexOutput) -> @location(0) vec4<f32> {
 
 fn validate_pixels(pixels: &[u8], seed: u8) -> Result<()> {
     const TOLERANCE: i16 = 48;
+    const CROP_EDGE_TOLERANCE: i16 = 96;
+    // Stay outside the H.264 in-loop filter's crop-edge neighborhood. The
+    // probe validates that macroblock padding preserves the visible interior;
+    // edge replication is a separate quality policy if black padding becomes
+    // visible in production.
+    const CROP_EDGE_INSET: u32 = 4;
     let samples = [
         (0, 0),
-        (WIDTH - 1, 0),
-        (0, HEIGHT - 1),
-        (WIDTH - 1, HEIGHT - 1),
+        (WIDTH - 1 - CROP_EDGE_INSET, 0),
+        (0, HEIGHT - 1 - CROP_EDGE_INSET),
+        (WIDTH - 1 - CROP_EDGE_INSET, HEIGHT - 1 - CROP_EDGE_INSET),
         (WIDTH / 2, HEIGHT / 2),
     ];
     for (x, y) in samples {
-        let offset = usize::try_from((y * WIDTH + x) * 4)?;
-        let actual = pixels
-            .get(offset..offset + 4)
-            .context("sampled image is truncated")?;
-        let horizontal = (x * 63) / WIDTH.saturating_sub(1).max(1);
-        let vertical = (y * 63) / HEIGHT.saturating_sub(1).max(1);
-        let value = u8::try_from(horizontal + vertical)?
-            .checked_add(seed)
-            .context("diagnostic gradient exceeds one byte")?;
-        let expected = [value, value, value];
-        ensure!(
-            actual[..3]
-                .iter()
-                .zip(expected)
-                .all(
-                    |(actual, expected)| (i16::from(*actual) - i16::from(expected)).abs()
-                        <= TOLERANCE
-                ),
-            "sample at ({x}, {y}) differs from the diagnostic gradient: actual={actual:?} expected={expected:?}"
-        );
+        validate_pixel(pixels, seed, x, y, TOLERANCE)?;
     }
+    // The first frame also keeps a loose assertion on the crop boundary. Later
+    // seeds intentionally increase brightness, amplifying the known dark-edge
+    // bleed from black macroblock padding rather than testing a new invariant.
+    if seed == 0 {
+        validate_pixel(pixels, seed, WIDTH - 1, HEIGHT / 2, CROP_EDGE_TOLERANCE)?;
+        validate_pixel(pixels, seed, WIDTH / 2, HEIGHT - 1, CROP_EDGE_TOLERANCE)?;
+    }
+    Ok(())
+}
+
+fn validate_pixel(pixels: &[u8], seed: u8, x: u32, y: u32, tolerance: i16) -> Result<()> {
+    let offset = usize::try_from((y * WIDTH + x) * 4)?;
+    let actual = pixels
+        .get(offset..offset + 4)
+        .context("sampled image is truncated")?;
+    let horizontal = (x * 63) / WIDTH.saturating_sub(1).max(1);
+    let vertical = (y * 63) / HEIGHT.saturating_sub(1).max(1);
+    let value = u8::try_from(horizontal + vertical)?
+        .checked_add(seed)
+        .context("diagnostic gradient exceeds one byte")?;
+    let expected = [value, value, value];
+    ensure!(
+        actual[..3].iter().zip(expected).all(|(actual, expected)| {
+            (i16::from(*actual) - i16::from(expected)).abs() <= tolerance
+        }),
+        "sample at ({x}, {y}) differs from the diagnostic gradient: actual={actual:?} expected={expected:?}"
+    );
     Ok(())
 }

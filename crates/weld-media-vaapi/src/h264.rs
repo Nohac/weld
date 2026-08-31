@@ -32,6 +32,78 @@ type CrosH264Encoder = StatelessEncoder<
 type CrosH264Decoder =
     StatelessDecoder<H264DecoderCodec, VaapiDecoderBackend<GenericDmaVideoFrame>>;
 
+const H264_MACROBLOCK_SIZE: u32 = 16;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum H264ReferenceMode {
+    LowDelay,
+    IndependentIdr,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct H264EncoderSettings {
+    bitrate: u64,
+    frames_per_second: u32,
+    intra_period: u16,
+    min_qp: u32,
+    max_qp: u32,
+    reference_mode: H264ReferenceMode,
+}
+
+impl H264EncoderSettings {
+    pub fn try_new(
+        bitrate: u64,
+        frames_per_second: u32,
+        intra_period: u16,
+        min_qp: u32,
+        max_qp: u32,
+        reference_mode: H264ReferenceMode,
+    ) -> Result<Self> {
+        ensure!(bitrate > 0, "H.264 bitrate must be positive");
+        ensure!(frames_per_second > 0, "H.264 frame rate must be positive");
+        ensure!(
+            intra_period >= 16 && intra_period.is_power_of_two(),
+            "H.264 intra period must be a power of two of at least 16"
+        );
+        ensure!(
+            (1..=51).contains(&min_qp) && (1..=51).contains(&max_qp) && min_qp <= max_qp,
+            "H.264 QP range must be ordered within 1..=51"
+        );
+        Ok(Self {
+            bitrate,
+            frames_per_second,
+            intra_period,
+            min_qp,
+            max_qp,
+            reference_mode,
+        })
+    }
+
+    pub const fn bitrate(self) -> u64 {
+        self.bitrate
+    }
+
+    pub const fn frames_per_second(self) -> u32 {
+        self.frames_per_second
+    }
+
+    pub const fn intra_period(self) -> u16 {
+        self.intra_period
+    }
+
+    pub const fn min_qp(self) -> u32 {
+        self.min_qp
+    }
+
+    pub const fn max_qp(self) -> u32 {
+        self.max_qp
+    }
+
+    pub const fn reference_mode(self) -> H264ReferenceMode {
+        self.reference_mode
+    }
+}
+
 #[derive(Debug)]
 struct EncodedInputFrame {
     frame: VaapiDmabuf,
@@ -107,7 +179,7 @@ impl VideoFrame for EncodedInputFrame {
 pub struct H264Encoder {
     encoder: CrosH264Encoder,
     repair_radeonsi_slice_header: bool,
-    resolution: Resolution,
+    coded_resolution: Resolution,
     cadence: EncoderCadence,
 }
 
@@ -150,10 +222,10 @@ impl H264Encoder {
         display: Rc<Display>,
         width: u32,
         height: u32,
-        bitrate: u64,
-        frames_per_second: u32,
-        intra_period: NonZeroU16,
+        settings: H264EncoderSettings,
     ) -> Result<Self> {
+        let intra_period = NonZeroU16::new(settings.intra_period())
+            .context("H.264 intra period must be non-zero")?;
         let cadence = EncoderCadence::new(intra_period)?;
         let entrypoints = display
             .query_config_entrypoints(VAProfile::VAProfileH264ConstrainedBaseline)
@@ -171,14 +243,15 @@ impl H264Encoder {
             .context("could not identify the VA-API encoder driver")?;
         let repair_radeonsi_slice_header =
             vendor.contains("Mesa Gallium") && vendor.contains("radeonsi");
-        let resolution = Resolution { width, height };
+        let visible_resolution = Resolution { width, height };
+        let coded_resolution = h264_coded_resolution(width, height)?;
         let config = EncoderConfig {
-            resolution,
+            resolution: visible_resolution,
             initial_tunings: Tunings {
-                rate_control: RateControl::ConstantBitrate(bitrate),
-                framerate: frames_per_second,
-                min_quality: 18,
-                max_quality: 36,
+                rate_control: RateControl::ConstantBitrate(settings.bitrate()),
+                framerate: settings.frames_per_second(),
+                min_quality: settings.min_qp(),
+                max_quality: settings.max_qp(),
             },
             pred_structure: PredictionStructure::LowDelay {
                 limit: intra_period.get(),
@@ -189,7 +262,7 @@ impl H264Encoder {
             display,
             config,
             Fourcc::from(b"NV12"),
-            resolution,
+            coded_resolution,
             low_power,
             BlockingMode::Blocking,
         )
@@ -197,9 +270,13 @@ impl H264Encoder {
         Ok(Self {
             encoder,
             repair_radeonsi_slice_header,
-            resolution,
+            coded_resolution,
             cadence,
         })
+    }
+
+    pub const fn coded_size(&self) -> (u32, u32) {
+        (self.coded_resolution.width, self.coded_resolution.height)
     }
 
     pub fn encode(
@@ -212,7 +289,8 @@ impl H264Encoder {
             bail!("H.264 encoder input is not NV12");
         }
         ensure!(
-            input.width == self.resolution.width && input.height == self.resolution.height,
+            input.width == self.coded_resolution.width
+                && input.height == self.coded_resolution.height,
             "H.264 encoder input extent differs from its stream generation"
         );
         let layout = frame_layout(input)?;
@@ -264,6 +342,21 @@ impl H264Encoder {
         self.cadence.complete();
         Ok(access_unit)
     }
+}
+
+pub(crate) fn h264_coded_resolution(width: u32, height: u32) -> Result<Resolution> {
+    Ok(Resolution {
+        width: align_h264_dimension(width)?,
+        height: align_h264_dimension(height)?,
+    })
+}
+
+fn align_h264_dimension(value: u32) -> Result<u32> {
+    ensure!(value > 0, "H.264 frame has zero extent");
+    value
+        .checked_add(H264_MACROBLOCK_SIZE - 1)
+        .map(|rounded| rounded / H264_MACROBLOCK_SIZE * H264_MACROBLOCK_SIZE)
+        .context("H.264 coded extent overflow")
 }
 
 const fn frame_kind(emitted_frames: u16, intra_period: NonZeroU16) -> EncodedFrameKind {
@@ -683,8 +776,9 @@ mod tests {
     use weld_media::EncodedFrameKind;
 
     use super::{
-        EncoderCadence, ExpGolombReader, frame_kind, normalize_annex_b, parse_slice_type,
-        slice_matches_kind, validate_and_repair_slice_headers,
+        EncoderCadence, ExpGolombReader, H264EncoderSettings, H264ReferenceMode, frame_kind,
+        h264_coded_resolution, normalize_annex_b, parse_slice_type, slice_matches_kind,
+        validate_and_repair_slice_headers,
     };
     use std::num::NonZeroU16;
 
@@ -771,6 +865,39 @@ mod tests {
             frame_kind(recreated.emitted_frames, recreated.intra_period),
             EncodedFrameKind::Keyframe
         );
+    }
+
+    #[test]
+    fn encoder_settings_reject_values_the_hardware_policy_would_rewrite() {
+        let settings = |bitrate, fps, period, min_qp, max_qp| {
+            H264EncoderSettings::try_new(
+                bitrate,
+                fps,
+                period,
+                min_qp,
+                max_qp,
+                H264ReferenceMode::LowDelay,
+            )
+        };
+
+        assert!(settings(0, 60, 32, 18, 36).is_err());
+        assert!(settings(16_000_000, 0, 32, 18, 36).is_err());
+        assert!(settings(16_000_000, 60, 24, 18, 36).is_err());
+        assert!(settings(16_000_000, 60, 32, 0, 36).is_err());
+        assert!(settings(16_000_000, 60, 32, 18, 52).is_err());
+        assert!(settings(16_000_000, 60, 32, 36, 18).is_err());
+        assert!(settings(16_000_000, 60, 32, 18, 36).is_ok());
+    }
+
+    #[test]
+    fn coded_resolution_preserves_visible_macroblock_crop() {
+        let aligned = h264_coded_resolution(320, 192).expect("aligned extent");
+        assert_eq!((aligned.width, aligned.height), (320, 192));
+
+        let cropped = h264_coded_resolution(944, 484).expect("cropped extent");
+        assert_eq!((cropped.width, cropped.height), (944, 496));
+        assert!(h264_coded_resolution(0, 484).is_err());
+        assert!(h264_coded_resolution(u32::MAX, 484).is_err());
     }
 
     #[test]

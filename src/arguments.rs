@@ -4,7 +4,7 @@ use std::{ffi::OsString, path::PathBuf};
 
 use clap::{Parser, ValueEnum};
 use weld_app::{Backend, OutputScale};
-use weld_hoist_local::LocalSurfaceMode;
+use weld_hoist_local::{LocalH264Profile, LocalSurfaceMode};
 
 const DEFAULT_REMOTE_ADDRESS: &str = "127.0.0.1:15702";
 
@@ -27,6 +27,24 @@ impl From<HoistSurfaceMode> for LocalSurfaceMode {
         match mode {
             HoistSurfaceMode::Native => Self::Native,
             HoistSurfaceMode::EncodedH264Opaque => Self::EncodedH264Opaque,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, ValueEnum)]
+pub enum HoistH264Profile {
+    #[default]
+    Standard,
+    HighBitrate,
+    AllIdr,
+}
+
+impl From<HoistH264Profile> for LocalH264Profile {
+    fn from(profile: HoistH264Profile) -> Self {
+        match profile {
+            HoistH264Profile::Standard => Self::Standard,
+            HoistH264Profile::HighBitrate => Self::HighBitrate,
+            HoistH264Profile::AllIdr => Self::AllIdr,
         }
     }
 }
@@ -86,6 +104,14 @@ pub struct AppArguments {
     /// Source-side surface carrier used for a local hoist peer.
     #[arg(long, value_enum, value_name = "MODE", requires = "hoist_listen")]
     pub(crate) hoist_surface_mode: Option<HoistSurfaceMode>,
+
+    /// Source-side H.264 diagnostic encoder profile.
+    #[arg(long, value_enum, value_name = "PROFILE", requires = "hoist_listen")]
+    pub(crate) hoist_h264_profile: Option<HoistH264Profile>,
+
+    /// Record source H.264 stream generations before local transport.
+    #[arg(long, value_name = "DIR", requires = "hoist_listen")]
+    pub(crate) hoist_h264_dump_dir: Option<PathBuf>,
 
     /// Optional client program followed by its arguments.
     #[arg(value_name = "CLIENT_AND_ARGS", allow_hyphen_values = true)]

@@ -2,6 +2,9 @@
 
 use std::{
     collections::{HashMap, HashSet, VecDeque},
+    fs::{self, File, OpenOptions},
+    io::{BufWriter, Write},
+    path::{Path, PathBuf},
     time::Instant,
 };
 
@@ -32,11 +35,17 @@ const MAX_DESTINATION_EVENTS: usize = 128;
 const MAX_REPLACEMENTS_PER_COMMIT: usize = 16;
 const MAX_PENDING_MEDIA_FRAMES: usize = 128;
 const MAX_CANCELLED_MEDIA_FRAMES: usize = 128;
+// This intentionally mirrors the current VA worker budget. Exceeding it while
+// diagnostics are enabled indicates that stream retirement has fallen behind,
+// so failing the requested diagnostic session is preferable to leaking files.
+const MAX_OPEN_H264_DUMPS: usize = 16;
+
+type EncodedGeneration = (MediaStreamId, StreamGeneration);
 
 struct SourceStream {
     stream: MediaStreamId,
     generation: StreamGeneration,
-    coded_extent: (u32, u32),
+    visible_extent: (u32, u32),
     next_sequence: Option<u64>,
 }
 
@@ -66,6 +75,74 @@ struct OutstandingCredit {
     sent_at: Instant,
 }
 
+struct H264AccessUnitDump {
+    directory: PathBuf,
+    streams: HashMap<(MediaStreamId, StreamGeneration), BufWriter<File>>,
+}
+
+impl H264AccessUnitDump {
+    fn new(directory: PathBuf) -> Result<Self> {
+        fs::create_dir_all(&directory).with_context(|| {
+            format!(
+                "could not create H.264 dump directory {}",
+                directory.display()
+            )
+        })?;
+        Ok(Self {
+            directory,
+            streams: HashMap::new(),
+        })
+    }
+
+    fn write(&mut self, access_unit: &weld_media::EncodedAccessUnit) -> Result<()> {
+        let key = (access_unit.frame.stream, access_unit.frame.generation);
+        if !self.streams.contains_key(&key) {
+            ensure!(
+                self.streams.len() < MAX_OPEN_H264_DUMPS,
+                "active H.264 dump stream bound exceeded"
+            );
+            let path = dump_path(&self.directory, key);
+            let file = OpenOptions::new()
+                .create(true)
+                .truncate(true)
+                .write(true)
+                .open(&path)
+                .with_context(|| format!("could not create H.264 dump {}", path.display()))?;
+            tracing::info!(path = %path.display(), "recording source H.264 stream generation");
+            self.streams.insert(key, BufWriter::new(file));
+        }
+        self.streams
+            .get_mut(&key)
+            .context("H.264 dump stream disappeared")?
+            .write_all(&access_unit.payload)
+            .context("could not write H.264 access unit")
+    }
+
+    fn flush(&mut self) -> Result<()> {
+        for writer in self.streams.values_mut() {
+            writer.flush().context("could not flush H.264 dump")?;
+        }
+        Ok(())
+    }
+
+    fn retire(&mut self, stream: MediaStreamId, generation: StreamGeneration) -> Result<()> {
+        if let Some(mut writer) = self.streams.remove(&(stream, generation)) {
+            writer
+                .flush()
+                .context("could not flush retired H.264 dump")?;
+        }
+        Ok(())
+    }
+}
+
+fn dump_path(directory: &Path, (stream, generation): (MediaStreamId, StreamGeneration)) -> PathBuf {
+    directory.join(format!(
+        "stream-{}-generation-{}.h264",
+        stream.raw(),
+        generation.raw()
+    ))
+}
+
 pub(crate) struct EncodedSourceState {
     backend: Box<dyn LocalEncodeBackend>,
     media: LocalPacketConnection,
@@ -79,6 +156,7 @@ pub(crate) struct EncodedSourceState {
     next_token: Option<u64>,
     started_at: Instant,
     last_timestamp_micros: u64,
+    dump: Option<H264AccessUnitDump>,
 }
 
 impl EncodedSourceState {
@@ -96,7 +174,13 @@ impl EncodedSourceState {
             next_token: Some(1),
             started_at: Instant::now(),
             last_timestamp_micros: 0,
+            dump: None,
         }
+    }
+
+    pub(crate) fn with_h264_dump_directory(mut self, directory: PathBuf) -> Result<Self> {
+        self.dump = Some(H264AccessUnitDump::new(directory)?);
+        Ok(self)
     }
 
     pub(crate) fn enqueue(
@@ -179,6 +263,23 @@ impl EncodedSourceState {
                 self.in_flight = Some(batch);
                 continue;
             }
+            let revision = commit_revision(&batch.event)
+                .context("encoded batch control event was not a commit")?;
+            tracing::trace!(
+                surface = ?batch.surface,
+                ?revision,
+                frames = batch.completed.len(),
+                payload_bytes = batch.completed.iter().map(|unit| unit.payload.len()).sum::<usize>(),
+                encode_batch_micros = batch.started_at.elapsed().as_micros(),
+                pending_events = self.pending.values().map(VecDeque::len).sum::<usize>(),
+                "completed encoded source batch"
+            );
+            if let Some(dump) = &mut self.dump {
+                for access_unit in &batch.completed {
+                    dump.write(access_unit)?;
+                }
+                dump.flush()?;
+            }
             for access_unit in batch.completed {
                 let (access_unit, descriptors) = export_access_unit(access_unit)?;
                 self.media.queue(
@@ -189,8 +290,6 @@ impl EncodedSourceState {
                     descriptors,
                 )?;
             }
-            let revision = commit_revision(&batch.event)
-                .context("encoded batch control event was not a commit")?;
             ensure!(
                 self.awaiting_credit
                     .insert(
@@ -202,14 +301,6 @@ impl EncodedSourceState {
                     )
                     .is_none(),
                 "encoded surface already held destination credit"
-            );
-            tracing::trace!(
-                surface = ?batch.surface,
-                ?revision,
-                frames = encoded_frames(&batch.event).len(),
-                encode_batch_micros = batch.started_at.elapsed().as_micros(),
-                pending_events = self.pending.values().map(VecDeque::len).sum::<usize>(),
-                "completed encoded source batch"
             );
             let removed_layers = removed_layers(&batch.event);
             control.queue(
@@ -497,9 +588,10 @@ impl EncodedSourceState {
         layer: SurfaceLayerId,
         metadata: ClientBufferMetadata,
     ) -> Result<MediaFrameId> {
-        let coded_extent = (
-            align_even(metadata.extent.width)?,
-            align_even(metadata.extent.height)?,
+        let visible_extent = (metadata.extent.width, metadata.extent.height);
+        ensure!(
+            visible_extent.0 > 0 && visible_extent.1 > 0,
+            "encoded extent is zero"
         );
         let key = (surface, layer);
         if !self.streams.contains_key(&key) {
@@ -509,32 +601,41 @@ impl EncodedSourceState {
                 SourceStream {
                     stream: MediaStreamId::new(stream),
                     generation: StreamGeneration::new(1),
-                    coded_extent,
+                    visible_extent,
                     next_sequence: Some(0),
                 },
             );
         }
-        let stream = self
-            .streams
-            .get_mut(&key)
-            .context("encoded stream disappeared")?;
-        if stream.coded_extent != coded_extent {
-            stream.generation = StreamGeneration::new(
-                stream
-                    .generation
-                    .raw()
-                    .checked_add(1)
-                    .context("encoded stream generation exhausted")?,
-            );
-            stream.coded_extent = coded_extent;
-            stream.next_sequence = Some(0);
+        let (frame, retired) = {
+            let stream = self
+                .streams
+                .get_mut(&key)
+                .context("encoded stream disappeared")?;
+            let retired = if stream.visible_extent != visible_extent {
+                let retired = (stream.stream, stream.generation);
+                stream.generation = StreamGeneration::new(
+                    stream
+                        .generation
+                        .raw()
+                        .checked_add(1)
+                        .context("encoded stream generation exhausted")?,
+                );
+                stream.visible_extent = visible_extent;
+                stream.next_sequence = Some(0);
+                Some(retired)
+            } else {
+                None
+            };
+            let sequence = take_counter(&mut stream.next_sequence, "encoded frame sequence")?;
+            (
+                MediaFrameId::new(stream.stream, stream.generation, sequence),
+                retired,
+            )
+        };
+        if let Some((stream, generation)) = retired {
+            self.retire_generation(stream, generation)?;
         }
-        let sequence = take_counter(&mut stream.next_sequence, "encoded frame sequence")?;
-        Ok(MediaFrameId::new(
-            stream.stream,
-            stream.generation,
-            sequence,
-        ))
+        Ok(frame)
     }
 
     fn retire_layers(
@@ -544,7 +645,7 @@ impl EncodedSourceState {
     ) -> Result<()> {
         for layer in layers {
             if let Some(stream) = self.streams.remove(&(surface, layer)) {
-                self.backend.retire(stream.stream, stream.generation)?;
+                self.retire_generation(stream.stream, stream.generation)?;
             }
         }
         Ok(())
@@ -557,7 +658,19 @@ impl EncodedSourceState {
             .map(|(_, stream)| stream)
             .collect::<Vec<_>>();
         for stream in streams {
-            self.backend.retire(stream.stream, stream.generation)?;
+            self.retire_generation(stream.stream, stream.generation)?;
+        }
+        Ok(())
+    }
+
+    fn retire_generation(
+        &mut self,
+        stream: MediaStreamId,
+        generation: StreamGeneration,
+    ) -> Result<()> {
+        self.backend.retire(stream, generation)?;
+        if let Some(dump) = &mut self.dump {
+            dump.retire(stream, generation)?;
         }
         Ok(())
     }
@@ -592,6 +705,7 @@ pub(crate) struct EncodedDestinationState {
     decoded: HashMap<MediaFrameId, weld_core::dmabuf::ExternalDmabuf>,
     decode_in_flight: Option<InFlightDecode>,
     cancelled_frames: HashSet<MediaFrameId>,
+    streams: HashMap<(ClientSurfaceId, SurfaceLayerId), EncodedGeneration>,
     outcomes: Vec<EncodedCommitOutcomeRecord>,
     next_token: Option<u64>,
     next_buffer: Option<u64>,
@@ -615,6 +729,7 @@ impl EncodedDestinationState {
             decoded: HashMap::new(),
             decode_in_flight: None,
             cancelled_frames: HashSet::new(),
+            streams: HashMap::new(),
             outcomes: Vec::new(),
             next_token: Some(1),
             next_buffer: Some(1),
@@ -640,6 +755,7 @@ impl EncodedDestinationState {
             return Ok(());
         }
         mark_encoded_buffers_opaque(&mut event);
+        self.update_stream_generations(&event)?;
         tracing::trace!(
             ?source_surface,
             revision = ?commit_revision(&event),
@@ -755,6 +871,50 @@ impl EncodedDestinationState {
                     });
                 }
             }
+        }
+        self.retire_surface_generations(surface)?;
+        Ok(())
+    }
+
+    fn update_stream_generations(
+        &mut self,
+        event: &WireClientSurfaceEvent<LocalBuffer>,
+    ) -> Result<()> {
+        let WireClientSurfaceEventKind::Commit(commit) = &event.kind else {
+            return Ok(());
+        };
+        for update in &commit.buffers {
+            let key = (event.surface, update.layer);
+            let next = match &update.change {
+                WireSurfaceBufferChange::Replaced { buffer, .. } => match buffer.content {
+                    LocalBufferContent::Encoded(encoded) => {
+                        Some((encoded.frame.stream, encoded.frame.generation))
+                    }
+                    _ => None,
+                },
+                WireSurfaceBufferChange::Removed => None,
+                WireSurfaceBufferChange::Retained { .. } => continue,
+            };
+            if let Some(previous) = self.streams.remove(&key)
+                && Some(previous) != next
+            {
+                self.backend.retire(previous.0, previous.1)?;
+            }
+            if let Some(next) = next {
+                self.streams.insert(key, next);
+            }
+        }
+        Ok(())
+    }
+
+    fn retire_surface_generations(&mut self, surface: ClientSurfaceId) -> Result<()> {
+        let generations = self
+            .streams
+            .extract_if(|(candidate, _), _| *candidate == surface)
+            .map(|(_, generation)| generation)
+            .collect::<Vec<_>>();
+        for (stream, generation) in generations {
+            self.backend.retire(stream, generation)?;
         }
         Ok(())
     }
@@ -977,13 +1137,6 @@ fn mark_encoded_buffers_opaque(event: &mut WireClientSurfaceEvent<LocalBuffer>) 
     }
 }
 
-fn align_even(value: u32) -> Result<u32> {
-    ensure!(value > 0, "encoded extent is zero");
-    value
-        .checked_add(value % 2)
-        .context("encoded extent overflow")
-}
-
 fn take_counter(counter: &mut Option<u64>, name: &str) -> Result<u64> {
     let value = counter.context(format!("{name} space is exhausted"))?;
     *counter = value.checked_add(1);
@@ -1008,6 +1161,7 @@ mod tests {
     struct FakeEncoderState {
         submitted: Vec<(u64, MediaFrameId, Vec<u8>)>,
         completions: Vec<LocalEncodeCompletion>,
+        retirements: Vec<(MediaStreamId, StreamGeneration)>,
     }
 
     struct FakeEncoder(Rc<RefCell<FakeEncoderState>>);
@@ -1033,9 +1187,46 @@ mod tests {
             std::mem::take(&mut self.0.borrow_mut().completions)
         }
 
-        fn retire(&mut self, _stream: MediaStreamId, _generation: StreamGeneration) -> Result<()> {
+        fn retire(&mut self, stream: MediaStreamId, generation: StreamGeneration) -> Result<()> {
+            self.0.borrow_mut().retirements.push((stream, generation));
             Ok(())
         }
+    }
+
+    #[test]
+    fn exact_visible_extent_rotates_and_retires_stream_generations() {
+        let (media, _media_peer) = LocalPacketConnection::pair().expect("media pair");
+        let fake = Rc::new(RefCell::new(FakeEncoderState::default()));
+        let mut source = EncodedSourceState::new(Box::new(FakeEncoder(fake.clone())), media);
+        let source_id = ClientSourceId::new(1);
+        let surface = ClientSurfaceId::new(ClientId::new(source_id, 2), 3);
+        let layer = SurfaceLayerId::new(4);
+        let metadata = |width| ClientBufferMetadata::new(Extent::new(width, 480), true);
+
+        let first = source
+            .allocate_frame(surface, layer, metadata(484))
+            .expect("first frame");
+        let retained = source
+            .allocate_frame(surface, layer, metadata(484))
+            .expect("retained extent");
+        let odd = source
+            .allocate_frame(surface, layer, metadata(485))
+            .expect("odd extent");
+        let even = source
+            .allocate_frame(surface, layer, metadata(486))
+            .expect("even extent");
+
+        assert_eq!((first.generation.raw(), first.sequence), (1, 0));
+        assert_eq!((retained.generation.raw(), retained.sequence), (1, 1));
+        assert_eq!((odd.generation.raw(), odd.sequence), (2, 0));
+        assert_eq!((even.generation.raw(), even.sequence), (3, 0));
+        assert_eq!(
+            fake.borrow().retirements,
+            vec![
+                (MediaStreamId::new(1), StreamGeneration::new(1)),
+                (MediaStreamId::new(1), StreamGeneration::new(2)),
+            ]
+        );
     }
 
     #[test]

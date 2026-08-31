@@ -4,6 +4,9 @@ use std::{
     rc::Rc,
 };
 
+#[cfg(feature = "encoded-vaapi")]
+use std::path::PathBuf;
+
 use tracing::{error, warn};
 use weld_client::{
     ClientAdapter, ClientAdapterCommandEnvelope, ClientAdapterEffect, ClientAdapterRegistration,
@@ -108,12 +111,24 @@ pub fn encoded_source_registration_with_backend(
     destination_source: ClientSourceId,
     backend: Box<dyn crate::LocalEncodeBackend>,
 ) -> (ClientAdapterRegistration, LocalDestinationEndpoint) {
-    let descriptor = ClientSourceDescriptor::new(adapter_source, ClientProvenance::Relocated);
-    let adapter = LocalSourceAdapter::new_encoded(
-        control.clone(),
+    encoded_source_registration_with_state(
+        control,
         upstream_source,
+        adapter_source,
+        destination_source,
         EncodedSourceState::new(backend, media),
-    );
+    )
+}
+
+fn encoded_source_registration_with_state(
+    control: LocalPacketConnection,
+    upstream_source: ClientSourceId,
+    adapter_source: ClientSourceId,
+    destination_source: ClientSourceId,
+    encoded: EncodedSourceState,
+) -> (ClientAdapterRegistration, LocalDestinationEndpoint) {
+    let descriptor = ClientSourceDescriptor::new(adapter_source, ClientProvenance::Relocated);
+    let adapter = LocalSourceAdapter::new_encoded(control.clone(), upstream_source, encoded);
     (
         ClientAdapterRegistration::new(descriptor, adapter, ControlOnlyClientImporter),
         LocalDestinationEndpoint {
@@ -145,31 +160,54 @@ pub fn encoded_destination_registration_with_backend(
 }
 
 #[cfg(feature = "encoded-vaapi")]
+pub struct EncodedSourceRegistrationOptions<'a> {
+    pub upstream_source: ClientSourceId,
+    pub adapter_source: ClientSourceId,
+    pub destination_source: ClientSourceId,
+    pub capabilities: &'a weld_core::dmabuf::ExternalDmabufCapabilities,
+    pub profile: crate::LocalH264Profile,
+    pub dump_directory: Option<PathBuf>,
+}
+
+#[cfg(feature = "encoded-vaapi")]
 pub fn encoded_source_registration(
     control: LocalPacketConnection,
     media: LocalPacketConnection,
-    upstream_source: ClientSourceId,
-    adapter_source: ClientSourceId,
-    destination_source: ClientSourceId,
-    capabilities: &weld_core::dmabuf::ExternalDmabufCapabilities,
+    options: EncodedSourceRegistrationOptions<'_>,
 ) -> anyhow::Result<(
     ClientAdapterRegistration,
     LocalDestinationEndpoint,
     Vec<weld_core::host::ClientRuntimeWakeSource>,
 )> {
-    let (notifier, worker_wake) = weld_core::host::client_runtime_notifier()?;
-    let backend = encode_backend(capabilities.render_node.clone(), move || {
-        if let Err(error) = notifier.notify() {
-            tracing::error!(%error, "could not wake the host for encoded output");
-        }
-    })?;
-    let (registration, endpoint) = encoded_source_registration_with_backend(
-        control.clone(),
-        media.clone(),
+    let EncodedSourceRegistrationOptions {
         upstream_source,
         adapter_source,
         destination_source,
-        backend,
+        capabilities,
+        profile,
+        dump_directory,
+    } = options;
+    let (notifier, worker_wake) = weld_core::host::client_runtime_notifier()?;
+    let backend = encode_backend(
+        capabilities.render_node.clone(),
+        profile,
+        dump_directory.clone(),
+        move || {
+            if let Err(error) = notifier.notify() {
+                tracing::error!(%error, "could not wake the host for encoded output");
+            }
+        },
+    )?;
+    let mut encoded = EncodedSourceState::new(backend, media.clone());
+    if let Some(directory) = dump_directory {
+        encoded = encoded.with_h264_dump_directory(directory)?;
+    }
+    let (registration, endpoint) = encoded_source_registration_with_state(
+        control.clone(),
+        upstream_source,
+        adapter_source,
+        destination_source,
+        encoded,
     );
     Ok((
         registration,

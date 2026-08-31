@@ -4,6 +4,14 @@ use anyhow::Result;
 use weld_core::dmabuf::ExternalDmabuf;
 use weld_media::{EncodedAccessUnit, MediaFrameId, MediaStreamId, StreamGeneration};
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum LocalH264Profile {
+    #[default]
+    Standard,
+    HighBitrate,
+    AllIdr,
+}
+
 pub enum LocalEncodeInput {
     Dmabuf(ExternalDmabuf),
     PackedBgra {
@@ -68,36 +76,38 @@ pub trait LocalDecodeBackend {
 
 #[cfg(feature = "encoded-vaapi")]
 mod vaapi {
-    use std::{num::NonZeroU16, path::PathBuf};
+    use std::path::PathBuf;
 
     use anyhow::{Context, Result, ensure};
     use weld_core::dmabuf::{ExternalDmabuf, ExternalDmabufCapabilities, ExternalDmabufPlane};
     use weld_media::{MediaStreamId, StreamGeneration};
     use weld_media_vaapi::{
-        VaapiDecodeRequest, VaapiDecodeWorker, VaapiDmabuf, VaapiDmabufObject, VaapiDmabufPlane,
-        VaapiEncodeInput, VaapiEncodeRequest, VaapiEncodeWorker, VaapiWorkerSubmitError,
+        H264EncoderSettings, H264ReferenceMode, VaapiDecodeRequest, VaapiDecodeWorker, VaapiDmabuf,
+        VaapiDmabufObject, VaapiDmabufPlane, VaapiEncodeInput, VaapiEncodeRequest,
+        VaapiEncodeWorker, VaapiWorkerSubmitError,
     };
 
     use super::{
         LocalDecodeBackend, LocalDecodeCompletion, LocalDecodeRequest, LocalDecodedFrame,
         LocalEncodeBackend, LocalEncodeCompletion, LocalEncodeInput, LocalEncodeRequest,
-        LocalSubmitError,
+        LocalH264Profile, LocalSubmitError,
     };
 
     const DEFAULT_BITRATE: u64 = 16_000_000;
+    const HIGH_BITRATE: u64 = 64_000_000;
     const DEFAULT_FRAMES_PER_SECOND: u32 = 60;
     const DEFAULT_INTRA_PERIOD: u16 = 32;
     const DRM_FORMAT_XRGB8888: u32 = u32::from_le_bytes(*b"XR24");
 
     pub(crate) fn encode_backend(
         render_node: PathBuf,
+        profile: LocalH264Profile,
+        dump_directory: Option<PathBuf>,
         notify: impl Fn() + Send + Sync + 'static,
     ) -> Result<Box<dyn LocalEncodeBackend>> {
-        let intra_period =
-            NonZeroU16::new(DEFAULT_INTRA_PERIOD).context("H.264 intra period must be non-zero")?;
         Ok(Box::new(VaapiLocalEncoder {
-            worker: VaapiEncodeWorker::spawn(render_node, notify)?,
-            intra_period,
+            worker: VaapiEncodeWorker::spawn(render_node, dump_directory, notify)?,
+            settings: profile.settings()?,
         }))
     }
 
@@ -122,7 +132,7 @@ mod vaapi {
 
     struct VaapiLocalEncoder {
         worker: VaapiEncodeWorker,
-        intra_period: NonZeroU16,
+        settings: H264EncoderSettings,
     }
 
     impl LocalEncodeBackend for VaapiLocalEncoder {
@@ -154,21 +164,19 @@ mod vaapi {
                 token,
                 frame,
                 timestamp_micros,
-                bitrate: DEFAULT_BITRATE,
-                frames_per_second: DEFAULT_FRAMES_PER_SECOND,
-                intra_period: self.intra_period,
+                settings: self.settings,
                 input,
             };
             match self.worker.try_encode(request) {
                 Ok(()) => Ok(()),
                 Err(VaapiWorkerSubmitError::Busy(request)) => {
                     let request =
-                        from_vaapi_encode_request(request).map_err(LocalSubmitError::Rejected)?;
+                        from_vaapi_encode_request(*request).map_err(LocalSubmitError::Rejected)?;
                     Err(LocalSubmitError::Busy(request))
                 }
                 Err(VaapiWorkerSubmitError::Stopped(request)) => {
                     let request =
-                        from_vaapi_encode_request(request).map_err(LocalSubmitError::Rejected)?;
+                        from_vaapi_encode_request(*request).map_err(LocalSubmitError::Rejected)?;
                     Err(LocalSubmitError::Stopped(request))
                 }
             }
@@ -214,6 +222,24 @@ mod vaapi {
             timestamp_micros: request.timestamp_micros,
             input,
         })
+    }
+
+    impl LocalH264Profile {
+        fn settings(self) -> Result<H264EncoderSettings> {
+            let (bitrate, reference_mode) = match self {
+                Self::Standard => (DEFAULT_BITRATE, H264ReferenceMode::LowDelay),
+                Self::HighBitrate => (HIGH_BITRATE, H264ReferenceMode::LowDelay),
+                Self::AllIdr => (DEFAULT_BITRATE, H264ReferenceMode::IndependentIdr),
+            };
+            H264EncoderSettings::try_new(
+                bitrate,
+                DEFAULT_FRAMES_PER_SECOND,
+                DEFAULT_INTRA_PERIOD,
+                18,
+                36,
+                reference_mode,
+            )
+        }
     }
 
     struct VaapiLocalDecoder {

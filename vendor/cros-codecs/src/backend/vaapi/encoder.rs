@@ -21,6 +21,9 @@ use libva::VAEntrypoint::VAEntrypointEncSlice;
 use libva::VAEntrypoint::VAEntrypointEncSliceLP;
 use libva::VAProfile;
 use libva::VASurfaceStatus;
+use libva::VA_CODED_BUF_STATUS_BAD_BITSTREAM;
+use libva::VA_CODED_BUF_STATUS_PICTURE_AVE_QP_MASK;
+use libva::VA_CODED_BUF_STATUS_SLICE_OVERFLOW_MASK;
 
 use crate::backend::vaapi::surface_pool::PooledVaSurface;
 use crate::backend::vaapi::surface_pool::VaSurfacePool;
@@ -42,6 +45,8 @@ const INITIAL_SCRATCH_POOL_SIZE: usize = 16;
 /// The maximum size of scratch pool size, after which the backend will refure to allocate more
 /// scratch frames.
 const MAX_SCRATCH_POOL_SIZE: usize = INITIAL_SCRATCH_POOL_SIZE * 4;
+const CODED_BUFFER_BYTES_PER_PIXEL: u64 = 3;
+const CODED_BUFFER_HEADER_BYTES: u64 = 1 << 16;
 
 impl From<libva::VaError> for StatelessBackendError {
     fn from(value: libva::VaError) -> Self {
@@ -163,6 +168,7 @@ where
 
     _va_profile: VAProfile::Type,
     scratch_pool: VaSurfacePool<()>,
+    coded_buffer_size: usize,
     _phantom: PhantomData<(M, H)>,
 }
 
@@ -218,11 +224,13 @@ where
 
         // TODO: Allow initial size to be changed
         scratch_pool.add_frames(vec![(); INITIAL_SCRATCH_POOL_SIZE])?;
+        let coded_buffer_size = coded_buffer_size(coded_size)?;
 
         Ok(Self {
             va_config,
             context,
             scratch_pool,
+            coded_buffer_size,
             _va_profile: va_profile,
             _phantom: Default::default(),
         })
@@ -232,22 +240,8 @@ where
         &self.context
     }
 
-    pub(crate) fn new_coded_buffer(
-        &self,
-        rate_control: &RateControl,
-    ) -> StatelessBackendResult<EncCodedBuffer> {
-        // Coded buffer size multiplier. It's inteded to give head room for the encoder.
-        const CODED_SIZE_MUL: usize = 2;
-
-        // Default coded buffer size if bitrate control is not used.
-        const DEFAULT_CODED_SIZE: usize = 1_500_000;
-
-        let coded_size = rate_control
-            .bitrate_target()
-            .map(|e| e as usize * CODED_SIZE_MUL)
-            .unwrap_or(DEFAULT_CODED_SIZE);
-
-        Ok(self.context().create_enc_coded(coded_size)?)
+    pub(crate) fn new_coded_buffer(&self) -> StatelessBackendResult<EncCodedBuffer> {
+        Ok(self.context().create_enc_coded(self.coded_buffer_size)?)
     }
 
     // Creates an empty surface that will be filled with reconstructed picture during encoding
@@ -358,8 +352,21 @@ where
         let coded = MappedCodedBuffer::new(&self.coded_buf)?;
         let mut bitstream = self.coded_output;
         for segment in coded.segments() {
-            // TODO: Handle flags?
-            // NOTE: on flags: 0-7 bits are average QP value
+            let failure = segment.status
+                & (VA_CODED_BUF_STATUS_SLICE_OVERFLOW_MASK
+                    | VA_CODED_BUF_STATUS_BAD_BITSTREAM);
+            if failure != 0 {
+                return Err(StatelessBackendError::Other(anyhow!(
+                    "VA encoder returned an invalid coded segment with status {:#x}",
+                    segment.status
+                )));
+            }
+            log::trace!(
+                "VA coded segment bytes={} average_qp={} status={:#x}",
+                segment.buf.len(),
+                segment.status & VA_CODED_BUF_STATUS_PICTURE_AVE_QP_MASK,
+                segment.status,
+            );
             if segment.bit_offset > 0 {
                 log::warn!("unsupported bit_offset != 0 (yet)");
             }
@@ -380,6 +387,18 @@ where
             }
         }
     }
+}
+
+fn coded_buffer_size(coded_size: Resolution) -> StatelessBackendResult<usize> {
+    let pixels = u64::from(coded_size.width)
+        .checked_mul(u64::from(coded_size.height))
+        .ok_or_else(|| StatelessBackendError::Other(anyhow!("coded extent exceeds address space")))?;
+    let bytes = pixels
+        .checked_mul(CODED_BUFFER_BYTES_PER_PIXEL)
+        .and_then(|bytes| bytes.checked_add(CODED_BUFFER_HEADER_BYTES))
+        .ok_or_else(|| StatelessBackendError::Other(anyhow!("coded buffer size overflow")))?;
+    usize::try_from(bytes)
+        .map_err(|error| StatelessBackendError::Other(anyhow!("coded buffer is too large: {error}")))
 }
 
 #[cfg(test)]
