@@ -40,6 +40,11 @@ pub struct ExternalDmabuf {
 }
 
 impl ExternalDmabuf {
+    pub fn is_y_inverted(&self) -> bool {
+        smithay::backend::allocator::dmabuf::DmabufFlags::from_bits_retain(self.flags)
+            .contains(smithay::backend::allocator::dmabuf::DmabufFlags::Y_INVERT)
+    }
+
     fn into_smithay(self) -> anyhow::Result<Dmabuf> {
         use anyhow::{Context, bail};
         use smithay::backend::allocator::{Fourcc, Modifier, dmabuf::DmabufFlags};

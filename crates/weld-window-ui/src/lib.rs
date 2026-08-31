@@ -501,7 +501,9 @@ fn sync_popup_presentations(
             continue;
         };
         if parent.is_none_or(|parent| parent.parent() != presentation.entity()) {
-            commands.entity(root).insert(ChildOf(presentation.entity()));
+            commands
+                .entity(root)
+                .try_insert(ChildOf(presentation.entity()));
         }
         let expected = popup_node(popup_position(*popup, *mapped, *anchor), true);
         if *node != expected {
@@ -561,7 +563,7 @@ fn reconcile_popup_projections(
             continue;
         }
         if parent.is_none_or(|parent| parent.parent() != window_root) {
-            commands.entity(root).insert(ChildOf(window_root));
+            commands.entity(root).try_insert(ChildOf(window_root));
         }
         let expected = popup_node(popup_position(*popup, *mapped, *anchor), visible);
         if *node != expected {

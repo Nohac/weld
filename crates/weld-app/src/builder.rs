@@ -221,6 +221,13 @@ impl WeldApp {
         self.prepared.render_context().dmabuf.clone()
     }
 
+    /// Returns native buffer capabilities for a codec or transport adapter.
+    pub fn external_dmabuf_capabilities(
+        &self,
+    ) -> Result<Option<weld_core::dmabuf::ExternalDmabufCapabilities>> {
+        self.prepared.render_context().dmabuf.external_imports()
+    }
+
     /// Borrows the underlying Bevy application.
     pub const fn app(&self) -> &App {
         &self.app

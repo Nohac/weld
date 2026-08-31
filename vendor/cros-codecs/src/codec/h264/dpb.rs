@@ -228,6 +228,29 @@ impl<T: Clone> Dpb<T> {
         });
     }
 
+    /// Outputs decoded pictures immediately for a stream that declares no reordering.
+    ///
+    /// The decoded handle remains in the DPB while the picture is referenced;
+    /// only its pending-output state is cleared.
+    pub fn output_zero_reorder(&mut self) -> Vec<T> {
+        if self.max_num_reorder_frames != 0 {
+            return Vec::new();
+        }
+        let output = self
+            .entries
+            .iter_mut()
+            .filter_map(|entry| {
+                if !entry.is_bumpable() {
+                    return None;
+                }
+                entry.needed_for_output = false;
+                entry.decoded_frame.clone()
+            })
+            .collect();
+        self.remove_unused();
+        output
+    }
+
     /// Find a short term reference picture with the given `pic_num` value.
     fn find_short_term_with_pic_num_pos(&self, pic_num: i32) -> Option<usize> {
         let position = self
@@ -491,7 +514,10 @@ impl<T: Clone> Dpb<T> {
         while self.needs_bumping(current_pic) && self.len() >= self.max_num_reorder_frames {
             match self.bump() {
                 Some(pic) => pics.push(pic),
-                None => return pics,
+                None => {
+                    self.remove_unused();
+                    return pics;
+                }
             }
             self.remove_unused();
         }
@@ -977,7 +1003,10 @@ impl<T: Clone> Dpb<T> {
 
     // 8.2.4.2.3 Initialization process for reference picture lists for B slices
     // in frames
-    fn build_ref_pic_list_b(&self, cur_pic: &PictureData) -> (DpbPicRefList<'_, T>, DpbPicRefList<'_, T>) {
+    fn build_ref_pic_list_b(
+        &self,
+        cur_pic: &PictureData,
+    ) -> (DpbPicRefList<'_, T>, DpbPicRefList<'_, T>) {
         let mut short_term_refs: Vec<_> =
             self.short_term_refs_iter().filter(|h| !h.pic.borrow().is_second_field()).collect();
 

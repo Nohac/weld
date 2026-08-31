@@ -839,6 +839,17 @@ where
     B: StatelessH264DecoderBackend,
     B::Handle: Clone,
 {
+    /// Finishes the current picture at a complete access-unit boundary.
+    ///
+    /// Unlike [`StatelessVideoDecoder::flush`], this preserves decoder state
+    /// and the DPB so subsequent delta access units retain their references.
+    pub fn finish_access_unit(&mut self) -> Result<(), DecodeError> {
+        if let Some(current) = self.codec.current_pic.take() {
+            self.finish_picture(current)?;
+        }
+        Ok(())
+    }
+
     fn negotiation_possible(sps: &Sps, old_negotiation_info: &NegotiationInfo) -> bool {
         let negotiation_info = NegotiationInfo::from(sps);
         *old_negotiation_info != negotiation_info
@@ -938,6 +949,8 @@ where
         } else {
             self.add_to_ready_queue(pic, handle);
         }
+
+        self.ready_queue.extend(self.codec.dpb.output_zero_reorder());
 
         Ok(())
     }

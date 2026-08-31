@@ -23,7 +23,7 @@ pub(crate) fn attach_resize_cursor_icons(mut commands: Commands, handles: AddedR
     for (entity, handle) in &handles {
         commands
             .entity(entity)
-            .insert(CursorIcon::System(resize_cursor_icon(handle.0)));
+            .try_insert(CursorIcon::System(resize_cursor_icon(handle.0)));
     }
 }
 
@@ -52,5 +52,38 @@ pub(crate) fn request_interaction_cursor(
         });
     if let Some(cursor) = cursor {
         requests.write(CursorRequest(cursor));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use bevy::{
+        app::{App, Update},
+        ecs::{schedule::IntoScheduleConfigs, system::Commands},
+    };
+
+    use super::*;
+
+    #[test]
+    fn resize_cursor_attachment_tolerates_a_handle_despawned_before_deferred_apply() {
+        let mut app = App::new();
+        let handle = app
+            .world_mut()
+            .spawn(WindowResizeHandle(ToplevelResizeEdge::Right))
+            .id();
+        app.add_systems(
+            Update,
+            (
+                move |mut commands: Commands| {
+                    commands.entity(handle).despawn();
+                },
+                attach_resize_cursor_icons,
+            )
+                .chain_ignore_deferred(),
+        );
+
+        app.update();
+
+        assert!(app.world().get_entity(handle).is_err());
     }
 }

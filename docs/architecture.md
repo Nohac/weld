@@ -32,9 +32,10 @@ Weld is a workspace of reusable layers and one standard distribution:
 - `weld-hoist-core` owns transport-independent hoist identities and the
   Bevy-free loopback client adapter.
 - `weld-hoist-local` owns the Linux-local Postcard/Unix-seqpacket binding,
-  SCM_RIGHTS native-buffer transfer, and source/destination `weld-client`
-  adapters. It depends on core's native import capability but has no Bevy
-  dependency.
+  SCM_RIGHTS native-buffer transfer, optional opaque encoded-media binding,
+  and source/destination `weld-client` adapters. It depends on core's native
+  import capability but has no Bevy dependency. Its `encoded-vaapi` feature is
+  optional for native-only library consumers.
 - `weld-hoist-ui` owns source placeholders, reclaim and closed-tombstone UI.
 - `weld-hoist` owns Bevy window-family admission and reclaim orchestration. It
   does not own client buffers, ordinary receiver presentation, a network
@@ -68,6 +69,17 @@ failure. Weld temporarily patches these small crates under `vendor/`; the
 recorded patches must be removed when upstream releases contain equivalent
 behavior.
 
+Weld also carries a narrow low-delay H.264 patch in `vendor/cros-codecs`.
+Upstream's SPS builder cannot declare decoded-picture buffering constraints,
+and its stateless decoder exposes only whole-stream flush: the current picture
+otherwise remains pending until the next slice, while flushing clears the DPB
+and breaks delta-frame references. Weld declares zero reordering in VUI,
+finishes each complete access unit without resetting decoder state, and clones
+the output handle while retaining the same reference in the DPB. The hardware
+round-trip probe verifies immediate output for every key and delta frame and
+rejects duplicate final drain. Remove this patch when cros-codecs provides
+equivalent low-delay stream declaration and access-unit finalization APIs.
+
 cros-libva 0.0.12 does not expose a typed VPP pipeline-parameter buffer, so
 `weld-media-vaapi` contains a narrow raw-libva VPP submission boundary. Its
 unsafe calls use bindgen's exact ABI types, keep display, context, surfaces and
@@ -85,8 +97,10 @@ a forced keyframe; the same output from an unknown driver fails closed. Remove
 the repair when packed slice-header support or an upstream backend fix makes
 the driver output conforming.
 
-The hardware tracer now retains one VA display, H.264 encoder, decoder, and
-VPP converter across a sequence of access units. Weld mirrors the encoder's
+The hardware tracer retains one VA display and persistent H.264 codec sessions
+across a sequence of access units. Bounded capacity-one workers keep blocking
+VPP and codec operations outside calloop and Bevy; an eventfd wakes the host
+only when a completion is ready. Weld mirrors the encoder's
 power-of-two low-delay intra period, which must be at least 16 because the
 current cros-codecs SPS builder derives its frame-number and POC widths with
 integer logarithms. Remove that restriction when upstream represents arbitrary
@@ -98,9 +112,12 @@ not make the next reference available until its previous output is drained.
 The persistent decoder preserves its DPB and may return a completed frame one
 access unit later; its final frame is drained only when that generation ends.
 It shares the same display for output allocation rather than reopening the DRM
-node per frame. A bounded off-thread worker, decoded-output reuse tied to
-destination GPU retirement, and local-hoist media transport are not yet
-connected.
+node per frame. The first local encoded binding carries H.264 access units in
+sealed descriptors on a media seqpacket channel separate from control. Source
+DMA-BUF leases complete after hardware encoding, while decoded DMA-BUF leases
+remain live through destination GPU use. Decoder output allocation is not yet
+pooled, so the current path still allocates and exports one decoded surface per
+frame.
 
 The presentation split follows Bevy UI's separation of raw UI infrastructure,
 unstyled reusable behavior, and opinionated Feathers scenes without depending

@@ -229,6 +229,14 @@ impl DmabufContext {
         )
     }
 
+    /// Returns the selected Vulkan render node and importable format/modifier pairs.
+    pub fn external_imports(&self) -> Result<Option<super::ExternalDmabufCapabilities>> {
+        self.capabilities
+            .as_ref()
+            .map(DmabufCapabilities::external_imports)
+            .transpose()
+    }
+
     pub(crate) fn release_unrendered(&self, pending: PendingWaylandDmabufUse) {
         let _ = self
             .release_sender

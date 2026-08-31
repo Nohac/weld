@@ -1123,6 +1123,24 @@ impl SpsBuilder {
         self
     }
 
+    /// Declares the decoded-picture buffering required by a low-delay stream.
+    pub fn bitstream_restriction(
+        mut self,
+        max_num_reorder_frames: u32,
+        max_dec_frame_buffering: u32,
+    ) -> Self {
+        self = self.vui_parameters_present();
+        self.0.vui_parameters.bitstream_restriction_flag = true;
+        self.0.vui_parameters.motion_vectors_over_pic_boundaries_flag = true;
+        self.0.vui_parameters.max_bytes_per_pic_denom = 0;
+        self.0.vui_parameters.max_bits_per_mb_denom = 0;
+        self.0.vui_parameters.log2_max_mv_length_horizontal = 16;
+        self.0.vui_parameters.log2_max_mv_length_vertical = 16;
+        self.0.vui_parameters.max_num_reorder_frames = max_num_reorder_frames;
+        self.0.vui_parameters.max_dec_frame_buffering = max_dec_frame_buffering;
+        self
+    }
+
     pub fn aspect_ratio_idc(mut self, value: u8) -> Self {
         self = self.vui_parameters_present();
         self.0.vui_parameters.aspect_ratio_info_present_flag = true;

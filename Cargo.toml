@@ -82,7 +82,8 @@ weld-window-ui = { path = "crates/weld-window-ui" }
 weld-ssd = { path = "crates/weld-ssd" }
 weld-float = { path = "crates/weld-float" }
 weld-hoist = { path = "crates/weld-hoist" }
-weld-hoist-local = { path = "crates/weld-hoist-local" }
+weld-hoist-local = { path = "crates/weld-hoist-local", features = ["encoded-vaapi"] }
+weld-media-vaapi = { path = "crates/weld-media-vaapi" }
 tracing.workspace = true
 tracing-subscriber.workspace = true
 tracing-tracy = { workspace = true, optional = true }

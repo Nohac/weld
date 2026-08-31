@@ -15,6 +15,7 @@ calloop.workspace = true
 input.workspace = true
 png.workspace = true
 pollster.workspace = true
+rustix.workspace = true
 smithay = { workspace = true, features = [
     "backend_drm",
     "backend_gbm",

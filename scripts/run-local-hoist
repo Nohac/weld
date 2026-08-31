@@ -7,13 +7,53 @@ repository_root="$(cd -- "${script_dir}/.." && pwd)"
 socket_path="${WELD_HOIST_SOCKET:-${repository_root}/target/validation/weld-hoist.sock}"
 source_log="${repository_root}/target/validation/weld-hoist-source.log"
 destination_log="${repository_root}/target/validation/weld-hoist-destination.log"
+surface_mode="encoded-h264-opaque"
+trace_media=false
+
+while [[ "$#" -gt 0 ]]; do
+    case "$1" in
+        --native)
+            surface_mode="native"
+            shift
+            ;;
+        --trace-media)
+            trace_media=true
+            shift
+            ;;
+        --)
+            shift
+            break
+            ;;
+        *)
+            break
+            ;;
+    esac
+done
+
+if [[ "${trace_media}" == true ]]; then
+    media_filter="weld_hoist_local::encoded=trace"
+    if [[ -n "${RUST_LOG:-}" ]]; then
+        export RUST_LOG="${RUST_LOG},${media_filter}"
+    else
+        export RUST_LOG="info,${media_filter}"
+    fi
+    printf 'Media trace filter: %s\n' "${RUST_LOG}"
+fi
+
+if [[ "$#" -eq 0 ]]; then
+    source_client=(foot)
+else
+    source_client=("$@")
+fi
 
 mkdir -p -- "$(dirname -- "${socket_path}")"
 rm -f -- "${socket_path}"
 
 cd -- "${repository_root}"
-printf 'Starting source. Focus its foot window and press Super+H to hoist it.\n'
-cargo run -- --backend nested --wayland-socket weld-hoist-source --hoist-listen "${socket_path}" foot \
+printf 'Starting %s local hoist. Focus the source window and press Super+H.\n' "${surface_mode}"
+cargo run -- --backend nested --wayland-socket weld-hoist-source \
+    --hoist-listen "${socket_path}" --hoist-surface-mode "${surface_mode}" \
+    -- "${source_client[@]}" \
     > >(tee "${source_log}") 2>&1 &
 source_pid=$!
 

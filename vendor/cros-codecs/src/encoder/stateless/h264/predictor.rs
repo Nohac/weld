@@ -98,6 +98,7 @@ impl<Picture, Reference> LowDelayH264<Picture, Reference> {
             // H264 spec Table A-4
             .direct_8x8_inference_flag(config.level >= Level::L3)
             .resolution(config.resolution.width, config.resolution.height)
+            .bitstream_restriction(0, 2)
             .bit_depth_luma(8)
             .bit_depth_chroma(8)
             .aspect_ratio(1, 1)

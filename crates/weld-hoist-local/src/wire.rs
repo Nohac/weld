@@ -1,9 +1,27 @@
 use serde::{Deserialize, Serialize};
 use weld_client::{
-    ClientBufferId, ClientBufferUseId, ClientInputEvent, ClientRequest, ClientSurfaceId,
-    WireClientInputEvent, WireClientSurfaceEvent,
+    ClientBufferId, ClientBufferUseId, ClientCommitRevision, ClientInputEvent, ClientRequest,
+    ClientSurfaceId, WireClientInputEvent, WireClientSurfaceEvent,
 };
 use weld_hoist_core::HoistSessionId;
+use weld_media::{EncodedFrameKind, MediaFrameId, VideoCodec};
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub enum LocalSurfaceMode {
+    Native,
+    EncodedH264Opaque,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub(crate) struct LocalBootstrapOffer {
+    pub mode: LocalSurfaceMode,
+    pub media_descriptor: Option<u16>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub(crate) struct LocalBootstrapAcknowledgement {
+    pub rejection: Option<String>,
+}
 
 /// One DMA-BUF plane whose descriptor is attached to the containing packet.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -33,6 +51,12 @@ pub enum LocalBufferContent {
     ImportedDmabuf(LocalDmabuf),
     ReusedDmabuf,
     Shm(LocalShm),
+    Encoded(LocalEncodedBuffer),
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct LocalEncodedBuffer {
+    pub frame: MediaFrameId,
 }
 
 /// One committed buffer use and its transport-specific content binding.
@@ -69,8 +93,37 @@ pub struct LocalDestinationPacket {
 pub enum LocalDestinationMessage {
     Request(ClientRequest),
     Input(WireClientInputEvent),
-    BufferReleased { use_id: ClientBufferUseId },
+    BufferReleased {
+        use_id: ClientBufferUseId,
+    },
     Reclaim,
+    EncodedCommitFinished {
+        surface: ClientSurfaceId,
+        revision: ClientCommitRevision,
+        outcome: LocalEncodedCommitOutcome,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub enum LocalEncodedCommitOutcome {
+    Applied,
+    Dropped,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct LocalEncodedAccessUnit {
+    pub frame: MediaFrameId,
+    pub codec: VideoCodec,
+    pub kind: EncodedFrameKind,
+    pub timestamp_micros: u64,
+    pub payload_descriptor: u16,
+    pub payload_bytes: u32,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct LocalMediaPacket {
+    pub session: HoistSessionId,
+    pub access_unit: LocalEncodedAccessUnit,
 }
 
 impl LocalDestinationMessage {

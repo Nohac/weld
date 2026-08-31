@@ -3,8 +3,9 @@
 use std::{
     ffi::OsString,
     io,
-    os::fd::{AsFd, BorrowedFd},
+    os::fd::{AsFd, BorrowedFd, OwnedFd},
     path::PathBuf,
+    sync::Arc,
 };
 
 use anyhow::{Context, Result};
@@ -198,6 +199,57 @@ impl AsFd for ClientRuntimeWakeSource {
     fn as_fd(&self) -> BorrowedFd<'_> {
         self.descriptor.as_fd()
     }
+}
+
+/// Thread-safe notification handle for work completed outside the host loop.
+#[derive(Clone)]
+pub struct ClientRuntimeNotifier {
+    event: Arc<OwnedFd>,
+}
+
+impl ClientRuntimeNotifier {
+    /// Wakes the host loop. Multiple pending notifications are coalesced by eventfd.
+    pub fn notify(&self) -> io::Result<()> {
+        match rustix::io::write(self.event.as_fd(), &1_u64.to_ne_bytes()) {
+            Ok(_) | Err(rustix::io::Errno::AGAIN) => Ok(()),
+            Err(error) => Err(error.into()),
+        }
+    }
+}
+
+#[derive(Clone)]
+struct SharedWakeDescriptor(Arc<OwnedFd>);
+
+impl AsFd for SharedWakeDescriptor {
+    fn as_fd(&self) -> BorrowedFd<'_> {
+        self.0.as_fd()
+    }
+}
+
+/// Creates a worker notifier paired with one level-triggered host wake source.
+pub fn client_runtime_notifier() -> io::Result<(ClientRuntimeNotifier, ClientRuntimeWakeSource)> {
+    let descriptor = rustix::event::eventfd(
+        0,
+        rustix::event::EventfdFlags::CLOEXEC | rustix::event::EventfdFlags::NONBLOCK,
+    )?;
+    let event = Arc::new(descriptor);
+    let notifier = ClientRuntimeNotifier {
+        event: event.clone(),
+    };
+    let descriptor = SharedWakeDescriptor(event.clone());
+    let source = ClientRuntimeWakeSource::new(descriptor, move || {
+        let mut counter = [0; std::mem::size_of::<u64>()];
+        match rustix::io::read(event.as_fd(), &mut counter) {
+            Ok(bytes) if bytes == counter.len() => Ok(()),
+            Ok(bytes) => Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                format!("eventfd returned {bytes} bytes"),
+            )),
+            Err(rustix::io::Errno::AGAIN) => Ok(()),
+            Err(error) => Err(error.into()),
+        }
+    });
+    Ok((notifier, source))
 }
 
 pub(crate) fn register_client_wake_sources<Data: 'static>(

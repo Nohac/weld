@@ -285,6 +285,23 @@ impl LocalPacketConnection {
         ))
     }
 
+    pub(crate) fn source_handoff_pair() -> Result<(Self, OwnedFd), TransportError> {
+        let flags = SocketFlags::CLOEXEC | SocketFlags::NONBLOCK;
+        let (source, destination) =
+            socketpair(AddressFamily::UNIX, SocketType::SEQPACKET, flags, None)?;
+        Ok((
+            Self::from_socket(source, LocalPeerRole::Source)?,
+            destination,
+        ))
+    }
+
+    pub(crate) fn from_received_fd(
+        socket: OwnedFd,
+        local_role: LocalPeerRole,
+    ) -> Result<Self, TransportError> {
+        Self::from_socket(socket, local_role)
+    }
+
     fn from_socket(socket: OwnedFd, local_role: LocalPeerRole) -> Result<Self, TransportError> {
         let expected_uid = rustix::process::geteuid().as_raw();
         let actual_uid = rustix::net::sockopt::socket_peercred(&socket)?.uid.as_raw();
@@ -428,6 +445,35 @@ impl LocalPacketConnection {
                 })
             })
             .collect()
+    }
+
+    /// Flushes startup records before the event loop begins driving the socket.
+    pub(crate) fn flush_blocking(&self) -> Result<(), TransportError> {
+        loop {
+            self.pump()?;
+            if self.state().outgoing.is_empty() {
+                return Ok(());
+            }
+            wait_readable(self.as_fd())?;
+        }
+    }
+
+    /// Receives exactly one startup record before the event loop begins.
+    pub(crate) fn receive_blocking<T: DeserializeOwned>(
+        &self,
+    ) -> Result<ReceivedLocalPacket<T>, TransportError> {
+        loop {
+            let mut packets = self.drain::<T>()?;
+            match packets.len() {
+                0 => wait_readable(self.as_fd())?,
+                1 => return Ok(packets.remove(0)),
+                count => {
+                    return Err(TransportError::Protocol(format!(
+                        "startup received {count} records instead of one"
+                    )));
+                }
+            }
+        }
     }
 
     pub fn runtime_wake_source(&self) -> weld_core::host::ClientRuntimeWakeSource {
@@ -592,6 +638,15 @@ impl AsFd for LocalPacketConnection {
 
 fn receive_event_flags() -> epoll::EventFlags {
     epoll::EventFlags::IN | epoll::EventFlags::ERR | epoll::EventFlags::HUP
+}
+
+fn wait_readable(descriptor: BorrowedFd<'_>) -> Result<(), TransportError> {
+    let mut descriptors = [rustix::event::PollFd::new(
+        &descriptor,
+        rustix::event::PollFlags::IN,
+    )];
+    rustix::event::poll(&mut descriptors, None)?;
+    Ok(())
 }
 
 fn validate_packet(bytes: &[u8], file_descriptors: &[OwnedFd]) -> Result<(), TransportError> {

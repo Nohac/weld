@@ -11,3 +11,4 @@ diagnostic = []
 anyhow.workspace = true
 cros-codecs.workspace = true
 weld-media = { path = "../weld-media" }
+tracing.workspace = true

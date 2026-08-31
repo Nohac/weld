@@ -2,9 +2,14 @@ use std::os::fd::{AsRawFd, OwnedFd};
 
 use anyhow::{Context, Result, ensure};
 use cros_codecs::libva::{
-    DrmPrimeSurfaceDescriptor, SurfaceMemoryDescriptor, VADRMPRIMESurfaceDescriptor,
-    VADRMPRIMESurfaceDescriptorLayer, VADRMPRIMESurfaceDescriptorObject, VASurfaceAttrib,
+    DrmPrimeSurfaceDescriptor, SurfaceMemoryDescriptor, VA_FOURCC_BGRX, VA_FOURCC_NV12,
+    VADRMPRIMESurfaceDescriptor, VADRMPRIMESurfaceDescriptorLayer,
+    VADRMPRIMESurfaceDescriptorObject, VASurfaceAttrib,
 };
+
+const DRM_FORMAT_ARGB8888: u32 = u32::from_le_bytes(*b"AR24");
+const DRM_FORMAT_XRGB8888: u32 = u32::from_le_bytes(*b"XR24");
+const DRM_FORMAT_NV12: u32 = u32::from_le_bytes(*b"NV12");
 
 #[derive(Debug)]
 pub struct VaapiDmabufObject {
@@ -32,6 +37,31 @@ pub struct VaapiDmabuf {
 }
 
 impl VaapiDmabuf {
+    /// Constructs a checked VA-API import from owned DRM DMA-BUF objects.
+    pub fn try_new(
+        width: u32,
+        height: u32,
+        fourcc: u32,
+        objects: Vec<VaapiDmabufObject>,
+        planes: Vec<VaapiDmabufPlane>,
+    ) -> Result<Self> {
+        let va_fourcc = match fourcc {
+            DRM_FORMAT_ARGB8888 | DRM_FORMAT_XRGB8888 => VA_FOURCC_BGRX,
+            DRM_FORMAT_NV12 => VA_FOURCC_NV12,
+            _ => anyhow::bail!("DRM format is not supported by the VA-API tracer"),
+        };
+        let frame = Self {
+            width,
+            height,
+            va_fourcc,
+            fourcc,
+            objects,
+            planes,
+        };
+        frame.validate()?;
+        Ok(frame)
+    }
+
     pub(crate) fn from_prime(descriptor: DrmPrimeSurfaceDescriptor) -> Result<Self> {
         ensure!(
             descriptor.layers.len() == 1,

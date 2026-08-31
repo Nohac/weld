@@ -4,6 +4,7 @@ use std::{ffi::OsString, path::PathBuf};
 
 use clap::{Parser, ValueEnum};
 use weld_app::{Backend, OutputScale};
+use weld_hoist_local::LocalSurfaceMode;
 
 const DEFAULT_REMOTE_ADDRESS: &str = "127.0.0.1:15702";
 
@@ -13,6 +14,21 @@ pub enum BackendKind {
     Auto,
     Nested,
     Drm,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+pub enum HoistSurfaceMode {
+    Native,
+    EncodedH264Opaque,
+}
+
+impl From<HoistSurfaceMode> for LocalSurfaceMode {
+    fn from(mode: HoistSurfaceMode) -> Self {
+        match mode {
+            HoistSurfaceMode::Native => Self::Native,
+            HoistSurfaceMode::EncodedH264Opaque => Self::EncodedH264Opaque,
+        }
+    }
 }
 
 impl BackendKind {
@@ -66,6 +82,10 @@ pub struct AppArguments {
     /// Import hoisted windows from a sibling Weld source.
     #[arg(long, value_name = "PATH", conflicts_with = "hoist_listen")]
     pub(crate) hoist_connect: Option<PathBuf>,
+
+    /// Source-side surface carrier used for a local hoist peer.
+    #[arg(long, value_enum, value_name = "MODE", requires = "hoist_listen")]
+    pub(crate) hoist_surface_mode: Option<HoistSurfaceMode>,
 
     /// Optional client program followed by its arguments.
     #[arg(value_name = "CLIENT_AND_ARGS", allow_hyphen_values = true)]

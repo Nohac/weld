@@ -4,7 +4,7 @@ mod arguments;
 mod overlay;
 mod telemetry;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::Parser;
 use overlay::DistributionOverlayPlugin;
 use weld_app::{
@@ -14,8 +14,9 @@ use weld_app::{
 use weld_float::FloatPlugin;
 use weld_hoist::{HoistPlugin, HoistTransport, loopback_registration};
 use weld_hoist_local::{
-    LocalPacketConnection, LocalPacketListener, LocalPeerRole, local_destination_registration,
-    local_source_registration,
+    LocalPacketConnection, LocalPacketListener, LocalPeerRole, LocalSurfaceMode,
+    bootstrap_destination, bootstrap_source, encoded_destination_registration,
+    encoded_source_registration, local_destination_registration, local_source_registration,
 };
 use weld_ssd::SsdPlugin;
 use weld_window::WindowPlugin;
@@ -26,16 +27,20 @@ pub use arguments::{AppArguments, BackendKind};
 pub fn run(arguments: AppArguments) -> Result<()> {
     telemetry::initialize()?;
 
-    let local_transport = if let Some(path) = &arguments.hoist_listen {
-        let listener = LocalPacketListener::bind(path, LocalPeerRole::Source)?;
-        Some((LocalPeerRole::Source, listener.accept_blocking()?))
-    } else if let Some(path) = &arguments.hoist_connect {
-        Some((
-            LocalPeerRole::Destination,
-            LocalPacketConnection::connect(path, LocalPeerRole::Destination)?,
-        ))
+    enum PendingLocalTransport {
+        Source(LocalPacketListener),
+        Destination(std::path::PathBuf),
+    }
+    let pending_local_transport = if let Some(path) = &arguments.hoist_listen {
+        Some(PendingLocalTransport::Source(LocalPacketListener::bind(
+            path,
+            LocalPeerRole::Source,
+        )?))
     } else {
-        None
+        arguments
+            .hoist_connect
+            .clone()
+            .map(PendingLocalTransport::Destination)
     };
 
     let mut app = WeldApp::builder()
@@ -46,28 +51,100 @@ pub fn run(arguments: AppArguments) -> Result<()> {
         .scale(arguments.scale)
         .socket_name(arguments.wayland_socket)
         .build()?;
+    let local_transport = match pending_local_transport {
+        Some(PendingLocalTransport::Source(listener)) => {
+            let mode = arguments
+                .hoist_surface_mode
+                .map(Into::into)
+                .unwrap_or(LocalSurfaceMode::Native);
+            if mode == LocalSurfaceMode::EncodedH264Opaque {
+                validate_encoded_media(&app)?;
+            }
+            Some((
+                LocalPeerRole::Source,
+                bootstrap_source(listener.accept_blocking()?, mode)?,
+            ))
+        }
+        Some(PendingLocalTransport::Destination(path)) => {
+            let control = LocalPacketConnection::connect(path, LocalPeerRole::Destination)?;
+            let capabilities = app.external_dmabuf_capabilities()?;
+            Some((
+                LocalPeerRole::Destination,
+                bootstrap_destination(control, |mode| {
+                    if mode == LocalSurfaceMode::EncodedH264Opaque {
+                        validate_encoded_capabilities(capabilities.as_ref())?;
+                    }
+                    Ok(())
+                })?,
+            ))
+        }
+        None => None,
+    };
     let mut enable_hoist_policy = true;
     match local_transport {
-        Some((LocalPeerRole::Source, connection)) => {
-            let (adapter, endpoint) = local_source_registration(
-                connection.clone(),
-                weld_core::WAYLAND_CLIENT_SOURCE,
-                weld_client::ClientSourceId::new(1),
-                weld_client::ClientSourceId::new(1),
-            );
-            app.add_client_wake_source(connection.runtime_wake_source())
-                .add_client_adapter(adapter)
-                .insert_resource(HoistTransport::new(endpoint));
+        Some((LocalPeerRole::Source, transport)) => {
+            let adapter_source = weld_client::ClientSourceId::new(1);
+            match (transport.mode, transport.media) {
+                (LocalSurfaceMode::Native, None) => {
+                    let (adapter, endpoint) = local_source_registration(
+                        transport.control.clone(),
+                        weld_core::WAYLAND_CLIENT_SOURCE,
+                        adapter_source,
+                        adapter_source,
+                    );
+                    app.add_client_wake_source(transport.control.runtime_wake_source())
+                        .add_client_adapter(adapter)
+                        .insert_resource(HoistTransport::new(endpoint));
+                }
+                (LocalSurfaceMode::EncodedH264Opaque, Some(media)) => {
+                    let capabilities = required_external_capabilities(&app)?;
+                    let (adapter, endpoint, wakes) = encoded_source_registration(
+                        transport.control,
+                        media,
+                        weld_core::WAYLAND_CLIENT_SOURCE,
+                        adapter_source,
+                        adapter_source,
+                        &capabilities,
+                    )?;
+                    for wake in wakes {
+                        app.add_client_wake_source(wake);
+                    }
+                    app.add_client_adapter(adapter)
+                        .insert_resource(HoistTransport::new(endpoint));
+                }
+                _ => anyhow::bail!("local hoist bootstrap returned an invalid media channel"),
+            }
         }
-        Some((LocalPeerRole::Destination, connection)) => {
-            let adapter = local_destination_registration(
-                connection.clone(),
-                weld_core::WAYLAND_CLIENT_SOURCE,
-                weld_client::ClientSourceId::new(1),
-                app.dmabuf_context(),
-            );
-            app.add_client_wake_source(connection.runtime_wake_source())
-                .add_client_adapter(adapter);
+        Some((LocalPeerRole::Destination, transport)) => {
+            let destination_source = weld_client::ClientSourceId::new(1);
+            match (transport.mode, transport.media) {
+                (LocalSurfaceMode::Native, None) => {
+                    let adapter = local_destination_registration(
+                        transport.control.clone(),
+                        weld_core::WAYLAND_CLIENT_SOURCE,
+                        destination_source,
+                        app.dmabuf_context(),
+                    );
+                    app.add_client_wake_source(transport.control.runtime_wake_source())
+                        .add_client_adapter(adapter);
+                }
+                (LocalSurfaceMode::EncodedH264Opaque, Some(media)) => {
+                    let capabilities = required_external_capabilities(&app)?;
+                    let (adapter, wakes) = encoded_destination_registration(
+                        transport.control,
+                        media,
+                        weld_core::WAYLAND_CLIENT_SOURCE,
+                        destination_source,
+                        app.dmabuf_context(),
+                        &capabilities,
+                    )?;
+                    for wake in wakes {
+                        app.add_client_wake_source(wake);
+                    }
+                    app.add_client_adapter(adapter);
+                }
+                _ => anyhow::bail!("local hoist bootstrap returned an invalid media channel"),
+            }
             enable_hoist_policy = false;
         }
         None => {
@@ -92,6 +169,33 @@ pub fn run(arguments: AppArguments) -> Result<()> {
         app.add_plugins(HoistPlugin);
     }
     app.run()
+}
+
+fn required_external_capabilities(
+    app: &WeldApp,
+) -> Result<weld_core::dmabuf::ExternalDmabufCapabilities> {
+    app.external_dmabuf_capabilities()?
+        .ok_or_else(|| anyhow::anyhow!("selected Weld GPU cannot import DMA-BUFs"))
+}
+
+fn validate_encoded_media(app: &WeldApp) -> Result<()> {
+    let capabilities = required_external_capabilities(app)?;
+    validate_encoded_capabilities(Some(&capabilities))
+}
+
+fn validate_encoded_capabilities(
+    capabilities: Option<&weld_core::dmabuf::ExternalDmabufCapabilities>,
+) -> Result<()> {
+    let capabilities =
+        capabilities.context("selected Weld GPU cannot import DMA-BUFs for decoded video")?;
+    let media = weld_media_vaapi::probe_vaapi_device(&capabilities.render_node)
+        .map_err(anyhow::Error::new)?;
+    anyhow::ensure!(
+        media.supports_h264_round_trip(),
+        "{} exposes no complete hardware H.264 and VPP path",
+        media.vendor
+    );
+    Ok(())
 }
 
 pub fn run_from_env() -> Result<()> {

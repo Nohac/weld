@@ -85,7 +85,12 @@ fn main() -> Result<()> {
             encoded.kind == expected_kind,
             "encoded frame kind differs from the low-delay cadence"
         );
-        for decoded in decoder.decode(&encoded)? {
+        let decoded = decoder.decode(&encoded)?;
+        ensure!(
+            decoded.len() == 1,
+            "low-delay access unit did not produce exactly one immediate frame"
+        );
+        for decoded in decoded {
             let decoded_sequence = decoded.timestamp_micros / 16_667;
             let decoded_seed = u8::try_from(decoded_sequence * 3)?;
             validator.validate(decoded, decoded_seed)?;
@@ -96,11 +101,10 @@ fn main() -> Result<()> {
             encoded.payload.len()
         );
     }
-    for decoded in decoder.drain()? {
-        let decoded_sequence = decoded.timestamp_micros / 16_667;
-        let decoded_seed = u8::try_from(decoded_sequence * 3)?;
-        validator.validate(decoded, decoded_seed)?;
-    }
+    ensure!(
+        decoder.drain()?.is_empty(),
+        "low-delay decoder retained a duplicate frame after access-unit completion"
+    );
     ensure!(
         validator.validated_frames == PERSISTENT_FRAME_COUNT,
         "persistent decoder did not return every submitted frame"

@@ -83,10 +83,18 @@ impl<B> WireClientSurfaceCommit<B> {
         commit: ClientSurfaceCommit,
         mut export: impl FnMut(ClientBufferLease) -> Result<B, E>,
     ) -> Result<Self, E> {
+        Self::try_from_client_with_layer(commit, |_, buffer| export(buffer))
+    }
+
+    pub fn try_from_client_with_layer<E>(
+        commit: ClientSurfaceCommit,
+        mut export: impl FnMut(SurfaceLayerId, ClientBufferLease) -> Result<B, E>,
+    ) -> Result<Self, E> {
         let buffers = commit
             .buffers
             .into_iter()
             .map(|update| {
+                let layer = update.layer;
                 let change = match update.change {
                     SurfaceBufferChange::Retained { metadata } => {
                         WireSurfaceBufferChange::Retained { metadata }
@@ -94,15 +102,12 @@ impl<B> WireClientSurfaceCommit<B> {
                     SurfaceBufferChange::Replaced { metadata, buffer } => {
                         WireSurfaceBufferChange::Replaced {
                             metadata,
-                            buffer: export(buffer)?,
+                            buffer: export(layer, buffer)?,
                         }
                     }
                     SurfaceBufferChange::Removed => WireSurfaceBufferChange::Removed,
                 };
-                Ok(WireSurfaceBufferUpdate {
-                    layer: update.layer,
-                    change,
-                })
+                Ok(WireSurfaceBufferUpdate { layer, change })
             })
             .collect::<Result<Vec<_>, E>>()?;
         Ok(Self {
@@ -171,12 +176,19 @@ pub enum WireClientSurfaceEventKind<B> {
 impl<B> WireClientSurfaceEvent<B> {
     pub fn try_from_client<E>(
         event: ClientSurfaceEvent,
-        export: impl FnMut(ClientBufferLease) -> Result<B, E>,
+        mut export: impl FnMut(ClientBufferLease) -> Result<B, E>,
+    ) -> Result<Self, E> {
+        Self::try_from_client_with_layer(event, |_, buffer| export(buffer))
+    }
+
+    pub fn try_from_client_with_layer<E>(
+        event: ClientSurfaceEvent,
+        export: impl FnMut(SurfaceLayerId, ClientBufferLease) -> Result<B, E>,
     ) -> Result<Self, E> {
         let kind = match event.kind {
             ClientSurfaceEventKind::Role(role) => WireClientSurfaceEventKind::Role(role),
             ClientSurfaceEventKind::Commit(commit) => WireClientSurfaceEventKind::Commit(
-                WireClientSurfaceCommit::try_from_client(commit, export)?,
+                WireClientSurfaceCommit::try_from_client_with_layer(commit, export)?,
             ),
             ClientSurfaceEventKind::Interaction(interaction) => {
                 WireClientSurfaceEventKind::Interaction(interaction)

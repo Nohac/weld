@@ -486,6 +486,9 @@ pub struct H264Decoder {
 
 pub struct DecodedH264Frame {
     pub timestamp_micros: u64,
+    /// Valid display region within the macroblock-aligned decoded frame.
+    pub display_width: u32,
+    pub display_height: u32,
     pub frame: VaapiDmabuf,
 }
 
@@ -552,6 +555,11 @@ impl H264Decoder {
             decoded.extend(events);
             ensure!(made_progress, "H.264 decoder made no progress");
         }
+        self.decoder
+            .finish_access_unit()
+            .context("could not finish H.264 access unit")?;
+        let (events, _) = self.collect_events()?;
+        decoded.extend(events);
         Ok(decoded)
     }
 
@@ -586,6 +594,18 @@ impl H264Decoder {
                         .context("could not synchronize decoded VA surface")?;
                     decoded.push(DecodedH264Frame {
                         timestamp_micros,
+                        display_width: self
+                            .stream_info
+                            .as_ref()
+                            .context("decoder produced a frame before stream information")?
+                            .display_resolution
+                            .width,
+                        display_height: self
+                            .stream_info
+                            .as_ref()
+                            .context("decoder produced a frame before stream information")?
+                            .display_resolution
+                            .height,
                         frame: VaapiDmabuf::from_prime(
                             surface
                                 .export_prime()

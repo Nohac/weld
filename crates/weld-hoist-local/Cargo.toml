@@ -4,6 +4,9 @@ version.workspace = true
 edition.workspace = true
 publish.workspace = true
 
+[features]
+encoded-vaapi = ["dep:weld-media-vaapi"]
+
 [dependencies]
 anyhow.workspace = true
 calloop.workspace = true
@@ -11,6 +14,9 @@ postcard.workspace = true
 rustix.workspace = true
 serde.workspace = true
 tracing.workspace = true
+smithay = { workspace = true, features = ["wayland_frontend"] }
 weld-client = { path = "../weld-client", features = ["serde"] }
 weld-core = { path = "../weld-core" }
 weld-hoist-core = { path = "../weld-hoist-core", features = ["serde"] }
+weld-media = { path = "../weld-media", features = ["serde"] }
+weld-media-vaapi = { path = "../weld-media-vaapi", optional = true }

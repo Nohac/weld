@@ -5,13 +5,28 @@
 //! and descriptor ownership without a byte-stream framing layer.
 
 mod adapter;
+mod bootstrap;
+mod codec;
+mod encoded;
+mod media;
 mod native;
 mod socket;
 mod wire;
 
 pub use adapter::{
-    LocalDestinationEndpoint, local_destination_registration, local_source_registration,
+    LocalDestinationEndpoint, encoded_destination_registration_with_backend,
+    encoded_source_registration_with_backend, local_destination_registration,
+    local_source_registration,
 };
+#[cfg(feature = "encoded-vaapi")]
+pub use adapter::{encoded_destination_registration, encoded_source_registration};
+pub use bootstrap::{LocalTransportConnections, bootstrap_destination, bootstrap_source};
+pub use codec::{
+    LocalDecodeBackend, LocalDecodeCompletion, LocalDecodeRequest, LocalDecodedFrame,
+    LocalEncodeBackend, LocalEncodeCompletion, LocalEncodeInput, LocalEncodeRequest,
+    LocalSubmitError,
+};
+pub(crate) use media::import_access_unit;
 pub use native::{
     ExportedLocalBuffer, ensure_descriptors_consumed, export_local_buffer, import_local_dmabuf,
     import_local_shm,
@@ -19,7 +34,9 @@ pub use native::{
 pub use socket::{
     LocalPacketConnection, LocalPacketListener, LocalPeerRole, ReceivedLocalPacket, TransportError,
 };
+pub(crate) use wire::{LocalBootstrapAcknowledgement, LocalBootstrapOffer};
 pub use wire::{
     LocalBuffer, LocalBufferContent, LocalDestinationMessage, LocalDestinationPacket, LocalDmabuf,
-    LocalDmabufPlane, LocalShm, LocalSourceMessage, LocalSourcePacket,
+    LocalDmabufPlane, LocalEncodedAccessUnit, LocalEncodedBuffer, LocalEncodedCommitOutcome,
+    LocalMediaPacket, LocalShm, LocalSourceMessage, LocalSourcePacket, LocalSurfaceMode,
 };

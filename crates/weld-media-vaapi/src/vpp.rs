@@ -19,6 +19,7 @@ use cros_codecs::libva::{
 use crate::dmabuf::VaapiDmabuf;
 
 const DRM_FORMAT_XRGB8888: u32 = u32::from_le_bytes(*b"XR24");
+const DRM_FORMAT_ARGB8888: u32 = u32::from_le_bytes(*b"AR24");
 const DRM_FORMAT_NV12: u32 = u32::from_le_bytes(*b"NV12");
 
 pub enum VppOutput {
@@ -45,6 +46,37 @@ impl VppConverter {
     }
 
     pub fn convert(&self, input: &VaapiDmabuf, output: VppOutput) -> Result<VaapiDmabuf> {
+        self.convert_scaled(
+            input,
+            input.width,
+            input.height,
+            input.width,
+            input.height,
+            output,
+        )
+    }
+
+    /// Converts a valid source region into an independently sized output.
+    pub fn convert_scaled(
+        &self,
+        input: &VaapiDmabuf,
+        source_width: u32,
+        source_height: u32,
+        output_width: u32,
+        output_height: u32,
+        output: VppOutput,
+    ) -> Result<VaapiDmabuf> {
+        ensure!(
+            source_width > 0
+                && source_height > 0
+                && source_width <= input.width
+                && source_height <= input.height,
+            "VPP source region is outside the input frame"
+        );
+        ensure!(
+            output_width > 0 && output_height > 0,
+            "VPP output has zero extent"
+        );
         let (input_rt_format, input_va_format) = surface_format(input.fourcc)
             .context("VPP input format is not supported by the hardware tracer")?;
         let input_surface = self
@@ -68,13 +100,19 @@ impl VppConverter {
                     .create_surfaces(
                         VA_RT_FORMAT_YUV420,
                         Some(VA_FOURCC_NV12),
-                        input.width,
-                        input.height,
+                        output_width,
+                        output_height,
                         Some(UsageHint::USAGE_HINT_VPP_WRITE | UsageHint::USAGE_HINT_EXPORT),
                         vec![ModifierAllocation { modifiers: vec![0] }],
                     )
                     .context("could not allocate VPP NV12 output")?;
-                self.process(input_surface, output_surface, VA_COLOR_SRGB, VA_COLOR_BT709)
+                self.process(
+                    input_surface,
+                    output_surface,
+                    (source_width, source_height),
+                    VA_COLOR_SRGB,
+                    VA_COLOR_BT709,
+                )
             }
             VppOutput::Xrgb8888 { modifiers } => {
                 ensure!(
@@ -86,21 +124,98 @@ impl VppConverter {
                     .create_surfaces(
                         VA_RT_FORMAT_RGB32,
                         Some(VA_FOURCC_BGRX),
-                        input.width,
-                        input.height,
+                        output_width,
+                        output_height,
                         Some(UsageHint::USAGE_HINT_VPP_WRITE | UsageHint::USAGE_HINT_EXPORT),
                         vec![ModifierAllocation { modifiers }],
                     )
                     .context("could not allocate modifier-constrained VPP XRGB output")?;
-                self.process(input_surface, output_surface, VA_COLOR_BT709, VA_COLOR_SRGB)
+                self.process(
+                    input_surface,
+                    output_surface,
+                    (source_width, source_height),
+                    VA_COLOR_BT709,
+                    VA_COLOR_SRGB,
+                )
             }
         }
+    }
+
+    /// Uploads tightly packed BGRA pixels into an XRGB DMA-BUF for VPP input.
+    pub fn upload_bgra(&self, width: u32, height: u32, pixels: &[u8]) -> Result<VaapiDmabuf> {
+        ensure!(width > 0 && height > 0, "BGRA upload has zero extent");
+        let expected = u64::from(width)
+            .checked_mul(u64::from(height))
+            .and_then(|pixels| pixels.checked_mul(4))
+            .and_then(|bytes| usize::try_from(bytes).ok())
+            .context("BGRA upload size overflow")?;
+        ensure!(
+            pixels.len() == expected,
+            "BGRA upload length differs from extent"
+        );
+        let mut surfaces = self
+            .display
+            .create_surfaces(
+                VA_RT_FORMAT_RGB32,
+                Some(VA_FOURCC_BGRX),
+                width,
+                height,
+                Some(UsageHint::USAGE_HINT_VPP_READ | UsageHint::USAGE_HINT_EXPORT),
+                vec![ModifierAllocation { modifiers: vec![0] }],
+            )
+            .context("could not allocate the BGRA upload surface")?;
+        let surface = surfaces
+            .pop()
+            .context("VA-API did not create the BGRA upload surface")?;
+        let image_format = self
+            .display
+            .query_image_formats()
+            .context("could not query VA image formats")?
+            .into_iter()
+            .find(|format| format.fourcc == VA_FOURCC_BGRX)
+            .context("VA-API does not expose a BGRX image format")?;
+        let mut image = cros_codecs::libva::Image::create_from(
+            &surface,
+            image_format,
+            (width, height),
+            (width, height),
+        )
+        .context("could not map the BGRA upload surface")?;
+        let description = *image.image();
+        let offset = usize::try_from(description.offsets[0])?;
+        let pitch = usize::try_from(description.pitches[0])?;
+        let row_bytes = usize::try_from(width)?
+            .checked_mul(4)
+            .context("BGRA row length overflow")?;
+        for (row, source) in pixels.chunks_exact(row_bytes).enumerate() {
+            let start = offset
+                .checked_add(row.saturating_mul(pitch))
+                .context("BGRA upload offset overflow")?;
+            let end = start
+                .checked_add(row_bytes)
+                .context("BGRA upload row overflow")?;
+            image
+                .as_mut()
+                .get_mut(start..end)
+                .context("BGRA upload row exceeds mapped image")?
+                .copy_from_slice(source);
+        }
+        drop(image);
+        surface
+            .sync()
+            .context("could not synchronize BGRA upload")?;
+        VaapiDmabuf::from_prime(
+            surface
+                .export_prime()
+                .context("could not export BGRA upload DMA-BUF")?,
+        )
     }
 
     fn process<I, O>(
         &self,
         input: Surface<I>,
         output: Vec<Surface<O>>,
+        source_size: (u32, u32),
         input_color_standard: u32,
         output_color_standard: u32,
     ) -> Result<VaapiDmabuf>
@@ -121,19 +236,26 @@ impl VppConverter {
                 true,
             )
             .context("could not create VA-API VPP context")?;
-        let region = VARectangle {
+        let source_region = VARectangle {
+            x: 0,
+            y: 0,
+            width: u16::try_from(source_size.0).context("VPP width exceeds VA rectangle range")?,
+            height: u16::try_from(source_size.1)
+                .context("VPP height exceeds VA rectangle range")?,
+        };
+        let output_region = VARectangle {
             x: 0,
             y: 0,
             width: u16::try_from(output_surface.size().0)
-                .context("VPP width exceeds VA rectangle range")?,
+                .context("VPP output width exceeds VA rectangle range")?,
             height: u16::try_from(output_surface.size().1)
-                .context("VPP height exceeds VA rectangle range")?,
+                .context("VPP output height exceeds VA rectangle range")?,
         };
         let mut parameters = VAProcPipelineParameterBuffer {
             surface: input.id(),
-            surface_region: &region,
+            surface_region: &source_region,
             surface_color_standard: input_color_standard,
-            output_region: &region,
+            output_region: &output_region,
             output_background_color: 0xff00_0000,
             output_color_standard,
             ..Default::default()
@@ -234,7 +356,7 @@ impl SurfaceMemoryDescriptor for ModifierAllocation {
 
 fn surface_format(fourcc: u32) -> Option<(u32, u32)> {
     match fourcc {
-        DRM_FORMAT_XRGB8888 => Some((VA_RT_FORMAT_RGB32, VA_FOURCC_BGRX)),
+        DRM_FORMAT_ARGB8888 | DRM_FORMAT_XRGB8888 => Some((VA_RT_FORMAT_RGB32, VA_FOURCC_BGRX)),
         DRM_FORMAT_NV12 => Some((VA_RT_FORMAT_YUV420, VA_FOURCC_NV12)),
         _ => None,
     }

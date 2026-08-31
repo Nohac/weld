@@ -21,9 +21,13 @@ use weld_hoist_core::{HoistEndpoint, HoistEndpointCommand, HoistSessionId, reloc
 
 use crate::{
     LocalBuffer, LocalBufferContent, LocalDestinationMessage, LocalDestinationPacket,
-    LocalPacketConnection, LocalSourceMessage, LocalSourcePacket, ensure_descriptors_consumed,
-    export_local_buffer, import_local_dmabuf, import_local_shm,
+    LocalPacketConnection, LocalSourceMessage, LocalSourcePacket,
+    encoded::{EncodedDestinationState, EncodedSourceState},
+    ensure_descriptors_consumed, export_local_buffer, import_local_dmabuf, import_local_shm,
 };
+
+#[cfg(feature = "encoded-vaapi")]
+use crate::codec::{decode_backend, encode_backend};
 
 #[derive(Clone)]
 pub struct LocalDestinationEndpoint {
@@ -94,6 +98,124 @@ pub fn local_destination_registration(
         LocalDestinationAdapter::new(connection, upstream_source, destination_source, dmabuf),
         DirectClientBufferImporter,
     )
+}
+
+pub fn encoded_source_registration_with_backend(
+    control: LocalPacketConnection,
+    media: LocalPacketConnection,
+    upstream_source: ClientSourceId,
+    adapter_source: ClientSourceId,
+    destination_source: ClientSourceId,
+    backend: Box<dyn crate::LocalEncodeBackend>,
+) -> (ClientAdapterRegistration, LocalDestinationEndpoint) {
+    let descriptor = ClientSourceDescriptor::new(adapter_source, ClientProvenance::Relocated);
+    let adapter = LocalSourceAdapter::new_encoded(
+        control.clone(),
+        upstream_source,
+        EncodedSourceState::new(backend, media),
+    );
+    (
+        ClientAdapterRegistration::new(descriptor, adapter, ControlOnlyClientImporter),
+        LocalDestinationEndpoint {
+            adapter_source,
+            destination_source,
+            connection: control,
+        },
+    )
+}
+
+pub fn encoded_destination_registration_with_backend(
+    control: LocalPacketConnection,
+    media: LocalPacketConnection,
+    upstream_source: ClientSourceId,
+    destination_source: ClientSourceId,
+    dmabuf: DmabufContext,
+    backend: Box<dyn crate::LocalDecodeBackend>,
+) -> ClientAdapterRegistration {
+    let descriptor = ClientSourceDescriptor::new(destination_source, ClientProvenance::Relocated);
+    let encoded = EncodedDestinationState::new(backend, media, descriptor, dmabuf.clone());
+    let adapter = LocalDestinationAdapter::new_encoded(
+        control,
+        upstream_source,
+        destination_source,
+        dmabuf,
+        encoded,
+    );
+    ClientAdapterRegistration::new(descriptor, adapter, DirectClientBufferImporter)
+}
+
+#[cfg(feature = "encoded-vaapi")]
+pub fn encoded_source_registration(
+    control: LocalPacketConnection,
+    media: LocalPacketConnection,
+    upstream_source: ClientSourceId,
+    adapter_source: ClientSourceId,
+    destination_source: ClientSourceId,
+    capabilities: &weld_core::dmabuf::ExternalDmabufCapabilities,
+) -> anyhow::Result<(
+    ClientAdapterRegistration,
+    LocalDestinationEndpoint,
+    Vec<weld_core::host::ClientRuntimeWakeSource>,
+)> {
+    let (notifier, worker_wake) = weld_core::host::client_runtime_notifier()?;
+    let backend = encode_backend(capabilities.render_node.clone(), move || {
+        if let Err(error) = notifier.notify() {
+            tracing::error!(%error, "could not wake the host for encoded output");
+        }
+    })?;
+    let (registration, endpoint) = encoded_source_registration_with_backend(
+        control.clone(),
+        media.clone(),
+        upstream_source,
+        adapter_source,
+        destination_source,
+        backend,
+    );
+    Ok((
+        registration,
+        endpoint,
+        vec![
+            control.runtime_wake_source(),
+            media.runtime_wake_source(),
+            worker_wake,
+        ],
+    ))
+}
+
+#[cfg(feature = "encoded-vaapi")]
+pub fn encoded_destination_registration(
+    control: LocalPacketConnection,
+    media: LocalPacketConnection,
+    upstream_source: ClientSourceId,
+    destination_source: ClientSourceId,
+    dmabuf: DmabufContext,
+    capabilities: &weld_core::dmabuf::ExternalDmabufCapabilities,
+) -> anyhow::Result<(
+    ClientAdapterRegistration,
+    Vec<weld_core::host::ClientRuntimeWakeSource>,
+)> {
+    let (notifier, worker_wake) = weld_core::host::client_runtime_notifier()?;
+    let backend = decode_backend(capabilities, move || {
+        if let Err(error) = notifier.notify() {
+            tracing::error!(%error, "could not wake the host for decoded output");
+        }
+    })?;
+    let registration = encoded_destination_registration_with_backend(
+        control.clone(),
+        media.clone(),
+        upstream_source,
+        destination_source,
+        dmabuf,
+        backend,
+    );
+    Ok((
+        registration,
+        vec![
+            control.runtime_wake_source(),
+            media.runtime_wake_source(),
+            worker_wake,
+        ],
+    ))
 }
 
 #[derive(Default)]
@@ -264,6 +386,7 @@ struct LocalSourceAdapter {
     retirements: Vec<ClientBufferUseId>,
     transport_failed: bool,
     remote_input: RemoteInputState,
+    encoded: Option<EncodedSourceState>,
 }
 
 impl LocalSourceAdapter {
@@ -279,7 +402,18 @@ impl LocalSourceAdapter {
             retirements: Vec::new(),
             transport_failed: false,
             remote_input: RemoteInputState::default(),
+            encoded: None,
         }
+    }
+
+    fn new_encoded(
+        connection: LocalPacketConnection,
+        upstream_source: ClientSourceId,
+        encoded: EncodedSourceState,
+    ) -> Self {
+        let mut adapter = Self::new(connection, upstream_source);
+        adapter.encoded = Some(encoded);
+        adapter
     }
 
     fn map(&mut self, session: HoistSessionId, source: ClientSurfaceId) {
@@ -358,7 +492,16 @@ impl LocalSourceAdapter {
         for popup in popups {
             self.unmap(popup);
         }
-        self.retire_session_buffers(session);
+        if let Some(encoded) = &mut self.encoded {
+            if let Err(error) = encoded.cancel_surface(source) {
+                warn!(%error, ?source, "could not retire an encoded source surface");
+                self.connection
+                    .record_failure(crate::TransportError::Protocol(error.to_string()));
+                self.fail_transport();
+            }
+        } else {
+            self.retire_session_buffers(session);
+        }
     }
 
     fn observe(&mut self, event: &ClientSurfaceEvent) {
@@ -411,6 +554,15 @@ impl LocalSourceAdapter {
 
     fn send_event(&mut self, session: HoistSessionId, event: ClientSurfaceEvent) {
         if self.transport_failed || self.connection.is_disconnected() {
+            return;
+        }
+        if let Some(encoded) = &mut self.encoded {
+            if let Err(error) = encoded.enqueue(session, event, &self.connection) {
+                error!(%error, ?session, "could not encode a hoisted client buffer");
+                self.connection
+                    .record_failure(crate::TransportError::Protocol(error.to_string()));
+                self.fail_transport();
+            }
             return;
         }
         let mut file_descriptors = Vec::new();
@@ -514,6 +666,7 @@ impl LocalSourceAdapter {
             let target = match &packet.message.message {
                 LocalDestinationMessage::Request(request) => request_surface(request),
                 LocalDestinationMessage::Input(input) => Some(input.target.surface()),
+                LocalDestinationMessage::EncodedCommitFinished { surface, .. } => Some(*surface),
                 LocalDestinationMessage::BufferReleased { .. }
                 | LocalDestinationMessage::Reclaim => None,
             };
@@ -525,6 +678,22 @@ impl LocalSourceAdapter {
             }
             match packet.message.message {
                 LocalDestinationMessage::Request(request) => {
+                    if let ClientRequest::Surface(surface_request) = &request
+                        && let ClientSurfaceRequestKind::Configure { resizing, .. } =
+                            surface_request.kind
+                        && let Some(encoded) = &mut self.encoded
+                        && let Err(error) = encoded.set_resizing(
+                            surface_request.surface,
+                            resizing,
+                            &self.connection,
+                        )
+                    {
+                        warn!(%error, "could not settle encoded resize state");
+                        self.connection
+                            .record_failure(crate::TransportError::Protocol(error.to_string()));
+                        self.fail_transport();
+                        return;
+                    }
                     self.remote_input.observe_request(&request);
                     self.effects.push(ClientAdapterEffect::Request(request));
                 }
@@ -545,6 +714,34 @@ impl LocalSourceAdapter {
                     }
                 }
                 LocalDestinationMessage::Reclaim => {}
+                LocalDestinationMessage::EncodedCommitFinished {
+                    surface,
+                    revision,
+                    outcome,
+                } => {
+                    let Some(encoded) = &mut self.encoded else {
+                        warn!(
+                            ?surface,
+                            ?revision,
+                            "native hoist peer sent an encoded commit outcome"
+                        );
+                        self.connection
+                            .record_failure(crate::TransportError::Protocol(
+                                "native hoist peer sent an encoded commit outcome".to_owned(),
+                            ));
+                        self.fail_transport();
+                        return;
+                    };
+                    if let Err(error) =
+                        encoded.finish_remote_commit(surface, revision, outcome, &self.connection)
+                    {
+                        warn!(%error, ?surface, ?revision, "rejected an encoded commit outcome");
+                        self.connection
+                            .record_failure(crate::TransportError::Protocol(error.to_string()));
+                        self.fail_transport();
+                        return;
+                    }
+                }
             }
         }
     }
@@ -572,6 +769,7 @@ impl LocalSourceAdapter {
         ));
         self.clear_scale_overrides();
         self.pending_uses.clear();
+        self.encoded = None;
     }
 
     fn retire_session_buffers(&mut self, session: HoistSessionId) {
@@ -614,6 +812,14 @@ impl LocalSourceAdapter {
 impl ClientAdapter for LocalSourceAdapter {
     fn drain_events(&mut self, _events: &mut ClientEventQueue) {
         self.receive_destination();
+        if let Some(encoded) = &mut self.encoded
+            && let Err(error) = encoded.drain(&self.connection)
+        {
+            warn!(%error, "encoded local hoist source failed");
+            self.connection
+                .record_failure(crate::TransportError::Protocol(error.to_string()));
+            self.fail_transport();
+        }
     }
 
     fn apply_request(&mut self, _request: ClientRequest) {}
@@ -643,7 +849,7 @@ impl ClientAdapter for LocalSourceAdapter {
     }
 
     fn observe_retired_buffer(&mut self, buffer: ClientBufferId) {
-        if buffer.source() == self.upstream_source {
+        if self.encoded.is_none() && buffer.source() == self.upstream_source {
             self.retire_buffer(buffer);
         }
     }
@@ -665,6 +871,7 @@ struct LocalDestinationAdapter {
     next_buffer: Option<u64>,
     next_use: Option<u64>,
     keyboard_focus: Option<ClientSurfaceId>,
+    encoded: Option<EncodedDestinationState>,
 }
 
 impl LocalDestinationAdapter {
@@ -688,7 +895,20 @@ impl LocalDestinationAdapter {
             next_buffer: Some(1),
             next_use: Some(1),
             keyboard_focus: None,
+            encoded: None,
         }
+    }
+
+    fn new_encoded(
+        connection: LocalPacketConnection,
+        upstream_source: ClientSourceId,
+        destination_source: ClientSourceId,
+        dmabuf: DmabufContext,
+        encoded: EncodedDestinationState,
+    ) -> Self {
+        let mut adapter = Self::new(connection, upstream_source, destination_source, dmabuf);
+        adapter.encoded = Some(encoded);
+        adapter
     }
 
     fn receive_source(&mut self) {
@@ -707,12 +927,43 @@ impl LocalDestinationAdapter {
         for packet in packets {
             self.apply_source_packet(packet.message, packet.file_descriptors);
         }
+        if let Some(encoded) = &mut self.encoded
+            && let Err(error) = encoded.drain(&mut self.events)
+        {
+            warn!(%error, "encoded local hoist destination failed");
+            self.connection
+                .record_failure(crate::TransportError::Protocol(error.to_string()));
+            self.end_all_sessions();
+        }
+        self.flush_encoded_outcomes();
     }
 
     fn apply_source_packet(&mut self, packet: LocalSourcePacket, file_descriptors: Vec<OwnedFd>) {
         match packet.message {
             LocalSourceMessage::Surface(mut event) => {
                 let source_surface = event.surface;
+                if let Some(encoded) = &mut self.encoded {
+                    if !file_descriptors.is_empty() {
+                        warn!("encoded control packet attached unexpected descriptors");
+                        self.connection
+                            .record_failure(crate::TransportError::Protocol(
+                                "encoded control packet attached descriptors".to_owned(),
+                            ));
+                        self.end_all_sessions();
+                        return;
+                    }
+                    self.sessions.insert(source_surface, packet.session);
+                    rewrite_wire_event(&mut event, self.descriptor.id);
+                    if let Err(error) =
+                        encoded.enqueue(packet.session, source_surface, event, &mut self.events)
+                    {
+                        warn!(%error, "rejected an encoded hoist surface packet");
+                        self.connection
+                            .record_failure(crate::TransportError::Protocol(error.to_string()));
+                        self.end_all_sessions();
+                    }
+                    return;
+                }
                 let mut unreleased_uses = wire_buffer_uses(&event);
                 self.sessions.insert(source_surface, packet.session);
                 rewrite_wire_event(&mut event, self.descriptor.id);
@@ -743,11 +994,28 @@ impl LocalDestinationAdapter {
                 }
             }
             LocalSourceMessage::BufferRetired { buffer } => {
+                if self.encoded.is_some() {
+                    warn!(?buffer, "encoded peer sent native buffer retirement");
+                    self.connection
+                        .record_failure(crate::TransportError::Protocol(
+                            "encoded peer sent native buffer retirement".to_owned(),
+                        ));
+                    self.end_all_sessions();
+                    return;
+                }
                 if let Some(imported) = self.buffers.remove(&buffer) {
                     self.dmabuf.remove_external(&imported.access);
                 }
             }
-            LocalSourceMessage::Withdraw { surface } => self.destroy_surface(surface),
+            LocalSourceMessage::Withdraw { surface } => {
+                if let Some(encoded) = &mut self.encoded
+                    && let Err(error) =
+                        encoded.cancel_surface(relocated_surface(self.descriptor.id, surface))
+                {
+                    warn!(%error, "could not cancel encoded destination surface");
+                }
+                self.destroy_surface(surface);
+            }
             LocalSourceMessage::Ended => self.end_session(packet.session),
         }
     }
@@ -786,6 +1054,9 @@ impl LocalDestinationAdapter {
             }
             LocalBufferContent::Shm(buffer) => {
                 ImportedAccess::Shm(import_local_shm(buffer, metadata, descriptors)?)
+            }
+            LocalBufferContent::Encoded(_) => {
+                anyhow::bail!("encoded buffer entered the native destination importer")
             }
         };
         let local = match &access {
@@ -868,6 +1139,24 @@ impl LocalDestinationAdapter {
         }
     }
 
+    fn flush_encoded_outcomes(&mut self) {
+        let outcomes = self
+            .encoded
+            .as_mut()
+            .map(EncodedDestinationState::take_outcomes)
+            .unwrap_or_default();
+        for outcome in outcomes {
+            self.send_destination(
+                outcome.session,
+                LocalDestinationMessage::EncodedCommitFinished {
+                    surface: outcome.surface,
+                    revision: outcome.revision,
+                    outcome: outcome.outcome,
+                },
+            );
+        }
+    }
+
     fn destroy_surface(&mut self, source: ClientSurfaceId) {
         self.sessions.remove(&source);
         if self
@@ -902,6 +1191,7 @@ impl LocalDestinationAdapter {
         for (_, imported) in self.buffers.drain() {
             self.dmabuf.remove_external(&imported.access);
         }
+        self.encoded = None;
     }
 }
 

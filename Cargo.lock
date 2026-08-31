@@ -5743,6 +5743,7 @@ dependencies = [
  "input",
  "png",
  "pollster",
+ "rustix 1.1.4",
  "smithay",
  "smithay-drm-extras",
  "tracing",
@@ -5797,10 +5798,13 @@ dependencies = [
  "postcard",
  "rustix 1.1.4",
  "serde",
+ "smithay",
  "tracing",
  "weld-client",
  "weld-core",
  "weld-hoist-core",
+ "weld-media",
+ "weld-media-vaapi",
 ]
 
 [[package]]
@@ -5825,6 +5829,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "cros-codecs",
+ "tracing",
  "weld-media",
 ]
 
