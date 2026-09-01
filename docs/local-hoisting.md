@@ -163,6 +163,82 @@ substantial runtime and packaging commitment compared with a narrow codec
 adapter. GStreamer remains useful as an independent implementation oracle;
 FFmpeg, Vulkan Video, and narrower native backends remain production candidates.
 
+### Independent FFmpeg encoder probe
+
+`scripts/run-ffmpeg-vaapi-probe` is a second standalone diagnostic. It uses
+`ffmpeg-next` for version and linkage integration and keeps the unavoidable
+DRM PRIME, hardware-frame, filter-graph, and encoder calls behind one small raw
+FFmpeg boundary. The probe wraps owned XRGB DMA-BUFs as
+`AV_PIX_FMT_DRM_PRIME`, derives a VA-API device with `hwmap`, performs the RGB
+to limited-range NV12 conversion with `scale_vaapi`, and feeds those hardware
+frames directly to the selected `av1_vaapi` or `h264_vaapi` encoder. It does
+not map the source or normalized frame into CPU memory. Run it with:
+
+```sh
+scripts/run-ffmpeg-vaapi-probe
+scripts/run-ffmpeg-vaapi-probe --render-node /dev/dri/renderD128
+scripts/run-ffmpeg-vaapi-probe --codec h264
+scripts/run-ffmpeg-vaapi-probe --codec h264 --bitrate-mbps 8
+```
+
+The default is the validated 8 Mbps AV1 path. H.264 defaults to the original
+64 Mbps comparison. The runner refuses other AV1 bitrates unless
+`WELD_FFMPEG_ALLOW_UNSAFE_AV1_BITRATE=1` is set because the first 64 Mbps AV1
+experiment caused radeonsi to declare the VCN context guilty and perform a hard
+GPU recovery after frame 16. This override is for supervised driver diagnosis,
+not normal validation.
+
+Each run writes a timestamped directory under
+`target/validation/ffmpeg-vaapi-probe-*`. The runner requires FFmpeg's debug
+trace to show a DRM object mapped into VA-API, verifies codec-specific profile
+and geometry, software-decodes the result, checks stable range anchors,
+measures PSNR, and records dynamic linkage and binary size. The initial upload
+of the deterministic test pattern is intentionally CPU-side; the boundary
+being validated starts at the resulting DMA-BUF.
+
+A September 1, 2026 Radeon 880M run imported all 64 explicit-linear XR24
+DMA-BUFs and emitted 64 H.264 packets. FFmpeg reported direct DRM-to-VA-API
+mapping, VA-API HQ scaling into NV12, CBR at 64 Mbps, and the constrained
+baseline hardware profile. The stream decoded to the expected 944x484 display
+extent from a 944x496 coded extent. Its stable luma anchors were 16, 235, and
+126, and range-normalized PSNR was 51.30 dB average and 43.44 dB minimum. This
+is materially cleaner than both the current cros-codecs result and the
+GStreamer reference on the same generated stimulus, and it did not reproduce
+the displaced macroblock bands seen in Blender captures.
+
+The result validates FFmpeg as a strong implementation candidate; it does not
+yet select it for Weld. The probe uses linear test buffers, not real client
+modifiers or client synchronization, and it encodes one composed layer rather
+than a transported surface tree. A production plan still needs capability
+negotiation, explicit synchronization and lease lifetime, frame coalescing,
+session reuse across resize, backpressure, alpha policy, decoder integration,
+and packaging/licensing decisions. The diagnostic binary is dynamically linked
+to FFmpeg 8.1.2's `libavcodec`, `libavfilter`, and `libavutil`; its debug binary
+was approximately 24 MB.
+
+The same probe now validates AV1 through `av1_vaapi` without changing the
+DMA-BUF import or VA-API scaling stages. At 8 Mbps it emitted and decoded all
+64 frames, preserved the 16, 235, and 126 range anchors, and measured 51.03 dB
+average and 45.92 dB minimum PSNR. An equal-rate H.264 control measured 50.94
+dB average and 43.44 dB minimum. Their one-second payloads were effectively
+identical because both encoders met the requested CBR budget, so this synthetic
+grayscale probe establishes AV1 viability and a modest worst-frame quality
+advantage, not a bandwidth advantage for real desktop content.
+
+On this radeonsi path, AV1 expands the 944x484 input into a 960x496 bitstream
+and reports no smaller AV1 render rectangle. FFmpeg's ordinary software-upload
+VA-API command produces the same expansion, so it is not caused by Weld's
+DMA-BUF wrapper or IVF carrier. The probe crops the decoded image back to the
+separately known 944x484 surface extent before checking samples and PSNR. Weld's
+transport already needs authoritative visible geometry, and a production AV1
+decoder must apply it rather than trusting the coded extent.
+
+The same Radeon exposes VP9 Profile 0 and Profile 2 hardware decoding but no
+VP9 VA-API encoding entrypoint. FFmpeg contains `vp9_vaapi`, but that encoder
+cannot operate on this device. VP9 therefore remains a negotiated backend for
+hardware that actually advertises encoding support; it is not included in this
+machine's probe modes.
+
 The August 31 artifact investigation also found a separate visible-versus-coded
 extent contract hidden by the cros-codecs H.264 API. Its SPS builder rounds a
 visible extent to 16x16 macroblocks and records the crop, while `new_vaapi`

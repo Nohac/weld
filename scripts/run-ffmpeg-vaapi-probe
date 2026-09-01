@@ -1,0 +1,240 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+repository_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+
+if [[ "${WELD_FFMPEG_PROBE_IN_SHELL:-0}" != "1" ]]; then
+    exec nix develop /home/jonas/Dotfiles/nixos/envs/rust --command \
+        env WELD_FFMPEG_PROBE_IN_SHELL=1 bash "$0" "$@"
+fi
+
+render_node="/dev/dri/renderD128"
+codec="av1"
+bitrate_mbps=""
+while (( $# > 0 )); do
+    case "$1" in
+        --render-node)
+            if (( $# < 2 )); then
+                echo "--render-node requires a path" >&2
+                exit 2
+            fi
+            render_node="$2"
+            shift 2
+            ;;
+        --codec)
+            if (( $# < 2 )); then
+                echo "--codec requires av1 or h264" >&2
+                exit 2
+            fi
+            codec="$2"
+            shift 2
+            ;;
+        --bitrate-mbps)
+            if (( $# < 2 )); then
+                echo "--bitrate-mbps requires a positive integer" >&2
+                exit 2
+            fi
+            bitrate_mbps="$2"
+            shift 2
+            ;;
+        *)
+            echo "unknown argument: $1" >&2
+            exit 2
+            ;;
+    esac
+done
+if [[ "${codec}" != "av1" && "${codec}" != "h264" ]]; then
+    echo "unsupported codec: ${codec}; expected av1 or h264" >&2
+    exit 2
+fi
+if [[ -z "${bitrate_mbps}" ]]; then
+    if [[ "${codec}" == "av1" ]]; then
+        bitrate_mbps="8"
+    else
+        bitrate_mbps="64"
+    fi
+fi
+if [[ ! "${bitrate_mbps}" =~ ^[1-9][0-9]*$ ]]; then
+    echo "invalid bitrate: ${bitrate_mbps}; expected a positive integer in Mbps" >&2
+    exit 2
+fi
+if [[ "${codec}" == "av1" && "${bitrate_mbps}" != "8" \
+    && "${WELD_FFMPEG_ALLOW_UNSAFE_AV1_BITRATE:-0}" != "1" ]]; then
+    echo "AV1 is limited to the validated 8 Mbps setting because 64 Mbps caused a Radeon GPU reset." >&2
+    echo "Set WELD_FFMPEG_ALLOW_UNSAFE_AV1_BITRATE=1 only for an explicitly supervised driver probe." >&2
+    exit 2
+fi
+bitrate_bits=$(( bitrate_mbps * 1000000 ))
+
+cd -- "${repository_root}"
+timestamp="$(date +%Y%m%d-%H%M%S)"
+output="${repository_root}/target/validation/ffmpeg-vaapi-probe-${timestamp}"
+manifest="tools/ffmpeg-vaapi-probe/Cargo.toml"
+target_directory="${repository_root}/target/ffmpeg-vaapi-probe"
+binary="${target_directory}/debug/ffmpeg-vaapi-probe"
+mkdir -p -- "${output}"
+
+echo "FFmpeg is used only as an isolated hardware-codec diagnostic."
+echo "Output: ${output}"
+echo "Render node: ${render_node}"
+echo "Codec: ${codec}"
+echo "Bitrate: ${bitrate_mbps} Mbps"
+
+vainfo --display drm --device "${render_node}" > "${output}/vainfo.txt" 2>&1
+case "${codec}" in
+    av1)
+        capability='VAProfileAV1Profile0.*VAEntrypointEncSlice(LP)?'
+        encoder='av1_vaapi'
+        ;;
+    h264)
+        capability='VAProfileH264ConstrainedBaseline.*VAEntrypointEncSlice(LP)?'
+        encoder='h264_vaapi'
+        ;;
+esac
+if ! rg -q "${capability}" "${output}/vainfo.txt"; then
+    echo "${render_node} does not expose ${codec} hardware encoding through VA-API" >&2
+    exit 1
+fi
+ffmpeg -hide_banner -encoders > "${output}/ffmpeg-encoders.txt" 2>&1
+if ! rg -q "${encoder}" "${output}/ffmpeg-encoders.txt"; then
+    echo "FFmpeg does not expose ${encoder}" >&2
+    exit 1
+fi
+
+export CARGO_TARGET_DIR="${target_directory}"
+cargo metadata --manifest-path "${manifest}" --format-version 1 \
+    > "${output}/cargo-metadata.json"
+cargo tree --manifest-path "${manifest}" > "${output}/cargo-tree.txt"
+rg -q 'ffmpeg-next v9\.0\.0' "${output}/cargo-tree.txt"
+rg -q 'cros-codecs .*vendor/cros-codecs' "${output}/cargo-tree.txt"
+rg -q 'cros-libva .*vendor/cros-libva' "${output}/cargo-tree.txt"
+
+WELD_FFMPEG_PROBE_OUTPUT="${output}" \
+WELD_RENDER_NODE="${render_node}" \
+WELD_FFMPEG_CODEC="${codec}" \
+WELD_FFMPEG_BITRATE_BITS="${bitrate_bits}" \
+    cargo run --manifest-path "${manifest}" > "${output}/run.log" 2>&1 || {
+        tail -80 "${output}/run.log" >&2
+        exit 1
+    }
+
+if ! rg -q 'Map DRM object .* to VAAPI' "${output}/run.log"; then
+    echo "FFmpeg did not report importing a DRM PRIME frame into VA-API" >&2
+    exit 1
+fi
+rg -m1 'Opened DRM device|Configure hwmap|Map DRM object|RC mode: CBR' \
+    "${output}/run.log"
+
+report_value() {
+    local name="$1"
+    awk -F= -v name="${name}" '$1 == name { print $2; exit }' "${output}/probe.txt"
+}
+
+stream="${output}/$(report_value stream)"
+stream_report="${output}/ffmpeg-stream.txt"
+trace_report="${output}/ffmpeg-trace-headers.txt"
+quality_report="${output}/quality-report.txt"
+
+ffprobe -v error -select_streams v:0 -count_frames \
+    -show_entries stream=codec_name,width,height,coded_width,coded_height,profile,nb_read_frames \
+    -of default=nw=1 "${stream}" | tee "${stream_report}"
+
+for contract in codec_name="${codec}" nb_read_frames=64; do
+    if ! rg -Fqx "${contract}" "${stream_report}"; then
+        echo "FFmpeg stream contract is missing ${contract}" >&2
+        exit 1
+    fi
+done
+decoded_width="$(awk -F= '$1 == "width" { print $2; exit }' "${stream_report}")"
+decoded_height="$(awk -F= '$1 == "height" { print $2; exit }' "${stream_report}")"
+
+case "${codec}" in
+    av1)
+        rg -Fqx 'profile=Main' "${stream_report}"
+        if (( decoded_width < 944 || decoded_width >= 1008 \
+            || decoded_height < 484 || decoded_height >= 548 )); then
+            echo "FFmpeg AV1 geometry is outside one 64-pixel padding quantum" >&2
+            exit 1
+        fi
+        ;;
+    h264)
+        for contract in width=944 height=484 coded_width=944 coded_height=496 \
+            profile='Constrained Baseline'; do
+            rg -Fqx "${contract}" "${stream_report}"
+        done
+        ffmpeg -v debug -i "${stream}" -c copy -bsf:v trace_headers \
+            -f null - > /dev/null 2> "${trace_report}"
+        profile_idc="$(awk '/profile_idc/ { print $NF; exit }' "${trace_report}")"
+        constrained_baseline="$(awk '/constraint_set1_flag/ { print $NF; exit }' "${trace_report}")"
+        crop_bottom="$(awk '/frame_crop_bottom_offset/ { print $NF; exit }' "${trace_report}")"
+        if [[ "${profile_idc}" != "66" || "${constrained_baseline}" != "1" || "${crop_bottom}" != "6" ]]; then
+            echo "FFmpeg H.264 profile or coded crop differs from the probe contract" >&2
+            exit 1
+        fi
+        ;;
+esac
+
+first_frame="${output}/ffmpeg-first-frame.yuv"
+ffmpeg -v error -i "${stream}" -frames:v 1 -pix_fmt yuv420p \
+    -f rawvideo -y "${first_frame}"
+
+sample_byte() {
+    local offset="$1"
+    od -An -tu1 -j "${offset}" -N1 "${first_frame}" | tr -d '[:space:]'
+}
+
+sample_offset() {
+    local name="$1"
+    local x
+    local y
+    x="$(report_value "sample-${name}-x")"
+    y="$(report_value "sample-${name}-y")"
+    echo $(( y * decoded_width + x ))
+}
+
+black="$(sample_byte "$(sample_offset black)")"
+white="$(sample_byte "$(sample_offset white)")"
+mid_gray="$(sample_byte "$(sample_offset mid-gray)")"
+printf 'codec=%s\nvisible-geometry=944x484\ndecoded-geometry=%sx%s\nffmpeg-range=limited black=%s white=%s mid-gray=%s\n' \
+    "${codec}" "${decoded_width}" "${decoded_height}" \
+    "${black}" "${white}" "${mid_gray}" | tee "${quality_report}"
+if (( black < 12 || black > 20 || white < 231 || white > 239 \
+    || mid_gray < 122 || mid_gray > 130 )); then
+    echo "FFmpeg output did not preserve the expected limited-range anchors" >&2
+    exit 1
+fi
+
+decoded="${output}/decoded"
+mkdir -p -- "${decoded}"
+ffmpeg -v error -i "${stream}" \
+    -vf 'crop=944:484:0:0,scale=in_range=limited:out_range=full' \
+    -pix_fmt rgb24 -start_number 0 -y "${decoded}/frame-%03d.ppm"
+ffmpeg -v info \
+    -framerate 60 -start_number 0 -i "${output}/reference/frame-%03d.ppm" \
+    -framerate 60 -start_number 0 -i "${decoded}/frame-%03d.ppm" \
+    -lavfi "psnr=stats_file=${output}/ffmpeg-psnr-frames.txt" -f null - \
+    > /dev/null 2> "${output}/ffmpeg-psnr-summary.txt"
+average="$(rg -o 'average:[0-9.]+' "${output}/ffmpeg-psnr-summary.txt" | tail -1 | cut -d: -f2)"
+minimum="$(rg -o 'min:[0-9.]+' "${output}/ffmpeg-psnr-summary.txt" | tail -1 | cut -d: -f2)"
+printf 'ffmpeg-psnr average=%s minimum=%s\n' "${average}" "${minimum}" \
+    | tee -a "${quality_report}"
+if ! awk -v average="${average}" -v minimum="${minimum}" \
+    'BEGIN { exit !(average >= 35.0 && minimum >= 28.0) }'; then
+    echo "FFmpeg quality gate failed: average >= 35 dB and minimum >= 28 dB required" >&2
+    exit 1
+fi
+
+stat -c 'binary-bytes=%s binary=%n' "${binary}" > "${output}/footprint.txt"
+ldd "${binary}" > "${output}/binary-ldd.txt"
+for library in libavcodec libavfilter libavutil; do
+    if ! rg -q "${library}\.so" "${output}/binary-ldd.txt"; then
+        echo "probe binary is not dynamically linked to ${library}" >&2
+        exit 1
+    fi
+done
+
+echo "Probe passed."
+echo "Report: ${quality_report}"
+echo "Pipeline: ${output}/probe.txt"
+echo "Footprint: ${output}/footprint.txt"

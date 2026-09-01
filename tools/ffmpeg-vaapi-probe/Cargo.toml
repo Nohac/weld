@@ -1,0 +1,17 @@
+[package]
+name = "ffmpeg-vaapi-probe"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[dependencies]
+anyhow = "1.0.100"
+ffmpeg-next = { version = "9.0.0", default-features = false, features = ["filter", "format"] }
+libc = "0.2.177"
+weld-media-vaapi = { path = "../../crates/weld-media-vaapi", features = ["diagnostic"] }
+
+[patch.crates-io]
+cros-libva = { path = "../../vendor/cros-libva" }
+cros-codecs = { path = "../../vendor/cros-codecs" }
