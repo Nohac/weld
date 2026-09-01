@@ -43,8 +43,8 @@ Weld is a workspace of reusable layers and one standard distribution:
 - `weld-media` owns transport- and platform-neutral media identities and
   encoded payload contracts. It owns no native graphics API, codec backend,
   transport, worker thread, Smithay, or Bevy object.
-- `weld-media-vaapi` owns Linux VA-API capability discovery and hardware media
-  stages behind `weld-media` contracts. Libva and cros-codecs types do not
+- `weld-media-vaapi` owns Linux FFmpeg/VA-API capability discovery and hardware
+  media stages behind `weld-media` contracts. FFmpeg and libva types do not
   cross that boundary; bounded worker ownership belongs here when the first
   streaming path is connected.
 - `weldwm` is the standard distribution. It requests a backend, configures the
@@ -62,62 +62,74 @@ must not depend directly on Smithay. A custom distribution can retain
 `weld-hoist`, or any combination of them, or build a different application
 host while retaining the native backend and protocol machinery.
 
-The active cros-codecs release still selects cros-libva 0.0.12, which predates
-the VP9 picture-parameter fields added in libva 2.23. It also creates a 16x16
-placeholder decoder context that radeonsi rejects and panics on initialization
-failure. Weld temporarily patches these small crates under `vendor/`; the
-recorded patches must be removed when upstream releases contain equivalent
-behavior.
+`weld-media-vaapi` uses FFmpeg's H.264 and AV1 VA-API codecs for production.
+The old cros-codecs H.264 implementation and its local patches remain available
+only through the crate's `diagnostic` feature so the independent GStreamer
+comparison stays reproducible; a default Weld build does not link it.
+cros-libva remains a direct dependency for capability queries, DMA-BUF import,
+and VPP because its surface ownership API is useful independently of its codec
+stack.
 
-Weld also carries a narrow low-delay H.264 patch in `vendor/cros-codecs`.
-Upstream's SPS builder cannot declare decoded-picture buffering constraints,
-and its stateless decoder exposes only whole-stream flush: the current picture
-otherwise remains pending until the next slice, while flushing clears the DPB
-and breaks delta-frame references. Weld declares zero reordering in VUI,
-finishes each complete access unit without resetting decoder state, and clones
-the output handle while retaining the same reference in the DPB. The hardware
-round-trip probe verifies immediate output for every key and delta frame and
-rejects duplicate final drain. Remove this patch when cros-codecs provides
-equivalent low-delay stream declaration and access-unit finalization APIs.
+FFmpeg owns a DRM hardware-frame context for source DMA-BUFs, derives one
+VA-API device per encoder worker, supplies it to `hwmap`, and converts RGB into
+limited-range NV12 with `scale_vaapi`. One persistent encoder and decoder pair
+belongs to each media stream generation. Encoder and filter time bases are
+microseconds, matching the transport timestamp. Both hardware encoders use
+`async_depth=1`, no B frames, a one-second CBR reservoir, and a capacity-one worker;
+the hardware round-trip example rejects a driver or FFmpeg build that does not
+emit exactly one packet for each submitted frame. This lets Weld retain the
+source client-buffer lease until its matching packet exists without an
+unbounded delayed-frame table. The CBR reservoir controls rate accounting; it
+does not add a software frame queue or frame reordering.
 
-cros-libva 0.0.12 does not expose a typed VPP pipeline-parameter buffer, so
-`weld-media-vaapi` contains a narrow raw-libva VPP submission boundary. Its
-unsafe calls use bindgen's exact ABI types, keep display, context, surfaces and
-parameter storage live through submission, and destroy the VA buffer through a
-single-owner guard. Replace this boundary with cros-libva's safe API when it
-gains the missing buffer type.
+Hardware-device ownership is per worker rather than per stream generation. The
+encode worker opens one FFmpeg DRM device and derives one FFmpeg VA-API device;
+the decode worker opens one FFmpeg VA-API device. Generation-specific filters
+and codecs retain references to those devices instead of reopening the render
+node during resize. The cros-libva VPP converter owns one additional VA display
+in each worker. The hardware round-trip probe rotates 16 encoder generations
+and requires the process descriptor count to remain unchanged.
 
-The VA-API DMA-BUF adapter retains both identities required by PRIME 2: the
-top-level VA pixel fourcc and each composed layer's DRM fourcc. They are not
-interchangeable even when formats such as NV12 happen to use the same bytes.
-Mesa radeonsi currently returns a reserved type-zero NAL header for the first
-driver-generated H.264 slice through cros-codecs. Weld repairs that single
-header only for an identified Mesa radeonsi encoder, only after SPS and PPS in
-a forced keyframe; the same output from an unknown driver fails closed. Remove
-the repair when packed slice-header support or an upstream backend fix makes
-the driver output conforming.
+Encoder coded extents come from the selected VA profile and entrypoint's
+reported minimum and maximum surface attributes. Missing AV1 minima use a
+guarded 128x128 fallback established by the radeonsi failure; a missing H.264
+minimum means no padding. Visible geometry above the maximum fails before the
+codec opens. Smaller valid windows retain exact transported visible geometry
+while `pad_vaapi` expands only their coded NV12 storage.
 
-The hardware tracer retains one VA display and persistent H.264 codec sessions
-across a sequence of access units. Bounded capacity-one workers keep blocking
-VPP and codec operations outside calloop and Bevy; an eventfd wakes the host
-only when a completion is ready. Weld mirrors the encoder's
-power-of-two low-delay intra period, which must be at least 16 because the
-current cros-codecs SPS builder derives its frame-number and POC widths with
-integer logarithms. Remove that restriction when upstream represents arbitrary
-valid periods. Weld validates I/P slice syntax independently from the
-driver-written NAL type and recreates both codec sessions when a new stream
-generation needs a recovery IDR. The synchronous tracer drains one
-encoder input at a time because this cros-codecs low-delay implementation does
-not make the next reference available until its previous output is drained.
-The persistent decoder preserves its DPB and may return a completed frame one
-access unit later; its final frame is drained only when that generation ends.
-It shares the same display for output allocation rather than reopening the DRM
-node per frame. The first local encoded binding carries H.264 access units in
-sealed descriptors on a media seqpacket channel separate from control. Source
-DMA-BUF leases complete after hardware encoding, while decoded DMA-BUF leases
-remain live through destination GPU use. Decoder output allocation is not yet
-pooled, so the current path still allocates and exports one decoded surface per
-frame.
+Run the bounded H.264 and AV1 production round trip with
+`scripts/run-vaapi-roundtrip-probe`. It lives in `weld-media-vaapi` so codec
+validation does not build the Bevy distribution dependency closure.
+
+The decoder selects FFmpeg's native H.264 or AV1 parser so its `get_format`
+callback can require VA-API output. A decoded AVFrame stays alive while Weld
+exports its VASurface as a composed PRIME descriptor and synchronously
+VPP-converts it into fresh XRGB storage at the authoritative transported
+visible extent. Duplicating an exported descriptor alone is not considered
+sufficient lifetime because FFmpeg may recycle the underlying decode surface.
+Only the fresh XRGB allocation escapes the media worker.
+
+FFmpeg and cros-libva intentionally own separate VA displays on the same render
+node in this first implementation. Frames cross that boundary through PRIME.
+Sharing FFmpeg's `AVVAAPIDeviceContext.display` with cros-libva could remove
+that interop boundary later, but would couple two ownership models and is not
+required for correctness.
+
+The FFmpeg hardware-context integration is a substantial audited unsafe
+boundary in `weld-media-vaapi::ffmpeg`, not a general escape hatch. It owns raw
+AVBufferRef, AVFrame, AVPacket, codec, and filter-graph lifetimes; every unsafe
+operation documents its local validity argument. The existing raw-libva VPP
+submission remains isolated in `vpp`; replace it with cros-libva's safe API
+when that crate exposes the missing typed pipeline-parameter buffer.
+
+The local encoded binding carries raw H.264 access units or low-overhead AV1
+OBUs in sealed descriptors on a media seqpacket channel separate from control.
+AV1 is currently capped at the validated 8 Mbps operating point because a
+64 Mbps radeonsi experiment reset the VCN context. H.264 defaults to 16 Mbps.
+There is no software fallback. Source DMA-BUF leases complete after hardware
+encoding, while decoded DMA-BUF leases remain live through destination GPU
+use. Decoder output allocation is not yet pooled, so the current path still
+allocates and exports one destination surface per frame.
 
 The presentation split follows Bevy UI's separation of raw UI infrastructure,
 unstyled reusable behavior, and opinionated Feathers scenes without depending

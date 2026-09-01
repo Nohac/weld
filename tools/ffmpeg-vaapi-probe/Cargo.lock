@@ -255,6 +255,7 @@ dependencies = [
  "anyhow",
  "ffmpeg-next",
  "libc",
+ "weld-media",
  "weld-media-vaapi",
 ]
 
@@ -592,6 +593,9 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "cros-codecs",
+ "cros-libva",
+ "ffmpeg-next",
+ "libc",
  "tracing",
  "weld-media",
 ]

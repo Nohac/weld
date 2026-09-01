@@ -40,6 +40,8 @@ pub enum TransportError {
     SendQueueFull {
         packets: usize,
         file_descriptors: usize,
+        preflush_sent: usize,
+        preflush_blocked: bool,
     },
     TruncatedPacket,
     PartialPacket {
@@ -76,9 +78,11 @@ impl fmt::Display for TransportError {
             Self::SendQueueFull {
                 packets,
                 file_descriptors,
+                preflush_sent,
+                preflush_blocked,
             } => write!(
                 formatter,
-                "local transport send queue is full: {packets} packets and {file_descriptors} file descriptors"
+                "local transport send queue is full: {packets} packets and {file_descriptors} file descriptors; preflush sent {preflush_sent} and blocked={preflush_blocked}"
             ),
             Self::TruncatedPacket => formatter.write_str("local transport packet was truncated"),
             Self::PartialPacket { expected, sent } => write!(
@@ -253,6 +257,12 @@ struct ConnectionState {
     receive_scratch: Vec<u8>,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct FlushStatus {
+    sent_packets: usize,
+    blocked: bool,
+}
+
 impl LocalPacketConnection {
     fn state(&self) -> MutexGuard<'_, ConnectionState> {
         self.0
@@ -343,6 +353,13 @@ impl LocalPacketConnection {
             },
             file_descriptors,
         )?;
+        let preflush = match self.send_ready() {
+            Ok(status) => status,
+            Err(error) => {
+                self.record_outgoing_failure(&error);
+                return Err(error);
+            }
+        };
         let mut state = self.state();
         if state.disconnected {
             return Err(TransportError::Disconnected);
@@ -353,6 +370,8 @@ impl LocalPacketConnection {
             .ok_or(TransportError::SendQueueFull {
                 packets: state.outgoing.len(),
                 file_descriptors: usize::MAX,
+                preflush_sent: preflush.sent_packets,
+                preflush_blocked: preflush.blocked,
             })?;
         if state.outgoing.len() >= MAX_QUEUED_PACKETS
             || queued_file_descriptors > MAX_QUEUED_FILE_DESCRIPTORS
@@ -362,15 +381,23 @@ impl LocalPacketConnection {
             self.record_failure(TransportError::SendQueueFull {
                 packets,
                 file_descriptors: queued_file_descriptors,
+                preflush_sent: preflush.sent_packets,
+                preflush_blocked: preflush.blocked,
             });
             return Err(TransportError::SendQueueFull {
                 packets,
                 file_descriptors: queued_file_descriptors,
+                preflush_sent: preflush.sent_packets,
+                preflush_blocked: preflush.blocked,
             });
         }
         state.queued_file_descriptors = queued_file_descriptors;
         state.outgoing.push_back(packet);
         drop(state);
+        if let Err(error) = self.send_ready() {
+            self.record_outgoing_failure(&error);
+            return Err(error);
+        }
         self.update_interest()?;
         Ok(())
     }
@@ -399,7 +426,7 @@ impl LocalPacketConnection {
                 self.receive_ready()?;
             }
             if flags.contains(epoll::EventFlags::OUT) {
-                self.send_ready()?;
+                let _ = self.send_ready()?;
             }
         }
         self.retire_disconnected_socket()?;
@@ -493,8 +520,9 @@ impl LocalPacketConnection {
         self.state().disconnected
     }
 
-    fn send_ready(&self) -> Result<(), TransportError> {
+    fn send_ready(&self) -> Result<FlushStatus, TransportError> {
         let mut state = self.state();
+        let mut status = FlushStatus::default();
         while let Some(packet) = state.outgoing.front() {
             let borrowed = packet
                 .file_descriptors
@@ -520,6 +548,7 @@ impl LocalPacketConnection {
                         .queued_file_descriptors
                         .saturating_sub(packet.file_descriptors.len());
                     state.outgoing.pop_front();
+                    status.sent_packets = status.sent_packets.saturating_add(1);
                 }
                 Ok(sent) => {
                     return Err(TransportError::PartialPacket {
@@ -527,11 +556,14 @@ impl LocalPacketConnection {
                         sent,
                     });
                 }
-                Err(Errno::AGAIN) => break,
+                Err(Errno::AGAIN) => {
+                    status.blocked = true;
+                    break;
+                }
                 Err(error) => return Err(error.into()),
             }
         }
-        Ok(())
+        Ok(status)
     }
 
     fn receive_ready(&self) -> Result<(), TransportError> {
@@ -628,6 +660,27 @@ impl LocalPacketConnection {
         }
         let _ = rustix::net::shutdown(&self.0.socket, rustix::net::Shutdown::Both);
     }
+
+    fn record_outgoing_failure(&self, error: &TransportError) {
+        let recorded = match error {
+            TransportError::Io(error) => {
+                let error = error.raw_os_error().map_or_else(
+                    || std::io::Error::new(error.kind(), error.to_string()),
+                    std::io::Error::from_raw_os_error,
+                );
+                TransportError::Io(error)
+            }
+            TransportError::TooManyFileDescriptors { count } => {
+                TransportError::TooManyFileDescriptors { count: *count }
+            }
+            TransportError::PartialPacket { expected, sent } => TransportError::PartialPacket {
+                expected: *expected,
+                sent: *sent,
+            },
+            _ => TransportError::Protocol(error.to_string()),
+        };
+        self.record_failure(recorded);
+    }
 }
 
 impl AsFd for LocalPacketConnection {
@@ -701,6 +754,47 @@ mod tests {
     }
 
     #[test]
+    fn queue_immediately_flushes_writable_packets_in_order() {
+        let (sender, receiver) = LocalPacketConnection::pair().expect("socket pair");
+        for sequence in 0..3_u64 {
+            sender
+                .queue(&sequence, Vec::new())
+                .expect("queue writable packet");
+            assert!(sender.state().outgoing.is_empty());
+        }
+
+        let packets = receiver.drain::<u64>().expect("receive ordered packets");
+        assert_eq!(
+            packets
+                .into_iter()
+                .map(|packet| packet.message)
+                .collect::<Vec<_>>(),
+            vec![0, 1, 2]
+        );
+    }
+
+    #[test]
+    fn blocked_peer_reaches_the_userspace_packet_bound() {
+        let (sender, receiver) = LocalPacketConnection::pair().expect("socket pair");
+        constrain_socket_buffers(&sender, &receiver);
+        let error = (0..10_000_u64)
+            .find_map(|sequence| sender.queue(&sequence, Vec::new()).err())
+            .expect("blocked peer should reach the bounded queue");
+
+        assert!(matches!(
+            error,
+            TransportError::SendQueueFull {
+                packets: MAX_QUEUED_PACKETS,
+                preflush_sent: 0,
+                preflush_blocked: true,
+                ..
+            }
+        ));
+        assert!(sender.is_disconnected());
+        assert!(sender.state().outgoing.is_empty());
+    }
+
+    #[test]
     fn calloop_wakes_for_a_queued_packet() {
         let (sender, receiver) = LocalPacketConnection::pair().expect("socket pair");
         let mut event_loop = calloop::EventLoop::<bool>::try_new().expect("event loop");
@@ -762,19 +856,31 @@ mod tests {
 
     #[test]
     fn descriptor_bearing_send_queue_is_bounded() {
-        let (sender, _receiver) = LocalPacketConnection::pair().expect("socket pair");
-        for sequence in 0..MAX_QUEUED_FILE_DESCRIPTORS {
-            let descriptor = std::fs::File::open("/dev/null").expect("test descriptor");
-            sender
-                .queue(&sequence, vec![descriptor.into()])
-                .expect("queue within descriptor bound");
-        }
-        let descriptor = std::fs::File::open("/dev/null").expect("test descriptor");
+        let (sender, receiver) = LocalPacketConnection::pair().expect("socket pair");
+        constrain_socket_buffers(&sender, &receiver);
+        let error = (0..10_000_usize)
+            .find_map(|sequence| {
+                let descriptor = std::fs::File::open("/dev/null").expect("test descriptor");
+                sender.queue(&sequence, vec![descriptor.into()]).err()
+            })
+            .expect("blocked peer should reach the descriptor bound");
 
         assert!(matches!(
-            sender.queue(&MAX_QUEUED_FILE_DESCRIPTORS, vec![descriptor.into()]),
-            Err(TransportError::SendQueueFull { .. })
+            error,
+            TransportError::SendQueueFull {
+                file_descriptors,
+                preflush_sent: 0,
+                preflush_blocked: true,
+                ..
+            } if file_descriptors == MAX_QUEUED_FILE_DESCRIPTORS + 1
         ));
         assert!(sender.is_disconnected());
+    }
+
+    fn constrain_socket_buffers(sender: &LocalPacketConnection, receiver: &LocalPacketConnection) {
+        rustix::net::sockopt::set_socket_send_buffer_size(&sender.0.socket, 4_096)
+            .expect("small send buffer");
+        rustix::net::sockopt::set_socket_recv_buffer_size(&receiver.0.socket, 4_096)
+            .expect("small receive buffer");
     }
 }

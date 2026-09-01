@@ -9,7 +9,7 @@ use weld_media::{EncodedFrameKind, MediaFrameId, VideoCodec};
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub enum LocalSurfaceMode {
     Native,
-    EncodedH264Opaque,
+    EncodedOpaque(VideoCodec),
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -102,6 +102,18 @@ pub enum LocalDestinationMessage {
         revision: ClientCommitRevision,
         outcome: LocalEncodedCommitOutcome,
     },
+}
+
+impl LocalDestinationMessage {
+    pub(crate) const fn kind(&self) -> &'static str {
+        match self {
+            Self::Request(_) => "request",
+            Self::Input(_) => "input",
+            Self::BufferReleased { .. } => "buffer-released",
+            Self::Reclaim => "reclaim",
+            Self::EncodedCommitFinished { .. } => "encoded-commit-finished",
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]

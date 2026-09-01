@@ -9,7 +9,7 @@ use std::{
 };
 
 use anyhow::{Context, Result, ensure};
-use cros_codecs::libva::{
+use cros_libva::{
     _VAProcColorStandardType_VAProcColorStandardBT709 as VA_COLOR_BT709,
     _VAProcColorStandardType_VAProcColorStandardSRGB as VA_COLOR_SRGB, Config, Display, Surface,
     SurfaceMemoryDescriptor, UsageHint, VA_FOURCC_BGRX, VA_FOURCC_NV12, VA_RT_FORMAT_RGB32,
@@ -264,7 +264,7 @@ impl VppConverter {
             .into_iter()
             .find(|format| format.fourcc == VA_FOURCC_BGRX)
             .context("VA-API does not expose a BGRX image format")?;
-        let mut image = cros_codecs::libva::Image::create_from(
+        let mut image = cros_libva::Image::create_from(
             &surface,
             image_format,
             (width, height),
@@ -340,7 +340,7 @@ impl VppConverter {
             .into_iter()
             .find(|format| format.fourcc == VA_FOURCC_BGRX)
             .context("VA-API does not expose a BGRX image format")?;
-        let image = cros_codecs::libva::Image::create_from(
+        let image = cros_libva::Image::create_from(
             &surface,
             image_format,
             (visible_width, visible_height),
@@ -373,6 +373,76 @@ impl VppConverter {
         }
         output.flush()?;
         Ok(())
+    }
+
+    /// Reads selected pixels from a diagnostic XRGB DMA-BUF.
+    #[cfg(feature = "diagnostic")]
+    pub fn sample_xrgb_bgra(
+        &self,
+        input: &VaapiDmabuf,
+        points: &[(u32, u32)],
+    ) -> Result<Vec<[u8; 4]>> {
+        ensure!(
+            input.fourcc == DRM_FORMAT_XRGB8888,
+            "diagnostic pixel sampling requires XRGB8888"
+        );
+        let surface = self
+            .display
+            .create_surfaces(
+                VA_RT_FORMAT_RGB32,
+                Some(VA_FOURCC_BGRX),
+                input.width,
+                input.height,
+                Some(UsageHint::USAGE_HINT_VPP_READ),
+                vec![input.import_descriptor()?],
+            )
+            .context("could not import diagnostic XRGB DMA-BUF")?
+            .pop()
+            .context("VA-API did not create a diagnostic XRGB surface")?;
+        surface
+            .sync()
+            .context("could not synchronize diagnostic XRGB surface")?;
+        let image_format = self
+            .display
+            .query_image_formats()
+            .context("could not query VA image formats")?
+            .into_iter()
+            .find(|format| format.fourcc == VA_FOURCC_BGRX)
+            .context("VA-API does not expose a BGRX image format")?;
+        let image = cros_libva::Image::create_from(
+            &surface,
+            image_format,
+            (input.width, input.height),
+            (input.width, input.height),
+        )
+        .context("could not map diagnostic XRGB pixels")?;
+        let description = *image.image();
+        let bytes = image.as_ref();
+        let offset = usize::try_from(description.offsets[0])?;
+        let pitch = usize::try_from(description.pitches[0])?;
+        points
+            .iter()
+            .map(|&(x, y)| {
+                ensure!(
+                    x < input.width && y < input.height,
+                    "diagnostic sample is outside the XRGB frame"
+                );
+                let pixel = usize::try_from(y)?
+                    .checked_mul(pitch)
+                    .and_then(|row| row.checked_add(offset))
+                    .and_then(|row| {
+                        usize::try_from(x)
+                            .ok()
+                            .and_then(|x| x.checked_mul(4))
+                            .and_then(|x| row.checked_add(x))
+                    })
+                    .context("diagnostic sample offset overflow")?;
+                let value = bytes
+                    .get(pixel..pixel + 4)
+                    .context("diagnostic XRGB image is truncated")?;
+                Ok([value[0], value[1], value[2], value[3]])
+            })
+            .collect()
     }
 
     fn process<I, O>(
@@ -474,7 +544,7 @@ impl VppConverter {
 }
 
 struct VppBuffer {
-    display: cros_codecs::libva::VADisplay,
+    display: cros_libva::VADisplay,
     id: VABufferID,
 }
 
@@ -563,13 +633,9 @@ pub(crate) fn create_xrgb_probe_frame(
         .into_iter()
         .find(|format| format.fourcc == VA_FOURCC_BGRX)
         .context("VA-API does not expose a BGRX image format")?;
-    let mut image = cros_codecs::libva::Image::create_from(
-        &surface,
-        image_format,
-        (width, height),
-        (width, height),
-    )
-    .context("could not map the diagnostic XRGB surface")?;
+    let mut image =
+        cros_libva::Image::create_from(&surface, image_format, (width, height), (width, height))
+            .context("could not map the diagnostic XRGB surface")?;
     let image_description = *image.image();
     let bytes = image.as_mut();
     let offset = usize::try_from(image_description.offsets[0])?;

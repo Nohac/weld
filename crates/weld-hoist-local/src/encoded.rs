@@ -17,7 +17,7 @@ use weld_client::{
 };
 use weld_core::dmabuf::{DirectClientBufferAccess, DmabufContext, export_client_dmabuf};
 use weld_hoist_core::HoistSessionId;
-use weld_media::{MediaFrameId, MediaStreamId, StreamGeneration};
+use weld_media::{MediaFrameId, MediaStreamId, StreamGeneration, VideoCodec};
 
 use crate::{
     LocalBuffer, LocalBufferContent, LocalEncodedBuffer, LocalEncodedCommitOutcome,
@@ -38,7 +38,7 @@ const MAX_CANCELLED_MEDIA_FRAMES: usize = 128;
 // This intentionally mirrors the current VA worker budget. Exceeding it while
 // diagnostics are enabled indicates that stream retirement has fallen behind,
 // so failing the requested diagnostic session is preferable to leaking files.
-const MAX_OPEN_H264_DUMPS: usize = 16;
+const MAX_OPEN_ACCESS_UNIT_DUMPS: usize = 16;
 
 type EncodedGeneration = (MediaStreamId, StreamGeneration);
 
@@ -75,52 +75,58 @@ struct OutstandingCredit {
     sent_at: Instant,
 }
 
-struct H264AccessUnitDump {
+struct AccessUnitDump {
     directory: PathBuf,
+    codec: VideoCodec,
     streams: HashMap<(MediaStreamId, StreamGeneration), BufWriter<File>>,
 }
 
-impl H264AccessUnitDump {
-    fn new(directory: PathBuf) -> Result<Self> {
+impl AccessUnitDump {
+    fn new(directory: PathBuf, codec: VideoCodec) -> Result<Self> {
         fs::create_dir_all(&directory).with_context(|| {
             format!(
-                "could not create H.264 dump directory {}",
+                "could not create encoded dump directory {}",
                 directory.display()
             )
         })?;
         Ok(Self {
             directory,
+            codec,
             streams: HashMap::new(),
         })
     }
 
     fn write(&mut self, access_unit: &weld_media::EncodedAccessUnit) -> Result<()> {
         let key = (access_unit.frame.stream, access_unit.frame.generation);
+        ensure!(
+            access_unit.codec == self.codec,
+            "encoded dump codec changed within one local session"
+        );
         if !self.streams.contains_key(&key) {
             ensure!(
-                self.streams.len() < MAX_OPEN_H264_DUMPS,
-                "active H.264 dump stream bound exceeded"
+                self.streams.len() < MAX_OPEN_ACCESS_UNIT_DUMPS,
+                "active encoded dump stream bound exceeded"
             );
-            let path = dump_path(&self.directory, key);
+            let path = dump_path(&self.directory, key, self.codec);
             let file = OpenOptions::new()
                 .create(true)
                 .truncate(true)
                 .write(true)
                 .open(&path)
-                .with_context(|| format!("could not create H.264 dump {}", path.display()))?;
-            tracing::info!(path = %path.display(), "recording source H.264 stream generation");
+                .with_context(|| format!("could not create encoded dump {}", path.display()))?;
+            tracing::info!(path = %path.display(), codec = ?self.codec, "recording source encoded stream generation");
             self.streams.insert(key, BufWriter::new(file));
         }
         self.streams
             .get_mut(&key)
-            .context("H.264 dump stream disappeared")?
+            .context("encoded dump stream disappeared")?
             .write_all(&access_unit.payload)
-            .context("could not write H.264 access unit")
+            .context("could not write encoded access unit")
     }
 
     fn flush(&mut self) -> Result<()> {
         for writer in self.streams.values_mut() {
-            writer.flush().context("could not flush H.264 dump")?;
+            writer.flush().context("could not flush encoded dump")?;
         }
         Ok(())
     }
@@ -129,17 +135,27 @@ impl H264AccessUnitDump {
         if let Some(mut writer) = self.streams.remove(&(stream, generation)) {
             writer
                 .flush()
-                .context("could not flush retired H.264 dump")?;
+                .context("could not flush retired encoded dump")?;
         }
         Ok(())
     }
 }
 
-fn dump_path(directory: &Path, (stream, generation): (MediaStreamId, StreamGeneration)) -> PathBuf {
+fn dump_path(
+    directory: &Path,
+    (stream, generation): (MediaStreamId, StreamGeneration),
+    codec: VideoCodec,
+) -> PathBuf {
+    let extension = match codec {
+        VideoCodec::H264 => "h264",
+        VideoCodec::Av1 => "obu",
+        VideoCodec::Vp9 => "vp9",
+    };
     directory.join(format!(
-        "stream-{}-generation-{}.h264",
+        "stream-{}-generation-{}.{}",
         stream.raw(),
-        generation.raw()
+        generation.raw(),
+        extension,
     ))
 }
 
@@ -156,7 +172,7 @@ pub(crate) struct EncodedSourceState {
     next_token: Option<u64>,
     started_at: Instant,
     last_timestamp_micros: u64,
-    dump: Option<H264AccessUnitDump>,
+    dump: Option<AccessUnitDump>,
 }
 
 impl EncodedSourceState {
@@ -178,8 +194,12 @@ impl EncodedSourceState {
         }
     }
 
-    pub(crate) fn with_h264_dump_directory(mut self, directory: PathBuf) -> Result<Self> {
-        self.dump = Some(H264AccessUnitDump::new(directory)?);
+    pub(crate) fn with_access_unit_dump_directory(
+        mut self,
+        directory: PathBuf,
+        codec: VideoCodec,
+    ) -> Result<Self> {
+        self.dump = Some(AccessUnitDump::new(directory, codec)?);
         Ok(self)
     }
 

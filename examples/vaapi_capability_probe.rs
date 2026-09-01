@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use weld_core::dmabuf::request_weld_device;
+use weld_media::VideoCodec;
 use weld_media_vaapi::{VaapiProbeError, probe_vaapi_device};
 
 const ENVIRONMENT_UNAVAILABLE: i32 = 2;
@@ -70,13 +71,20 @@ fn run() -> Result<bool, ProbeFailure> {
     };
     println!("VA-API vendor={}", media.vendor);
     println!(
-        "h264-decode={} h264-encode={:?} video-processing={}",
-        media.h264_decode, media.h264_encode, media.video_processing
+        "h264-decode={} h264-encode={:?} av1-decode={} av1-encode={:?} video-processing={}",
+        media.h264_decode,
+        media.h264_encode,
+        media.av1_decode,
+        media.av1_encode,
+        media.video_processing
     );
-    if !media.supports_h264_round_trip() {
-        eprintln!("capability unsupported: no complete hardware H.264 plus VPP path");
+    let h264 = media.supports_round_trip(VideoCodec::H264);
+    let av1 = media.supports_round_trip(VideoCodec::Av1);
+    println!("hardware-round-trip h264={h264} av1={av1}");
+    if !h264 {
+        eprintln!("capability unsupported: the default H.264 hardware round trip is unavailable");
         return Ok(false);
     }
-    println!("complete hardware H.264 and VPP capability path is available");
+    println!("the default H.264 hardware round trip is available");
     Ok(true)
 }

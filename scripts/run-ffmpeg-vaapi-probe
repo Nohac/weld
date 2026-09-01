@@ -52,7 +52,7 @@ if [[ -z "${bitrate_mbps}" ]]; then
     if [[ "${codec}" == "av1" ]]; then
         bitrate_mbps="8"
     else
-        bitrate_mbps="64"
+        bitrate_mbps="16"
     fi
 fi
 if [[ ! "${bitrate_mbps}" =~ ^[1-9][0-9]*$ ]]; then
@@ -163,7 +163,7 @@ case "${codec}" in
             profile='Constrained Baseline'; do
             rg -Fqx "${contract}" "${stream_report}"
         done
-        ffmpeg -v debug -i "${stream}" -c copy -bsf:v trace_headers \
+        timeout 30s ffmpeg -v debug -i "${stream}" -c copy -bsf:v trace_headers \
             -f null - > /dev/null 2> "${trace_report}"
         profile_idc="$(awk '/profile_idc/ { print $NF; exit }' "${trace_report}")"
         constrained_baseline="$(awk '/constraint_set1_flag/ { print $NF; exit }' "${trace_report}")"
@@ -176,7 +176,7 @@ case "${codec}" in
 esac
 
 first_frame="${output}/ffmpeg-first-frame.yuv"
-ffmpeg -v error -i "${stream}" -frames:v 1 -pix_fmt yuv420p \
+timeout 30s ffmpeg -v error -i "${stream}" -frames:v 1 -pix_fmt yuv420p \
     -f rawvideo -y "${first_frame}"
 
 sample_byte() {
@@ -207,10 +207,16 @@ fi
 
 decoded="${output}/decoded"
 mkdir -p -- "${decoded}"
-ffmpeg -v error -i "${stream}" \
+timeout 30s ffmpeg -v error -i "${stream}" \
     -vf 'crop=944:484:0:0,scale=in_range=limited:out_range=full' \
-    -pix_fmt rgb24 -start_number 0 -y "${decoded}/frame-%03d.ppm"
-ffmpeg -v info \
+    -pix_fmt rgb24 -frames:v 64 -fps_mode passthrough -start_number 0 \
+    -y "${decoded}/frame-%03d.ppm"
+decoded_frames="$(find "${decoded}" -maxdepth 1 -type f -name 'frame-*.ppm' | wc -l)"
+if [[ "${decoded_frames}" != "64" ]]; then
+    echo "FFmpeg decode produced ${decoded_frames} files; expected the hard bound of 64" >&2
+    exit 1
+fi
+timeout 30s ffmpeg -v info \
     -framerate 60 -start_number 0 -i "${output}/reference/frame-%03d.ppm" \
     -framerate 60 -start_number 0 -i "${decoded}/frame-%03d.ppm" \
     -lavfi "psnr=stats_file=${output}/ffmpeg-psnr-frames.txt" -f null - \
@@ -227,7 +233,7 @@ fi
 
 stat -c 'binary-bytes=%s binary=%n' "${binary}" > "${output}/footprint.txt"
 ldd "${binary}" > "${output}/binary-ldd.txt"
-for library in libavcodec libavfilter libavutil; do
+for library in libavcodec libavfilter libavformat libavutil; do
     if ! rg -q "${library}\.so" "${output}/binary-ldd.txt"; then
         echo "probe binary is not dynamically linked to ${library}" >&2
         exit 1

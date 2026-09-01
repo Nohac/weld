@@ -19,7 +19,7 @@ pub fn bootstrap_source(
 ) -> Result<LocalTransportConnections, TransportError> {
     let (media, descriptors) = match mode {
         LocalSurfaceMode::Native => (None, Vec::new()),
-        LocalSurfaceMode::EncodedH264Opaque => {
+        LocalSurfaceMode::EncodedOpaque(_) => {
             let (source, destination) = LocalPacketConnection::source_handoff_pair()?;
             (Some(source), vec![destination])
         }
@@ -92,7 +92,7 @@ fn receive_media_connection(
             }
             Ok(None)
         }
-        LocalSurfaceMode::EncodedH264Opaque => {
+        LocalSurfaceMode::EncodedOpaque(_) => {
             let index = descriptor_index.ok_or_else(|| {
                 TransportError::Protocol("encoded bootstrap omitted its media channel".to_owned())
             })?;
@@ -117,8 +117,11 @@ mod tests {
         let (source_control, destination_control) =
             LocalPacketConnection::pair().expect("control pair");
         let source = std::thread::spawn(move || {
-            bootstrap_source(source_control, LocalSurfaceMode::EncodedH264Opaque)
-                .expect("source bootstrap")
+            bootstrap_source(
+                source_control,
+                LocalSurfaceMode::EncodedOpaque(weld_media::VideoCodec::H264),
+            )
+            .expect("source bootstrap")
         });
         let destination =
             bootstrap_destination(destination_control, |_| Ok(())).expect("destination bootstrap");
@@ -142,10 +145,13 @@ mod tests {
         let (source_control, destination_control) =
             LocalPacketConnection::pair().expect("control pair");
         let source = std::thread::spawn(move || {
-            bootstrap_source(source_control, LocalSurfaceMode::EncodedH264Opaque)
-                .err()
-                .expect("source must observe rejection")
-                .to_string()
+            bootstrap_source(
+                source_control,
+                LocalSurfaceMode::EncodedOpaque(weld_media::VideoCodec::Av1),
+            )
+            .err()
+            .expect("source must observe rejection")
+            .to_string()
         });
         let destination = bootstrap_destination(destination_control, |_| {
             anyhow::bail!("no hardware decoder")

@@ -165,7 +165,7 @@ pub struct EncodedSourceRegistrationOptions<'a> {
     pub adapter_source: ClientSourceId,
     pub destination_source: ClientSourceId,
     pub capabilities: &'a weld_core::dmabuf::ExternalDmabufCapabilities,
-    pub profile: crate::LocalH264Profile,
+    pub codec: weld_media::VideoCodec,
     pub dump_directory: Option<PathBuf>,
 }
 
@@ -184,13 +184,13 @@ pub fn encoded_source_registration(
         adapter_source,
         destination_source,
         capabilities,
-        profile,
+        codec,
         dump_directory,
     } = options;
     let (notifier, worker_wake) = weld_core::host::client_runtime_notifier()?;
     let backend = encode_backend(
         capabilities.render_node.clone(),
-        profile,
+        codec,
         dump_directory.clone(),
         move || {
             if let Err(error) = notifier.notify() {
@@ -200,7 +200,7 @@ pub fn encoded_source_registration(
     )?;
     let mut encoded = EncodedSourceState::new(backend, media.clone());
     if let Some(directory) = dump_directory {
-        encoded = encoded.with_h264_dump_directory(directory)?;
+        encoded = encoded.with_access_unit_dump_directory(directory, codec)?;
     }
     let (registration, endpoint) = encoded_source_registration_with_state(
         control.clone(),
@@ -228,12 +228,13 @@ pub fn encoded_destination_registration(
     destination_source: ClientSourceId,
     dmabuf: DmabufContext,
     capabilities: &weld_core::dmabuf::ExternalDmabufCapabilities,
+    codec: weld_media::VideoCodec,
 ) -> anyhow::Result<(
     ClientAdapterRegistration,
     Vec<weld_core::host::ClientRuntimeWakeSource>,
 )> {
     let (notifier, worker_wake) = weld_core::host::client_runtime_notifier()?;
-    let backend = decode_backend(capabilities, move || {
+    let backend = decode_backend(capabilities, codec, move || {
         if let Err(error) = notifier.notify() {
             tracing::error!(%error, "could not wake the host for decoded output");
         }
@@ -1123,7 +1124,7 @@ impl LocalDestinationAdapter {
                 message: LocalDestinationMessage::BufferReleased { use_id: source_use },
             };
             if let Err(error) = connection.queue(&packet, Vec::new()) {
-                warn!(%error, "could not release a local hoist buffer use");
+                warn!(%error, message_kind = "buffer-released", "could not release a local hoist buffer use");
             }
         };
         let buffer = ClientBufferId::new(self.descriptor.id, local);
@@ -1169,11 +1170,12 @@ impl LocalDestinationAdapter {
     }
 
     fn send_destination(&self, session: HoistSessionId, message: LocalDestinationMessage) {
+        let message_kind = message.kind();
         if let Err(error) = self
             .connection
             .queue(&LocalDestinationPacket { session, message }, Vec::new())
         {
-            warn!(%error, "could not queue a local hoist destination packet");
+            warn!(%error, message_kind, "could not queue a local hoist destination packet");
         }
     }
 

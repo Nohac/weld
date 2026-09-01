@@ -5,10 +5,11 @@ set -euo pipefail
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 repository_root="$(cd -- "${script_dir}/.." && pwd)"
 socket_path="${WELD_HOIST_SOCKET:-${repository_root}/target/validation/weld-hoist.sock}"
-surface_mode="encoded-h264-opaque"
-h264_profile="standard"
+surface_mode="encoded-opaque"
+codec="h264"
+codec_selected=false
 trace_media=false
-dump_h264=false
+dump_encoded=false
 
 while [[ "$#" -gt 0 ]]; do
     case "$1" in
@@ -20,25 +21,22 @@ while [[ "$#" -gt 0 ]]; do
             trace_media=true
             shift
             ;;
-        --dump-h264)
-            dump_h264=true
+        --dump-encoded)
+            dump_encoded=true
             shift
             ;;
-        --high-bitrate)
-            if [[ "${h264_profile}" != "standard" ]]; then
-                printf 'Only one H.264 profile flag may be selected.\n' >&2
+        --codec)
+            if [[ "$#" -lt 2 ]]; then
+                printf '%s\n' '--codec requires h264 or av1.' >&2
                 exit 2
             fi
-            h264_profile="high-bitrate"
-            shift
-            ;;
-        --all-idr)
-            if [[ "${h264_profile}" != "standard" ]]; then
-                printf 'Only one H.264 profile flag may be selected.\n' >&2
+            codec="$2"
+            codec_selected=true
+            if [[ "${codec}" != "h264" && "${codec}" != "av1" ]]; then
+                printf 'Unsupported codec: %s; expected h264 or av1.\n' "${codec}" >&2
                 exit 2
             fi
-            h264_profile="all-idr"
-            shift
+            shift 2
             ;;
         --)
             shift
@@ -50,27 +48,27 @@ while [[ "$#" -gt 0 ]]; do
     esac
 done
 
-if [[ "${surface_mode}" == "native" && "${h264_profile}" != "standard" ]]; then
-    printf 'H.264 profile flags cannot be combined with --native.\n' >&2
+if [[ "${surface_mode}" == "native" && "${dump_encoded}" == true ]]; then
+    printf 'Encoded dumping cannot be combined with --native.\n' >&2
     exit 2
 fi
-if [[ "${surface_mode}" == "native" && "${dump_h264}" == true ]]; then
-    printf 'H.264 dumping cannot be combined with --native.\n' >&2
+if [[ "${surface_mode}" == "native" && "${codec_selected}" == true ]]; then
+    printf '%s\n' '--codec cannot be combined with --native.' >&2
     exit 2
 fi
 
-if [[ "${surface_mode}" == "encoded-h264-opaque" ]]; then
-    log_label="h264-${h264_profile}"
+if [[ "${surface_mode}" == "encoded-opaque" ]]; then
+    log_label="encoded-${codec}"
 else
     log_label="${surface_mode}"
 fi
 source_log="${repository_root}/target/validation/weld-hoist-source-${log_label}.log"
 destination_log="${repository_root}/target/validation/weld-hoist-destination-${log_label}.log"
-h264_dump_run="$(date -u +%Y%m%dT%H%M%SZ)"
-h264_dump_directory="${repository_root}/target/validation/h264-${h264_profile}-${h264_dump_run}"
+encoded_dump_run="$(date -u +%Y%m%dT%H%M%SZ)"
+encoded_dump_directory="${repository_root}/target/validation/${codec}-${encoded_dump_run}"
 
 if [[ "${trace_media}" == true ]]; then
-    media_filter="weld_hoist_local::encoded=trace,cros_codecs::backend::vaapi::encoder=trace"
+    media_filter="weld_hoist_local::encoded=trace,weld_media_vaapi=trace"
     if [[ -n "${RUST_LOG:-}" ]]; then
         export RUST_LOG="${RUST_LOG},${media_filter}"
     else
@@ -89,19 +87,19 @@ mkdir -p -- "$(dirname -- "${socket_path}")"
 rm -f -- "${socket_path}"
 
 cd -- "${repository_root}"
-printf 'Starting %s local hoist (H.264 profile: %s). Focus the source window and press Super+H.\n' \
-    "${surface_mode}" "${h264_profile}"
+printf 'Starting %s local hoist with %s. Focus the source window and press Super+H.\n' \
+    "${surface_mode}" "${codec}"
 source_options=(
     --backend nested
     --wayland-socket weld-hoist-source
     --hoist-listen "${socket_path}"
     --hoist-surface-mode "${surface_mode}"
 )
-if [[ "${surface_mode}" == "encoded-h264-opaque" ]]; then
-    source_options+=(--hoist-h264-profile "${h264_profile}")
-    if [[ "${dump_h264}" == true ]]; then
-        source_options+=(--hoist-h264-dump-dir "${h264_dump_directory}")
-        printf 'H.264 dump directory: %s\n' "${h264_dump_directory}"
+if [[ "${surface_mode}" == "encoded-opaque" ]]; then
+    source_options+=(--hoist-codec "${codec}")
+    if [[ "${dump_encoded}" == true ]]; then
+        source_options+=(--hoist-encoded-dump-dir "${encoded_dump_directory}")
+        printf 'Encoded dump directory: %s\n' "${encoded_dump_directory}"
     fi
 fi
 cargo run -- "${source_options[@]}" \

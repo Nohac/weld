@@ -35,15 +35,16 @@ Native mode has these properties:
   draining fails the local session cleanly instead of retaining unbounded
   per-frame SHM descriptors.
 
-The optional `encoded-h264-opaque` mode keeps the same control and input
-protocol while replacing native surface-buffer transfer with a hardware codec
-path:
+The optional `encoded-opaque` mode keeps the same control and input protocol
+while replacing native surface-buffer transfer with an H.264 or AV1 hardware
+codec path:
 
 - The source selects the mode during a request/acknowledgement bootstrap. It
   passes one end of a fresh seqpacket socketpair to the destination with
   `SCM_RIGHTS`; media therefore cannot fill the independent control queue.
-- One capacity-one worker per endpoint owns persistent VA-API H.264 sessions.
-  Worker completion wakes calloop through eventfd rather than polling.
+- One capacity-one worker per endpoint owns persistent FFmpeg VA-API sessions
+  for the bootstrap-selected codec. Worker completion wakes calloop through
+  eventfd rather than polling.
 - DMA-BUF input remains device resident and its source lease completes after
   VPP and encoding. Foot's already-normalized SHM pixels are copied once into
   owned worker input and release immediately after that copy.
@@ -60,6 +61,10 @@ path:
   one-credit window can reduce frame rate when a complete encode/decode round
   trip exceeds the frame interval. Credit does not acknowledge final renderer
   presentation or extend decoded-buffer lifetime.
+- Destination control packets flush immediately through the nonblocking Unix
+  socket when it is writable. `EAGAIN` leaves them in a bounded 256-packet
+  userspace queue for calloop; reaching that bound remains a fatal stalled-peer
+  condition and reports whether the attempted preflush was blocked.
 - This tracer intentionally discards alpha. Each replaced surface-tree layer
   has its own persistent codec stream. Multi-layer commits are encoded
   sequentially through the capacity-one worker and become visible only after
@@ -69,6 +74,20 @@ path:
   capability-driven media budgeting replaces this tracer policy.
 - Unsupported hardware, y-inverted input, or a commit beyond those explicit
   bounds fails the session; there is no silent native or software fallback.
+
+H.264 currently uses constrained baseline at 16 Mbps. AV1 uses Main at 8 Mbps;
+the settings type rejects higher AV1 bitrates because a supervised 64 Mbps
+radeonsi probe reset the VCN context. Both paths use a microsecond time base,
+one-packet-per-frame low-delay encoding, and the exact visible extent carried
+by the client protocol. The bitrate applies to each current surface-tree layer
+stream, not once across an entire hoisted top-level; composition and shared
+budgeting remain future work. In particular, AV1 may decode into 960x496 coded
+storage for a 944x484 client surface; destination VPP crops that storage rather
+than allowing coded padding to affect window geometry. The backend queries the
+selected VA profile and entrypoint's minimum and maximum surface geometry. If
+an AV1 driver omits its minima, Weld uses the validated 128x128 fallback. On
+the Radeon 880M, a 192x64 popup is therefore encoded in 192x128 storage while
+retaining 192x64 as its authoritative visible geometry.
 
 The source compositor still completes Wayland frame callbacks according to its
 own mapped-surface presentation cadence. A transported surface should
@@ -169,8 +188,9 @@ FFmpeg, Vulkan Video, and narrower native backends remain production candidates.
 `ffmpeg-next` for version and linkage integration and keeps the unavoidable
 DRM PRIME, hardware-frame, filter-graph, and encoder calls behind one small raw
 FFmpeg boundary. The probe wraps owned XRGB DMA-BUFs as
-`AV_PIX_FMT_DRM_PRIME`, derives a VA-API device with `hwmap`, performs the RGB
-to limited-range NV12 conversion with `scale_vaapi`, and feeds those hardware
+`AV_PIX_FMT_DRM_PRIME`, derives one VA-API device per worker from its DRM
+device, supplies it to `hwmap`, performs the RGB to limited-range NV12
+conversion with `scale_vaapi`, and feeds those hardware
 frames directly to the selected `av1_vaapi` or `h264_vaapi` encoder. It does
 not map the source or normalized frame into CPU memory. Run it with:
 
@@ -181,8 +201,8 @@ scripts/run-ffmpeg-vaapi-probe --codec h264
 scripts/run-ffmpeg-vaapi-probe --codec h264 --bitrate-mbps 8
 ```
 
-The default is the validated 8 Mbps AV1 path. H.264 defaults to the original
-64 Mbps comparison. The runner refuses other AV1 bitrates unless
+The default is the validated 8 Mbps AV1 path. H.264 defaults to Weld's 16 Mbps
+production setting. The runner refuses other AV1 bitrates unless
 `WELD_FFMPEG_ALLOW_UNSAFE_AV1_BITRATE=1` is set because the first 64 Mbps AV1
 experiment caused radeonsi to declare the VCN context guilty and perform a hard
 GPU recovery after frame 16. This override is for supervised driver diagnosis,
@@ -196,34 +216,47 @@ measures PSNR, and records dynamic linkage and binary size. The initial upload
 of the deterministic test pattern is intentionally CPU-side; the boundary
 being validated starts at the resulting DMA-BUF.
 
-A September 1, 2026 Radeon 880M run imported all 64 explicit-linear XR24
-DMA-BUFs and emitted 64 H.264 packets. FFmpeg reported direct DRM-to-VA-API
-mapping, VA-API HQ scaling into NV12, CBR at 64 Mbps, and the constrained
-baseline hardware profile. The stream decoded to the expected 944x484 display
-extent from a 944x496 coded extent. Its stable luma anchors were 16, 235, and
-126, and range-normalized PSNR was 51.30 dB average and 43.44 dB minimum. This
-is materially cleaner than both the current cros-codecs result and the
-GStreamer reference on the same generated stimulus, and it did not reproduce
-the displaced macroblock bands seen in Blender captures.
+The encoder and filter graph use microsecond timestamps. The diagnostic IVF
+carrier translates them back to sequential 60 Hz frame indices because IVF's
+header declares a 1/60-second time base. Its image decode is hard-limited to 64
+frames with timestamp passthrough and verifies exactly 64 output files. Keep
+those bounds: mixing microsecond packet timestamps with the old IVF time base
+caused FFmpeg to synthesize a multi-hour image sequence during development.
 
-The result validates FFmpeg as a strong implementation candidate; it does not
-yet select it for Weld. The probe uses linear test buffers, not real client
-modifiers or client synchronization, and it encodes one composed layer rather
-than a transported surface tree. A production plan still needs capability
-negotiation, explicit synchronization and lease lifetime, frame coalescing,
-session reuse across resize, backpressure, alpha policy, decoder integration,
-and packaging/licensing decisions. The diagnostic binary is dynamically linked
-to FFmpeg 8.1.2's `libavcodec`, `libavfilter`, and `libavutil`; its debug binary
-was approximately 24 MB.
+A September 1, 2026 Radeon 880M run using the production one-second CBR
+reservoir
+imported all 64 explicit-linear XR24 DMA-BUFs and emitted 64 H.264 packets.
+FFmpeg reported direct DRM-to-VA-API mapping, VA-API HQ scaling into NV12, CBR
+at 16 Mbps, and the constrained baseline hardware profile. The stream decoded
+to the expected 944x484 display extent from a 944x496 coded extent. Its stable
+luma anchors were 16, 235, and 126, and range-normalized PSNR was 51.23 dB
+average and 43.44 dB minimum. It did not reproduce the displaced macroblock
+bands seen in Blender captures.
 
-The same probe now validates AV1 through `av1_vaapi` without changing the
-DMA-BUF import or VA-API scaling stages. At 8 Mbps it emitted and decoded all
-64 frames, preserved the 16, 235, and 126 range anchors, and measured 51.03 dB
-average and 45.92 dB minimum PSNR. An equal-rate H.264 control measured 50.94
-dB average and 43.44 dB minimum. Their one-second payloads were effectively
-identical because both encoders met the requested CBR budget, so this synthetic
-grayscale probe establishes AV1 viability and a modest worst-frame quality
-advantage, not a bandwidth advantage for real desktop content.
+These results selected FFmpeg for Weld's initial production hardware codec
+backend. The independent probe still uses linear generated buffers and remains
+useful for separating encoder quality from real client modifiers, explicit
+synchronization, surface-tree composition, and transport behavior. The backend
+is dynamically linked to FFmpeg's `libavcodec`, `libavfilter`, `libavformat`,
+and `libavutil`.
+
+The same production-reservoir probe validates AV1 through `av1_vaapi` without
+changing the DMA-BUF import or VA-API scaling stages. At 8 Mbps it emitted and
+decoded all 64 frames, preserved the 16, 235, and 126 range anchors, and
+measured 51.03 dB average and 45.92 dB minimum PSNR. These deterministic
+results validate both production operating points; their different bitrate
+budgets do not establish a general codec-quality comparison for desktop
+content.
+
+A September 1 Blender stress run with an experimental four-frame CBR reservoir
+timed out the Radeon `vcn_unified_0` ring before the destination control queue
+filled. The kernel reset the ring, and Mesa then called `abort` while FFmpeg
+destroyed the guilty VA encoder context during hoist teardown. Restoring the
+previously validated one-second reservoir removes that experiment, but one
+clean stress run cannot prove it caused the hardware fault. Codec work remains
+in-process for this tracer; process-isolated codec workers are the robust
+future boundary for containing a driver abort without taking down the
+compositor.
 
 On this radeonsi path, AV1 expands the 944x484 input into a 960x496 bitstream
 and reports no smaller AV1 render rectangle. FFmpeg's ordinary software-upload
@@ -239,30 +272,16 @@ cannot operate on this device. VP9 therefore remains a negotiated backend for
 hardware that actually advertises encoding support; it is not included in this
 machine's probe modes.
 
-The August 31 artifact investigation also found a separate visible-versus-coded
-extent contract hidden by the cros-codecs H.264 API. Its SPS builder rounds a
-visible extent to 16x16 macroblocks and records the crop, while `new_vaapi`
-accepts an independent coded size used for VA surface allocation. The API docs
-do not state that the latter must contain the rounded SPS extent, and Weld had
-passed the visible extent to both. A 944x484 Blender surface therefore declared
-a 944x496 coded picture while the driver received only a 944x484 surface, which
-matches the displaced horizontal bands in the recorded source bitstream.
-
-`weld-media-vaapi` now owns this adaptation explicitly. The H.264 encoder is
-configured with the exact visible extent, its VA surfaces are rounded up to
-16x16 macroblocks, and VPP copies the visible source one-to-one into the
-top-left of an opaque-black padded NV12 surface without scaling. Stream
-generations rotate on exact visible extent changes so SPS crop metadata cannot
-drift from a reused encoder session. On radeonsi, black padding affects a few
-pixels at the bottom or right edge through in-loop deblocking. Replicated edge
-pixels remain a future quality improvement; this narrow border defect is
-separate from the large stale macroblock bands under investigation.
-
-H.264 4:2:0 cropping is expressed in two-pixel chroma units. An odd transported
-extent therefore decodes to the next even display extent; Weld crops that
-decoded surface back to the exact transported width and height instead of
-resampling it. The extra coded pixel never becomes part of the destination
-window geometry.
+The August 31 artifact investigation also exposed a visible-versus-coded extent
+contract hidden by the old cros-codecs H.264 API. A 944x484 Blender surface
+declared a 944x496 coded picture while the driver received only a 944x484
+surface, matching the displaced macroblock bands in the recorded bitstream.
+The FFmpeg backend owns its aligned VA surface allocation and SPS crop together,
+so Weld supplies only the exact visible source extent. Stream generations still
+rotate when that extent changes, and the destination always crops decoded coded
+storage back to transported visible geometry. The same rule handles H.264 odd
+chroma extents and AV1's larger 960x496 allocation without exposing padding in
+the window.
 
 Destination input is already addressed to the transported surface and enters
 the source's client runtime without the destination's compositor-global
@@ -283,33 +302,35 @@ sockets. The source launches Foot. Focus Foot in the source window and press
 `Super+H`; the source should retain a Reclaim placeholder and the live client
 should appear in the destination window.
 
-The script defaults to the hardware `encoded-h264-opaque` path. Use the native
-descriptor baseline or choose another source client with:
+The script defaults to hardware H.264 in `encoded-opaque` mode. Select AV1, use
+the native descriptor baseline, or choose another source client with:
 
 ```sh
 scripts/run-local-hoist --native
+scripts/run-local-hoist --codec av1
 scripts/run-local-hoist firefox
 scripts/run-local-hoist --trace-media blender
-scripts/run-local-hoist --trace-media --high-bitrate blender
-scripts/run-local-hoist --trace-media --all-idr blender
-scripts/run-local-hoist --trace-media --high-bitrate --dump-h264 blender
+scripts/run-local-hoist --codec av1 --trace-media blender
+scripts/run-local-hoist --codec h264 --dump-encoded blender
 ```
 
 `--trace-media` keeps ordinary dependencies at `info` while enabling structured
-source-batch, destination-decode, coalescing, credit timing, VA segment status,
-and average QP for the encoded boundary. For example, 60 surface-tree commits
+source-batch, destination-decode, coalescing, and credit timing for the encoded
+boundary. For example, 60 surface-tree commits
 per second with two changed
 layers requests 120 sequential codec frames per second in the current tracer;
 the trace records both the commit and layer counts so that multiplication is
 visible separately from per-frame decode time.
 
-`--dump-h264` creates a timestamped directory printed by the script and records
-each source stream generation independently. This keeps evidence from earlier
-runs out of the current comparison. Inspect the relevant Blender stream with
+`--dump-encoded` creates a timestamped directory printed by the script and
+records each source stream generation independently. H.264 uses `.h264`; AV1
+uses concatenated low-overhead `.obu`. This keeps evidence from earlier runs
+out of the current comparison. Inspect the relevant Blender stream with
 software decoding so the destination VA decoder is not reused:
 
 ```sh
 ffplay -hwaccel none -f h264 PRINTED_DUMP_DIRECTORY/stream-1-generation-1.h264
+ffplay -hwaccel none -f obu PRINTED_DUMP_DIRECTORY/stream-1-generation-1.obu
 ```
 
 Use the filename emitted by the source log; Blender can advance generations
@@ -318,15 +339,13 @@ transport, in source-buffer readiness, VPP, or encoding. A clean file places
 it after transport, in destination decoding, VPP, DMA-BUF import, or final
 composition.
 
-The same directory contains sampled stage snapshots under `stages/`. Through
-sequence 300, every thirtieth encoded frame writes matching
-`stream-N-generation-N-sequence-N-source.ppm` and `-normalized.ppm` files.
-`source` is the client DMA-BUF after VA import; `normalized` is the padded NV12
-encoder input converted back to XRGB and cropped to visible geometry. Clean
-matching snapshots followed by a corrupt software-decoded H.264 frame isolate
-the fault to encoding. Stage capture performs extra synchronous VPP work and
-file writes in the encoder worker, so timing and credit traces from dump runs
-must not be used as ordinary performance measurements.
+The same directory contains sampled source snapshots under `stages/`. Through
+sequence 300, every thirtieth encoded frame writes a
+`stream-N-generation-N-sequence-N-source.ppm` file. FFmpeg owns the normalized
+NV12 hardware frame, so Weld no longer duplicates that stage solely for a
+diagnostic image. Stage capture performs synchronous VPP work and file writes
+in the encoder worker, so timing and credit traces from dump runs must not be
+used as ordinary performance measurements.
 
 The eventual one-frame-per-surface-tree path must not use a repacked atlas on
 every commit. It requires sticky macroblock-aligned slots with gutters,
@@ -372,8 +391,9 @@ multiple Weld instances in one runtime directory.
   inside the source's Wayland session.
 - The Postcard records are intentionally pre-1.0 and require matching Weld
   builds. Compatibility negotiation is deferred until the protocol stabilizes.
-- Encoded mode is opaque H.264 only. It has no AV1, VP9, alpha plane, software
-  codec fallback, cross-device capability negotiation, or decoded-output pool.
+- Encoded mode supports opaque H.264 and AV1. It has no VP9, alpha plane,
+  software codec fallback, cross-device capability negotiation, or
+  decoded-output pool.
 - Decoder generation retirement is queued when transported layers rotate or
   disappear and is applied by the worker before its next decode command; an
   idle worker can therefore retain the last retired VA session until new work

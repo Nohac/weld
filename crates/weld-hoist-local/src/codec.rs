@@ -4,14 +4,6 @@ use anyhow::Result;
 use weld_core::dmabuf::ExternalDmabuf;
 use weld_media::{EncodedAccessUnit, MediaFrameId, MediaStreamId, StreamGeneration};
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub enum LocalH264Profile {
-    #[default]
-    Standard,
-    HighBitrate,
-    AllIdr,
-}
-
 pub enum LocalEncodeInput {
     Dmabuf(ExternalDmabuf),
     PackedBgra {
@@ -80,39 +72,40 @@ mod vaapi {
 
     use anyhow::{Context, Result, ensure};
     use weld_core::dmabuf::{ExternalDmabuf, ExternalDmabufCapabilities, ExternalDmabufPlane};
-    use weld_media::{MediaStreamId, StreamGeneration};
+    use weld_media::{MediaStreamId, StreamGeneration, VideoCodec};
     use weld_media_vaapi::{
-        H264EncoderSettings, H264ReferenceMode, VaapiDecodeRequest, VaapiDecodeWorker, VaapiDmabuf,
-        VaapiDmabufObject, VaapiDmabufPlane, VaapiEncodeInput, VaapiEncodeRequest,
-        VaapiEncodeWorker, VaapiWorkerSubmitError,
+        VaapiDecodeRequest, VaapiDecodeWorker, VaapiDmabuf, VaapiDmabufObject, VaapiDmabufPlane,
+        VaapiEncodeInput, VaapiEncodeRequest, VaapiEncodeWorker, VaapiEncoderSettings,
+        VaapiWorkerSubmitError,
     };
 
     use super::{
         LocalDecodeBackend, LocalDecodeCompletion, LocalDecodeRequest, LocalDecodedFrame,
         LocalEncodeBackend, LocalEncodeCompletion, LocalEncodeInput, LocalEncodeRequest,
-        LocalH264Profile, LocalSubmitError,
+        LocalSubmitError,
     };
 
-    const DEFAULT_BITRATE: u64 = 16_000_000;
-    const HIGH_BITRATE: u64 = 64_000_000;
+    const H264_BITRATE: u64 = 16_000_000;
+    const AV1_BITRATE: u64 = 8_000_000;
     const DEFAULT_FRAMES_PER_SECOND: u32 = 60;
-    const DEFAULT_INTRA_PERIOD: u16 = 32;
+    const DEFAULT_KEYFRAME_INTERVAL: u32 = 32;
     const DRM_FORMAT_XRGB8888: u32 = u32::from_le_bytes(*b"XR24");
 
     pub(crate) fn encode_backend(
         render_node: PathBuf,
-        profile: LocalH264Profile,
+        codec: VideoCodec,
         dump_directory: Option<PathBuf>,
         notify: impl Fn() + Send + Sync + 'static,
     ) -> Result<Box<dyn LocalEncodeBackend>> {
         Ok(Box::new(VaapiLocalEncoder {
             worker: VaapiEncodeWorker::spawn(render_node, dump_directory, notify)?,
-            settings: profile.settings()?,
+            settings: encoder_settings(codec)?,
         }))
     }
 
     pub(crate) fn decode_backend(
         capabilities: &ExternalDmabufCapabilities,
+        codec: VideoCodec,
         notify: impl Fn() + Send + Sync + 'static,
     ) -> Result<Box<dyn LocalDecodeBackend>> {
         let xrgb_modifiers = capabilities
@@ -126,13 +119,14 @@ mod vaapi {
         );
         Ok(Box::new(VaapiLocalDecoder {
             worker: VaapiDecodeWorker::spawn(capabilities.render_node.clone(), notify)?,
+            codec,
             xrgb_modifiers,
         }))
     }
 
     struct VaapiLocalEncoder {
         worker: VaapiEncodeWorker,
-        settings: H264EncoderSettings,
+        settings: VaapiEncoderSettings,
     }
 
     impl LocalEncodeBackend for VaapiLocalEncoder {
@@ -224,26 +218,23 @@ mod vaapi {
         })
     }
 
-    impl LocalH264Profile {
-        fn settings(self) -> Result<H264EncoderSettings> {
-            let (bitrate, reference_mode) = match self {
-                Self::Standard => (DEFAULT_BITRATE, H264ReferenceMode::LowDelay),
-                Self::HighBitrate => (HIGH_BITRATE, H264ReferenceMode::LowDelay),
-                Self::AllIdr => (DEFAULT_BITRATE, H264ReferenceMode::IndependentIdr),
-            };
-            H264EncoderSettings::try_new(
-                bitrate,
-                DEFAULT_FRAMES_PER_SECOND,
-                DEFAULT_INTRA_PERIOD,
-                18,
-                36,
-                reference_mode,
-            )
-        }
+    fn encoder_settings(codec: VideoCodec) -> Result<VaapiEncoderSettings> {
+        let bitrate = match codec {
+            VideoCodec::H264 => H264_BITRATE,
+            VideoCodec::Av1 => AV1_BITRATE,
+            VideoCodec::Vp9 => anyhow::bail!("VP9 local hoisting is not implemented"),
+        };
+        VaapiEncoderSettings::try_new(
+            codec,
+            bitrate,
+            DEFAULT_FRAMES_PER_SECOND,
+            DEFAULT_KEYFRAME_INTERVAL,
+        )
     }
 
     struct VaapiLocalDecoder {
         worker: VaapiDecodeWorker,
+        codec: VideoCodec,
         xrgb_modifiers: Vec<u64>,
     }
 
@@ -252,6 +243,13 @@ mod vaapi {
             &mut self,
             request: LocalDecodeRequest,
         ) -> Result<(), LocalSubmitError<LocalDecodeRequest>> {
+            if request.access_unit.codec != self.codec {
+                return Err(LocalSubmitError::Rejected(anyhow::anyhow!(
+                    "received {:?} in a negotiated {:?} stream",
+                    request.access_unit.codec,
+                    self.codec,
+                )));
+            }
             let vaapi = VaapiDecodeRequest {
                 token: request.token,
                 access_unit: request.access_unit,

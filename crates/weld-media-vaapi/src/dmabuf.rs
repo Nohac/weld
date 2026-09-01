@@ -1,7 +1,7 @@
 use std::os::fd::{AsRawFd, OwnedFd};
 
 use anyhow::{Context, Result, ensure};
-use cros_codecs::libva::{
+use cros_libva::{
     DrmPrimeSurfaceDescriptor, SurfaceMemoryDescriptor, VA_FOURCC_BGRX, VA_FOURCC_NV12,
     VADRMPRIMESurfaceDescriptor, VADRMPRIMESurfaceDescriptorLayer,
     VADRMPRIMESurfaceDescriptorObject, VASurfaceAttrib,
@@ -195,7 +195,7 @@ impl SurfaceMemoryDescriptor for PrimeImportDescriptor {
         }
         descriptor.layers[0] = layer;
         attributes.push(VASurfaceAttrib::new_memory_type(
-            cros_codecs::libva::MemoryType::DrmPrime2,
+            cros_libva::MemoryType::DrmPrime2,
         ));
         attributes.push(VASurfaceAttrib::new_buffer_descriptor(descriptor.as_mut()));
         Some(descriptor)

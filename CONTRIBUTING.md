@@ -81,11 +81,15 @@ building and `libfontconfig` at runtime. The shared Rust shell provides both;
 other environments must make Fontconfig available to `pkg-config` and the
 runtime loader.
 
-Hardware media probes require libva development/runtime libraries and
-`libva-utils`. On NixOS, the shared Rust shell points libva at the active
-system driver directory under `/run/opengl-driver/lib/dri`; it deliberately
-does not force a vendor driver name. A missing libva environment must be
-reported separately from a loaded driver that lacks a requested capability.
+Hardware media work requires FFmpeg development/runtime libraries, libva
+development/runtime libraries, `libva-utils`, Clang, and bindgen. In
+particular, `libavcodec`, `libavfilter`, `libavformat`, and `libavutil` must be
+visible to `pkg-config`; they are required by ordinary workspace checks because
+the standard distribution includes encoded hoisting. On NixOS, the shared Rust
+shell provides those libraries and points libva at the active system driver
+directory under `/run/opengl-driver/lib/dri`; it deliberately does not force a
+vendor driver name. A missing FFmpeg or libva environment must be reported
+separately from a loaded driver that lacks a requested capability.
 
 Run Weld inside a development shell whose glibc is compatible with the running
 NixOS graphics drivers. The shared Rust shell is located at

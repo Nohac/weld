@@ -26,7 +26,7 @@ pub use bootstrap::{LocalTransportConnections, bootstrap_destination, bootstrap_
 pub use codec::{
     LocalDecodeBackend, LocalDecodeCompletion, LocalDecodeRequest, LocalDecodedFrame,
     LocalEncodeBackend, LocalEncodeCompletion, LocalEncodeInput, LocalEncodeRequest,
-    LocalH264Profile, LocalSubmitError,
+    LocalSubmitError,
 };
 pub(crate) use media::import_access_unit;
 pub use native::{

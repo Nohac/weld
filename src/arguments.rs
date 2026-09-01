@@ -4,7 +4,8 @@ use std::{ffi::OsString, path::PathBuf};
 
 use clap::{Parser, ValueEnum};
 use weld_app::{Backend, OutputScale};
-use weld_hoist_local::{LocalH264Profile, LocalSurfaceMode};
+use weld_hoist_local::LocalSurfaceMode;
+use weld_media::VideoCodec;
 
 const DEFAULT_REMOTE_ADDRESS: &str = "127.0.0.1:15702";
 
@@ -19,32 +20,30 @@ pub enum BackendKind {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
 pub enum HoistSurfaceMode {
     Native,
-    EncodedH264Opaque,
+    EncodedOpaque,
 }
 
-impl From<HoistSurfaceMode> for LocalSurfaceMode {
-    fn from(mode: HoistSurfaceMode) -> Self {
-        match mode {
-            HoistSurfaceMode::Native => Self::Native,
-            HoistSurfaceMode::EncodedH264Opaque => Self::EncodedH264Opaque,
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, ValueEnum)]
+pub enum HoistCodec {
+    Av1,
+    #[default]
+    H264,
+}
+
+impl From<HoistCodec> for VideoCodec {
+    fn from(codec: HoistCodec) -> Self {
+        match codec {
+            HoistCodec::Av1 => Self::Av1,
+            HoistCodec::H264 => Self::H264,
         }
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, ValueEnum)]
-pub enum HoistH264Profile {
-    #[default]
-    Standard,
-    HighBitrate,
-    AllIdr,
-}
-
-impl From<HoistH264Profile> for LocalH264Profile {
-    fn from(profile: HoistH264Profile) -> Self {
-        match profile {
-            HoistH264Profile::Standard => Self::Standard,
-            HoistH264Profile::HighBitrate => Self::HighBitrate,
-            HoistH264Profile::AllIdr => Self::AllIdr,
+impl HoistSurfaceMode {
+    pub(crate) fn local(self, codec: HoistCodec) -> LocalSurfaceMode {
+        match self {
+            Self::Native => LocalSurfaceMode::Native,
+            Self::EncodedOpaque => LocalSurfaceMode::EncodedOpaque(codec.into()),
         }
     }
 }
@@ -105,13 +104,13 @@ pub struct AppArguments {
     #[arg(long, value_enum, value_name = "MODE", requires = "hoist_listen")]
     pub(crate) hoist_surface_mode: Option<HoistSurfaceMode>,
 
-    /// Source-side H.264 diagnostic encoder profile.
-    #[arg(long, value_enum, value_name = "PROFILE", requires = "hoist_listen")]
-    pub(crate) hoist_h264_profile: Option<HoistH264Profile>,
+    /// Codec used by the opaque encoded local-hoist carrier.
+    #[arg(long, value_enum, value_name = "CODEC", requires = "hoist_listen")]
+    pub(crate) hoist_codec: Option<HoistCodec>,
 
-    /// Record source H.264 stream generations before local transport.
+    /// Record source encoded stream generations before local transport.
     #[arg(long, value_name = "DIR", requires = "hoist_listen")]
-    pub(crate) hoist_h264_dump_dir: Option<PathBuf>,
+    pub(crate) hoist_encoded_dump_dir: Option<PathBuf>,
 
     /// Optional client program followed by its arguments.
     #[arg(value_name = "CLIENT_AND_ARGS", allow_hyphen_values = true)]

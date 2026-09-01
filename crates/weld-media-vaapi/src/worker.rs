@@ -9,14 +9,15 @@ use std::{
         mpsc::{self, Receiver, SyncSender, TrySendError},
     },
     thread::{self, JoinHandle},
+    time::Instant,
 };
 
 use anyhow::{Context, Result, ensure};
 use weld_media::{EncodedAccessUnit, MediaFrameId, MediaStreamId, StreamGeneration};
 
 use crate::{
-    H264Decoder, H264Encoder, H264EncoderSettings, H264ReferenceMode, VaapiDevice, VaapiDmabuf,
-    VppConverter, VppOutput,
+    FfmpegDecoder, FfmpegEncodeDevice, FfmpegEncoder, FfmpegVaapiDevice, VaapiDevice, VaapiDmabuf,
+    VaapiEncodeGeometry, VaapiEncoderSettings, VppConverter,
 };
 
 const WORK_QUEUE_CAPACITY: usize = 1;
@@ -51,7 +52,7 @@ pub struct VaapiEncodeRequest {
     pub token: u64,
     pub frame: MediaFrameId,
     pub timestamp_micros: u64,
-    pub settings: H264EncoderSettings,
+    pub settings: VaapiEncoderSettings,
     pub input: VaapiEncodeInput,
 }
 
@@ -251,10 +252,36 @@ impl Drop for VaapiDecodeWorker {
 }
 
 struct EncoderSession {
-    encoder: H264Encoder,
+    encoder: FfmpegEncoder,
     visible_size: (u32, u32),
     coded_size: (u32, u32),
-    settings: H264EncoderSettings,
+    settings: VaapiEncoderSettings,
+}
+
+#[derive(Default)]
+struct EncodeGeometryCache {
+    h264: Option<VaapiEncodeGeometry>,
+    av1: Option<VaapiEncodeGeometry>,
+}
+
+impl EncodeGeometryCache {
+    fn get(
+        &mut self,
+        device: &VaapiDevice,
+        codec: weld_media::VideoCodec,
+    ) -> Result<VaapiEncodeGeometry> {
+        let cached = match codec {
+            weld_media::VideoCodec::H264 => &mut self.h264,
+            weld_media::VideoCodec::Av1 => &mut self.av1,
+            weld_media::VideoCodec::Vp9 => anyhow::bail!("VP9 VA-API encoding is not implemented"),
+        };
+        if let Some(geometry) = *cached {
+            return Ok(geometry);
+        }
+        let geometry = device.encode_geometry(codec)?;
+        *cached = Some(geometry);
+        Ok(geometry)
+    }
 }
 
 fn encode_worker_loop(
@@ -265,19 +292,25 @@ fn encode_worker_loop(
     retirements: Arc<Mutex<HashSet<GenerationKey>>>,
     dump_directory: Option<PathBuf>,
 ) {
-    let runtime =
-        VaapiDevice::open(render_node).and_then(|device| Ok((device.vpp_converter()?, device)));
+    let runtime = VaapiDevice::open(&render_node).and_then(|device| {
+        let vpp = device.vpp_converter()?;
+        let ffmpeg = FfmpegEncodeDevice::open(&render_node)?;
+        Ok((device, vpp, ffmpeg))
+    });
     let mut sessions = HashMap::<GenerationKey, EncoderSession>::new();
+    let mut geometries = EncodeGeometryCache::default();
     while let Ok(request) = commands.recv() {
         apply_retirements(&retirements, &mut sessions);
         let token = request.token;
         let result = runtime
             .as_ref()
             .map_err(|error| anyhow::anyhow!(error.to_string()))
-            .and_then(|(vpp, device)| {
+            .and_then(|(device, vpp, ffmpeg_device)| {
                 encode_one(
-                    vpp,
                     device,
+                    vpp,
+                    ffmpeg_device,
+                    &mut geometries,
                     &mut sessions,
                     request,
                     dump_directory.as_deref(),
@@ -294,8 +327,10 @@ fn encode_worker_loop(
 }
 
 fn encode_one(
-    vpp: &VppConverter,
     device: &VaapiDevice,
+    vpp: &VppConverter,
+    ffmpeg_device: &FfmpegEncodeDevice,
+    geometries: &mut EncodeGeometryCache,
     sessions: &mut HashMap<GenerationKey, EncoderSession>,
     request: VaapiEncodeRequest,
     dump_directory: Option<&std::path::Path>,
@@ -303,19 +338,16 @@ fn encode_one(
     let key = (request.frame.stream, request.frame.generation);
     let (visible_width, visible_height) = request.input.extent();
     let visible_size = (visible_width, visible_height);
-    let independent_idr = request.settings.reference_mode() == H264ReferenceMode::IndependentIdr;
-    // Current cros-codecs cannot express an all-IDR predictor: force_keyframe
-    // emits a non-IDR I slice without parameter sets, while period 1
-    // underflows SPS frame-number derivation. Independent mode therefore
-    // recreates the session so every frame starts at counter zero with SPS/PPS.
-    if reserve_encoder_generation(
-        sessions,
-        key,
-        request.settings.reference_mode(),
-        "VA-API encoder layer-stream limit reached",
-    )? {
-        let encoder = device.h264_encoder(visible_width, visible_height, request.settings)?;
-        let coded_size = encoder.coded_size();
+    if reserve_generation(sessions, key, "VA-API encoder layer-stream limit reached")? {
+        let geometry = geometries.get(device, request.settings.codec())?;
+        let coded_size = geometry.coded_extent(visible_width, visible_height)?;
+        let encoder = FfmpegEncoder::new(
+            request.settings,
+            geometry,
+            ffmpeg_device,
+            visible_width,
+            visible_height,
+        )?;
         sessions.insert(
             key,
             EncoderSession {
@@ -334,6 +366,7 @@ fn encode_one(
             pixels,
         } => vpp.upload_bgra(width, height, &pixels)?,
     };
+    let active_sessions = sessions.len();
     let result = {
         let session = sessions
             .get_mut(&key)
@@ -342,26 +375,43 @@ fn encode_one(
             session.visible_size == visible_size && session.settings == request.settings,
             "encoded stream generation configuration changed without retirement"
         );
-        let nv12 = vpp.convert_padded(
-            &input,
-            visible_width,
-            visible_height,
-            session.coded_size.0,
-            session.coded_size.1,
-            VppOutput::Nv12,
-        )?;
         if should_dump_stages(request.frame)
             && let Some(directory) = dump_directory
             && let Err(error) =
-                dump_encode_stages(vpp, directory, request.frame, &input, &nv12, visible_size)
+                dump_encode_source(vpp, directory, request.frame, &input, visible_size)
         {
             tracing::warn!(%error, frame = ?request.frame, "could not record VA-API encode stages");
         }
-        session
-            .encoder
-            .encode(request.frame, request.timestamp_micros, &nv12)
+        let started_at = Instant::now();
+        let packet = session.encoder.encode(input, request.timestamp_micros)?;
+        tracing::trace!(
+            stream = request.frame.stream.raw(),
+            generation = request.frame.generation.raw(),
+            sequence = request.frame.sequence,
+            codec = ?request.settings.codec(),
+            visible_width,
+            visible_height,
+            coded_width = session.coded_size.0,
+            coded_height = session.coded_size.1,
+            bitrate_bits = request.settings.bitrate_bits(),
+            active_sessions,
+            payload_bytes = packet.payload.len(),
+            encode_micros = started_at.elapsed().as_micros(),
+            "encoded VA-API frame"
+        );
+        ensure!(
+            packet.timestamp_micros == request.timestamp_micros,
+            "FFmpeg encoder changed the submitted frame timestamp"
+        );
+        Ok(EncodedAccessUnit {
+            frame: request.frame,
+            codec: request.settings.codec(),
+            kind: packet.kind,
+            timestamp_micros: packet.timestamp_micros,
+            payload: packet.payload,
+        })
     };
-    if independent_idr || result.is_err() {
+    if result.is_err() {
         sessions.remove(&key);
     }
     result
@@ -371,12 +421,11 @@ fn should_dump_stages(frame: MediaFrameId) -> bool {
     frame.sequence <= 300 && frame.sequence.is_multiple_of(30)
 }
 
-fn dump_encode_stages(
+fn dump_encode_source(
     vpp: &VppConverter,
     directory: &std::path::Path,
     frame: MediaFrameId,
     source: &VaapiDmabuf,
-    normalized: &VaapiDmabuf,
     visible_size: (u32, u32),
 ) -> Result<()> {
     let directory = directory.join("stages");
@@ -398,17 +447,12 @@ fn dump_encode_stages(
         visible_size.1,
         &directory.join(format!("{stem}-source.ppm")),
     )?;
-    vpp.write_xrgb_ppm(
-        normalized,
-        visible_size.0,
-        visible_size.1,
-        &directory.join(format!("{stem}-normalized.ppm")),
-    )?;
     Ok(())
 }
 
 struct DecoderSession {
-    decoder: H264Decoder,
+    decoder: FfmpegDecoder,
+    codec: weld_media::VideoCodec,
     pending: HashMap<u64, PendingDecodedFrame>,
 }
 
@@ -416,7 +460,6 @@ struct PendingDecodedFrame {
     frame: MediaFrameId,
     visible_width: u32,
     visible_height: u32,
-    xrgb_modifiers: Vec<u64>,
 }
 
 fn decode_worker_loop(
@@ -426,8 +469,12 @@ fn decode_worker_loop(
     notify: CompletionNotifier,
     retirements: Arc<Mutex<HashSet<GenerationKey>>>,
 ) {
-    let runtime =
-        VaapiDevice::open(render_node).and_then(|device| Ok((device.vpp_converter()?, device)));
+    let runtime = VaapiDevice::open(&render_node).and_then(|device| {
+        Ok((
+            device.vpp_converter()?,
+            FfmpegVaapiDevice::open(&render_node)?,
+        ))
+    });
     let mut sessions = HashMap::<GenerationKey, DecoderSession>::new();
     while let Ok(request) = commands.recv() {
         apply_retirements(&retirements, &mut sessions);
@@ -435,7 +482,9 @@ fn decode_worker_loop(
         let result = runtime
             .as_ref()
             .map_err(|error| anyhow::anyhow!(error.to_string()))
-            .and_then(|(vpp, device)| decode_one(vpp, device, &mut sessions, request));
+            .and_then(|(vpp, ffmpeg_device)| {
+                decode_one(vpp, ffmpeg_device, &mut sessions, request)
+            });
         if completions
             .send(VaapiDecodeCompletion { token, result })
             .is_err()
@@ -448,7 +497,7 @@ fn decode_worker_loop(
 
 fn decode_one(
     vpp: &VppConverter,
-    device: &VaapiDevice,
+    ffmpeg_device: &FfmpegVaapiDevice,
     sessions: &mut HashMap<GenerationKey, DecoderSession>,
     request: VaapiDecodeRequest,
 ) -> Result<Vec<VaapiDecodedFrame>> {
@@ -460,7 +509,8 @@ fn decode_one(
         sessions.insert(
             key,
             DecoderSession {
-                decoder: device.h264_decoder()?,
+                decoder: FfmpegDecoder::new(request.access_unit.codec, ffmpeg_device)?,
+                codec: request.access_unit.codec,
                 pending: HashMap::new(),
             },
         );
@@ -468,6 +518,10 @@ fn decode_one(
     let session = sessions
         .get_mut(&key)
         .context("VA-API decoder session disappeared")?;
+    ensure!(
+        session.codec == request.access_unit.codec,
+        "encoded stream generation changed codec without retirement"
+    );
     ensure!(
         session
             .pending
@@ -477,13 +531,19 @@ fn decode_one(
                     frame: request.access_unit.frame,
                     visible_width: request.visible_width,
                     visible_height: request.visible_height,
-                    xrgb_modifiers: request.xrgb_modifiers,
                 },
             )
             .is_none(),
         "encoded frame timestamp was reused within one generation"
     );
-    let decoded = match session.decoder.decode(&request.access_unit) {
+    let decoded = match session.decoder.decode_and_convert(
+        &request.access_unit.payload,
+        request.access_unit.timestamp_micros,
+        request.visible_width,
+        request.visible_height,
+        &request.xrgb_modifiers,
+        vpp,
+    ) {
         Ok(decoded) => decoded,
         Err(error) => {
             sessions.remove(&key);
@@ -498,23 +558,13 @@ fn decode_one(
                 .remove(&decoded.timestamp_micros)
                 .context("decoder returned an unknown frame timestamp")?;
             ensure!(
-                pending.visible_width <= decoded.display_width
-                    && pending.visible_height <= decoded.display_height,
-                "decoded H.264 display extent is smaller than its transported visible extent"
+                pending.visible_width == decoded.dmabuf.width
+                    && pending.visible_height == decoded.dmabuf.height,
+                "decoded output extent differs from its transported visible extent"
             );
-            let dmabuf = vpp.convert_scaled(
-                &decoded.frame,
-                pending.visible_width,
-                pending.visible_height,
-                pending.visible_width,
-                pending.visible_height,
-                VppOutput::Xrgb8888 {
-                    modifiers: pending.xrgb_modifiers,
-                },
-            )?;
             Ok(VaapiDecodedFrame {
                 frame: pending.frame,
-                dmabuf,
+                dmabuf: decoded.dmabuf,
             })
         })
         .collect()
@@ -543,18 +593,6 @@ fn reserve_generation<T>(
     sessions.retain(|(stream, _), _| *stream != key.0);
     ensure!(sessions.len() < MAX_ACTIVE_GENERATIONS, limit_message);
     Ok(true)
-}
-
-fn reserve_encoder_generation<T>(
-    sessions: &mut HashMap<GenerationKey, T>,
-    key: GenerationKey,
-    reference_mode: H264ReferenceMode,
-    limit_message: &'static str,
-) -> Result<bool> {
-    if reference_mode == H264ReferenceMode::IndependentIdr {
-        sessions.remove(&key);
-    }
-    reserve_generation(sessions, key, limit_message)
 }
 
 #[cfg(test)]
@@ -592,27 +630,5 @@ mod worker_policy_tests {
             )
             .is_err()
         );
-    }
-
-    #[test]
-    fn independent_idr_recreates_a_generation_that_low_delay_reuses() {
-        let key = (MediaStreamId::new(1), StreamGeneration::new(1));
-        let mut sessions = HashMap::from([(key, ())]);
-
-        assert!(
-            !reserve_encoder_generation(&mut sessions, key, H264ReferenceMode::LowDelay, "limit",)
-                .expect("reuse persistent generation")
-        );
-        assert!(sessions.contains_key(&key));
-        assert!(
-            reserve_encoder_generation(
-                &mut sessions,
-                key,
-                H264ReferenceMode::IndependentIdr,
-                "limit",
-            )
-            .expect("recreate independent generation")
-        );
-        assert!(!sessions.contains_key(&key));
     }
 }

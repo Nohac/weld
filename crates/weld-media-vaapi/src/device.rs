@@ -1,9 +1,11 @@
 use std::{path::Path, rc::Rc};
 
 use anyhow::{Context, Result};
-use cros_codecs::libva::Display;
+use cros_libva::Display;
 
-use crate::{H264Decoder, H264Encoder, H264EncoderSettings, VppConverter};
+#[cfg(feature = "diagnostic")]
+use crate::{H264Decoder, H264Encoder, H264EncoderSettings};
+use crate::{VaapiEncodeGeometry, VppConverter};
 
 /// One VA-API display shared by codec and video-processing sessions.
 pub struct VaapiDevice {
@@ -25,6 +27,11 @@ impl VaapiDevice {
         VppConverter::new(self.display.clone())
     }
 
+    pub fn encode_geometry(&self, codec: weld_media::VideoCodec) -> Result<VaapiEncodeGeometry> {
+        crate::probe::query_encode_geometry(&self.display, codec)
+    }
+
+    #[cfg(feature = "diagnostic")]
     pub fn h264_encoder(
         &self,
         width: u32,
@@ -34,6 +41,7 @@ impl VaapiDevice {
         H264Encoder::new(self.display.clone(), width, height, settings)
     }
 
+    #[cfg(feature = "diagnostic")]
     pub fn h264_decoder(&self) -> Result<H264Decoder> {
         H264Decoder::new(self.display.clone())
     }

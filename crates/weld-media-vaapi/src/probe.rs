@@ -1,28 +1,105 @@
 use std::{error::Error, fmt, path::Path};
 
-use cros_codecs::libva::{
-    Display, VA_STATUS_ERROR_UNSUPPORTED_PROFILE, VAEntrypoint, VAProfile, VaError,
+use anyhow::ensure;
+use cros_libva::{
+    Config, Display, GenericValue, VA_STATUS_ERROR_UNSUPPORTED_PROFILE, VAEntrypoint, VAProfile,
+    VASurfaceAttribType, VaError,
 };
+use weld_media::VideoCodec;
 
 /// Hardware H.264 entrypoint selected on one VA-API device.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum H264EncodeEntrypoint {
+pub enum VaapiEncodeEntrypoint {
     Slice,
     LowPowerSlice,
 }
 
-/// Capabilities needed by the first opaque H.264 round-trip tracer.
+impl VaapiEncodeEntrypoint {
+    const fn va_entrypoint(self) -> VAEntrypoint::Type {
+        match self {
+            Self::Slice => VAEntrypoint::VAEntrypointEncSlice,
+            Self::LowPowerSlice => VAEntrypoint::VAEntrypointEncSliceLP,
+        }
+    }
+
+    pub const fn is_low_power(self) -> bool {
+        matches!(self, Self::LowPowerSlice)
+    }
+}
+
+/// Codec geometry accepted by one selected VA-API encoder entrypoint.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct VaapiEncodeGeometry {
+    entrypoint: VaapiEncodeEntrypoint,
+    minimum_width: Option<u32>,
+    minimum_height: Option<u32>,
+    maximum_width: u32,
+    maximum_height: u32,
+}
+
+impl VaapiEncodeGeometry {
+    pub fn coded_extent(
+        self,
+        visible_width: u32,
+        visible_height: u32,
+    ) -> anyhow::Result<(u32, u32)> {
+        ensure!(
+            visible_width > 0 && visible_height > 0,
+            "VA-API encoder visible extent is empty"
+        );
+        ensure!(
+            visible_width <= self.maximum_width && visible_height <= self.maximum_height,
+            "visible extent {visible_width}x{visible_height} exceeds VA-API encoder maximum {}x{}",
+            self.maximum_width,
+            self.maximum_height
+        );
+        let coded_width = self
+            .minimum_width
+            .map_or(visible_width, |minimum| visible_width.max(minimum));
+        let coded_height = self
+            .minimum_height
+            .map_or(visible_height, |minimum| visible_height.max(minimum));
+        ensure!(
+            coded_width <= self.maximum_width && coded_height <= self.maximum_height,
+            "coded extent {coded_width}x{coded_height} exceeds VA-API encoder maximum {}x{}",
+            self.maximum_width,
+            self.maximum_height
+        );
+        Ok((coded_width, coded_height))
+    }
+
+    pub const fn entrypoint(self) -> VaapiEncodeEntrypoint {
+        self.entrypoint
+    }
+
+    pub const fn minimum(self) -> (Option<u32>, Option<u32>) {
+        (self.minimum_width, self.minimum_height)
+    }
+
+    pub const fn maximum(self) -> (u32, u32) {
+        (self.maximum_width, self.maximum_height)
+    }
+}
+
+/// Hardware capabilities used by Weld's initial FFmpeg VA-API backend.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct VaapiCapabilities {
     pub vendor: String,
     pub h264_decode: bool,
-    pub h264_encode: Option<H264EncodeEntrypoint>,
+    pub h264_encode: Option<VaapiEncodeEntrypoint>,
+    pub av1_decode: bool,
+    pub av1_encode: Option<VaapiEncodeEntrypoint>,
     pub video_processing: bool,
 }
 
 impl VaapiCapabilities {
-    pub const fn supports_h264_round_trip(&self) -> bool {
-        self.h264_decode && self.h264_encode.is_some() && self.video_processing
+    pub const fn supports_round_trip(&self, codec: VideoCodec) -> bool {
+        let codec = match codec {
+            VideoCodec::H264 => self.h264_decode && self.h264_encode.is_some(),
+            VideoCodec::Av1 => self.av1_decode && self.av1_encode.is_some(),
+            VideoCodec::Vp9 => false,
+        };
+        codec && self.video_processing
     }
 }
 
@@ -63,14 +140,11 @@ pub fn probe_vaapi_device(
         .map_err(|error| VaapiProbeError::Operation(error.to_owned()))?;
 
     let h264 = supported_entrypoints(&display, VAProfile::VAProfileH264ConstrainedBaseline)?;
-    let h264_encode = if h264.contains(&VAEntrypoint::VAEntrypointEncSliceLP) {
-        Some(H264EncodeEntrypoint::LowPowerSlice)
-    } else if h264.contains(&VAEntrypoint::VAEntrypointEncSlice) {
-        Some(H264EncodeEntrypoint::Slice)
-    } else {
-        None
-    };
+    let h264_encode = select_encode_entrypoint(&h264);
     let h264_decode = h264.contains(&VAEntrypoint::VAEntrypointVLD);
+    let av1 = supported_entrypoints(&display, VAProfile::VAProfileAV1Profile0)?;
+    let av1_encode = select_encode_entrypoint(&av1);
+    let av1_decode = av1.contains(&VAEntrypoint::VAEntrypointVLD);
     let video_processing = supported_entrypoints(&display, VAProfile::VAProfileNone)?
         .contains(&VAEntrypoint::VAEntrypointVideoProc);
 
@@ -78,8 +152,88 @@ pub fn probe_vaapi_device(
         vendor,
         h264_decode,
         h264_encode,
+        av1_decode,
+        av1_encode,
         video_processing,
     })
+}
+
+pub(crate) fn query_encode_geometry(
+    display: &std::rc::Rc<Display>,
+    codec: VideoCodec,
+) -> anyhow::Result<VaapiEncodeGeometry> {
+    let profile = match codec {
+        VideoCodec::H264 => VAProfile::VAProfileH264ConstrainedBaseline,
+        VideoCodec::Av1 => VAProfile::VAProfileAV1Profile0,
+        VideoCodec::Vp9 => anyhow::bail!("VP9 VA-API encoding is not implemented"),
+    };
+    let entrypoints = display
+        .query_config_entrypoints(profile)
+        .map_err(anyhow::Error::new)?;
+    let entrypoint = select_encode_entrypoint(&entrypoints).ok_or_else(|| {
+        anyhow::anyhow!("VA-API exposes no supported {codec:?} encode entrypoint")
+    })?;
+    let mut config = display
+        .create_config(Vec::new(), profile, entrypoint.va_entrypoint())
+        .map_err(anyhow::Error::new)?;
+    let mut minimum_width =
+        query_dimension(&mut config, VASurfaceAttribType::VASurfaceAttribMinWidth)?;
+    let mut minimum_height =
+        query_dimension(&mut config, VASurfaceAttribType::VASurfaceAttribMinHeight)?;
+    let maximum_width = query_dimension(&mut config, VASurfaceAttribType::VASurfaceAttribMaxWidth)?
+        .unwrap_or(i32::MAX as u32);
+    let maximum_height =
+        query_dimension(&mut config, VASurfaceAttribType::VASurfaceAttribMaxHeight)?
+            .unwrap_or(i32::MAX as u32);
+    if codec == VideoCodec::Av1 {
+        minimum_width.get_or_insert(128);
+        minimum_height.get_or_insert(128);
+    }
+    if let Some(minimum) = minimum_width {
+        ensure!(
+            minimum <= maximum_width,
+            "VA-API encoder minimum width exceeds its maximum"
+        );
+    }
+    if let Some(minimum) = minimum_height {
+        ensure!(
+            minimum <= maximum_height,
+            "VA-API encoder minimum height exceeds its maximum"
+        );
+    }
+    Ok(VaapiEncodeGeometry {
+        entrypoint,
+        minimum_width,
+        minimum_height,
+        maximum_width,
+        maximum_height,
+    })
+}
+
+fn select_encode_entrypoint(entrypoints: &[VAEntrypoint::Type]) -> Option<VaapiEncodeEntrypoint> {
+    if entrypoints.contains(&VAEntrypoint::VAEntrypointEncSlice) {
+        Some(VaapiEncodeEntrypoint::Slice)
+    } else if entrypoints.contains(&VAEntrypoint::VAEntrypointEncSliceLP) {
+        Some(VaapiEncodeEntrypoint::LowPowerSlice)
+    } else {
+        None
+    }
+}
+
+fn query_dimension(
+    config: &mut Config,
+    attribute: VASurfaceAttribType::Type,
+) -> anyhow::Result<Option<u32>> {
+    let values = config
+        .query_surface_attributes_by_type(attribute)
+        .map_err(anyhow::Error::new)?;
+    match values.as_slice() {
+        [] => Ok(None),
+        [GenericValue::Integer(value)] if *value > 0 => Ok(Some(u32::try_from(*value)?)),
+        [GenericValue::Integer(_)] => Ok(None),
+        [_] => anyhow::bail!("VA-API encoder geometry attribute is not an integer"),
+        _ => anyhow::bail!("VA-API encoder returned duplicate geometry attributes"),
+    }
 }
 
 fn supported_entrypoints(
@@ -95,4 +249,44 @@ fn supported_entrypoints(
 
 fn is_unsupported_profile(error: &VaError) -> bool {
     error.va_status() as u32 == VA_STATUS_ERROR_UNSUPPORTED_PROFILE
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn encode_geometry_pads_to_minimum_and_rejects_maximum() {
+        let geometry = VaapiEncodeGeometry {
+            entrypoint: VaapiEncodeEntrypoint::Slice,
+            minimum_width: Some(128),
+            minimum_height: Some(128),
+            maximum_width: 8192,
+            maximum_height: 4352,
+        };
+        assert_eq!(
+            geometry.coded_extent(192, 64).expect("small popup"),
+            (192, 128)
+        );
+        assert_eq!(
+            geometry.coded_extent(944, 484).expect("ordinary window"),
+            (944, 484)
+        );
+        assert!(geometry.coded_extent(8193, 484).is_err());
+    }
+
+    #[test]
+    fn absent_minimum_preserves_visible_extent() {
+        let geometry = VaapiEncodeGeometry {
+            entrypoint: VaapiEncodeEntrypoint::Slice,
+            minimum_width: None,
+            minimum_height: None,
+            maximum_width: 4096,
+            maximum_height: 4096,
+        };
+        assert_eq!(
+            geometry.coded_extent(7, 5).expect("unrestricted minimum"),
+            (7, 5)
+        );
+    }
 }

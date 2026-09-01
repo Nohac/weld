@@ -365,9 +365,10 @@ so it can reconnect, reclaim, or fail visibly rather than freezing stale media.
 
 ## Codec and media implementation candidates — Exploration
 
-[cros-codecs](https://docs.rs/cros-codecs/latest/cros_codecs/) is a possible
-Linux hardware codec primitive for VA-API AV1, VP9, and H.264 paths.
-[FFmpeg](https://ffmpeg.org/ffmpeg.html) with VA-API is another candidate.
+[FFmpeg](https://ffmpeg.org/ffmpeg.html) with VA-API is the selected initial
+Linux implementation for H.264 and AV1. cros-codecs remains useful as an
+independent diagnostic reference, and narrower native or Vulkan Video backends
+may implement the same contract later.
 Android destinations should evaluate MediaCodec behind the same neutral media
 contract rather than expose an Android API through the wire protocol.
 
@@ -377,10 +378,9 @@ VA-API, Android MediaCodec, hardware-buffer presentation, and Dioxus adapters.
 Its components and current capabilities should be evaluated or ported
 independently against Weld's contracts rather than adopted as one stack.
 
-No candidate is selected. A backend must accept Weld-owned native frames,
-report truthful stage and session capabilities, preserve per-stream lifetime,
-and never move a promised hardware path onto the compositor thread or an
-unreported CPU fallback.
+Any backend must accept Weld-owned native frames, report truthful stage and
+session capabilities, preserve per-stream lifetime, and never move a promised
+hardware path onto the compositor thread or an unreported CPU fallback.
 
 ## GPU-resident network handoff — Exploration
 

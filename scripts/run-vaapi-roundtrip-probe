@@ -6,4 +6,4 @@ repository_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 
 cd -- "${repository_root}"
 nix develop /home/jonas/Dotfiles/nixos/envs/rust --command \
-    cargo run --example vaapi_roundtrip_probe
+    cargo run -p weld-media-vaapi --features diagnostic --example vaapi_roundtrip_probe

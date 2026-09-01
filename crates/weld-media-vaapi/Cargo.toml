@@ -5,10 +5,17 @@ edition.workspace = true
 publish.workspace = true
 
 [features]
-diagnostic = []
+diagnostic = ["dep:cros-codecs"]
 
 [dependencies]
 anyhow.workspace = true
-cros-codecs.workspace = true
+cros-codecs = { workspace = true, optional = true }
+cros-libva.workspace = true
+ffmpeg-next.workspace = true
+libc.workspace = true
 weld-media = { path = "../weld-media" }
 tracing.workspace = true
+
+[[example]]
+name = "vaapi_roundtrip_probe"
+required-features = ["diagnostic"]
