@@ -1,0 +1,258 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+repository_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+
+if [[ "${WELD_GSTREAMER_PROBE_IN_SHELL:-0}" != "1" ]]; then
+    exec nix develop /home/jonas/Dotfiles/nixos/envs/rust --command \
+        env WELD_GSTREAMER_PROBE_IN_SHELL=1 bash "$0" "$@"
+fi
+
+render_node="/dev/dri/renderD128"
+while (( $# > 0 )); do
+    case "$1" in
+        --render-node)
+            if (( $# < 2 )); then
+                echo "--render-node requires a path" >&2
+                exit 2
+            fi
+            render_node="$2"
+            shift 2
+            ;;
+        *)
+            echo "unknown argument: $1" >&2
+            exit 2
+            ;;
+    esac
+done
+
+cd -- "${repository_root}"
+
+timestamp="$(date +%Y%m%d-%H%M%S)"
+output="${repository_root}/target/validation/gstreamer-vaapi-probe-${timestamp}"
+manifest="tools/gstreamer-vaapi-probe/Cargo.toml"
+target_directory="${repository_root}/target/gstreamer-vaapi-probe"
+binary="${target_directory}/debug/gstreamer-vaapi-probe"
+mkdir -p -- "${output}"
+
+echo "GStreamer is used only as an isolated hardware-codec diagnostic."
+echo "Output: ${output}"
+echo "Render node: ${render_node}"
+
+export CARGO_TARGET_DIR="${target_directory}"
+cargo metadata --manifest-path "${manifest}" --format-version 1 \
+    > "${output}/cargo-metadata.json"
+cargo tree --manifest-path "${manifest}" > "${output}/cargo-tree.txt"
+if ! rg -q 'cros-codecs .*vendor/cros-codecs' "${output}/cargo-tree.txt"; then
+    echo "probe did not resolve the vendored cros-codecs tree" >&2
+    exit 1
+fi
+if ! rg -q 'cros-libva .*vendor/cros-libva' "${output}/cargo-tree.txt"; then
+    echo "probe did not resolve the vendored cros-libva tree" >&2
+    exit 1
+fi
+
+WELD_GSTREAMER_PROBE_OUTPUT="${output}" \
+WELD_RENDER_NODE="${render_node}" \
+    cargo run --manifest-path "${manifest}" | tee "${output}/run.log"
+
+sample_byte() {
+    local file="$1"
+    local offset="$2"
+    od -An -tu1 -j "${offset}" -N1 "${file}" | tr -d '[:space:]'
+}
+
+report_value() {
+    local name="$1"
+    awk -F= -v name="${name}" '$1 == name { print $2; exit }' "${output}/probe.txt"
+}
+
+classify_range() {
+    local black="$1"
+    local white="$2"
+    if (( black <= 4 && white >= 251 )); then
+        echo "full"
+    elif (( black >= 12 && black <= 20 && white >= 231 && white <= 239 )); then
+        echo "limited"
+    else
+        echo "unknown"
+    fi
+}
+
+inspect_range() {
+    local label="$1"
+    local stream="$2"
+    local raw="${output}/${label}-first-frame.yuv"
+    ffmpeg -v error -i "${stream}" -frames:v 1 -pix_fmt yuv420p \
+        -f rawvideo -y "${raw}"
+    local black
+    local white
+    local mid_gray
+    black="$(sample_byte "${raw}" "${black_sample_offset}")"
+    white="$(sample_byte "${raw}" "${white_sample_offset}")"
+    mid_gray="$(sample_byte "${raw}" "${mid_gray_sample_offset}")"
+    local range
+    range="$(classify_range "${black}" "${white}")"
+    printf '%s-range=%s black=%s white=%s mid-gray=%s\n' \
+        "${label}" "${range}" "${black}" "${white}" "${mid_gray}" \
+        | tee -a "${output}/quality-report.txt" >&2
+    echo "${range}"
+}
+
+assert_stream_contract() {
+    local label="$1"
+    local stream="$2"
+    local stream_report="${output}/${label}-stream.txt"
+    local trace_report="${output}/${label}-trace-headers.txt"
+
+    ffprobe -v error -select_streams v:0 -count_frames \
+        -show_entries stream=width,height,coded_width,coded_height,nb_read_frames \
+        -of default=nw=1 "${stream}" | tee "${stream_report}"
+
+    local width
+    local height
+    local frames
+    width="$(awk -F= '$1 == "width" { print $2; exit }' "${stream_report}")"
+    height="$(awk -F= '$1 == "height" { print $2; exit }' "${stream_report}")"
+    frames="$(awk -F= '$1 == "nb_read_frames" { print $2; exit }' "${stream_report}")"
+    if [[ "${width}" != "944" || "${height}" != "484" || "${frames}" != "64" ]]; then
+        echo "${label} stream contract differs from 944x484 and 64 frames" >&2
+        exit 1
+    fi
+
+    ffmpeg -v debug -i "${stream}" -c copy -bsf:v trace_headers \
+        -f null - > /dev/null 2> "${trace_report}"
+    local macroblock_width
+    local macroblock_height
+    local crop_right
+    local crop_bottom
+    local profile_idc
+    local constrained_baseline
+    profile_idc="$(awk '/profile_idc/ { print $NF; exit }' "${trace_report}")"
+    constrained_baseline="$(awk '/constraint_set1_flag/ { print $NF; exit }' "${trace_report}")"
+    macroblock_width="$(awk '/pic_width_in_mbs_minus1/ { print $NF; exit }' "${trace_report}")"
+    macroblock_height="$(awk '/pic_height_in_map_units_minus1/ { print $NF; exit }' "${trace_report}")"
+    crop_right="$(awk '/frame_crop_right_offset/ { print $NF; exit }' "${trace_report}")"
+    crop_bottom="$(awk '/frame_crop_bottom_offset/ { print $NF; exit }' "${trace_report}")"
+    if [[ "${profile_idc}" != "66" \
+        || "${constrained_baseline}" != "1" \
+        || "${macroblock_width}" != "58" \
+        || "${macroblock_height}" != "30" \
+        || "${crop_right}" != "0" \
+        || "${crop_bottom}" != "6" ]]; then
+        echo "${label} H.264 profile or SPS geometry differs from the probe contract" >&2
+        exit 1
+    fi
+    printf '%s-sps profile-idc=%s constraint-set1=%s width-mbs-minus-one=%s height-map-units-minus-one=%s crop-right=%s crop-bottom=%s\n' \
+        "${label}" "${profile_idc}" "${constrained_baseline}" \
+        "${macroblock_width}" "${macroblock_height}" \
+        "${crop_right}" "${crop_bottom}" \
+        | tee -a "${output}/quality-report.txt"
+}
+
+run_psnr() {
+    local label="$1"
+    local stream="$2"
+    local range="$3"
+    local decoded="${output}/decoded-${label}"
+    local stats="${output}/${label}-psnr-frames.txt"
+    local summary="${output}/${label}-psnr-summary.txt"
+    mkdir -p -- "${decoded}"
+
+    ffmpeg -v error -i "${stream}" \
+        -vf "scale=in_range=${range}:out_range=full" -pix_fmt rgb24 \
+        -start_number 0 -y "${decoded}/frame-%03d.ppm"
+    ffmpeg -v info \
+        -framerate 60 -start_number 0 -i "${output}/reference/frame-%03d.ppm" \
+        -framerate 60 -start_number 0 -i "${decoded}/frame-%03d.ppm" \
+        -lavfi "psnr=stats_file=${stats}" -f null - \
+        > /dev/null 2> "${summary}"
+
+    local average
+    local minimum
+    average="$(rg -o 'average:[0-9.]+' "${summary}" | tail -1 | cut -d: -f2 || true)"
+    minimum="$(rg -o 'min:[0-9.]+' "${summary}" | tail -1 | cut -d: -f2 || true)"
+    if [[ -z "${average}" || -z "${minimum}" ]]; then
+        echo "could not read ${label} PSNR result" >&2
+        return 1
+    fi
+    printf '%s-psnr average=%s minimum=%s\n' "${label}" "${average}" "${minimum}" \
+        | tee -a "${output}/quality-report.txt" >&2
+    echo "${average} ${minimum}"
+}
+
+cros_stream="${output}/cros.h264"
+gstreamer_stream="${output}/gstreamer.h264"
+assert_stream_contract "cros" "${cros_stream}"
+assert_stream_contract "gstreamer" "${gstreamer_stream}"
+
+validated_width="$(awk -F= '$1 == "width" { print $2; exit }' "${output}/cros-stream.txt")"
+for sample in black white mid-gray; do
+    sample_x="$(report_value "sample-${sample}-x")"
+    sample_y="$(report_value "sample-${sample}-y")"
+    sample_offset="$(report_value "sample-${sample}-offset")"
+    expected_offset=$(( sample_y * validated_width + sample_x ))
+    if (( sample_offset != expected_offset )); then
+        echo "${sample} sample offset differs from the decoded luma layout" >&2
+        exit 1
+    fi
+done
+black_sample_offset="$(report_value sample-black-offset)"
+white_sample_offset="$(report_value sample-white-offset)"
+mid_gray_sample_offset="$(report_value sample-mid-gray-offset)"
+
+cros_range="$(inspect_range "cros" "${cros_stream}")"
+gstreamer_range="$(inspect_range "gstreamer" "${gstreamer_stream}")"
+if [[ "${gstreamer_range}" == "unknown" ]]; then
+    echo "GStreamer output range is unknown; quality comparison is invalid" >&2
+    exit 1
+fi
+gstreamer_mid_gray="$(sample_byte "${output}/gstreamer-first-frame.yuv" "${mid_gray_sample_offset}")"
+if (( gstreamer_mid_gray < 122 || gstreamer_mid_gray > 130 )); then
+    echo "GStreamer negotiated sRGB transfer but did not preserve the expected mid-gray luma: ${gstreamer_mid_gray}" >&2
+    exit 1
+fi
+
+if ! gstreamer_psnr="$(run_psnr "gstreamer" "${gstreamer_stream}" "${gstreamer_range}")"; then
+    echo "could not measure GStreamer PSNR" >&2
+    exit 1
+fi
+read -r gstreamer_average gstreamer_minimum <<< "${gstreamer_psnr}"
+echo "GStreamer PSNR: average=${gstreamer_average} minimum=${gstreamer_minimum}"
+if ! awk -v average="${gstreamer_average}" -v minimum="${gstreamer_minimum}" \
+    'BEGIN { exit !(average >= 35.0 && minimum >= 28.0) }'; then
+    echo "GStreamer quality gate failed: average >= 35 dB and minimum >= 28 dB required" >&2
+    exit 1
+fi
+
+if [[ "${cros_range}" == "${gstreamer_range}" && "${cros_range}" != "unknown" ]]; then
+    run_psnr "cros" "${cros_stream}" "${cros_range}" > /dev/null
+    echo "relative-comparison=valid" | tee -a "${output}/quality-report.txt"
+else
+    echo "relative-comparison=skipped range mismatch or unknown cros range" \
+        | tee -a "${output}/quality-report.txt"
+fi
+
+stat -c 'binary-bytes=%s binary=%n' "${binary}" > "${output}/footprint.txt"
+ldd "${binary}" > "${output}/binary-ldd.txt"
+while IFS= read -r plugin; do
+    stat -c 'plugin-bytes=%s plugin=%n' "${plugin}" >> "${output}/footprint.txt"
+    ldd "${plugin}" >> "${output}/plugin-ldd.txt"
+done < <(awk -F= '$1 == "gstreamer-plugin" { print $2 }' "${output}/probe.txt" | sort -u)
+
+{
+    awk '/=> \/nix\/store/ { print $3 }' "${output}/binary-ldd.txt"
+    awk '/=> \/nix\/store/ { print $3 }' "${output}/plugin-ldd.txt"
+    awk -F= '$1 == "gstreamer-plugin" { print $2 }' "${output}/probe.txt"
+} | awk -F/ '/^\/nix\/store\// { print "/nix/store/" $4 }' \
+    | sort -u > "${output}/gstreamer-store-paths.txt"
+if [[ -s "${output}/gstreamer-store-paths.txt" ]]; then
+    xargs nix path-info -Sh < "${output}/gstreamer-store-paths.txt" \
+        > "${output}/gstreamer-closure-sizes.txt"
+fi
+
+echo "Probe passed."
+echo "Report: ${output}/quality-report.txt"
+echo "Pipeline: ${output}/probe.txt"
+echo "Footprint: ${output}/footprint.txt"

@@ -1,0 +1,20 @@
+[package]
+name = "gstreamer-vaapi-probe"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[dependencies]
+anyhow = "1.0.100"
+gstreamer = { version = "0.25.3", features = ["v1_28"] }
+gstreamer-allocators = { version = "0.25.3", features = ["v1_28"] }
+gstreamer-app = { version = "0.25.2", features = ["v1_28"] }
+gstreamer-video = { version = "0.25.3", features = ["v1_28"] }
+weld-media = { path = "../../crates/weld-media" }
+weld-media-vaapi = { path = "../../crates/weld-media-vaapi", features = ["diagnostic"] }
+
+[patch.crates-io]
+cros-libva = { path = "../../vendor/cros-libva" }
+cros-codecs = { path = "../../vendor/cros-codecs" }

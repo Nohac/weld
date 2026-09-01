@@ -110,6 +110,59 @@ bitrate is not binding; it is not mixed into this comparison. Automatic
 per-device round-trip validation remains deferred to the capability-negotiation
 pass, where peers should advertise only profiles that survive validation.
 
+### Independent GStreamer encoder probe
+
+`scripts/run-gstreamer-vaapi-probe` is an isolated diagnostic comparison, not a
+Weld runtime dependency or a production codec decision. Its standalone Cargo
+workspace feeds the same deterministic XRGB DMA-BUF frames to Weld's patched
+cros-codecs H.264 path and to GStreamer's VA-API H.264 path. The runner rejects
+system-memory negotiation, software-decodes both streams, checks range anchors,
+SPS geometry and profile, measures PSNR, and records the executable, plugin,
+linkage, and Nix closure footprint. Run it with:
+
+```sh
+scripts/run-gstreamer-vaapi-probe
+scripts/run-gstreamer-vaapi-probe --render-node /dev/dri/renderD128
+```
+
+Each run writes a timestamped directory under
+`target/validation/gstreamer-vaapi-probe-*`. The test source contains stable
+black, white, and mid-gray patches, localized 8-pixel detail, and moving
+high-contrast regions. The stable patches distinguish range conversion from a
+transfer-curve conversion instead of relying on PSNR alone. All pixels are
+grayscale, so this probe intentionally does not validate RGB channel order.
+
+A September 1, 2026 Radeon 880M run established GStreamer integration
+viability without establishing that GStreamer fixes Weld's Blender artifact.
+GStreamer negotiated modifier-bearing XRGB DMA-BUF input, `VAMemory` NV12
+postprocessing, and constrained-baseline H.264 output. It emitted all 64 frames
+with the expected 944x484 display and 944x496 coded geometry. The SPS reported
+`profile_idc=66`, constrained-baseline flag 1, 59 macroblocks horizontally, 31
+vertically, and a 12-row bottom crop. Stable luma anchors decoded to 16, 235,
+and 126, confirming limited range while preserving the requested sRGB transfer.
+Its range-normalized PSNR was 46.09 dB average and 39.99 dB minimum.
+
+The cros-codecs arm had matching geometry, cadence, and constrained-baseline
+profile, but its stable anchors decoded to 3, 241, and 125. The endpoints match
+neither standard full nor limited range and are an independent cros-path
+anomaly. Because that range cannot be classified, relative PSNR is deliberately
+skipped. None of the planned clean-versus-corrupt A/B interpretation branches
+was reached, and the large Blender corruption was not reproduced by either arm.
+Both arms nevertheless preserved mid-gray within one code value. Matching
+mid-tones with divergent endpoints narrows the cros anomaly to endpoint or
+clamping behavior, not a transfer-curve or matrix conversion. The result
+narrows future work to the real client-buffer input and rate-control conditions
+rather than proving that a codec framework replacement solves it.
+
+The same run also supports keeping GStreamer out of Weld's production graph.
+The diagnostic executable was 49 MB with debug information and dynamically
+loaded a 650 KB VA plugin. More importantly, Nix reported overlapping closure
+sizes of roughly 244 MB for GStreamer core, 320 MB for plugins-base, and 893 MB
+for plugins-bad. These closure figures are not additive, but they demonstrate a
+substantial runtime and packaging commitment compared with a narrow codec
+adapter. GStreamer remains useful as an independent implementation oracle;
+FFmpeg, Vulkan Video, and narrower native backends remain production candidates.
+
 The August 31 artifact investigation also found a separate visible-versus-coded
 extent contract hidden by the cros-codecs H.264 API. Its SPS builder rounds a
 visible extent to 16x16 macroblocks and records the crop, while `new_vaapi`

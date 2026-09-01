@@ -207,6 +207,32 @@ impl VppConverter {
 
     /// Uploads tightly packed BGRA pixels into an XRGB DMA-BUF for VPP input.
     pub fn upload_bgra(&self, width: u32, height: u32, pixels: &[u8]) -> Result<VaapiDmabuf> {
+        self.upload_bgra_with_modifier_candidates(width, height, pixels, vec![0])
+    }
+
+    /// Uploads diagnostic BGRA pixels into an XRGB DMA-BUF selected from explicit modifiers.
+    #[cfg(feature = "diagnostic")]
+    pub fn upload_bgra_with_modifiers(
+        &self,
+        width: u32,
+        height: u32,
+        pixels: &[u8],
+        modifiers: Vec<u64>,
+    ) -> Result<VaapiDmabuf> {
+        ensure!(
+            !modifiers.is_empty(),
+            "BGRA upload has no candidate modifiers"
+        );
+        self.upload_bgra_with_modifier_candidates(width, height, pixels, modifiers)
+    }
+
+    fn upload_bgra_with_modifier_candidates(
+        &self,
+        width: u32,
+        height: u32,
+        pixels: &[u8],
+        modifiers: Vec<u64>,
+    ) -> Result<VaapiDmabuf> {
         ensure!(width > 0 && height > 0, "BGRA upload has zero extent");
         let expected = u64::from(width)
             .checked_mul(u64::from(height))
@@ -225,7 +251,7 @@ impl VppConverter {
                 width,
                 height,
                 Some(UsageHint::USAGE_HINT_VPP_READ | UsageHint::USAGE_HINT_EXPORT),
-                vec![ModifierAllocation { modifiers: vec![0] }],
+                vec![ModifierAllocation { modifiers }],
             )
             .context("could not allocate the BGRA upload surface")?;
         let surface = surfaces
