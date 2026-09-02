@@ -11,6 +11,15 @@ The source remains the authoritative Wayland compositor for the real client.
 The destination registers a Relocated `weld-client` adapter and presents the
 transported toplevels and popups through ordinary window admission.
 
+`weld-hoist-core` supplies the shared source and destination relays used by
+both this binding and same-process loopback. Those relays own session checks,
+surface caching and replay, popup recursion, identity relocation, request and
+input back-routing, scale reset, and input cleanup on peer loss.
+`weld-hoist-local` supplies only binding mechanics: Postcard records, Unix
+packet and descriptor ownership, native buffer import/export, encoded-media
+state, bounded queues, and calloop wake sources. A local source or destination
+failure therefore enters the same hoist cleanup policy as another transport.
+
 Native mode has these properties:
 
 - Unix `SOCK_SEQPACKET` preserves one Postcard record per message.
@@ -18,6 +27,9 @@ Native mode has these properties:
   describes them.
 - Both endpoints verify `SO_PEERCRED` against Weld's effective UID and validate
   the opposite Source/Destination role on every packet.
+- Destination control packets must not carry file descriptors. Receiving one
+  is fatal because skipping it would discard descriptor ownership and could
+  desynchronize descriptor indices in later packets.
 - One stable epoll descriptor wakes Smithay's calloop. Writable readiness is
   enabled only while a send queue is nonempty.
 - The first committed use imports an allocation. Later uses name the stable
@@ -42,6 +54,8 @@ codec path:
 - The source selects the mode during a request/acknowledgement bootstrap. It
   passes one end of a fresh seqpacket socketpair to the destination with
   `SCM_RIGHTS`; media therefore cannot fill the independent control queue.
+- Both sides exchange and require the exact current pre-1.0 hoist protocol
+  revision before accepting the selected surface mode.
 - One capacity-one worker per endpoint owns persistent FFmpeg VA-API sessions
   for the bootstrap-selected codec. Worker completion wakes calloop through
   eventfd rather than polling.
@@ -390,7 +404,8 @@ multiple Weld instances in one runtime directory.
 - The supported topology is sibling compositors. Do not launch the destination
   inside the source's Wayland session.
 - The Postcard records are intentionally pre-1.0 and require matching Weld
-  builds. Compatibility negotiation is deferred until the protocol stabilizes.
+  builds. The bootstrap rejects a different exact protocol revision; no
+  backward-compatibility negotiation is attempted before 1.0.
 - Encoded mode supports opaque H.264 and AV1. It has no VP9, alpha plane,
   software codec fallback, cross-device capability negotiation, or
   decoded-output pool.

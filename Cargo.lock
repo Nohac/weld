@@ -5850,8 +5850,8 @@ dependencies = [
 name = "weld-hoist-core"
 version = "0.1.0"
 dependencies = [
- "serde",
  "weld-client",
+ "weld-hoist-protocol",
 ]
 
 [[package]]
@@ -5868,8 +5868,18 @@ dependencies = [
  "weld-client",
  "weld-core",
  "weld-hoist-core",
+ "weld-hoist-protocol",
  "weld-media",
  "weld-media-vaapi",
+]
+
+[[package]]
+name = "weld-hoist-protocol"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "weld-client",
+ "weld-media",
 ]
 
 [[package]]

@@ -6,6 +6,7 @@ use std::{
 
 use anyhow::{Context, Result, ensure};
 use smithay::utils::SealedFile;
+use weld_hoist_protocol::EncodedAccessUnitHeader;
 use weld_media::EncodedAccessUnit;
 
 use crate::{LocalEncodedAccessUnit, ensure_descriptors_consumed};
@@ -30,12 +31,14 @@ pub(crate) fn export_access_unit(
         .context("failed to duplicate encoded access unit descriptor")?;
     Ok((
         LocalEncodedAccessUnit {
-            frame: access_unit.frame,
-            codec: access_unit.codec,
-            kind: access_unit.kind,
-            timestamp_micros: access_unit.timestamp_micros,
+            header: EncodedAccessUnitHeader {
+                frame: access_unit.frame,
+                codec: access_unit.codec,
+                kind: access_unit.kind,
+                timestamp_micros: access_unit.timestamp_micros,
+                payload_bytes,
+            },
             payload_descriptor: 0,
-            payload_bytes,
         },
         vec![descriptor],
     ))
@@ -52,7 +55,7 @@ pub(crate) fn import_access_unit(
         .take()
         .context("encoded payload descriptor index was reused")?;
     ensure_descriptors_consumed(&descriptors)?;
-    let payload_bytes = usize::try_from(access_unit.payload_bytes)
+    let payload_bytes = usize::try_from(access_unit.header.payload_bytes)
         .context("encoded access unit length exceeds address space")?;
     ensure!(
         payload_bytes > 0 && payload_bytes <= MAX_ENCODED_ACCESS_UNIT_BYTES,
@@ -78,10 +81,10 @@ pub(crate) fn import_access_unit(
     let mut payload = vec![0; payload_bytes];
     file.read_exact(&mut payload)?;
     Ok(EncodedAccessUnit {
-        frame: access_unit.frame,
-        codec: access_unit.codec,
-        kind: access_unit.kind,
-        timestamp_micros: access_unit.timestamp_micros,
+        frame: access_unit.header.frame,
+        codec: access_unit.header.codec,
+        kind: access_unit.header.kind,
+        timestamp_micros: access_unit.header.timestamp_micros,
         payload,
     })
 }
@@ -117,16 +120,18 @@ mod tests {
     #[test]
     fn access_unit_rejects_unsealed_and_mismatched_descriptors() {
         let (mut record, descriptors) = export_access_unit(access_unit()).expect("export");
-        record.payload_bytes += 1;
+        record.header.payload_bytes += 1;
         assert!(import_access_unit(record, descriptors).is_err());
 
         let record = LocalEncodedAccessUnit {
-            frame: access_unit().frame,
-            codec: VideoCodec::H264,
-            kind: EncodedFrameKind::Keyframe,
-            timestamp_micros: 4,
+            header: EncodedAccessUnitHeader {
+                frame: access_unit().frame,
+                codec: VideoCodec::H264,
+                kind: EncodedFrameKind::Keyframe,
+                timestamp_micros: 4,
+                payload_bytes: 3,
+            },
             payload_descriptor: 0,
-            payload_bytes: 3,
         };
         let descriptor: OwnedFd = File::open("/dev/null").expect("descriptor").into();
         assert!(import_access_unit(record, vec![descriptor]).is_err());

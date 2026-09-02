@@ -1,30 +1,19 @@
 //! Runtime-independent hoist sessions and same-process loopback client adapter.
 
-use std::collections::{HashMap, VecDeque};
+mod loopback;
+mod relay;
 
-use weld_client::{
-    ClientAdapter, ClientAdapterCommandEnvelope, ClientAdapterRegistration, ClientBufferId,
-    ClientBufferUseId, ClientEventQueue, ClientInputEvent, ClientProvenance, ClientRequest,
-    ClientRouteAliasUpdate, ClientSourceDescriptor, ClientSourceId, ClientSurfaceCommit,
-    ClientSurfaceEvent, ClientSurfaceEventKind, ClientSurfaceId, ClientSurfaceRole,
-    PassthroughClientImporter, PopupState, SurfaceBufferChange, ToplevelState,
+pub use relay::{
+    DestinationPortCommand, DestinationPortEvent, DestinationPortRecord, DestinationRelayAdapter,
+    HoistDestinationPort, HoistPortError, HoistPortResult, HoistSourcePort, SourcePortCommand,
+    SourceRelayAdapter,
 };
+use weld_client::{
+    ClientAdapterCommandEnvelope, ClientAdapterRegistration, ClientProvenance,
+    ClientSourceDescriptor, ClientSourceId, ClientSurfaceId,
+};
+pub use weld_hoist_protocol::HoistSessionId;
 
-#[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
-#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub struct HoistSessionId(u64);
-
-impl HoistSessionId {
-    pub const fn new(raw: u64) -> Self {
-        Self(raw)
-    }
-
-    pub const fn raw(self) -> u64 {
-        self.0
-    }
-}
-
-#[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct HoistFamilyId(u64);
 
@@ -137,12 +126,9 @@ pub fn loopback_registration(
     destination: ClientSourceId,
 ) -> (ClientAdapterRegistration, LoopbackEndpoint) {
     let descriptor = ClientSourceDescriptor::new(destination, ClientProvenance::Relocated);
-    let adapter = LoopbackClientAdapter::new(upstream, descriptor);
     (
-        ClientAdapterRegistration::new(descriptor, adapter, PassthroughClientImporter),
-        LoopbackEndpoint {
-            source: destination,
-        },
+        loopback::registration(upstream, descriptor),
+        loopback::endpoint(destination),
     )
 }
 
@@ -156,255 +142,6 @@ pub const fn relocated_surface(
     )
 }
 
-#[derive(Default)]
-struct CachedSurface {
-    role: Option<ClientSurfaceRole>,
-    commit: Option<ClientSurfaceCommit>,
-}
-
-struct LoopbackClientAdapter {
-    upstream: ClientSourceId,
-    descriptor: ClientSourceDescriptor,
-    cache: HashMap<ClientSurfaceId, CachedSurface>,
-    mappings: HashMap<ClientSurfaceId, ClientSurfaceId>,
-    events: ClientEventQueue,
-    aliases: VecDeque<ClientRouteAliasUpdate>,
-    next_buffer_use: Option<u64>,
-}
-
-impl LoopbackClientAdapter {
-    fn new(upstream: ClientSourceId, descriptor: ClientSourceDescriptor) -> Self {
-        Self {
-            upstream,
-            descriptor,
-            cache: HashMap::new(),
-            mappings: HashMap::new(),
-            events: ClientEventQueue::default(),
-            aliases: VecDeque::new(),
-            next_buffer_use: Some(1),
-        }
-    }
-
-    fn map(&mut self, source: ClientSurfaceId) {
-        if source.source() != self.upstream || self.mappings.contains_key(&source) {
-            return;
-        }
-        let destination = relocated_surface(self.descriptor.id, source);
-        self.mappings.insert(source, destination);
-        self.aliases.push_back(ClientRouteAliasUpdate {
-            destination,
-            source: Some(source),
-        });
-        if let Some(cached) = self.cache.get(&source) {
-            if let Some(role) = cached.role.and_then(|role| self.relay_role(role)) {
-                self.events.push(ClientSurfaceEvent {
-                    surface: destination,
-                    kind: ClientSurfaceEventKind::Role(role),
-                });
-            }
-            if let Some(commit) = cached.commit.clone() {
-                self.push_commit(source, commit);
-            }
-        }
-        self.map_cached_popups(source);
-        self.refresh_children_of(source);
-    }
-
-    fn unmap(&mut self, source: ClientSurfaceId) {
-        let Some(destination) = self.mappings.remove(&source) else {
-            return;
-        };
-        self.aliases.push_back(ClientRouteAliasUpdate {
-            destination,
-            source: None,
-        });
-        self.events.push(ClientSurfaceEvent {
-            surface: destination,
-            kind: ClientSurfaceEventKind::Destroyed,
-        });
-        let popups = self
-            .cache
-            .iter()
-            .filter_map(|(surface, cached)| match cached.role {
-                Some(ClientSurfaceRole::Popup(popup)) if popup.owner == source => Some(*surface),
-                _ => None,
-            })
-            .collect::<Vec<_>>();
-        for popup in popups {
-            self.unmap(popup);
-        }
-    }
-
-    fn relay_role(&self, role: ClientSurfaceRole) -> Option<ClientSurfaceRole> {
-        match role {
-            ClientSurfaceRole::Toplevel(toplevel) => {
-                Some(ClientSurfaceRole::Toplevel(ToplevelState {
-                    parent: toplevel
-                        .parent
-                        .and_then(|parent| self.mappings.get(&parent).copied()),
-                    decoration: toplevel.decoration,
-                }))
-            }
-            ClientSurfaceRole::Popup(popup) => {
-                let owner = self.mappings.get(&popup.owner).copied()?;
-                Some(ClientSurfaceRole::Popup(PopupState { owner, ..popup }))
-            }
-        }
-    }
-
-    fn push_commit(&mut self, source: ClientSurfaceId, mut commit: ClientSurfaceCommit) {
-        let Some(destination) = self.mappings.get(&source).copied() else {
-            return;
-        };
-        for update in &mut commit.buffers {
-            let SurfaceBufferChange::Replaced { metadata, buffer } = &mut update.change else {
-                continue;
-            };
-            let Some(use_local) = self.next_buffer_use else {
-                update.change = SurfaceBufferChange::Retained {
-                    metadata: *metadata,
-                };
-                continue;
-            };
-            self.next_buffer_use = use_local.checked_add(1);
-            let destination_buffer =
-                ClientBufferId::new(self.descriptor.id, buffer.buffer().local());
-            let destination_use = ClientBufferUseId::new(self.descriptor.id, use_local);
-            match buffer.clone().relay(destination_buffer, destination_use) {
-                Ok(relayed) => *buffer = relayed,
-                Err(_) => {
-                    update.change = SurfaceBufferChange::Retained {
-                        metadata: *metadata,
-                    };
-                }
-            }
-        }
-        self.events.push(ClientSurfaceEvent {
-            surface: destination,
-            kind: ClientSurfaceEventKind::Commit(commit),
-        });
-    }
-
-    fn map_cached_popups(&mut self, owner: ClientSurfaceId) {
-        let popups = self
-            .cache
-            .iter()
-            .filter_map(|(surface, cached)| match cached.role {
-                Some(ClientSurfaceRole::Popup(popup)) if popup.owner == owner => Some(*surface),
-                _ => None,
-            })
-            .collect::<Vec<_>>();
-        for popup in popups {
-            self.map(popup);
-        }
-    }
-
-    fn refresh_children_of(&mut self, parent: ClientSurfaceId) {
-        let children = self
-            .cache
-            .iter()
-            .filter_map(|(surface, cached)| match cached.role {
-                Some(ClientSurfaceRole::Toplevel(ToplevelState {
-                    parent: Some(candidate),
-                    ..
-                })) if candidate == parent && self.mappings.contains_key(surface) => Some(*surface),
-                _ => None,
-            })
-            .collect::<Vec<_>>();
-        for child in children {
-            if let Some(destination) = self.mappings.get(&child).copied()
-                && let Some(role) = self.cache[&child]
-                    .role
-                    .and_then(|role| self.relay_role(role))
-            {
-                self.events.push(ClientSurfaceEvent {
-                    surface: destination,
-                    kind: ClientSurfaceEventKind::Role(role),
-                });
-            }
-        }
-    }
-
-    fn observe(&mut self, event: &ClientSurfaceEvent) {
-        if event.surface.source() != self.upstream {
-            return;
-        }
-        let source = event.surface;
-        match &event.kind {
-            ClientSurfaceEventKind::Role(role) => {
-                self.cache.entry(source).or_default().role = Some(*role);
-                let auto_popup = matches!(
-                    role,
-                    ClientSurfaceRole::Popup(popup) if self.mappings.contains_key(&popup.owner)
-                );
-                if auto_popup && !self.mappings.contains_key(&source) {
-                    self.map(source);
-                } else if let Some(destination) = self.mappings.get(&source).copied()
-                    && let Some(role) = self.relay_role(*role)
-                {
-                    self.events.push(ClientSurfaceEvent {
-                        surface: destination,
-                        kind: ClientSurfaceEventKind::Role(role),
-                    });
-                }
-            }
-            ClientSurfaceEventKind::Commit(commit) => {
-                let outgoing = commit.clone();
-                let cached = self.cache.entry(source).or_default();
-                let mut retained = commit.clone();
-                if let Some(previous) = &mut cached.commit {
-                    retained.carry_unobserved_content_from(previous);
-                }
-                cached.commit = Some(retained);
-                self.push_commit(source, outgoing);
-            }
-            ClientSurfaceEventKind::Interaction(interaction) => {
-                if let Some(destination) = self.mappings.get(&source).copied() {
-                    self.events.push(ClientSurfaceEvent {
-                        surface: destination,
-                        kind: ClientSurfaceEventKind::Interaction(*interaction),
-                    });
-                }
-            }
-            ClientSurfaceEventKind::Destroyed => {
-                self.unmap(source);
-                self.cache.remove(&source);
-            }
-        }
-    }
-}
-
-impl ClientAdapter for LoopbackClientAdapter {
-    fn drain_events(&mut self, events: &mut ClientEventQueue) {
-        while let Some(event) = self.events.pop_front() {
-            events.push(event);
-        }
-    }
-
-    fn apply_request(&mut self, _request: ClientRequest) {}
-    fn apply_input(&mut self, _event: ClientInputEvent) {}
-
-    fn apply_command(&mut self, command: ClientAdapterCommandEnvelope) {
-        let Ok(command) = command.downcast::<HoistEndpointCommand>() else {
-            return;
-        };
-        match *command {
-            HoistEndpointCommand::Map { source, .. } => self.map(source),
-            HoistEndpointCommand::Unmap { source } => self.unmap(source),
-        }
-    }
-
-    fn host_focus_lost(&mut self, _time: u32) {}
-
-    fn observe_event(&mut self, event: &ClientSurfaceEvent) {
-        self.observe(event);
-    }
-
-    fn drain_route_alias_updates(&mut self, updates: &mut Vec<ClientRouteAliasUpdate>) {
-        updates.extend(self.aliases.drain(..));
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::{cell::RefCell, rc::Rc};
@@ -415,8 +152,9 @@ mod tests {
         ClientEventQueue, ClientFocusRequest, ClientInputEvent, ClientProvenance, ClientRequest,
         ClientRuntime, ClientRuntimeAdapter, ClientSourceDescriptor, ClientSourceId,
         ClientSurfaceCommit, ClientSurfaceEvent, ClientSurfaceEventKind, ClientSurfaceRequest,
-        ClientSurfaceRequestKind, InputEventKind, LinuxKeycode, SurfaceBufferChange,
-        SurfaceBufferUpdate, ToplevelInteractionRequestKind, ToplevelState, WindowDecoration,
+        ClientSurfaceRequestKind, ClientSurfaceRole, InputEventKind, LinuxKeycode, PopupState,
+        SurfaceBufferChange, SurfaceBufferUpdate, ToplevelInteractionRequestKind, ToplevelState,
+        WindowDecoration,
     };
 
     use super::*;
@@ -702,6 +440,36 @@ mod tests {
                 1,
             )),
             weld_client::ClientInputDispatchResult::Delivered
+        );
+    }
+
+    #[test]
+    fn duplicate_map_and_unknown_unmap_do_not_retire_the_live_alias() {
+        let (mut runtime, upstream, endpoint) = runtime();
+        let surface = source(ClientSourceId::new(0), 11);
+        let unknown = source(ClientSourceId::new(0), 12);
+        let session = HoistSessionId::new(1);
+        assert!(runtime.apply_command(endpoint.map(session, surface)));
+        let mut events = ClientEventQueue::default();
+        let mut invalid = Vec::new();
+        runtime.drain_events(&mut events, &mut invalid);
+
+        assert!(runtime.apply_command(endpoint.map(session, surface)));
+        assert!(runtime.apply_command(endpoint.unmap(unknown)));
+        runtime.drain_events(&mut events, &mut invalid);
+
+        assert!(
+            runtime.apply_request(ClientRequest::Surface(ClientSurfaceRequest {
+                surface: endpoint.destination(surface),
+                kind: ClientSurfaceRequestKind::Close,
+            }))
+        );
+        assert_eq!(
+            upstream.borrow().requests.last(),
+            Some(&ClientRequest::Surface(ClientSurfaceRequest {
+                surface,
+                kind: ClientSurfaceRequestKind::Close,
+            }))
         );
     }
 }

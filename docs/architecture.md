@@ -29,12 +29,21 @@ Weld is a workspace of reusable layers and one standard distribution:
   shell or window manager can replace.
 - `weld-float` supplies conventional freeform placement, focus, stacking,
   movement, and interactive-resize policy without owning UI entities.
-- `weld-hoist-core` owns transport-independent hoist identities and the
-  Bevy-free loopback client adapter.
+- `weld-hoist-protocol` owns the serializable, transport-neutral hoist record
+  subset shared by current bindings: exact revision and session identities,
+  source and destination envelopes, surface modes, and
+  encoded access-unit metadata. It contains no compositor, application,
+  codec-backend, or transport implementation.
+- `weld-hoist-core` owns transport-independent hoist identities, source and
+  destination relay policy, and the Bevy-free loopback binding. Its relay
+  ports hide framing, serialization, native handles, codecs, queues, and wake
+  integration. The relays own surface admission, session authorization,
+  source-authoritative identity relocation, popup and parent relationships,
+  scale reset, focus, and remote-input cleanup.
 - `weld-hoist-local` owns the Linux-local Postcard/Unix-seqpacket binding,
   SCM_RIGHTS native-buffer transfer, optional opaque encoded-media binding,
-  and source/destination `weld-client` adapters. It depends on core's native
-  import capability but has no Bevy dependency. Its `encoded-vaapi` feature is
+  and source/destination relay ports. It depends on core's native import
+  capability but has no Bevy dependency. Its `encoded-vaapi` feature is
   optional for native-only library consumers.
 - `weld-hoist-ui` owns source placeholders, reclaim and closed-tombstone UI.
 - `weld-hoist` owns Bevy window-family admission and reclaim orchestration. It
@@ -56,11 +65,18 @@ Dependencies point inward: `weld-core` implements the local Smithay adapter
 through `weld-client`; `weld-app` depends on both; `weld-window` depends on
 `weld-app`; the UI and floating-policy crates depend on the window domain
 rather than on each other; and the distribution composes the complete set.
-Core and hoist core must not depend on Bevy, and application or policy crates
-must not depend directly on Smithay. A custom distribution can retain
+Core, hoist protocol, and hoist core must not depend on Bevy, and application
+or policy crates must not depend directly on Smithay. A custom distribution can retain
 `weld-window` while replacing `weld-window-ui`, `weld-ssd`, `weld-float`,
 `weld-hoist`, or any combination of them, or build a different application
 host while retaining the native backend and protocol machinery.
+
+The local and loopback bindings both enter the same relay implementation.
+Loopback contributes only in-process queues, buffer-lease relay, and route
+aliases; the local binding contributes Postcard, Unix descriptors, DMA-BUF or
+SHM import/export, encoded-media state, and calloop wakes. A future Iroh
+binding should add another pair of ports rather than another client-surface
+lifecycle implementation.
 
 `weld-media-vaapi` uses FFmpeg's H.264 and AV1 VA-API codecs for production.
 The old cros-codecs H.264 implementation and its local patches remain available

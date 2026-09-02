@@ -1,0 +1,10 @@
+[package]
+name = "weld-hoist-protocol"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+serde.workspace = true
+weld-client = { path = "../weld-client", features = ["serde"] }
+weld-media = { path = "../weld-media", features = ["serde"] }

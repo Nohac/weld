@@ -7,10 +7,12 @@
 mod adapter;
 mod bootstrap;
 mod codec;
+mod destination;
 mod encoded;
 mod media;
 mod native;
 mod socket;
+mod source;
 mod wire;
 
 #[cfg(feature = "encoded-vaapi")]

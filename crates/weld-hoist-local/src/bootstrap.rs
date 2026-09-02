@@ -1,6 +1,7 @@
 use std::os::fd::OwnedFd;
 
 use anyhow::Result;
+use weld_hoist_protocol::ProtocolRevision;
 
 use crate::{
     LocalBootstrapAcknowledgement, LocalBootstrapOffer, LocalPacketConnection, LocalPeerRole,
@@ -26,6 +27,7 @@ pub fn bootstrap_source(
     };
     control.queue(
         &LocalBootstrapOffer {
+            revision: ProtocolRevision::CURRENT,
             mode,
             media_descriptor: media.as_ref().map(|_| 0),
         },
@@ -38,6 +40,9 @@ pub fn bootstrap_source(
             "bootstrap acknowledgement attached unexpected descriptors".to_owned(),
         ));
     }
+    ProtocolRevision::CURRENT
+        .ensure_compatible(acknowledgement.message.revision)
+        .map_err(|error| TransportError::Protocol(error.to_string()))?;
     if let Some(rejection) = acknowledgement.message.rejection {
         return Err(TransportError::Protocol(format!(
             "destination rejected {mode:?}: {rejection}"
@@ -56,15 +61,21 @@ pub fn bootstrap_destination(
 ) -> Result<LocalTransportConnections, TransportError> {
     let offer = control.receive_blocking::<LocalBootstrapOffer>()?;
     let mode = offer.message.mode;
-    let result = match validate(mode) {
-        Ok(()) => {
-            receive_media_connection(mode, offer.message.media_descriptor, offer.file_descriptors)
-                .map_err(|error| error.to_string())
-        }
+    let result = match ProtocolRevision::CURRENT.ensure_compatible(offer.message.revision) {
         Err(error) => Err(error.to_string()),
+        Ok(()) => match validate(mode) {
+            Ok(()) => receive_media_connection(
+                mode,
+                offer.message.media_descriptor,
+                offer.file_descriptors,
+            )
+            .map_err(|error| error.to_string()),
+            Err(error) => Err(error.to_string()),
+        },
     };
     control.queue(
         &LocalBootstrapAcknowledgement {
+            revision: ProtocolRevision::CURRENT,
             rejection: result.as_ref().err().cloned(),
         },
         Vec::new(),
@@ -162,5 +173,38 @@ mod tests {
 
         assert!(source.contains("no hardware decoder"));
         assert!(destination.to_string().contains("no hardware decoder"));
+    }
+
+    #[test]
+    fn destination_rejects_a_different_exact_protocol_revision() {
+        let (source, destination) = LocalPacketConnection::pair().expect("control pair");
+        source
+            .queue(
+                &LocalBootstrapOffer {
+                    revision: ProtocolRevision::new(2),
+                    mode: LocalSurfaceMode::Native,
+                    media_descriptor: None,
+                },
+                Vec::new(),
+            )
+            .expect("bootstrap offer");
+        source.flush_blocking().expect("bootstrap offer send");
+
+        let rejection = match bootstrap_destination(destination, |_| Ok(())) {
+            Ok(_) => panic!("destination accepted a mismatched revision"),
+            Err(error) => error,
+        };
+        let acknowledgement = source
+            .receive_blocking::<LocalBootstrapAcknowledgement>()
+            .expect("bootstrap acknowledgement");
+
+        assert!(rejection.to_string().contains("revision 1"));
+        assert!(rejection.to_string().contains("revision 2"));
+        assert!(
+            acknowledgement
+                .message
+                .rejection
+                .is_some_and(|reason| reason.contains("revision 2"))
+        );
     }
 }

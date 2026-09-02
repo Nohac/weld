@@ -1,25 +1,24 @@
 use serde::{Deserialize, Serialize};
-use weld_client::{
-    ClientBufferId, ClientBufferUseId, ClientCommitRevision, ClientInputEvent, ClientRequest,
-    ClientSurfaceId, WireClientInputEvent, WireClientSurfaceEvent,
+use weld_hoist_protocol::{
+    EncodedAccessUnitHeader, EncodedBuffer, MediaEnvelope, ProtocolRevision, SourceEnvelope,
+    SourceMessage,
 };
-use weld_hoist_core::HoistSessionId;
-use weld_media::{EncodedFrameKind, MediaFrameId, VideoCodec};
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub enum LocalSurfaceMode {
-    Native,
-    EncodedOpaque(VideoCodec),
-}
+pub use weld_hoist_protocol::{
+    DestinationEnvelope as LocalDestinationPacket, DestinationMessage as LocalDestinationMessage,
+    EncodedCommitOutcome as LocalEncodedCommitOutcome, SurfaceMode as LocalSurfaceMode,
+};
 
 #[derive(Debug, Deserialize, Serialize)]
 pub(crate) struct LocalBootstrapOffer {
+    pub revision: ProtocolRevision,
     pub mode: LocalSurfaceMode,
     pub media_descriptor: Option<u16>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
 pub(crate) struct LocalBootstrapAcknowledgement {
+    pub revision: ProtocolRevision,
     pub rejection: Option<String>,
 }
 
@@ -51,95 +50,26 @@ pub enum LocalBufferContent {
     ImportedDmabuf(LocalDmabuf),
     ReusedDmabuf,
     Shm(LocalShm),
-    Encoded(LocalEncodedBuffer),
+    Encoded(EncodedBuffer),
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct LocalEncodedBuffer {
-    pub frame: MediaFrameId,
-}
-
-/// One committed buffer use and its transport-specific content binding.
+/// One committed buffer use and its Unix-local content binding.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct LocalBuffer {
-    pub buffer: ClientBufferId,
-    pub use_id: ClientBufferUseId,
+    pub buffer: weld_client::ClientBufferId,
+    pub use_id: weld_client::ClientBufferUseId,
     pub content: LocalBufferContent,
 }
 
-/// One source-to-destination packet. The session is common to every message.
-#[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct LocalSourcePacket {
-    pub session: HoistSessionId,
-    pub message: LocalSourceMessage,
-}
+pub type LocalSourcePacket = SourceEnvelope<LocalBuffer>;
+pub type LocalSourceMessage = SourceMessage<LocalBuffer>;
+pub type LocalEncodedBuffer = EncodedBuffer;
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
-pub enum LocalSourceMessage {
-    Surface(WireClientSurfaceEvent<LocalBuffer>),
-    BufferRetired { buffer: ClientBufferId },
-    Withdraw { surface: ClientSurfaceId },
-    Ended,
-}
-
-/// One destination-to-source packet. The session is common to every message.
-#[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct LocalDestinationPacket {
-    pub session: HoistSessionId,
-    pub message: LocalDestinationMessage,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-pub enum LocalDestinationMessage {
-    Request(ClientRequest),
-    Input(WireClientInputEvent),
-    BufferReleased {
-        use_id: ClientBufferUseId,
-    },
-    Reclaim,
-    EncodedCommitFinished {
-        surface: ClientSurfaceId,
-        revision: ClientCommitRevision,
-        outcome: LocalEncodedCommitOutcome,
-    },
-}
-
-impl LocalDestinationMessage {
-    pub(crate) const fn kind(&self) -> &'static str {
-        match self {
-            Self::Request(_) => "request",
-            Self::Input(_) => "input",
-            Self::BufferReleased { .. } => "buffer-released",
-            Self::Reclaim => "reclaim",
-            Self::EncodedCommitFinished { .. } => "encoded-commit-finished",
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub enum LocalEncodedCommitOutcome {
-    Applied,
-    Dropped,
-}
-
+/// Unix media binding for one transport-neutral access-unit header.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct LocalEncodedAccessUnit {
-    pub frame: MediaFrameId,
-    pub codec: VideoCodec,
-    pub kind: EncodedFrameKind,
-    pub timestamp_micros: u64,
+    pub header: EncodedAccessUnitHeader,
     pub payload_descriptor: u16,
-    pub payload_bytes: u32,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct LocalMediaPacket {
-    pub session: HoistSessionId,
-    pub access_unit: LocalEncodedAccessUnit,
-}
-
-impl LocalDestinationMessage {
-    pub fn input(event: ClientInputEvent) -> Self {
-        Self::Input(event.into())
-    }
-}
+pub type LocalMediaPacket = MediaEnvelope<LocalEncodedAccessUnit>;

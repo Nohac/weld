@@ -11,9 +11,9 @@ use std::{
 use anyhow::{Context, Result, bail, ensure};
 use weld_client::{
     ClientBufferId, ClientBufferLease, ClientBufferMetadata, ClientBufferUseId,
-    ClientCommitRevision, ClientEventQueue, ClientSourceDescriptor, ClientSurfaceEvent,
-    ClientSurfaceEventKind, ClientSurfaceId, SurfaceBufferChange, SurfaceLayerId,
-    WireClientSurfaceEvent, WireClientSurfaceEventKind, WireSurfaceBufferChange,
+    ClientCommitRevision, ClientSourceDescriptor, ClientSurfaceEvent, ClientSurfaceEventKind,
+    ClientSurfaceId, SurfaceBufferChange, SurfaceLayerId, WireClientSurfaceEvent,
+    WireClientSurfaceEventKind, WireSurfaceBufferChange,
 };
 use weld_core::dmabuf::{DirectClientBufferAccess, DmabufContext, export_client_dmabuf};
 use weld_hoist_core::HoistSessionId;
@@ -702,6 +702,11 @@ struct QueuedDestinationEvent {
     event: WireClientSurfaceEvent<LocalBuffer>,
 }
 
+pub(crate) struct EncodedDestinationEvent {
+    pub(crate) session: HoistSessionId,
+    pub(crate) event: ClientSurfaceEvent,
+}
+
 pub(crate) struct EncodedCommitOutcomeRecord {
     pub(crate) session: HoistSessionId,
     pub(crate) surface: ClientSurfaceId,
@@ -760,18 +765,20 @@ impl EncodedDestinationState {
     pub(crate) fn enqueue(
         &mut self,
         session: HoistSessionId,
-        source_surface: ClientSurfaceId,
         mut event: WireClientSurfaceEvent<LocalBuffer>,
-        output: &mut ClientEventQueue,
+        output: &mut Vec<EncodedDestinationEvent>,
     ) -> Result<()> {
-        let surface = event.surface;
+        let source_surface = event.surface;
         if matches!(event.kind, WireClientSurfaceEventKind::Destroyed) {
-            self.cancel_surface(surface)?;
-            output.push(event.try_into_client(|_, _| {
-                Err::<ClientBufferLease, _>(anyhow::anyhow!(
-                    "destroy event unexpectedly carried a buffer"
-                ))
-            })?);
+            self.cancel_surface(source_surface)?;
+            output.push(EncodedDestinationEvent {
+                session,
+                event: event.try_into_client(|_, _| {
+                    Err::<ClientBufferLease, _>(anyhow::anyhow!(
+                        "destroy event unexpectedly carried a buffer"
+                    ))
+                })?,
+            });
             return Ok(());
         }
         mark_encoded_buffers_opaque(&mut event);
@@ -789,7 +796,7 @@ impl EncodedDestinationState {
             "encoded destination event bound exceeded"
         );
         self.queues
-            .entry(surface)
+            .entry(source_surface)
             .or_default()
             .push_back(QueuedDestinationEvent {
                 session,
@@ -803,14 +810,14 @@ impl EncodedDestinationState {
         std::mem::take(&mut self.outcomes)
     }
 
-    pub(crate) fn drain(&mut self, output: &mut ClientEventQueue) -> Result<()> {
+    pub(crate) fn drain(&mut self, output: &mut Vec<EncodedDestinationEvent>) -> Result<()> {
         let packets = self.media.drain::<LocalMediaPacket>()?;
         for packet in packets {
             ensure!(
                 packet.file_descriptors.len() == 1,
                 "encoded media packet must attach exactly one descriptor"
             );
-            let frame = packet.message.access_unit.frame;
+            let frame = packet.message.access_unit.header.frame;
             if self.cancelled_frames.remove(&frame) {
                 continue;
             }
@@ -939,7 +946,7 @@ impl EncodedDestinationState {
         Ok(())
     }
 
-    fn advance(&mut self, output: &mut ClientEventQueue) -> Result<()> {
+    fn advance(&mut self, output: &mut Vec<EncodedDestinationEvent>) -> Result<()> {
         loop {
             let surfaces = self.queues.keys().copied().collect::<Vec<_>>();
             let mut progressed = false;
@@ -950,11 +957,14 @@ impl EncodedDestinationState {
                 let frames = encoded_frames(&front.event);
                 if frames.is_empty() {
                     let event = self.pop_event(surface)?;
-                    output.push(event.event.try_into_client(|_, _| {
-                        Err::<ClientBufferLease, _>(anyhow::anyhow!(
-                            "encoded destination received native buffer content"
-                        ))
-                    })?);
+                    output.push(EncodedDestinationEvent {
+                        session: event.session,
+                        event: event.event.try_into_client(|_, _| {
+                            Err::<ClientBufferLease, _>(anyhow::anyhow!(
+                                "encoded destination received native buffer content"
+                            ))
+                        })?,
+                    });
                     progressed = true;
                     continue;
                 }
@@ -974,7 +984,10 @@ impl EncodedDestinationState {
                             }
                             _ => bail!("encoded destination received native buffer content"),
                         })?;
-                    output.push(event);
+                    output.push(EncodedDestinationEvent {
+                        session: queued.session,
+                        event,
+                    });
                     self.outcomes.push(EncodedCommitOutcomeRecord {
                         session: queued.session,
                         surface: queued.source_surface,
@@ -1314,7 +1327,7 @@ mod tests {
             .expect("media packet");
         assert_eq!(control_packets.len(), 1);
         assert_eq!(media_packets.len(), 1);
-        assert_eq!(media_packets[0].message.access_unit.frame, frame);
+        assert_eq!(media_packets[0].message.access_unit.header.frame, frame);
     }
 
     #[test]
@@ -1394,8 +1407,14 @@ mod tests {
             .expect("media packets");
         assert_eq!(control_packets.len(), 1);
         assert_eq!(media_packets.len(), 2);
-        assert_eq!(media_packets[0].message.access_unit.frame, first_frame);
-        assert_eq!(media_packets[1].message.access_unit.frame, second_frame);
+        assert_eq!(
+            media_packets[0].message.access_unit.header.frame,
+            first_frame
+        );
+        assert_eq!(
+            media_packets[1].message.access_unit.header.frame,
+            second_frame
+        );
     }
 
     #[test]

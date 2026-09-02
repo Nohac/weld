@@ -21,6 +21,7 @@ members = [
   "crates/weld-hoist",
   "crates/weld-hoist-core",
   "crates/weld-hoist-local",
+  "crates/weld-hoist-protocol",
   "crates/weld-hoist-ui",
   "crates/weld-media",
   "crates/weld-media-vaapi",

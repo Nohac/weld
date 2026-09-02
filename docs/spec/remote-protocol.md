@@ -9,10 +9,13 @@ topology, codec selection, adaptation, and failure semantics. Hoist scope,
 window-family admission, placeholders, reclaim, and source-authoritative
 lifecycle remain defined by the hoisting specification.
 
-No network protocol, encoder, or decoder is implemented yet. Before 1.0, peers
-may require an exact protocol revision rather than maintaining compatibility
-with earlier revisions. Capability negotiation remains necessary even when
-revisions match because devices, transports, targets, and hardware differ.
+No network binding or complete remote handshake is implemented yet. The
+current `weld-hoist-protocol` crate provides a small transport-neutral record
+subset used by loopback and the Unix local tracer, and local encoded hoisting
+exercises FFmpeg VA-API encode and decode. Before 1.0, peers require an exact
+protocol revision rather than maintaining compatibility with earlier
+revisions. Capability negotiation remains necessary even when revisions match
+because devices, transports, targets, and hardware differ.
 
 Wire records use project-owned identities and values. They do not expose Bevy
 entities, Smithay resources, Rust ABI details, native handles, wgpu objects,
@@ -39,9 +42,11 @@ The following decisions are independent:
 
 Native and encoded surface modes can therefore use the same Unix transport,
 while encoded media can use Iroh or WebRTC without changing hoist policy. The
-existing generic `weld-client` wire projection is compatible with this split,
-but its in-process types and current Postcard records are not the remote wire
-protocol.
+existing generic `weld-client` wire projection and the current
+`weld-hoist-protocol` envelopes are compatible with this split. They form the
+implemented surface/control record substrate, not the complete remote
+handshake, authorization, capability, adaptation, or recovery protocol
+described here.
 
 Illustrative configuration might use `--transport`, `--surface-mode`, and a
 debug-only `--codec` preference. Those names are not a committed CLI or config
