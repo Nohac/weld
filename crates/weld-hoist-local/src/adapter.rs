@@ -10,16 +10,17 @@ use weld_hoist_core::{
     DestinationRelayAdapter, HoistEndpoint, HoistEndpointCommand, HoistSessionId,
     SourceRelayAdapter, relocated_surface,
 };
+use weld_hoist_encoded::{EncodedDestinationPort, EncodedSourcePort};
 
 use crate::{
     LocalPacketConnection,
     destination::LocalDestinationPort,
-    encoded::{EncodedDestinationState, EncodedSourceState},
+    encoded_transport::{LocalEncodedDestinationTransport, LocalEncodedSourceTransport},
     source::LocalSourcePort,
 };
 
 #[cfg(feature = "encoded-vaapi")]
-use crate::codec::{decode_backend, encode_backend};
+use weld_hoist_encoded::{decode_backend, encode_backend};
 
 #[derive(Clone)]
 pub struct LocalDestinationEndpoint {
@@ -105,27 +106,10 @@ pub fn encoded_source_registration_with_backend(
     destination_source: ClientSourceId,
     backend: Box<dyn crate::LocalEncodeBackend>,
 ) -> (ClientAdapterRegistration, LocalDestinationEndpoint) {
-    encoded_source_registration_with_state(
-        control,
-        upstream_source,
-        adapter_source,
-        destination_source,
-        EncodedSourceState::new(backend, media),
-    )
-}
-
-fn encoded_source_registration_with_state(
-    control: LocalPacketConnection,
-    upstream_source: ClientSourceId,
-    adapter_source: ClientSourceId,
-    destination_source: ClientSourceId,
-    encoded: EncodedSourceState,
-) -> (ClientAdapterRegistration, LocalDestinationEndpoint) {
     let descriptor = ClientSourceDescriptor::new(adapter_source, ClientProvenance::Relocated);
-    let adapter = SourceRelayAdapter::new(
-        upstream_source,
-        LocalSourcePort::new_encoded(control.clone(), encoded),
-    );
+    let transport = LocalEncodedSourceTransport::new(control.clone(), media);
+    let adapter =
+        SourceRelayAdapter::new(upstream_source, EncodedSourcePort::new(transport, backend));
     (
         ClientAdapterRegistration::new(descriptor, adapter, ControlOnlyClientImporter),
         LocalDestinationEndpoint {
@@ -145,11 +129,11 @@ pub fn encoded_destination_registration_with_backend(
     backend: Box<dyn crate::LocalDecodeBackend>,
 ) -> ClientAdapterRegistration {
     let descriptor = ClientSourceDescriptor::new(destination_source, ClientProvenance::Relocated);
-    let encoded = EncodedDestinationState::new(backend, media, descriptor, dmabuf.clone());
+    let transport = LocalEncodedDestinationTransport::new(control, media);
     let adapter = DestinationRelayAdapter::new(
         upstream_source,
         descriptor,
-        LocalDestinationPort::new_encoded(control, descriptor, dmabuf, encoded),
+        EncodedDestinationPort::new(transport, backend, descriptor, dmabuf),
     );
     ClientAdapterRegistration::new(descriptor, adapter, DirectClientBufferImporter)
 }
@@ -193,17 +177,20 @@ pub fn encoded_source_registration(
             }
         },
     )?;
-    let mut encoded = EncodedSourceState::new(backend, media.clone());
+    let descriptor = ClientSourceDescriptor::new(adapter_source, ClientProvenance::Relocated);
+    let transport = LocalEncodedSourceTransport::new(control.clone(), media.clone());
+    let mut port = EncodedSourcePort::new(transport, backend);
     if let Some(directory) = dump_directory {
-        encoded = encoded.with_access_unit_dump_directory(directory, codec)?;
+        port = port.with_access_unit_dump_directory(directory, codec)?;
     }
-    let (registration, endpoint) = encoded_source_registration_with_state(
-        control.clone(),
-        upstream_source,
+    let adapter = SourceRelayAdapter::new(upstream_source, port);
+    let registration =
+        ClientAdapterRegistration::new(descriptor, adapter, ControlOnlyClientImporter);
+    let endpoint = LocalDestinationEndpoint {
         adapter_source,
         destination_source,
-        encoded,
-    );
+        connection: control.clone(),
+    };
     Ok((
         registration,
         endpoint,

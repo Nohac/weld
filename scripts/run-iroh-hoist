@@ -1,0 +1,111 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+repository_root="$(cd -- "${script_dir}/.." && pwd)"
+ticket_path="${WELD_IROH_TICKET:-${repository_root}/target/validation/weld-iroh.ticket}"
+codec="av1"
+network="direct"
+ticket_timeout=120
+
+while [[ "$#" -gt 0 ]]; do
+    case "$1" in
+        --codec)
+            [[ "$#" -ge 2 ]] || {
+                printf '%s\n' '--codec requires av1 or h264.' >&2
+                exit 2
+            }
+            codec="$2"
+            [[ "${codec}" == "av1" || "${codec}" == "h264" ]] || {
+                printf 'Unsupported codec: %s; expected av1 or h264.\n' "${codec}" >&2
+                exit 2
+            }
+            shift 2
+            ;;
+        --network)
+            [[ "$#" -ge 2 ]] || {
+                printf '%s\n' '--network requires direct or n0.' >&2
+                exit 2
+            }
+            network="$2"
+            [[ "${network}" == "direct" || "${network}" == "n0" ]] || {
+                printf 'Unsupported network: %s; expected direct or n0.\n' "${network}" >&2
+                exit 2
+            }
+            shift 2
+            ;;
+        --ticket-timeout)
+            [[ "$#" -ge 2 && "$2" =~ ^[1-9][0-9]*$ ]] || {
+                printf '%s\n' '--ticket-timeout requires a positive number of seconds.' >&2
+                exit 2
+            }
+            ticket_timeout="$2"
+            shift 2
+            ;;
+        --)
+            shift
+            break
+            ;;
+        *)
+            break
+            ;;
+    esac
+done
+
+if [[ "$#" -eq 0 ]]; then
+    source_client=(foot)
+else
+    source_client=("$@")
+fi
+
+validation_directory="${repository_root}/target/validation"
+source_log="${validation_directory}/weld-iroh-source-${codec}-${network}.log"
+destination_log="${validation_directory}/weld-iroh-destination-${codec}-${network}.log"
+cd -- "${repository_root}"
+cargo build --bin weldwm
+mkdir -p -- "${validation_directory}"
+rm -f -- "${ticket_path}"
+
+printf 'Starting encoded Iroh hoist with %s over %s. Focus the source window and press Super+H.\n' \
+    "${codec}" "${network}"
+started_at=${SECONDS}
+cargo run -- \
+    --backend nested \
+    --wayland-socket weld-iroh-source \
+    --hoist-iroh-listen "${ticket_path}" \
+    --hoist-iroh-network "${network}" \
+    --hoist-codec "${codec}" \
+    -- "${source_client[@]}" \
+    > >(tee "${source_log}") 2>&1 &
+source_pid=$!
+
+cleanup() {
+    kill -TERM "${source_pid}" "${destination_pid:-}" 2>/dev/null || true
+    wait "${source_pid}" "${destination_pid:-}" 2>/dev/null || true
+    rm -f -- "${ticket_path}"
+}
+trap cleanup EXIT INT TERM
+
+while [[ ! -s "${ticket_path}" ]]; do
+    kill -0 "${source_pid}" 2>/dev/null || {
+        printf 'Source exited before publishing %s\n' "${ticket_path}" >&2
+        exit 1
+    }
+    if (( SECONDS - started_at >= ticket_timeout )); then
+        printf 'Timed out waiting for Iroh ticket %s\n' "${ticket_path}" >&2
+        exit 1
+    fi
+    sleep 0.05
+done
+
+cargo run -- \
+    --backend nested \
+    --wayland-socket weld-iroh-destination \
+    --hoist-iroh-connect "${ticket_path}" \
+    --hoist-iroh-network "${network}" \
+    > >(tee "${destination_log}") 2>&1 &
+destination_pid=$!
+
+printf 'Source log: %s\nDestination log: %s\n' "${source_log}" "${destination_log}"
+wait "${source_pid}" "${destination_pid}"

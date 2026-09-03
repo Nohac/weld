@@ -40,11 +40,19 @@ Weld is a workspace of reusable layers and one standard distribution:
   integration. The relays own surface admission, session authorization,
   source-authoritative identity relocation, popup and parent relationships,
   scale reset, focus, and remote-input cleanup.
+- `weld-hoist-encoded` owns transport-neutral encoded commit scheduling,
+  per-surface credit, resize coalescing, codec worker contracts, and decoded
+  DMA-BUF import. Codec and DMA-BUF work stays on the compositor thread while
+  bindings move only control records and compressed access units.
 - `weld-hoist-local` owns the Linux-local Postcard/Unix-seqpacket binding,
   SCM_RIGHTS native-buffer transfer, optional opaque encoded-media binding,
   and source/destination relay ports. It depends on core's native import
   capability but has no Bevy dependency. Its `encoded-vaapi` feature is
   optional for native-only library consumers.
+- `weld-hoist-iroh` owns the authenticated Iroh endpoint host, peer
+  connections, endpoint-ticket rendezvous, bounded Postcard framing, and the
+  independent QUIC control and encoded-media streams. Iroh and Tokio types do
+  not cross its registration boundary.
 - `weld-hoist-ui` owns source placeholders, reclaim and closed-tombstone UI.
 - `weld-hoist` owns Bevy window-family admission and reclaim orchestration. It
   also owns the process-local endpoint registry used to select an endpoint for
@@ -72,12 +80,13 @@ or policy crates must not depend directly on Smithay. A custom distribution can 
 `weld-hoist`, or any combination of them, or build a different application
 host while retaining the native backend and protocol machinery.
 
-The local and loopback bindings both enter the same relay implementation.
+The local, Iroh, and loopback bindings enter the same relay implementation.
 Loopback contributes only in-process queues, buffer-lease relay, and route
 aliases; the local binding contributes Postcard, Unix descriptors, DMA-BUF or
-SHM import/export, encoded-media state, and calloop wakes. A future Iroh
-binding should add another pair of ports rather than another client-surface
-lifecycle implementation.
+SHM import/export, and calloop wakes; and the Iroh binding contributes QUIC
+connectivity, framing, and network wakes. Both encoded bindings use the same
+`weld-hoist-encoded` ports rather than implementing another client-surface or
+codec lifecycle.
 
 `weld-media-vaapi` uses FFmpeg's H.264 and AV1 VA-API codecs for production.
 The old cros-codecs H.264 implementation and its local patches remain available
@@ -619,10 +628,14 @@ and finger scrolling before restoring source presentation.
 
 The first supported topology is two sibling compositor processes. A source
 blocks for one startup peer and a destination connects before either runtime
-starts; dynamic admission and reconnect are not implemented. Nesting the
+starts; dynamic admission and reconnect are not implemented. The Unix binding
+uses a same-UID local socket. The encoded Iroh binding uses an authenticated,
+encrypted connection reached through an explicitly shared development ticket;
+that ticket is not yet Weld authorization or device pairing. Nesting the
 destination as a client of the source is deliberately unsupported because it
 would create an input/focus feedback path. See [Local hoisting](local-hoisting.md)
-for commands, validation, and current constraints.
+and [Iroh hoisting](iroh-hoisting.md) for commands, validation, and current
+constraints.
 
 Core translates Smithay's `xdg_toplevel.set_parent` state into stable
 `SurfaceId` parent metadata; no Wayland object crosses into the application

@@ -2,7 +2,7 @@
 
 use std::{ffi::OsString, path::PathBuf};
 
-use clap::{Parser, ValueEnum};
+use clap::{ArgGroup, Parser, ValueEnum};
 use weld_app::{Backend, OutputScale};
 use weld_hoist_local::LocalSurfaceMode;
 use weld_media::VideoCodec;
@@ -28,6 +28,22 @@ pub enum HoistCodec {
     Av1,
     #[default]
     H264,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, ValueEnum)]
+pub enum IrohNetworkKind {
+    #[default]
+    Direct,
+    N0,
+}
+
+impl From<IrohNetworkKind> for weld_hoist_iroh::IrohNetwork {
+    fn from(network: IrohNetworkKind) -> Self {
+        match network {
+            IrohNetworkKind::Direct => Self::Direct,
+            IrohNetworkKind::N0 => Self::N0,
+        }
+    }
 }
 
 impl From<HoistCodec> for VideoCodec {
@@ -62,7 +78,17 @@ impl BackendKind {
 #[command(
     version,
     about = "Bevy-native Wayland compositor",
-    trailing_var_arg = true
+    trailing_var_arg = true,
+    group(ArgGroup::new("hoist_peer").args([
+        "hoist_listen",
+        "hoist_connect",
+        "hoist_iroh_listen",
+        "hoist_iroh_connect",
+    ]).multiple(false)),
+    group(ArgGroup::new("hoist_iroh_peer").args([
+        "hoist_iroh_listen",
+        "hoist_iroh_connect",
+    ]).multiple(false))
 )]
 pub struct AppArguments {
     /// Host backend. Auto uses a nested host when available and DRM on a TTY.
@@ -100,16 +126,28 @@ pub struct AppArguments {
     #[arg(long, value_name = "PATH", conflicts_with = "hoist_listen")]
     pub(crate) hoist_connect: Option<PathBuf>,
 
+    /// Publish an Iroh ticket and accept one encoded Weld destination.
+    #[arg(long, value_name = "PATH")]
+    pub(crate) hoist_iroh_listen: Option<PathBuf>,
+
+    /// Import encoded windows from the Weld source named by an Iroh ticket.
+    #[arg(long, value_name = "PATH")]
+    pub(crate) hoist_iroh_connect: Option<PathBuf>,
+
+    /// Iroh connectivity preset. Direct has no DNS or relay dependency.
+    #[arg(long, value_enum, value_name = "PRESET", requires = "hoist_iroh_peer")]
+    pub(crate) hoist_iroh_network: Option<IrohNetworkKind>,
+
     /// Source-side surface carrier used for a local hoist peer.
     #[arg(long, value_enum, value_name = "MODE", requires = "hoist_listen")]
     pub(crate) hoist_surface_mode: Option<HoistSurfaceMode>,
 
-    /// Codec used by the opaque encoded local-hoist carrier.
-    #[arg(long, value_enum, value_name = "CODEC", requires = "hoist_listen")]
+    /// Codec used by an opaque encoded hoist source.
+    #[arg(long, value_enum, value_name = "CODEC")]
     pub(crate) hoist_codec: Option<HoistCodec>,
 
-    /// Record source encoded stream generations before local transport.
-    #[arg(long, value_name = "DIR", requires = "hoist_listen")]
+    /// Record source encoded stream generations before transport.
+    #[arg(long, value_name = "DIR")]
     pub(crate) hoist_encoded_dump_dir: Option<PathBuf>,
 
     /// Optional client program followed by its arguments.

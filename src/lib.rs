@@ -13,6 +13,11 @@ use weld_app::{
 };
 use weld_float::FloatPlugin;
 use weld_hoist::{HoistEndpointRegistry, HoistPlugin, loopback_registration};
+use weld_hoist_iroh::{
+    IrohHost, IrohSourceRegistrationOptions,
+    destination_registration as iroh_destination_registration,
+    source_registration as iroh_source_registration,
+};
 use weld_hoist_local::{
     EncodedSourceRegistrationOptions, LocalPacketConnection, LocalPacketListener, LocalPeerRole,
     LocalSurfaceMode, bootstrap_destination, bootstrap_source, encoded_destination_registration,
@@ -26,27 +31,39 @@ pub use arguments::{AppArguments, BackendKind};
 
 pub fn run(arguments: AppArguments) -> Result<()> {
     telemetry::initialize()?;
-    if (arguments.hoist_codec.is_some() || arguments.hoist_encoded_dump_dir.is_some())
-        && arguments.hoist_surface_mode != Some(arguments::HoistSurfaceMode::EncodedOpaque)
-    {
-        anyhow::bail!("codec and encoded diagnostics require --hoist-surface-mode encoded-opaque");
-    }
+    validate_hoist_arguments(&arguments)?;
     let hoist_codec = arguments.hoist_codec.unwrap_or_default();
 
-    enum PendingLocalTransport {
-        Source(LocalPacketListener),
-        Destination(std::path::PathBuf),
+    enum PendingHoistTransport {
+        LocalSource(LocalPacketListener),
+        LocalDestination(std::path::PathBuf),
+        IrohSource {
+            host: IrohHost,
+            ticket: std::path::PathBuf,
+        },
+        IrohDestination {
+            host: IrohHost,
+            ticket: std::path::PathBuf,
+        },
     }
-    let pending_local_transport = if let Some(path) = &arguments.hoist_listen {
-        Some(PendingLocalTransport::Source(LocalPacketListener::bind(
-            path,
-            LocalPeerRole::Source,
-        )?))
+    let pending_transport = if let Some(path) = &arguments.hoist_listen {
+        Some(PendingHoistTransport::LocalSource(
+            LocalPacketListener::bind(path, LocalPeerRole::Source)?,
+        ))
+    } else if let Some(path) = &arguments.hoist_connect {
+        Some(PendingHoistTransport::LocalDestination(path.clone()))
+    } else if let Some(ticket) = &arguments.hoist_iroh_listen {
+        Some(PendingHoistTransport::IrohSource {
+            host: IrohHost::bind(arguments.hoist_iroh_network.unwrap_or_default().into())?,
+            ticket: ticket.clone(),
+        })
+    } else if let Some(ticket) = &arguments.hoist_iroh_connect {
+        Some(PendingHoistTransport::IrohDestination {
+            host: IrohHost::bind(arguments.hoist_iroh_network.unwrap_or_default().into())?,
+            ticket: ticket.clone(),
+        })
     } else {
-        arguments
-            .hoist_connect
-            .clone()
-            .map(PendingLocalTransport::Destination)
+        None
     };
 
     let mut app = WeldApp::builder()
@@ -57,8 +74,9 @@ pub fn run(arguments: AppArguments) -> Result<()> {
         .scale(arguments.scale)
         .socket_name(arguments.wayland_socket)
         .build()?;
-    let local_transport = match pending_local_transport {
-        Some(PendingLocalTransport::Source(listener)) => {
+    let mut enable_hoist_policy = true;
+    match pending_transport {
+        Some(PendingHoistTransport::LocalSource(listener)) => {
             let mode = arguments
                 .hoist_surface_mode
                 .map(|mode| mode.local(hoist_codec))
@@ -66,29 +84,7 @@ pub fn run(arguments: AppArguments) -> Result<()> {
             if let LocalSurfaceMode::EncodedOpaque(codec) = mode {
                 validate_encoded_media(&app, codec)?;
             }
-            Some((
-                LocalPeerRole::Source,
-                bootstrap_source(listener.accept_blocking()?, mode)?,
-            ))
-        }
-        Some(PendingLocalTransport::Destination(path)) => {
-            let control = LocalPacketConnection::connect(path, LocalPeerRole::Destination)?;
-            let capabilities = app.external_dmabuf_capabilities()?;
-            Some((
-                LocalPeerRole::Destination,
-                bootstrap_destination(control, |mode| {
-                    if let LocalSurfaceMode::EncodedOpaque(codec) = mode {
-                        validate_encoded_capabilities(capabilities.as_ref(), codec)?;
-                    }
-                    Ok(())
-                })?,
-            ))
-        }
-        None => None,
-    };
-    let mut enable_hoist_policy = true;
-    match local_transport {
-        Some((LocalPeerRole::Source, transport)) => {
+            let transport = bootstrap_source(listener.accept_blocking()?, mode)?;
             let adapter_source = weld_client::ClientSourceId::new(1);
             match (transport.mode, transport.media) {
                 (LocalSurfaceMode::Native, None) => {
@@ -126,7 +122,15 @@ pub fn run(arguments: AppArguments) -> Result<()> {
                 _ => anyhow::bail!("local hoist bootstrap returned an invalid media channel"),
             }
         }
-        Some((LocalPeerRole::Destination, transport)) => {
+        Some(PendingHoistTransport::LocalDestination(path)) => {
+            let control = LocalPacketConnection::connect(path, LocalPeerRole::Destination)?;
+            let capabilities = app.external_dmabuf_capabilities()?;
+            let transport = bootstrap_destination(control, |mode| {
+                if let LocalSurfaceMode::EncodedOpaque(codec) = mode {
+                    validate_encoded_capabilities(capabilities.as_ref(), codec)?;
+                }
+                Ok(())
+            })?;
             let destination_source = weld_client::ClientSourceId::new(1);
             match (transport.mode, transport.media) {
                 (LocalSurfaceMode::Native, None) => {
@@ -159,6 +163,69 @@ pub fn run(arguments: AppArguments) -> Result<()> {
             }
             enable_hoist_policy = false;
         }
+        Some(PendingHoistTransport::IrohSource { host, ticket }) => {
+            let codec: weld_media::VideoCodec = hoist_codec.into();
+            validate_encoded_media(&app, codec)?;
+            let (network_notifier, network_wake) = weld_core::host::client_runtime_notifier()?;
+            let peer = host.accept_source(ticket, codec, network_notifier)?;
+            tracing::info!(
+                peer = peer.identity().as_str(),
+                ?codec,
+                "connected Iroh hoist destination"
+            );
+            let capabilities = required_external_capabilities(&app)?;
+            let adapter_source = weld_client::ClientSourceId::new(1);
+            let (adapter, endpoint, codec_wake) = iroh_source_registration(
+                peer,
+                IrohSourceRegistrationOptions {
+                    upstream_source: weld_core::WAYLAND_CLIENT_SOURCE,
+                    adapter_source,
+                    destination_source: adapter_source,
+                    capabilities: &capabilities,
+                    codec,
+                    dump_directory: arguments.hoist_encoded_dump_dir,
+                },
+            )?;
+            app.add_client_wake_source(network_wake)
+                .add_client_wake_source(codec_wake)
+                .add_client_adapter(adapter)
+                .insert_resource(HoistEndpointRegistry::with_default(endpoint));
+        }
+        Some(PendingHoistTransport::IrohDestination { host, ticket }) => {
+            let capabilities = required_external_capabilities(&app)?;
+            let media = weld_media_vaapi::probe_vaapi_device(&capabilities.render_node)
+                .map_err(anyhow::Error::new)?;
+            let supported_codecs = [weld_media::VideoCodec::Av1, weld_media::VideoCodec::H264]
+                .into_iter()
+                .filter(|codec| media.supports_decode(*codec))
+                .collect::<Vec<_>>();
+            anyhow::ensure!(
+                !supported_codecs.is_empty(),
+                "{} exposes no supported hardware decoder and VPP path",
+                media.vendor
+            );
+            let (network_notifier, network_wake) = weld_core::host::client_runtime_notifier()?;
+            let peer = host.connect_destination(ticket, supported_codecs, network_notifier)?;
+            let codec = peer.codec();
+            tracing::info!(
+                peer = peer.identity().as_str(),
+                ?codec,
+                "connected to Iroh hoist source"
+            );
+            let destination_source = weld_client::ClientSourceId::new(1);
+            let (adapter, codec_wake) = iroh_destination_registration(
+                peer,
+                weld_core::WAYLAND_CLIENT_SOURCE,
+                destination_source,
+                app.dmabuf_context(),
+                &capabilities,
+                codec,
+            )?;
+            app.add_client_wake_source(network_wake)
+                .add_client_wake_source(codec_wake)
+                .add_client_adapter(adapter);
+            enable_hoist_policy = false;
+        }
         None => {
             let (adapter, endpoint) = loopback_registration(
                 weld_core::WAYLAND_CLIENT_SOURCE,
@@ -181,6 +248,18 @@ pub fn run(arguments: AppArguments) -> Result<()> {
         app.add_plugins(HoistPlugin);
     }
     app.run()
+}
+
+fn validate_hoist_arguments(arguments: &AppArguments) -> Result<()> {
+    let encoded_source = arguments.hoist_iroh_listen.is_some()
+        || (arguments.hoist_listen.is_some()
+            && arguments.hoist_surface_mode == Some(arguments::HoistSurfaceMode::EncodedOpaque));
+    if (arguments.hoist_codec.is_some() || arguments.hoist_encoded_dump_dir.is_some())
+        && !encoded_source
+    {
+        anyhow::bail!("codec and encoded diagnostics require an encoded hoist source");
+    }
+    Ok(())
 }
 
 fn required_external_capabilities(
@@ -214,4 +293,72 @@ fn validate_encoded_capabilities(
 
 pub fn run_from_env() -> Result<()> {
     run(AppArguments::parse())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn arguments(values: &[&str]) -> AppArguments {
+        AppArguments::try_parse_from(std::iter::once("weldwm").chain(values.iter().copied()))
+            .expect("valid command line")
+    }
+
+    #[test]
+    fn encoded_options_accept_both_source_transports_without_starting_a_host() {
+        let local = arguments(&[
+            "--hoist-listen",
+            "/tmp/weld.sock",
+            "--hoist-surface-mode",
+            "encoded-opaque",
+            "--hoist-codec",
+            "av1",
+        ]);
+        let iroh = arguments(&[
+            "--hoist-iroh-listen",
+            "/tmp/weld.ticket",
+            "--hoist-codec",
+            "av1",
+        ]);
+
+        assert!(validate_hoist_arguments(&local).is_ok());
+        assert!(validate_hoist_arguments(&iroh).is_ok());
+    }
+
+    #[test]
+    fn encoded_options_reject_destinations_and_native_sources() {
+        for arguments in [
+            arguments(&["--hoist-connect", "/tmp/weld.sock", "--hoist-codec", "av1"]),
+            arguments(&[
+                "--hoist-iroh-connect",
+                "/tmp/weld.ticket",
+                "--hoist-codec",
+                "av1",
+            ]),
+            arguments(&["--hoist-listen", "/tmp/weld.sock", "--hoist-codec", "av1"]),
+        ] {
+            assert!(validate_hoist_arguments(&arguments).is_err());
+        }
+    }
+
+    #[test]
+    fn peer_transports_are_mutually_exclusive() {
+        assert!(
+            AppArguments::try_parse_from([
+                "weldwm",
+                "--hoist-listen",
+                "/tmp/weld.sock",
+                "--hoist-iroh-connect",
+                "/tmp/weld.ticket",
+            ])
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn iroh_network_requires_an_iroh_peer() {
+        assert!(
+            AppArguments::try_parse_from(["weldwm", "--hoist-iroh-network", "direct"]).is_err()
+        );
+    }
 }

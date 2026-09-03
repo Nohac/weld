@@ -9,13 +9,16 @@ topology, codec selection, adaptation, and failure semantics. Hoist scope,
 window-family admission, placeholders, reclaim, and source-authoritative
 lifecycle remain defined by the hoisting specification.
 
-No network binding or complete remote handshake is implemented yet. The
-current `weld-hoist-protocol` crate provides a small transport-neutral record
-subset used by loopback and the Unix local tracer, and local encoded hoisting
-exercises FFmpeg VA-API encode and decode. Before 1.0, peers require an exact
-protocol revision rather than maintaining compatibility with earlier
-revisions. Capability negotiation remains necessary even when revisions match
-because devices, transports, targets, and hardware differ.
+An initial Iroh binding now carries the implemented record subset and opaque
+encoded surfaces between two Weld processes. It validates exact revision,
+roles, and a source-selected codec over authenticated encrypted QUIC, but is
+still a development tracer rather than the complete handshake described here:
+the listener accepts the first authenticated ALPN peer and enforces no Weld
+authorization, while discovery policy, pairing, general capability
+negotiation, reconnect, and dynamic peer admission remain unimplemented. The
+same `weld-hoist-protocol` records are also used by
+loopback and the Unix tracer. Before 1.0, peers require an exact protocol
+revision rather than maintaining compatibility with earlier revisions.
 
 Wire records use project-owned identities and values. They do not expose Bevy
 entities, Smithay resources, Rust ABI details, native handles, wgpu objects,
@@ -449,17 +452,19 @@ Native mode remains the same-machine correctness and latency baseline.
 
 After the local tracer:
 
-1. Measure a retained Iroh link between a laptop on Wi-Fi and an Android phone
-   on 5G. A one-time development ticket authorizes exactly the authenticated
-   endpoint for that run without becoming the production pairing model. Record
-   direct versus relayed path, establishment time, round-trip time, throughput,
-   path changes, reconnect, and input-sized messages.
-2. Carry one opaque toplevel between Weld processes over Iroh using the same
+1. Carry one opaque toplevel between Weld processes over Iroh using the same
    semantic protocol, independent control/input/media flows, and selected
-   hardware profile.
-3. Replace the Weld destination with a minimal Android destination. Decode into
-   an Android hardware buffer and compare a custom WGPU paint source with a
-   native EGL surface. Reject per-frame raw CPU readback.
+   hardware profile. The initial same-device direct tracer implements this
+   step; cross-device validation remains.
+2. Measure a retained Iroh link between a laptop on Wi-Fi and a second device
+   over a direct or relayed path. A one-time development ticket communicates
+   the source address and identity for that run without becoming the production
+   pairing model or an enforced admission proof. Record establishment time,
+   round-trip time, throughput, path changes, reconnect, and input-sized
+   messages.
+3. Replace the Weld destination with a minimal Android destination on 5G.
+   Decode into an Android hardware buffer and compare a custom WGPU paint
+   source with a native EGL surface. Reject per-frame raw CPU readback.
 4. Validate destination-driven size, scale, orientation, input, reclaim, loss
    recovery, and thermal or software-decoder renegotiation while the phone
    remains on 5G.
@@ -472,8 +477,8 @@ work.
 
 ## Open work — Exploration
 
-- Define binding-specific framing around the initial Postcard records and
-  select the exact-revision identifier.
+- Evolve the initial bounded Iroh framing and exact-revision handshake with
+  authorization, negotiated capabilities, recovery, and observability.
 - Define binding-independent device proof over transport session transcripts.
 - Use validation evidence to select production Iroh discovery, relay, pairing,
   flow mapping, and reconnect policy.

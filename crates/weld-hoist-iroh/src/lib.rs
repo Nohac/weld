@@ -1,0 +1,154 @@
+//! Encoded hoist transport over authenticated Iroh connections.
+
+mod adapter;
+mod framing;
+mod host;
+mod peer;
+
+pub use adapter::{
+    IrohDestinationEndpoint, destination_registration_with_backend,
+    source_registration_with_backend,
+};
+#[cfg(feature = "vaapi")]
+pub use adapter::{IrohSourceRegistrationOptions, destination_registration, source_registration};
+pub use host::{IrohHost, IrohNetwork};
+pub use peer::{IrohDestinationPeer, IrohSourcePeer};
+
+/// Authenticated Iroh endpoint identity, kept opaque to Weld policy.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct IrohPeerIdentity(String);
+
+impl IrohPeerIdentity {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{path::Path, thread, time::Duration};
+
+    use weld_client::{ClientId, ClientSourceId, ClientSurfaceId};
+    use weld_hoist_encoded::{
+        EncodedDestinationTransport, EncodedSourceTransport, SourceTransportPacket,
+    };
+    use weld_hoist_protocol::{
+        DestinationEnvelope, DestinationMessage, HoistSessionId, MediaEnvelope, SourceEnvelope,
+        SourceMessage,
+    };
+    use weld_media::{
+        EncodedAccessUnit, EncodedFrameKind, MediaFrameId, MediaStreamId, StreamGeneration,
+        VideoCodec,
+    };
+
+    use super::*;
+
+    #[test]
+    fn direct_hosts_exchange_independent_control_and_media() {
+        let ticket = test_ticket_path();
+        let source_host = IrohHost::bind(IrohNetwork::Direct).expect("source host");
+        let destination_host = IrohHost::bind(IrohNetwork::Direct).expect("destination host");
+        let (source_notifier, _source_wake) =
+            weld_core::host::client_runtime_notifier().expect("source notifier");
+        let (destination_notifier, _destination_wake) =
+            weld_core::host::client_runtime_notifier().expect("destination notifier");
+        let source_ticket = ticket.clone();
+        let source = thread::spawn(move || {
+            source_host
+                .accept_source(source_ticket, VideoCodec::H264, source_notifier)
+                .expect("accepted source peer")
+        });
+        wait_for_ticket(&ticket);
+        let destination = destination_host
+            .connect_destination(&ticket, vec![VideoCodec::H264], destination_notifier)
+            .expect("connected destination peer");
+        let source = source.join().expect("source thread");
+        assert_eq!(source.codec(), VideoCodec::H264);
+        assert_eq!(destination.codec(), VideoCodec::H264);
+        assert!(!source.identity().as_str().is_empty());
+        assert!(!destination.identity().as_str().is_empty());
+
+        let session = HoistSessionId::new(1);
+        let surface = ClientSurfaceId::new(ClientId::new(ClientSourceId::new(0), 2), 3);
+        source
+            .send(SourceTransportPacket::Control(SourceEnvelope {
+                session,
+                message: SourceMessage::Mapped { surface },
+            }))
+            .expect("source control");
+        let received = wait_for(|| destination.drain().ok().filter(|items| !items.is_empty()));
+        assert!(matches!(
+            &received[0],
+            SourceTransportPacket::Control(SourceEnvelope {
+                session: observed_session,
+                message: SourceMessage::Mapped { surface: observed_surface },
+            }) if *observed_session == session && *observed_surface == surface
+        ));
+
+        destination
+            .send(DestinationEnvelope {
+                session,
+                message: DestinationMessage::Reclaim,
+            })
+            .expect("destination control");
+        let returned = wait_for(|| source.drain().ok().filter(|items| !items.is_empty()));
+        assert!(matches!(returned[0].message, DestinationMessage::Reclaim));
+
+        let access_unit = EncodedAccessUnit {
+            frame: MediaFrameId::new(MediaStreamId::new(4), StreamGeneration::new(5), 6),
+            codec: VideoCodec::H264,
+            kind: EncodedFrameKind::Keyframe,
+            timestamp_micros: 7,
+            payload: vec![8, 9, 10],
+        };
+        source
+            .send(SourceTransportPacket::Media(MediaEnvelope {
+                session,
+                access_unit: access_unit.clone(),
+            }))
+            .expect("source media");
+        let received = wait_for(|| destination.drain().ok().filter(|items| !items.is_empty()));
+        assert!(matches!(
+            &received[0],
+            SourceTransportPacket::Media(MediaEnvelope {
+                session: observed_session,
+                access_unit: observed,
+            }) if *observed_session == session && *observed == access_unit
+        ));
+
+        source.disconnect();
+        wait_for(|| (!destination.is_available()).then_some(()));
+        let _ = std::fs::remove_file(ticket);
+    }
+
+    fn wait_for_ticket(path: &Path) {
+        wait_for(|| {
+            path.metadata()
+                .ok()
+                .filter(|metadata| metadata.len() > 0)
+                .map(|_| ())
+        });
+    }
+
+    fn wait_for<T>(mut condition: impl FnMut() -> Option<T>) -> T {
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            if let Some(value) = condition() {
+                return value;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "timed out waiting for Iroh test state"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    fn test_ticket_path() -> std::path::PathBuf {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system time")
+            .as_nanos();
+        std::env::temp_dir().join(format!("weld-iroh-{}-{nonce}.ticket", std::process::id()))
+    }
+}

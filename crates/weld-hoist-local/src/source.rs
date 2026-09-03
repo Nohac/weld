@@ -5,8 +5,8 @@ use std::{
 
 use tracing::{error, warn};
 use weld_client::{
-    ClientBufferId, ClientBufferLease, ClientBufferUseId, ClientRequest, ClientSurfaceEvent,
-    ClientSurfaceRequestKind, WireClientSurfaceEvent,
+    ClientBufferId, ClientBufferLease, ClientBufferUseId, ClientSurfaceEvent,
+    WireClientSurfaceEvent,
 };
 use weld_hoist_core::{HoistPortResult, HoistSourcePort, SourcePortCommand};
 use weld_hoist_protocol::{
@@ -15,7 +15,7 @@ use weld_hoist_protocol::{
 
 use crate::{
     LocalBufferContent, LocalDestinationPacket, LocalPacketConnection, LocalSourcePacket,
-    encoded::EncodedSourceState, export_local_buffer,
+    export_local_buffer,
 };
 
 pub(crate) struct LocalSourcePort {
@@ -23,7 +23,6 @@ pub(crate) struct LocalSourcePort {
     published_buffers: HashMap<ClientBufferId, HashSet<HoistSessionId>>,
     pending_uses: HashMap<ClientBufferUseId, (HoistSessionId, ClientBufferLease)>,
     retirements: Vec<ClientBufferUseId>,
-    encoded: Option<EncodedSourceState>,
 }
 
 impl LocalSourcePort {
@@ -33,17 +32,7 @@ impl LocalSourcePort {
             published_buffers: HashMap::new(),
             pending_uses: HashMap::new(),
             retirements: Vec::new(),
-            encoded: None,
         }
-    }
-
-    pub(crate) fn new_encoded(
-        connection: LocalPacketConnection,
-        encoded: EncodedSourceState,
-    ) -> Self {
-        let mut port = Self::new(connection);
-        port.encoded = Some(encoded);
-        port
     }
 
     fn send_event(
@@ -51,17 +40,6 @@ impl LocalSourcePort {
         session: HoistSessionId,
         event: ClientSurfaceEvent,
     ) -> HoistPortResult<()> {
-        if let Some(encoded) = &mut self.encoded {
-            encoded
-                .enqueue(session, event, &self.connection)
-                .map_err(|error| {
-                    error!(%error, ?session, "could not encode a hoisted client buffer");
-                    self.connection
-                        .record_failure(crate::TransportError::Protocol(error.to_string()));
-                    protocol_error(error)
-                })?;
-            return Ok(());
-        }
         let mut file_descriptors = Vec::new();
         let mut added_buffer_sessions = Vec::new();
         let mut added_uses = Vec::new();
@@ -204,36 +182,13 @@ impl HoistSourcePort for LocalSourcePort {
                     },
                     Vec::new(),
                 )?;
-                if let Some(encoded) = &mut self.encoded {
-                    encoded.cancel_surface(surface).map_err(|error| {
-                        warn!(%error, ?surface, "could not retire an encoded source surface");
-                        self.connection
-                            .record_failure(crate::TransportError::Protocol(error.to_string()));
-                        protocol_error(error)
-                    })
-                } else {
-                    self.retire_session_buffers(session)
-                }
+                self.retire_session_buffers(session)
             }
-            SourcePortCommand::RetireUpstreamBuffer(buffer) => {
-                if self.encoded.is_some() {
-                    Ok(())
-                } else {
-                    self.retire_buffer(buffer)
-                }
-            }
+            SourcePortCommand::RetireUpstreamBuffer(buffer) => self.retire_buffer(buffer),
         }
     }
 
     fn poll(&mut self) -> HoistPortResult<Vec<DestinationEnvelope>> {
-        if let Some(encoded) = &mut self.encoded {
-            encoded.drain(&self.connection).map_err(|error| {
-                warn!(%error, "encoded local hoist source failed");
-                self.connection
-                    .record_failure(crate::TransportError::Protocol(error.to_string()));
-                protocol_error(error)
-            })?;
-        }
         let packets = self
             .connection
             .drain::<LocalDestinationPacket>()
@@ -258,22 +213,6 @@ impl HoistSourcePort for LocalSourcePort {
 
     fn accept_destination(&mut self, envelope: &DestinationEnvelope) -> HoistPortResult<()> {
         match &envelope.message {
-            DestinationMessage::Request(ClientRequest::Surface(request))
-                if matches!(request.kind, ClientSurfaceRequestKind::Configure { .. }) =>
-            {
-                if let ClientSurfaceRequestKind::Configure { resizing, .. } = request.kind
-                    && let Some(encoded) = &mut self.encoded
-                {
-                    encoded
-                        .set_resizing(request.surface, resizing, &self.connection)
-                        .map_err(|error| {
-                            warn!(%error, "could not settle encoded resize state");
-                            self.connection
-                                .record_failure(crate::TransportError::Protocol(error.to_string()));
-                            protocol_error(error)
-                        })?;
-                }
-            }
             DestinationMessage::BufferReleased { use_id } => {
                 if self
                     .pending_uses
@@ -285,27 +224,10 @@ impl HoistSourcePort for LocalSourcePort {
                     warn!(?use_id, session = ?envelope.session, "ignored an unknown local hoist buffer release");
                 }
             }
-            DestinationMessage::EncodedCommitFinished {
-                surface,
-                revision,
-                outcome,
-            } => {
-                let Some(encoded) = &mut self.encoded else {
-                    let error = crate::TransportError::Protocol(
-                        "native hoist peer sent an encoded commit outcome".to_owned(),
-                    );
-                    self.connection
-                        .record_failure(crate::TransportError::Protocol(error.to_string()));
-                    return Err(Box::new(error));
-                };
-                encoded
-                    .finish_remote_commit(*surface, *revision, *outcome, &self.connection)
-                    .map_err(|error| {
-                        warn!(%error, ?surface, ?revision, "rejected an encoded commit outcome");
-                        self.connection
-                            .record_failure(crate::TransportError::Protocol(error.to_string()));
-                        protocol_error(error)
-                    })?;
+            DestinationMessage::EncodedCommitFinished { .. } => {
+                return Err(protocol_error(
+                    "native hoist peer sent an encoded commit outcome",
+                ));
             }
             DestinationMessage::Request(_)
             | DestinationMessage::Input(_)
@@ -328,7 +250,6 @@ impl HoistSourcePort for LocalSourcePort {
                 ));
         }
         self.pending_uses.clear();
-        self.encoded = None;
     }
 }
 

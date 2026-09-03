@@ -63,6 +63,7 @@ pub struct LocalBuffer {
 
 pub type LocalSourcePacket = SourceEnvelope<LocalBuffer>;
 pub type LocalSourceMessage = SourceMessage<LocalBuffer>;
+pub type LocalEncodedSourcePacket = SourceEnvelope<EncodedBuffer>;
 pub type LocalEncodedBuffer = EncodedBuffer;
 
 /// Unix media binding for one transport-neutral access-unit header.

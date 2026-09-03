@@ -44,15 +44,17 @@ for one frame before window admission and follow-family policy observe it; that
 prototype transition remains to be tightened. A same-machine sibling-process
 native-buffer transport now exists as an architectural validation binding. It
 retains DMA-BUF allocations without a pixel copy and carries already-copied SHM
-pixels through sealed descriptors. No network transport, complete transient
-policy, or non-xdg family inference is implemented.
+pixels through sealed descriptors. An initial Iroh binding carries opaque
+encoded surfaces between sibling Weld processes. Complete pairing, dynamic
+peer admission, transient policy, and non-xdg family inference are not
+implemented.
 
 ## Hoisting layers and crate boundaries — Direction
 
-The local proof now separates its neutral relay, Weld application integration,
-placeholder scene, and Linux-local process transport. The present crates
-establish dependency direction, but the local Postcard records are not yet the
-remote network or media protocol:
+The proof now separates its neutral relay, Weld application integration,
+placeholder scene, encoded scheduling, and concrete process transports. The
+present crates establish dependency direction while leaving the wider remote
+protocol open:
 
 - `weld-hoist-core` owns the runtime-independent hoist identities and current
   same-process loopback adapter. It must remain free of Bevy, Smithay, wgpu,
@@ -72,8 +74,12 @@ remote network or media protocol:
   Unix sequenced packets and SCM_RIGHTS to relay native buffers between sibling
   Weld processes. DMA-BUF uses a bind-once descriptor path without a pixel
   copy; SHM uses an explicit sealed-descriptor CPU-copy path. It is
-  deliberately separate from `weld-hoist-core` and does not establish the
-  future Iroh or encoded-media framing.
+  deliberately separate from `weld-hoist-core`.
+- `weld-hoist-encoded` owns transport-neutral encoded commit scheduling and
+  codec worker contracts. Both Unix and Iroh bindings use these ports.
+- `weld-hoist-iroh` owns the initial authenticated QUIC connection, bounded
+  control and media framing, and runtime bridge. Its development ticket is not
+  yet Weld device authorization.
 
 Transport and codec implementations remain replaceable adapters around
 `weld-hoist-core`; concrete crates should be introduced only when their
@@ -118,10 +124,11 @@ configure state, and lifecycle transitions. A destination may either mirror
 the remote workspace structure or meld remote windows into local workspaces;
 that placement policy is not yet selected.
 
-No network transport, encoder, or decoder is implemented yet. The implemented
-local sibling-process binding proves the adapter, buffer-lifetime, input,
-configure, scale, reclaim, and failure-recovery boundaries without claiming to
-solve remote media delivery.
+The initial Iroh transport and FFmpeg VA-API encoder/decoder now provide an
+encoded Weld-to-Weld tracer. The local sibling-process binding remains the
+native-buffer baseline for adapter, buffer-lifetime, input, configure, scale,
+reclaim, and failure-recovery behavior. Neither tracer implements the complete
+authorization, negotiation, recovery, and budgeting model described here.
 
 ## Endpoint policy projection — Direction
 

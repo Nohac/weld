@@ -6,9 +6,8 @@
 
 mod adapter;
 mod bootstrap;
-mod codec;
 mod destination;
-mod encoded;
+mod encoded_transport;
 mod media;
 mod native;
 mod socket;
@@ -25,11 +24,6 @@ pub use adapter::{
     local_source_registration,
 };
 pub use bootstrap::{LocalTransportConnections, bootstrap_destination, bootstrap_source};
-pub use codec::{
-    LocalDecodeBackend, LocalDecodeCompletion, LocalDecodeRequest, LocalDecodedFrame,
-    LocalEncodeBackend, LocalEncodeCompletion, LocalEncodeInput, LocalEncodeRequest,
-    LocalSubmitError,
-};
 pub(crate) use media::import_access_unit;
 pub use native::{
     ExportedLocalBuffer, ensure_descriptors_consumed, export_local_buffer, import_local_dmabuf,
@@ -38,9 +32,17 @@ pub use native::{
 pub use socket::{
     LocalPacketConnection, LocalPacketListener, LocalPeerRole, ReceivedLocalPacket, TransportError,
 };
+pub use weld_hoist_encoded::{
+    DecodeBackend as LocalDecodeBackend, DecodeCompletion as LocalDecodeCompletion,
+    DecodeRequest as LocalDecodeRequest, DecodedFrame as LocalDecodedFrame,
+    EncodeBackend as LocalEncodeBackend, EncodeCompletion as LocalEncodeCompletion,
+    EncodeInput as LocalEncodeInput, EncodeRequest as LocalEncodeRequest,
+    SubmitError as LocalSubmitError,
+};
 pub(crate) use wire::{LocalBootstrapAcknowledgement, LocalBootstrapOffer};
 pub use wire::{
     LocalBuffer, LocalBufferContent, LocalDestinationMessage, LocalDestinationPacket, LocalDmabuf,
     LocalDmabufPlane, LocalEncodedAccessUnit, LocalEncodedBuffer, LocalEncodedCommitOutcome,
-    LocalMediaPacket, LocalShm, LocalSourceMessage, LocalSourcePacket, LocalSurfaceMode,
+    LocalEncodedSourcePacket, LocalMediaPacket, LocalShm, LocalSourceMessage, LocalSourcePacket,
+    LocalSurfaceMode,
 };

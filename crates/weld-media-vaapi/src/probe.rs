@@ -93,6 +93,15 @@ pub struct VaapiCapabilities {
 }
 
 impl VaapiCapabilities {
+    pub const fn supports_decode(&self, codec: VideoCodec) -> bool {
+        let decoder = match codec {
+            VideoCodec::H264 => self.h264_decode,
+            VideoCodec::Av1 => self.av1_decode,
+            VideoCodec::Vp9 => false,
+        };
+        decoder && self.video_processing
+    }
+
     pub const fn supports_round_trip(&self, codec: VideoCodec) -> bool {
         let codec = match codec {
             VideoCodec::H264 => self.h264_decode && self.h264_encode.is_some(),
@@ -288,5 +297,21 @@ mod tests {
             geometry.coded_extent(7, 5).expect("unrestricted minimum"),
             (7, 5)
         );
+    }
+
+    #[test]
+    fn decode_support_requires_the_codec_and_video_processing() {
+        let mut capabilities = VaapiCapabilities {
+            vendor: "test".to_owned(),
+            h264_decode: true,
+            h264_encode: None,
+            av1_decode: false,
+            av1_encode: None,
+            video_processing: true,
+        };
+        assert!(capabilities.supports_decode(VideoCodec::H264));
+        assert!(!capabilities.supports_decode(VideoCodec::Av1));
+        capabilities.video_processing = false;
+        assert!(!capabilities.supports_decode(VideoCodec::H264));
     }
 }

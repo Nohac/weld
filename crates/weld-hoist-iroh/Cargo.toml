@@ -1,23 +1,27 @@
 [package]
-name = "weld-hoist-local"
+name = "weld-hoist-iroh"
 version.workspace = true
 edition.workspace = true
 publish.workspace = true
 
 [features]
-encoded-vaapi = ["weld-hoist-encoded/vaapi"]
+default = []
+vaapi = ["weld-hoist-encoded/vaapi"]
 
 [dependencies]
 anyhow.workspace = true
-calloop.workspace = true
+iroh.workspace = true
+iroh-tickets.workspace = true
 postcard.workspace = true
-rustix.workspace = true
 serde.workspace = true
+tokio.workspace = true
 tracing.workspace = true
-smithay = { workspace = true, features = ["wayland_frontend"] }
-weld-client = { path = "../weld-client", features = ["serde"] }
+weld-client = { path = "../weld-client" }
 weld-core = { path = "../weld-core" }
 weld-hoist-core = { path = "../weld-hoist-core" }
 weld-hoist-encoded = { path = "../weld-hoist-encoded" }
 weld-hoist-protocol = { path = "../weld-hoist-protocol" }
 weld-media = { path = "../weld-media", features = ["serde"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros"] }

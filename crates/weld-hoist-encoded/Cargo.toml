@@ -1,0 +1,19 @@
+[package]
+name = "weld-hoist-encoded"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[features]
+vaapi = ["dep:weld-media-vaapi"]
+
+[dependencies]
+anyhow.workspace = true
+rustix.workspace = true
+tracing.workspace = true
+weld-client = { path = "../weld-client" }
+weld-core = { path = "../weld-core" }
+weld-hoist-core = { path = "../weld-hoist-core" }
+weld-hoist-protocol = { path = "../weld-hoist-protocol" }
+weld-media = { path = "../weld-media" }
+weld-media-vaapi = { path = "../weld-media-vaapi", optional = true }

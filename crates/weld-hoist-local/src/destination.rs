@@ -15,7 +15,6 @@ use weld_hoist_protocol::{DestinationEnvelope, DestinationMessage, HoistSessionI
 
 use crate::{
     LocalBuffer, LocalBufferContent, LocalPacketConnection, LocalSourcePacket,
-    encoded::{EncodedDestinationEvent, EncodedDestinationState},
     ensure_descriptors_consumed, import_local_dmabuf, import_local_shm,
 };
 
@@ -31,7 +30,6 @@ pub(crate) struct LocalDestinationPort {
     buffers: HashMap<ClientBufferId, ImportedDmabuf>,
     next_buffer: Option<u64>,
     next_use: Option<u64>,
-    encoded: Option<EncodedDestinationState>,
 }
 
 impl LocalDestinationPort {
@@ -47,19 +45,7 @@ impl LocalDestinationPort {
             buffers: HashMap::new(),
             next_buffer: Some(1),
             next_use: Some(1),
-            encoded: None,
         }
-    }
-
-    pub(crate) fn new_encoded(
-        connection: LocalPacketConnection,
-        descriptor: ClientSourceDescriptor,
-        dmabuf: DmabufContext,
-        encoded: EncodedDestinationState,
-    ) -> Self {
-        let mut port = Self::new(connection, descriptor, dmabuf);
-        port.encoded = Some(encoded);
-        port
     }
 
     #[cfg(test)]
@@ -74,7 +60,6 @@ impl LocalDestinationPort {
             buffers: HashMap::new(),
             next_buffer: Some(1),
             next_use: Some(1),
-            encoded: None,
         }
     }
 
@@ -90,18 +75,9 @@ impl LocalDestinationPort {
                 event: DestinationPortEvent::MappedSurface(surface),
             }),
             SourceMessage::Surface(event) => {
-                if self.encoded.is_some() {
-                    self.enqueue_encoded(packet.session, event, file_descriptors, records)?;
-                } else {
-                    self.import_native(packet.session, event, file_descriptors, records)?;
-                }
+                self.import_native(packet.session, event, file_descriptors, records)?;
             }
             SourceMessage::BufferRetired { buffer } => {
-                if self.encoded.is_some() {
-                    return Err(self.protocol_failure(format!(
-                        "encoded peer retired native buffer {buffer:?}"
-                    )));
-                }
                 if let Some(imported) = self.buffers.remove(&buffer) {
                     let Some(dmabuf) = &self.dmabuf else {
                         return Err(self.protocol_failure(
@@ -112,9 +88,6 @@ impl LocalDestinationPort {
                 }
             }
             SourceMessage::Withdraw { surface } => {
-                if let Some(encoded) = &mut self.encoded {
-                    encoded.cancel_surface(surface).map_err(protocol_error)?;
-                }
                 records.push(DestinationPortRecord {
                     session: packet.session,
                     event: DestinationPortEvent::WithdrawSurface(surface),
@@ -125,30 +98,6 @@ impl LocalDestinationPort {
                 event: DestinationPortEvent::Ended,
             }),
         }
-        Ok(())
-    }
-
-    fn enqueue_encoded(
-        &mut self,
-        session: HoistSessionId,
-        event: WireClientSurfaceEvent<LocalBuffer>,
-        file_descriptors: Vec<OwnedFd>,
-        records: &mut Vec<DestinationPortRecord>,
-    ) -> HoistPortResult<()> {
-        if !file_descriptors.is_empty() {
-            return Err(
-                self.protocol_failure("encoded control packet attached descriptors".to_owned())
-            );
-        }
-        let mut decoded = Vec::new();
-        let encoded = self
-            .encoded
-            .as_mut()
-            .ok_or_else(|| protocol_error("encoded destination state disappeared"))?;
-        encoded
-            .enqueue(session, event, &mut decoded)
-            .map_err(protocol_error)?;
-        extend_encoded_records(records, decoded);
         Ok(())
     }
 
@@ -308,25 +257,6 @@ impl LocalDestinationPort {
             })
     }
 
-    fn flush_encoded_outcomes(&mut self) -> HoistPortResult<()> {
-        let outcomes = self
-            .encoded
-            .as_mut()
-            .map(EncodedDestinationState::take_outcomes)
-            .unwrap_or_default();
-        for outcome in outcomes {
-            self.queue_destination(
-                outcome.session,
-                DestinationMessage::EncodedCommitFinished {
-                    surface: outcome.surface,
-                    revision: outcome.revision,
-                    outcome: outcome.outcome,
-                },
-            )?;
-        }
-        Ok(())
-    }
-
     fn protocol_failure(&self, message: String) -> weld_hoist_core::HoistPortError {
         self.connection
             .record_failure(crate::TransportError::Protocol(message.clone()));
@@ -347,15 +277,6 @@ impl HoistDestinationPort for LocalDestinationPort {
         for packet in packets {
             self.apply_source_packet(packet.message, packet.file_descriptors, &mut records)?;
         }
-        if let Some(encoded) = &mut self.encoded {
-            let mut decoded = Vec::new();
-            encoded.drain(&mut decoded).map_err(|error| {
-                warn!(%error, "encoded local hoist destination failed");
-                protocol_error(error)
-            })?;
-            extend_encoded_records(&mut records, decoded);
-        }
-        self.flush_encoded_outcomes()?;
         Ok(records)
     }
 
@@ -393,18 +314,7 @@ impl HoistDestinationPort for LocalDestinationPort {
                 ));
             self.buffers.clear();
         }
-        self.encoded = None;
     }
-}
-
-fn extend_encoded_records(
-    records: &mut Vec<DestinationPortRecord>,
-    decoded: Vec<EncodedDestinationEvent>,
-) {
-    records.extend(decoded.into_iter().map(|decoded| DestinationPortRecord {
-        session: decoded.session,
-        event: DestinationPortEvent::Surface(decoded.event),
-    }));
 }
 
 fn wire_buffer_uses(event: &WireClientSurfaceEvent<LocalBuffer>) -> Vec<ClientBufferUseId> {

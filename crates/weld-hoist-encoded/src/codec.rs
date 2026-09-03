@@ -1,10 +1,10 @@
-//! Codec-independent local adapter contracts and optional VA-API binding.
+//! Codec-independent hoist adapter contracts and optional VA-API binding.
 
 use anyhow::Result;
 use weld_core::dmabuf::ExternalDmabuf;
 use weld_media::{EncodedAccessUnit, MediaFrameId, MediaStreamId, StreamGeneration};
 
-pub enum LocalEncodeInput {
+pub enum EncodeInput {
     Dmabuf(ExternalDmabuf),
     PackedBgra {
         width: u32,
@@ -13,60 +13,54 @@ pub enum LocalEncodeInput {
     },
 }
 
-pub struct LocalEncodeRequest {
+pub struct EncodeRequest {
     pub token: u64,
     pub frame: MediaFrameId,
     pub timestamp_micros: u64,
-    pub input: LocalEncodeInput,
+    pub input: EncodeInput,
 }
 
-pub struct LocalEncodeCompletion {
+pub struct EncodeCompletion {
     pub token: u64,
     pub result: Result<EncodedAccessUnit>,
 }
 
-pub struct LocalDecodeRequest {
+pub struct DecodeRequest {
     pub token: u64,
     pub access_unit: EncodedAccessUnit,
     pub visible_width: u32,
     pub visible_height: u32,
 }
 
-pub struct LocalDecodedFrame {
+pub struct DecodedFrame {
     pub frame: MediaFrameId,
     pub dmabuf: ExternalDmabuf,
 }
 
-pub struct LocalDecodeCompletion {
+pub struct DecodeCompletion {
     pub token: u64,
-    pub result: Result<Vec<LocalDecodedFrame>>,
+    pub result: Result<Vec<DecodedFrame>>,
 }
 
-pub enum LocalSubmitError<T> {
+pub enum SubmitError<T> {
     Busy(T),
     Stopped(T),
     Rejected(anyhow::Error),
 }
 
-pub trait LocalEncodeBackend {
-    fn try_submit(
-        &mut self,
-        request: LocalEncodeRequest,
-    ) -> Result<(), LocalSubmitError<LocalEncodeRequest>>;
-    fn drain(&mut self) -> Vec<LocalEncodeCompletion>;
+pub trait EncodeBackend {
+    fn try_submit(&mut self, request: EncodeRequest) -> Result<(), SubmitError<EncodeRequest>>;
+    fn drain(&mut self) -> Vec<EncodeCompletion>;
     fn retire(&mut self, stream: MediaStreamId, generation: StreamGeneration) -> Result<()>;
 }
 
-pub trait LocalDecodeBackend {
-    fn try_submit(
-        &mut self,
-        request: LocalDecodeRequest,
-    ) -> Result<(), LocalSubmitError<LocalDecodeRequest>>;
-    fn drain(&mut self) -> Vec<LocalDecodeCompletion>;
+pub trait DecodeBackend {
+    fn try_submit(&mut self, request: DecodeRequest) -> Result<(), SubmitError<DecodeRequest>>;
+    fn drain(&mut self) -> Vec<DecodeCompletion>;
     fn retire(&mut self, stream: MediaStreamId, generation: StreamGeneration) -> Result<()>;
 }
 
-#[cfg(feature = "encoded-vaapi")]
+#[cfg(feature = "vaapi")]
 mod vaapi {
     use std::path::PathBuf;
 
@@ -80,9 +74,8 @@ mod vaapi {
     };
 
     use super::{
-        LocalDecodeBackend, LocalDecodeCompletion, LocalDecodeRequest, LocalDecodedFrame,
-        LocalEncodeBackend, LocalEncodeCompletion, LocalEncodeInput, LocalEncodeRequest,
-        LocalSubmitError,
+        DecodeBackend, DecodeCompletion, DecodeRequest, DecodedFrame, EncodeBackend,
+        EncodeCompletion, EncodeInput, EncodeRequest, SubmitError,
     };
 
     const H264_BITRATE: u64 = 16_000_000;
@@ -91,23 +84,23 @@ mod vaapi {
     const DEFAULT_KEYFRAME_INTERVAL: u32 = 32;
     const DRM_FORMAT_XRGB8888: u32 = u32::from_le_bytes(*b"XR24");
 
-    pub(crate) fn encode_backend(
+    pub fn encode_backend(
         render_node: PathBuf,
         codec: VideoCodec,
         dump_directory: Option<PathBuf>,
         notify: impl Fn() + Send + Sync + 'static,
-    ) -> Result<Box<dyn LocalEncodeBackend>> {
-        Ok(Box::new(VaapiLocalEncoder {
+    ) -> Result<Box<dyn EncodeBackend>> {
+        Ok(Box::new(VaapiEncoder {
             worker: VaapiEncodeWorker::spawn(render_node, dump_directory, notify)?,
             settings: encoder_settings(codec)?,
         }))
     }
 
-    pub(crate) fn decode_backend(
+    pub fn decode_backend(
         capabilities: &ExternalDmabufCapabilities,
         codec: VideoCodec,
         notify: impl Fn() + Send + Sync + 'static,
-    ) -> Result<Box<dyn LocalDecodeBackend>> {
+    ) -> Result<Box<dyn DecodeBackend>> {
         let xrgb_modifiers = capabilities
             .formats
             .iter()
@@ -117,34 +110,31 @@ mod vaapi {
             !xrgb_modifiers.is_empty(),
             "Weld exposes no XRGB DMA-BUF modifier for decoded video"
         );
-        Ok(Box::new(VaapiLocalDecoder {
+        Ok(Box::new(VaapiDecoder {
             worker: VaapiDecodeWorker::spawn(capabilities.render_node.clone(), notify)?,
             codec,
             xrgb_modifiers,
         }))
     }
 
-    struct VaapiLocalEncoder {
+    struct VaapiEncoder {
         worker: VaapiEncodeWorker,
         settings: VaapiEncoderSettings,
     }
 
-    impl LocalEncodeBackend for VaapiLocalEncoder {
-        fn try_submit(
-            &mut self,
-            request: LocalEncodeRequest,
-        ) -> Result<(), LocalSubmitError<LocalEncodeRequest>> {
-            let LocalEncodeRequest {
+    impl EncodeBackend for VaapiEncoder {
+        fn try_submit(&mut self, request: EncodeRequest) -> Result<(), SubmitError<EncodeRequest>> {
+            let EncodeRequest {
                 token,
                 frame,
                 timestamp_micros,
                 input,
             } = request;
             let input = match input {
-                LocalEncodeInput::Dmabuf(dmabuf) => VaapiEncodeInput::Dmabuf(
-                    to_vaapi_dmabuf(dmabuf).map_err(LocalSubmitError::Rejected)?,
+                EncodeInput::Dmabuf(dmabuf) => VaapiEncodeInput::Dmabuf(
+                    to_vaapi_dmabuf(dmabuf).map_err(SubmitError::Rejected)?,
                 ),
-                LocalEncodeInput::PackedBgra {
+                EncodeInput::PackedBgra {
                     width,
                     height,
                     pixels,
@@ -165,21 +155,21 @@ mod vaapi {
                 Ok(()) => Ok(()),
                 Err(VaapiWorkerSubmitError::Busy(request)) => {
                     let request =
-                        from_vaapi_encode_request(*request).map_err(LocalSubmitError::Rejected)?;
-                    Err(LocalSubmitError::Busy(request))
+                        from_vaapi_encode_request(*request).map_err(SubmitError::Rejected)?;
+                    Err(SubmitError::Busy(request))
                 }
                 Err(VaapiWorkerSubmitError::Stopped(request)) => {
                     let request =
-                        from_vaapi_encode_request(*request).map_err(LocalSubmitError::Rejected)?;
-                    Err(LocalSubmitError::Stopped(request))
+                        from_vaapi_encode_request(*request).map_err(SubmitError::Rejected)?;
+                    Err(SubmitError::Stopped(request))
                 }
             }
         }
 
-        fn drain(&mut self) -> Vec<LocalEncodeCompletion> {
+        fn drain(&mut self) -> Vec<EncodeCompletion> {
             self.worker
                 .drain()
-                .map(|completion| LocalEncodeCompletion {
+                .map(|completion| EncodeCompletion {
                     token: completion.token,
                     result: completion.result,
                 })
@@ -195,22 +185,20 @@ mod vaapi {
         }
     }
 
-    fn from_vaapi_encode_request(request: VaapiEncodeRequest) -> Result<LocalEncodeRequest> {
+    fn from_vaapi_encode_request(request: VaapiEncodeRequest) -> Result<EncodeRequest> {
         let input = match request.input {
-            VaapiEncodeInput::Dmabuf(dmabuf) => {
-                LocalEncodeInput::Dmabuf(from_vaapi_dmabuf(dmabuf)?)
-            }
+            VaapiEncodeInput::Dmabuf(dmabuf) => EncodeInput::Dmabuf(from_vaapi_dmabuf(dmabuf)?),
             VaapiEncodeInput::PackedBgra {
                 width,
                 height,
                 pixels,
-            } => LocalEncodeInput::PackedBgra {
+            } => EncodeInput::PackedBgra {
                 width,
                 height,
                 pixels,
             },
         };
-        Ok(LocalEncodeRequest {
+        Ok(EncodeRequest {
             token: request.token,
             frame: request.frame,
             timestamp_micros: request.timestamp_micros,
@@ -222,7 +210,7 @@ mod vaapi {
         let bitrate = match codec {
             VideoCodec::H264 => H264_BITRATE,
             VideoCodec::Av1 => AV1_BITRATE,
-            VideoCodec::Vp9 => anyhow::bail!("VP9 local hoisting is not implemented"),
+            VideoCodec::Vp9 => anyhow::bail!("VP9 encoded hoisting is not implemented"),
         };
         VaapiEncoderSettings::try_new(
             codec,
@@ -232,19 +220,16 @@ mod vaapi {
         )
     }
 
-    struct VaapiLocalDecoder {
+    struct VaapiDecoder {
         worker: VaapiDecodeWorker,
         codec: VideoCodec,
         xrgb_modifiers: Vec<u64>,
     }
 
-    impl LocalDecodeBackend for VaapiLocalDecoder {
-        fn try_submit(
-            &mut self,
-            request: LocalDecodeRequest,
-        ) -> Result<(), LocalSubmitError<LocalDecodeRequest>> {
+    impl DecodeBackend for VaapiDecoder {
+        fn try_submit(&mut self, request: DecodeRequest) -> Result<(), SubmitError<DecodeRequest>> {
             if request.access_unit.codec != self.codec {
-                return Err(LocalSubmitError::Rejected(anyhow::anyhow!(
+                return Err(SubmitError::Rejected(anyhow::anyhow!(
                     "received {:?} in a negotiated {:?} stream",
                     request.access_unit.codec,
                     self.codec,
@@ -258,35 +243,31 @@ mod vaapi {
                 xrgb_modifiers: self.xrgb_modifiers.clone(),
             };
             self.worker.try_decode(vaapi).map_err(|error| match error {
-                VaapiWorkerSubmitError::Busy(request) => {
-                    LocalSubmitError::Busy(LocalDecodeRequest {
-                        token: request.token,
-                        access_unit: request.access_unit,
-                        visible_width: request.visible_width,
-                        visible_height: request.visible_height,
-                    })
-                }
-                VaapiWorkerSubmitError::Stopped(request) => {
-                    LocalSubmitError::Stopped(LocalDecodeRequest {
-                        token: request.token,
-                        access_unit: request.access_unit,
-                        visible_width: request.visible_width,
-                        visible_height: request.visible_height,
-                    })
-                }
+                VaapiWorkerSubmitError::Busy(request) => SubmitError::Busy(DecodeRequest {
+                    token: request.token,
+                    access_unit: request.access_unit,
+                    visible_width: request.visible_width,
+                    visible_height: request.visible_height,
+                }),
+                VaapiWorkerSubmitError::Stopped(request) => SubmitError::Stopped(DecodeRequest {
+                    token: request.token,
+                    access_unit: request.access_unit,
+                    visible_width: request.visible_width,
+                    visible_height: request.visible_height,
+                }),
             })
         }
 
-        fn drain(&mut self) -> Vec<LocalDecodeCompletion> {
+        fn drain(&mut self) -> Vec<DecodeCompletion> {
             self.worker
                 .drain()
-                .map(|completion| LocalDecodeCompletion {
+                .map(|completion| DecodeCompletion {
                     token: completion.token,
                     result: completion.result.and_then(|frames| {
                         frames
                             .into_iter()
                             .map(|frame| {
-                                Ok(LocalDecodedFrame {
+                                Ok(DecodedFrame {
                                     frame: frame.frame,
                                     dmabuf: from_vaapi_dmabuf(frame.dmabuf)?,
                                 })
@@ -367,5 +348,5 @@ mod vaapi {
     }
 }
 
-#[cfg(feature = "encoded-vaapi")]
-pub(crate) use vaapi::{decode_backend, encode_backend};
+#[cfg(feature = "vaapi")]
+pub use vaapi::{decode_backend, encode_backend};
