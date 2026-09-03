@@ -33,9 +33,9 @@ use weld_window::{
 };
 
 use crate::{
-    ActiveHoistFamily, HoistDetached, HoistFamilyAssignments, HoistMembership, HoistSession,
-    HoistShortcut, HoistTransport, HoistWindow, HoistedWindow, LoopbackReceiver, NextHoistFamilyId,
-    NextHoistSessionId, PlannedHoist, RECLAIM_CONFIGURE_TIMEOUT, SessionState,
+    ActiveHoistFamily, HoistDetached, HoistEndpointRegistry, HoistFamilyAssignments,
+    HoistMembership, HoistSession, HoistShortcut, HoistWindow, HoistedWindow, LoopbackReceiver,
+    NextHoistFamilyId, NextHoistSessionId, PlannedHoist, RECLAIM_CONFIGURE_TIMEOUT, SessionState,
 };
 
 pub(super) fn request_focused_hoist(
@@ -60,7 +60,7 @@ pub(super) struct BeginHoistParams<'w, 's> {
     next_session: ResMut<'w, NextHoistSessionId>,
     next_family: ResMut<'w, NextHoistFamilyId>,
     assignments: ResMut<'w, HoistFamilyAssignments>,
-    transport: Res<'w, HoistTransport>,
+    endpoints: Res<'w, HoistEndpointRegistry>,
     adapter_commands: ResMut<'w, ClientAdapterCommandQueue>,
     windows: HoistableWindows<'w, 's>,
     clients: Query<
@@ -111,6 +111,7 @@ pub(super) fn begin_requested_hoists(mut params: BeginHoistParams) {
                     ActiveHoistFamily {
                         id: session.family,
                         root: session.membership.group_root(),
+                        endpoint: session.endpoint,
                     },
                 );
             }
@@ -141,12 +142,30 @@ pub(super) fn begin_requested_hoists(mut params: BeginHoistParams) {
             continue;
         }
         let (family, source_mode) = match params.assignments.active.get(&client).copied() {
-            Some(family) => (family, HoistSourceMode::Followed),
+            Some(family)
+                if params
+                    .endpoints
+                    .endpoint(family.endpoint)
+                    .is_some_and(|endpoint| endpoint.is_available()) =>
+            {
+                (family, HoistSourceMode::Followed)
+            }
+            Some(_) => continue,
             None => {
+                let Some(endpoint) = params.endpoints.default_id() else {
+                    continue;
+                };
+                if !params
+                    .endpoints
+                    .endpoint(endpoint)
+                    .is_some_and(|endpoint| endpoint.is_available())
+                {
+                    continue;
+                }
                 let Some(id) = params.next_family.allocate() else {
                     continue;
                 };
-                let family = ActiveHoistFamily { id, root };
+                let family = ActiveHoistFamily { id, root, endpoint };
                 params.assignments.active.insert(client, family);
                 (family, HoistSourceMode::PreservedSlot)
             }
@@ -221,6 +240,7 @@ fn plan_client_windows(
             };
             (toplevel.surface.client() == client).then(|| PlannedHoist {
                 source,
+                endpoint: family.endpoint,
                 family: family.id,
                 client,
                 membership: if params.families.root_for_window(source) == Some(family.root) {
@@ -239,6 +259,12 @@ fn plan_client_windows(
 }
 
 fn begin_hoist(params: &mut BeginHoistParams, planned: PlannedHoist) {
+    let Some(endpoint) = params.endpoints.endpoint(planned.endpoint) else {
+        return;
+    };
+    if !endpoint.is_available() {
+        return;
+    }
     let Ok((_, _, occupant, _, presentation, already_hoisted, vacancy)) =
         params.windows.get(planned.source)
     else {
@@ -265,10 +291,8 @@ fn begin_hoist(params: &mut BeginHoistParams, planned: PlannedHoist) {
         });
     let session = params.commands.spawn_empty().id();
     let surface = toplevel.surface;
-    let destination = params.transport.0.destination(surface);
-    params
-        .adapter_commands
-        .push(params.transport.0.map(id, surface));
+    let destination = endpoint.destination(surface);
+    params.adapter_commands.push(endpoint.map(id, surface));
     params
         .commands
         .entity(source_client)
@@ -296,6 +320,7 @@ fn begin_hoist(params: &mut BeginHoistParams, planned: PlannedHoist) {
     };
     params.commands.entity(session).insert(HoistSession {
         id,
+        endpoint: planned.endpoint,
         family: planned.family,
         client: planned.client,
         membership: planned.membership,
@@ -308,7 +333,7 @@ fn begin_hoist(params: &mut BeginHoistParams, planned: PlannedHoist) {
         original_vacancy: *vacancy,
         placeholder_metrics: metrics,
         detach_on_restore: false,
-        state: if params.transport.0.has_local_receiver() {
+        state: if endpoint.has_local_receiver() {
             SessionState::Mapping
         } else {
             SessionState::Active
@@ -328,7 +353,7 @@ type ReceiverWindows<'w, 's> = ParamSet<
 #[derive(SystemParam)]
 pub(super) struct BindReceiverParams<'w, 's> {
     commands: Commands<'w, 's>,
-    transport: Res<'w, HoistTransport>,
+    endpoints: Res<'w, HoistEndpointRegistry>,
     sessions: Query<'w, 's, (Entity, &'static mut HoistSession)>,
     clients: Query<
         'w,
@@ -343,11 +368,14 @@ pub(super) struct BindReceiverParams<'w, 's> {
 }
 
 pub(super) fn bind_loopback_receivers(mut params: BindReceiverParams) {
-    if !params.transport.0.has_local_receiver() {
-        return;
-    }
     for (session_entity, mut session) in &mut params.sessions {
         if !matches!(session.state, SessionState::Mapping) {
+            continue;
+        }
+        let Some(endpoint) = params.endpoints.endpoint(session.endpoint) else {
+            continue;
+        };
+        if !endpoint.is_available() || !endpoint.has_local_receiver() {
             continue;
         }
         let Some((_, _, occupancy)) = params.clients.iter().find(|(source, toplevel, _)| {
@@ -411,7 +439,7 @@ pub(super) struct MaintainParams<'w, 's> {
     presentation_insets: Query<'w, 's, &'static PresentationInsets>,
     placeholders: Query<'w, 's, &'static mut HoistPlaceholder>,
     families: WindowFamilyResolver<'w, 's>,
-    transport: Res<'w, HoistTransport>,
+    endpoints: Res<'w, HoistEndpointRegistry>,
     adapter_commands: ResMut<'w, ClientAdapterCommandQueue>,
     actions: ResMut<'w, SurfaceActionQueue>,
     revisions: Res<'w, SurfaceCommitRevisions>,
@@ -438,7 +466,11 @@ pub(super) fn maintain_sessions(mut params: MaintainParams) {
     }
 
     for (entity, mut session) in &mut params.sessions {
-        if !params.transport.0.is_available() {
+        let Some(endpoint) = params.endpoints.endpoint(session.endpoint) else {
+            restore_source(&mut params.commands, entity, &session);
+            continue;
+        };
+        if !endpoint.is_available() {
             restore_source(&mut params.commands, entity, &session);
             continue;
         }
@@ -456,7 +488,7 @@ pub(super) fn maintain_sessions(mut params: MaintainParams) {
         if source_mapping.is_err() {
             params
                 .adapter_commands
-                .push(params.transport.0.unmap(session.surface));
+                .push(endpoint.unmap(session.surface));
             if let Some(source) = session.source_window {
                 if let Ok(mut placeholder) = params.placeholders.get_mut(source) {
                     placeholder.state = HoistPlaceholderState::Closed;
@@ -472,7 +504,7 @@ pub(super) fn maintain_sessions(mut params: MaintainParams) {
         {
             params
                 .adapter_commands
-                .push(params.transport.0.unmap(session.surface));
+                .push(endpoint.unmap(session.surface));
             session.detach_on_restore = true;
             session.state = SessionState::Unmapping;
             continue;
@@ -488,7 +520,7 @@ pub(super) fn maintain_sessions(mut params: MaintainParams) {
                 {
                     params
                         .adapter_commands
-                        .push(params.transport.0.unmap(session.surface));
+                        .push(endpoint.unmap(session.surface));
                     session.detach_on_restore = true;
                     session.state = SessionState::Unmapping;
                 }
@@ -514,7 +546,7 @@ pub(super) fn maintain_sessions(mut params: MaintainParams) {
         {
             params
                 .adapter_commands
-                .push(params.transport.0.unmap(session.surface));
+                .push(endpoint.unmap(session.surface));
             session.detach_on_restore = true;
             session.state = SessionState::Unmapping;
             continue;
@@ -527,7 +559,7 @@ pub(super) fn maintain_sessions(mut params: MaintainParams) {
         let Some(source) = session.source_window else {
             params
                 .adapter_commands
-                .push(params.transport.0.unmap(session.surface));
+                .push(endpoint.unmap(session.surface));
             session.state = SessionState::Unmapping;
             continue;
         };
@@ -537,7 +569,7 @@ pub(super) fn maintain_sessions(mut params: MaintainParams) {
         let target_size = rounded_client_size(
             (source_geometry.size - session.placeholder_metrics.insets.extent()).max(Vec2::ONE),
         );
-        if !params.transport.0.has_local_receiver() {
+        if !endpoint.has_local_receiver() {
             let after_revision = params.revisions.revision(session.surface);
             params.actions.push(SurfaceAction::Resize {
                 surface: session.surface,
@@ -596,7 +628,7 @@ pub(super) fn complete_reclaims(
     mut sessions: Query<(Entity, &mut HoistSession)>,
     receivers: Query<&ClientResizeState, With<LoopbackReceiver>>,
     revisions: Res<SurfaceCommitRevisions>,
-    transport: Res<HoistTransport>,
+    endpoints: Res<HoistEndpointRegistry>,
     mut adapter_commands: ResMut<ClientAdapterCommandQueue>,
     mut scratch: Local<CompleteScratch>,
 ) {
@@ -655,7 +687,11 @@ pub(super) fn complete_reclaims(
                 .iter()
                 .any(|(family, ready)| *family == session.family && *ready);
         if ready {
-            adapter_commands.push(transport.0.unmap(session.surface));
+            if let Some(endpoint) = endpoints.endpoint(session.endpoint)
+                && endpoint.is_available()
+            {
+                adapter_commands.push(endpoint.unmap(session.surface));
+            }
             session.state = SessionState::Unmapping;
         }
     }

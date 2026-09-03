@@ -1,5 +1,6 @@
 //! Window-family orchestration over transport-independent hoist endpoints.
 
+mod endpoint;
 mod lifecycle;
 
 #[cfg(test)]
@@ -7,7 +8,6 @@ mod tests;
 
 use std::{
     collections::{HashMap, HashSet},
-    sync::Arc,
     time::{Duration, Instant},
 };
 
@@ -26,6 +26,7 @@ use weld_app::{
 };
 use weld_window::{WindowSystems, WindowVacancy};
 
+pub use endpoint::{HoistEndpointId, HoistEndpointRegistry};
 pub use weld_hoist_core::{
     HoistEndpoint, HoistFamilyId, HoistSessionId, HoistSessionPhase, HoistSourceMode, ReclaimScope,
     loopback_registration,
@@ -36,15 +37,6 @@ pub use weld_hoist_ui::{
 };
 
 const RECLAIM_CONFIGURE_TIMEOUT: Duration = Duration::from_secs(2);
-
-#[derive(Resource, Clone)]
-pub struct HoistTransport(pub Arc<dyn HoistEndpoint>);
-
-impl HoistTransport {
-    pub fn new(endpoint: impl HoistEndpoint + 'static) -> Self {
-        Self(Arc::new(endpoint))
-    }
-}
 
 #[derive(Component, Clone, Copy, Debug, Eq, PartialEq)]
 pub struct HoistedWindow {
@@ -87,6 +79,7 @@ enum SessionState {
 #[derive(Component, Clone, Copy, Debug)]
 pub struct HoistSession {
     id: HoistSessionId,
+    endpoint: HoistEndpointId,
     family: HoistFamilyId,
     client: ClientId,
     membership: HoistMembership,
@@ -105,6 +98,10 @@ pub struct HoistSession {
 impl HoistSession {
     pub const fn id(&self) -> HoistSessionId {
         self.id
+    }
+
+    pub const fn endpoint(&self) -> HoistEndpointId {
+        self.endpoint
     }
 
     pub const fn family(&self) -> HoistFamilyId {
@@ -189,6 +186,7 @@ impl NextHoistFamilyId {
 #[derive(Clone, Copy)]
 struct PlannedHoist {
     source: Entity,
+    endpoint: HoistEndpointId,
     family: HoistFamilyId,
     client: ClientId,
     membership: HoistMembership,
@@ -199,6 +197,7 @@ struct PlannedHoist {
 struct ActiveHoistFamily {
     id: HoistFamilyId,
     root: SurfaceId,
+    endpoint: HoistEndpointId,
 }
 
 #[derive(Resource, Default)]

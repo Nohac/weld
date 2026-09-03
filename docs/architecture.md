@@ -47,8 +47,9 @@ Weld is a workspace of reusable layers and one standard distribution:
   optional for native-only library consumers.
 - `weld-hoist-ui` owns source placeholders, reclaim and closed-tombstone UI.
 - `weld-hoist` owns Bevy window-family admission and reclaim orchestration. It
-  does not own client buffers, ordinary receiver presentation, a network
-  transport, or a media codec.
+  also owns the process-local endpoint registry used to select an endpoint for
+  each new family. It does not own client buffers, ordinary receiver
+  presentation, a network transport, or a media codec.
 - `weld-media` owns transport- and platform-neutral media identities and
   encoded payload contracts. It owns no native graphics API, codec backend,
   transport, worker thread, Smithay, or Bevy object.
@@ -546,6 +547,25 @@ one upstream consumer. Runtime route aliases rewrite destination input, focus,
 close, resize, and output requests back to the source surface. Owner-related
 popups are mapped automatically. Relay-generated events are published in the
 same runtime drain but are not recursively observed, preventing relay cycles.
+
+`HoistEndpointRegistry` is application orchestration, not a wire or transport
+contract. Its monotonically allocated `HoistEndpointId` identifies one
+registered endpoint only within the current Weld process; it is distinct from
+a device identity, peer connection, presentation target, transport kind, and
+`ClientSourceId`. The default endpoint is consulted only when starting a new
+hoist family. Every resulting session stores that endpoint ID, so later family
+members, reclaim, unmap, and failure recovery keep using the owning endpoint
+even if the default changes. Active endpoints must allocate non-overlapping
+destination `ClientSurfaceId` namespaces.
+
+Registry entries remain present while sessions can reference them. A lost
+connection is represented by `HoistEndpoint::is_available`, making the entry a
+stable tombstone rather than allowing its ID to be reused for another peer.
+The standard distribution currently registers one startup endpoint when it is
+a hoist source or loopback host; destination-only startup installs neither the
+registry nor `weld-hoist`. Dynamic endpoint registration, removal after the
+last referencing session, and live multi-peer admission remain future runtime
+work.
 
 `Super+H` asks `weld-hoist` to detach and admission-hold every mapped toplevel
 from the focused surface's stable `ClientId`. That identity represents one

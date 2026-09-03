@@ -12,7 +12,7 @@ use weld_app::{
     input::{GlobalShortcutPlugin, VirtualTerminalShortcutPlugin},
 };
 use weld_float::FloatPlugin;
-use weld_hoist::{HoistPlugin, HoistTransport, loopback_registration};
+use weld_hoist::{HoistEndpointRegistry, HoistPlugin, loopback_registration};
 use weld_hoist_local::{
     EncodedSourceRegistrationOptions, LocalPacketConnection, LocalPacketListener, LocalPeerRole,
     LocalSurfaceMode, bootstrap_destination, bootstrap_source, encoded_destination_registration,
@@ -100,7 +100,7 @@ pub fn run(arguments: AppArguments) -> Result<()> {
                     );
                     app.add_client_wake_source(transport.control.runtime_wake_source())
                         .add_client_adapter(adapter)
-                        .insert_resource(HoistTransport::new(endpoint));
+                        .insert_resource(HoistEndpointRegistry::with_default(endpoint));
                 }
                 (LocalSurfaceMode::EncodedOpaque(codec), Some(media)) => {
                     tracing::info!(?codec, "selected local hoist encoded codec");
@@ -121,7 +121,7 @@ pub fn run(arguments: AppArguments) -> Result<()> {
                         app.add_client_wake_source(wake);
                     }
                     app.add_client_adapter(adapter)
-                        .insert_resource(HoistTransport::new(endpoint));
+                        .insert_resource(HoistEndpointRegistry::with_default(endpoint));
                 }
                 _ => anyhow::bail!("local hoist bootstrap returned an invalid media channel"),
             }
@@ -165,7 +165,7 @@ pub fn run(arguments: AppArguments) -> Result<()> {
                 weld_client::ClientSourceId::new(1),
             );
             app.add_client_adapter(adapter)
-                .insert_resource(HoistTransport::new(endpoint));
+                .insert_resource(HoistEndpointRegistry::with_default(endpoint));
         }
     }
     app.add_plugins((

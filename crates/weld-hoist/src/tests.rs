@@ -1,4 +1,10 @@
-use std::time::{Duration, Instant};
+use std::{
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::{Duration, Instant},
+};
 
 use bevy::{
     app::App,
@@ -22,7 +28,8 @@ use weld_app::{
     },
 };
 use weld_client::{
-    ClientId, ClientSourceDescriptor, ClientSourceId, ClientSurfaceRole, ToplevelState,
+    ClientAdapterCommandEnvelope, ClientId, ClientSourceDescriptor, ClientSourceId,
+    ClientSurfaceRole, ToplevelState,
 };
 use weld_float::FloatPlugin;
 use weld_ssd::SsdPlugin;
@@ -33,12 +40,74 @@ use weld_window::{
 use weld_window_ui::WindowUiPlugin;
 
 use crate::{
-    DismissHoistTombstone, HoistPlaceholder, HoistPlugin, HoistSession, HoistTransport,
-    HoistWindow, ReclaimHoist, SessionState, loopback_registration,
+    DismissHoistTombstone, HoistDetached, HoistEndpoint, HoistEndpointRegistry, HoistFamilyId,
+    HoistPlaceholder, HoistPlugin, HoistSession, HoistSessionId, HoistWindow, ReclaimHoist,
+    SessionState, loopback_registration,
 };
 
 const LOCAL_SOURCE: ClientSourceId = ClientSourceId::new(0);
 const LOOPBACK_SOURCE: ClientSourceId = ClientSourceId::new(1);
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum EndpointCall {
+    Map(SurfaceId),
+    Unmap(SurfaceId),
+}
+
+#[derive(Clone)]
+struct RecordingEndpoint {
+    inner: weld_hoist_core::LoopbackEndpoint,
+    available: Arc<AtomicBool>,
+    calls: Arc<Mutex<Vec<EndpointCall>>>,
+}
+
+impl RecordingEndpoint {
+    fn new(inner: weld_hoist_core::LoopbackEndpoint) -> Self {
+        Self {
+            inner,
+            available: Arc::new(AtomicBool::new(true)),
+            calls: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
+    fn set_available(&self, available: bool) {
+        self.available.store(available, Ordering::Relaxed);
+    }
+
+    fn take_calls(&self) -> Vec<EndpointCall> {
+        std::mem::take(&mut *self.calls.lock().expect("endpoint call recorder"))
+    }
+}
+
+impl HoistEndpoint for RecordingEndpoint {
+    fn is_available(&self) -> bool {
+        self.available.load(Ordering::Relaxed)
+    }
+
+    fn has_local_receiver(&self) -> bool {
+        self.inner.has_local_receiver()
+    }
+
+    fn destination(&self, source: SurfaceId) -> SurfaceId {
+        self.inner.destination(source)
+    }
+
+    fn map(&self, session: HoistSessionId, source: SurfaceId) -> ClientAdapterCommandEnvelope {
+        self.calls
+            .lock()
+            .expect("endpoint call recorder")
+            .push(EndpointCall::Map(source));
+        self.inner.map(session, source)
+    }
+
+    fn unmap(&self, source: SurfaceId) -> ClientAdapterCommandEnvelope {
+        self.calls
+            .lock()
+            .expect("endpoint call recorder")
+            .push(EndpointCall::Unmap(source));
+        self.inner.unmap(source)
+    }
+}
 
 fn test_app() -> (App, weld_hoist_core::LoopbackEndpoint) {
     let (_, endpoint) = loopback_registration(LOCAL_SOURCE, LOOPBACK_SOURCE);
@@ -52,7 +121,7 @@ fn test_app() -> (App, weld_hoist_core::LoopbackEndpoint) {
         .insert_resource(Assets::<Image>::default())
         .insert_resource(UiScale(1.0))
         .insert_resource(ClientAdapterCommandQueue::default())
-        .insert_resource(HoistTransport::new(endpoint))
+        .insert_resource(HoistEndpointRegistry::with_default(endpoint))
         .add_message::<RequestRedraw>()
         .add_plugins((
             SurfacePlugin,
@@ -1186,6 +1255,152 @@ fn root_unmap_keeps_the_surviving_family_placeholder() {
             .query::<&HoistSession>()
             .iter(app.world())
             .any(|session| session.surface() == root_surface)
+    );
+}
+
+#[test]
+fn active_family_keeps_its_endpoint_after_the_default_changes() {
+    let (mut app, first_loopback) = test_app();
+    let first = RecordingEndpoint::new(first_loopback);
+    let (_, second_loopback) = loopback_registration(LOCAL_SOURCE, ClientSourceId::new(2));
+    let second = RecordingEndpoint::new(second_loopback);
+    let mut endpoints = HoistEndpointRegistry::with_default(first.clone());
+    let first_id = endpoints.default_id().expect("first endpoint");
+    let second_id = endpoints.register(second.clone()).expect("second endpoint");
+    let namespace_probe = surface(LOCAL_SOURCE, 999);
+    assert_ne!(
+        first.destination(namespace_probe),
+        second.destination(namespace_probe)
+    );
+    app.world_mut().insert_resource(endpoints);
+
+    let root_surface = surface(LOCAL_SOURCE, 70);
+    let root_client = map_surface(&mut app, root_surface, None, WindowDecoration::ServerSide);
+    let root_window = window_for_client(&mut app, root_client);
+    app.world_mut().write_message(HoistWindow {
+        window: root_window,
+    });
+    app.update();
+    assert!(
+        app.world_mut()
+            .query::<&HoistSession>()
+            .iter(app.world())
+            .all(|session| session.endpoint() == first_id)
+    );
+
+    assert!(
+        app.world_mut()
+            .resource_mut::<HoistEndpointRegistry>()
+            .set_default(second_id)
+    );
+    first.take_calls();
+    second.take_calls();
+    let child_surface = surface(LOCAL_SOURCE, 71);
+    let _child_client = map_surface(
+        &mut app,
+        child_surface,
+        Some(root_surface),
+        WindowDecoration::ServerSide,
+    );
+    app.update();
+
+    let session_endpoints = app
+        .world_mut()
+        .query::<&HoistSession>()
+        .iter(app.world())
+        .map(HoistSession::endpoint)
+        .collect::<Vec<_>>();
+    assert_eq!(session_endpoints.len(), 2);
+    assert!(
+        session_endpoints
+            .iter()
+            .all(|endpoint| *endpoint == first_id)
+    );
+
+    first.take_calls();
+    second.take_calls();
+    unmap_surface(&mut app, root_surface);
+    app.update();
+    assert_eq!(first.take_calls(), vec![EndpointCall::Unmap(root_surface)]);
+    assert!(second.take_calls().is_empty());
+}
+
+#[test]
+fn unavailable_default_refuses_admission_without_mutating_the_source() {
+    let (mut app, loopback) = test_app();
+    let endpoint = RecordingEndpoint::new(loopback);
+    endpoint.set_available(false);
+    app.world_mut()
+        .insert_resource(HoistEndpointRegistry::with_default(endpoint.clone()));
+    let source_surface = surface(LOCAL_SOURCE, 72);
+    let source_client = map_surface(&mut app, source_surface, None, WindowDecoration::ServerSide);
+    let source_window = window_for_client(&mut app, source_client);
+    let detached_family = HoistFamilyId::new(44);
+    app.world_mut()
+        .entity_mut(source_client)
+        .insert(HoistDetached {
+            family: detached_family,
+        });
+
+    app.world_mut().write_message(HoistWindow {
+        window: source_window,
+    });
+    app.update();
+
+    assert_eq!(
+        app.world()
+            .get::<HoistDetached>(source_client)
+            .map(|detached| detached.family),
+        Some(detached_family)
+    );
+    assert_eq!(
+        app.world()
+            .get::<OccupiesWindow>(source_client)
+            .map(|occupancy| occupancy.0),
+        Some(source_window)
+    );
+    assert_eq!(
+        app.world_mut()
+            .query::<&HoistSession>()
+            .iter(app.world())
+            .count(),
+        0
+    );
+    assert!(endpoint.take_calls().is_empty());
+}
+
+#[test]
+fn unavailable_session_endpoint_restores_its_source() {
+    let (mut app, loopback) = test_app();
+    let endpoint = RecordingEndpoint::new(loopback);
+    app.world_mut()
+        .insert_resource(HoistEndpointRegistry::with_default(endpoint.clone()));
+    let source_surface = surface(LOCAL_SOURCE, 73);
+    let source_client = map_surface(&mut app, source_surface, None, WindowDecoration::ServerSide);
+    let source_window = window_for_client(&mut app, source_client);
+    app.world_mut().write_message(HoistWindow {
+        window: source_window,
+    });
+    app.update();
+    assert!(app.world().get::<OccupiesWindow>(source_client).is_none());
+    assert!(app.world().get::<HoistPlaceholder>(source_window).is_some());
+
+    endpoint.set_available(false);
+    app.update();
+
+    assert_eq!(
+        app.world()
+            .get::<OccupiesWindow>(source_client)
+            .map(|occupancy| occupancy.0),
+        Some(source_window)
+    );
+    assert!(app.world().get::<HoistPlaceholder>(source_window).is_none());
+    assert_eq!(
+        app.world_mut()
+            .query::<&HoistSession>()
+            .iter(app.world())
+            .count(),
+        0
     );
 }
 
