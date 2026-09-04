@@ -77,6 +77,56 @@ follow the Direction-level
 contract](remote-presentation.md#presentation-target-model--direction)
 rather than being defined by the mobile assembly.
 
+### Linux-native XR desktop
+
+A Linux headset can be a complete Weld desktop rather than only a thin remote
+viewer. Local Wayland applications should run natively against the headset's
+Weld instance and enter the same client, window, seat, and presentation models
+as applications adapted from another Weld device. Native applications bypass
+media encoding and transport entirely; only remote or otherwise isolated
+applications pay that cost. The spatial shell must not make local content take
+a streaming round trip merely to give local and remote windows a uniform UI.
+
+The first tracer can run as an ordinary OpenXR destination on an existing Linux
+desktop. If a headset platform permits replacement desktop software, a later
+distribution may instead combine the compositor, spatial shell, and OpenXR
+integration into the primary user environment. The boundary remains the same:
+OpenXR supplies headset views, timing, tracking, and composition integration;
+Weld owns application presentation, window relationships, logical seats,
+authorization, and local-versus-hoisted source selection. Raw DRM ownership and
+XR-runtime integration are platform decisions, not requirements of the client
+or hoist protocols.
+
+An open, Arch-based standalone headset such as Valve's announced Steam Frame is
+a promising validation target, but the design must not depend on one product's
+installation policy, compositor stack, codec API, or runtime privileges. Media
+backends are capability-selected: a headset may expose VA-API, Vulkan Video, a
+platform codec, software decode, or no codec path at all for local content.
+
+This distribution should compose existing mechanisms rather than introduce a
+parallel VR protocol:
+
+- local Wayland and other native adapters provide client surfaces directly;
+- hoist adapters provide remote client surfaces and ordered input routes;
+- the spatial presentation target places both kinds of windows in one canvas;
+- application view sets optionally provide fixed or head-tracked stereo;
+- logical seats route keyboard, pointer, controller, hand, and accessibility
+  input; and
+- media negotiation and budgeting apply only where content crosses a transport
+  or another isolation boundary.
+
+For streamed XR content, eye tracking can drive a low-detail full-view base plus
+high-detail gaze-local enhancement regions. Raw gaze stays on the headset by
+default, while the media protocol receives only predicted normalized regions.
+This foveated streaming path is independent of application foveated rendering
+and is unnecessary for native local windows unless another isolation boundary
+still requires encoding.
+
+A workspace can be handed to the headset as a sliding set, spatial field, or
+unbounded canvas while the source retains an emergency reclaim path. Shared
+spatial workspaces and several independently focused users build on the same
+multi-seat model; they do not change the local-first rule.
+
 ### Master desktop
 
 The comprehensive desktop assembly could provide default window policy, bars,

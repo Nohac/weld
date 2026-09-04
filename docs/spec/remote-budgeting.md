@@ -111,6 +111,7 @@ least:
 - codec profile and acceleration at both endpoints;
 - aligned capacity extent and current visible extent;
 - target and observed cadence;
+- application view count and packed or separate-view layout;
 - color and alpha plane count;
 - locally allocated encoder or decoder context count;
 - local conversion, presentation, and in-flight-frame count;
@@ -135,6 +136,26 @@ session, pixel-rate contribution, memory allocation, and bitrate selected by
 the protocol's
 [alpha path](remote-protocol.md#adaptive-and-alpha-media--direction) rather
 than inferring one stream from the presentation identity.
+
+Multiview content is likewise explicit capacity. A packed stereo access unit
+may use one codec context, but budgeting charges the combined aligned pixels,
+conversion bandwidth, decoded storage, destination sampling, and observed
+bitrate. Separate eye streams additionally reserve their real encoder and
+decoder contexts. Repeated mono/stereo toggling is subject to the same
+generation-migration headroom and hysteresis as resize.
+
+Fixed stereo may share one rendition among compatible targets. Head-tracked
+content generally cannot: each independently moving viewer contributes its own
+pose-driven rendition, predicted deadline, aligned view pixels, encode/decode
+work, and in-flight surfaces. Admission must expose that multiplier rather than
+silently degrading every viewer when another headset joins.
+
+Alpha and depth are separate budgeted planes even when they belong to one
+spatial frame group. Policy may lower depth resolution or cadence when
+reprojection remains useful, but it must preserve explicit synchronization and
+the admitted color and alpha floors. Pose-to-photon deadlines take precedence
+over draining obsolete work; a late tracked frame is dropped or reprojected
+according to negotiated policy instead of building a FIFO backlog.
 
 ## Conversion surfaces and memory — Direction
 
@@ -192,6 +213,48 @@ Exact decay curves remain distribution policy and require measurement.
 Input immediately promotes its authorized target before waiting for a later
 media frame. The compositor or destination supplies focus and visibility
 observations; application damage alone cannot claim interaction priority.
+
+An XR destination may additionally report coarse gaze-derived attention for an
+authorized presentation. This is a trusted destination observation, not client
+self-promotion and not necessarily keyboard focus. Raw eye-tracking coordinates
+remain destination-local by default; budgeting needs only presentation
+identity, strength, and recency. Dwell, hysteresis, and recent-attention grace
+prevent quality oscillation. Initial policy prioritizes whole presentations;
+within-window foveated regions require an explicitly negotiated media layout.
+
+When that layout is available, the budget separates an always-usable full-view
+base from gaze-local enhancement regions. The base owns the admitted coverage
+and recovery floor. Enhancements compete for remaining bitrate, encoder and
+decoder contexts, aligned pixel rate, composition work, and latency headroom.
+Policy sizes a guard band using observed eye-tracking, transport, decode, and
+presentation delay rather than assuming the reported gaze point will remain
+stationary. Under pressure it reduces or drops enhancement detail before
+violating the base floor.
+
+The default spatial-workspace policy is hierarchical rather than giving every
+window an equal full-resolution stream. Visible background presentations receive
+only their admitted low-detail base and may run at reduced cadence. The focused
+and gaze-confirmed presentation is promoted to a higher whole-window bitrate
+and is normally the only presentation reserving a high-resolution foveal
+enhancement. Focus changes transfer that reservation with hysteresis and a
+bounded overlap period. This makes aggregate source work scale roughly with the
+background bases plus one interactive enhancement, rather than the number of
+open windows multiplied by full-detail stereo.
+
+The savings include source-side composition or downscaling, pixel conversion,
+encode pixel rate, encoded bitrate, queue memory, and network throughput. They
+include client rendering only when policy also negotiates a smaller application
+raster or the application performs foveated rendering. The measurements report
+those categories separately so a cheap media path cannot conceal an application
+that continues rendering every pixel at full cost.
+
+A pair of low-detail eye views plus a pair of high-detail gaze fragments may be
+cheaper in bandwidth than full-detail stereo, but it is not automatically
+cheaper in hardware sessions or decode power. Codec-native ROI or quantization
+maps may preserve one context; separate enhancement streams may require several.
+Admission uses probed endpoint costs and never infers savings from the word
+"foveated." Local native applications do not reserve streaming media merely
+because their XR runtime uses foveated rendering.
 
 ## Workspaces, visibility, and occlusion — Direction
 
@@ -402,6 +465,13 @@ stack. They do not become universal vendor promises.
 - Determine focus-recency decay, grace, aging, and minimum-service policy from
   realistic desktop use.
 - Validate full and partial occlusion observations across destination layouts.
+- Measure gaze-driven XR prioritization, transition hysteresis, and peripheral
+  quality floors without transmitting raw gaze coordinates.
+- Measure fixed-view sharing versus per-viewer tracked renditions, including
+  pose-to-photon deadlines and color/alpha/depth plane costs.
+- Compare full-detail stereo against base-plus-enhancement and codec-native ROI
+  paths across bitrate, session count, decode power, guard-band size, and visible
+  quality during rapid saccades.
 - Decide when several compatible targets share one rendition or require more.
 - Measure exact aligned extents against reusable capacity classes.
 - Establish policy for conflicting user-pinned or guaranteed quality floors.

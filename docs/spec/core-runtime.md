@@ -18,8 +18,8 @@ application hosts.
 
 - Smithay remains authoritative for protocol validity and objects tied to the
   server thread or event loop.
-- Application policy owns windows, presentation choices, placement, focus,
-  layout, shell state, and reloadable settings.
+- Application policy owns windows, presentation choices, placement, per-seat
+  focus, activation, layout, shell state, and reloadable settings.
 - Rendering consumes independently owned state and must not mutate window
   policy as a side effect.
 - Plugins exchange stable Weld identifiers and typed requests across host,

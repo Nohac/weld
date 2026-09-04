@@ -121,6 +121,14 @@ whether pixels already reside in CPU memory. Native-buffer selection is valid
 only when the binding can transfer the handle and the destination can import
 it safely.
 
+Presentation-view capabilities describe supported view counts, packed view
+layouts, source rectangles, eye selection, and whether mono can be derived from
+a multiview source. They are independent from native versus encoded transport:
+the same logical stereo view set may travel as a native DMA-BUF, one packed
+encoded frame, or several synchronized streams. Source capability reflects what
+the application has actually advertised, not what Weld could synthesize by
+duplicating a mono image.
+
 Encoded-video capabilities cover at least:
 
 - encode or decode direction;
@@ -193,9 +201,10 @@ as another codec capability without changing the protocol layers.
 
 Capabilities say what a peer could do. A hoist offer identifies the authorized
 scope and admission mode, presentation target, selected window and surface
-identities, logical geometry, visibility, required alpha and color behavior,
-input and data permissions, preferred cadence, and latency policy. It does not
-grant anything beyond the already authorized hoist request.
+identities, logical geometry, visibility, desired or required view
+configuration, required alpha and color behavior, input and data permissions,
+preferred cadence, and latency policy. It does not grant anything beyond the
+already authorized hoist request.
 
 The answer accepts or refuses each required presentation and chooses its
 surface mode. Native mode selects a compatible handle and synchronization
@@ -229,6 +238,26 @@ Media congestion must not block input or lifecycle control. Explicitly
 coalescible absolute pointer observations may later use an unreliable path.
 Keys, buttons, modifiers, relative locked-pointer deltas, focus, configure,
 and lifecycle transitions remain reliable and ordered.
+
+Input coordinates are scoped to an authorized logical seat and stable
+presentation, not implicitly to a shared source desktop. A negotiated pointer
+mode distinguishes target-absolute coordinates, surface-local projection, and
+relative deltas captured by the focused surface. Each focus transition carries
+an ordered epoch or equivalent generation; motion, buttons, grabs, and releases
+name that state so delayed input cannot land on a newly focused window. A
+source-attached device may deliver directly to the authoritative client while
+following destination-led focus, whereas a destination-attached device crosses
+the input flow. Both paths project the generic
+[logical-seat contract](surfaces-and-input.md#seats-and-devices--direction);
+the transport does not invent a second focus model.
+
+A session-wide handoff does not weaken input recovery. The source retains a
+local emergency reclaim action outside the transported shortcut namespace.
+Revocation, peer loss, or reclaim first cancels remote focus and held input,
+then restores source presentation. Cursor visualization may remain
+destination-owned even when the physical mouse is attached to the source;
+cursor state and client-selected shape are synchronization data, not authority
+to inject input.
 
 The current local binding uses Unix sequenced packets and `SCM_RIGHTS` for
 native buffers. An encoded local mode may use a separately framed Unix stream
@@ -306,6 +335,58 @@ rectangles into coded regions with destination rectangles, transforms, and
 stacking. Input remains addressed to logical surface identities rather than
 codec tiles or atlas coordinates.
 
+One logical presentation may contain a synchronized view set. A packed stereo
+buffer can map its left- and right-eye rectangles into one coded region and one
+access unit, preserving one encoder context and atomic timing while accounting
+for the combined pixel rate. Separate per-view streams are negotiated only when
+extent limits, independent quality, or a demonstrated hardware path justify
+their additional contexts and synchronization. Changing mono or multiview
+interpretation rotates the affected stream generation only after the matching
+application commit is accepted.
+
+Fixed view sets require only configuration and synchronized frame identity.
+Head-tracked view sets add a time-sensitive request/result exchange. The
+destination sends a session-relative reference space, predicted display time,
+request identity, per-view pose and field of view, recommended extent, and
+application transform. The returned frame group acknowledges that request and
+records the actual rendered views. A destination can therefore discard stale
+results or late-reproject them without treating head pose as pointer input.
+Tracked output is normally rendition-specific per independently moving viewer;
+compatible fixed stereo can be shared.
+
+A spatial frame group may synchronize color with optional alpha and depth.
+Those planes may use distinct payloads, codec profiles, resolutions, or
+cadences, but they carry the same frame-group identity and explicit missing-
+plane behavior. A packed color view set remains one access unit where practical.
+Alpha and depth are never authority for input routing: the logical surface and
+its explicit input region remain authoritative.
+
+Foveated streaming is expressed as a media layout over that same presentation,
+not as another surface or input target. A base region covers the complete mono
+or per-eye view at a lower detail level. One or more enhancement regions carry
+higher detail for gaze-local rectangles. Every region records its frame-group,
+eye or view, source crop, destination rectangle, quality role, and gaze-request
+identity. The destination can always present the base alone; enhancement loss,
+lateness, or decode failure is a local quality degradation rather than a stream
+failure.
+
+Capability negotiation describes whether an endpoint supports separate base
+and enhancement streams, scalable or tiled codec layers, codec-native ROI or
+quantization maps, maximum active regions, alignment, per-eye association,
+decoder composition, and the additional context and pixel-rate cost. A
+destination reports only a normalized, optionally quantized gaze region with
+sample and predicted-display timing. Raw gaze history is neither required nor
+transported by default. These observations use latest-value delivery and cannot
+block ordered control or input.
+
+Each presentation retains its own base-quality state. Focus and attention can
+promote one presentation's existing media path and attach or enlarge its
+enhancement without rebuilding unrelated presentation streams. Normal gaze
+movement updates region coordinates inside the accepted layout; it does not
+rotate stream generations or perform full capability negotiation per sample.
+Promotion, demotion, and enhancement handoff carry enough ordering information
+that a late gaze sample cannot sharpen a previously focused window.
+
 The first encoded implementation uses one presentation and one region per
 stream. Future negotiated layouts may use:
 
@@ -352,6 +433,13 @@ Changing transparent content may consume two encoder and two decoder sessions.
 Admission accounts for those budgets. Static or sparse alpha updates remain a
 future optimization. The hoisting policy owns refusal and user approval for an
 opaque degradation when transparency is required.
+
+Regional quality can vary without changing presentation identity. A foveated
+base-plus-enhancement layout, codec ROI map, visibility tile, or other regional
+scheme is selected by capabilities and budgeting. The protocol specifies the
+region mapping and synchronization while the media backend owns how it realizes
+the requested quality. A gaze region is scheduling data only: it cannot focus a
+window, authorize input, or reveal raw eye coordinates unnecessarily.
 
 ## Runtime adaptation and renegotiation — Direction
 
@@ -480,6 +568,14 @@ work.
 - Evolve the initial bounded Iroh framing and exact-revision handshake with
   authorization, negotiated capabilities, recovery, and observability.
 - Define binding-independent device proof over transport session transcripts.
+- Define logical-seat, focus-epoch, pointer-mode, and bidirectional cursor-state
+  records for destination-led focus with source- or destination-attached input.
+- Define fixed and tracked view-set records, relative reference spaces,
+  view-request deadlines, rendered-pose acknowledgement, and synchronized
+  color/alpha/depth frame groups.
+- Define base and foveal-enhancement region records, latest-value gaze requests,
+  base-only recovery, and capability mapping for separate streams versus
+  codec-native ROI or scalable layers.
 - Use validation evidence to select production Iroh discovery, relay, pairing,
   flow mapping, and reconnect policy.
 - Decide media packetization and feedback mappings for Iroh and WebRTC.

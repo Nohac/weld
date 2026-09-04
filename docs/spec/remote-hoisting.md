@@ -209,6 +209,26 @@ filters and current membership must be visible and revocable; windows excluded
 by policy must not be disclosed to the peer. A revoked admission restores the
 window at its authoritative source.
 
+An XR workspace handoff may deliberately admit every eligible window in one
+workspace or desktop scope. Snapshot admission moves the current set; follow
+scope also admits later matching windows. The broad scope is one authorized
+session containing independent window presentations, not a flattened desktop
+video stream. A sliding layout, infinite canvas, or spatial arrangement is
+chosen by the destination and does not alter source window identity or family
+lifecycle.
+
+An accepted destination may request a view configuration for each admitted
+presentation. Hoist policy projects that preference through the source's
+[application view-set
+contract](surfaces-and-input.md#application-provided-view-sets--exploration).
+A stereo-capable application can therefore switch an included window from mono
+to stereo when an XR window, workspace, or desktop handoff begins. Ordinary
+applications remain mono, and a required stereo admission waits, degrades with
+approval, or fails according to the offer instead of pretending a second eye
+exists. When the last stereo target leaves, policy may request mono again; the
+acknowledged client commit, not session timing, determines when interpretation
+changes.
+
 The owned surface tree, including later popups and subsurfaces, always follows
 an admitted toplevel so its interaction remains coherent. Those roles do not
 become freely placeable windows. A newly created independent toplevel is a
@@ -270,6 +290,22 @@ presentation or a bounded live preview without reclaiming the window, changing
 placement, or transferring input ownership. Peek availability, cadence, and
 input behavior must remain explicit policy rather than an implicit transport
 side effect.
+
+For a whole-workspace handoff, source presentation may replace the individual
+placeholders with a session-level **handoff shield** that explains where the
+windows are presented and exposes an unconditional local reclaim shortcut. It
+may resemble a lock screen, but it is not an authentication or security lock:
+the compositor remains active, authorized source-attached keyboards and
+pointers may still target the remotely presented clients, and the recovery
+shortcut is consumed locally before client delivery or shortcut inhibition.
+If the operating session is actually locked, ordinary lock-screen security
+policy takes precedence and client input is suspended.
+
+The shield is only a visual aggregation. Source layout slots, per-window
+identity, reclaim state, and restoration geometry remain recoverable beneath
+it. Peer loss, focus-state loss, or the local reclaim shortcut atomically
+revokes remote input routes before restoring local presentation, preventing a
+held key, button, or stale remote focus epoch from crossing the handoff.
 
 The destination may request a new logical content size. The source translates
 that request into a client configure and streams the eventual committed size;

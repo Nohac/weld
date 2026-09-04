@@ -20,11 +20,13 @@ A target advertises stable identity and current observations including:
 
 - layout mode and maximum simultaneously visible presentations;
 - usable logical viewport and safe-area insets;
+- optional spatial placement, view-frustum, and attention observations;
 - physical pixel extent and density or scale;
 - orientation, refresh range, and presentation cadence;
 - color, transfer, HDR, and alpha capabilities;
 - destination decoration and visual-overflow policy;
-- pointer, touch, keyboard, IME, gamepad, and accessibility input;
+- pointer, touch, keyboard, IME, gamepad, tracked-hand, controller, and
+  accessibility input;
 - power, thermal, data, latency, and quality preferences; and
 - whether resizing, letterboxing, destination scaling, or cropping is allowed.
 
@@ -74,6 +76,173 @@ A **freeform** target presents independent windows in a desktop-like canvas. A
 external displays may expose several targets or one target whose viewport
 changes; that choice is destination policy. Every mode preserves stable window,
 surface, relationship, and input identities.
+
+A target may also expose a **sliding set** or a conceptually unbounded canvas.
+These are presentation policies over an admitted collection, not protocol
+surface modes. The protocol supplies stable windows, relationships, ordering
+hints, and lifecycle; the destination decides whether they appear as a strip,
+carousel, layered spatial field, or infinite scrollable canvas. Changing that
+layout does not remap, reclaim, or change the identity of its windows.
+
+## Spatial and XR targets — Exploration
+
+An XR headset is a destination presentation adapter, not a new client-surface
+mode or transport. Each hoisted window remains an independent presentation that
+the destination may place, scale, curve, hide, or group in a spatial canvas.
+Popups and related windows retain their protocol identities and relationships;
+the headset may present them as attached planes or promote them into suitable
+spatial panels without flattening the application into one remote desktop.
+
+When an XR target requests a window, workspace, or desktop handoff, it may mark
+stereo as desired or required for each presentation. Source policy projects that
+request through the application's optional
+[view-set contract](surfaces-and-input.md#application-provided-view-sets--exploration).
+The request can therefore toggle a cooperating window between mono and stereo,
+but cannot manufacture a second view for an ordinary application. The target
+continues presenting the last accepted configuration until the source reports
+the acknowledged replacement commit.
+
+The headset can derive visible fraction, occlusion, distance, projected pixel
+extent, and whether a presentation intersects the current view frustum. These
+are target-local observations under the same trust and optional-disclosure rules
+as ordinary destination visibility. Head pose changes spatial composition at
+the destination and do not become application pointer motion.
+
+Eye tracking introduces an **attention** observation, which is distinct from
+application input and keyboard focus. By default, raw gaze coordinates remain
+on the headset. The destination may instead report a coarse presentation ID,
+attention strength, and recency so media budgeting can raise quality for the
+gazed-at window and reduce cadence, extent, or bitrate for peripheral or unseen
+windows. Dwell thresholds, hysteresis, and a short grace period prevent small
+eye movements from continuously renegotiating streams. Region-level foveated
+quality inside one window is a later media-layout capability, not a prerequisite
+for per-window prioritization.
+
+These form two nested allocation levels. A spatial workspace may keep every
+visible background presentation available as a low-resolution or low-cadence
+base. Focus and gaze first promote one presentation to the interactive quality
+tier; only that presentation normally receives a higher whole-window bitrate
+and gaze-local high-resolution enhancement. Moving attention transfers that
+enhancement budget rather than maintaining full-resolution encodes for every
+open application. A short grace period may retain the previous target long
+enough to avoid a visible quality flash during accidental gaze crossings.
+
+For remotely presented content, **foveated streaming** may add a continuously
+decodable low-detail base image covering each complete eye view plus a
+high-detail enhancement region centered around predicted gaze.
+[Valve has described its Steam Frame game-streaming
+path](https://www.pcgamer.com/hardware/vr-hardware/foveated-streaming-genius-tech/)
+in this form: two low-resolution full views and two high-resolution gaze-local
+fragments. Weld should treat that as strong prior art for a general media
+layout, not as a dependency on Valve's wire format or implementation.
+
+The destination retains raw eye samples and projects only the smallest useful
+request into normalized presentation or eye-view coordinates: a sample time,
+prediction time, region center and extent, and optional confidence. Requests
+are latest-value observations; stale gaze must be discarded rather than queued.
+A guard band around the fovea, overlap or feathering at the boundary, and a
+stable low-detail base hide tracking, network, and decode latency. Loss or late
+arrival of the enhancement region degrades local sharpness for that frame but
+does not freeze or invalidate the base presentation.
+
+This is separate from application foveated rendering. Streaming foveation can
+be application-agnostic because it redistributes encoded detail after the full
+image exists. Across a workspace it can substantially reduce source-side
+scaling, composition, color conversion, encoding, and network work because most
+presentations never enter the full-resolution media path. By itself it does not
+reduce the source application's own rendering cost if that application still
+produces a full-resolution client buffer. Weld may separately request a smaller
+source raster, and a cooperating application may render peripheral pixels more
+cheaply, but both use application-facing contracts and remain independently
+negotiated.
+
+Spatial attention, pointer or gesture targeting, keyboard focus, and permission
+to inject input are separate states:
+
+- gaze may prime a presentation for higher quality without focusing its client;
+- a controller action, hand interaction, configurable gaze dwell, or explicit
+  shell action may request focus for a stable presentation identity;
+- the source validates that request against the authorized session and the
+  core [logical-seat
+  contract](surfaces-and-input.md#seats-and-devices--direction) before changing
+  authoritative client focus; and
+- an input device sends events only through the seat and focus route to which it
+  is assigned.
+
+This separation allows a hoisted window viewed in a headset to keep receiving a
+physical keyboard attached to either endpoint. A keyboard attached to the
+destination uses the ordered input flow. A keyboard attached to the source can
+reach the authoritative client directly, but follows the same destination-led
+focus state and seat assignment rather than the placeholder's local visual
+selection. Focus changes need an ordered epoch or equivalent stale-update guard,
+and one logical seat has at most one keyboard-focused surface. Headset focus
+loss, session revocation, or disconnect releases held input state and removes
+the route so keystrokes cannot leak into the previously viewed application.
+
+An XR target may use a focused-window-relative pointer instead of projecting a
+mouse across one global desktop rectangle. The target negotiates whether a seat
+uses surface-local absolute coordinates, ray intersections projected into a
+surface, or relative deltas captured by the focused presentation. Focus and
+grab identity accompany that state, so changing panels cannot reinterpret an
+old delta or release against another window. The destination owns cursor
+placement in its spatial scene; the source still supplies client cursor shape
+and hotspot changes and validates input before delivery.
+
+### Fixed and head-tracked spatial content
+
+Fixed stereo and head-tracked stereo have different lifecycle and sharing
+requirements. Fixed stereo content, such as a stereoscopic film or an emulator
+with stable left and right images, declares a view relationship but needs no
+headset pose. One synchronized rendition may therefore be shared by compatible
+viewers. A head-coupled Blender viewport renders from the viewer's predicted eye
+poses and generally needs a separate rendition for each independently moving
+viewer.
+
+A tracked target issues a session-scoped view request containing a reference
+space identity, predicted display time, sample or generation identity, per-eye
+pose and field of view, recommended raster extent, and the transform from the
+application scene into that reference space. The application result names the
+request it rendered, the actual poses and fields of view, and the rectangles
+containing each view. Room-scale coordinates remain local to the XR session;
+Weld exchanges relative spaces and transforms unless the user explicitly
+authorizes a broader spatial map.
+
+Network delay makes the source-rendered pose historical by presentation time.
+The destination may late-reproject the result using current tracking. Optional
+depth improves translational reprojection and spatial occlusion, but it cannot
+reconstruct pixels that were never visible to the source view. Prediction,
+deadline handling, stale-frame dropping, and reprojection metadata are part of
+the presentation contract rather than pointer input.
+
+The protocol-neutral spatial result is conceptually a frame group containing:
+
+- a synchronized color view set;
+- optional alpha and depth view sets;
+- the acknowledged view-request identity and rendered pose metadata;
+- content bounds; and
+- an explicit input region.
+
+All planes share one frame-group identity even when media negotiation carries
+them in separate payloads or at different resolutions and cadences. Packed eye
+views can remain one encoded access unit. Alpha may use an auxiliary payload
+when the selected color codec has no alpha, while depth may use a lower-rate or
+lower-resolution representation. Each plane consumes an explicit resource
+budget. Transparency never implicitly defines hit testing: a transparent
+spatial surface still needs an input region and destination input policy.
+
+A foveated enhancement is another synchronized region in this frame group, not
+a new logical surface. Its destination rectangle, source crop, eye association,
+quality role, and gaze-sample identity are explicit so compositing cannot place
+an old sharp region over a new base frame. Implementations may carry base and
+enhancement as separate streams, codec layers, tiles, or a codec-native region-
+of-interest map. That choice remains inside negotiated media capabilities.
+
+This produces a useful progression without claiming a geometry protocol:
+ordinary mono windows, mono cutouts with alpha, fixed binocular cutouts,
+head-tracked binocular content, and depth-assisted spatial content. These are
+raster views with optional reprojection data, not a substitute for meshes or a
+complete scene graph. Local applications and transported applications expose
+the same result semantics; only the latter require codec and network framing.
 
 ## Window geometry and visual overflow — Direction
 
@@ -283,3 +452,12 @@ matrix](remote-budgeting.md#initial-measurement-matrix--exploration).
   the low-latency base stream.
 - Decide when exact oversized presentation justifies tiling rather than an
   explicit quality warning or source resize.
+- Prototype an XR spatial target with independent windows, destination-led seat
+  focus, source- and destination-attached keyboards, and privacy-preserving
+  gaze-derived attention.
+- Validate one fixed-stereo application and one head-tracked application against
+  the same view-set contract, including pose prediction and stale-frame policy.
+- Validate synchronized color, alpha, and optional depth planes without deriving
+  input regions from pixel transparency.
+- Prototype a foveated base-plus-enhancement layout, measure gaze-to-photon
+  latency and boundary visibility, and compare it with codec-native ROI maps.
