@@ -151,6 +151,9 @@ impl ServerState {
     }
 
     pub(super) fn focus_toplevel(&mut self, requested: Option<SurfaceId>) {
+        if requested.is_none() {
+            self.dismiss_popup_grab(self.event_time());
+        }
         let grabbed = self
             .seat
             .get_pointer()
@@ -338,6 +341,16 @@ impl ServerState {
         let serial = SERIAL_COUNTER.next_serial();
         let focus = self.pointer_focus(position, target);
         let pointer_was_grabbed = pointer.is_grabbed();
+        debug!(
+            target: "weld_input_diag",
+            time, button, ?state, ?target,
+            resolved_surface = ?focus.as_ref().map(|(surface, _)| surface.id()),
+            current_surface = ?pointer.current_focus().map(|surface| surface.id()),
+            pointer_was_grabbed,
+            popup_grab_active = self.popup_grab.as_ref().is_some_and(|grab| !grab.has_ended()),
+            modifiers = ?self.seat.get_keyboard().map(|keyboard| keyboard.modifier_state()),
+            "source pointer button before delivery"
+        );
         let shell_owns_cursor = shell_owns_cursor(
             focus.is_none(),
             pointer_was_grabbed,
@@ -378,6 +391,14 @@ impl ServerState {
             },
         );
         pointer.frame(self);
+        debug!(
+            target: "weld_input_diag",
+            time, button, ?state,
+            current_surface = ?pointer.current_focus().map(|surface| surface.id()),
+            grabbed = pointer.is_grabbed(),
+            pressed_buttons = ?self.pressed_pointer_buttons,
+            "source pointer button after delivery"
+        );
         self.set_shell_cursor_ownership(shell_owns_cursor);
         self.retry_pending_focus(pointer.is_grabbed());
     }
@@ -521,7 +542,7 @@ impl ServerState {
         // Ordinary focus clearing is intentionally ignored by active popup
         // grabs. End the protocol grab first so losing nested host focus cannot
         // leave a client menu open and holding Weld's seat.
-        self.dismiss_popup_grab();
+        self.dismiss_popup_grab(time);
         self.ordinary_implicit_grab = None;
         let serial = SERIAL_COUNTER.next_serial();
         if let Some(pointer) = self.seat.get_pointer() {

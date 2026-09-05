@@ -559,6 +559,14 @@ impl ServerState {
         for surface in surfaces {
             with_states(&surface, |states| {
                 let mut attributes = states.cached_state.get::<SurfaceAttributes>();
+                if !attributes.current().frame_callbacks.is_empty() {
+                    tracing::trace!(
+                        target: "weld_surface_diag",
+                        presentation_id, surface = ?surface.id(),
+                        count = attributes.current().frame_callbacks.len(),
+                        "staged frame callbacks"
+                    );
+                }
                 callbacks.append(&mut attributes.current().frame_callbacks);
             });
         }
@@ -577,6 +585,9 @@ impl ServerState {
             let Some((_, callbacks)) = self.staged_frame_callbacks.pop_front() else {
                 break;
             };
+            if !callbacks.is_empty() {
+                tracing::trace!(target: "weld_surface_diag", presentation_id, time, count = callbacks.len(), "completed frame callbacks");
+            }
             for callback in callbacks {
                 callback.done(time);
             }
@@ -752,6 +763,7 @@ impl CompositorHandler for ServerState {
             return;
         }
         let root = owning_root(surface);
+        tracing::trace!(target: "weld_surface_diag", surface = ?surface.id(), root = ?root.id(), "processed surface commit");
         let Some(surface_id) = self.toplevels.id_for_surface(&root) else {
             if !self.commit_popup(&root) {
                 if get_role(&root).is_some() {

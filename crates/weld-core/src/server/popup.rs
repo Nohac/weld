@@ -11,7 +11,7 @@ use smithay::{
         backend::ObjectId,
         protocol::{wl_seat, wl_surface::WlSurface},
     },
-    utils::Serial,
+    utils::{SERIAL_COUNTER, Serial},
     wayland::shell::xdg::{PopupSurface, PositionerState},
 };
 use tracing::{debug, info, warn};
@@ -36,6 +36,14 @@ pub(super) struct PopupState {
 
 #[derive(Default)]
 pub(super) struct PopupStore(IndexedStore<ObjectId, PopupState>);
+
+fn popup_grab_matches(
+    serial: Serial,
+    previous: Option<Serial>,
+    has_grab: impl Fn(Serial) -> bool,
+) -> bool {
+    has_grab(serial) || previous.is_some_and(has_grab)
+}
 
 impl PopupStore {
     fn insert(&mut self, id: SurfaceId, state: PopupState) -> bool {
@@ -221,34 +229,50 @@ impl ServerState {
         let Ok(mut grab) = self.popup_manager.grab_popup(root, kind, &seat, serial) else {
             return;
         };
-        let accepted_serial = grab.previous_serial().unwrap_or(serial);
+        let previous_serial = grab.previous_serial();
 
-        if let Some(keyboard) = seat.get_keyboard() {
-            if keyboard.is_grabbed()
-                && !(keyboard.has_grab(serial) || keyboard.has_grab(accepted_serial))
-            {
-                grab.ungrab(PopupUngrabStrategy::All);
-                return;
-            }
+        let keyboard = seat.get_keyboard();
+        let pointer = seat.get_pointer();
+        // Validate both devices before installing either grab, so rejection
+        // cannot leave an unrecorded keyboard-only popup grab behind.
+        if keyboard.as_ref().is_some_and(|keyboard| {
+            keyboard.is_grabbed()
+                && !popup_grab_matches(serial, previous_serial, |serial| keyboard.has_grab(serial))
+        }) || pointer.as_ref().is_some_and(|pointer| {
+            pointer.is_grabbed()
+                && !popup_grab_matches(serial, previous_serial, |serial| pointer.has_grab(serial))
+        }) {
+            grab.ungrab(PopupUngrabStrategy::All);
+            return;
+        }
+        if let Some(keyboard) = keyboard {
             keyboard.set_focus(self, grab.current_grab(), serial);
             keyboard.set_grab(self, PopupKeyboardGrab::new(&grab), serial);
         }
-        if let Some(pointer) = seat.get_pointer() {
-            if pointer.is_grabbed()
-                && !(pointer.has_grab(serial) || pointer.has_grab(accepted_serial))
-            {
-                grab.ungrab(PopupUngrabStrategy::All);
-                return;
-            }
+        if let Some(pointer) = pointer {
             pointer.set_grab(self, PopupPointerGrab::new(&grab), serial, Focus::Keep);
         }
         self.ordinary_implicit_grab = None;
         self.popup_grab = Some(grab);
     }
 
-    pub(super) fn dismiss_popup_grab(&mut self) {
+    /// End only our popup grabs. Callers clear keyboard focus immediately after
+    /// this, including the keyboard-only case where there is no pointer cascade.
+    pub(super) fn dismiss_popup_grab(&mut self, time: u32) {
         if let Some(mut grab) = self.popup_grab.take() {
+            let serial = grab.serial();
+            let previous_serial = grab.previous_serial();
             grab.ungrab(PopupUngrabStrategy::All);
+            if let Some(pointer) = self.seat.get_pointer()
+                && popup_grab_matches(serial, previous_serial, |serial| pointer.has_grab(serial))
+            {
+                pointer.unset_grab(self, SERIAL_COUNTER.next_serial(), time);
+            }
+            if let Some(keyboard) = self.seat.get_keyboard()
+                && popup_grab_matches(serial, previous_serial, |serial| keyboard.has_grab(serial))
+            {
+                keyboard.unset_grab(self);
+            }
         }
     }
 
@@ -297,6 +321,33 @@ impl ServerState {
                 surface,
                 kind: PendingSurfaceEventKind::Role(ClientSurfaceRole::Popup(popup)),
             });
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::popup_grab_matches;
+    use smithay::utils::Serial;
+
+    #[test]
+    fn popup_grab_ownership_accepts_current_or_parent_serial_only() {
+        let current = Serial::from(20);
+        let parent = Serial::from(10);
+        let unrelated = Serial::from(30);
+        for (previous, candidate, expected) in [
+            (None, Some(current), true),
+            (None, Some(parent), false),
+            (Some(parent), Some(current), true),
+            (Some(parent), Some(parent), true),
+            (Some(parent), Some(unrelated), false),
+            (Some(parent), None, false),
+            (None, None, false),
+        ] {
+            assert_eq!(
+                popup_grab_matches(current, previous, |serial| candidate == Some(serial)),
+                expected
+            );
         }
     }
 }

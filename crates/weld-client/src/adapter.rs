@@ -9,7 +9,7 @@ use std::{
 use crate::{
     ButtonState, ClientEventQueue, ClientInputEvent, ClientInputTarget, ClientKeyboardRoute,
     ClientPointerRoute, ClientPointerRouteUpdate, ClientRequest, ClientSourceDescriptor,
-    ClientSourceId, ClientSurfaceId, InputEventKind, LinuxButtonCode, PointerGesture,
+    ClientSourceId, ClientSurfaceId, InputEventKind, LinuxButtonCode, LinuxKeycode, PointerGesture,
     PointerGestureKind, RawScrollFrame, RawScrollPhase, RawScrollSource, RuntimeInputEvent,
     RuntimeInputEventKind,
 };
@@ -337,6 +337,8 @@ pub struct ClientRuntime {
     pointer_route: Option<ClientPointerRoute>,
     pending_pointer_route: Option<Option<ClientPointerRoute>>,
     keyboard_route: Option<ClientKeyboardRoute>,
+    // Resolve once on press: focus/alias changes must not strand the release.
+    keyboard_captures: HashMap<LinuxKeycode, ClientKeyboardRoute>,
     pointer_capture: PointerCapture,
     gesture_capture: Option<GestureCapture>,
     finger_scroll_capture: Option<FingerScrollCapture>,
@@ -735,12 +737,38 @@ impl ClientRuntime {
                 self.dispatch_gesture(gesture, time)
             }
             RuntimeInputEventKind::Input(InputEventKind::Keyboard { keycode, state }) => {
-                let route = match self.resolved_keyboard_route(self.keyboard_route) {
-                    Ok(Some(route)) => route,
-                    Ok(None) => return ClientInputDispatchResult::NoRoute,
-                    Err(error) => return error,
+                let captured = match state {
+                    ButtonState::Pressed => {
+                        if let Some(previous) = self.keyboard_captures.remove(&keycode) {
+                            self.dispatch_to(
+                                previous.surface.source(),
+                                ClientInputEvent {
+                                    target: ClientInputTarget::Keyboard {
+                                        surface: previous.surface,
+                                    },
+                                    host_position: None,
+                                    event: InputEventKind::Keyboard {
+                                        keycode,
+                                        state: ButtonState::Released,
+                                    },
+                                    time,
+                                },
+                            );
+                        }
+                        None
+                    }
+                    ButtonState::Released => self.keyboard_captures.remove(&keycode),
                 };
-                self.dispatch_to(
+                let route = if let Some(route) = captured {
+                    route
+                } else {
+                    match self.resolved_keyboard_route(self.keyboard_route) {
+                        Ok(Some(route)) => route,
+                        Ok(None) => return ClientInputDispatchResult::NoRoute,
+                        Err(error) => return error,
+                    }
+                };
+                let result = self.dispatch_to(
                     route.surface.source(),
                     ClientInputEvent {
                         target: ClientInputTarget::Keyboard {
@@ -750,7 +778,11 @@ impl ClientRuntime {
                         event: InputEventKind::Keyboard { keycode, state },
                         time,
                     },
-                )
+                );
+                if state == ButtonState::Pressed && result == ClientInputDispatchResult::Delivered {
+                    self.keyboard_captures.insert(keycode, route);
+                }
+                result
             }
             RuntimeInputEventKind::HostFocusLost => self.host_focus_lost(time),
         }
@@ -767,6 +799,7 @@ impl ClientRuntime {
         self.pending_pointer_route = None;
         self.keyboard_route = None;
         self.pointer_capture = PointerCapture::Idle;
+        self.keyboard_captures.clear();
         self.gesture_capture = None;
         self.finger_scroll_capture = None;
         self.pressed_buttons.clear();
@@ -1029,6 +1062,17 @@ impl ClientRuntime {
     }
 
     fn forget_surface(&mut self, surface: ClientSurfaceId) {
+        let destroyed_keys = self
+            .keyboard_captures
+            .iter()
+            .filter_map(|(key, route)| {
+                self.surface_resolves_to(route.surface, surface)
+                    .then_some(*key)
+            })
+            .collect::<Vec<_>>();
+        for key in destroyed_keys {
+            self.keyboard_captures.remove(&key);
+        }
         let pointer_destroyed = self.route_resolves_to(self.pointer_route, surface);
         let pending_destroyed = self
             .pending_pointer_route
@@ -1084,9 +1128,11 @@ impl ClientRuntime {
         route: Option<ClientPointerRoute>,
         surface: ClientSurfaceId,
     ) -> bool {
-        route.is_some_and(|route| {
-            route.surface == surface || self.resolve_alias(route.surface) == Ok(surface)
-        })
+        route.is_some_and(|route| self.surface_resolves_to(route.surface, surface))
+    }
+
+    fn surface_resolves_to(&self, candidate: ClientSurfaceId, surface: ClientSurfaceId) -> bool {
+        candidate == surface || self.resolve_alias(candidate) == Ok(surface)
     }
 }
 
@@ -1158,6 +1204,97 @@ mod tests {
             ))
             .expect("unique test source");
         record
+    }
+
+    #[test]
+    fn duplicate_key_press_settles_the_old_route_before_starting_the_new_one() {
+        let mut runtime = ClientRuntime::default();
+        let first = register(&mut runtime, 1);
+        let second = register(&mut runtime, 2);
+        let key = |state| {
+            RuntimeInputEvent::new(
+                RuntimeInputEventKind::Input(InputEventKind::Keyboard {
+                    keycode: LinuxKeycode(42),
+                    state,
+                }),
+                10,
+            )
+        };
+        runtime.set_keyboard_route(Some(ClientKeyboardRoute {
+            surface: surface(1, 1, 1),
+        }));
+        runtime.dispatch_unconsumed_input(key(ButtonState::Pressed));
+        runtime.set_keyboard_route(Some(ClientKeyboardRoute {
+            surface: surface(2, 1, 1),
+        }));
+        runtime.dispatch_unconsumed_input(key(ButtonState::Pressed));
+        assert_eq!(
+            first.borrow().inputs.len(),
+            2,
+            "old press must be released immediately"
+        );
+        runtime.dispatch_unconsumed_input(key(ButtonState::Released));
+        for record in [first, second] {
+            let record = record.borrow();
+            assert_eq!(record.inputs.len(), 2);
+            assert!(matches!(
+                record.inputs[0].event,
+                InputEventKind::Keyboard {
+                    state: ButtonState::Pressed,
+                    ..
+                }
+            ));
+            assert!(matches!(
+                record.inputs[1].event,
+                InputEventKind::Keyboard {
+                    state: ButtonState::Released,
+                    ..
+                }
+            ));
+        }
+    }
+
+    #[test]
+    fn keyboard_release_keeps_the_press_route_after_focus_or_alias_changes() {
+        let mut runtime = ClientRuntime::default();
+        let first = register(&mut runtime, 1);
+        let second = register(&mut runtime, 2);
+        let original = surface(1, 1, 1);
+        let other = surface(2, 1, 1);
+        let alias = surface(3, 1, 1);
+        let key = |state| {
+            RuntimeInputEvent::new(
+                RuntimeInputEventKind::Input(InputEventKind::Keyboard {
+                    keycode: LinuxKeycode(42),
+                    state,
+                }),
+                10,
+            )
+        };
+        for focus in [None, Some(ClientKeyboardRoute { surface: other })] {
+            runtime.set_route_alias(alias, original);
+            runtime.set_keyboard_route(Some(ClientKeyboardRoute { surface: alias }));
+            assert_eq!(
+                runtime.dispatch_unconsumed_input(key(ButtonState::Pressed)),
+                ClientInputDispatchResult::Delivered
+            );
+            runtime.remove_route_alias(alias);
+            runtime.forget_surface(alias);
+            runtime.set_keyboard_route(focus);
+            assert_eq!(
+                runtime.dispatch_unconsumed_input(key(ButtonState::Released)),
+                ClientInputDispatchResult::Delivered
+            );
+        }
+        assert_eq!(first.borrow().inputs.len(), 4);
+        assert!(second.borrow().inputs.is_empty());
+        assert!(
+            first
+                .borrow()
+                .inputs
+                .iter()
+                .all(|event| event.target.surface() == original)
+        );
     }
 
     #[test]

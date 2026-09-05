@@ -1,9 +1,6 @@
 //! Shared source and destination relay policy over binding-owned ports.
 
-use std::{
-    collections::{HashMap, HashSet},
-    error::Error,
-};
+use std::{collections::HashMap, error::Error};
 
 use weld_client::{
     ClientAdapter, ClientAdapterCommandEnvelope, ClientAdapterEffect, ClientBufferId,
@@ -172,6 +169,10 @@ impl SourceRelayAdapter {
         let Some(session) = self.mappings.remove(&source) else {
             return;
         };
+        self.effects.extend(
+            self.remote_input
+                .release_effects(self.upstream_source, |surface| surface == source),
+        );
         self.effects
             .push(ClientAdapterEffect::Request(ClientRequest::Surface(
                 weld_client::ClientSurfaceRequest {
@@ -248,6 +249,10 @@ impl SourceRelayAdapter {
                 }
             }
             ClientSurfaceEventKind::Destroyed => {
+                self.effects.extend(
+                    self.remote_input
+                        .release_effects(self.upstream_source, |surface| surface == source),
+                );
                 if let Some(session) = self.mappings.remove(&source) {
                     self.send_surface(session, event.clone());
                 }
@@ -288,7 +293,21 @@ impl SourceRelayAdapter {
     }
 
     fn accept_destination(&mut self, envelope: DestinationEnvelope) -> bool {
-        let target = destination_message_surface(&envelope.message);
+        let target =
+            if let DestinationMessage::Request(ClientRequest::Focus(focus)) = &envelope.message {
+                if focus.source != self.upstream_source {
+                    // A wrong namespace is a protocol violation, not a stale route.
+                    self.fail();
+                    return false;
+                }
+                let target = focus.surface.or(self.remote_input.keyboard_focus);
+                if target.is_none() {
+                    return true;
+                }
+                target
+            } else {
+                destination_message_surface(&envelope.message)
+            };
         if let Some(surface) = target {
             match self.mappings.get(&surface).copied() {
                 Some(session) if session == envelope.session => {}
@@ -326,10 +345,10 @@ impl SourceRelayAdapter {
         }
         self.failed = true;
         self.port.disconnect();
-        self.effects.extend(self.remote_input.release_effects(
-            self.upstream_source,
-            self.mappings.keys().copied().collect(),
-        ));
+        self.effects.extend(
+            self.remote_input
+                .release_effects(self.upstream_source, |_| true),
+        );
         self.effects
             .extend(self.mappings.keys().copied().map(|surface| {
                 ClientAdapterEffect::Request(ClientRequest::Surface(
@@ -390,7 +409,7 @@ pub struct DestinationRelayAdapter {
     sessions: HashMap<ClientSurfaceId, HoistSessionId>,
     roles: HashMap<ClientSurfaceId, weld_client::ClientSurfaceRole>,
     events: ClientEventQueue,
-    keyboard_focus: Option<ClientSurfaceId>,
+    input: RemoteInputState,
     failed: bool,
     port: Box<dyn HoistDestinationPort>,
 }
@@ -407,7 +426,7 @@ impl DestinationRelayAdapter {
             sessions: HashMap::new(),
             roles: HashMap::new(),
             events: ClientEventQueue::default(),
-            keyboard_focus: None,
+            input: RemoteInputState::default(),
             failed: false,
             port: Box::new(port),
         }
@@ -566,9 +585,13 @@ impl DestinationRelayAdapter {
         }
         self.roles.remove(&source);
         let destination = relocated_surface(self.descriptor.id, source);
-        if self.keyboard_focus == Some(destination) {
-            self.keyboard_focus = None;
-        }
+        // The source settles withdrawn input before removing its mapping;
+        // transport failure instead makes its disconnect path settle all input.
+        // Forget locally without emitting late packets for the retired route.
+        drop(
+            self.input
+                .release_effects(self.descriptor.id, |surface| surface == destination),
+        );
         if notify_port
             && self
                 .port
@@ -639,7 +662,7 @@ impl ClientAdapter for DestinationRelayAdapter {
 
     fn apply_request(&mut self, mut request: ClientRequest) {
         let destination = match &request {
-            ClientRequest::Focus(focus) if focus.surface.is_none() => self.keyboard_focus,
+            ClientRequest::Focus(focus) if focus.surface.is_none() => self.input.keyboard_focus,
             _ => request_surface(&request),
         };
         let Some(destination) = destination else {
@@ -651,14 +674,13 @@ impl ClientAdapter for DestinationRelayAdapter {
         let Some(session) = self.sessions.get(&source).copied() else {
             return;
         };
+        self.input.observe_request(&request);
         match &mut request {
             ClientRequest::Focus(focus) if focus.surface.is_none() => {
                 focus.source = self.upstream_source;
-                self.keyboard_focus = None;
             }
             ClientRequest::Focus(_) => {
                 rewrite_request_surface(&mut request, source);
-                self.keyboard_focus = Some(destination);
             }
             ClientRequest::Surface(_) | ClientRequest::ClearFocus => {
                 rewrite_request_surface(&mut request, source);
@@ -675,6 +697,7 @@ impl ClientAdapter for DestinationRelayAdapter {
         let Some(session) = self.sessions.get(&source).copied() else {
             return;
         };
+        self.input.observe_input(&event);
         event.target = match event.target {
             ClientInputTarget::Pointer { layer, .. } => ClientInputTarget::Pointer {
                 surface: source,
@@ -686,7 +709,25 @@ impl ClientAdapter for DestinationRelayAdapter {
     }
 
     fn apply_command(&mut self, _command: ClientAdapterCommandEnvelope) {}
-    fn host_focus_lost(&mut self, _time: u32) {}
+    fn host_focus_lost(&mut self, time: u32) {
+        self.input.last_time = time;
+        let previous_focus = self.input.keyboard_focus;
+        let effects = self.input.release_effects(self.descriptor.id, |_| true);
+        for effect in effects {
+            if self.failed {
+                break;
+            }
+            match effect {
+                ClientAdapterEffect::Input(input) => self.apply_input(input),
+                ClientAdapterEffect::Request(request) => {
+                    // apply_request needs the previous destination to route a
+                    // source-qualified focus clear after the ledger is drained.
+                    self.input.keyboard_focus = previous_focus;
+                    self.apply_request(request);
+                }
+            }
+        }
+    }
 
     fn drain_route_alias_updates(&mut self, updates: &mut Vec<ClientRouteAliasUpdate>) {
         self.port.drain_route_alias_updates(updates);
@@ -807,53 +848,75 @@ impl RemoteInputState {
                     self.keys.remove(keycode);
                 }
             },
-            InputEventKind::PointerMotion { .. }
-            | InputEventKind::PointerLeft { .. }
-            | InputEventKind::PointerAxis { .. } => {}
+            InputEventKind::PointerMotion { position } => {
+                for (target, last_position) in self.buttons.values_mut() {
+                    if *target == input.target {
+                        *last_position = Some(*position);
+                    }
+                }
+            }
+            InputEventKind::PointerLeft { .. } | InputEventKind::PointerAxis { .. } => {}
         }
     }
 
     fn release_effects(
         &mut self,
         source: ClientSourceId,
-        mapped_surfaces: HashSet<ClientSurfaceId>,
+        should_release: impl Fn(ClientSurfaceId) -> bool,
     ) -> Vec<ClientAdapterEffect> {
         let mut effects = Vec::new();
         let time = self.last_time;
-        effects.extend(self.buttons.drain().map(|(button, (target, position))| {
-            ClientAdapterEffect::Input(ClientInputEvent {
-                target,
-                host_position: None,
-                event: InputEventKind::PointerButton {
-                    position,
-                    button,
-                    state: weld_client::ButtonState::Released,
-                },
-                time,
-            })
-        }));
-        effects.extend(self.keys.drain().map(|(keycode, target)| {
-            ClientAdapterEffect::Input(ClientInputEvent {
-                target,
-                host_position: None,
-                event: InputEventKind::Keyboard {
-                    keycode,
-                    state: weld_client::ButtonState::Released,
-                },
-                time,
-            })
-        }));
-        effects.extend(self.gestures.drain(..).map(|(kind, target)| {
-            ClientAdapterEffect::Input(ClientInputEvent {
-                target,
-                host_position: None,
-                event: InputEventKind::PointerGesture {
-                    gesture: kind.cancelled(),
-                },
-                time,
-            })
-        }));
-        if let Some(scroll) = self.finger_scroll.take() {
+        effects.extend(
+            self.buttons
+                .extract_if(|_, (target, _)| should_release(target.surface()))
+                .map(|(button, (target, position))| {
+                    ClientAdapterEffect::Input(ClientInputEvent {
+                        target,
+                        host_position: None,
+                        event: InputEventKind::PointerButton {
+                            position,
+                            button,
+                            state: weld_client::ButtonState::Released,
+                        },
+                        time,
+                    })
+                }),
+        );
+        effects.extend(
+            self.keys
+                .extract_if(|_, target| should_release(target.surface()))
+                .map(|(keycode, target)| {
+                    ClientAdapterEffect::Input(ClientInputEvent {
+                        target,
+                        host_position: None,
+                        event: InputEventKind::Keyboard {
+                            keycode,
+                            state: weld_client::ButtonState::Released,
+                        },
+                        time,
+                    })
+                }),
+        );
+        effects.extend(
+            self.gestures
+                .extract_if(.., |(_, target)| should_release(target.surface()))
+                .map(|(kind, target)| {
+                    ClientAdapterEffect::Input(ClientInputEvent {
+                        target,
+                        host_position: None,
+                        event: InputEventKind::PointerGesture {
+                            gesture: kind.cancelled(),
+                        },
+                        time,
+                    })
+                }),
+        );
+        if self
+            .finger_scroll
+            .as_ref()
+            .is_some_and(|scroll| should_release(scroll.target.surface()))
+            && let Some(scroll) = self.finger_scroll.take()
+        {
             effects.push(ClientAdapterEffect::Input(ClientInputEvent {
                 target: scroll.target,
                 host_position: None,
@@ -867,11 +930,8 @@ impl RemoteInputState {
                 time,
             }));
         }
-        if self
-            .keyboard_focus
-            .take()
-            .is_some_and(|surface| mapped_surfaces.contains(&surface))
-        {
+        if self.keyboard_focus.is_some_and(should_release) {
+            self.keyboard_focus = None;
             effects.push(ClientAdapterEffect::Request(ClientRequest::Focus(
                 weld_client::ClientFocusRequest {
                     source,
@@ -889,9 +949,10 @@ mod tests {
 
     use weld_client::{
         ButtonState, ClientAdapter, ClientAdapterCommandEnvelope, ClientFocusRequest, ClientId,
-        ClientInputEvent, ClientInputTarget, ClientProvenance, ClientRequest, ClientSurfaceRequest,
-        ClientSurfaceRequestKind, ClientSurfaceRole, InputEventKind, LinuxKeycode, LogicalPoint,
-        PopupState,
+        ClientInputEvent, ClientInputTarget, ClientKeyboardRoute, ClientProvenance, ClientRequest,
+        ClientRuntime, ClientRuntimeAdapter, ClientSurfaceRequest, ClientSurfaceRequestKind,
+        ClientSurfaceRole, InputEventKind, LinuxKeycode, LogicalPoint, PopupState,
+        RuntimeInputEvent, RuntimeInputEventKind,
     };
 
     use super::*;
@@ -908,14 +969,22 @@ mod tests {
 
     struct FakeSourcePort(Rc<RefCell<FakeSourceState>>);
 
-    struct FakeDestinationPort;
+    #[derive(Default)]
+    struct FakeDestinationState {
+        inbound: Vec<DestinationPortRecord>,
+        outbound: Vec<DestinationPortCommand>,
+    }
+
+    #[derive(Default)]
+    struct FakeDestinationPort(Rc<RefCell<FakeDestinationState>>);
 
     impl HoistDestinationPort for FakeDestinationPort {
         fn poll(&mut self) -> HoistPortResult<Vec<DestinationPortRecord>> {
-            Ok(Vec::new())
+            Ok(std::mem::take(&mut self.0.borrow_mut().inbound))
         }
 
-        fn submit(&mut self, _command: DestinationPortCommand) -> HoistPortResult<()> {
+        fn submit(&mut self, command: DestinationPortCommand) -> HoistPortResult<()> {
+            self.0.borrow_mut().outbound.push(command);
             Ok(())
         }
 
@@ -932,7 +1001,7 @@ mod tests {
         let mut relay = DestinationRelayAdapter::new(
             source,
             ClientSourceDescriptor::new(destination, ClientProvenance::Relocated),
-            FakeDestinationPort,
+            FakeDestinationPort::default(),
         );
         assert!(relay.apply_record(DestinationPortRecord {
             session,
@@ -1034,6 +1103,233 @@ mod tests {
             },
         ));
         (adapter, state, surface, session)
+    }
+
+    fn key_input(surface: ClientSurfaceId, keycode: u32, state: ButtonState) -> ClientInputEvent {
+        ClientInputEvent {
+            target: ClientInputTarget::Keyboard { surface },
+            host_position: None,
+            event: InputEventKind::Keyboard {
+                keycode: LinuxKeycode(keycode),
+                state,
+            },
+            time: 15,
+        }
+    }
+
+    fn sent_messages(state: &Rc<RefCell<FakeDestinationState>>) -> Vec<DestinationEnvelope> {
+        std::mem::take(&mut state.borrow_mut().outbound)
+            .into_iter()
+            .filter_map(|command| match command {
+                DestinationPortCommand::Message(envelope) => Some(envelope),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn destination_host_loss_releases_forwarded_input_once() {
+        let upstream = ClientSourceId::new(4);
+        let descriptor =
+            ClientSourceDescriptor::new(ClientSourceId::new(9), ClientProvenance::Relocated);
+        let original = surface(upstream, 7);
+        let destination = relocated_surface(descriptor.id, original);
+        let port = FakeDestinationPort::default();
+        let state = port.0.clone();
+        let mut relay = DestinationRelayAdapter::new(upstream, descriptor, port);
+        assert!(relay.map_surface(HoistSessionId::new(1), original));
+        relay.apply_request(ClientRequest::Focus(ClientFocusRequest {
+            source: descriptor.id,
+            surface: Some(destination),
+        }));
+        relay.apply_input(key_input(destination, 42, ButtonState::Pressed));
+        let pointer = ClientInputTarget::Pointer {
+            surface: destination,
+            layer: weld_client::SurfaceLayerId::new(1),
+        };
+        let position = InputPosition::new(10.0, 20.0);
+        for event in [
+            InputEventKind::PointerButton {
+                position: Some(position),
+                button: LinuxButtonCode(0x110),
+                state: ButtonState::Pressed,
+            },
+            InputEventKind::PointerGesture {
+                gesture: weld_client::PointerGesture::Swipe(weld_client::TouchpadSwipe::Begin {
+                    fingers: 3,
+                }),
+            },
+            InputEventKind::PointerAxis {
+                position: Some(position),
+                axis: weld_client::RawScrollFrame {
+                    source: RawScrollSource::Finger,
+                    phase: RawScrollPhase::Started,
+                    horizontal: 1.0,
+                    vertical: 2.0,
+                    horizontal_v120: None,
+                    vertical_v120: None,
+                    horizontal_stop: false,
+                    vertical_stop: false,
+                },
+            },
+            InputEventKind::PointerMotion {
+                position: InputPosition::new(30.0, 40.0),
+            },
+        ] {
+            relay.apply_input(ClientInputEvent {
+                target: pointer,
+                host_position: None,
+                event,
+                time: 20,
+            });
+        }
+        sent_messages(&state);
+        relay.host_focus_lost(30);
+        let messages = sent_messages(&state);
+        assert_eq!(
+            messages.len(),
+            5,
+            "key, button, gesture, scroll and focus must settle"
+        );
+        assert!(messages.iter().any(|message| matches!(&message.message,
+            DestinationMessage::Input(input) if input.time == 30 && input.event == key_input(original, 42, ButtonState::Released).event
+        )));
+        assert!(messages.iter().any(|message| matches!(&message.message,
+            DestinationMessage::Input(input) if input.event == InputEventKind::PointerGesture { gesture: PointerGestureKind::Swipe.cancelled() }
+        )));
+        assert!(messages.iter().any(|message| matches!(&message.message,
+            DestinationMessage::Input(input) if matches!(input.event, InputEventKind::PointerAxis { axis, .. }
+                if axis.phase == RawScrollPhase::Cancelled && axis.horizontal_stop && axis.vertical_stop)
+        )));
+        assert!(messages.iter().any(|message| matches!(&message.message,
+            DestinationMessage::Request(ClientRequest::Focus(focus)) if focus.source == upstream && focus.surface.is_none()
+        )));
+        assert!(messages.iter().any(|message| matches!(&message.message,
+            DestinationMessage::Input(input) if matches!(input.event,
+                InputEventKind::PointerButton { state: ButtonState::Released, position: Some(p), .. } if p == InputPosition::new(30.0, 40.0)
+            )
+        )));
+        relay.host_focus_lost(31);
+        assert!(sent_messages(&state).is_empty());
+        assert!(!relay.failed);
+    }
+
+    #[test]
+    fn reclaim_releases_only_the_selected_surface_input() {
+        let (mut relay, _, first, session) = mapped_source();
+        let second = surface(first.source(), 8);
+        relay.map(HoistSessionId::new(10), second);
+        for (surface, session, key) in [(first, session, 42), (second, HoistSessionId::new(10), 29)]
+        {
+            assert!(relay.accept_destination(DestinationEnvelope {
+                session,
+                message: DestinationMessage::input(key_input(surface, key, ButtonState::Pressed))
+            }));
+        }
+        relay.effects.clear();
+        relay.unmap(first);
+        let releases = relay
+            .effects
+            .iter()
+            .filter(|effect| matches!(effect, ClientAdapterEffect::Input(_)))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            releases,
+            [&ClientAdapterEffect::Input(key_input(
+                first,
+                42,
+                ButtonState::Released
+            ))]
+        );
+        relay.effects.clear();
+        relay.unmap(second);
+        assert!(
+            relay
+                .effects
+                .contains(&ClientAdapterEffect::Input(key_input(
+                    second,
+                    29,
+                    ButtonState::Released
+                )))
+        );
+    }
+
+    #[test]
+    fn reclaim_while_runtime_holds_a_key_releases_upstream_exactly_once() {
+        let (mut source, _, original, session) = mapped_source();
+        let descriptor =
+            ClientSourceDescriptor::new(ClientSourceId::new(9), ClientProvenance::Relocated);
+        let destination = relocated_surface(descriptor.id, original);
+        let port = FakeDestinationPort::default();
+        let state = port.0.clone();
+        let mut relay = DestinationRelayAdapter::new(original.source(), descriptor, port);
+        assert!(relay.map_surface(session, original));
+        let mut runtime = ClientRuntime::default();
+        runtime
+            .register(ClientRuntimeAdapter::new(descriptor, relay))
+            .expect("destination adapter");
+        runtime.set_keyboard_route(Some(ClientKeyboardRoute {
+            surface: destination,
+        }));
+        let event = |state| {
+            RuntimeInputEvent::new(
+                RuntimeInputEventKind::Input(key_input(destination, 42, state).event),
+                15,
+            )
+        };
+        runtime.dispatch_unconsumed_input(event(ButtonState::Pressed));
+        for message in sent_messages(&state) {
+            assert!(source.accept_destination(message));
+        }
+        source.effects.clear();
+        source.unmap(original);
+        state.borrow_mut().inbound.push(DestinationPortRecord {
+            session,
+            event: DestinationPortEvent::WithdrawSurface(original),
+        });
+        runtime.drain_events(&mut ClientEventQueue::default(), &mut Vec::new());
+        runtime.dispatch_unconsumed_input(event(ButtonState::Released));
+        runtime.host_focus_lost(20);
+        for message in sent_messages(&state) {
+            assert!(source.accept_destination(message));
+        }
+        let releases = source
+            .effects
+            .iter()
+            .filter(|effect| {
+                matches!(
+                    effect,
+                    ClientAdapterEffect::Input(ClientInputEvent {
+                        event: InputEventKind::Keyboard {
+                            state: ButtonState::Released,
+                            ..
+                        },
+                        ..
+                    })
+                )
+            })
+            .count();
+        assert_eq!(releases, 1);
+    }
+
+    #[test]
+    fn remote_focus_clear_is_authorized_by_the_focused_session() {
+        let (mut relay, _, surface, session) = mapped_source();
+        assert!(relay.accept_destination(DestinationEnvelope {
+            session,
+            message: DestinationMessage::Request(ClientRequest::Focus(ClientFocusRequest {
+                source: surface.source(),
+                surface: Some(surface)
+            }))
+        }));
+        relay.effects.clear();
+        assert!(!relay.accept_destination(DestinationEnvelope {
+            session: HoistSessionId::new(123),
+            message: DestinationMessage::Request(ClientRequest::Focus(ClientFocusRequest {
+                source: surface.source(),
+                surface: None
+            })),
+        }));
     }
 
     #[test]

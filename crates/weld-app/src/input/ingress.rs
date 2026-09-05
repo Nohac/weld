@@ -34,6 +34,18 @@ impl ApplicationInputBuffer {
         let consumed = filter_global_shortcut_event(world, &event)
             | filter_virtual_terminal_event(world, &event)
             | filter_pointer_shortcut_event(world, &event);
+        if let RawSeatEventKind::PointerButton {
+            position,
+            button,
+            state,
+        } = &event.event
+        {
+            tracing::debug!(
+                target: "weld_input_diag",
+                time = event.time, ?position, ?button, ?state, consumed,
+                "host pointer button filtered"
+            );
+        }
         self.push(event);
         !consumed
     }

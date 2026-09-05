@@ -68,3 +68,26 @@ Both endpoints must be rebuilt together after the protocol revision change.
 The current crop is applied at presentation; full buffers still pass through
 the encoder. Removing that unused encoded margin is a later optimization and
 must preserve geometry, scale, viewport, and input mappings across commits.
+
+## Input and partial-surface stalls
+
+The September 5 investigation found missing input cleanup on destination host
+focus loss and source withdrawal, lost key releases across focus changes,
+popup grabs that could block explicit focus clearing, and encoded coalescing
+that erased unmap/remap boundaries. Regression tests cover Weld's routing and
+relay lifecycle; Smithay grab behavior still needs live validation.
+
+A separate explicit-sync defect discarded leftover release points when a
+cached buffer assignment had been removed or had no new buffer to import.
+Those points are now signalled without changing the lease-driven completion
+of buffers actually sampled by the GPU. This can prevent a client buffer-pool
+stall, but has not yet been confirmed as the cause of Firefox's frozen toolbar.
+
+If the toolbar or resizing stalls while website content continues, reproduce
+with `RUST_LOG=warn,weld_input_diag=debug,weld_surface_diag=trace scripts/run-iroh-hoist --codec av1`.
+Click a tab, the address bar, and page content; resize; then reclaim and repeat.
+The normal source/destination logs include button filtering, picking, source
+grab state, and frame-callback progress. The opt-in trace logs no keyboard text
+or video dumps. Stop the run after reproduction to keep the capture small.
+Unmapped-surface callback throttling and cursor-animation callbacks remain
+separate follow-up work; this fix does not enable unconditional callbacks.

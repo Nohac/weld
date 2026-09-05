@@ -405,6 +405,7 @@ impl EncodedSourceState {
                 ClientSurfaceEventKind::Commit(current),
                 ClientSurfaceEventKind::Commit(previous),
             ) = (&mut event.kind, &mut previous.kind)
+            && current.mapped == previous.mapped
         {
             current.carry_unobserved_content_from(previous);
             queue.pop_back();
@@ -2080,6 +2081,30 @@ mod tests {
         source.drain().expect("encoder completion");
 
         assert_eq!(output_kinds(&source.output), vec!["media", "control"]);
+    }
+
+    #[test]
+    fn encoded_queue_preserves_unmap_and_remap_boundaries() {
+        let (mut source, _) = source();
+        let surface = surface(ClientSourceId::new(1), 2, 3);
+        let session = HoistSessionId::new(4);
+        for (revision, mapped) in [(1, true), (2, false), (3, true), (4, true)] {
+            let mut event = commit(surface, revision, Vec::new());
+            if let ClientSurfaceEventKind::Commit(commit) = &mut event.kind {
+                commit.mapped = mapped;
+            }
+            source.queue_event(session, event).expect("bounded queue");
+        }
+        let queued = &source.pending[&surface];
+        let states = queued
+            .iter()
+            .map(|(_, event)| match &event.kind {
+                ClientSurfaceEventKind::Commit(commit) => (commit.revision.raw(), commit.mapped),
+                _ => panic!("only commits were queued"),
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(states, [(1, true), (2, false), (4, true)]);
+        assert!(queued.len() < MAX_PENDING_SOURCE_EVENTS);
     }
 
     #[test]

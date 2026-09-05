@@ -82,7 +82,22 @@ fn resolve_input_effects(
         mut published_target,
     } = resources;
 
+    let trace_button = tracing::enabled!(target: "weld_input_diag", tracing::Level::DEBUG)
+        && pending
+            .0
+            .iter()
+            .any(|event| matches!(event.event, RawSeatEventKind::PointerButton { .. }));
     replay_input_batch(&mut routing, pending.0.drain(..));
+    if trace_button {
+        let picked = picked_pointer_target(&pointers, &picked_nodes, &cameras, &output_positions);
+        tracing::debug!(
+            target: "weld_input_diag",
+            time = update_time.0, ?picked,
+            published = ?routing.last_sent,
+            pressed_buttons = ?routing.pressed_buttons,
+            "frame pointer picking after button batch"
+        );
+    }
 
     // Client protocol delivery is not performed here. Core retains this
     // frame-published target and independently forwards every raw event using

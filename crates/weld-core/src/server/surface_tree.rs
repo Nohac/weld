@@ -259,6 +259,19 @@ impl SurfaceTreeState {
             .get_mut(&object_id)
             .expect("layer was just inserted");
         cached.input_region = committed.input_region;
+        let release_point = retain_release_for_import(
+            committed.release_point,
+            matches!(
+                committed.assignment.as_ref(),
+                Some(BufferAssignment::NewBuffer(_))
+            ),
+            |point| {
+                signal_release_point(
+                    Some(point),
+                    "buffer assignment was superseded before import",
+                )
+            },
+        );
 
         match committed.assignment {
             Some(BufferAssignment::NewBuffer(buffer)) => {
@@ -267,7 +280,7 @@ impl SurfaceTreeState {
                     &buffer,
                     committed.buffer_scale,
                     committed.buffer_transform,
-                    committed.release_point,
+                    release_point,
                     releases,
                 );
                 cached.client_mapped = true;
@@ -728,6 +741,23 @@ pub(super) fn release_untracked_surface_tree(root: &WlSurface) {
     );
 }
 
+// A synchronized assignment may be superseded while its release point remains
+// cached. Only a new buffer transfers that point to an imported buffer lease.
+fn retain_release_for_import<T>(
+    point: Option<T>,
+    new_buffer: bool,
+    signal: impl FnOnce(T),
+) -> Option<T> {
+    if new_buffer {
+        point
+    } else {
+        if let Some(point) = point {
+            signal(point);
+        }
+        None
+    }
+}
+
 fn release_without_sampling(
     assignment: Option<BufferAssignment>,
     release_point: Option<DrmSyncPoint>,
@@ -741,12 +771,41 @@ fn release_without_sampling(
 
 #[cfg(test)]
 mod tests {
-    use super::{crop_root_view, displayed_root_bounds, effective_region};
+    use super::{
+        crop_root_view, displayed_root_bounds, effective_region, retain_release_for_import,
+    };
     use crate::surface::{LogicalPoint, SurfaceContentView};
     use smithay::{
         utils::Rectangle,
         wayland::compositor::{RectangleKind, RegionAttributes},
     };
+
+    #[test]
+    fn explicit_release_points_are_retained_only_for_new_buffer_imports() {
+        for (assignment, new_buffer) in [
+            ("new buffer", true),
+            ("removed", false),
+            ("no assignment", false),
+        ] {
+            for point in [None, Some(7)] {
+                let mut signalled = None;
+                let retained = retain_release_for_import(point, new_buffer, |point| {
+                    assert!(signalled.is_none(), "release must occur only once");
+                    signalled = Some(point);
+                });
+                assert_eq!(
+                    retained,
+                    if new_buffer { point } else { None },
+                    "{assignment}"
+                );
+                assert_eq!(
+                    signalled,
+                    if new_buffer { None } else { point },
+                    "{assignment}"
+                );
+            }
+        }
+    }
 
     #[test]
     fn identity_window_geometry_preserves_the_view_exactly() {
