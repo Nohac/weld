@@ -290,7 +290,7 @@ async fn run_source_peer(
         Ok::<(), anyhow::Error>(())
     };
     if let Err(error) = tokio::try_join!(control_writer, control_reader, media_writer) {
-        tracing::warn!(%error, "Iroh source peer stopped");
+        tracing::warn!(error = %format_args!("{error:#}"), "Iroh source peer stopped");
     }
     state.fail();
 }
@@ -311,7 +311,7 @@ async fn run_destination_peer(
     let control_reader = read_source_control(state.clone(), control_recv);
     let media = read_source_media(state.clone(), media_recv);
     if let Err(error) = tokio::try_join!(control_writer, control_reader, media) {
-        tracing::warn!(%error, "Iroh destination peer stopped");
+        tracing::warn!(error = %format_args!("{error:#}"), "Iroh destination peer stopped");
     }
     state.fail();
 }

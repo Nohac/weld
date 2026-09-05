@@ -156,6 +156,10 @@ pub struct ClientSurfaceCommit {
     pub window_geometry: Option<SurfaceWindowGeometry>,
     pub overlays: Vec<SurfaceLayerPlacement>,
     pub inputs: Vec<SurfaceInputPlacement>,
+    /// Complete current buffer inventory, not an incremental update list.
+    /// Unchanged layers must appear as [`SurfaceBufferChange::Retained`].
+    /// Omission or [`SurfaceBufferChange::Removed`] retires a layer's buffer;
+    /// geometry visibility alone does not change this inventory.
     pub buffers: Vec<SurfaceBufferUpdate>,
 }
 

@@ -91,3 +91,42 @@ grab state, and frame-callback progress. The opt-in trace logs no keyboard text
 or video dumps. Stop the run after reproduction to keep the capture small.
 Unmapped-surface callback throttling and cursor-animation callbacks remain
 separate follow-up work; this fix does not enable unconditional callbacks.
+
+## Popup teardown and disconnects
+
+The September 5 popup investigation reproduced a teardown deadlock: the source
+relay removed a destroyed popup's route, while the encoded scheduler queued its
+destruction behind an acknowledgement that could no longer pass that route.
+Destruction now cancels pending frames and bypasses frame credit. Codec work
+already submitted retains its input lease until completion, then discards the
+obsolete result and retires the active generation. Retirement must not race
+ahead of a job that can still create that generation.
+
+On the receiver, only media that has not arrived needs a late-frame marker.
+Already-decoded layers are dropped directly; active decodes are cancelled and
+retired after completion. Cancelled results cannot resurrect a popup or fail
+the session merely because obsolete codec work returned an error. Completion
+tokens and late-media session identities are still validated.
+
+Regression tests exercise 160 consecutive surface teardowns, including
+withheld frame acknowledgements and partial multi-layer decoding. For live
+validation, repeatedly move between Firefox tabs to open and dismiss previews,
+then exercise menus, resize, and reclaim. Old previews should disappear and
+the hoist should remain connected.
+
+The follow-up run with improved logs confirmed encoder stream-budget exhaustion
+as the initiating failure, while popup previews were now disappearing correctly.
+It exposed a second contract mismatch: Wayland snapshots omit vanished layers,
+and normal rendering treats the buffer list as the complete inventory, but
+encoding retired only explicit `Removed` entries. Both encoded endpoints now
+reconcile that complete inventory. The source retires omitted layers before
+submitting replacement layers, preserves `Retained` layers and other surfaces,
+and clears an empty unmap inventory. A 160-commit rotating-layer regression uses
+a strict fake encoder budget without destroying the surface. The exact mix of
+Firefox unmapping and child-layer churn in the live run was not logged.
+
+Relay failures log their initiating reason, and encoded/Iroh errors retain
+nested context. Normal warning-level
+logs are sufficient for another disconnect; optional
+`weld_hoist_core::relay=debug` also identifies ignored stale messages by
+surface, session, and message kind without logging input payloads.

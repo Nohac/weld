@@ -1,6 +1,6 @@
 //! Shared source and destination relay policy over binding-owned ports.
 
-use std::{collections::HashMap, error::Error};
+use std::{collections::HashMap, error::Error, fmt::Display};
 
 use weld_client::{
     ClientAdapter, ClientAdapterCommandEnvelope, ClientAdapterEffect, ClientBufferId,
@@ -115,15 +115,11 @@ impl SourceRelayAdapter {
             return;
         }
         self.mappings.insert(source, session);
-        if self
-            .port
-            .submit(SourcePortCommand::MapSurface {
-                session,
-                surface: source,
-            })
-            .is_err()
-        {
-            self.fail();
+        if let Err(error) = self.port.submit(SourcePortCommand::MapSurface {
+            session,
+            surface: source,
+        }) {
+            self.fail(error);
             return;
         }
         if let Some((role, commit)) = self
@@ -180,15 +176,11 @@ impl SourceRelayAdapter {
                     kind: ClientSurfaceRequestKind::SetPreferredScale { scale_120: None },
                 },
             )));
-        if self
-            .port
-            .submit(SourcePortCommand::WithdrawSurface {
-                session,
-                surface: source,
-            })
-            .is_err()
-        {
-            self.fail();
+        if let Err(error) = self.port.submit(SourcePortCommand::WithdrawSurface {
+            session,
+            surface: source,
+        }) {
+            self.fail(error);
             return;
         }
         let popups = self
@@ -265,12 +257,11 @@ impl SourceRelayAdapter {
         if self.failed {
             return;
         }
-        if self
+        if let Err(error) = self
             .port
             .submit(SourcePortCommand::Surface { session, event })
-            .is_err()
         {
-            self.fail();
+            self.fail(error);
         }
     }
 
@@ -280,8 +271,8 @@ impl SourceRelayAdapter {
         }
         let envelopes = match self.port.poll() {
             Ok(envelopes) => envelopes,
-            Err(_) => {
-                self.fail();
+            Err(error) => {
+                self.fail(error);
                 return;
             }
         };
@@ -297,7 +288,7 @@ impl SourceRelayAdapter {
             if let DestinationMessage::Request(ClientRequest::Focus(focus)) = &envelope.message {
                 if focus.source != self.upstream_source {
                     // A wrong namespace is a protocol violation, not a stale route.
-                    self.fail();
+                    self.fail("destination focus targeted another source");
                     return false;
                 }
                 let target = focus.surface.or(self.remote_input.keyboard_focus);
@@ -312,14 +303,19 @@ impl SourceRelayAdapter {
             match self.mappings.get(&surface).copied() {
                 Some(session) if session == envelope.session => {}
                 Some(_) => {
-                    self.fail();
+                    self.fail("destination message crossed hoist sessions");
                     return false;
                 }
-                None => return true,
+                None => {
+                    tracing::debug!(?surface, session = ?envelope.session,
+                        message_kind = envelope.message.kind(),
+                        "ignored destination message for an unmapped surface");
+                    return true;
+                }
             }
         }
-        if self.port.accept_destination(&envelope).is_err() {
-            self.fail();
+        if let Err(error) = self.port.accept_destination(&envelope) {
+            self.fail(error);
             return false;
         }
         match envelope.message {
@@ -339,11 +335,12 @@ impl SourceRelayAdapter {
         true
     }
 
-    fn fail(&mut self) {
+    fn fail(&mut self, reason: impl Display) {
         if self.failed {
             return;
         }
         self.failed = true;
+        tracing::warn!(source = ?self.upstream_source, error = %reason, "hoist source relay failed");
         self.port.disconnect();
         self.effects.extend(
             self.remote_input
@@ -392,12 +389,11 @@ impl ClientAdapter for SourceRelayAdapter {
 
     fn observe_retired_buffer(&mut self, buffer: ClientBufferId) {
         if buffer.source() == self.upstream_source
-            && self
+            && let Err(error) = self
                 .port
                 .submit(SourcePortCommand::RetireUpstreamBuffer(buffer))
-                .is_err()
         {
-            self.fail();
+            self.fail(error);
         }
     }
 }
@@ -438,8 +434,8 @@ impl DestinationRelayAdapter {
         }
         let records = match self.port.poll() {
             Ok(records) => records,
-            Err(_) => {
-                self.fail();
+            Err(error) => {
+                self.fail(error);
                 return;
             }
         };
@@ -460,11 +456,13 @@ impl DestinationRelayAdapter {
             DestinationPortEvent::Surface(event) => {
                 let source = event.surface;
                 if source.source() != self.upstream_source {
-                    self.fail();
+                    self.fail("source event targeted another source");
                     return false;
                 }
                 if self.sessions.get(&source).copied() != Some(record.session) {
-                    self.fail();
+                    self.fail(
+                        "source event targeted an unmapped surface or crossed hoist sessions",
+                    );
                     return false;
                 }
                 if matches!(event.kind, ClientSurfaceEventKind::Destroyed) {
@@ -495,28 +493,24 @@ impl DestinationRelayAdapter {
 
     fn map_surface(&mut self, session: HoistSessionId, source: ClientSurfaceId) -> bool {
         if source.source() != self.upstream_source {
-            self.fail();
+            self.fail("surface mapping targeted another source");
             return false;
         }
         match self.sessions.get(&source).copied() {
             Some(current) if current == session => return true,
             Some(_) => {
-                self.fail();
+                self.fail("surface mapping crossed hoist sessions");
                 return false;
             }
             None => {}
         }
         self.sessions.insert(source, session);
         let destination = relocated_surface(self.descriptor.id, source);
-        if self
-            .port
-            .submit(DestinationPortCommand::RouteMapped {
-                source,
-                destination,
-            })
-            .is_err()
-        {
-            self.fail();
+        if let Err(error) = self.port.submit(DestinationPortCommand::RouteMapped {
+            source,
+            destination,
+        }) {
+            self.fail(error);
             return false;
         }
         self.refresh_children_of(source);
@@ -593,12 +587,11 @@ impl DestinationRelayAdapter {
                 .release_effects(self.descriptor.id, |surface| surface == destination),
         );
         if notify_port
-            && self
+            && let Err(error) = self
                 .port
                 .submit(DestinationPortCommand::RouteUnmapped { destination })
-                .is_err()
         {
-            self.fail();
+            self.fail(error);
         }
         self.events.push(ClientSurfaceEvent {
             surface: destination,
@@ -617,11 +610,13 @@ impl DestinationRelayAdapter {
         }
     }
 
-    fn fail(&mut self) {
+    fn fail(&mut self, reason: impl Display) {
         if self.failed {
             return;
         }
         self.failed = true;
+        tracing::warn!(source = ?self.upstream_source, destination = ?self.descriptor.id,
+            error = %reason, "hoist destination relay failed");
         self.port.disconnect();
         let surfaces = self.sessions.keys().copied().collect::<Vec<_>>();
         for surface in surfaces {
@@ -639,15 +634,14 @@ impl DestinationRelayAdapter {
     }
 
     fn send_destination(&mut self, session: HoistSessionId, message: DestinationMessage) {
-        if self
+        if let Err(error) = self
             .port
             .submit(DestinationPortCommand::Message(DestinationEnvelope {
                 session,
                 message,
             }))
-            .is_err()
         {
-            self.fail();
+            self.fail(error);
         }
     }
 }
