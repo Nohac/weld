@@ -39,9 +39,10 @@ pub use input::{
 pub use surface::{
     ClientCommitRevision, ClientEventQueue, ClientFocusRequest, ClientRequest, ClientSurfaceCommit,
     ClientSurfaceEvent, ClientSurfaceEventKind, ClientSurfaceRequest, ClientSurfaceRequestKind,
-    ClientSurfaceRole, PopupState, SurfaceBufferChange, SurfaceBufferUpdate, SurfaceContentView,
-    SurfaceInputPlacement, SurfaceInputRect, SurfaceLayerPlacement, SurfaceWindowGeometry,
-    ToplevelInteractionRequestKind, ToplevelState, WindowDecoration, WindowResizeEdge,
+    ClientSurfaceRole, PopupState, SurfaceAlphaMode, SurfaceBufferChange, SurfaceBufferUpdate,
+    SurfaceContentView, SurfaceInputPlacement, SurfaceInputRect, SurfaceLayerPlacement,
+    SurfaceWindowGeometry, ToplevelInteractionRequestKind, ToplevelState, WindowDecoration,
+    WindowResizeEdge,
 };
 #[cfg(feature = "serde")]
 pub use wire::{

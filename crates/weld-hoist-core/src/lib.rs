@@ -292,6 +292,45 @@ mod tests {
     }
 
     #[test]
+    fn mapped_popup_relays_each_position_and_stack_update_once() {
+        let (mut runtime, upstream, endpoint) = runtime();
+        let owner = source(ClientSourceId::new(0), 1);
+        let popup = source(ClientSourceId::new(0), 2);
+        assert!(runtime.apply_command(endpoint.map(HoistSessionId::new(1), owner)));
+        let mut events = ClientEventQueue::default();
+        let mut invalid = Vec::new();
+        for (x, y, stack_index) in [(0.0, 0.0, 1), (400.0, 32.0, 2), (-20.0, 250.0, 3)] {
+            let position = weld_client::LogicalPoint::new(x, y);
+            upstream.borrow_mut().events.push(ClientSurfaceEvent {
+                surface: popup,
+                kind: ClientSurfaceEventKind::Role(ClientSurfaceRole::Popup(PopupState {
+                    owner,
+                    position,
+                    stack_index,
+                })),
+            });
+            runtime.drain_events(&mut events, &mut invalid);
+            let mut received = Vec::new();
+            while let Some(event) = events.pop_front() {
+                if event.surface == endpoint.destination(popup)
+                    && let ClientSurfaceEventKind::Role(ClientSurfaceRole::Popup(role)) = event.kind
+                {
+                    received.push(role);
+                }
+            }
+            assert_eq!(
+                received,
+                vec![PopupState {
+                    owner: endpoint.destination(owner),
+                    position,
+                    stack_index,
+                }]
+            );
+            assert!(invalid.is_empty());
+        }
+    }
+
+    #[test]
     fn mapped_toplevel_relays_client_interactions_to_the_destination_identity() {
         let (mut runtime, upstream, endpoint) = runtime();
         let source = source(ClientSourceId::new(0), 3);
@@ -367,6 +406,7 @@ mod tests {
             surface,
             kind: ClientSurfaceEventKind::Commit(ClientSurfaceCommit {
                 revision: ClientCommitRevision::new(revision),
+                alpha_mode: Default::default(),
                 mapped: true,
                 root: None,
                 window_geometry: None,

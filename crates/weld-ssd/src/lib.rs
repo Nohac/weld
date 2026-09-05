@@ -10,7 +10,7 @@ use bevy::{
     ecs::{
         component::Component,
         entity::Entity,
-        query::{With, Without},
+        query::{Has, With, Without},
         schedule::IntoScheduleConfigs,
         system::{Commands, Query, Res},
         template::template,
@@ -38,7 +38,7 @@ use weld_window::{
     WindowMoveHandle, WindowOutput, WindowOutputIntersections, WindowPresentationOverride,
     WindowProjection, WindowResizeHandle, WindowSystems, WindowVacancy, WindowZOrder,
 };
-use weld_window_ui::surface_content_with_node;
+use weld_window_ui::{server_frame_required, surface_content_with_node};
 
 const BORDER_WIDTH: f32 = 3.0;
 const OUTER_BORDER_RADIUS: f32 = 9.0;
@@ -104,7 +104,7 @@ fn revoke_ssd_presentations(
     >,
     windows: Query<(&WindowVacancy, Option<&WindowPresentationOverride>)>,
     clients: WindowClientResolver,
-    occupants: Query<(), With<ServerDecorated>>,
+    occupants: Query<(Option<&MappedSurface>, Has<ServerDecorated>), With<ClientToplevel>>,
 ) {
     for (root, projection, vacant_presentation) in &roots {
         let still_server_decorated =
@@ -114,7 +114,13 @@ fn revoke_ssd_presentations(
                     presentation_override.is_none()
                         && clients.client_entity(projection.window()).map_or(
                             vacant_presentation.is_some() && *vacancy == WindowVacancy::Retain,
-                            |client| vacant_presentation.is_none() && occupants.contains(client),
+                            |client| {
+                                vacant_presentation.is_none()
+                                    && occupants.get(client).is_ok_and(|(mapped, requested)| {
+                                        // Unmapping hides the frame; remapping resolves policy.
+                                        mapped.is_none() || server_frame_required(requested, mapped)
+                                    })
+                            },
                         )
                 });
         if !still_server_decorated {
@@ -191,9 +197,12 @@ fn reconcile_ssd_projections(
         }
         let content = match clients.client_entity(window) {
             Some(client) => {
-                let Ok((toplevel, Some(_), Some(_))) = occupants.get(client) else {
+                let Ok((toplevel, Some(mapped), requested)) = occupants.get(client) else {
                     continue;
                 };
+                if !server_frame_required(requested.is_some(), Some(mapped)) {
+                    continue;
+                }
                 SsdContent::Surface(toplevel.surface)
             }
             None if *vacancy == WindowVacancy::Retain => SsdContent::Vacant,
@@ -274,9 +283,12 @@ fn present_ssd_windows(
     for (window, vacancy, z_order, output) in &windows {
         let content = match clients.client_entity(window) {
             Some(client) => {
-                let Ok((toplevel, Some(_), Some(_))) = occupants.get(client) else {
+                let Ok((toplevel, Some(mapped), requested)) = occupants.get(client) else {
                     continue;
                 };
+                if !server_frame_required(requested.is_some(), Some(mapped)) {
+                    continue;
+                }
                 SsdContent::Surface(toplevel.surface)
             }
             None if *vacancy == WindowVacancy::Retain => SsdContent::Vacant,
@@ -620,11 +632,12 @@ mod tests {
     use weld_app::{
         output::{OutputGeometry, OutputId, OutputPosition, PrimaryOutput, WeldOutput},
         surface::{
-            ClientPopup, ClientToplevel, HostSurfaceEvent, HostSurfaceEventKind, SurfaceAction,
-            SurfaceBufferUpdate, SurfaceContentView, SurfaceId, SurfaceLayerId,
-            SurfaceLayerPlacement, SurfaceNode, SurfacePlugin, SurfaceTreeSnapshot,
-            SurfaceWindowGeometry, ToplevelInteractionRequestKind, ToplevelResizeEdge,
-            WindowDecoration, enqueue_surface_event, register_client_source, take_surface_actions,
+            ClientDecorated, ClientPopup, ClientToplevel, HostSurfaceEvent, HostSurfaceEventKind,
+            SurfaceAction, SurfaceAlphaMode, SurfaceBufferContent, SurfaceBufferUpdate,
+            SurfaceContentView, SurfaceId, SurfaceLayerId, SurfaceLayerPlacement, SurfaceNode,
+            SurfacePlugin, SurfaceTreeSnapshot, SurfaceWindowGeometry,
+            ToplevelInteractionRequestKind, ToplevelResizeEdge, WindowDecoration,
+            enqueue_surface_event, register_client_source, take_surface_actions,
         },
     };
     use weld_client::{ClientId, ClientSourceDescriptor, ClientSourceId};
@@ -770,6 +783,7 @@ mod tests {
             surface,
             kind: HostSurfaceEventKind::Commit(SurfaceTreeSnapshot {
                 client_mapped: true,
+                alpha_mode: Default::default(),
                 root: Some(SurfaceLayerPlacement {
                     layer: SurfaceLayerId::new(1),
                     position: Vec2::ZERO,
@@ -803,6 +817,7 @@ mod tests {
             surface,
             kind: HostSurfaceEventKind::Commit(SurfaceTreeSnapshot {
                 client_mapped: false,
+                alpha_mode: Default::default(),
                 root: None,
                 window_geometry: None,
                 overlays: Vec::new(),
@@ -1180,6 +1195,8 @@ mod tests {
                 .is_none()
         );
     }
+
+    mod opaque;
 
     #[test]
     fn popup_reparents_when_the_owner_changes_presentation() {

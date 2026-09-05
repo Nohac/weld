@@ -18,7 +18,7 @@ use weld_media::{EncodedFrameKind, MediaFrameId, VideoCodec};
 pub struct ProtocolRevision(u32);
 
 impl ProtocolRevision {
-    pub const CURRENT: Self = Self(1);
+    pub const CURRENT: Self = Self(2);
 
     pub const fn new(raw: u32) -> Self {
         Self(raw)
@@ -88,8 +88,7 @@ pub enum SourceMessage<B> {
     BufferRetired { buffer: ClientBufferId },
     Withdraw { surface: ClientSurfaceId },
     Ended,
-    // Appended while revision 1 is unreleased so existing Postcard variant
-    // discriminants remain stable during development.
+    // Added after the original surface messages; retain its wire discriminant.
     Mapped { surface: ClientSurfaceId },
 }
 
@@ -171,7 +170,7 @@ mod tests {
         );
         assert!(
             ProtocolRevision::CURRENT
-                .ensure_compatible(ProtocolRevision::new(2))
+                .ensure_compatible(ProtocolRevision::new(ProtocolRevision::CURRENT.raw() + 1))
                 .is_err()
         );
     }

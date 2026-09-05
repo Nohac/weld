@@ -196,6 +196,7 @@ mod tests {
                     kind: weld_client::WireClientSurfaceEventKind::Commit(
                         weld_client::WireClientSurfaceCommit {
                             revision: weld_client::ClientCommitRevision::new(10),
+                            alpha_mode: weld_client::SurfaceAlphaMode::Discarded,
                             mapped: true,
                             root: None,
                             window_geometry: None,
@@ -221,7 +222,13 @@ mod tests {
 
         let packets = destination.drain().expect("destination packets");
         assert_eq!(packets.len(), 2);
-        assert!(matches!(packets[0], SourceTransportPacket::Control(_)));
+        assert!(
+            matches!(&packets[0], SourceTransportPacket::Control(SourceEnvelope {
+            message: SourceMessage::Surface(weld_client::WireClientSurfaceEvent {
+                kind: weld_client::WireClientSurfaceEventKind::Commit(commit), ..
+            }), ..
+        }) if commit.alpha_mode == weld_client::SurfaceAlphaMode::Discarded)
+        );
         assert!(matches!(packets[1], SourceTransportPacket::Media(_)));
 
         destination

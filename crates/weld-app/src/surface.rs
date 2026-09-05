@@ -40,8 +40,8 @@ use tracing::warn;
 use weld_client::ClientSourceDescriptor;
 pub use weld_client::{ClientId, ClientSurfaceId as SurfaceId, SurfaceLayerId};
 pub use weld_client::{
-    ClientProvenance, ClientSourceId, ToplevelInteractionRequestKind, WindowDecoration,
-    WindowResizeEdge as ToplevelResizeEdge,
+    ClientProvenance, ClientSourceId, SurfaceAlphaMode, ToplevelInteractionRequestKind,
+    WindowDecoration, WindowResizeEdge as ToplevelResizeEdge,
 };
 use weld_core::dmabuf::ImportId;
 
@@ -193,7 +193,10 @@ pub struct MappedSurface {
     pub visual_offset: Vec2,
     /// Full surface extent, including client-owned visual overflow.
     pub visual_size: Vec2,
+    /// Whether the root buffer's pixel format is opaque; not an alpha-loss policy.
     pub opaque: bool,
+    /// Alpha fidelity of the entire committed tree, independent of pixel format.
+    pub alpha_mode: SurfaceAlphaMode,
 }
 
 impl MappedSurface {
@@ -359,6 +362,7 @@ pub struct SurfaceInputPlacement {
 #[doc(hidden)]
 pub struct SurfaceTreeSnapshot {
     pub client_mapped: bool,
+    pub alpha_mode: SurfaceAlphaMode,
     pub root: Option<SurfaceLayerPlacement>,
     pub window_geometry: Option<SurfaceWindowGeometry>,
     pub overlays: Vec<SurfaceLayerPlacement>,
@@ -1105,6 +1109,7 @@ fn apply_surface_tree_snapshot(
             content.root.view.logical_height,
         );
         let mapped = MappedSurface {
+            alpha_mode: snapshot.alpha_mode,
             logical_size,
             visual_offset,
             visual_size,
@@ -1650,6 +1655,7 @@ mod tests {
     fn root_snapshot(pixel: Option<[u8; 4]>) -> SurfaceTreeSnapshot {
         SurfaceTreeSnapshot {
             client_mapped: true,
+            alpha_mode: Default::default(),
             root: Some(placement(1, Vec2::ZERO)),
             window_geometry: Some(SurfaceWindowGeometry {
                 origin: Vec2::ZERO,
@@ -1893,6 +1899,7 @@ mod tests {
                 surface,
                 SurfaceTreeSnapshot {
                     client_mapped: false,
+                    alpha_mode: Default::default(),
                     root: None,
                     window_geometry: None,
                     overlays: Vec::new(),
@@ -2078,6 +2085,80 @@ mod tests {
                 .revision(surface),
             revision + 1
         );
+    }
+
+    #[test]
+    fn cropped_opaque_mount_keeps_scaled_sampling_and_surface_local_input() {
+        let mut app = test_app();
+        let surface = SurfaceId::for_test(73);
+        register_window(&mut app, surface);
+        let mount = app
+            .world_mut()
+            .spawn((
+                SurfaceNode {
+                    surface,
+                    view: SurfaceView::WindowGeometry,
+                },
+                Node {
+                    overflow: bevy::ui::Overflow::clip(),
+                    ..Default::default()
+                },
+            ))
+            .id();
+        let mut snapshot = root_snapshot(None);
+        snapshot.alpha_mode = SurfaceAlphaMode::Discarded;
+        snapshot.root.as_mut().expect("root").view = SurfaceContentView {
+            source_x: 0.0,
+            source_y: 0.0,
+            source_width: 200.0,
+            source_height: 160.0,
+            logical_width: 100.0,
+            logical_height: 80.0,
+        };
+        snapshot.window_geometry = Some(SurfaceWindowGeometry {
+            origin: Vec2::new(10.0, 5.0),
+            view: SurfaceContentView {
+                source_x: 20.0,
+                source_y: 10.0,
+                source_width: 160.0,
+                source_height: 120.0,
+                logical_width: 80.0,
+                logical_height: 60.0,
+            },
+        });
+        snapshot.buffers[0].width = 200;
+        snapshot.buffers[0].height = 160;
+        snapshot.buffers[0].content = SurfaceBufferContent::Pixels(vec![255; 200 * 160 * 4]);
+        snapshot.inputs.push(SurfaceInputPlacement {
+            layer: SurfaceLayerId::new(1),
+            position: Vec2::ZERO,
+            regions: vec![SurfaceInputRect {
+                position: Vec2::new(10.0, 5.0),
+                size: Vec2::new(80.0, 60.0),
+            }],
+        });
+        enqueue_surface_event(app.world_mut(), snapshot_event(surface, snapshot));
+        app.update();
+        let material = app
+            .world()
+            .get::<MaterialNode<SurfaceUiMaterial>>(mount)
+            .expect("mount material");
+        let parameters = app
+            .world()
+            .resource::<Assets<SurfaceUiMaterial>>()
+            .get(&material.0)
+            .expect("sampling parameters")
+            .parameters;
+        assert_eq!(parameters.source_rect, Vec4::new(20.0, 10.0, 160.0, 120.0));
+        let (input, node) = app
+            .world_mut()
+            .query::<(&SurfaceInputNode, &Node)>()
+            .single(app.world())
+            .expect("one input region");
+        assert_eq!(input.surface, surface);
+        assert_eq!(input.local_origin, Vec2::new(10.0, 5.0));
+        assert_eq!((node.left, node.top), (px(0.0), px(0.0)));
+        assert_eq!((node.width, node.height), (px(80.0), px(60.0)));
     }
 
     #[test]

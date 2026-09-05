@@ -181,7 +181,7 @@ mod tests {
         source
             .queue(
                 &LocalBootstrapOffer {
-                    revision: ProtocolRevision::new(2),
+                    revision: ProtocolRevision::new(ProtocolRevision::CURRENT.raw() + 1),
                     mode: LocalSurfaceMode::Native,
                     media_descriptor: None,
                 },
@@ -198,8 +198,16 @@ mod tests {
             .receive_blocking::<LocalBootstrapAcknowledgement>()
             .expect("bootstrap acknowledgement");
 
-        assert!(rejection.to_string().contains("revision 1"));
-        assert!(rejection.to_string().contains("revision 2"));
+        assert!(
+            rejection
+                .to_string()
+                .contains(&format!("revision {}", ProtocolRevision::CURRENT.raw()))
+        );
+        assert!(
+            rejection
+                .to_string()
+                .contains(&format!("revision {}", ProtocolRevision::CURRENT.raw() + 1))
+        );
         assert!(
             acknowledgement
                 .message

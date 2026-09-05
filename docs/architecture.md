@@ -533,6 +533,28 @@ by their delta, preserving desired client content size without configuring a
 client solely because chrome changed. The presentation root's entity identity
 is intentionally not stable.
 
+`ClientSurfaceCommit::alpha_mode` separately records whether a media adapter
+discarded the original tree's transparency. Ordinary Wayland commits preserve
+alpha semantics, even for naturally opaque buffers. The opaque encoded source
+declares `Discarded` before scheduling every commit, including retained-buffer
+updates; native and loopback relays preserve that declaration. The encoded
+destination rejects commits that do not declare the selected opaque mode.
+`ClientBufferMetadata::opaque` and `MappedSurface::opaque` instead describe
+pixel sampling and do not select a frame policy. The wire change uses exact
+protocol revision 2, so both endpoints must run the matching build.
+
+The default UI policy presents alpha-discarded toplevels with destination SSD
+and a `WindowGeometry` content mount, retaining the source client's decoration
+declaration. Cropping removes the client's shadow and invisible resize margins;
+SSD restores resize and close affordances with a local frame and shadow.
+In-geometry CSD controls, including Firefox's tab strip, remain visible beneath
+the additional SSD header. Existing inset reconciliation preserves desired
+client content size when the frame changes. Unmapping hides and retains the
+existing frame; the next mapped commit resolves the current frame policy without
+guessing during the gap. Cropping currently occurs during presentation; encoding
+still carries the whole buffer. Pre-encode cropping requires a separate mapping
+change because committed geometry can change even when buffer extent does not.
+
 `WindowPresentationOverride` lets an optional presenter reserve one managed
 window without teaching the default CSD or SSD plugins about that feature.
 Those presenters revoke and suppress all of their primary, secondary, and
@@ -790,6 +812,17 @@ particular decoration implementation. Popups never receive `ManagedWindow`,
 move/resize policy. The initial popup slice honors committed client positioner
 geometry directly; output-edge flip, slide, and resize constraints remain a
 bounded follow-up using the owner's on-output client geometry.
+
+The shared hoist relay forwards every mapped popup role update, including
+position and stack changes, and replays pending popup roles when their owner
+mapping arrives. Popups remain independently streamed children of the outer
+window presentation, outside its content clip. Alpha-preserving popups show
+their complete surface at the owner anchor plus popup position and visual
+offset. Alpha-discarded popups instead mount `WindowGeometry` at the owner
+anchor plus popup position, clipping only their own mount through Bevy's UI
+overflow and picking. Mount view and clipping update in place when alpha mode
+changes. Input retains the original surface-local coordinates through the
+existing `SurfaceNode` geometry origin mapping.
 
 Explicit Wayland input regions are evaluated in protocol order and may extend
 outside the window geometry, which keeps client-side resize gutters reachable.

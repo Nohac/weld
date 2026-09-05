@@ -1316,6 +1316,7 @@ mod tests {
                 ClientDecorated,
                 MappedSurface {
                     logical_size: Vec2::new(320.0, 240.0),
+                    alpha_mode: Default::default(),
                     visual_offset: Vec2::ZERO,
                     visual_size: Vec2::new(320.0, 240.0),
                     opaque: true,

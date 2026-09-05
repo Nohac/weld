@@ -11,8 +11,8 @@ use weld_client::{
     ClientAdapter, ClientAdapterCommandEnvelope, ClientAdapterRegistration, ClientBufferId,
     ClientBufferLease, ClientBufferMetadata, ClientBufferUseId, ClientCommitRevision,
     ClientEventQueue, ClientInputEvent, ClientProvenance, ClientRequest, ClientSourceDescriptor,
-    ClientSurfaceCommit, ClientSurfaceEvent, ClientSurfaceEventKind, SurfaceBufferChange,
-    SurfaceBufferUpdate,
+    ClientSurfaceCommit, ClientSurfaceEvent, ClientSurfaceEventKind, SurfaceAlphaMode,
+    SurfaceBufferChange, SurfaceBufferUpdate,
 };
 
 use crate::{
@@ -268,6 +268,7 @@ impl WaylandClientAdapter {
             .collect();
         ClientSurfaceCommit {
             revision: ClientCommitRevision::new(revision),
+            alpha_mode: SurfaceAlphaMode::Preserved,
             mapped: client_mapped,
             root,
             window_geometry,

@@ -192,6 +192,7 @@ fn commit_event(surface: SurfaceId, size: UVec2) -> HostSurfaceEvent {
         surface,
         kind: HostSurfaceEventKind::Commit(SurfaceTreeSnapshot {
             client_mapped: true,
+            alpha_mode: Default::default(),
             root: Some(SurfaceLayerPlacement {
                 layer: SurfaceLayerId::new(1),
                 position: Vec2::ZERO,
@@ -241,6 +242,7 @@ fn unmap_surface(app: &mut App, surface: SurfaceId) {
             surface,
             kind: HostSurfaceEventKind::Commit(SurfaceTreeSnapshot {
                 client_mapped: false,
+                alpha_mode: Default::default(),
                 root: None,
                 window_geometry: None,
                 overlays: Vec::new(),

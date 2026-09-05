@@ -439,6 +439,7 @@ mod tests {
             surface,
             kind: WireClientSurfaceEventKind::Commit(WireClientSurfaceCommit {
                 revision: ClientCommitRevision::new(1),
+                alpha_mode: Default::default(),
                 mapped: true,
                 root: None,
                 window_geometry: None,

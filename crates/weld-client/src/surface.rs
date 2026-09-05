@@ -126,6 +126,22 @@ pub struct SurfaceBufferUpdate {
     pub change: SurfaceBufferChange,
 }
 
+/// Whether an adapter has discarded the original surface tree's transparency.
+///
+/// This is independent of an individual buffer's opaque pixel format. An
+/// opaque transport cannot reproduce visual overflow such as client shadows,
+/// even though the application still declares the same window geometry and
+/// decoration preference.
+#[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum SurfaceAlphaMode {
+    /// Original alpha semantics are intact, including naturally opaque buffers.
+    #[default]
+    Preserved,
+    /// Alpha has been lost through an opaque media path.
+    Discarded,
+}
+
 /// Complete current surface-tree geometry plus changed buffer uses.
 /// One atomic surface commit.
 ///
@@ -134,6 +150,7 @@ pub struct SurfaceBufferUpdate {
 #[derive(Clone, Debug)]
 pub struct ClientSurfaceCommit {
     pub revision: ClientCommitRevision,
+    pub alpha_mode: SurfaceAlphaMode,
     pub mapped: bool,
     pub root: Option<SurfaceLayerPlacement>,
     pub window_geometry: Option<SurfaceWindowGeometry>,
@@ -316,6 +333,7 @@ mod tests {
             surface: surface(),
             kind: ClientSurfaceEventKind::Commit(ClientSurfaceCommit {
                 revision: ClientCommitRevision::new(revision),
+                alpha_mode: Default::default(),
                 mapped: true,
                 root: None,
                 window_geometry: None,

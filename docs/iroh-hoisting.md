@@ -47,3 +47,24 @@ The current tracer has deliberate limits:
 different identities. The first authenticates a network endpoint, the second
 selects process-local hoist orchestration, and the third namespaces client
 surfaces inside one Weld runtime.
+
+## Opaque window and popup validation
+
+Opaque encoded toplevels use destination SSD and display the client's declared
+window geometry, excluding external shadow margins. Firefox's own tab strip
+and controls remain inside that crop beneath the destination header. Popups
+stay undecorated and independently streamed, with their own geometry crop;
+they may extend outside the parent window. Transparency inside the declared
+geometry, including translucent rounded corners, remains unsupported.
+
+Run `scripts/run-iroh-hoist --codec av1`, open Firefox with `Super+F`, and hoist
+it with `Super+H`. Check tab previews, the hamburger menu, context menus, and
+submenus near both sides of the window. They should follow their anchors,
+remain clickable outside the window, and close normally. Resize and move the
+receiver, repeat the menus, then reclaim. Compare with `scripts/run-local-hoist`
+and its `--native` mode, and check Foot and Blender for decoration regressions.
+Both endpoints must be rebuilt together after the protocol revision change.
+
+The current crop is applied at presentation; full buffers still pass through
+the encoder. Removing that unused encoded margin is a later optimization and
+must preserve geometry, scale, viewport, and input mappings across commits.

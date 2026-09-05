@@ -5,9 +5,9 @@ use serde::{Deserialize, Serialize};
 use crate::{
     ClientBufferLease, ClientBufferMetadata, ClientCommitRevision, ClientInputEvent,
     ClientInputTarget, ClientSurfaceCommit, ClientSurfaceEvent, ClientSurfaceEventKind,
-    ClientSurfaceId, ClientSurfaceRole, InputEventKind, SurfaceBufferChange, SurfaceBufferUpdate,
-    SurfaceInputPlacement, SurfaceLayerId, SurfaceLayerPlacement, SurfaceWindowGeometry,
-    ToplevelInteractionRequestKind,
+    ClientSurfaceId, ClientSurfaceRole, InputEventKind, SurfaceAlphaMode, SurfaceBufferChange,
+    SurfaceBufferUpdate, SurfaceInputPlacement, SurfaceLayerId, SurfaceLayerPlacement,
+    SurfaceWindowGeometry, ToplevelInteractionRequestKind,
 };
 
 /// Addressed input suitable for transport to another compositor.
@@ -70,6 +70,7 @@ pub struct WireSurfaceBufferUpdate<B> {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct WireClientSurfaceCommit<B> {
     pub revision: ClientCommitRevision,
+    pub alpha_mode: SurfaceAlphaMode,
     pub mapped: bool,
     pub root: Option<SurfaceLayerPlacement>,
     pub window_geometry: Option<SurfaceWindowGeometry>,
@@ -112,6 +113,7 @@ impl<B> WireClientSurfaceCommit<B> {
             .collect::<Result<Vec<_>, E>>()?;
         Ok(Self {
             revision: commit.revision,
+            alpha_mode: commit.alpha_mode,
             mapped: commit.mapped,
             root: commit.root,
             window_geometry: commit.window_geometry,
@@ -149,6 +151,7 @@ impl<B> WireClientSurfaceCommit<B> {
             .collect::<Result<Vec<_>, E>>()?;
         Ok(ClientSurfaceCommit {
             revision: self.revision,
+            alpha_mode: self.alpha_mode,
             mapped: self.mapped,
             root: self.root,
             window_geometry: self.window_geometry,
@@ -272,6 +275,7 @@ mod tests {
         .expect("matching source");
         let commit = ClientSurfaceCommit {
             revision: ClientCommitRevision::new(4),
+            alpha_mode: SurfaceAlphaMode::Discarded,
             mapped: true,
             root: Some(SurfaceLayerPlacement {
                 layer: SurfaceLayerId::new(1),
@@ -302,6 +306,8 @@ mod tests {
         })
         .expect("exported commit");
 
+        assert_eq!(wire.alpha_mode, SurfaceAlphaMode::Discarded);
+
         assert!(matches!(
             wire.buffers[0].change,
             WireSurfaceBufferChange::Replaced { buffer, .. }
@@ -310,5 +316,11 @@ mod tests {
                     ClientBufferUseId::new(source, 3)
                 )
         ));
+        let imported = wire
+            .try_into_client(|(buffer, use_id), metadata| {
+                ClientBufferLease::new(buffer, use_id, metadata, Rc::new(()), |_| {})
+            })
+            .expect("imported commit");
+        assert_eq!(imported.alpha_mode, SurfaceAlphaMode::Discarded);
     }
 }

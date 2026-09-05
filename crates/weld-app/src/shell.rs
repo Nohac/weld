@@ -682,6 +682,7 @@ impl AppShell {
     ) -> SurfaceTreeSnapshot {
         let weld_client::ClientSurfaceCommit {
             revision: _,
+            alpha_mode,
             mapped,
             root,
             window_geometry,
@@ -783,6 +784,7 @@ impl AppShell {
             .collect();
         SurfaceTreeSnapshot {
             client_mapped: mapped,
+            alpha_mode,
             root: root.map(app_layer_placement),
             window_geometry: window_geometry.map(app_window_geometry),
             overlays: overlays.into_iter().map(app_layer_placement).collect(),
@@ -1294,6 +1296,7 @@ mod tests {
             surface,
             kind: ClientSurfaceEventKind::Commit(ClientSurfaceCommit {
                 revision: ClientCommitRevision::new(1),
+                alpha_mode: Default::default(),
                 mapped: client_mapped,
                 root: None,
                 window_geometry: None,
@@ -1574,6 +1577,7 @@ mod tests {
             surface,
             kind: ClientSurfaceEventKind::Commit(ClientSurfaceCommit {
                 revision: ClientCommitRevision::new(1),
+                alpha_mode: Default::default(),
                 mapped: true,
                 root: Some(SurfaceLayerPlacement {
                     layer,

@@ -259,6 +259,12 @@ without the geometry crop. Weld therefore does not yet compute complete
 surface-tree visual overflow. The remote presentation implementation must close
 that gap before promising automatic shadow trimming for every client.
 
+The current opaque encoded path declares discarded alpha on its commits. The
+default destination presenter uses SSD and clips to declared window geometry,
+while preserving the client's original decoration preference and in-geometry
+controls. Popups use their own geometry crop outside the owner's content clip.
+This is presentation cropping; the encoder still receives complete buffers.
+
 Client-side decoration is not visual overflow. Firefox tabs, titlebar buttons,
 menus, and other CSD controls inside the declared window geometry remain part
 of the presentation. Weld cannot infer a generic application content box and

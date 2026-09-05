@@ -22,8 +22,8 @@ pub mod surface {
     pub use crate::surface_impl::{
         ClientDecorated, ClientId, ClientPopup, ClientProvenance, ClientSource, ClientSourceId,
         ClientSurface, ClientToplevel, ClientToplevelParent, MappedSurface, ServerDecorated,
-        SurfaceAction, SurfaceActionQueue, SurfaceCommitRevisions, SurfaceId, SurfaceLayerId,
-        SurfaceNode, SurfaceSystems, SurfaceView, ToplevelInteractionRequest,
+        SurfaceAction, SurfaceActionQueue, SurfaceAlphaMode, SurfaceCommitRevisions, SurfaceId,
+        SurfaceLayerId, SurfaceNode, SurfaceSystems, SurfaceView, ToplevelInteractionRequest,
         ToplevelInteractionRequestKind, ToplevelResizeEdge, WindowDecoration,
         register_client_source,
     };

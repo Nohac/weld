@@ -301,6 +301,7 @@ mod tests {
                 surface,
                 kind: ClientSurfaceEventKind::Commit(ClientSurfaceCommit {
                     revision: ClientCommitRevision::new(1),
+                    alpha_mode: Default::default(),
                     mapped: true,
                     root: None,
                     window_geometry: None,

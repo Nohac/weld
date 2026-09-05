@@ -12,8 +12,9 @@ use anyhow::{Context, Result, bail, ensure};
 use weld_client::{
     ClientBufferId, ClientBufferLease, ClientBufferMetadata, ClientBufferUseId,
     ClientCommitRevision, ClientRequest, ClientSourceDescriptor, ClientSurfaceEvent,
-    ClientSurfaceEventKind, ClientSurfaceId, ClientSurfaceRequestKind, SurfaceBufferChange,
-    SurfaceLayerId, WireClientSurfaceEvent, WireClientSurfaceEventKind, WireSurfaceBufferChange,
+    ClientSurfaceEventKind, ClientSurfaceId, ClientSurfaceRequestKind, SurfaceAlphaMode,
+    SurfaceBufferChange, SurfaceLayerId, WireClientSurfaceEvent, WireClientSurfaceEventKind,
+    WireSurfaceBufferChange,
 };
 use weld_core::dmabuf::{DirectClientBufferAccess, DmabufContext, export_client_dmabuf};
 use weld_hoist_core::{
@@ -223,7 +224,11 @@ impl EncodedSourceState {
         Ok(self)
     }
 
-    fn enqueue(&mut self, session: HoistSessionId, event: ClientSurfaceEvent) -> Result<()> {
+    fn enqueue(&mut self, session: HoistSessionId, mut event: ClientSurfaceEvent) -> Result<()> {
+        if let ClientSurfaceEventKind::Commit(commit) = &mut event.kind {
+            // The selected encoded path has no alpha, including on retained commits.
+            commit.alpha_mode = SurfaceAlphaMode::Discarded;
+        }
         let surface = event.surface;
         let surface_busy = self.pending.contains_key(&surface)
             || self.awaiting_credit.contains_key(&surface)
@@ -904,6 +909,12 @@ impl EncodedDestinationState {
         output: &mut Vec<EncodedDestinationEvent>,
     ) -> Result<()> {
         let source_surface = event.surface;
+        if let WireClientSurfaceEventKind::Commit(commit) = &event.kind {
+            ensure!(
+                commit.alpha_mode == SurfaceAlphaMode::Discarded,
+                "opaque encoded commit must declare discarded alpha"
+            );
+        }
         if matches!(event.kind, WireClientSurfaceEventKind::Destroyed) {
             self.cancel_surface(source_surface)?;
             output.push(EncodedDestinationEvent {
@@ -1445,7 +1456,9 @@ fn mark_encoded_buffers_opaque(event: &mut WireClientSurfaceEvent<EncodedBuffer>
         return;
     };
     for update in &mut commit.buffers {
-        if let WireSurfaceBufferChange::Replaced { metadata, .. } = &mut update.change {
+        if let WireSurfaceBufferChange::Replaced { metadata, .. }
+        | WireSurfaceBufferChange::Retained { metadata } = &mut update.change
+        {
             metadata.opaque = true;
         }
     }
@@ -1660,6 +1673,7 @@ mod tests {
             surface,
             kind: ClientSurfaceEventKind::Commit(ClientSurfaceCommit {
                 revision: ClientCommitRevision::new(revision),
+                alpha_mode: Default::default(),
                 mapped: true,
                 root: None,
                 window_geometry: None,
@@ -1699,6 +1713,7 @@ mod tests {
             surface,
             kind: WireClientSurfaceEventKind::Commit(weld_client::WireClientSurfaceCommit {
                 revision: ClientCommitRevision::new(revision),
+                alpha_mode: SurfaceAlphaMode::Discarded,
                 mapped: true,
                 root: None,
                 window_geometry: None,
@@ -1830,6 +1845,81 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn opaque_mode_survives_a_retained_commit_through_both_ports() {
+        let (mut source, _) = source();
+        let (mut destination, transport, _) = destination_port();
+        let surface = surface(ClientSourceId::new(2), 3, 4);
+        let session = HoistSessionId::new(1);
+        source
+            .enqueue(
+                session,
+                commit(
+                    surface,
+                    7,
+                    vec![SurfaceBufferUpdate {
+                        layer: SurfaceLayerId::new(1),
+                        change: SurfaceBufferChange::Retained {
+                            metadata: ClientBufferMetadata::new(Extent::new(8, 8), false),
+                        },
+                    }],
+                ),
+            )
+            .expect("retained source commit");
+        transport
+            .borrow_mut()
+            .incoming
+            .extend(source.output.drain(..));
+        let records = destination.poll().expect("opaque retained commit");
+        let [
+            DestinationPortRecord {
+                event:
+                    DestinationPortEvent::Surface(ClientSurfaceEvent {
+                        kind: ClientSurfaceEventKind::Commit(commit),
+                        ..
+                    }),
+                ..
+            },
+        ] = records.as_slice()
+        else {
+            panic!("expected one retained destination commit");
+        };
+        assert_eq!(commit.alpha_mode, SurfaceAlphaMode::Discarded);
+        assert!(
+            commit.buffers[0]
+                .change
+                .metadata()
+                .expect("retained metadata")
+                .opaque
+        );
+    }
+
+    #[test]
+    fn opaque_destination_rejects_an_undeclared_alpha_loss() {
+        let (mut destination, transport, _) = destination_port();
+        let surface = surface(ClientSourceId::new(2), 3, 4);
+        let mut event = encoded_commit(
+            surface,
+            1,
+            MediaFrameId::new(MediaStreamId::new(1), StreamGeneration::new(1), 0),
+        );
+        if let WireClientSurfaceEventKind::Commit(commit) = &mut event.kind {
+            commit.alpha_mode = SurfaceAlphaMode::Preserved;
+        }
+        transport
+            .borrow_mut()
+            .incoming
+            .push_back(SourceTransportPacket::Control(SourceEnvelope {
+                session: HoistSessionId::new(1),
+                message: SourceMessage::Surface(event),
+            }));
+        let error = destination.poll().err().expect("invalid alpha mode");
+        assert!(error.to_string().contains("declare discarded alpha"));
+        // The owning relay handles a port error by disconnecting the session.
+        destination.disconnect();
+        assert!(transport.borrow().disconnected);
     }
 
     #[test]

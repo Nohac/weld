@@ -216,6 +216,7 @@ fn surface_snapshot(content: SyntheticContent) -> ClientSurfaceEvent {
         surface: CLIENT_SURFACE,
         kind: ClientSurfaceEventKind::Commit(ClientSurfaceCommit {
             revision: ClientCommitRevision::new(1),
+            alpha_mode: Default::default(),
             mapped: true,
             root: Some(SurfaceLayerPlacement {
                 layer: CLIENT_LAYER,

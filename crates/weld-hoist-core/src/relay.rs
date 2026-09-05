@@ -214,12 +214,14 @@ impl SourceRelayAdapter {
         match &event.kind {
             ClientSurfaceEventKind::Role(role) => {
                 self.cache.entry(source).or_default().role = Some(*role);
-                if let weld_client::ClientSurfaceRole::Popup(popup) = role
+                // Already admitted popups still publish position and stack changes.
+                // Only the initial map replays the cached role itself.
+                if let Some(session) = self.mappings.get(&source).copied() {
+                    self.send_surface(session, event.clone());
+                } else if let weld_client::ClientSurfaceRole::Popup(popup) = role
                     && let Some(session) = self.mappings.get(&popup.owner).copied()
                 {
                     self.map(session, source);
-                } else if let Some(session) = self.mappings.get(&source).copied() {
-                    self.send_surface(session, event.clone());
                 }
             }
             ClientSurfaceEventKind::Commit(commit) => {
@@ -538,6 +540,11 @@ impl DestinationRelayAdapter {
                     parent: Some(candidate),
                     ..
                 }) if *candidate == parent && self.sessions.contains_key(surface) => {
+                    Some((*surface, *role))
+                }
+                weld_client::ClientSurfaceRole::Popup(popup)
+                    if popup.owner == parent && self.sessions.contains_key(surface) =>
+                {
                     Some((*surface, *role))
                 }
                 _ => None,
@@ -882,8 +889,9 @@ mod tests {
 
     use weld_client::{
         ButtonState, ClientAdapter, ClientAdapterCommandEnvelope, ClientFocusRequest, ClientId,
-        ClientInputEvent, ClientInputTarget, ClientRequest, ClientSurfaceRequest,
-        ClientSurfaceRequestKind, InputEventKind, LinuxKeycode,
+        ClientInputEvent, ClientInputTarget, ClientProvenance, ClientRequest, ClientSurfaceRequest,
+        ClientSurfaceRequestKind, ClientSurfaceRole, InputEventKind, LinuxKeycode, LogicalPoint,
+        PopupState,
     };
 
     use super::*;
@@ -899,6 +907,67 @@ mod tests {
     }
 
     struct FakeSourcePort(Rc<RefCell<FakeSourceState>>);
+
+    struct FakeDestinationPort;
+
+    impl HoistDestinationPort for FakeDestinationPort {
+        fn poll(&mut self) -> HoistPortResult<Vec<DestinationPortRecord>> {
+            Ok(Vec::new())
+        }
+
+        fn submit(&mut self, _command: DestinationPortCommand) -> HoistPortResult<()> {
+            Ok(())
+        }
+
+        fn disconnect(&mut self) {}
+    }
+
+    #[test]
+    fn popup_role_waits_for_owner_mapping_and_keeps_the_latest_position() {
+        let source = ClientSourceId::new(1);
+        let destination = ClientSourceId::new(2);
+        let owner = surface(source, 1);
+        let popup = surface(source, 2);
+        let session = HoistSessionId::new(1);
+        let mut relay = DestinationRelayAdapter::new(
+            source,
+            ClientSourceDescriptor::new(destination, ClientProvenance::Relocated),
+            FakeDestinationPort,
+        );
+        assert!(relay.apply_record(DestinationPortRecord {
+            session,
+            event: DestinationPortEvent::MappedSurface(popup),
+        }));
+        for position in [LogicalPoint::ZERO, LogicalPoint::new(450.0, -20.0)] {
+            assert!(relay.apply_record(DestinationPortRecord {
+                session,
+                event: DestinationPortEvent::Surface(ClientSurfaceEvent {
+                    surface: popup,
+                    kind: ClientSurfaceEventKind::Role(ClientSurfaceRole::Popup(PopupState {
+                        owner,
+                        position,
+                        stack_index: 3,
+                    })),
+                }),
+            }));
+        }
+        assert!(relay.events.is_empty());
+        assert!(relay.apply_record(DestinationPortRecord {
+            session,
+            event: DestinationPortEvent::MappedSurface(owner),
+        }));
+        let event = relay.events.pop_front().expect("delayed popup role");
+        assert_eq!(event.surface, relocated_surface(destination, popup));
+        assert!(matches!(event.kind,
+            ClientSurfaceEventKind::Role(ClientSurfaceRole::Popup(role))
+                if role == PopupState {
+                    owner: relocated_surface(destination, owner),
+                    position: LogicalPoint::new(450.0, -20.0),
+                    stack_index: 3,
+                }
+        ));
+        assert!(relay.events.is_empty());
+    }
 
     #[derive(Debug)]
     struct FakePortFailure;

@@ -29,7 +29,10 @@ use bevy::{
 use weld_app::{
     cursor::{CursorRequest, CursorSystems},
     output::{OutputCompositionCamera, OutputPosition, PrimaryOutput, WeldOutput},
-    surface::{ClientDecorated, ClientPopup, ClientSurface, ClientToplevel, MappedSurface},
+    surface::{
+        ClientDecorated, ClientPopup, ClientSurface, ClientToplevel, MappedSurface,
+        SurfaceAlphaMode, SurfaceView,
+    },
 };
 use weld_window::{
     ManagedWindow, PresentationInsets, PresentationOffset, PresentsWindow,
@@ -63,6 +66,16 @@ struct PopupProjection {
 
 /// Installs baseline CSD, popup, and reusable window-UI behavior.
 pub struct WindowUiPlugin;
+
+/// Selects a destination-owned frame when requested or when client alpha was lost.
+///
+/// Cropping opaque media removes client shadow/resize margins, so the shell
+/// supplies resize and close affordances. The client's decoration declaration
+/// remains unchanged, and controls inside its window geometry remain visible.
+pub fn server_frame_required(server_requested: bool, mapped: Option<&MappedSurface>) -> bool {
+    server_requested
+        || mapped.is_some_and(|mapped| mapped.alpha_mode == SurfaceAlphaMode::Discarded)
+}
 
 impl Plugin for WindowUiPlugin {
     fn build(&self, app: &mut App) {
@@ -100,6 +113,7 @@ impl Plugin for WindowUiPlugin {
                     sync_window_roots,
                     sync_popup_presentations,
                     reconcile_popup_projections,
+                    popup::sync_content,
                 )
                     .chain()
                     .in_set(WindowSystems::UiReconcile),
@@ -116,7 +130,7 @@ fn revoke_client_presentations(
     roots: Query<(Entity, &WindowProjection), With<client::ClientWindowPresentation>>,
     windows: Query<Option<&WindowPresentationOverride>, With<ManagedWindow>>,
     clients: WindowClientResolver,
-    occupants: Query<(), With<ClientDecorated>>,
+    occupants: Query<Option<&MappedSurface>, With<ClientDecorated>>,
 ) {
     for (root, projection) in &roots {
         let still_client_decorated = windows
@@ -124,7 +138,11 @@ fn revoke_client_presentations(
             .is_ok_and(|presentation_override| presentation_override.is_none())
             && clients
                 .client_entity(projection.window())
-                .is_some_and(|client| occupants.contains(client));
+                .is_some_and(|client| {
+                    occupants
+                        .get(client)
+                        .is_ok_and(|mapped| !server_frame_required(false, mapped))
+                });
         if !still_client_decorated {
             commands.entity(root).despawn();
         }
@@ -197,6 +215,9 @@ fn reconcile_client_window_projections(
         let Ok((toplevel, mapped, Some(_))) = occupants.get(client) else {
             continue;
         };
+        if server_frame_required(false, Some(mapped)) {
+            continue;
+        }
         for output in intersections.iter() {
             if !retained.insert((window, output)) {
                 continue;
@@ -260,6 +281,9 @@ fn present_client_windows(
         let Ok((toplevel, mapped, Some(_))) = occupants.get(client) else {
             continue;
         };
+        if server_frame_required(false, Some(mapped)) {
+            continue;
+        }
         let output = output.map(|output| output.0).or_else(|| {
             outputs
                 .iter()
@@ -435,7 +459,10 @@ fn present_popups(
         };
         let position = popup_position(*popup, *mapped, *anchor);
         commands
-            .spawn_scene(popup::scene(client_surface.surface))
+            .spawn_scene(popup::scene(
+                client_surface.surface,
+                popup::content_view(*mapped),
+            ))
             .insert((
                 PresentsSurface(source),
                 PopupProjection {
@@ -598,7 +625,10 @@ fn reconcile_popup_projections(
                 continue;
             }
             commands
-                .spawn_scene(popup::scene(client_surface.surface))
+                .spawn_scene(popup::scene(
+                    client_surface.surface,
+                    popup::content_view(*mapped),
+                ))
                 .insert((
                     PopupProjection {
                         source,
@@ -615,7 +645,11 @@ fn reconcile_popup_projections(
 }
 
 fn popup_position(popup: ClientPopup, mapped: MappedSurface, anchor: WindowGeometryAnchor) -> Vec2 {
-    anchor.0 + popup.position + mapped.visual_offset
+    let offset = match popup::content_view(mapped) {
+        SurfaceView::FullSurface => mapped.visual_offset,
+        SurfaceView::WindowGeometry => Vec2::ZERO,
+    };
+    anchor.0 + popup.position + offset
 }
 
 fn popup_node(position: Vec2, visible: bool) -> Node {
