@@ -11,7 +11,9 @@ use weld_hoist_core::{
     DestinationRelayAdapter, HoistEndpoint, HoistEndpointCommand, HoistSessionId,
     SourceRelayAdapter, relocated_surface,
 };
-use weld_hoist_encoded::{DecodeBackend, EncodeBackend, EncodedDestinationPort, EncodedSourcePort};
+use weld_hoist_encoded::{
+    DecodeBackend, EncodeBackend, EncodedDestinationPort, EncodedSourcePort, EncoderRateControl,
+};
 use weld_media::VideoCodec;
 
 use crate::{IrohDestinationPeer, IrohSourcePeer};
@@ -27,6 +29,14 @@ pub struct IrohDestinationEndpoint {
     adapter_source: ClientSourceId,
     destination_source: ClientSourceId,
     peer: IrohSourcePeer,
+    rate_control: Option<EncoderRateControl>,
+}
+
+impl IrohDestinationEndpoint {
+    /// Optional source-side actuator; the handle expires with its registered adapter.
+    pub fn encoder_rate_control(&self) -> Option<EncoderRateControl> {
+        self.rate_control.clone()
+    }
 }
 
 impl HoistEndpoint for IrohDestinationEndpoint {
@@ -84,6 +94,7 @@ pub fn source_registration_with_backend(
     if let Some((directory, codec)) = dump_directory {
         port = port.with_access_unit_dump_directory(directory, codec)?;
     }
+    let rate_control = port.encoder_rate_control();
     let adapter = SourceRelayAdapter::new(upstream_source, port);
     Ok((
         ClientAdapterRegistration::new(descriptor, adapter, ControlOnlyClientImporter),
@@ -91,6 +102,7 @@ pub fn source_registration_with_backend(
             adapter_source,
             destination_source,
             peer,
+            rate_control,
         },
     ))
 }

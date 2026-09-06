@@ -10,7 +10,7 @@ use weld_hoist_core::{
     DestinationRelayAdapter, HoistEndpoint, HoistEndpointCommand, HoistSessionId,
     SourceRelayAdapter, relocated_surface,
 };
-use weld_hoist_encoded::{EncodedDestinationPort, EncodedSourcePort};
+use weld_hoist_encoded::{EncodedDestinationPort, EncodedSourcePort, EncoderRateControl};
 
 use crate::{
     LocalPacketConnection,
@@ -27,6 +27,14 @@ pub struct LocalDestinationEndpoint {
     adapter_source: ClientSourceId,
     destination_source: ClientSourceId,
     connection: LocalPacketConnection,
+    rate_control: Option<EncoderRateControl>,
+}
+
+impl LocalDestinationEndpoint {
+    /// Optional source-side actuator; native-buffer hoisting has no encoder.
+    pub fn encoder_rate_control(&self) -> Option<EncoderRateControl> {
+        self.rate_control.clone()
+    }
 }
 
 impl HoistEndpoint for LocalDestinationEndpoint {
@@ -76,6 +84,7 @@ pub fn local_source_registration(
             adapter_source,
             destination_source,
             connection,
+            rate_control: None,
         },
     )
 }
@@ -108,14 +117,16 @@ pub fn encoded_source_registration_with_backend(
 ) -> (ClientAdapterRegistration, LocalDestinationEndpoint) {
     let descriptor = ClientSourceDescriptor::new(adapter_source, ClientProvenance::Relocated);
     let transport = LocalEncodedSourceTransport::new(control.clone(), media);
-    let adapter =
-        SourceRelayAdapter::new(upstream_source, EncodedSourcePort::new(transport, backend));
+    let port = EncodedSourcePort::new(transport, backend);
+    let rate_control = port.encoder_rate_control();
+    let adapter = SourceRelayAdapter::new(upstream_source, port);
     (
         ClientAdapterRegistration::new(descriptor, adapter, ControlOnlyClientImporter),
         LocalDestinationEndpoint {
             adapter_source,
             destination_source,
             connection: control,
+            rate_control,
         },
     )
 }
@@ -183,6 +194,7 @@ pub fn encoded_source_registration(
     if let Some(directory) = dump_directory {
         port = port.with_access_unit_dump_directory(directory, codec)?;
     }
+    let rate_control = port.encoder_rate_control();
     let adapter = SourceRelayAdapter::new(upstream_source, port);
     let registration =
         ClientAdapterRegistration::new(descriptor, adapter, ControlOnlyClientImporter);
@@ -190,6 +202,7 @@ pub fn encoded_source_registration(
         adapter_source,
         destination_source,
         connection: control.clone(),
+        rate_control,
     };
     Ok((
         registration,

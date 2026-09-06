@@ -2,9 +2,10 @@
 
 ## Status and scope
 
-The source, receiver, and Iroh transport observations below are implemented;
-the budgeting and adaptation batches remain a proposed implementation sequence. The design has
-been peer reviewed; implementation may proceed in the order below. The broader
+The source, receiver, and Iroh transport observations and the first bitrate
+actuator below are implemented. Shared budgeting and adaptation remain proposed
+work. The actuator precedes the combined feedback/allowance wire change so those
+controls have a real consumer. The design has been peer reviewed. The broader
 [budgeting specification](spec/remote-budgeting.md) remains Direction, not a
 checklist to implement wholesale.
 
@@ -106,9 +107,62 @@ The observer wakes Tokio, not Bevy or the compositor host.
 `run-network-hoist` now enables `weld_media_diag=debug` in its default filter and
 preserves an explicit `RUST_LOG`. No protocol, codec settings, scheduling,
 network-interface handling, or GPU lifetime behavior changes in this sub-batch.
-Local transport attribution, coordinated feedback/preferences, the bitrate
-actuator, and budget enforcement are still pending. The codec-pool and alpha-atlas
+Local transport attribution, coordinated feedback/preferences, and budget
+enforcement are still pending. The codec-pool and alpha-atlas
 explorations in the specifications do not expand this initial implementation.
+
+### Implemented: generation-based bitrate actuator
+
+Encoded source ports expose optional `EncoderRateControl` handles before adapter
+erasure. The concrete Unix and Iroh source-side destination endpoints retain
+these weak handles; native-buffer hoisting and custom backends without rate
+control return None. Callers can list live stream identities and source
+surface/layer mappings, request a rate, and inspect revisioned requested,
+submitted, and applied state. No new knobs enter the generic window/client/hoist
+protocol. The standard distribution does not yet drive this automatically or
+expose a new bitrate/cap flag.
+
+Handles are safe to retain across threads; selection, codec work, and application
+remain host-owned. Short mutex sections protect only numeric state, never
+spanning backend/transport calls, tracing callbacks, or await. Only live streams
+accept requests, duplicate targets reuse revisions, and intermediate requests
+coalesce to one latest desired value. Layer/surface retirement removes entries.
+Owner closure marks the registry closed and clears it under the same lock as
+requests, including callers that upgraded their weak handle before disconnect.
+The control retains neither buffers nor encoder contexts.
+
+Every prepared job freezes its bitrate. Later requests cannot rewrite an active
+multi-layer batch. A changed bitrate or extent uses the existing single
+generation-rotation point after old prepared work completes; changing both
+rotates once. Old encoder generations are retired before replacement and never
+resubmitted. Existing surface credit still orders receiver processing. A matching
+codec packet confirms application; sequence zero must be a keyframe. Applied
+means codec output exists, not receiver display or measured wire bitrate.
+Failed, rejected, mismatched, and cancelled work never confirms a new rate.
+An unexpected frame identity or non-keyframe at generation start is a fatal
+backend-contract error, not an advisory confirmation failure.
+
+The first rate change can proceed immediately. Further switches have a two-second
+minimum dwell starting at changed-rate submission, not preparation. Requests
+apply lazily to the next eligible replacement pixels after dwell. There is no
+new timer, synthetic commit, or extra retained frame; static/retained-only
+content can keep intent pending. Diagnostics expose requested/applied sums and
+pending stream counts when polled. Unusable bookkeeping retains an existing
+stream's frozen settings rather than defaulting a lower-rate generation back to
+its startup rate. Mandatory budget admission must later treat unavailable
+control as unavailable, not assume a cap was enforced.
+
+The VA-API adapter permits lowering and restoring its validated startup bitrate:
+AV1 8 Mbps or H.264 16 Mbps per layer. The positive lower bound is numeric
+validation, not a usable quality floor or hardware-capacity claim.
+`VaapiEncoderSettings::with_bitrate` revalidates overrides while preserving codec,
+cadence, and GOP. FFmpeg constructs the replacement with target, minimum, maximum,
+and CBR reservoir updated together. No live-context mutation or hot retuning is
+assumed. Hardware rate-switch validation remains opt-in and has not run here.
+
+This is the actuator portion of Batch B, not aggregate budgeting or adaptation.
+Old-rate work and queued bytes may finish. Immediate admission relief, shared
+caps, receiver allowances, and decrease/recovery policy remain pending.
 
 ## Verified starting point
 
@@ -131,9 +185,10 @@ explorations in the specifications do not expand this initial implementation.
   can delay focused media. Priority can choose what enters that stream next;
   it cannot overtake bytes already submitted to it. Both streams share QUIC's
   congestion budget.
-- Encoder settings are fixed per generation today. The worker rejects changed
-  settings, and admitting a new generation evicts other generations of that
-  same stream. Concurrent old/new encoder generations cannot be assumed.
+- Encoder settings remain fixed per generation. Rate changes use a replacement
+  generation; the worker rejects changed settings within one generation and
+  evicts other generations of that stream. Concurrent old/new encoder
+  generations cannot be assumed.
 
 Evidence: `weld-hoist-encoded/src/{state,codec}.rs`,
 `weld-hoist-iroh/src/{peer,framing,admission}.rs`,

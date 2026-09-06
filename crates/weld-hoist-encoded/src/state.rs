@@ -25,9 +25,12 @@ use weld_hoist_protocol::{
     DestinationEnvelope, DestinationMessage, EncodedBuffer, EncodedCommitOutcome, MediaEnvelope,
     SourceEnvelope, SourceMessage,
 };
-use weld_media::{EncodedAccessUnit, MediaFrameId, MediaStreamId, StreamGeneration, VideoCodec};
+use weld_media::{
+    EncodedAccessUnit, EncodedFrameKind, MediaFrameId, MediaStreamId, StreamGeneration, VideoCodec,
+};
 
 use crate::TransportSnapshot;
+use crate::bitrate::{BitrateRequest, EncoderRateApplication, EncoderRateControl, EncoderRates};
 use crate::codec::{
     DecodeBackend, DecodeRequest, EncodeBackend, EncodeInput, EncodeRequest, SubmitError,
 };
@@ -78,17 +81,20 @@ struct SourceStream {
     generation: StreamGeneration,
     visible_extent: (u32, u32),
     next_sequence: Option<u64>,
+    frozen_rate: Option<BitrateRequest>,
 }
 
 struct PreparedEncode {
     request: EncodeRequest,
     retained_dmabuf_lease: Option<ClientBufferLease>,
+    rate: Option<BitrateRequest>,
 }
 
 struct ActiveEncode {
     token: u64,
     frame: MediaFrameId,
     retained_dmabuf_lease: Option<ClientBufferLease>,
+    rate: Option<BitrateRequest>,
 }
 
 struct InFlightEncodeBatch {
@@ -206,11 +212,13 @@ struct EncodedSourceState {
     last_timestamp_micros: u64,
     dump: Option<AccessUnitDump>,
     observations: SourceObservations,
+    rates: Option<EncoderRates>,
 }
 
 impl EncodedSourceState {
     fn new(backend: Box<dyn EncodeBackend>) -> Self {
         let started_at = Instant::now();
+        let rates = backend.bitrate_limits().map(EncoderRates::new);
         Self {
             backend,
             output: VecDeque::new(),
@@ -226,6 +234,7 @@ impl EncodedSourceState {
             last_timestamp_micros: 0,
             dump: None,
             observations: SourceObservations::new(started_at),
+            rates,
         }
     }
 
@@ -299,6 +308,19 @@ impl EncodedSourceState {
                 "encoder completed an unexpected source event"
             );
             drop(batch.active.retained_dmabuf_lease.take());
+            let valid_packet = completion.result.as_ref().is_ok_and(|unit| {
+                unit.frame == batch.active.frame
+                    && (unit.frame.sequence != 0 || unit.kind == EncodedFrameKind::Keyframe)
+            });
+            if let (Some(rates), Some(request)) = (&self.rates, batch.active.rate) {
+                rates.finished(
+                    EncoderRateApplication {
+                        request,
+                        frame: batch.active.frame,
+                    },
+                    !batch.cancelled && valid_packet,
+                );
+            }
             if completion.result.is_err() {
                 self.observations.record(SourceObservation::CodecFailed);
             }
@@ -314,6 +336,10 @@ impl EncodedSourceState {
                 continue;
             }
             let access_unit = completion.result?;
+            ensure!(
+                valid_packet,
+                "encoder returned an unexpected frame or a non-keyframe at generation start"
+            );
             batch.completed.push(access_unit);
             if let Some(next) = batch.pending.pop_front() {
                 batch.active = self.submit_prepared(next)?;
@@ -401,7 +427,11 @@ impl EncodedSourceState {
                 .map(|batch| now.saturating_duration_since(batch.started_at))
                 .unwrap_or_default(),
         };
-        if let Some(report) = self.observations.take_report(now, gauges, final_report) {
+        let report = self.observations.take_report(now, gauges, final_report);
+        if let Some(rates) = &self.rates {
+            rates.report(report.is_some() || final_report);
+        }
+        if let Some(report) = report {
             report.emit();
             if let Some(snapshot) = transport(now) {
                 snapshot.emit();
@@ -578,7 +608,7 @@ impl EncodedSourceState {
         let surface = event.surface;
         let mut prepared = VecDeque::new();
         let event = WireClientSurfaceEvent::try_from_client_with_layer(event, |layer, lease| {
-            let frame = self.allocate_frame(surface, layer, lease.metadata())?;
+            let (frame, rate) = self.allocate_frame(surface, layer, lease.metadata())?;
             let access = lease
                 .access::<DirectClientBufferAccess>()
                 .context("client-buffer lease does not contain direct native access")?;
@@ -608,8 +638,10 @@ impl EncodedSourceState {
                     frame,
                     timestamp_micros,
                     input,
+                    bitrate_bits_per_second: rate.map(|value| value.bits_per_second),
                 },
                 retained_dmabuf_lease,
+                rate,
             });
             Ok::<_, anyhow::Error>(EncodedBuffer { frame })
         })?;
@@ -653,14 +685,26 @@ impl EncodedSourceState {
         let PreparedEncode {
             request,
             retained_dmabuf_lease,
+            rate,
         } = prepared;
         let token = request.token;
         let frame = request.frame;
-        match self.backend.try_submit(request) {
+        let application = rate.map(|request| EncoderRateApplication { request, frame });
+        if let (Some(rates), Some(application)) = (&self.rates, application) {
+            rates.submitted(application, Instant::now());
+        }
+        let result = self.backend.try_submit(request);
+        if result.is_err()
+            && let (Some(rates), Some(application)) = (&self.rates, application)
+        {
+            rates.finished(application, false);
+        }
+        match result {
             Ok(()) => Ok(ActiveEncode {
                 token,
                 frame,
                 retained_dmabuf_lease,
+                rate,
             }),
             Err(SubmitError::Busy(_)) => {
                 bail!("encoder queue was busy without an in-flight source frame")
@@ -675,7 +719,7 @@ impl EncodedSourceState {
         surface: ClientSurfaceId,
         layer: SurfaceLayerId,
         metadata: ClientBufferMetadata,
-    ) -> Result<MediaFrameId> {
+    ) -> Result<(MediaFrameId, Option<BitrateRequest>)> {
         let visible_extent = (metadata.extent.width, metadata.extent.height);
         ensure!(
             visible_extent.0 > 0 && visible_extent.1 > 0,
@@ -684,22 +728,38 @@ impl EncodedSourceState {
         let key = (surface, layer);
         if !self.streams.contains_key(&key) {
             let stream = take_counter(&mut self.next_stream, "encoded stream")?;
+            let stream = MediaStreamId::new(stream);
+            let frozen_rate = self
+                .rates
+                .as_ref()
+                .and_then(|rates| rates.register(stream, surface, layer));
             self.streams.insert(
                 key,
                 SourceStream {
-                    stream: MediaStreamId::new(stream),
+                    stream,
                     generation: StreamGeneration::new(1),
                     visible_extent,
                     next_sequence: Some(0),
+                    frozen_rate,
                 },
             );
         }
-        let (frame, retired) = {
+        let (frame, rate, retired) = {
             let stream = self
                 .streams
                 .get_mut(&key)
                 .context("encoded stream disappeared")?;
-            let retired = if stream.visible_extent != visible_extent {
+            let rate = self
+                .rates
+                .as_ref()
+                .and_then(|rates| rates.select(stream.stream, Instant::now()))
+                .or(stream.frozen_rate);
+            // Scheduling admits a new batch only after every old PreparedEncode
+            // has finished. Never rotate by rewriting a job in that old batch.
+            let retired = if stream.visible_extent != visible_extent
+                || rate.map(|value| value.bits_per_second)
+                    != stream.frozen_rate.map(|value| value.bits_per_second)
+            {
                 let retired = (stream.stream, stream.generation);
                 stream.generation = StreamGeneration::new(
                     stream
@@ -714,16 +774,18 @@ impl EncodedSourceState {
             } else {
                 None
             };
+            stream.frozen_rate = rate;
             let sequence = take_counter(&mut stream.next_sequence, "encoded frame sequence")?;
             (
                 MediaFrameId::new(stream.stream, stream.generation, sequence),
+                rate,
                 retired,
             )
         };
         if let Some((stream, generation)) = retired {
             self.retire_generation(stream, generation)?;
         }
-        Ok(frame)
+        Ok((frame, rate))
     }
 
     fn reconcile_streams(&mut self, event: &ClientSurfaceEvent) -> Result<()> {
@@ -742,6 +804,9 @@ impl EncodedSourceState {
             .map(|(_, stream)| stream)
             .collect::<Vec<_>>();
         for stream in retired {
+            if let Some(rates) = &self.rates {
+                rates.remove(stream.stream);
+            }
             self.retire_generation(stream.stream, stream.generation)?;
         }
         Ok(())
@@ -754,6 +819,9 @@ impl EncodedSourceState {
             .map(|(_, stream)| stream)
             .collect::<Vec<_>>();
         for stream in streams {
+            if let Some(rates) = &self.rates {
+                rates.remove(stream.stream);
+            }
             self.retire_generation(stream.stream, stream.generation)?;
         }
         Ok(())
@@ -804,6 +872,16 @@ impl<T: EncodedSourceTransport> EncodedSourcePort<T> {
             transport,
             state: Some(EncodedSourceState::new(backend)),
         }
+    }
+
+    /// Retain this weak control handle before moving the port into an adapter.
+    /// None means the backend does not advertise rate control.
+    pub fn encoder_rate_control(&self) -> Option<EncoderRateControl> {
+        self.state
+            .as_ref()?
+            .rates
+            .as_ref()
+            .map(EncoderRates::control)
     }
 
     pub fn with_access_unit_dump_directory(
@@ -1711,6 +1789,7 @@ fn take_counter(counter: &mut Option<u64>, name: &str) -> Result<u64> {
 
 #[cfg(test)]
 mod tests {
+    mod bitrate_tests;
     use std::{
         cell::{Cell, RefCell},
         rc::Rc,
@@ -1785,11 +1864,17 @@ mod tests {
         retirements: Vec<(MediaStreamId, StreamGeneration)>,
         generations: HashSet<EncodedGeneration>,
         generation_limit: Option<usize>,
+        bitrate_limits: Option<crate::EncoderBitrateLimits>,
+        submitted_bitrates: Vec<Option<u64>>,
+        generation_bitrates: HashMap<EncodedGeneration, Option<u64>>,
     }
 
     struct FakeEncoder(Rc<RefCell<FakeEncoderState>>);
 
     impl EncodeBackend for FakeEncoder {
+        fn bitrate_limits(&self) -> Option<crate::EncoderBitrateLimits> {
+            self.0.borrow().bitrate_limits
+        }
         fn try_submit(&mut self, request: EncodeRequest) -> Result<(), SubmitError<EncodeRequest>> {
             let EncodeInput::PackedBgra { pixels, .. } = request.input else {
                 return Err(SubmitError::Rejected(anyhow::anyhow!(
@@ -1798,6 +1883,15 @@ mod tests {
             };
             let mut state = self.0.borrow_mut();
             let generation = (request.frame.stream, request.frame.generation);
+            if state
+                .generation_bitrates
+                .get(&generation)
+                .is_some_and(|rate| *rate != request.bitrate_bits_per_second)
+            {
+                return Err(SubmitError::Rejected(anyhow::anyhow!(
+                    "fake encoder settings changed within generation"
+                )));
+            }
             if !state.generations.contains(&generation)
                 && state
                     .generation_limit
@@ -1808,6 +1902,12 @@ mod tests {
                 )));
             }
             state.generations.insert(generation);
+            state
+                .generation_bitrates
+                .insert(generation, request.bitrate_bits_per_second);
+            state
+                .submitted_bitrates
+                .push(request.bitrate_bits_per_second);
             state.submitted.push((request.token, request.frame, pixels));
             Ok(())
         }
@@ -1817,6 +1917,10 @@ mod tests {
         }
 
         fn retire(&mut self, stream: MediaStreamId, generation: StreamGeneration) -> Result<()> {
+            self.0
+                .borrow_mut()
+                .generation_bitrates
+                .remove(&(stream, generation));
             self.0
                 .borrow_mut()
                 .generations
@@ -3030,16 +3134,16 @@ mod tests {
         let layer = SurfaceLayerId::new(4);
         let metadata = |width| ClientBufferMetadata::new(Extent::new(width, 480), true);
 
-        let first = source
+        let (first, _) = source
             .allocate_frame(surface, layer, metadata(484))
             .expect("first frame");
-        let retained = source
+        let (retained, _) = source
             .allocate_frame(surface, layer, metadata(484))
             .expect("retained extent");
-        let odd = source
+        let (odd, _) = source
             .allocate_frame(surface, layer, metadata(485))
             .expect("odd extent");
-        let even = source
+        let (even, _) = source
             .allocate_frame(surface, layer, metadata(486))
             .expect("even extent");
 

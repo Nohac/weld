@@ -108,6 +108,19 @@ source client-buffer lease until its matching packet exists without an
 unbounded delayed-frame table. The CBR reservoir controls rate accounting; it
 does not add a software frame queue or frame reordering.
 
+`weld-hoist-encoded` owns an optional bitrate actuator for live layer streams.
+Its weak `EncoderRateControl` is safe to retain in the thread-safe concrete
+local/Iroh endpoint handles; only the host selects settings and submits codec
+work. Requests coalesce, prepared jobs keep frozen settings, and bitrate changes
+use the same serialized generation replacement as extent changes. Short control
+locks never span codec work. Requested/submitted/applied revisions distinguish
+intent from matching codec output, not remote presentation or measured bitrate.
+Retirement removes control entries and owner closure invalidates handles.
+VA-API supports lowering and restoring the validated startup rate by constructing
+a replacement encoder, not by mutating a live context. No aggregate budget or
+automatic adaptive bitrate is implied; see the
+[streaming-budget plan](remote-budgeting-plan.md).
+
 Hardware-device ownership is per worker rather than per stream generation. The
 encode worker opens one FFmpeg DRM device and derives one FFmpeg VA-API device;
 the decode worker opens one FFmpeg VA-API device. Generation-specific filters

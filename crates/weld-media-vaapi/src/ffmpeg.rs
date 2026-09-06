@@ -104,6 +104,17 @@ impl VaapiEncoderSettings {
     pub const fn bitrate_bits(self) -> u64 {
         self.bitrate_bits
     }
+
+    /// Validate settings for a replacement encoder while preserving codec,
+    /// nominal cadence and GOP. This does not mutate a live FFmpeg context.
+    pub fn with_bitrate(self, bitrate_bits: u64) -> Result<Self> {
+        Self::try_new(
+            self.codec,
+            bitrate_bits,
+            self.frames_per_second,
+            self.keyframe_interval,
+        )
+    }
 }
 
 pub struct EncodedPacket {
@@ -1181,6 +1192,20 @@ fn check(code: i32, operation: &'static str) -> Result<()> {
 #[cfg(test)]
 mod settings_tests {
     use super::*;
+
+    #[test]
+    fn replacement_rate_preserves_other_settings_and_revalidates_limits() {
+        let original =
+            VaapiEncoderSettings::try_new(VideoCodec::Av1, 8_000_000, 30, 60).expect("settings");
+        let reduced = original.with_bitrate(4_000_000).expect("lower rate");
+        assert_eq!(reduced.codec, original.codec);
+        assert_eq!(reduced.frames_per_second, original.frames_per_second);
+        assert_eq!(reduced.keyframe_interval, original.keyframe_interval);
+        assert_eq!(reduced.bitrate_bits, 4_000_000);
+        assert_eq!(original.bitrate_bits, 8_000_000);
+        assert!(original.with_bitrate(0).is_err());
+        assert!(original.with_bitrate(8_000_001).is_err());
+    }
 
     #[test]
     fn av1_settings_enforce_the_validated_driver_ceiling() {
