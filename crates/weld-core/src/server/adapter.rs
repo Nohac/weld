@@ -30,6 +30,7 @@ struct WaylandClientBridgeState {
     events: VecDeque<PendingSurfaceEvent>,
     retired_dmabufs: VecDeque<crate::dmabuf::ImportId>,
     work: VecDeque<WaylandClientWork>,
+    cursors: HashMap<weld_client::ClientSurfaceId, weld_client::ClientCursor>,
 }
 
 /// Shared same-thread mailbox used because Smithay owns its concrete dispatch state.
@@ -37,6 +38,12 @@ struct WaylandClientBridgeState {
 pub(crate) struct WaylandClientBridge(Rc<RefCell<WaylandClientBridgeState>>);
 
 impl WaylandClientBridge {
+    pub(crate) fn publish_cursor(&self, update: weld_client::ClientCursorUpdate) {
+        self.0
+            .borrow_mut()
+            .cursors
+            .insert(update.surface, update.cursor);
+    }
     pub(crate) fn push_back(&self, event: PendingSurfaceEvent) {
         self.0.borrow_mut().events.push_back(event);
     }
@@ -299,6 +306,16 @@ fn translate_non_commit_event(event: PendingSurfaceEvent) -> Option<ClientSurfac
 }
 
 impl ClientAdapter for WaylandClientAdapter {
+    fn drain_cursor_updates(&mut self, updates: &mut Vec<weld_client::ClientCursorUpdate>) {
+        updates.extend(
+            self.bridge
+                .0
+                .borrow_mut()
+                .cursors
+                .drain()
+                .map(|(surface, cursor)| weld_client::ClientCursorUpdate { surface, cursor }),
+        );
+    }
     fn drain_events(&mut self, events: &mut ClientEventQueue) {
         while let Some(import) = self.bridge.pop_retired_dmabuf() {
             if let Some(local) = self.buffer_ids.retire_dmabuf(import) {

@@ -484,16 +484,54 @@ extraction, asset preparation, and render work need not converge in one pass.
 Ordinary client commits request one composition and do not turn Weld into a
 continuous renderer.
 
+`weld-client` owns bounded client cursor feedback: named shapes from the
+standalone `cursor-icon` crate, hidden state, and validated straight-alpha RGBA
+images with hotspots. Feedback is separate from surface commits and is selected
+by `ClientRuntime`'s current pointer route/capture, including loopback aliases;
+keyboard focus never selects a cursor. Unmap, destruction, and retired aliases
+cannot leave feedback authoritative for an absent route.
+
 `weld-core` owns backend-neutral cursor configuration, Smithay cursor-surface
-lifecycle, and normalized client cursor pixels. `weld-app` exposes reloadable
+lifecycle, and native raster normalization. Cursor callbacks only mark state
+dirty; ownership is resolved after Smithay dispatch returns, outside its pointer
+mutex. `weld-app` exposes reloadable
 `CursorSettings`, interprets Bevy's standard `CursorIcon`, and accepts transient
 `CursorRequest` overrides. Nested mode delegates final cursor presentation to
-the host window system. DRM mode normalizes named and client cursor images into
-per-output Smithay `MemoryRenderBuffer` elements. The global pointer is
+the host window system and supports custom Winit cursors. DRM mode normalizes
+named and client cursor images into per-output Smithay `MemoryRenderBuffer`
+elements. The global pointer is
 projected into each output's local coordinates, so a cursor visual intersecting
 a seam can be considered on both outputs. Smithay chooses each GBM cursor
 plane; the existing composition blitter supplies the GPU fallback. Cursor-only
 motion does not dirty the Bevy scene.
+
+All hoist bindings carry cursor feedback over control, independently of codec
+credit. One cursor update may be outstanding per connection; subsequent updates
+retain the newest desired image per surface until `CursorReceived` acknowledges
+receipt, not display. Identical state is suppressed. Withdrawal does not free the
+slot prematurely: the receiver acknowledges late feedback without resurrecting
+the withdrawn surface. A missing acknowledgement stalls only cursor feedback,
+with one warning after two seconds on the next ordinary relay poll.
+
+The receiver retains the latest cursor preference across unmap/remap, but only
+a currently mapped surface under the pointer has cursor authority. Newer cursor
+control can overtake video-delayed mapping commits; erasing preference on unmap
+would lose that update while source deduplication suppresses its resend.
+Destruction and withdrawal still discard it. The source conservatively clears
+its own remembered/sent cursor on observed unmap so a later enter can publish a
+fresh default.
+
+Bitmap cursors use destination-controlled scale-to-fit sizing: the larger
+dimension equals configured nominal size times output scale, preserving aspect
+and hotspot even when that requires upscaling a small sprite. This is shared by
+local and hoisted cursors; clients choose artwork, not displayed nominal size.
+The canonical source raster is at most 128x128 (64 KiB), with crop/viewport
+normalization and no unconditional source upscaling. Native destination rasters
+are bounded at 512 pixels per dimension. Explicit `CursorRequest` overrides
+take priority, with the override flag change-tracked independently of the icon
+so ending a resize restores client authority even when its hover icon matches.
+DRM cursor selection runs outside the Bevy frame gate. See
+[Cursor feedback](cursor-feedback.md) for validation and limitations.
 
 Raw input is forwarded to the focused client in order and retained for the next
 refresh-paced application update. That contract lets client delivery run at
@@ -541,7 +579,8 @@ updates; native and loopback relays preserve that declaration. The encoded
 destination rejects commits that do not declare the selected opaque mode.
 `ClientBufferMetadata::opaque` and `MappedSurface::opaque` instead describe
 pixel sampling and do not select a frame policy. The wire change uses exact
-protocol revision 2, so both endpoints must run the matching build.
+protocol revision 3 (including cursor feedback), so both endpoints must run the
+matching build.
 
 The default UI policy presents alpha-discarded toplevels with destination SSD
 and a `WindowGeometry` content mount, retaining the source client's decoration

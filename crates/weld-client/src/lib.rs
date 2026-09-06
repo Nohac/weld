@@ -7,6 +7,7 @@
 
 mod adapter;
 mod buffer;
+mod cursor;
 mod geometry;
 mod id;
 mod input;
@@ -23,6 +24,9 @@ pub use adapter::{
 pub use buffer::{
     ClientBufferId, ClientBufferLease, ClientBufferLeaseSourceMismatch, ClientBufferMetadata,
     ClientBufferUseId,
+};
+pub use cursor::{
+    ClientCursor, ClientCursorImage, ClientCursorUpdate, CursorIcon, CursorImageError,
 };
 pub use geometry::{Extent, LogicalPoint, LogicalSize};
 pub use id::{

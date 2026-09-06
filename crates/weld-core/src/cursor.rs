@@ -5,13 +5,13 @@
 //! applications configure cursor policy, while core retains normalized client
 //! pixels without exposing protocol objects.
 
-use std::{env, num::NonZeroU32, sync::Arc};
+use std::{env, num::NonZeroU32};
 
 use anyhow::{Result, bail};
 
-use crate::surface::SurfaceContentView;
-
-pub use smithay::input::pointer::CursorIcon;
+pub(crate) mod raster;
+pub(crate) use weld_client::ClientCursor as CursorImage;
+pub use weld_client::CursorIcon;
 
 const DEFAULT_CURSOR_SIZE: u32 = 24;
 const DEFAULT_CURSOR_THEME: &str = "default";
@@ -87,32 +87,18 @@ impl Default for CursorAppearance {
 pub struct CursorHostUpdate {
     pub configuration: Option<CursorConfiguration>,
     pub appearance: Option<CursorAppearance>,
+    /// Explicit application interaction overrides client feedback, even when
+    /// the named shape is identical to the current hover shape.
+    pub override_client: Option<bool>,
 }
 
 impl CursorHostUpdate {
     pub const fn is_empty(&self) -> bool {
-        self.configuration.is_none() && self.appearance.is_none()
+        self.configuration.is_none() && self.appearance.is_none() && self.override_client.is_none()
     }
 }
 
-#[derive(Clone, Debug)]
-pub(crate) struct ClientCursorImage {
-    pub(crate) pixels: Arc<[u8]>,
-    pub(crate) width: u32,
-    pub(crate) height: u32,
-    pub(crate) view: SurfaceContentView,
-    pub(crate) hotspot_x: f32,
-    pub(crate) hotspot_y: f32,
-}
-
-#[derive(Clone, Debug)]
-pub(crate) enum CursorImage {
-    Hidden,
-    Named(CursorIcon),
-    Surface(ClientCursorImage),
-}
-
-pub(crate) fn unpremultiply_bgra(pixels: &mut [u8]) {
+pub(crate) fn unpremultiply_alpha(pixels: &mut [u8]) {
     unpremultiply_channels(pixels, [0, 1, 2]);
 }
 

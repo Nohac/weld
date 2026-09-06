@@ -8,3 +8,6 @@ publish.workspace = true
 serde.workspace = true
 weld-client = { path = "../weld-client", features = ["serde"] }
 weld-media = { path = "../weld-media", features = ["serde"] }
+
+[dev-dependencies]
+postcard.workspace = true

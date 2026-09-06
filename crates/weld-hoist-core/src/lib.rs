@@ -164,11 +164,15 @@ mod tests {
         events: ClientEventQueue,
         requests: Vec<ClientRequest>,
         inputs: Vec<ClientInputEvent>,
+        cursors: Vec<weld_client::ClientCursorUpdate>,
     }
 
     struct UpstreamAdapter(Rc<RefCell<UpstreamRecord>>);
 
     impl ClientAdapter for UpstreamAdapter {
+        fn drain_cursor_updates(&mut self, updates: &mut Vec<weld_client::ClientCursorUpdate>) {
+            updates.append(&mut self.0.borrow_mut().cursors);
+        }
         fn drain_events(&mut self, events: &mut ClientEventQueue) {
             while let Some(event) = self.0.borrow_mut().events.pop_front() {
                 events.push(event);
@@ -207,6 +211,57 @@ mod tests {
             .register(registration.into_parts().runtime)
             .expect("unique loopback");
         (runtime, record, endpoint)
+    }
+
+    #[test]
+    fn loopback_cursor_feedback_is_available_in_the_same_runtime_drain() {
+        let (mut runtime, upstream, endpoint) = runtime();
+        let surface = source(ClientSourceId::new(0), 7);
+        upstream.borrow_mut().events.push(ClientSurfaceEvent {
+            surface,
+            kind: ClientSurfaceEventKind::Commit(ClientSurfaceCommit {
+                revision: ClientCommitRevision::new(1),
+                alpha_mode: Default::default(),
+                mapped: true,
+                root: None,
+                window_geometry: None,
+                overlays: Vec::new(),
+                inputs: Vec::new(),
+                buffers: Vec::new(),
+            }),
+        });
+        upstream.borrow_mut().events.push(ClientSurfaceEvent {
+            surface,
+            kind: ClientSurfaceEventKind::Role(ClientSurfaceRole::Toplevel(ToplevelState {
+                parent: None,
+                decoration: WindowDecoration::ClientSide,
+            })),
+        });
+        runtime.drain_events(&mut ClientEventQueue::default(), &mut Vec::new());
+        runtime.apply_command(endpoint.map(HoistSessionId::new(1), surface));
+        upstream
+            .borrow_mut()
+            .cursors
+            .push(weld_client::ClientCursorUpdate {
+                surface,
+                cursor: weld_client::ClientCursor::Named(weld_client::CursorIcon::Text),
+            });
+        runtime.drain_events(&mut ClientEventQueue::default(), &mut Vec::new());
+        runtime.set_pointer_route(Some(weld_client::ClientPointerRoute {
+            surface: endpoint.destination(surface),
+            layer: weld_client::SurfaceLayerId::new(1),
+            transform: weld_client::InputTransform::IDENTITY,
+        }));
+        assert_eq!(
+            runtime.pointer_cursor(),
+            Some((
+                surface,
+                weld_client::ClientCursor::Named(weld_client::CursorIcon::Text)
+            ))
+        );
+        runtime.apply_command(endpoint.unmap(surface));
+        runtime.drain_events(&mut ClientEventQueue::default(), &mut Vec::new());
+        assert_eq!(runtime.pointer_cursor(), None);
     }
 
     #[test]

@@ -326,6 +326,7 @@ pub(crate) fn prepare(options: RunOptions, signals: Signals) -> Result<PreparedH
                 if !completed_dmabuf_uses.is_empty() {
                     shell.complete_dmabuf_uses(&completed_dmabuf_uses);
                 }
+                loop_data.server.flush_cursor_feedback();
                 clients.drain_events(&mut client_events, &mut invalid_client_events);
                 for invalid in invalid_client_events.drain(..) {
                     warn!(%invalid, "client adapter published an invalid event");
@@ -430,6 +431,13 @@ pub(crate) fn prepare(options: RunOptions, signals: Signals) -> Result<PreparedH
                     if let Some(appearance) = cursor_update.appearance {
                         loop_data.server.set_shell_cursor(appearance);
                     }
+                    if let Some(active) = cursor_update.override_client {
+                        loop_data.server.set_shell_cursor_override(active);
+                    }
+                    if let Some(configuration) = cursor_update.configuration {
+                        host.cursor_configuration = configuration;
+                        host.cursor_dirty = true;
+                    }
                     if shell.should_exit() {
                         if pending_capture
                             .as_ref()
@@ -458,9 +466,11 @@ pub(crate) fn prepare(options: RunOptions, signals: Signals) -> Result<PreparedH
                     }
                 }
 
-                if let Some(image) = loop_data.server.take_cursor_image() {
-                    apply_nested_cursor(&host, image);
-                }
+                apply_nested_cursor(
+                    &mut host,
+                    &host_event_loop,
+                    loop_data.server.take_cursor_image(&clients),
+                );
 
                 if pending_capture.is_none()
                     && let Some(request) = shell.take_capture_request()
@@ -646,24 +656,63 @@ fn nonzero_size(size: PhysicalSize<u32>) -> PhysicalSize<u32> {
     PhysicalSize::new(size.width.max(1), size.height.max(1))
 }
 
-fn apply_nested_cursor(host: &NestedHost, image: CursorImage) {
+fn apply_nested_cursor(
+    host: &mut NestedHost,
+    event_loop: &EventLoop<()>,
+    image: Option<CursorImage>,
+) {
+    if let Some(image) = image {
+        host.cursor_image = image;
+        host.cursor_dirty = true;
+    }
+    if host.cursor_scale != host.scale_factor {
+        host.cursor_scale = host.scale_factor;
+        host.cursor_dirty = true;
+    }
     let Some(window) = &host.window else {
         return;
     };
-    match image {
+    if !std::mem::take(&mut host.cursor_dirty) {
+        return;
+    }
+    match &host.cursor_image {
         CursorImage::Hidden => window.set_cursor_visible(false),
         CursorImage::Named(icon) => {
-            window.set_cursor(icon);
+            window.set_cursor(*icon);
             window.set_cursor_visible(true);
         }
-        CursorImage::Surface(_) => {
-            window.set_cursor(crate::cursor::CursorIcon::Default);
+        CursorImage::Image(image) => {
+            let custom = crate::cursor::raster::destination_raster(
+                image,
+                host.cursor_configuration.size(),
+                host.scale_factor,
+            )
+            .and_then(|raster| {
+                Ok(winit::window::CustomCursor::from_rgba(
+                    raster.rgba,
+                    u16::try_from(raster.width)?,
+                    u16::try_from(raster.height)?,
+                    u16::try_from(raster.hotspot.0)?,
+                    u16::try_from(raster.hotspot.1)?,
+                )?)
+            });
+            match custom {
+                Ok(source) => window.set_cursor(event_loop.create_custom_cursor(source)),
+                Err(error) => {
+                    warn!(%error, "could not present a custom nested cursor");
+                    window.set_cursor(crate::cursor::CursorIcon::Default);
+                }
+            }
             window.set_cursor_visible(true);
         }
     }
 }
 
 struct NestedHost {
+    cursor_image: CursorImage,
+    cursor_configuration: crate::cursor::CursorConfiguration,
+    cursor_scale: f64,
+    cursor_dirty: bool,
     window: Option<Arc<Window>>,
     pending_size: Option<PhysicalSize<u32>>,
     pending_scale_factor: Option<f64>,
@@ -678,6 +727,10 @@ struct NestedHost {
 impl NestedHost {
     fn new(started_at: Instant) -> Self {
         Self {
+            cursor_image: CursorImage::default(),
+            cursor_configuration: crate::cursor::CursorConfiguration::default(),
+            cursor_scale: 1.0,
+            cursor_dirty: true,
             window: None,
             pending_size: None,
             pending_scale_factor: None,

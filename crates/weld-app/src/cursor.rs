@@ -77,12 +77,16 @@ impl Plugin for CursorPlugin {
 }
 
 #[derive(Default, Resource)]
-struct ResolvedCursor(CursorAppearance);
+struct ResolvedCursor {
+    appearance: CursorAppearance,
+    override_client: bool,
+}
 
 #[derive(Default)]
 pub(crate) struct CursorHostTracker {
     configuration: Option<CursorConfiguration>,
     appearance: Option<CursorAppearance>,
+    override_client: Option<bool>,
 }
 
 impl CursorHostTracker {
@@ -90,6 +94,7 @@ impl CursorHostTracker {
         &mut self,
         settings: &CursorSettings,
         appearance: CursorAppearance,
+        override_client: bool,
     ) -> CursorHostUpdate {
         let configuration = (self.configuration.as_ref() != Some(settings.configuration()))
             .then(|| settings.configuration().clone());
@@ -100,9 +105,15 @@ impl CursorHostTracker {
         if let Some(appearance) = appearance {
             self.appearance = Some(appearance);
         }
+        let override_client =
+            (self.override_client != Some(override_client)).then_some(override_client);
+        if let Some(active) = override_client {
+            self.override_client = Some(active);
+        }
         CursorHostUpdate {
             configuration,
             appearance,
+            override_client,
         }
     }
 }
@@ -112,8 +123,8 @@ pub(crate) fn take_cursor_update(
     tracker: &mut CursorHostTracker,
 ) -> CursorHostUpdate {
     let settings = world.resource::<CursorSettings>();
-    let appearance = world.resource::<ResolvedCursor>().0;
-    tracker.take_changed(settings, appearance)
+    let resolved = world.resource::<ResolvedCursor>();
+    tracker.take_changed(settings, resolved.appearance, resolved.override_client)
 }
 
 fn resolve_hovered_cursor(
@@ -136,11 +147,14 @@ fn resolve_hovered_cursor(
                 .map(|(_, icon)| CursorAppearance::Named(core_cursor_icon(icon)))
         })
         .unwrap_or_default();
-    let appearance = requests.read().last().map_or(hovered, |request| {
+    let request = requests.read().last();
+    let override_client = request.is_some();
+    let appearance = request.map_or(hovered, |request| {
         CursorAppearance::Named(core_cursor_icon(request.0))
     });
-    if resolved.0 != appearance {
-        resolved.0 = appearance;
+    if resolved.appearance != appearance || resolved.override_client != override_client {
+        resolved.appearance = appearance;
+        resolved.override_client = override_client;
     }
 }
 
@@ -212,26 +226,46 @@ mod tests {
         let mut tracker = CursorHostTracker::default();
         let initial = CursorSettings::new("default", 24).expect("valid settings");
         assert_eq!(
-            tracker.take_changed(&initial, CursorAppearance::default()),
+            tracker.take_changed(&initial, CursorAppearance::default(), false),
             CursorHostUpdate {
                 configuration: Some(initial.0.clone()),
                 appearance: Some(CursorAppearance::default()),
+                override_client: Some(false),
             }
         );
         assert!(
             tracker
-                .take_changed(&initial, CursorAppearance::default())
+                .take_changed(&initial, CursorAppearance::default(), false)
                 .is_empty()
         );
 
         let changed = CursorSettings::new("default", 36).expect("valid settings");
         assert_eq!(
-            tracker.take_changed(&changed, CursorAppearance::Named(CoreCursorIcon::Crosshair)),
+            tracker.take_changed(
+                &changed,
+                CursorAppearance::Named(CoreCursorIcon::Crosshair),
+                false
+            ),
             CursorHostUpdate {
                 configuration: Some(changed.0.clone()),
                 appearance: Some(CursorAppearance::Named(CoreCursorIcon::Crosshair)),
+                override_client: None,
             }
         );
+    }
+
+    #[test]
+    fn ending_an_override_is_published_even_when_the_hover_shape_is_identical() {
+        let mut tracker = CursorHostTracker::default();
+        let settings = CursorSettings::default();
+        let shape = CursorAppearance::Named(CoreCursorIcon::EwResize);
+        tracker.take_changed(&settings, shape, false);
+        let started = tracker.take_changed(&settings, shape, true);
+        assert_eq!(started.appearance, None);
+        assert_eq!(started.override_client, Some(true));
+        let ended = tracker.take_changed(&settings, shape, false);
+        assert_eq!(ended.appearance, None);
+        assert_eq!(ended.override_client, Some(false));
     }
 
     #[test]
@@ -259,7 +293,7 @@ mod tests {
         app.update();
 
         assert_eq!(
-            app.world().resource::<ResolvedCursor>().0,
+            app.world().resource::<ResolvedCursor>().appearance,
             CursorAppearance::Named(CoreCursorIcon::EwResize)
         );
     }

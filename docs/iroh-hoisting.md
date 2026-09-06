@@ -71,6 +71,10 @@ must preserve geometry, scale, viewport, and input mappings across commits.
 
 ## Input and partial-surface stalls
 
+Client cursor feedback (including custom images) travels separately from video.
+See [Cursor feedback](cursor-feedback.md) for the protocol revision, local sizing
+policy, and hover/resize/reclaim validation sequence.
+
 The September 5 investigation found missing input cleanup on destination host
 focus loss and source withdrawal, lost key releases across focus changes,
 popup grabs that could block explicit focus clearing, and encoded coalescing

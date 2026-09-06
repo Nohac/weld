@@ -13,8 +13,9 @@ use smithay::{
     },
 };
 use tracing::warn;
+use weld_client::{ClientCursorUpdate, ClientRuntime};
 
-use crate::cursor::{ClientCursorImage, CursorAppearance, CursorImage, unpremultiply_bgra};
+use crate::cursor::{CursorAppearance, CursorImage, raster::canonical_cursor, unpremultiply_alpha};
 
 use super::{
     ServerState,
@@ -40,9 +41,10 @@ enum CachedCursorSurface {
 impl ServerState {
     pub(crate) fn set_shell_cursor(&mut self, appearance: CursorAppearance) {
         self.shell_cursor = appearance;
-        if self.shell_owns_cursor {
-            self.apply_shell_cursor();
-        }
+    }
+
+    pub(crate) fn set_shell_cursor_override(&mut self, active: bool) {
+        self.shell_cursor_override = active;
     }
 
     pub(super) fn set_shell_cursor_ownership(&mut self, owned: bool) {
@@ -50,25 +52,12 @@ impl ServerState {
             return;
         }
         self.shell_owns_cursor = owned;
-        if owned {
-            self.apply_shell_cursor();
-        } else {
+        if !owned {
+            self.cursor_feedback_dirty = true;
             let default = CursorImageStatus::default_named();
             if self.cursor_status != default {
                 self.cursor_status = default;
-                self.queue_current_cursor();
             }
-        }
-    }
-
-    fn apply_shell_cursor(&mut self) {
-        let status = match self.shell_cursor {
-            CursorAppearance::Hidden => CursorImageStatus::Hidden,
-            CursorAppearance::Named(icon) => CursorImageStatus::Named(icon),
-        };
-        if self.cursor_status != status {
-            self.cursor_status = status;
-            self.queue_current_cursor();
         }
     }
 
@@ -85,12 +74,22 @@ impl ServerState {
         if matches!(&self.cursor_status, CursorImageStatus::Surface(current) if current == surface)
         {
             self.cursor_status = CursorImageStatus::default_named();
-            self.pending_cursor_image = Some(CursorImage::Named(CursorIcon::Default));
+            self.cursor_feedback_dirty = true;
         }
     }
 
-    pub(crate) fn take_cursor_image(&mut self) -> Option<CursorImage> {
-        self.pending_cursor_image.take()
+    pub(crate) fn take_cursor_image(&mut self, clients: &ClientRuntime) -> Option<CursorImage> {
+        let selected = select_cursor(
+            self.shell_cursor,
+            self.shell_cursor_override,
+            self.shell_owns_cursor,
+            clients.pointer_cursor(),
+        );
+        if self.presented_cursor.as_ref() == Some(&selected) {
+            return None;
+        }
+        self.presented_cursor = Some(selected.clone());
+        Some(selected)
     }
 
     pub(super) fn set_client_cursor_image(&mut self, image: CursorImageStatus) {
@@ -98,7 +97,7 @@ impl ServerState {
             self.refresh_cursor_surface(surface);
         }
         self.cursor_status = image;
-        self.queue_current_cursor();
+        self.cursor_feedback_dirty = true;
     }
 
     fn refresh_cursor_surface(&mut self, surface: &WlSurface) {
@@ -164,7 +163,7 @@ impl ServerState {
                             }) {
                                 Ok((metadata, view)) => {
                                     let mut pixels = copied.bgra_pixels;
-                                    unpremultiply_bgra(&mut pixels);
+                                    unpremultiply_alpha(&mut pixels);
                                     CachedCursorSurface::Image {
                                         pixels: pixels.into(),
                                         metadata,
@@ -204,7 +203,7 @@ impl ServerState {
 
         if matches!(&self.cursor_status, CursorImageStatus::Surface(current) if current == surface)
         {
-            self.queue_current_cursor();
+            self.cursor_feedback_dirty = true;
         }
     }
 
@@ -253,8 +252,29 @@ impl ServerState {
         }
     }
 
-    fn queue_current_cursor(&mut self) {
-        self.pending_cursor_image = Some(match &self.cursor_status {
+    /// Must run after dispatch returns: Smithay can call cursor_image while
+    /// holding its pointer mutex, so that callback cannot query current_focus.
+    pub(crate) fn flush_cursor_feedback(&mut self) {
+        if !self.cursor_feedback_dirty || self.shell_owns_cursor {
+            return;
+        }
+        let Some(focus) = self
+            .seat
+            .get_pointer()
+            .and_then(|pointer| pointer.current_focus())
+        else {
+            return;
+        };
+        let root = super::surface_tree::owning_root(&focus);
+        let Some(owner) = self
+            .toplevels
+            .id_for_surface(&root)
+            .or_else(|| self.popups.id_for_surface(&root))
+        else {
+            return;
+        };
+        self.cursor_feedback_dirty = false;
+        let cursor = match &self.cursor_status {
             CursorImageStatus::Hidden => CursorImage::Hidden,
             CursorImageStatus::Named(icon) => CursorImage::Named(*icon),
             CursorImageStatus::Surface(surface) => {
@@ -265,14 +285,19 @@ impl ServerState {
                         view,
                     }) => {
                         let hotspot = cursor_hotspot(surface).unwrap_or_default();
-                        CursorImage::Surface(ClientCursorImage {
-                            pixels: Arc::clone(pixels),
-                            width: metadata.width,
-                            height: metadata.height,
-                            view: *view,
-                            hotspot_x: hotspot.0 as f32,
-                            hotspot_y: hotspot.1 as f32,
-                        })
+                        match canonical_cursor(
+                            pixels,
+                            metadata.width,
+                            metadata.height,
+                            *view,
+                            (hotspot.0 as f32, hotspot.1 as f32),
+                        ) {
+                            Ok(image) => CursorImage::Image(image),
+                            Err(error) => {
+                                warn!(%error, "invalid client cursor raster");
+                                CursorImage::default()
+                            }
+                        }
                     }
                     Some(CachedCursorSurface::Unsupported) => {
                         CursorImage::Named(CursorIcon::Default)
@@ -280,7 +305,30 @@ impl ServerState {
                     Some(CachedCursorSurface::Empty) | None => CursorImage::Hidden,
                 }
             }
-        });
+        };
+        self.pending_surface_events
+            .publish_cursor(ClientCursorUpdate {
+                surface: owner,
+                cursor,
+            });
+    }
+}
+
+fn select_cursor(
+    shell: CursorAppearance,
+    explicit_override: bool,
+    local_shell_owns: bool,
+    client: Option<(weld_client::ClientSurfaceId, CursorImage)>,
+) -> CursorImage {
+    if !explicit_override
+        && let Some((surface, image)) = client
+        && !(surface.source() == crate::WAYLAND_CLIENT_SOURCE && local_shell_owns)
+    {
+        return image;
+    }
+    match shell {
+        CursorAppearance::Hidden => CursorImage::Hidden,
+        CursorAppearance::Named(icon) => CursorImage::Named(icon),
     }
 }
 
@@ -292,4 +340,38 @@ fn cursor_hotspot(surface: &WlSurface) -> Option<(i32, i32)> {
             .and_then(|attributes| attributes.lock().ok())
             .map(|attributes| (attributes.hotspot.x, attributes.hotspot.y))
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use weld_client::{ClientId, ClientSourceId, ClientSurfaceId};
+
+    #[test]
+    fn remote_feedback_respects_shell_override_without_borrowing_source_seat_focus() {
+        let remote = ClientSurfaceId::new(ClientId::new(ClientSourceId::new(9), 1), 1);
+        let local = ClientSurfaceId::new(ClientId::new(crate::WAYLAND_CLIENT_SOURCE, 1), 1);
+        let shell = CursorAppearance::Named(CursorIcon::EwResize);
+        let client = CursorImage::Named(CursorIcon::Text);
+        assert_eq!(
+            select_cursor(shell, false, true, Some((remote, client.clone()))),
+            client
+        );
+        assert_eq!(
+            select_cursor(shell, true, false, Some((remote, client.clone()))),
+            CursorImage::Named(CursorIcon::EwResize)
+        );
+        assert_eq!(
+            select_cursor(shell, false, true, Some((local, client.clone()))),
+            CursorImage::Named(CursorIcon::EwResize)
+        );
+        assert_eq!(
+            select_cursor(shell, false, false, Some((local, client))),
+            CursorImage::Named(CursorIcon::Text)
+        );
+        assert_eq!(
+            select_cursor(shell, false, false, None),
+            CursorImage::Named(CursorIcon::EwResize)
+        );
+    }
 }

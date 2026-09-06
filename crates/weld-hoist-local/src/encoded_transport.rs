@@ -241,6 +241,41 @@ mod tests {
         let replies = source.drain().expect("source replies");
         assert!(matches!(replies[0].message, DestinationMessage::Reclaim));
 
+        source
+            .send(SourceTransportPacket::Control(SourceEnvelope {
+                session,
+                message: SourceMessage::Cursor {
+                    update: weld_client::ClientCursorUpdate {
+                        surface,
+                        cursor: weld_client::ClientCursor::Named(weld_client::CursorIcon::Text),
+                    },
+                    sequence: 1,
+                },
+            }))
+            .expect("cursor");
+        source_control.pump().expect("cursor pump");
+        assert!(matches!(
+            destination.drain().expect("cursor delivery").as_slice(),
+            [SourceTransportPacket::Control(SourceEnvelope {
+                message: SourceMessage::Cursor { sequence: 1, .. },
+                ..
+            })]
+        ));
+        destination
+            .send(weld_hoist_protocol::DestinationEnvelope {
+                session,
+                message: DestinationMessage::CursorReceived {
+                    surface,
+                    sequence: 1,
+                },
+            })
+            .expect("cursor ack");
+        destination_control.pump().expect("ack pump");
+        assert!(matches!(
+            source.drain().expect("ack delivery")[0].message,
+            DestinationMessage::CursorReceived { sequence: 1, .. }
+        ));
+
         source.disconnect();
         assert!(source_control.is_disconnected());
         assert!(source_media.is_disconnected());

@@ -174,6 +174,17 @@ impl HoistSourcePort for LocalSourcePort {
                 Vec::new(),
             ),
             SourcePortCommand::Surface { session, event } => self.send_event(session, event),
+            SourcePortCommand::Cursor {
+                session,
+                update,
+                sequence,
+            } => self.queue_source(
+                SourceEnvelope {
+                    session,
+                    message: SourceMessage::Cursor { update, sequence },
+                },
+                Vec::new(),
+            ),
             SourcePortCommand::WithdrawSurface { session, surface } => {
                 self.queue_source(
                     SourceEnvelope {
@@ -231,7 +242,8 @@ impl HoistSourcePort for LocalSourcePort {
             }
             DestinationMessage::Request(_)
             | DestinationMessage::Input(_)
-            | DestinationMessage::Reclaim => {}
+            | DestinationMessage::Reclaim
+            | DestinationMessage::CursorReceived { .. } => {}
         }
         Ok(())
     }

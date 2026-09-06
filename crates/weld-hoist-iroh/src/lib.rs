@@ -94,6 +94,41 @@ mod tests {
         let returned = wait_for(|| source.drain().ok().filter(|items| !items.is_empty()));
         assert!(matches!(returned[0].message, DestinationMessage::Reclaim));
 
+        let cursor = weld_client::ClientCursor::Image(
+            weld_client::ClientCursorImage::new(2, 1, (1, 0), vec![255; 8]).expect("cursor"),
+        );
+        source
+            .send(SourceTransportPacket::Control(SourceEnvelope {
+                session,
+                message: SourceMessage::Cursor {
+                    update: weld_client::ClientCursorUpdate {
+                        surface,
+                        cursor: cursor.clone(),
+                    },
+                    sequence: 1,
+                },
+            }))
+            .expect("cursor control");
+        let received = wait_for(|| destination.drain().ok().filter(|items| !items.is_empty()));
+        assert!(
+            matches!(&received[0], SourceTransportPacket::Control(SourceEnvelope {
+            message: SourceMessage::Cursor { update, sequence: 1 }, .. }) if update.cursor == cursor)
+        );
+        destination
+            .send(DestinationEnvelope {
+                session,
+                message: DestinationMessage::CursorReceived {
+                    surface,
+                    sequence: 1,
+                },
+            })
+            .expect("cursor ack");
+        let returned = wait_for(|| source.drain().ok().filter(|items| !items.is_empty()));
+        assert!(matches!(
+            returned[0].message,
+            DestinationMessage::CursorReceived { sequence: 1, .. }
+        ));
+
         let access_unit = EncodedAccessUnit {
             frame: MediaFrameId::new(MediaStreamId::new(4), StreamGeneration::new(5), 6),
             codec: VideoCodec::H264,

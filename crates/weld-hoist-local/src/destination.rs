@@ -70,6 +70,16 @@ impl LocalDestinationPort {
         records: &mut Vec<DestinationPortRecord>,
     ) -> HoistPortResult<()> {
         match packet.message {
+            SourceMessage::Cursor { update, sequence } => {
+                if !file_descriptors.is_empty() {
+                    return Err(self
+                        .protocol_failure("cursor feedback carried file descriptors".to_owned()));
+                }
+                records.push(DestinationPortRecord {
+                    session: packet.session,
+                    event: DestinationPortEvent::Cursor { update, sequence },
+                });
+            }
             SourceMessage::Mapped { surface } => records.push(DestinationPortRecord {
                 session: packet.session,
                 event: DestinationPortEvent::MappedSurface(surface),

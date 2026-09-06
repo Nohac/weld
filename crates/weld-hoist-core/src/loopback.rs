@@ -29,6 +29,14 @@ struct LoopbackSourcePort {
 impl HoistSourcePort for LoopbackSourcePort {
     fn submit(&mut self, command: SourcePortCommand) -> HoistPortResult<()> {
         let record = match command {
+            SourcePortCommand::Cursor {
+                session,
+                update,
+                sequence,
+            } => DestinationPortRecord {
+                session,
+                event: DestinationPortEvent::Cursor { update, sequence },
+            },
             SourcePortCommand::MapSurface { session, surface } => DestinationPortRecord {
                 session,
                 event: DestinationPortEvent::MappedSurface(surface),
@@ -170,6 +178,14 @@ struct LoopbackClientAdapter {
 }
 
 impl ClientAdapter for LoopbackClientAdapter {
+    fn observe_cursor_update(&mut self, update: &weld_client::ClientCursorUpdate) {
+        self.source.observe_cursor_update(update);
+        self.destination.drain_events(&mut self.events);
+    }
+
+    fn drain_cursor_updates(&mut self, updates: &mut Vec<weld_client::ClientCursorUpdate>) {
+        self.destination.drain_cursor_updates(updates);
+    }
     fn drain_events(&mut self, events: &mut ClientEventQueue) {
         // Pump source commands into the in-process queue before the destination
         // drains it. Route aliases therefore exist when the runtime collects
@@ -253,5 +269,49 @@ pub(crate) fn registration(
 pub(crate) fn endpoint(destination: ClientSourceId) -> LoopbackEndpoint {
     LoopbackEndpoint {
         source: destination,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use weld_client::{
+        ClientCursor, ClientCursorUpdate, ClientId, ClientProvenance, ClientSurfaceId,
+        ClientSurfaceRole, CursorIcon, ToplevelState, WindowDecoration,
+    };
+
+    #[test]
+    fn loopback_adapter_drains_relocated_feedback_without_using_a_runtime_alias() {
+        let source = ClientSourceId::new(0);
+        let destination = ClientSourceId::new(1);
+        let surface = ClientSurfaceId::new(ClientId::new(source, 1), 7);
+        let mut adapter = registration(
+            source,
+            ClientSourceDescriptor::new(destination, ClientProvenance::Relocated),
+        )
+        .into_parts()
+        .runtime
+        .driver;
+        adapter.observe_event(&ClientSurfaceEvent {
+            surface,
+            kind: ClientSurfaceEventKind::Role(ClientSurfaceRole::Toplevel(ToplevelState {
+                parent: None,
+                decoration: WindowDecoration::ClientSide,
+            })),
+        });
+        adapter.apply_command(endpoint(destination).map(crate::HoistSessionId::new(1), surface));
+        adapter.observe_cursor_update(&ClientCursorUpdate {
+            surface,
+            cursor: ClientCursor::Named(CursorIcon::Text),
+        });
+        let mut updates = Vec::new();
+        adapter.drain_cursor_updates(&mut updates);
+        assert_eq!(
+            updates,
+            vec![ClientCursorUpdate {
+                surface: endpoint(destination).destination(surface),
+                cursor: ClientCursor::Named(CursorIcon::Text)
+            }]
+        );
     }
 }

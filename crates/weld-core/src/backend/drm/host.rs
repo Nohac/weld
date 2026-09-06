@@ -400,6 +400,7 @@ pub(super) fn run(
         if !completed_dmabuf_uses.is_empty() {
             application.complete_dmabuf_uses(&completed_dmabuf_uses);
         }
+        loop_data.server.flush_cursor_feedback();
         clients.drain_events(&mut client_events, &mut invalid_client_events);
         for invalid in invalid_client_events.drain(..) {
             warn!(%invalid, "client adapter published an invalid event");
@@ -562,10 +563,8 @@ pub(super) fn run(
             if let Some(appearance) = cursor_update.appearance {
                 loop_data.server.set_shell_cursor(appearance);
             }
-            if let Some(image) = loop_data.server.take_cursor_image() {
-                desktop.set_cursor_image(image)?;
-                presentation_schedule.request_present_all();
-                frame_state.request_present();
+            if let Some(active) = cursor_update.override_client {
+                loop_data.server.set_shell_cursor_override(active);
             }
             if let Some(vt) = application.take_virtual_terminal_switch_request() {
                 target = SessionTarget::InactiveOwned;
@@ -577,6 +576,13 @@ pub(super) fn run(
             if application.should_exit() {
                 exit_requested = true;
             }
+        }
+
+        // Client feedback is device/transport paced, independent of Bevy ticks.
+        if let Some(image) = loop_data.server.take_cursor_image(&clients) {
+            desktop.set_cursor_image(image)?;
+            presentation_schedule.request_present_all();
+            frame_state.request_present();
         }
 
         let capture_ready = pending_capture

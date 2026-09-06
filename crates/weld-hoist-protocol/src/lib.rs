@@ -18,7 +18,7 @@ use weld_media::{EncodedFrameKind, MediaFrameId, VideoCodec};
 pub struct ProtocolRevision(u32);
 
 impl ProtocolRevision {
-    pub const CURRENT: Self = Self(2);
+    pub const CURRENT: Self = Self(3);
 
     pub const fn new(raw: u32) -> Self {
         Self(raw)
@@ -85,11 +85,22 @@ pub struct SourceEnvelope<B> {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub enum SourceMessage<B> {
     Surface(WireClientSurfaceEvent<B>),
-    BufferRetired { buffer: ClientBufferId },
-    Withdraw { surface: ClientSurfaceId },
+    BufferRetired {
+        buffer: ClientBufferId,
+    },
+    Withdraw {
+        surface: ClientSurfaceId,
+    },
     Ended,
     // Added after the original surface messages; retain its wire discriminant.
-    Mapped { surface: ClientSurfaceId },
+    Mapped {
+        surface: ClientSurfaceId,
+    },
+    /// Lossless cursor feedback, independent of encoded surface-frame credit.
+    Cursor {
+        update: weld_client::ClientCursorUpdate,
+        sequence: u64,
+    },
 }
 
 /// Destination-to-source semantic envelope.
@@ -112,6 +123,11 @@ pub enum DestinationMessage {
         revision: ClientCommitRevision,
         outcome: EncodedCommitOutcome,
     },
+    /// Acknowledges receipt, not visibility or presentation of the cursor.
+    CursorReceived {
+        surface: ClientSurfaceId,
+        sequence: u64,
+    },
 }
 
 impl DestinationMessage {
@@ -126,6 +142,7 @@ impl DestinationMessage {
             Self::BufferReleased { .. } => "buffer-released",
             Self::Reclaim => "reclaim",
             Self::EncodedCommitFinished { .. } => "encoded-commit-finished",
+            Self::CursorReceived { .. } => "cursor-received",
         }
     }
 }
@@ -160,6 +177,38 @@ pub struct MediaEnvelope<A> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cursor_feedback_roundtrips_losslessly_and_rejects_invalid_rasters() {
+        let image = weld_client::ClientCursorImage::new(128, 128, (7, 11), vec![127; 65536])
+            .expect("bounded image");
+        let cursor = weld_client::ClientCursor::Image(image);
+        let bytes = postcard::to_allocvec(&cursor).expect("serialize cursor");
+        assert!(bytes.len() < 192 * 1024);
+        assert_eq!(
+            postcard::from_bytes::<weld_client::ClientCursor>(&bytes).expect("decode"),
+            cursor
+        );
+
+        let small = weld_client::ClientCursor::Image(
+            weld_client::ClientCursorImage::new(1, 1, (0, 0), vec![255; 4]).expect("small cursor"),
+        );
+        let mut bytes = postcard::to_allocvec(&small).expect("encode small");
+        // Image discriminant, width, height, hotspot, then pixel data.
+        bytes[1] = 0;
+        assert!(postcard::from_bytes::<weld_client::ClientCursor>(&bytes).is_err());
+        for cursor in [
+            weld_client::ClientCursor::Hidden,
+            weld_client::ClientCursor::Named(weld_client::CursorIcon::Text),
+        ] {
+            let bytes = postcard::to_allocvec(&cursor).expect("encode shape");
+            assert_eq!(
+                postcard::from_bytes::<weld_client::ClientCursor>(&bytes).expect("decode shape"),
+                cursor
+            );
+        }
+        assert!(postcard::from_bytes::<weld_client::ClientCursor>(&[0, 127]).is_err());
+    }
 
     #[test]
     fn protocol_revisions_require_an_exact_match() {

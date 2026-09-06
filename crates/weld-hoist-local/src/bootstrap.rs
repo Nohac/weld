@@ -208,11 +208,8 @@ mod tests {
                 .to_string()
                 .contains(&format!("revision {}", ProtocolRevision::CURRENT.raw() + 1))
         );
-        assert!(
-            acknowledgement
-                .message
-                .rejection
-                .is_some_and(|reason| reason.contains("revision 2"))
-        );
+        assert!(acknowledgement.message.rejection.is_some_and(|reason| {
+            reason.contains(&format!("revision {}", ProtocolRevision::CURRENT.raw()))
+        }));
     }
 }

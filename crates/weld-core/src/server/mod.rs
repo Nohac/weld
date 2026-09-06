@@ -127,7 +127,9 @@ pub struct ServerState {
     shell_cursor: crate::cursor::CursorAppearance,
     shell_owns_cursor: bool,
     cursor_surfaces: CursorSurfaceStore,
-    pending_cursor_image: Option<crate::cursor::CursorImage>,
+    cursor_feedback_dirty: bool,
+    presented_cursor: Option<crate::cursor::CursorImage>,
+    shell_cursor_override: bool,
     dmabuf_blocker_installer: Option<Box<dyn Fn(DmabufSource, Client) -> bool>>,
     syncobj_blocker_installer: Option<Box<dyn Fn(DrmSyncPointSource, Client) -> bool>>,
 }
@@ -363,9 +365,9 @@ impl ServerState {
             shell_cursor: crate::cursor::CursorAppearance::default(),
             shell_owns_cursor: true,
             cursor_surfaces: CursorSurfaceStore::default(),
-            pending_cursor_image: Some(crate::cursor::CursorImage::Named(
-                crate::cursor::CursorIcon::Default,
-            )),
+            cursor_feedback_dirty: true,
+            presented_cursor: None,
+            shell_cursor_override: false,
             dmabuf_blocker_installer,
             syncobj_blocker_installer,
         })

@@ -1,6 +1,11 @@
 //! Shared source and destination relay policy over binding-owned ports.
 
-use std::{collections::HashMap, error::Error, fmt::Display};
+use std::{
+    collections::{HashMap, VecDeque},
+    error::Error,
+    fmt::Display,
+    time::{Duration, Instant},
+};
 
 use weld_client::{
     ClientAdapter, ClientAdapterCommandEnvelope, ClientAdapterEffect, ClientBufferId,
@@ -25,6 +30,11 @@ pub enum SourcePortCommand {
     Surface {
         session: HoistSessionId,
         event: ClientSurfaceEvent,
+    },
+    Cursor {
+        session: HoistSessionId,
+        update: weld_client::ClientCursorUpdate,
+        sequence: u64,
     },
     WithdrawSurface {
         session: HoistSessionId,
@@ -55,6 +65,10 @@ pub enum DestinationPortEvent {
     Surface(ClientSurfaceEvent),
     WithdrawSurface(ClientSurfaceId),
     Ended,
+    Cursor {
+        update: weld_client::ClientCursorUpdate,
+        sequence: u64,
+    },
 }
 
 pub enum DestinationPortCommand {
@@ -84,6 +98,16 @@ pub trait HoistDestinationPort {
 struct CachedSurface {
     role: Option<weld_client::ClientSurfaceRole>,
     commit: Option<ClientSurfaceCommit>,
+    cursor: Option<weld_client::ClientCursor>,
+    sent_cursor: Option<weld_client::ClientCursor>,
+}
+
+struct CursorInFlight {
+    session: HoistSessionId,
+    surface: ClientSurfaceId,
+    sequence: u64,
+    sent_at: Instant,
+    warned: bool,
 }
 
 /// One source-side relay shared by loopback and external bindings.
@@ -95,6 +119,9 @@ pub struct SourceRelayAdapter {
     failed: bool,
     remote_input: RemoteInputState,
     port: Box<dyn HoistSourcePort>,
+    pending_cursors: VecDeque<ClientSurfaceId>,
+    cursor_in_flight: Option<CursorInFlight>,
+    next_cursor_sequence: Option<u64>,
 }
 
 impl SourceRelayAdapter {
@@ -107,6 +134,9 @@ impl SourceRelayAdapter {
             failed: false,
             remote_input: RemoteInputState::default(),
             port: Box::new(port),
+            pending_cursors: VecDeque::new(),
+            cursor_in_flight: None,
+            next_cursor_sequence: Some(1),
         }
     }
 
@@ -146,6 +176,7 @@ impl SourceRelayAdapter {
                 );
             }
         }
+        self.queue_cursor(source);
         let popups = self
             .cache
             .iter()
@@ -165,6 +196,10 @@ impl SourceRelayAdapter {
         let Some(session) = self.mappings.remove(&source) else {
             return;
         };
+        self.pending_cursors.retain(|surface| *surface != source);
+        if let Some(cached) = self.cache.get_mut(&source) {
+            cached.sent_cursor = None;
+        }
         self.effects.extend(
             self.remote_input
                 .release_effects(self.upstream_source, |surface| surface == source),
@@ -220,6 +255,11 @@ impl SourceRelayAdapter {
             ClientSurfaceEventKind::Commit(commit) => {
                 let outgoing = commit.clone();
                 let cached = self.cache.entry(source).or_default();
+                if !commit.mapped {
+                    cached.cursor = None;
+                    cached.sent_cursor = None;
+                    self.pending_cursors.retain(|surface| *surface != source);
+                }
                 let mut retained = commit.clone();
                 if let Some(previous) = &mut cached.commit {
                     retained.carry_unobserved_content_from(previous);
@@ -249,6 +289,7 @@ impl SourceRelayAdapter {
                     self.send_surface(session, event.clone());
                 }
                 self.cache.remove(&source);
+                self.pending_cursors.retain(|surface| *surface != source);
             }
         }
     }
@@ -269,6 +310,14 @@ impl SourceRelayAdapter {
         if self.failed {
             return;
         }
+        if let Some(active) = &mut self.cursor_in_flight
+            && !active.warned
+            && active.sent_at.elapsed() >= Duration::from_secs(2)
+        {
+            active.warned = true;
+            tracing::warn!(surface = ?active.surface, session = ?active.session,
+                sequence = active.sequence, "cursor feedback is waiting for peer acknowledgement");
+        }
         let envelopes = match self.port.poll() {
             Ok(envelopes) => envelopes,
             Err(error) => {
@@ -284,6 +333,30 @@ impl SourceRelayAdapter {
     }
 
     fn accept_destination(&mut self, envelope: DestinationEnvelope) -> bool {
+        if let DestinationMessage::CursorReceived { surface, sequence } = envelope.message {
+            let Some(active) = &self.cursor_in_flight else {
+                if self
+                    .next_cursor_sequence
+                    .is_some_and(|next| sequence >= next)
+                {
+                    self.fail("cursor acknowledgement precedes transmission");
+                    return false;
+                }
+                return true;
+            };
+            if sequence < active.sequence {
+                return true;
+            }
+            if (envelope.session, surface, sequence)
+                != (active.session, active.surface, active.sequence)
+            {
+                self.fail("cursor acknowledgement does not match the outstanding update");
+                return false;
+            }
+            self.cursor_in_flight = None;
+            self.send_next_cursor();
+            return !self.failed;
+        }
         let target =
             if let DestinationMessage::Request(ClientRequest::Focus(focus)) = &envelope.message {
                 if focus.source != self.upstream_source {
@@ -331,6 +404,7 @@ impl SourceRelayAdapter {
             DestinationMessage::BufferReleased { .. }
             | DestinationMessage::Reclaim
             | DestinationMessage::EncodedCommitFinished { .. } => {}
+            DestinationMessage::CursorReceived { .. } => {}
         }
         true
     }
@@ -340,6 +414,8 @@ impl SourceRelayAdapter {
             return;
         }
         self.failed = true;
+        self.cursor_in_flight = None;
+        self.pending_cursors.clear();
         tracing::warn!(source = ?self.upstream_source, error = %reason, "hoist source relay failed");
         self.port.disconnect();
         self.effects.extend(
@@ -358,7 +434,75 @@ impl SourceRelayAdapter {
     }
 }
 
+impl SourceRelayAdapter {
+    fn queue_cursor(&mut self, surface: ClientSurfaceId) {
+        if !self.mappings.contains_key(&surface) || self.failed {
+            return;
+        }
+        if !self.pending_cursors.contains(&surface) {
+            self.pending_cursors.push_back(surface);
+        }
+        self.send_next_cursor();
+    }
+
+    fn send_next_cursor(&mut self) {
+        if self.failed || self.cursor_in_flight.is_some() {
+            return;
+        }
+        while let Some(surface) = self.pending_cursors.pop_front() {
+            let Some(session) = self.mappings.get(&surface).copied() else {
+                continue;
+            };
+            let Some(cached) = self.cache.get_mut(&surface) else {
+                continue;
+            };
+            let Some(cursor) = &cached.cursor else {
+                continue;
+            };
+            if cached.sent_cursor.as_ref() == Some(cursor) {
+                continue;
+            }
+            let Some(sequence) = self.next_cursor_sequence else {
+                self.fail("cursor sequence space is exhausted");
+                return;
+            };
+            self.next_cursor_sequence = sequence.checked_add(1);
+            cached.sent_cursor = Some(cursor.clone());
+            let update = weld_client::ClientCursorUpdate {
+                surface,
+                cursor: cursor.clone(),
+            };
+            self.cursor_in_flight = Some(CursorInFlight {
+                session,
+                surface,
+                sequence,
+                sent_at: Instant::now(),
+                warned: false,
+            });
+            if let Err(error) = self.port.submit(SourcePortCommand::Cursor {
+                session,
+                update,
+                sequence,
+            }) {
+                self.fail(error);
+            }
+            return;
+        }
+    }
+}
+
 impl ClientAdapter for SourceRelayAdapter {
+    fn observe_cursor_update(&mut self, update: &weld_client::ClientCursorUpdate) {
+        if update.surface.source() != self.upstream_source || self.failed {
+            return;
+        }
+        let cached = self.cache.entry(update.surface).or_default();
+        if cached.cursor.as_ref() == Some(&update.cursor) {
+            return;
+        }
+        cached.cursor = Some(update.cursor.clone());
+        self.queue_cursor(update.surface);
+    }
     fn drain_events(&mut self, _events: &mut ClientEventQueue) {
         self.poll();
     }
@@ -408,6 +552,7 @@ pub struct DestinationRelayAdapter {
     input: RemoteInputState,
     failed: bool,
     port: Box<dyn HoistDestinationPort>,
+    cursor_updates: HashMap<ClientSurfaceId, weld_client::ClientCursor>,
 }
 
 impl DestinationRelayAdapter {
@@ -425,6 +570,7 @@ impl DestinationRelayAdapter {
             input: RemoteInputState::default(),
             failed: false,
             port: Box::new(port),
+            cursor_updates: HashMap::new(),
         }
     }
 
@@ -448,6 +594,30 @@ impl DestinationRelayAdapter {
 
     fn apply_record(&mut self, record: DestinationPortRecord) -> bool {
         match record.event {
+            DestinationPortEvent::Cursor { update, sequence } => {
+                if update.surface.source() != self.upstream_source {
+                    self.fail("cursor feedback targeted another source");
+                    return false;
+                }
+                if let Some(session) = self.sessions.get(&update.surface) {
+                    if *session != record.session {
+                        self.fail("cursor feedback crossed hoist sessions");
+                        return false;
+                    }
+                    self.cursor_updates.insert(
+                        relocated_surface(self.descriptor.id, update.surface),
+                        update.cursor,
+                    );
+                }
+                // Even withdrawn feedback must release the source's global slot.
+                self.send_destination(
+                    record.session,
+                    DestinationMessage::CursorReceived {
+                        surface: update.surface,
+                        sequence,
+                    },
+                );
+            }
             DestinationPortEvent::MappedSurface(source) => {
                 if !self.map_surface(record.session, source) {
                     return false;
@@ -469,6 +639,10 @@ impl DestinationRelayAdapter {
                     self.destroy_surface(source, true);
                     return true;
                 }
+                // Unlike the source's conservative reset on unmap, the
+                // receiver retains cursor preference: newer cursor control can
+                // overtake this video-delayed commit. Runtime mapping gates
+                // visibility; destruction/withdrawal still discard feedback.
                 match event.kind {
                     ClientSurfaceEventKind::Role(role) => {
                         self.roles.insert(source, role);
@@ -574,6 +748,8 @@ impl DestinationRelayAdapter {
     }
 
     fn destroy_surface(&mut self, source: ClientSurfaceId, notify_port: bool) {
+        self.cursor_updates
+            .remove(&relocated_surface(self.descriptor.id, source));
         if self.sessions.remove(&source).is_none() {
             return;
         }
@@ -647,6 +823,13 @@ impl DestinationRelayAdapter {
 }
 
 impl ClientAdapter for DestinationRelayAdapter {
+    fn drain_cursor_updates(&mut self, updates: &mut Vec<weld_client::ClientCursorUpdate>) {
+        updates.extend(
+            self.cursor_updates
+                .drain()
+                .map(|(surface, cursor)| weld_client::ClientCursorUpdate { surface, cursor }),
+        );
+    }
     fn drain_events(&mut self, events: &mut ClientEventQueue) {
         self.poll();
         while let Some(event) = self.events.pop_front() {
@@ -733,7 +916,9 @@ fn destination_message_surface(message: &DestinationMessage) -> Option<ClientSur
         DestinationMessage::Request(request) => request_surface(request),
         DestinationMessage::Input(input) => Some(input.target.surface()),
         DestinationMessage::EncodedCommitFinished { surface, .. } => Some(*surface),
-        DestinationMessage::BufferReleased { .. } | DestinationMessage::Reclaim => None,
+        DestinationMessage::BufferReleased { .. }
+        | DestinationMessage::Reclaim
+        | DestinationMessage::CursorReceived { .. } => None,
     }
 }
 
@@ -1097,6 +1282,172 @@ mod tests {
             },
         ));
         (adapter, state, surface, session)
+    }
+
+    #[test]
+    fn cursor_credit_survives_withdrawal_and_bounds_updates_without_blocking_input() {
+        let (mut relay, port, surface, session) = mapped_source();
+        relay.observe_cursor_update(&weld_client::ClientCursorUpdate {
+            surface,
+            cursor: weld_client::ClientCursor::Hidden,
+        });
+        let sequence = relay
+            .cursor_in_flight
+            .as_ref()
+            .expect("outstanding cursor")
+            .sequence;
+        for index in 0..300 {
+            relay.observe_cursor_update(&weld_client::ClientCursorUpdate {
+                surface,
+                cursor: weld_client::ClientCursor::Named(if index % 2 == 0 {
+                    weld_client::CursorIcon::Text
+                } else {
+                    weld_client::CursorIcon::Pointer
+                }),
+            });
+        }
+        assert_eq!(
+            port.borrow()
+                .submitted
+                .iter()
+                .filter(|command| matches!(command, SourcePortCommand::Cursor { .. }))
+                .count(),
+            1
+        );
+        assert_eq!(relay.pending_cursors.len(), 1);
+        assert!(relay.accept_destination(DestinationEnvelope {
+            session,
+            message: DestinationMessage::input(key_input(surface, 30, ButtonState::Pressed))
+        }));
+        assert_eq!(
+            port.borrow().accepted,
+            1,
+            "unrelated input is not cursor-credit gated"
+        );
+        relay.send_surface(
+            session,
+            ClientSurfaceEvent {
+                surface,
+                kind: ClientSurfaceEventKind::Interaction(
+                    weld_client::ToplevelInteractionRequestKind::End,
+                ),
+            },
+        );
+        assert!(matches!(
+            port.borrow().submitted.last(),
+            Some(SourcePortCommand::Surface { .. })
+        ));
+        relay.unmap(surface);
+        relay.map(session, surface);
+        assert_eq!(
+            relay
+                .cursor_in_flight
+                .as_ref()
+                .expect("still waiting")
+                .sequence,
+            sequence
+        );
+        assert!(relay.accept_destination(DestinationEnvelope {
+            session,
+            message: DestinationMessage::CursorReceived { surface, sequence }
+        }));
+        let next = relay
+            .cursor_in_flight
+            .as_ref()
+            .expect("latest replay")
+            .sequence;
+        assert!(next > sequence);
+        assert!(relay.accept_destination(DestinationEnvelope {
+            session,
+            message: DestinationMessage::CursorReceived { surface, sequence }
+        }));
+        assert_eq!(
+            relay
+                .cursor_in_flight
+                .as_ref()
+                .expect("old ack cannot release new cursor")
+                .sequence,
+            next
+        );
+        relay.observe(&ClientSurfaceEvent {
+            surface,
+            kind: ClientSurfaceEventKind::Destroyed,
+        });
+        assert!(relay.accept_destination(DestinationEnvelope {
+            session,
+            message: DestinationMessage::CursorReceived {
+                surface,
+                sequence: next
+            }
+        }));
+        assert!(relay.cursor_in_flight.is_none());
+        assert!(relay.pending_cursors.is_empty());
+        assert!(!relay.failed);
+        assert_eq!(
+            destination_message_surface(&DestinationMessage::CursorReceived {
+                surface,
+                sequence: next
+            }),
+            None
+        );
+    }
+
+    #[test]
+    fn cursor_acknowledgements_validate_session_and_disconnect_clears_the_slot() {
+        let (mut relay, _, surface, _) = mapped_source();
+        relay.observe_cursor_update(&weld_client::ClientCursorUpdate {
+            surface,
+            cursor: weld_client::ClientCursor::Hidden,
+        });
+        let sequence = relay.cursor_in_flight.as_ref().expect("cursor").sequence;
+        assert!(!relay.accept_destination(DestinationEnvelope {
+            session: HoistSessionId::new(999),
+            message: DestinationMessage::CursorReceived { surface, sequence }
+        }));
+        assert!(relay.failed);
+        assert!(relay.cursor_in_flight.is_none());
+    }
+
+    #[test]
+    fn destination_relocates_cursor_feedback_and_acks_withdrawn_updates_without_resurrection() {
+        let source = ClientSourceId::new(1);
+        let destination = ClientSourceId::new(2);
+        let surface = surface(source, 7);
+        let session = HoistSessionId::new(1);
+        let port = Rc::new(RefCell::new(FakeDestinationState::default()));
+        let mut relay = DestinationRelayAdapter::new(
+            source,
+            ClientSourceDescriptor::new(destination, ClientProvenance::Relocated),
+            FakeDestinationPort(port.clone()),
+        );
+        relay.map_surface(session, surface);
+        let feedback = |session, sequence| DestinationPortRecord {
+            session,
+            event: DestinationPortEvent::Cursor {
+                update: weld_client::ClientCursorUpdate {
+                    surface,
+                    cursor: weld_client::ClientCursor::Named(weld_client::CursorIcon::Text),
+                },
+                sequence,
+            },
+        };
+        assert!(relay.apply_record(feedback(session, 1)));
+        let mut updates = Vec::new();
+        relay.drain_cursor_updates(&mut updates);
+        assert_eq!(updates[0].surface, relocated_surface(destination, surface));
+        relay.destroy_surface(surface, true);
+        assert!(relay.apply_record(feedback(session, 2)));
+        assert!(relay.cursor_updates.is_empty());
+        assert!(matches!(
+            port.borrow().outbound.last(),
+            Some(DestinationPortCommand::Message(DestinationEnvelope {
+                message: DestinationMessage::CursorReceived { sequence: 2, .. },
+                ..
+            }))
+        ));
+        relay.map_surface(session, surface);
+        assert!(!relay.apply_record(feedback(HoistSessionId::new(9), 3)));
+        assert!(relay.failed);
     }
 
     fn key_input(surface: ClientSurfaceId, keycode: u32, state: ButtonState) -> ClientInputEvent {

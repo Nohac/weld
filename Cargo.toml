@@ -56,6 +56,7 @@ calloop = { version = "0.14.4", features = ["signals"] }
 clap = { version = "4.5", features = ["derive"] }
 cros-codecs = { version = "=0.0.6", features = ["vaapi"] }
 cros-libva = "=0.0.12"
+cursor-icon = "1.2.0"
 ffmpeg-next = { version = "=9.0.0", default-features = false, features = ["filter", "format"] }
 leafwing-input-manager = { version = "0.21.0", default-features = false }
 input = { version = "0.10.0", features = ["libinput_1_26"] }

@@ -784,6 +784,16 @@ impl<T: EncodedSourceTransport> HoistSourcePort for EncodedSourcePort<T> {
                     .map_err(protocol_error)
             }
             SourcePortCommand::RetireUpstreamBuffer(_) => Ok(()),
+            SourcePortCommand::Cursor {
+                session,
+                update,
+                sequence,
+            } => self
+                .transport
+                .send(SourceTransportPacket::Control(SourceEnvelope {
+                    session,
+                    message: SourceMessage::Cursor { update, sequence },
+                })),
         }
     }
 
@@ -827,7 +837,8 @@ impl<T: EncodedSourceTransport> HoistSourcePort for EncodedSourcePort<T> {
             }
             DestinationMessage::Request(_)
             | DestinationMessage::Input(_)
-            | DestinationMessage::Reclaim => {}
+            | DestinationMessage::Reclaim
+            | DestinationMessage::CursorReceived { .. } => {}
         }
         self.flush()
     }
@@ -1332,6 +1343,10 @@ impl<T: EncodedDestinationTransport> EncodedDestinationPort<T> {
                     .map_err(protocol_error)?;
             }
             SourceTransportPacket::Control(packet) => match packet.message {
+                SourceMessage::Cursor { update, sequence } => records.push(DestinationPortRecord {
+                    session: packet.session,
+                    event: DestinationPortEvent::Cursor { update, sequence },
+                }),
                 SourceMessage::Mapped { surface } => records.push(DestinationPortRecord {
                     session: packet.session,
                     event: DestinationPortEvent::MappedSurface(surface),
@@ -1685,6 +1700,160 @@ mod tests {
             transport,
             encoder,
         )
+    }
+
+    #[test]
+    fn cursor_control_bypasses_an_unfinished_encode_on_both_ports() {
+        let (mut source, transport, _) = source_port();
+        let (mut destination, destination_transport, _) = destination_port();
+        let source_id = ClientSourceId::new(1);
+        let surface = surface(source_id, 1, 1);
+        let session = HoistSessionId::new(1);
+        let metadata = ClientBufferMetadata::new(Extent::new(1, 1), true);
+        source
+            .submit(SourcePortCommand::Surface {
+                session,
+                event: one_buffer_commit(surface, 1, 1, shm_lease(source_id, 1, 10, metadata)),
+            })
+            .expect("encode");
+        source
+            .submit(SourcePortCommand::Cursor {
+                session,
+                update: weld_client::ClientCursorUpdate {
+                    surface,
+                    cursor: weld_client::ClientCursor::Hidden,
+                },
+                sequence: 7,
+            })
+            .expect("cursor bypass");
+        assert!(source.state.as_ref().expect("state").in_flight.is_some());
+        assert_eq!(transport.borrow().sent.len(), 1);
+        destination_transport
+            .borrow_mut()
+            .incoming
+            .extend(transport.borrow_mut().sent.drain(..));
+        let records = destination.poll().expect("cursor before any decoded frame");
+        assert!(matches!(
+            records.as_slice(),
+            [DestinationPortRecord {
+                event: DestinationPortEvent::Cursor { sequence: 7, .. },
+                ..
+            }]
+        ));
+    }
+
+    #[test]
+    fn cursor_overtaking_credit_blocked_unmap_remap_keeps_its_newer_preference() {
+        let (mut source, transport, encoder) = source_port();
+        let (destination, incoming, _) = destination_port();
+        let source_id = ClientSourceId::new(1);
+        let destination_id = ClientSourceId::new(9);
+        let surface = surface(source_id, 1, 1);
+        let session = HoistSessionId::new(1);
+        source
+            .submit(SourcePortCommand::MapSurface { session, surface })
+            .expect("map");
+        let metadata = ClientBufferMetadata::new(Extent::new(1, 1), true);
+        source
+            .submit(SourcePortCommand::Surface {
+                session,
+                event: one_buffer_commit(surface, 1, 1, shm_lease(source_id, 1, 10, metadata)),
+            })
+            .expect("first frame");
+        let (token, frame, _) = encoder.borrow().submitted[0].clone();
+        complete(&encoder, token, frame, 10);
+        source.poll().expect("park first frame in credit");
+        assert!(
+            source
+                .state
+                .as_ref()
+                .expect("state")
+                .awaiting_credit
+                .contains_key(&surface)
+        );
+
+        // Model an already-displayed first frame while withholding its credit.
+        // Strip only its GPU payload: this test exercises cursor/lifecycle order,
+        // not decoding or native buffer import.
+        for packet in transport.borrow_mut().sent.drain(..) {
+            if let SourceTransportPacket::Control(mut envelope) = packet {
+                if let SourceMessage::Surface(WireClientSurfaceEvent {
+                    kind: WireClientSurfaceEventKind::Commit(commit),
+                    ..
+                }) = &mut envelope.message
+                {
+                    commit.buffers.clear();
+                }
+                incoming
+                    .borrow_mut()
+                    .incoming
+                    .push_back(SourceTransportPacket::Control(envelope));
+            }
+        }
+        let descriptor =
+            ClientSourceDescriptor::new(destination_id, weld_client::ClientProvenance::Relocated);
+        let relay =
+            weld_hoist_core::DestinationRelayAdapter::new(source_id, descriptor, destination);
+        let mut runtime = weld_client::ClientRuntime::default();
+        runtime
+            .register(weld_client::ClientRuntimeAdapter::new(descriptor, relay))
+            .expect("register receiver");
+        runtime.drain_events(&mut ClientEventQueue::default(), &mut Vec::new());
+        let relocated = weld_hoist_core::relocated_surface(destination_id, surface);
+        runtime.set_pointer_route(Some(weld_client::ClientPointerRoute {
+            surface: relocated,
+            layer: SurfaceLayerId::new(1),
+            transform: weld_client::InputTransform::IDENTITY,
+        }));
+
+        let mut unmap = commit(surface, 2, Vec::new());
+        if let ClientSurfaceEventKind::Commit(commit) = &mut unmap.kind {
+            commit.mapped = false;
+        }
+        for event in [unmap, commit(surface, 3, Vec::new())] {
+            source
+                .submit(SourcePortCommand::Surface { session, event })
+                .expect("credit-blocked lifecycle");
+        }
+        assert!(transport.borrow().sent.is_empty());
+        let cursor = weld_client::ClientCursor::Named(weld_client::CursorIcon::Text);
+        source
+            .submit(SourcePortCommand::Cursor {
+                session,
+                update: weld_client::ClientCursorUpdate {
+                    surface,
+                    cursor: cursor.clone(),
+                },
+                sequence: 1,
+            })
+            .expect("newer cursor bypass");
+        incoming
+            .borrow_mut()
+            .incoming
+            .extend(transport.borrow_mut().sent.drain(..));
+        runtime.drain_events(&mut ClientEventQueue::default(), &mut Vec::new());
+        assert_eq!(runtime.pointer_cursor(), Some((relocated, cursor.clone())));
+
+        source
+            .accept_destination(&DestinationEnvelope {
+                session,
+                message: DestinationMessage::EncodedCommitFinished {
+                    surface,
+                    revision: ClientCommitRevision::new(1),
+                    outcome: EncodedCommitOutcome::Applied,
+                },
+            })
+            .expect("release frame credit");
+        let delayed = std::mem::take(&mut transport.borrow_mut().sent);
+        assert_eq!(delayed.len(), 2);
+        for (index, packet) in delayed.into_iter().enumerate() {
+            incoming.borrow_mut().incoming.push_back(packet);
+            runtime.drain_events(&mut ClientEventQueue::default(), &mut Vec::new());
+            assert_eq!(
+                runtime.pointer_cursor(),
+                (index == 1).then(|| (relocated, cursor.clone()))
+            );
+        }
     }
 
     fn destination_port() -> (

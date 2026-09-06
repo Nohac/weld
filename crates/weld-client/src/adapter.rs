@@ -7,11 +7,11 @@ use std::{
 };
 
 use crate::{
-    ButtonState, ClientEventQueue, ClientInputEvent, ClientInputTarget, ClientKeyboardRoute,
-    ClientPointerRoute, ClientPointerRouteUpdate, ClientRequest, ClientSourceDescriptor,
-    ClientSourceId, ClientSurfaceId, InputEventKind, LinuxButtonCode, LinuxKeycode, PointerGesture,
-    PointerGestureKind, RawScrollFrame, RawScrollPhase, RawScrollSource, RuntimeInputEvent,
-    RuntimeInputEventKind,
+    ButtonState, ClientCursor, ClientCursorUpdate, ClientEventQueue, ClientInputEvent,
+    ClientInputTarget, ClientKeyboardRoute, ClientPointerRoute, ClientPointerRouteUpdate,
+    ClientRequest, ClientSourceDescriptor, ClientSourceId, ClientSurfaceId, InputEventKind,
+    LinuxButtonCode, LinuxKeycode, PointerGesture, PointerGestureKind, RawScrollFrame,
+    RawScrollPhase, RawScrollSource, RuntimeInputEvent, RuntimeInputEventKind,
 };
 
 /// One client source driven by the native runtime.
@@ -28,6 +28,12 @@ pub trait ClientAdapter {
     /// Observes one validated event from another local-provenance adapter.
     /// Relocated events are not observed recursively.
     fn observe_event(&mut self, _event: &crate::ClientSurfaceEvent) {}
+
+    /// Drains coalesced cursor feedback without producing surface/render work.
+    fn drain_cursor_updates(&mut self, _updates: &mut Vec<ClientCursorUpdate>) {}
+
+    /// Observes validated local-source cursor feedback for an optional relay.
+    fn observe_cursor_update(&mut self, _update: &ClientCursorUpdate) {}
 
     /// Publishes input/request route aliases created by observed events.
     fn drain_route_alias_updates(&mut self, _updates: &mut Vec<ClientRouteAliasUpdate>) {}
@@ -313,6 +319,12 @@ impl PressedButtons {
     }
 }
 
+#[derive(Default)]
+struct ClientCursorState {
+    mapped: bool,
+    cursor: ClientCursor,
+}
+
 /// Registry above all client adapters in one native backend loop.
 ///
 /// [`Self::dispatch_unconsumed_input`] must be called only after application
@@ -344,6 +356,9 @@ pub struct ClientRuntime {
     finger_scroll_capture: Option<FingerScrollCapture>,
     pressed_buttons: PressedButtons,
     pointer_position: Option<crate::InputPosition>,
+    cursors: HashMap<ClientSurfaceId, ClientCursorState>,
+    scratch_cursor_updates: Vec<ClientCursorUpdate>,
+    sourced_cursor_updates: Vec<(ClientSourceId, ClientCursorUpdate)>,
 }
 
 impl ClientRuntime {
@@ -456,6 +471,7 @@ impl ClientRuntime {
             }
         }
         while let Some(event) = self.generated_events.pop_front() {
+            track_cursor_surface(&mut self.cursors, &event);
             let event_source = event.surface.source();
             let relayable = self.adapters.get(&event_source).is_some_and(|adapter| {
                 adapter.descriptor.provenance == crate::ClientProvenance::Local
@@ -512,6 +528,7 @@ impl ClientRuntime {
             adapter.driver.drain_events(&mut self.scratch_events);
             while let Some(event) = self.scratch_events.pop_front() {
                 if event.surface.source() == source {
+                    track_cursor_surface(&mut self.cursors, &event);
                     if matches!(&event.kind, crate::ClientSurfaceEventKind::Destroyed) {
                         self.scratch_destroyed.push(event.surface);
                     }
@@ -530,6 +547,8 @@ impl ClientRuntime {
             self.forget_surface(surface);
         }
         self.scratch_destroyed.clear();
+
+        self.drain_cursor_feedback(invalid);
 
         for (source, adapter) in &mut self.adapters {
             adapter.driver.drain_effects(&mut self.scratch_effects);
@@ -554,6 +573,55 @@ impl ClientRuntime {
             for (source, adapter) in &mut self.adapters {
                 if *source != buffer.source() {
                     adapter.driver.observe_retired_buffer(buffer);
+                }
+            }
+        }
+    }
+
+    /// The client under the current pointer/capture, resolved through aliases.
+    /// A newly mapped surface starts with the default arrow until feedback arrives.
+    pub fn pointer_cursor(&self) -> Option<(ClientSurfaceId, ClientCursor)> {
+        let route = self.captured_or_current_pointer_route().ok()??;
+        let state = self.cursors.get(&route.surface)?;
+        state.mapped.then(|| (route.surface, state.cursor.clone()))
+    }
+
+    fn drain_cursor_feedback(&mut self, invalid: &mut Vec<ClientRuntimeEventError>) {
+        // The second pass picks up loopback feedback created by observation.
+        // Relocated feedback is never observed recursively.
+        for pass in 0..2 {
+            for (source, adapter) in &mut self.adapters {
+                adapter
+                    .driver
+                    .drain_cursor_updates(&mut self.scratch_cursor_updates);
+                self.sourced_cursor_updates.extend(
+                    self.scratch_cursor_updates
+                        .drain(..)
+                        .map(|update| (*source, update)),
+                );
+            }
+            for (source, update) in self.sourced_cursor_updates.drain(..) {
+                if update.surface.source() != source {
+                    invalid.push(ClientRuntimeEventError {
+                        registered_source: source,
+                        event_surface: update.surface,
+                    });
+                    continue;
+                }
+                let Some(cursor) = self.cursors.get_mut(&update.surface) else {
+                    continue;
+                };
+                cursor.cursor = update.cursor.clone();
+                if pass == 0
+                    && self.adapters.get(&source).is_some_and(|adapter| {
+                        adapter.descriptor.provenance == crate::ClientProvenance::Local
+                    })
+                {
+                    for (observer, adapter) in &mut self.adapters {
+                        if *observer != source {
+                            adapter.driver.observe_cursor_update(&update);
+                        }
+                    }
                 }
             }
         }
@@ -1062,6 +1130,7 @@ impl ClientRuntime {
     }
 
     fn forget_surface(&mut self, surface: ClientSurfaceId) {
+        self.cursors.remove(&surface);
         let destroyed_keys = self
             .keyboard_captures
             .iter()
@@ -1136,6 +1205,27 @@ impl ClientRuntime {
     }
 }
 
+fn track_cursor_surface(
+    cursors: &mut HashMap<ClientSurfaceId, ClientCursorState>,
+    event: &crate::ClientSurfaceEvent,
+) {
+    match &event.kind {
+        crate::ClientSurfaceEventKind::Role(_) => {
+            cursors.entry(event.surface).or_default();
+        }
+        crate::ClientSurfaceEventKind::Commit(commit) => {
+            // Authority follows the locally displayed mapping timeline, but
+            // newer cursor feedback can overtake video-delayed unmap/remap.
+            // Hiding must not erase that newer preference.
+            cursors.entry(event.surface).or_default().mapped = commit.mapped;
+        }
+        crate::ClientSurfaceEventKind::Destroyed => {
+            cursors.remove(&event.surface);
+        }
+        crate::ClientSurfaceEventKind::Interaction(_) => {}
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::{cell::RefCell, rc::Rc};
@@ -1149,6 +1239,8 @@ mod tests {
 
     #[derive(Default)]
     struct AdapterRecord {
+        events: ClientEventQueue,
+        cursors: Vec<crate::ClientCursorUpdate>,
         inputs: Vec<ClientInputEvent>,
         focus_lost: Vec<u32>,
         requests: Vec<ClientRequest>,
@@ -1172,7 +1264,14 @@ mod tests {
     }
 
     impl ClientAdapter for RecordingAdapter {
-        fn drain_events(&mut self, _events: &mut ClientEventQueue) {}
+        fn drain_events(&mut self, events: &mut ClientEventQueue) {
+            while let Some(event) = self.0.borrow_mut().events.pop_front() {
+                events.push(event);
+            }
+        }
+        fn drain_cursor_updates(&mut self, updates: &mut Vec<crate::ClientCursorUpdate>) {
+            updates.append(&mut self.0.borrow_mut().cursors);
+        }
 
         fn apply_request(&mut self, request: ClientRequest) {
             self.0.borrow_mut().requests.push(request);
@@ -1204,6 +1303,182 @@ mod tests {
             ))
             .expect("unique test source");
         record
+    }
+
+    fn mapping_event(surface: ClientSurfaceId, mapped: bool) -> ClientSurfaceEvent {
+        ClientSurfaceEvent {
+            surface,
+            kind: ClientSurfaceEventKind::Commit(crate::ClientSurfaceCommit {
+                revision: crate::ClientCommitRevision::new(1),
+                alpha_mode: Default::default(),
+                mapped,
+                root: None,
+                window_geometry: None,
+                overlays: Vec::new(),
+                inputs: Vec::new(),
+                buffers: Vec::new(),
+            }),
+        }
+    }
+
+    #[test]
+    fn cursor_feedback_follows_pointer_capture_and_aliases_not_keyboard_focus() {
+        let mut runtime = ClientRuntime::default();
+        let first = register(&mut runtime, 1);
+        let second = register(&mut runtime, 2);
+        let a = surface(1, 1, 1);
+        let b = surface(2, 1, 1);
+        let alias = surface(3, 1, 1);
+        for (record, surface) in [(&first, a), (&second, b)] {
+            record
+                .borrow_mut()
+                .events
+                .push(mapping_event(surface, true));
+            record.borrow_mut().events.push(ClientSurfaceEvent {
+                surface,
+                kind: ClientSurfaceEventKind::Role(crate::ClientSurfaceRole::Toplevel(
+                    crate::ToplevelState {
+                        parent: None,
+                        decoration: crate::WindowDecoration::ClientSide,
+                    },
+                )),
+            });
+        }
+        let route = |surface| ClientPointerRoute {
+            surface,
+            layer: SurfaceLayerId::new(1),
+            transform: InputTransform::IDENTITY,
+        };
+        runtime.set_route_alias(alias, a);
+        runtime.set_pointer_route(Some(route(alias)));
+        runtime.set_keyboard_route(Some(ClientKeyboardRoute { surface: b }));
+        runtime.drain_events(&mut ClientEventQueue::default(), &mut Vec::new());
+        assert_eq!(
+            runtime.pointer_cursor(),
+            Some((a, crate::ClientCursor::default()))
+        );
+        first.borrow_mut().cursors.push(crate::ClientCursorUpdate {
+            surface: a,
+            cursor: crate::ClientCursor::Named(crate::CursorIcon::Text),
+        });
+        second.borrow_mut().cursors.push(crate::ClientCursorUpdate {
+            surface: b,
+            cursor: crate::ClientCursor::Hidden,
+        });
+        let mut events = ClientEventQueue::default();
+        runtime.drain_events(&mut events, &mut Vec::new());
+        assert!(
+            events.is_empty(),
+            "cursor feedback must not produce composition work"
+        );
+        assert_eq!(
+            runtime.pointer_cursor(),
+            Some((a, crate::ClientCursor::Named(crate::CursorIcon::Text)))
+        );
+        let button = |state| {
+            RuntimeInputEvent::new(
+                RuntimeInputEventKind::Input(InputEventKind::PointerButton {
+                    position: Some(InputPosition::default()),
+                    button: LinuxButtonCode(0x110),
+                    state,
+                }),
+                1,
+            )
+        };
+        runtime.dispatch_unconsumed_input(button(ButtonState::Pressed));
+        runtime.set_pointer_route(Some(route(b)));
+        assert_eq!(
+            runtime.pointer_cursor().map(|(surface, _)| surface),
+            Some(a)
+        );
+        runtime.dispatch_unconsumed_input(button(ButtonState::Released));
+        assert_eq!(
+            runtime.pointer_cursor(),
+            Some((b, crate::ClientCursor::Hidden))
+        );
+        runtime.host_focus_lost(3);
+        assert_eq!(runtime.pointer_cursor(), None);
+        runtime.set_pointer_route(Some(route(alias)));
+        runtime.remove_route_alias(alias);
+        assert_eq!(runtime.pointer_cursor(), None);
+    }
+
+    #[test]
+    fn cursor_feedback_rejects_foreign_namespaces_and_cannot_resurrect_destroyed_surfaces() {
+        let mut runtime = ClientRuntime::default();
+        let record = register(&mut runtime, 1);
+        let surface = surface(1, 1, 1);
+        record.borrow_mut().events.push(ClientSurfaceEvent {
+            surface,
+            kind: ClientSurfaceEventKind::Destroyed,
+        });
+        record.borrow_mut().cursors.push(crate::ClientCursorUpdate {
+            surface,
+            cursor: crate::ClientCursor::Hidden,
+        });
+        record.borrow_mut().cursors.push(crate::ClientCursorUpdate {
+            surface: super::tests::surface(2, 1, 1),
+            cursor: crate::ClientCursor::Hidden,
+        });
+        let mut invalid = Vec::new();
+        runtime.drain_events(&mut ClientEventQueue::default(), &mut invalid);
+        assert_eq!(invalid.len(), 1);
+        assert!(!runtime.cursors.contains_key(&surface));
+    }
+
+    #[test]
+    fn hidden_surface_retains_newer_cursor_preference_but_has_no_authority() {
+        let mut runtime = ClientRuntime::default();
+        let record = register(&mut runtime, 1);
+        let surface = surface(1, 1, 1);
+        runtime.set_pointer_route(Some(ClientPointerRoute {
+            surface,
+            layer: SurfaceLayerId::new(1),
+            transform: InputTransform::IDENTITY,
+        }));
+        record
+            .borrow_mut()
+            .events
+            .push(mapping_event(surface, true));
+        record.borrow_mut().cursors.push(ClientCursorUpdate {
+            surface,
+            cursor: ClientCursor::Named(crate::CursorIcon::Text),
+        });
+        runtime.drain_events(&mut ClientEventQueue::default(), &mut Vec::new());
+        record
+            .borrow_mut()
+            .events
+            .push(mapping_event(surface, false));
+        runtime.drain_events(&mut ClientEventQueue::default(), &mut Vec::new());
+        assert_eq!(runtime.pointer_cursor(), None);
+        record.borrow_mut().cursors.push(ClientCursorUpdate {
+            surface,
+            cursor: ClientCursor::Hidden,
+        });
+        runtime.drain_events(&mut ClientEventQueue::default(), &mut Vec::new());
+        assert_eq!(runtime.pointer_cursor(), None);
+        record
+            .borrow_mut()
+            .events
+            .push(mapping_event(surface, true));
+        runtime.drain_events(&mut ClientEventQueue::default(), &mut Vec::new());
+        assert_eq!(
+            runtime.pointer_cursor(),
+            Some((surface, ClientCursor::Hidden))
+        );
+        // Popup position/role updates must not revoke an existing mapping.
+        record.borrow_mut().events.push(ClientSurfaceEvent {
+            surface,
+            kind: ClientSurfaceEventKind::Role(ClientSurfaceRole::Toplevel(ToplevelState {
+                parent: None,
+                decoration: WindowDecoration::ClientSide,
+            })),
+        });
+        runtime.drain_events(&mut ClientEventQueue::default(), &mut Vec::new());
+        assert_eq!(
+            runtime.pointer_cursor(),
+            Some((surface, ClientCursor::Hidden))
+        );
     }
 
     #[test]
