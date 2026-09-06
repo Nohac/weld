@@ -1,18 +1,13 @@
 //! Nonblocking compositor-facing peer handles and async stream drivers.
 
-use std::{
-    collections::VecDeque,
-    fmt,
-    sync::{
-        Arc, Mutex,
-        atomic::{AtomicBool, Ordering},
-    },
-    time::Instant,
-};
+use std::{fmt, sync::Arc, time::Instant};
 
 use anyhow::{Context, Result, ensure};
 use iroh::endpoint::{Connection, RecvStream, SendStream};
-use tokio::sync::mpsc;
+use tokio::{
+    io::{AsyncRead, AsyncReadExt, AsyncWrite},
+    sync::mpsc,
+};
 use weld_core::host::ClientRuntimeNotifier;
 use weld_hoist_core::{HoistPortError, HoistPortResult};
 use weld_hoist_encoded::{
@@ -26,82 +21,29 @@ use crate::{
     diagnostics::PathMonitor,
     framing::{read_media, read_record, write_record},
     host::HostLifetime,
+    inbox::IncomingQueue,
+    input_outbox::InputOutbox,
     media_queue::{MediaSender, QueuedMedia, write_media_queue},
 };
 
-const QUEUE_CAPACITY: usize = 256;
+pub(super) const QUEUE_CAPACITY: usize = 256;
 const MEDIA_STREAM_MAGIC: [u8; 8] = *b"weldmed1";
 
 struct PeerState<T> {
     incoming: IncomingQueue<T>,
     connection: Connection,
-    notifier: ClientRuntimeNotifier,
-}
-
-struct IncomingQueue<T> {
-    available: AtomicBool,
-    values: Mutex<VecDeque<T>>,
-}
-
-impl<T> IncomingQueue<T> {
-    fn new() -> Self {
-        Self {
-            available: AtomicBool::new(true),
-            values: Mutex::new(VecDeque::new()),
-        }
-    }
-
-    fn push(&self, value: T) -> Result<()> {
-        let mut values = self
-            .values
-            .lock()
-            .map_err(|_| anyhow::anyhow!("Iroh peer input queue lock is poisoned"))?;
-        ensure!(
-            values.len() < QUEUE_CAPACITY,
-            "Iroh peer input queue is full"
-        );
-        values.push_back(value);
-        Ok(())
-    }
-
-    fn drain(&self) -> HoistPortResult<Vec<T>> {
-        let mut values = self
-            .values
-            .lock()
-            .map_err(|_| peer_error("Iroh peer input queue lock is poisoned"))?;
-        if values.is_empty() && !self.is_available() {
-            return Err(peer_error("Iroh peer is unavailable"));
-        }
-        Ok(values.drain(..).collect())
-    }
-
-    fn is_available(&self) -> bool {
-        self.available.load(Ordering::Acquire)
-    }
-
-    fn fail(&self) -> bool {
-        self.available.swap(false, Ordering::AcqRel)
-    }
 }
 
 impl<T> PeerState<T> {
     fn new(connection: Connection, notifier: ClientRuntimeNotifier) -> Self {
         Self {
-            incoming: IncomingQueue::new(),
+            incoming: IncomingQueue::new(notifier),
             connection,
-            notifier,
         }
     }
 
-    fn push(&self, value: T) -> Result<()> {
-        self.incoming.push(value)?;
-        self.notifier
-            .notify()
-            .context("could not wake Weld for Iroh input")
-    }
-
     fn drain(&self) -> HoistPortResult<Vec<T>> {
-        self.incoming.drain()
+        self.incoming.drain().map_err(peer_error)
     }
 
     fn is_available(&self) -> bool {
@@ -111,7 +53,6 @@ impl<T> PeerState<T> {
     fn fail(&self) {
         if self.incoming.fail() {
             self.connection.close(1_u32.into(), b"weld peer closed");
-            let _ = self.notifier.notify();
         }
     }
 }
@@ -183,7 +124,7 @@ impl EncodedSourceTransport for IrohSourcePeer {
 #[derive(Clone)]
 pub struct IrohDestinationPeer {
     state: Arc<PeerState<SourceTransportPacket>>,
-    control: mpsc::Sender<DestinationEnvelope>,
+    control: Arc<InputOutbox>,
     identity: IrohPeerIdentity,
     codec: VideoCodec,
     _host: Arc<HostLifetime>,
@@ -205,7 +146,7 @@ impl IrohDestinationPeer {
 
 impl EncodedDestinationTransport for IrohDestinationPeer {
     fn send(&self, packet: DestinationEnvelope) -> HoistPortResult<()> {
-        self.control.try_send(packet).map_err(|error| {
+        self.control.push(packet).map_err(|error| {
             self.state.fail();
             peer_error(format!("could not queue Iroh destination packet: {error}"))
         })
@@ -216,6 +157,7 @@ impl EncodedDestinationTransport for IrohDestinationPeer {
     }
 
     fn disconnect(&self) {
+        self.control.close();
         self.state.fail();
     }
 }
@@ -265,17 +207,17 @@ pub(crate) fn spawn_destination_peer(
     crate::diagnostics::observe(&connection);
     let identity = IrohPeerIdentity(connection.remote_id().to_string());
     let state = Arc::new(PeerState::new(connection.clone(), notifier));
-    let (control_tx, control_rx) = mpsc::channel(QUEUE_CAPACITY);
+    let control = Arc::new(InputOutbox::default());
     tokio::spawn(run_destination_peer(
         state.clone(),
         control_send,
         control_recv,
-        control_rx,
+        control.clone(),
         media_recv,
     ));
     IrohDestinationPeer {
         state,
-        control: control_tx,
+        control,
         identity,
         codec,
         _host: host,
@@ -296,7 +238,7 @@ async fn run_source_peer(
         }
         Ok::<(), anyhow::Error>(())
     };
-    let control_reader = read_destination_control(state.clone(), control_recv);
+    let control_reader = read_destination_control(&state.incoming, control_recv);
     let media_writer = async move {
         media_send
             .write_all(&MEDIA_STREAM_MAGIC)
@@ -305,8 +247,15 @@ async fn run_source_peer(
         write_media_queue(&mut media_send, &mut outgoing_media).await?;
         Ok::<(), anyhow::Error>(())
     };
-    if let Err(error) = tokio::try_join!(control_writer, control_reader, media_writer) {
-        tracing::warn!(error = %format_args!("{error:#}"), "Iroh source peer stopped");
+    tokio::select! {
+        result = async { tokio::try_join!(control_writer, control_reader, media_writer) } => {
+            if let Err(error) = result {
+                tracing::warn!(error = %format_args!("{error:#}"), "Iroh source peer stopped");
+            }
+        }
+        reason = state.connection.closed() => {
+            tracing::debug!(%reason, "Iroh source connection closed");
+        }
     }
     state.fail();
 }
@@ -315,47 +264,64 @@ async fn run_destination_peer(
     state: Arc<PeerState<SourceTransportPacket>>,
     mut control_send: SendStream,
     control_recv: RecvStream,
-    mut outgoing_control: mpsc::Receiver<DestinationEnvelope>,
+    outgoing_control: Arc<InputOutbox>,
     media_recv: RecvStream,
 ) {
-    let control_writer = async move {
-        while let Some(packet) = outgoing_control.recv().await {
-            write_record(&mut control_send, &packet).await?;
+    let control_writer = write_destination_control(&outgoing_control, &mut control_send);
+    let control_reader = read_source_control(&state.incoming, control_recv);
+    let media = read_source_media(&state.incoming, media_recv);
+    tokio::select! {
+        result = async { tokio::try_join!(control_writer, control_reader, media) } => {
+            if let Err(error) = result {
+                tracing::warn!(error = %format_args!("{error:#}"), "Iroh destination peer stopped");
+            }
         }
-        Ok::<(), anyhow::Error>(())
-    };
-    let control_reader = read_source_control(state.clone(), control_recv);
-    let media = read_source_media(state.clone(), media_recv);
-    if let Err(error) = tokio::try_join!(control_writer, control_reader, media) {
-        tracing::warn!(error = %format_args!("{error:#}"), "Iroh destination peer stopped");
+        reason = state.connection.closed() => {
+            tracing::debug!(%reason, "Iroh destination connection closed");
+        }
     }
+    outgoing_control.close();
     state.fail();
 }
 
-async fn read_destination_control(
-    state: Arc<PeerState<DestinationEnvelope>>,
-    mut stream: RecvStream,
+async fn read_destination_control<R: AsyncRead + Unpin>(
+    incoming: &IncomingQueue<DestinationEnvelope>,
+    mut stream: R,
 ) -> anyhow::Result<()> {
     loop {
-        state.push(read_record::<_, DestinationEnvelope>(&mut stream).await?)?;
+        incoming
+            .push(read_record::<_, DestinationEnvelope>(&mut stream).await?)
+            .await?;
     }
 }
 
-async fn read_source_control(
-    state: Arc<PeerState<SourceTransportPacket>>,
-    mut stream: RecvStream,
-) -> anyhow::Result<()> {
+pub(super) async fn write_destination_control<W: AsyncWrite + Unpin>(
+    outgoing: &InputOutbox,
+    writer: &mut W,
+) -> Result<()> {
     loop {
-        state.push(SourceTransportPacket::Control(
-            read_record::<_, SourceEnvelope<weld_hoist_protocol::EncodedBuffer>>(&mut stream)
-                .await?,
-        ))?;
+        let packet = outgoing.recv().await?;
+        write_record(writer, &packet).await?;
     }
 }
 
-async fn read_source_media(
-    state: Arc<PeerState<SourceTransportPacket>>,
-    mut stream: RecvStream,
+async fn read_source_control<R: AsyncRead + Unpin>(
+    incoming: &IncomingQueue<SourceTransportPacket>,
+    mut stream: R,
+) -> anyhow::Result<()> {
+    loop {
+        incoming
+            .push(SourceTransportPacket::Control(
+                read_record::<_, SourceEnvelope<weld_hoist_protocol::EncodedBuffer>>(&mut stream)
+                    .await?,
+            ))
+            .await?;
+    }
+}
+
+async fn read_source_media<R: AsyncRead + Unpin>(
+    incoming: &IncomingQueue<SourceTransportPacket>,
+    mut stream: R,
 ) -> anyhow::Result<()> {
     let mut magic = [0; MEDIA_STREAM_MAGIC.len()];
     stream
@@ -364,7 +330,9 @@ async fn read_source_media(
         .context("could not initialize Iroh media stream")?;
     ensure!(magic == MEDIA_STREAM_MAGIC, "invalid Iroh media stream");
     loop {
-        state.push(SourceTransportPacket::Media(read_media(&mut stream).await?))?;
+        incoming
+            .push(SourceTransportPacket::Media(read_media(&mut stream).await?))
+            .await?;
     }
 }
 
@@ -385,18 +353,56 @@ impl std::error::Error for PeerError {}
 
 #[cfg(test)]
 mod tests {
+    use futures_lite::future::poll_once;
+    use weld_core::host::client_runtime_notifier;
+    use weld_hoist_protocol::{DestinationMessage, HoistSessionId};
+
     use super::*;
 
-    #[test]
-    fn inbound_queue_drains_buffered_records_before_reporting_failure() {
-        let incoming = IncomingQueue::new();
-        incoming.push(1_u8).expect("available push");
-        assert_eq!(incoming.drain().expect("available drain"), vec![1]);
-
-        incoming.push(2).expect("buffered push");
-        assert!(incoming.fail());
-        assert!(!incoming.is_available());
-        assert_eq!(incoming.drain().expect("failed buffered drain"), vec![2]);
-        assert!(incoming.drain().is_err());
+    #[tokio::test]
+    async fn saturated_stream_reader_does_not_block_opposite_control_writer() {
+        let (notifier, _wake) = client_runtime_notifier().expect("notifier");
+        let inbox = IncomingQueue::new(notifier);
+        let (mut input, reader) = tokio::io::duplex(8192);
+        for sequence in 0..QUEUE_CAPACITY + 1 {
+            write_record(
+                &mut input,
+                &DestinationEnvelope {
+                    session: HoistSessionId::new(sequence as u64),
+                    message: DestinationMessage::Reclaim,
+                },
+            )
+            .await
+            .expect("input record");
+        }
+        let mut reading = Box::pin(read_destination_control(&inbox, reader));
+        // Tokio IO can cooperatively yield before capacity is reached.
+        for _ in 0..8 {
+            assert!(poll_once(reading.as_mut()).await.is_none());
+            tokio::task::yield_now().await;
+        }
+        let outgoing = InputOutbox::default();
+        outgoing
+            .push(DestinationEnvelope {
+                session: HoistSessionId::new(999),
+                message: DestinationMessage::Reclaim,
+            })
+            .expect("opposite record");
+        let (mut writer, mut output) = tokio::io::duplex(64);
+        let mut writing = Box::pin(write_destination_control(&outgoing, &mut writer));
+        assert!(poll_once(writing.as_mut()).await.is_none());
+        let packet: DestinationEnvelope =
+            read_record(&mut output).await.expect("opposite progress");
+        assert_eq!(packet.session, HoistSessionId::new(999));
+        let batch = inbox.drain().expect("full batch");
+        assert_eq!(batch.len(), QUEUE_CAPACITY);
+        for (sequence, packet) in batch.into_iter().enumerate() {
+            assert_eq!(packet.session, HoistSessionId::new(sequence as u64));
+        }
+        assert!(poll_once(reading.as_mut()).await.is_none());
+        assert_eq!(
+            inbox.drain().expect("last record")[0].session,
+            HoistSessionId::new(QUEUE_CAPACITY as u64)
+        );
     }
 }

@@ -81,6 +81,39 @@ is needed: the existing exact revision, role, and codec checks remain in place.
 
 ## Connection diagnostics
 
+### Queue pressure
+
+Iroh ingress admits at most 256 records per peer inbox. A full inbox now parks
+the async reader until the compositor drains a batch; it does not disconnect.
+Each record owns its capacity permit, and terminal peer closure wakes parked
+readers. Destination control and media share this inbox, so control admission
+can wait behind media pressure, but draining never waits for decode completion.
+Opposite-direction stream work remains independently polled. Host notifications
+remain level-triggered eventfd writes for every admitted record.
+
+The destination's outgoing control queue retains at most 256 records plus the
+record currently being written. Adjacent absolute pointer motions for the same
+session and exact layer target retain only the latest position and timestamp.
+Keys, buttons, scroll, gestures, pointer leave, acknowledgements and all other
+control records are barriers; in-flight records are never rewritten. This is
+the same adjacent-motion rule as `ApplicationInputBuffer`, applied to transport
+backlog rather than introducing an input sampling timer.
+
+Sustained non-coalescible outgoing overload is still terminal: synchronous
+compositor callers cannot wait, and losing a release or growing an unbounded
+queue is not acceptable. The error includes message-kind totals and coalesced
+motion count. Source control/media retain their existing hard bounds. End-to-end
+retry admission for these synchronous APIs is separate work; this is not a claim
+that all network stalls or overloads are solved.
+
+`weld_network_diag` reports parked incoming admissions, currently parked readers
+and the longest **completed or cancelled** admission wait, at most once per
+second when the host drains and pressure changed or readers remain parked.
+That completed-wait maximum does not measure an ongoing wait. No additional
+timer, input payload logging or video trace is enabled.
+
+### Selected paths
+
 ```sh
 RUST_LOG=info,weld_network_diag=debug scripts/run-iroh-hoist --codec av1
 ```

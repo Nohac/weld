@@ -5,6 +5,8 @@ mod admission;
 mod diagnostics;
 mod framing;
 mod host;
+mod inbox;
+mod input_outbox;
 mod media_queue;
 mod peer;
 mod rendezvous;
