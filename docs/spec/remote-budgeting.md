@@ -105,6 +105,51 @@ errors, memory pressure, throughput, loss, power, and thermal observations
 correct the estimate. A successful context creation does not prove sustainable
 cadence; sustained deadlines matter.
 
+## Codec pools and auxiliary capacity — Exploration
+
+Hardware engines, concurrent codec sessions, sustainable pixel throughput, and
+memory are separate limits. A Weld safety bound on live generations is not a
+measurement of the device's physical encoder count. Lower resolution or cadence
+can relieve throughput pressure without increasing a hard session ceiling.
+
+Explore a device-local capacity pool with dedicated interactive/high-detail
+streams, auxiliary capacity for popup color and alpha masks, lower-cadence
+background atlases, and unallocated transition/external-work headroom. These
+are allocation roles, not fixed portable numbers of hardware encoders. Reserving
+"all but one" context is only a possible policy seed: leave throughput and
+memory headroom too, and do not promise another application an OS-enforced
+reservation. Encoder and destination decoder budgets must both admit a layout.
+
+Reserve capacity in bookkeeping before allocating actual sessions. Start
+sessions and appropriately sized buffers lazily; consider only a small bounded
+warm pool if startup measurements justify it. Do not discover the device limit
+by opening every possible encoder during normal startup, or allocate every
+session at the device's maximum extent.
+
+Auxiliary grouping should consider observed color and alpha change cadence,
+trusted focus/attention, visibility, quality guarantees, and recipient
+compatibility. Frequently changing alpha can share an active group, while static
+masks remain retained without repeated transmission. A focused presentation's
+required alpha gets corresponding service; alpha is not automatically an
+optional enhancement that can be dropped under pressure. Pins, accessibility,
+and other admitted guarantees still constrain focus-based policy.
+
+Sharing one auxiliary pool does not require one universal auxiliary stream.
+Mixing a rapidly changing popup with many static masks can force work over the
+whole atlas at the popup's cadence. Group by compatible cadence, use stable
+placements, and apply dwell/hysteresis to promotion and regrouping rather than
+repacking on every focus or damage event. Charge composition, aligned coded
+pixels, memory, contexts, and destination decoding as well as encoded bytes;
+cheap compression of flat masks is not proof of cheap hardware processing.
+
+Packing may reduce session count; downscaling and lower cadence may reduce
+pixel work. Neither is a substitute for measuring the limiting resource. The
+protocol owns the [auxiliary layout and alpha contracts][auxiliary-alpha], while
+budgeting recommends groups and allocations. This exploration is deferred from
+the first fixed/adaptive network-budget implementation.
+
+[auxiliary-alpha]: remote-protocol.md#auxiliary-color-and-alpha-atlases--exploration
+
 ## Reservation model — Direction
 
 Each active presentation stream has a peer-local reservation containing at

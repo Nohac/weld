@@ -413,6 +413,49 @@ The mapping can change without changing the surface graph. A new layout uses a
 new stream generation and becomes active only when the destination can decode
 and map it atomically.
 
+## Auxiliary color and alpha atlases — Exploration
+
+An auxiliary media pool may serve both independently positioned popup/tooltip
+color and alpha masks for several presentations. It may use several streams
+grouped by update cadence and negotiated quality, rather than forcing every
+auxiliary image into one stream. It encodes composed stable atlas images, not
+unrelated surfaces alternated through a predictive encoder without mappings.
+
+Every tile maps to an authorized logical surface and color/alpha role. Grouping
+must respect recipient permissions: a receiver must never obtain an atlas with
+another recipient's private pixels. Clear reused tiles and define sampling
+boundaries/padding so filtering and stale mappings cannot expose adjacent or
+previously assigned content. Popup geometry, input, stacking, clipping, and
+lifetime stay independent of the atlas; a popup may extend beyond its parent.
+
+Explore these negotiated alpha representations:
+
+- implicit opaque alpha, with no mask pixels;
+- a constant opacity value for genuinely uniform alpha;
+- lower-resolution filtered masks for soft shadows and gradients;
+- higher-resolution or lossless masks for sharp cutouts, corners, and text;
+- retained unchanged masks, referenced by explicit mask revision rather than
+  retransmitted with each color update.
+
+Alpha may be carried as grayscale data in a supported video plane, but range
+mapping, precision, transfer behavior, filtering, and premultiplication must be
+specified independently from color. A mask carries opacity, not arbitrary
+shadow color. Known Weld-owned effects could instead be generated at the
+receiver; arbitrary client artwork is not replaced by guessed geometry.
+
+Color references the compatible mask revision and accepted layout generation.
+Resize, tile reuse, regrouping, loss, and recovery must not apply an old mask to
+new geometry or another surface. Static-mask reuse must be explicitly allowed;
+missing required alpha follows the negotiated hold/recovery policy, never an
+implicit opaque fallback. Layout transitions activate atomically through the
+existing generation contract. Different color/mask resolutions retain precise
+source-to-destination mappings and do not change input coordinates.
+
+The [budgeting exploration](remote-budgeting.md#codec-pools-and-auxiliary-capacity--exploration)
+owns cadence/focus grouping recommendations and resource reservations. The
+protocol owns these representations and compatibility rules. This does not
+enable alpha, atlases, or new encoders in the current opaque implementation.
+
 ## Adaptive and alpha media — Direction
 
 Encoding policy can use compositor knowledge unavailable to screen capture.
