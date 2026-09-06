@@ -2,7 +2,7 @@
 
 ## Status and scope
 
-The first source-observation sub-batch below is implemented; the budgeting and
+The source- and receiver-observation sub-batches below are implemented; the budgeting and
 adaptation batches remain a proposed implementation sequence. The design has
 been peer reviewed; implementation may proceed in the order below. The broader
 [budgeting specification](spec/remote-budgeting.md) remains Direction, not a
@@ -39,9 +39,41 @@ presentation latency. Encoded-byte counts are produced payloads, not delivered
 or carrier-billed bytes. These observations do not change scheduling, codec
 parameters, credit policy, or source-buffer lifetime.
 
-The transport/receiver split, reasoned wire feedback, preferences and actual
-budget enforcement remain subsequent work. In particular, no data-saving or
-hard-cap option is exposed before it can be enforced.
+### Implemented: receiver observations
+
+The same encoded ports used by Unix and Iroh now collect fixed-size receiver
+summaries under `weld_media_diag`. They count accepted commits and media payloads,
+submitted/successfully completed decodes, applied encoded commits, lifecycle
+cancellations, late cancelled media and codec-result errors. Late cancelled
+media is counted separately, not as accepted media or congestion loss. An
+obsolete decode can count both a cancellation and a codec error; invalid tokens
+and failed results never count as successful decodes. Received commits include
+metadata-only commits, while applied/cancelled counters cover commits carrying
+encoded replacements and their credit outcomes.
+
+Timestamps occupy existing bounded queue entries. The locally measured stages
+are deliberately distinct and **overlap**, so do not add them:
+
+- `media_wait`: media ingress into the encoded port to decode submission,
+  including any wait for control metadata and earlier work;
+- `decode_wall`: accepted submission to matching successful completion drain,
+  including worker processing and host polling;
+- `commit_wall`: control ingress through decoded-buffer import and queuing the
+  adapter event. This is not actual presentation or acknowledgement delivery.
+
+Ingress here is not socket receipt: time in the binding's receive queue is not
+included. Gauges report queued control events, pending media frames/bytes,
+decoded frames, logical streams, the active decode, and oldest control/media
+and active-decode ages. Queue scans happen only when a summary is due. Idle
+mapped streams do not emit continuously; pending work can still report a stall.
+Like source observations, collection is independent from tracing and creates
+no new timer or compositor wake. A failing decode drain emits a partial summary
+before propagating its error, with a best-effort final summary on ordinary Drop.
+
+The transport measurement split, reasoned wire feedback, preferences and actual
+budget enforcement remain subsequent work. These receiver observations do not
+change scheduling or the protocol. No data-saving or hard-cap option is exposed
+before it can be enforced.
 
 ## Verified starting point
 

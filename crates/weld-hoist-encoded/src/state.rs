@@ -30,6 +30,9 @@ use weld_media::{EncodedAccessUnit, MediaFrameId, MediaStreamId, StreamGeneratio
 use crate::codec::{
     DecodeBackend, DecodeRequest, EncodeBackend, EncodeInput, EncodeRequest, SubmitError,
 };
+use crate::destination_observations::{
+    DestinationGauges, DestinationObservation, DestinationObservations,
+};
 use crate::observations::{SourceGauges, SourceObservation, SourceObservations};
 
 /// One packet sent from an encoded source to its destination.
@@ -918,6 +921,13 @@ struct QueuedDestinationEvent {
     session: HoistSessionId,
     source_surface: ClientSurfaceId,
     event: WireClientSurfaceEvent<EncodedBuffer>,
+    received_at: Instant,
+}
+
+struct PendingMedia {
+    session: HoistSessionId,
+    access_unit: EncodedAccessUnit,
+    received_at: Instant,
 }
 
 struct EncodedDestinationEvent {
@@ -944,7 +954,7 @@ struct EncodedDestinationState {
     descriptor: ClientSourceDescriptor,
     dmabuf: Option<DmabufContext>,
     queues: HashMap<ClientSurfaceId, VecDeque<QueuedDestinationEvent>>,
-    media_frames: HashMap<MediaFrameId, (HoistSessionId, weld_media::EncodedAccessUnit)>,
+    media_frames: HashMap<MediaFrameId, PendingMedia>,
     decoded: HashMap<MediaFrameId, weld_core::dmabuf::ExternalDmabuf>,
     decode_in_flight: Option<InFlightDecode>,
     cancelled_frames: HashMap<MediaFrameId, HoistSessionId>,
@@ -953,6 +963,7 @@ struct EncodedDestinationState {
     next_token: Option<u64>,
     next_buffer: Option<u64>,
     next_use: Option<u64>,
+    observations: DestinationObservations,
 }
 
 impl EncodedDestinationState {
@@ -983,6 +994,7 @@ impl EncodedDestinationState {
             next_token: Some(1),
             next_buffer: Some(1),
             next_use: Some(1),
+            observations: DestinationObservations::new(Instant::now()),
         }
     }
 
@@ -1033,6 +1045,10 @@ impl EncodedDestinationState {
             queued < MAX_DESTINATION_EVENTS,
             "encoded destination event bound exceeded"
         );
+        if matches!(event.kind, WireClientSurfaceEventKind::Commit(_)) {
+            self.observations
+                .record(DestinationObservation::CommitReceived);
+        }
         self.queues
             .entry(source_surface)
             .or_default()
@@ -1040,6 +1056,7 @@ impl EncodedDestinationState {
                 session,
                 source_surface,
                 event,
+                received_at: Instant::now(),
             });
         self.advance(output)
     }
@@ -1056,18 +1073,30 @@ impl EncodedDestinationState {
                 "cancelled encoded media crossed hoist sessions"
             );
             self.cancelled_frames.remove(&frame);
+            self.observations
+                .record(DestinationObservation::LateCancelledMedia);
             return Ok(());
         }
         ensure!(
             self.media_frames.len() < MAX_PENDING_MEDIA_FRAMES,
             "encoded destination media-frame bound exceeded"
         );
+        let payload_bytes = u64::try_from(packet.access_unit.payload.len()).unwrap_or(u64::MAX);
         ensure!(
             self.media_frames
-                .insert(frame, (packet.session, packet.access_unit))
+                .insert(
+                    frame,
+                    PendingMedia {
+                        session: packet.session,
+                        access_unit: packet.access_unit,
+                        received_at: Instant::now(),
+                    }
+                )
                 .is_none(),
             "encoded media frame was delivered more than once"
         );
+        self.observations
+            .record(DestinationObservation::MediaReceived { payload_bytes });
         Ok(())
     }
 
@@ -1081,7 +1110,13 @@ impl EncodedDestinationState {
                 completion.token == in_flight.token,
                 "decoder completed an unexpected token"
             );
+            if completion.result.is_err() {
+                self.observations
+                    .record(DestinationObservation::CodecFailed);
+            }
             if in_flight.cancelled {
+                self.observations
+                    .record(DestinationObservation::DecodeCancelled);
                 if let Err(error) = completion.result {
                     tracing::debug!(frame = ?in_flight.frame, error = %format_args!("{error:#}"),
                         "discarded cancelled decode failure");
@@ -1103,9 +1138,12 @@ impl EncodedDestinationState {
                 frame.frame == in_flight.frame,
                 "low-delay decoder returned another frame"
             );
+            let wall_time = in_flight.submitted_at.elapsed();
+            self.observations
+                .record(DestinationObservation::DecodeCompleted { wall_time });
             tracing::trace!(
                 frame = ?frame.frame,
-                decode_micros = in_flight.submitted_at.elapsed().as_micros(),
+                decode_micros = wall_time.as_micros(),
                 "completed encoded destination decode"
             );
             self.decoded.insert(frame.frame, frame.dmabuf);
@@ -1144,6 +1182,8 @@ impl EncodedDestinationState {
                         revision,
                         outcome: EncodedCommitOutcome::Dropped,
                     });
+                    self.observations
+                        .record(DestinationObservation::CommitCancelled);
                 }
             }
         }
@@ -1259,6 +1299,10 @@ impl EncodedDestinationState {
                         revision,
                         outcome: EncodedCommitOutcome::Applied,
                     });
+                    self.observations
+                        .record(DestinationObservation::CommitApplied {
+                            wall_time: queued.received_at.elapsed(),
+                        });
                     tracing::trace!(
                         source_surface = ?queued.source_surface,
                         ?revision,
@@ -1288,11 +1332,11 @@ impl EncodedDestinationState {
         if self.decode_in_flight.is_some() {
             return Ok(());
         }
-        let Some((media_session, access_unit)) = self.media_frames.remove(&frame) else {
+        let Some(media) = self.media_frames.remove(&frame) else {
             return Ok(());
         };
         ensure!(
-            media_session == session,
+            media.session == session,
             "encoded media crossed hoist sessions"
         );
         let metadata = self
@@ -1304,17 +1348,22 @@ impl EncodedDestinationState {
         let token = take_counter(&mut self.next_token, "encoded decode token")?;
         let request = DecodeRequest {
             token,
-            access_unit,
+            access_unit: media.access_unit,
             visible_width: metadata.extent.width,
             visible_height: metadata.extent.height,
         };
+        let submitted_at = Instant::now();
         match self.backend.try_submit(request) {
             Ok(()) => {
+                self.observations
+                    .record(DestinationObservation::DecodeSubmitted {
+                        media_wait: submitted_at.saturating_duration_since(media.received_at),
+                    });
                 self.decode_in_flight = Some(InFlightDecode {
                     token,
                     frame,
                     cancelled: false,
-                    submitted_at: Instant::now(),
+                    submitted_at,
                 });
                 Ok(())
             }
@@ -1331,6 +1380,50 @@ impl EncodedDestinationState {
             .get_mut(&surface)
             .and_then(VecDeque::pop_front)
             .context("encoded destination queue disappeared")
+    }
+
+    fn observation_gauges(&self, now: Instant) -> DestinationGauges {
+        DestinationGauges {
+            pending_events: self.queues.values().map(VecDeque::len).sum(),
+            pending_media_frames: self.media_frames.len(),
+            pending_media_bytes: self.media_frames.values().fold(0_u64, |total, media| {
+                total.saturating_add(
+                    u64::try_from(media.access_unit.payload.len()).unwrap_or(u64::MAX),
+                )
+            }),
+            decoded_frames: self.decoded.len(),
+            active_streams: self.streams.len(),
+            decode_in_flight: self.decode_in_flight.is_some(),
+            oldest_control_age: self
+                .queues
+                .values()
+                .filter_map(|queue| queue.front())
+                .map(|event| now.saturating_duration_since(event.received_at))
+                .max()
+                .unwrap_or_default(),
+            oldest_media_age: self
+                .media_frames
+                .values()
+                .map(|media| now.saturating_duration_since(media.received_at))
+                .max()
+                .unwrap_or_default(),
+            active_decode_age: self
+                .decode_in_flight
+                .as_ref()
+                .map(|active| now.saturating_duration_since(active.submitted_at))
+                .unwrap_or_default(),
+        }
+    }
+
+    fn report_observations(&mut self, final_report: bool) {
+        let now = Instant::now();
+        if !self.observations.report_due(now, final_report) {
+            return;
+        }
+        let gauges = self.observation_gauges(now);
+        if let Some(report) = self.observations.take_report(now, gauges, final_report) {
+            report.emit();
+        }
     }
 
     fn import_decoded(
@@ -1356,6 +1449,13 @@ impl EncodedDestinationState {
         context.lease_external(buffer, use_id, metadata, access, move |_| {
             dmabuf_for_release.remove_external(&access_for_release)
         })
+    }
+}
+
+impl Drop for EncodedDestinationState {
+    fn drop(&mut self) {
+        // Best effort before ordinary teardown; process abort/SIGKILL may skip it.
+        self.report_observations(true);
     }
 }
 
@@ -1474,11 +1574,13 @@ impl<T: EncodedDestinationTransport> HoistDestinationPort for EncodedDestination
             self.apply_source_packet(packet, &mut records)?;
         }
         let mut decoded = Vec::new();
-        self.state
+        let state = self
+            .state
             .as_mut()
-            .ok_or_else(|| protocol_error("encoded destination port is disconnected"))?
-            .drain(&mut decoded)
-            .map_err(protocol_error)?;
+            .ok_or_else(|| protocol_error("encoded destination port is disconnected"))?;
+        let result = state.drain(&mut decoded);
+        state.report_observations(result.is_err());
+        result.map_err(protocol_error)?;
         extend_encoded_records(&mut records, decoded);
         self.flush_outcomes()?;
         Ok(records)
@@ -1599,6 +1701,7 @@ mod tests {
     use std::{
         cell::{Cell, RefCell},
         rc::Rc,
+        time::Duration,
     };
 
     use weld_client::{
@@ -2197,6 +2300,7 @@ mod tests {
             Err(anyhow::anyhow!("obsolete decode failed")),
             Ok(Vec::new()),
         ] {
+            let failed = result.is_err();
             let (mut port, _, decoder) = destination_port();
             let state = port.state.as_mut().expect("state");
             let source_id = ClientSourceId::new(1);
@@ -2233,6 +2337,16 @@ mod tests {
                 vec![(frame.stream, frame.generation)]
             );
             assert_eq!(decoder.borrow().submitted, vec![frame, next]);
+            let report = state
+                .observations
+                .take_report(Instant::now(), DestinationGauges::default(), true)
+                .expect("observations");
+            assert_eq!(report.counters.media_wait.samples, 2);
+            assert_eq!(report.counters.decodes_cancelled, 1);
+            assert_eq!(report.counters.codec_failures, u64::from(failed));
+            assert_eq!(report.counters.decode_wall.samples, 0);
+            assert_eq!(report.counters.commit_wall.samples, 0);
+            assert_eq!(report.counters.commits_cancelled, 1);
         }
     }
 
@@ -2299,6 +2413,15 @@ mod tests {
             assert!(state.media_frames.is_empty());
             state.take_outcomes();
         }
+        let report = state
+            .observations
+            .take_report(Instant::now(), DestinationGauges::default(), true)
+            .expect("observations");
+        assert_eq!(report.counters.decode_wall.samples, 160);
+        assert_eq!(report.counters.commit_wall.samples, 0);
+        assert_eq!(report.counters.commits_cancelled, 160);
+        assert_eq!(report.counters.late_cancelled_media, 160);
+        assert_eq!(report.counters.media_received, 160);
     }
 
     #[test]
@@ -2517,6 +2640,15 @@ mod tests {
                 .to_string()
                 .contains("unexpected token")
         );
+        let report = state
+            .observations
+            .take_report(Instant::now(), DestinationGauges::default(), true)
+            .expect("observations");
+        assert_eq!(report.counters.media_wait.samples, 1);
+        assert_eq!(report.counters.decode_wall.samples, 0);
+        assert_eq!(report.counters.commit_wall.samples, 0);
+        assert_eq!(report.counters.decodes_cancelled, 0);
+        assert_eq!(report.counters.codec_failures, 0);
     }
 
     #[test]
@@ -2693,6 +2825,16 @@ mod tests {
 
             assert!(port.poll().expect("ordered packets").is_empty());
             assert_eq!(decoder.borrow().submitted, vec![frame]);
+            let state = port.state.as_mut().expect("state");
+            let report = state
+                .observations
+                .take_report(Instant::now(), DestinationGauges::default(), true)
+                .expect("observations");
+            assert_eq!(report.counters.commits_received, 1);
+            assert_eq!(report.counters.media_received, 1);
+            assert_eq!(report.counters.payload_bytes_received, 1);
+            assert_eq!(report.counters.media_wait.samples, 1);
+            assert_eq!(report.counters.commit_wall.samples, 0);
         }
     }
 
@@ -2732,6 +2874,107 @@ mod tests {
                 ..
             }] if *observed == surface && *revision == ClientCommitRevision::new(8)
         ));
+        let state = port.state.as_mut().expect("state");
+        let report = state
+            .observations
+            .take_report(Instant::now(), DestinationGauges::default(), true)
+            .expect("observations");
+        assert_eq!(report.counters.commits_cancelled, 1);
+        assert_eq!(report.counters.commit_wall.samples, 0);
+    }
+
+    #[test]
+    fn receiver_gauges_measure_existing_queue_entries_without_clock_sleeps() {
+        let (mut port, _, _) = destination_port();
+        let state = port.state.as_mut().expect("state");
+        let session = HoistSessionId::new(1);
+        let surface = surface(ClientSourceId::new(2), 3, 4);
+        let frame = MediaFrameId::new(MediaStreamId::new(5), StreamGeneration::new(6), 7);
+        let mut output = Vec::new();
+        state
+            .enqueue(session, encoded_commit(surface, 8, frame), &mut output)
+            .expect("control");
+        state
+            .enqueue_media(encoded_media(session, frame))
+            .expect("media");
+        let start = Instant::now();
+        state
+            .queues
+            .get_mut(&surface)
+            .expect("queue")
+            .front_mut()
+            .expect("event")
+            .received_at = start;
+        state
+            .media_frames
+            .get_mut(&frame)
+            .expect("media")
+            .received_at = start + Duration::from_millis(10);
+        let now = start + Duration::from_millis(30);
+        let gauges = state.observation_gauges(now);
+        assert_eq!(gauges.pending_events, 1);
+        assert_eq!(gauges.pending_media_frames, 1);
+        assert_eq!(gauges.pending_media_bytes, 1);
+        assert_eq!(gauges.oldest_control_age, Duration::from_millis(30));
+        assert_eq!(gauges.oldest_media_age, Duration::from_millis(20));
+        assert!(!gauges.decode_in_flight);
+        state.advance(&mut output).expect("submit");
+        state
+            .decode_in_flight
+            .as_mut()
+            .expect("decode")
+            .submitted_at = start;
+        let gauges = state.observation_gauges(now);
+        assert_eq!(gauges.pending_events, 1);
+        assert_eq!(gauges.pending_media_frames, 0);
+        assert_eq!(gauges.pending_media_bytes, 0);
+        assert!(gauges.decode_in_flight);
+        assert_eq!(gauges.active_decode_age, Duration::from_millis(30));
+    }
+
+    #[test]
+    fn receiver_does_not_count_duplicate_media_or_failed_decodes_as_success() {
+        let (mut port, _, decoder) = destination_port();
+        let state = port.state.as_mut().expect("state");
+        let session = HoistSessionId::new(1);
+        let surface = surface(ClientSourceId::new(2), 3, 4);
+        let frame = MediaFrameId::new(MediaStreamId::new(5), StreamGeneration::new(6), 7);
+        state
+            .enqueue_media(encoded_media(session, frame))
+            .expect("media");
+        state
+            .enqueue(session, encoded_commit(surface, 8, frame), &mut Vec::new())
+            .expect("control");
+        let token = decoder.borrow().tokens[0];
+        decoder.borrow_mut().completions.push(DecodeCompletion {
+            token,
+            result: Err(anyhow::anyhow!("fake decode failure")),
+        });
+        assert!(state.drain(&mut Vec::new()).is_err());
+        let report = state
+            .observations
+            .take_report(Instant::now(), DestinationGauges::default(), true)
+            .expect("observations");
+        assert_eq!(report.counters.codec_failures, 1);
+        assert_eq!(report.counters.media_wait.samples, 1);
+        assert_eq!(report.counters.decode_wall.samples, 0);
+        assert_eq!(report.counters.commit_wall.samples, 0);
+        assert_eq!(report.counters.commits_cancelled, 0);
+
+        // A separate destination fails before control/codec work on duplicate media.
+        let (mut port, _, _) = destination_port();
+        let state = port.state.as_mut().expect("state");
+        state
+            .enqueue_media(encoded_media(session, frame))
+            .expect("media");
+        assert!(state.enqueue_media(encoded_media(session, frame)).is_err());
+        let report = state
+            .observations
+            .take_report(Instant::now(), DestinationGauges::default(), true)
+            .expect("observations");
+        assert_eq!(report.counters.media_received, 1);
+        assert_eq!(report.counters.payload_bytes_received, 1);
+        assert_eq!(report.counters.media_wait.samples, 0);
     }
 
     #[test]

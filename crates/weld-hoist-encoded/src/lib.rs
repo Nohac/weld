@@ -1,6 +1,7 @@
 //! Transport-neutral encoded hoist scheduling and codec integration.
 
 mod codec;
+mod destination_observations;
 mod observations;
 mod state;
 

@@ -11,7 +11,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-const REPORT_INTERVAL: Duration = Duration::from_secs(1);
+pub(super) const REPORT_INTERVAL: Duration = Duration::from_secs(1);
 
 #[derive(Clone, Copy, Debug)]
 pub(super) enum SourceObservation {
@@ -37,7 +37,7 @@ pub(super) struct TimingSummary {
 }
 
 impl TimingSummary {
-    fn record(&mut self, duration: Duration) {
+    pub(super) fn record(&mut self, duration: Duration) {
         self.samples = self.samples.saturating_add(1);
         self.total = self.total.saturating_add(duration);
         self.maximum = self.maximum.max(duration);
