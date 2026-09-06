@@ -15,16 +15,21 @@ import os
 from pathlib import Path
 import pwd
 import shutil
+import signal
 import stat
 import subprocess
 import sys
 import tempfile
 import time
+from types import SimpleNamespace
 
 from policy import (Refused, dns_servers, interface_name, run_id, seconds,
                     validate_namespace, validate_profile, validate_routes, verify_device)
 
 ROOT = Path("/run/weld-network")
+# 5s lock + 15s DHCP stop + 5s NM readiness + 25s activation leaves
+# 20s for checks here, and another 20s before systemd's 90s stop ceiling.
+CLEANUP_SECONDS = 70
 TOOL_PATH = "/run/current-system/sw/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 ROOT_ENV = {"PATH": TOOL_PATH, "LANG": "C", "LC_ALL": "C"}
 COMMAND_DEADLINE = ContextVar("command_deadline", default=None)
@@ -227,7 +232,49 @@ def device_lock(client, wait_seconds=0):
         os.close(fd)
 
 
+@contextlib.contextmanager
+def record_interrupts(ignore=False):
+    """Do not raise through Popen.wait and accidentally kill the supervised child."""
+    status = SimpleNamespace(requested=False)
+
+    def received(_signal, _frame):
+        status.requested = True
+
+    previous = {number: signal.signal(number, signal.SIG_IGN if ignore else received)
+                for number in (signal.SIGINT, signal.SIGQUIT)}
+    try:
+        yield status
+    finally:
+        for number, handler in previous.items():
+            signal.signal(number, handler)
+
+
+def report(message, *, error=False):
+    """Terminal output is not part of successful restoration's contract."""
+    stream = sys.stderr if error else sys.stdout
+    try:
+        print(message, file=stream, flush=True)
+    except BrokenPipeError:
+        # Keep the existing stream's buffered final flush from failing with 120.
+        descriptor = os.open(os.devnull, os.O_WRONLY)
+        try:
+            os.dup2(descriptor, stream.fileno())
+        finally:
+            os.close(descriptor)
+
+
 def prepare(manifest):
+    with record_interrupts() as interruption:
+        try:
+            return prepare_run(manifest, interruption)
+        except (Refused, OSError, ValueError, subprocess.SubprocessError):
+            if interruption.requested:
+                report("Network test cancelled before supervision started.")
+                return 130
+            raise
+
+
+def prepare_run(manifest, interruption):
     owner = int(os.environ.get("SUDO_UID", "0"))
     if owner == 0:
         raise Refused("start via the normal-user launcher and sudo")
@@ -274,14 +321,56 @@ def prepare(manifest):
     write_state(directory, state)
     helper = directory / "main.py"
     total = config["startup_seconds"] + config["seconds"] + 15
-    return subprocess.call([executable("systemd-run"), "--unit=" + unit_name(identifier),
+    arguments = [executable("systemd-run"), "--unit=" + unit_name(identifier),
         "--wait", "--pipe", "--collect", "--service-type=exec",
         "--property=KillMode=control-group", "--property=TimeoutStopSec=90",
         "--property=LimitCORE=0", "--property=PrivateMounts=no",
         "--property=UnsetEnvironment=LD_LIBRARY_PATH LD_PRELOAD PYTHONPATH PYTHONHOME",
         "--property=RuntimeMaxSec=" + str(total),
         "--property=ExecStopPost=" + str(helper) + " _cleanup " + identifier,
-        str(helper), "_service", identifier], env=ROOT_ENV)
+        str(helper), "_service", identifier]
+    return run_unit(arguments, identifier, interruption)
+
+
+def run_unit(arguments, identifier, interruption):
+    if interruption.requested:
+        report("Network test cancelled before starting the service.")
+        return 130
+    # Only the already-privileged systemd-run waiter is isolated. sudo stays in
+    # the foreground, where it can prompt and forward signals to _prepare.
+    process = subprocess.Popen(arguments, env=ROOT_ENV, start_new_session=True)
+    while True:
+        if interruption.requested:
+            return cancel_unit(process, identifier)
+        try:
+            result = process.wait(timeout=0.2)
+            return cancel_unit(process, identifier) if interruption.requested else result
+        except subprocess.TimeoutExpired:
+            pass
+
+
+def cancel_unit(process, identifier):
+    with record_interrupts(ignore=True):
+        report("Cancellation requested; stopping this run and restoring the tether. "
+               "Allow up to about 90 seconds, longer if the first cleanup did not finish.")
+        try:
+            directory, _state = load(identifier)
+            # Separate from state.json: the running service owns its checkpoints.
+            # A unit registered after stop's lookup must not start a new move.
+            try:
+                descriptor = os.open(directory / "cancelled", os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+            except FileExistsError:
+                pass
+            else:
+                os.close(descriptor)
+            command("systemctl", "stop", unit_name(identifier), timeout=100, check=False)
+            process.wait(timeout=100)
+            result = cleanup(identifier)
+            return 130 if result == 0 else result
+        except (Refused, OSError, ValueError, subprocess.SubprocessError) as error:
+            report(f"Cancellation recovery incomplete: {error}\n"
+                   f"Retry: scripts/run-network-hoist --recover {identifier}", error=True)
+            return 1
 
 
 def mark(directory, state, key, value=True):
@@ -337,6 +426,9 @@ def service(identifier):
     config = state["config"]
     client = config["client"]
     with device_lock(client):
+        directory, state = load(identifier)
+        if state.get("closed") or (directory / "cancelled").exists():
+            return 0
         fresh = preflight(config["host"], client, config["dhcpcd"])
         if fresh["profile"] != state["snapshot"]["profile"]:
             raise Refused("tether profile changed before setup")
@@ -344,7 +436,7 @@ def service(identifier):
         if Path("/run/netns", state["namespace"]).exists():
             raise Refused("namespace already exists")
         deadline = time.monotonic() + config["startup_seconds"]
-        print("Creating isolated receiver namespace.", flush=True)
+        report("Creating isolated receiver namespace.")
         mark(directory, state, "namespace_requested")
         command("ip", "netns", "add", state["namespace"])
         mark(directory, state, "namespace_inode", namespace_inode("/run/netns/" + state["namespace"]))
@@ -363,7 +455,7 @@ def service(identifier):
         command("ip", "-n", state["namespace"], "link", "set", "lo", "up")
         create_mountpoints(directory, state)
         helper = directory / "main.py"
-        print("Acquiring a fresh namespace lease (host DHCP state is isolated).", flush=True)
+        report("Acquiring a fresh namespace lease (host DHCP state is isolated).")
         mark(directory, state, "dhcp_requested")
         command("systemd-run", "--unit=" + state["dhcp_unit"], "--service-type=exec", "--collect",
                 "--property=BindsTo=" + unit_name(identifier), "--property=After=" + unit_name(identifier),
@@ -407,11 +499,11 @@ def service(identifier):
             if time.monotonic() >= deadline:
                 raise Refused("startup deadline expired waiting for both Weld runtimes")
             time.sleep(0.2)
-        print(f"Both Weld instances ready. Test for {config['seconds']} seconds; focus source and press Super+H.", flush=True)
+        report(f"Both Weld instances ready. Test for {config['seconds']} seconds; focus source and press Super+H.")
         end = time.monotonic() + config["seconds"]
         while time.monotonic() < end:
             if source.poll() is not None or destination.poll() is not None:
-                print(f"Peer exited: source={source.poll()}, destination={destination.poll()}", flush=True)
+                report(f"Peer exited: source={source.poll()}, destination={destination.poll()}")
                 if any(code not in (None, 0) for code in (source.poll(), destination.poll())):
                     raise Refused("a Weld peer failed; inspect the private source/destination logs")
                 break
@@ -420,8 +512,8 @@ def service(identifier):
                 raise Refused("receiver lease was lost")
             time.sleep(1)
         after = counters(state)
-        print(f"Client-interface byte delta (includes DHCP/N0): RX {after[0] - counters_before[0]}, TX {after[1] - counters_before[1]}", flush=True)
-        print("Run finished; systemd will stop this run's processes before restoring the tether.", flush=True)
+        report(f"Client-interface byte delta (includes DHCP/N0): RX {after[0] - counters_before[0]}, TX {after[1] - counters_before[1]}")
+        report("Run finished; systemd will stop this run's processes before restoring the tether.")
     return 0
 
 
@@ -520,7 +612,7 @@ def namespace_links(state):
 def cleanup(identifier):
     """Retryable rollback; intents cover termination between a syscall and its checkpoint."""
     directory, state = load(identifier)
-    token = COMMAND_DEADLINE.set(time.monotonic() + 60)
+    token = COMMAND_DEADLINE.set(time.monotonic() + CLEANUP_SECONDS)
     try:
         with device_lock(state["config"]["client"], wait_seconds=5):
             # Another recovery may have progressed while we waited. Never write a
@@ -541,20 +633,55 @@ def cleanup(identifier):
                 route_check(state["config"]["host"], state["config"]["client"])
             except (Refused, OSError, ValueError, subprocess.SubprocessError) as error:
                 mark(directory, state, "verification_error", str(error))
-                print(f"Tether restored, but host routing/DNS verification FAILED: {error}\n"
-                      f"Check host connectivity, then re-verify: scripts/run-network-hoist --recover {identifier}", file=sys.stderr)
+                report(f"Tether restored, but host routing/DNS verification FAILED: {error}\n"
+                       f"Check host connectivity, then re-verify: scripts/run-network-hoist --recover {identifier}", error=True)
                 return 2
             state.pop("verification_error", None)
             write_state(directory, state)
-            print("Tether restored; this run's namespace and processes are gone.", flush=True)
+            report("Tether restored; this run's namespace and processes are gone.")
             for note in state.get("cleanup_notes", []):
-                print("Cleanup note: " + note, flush=True)
+                report("Cleanup note: " + note)
         return 0
     except (Refused, OSError, ValueError, subprocess.SubprocessError) as error:
-        print(f"Recovery incomplete: {error}\nRetry: scripts/run-network-hoist --recover {identifier}", file=sys.stderr)
+        report(f"Recovery incomplete: {error}\nRetry: scripts/run-network-hoist --recover {identifier}", error=True)
         return 1
     finally:
         COMMAND_DEADLINE.reset(token)
+
+
+def wait_for_network_manager(state):
+    deadline = min(time.monotonic() + 5, COMMAND_DEADLINE.get() or float("inf"))
+    token = COMMAND_DEADLINE.set(deadline)
+    try:
+        wait_for_managed_device(state, deadline)
+    finally:
+        COMMAND_DEADLINE.reset(token)
+
+
+def wait_for_managed_device(state, deadline):
+    client = state["config"]["client"]
+    original = state["snapshot"]["profile"]
+    while True:
+        ensure_physical_instance(state)
+        verify_device(state["snapshot"]["device"], device(client))
+        if profile(client, original["uuid"]) != original:
+            raise Refused("original safe tether profile changed while waiting for NetworkManager")
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise Refused("NetworkManager did not manage the returning tether before the readiness deadline")
+        # An unknown device is expected briefly after netns return. Both the
+        # setter and query may fail until NM has registered it; neither is proof
+        # that it is safe to activate a different device or profile.
+        managed = command("nmcli", "--wait", str(int(remaining)), "device", "set", client, "managed", "yes",
+                          timeout=remaining, check=False)
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise Refused("NetworkManager tether readiness deadline reached")
+        result = command("nmcli", "-g", "GENERAL.NM-MANAGED", "device", "show", client,
+                         timeout=remaining, check=False)
+        if managed.returncode == 0 and result.returncode == 0 and result.stdout.strip() == "yes":
+            return
+        time.sleep(min(0.1, max(0, deadline - time.monotonic())))
 
 
 def restore(directory, state):
@@ -600,7 +727,7 @@ def restore(directory, state):
             verify_device(recorded, current, inside=True)
             command("ip", "-n", state["namespace"], "link", "set", "dev", client, "netns", "1")
         verify_device(state["snapshot"]["device"], device(client))
-        command("nmcli", "--wait", "10", "device", "set", client, "managed", "yes")
+        wait_for_network_manager(state)
         command("nmcli", "--wait", "20", "connection", "up", "uuid", original["uuid"], "ifname", client, timeout=25)
         if command("nmcli", "-g", "GENERAL.CON-UUID", "device", "show", client).stdout.strip() != original["uuid"]:
             raise Refused("NetworkManager did not restore the original tether profile")
@@ -654,6 +781,7 @@ def dispatch(operation, args):
         directory, state = load(identifier)
         if int(os.environ.get("SUDO_UID", "0")) not in (0, state["config"]["uid"]):
             raise Refused("run belongs to another user")
-        command("systemctl", "stop", unit_name(identifier), timeout=100, check=False)
-        return cleanup(identifier)
+        with record_interrupts(ignore=True):
+            command("systemctl", "stop", unit_name(identifier), timeout=100, check=False)
+            return cleanup(identifier)
     raise Refused("unknown internal operation")

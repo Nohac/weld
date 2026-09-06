@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -72,6 +73,21 @@ def execute_user(path, role):
     os.execve(args[0], args, environment)
 
 
+def supervise(arguments):
+    # Callers must pass a foreground sudo command so its password prompt works. It
+    # forwards SIGINT to _prepare, which owns the exact-unit stop and recovery.
+    # Raising KeyboardInterrupt here would make subprocess.call kill that owner.
+    with lifecycle.record_interrupts() as interruption:
+        if interruption.requested:
+            return 130
+        process = subprocess.Popen(arguments)
+        if interruption.requested:
+            # Cover a signal received by the parent before the child existed.
+            process.send_signal(signal.SIGINT)
+        result = process.wait()
+        return 130 if interruption.requested and result == 0 else result
+
+
 def launch():
     parser = argparse.ArgumentParser(prog="scripts/run-network-hoist", description="Bounded, intended-peer-only Weld Wi-Fi/USB network test")
     parser.add_argument("--host", type=interface_name, help="uplink left in the host namespace")
@@ -89,7 +105,7 @@ def launch():
         raise Refused("run this launcher as your normal user, not with sudo")
     if args.recover:
         helper = lifecycle.ROOT / args.recover / "main.py"
-        return subprocess.call(["sudo", str(helper), "_recover", args.recover])
+        return supervise(["sudo", str(helper), "_recover", args.recover])
     if not args.host or not args.client or not args.dhcpcd:
         parser.error("--host, --client and an available --dhcpcd executable are required")
     snapshot = lifecycle.preflight(args.host, args.client, args.dhcpcd)
@@ -134,10 +150,7 @@ def launch():
     save_private(manifest, config)
     print(f"Logs: {directory}\nRecovery: scripts/run-network-hoist --recover {identifier}", flush=True)
     try:
-        return subprocess.call(["sudo", sys.executable, "-I", str(entry), "_prepare", str(manifest)])
-    except KeyboardInterrupt:
-        subprocess.run(["sudo", "-n", "systemctl", "stop", lifecycle.unit_name(identifier)], check=False)
-        return 130
+        return supervise(["sudo", sys.executable, "-I", str(entry), "_prepare", str(manifest)])
     finally:
         for name in ("source.ticket", "destination.identity"):
             (directory / name).unlink(missing_ok=True)
@@ -160,5 +173,5 @@ if __name__ == "__main__":
     try:
         sys.exit(main())
     except (Refused, OSError, ValueError, subprocess.SubprocessError) as error:
-        print(f"Network test stopped: {error}", file=sys.stderr)
+        lifecycle.report(f"Network test stopped: {error}", error=True)
         sys.exit(1)

@@ -161,6 +161,24 @@ under a fresh private `target/validation/network-hoist-*` directory. Identity
 exchange files are private and removed when the launcher returns; this is the
 existing intended-peer approval mechanism, not a new authentication protocol.
 
+Ctrl-C is owned by the privileged supervisor, which stops only this run's unit
+and waits for its `ExecStopPost` recovery. The foreground launcher does not kill
+the sudo child when interrupted; sudo can still show its initial password prompt.
+Only the already-privileged `systemd-run` waiter is isolated from terminal signals.
+Repeated interrupts cannot interrupt the stop/recovery sequence. Allow about
+90 seconds, longer if the first recovery fails and its idempotent retry is needed.
+A root-owned cancellation marker prevents late service registration from moving
+the tether after an early cancellation. Failed terminal output cannot invalidate
+successful cleanup or turn its final Python flush into exit status 120.
+
+Recovery waits up to five seconds for NetworkManager to register and manage the
+returning physical device. Unknown/unmanaged responses are retryable within that
+bound; changed device identity or profile is not. Cleanup has a 70-second internal
+budget beneath systemd's 90-second stop ceiling. No profile settings are changed.
+These cancellation/readiness paths have deterministic tests; manual validation
+must still check Ctrl-C both during startup and after both peers are ready, then
+verify the original tether profile, routes and DNS after recovery.
+
 ### Isolation and recovery boundaries
 
 The thin shell entry point delegates to `tools/network-hoist/`. Python's standard

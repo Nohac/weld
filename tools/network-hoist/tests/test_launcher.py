@@ -4,6 +4,7 @@ import contextlib
 import io
 import json
 import os
+import signal
 from pathlib import Path
 import subprocess
 import stat
@@ -11,7 +12,7 @@ import sys
 import tempfile
 from types import SimpleNamespace
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import lifecycle
@@ -107,6 +108,8 @@ class RecoveryTests(unittest.TestCase):
                 self.links.remove("usb0")
             if program == "nmcli" and "GENERAL.CON-UUID" in args:
                 return subprocess.CompletedProcess([], 0, "original\n", "")
+            if program == "nmcli" and "GENERAL.NM-MANAGED" in args:
+                return subprocess.CompletedProcess([], 0, "yes\n", "")
             return subprocess.CompletedProcess([], 0, "", "")
 
         mocks = {
@@ -209,6 +212,158 @@ class RecoveryTests(unittest.TestCase):
             self.assertEqual(lifecycle.cleanup("test"), 0)
         remove.assert_not_called()
         self.assertIn("/run/dhcpcd", self.state["cleanup_notes"][0])
+
+
+class ReadinessTests(unittest.TestCase):
+    def setUp(self):
+        self.state = {"config": {"client": "usb0"}, "snapshot": {"profile": safe_profile(), "device": physical()}}
+        self.now = 0.0
+        for name, replacement in (("ensure_physical_instance", lambda _: None),
+                                  ("device", lambda _: physical()), ("profile", lambda *_: safe_profile())):
+            p = patch.object(lifecycle, name, replacement)
+            p.start()
+            self.addCleanup(p.stop)
+        p = patch.object(lifecycle.time, "monotonic", side_effect=lambda: self.now)
+        p.start()
+        self.addCleanup(p.stop)
+        p = patch.object(lifecycle.time, "sleep", side_effect=self.advance)
+        p.start()
+        self.addCleanup(p.stop)
+
+    def advance(self, seconds):
+        self.now += seconds
+
+    def test_unknown_then_unmanaged_then_managed_device_is_retried(self):
+        responses = iter([(1, ""), (0, "no"), (0, "yes")])
+
+        def command(program, *args, **kwargs):
+            self.assertFalse(kwargs["check"])
+            self.assertLessEqual(kwargs["timeout"], 5 - self.now)
+            if "GENERAL.NM-MANAGED" in args:
+                code, value = next(responses)
+                return subprocess.CompletedProcess([], code, value, "unknown device" if code else "")
+            return subprocess.CompletedProcess([], 0, "", "")
+
+        with patch.object(lifecycle, "command", side_effect=command):
+            lifecycle.wait_for_network_manager(self.state)
+        self.assertAlmostEqual(self.now, 0.2)
+
+    def test_unregistered_setter_and_query_time_out_without_activation(self):
+        with patch.object(lifecycle, "command", return_value=subprocess.CompletedProcess([], 1, "", "unknown device")) as command:
+            with self.assertRaisesRegex(Refused, "deadline"):
+                lifecycle.wait_for_network_manager(self.state)
+        self.assertLessEqual(self.now, 5.1)
+        self.assertFalse(any("connection" in call.args for call in command.call_args_list))
+
+    def test_changed_identity_is_not_retried(self):
+        with patch.object(lifecycle, "ensure_physical_instance", side_effect=Refused("replaced")), \
+             patch.object(lifecycle, "command") as command, self.assertRaisesRegex(Refused, "replaced"):
+            lifecycle.wait_for_network_manager(self.state)
+        command.assert_not_called()
+
+
+class CancellationTests(unittest.TestCase):
+    def test_interrupt_during_spawn_is_forwarded_to_the_new_child(self):
+        process = Mock()
+        process.wait.return_value = 130
+
+        def spawn(*args):
+            signal.getsignal(signal.SIGINT)(signal.SIGINT, None)
+            return process
+
+        with patch.object(subprocess, "Popen", side_effect=spawn):
+            self.assertEqual(main.supervise(["sudo", "/entry", "_prepare", "/manifest"]), 130)
+        process.send_signal.assert_called_once_with(signal.SIGINT)
+
+    def test_foreground_sudo_survives_first_and_repeated_interrupts(self):
+        previous = signal.getsignal(signal.SIGINT)
+
+        def wait():
+            signal.getsignal(signal.SIGINT)(signal.SIGINT, None)
+            signal.getsignal(signal.SIGINT)(signal.SIGINT, None)
+            return 130
+
+        process = Mock()
+        process.wait.side_effect = wait
+        with patch.object(subprocess, "Popen", return_value=process) as popen, \
+             patch.object(subprocess, "run") as run:
+            self.assertEqual(main.supervise(["sudo", "/entry", "_prepare", "/manifest"]), 130)
+        self.assertNotIn("start_new_session", popen.call_args.kwargs)
+        run.assert_not_called()  # No second sudo -n, and no kill on KeyboardInterrupt.
+        process.kill.assert_not_called()
+        self.assertEqual(signal.getsignal(signal.SIGINT), previous)
+
+    def test_cancelled_before_unit_start_never_spawns(self):
+        with patch.object(subprocess, "Popen") as popen, patch.object(lifecycle, "report"):
+            self.assertEqual(lifecycle.run_unit([], "a" * 32, SimpleNamespace(requested=True)), 130)
+        popen.assert_not_called()
+
+    def test_privileged_owner_stops_exact_unit_and_returns_cleanup_result(self):
+        for cleanup_result, expected in ((0, 130), (1, 1), (2, 2)):
+            with self.subTest(cleanup_result=cleanup_result), tempfile.TemporaryDirectory() as temporary:
+                directory = Path(temporary)
+                interrupted = SimpleNamespace(requested=False)
+                process = Mock()
+
+                def wait(timeout):
+                    if timeout == 0.2:
+                        interrupted.requested = True
+                        raise subprocess.TimeoutExpired("systemd-run", timeout)
+                    self.assertGreaterEqual(timeout, 90)
+                    return 143
+
+                process.wait.side_effect = wait
+
+                def stop(program, *args, **kwargs):
+                    self.assertEqual((program, *args), ("systemctl", "stop", "weld-network-" + "a" * 32 + ".service"))
+                    self.assertGreaterEqual(kwargs["timeout"], 90)
+                    self.assertEqual(signal.getsignal(signal.SIGINT), signal.SIG_IGN)
+                    self.assertTrue((directory / "cancelled").exists())
+                    return subprocess.CompletedProcess([], 0, "", "")
+
+                with patch.object(subprocess, "Popen", return_value=process) as popen, \
+                     patch.object(lifecycle, "load", return_value=(directory, {})), \
+                     patch.object(lifecycle, "command", side_effect=stop), \
+                     patch.object(lifecycle, "cleanup", return_value=cleanup_result), \
+                     patch.object(lifecycle, "report"):
+                    self.assertEqual(lifecycle.run_unit(["systemd-run"], "a" * 32, interrupted), expected)
+                self.assertTrue(popen.call_args.kwargs["start_new_session"])
+                self.assertNotIn("stdout", popen.call_args.kwargs)
+                self.assertNotIn("stderr", popen.call_args.kwargs)
+
+    def test_late_service_cannot_move_tether_after_cancel_marker(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            (directory / "cancelled").touch()
+            state = {"config": {"client": "usb0"}}
+            with patch.object(lifecycle, "load", return_value=(directory, state)), \
+                 patch.object(lifecycle, "ensure_host"), \
+                 patch.object(lifecycle, "device_lock", return_value=contextlib.nullcontext()), \
+                 patch.object(lifecycle, "preflight") as preflight, patch.object(lifecycle, "command") as command:
+                self.assertEqual(lifecycle.service("a" * 32), 0)
+            preflight.assert_not_called()
+            command.assert_not_called()
+
+    def test_cancel_failure_reports_recovery_instead_of_success(self):
+        with patch.object(lifecycle, "load", side_effect=Refused("state unavailable")), \
+             patch.object(lifecycle, "report") as report:
+            self.assertEqual(lifecycle.cancel_unit(Mock(), "a" * 32), 1)
+        self.assertIn("--recover", report.call_args.args[0])
+
+    def test_closed_output_pipe_cannot_change_success_to_python_exit_120(self):
+        module_path = str(Path(lifecycle.__file__).parent)
+        for error in (False, True):
+            with self.subTest(stderr=error):
+                reader, writer = os.pipe()
+                os.close(reader)
+                script = f"import sys; sys.path.insert(0, {module_path!r}); import lifecycle; lifecycle.report('restored', error={error!r})"
+                try:
+                    result = subprocess.run([sys.executable, "-I", "-B", "-c", script],
+                                            stdout=subprocess.PIPE if error else writer,
+                                            stderr=writer if error else subprocess.PIPE, timeout=5)
+                finally:
+                    os.close(writer)
+                self.assertEqual(result.returncode, 0)
 
 
 class CleanupStateTests(unittest.TestCase):
@@ -359,6 +514,18 @@ class DhcpHookTests(unittest.TestCase):
 
 
 class UserBoundaryTests(unittest.TestCase):
+    def test_recovery_executes_validated_helper_shebang_not_caller_python(self):
+        identifier = "a" * 32
+        process = Mock()
+        process.wait.return_value = 0
+        with patch.object(sys, "argv", ["launcher", "--recover", identifier]), \
+             patch.object(os, "geteuid", return_value=1000), \
+             patch.object(subprocess, "Popen", return_value=process) as popen:
+            self.assertEqual(main.launch(), 0)
+        arguments = popen.call_args.args[0]
+        self.assertEqual(arguments, ["sudo", str(lifecycle.ROOT / identifier / "main.py"), "_recover", identifier])
+        self.assertNotIn(sys.executable, arguments)
+
     def test_runtime_environment_is_loaded_only_after_privilege_drop(self):
         state = {"config": {"uid": 1000, "gid": 1000}, "python": "/trusted/python",
                  "entry": "/repo/main.py", "manifest": "/private/run.json"}
