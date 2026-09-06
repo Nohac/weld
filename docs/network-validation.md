@@ -2,11 +2,23 @@
 
 ## Status
 
-Preparation plan, not a completed or approved-to-run isolated internet test. The
-read-only inventory helper, intended-peer admission, and opt-in path diagnostics
-are implemented. The privileged isolation launcher below is still work to do;
-the same-namespace launcher does not prove a Wi-Fi/5G path.
+The read-only inventory helper, intended-peer admission, opt-in path diagnostics,
+and `scripts/run-network-hoist` launcher are implemented. The launcher's policy
+and recovery sequencing have automated tests and its read-only preflight passed
+on the selected host. The privileged lifecycle and real internet hoist still need
+manual validation; this is not a completed Wi-Fi/5G test. The same-namespace
+launcher does not prove that path either.
 The [implemented Iroh binding](iroh-hoisting.md) remains the baseline.
+
+The first privileged attempt reached dhcpcd but aborted before launching either
+Weld peer: the hook incorrectly classified an initial `NOCARRIER` as lease loss,
+even though the journal immediately reported carrier acquisition. The launcher
+reported successful tether restoration and host routing/DNS verification; its
+protected recovery state was not independently read (sudo required a password).
+This exercises an early-failure teardown, not the full internet-hoist lifecycle.
+Initial carrier waiting is now nonfatal until a valid lease is configured. The
+startup deadline remains the bound; terminal/validation errors and subsequent
+lease loss stay fatal and cannot be hidden by a later hook event.
 
 The first target is two nested Weld instances on the same laptop:
 
@@ -58,7 +70,9 @@ to embed in a privileged helper.
 
 The user was given an optional NetworkManager change to make the tether
 non-default and ignore its automatic DNS on the host. This is not implemented
-by the helper and is not required for namespace isolation. Before making that
+by the inventory helper. The first isolated launcher requires those safe
+persistent settings so returning the tether cannot replace host defaults/DNS.
+Before making that
 change, record the exact profile's `ipv4.never-default`, `ipv6.never-default`,
 `ipv4.ignore-auto-dns`, and `ipv6.ignore-auto-dns` values so they can be restored.
 Do not assume the suggestion was applied; rerun inventory after applying it.
@@ -108,6 +122,104 @@ distinguishes cryptographic identity from changing reachability information.
 
 ## Batch 2: isolated launcher with bounded recovery
 
+### Running the first validation
+
+Run as the ordinary desktop user from the Rust development shell. First turn
+OFF the phone's Wi-Fi. On the investigated host, dhcpcd 10.3.2 is already in the
+Nix store but not on PATH; no installation is needed:
+
+```sh
+scripts/run-network-hoist --host wlp194s0 --client enp197s0f0u1i1 \
+  --dhcpcd /nix/store/hwkp0y8nskmgbj02cnx97mny42vkn9bv-dhcpcd-10.3.2/bin/dhcpcd \
+  --dry-run
+```
+
+Dry-run is read-only: no build, sudo, network probes, or system changes. It checks
+current interfaces, routing, DNS, and the persistent NetworkManager profile.
+Root-only checks (including PID 1 namespace identity where hidden from normal
+users) repeat after elevation, before the move. The path above is a host
+observation, not embedded in the launcher; use your installed dhcpcd elsewhere.
+
+After reviewing the interface move and recovery behavior below, remove
+`--dry-run` to authorize the actual test. The launcher asks you to type the
+client interface, builds once without changing the Cargo profile or target
+directory, and then asks for sudo. `--yes` supplies the same explicit interface
+and phone-Wi-Fi-off confirmation for a noninteractive launch; it does not bypass
+sudo or any checks. Both Weld processes and the source application run as you,
+not as root. The runtime uses N0 discovery/relay services over the Internet.
+
+The default is AV1 with foot, 120 seconds of startup budget and 120 seconds
+after both Weld sockets are ready. Override with `--codec h264`, `--seconds 60`,
+`--startup-seconds 180`, or a source application following `--`. Focus the source
+window and press Super+H. Closing either peer, Ctrl-C, failure, or the deadline
+stops the run and initiates recovery. Source and destination logs are printed
+under a fresh private `target/validation/network-hoist-*` directory. Identity
+exchange files are private and removed when the launcher returns; this is the
+existing intended-peer approval mechanism, not a new authentication protocol.
+
+### Isolation and recovery boundaries
+
+The thin shell entry point delegates to `tools/network-hoist/`. Python's standard
+library supplies process handling, validation, and state; no Rust/runtime
+dependency or compositor code changes are involved. This is reviewed local
+developer tooling executed with explicit sudo, not an installed privileged API
+intended to defend against malicious edits by its invoking developer.
+
+- The root supervisor stays in the original host mount and network namespaces.
+  It releases only `--client` from NetworkManager and moves it to a unique named
+  namespace. There is no veth, host NAT, bridge, or shared local IP shortcut.
+- An independent transient DHCP service acquires a fresh **IPv4** lease with
+  dhcpcd 10.x without PRIVSEP (validated inventory: 10.3.2). Its runtime/lease
+  directories are private tmpfs mounts, and a replacement hook writes only this
+  run's resolver/status. Host DHCP leases, hostname, and resolver are untouched.
+  IPv6 DHCP/RA validation is deferred; do not claim a verified IPv6 test from
+  this launcher. It does not replay the old phone lease or reinstate an old host
+  IPv6 default route.
+- The DHCP service and receiver each enter a private mount namespace before
+  binding the private resolver and entering the network namespace. The receiver
+  then drops privileges before loading the captured Cargo runtime environment.
+  Native, filesystem-socket Wayland is required; abstract Unix sockets and X11
+  do not cross this network-namespace boundary.
+- The normal-user launcher snapshots its helper code in the private run
+  directory before build/elevation. The root recovery copy comes from that same
+  per-run snapshot, with its file hashes recorded. Repository edits cannot change
+  either side of a running test.
+- The systemd supervisor has a hard lifetime independent of the invoking
+  terminal. Its cgroup is stopped before `ExecStopPost` recovery; the separate
+  DHCP unit is stopped before returning the interface. Recovery uses a
+  root-owned code/state snapshot under `/run/weld-network/RUN_ID`, not later
+  edits to the repository or a user-writable cleanup manifest.
+- Recovery rechecks the original physical device instance, namespace ownership,
+  and saved interface-bound profile before returning the interface to the host.
+  It reactivates that profile with a fresh lease, without changing its settings,
+  host routes, DNS, forwarding, or firewall. Empty DHCP mountpoint directories
+  created by the run are removed only when their recorded inode still matches.
+- A replaced/unplugged device, changed/absent profile, or unknown namespace holder
+  causes conservative refusal, not a guess. Interrupted empty-namespace creation
+  is recovered only from this run's unique creation intent, before any device
+  release; an unknown temporary-directory inode is left untouched with a note.
+  State remains for inspection. In particular, a newly plugged device with the
+  same interface name is **not** claimed automatically. Fix/inspect the reported
+  condition and retry the printed `scripts/run-network-hoist --recover RUN_ID`.
+  The same cleanup path is used automatically and manually, with a 60-second
+  command budget and a short bounded lock wait. A still-failing ownership check
+  needs manual administrator inspection. Recovery state is under `/run` and does
+  not survive reboot.
+- "Tether restored, but host routing/DNS verification FAILED" is a distinct,
+  nonzero outcome. It means the original profile is active and the namespace has
+  been cleaned up, but host connectivity needs investigation. The same recovery
+  command retries verification without reactivating the tether. Minor preserved
+  directory leftovers are recorded separately and do not prevent successful
+  network recovery.
+
+The first manual acceptance run must check timeout/Ctrl-C, early peer exit,
+original profile restoration, unchanged host DNS/default routes, and no live
+run-owned service/namespace. Policy tests mock system commands: they establish
+our ordering/refusal decisions, not that this host's privileged lifecycle has
+already been exercised.
+
+### Original design requirements
+
 Do not extend the current `run-iroh-hoist` script by simply adding `--network n0`:
 it launches both processes in the same network namespace. Separate namespaces
 have separate interfaces, routes, and firewall state; a physical interface can
@@ -123,8 +235,8 @@ The launcher must:
   per-run directory for tickets, logs, and recovery state. Do not overwrite
   previous reproduction logs or launch Cargo as root.
 - Establish bounded address and DNS configuration using an explicitly selected
-  installed lease client. Select/install that prerequisite first; there is none
-  in the observed environment. Do not start a competing DHCP client while
+  installed lease client. The subsequent investigation found the dhcpcd store
+  path above; it was absent only from PATH. Do not start a competing DHCP client while
   NetworkManager still owns the device. Validate IPv4 and IPv6 independently.
 - Temporarily release only the confirmed tether from its manager and move it
   into a newly owned namespace with loopback. Leave Wi-Fi, Docker, host firewall,
@@ -134,8 +246,9 @@ The launcher must:
   observed host loses its sole IPv6 internet route during isolation.
 - Verify host DNS has reconverged to Wi-Fi-reachable servers before proceeding.
   Give the receiver namespace its own reachable DNS, not a copied phone/host
-  loopback assumption. `/etc/netns/NAME/resolv.conf` and the mount handling of
-  `ip netns exec` are existing mechanisms, not Weld features.
+  loopback assumption. The implementation binds a run-owned resolver into a
+  private mount namespace, then uses `ip netns exec`; it creates no `/etc/netns`
+  files.
 - Enter the receiver namespace and drop privileges before executing Weld with
   its existing user runtime directory, display socket, and GPU access. Preserve
   the debug build's dynamic-library environment. Test those accesses explicitly.
@@ -165,7 +278,8 @@ The launcher must:
 Namespace DNS and lifetime details:
 [ip-netns](https://www.man7.org/linux/man-pages/man8/ip-netns.8.html).
 The first privileged execution requires approval of the exact interface and
-restoration plan. This preparation batch changes none of that system state.
+restoration plan. Implementation and read-only validation change none of that
+system state.
 
 ## Batch 3: prove the route, then exercise hoisting
 
