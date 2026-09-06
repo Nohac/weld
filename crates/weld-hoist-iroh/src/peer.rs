@@ -214,6 +214,7 @@ pub(crate) fn spawn_source_peer(
     notifier: ClientRuntimeNotifier,
     codec: VideoCodec,
 ) -> IrohSourcePeer {
+    crate::diagnostics::observe(&connection);
     let identity = IrohPeerIdentity(connection.remote_id().to_string());
     let state = Arc::new(PeerState::new(connection.clone(), notifier));
     let (control_tx, control_rx) = mpsc::channel(QUEUE_CAPACITY);
@@ -245,6 +246,7 @@ pub(crate) fn spawn_destination_peer(
     notifier: ClientRuntimeNotifier,
     codec: VideoCodec,
 ) -> IrohDestinationPeer {
+    crate::diagnostics::observe(&connection);
     let identity = IrohPeerIdentity(connection.remote_id().to_string());
     let state = Arc::new(PeerState::new(connection.clone(), notifier));
     let (control_tx, control_rx) = mpsc::channel(QUEUE_CAPACITY);

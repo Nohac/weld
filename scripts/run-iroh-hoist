@@ -4,13 +4,24 @@ set -euo pipefail
 
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 repository_root="$(cd -- "${script_dir}/.." && pwd)"
-ticket_path="${WELD_IROH_TICKET:-${repository_root}/target/validation/weld-iroh.ticket}"
 codec="av1"
 network="direct"
 ticket_timeout=120
 
+usage() {
+    printf '%s\n' \
+        'Usage: scripts/run-iroh-hoist [--codec av1|h264] [--network direct|n0]' \
+        '       [--ticket-timeout SECONDS] [-- CLIENT ARGS...]' \
+        'Each run exchanges the intended peer identities in a fresh private directory.' \
+        'Both endpoints use the current network namespace; this is not the isolated 5G test.'
+}
+
 while [[ "$#" -gt 0 ]]; do
     case "$1" in
+        --help|-h)
+            usage
+            exit 0
+            ;;
         --codec)
             [[ "$#" -ge 2 ]] || {
                 printf '%s\n' '--codec requires av1 or h264.' >&2
@@ -36,8 +47,8 @@ while [[ "$#" -gt 0 ]]; do
             shift 2
             ;;
         --ticket-timeout)
-            [[ "$#" -ge 2 && "$2" =~ ^[1-9][0-9]*$ ]] || {
-                printf '%s\n' '--ticket-timeout requires a positive number of seconds.' >&2
+            [[ "$#" -ge 2 && "$2" =~ ^[1-9][0-9]{0,3}$ && "$2" -le 3600 ]] || {
+                printf '%s\n' '--ticket-timeout requires 1..3600 seconds.' >&2
                 exit 2
             }
             ticket_timeout="$2"
@@ -53,6 +64,11 @@ while [[ "$#" -gt 0 ]]; do
     esac
 done
 
+if [[ -n "${WELD_IROH_TICKET+x}" ]]; then
+    printf '%s\n' 'WELD_IROH_TICKET is no longer supported; each run needs a fresh private identity exchange.' >&2
+    exit 2
+fi
+
 if [[ "$#" -eq 0 ]]; then
     source_client=(foot)
 else
@@ -60,12 +76,14 @@ else
 fi
 
 validation_directory="${repository_root}/target/validation"
-source_log="${validation_directory}/weld-iroh-source-${codec}-${network}.log"
-destination_log="${validation_directory}/weld-iroh-destination-${codec}-${network}.log"
 cd -- "${repository_root}"
 cargo build --bin weldwm
 mkdir -p -- "${validation_directory}"
-rm -f -- "${ticket_path}"
+run_directory=$(mktemp -d "${validation_directory}/iroh-${codec}-${network}.XXXXXX")
+ticket_path="${run_directory}/source.ticket"
+identity_path="${run_directory}/destination.identity"
+source_log="${run_directory}/source.log"
+destination_log="${run_directory}/destination.log"
 
 printf 'Starting encoded Iroh hoist with %s over %s. Focus the source window and press Super+H.\n' \
     "${codec}" "${network}"
@@ -74,6 +92,8 @@ cargo run -- \
     --backend nested \
     --wayland-socket weld-iroh-source \
     --hoist-iroh-listen "${ticket_path}" \
+    --hoist-iroh-expect-peer "${identity_path}" \
+    --hoist-iroh-timeout "${ticket_timeout}" \
     --hoist-iroh-network "${network}" \
     --hoist-codec "${codec}" \
     -- "${source_client[@]}" \
@@ -83,7 +103,7 @@ source_pid=$!
 cleanup() {
     kill -TERM "${source_pid}" "${destination_pid:-}" 2>/dev/null || true
     wait "${source_pid}" "${destination_pid:-}" 2>/dev/null || true
-    rm -f -- "${ticket_path}"
+    rm -f -- "${ticket_path}" "${identity_path}"
 }
 trap cleanup EXIT INT TERM
 
@@ -103,6 +123,8 @@ cargo run -- \
     --backend nested \
     --wayland-socket weld-iroh-destination \
     --hoist-iroh-connect "${ticket_path}" \
+    --hoist-iroh-publish-identity "${identity_path}" \
+    --hoist-iroh-timeout "${ticket_timeout}" \
     --hoist-iroh-network "${network}" \
     > >(tee "${destination_log}") 2>&1 &
 destination_pid=$!

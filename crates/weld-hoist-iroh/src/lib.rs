@@ -1,9 +1,12 @@
 //! Encoded hoist transport over authenticated Iroh connections.
 
 mod adapter;
+mod admission;
+mod diagnostics;
 mod framing;
 mod host;
 mod peer;
+mod rendezvous;
 
 pub use adapter::{
     IrohDestinationEndpoint, destination_registration_with_backend,
@@ -45,9 +48,14 @@ mod tests {
 
     #[test]
     fn direct_hosts_exchange_independent_control_and_media() {
-        let ticket = test_ticket_path();
+        let directory = rendezvous::tests::ExchangeDirectory::new();
+        let ticket = directory.0.join("source.ticket");
+        let expected = directory.0.join("destination.identity");
         let source_host = IrohHost::bind(IrohNetwork::Direct).expect("source host");
         let destination_host = IrohHost::bind(IrohNetwork::Direct).expect("destination host");
+        destination_host
+            .publish_identity(&expected)
+            .expect("approved destination identity");
         let (source_notifier, _source_wake) =
             weld_core::host::client_runtime_notifier().expect("source notifier");
         let (destination_notifier, _destination_wake) =
@@ -55,12 +63,23 @@ mod tests {
         let source_ticket = ticket.clone();
         let source = thread::spawn(move || {
             source_host
-                .accept_source(source_ticket, VideoCodec::H264, source_notifier)
+                .accept_source(
+                    source_ticket,
+                    expected,
+                    VideoCodec::H264,
+                    source_notifier,
+                    Duration::from_secs(10),
+                )
                 .expect("accepted source peer")
         });
         wait_for_ticket(&ticket);
         let destination = destination_host
-            .connect_destination(&ticket, vec![VideoCodec::H264], destination_notifier)
+            .connect_destination(
+                &ticket,
+                vec![VideoCodec::H264],
+                destination_notifier,
+                Duration::from_secs(10),
+            )
             .expect("connected destination peer");
         let source = source.join().expect("source thread");
         assert_eq!(source.codec(), VideoCodec::H264);
@@ -165,6 +184,26 @@ mod tests {
         });
     }
 
+    #[test]
+    fn invalid_approved_identity_fails_without_anonymous_fallback() {
+        let directory = rendezvous::tests::ExchangeDirectory::new();
+        let expected = directory.0.join("invalid.identity");
+        rendezvous::publish(&expected, "not-an-endpoint-id").expect("invalid identity fixture");
+        let host = IrohHost::bind(IrohNetwork::Direct).expect("host");
+        let (notifier, _wake) = weld_core::host::client_runtime_notifier().expect("notifier");
+        let error = host
+            .accept_source(
+                directory.0.join("source.ticket"),
+                expected,
+                VideoCodec::H264,
+                notifier,
+                Duration::from_secs(1),
+            )
+            .err()
+            .expect("invalid identity rejected");
+        assert!(error.to_string().contains("identity is invalid"));
+    }
+
     fn wait_for<T>(mut condition: impl FnMut() -> Option<T>) -> T {
         let deadline = std::time::Instant::now() + Duration::from_secs(10);
         loop {
@@ -177,13 +216,5 @@ mod tests {
             );
             thread::sleep(Duration::from_millis(10));
         }
-    }
-
-    fn test_ticket_path() -> std::path::PathBuf {
-        let nonce = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .expect("system time")
-            .as_nanos();
-        std::env::temp_dir().join(format!("weld-iroh-{}-{nonce}.ticket", std::process::id()))
     }
 }

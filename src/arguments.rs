@@ -127,12 +127,24 @@ pub struct AppArguments {
     pub(crate) hoist_connect: Option<PathBuf>,
 
     /// Publish an Iroh ticket and accept one encoded Weld destination.
-    #[arg(long, value_name = "PATH")]
+    #[arg(long, value_name = "PATH", requires = "hoist_iroh_expect_peer")]
     pub(crate) hoist_iroh_listen: Option<PathBuf>,
 
     /// Import encoded windows from the Weld source named by an Iroh ticket.
-    #[arg(long, value_name = "PATH")]
+    #[arg(long, value_name = "PATH", requires = "hoist_iroh_publish_identity")]
     pub(crate) hoist_iroh_connect: Option<PathBuf>,
+
+    /// Trusted private file containing the only destination identity to admit.
+    #[arg(long, value_name = "PATH", requires = "hoist_iroh_listen")]
+    pub(crate) hoist_iroh_expect_peer: Option<PathBuf>,
+
+    /// Publish this destination's ephemeral identity for explicit source approval.
+    #[arg(long, value_name = "PATH", requires = "hoist_iroh_connect")]
+    pub(crate) hoist_iroh_publish_identity: Option<PathBuf>,
+
+    /// Rendezvous and peer startup budget in seconds (default 120, maximum 3600).
+    #[arg(long, value_name = "SECONDS", requires = "hoist_iroh_peer", value_parser = clap::value_parser!(u64).range(1..=3600))]
+    pub(crate) hoist_iroh_timeout: Option<u64>,
 
     /// Iroh connectivity preset. Direct has no DNS or relay dependency.
     #[arg(long, value_enum, value_name = "PRESET", requires = "hoist_iroh_peer")]

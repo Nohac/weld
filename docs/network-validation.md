@@ -1,0 +1,200 @@
+# First cross-network hoist validation
+
+## Status
+
+Preparation plan, not a completed or approved-to-run isolated internet test. The
+read-only inventory helper, intended-peer admission, and opt-in path diagnostics
+are implemented. The privileged isolation launcher below is still work to do;
+the same-namespace launcher does not prove a Wi-Fi/5G path.
+The [implemented Iroh binding](iroh-hoisting.md) remains the baseline.
+
+The first target is two nested Weld instances on the same laptop:
+
+```text
+source Weld + applications                    receiver Weld
+host namespace                               temporary network namespace
+wlp194s0 -> home Wi-Fi -> Internet <- phone mobile data <- enp197s0f0u1i1
+```
+
+Both host windows remain visible on the existing desktop. Only IP networking
+is separated; the receiver keeps access to the same user's filesystem-backed
+Wayland socket and GPU. Neither Weld process runs as root. This exercises real
+WAN transport, but not different GPU hardware or a phone presenter.
+
+## Read-only inventory
+
+Run from an ordinary host terminal, without sudo:
+
+```sh
+scripts/check-hoist-network --tether enp197s0f0u1i1
+```
+
+Without `--tether`, it only lists candidates. USB ancestry proves a USB device,
+not that it is a phone or using 5G. Confirm the selected interface and turn off
+the phone's Wi-Fi. The helper does not mutate networking, resolve external
+names, send probes, or read tickets, keys, SSIDs, MAC addresses, or USB serials.
+Its output does contain IP addresses. Exit 0 means inventory completed, 1 means
+the inventory environment is unusable, and 2 means invalid arguments or an
+invalid/non-USB tether selection. None means ready to expose a listener.
+
+On September 6, the host had:
+
+- NetworkManager-managed Wi-Fi `wlp194s0`, IPv4 default metric 600.
+- NetworkManager-managed USB tether `enp197s0f0u1i1`, IPv4 default metric 100
+  and the only IPv6 default route. The tether could take over normal host
+  traffic, not just Weld traffic.
+- Phone DNS first in the resolvconf-generated `/etc/resolv.conf`; this was not
+  a systemd-resolved loopback stub. Moving the tether without restoring host
+  DNS could interrupt Codex and other host applications.
+- No standalone `dhcpcd`, `dhclient`, or `udhcpc`; NetworkManager used its
+  internal DHCP. No named network namespace or `/etc/netns` configuration was
+  present. These are blockers to a naive namespace recipe, not reasons to copy
+  the current lease blindly.
+- Inactive Docker bridges. Preserve them and their firewall rules.
+
+Recheck all of this before execution. Interface names, addresses, gateways,
+DNS, connection settings, and device ownership are observations, not constants
+to embed in a privileged helper.
+
+The user was given an optional NetworkManager change to make the tether
+non-default and ignore its automatic DNS on the host. This is not implemented
+by the helper and is not required for namespace isolation. Before making that
+change, record the exact profile's `ipv4.never-default`, `ipv6.never-default`,
+`ipv4.ignore-auto-dns`, and `ipv6.ignore-auto-dns` values so they can be restored.
+Do not assume the suggestion was applied; rerun inventory after applying it.
+It disables automatic tether fallback rather than merely preferring Wi-Fi.
+See [NetworkManager's settings reference](https://www.networkmanager.dev/docs/api/latest/nm-settings-nmcli.html).
+
+## Batch 1: intended-peer admission and diagnostics
+
+Transport admission and path diagnostics are implemented as described in
+[Iroh hoisting](iroh-hoisting.md#intended-peer-admission). The original requirements
+below explain the boundary. Application exit/disconnect diagnostics in item 6
+remain follow-up work; they are not supplied by the network observer.
+
+1. Each process generates its own ephemeral Iroh identity. The destination
+   already authenticates the source ID from its trusted endpoint ticket. The
+   source must also receive the expected destination ID through an explicit,
+   trusted out-of-band exchange before accepting it. Publish identities before
+   either side blocks waiting for the other; avoid a startup deadlock.
+2. Check Iroh's authenticated `connection.remote_id()` before exposing the Weld
+   codec offer, application metadata, input, or media. Never rely on EndpointId
+   secrecy as authorization. Use Iroh authentication, not another homegrown
+   key exchange. A shared local, private run directory can carry both IDs for
+   this same-user test; a future cross-device test needs a trusted exchange.
+3. Reject a wrong peer without consuming the sole intended session. The
+   old `accept_source` accepted once and exited on bootstrap failure. Bound
+   bootstrap time, rejection work/logging, and total startup waiting. Test a
+   rejected peer followed by the expected peer and a silent peer timeout.
+4. Do not log secret material. This one-run transport-ID approval is not the
+   transport-independent device proof, grants, QR approval, or mesh trust from
+   the [identity specification](spec/identity-and-meshes.md).
+5. Record accepted peer identity, selected path changes (IP versus relay), RTT,
+   and eventually bounded byte/queue summaries. The implemented observer reports
+   path selection and RTT, not media throughput or queue accounting. Iroh 1.1.0 exposes
+   `Connection::paths()`, `paths_stream()`, `rtt(path_id)`, and `stats()`;
+   `Path::is_selected()`, `is_ip()`, and `is_relay()` distinguish selected paths
+   from merely available ones. Use these, not a guessed path from the ticket.
+6. Retain first-cause transport/codec errors. Add launched-client exit status
+   and identifiable Wayland disconnect reasons so a disappeared Firefox window
+   is distinguishable from lost transport. No keyboard contents, raw video
+   dumps, per-motion logging, or unbounded trace capture.
+
+Code evidence: `crates/weld-hoist-iroh/src/host.rs` and `peer.rs`,
+`crates/weld-core/src/runtime.rs`, and `server/mod.rs`. Iroh is pinned to
+`=1.1.0` in `Cargo.toml`; the path APIs above were checked in that installed
+source. The [Iroh endpoint model](https://docs.iroh.computer/concepts/endpoints)
+distinguishes cryptographic identity from changing reachability information.
+
+## Batch 2: isolated launcher with bounded recovery
+
+Do not extend the current `run-iroh-hoist` script by simply adding `--network n0`:
+it launches both processes in the same network namespace. Separate namespaces
+have separate interfaces, routes, and firewall state; a physical interface can
+belong to only one at a time.
+[Linux network namespaces](https://man7.org/linux/man-pages/man7/network_namespaces.7.html).
+
+The launcher must:
+
+- Require explicit confirmation of the tether and host uplink. Reject an
+  unexpected device, occupied namespace name, unsupported manager, or ambiguous
+  ownership. Capture the tether profile/management state and host routes/DNS.
+- Build once as the normal user before touching networking. Create a private
+  per-run directory for tickets, logs, and recovery state. Do not overwrite
+  previous reproduction logs or launch Cargo as root.
+- Establish bounded address and DNS configuration using an explicitly selected
+  installed lease client. Select/install that prerequisite first; there is none
+  in the observed environment. Do not start a competing DHCP client while
+  NetworkManager still owns the device. Validate IPv4 and IPv6 independently.
+- Temporarily release only the confirmed tether from its manager and move it
+  into a newly owned namespace with loopback. Leave Wi-Fi, Docker, host firewall,
+  and host forwarding settings untouched. Do not add a veth, host NAT, or bridge
+  that gives the peers a local shortcut. Moving the tether removes its host
+  routes; the existing Wi-Fi default remains without manual metric edits. The
+  observed host loses its sole IPv6 internet route during isolation.
+- Verify host DNS has reconverged to Wi-Fi-reachable servers before proceeding.
+  Give the receiver namespace its own reachable DNS, not a copied phone/host
+  loopback assumption. `/etc/netns/NAME/resolv.conf` and the mount handling of
+  `ip netns exec` are existing mechanisms, not Weld features.
+- Enter the receiver namespace and drop privileges before executing Weld with
+  its existing user runtime directory, display socket, and GPU access. Preserve
+  the debug build's dynamic-library environment. Test those accesses explicitly.
+- Use separate source/destination launches. The existing CLI ingredients are
+  source `--backend nested --hoist-iroh-listen <ticket-path> --hoist-codec av1`,
+  destination `--backend nested --hoist-iroh-connect <ticket-path>`, distinct
+  `--wayland-socket` names, and `--hoist-iroh-network n0` on both. Add the
+  implemented admission mechanism from batch 1: source
+  `--hoist-iroh-expect-peer <identity-path>` and destination
+  `--hoist-iroh-publish-identity <identity-path>`. Exchange paths must be fresh
+  and private; publish before waiting as the current same-namespace script does.
+  This list is deliberately not a runnable unsecured N0 recipe.
+- Choose N0 for discovery, NAT traversal, and relay fallback in this mobile
+  topology. Separate networks do not universally require relays: globally
+  reachable direct paths can work. Record what actually carries application
+  data; enabling N0 alone proves neither relay use nor a WAN path.
+- Start a 120-second session watchdog after successful setup, with separate
+  bounded startup/cleanup deadlines. Stop only processes owned by this run.
+  Stop namespace processes before moving the tether back and deleting its
+  namespace. Restore its prior management/profile state, then verify host
+  networking. Handle startup failure, Ctrl-C, peer exit, and USB unplugging.
+  Do not blindly reuse a newly plugged interface with the same name.
+- Keep a narrowly scoped recovery command/state record in case the launcher
+  dies. Deleting a namespace name while processes still hold it does not free
+  the device. Do not rely on an EXIT trap surviving SIGKILL.
+
+Namespace DNS and lifetime details:
+[ip-netns](https://www.man7.org/linux/man-pages/man8/ip-netns.8.html).
+The first privileged execution requires approval of the exact interface and
+restoration plan. This preparation batch changes none of that system state.
+
+## Batch 3: prove the route, then exercise hoisting
+
+Before launching media, verify the source namespace has no tether and the
+receiver has only loopback plus tether. Verify routing/DNS separately, phone
+Wi-Fi is off, and no inherited proxy path points through the host. Record
+selected Iroh path and interface byte deltas during a bounded transfer. If
+route evidence is ambiguous, stop; two functioning windows do not prove 5G.
+Any external reachability probe must be explicit, bounded, and identified in
+the run instructions rather than hidden in the inventory helper.
+
+For each run, record codec, window/layer count, image extents, selected path,
+RTT, throughput, frame cadence/age, coalesced work, and first failure. Start
+with one foot window: typing, selection/cursor shapes, resize, and reclaim.
+Then Blender with one settings window. Firefox menus/tab previews come last;
+its September 6 disappearance left a Dismiss tombstone but no conclusive
+process-exit or transport-failure evidence. Do not treat that as a proven
+network fault. Close the receiver deliberately and verify source recovery and
+release of held inputs; automatic reconnect is not implemented.
+
+Avoid promising 60 fps. The current per-surface single outstanding commit
+couples cadence to round-trip time plus processing; the session also permits
+only one in-flight encode globally. AV1's configured bitrate is per layer
+encoder, not a total session budget. Use the validated settings and a small
+window first; do not raise bitrate or widen queues to hide latency. Measure
+the limitation before changing credit, dropping encoded dependencies, or
+implementing the broader [budgeting design](spec/remote-budgeting.md).
+
+Success means verified distinct uplinks, intended-peer-only admission, usable
+input and presentation, bounded memory/logs, and reliable reclaim/cleanup. A
+working relay path is a valid first success. Direct mobile hole punching,
+different hardware, adaptive streaming, and the phone UI remain later tests.

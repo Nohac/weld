@@ -7,6 +7,7 @@ mod telemetry;
 use anyhow::{Context, Result};
 use clap::Parser;
 use overlay::DistributionOverlayPlugin;
+use std::time::Duration;
 use weld_app::{
     WeldApp,
     input::{GlobalShortcutPlugin, VirtualTerminalShortcutPlugin},
@@ -33,6 +34,7 @@ pub fn run(arguments: AppArguments) -> Result<()> {
     telemetry::initialize()?;
     validate_hoist_arguments(&arguments)?;
     let hoist_codec = arguments.hoist_codec.unwrap_or_default();
+    let iroh_timeout = Duration::from_secs(arguments.hoist_iroh_timeout.unwrap_or(120));
 
     enum PendingHoistTransport {
         LocalSource(LocalPacketListener),
@@ -58,8 +60,15 @@ pub fn run(arguments: AppArguments) -> Result<()> {
             ticket: ticket.clone(),
         })
     } else if let Some(ticket) = &arguments.hoist_iroh_connect {
+        let host = IrohHost::bind(arguments.hoist_iroh_network.unwrap_or_default().into())?;
+        host.publish_identity(
+            arguments
+                .hoist_iroh_publish_identity
+                .as_ref()
+                .context("Iroh destination needs an identity publication path")?,
+        )?;
         Some(PendingHoistTransport::IrohDestination {
-            host: IrohHost::bind(arguments.hoist_iroh_network.unwrap_or_default().into())?,
+            host,
             ticket: ticket.clone(),
         })
     } else {
@@ -167,7 +176,16 @@ pub fn run(arguments: AppArguments) -> Result<()> {
             let codec: weld_media::VideoCodec = hoist_codec.into();
             validate_encoded_media(&app, codec)?;
             let (network_notifier, network_wake) = weld_core::host::client_runtime_notifier()?;
-            let peer = host.accept_source(ticket, codec, network_notifier)?;
+            let peer = host.accept_source(
+                ticket,
+                arguments
+                    .hoist_iroh_expect_peer
+                    .as_ref()
+                    .context("Iroh source needs an approved peer identity path")?,
+                codec,
+                network_notifier,
+                iroh_timeout,
+            )?;
             tracing::info!(
                 peer = peer.identity().as_str(),
                 ?codec,
@@ -205,7 +223,8 @@ pub fn run(arguments: AppArguments) -> Result<()> {
                 media.vendor
             );
             let (network_notifier, network_wake) = weld_core::host::client_runtime_notifier()?;
-            let peer = host.connect_destination(ticket, supported_codecs, network_notifier)?;
+            let peer =
+                host.connect_destination(ticket, supported_codecs, network_notifier, iroh_timeout)?;
             let codec = peer.codec();
             tracing::info!(
                 peer = peer.identity().as_str(),
@@ -317,6 +336,8 @@ mod tests {
         let iroh = arguments(&[
             "--hoist-iroh-listen",
             "/tmp/weld.ticket",
+            "--hoist-iroh-expect-peer",
+            "/tmp/destination.identity",
             "--hoist-codec",
             "av1",
         ]);
@@ -332,6 +353,8 @@ mod tests {
             arguments(&[
                 "--hoist-iroh-connect",
                 "/tmp/weld.ticket",
+                "--hoist-iroh-publish-identity",
+                "/tmp/destination.identity",
                 "--hoist-codec",
                 "av1",
             ]),
@@ -360,5 +383,47 @@ mod tests {
         assert!(
             AppArguments::try_parse_from(["weldwm", "--hoist-iroh-network", "direct"]).is_err()
         );
+    }
+
+    #[test]
+    fn iroh_cli_requires_explicit_peer_exchange_and_bounded_timeout() {
+        for args in [
+            vec!["--hoist-iroh-listen", "/tmp/source"],
+            vec!["--hoist-iroh-connect", "/tmp/source"],
+            vec!["--hoist-iroh-expect-peer", "/tmp/peer"],
+            vec!["--hoist-iroh-publish-identity", "/tmp/peer"],
+            vec!["--hoist-iroh-timeout", "120"],
+            vec![
+                "--hoist-iroh-listen",
+                "/tmp/source",
+                "--hoist-iroh-expect-peer",
+                "/tmp/peer",
+                "--hoist-iroh-timeout",
+                "0",
+            ],
+            vec![
+                "--hoist-iroh-listen",
+                "/tmp/source",
+                "--hoist-iroh-expect-peer",
+                "/tmp/peer",
+                "--hoist-iroh-timeout",
+                "3601",
+            ],
+        ] {
+            assert!(AppArguments::try_parse_from(std::iter::once("weldwm").chain(args)).is_err());
+        }
+        for network in ["direct", "n0"] {
+            let args = arguments(&[
+                "--hoist-iroh-listen",
+                "/tmp/source",
+                "--hoist-iroh-expect-peer",
+                "/tmp/peer",
+                "--hoist-iroh-network",
+                network,
+                "--hoist-iroh-timeout",
+                "300",
+            ]);
+            assert_eq!(args.hoist_iroh_timeout, Some(300));
+        }
     }
 }

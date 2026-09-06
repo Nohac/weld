@@ -78,8 +78,8 @@ protocol open:
 - `weld-hoist-encoded` owns transport-neutral encoded commit scheduling and
   codec worker contracts. Both Unix and Iroh bindings use these ports.
 - `weld-hoist-iroh` owns the initial authenticated QUIC connection, bounded
-  control and media framing, and runtime bridge. Its development ticket is not
-  yet Weld device authorization.
+  control and media framing, and runtime bridge. Private local identity exchange
+  approves the intended transport peer; it is not yet Weld device authorization.
 
 Transport and codec implementations remain replaceable adapters around
 `weld-hoist-core`; concrete crates should be introduced only when their

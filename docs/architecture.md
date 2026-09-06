@@ -691,8 +691,11 @@ The first supported topology is two sibling compositor processes. A source
 blocks for one startup peer and a destination connects before either runtime
 starts; dynamic admission and reconnect are not implemented. The Unix binding
 uses a same-UID local socket. The encoded Iroh binding uses an authenticated,
-encrypted connection reached through an explicitly shared development ticket;
-that ticket is not yet Weld authorization or device pairing. Nesting the
+encrypted connection reached through a trusted source ticket and checks the
+destination's authenticated EndpointId against an explicitly supplied identity.
+The binding owns private one-shot rendezvous files and bounded concurrent
+bootstrap; neither enters the semantic hoist protocol. This is transport-peer
+approval, not device pairing or mesh authorization. Nesting the
 destination as a client of the source is deliberately unsupported because it
 would create an input/focus feedback path. See [Local hoisting](local-hoisting.md)
 and [Iroh hoisting](iroh-hoisting.md) for commands, validation, and current

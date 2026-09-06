@@ -13,9 +13,12 @@ An initial Iroh binding now carries the implemented record subset and opaque
 encoded surfaces between two Weld processes. It validates exact revision,
 roles, and a source-selected codec over authenticated encrypted QUIC, but is
 still a development tracer rather than the complete handshake described here:
-the listener accepts the first authenticated ALPN peer and enforces no Weld
-authorization, while discovery policy, pairing, general capability
-negotiation, reconnect, and dynamic peer admission remain unimplemented. The
+the listener checks the authenticated destination against an explicitly
+approved EndpointId exchanged through private local files, while the destination
+authenticates the source from its trusted ticket. This transport-peer approval
+is not the device proof or mesh authorization below. Discovery policy, pairing,
+general capability negotiation, reconnect, and dynamic peer admission remain
+unimplemented. The
 same `weld-hoist-protocol` records are also used by
 loopback and the Unix tracer. Before 1.0, peers require an exact protocol
 revision rather than maintaining compatibility with earlier revisions.

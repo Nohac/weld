@@ -7891,9 +7891,11 @@ name = "weld-hoist-iroh"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "futures-lite",
  "iroh",
  "iroh-tickets",
  "postcard",
+ "rustix 1.1.4",
  "serde",
  "tokio",
  "tracing",

@@ -1,0 +1,161 @@
+#!/usr/bin/env bash
+
+# Read-only inventory. This does not authorize or configure a network test.
+set -euo pipefail
+
+usage() {
+    printf '%s\n' \
+        'Usage: scripts/check-hoist-network [--tether INTERFACE]' \
+        'Reports local network inventory without changing settings or sending probes.' \
+        'Exit 0: inventory completed, NOT ready for an internet hoist.' \
+        'Exit 1: inventory unavailable. Exit 2: invalid arguments/interface.'
+}
+
+tether=''
+while (( $# )); do
+    case "$1" in
+        --help|-h) usage; exit 0 ;;
+        --tether)
+            if (( $# < 2 )) || [[ -n "$tether" ]]; then
+                usage >&2
+                exit 2
+            fi
+            tether="$2"
+            if [[ ! "$tether" =~ ^[[:alnum:]_][[:alnum:]_.:-]{0,14}$ ]]; then
+                printf 'Invalid interface name: %s\n' "$tether" >&2
+                exit 2
+            fi
+            shift 2
+            ;;
+        *) usage >&2; exit 2 ;;
+    esac
+done
+
+for tool in ip readlink awk; do
+    if ! command -v "$tool" >/dev/null; then
+        printf 'Inventory unavailable: missing %s.\n' "$tool" >&2
+        exit 1
+    fi
+done
+
+if [[ -n "$tether" ]]; then
+    if [[ ! -e "/sys/class/net/${tether}" ]]; then
+        printf 'Interface not found: %s\n' "$tether" >&2
+        exit 2
+    fi
+    device_path=$(readlink -f "/sys/class/net/${tether}/device" || true)
+    if [[ ! "$device_path" =~ /usb[0-9]+/ ]]; then
+        printf '%s is not a verified USB network device; refusing to guess.\n' "$tether" >&2
+        exit 2
+    fi
+fi
+
+if ! addresses=$(ip -o address show); then
+    printf '%s\n' \
+        'Inventory unavailable: cannot read network addresses.' \
+        'Run from a normal host terminal; a sandbox may deny netlink or hide host interfaces.' >&2
+    exit 1
+fi
+if ! defaults_v4=$(ip -4 -o route show default) || ! defaults_v6=$(ip -6 -o route show default); then
+    printf 'Inventory unavailable: cannot read default routes.\n' >&2
+    exit 1
+fi
+
+printf 'Network namespace: %s (may not be the host namespace)\n' "$(readlink /proc/self/ns/net)"
+printf '\nAddresses (no MAC addresses):\n%s\n' "$addresses"
+printf '\nIPv4 defaults:\n%s\n' "${defaults_v4:-(none)}"
+printf '\nIPv6 defaults:\n%s\n' "${defaults_v6:-(none)}"
+printf '\nInterface state and USB candidates:\n'
+for interface_path in /sys/class/net/*; do
+    [[ -d "$interface_path" ]] || continue
+    interface=${interface_path##*/}
+    state=$(<"${interface_path}/operstate")
+    ancestry=$(readlink -f "${interface_path}/device" || true)
+    kind='other/virtual'
+    if [[ "$ancestry" =~ /usb[0-9]+/ ]]; then
+        kind='USB (not proof of phone/5G)'
+    elif [[ -d "${interface_path}/wireless" ]]; then
+        kind='Wi-Fi'
+    fi
+    printf '  %s: %s; %s\n' "$interface" "$state" "$kind"
+done
+
+if [[ -n "$tether" ]]; then
+    printf '\nSelected tether: %s (USB verified; confirm phone Wi-Fi is OFF)\n' "$tether"
+    driver=$(readlink -f "${device_path}/driver" || true)
+    printf 'Driver: %s\n' "${driver##*/}"
+    usb_parent="$device_path"
+    while [[ "$usb_parent" != / && -n "$usb_parent" ]]; do
+        if [[ -r "${usb_parent}/idVendor" && -r "${usb_parent}/idProduct" ]]; then
+            printf 'USB vendor/product: %s:%s\n' "$(<"${usb_parent}/idVendor")" "$(<"${usb_parent}/idProduct")"
+            break
+        fi
+        usb_parent=${usb_parent%/*}
+    done
+    for counter in rx_bytes tx_bytes; do
+        counter_path="/sys/class/net/${tether}/statistics/${counter}"
+        if [[ -r "$counter_path" ]]; then
+            printf '%s: %s\n' "$counter" "$(<"$counter_path")"
+        fi
+    done
+    if printf '%s\n%s\n' "$defaults_v4" "$defaults_v6" |
+        awk -v device="$tether" '{for (i=1;i<NF;i++) if ($i=="dev" && $(i+1)==device) found=1} END {exit !found}'; then
+        printf '%s\n' 'WARNING: tether supplies a host default route; ordinary host traffic may use it.'
+    fi
+fi
+
+printf '\nNetworkManager inventory:\n'
+if command -v nmcli >/dev/null && command -v timeout >/dev/null; then
+    if ! timeout 5s nmcli -t -f DEVICE,TYPE,STATE device status; then
+        printf 'NetworkManager status unavailable; ownership is NOT determined.\n'
+    fi
+    if [[ -n "$tether" ]]; then
+        if ! timeout 5s nmcli -f GENERAL.DEVICE,GENERAL.NM-MANAGED device show "$tether"; then
+            printf 'Tether ownership is NOT determined.\n'
+        fi
+    fi
+else
+    printf 'nmcli/timeout unavailable; ownership is NOT determined.\n'
+fi
+
+printf '\nResolver nameservers and local route lookup (no packets sent):\n'
+if [[ -r /etc/resolv.conf ]]; then
+    while read -r nameserver; do
+        [[ -n "$nameserver" ]] || continue
+        family=-4
+        [[ "$nameserver" == *:* ]] && family=-6
+        printf '  nameserver %s\n' "$nameserver"
+        if ! ip "$family" -o route get "$nameserver"; then
+            printf '  Resolver route unavailable.\n'
+        fi
+        case "$nameserver" in
+            127.*|::1) printf '  Loopback resolver: cannot assume it exists in a new namespace.\n' ;;
+        esac
+    done < <(awk '$1 == "nameserver" {print $2}' /etc/resolv.conf)
+else
+    printf '/etc/resolv.conf is unreadable.\n'
+fi
+
+printf '\nNamespace/lease tools (presence only, not configuration):\n'
+for tool in nsenter unshare timeout dhcpcd dhclient udhcpc; do
+    if command -v "$tool" >/dev/null; then
+        printf '  %s: installed\n' "$tool"
+    else
+        printf '  %s: missing\n' "$tool"
+    fi
+done
+for directory in /etc/netns /run/netns; do
+    if [[ -d "$directory" ]]; then
+        printf '  %s: exists\n' "$directory"
+    else
+        printf '  %s: absent\n' "$directory"
+    fi
+done
+printf '\nNamed namespaces:\n'
+if ! ip netns list; then
+    printf 'Named namespace inventory unavailable.\n'
+fi
+printf '\n%s\n' \
+    'Inventory complete; NOT an internet-hoist readiness check.' \
+    'No settings changed, no external probes sent. Output contains IP addresses; review before sharing.' \
+    'Admission and the isolated launcher remain prerequisites. See docs/network-validation.md.'

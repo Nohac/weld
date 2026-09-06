@@ -12,13 +12,19 @@ scripts/run-iroh-hoist --codec av1 --network direct
 ```
 
 Focus the source window and press `Super+H`. `h264` is also accepted. The
-script starts two nested Weld instances, atomically publishes a temporary Iroh
-endpoint ticket under `target/validation`, waits for the destination to
-connect, and writes separate source and destination logs there. `direct` is
+script starts two nested Weld instances, exchanges the intended endpoint
+identities in a fresh private `target/validation/iroh-CODEC-NETWORK.XXXXXX`
+directory, and writes separate `source.log` and `destination.log` files there.
+It prints the paths and retains logs across runs; ticket and identity files are
+removed on exit. `WELD_IROH_TICKET` is no longer supported. `direct` is
 the default and disables address lookup and relays, so this validation has no
 network-service dependency. `--network n0` enables N0 discovery, NAT traversal,
 and relay fallback for later cross-network testing; startup fails clearly if
 the endpoint does not become online within 30 seconds.
+
+For the planned Wi-Fi/USB-tether test, see [Network validation](network-validation.md).
+Its read-only preflight and intended-peer admission are available; the isolated
+launcher and namespace address/DNS configuration are still prerequisites.
 
 The current tracer has deliberate limits:
 
@@ -26,11 +32,11 @@ The current tracer has deliberate limits:
   independent peer state. The distribution still accepts or connects exactly
   one peer before its compositor runtime starts; dynamic adapter admission and
   reconnect are not implemented.
-- Iroh authenticates the remote `EndpointId` and encrypts the connection. The
-  initial listener accepts the first authenticated peer that reaches its ALPN;
-  the explicitly shared ticket supplies reachability, not an enforced
-  admission proof. This is not the future Weld device proof, pairing approval,
-  or mesh authorization flow. The ephemeral secret key is not persisted.
+- Iroh authenticates the remote `EndpointId` and encrypts the connection. Weld
+  admits only the intended destination identity supplied through a trusted
+  local file; the destination authenticates the source identity from its
+  trusted ticket. This is one-run transport identity approval, not the future
+  Weld device proof, pairing UI, or mesh grants. Secret keys are ephemeral.
 - Only opaque encoded surfaces are supported. The source selects AV1 or H.264;
   the destination accepts it only when its hardware decoder and video
   processing path support that codec. Native file descriptors cannot cross the
@@ -42,6 +48,56 @@ The current tracer has deliberate limits:
   and one global in-flight encode. This bounds memory and stale frames, but its
   throughput is currently coupled to round-trip time. Later media budgeting
   and feedback may widen or replace that credit policy based on measurements.
+
+## Intended-peer admission
+
+Manual source launches require `--hoist-iroh-expect-peer PATH`; the file contains
+the destination's public EndpointId, not its private key. Destination launches
+require `--hoist-iroh-publish-identity PATH`, published immediately after binding,
+before GPU probing or waiting for the source. The source publishes its ticket
+before waiting for that identity. `run-iroh-hoist` arranges both paths without
+parsing keys or implementing a second authentication protocol.
+
+Both publications must be regular, current-user-owned files with mode 0600 in
+current-user-owned mode-0700 directories. Reads are bounded to 4096 bytes and
+reject symlinks and special files; directory-relative operations hold the checked
+directory open. Publications are atomic and never overwrite existing paths.
+Use a fresh directory for each run. This trusts the local OS user to select the
+peer: anyone acting as that user can supply a different identity. The files do
+not prove a remote device's mesh membership, nor is ticket secrecy authorization.
+
+The source checks Iroh's authenticated identity before opening or writing the
+Weld bootstrap offer. Up to eight candidate attempts may run concurrently;
+each gets five seconds for TLS and bootstrap. Rejected or timed-out attempts do
+not consume the intended session, and losing established connections are closed.
+Weld logs only the first three candidate failures plus a final count. These
+bounds are not a guarantee of availability under an ongoing network DoS attack.
+
+`--hoist-iroh-timeout SECONDS` bounds rendezvous plus admission/connect together
+(default 120; range 1..3600). The script forwards its `--ticket-timeout` value to
+both peers. Endpoint binding/N0 online waiting and GPU initialization precede
+that budget; this is not a complete-process watchdog. No wire revision change
+is needed: the existing exact revision, role, and codec checks remain in place.
+
+## Connection diagnostics
+
+```sh
+RUST_LOG=info,weld_network_diag=debug scripts/run-iroh-hoist --codec av1
+```
+
+The optional observer uses Iroh path events for selected-path changes and reports
+`ipv4`, `ipv6`, `relay`, or `other`; it resnapshots if events were missed. A
+five-second timer reports selected-path RTT. It records public peer/path IDs,
+not raw IP addresses, tickets, private keys, input, or video. A relay report
+describes the relay transport, not the relay socket's IP family. The observer
+holds only a weak connection handle, exits on close, and never wakes Bevy. With
+the diagnostic target disabled, no observer task or timer is created.
+
+Direct loopback tests cover rejection without exposing the offer, concurrent
+silent attempts, retry after timeout, cleanup on overall timeout, and the
+existing independent control/media exchange. Live N0/mobile validation remains
+separate. These diagnostics do not yet log launched application exit statuses;
+a Firefox window disappearing is still not by itself proof of transport loss.
 
 `Iroh EndpointId`, `HoistEndpointId`, and `ClientSourceId` are intentionally
 different identities. The first authenticates a network endpoint, the second

@@ -1,31 +1,27 @@
 //! One long-lived Iroh endpoint with disposable peer connections.
 
 use std::{
-    fs::OpenOptions,
-    io::Write,
     path::Path,
     str::FromStr,
     sync::{Arc, Mutex, Weak, mpsc as std_mpsc},
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use anyhow::{Context, Result, bail};
-use iroh::{Endpoint, RelayMode, Watcher, endpoint::presets};
+use iroh::{Endpoint, EndpointId, RelayMode, Watcher, endpoint::presets};
 use iroh_tickets::endpoint::EndpointTicket;
-use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 use weld_core::host::ClientRuntimeNotifier;
-use weld_hoist_protocol::{ProtocolRevision, SurfaceMode};
 use weld_media::VideoCodec;
 
 use crate::{
     IrohDestinationPeer, IrohSourcePeer,
-    framing::{read_record, write_record},
+    admission::{self, WELD_ALPN},
     peer::{spawn_destination_peer, spawn_source_peer},
+    rendezvous,
 };
 
-const WELD_ALPN: &[u8] = b"weld/hoist/1";
 const SHUTDOWN_WAIT: Duration = Duration::from_secs(3);
 const N0_ONLINE_WAIT: Duration = Duration::from_secs(30);
 
@@ -78,14 +74,26 @@ impl IrohHost {
         })
     }
 
-    /// Atomically publishes this host's current endpoint ticket and accepts one source peer.
+    /// Publishes the source ticket, then admits only the destination named by a trusted file.
+    /// Both files must be in private current-user directories; publications are one-shot.
+    /// The timeout covers the file exchange and admission together, excluding endpoint bind.
+    /// Only one acceptor may wait on this host at a time: incoming connections share
+    /// its accept queue. Concurrent multi-peer admission needs a central dispatcher.
     pub fn accept_source(
         &self,
         ticket_path: impl AsRef<Path>,
+        expected_peer_path: impl AsRef<Path>,
         codec: VideoCodec,
         notifier: ClientRuntimeNotifier,
+        startup_timeout: Duration,
     ) -> Result<IrohSourcePeer> {
-        publish_ticket(ticket_path.as_ref(), &self.ticket)?;
+        let deadline = Instant::now()
+            .checked_add(startup_timeout)
+            .context("Iroh startup timeout exceeds clock range")?;
+        rendezvous::publish(ticket_path.as_ref(), &self.ticket)?;
+        let expected = rendezvous::read(expected_peer_path.as_ref(), deadline)?;
+        let expected = EndpointId::from_str(expected.trim())
+            .context("approved Iroh peer identity is invalid")?;
         tracing::info!(path = %ticket_path.as_ref().display(), "waiting for an Iroh hoist destination");
         let (reply, result) = std_mpsc::sync_channel(1);
         self.lifetime
@@ -93,6 +101,8 @@ impl IrohHost {
             .send(HostCommand::AcceptSource {
                 host: Arc::downgrade(&self.lifetime),
                 codec,
+                expected,
+                deadline,
                 notifier,
                 reply,
             })
@@ -103,19 +113,25 @@ impl IrohHost {
             .map_err(anyhow::Error::msg)
     }
 
-    /// Connects one destination peer using a published endpoint ticket.
+    /// Publishes this process's ephemeral public identity before it waits for a source.
+    pub fn publish_identity(&self, path: impl AsRef<Path>) -> Result<()> {
+        let ticket =
+            EndpointTicket::from_str(&self.ticket).context("local Iroh ticket is invalid")?;
+        rendezvous::publish(path.as_ref(), &ticket.endpoint_addr().id.to_string())
+    }
+
+    /// Connects using a trusted source ticket. The timeout covers file exchange and bootstrap.
     pub fn connect_destination(
         &self,
         ticket_path: impl AsRef<Path>,
         supported_codecs: Vec<VideoCodec>,
         notifier: ClientRuntimeNotifier,
+        startup_timeout: Duration,
     ) -> Result<IrohDestinationPeer> {
-        let encoded = std::fs::read_to_string(ticket_path.as_ref()).with_context(|| {
-            format!(
-                "could not read Iroh endpoint ticket {}",
-                ticket_path.as_ref().display()
-            )
-        })?;
+        let deadline = Instant::now()
+            .checked_add(startup_timeout)
+            .context("Iroh startup timeout exceeds clock range")?;
+        let encoded = rendezvous::read(ticket_path.as_ref(), deadline)?;
         let ticket =
             EndpointTicket::from_str(encoded.trim()).context("Iroh endpoint ticket is invalid")?;
         let (reply, result) = std_mpsc::sync_channel(1);
@@ -125,6 +141,7 @@ impl IrohHost {
                 host: Arc::downgrade(&self.lifetime),
                 ticket,
                 supported_codecs,
+                deadline,
                 notifier,
                 reply,
             })
@@ -183,6 +200,8 @@ enum HostCommand {
     AcceptSource {
         host: Weak<HostLifetime>,
         codec: VideoCodec,
+        expected: EndpointId,
+        deadline: Instant,
         notifier: ClientRuntimeNotifier,
         reply: std_mpsc::SyncSender<Result<IrohSourcePeer, String>>,
     },
@@ -190,6 +209,7 @@ enum HostCommand {
         host: Weak<HostLifetime>,
         ticket: EndpointTicket,
         supported_codecs: Vec<VideoCodec>,
+        deadline: Instant,
         notifier: ClientRuntimeNotifier,
         reply: std_mpsc::SyncSender<Result<IrohDestinationPeer, String>>,
     },
@@ -236,14 +256,16 @@ async fn run_host(
             HostCommand::AcceptSource {
                 host,
                 codec,
+                expected,
+                deadline,
                 notifier,
                 reply,
             } => {
                 let endpoint = endpoint.clone();
                 tokio::spawn(async move {
-                    let result = accept_source(host, endpoint, codec, notifier)
+                    let result = accept_source(host, endpoint, expected, codec, deadline, notifier)
                         .await
-                        .map_err(|error| error.to_string());
+                        .map_err(|error| format!("{error:#}"));
                     let _ = reply.send(result);
                 });
             }
@@ -251,15 +273,22 @@ async fn run_host(
                 host,
                 ticket,
                 supported_codecs,
+                deadline,
                 notifier,
                 reply,
             } => {
                 let endpoint = endpoint.clone();
                 tokio::spawn(async move {
-                    let result =
-                        connect_destination(host, endpoint, ticket, supported_codecs, notifier)
-                            .await
-                            .map_err(|error| error.to_string());
+                    let result = connect_destination(
+                        host,
+                        endpoint,
+                        ticket,
+                        supported_codecs,
+                        deadline,
+                        notifier,
+                    )
+                    .await
+                    .map_err(|error| format!("{error:#}"));
                     let _ = reply.send(result);
                 });
             }
@@ -273,45 +302,33 @@ async fn run_host(
 async fn accept_source(
     host: Weak<HostLifetime>,
     endpoint: Endpoint,
+    expected: EndpointId,
     codec: VideoCodec,
+    deadline: Instant,
     notifier: ClientRuntimeNotifier,
 ) -> Result<IrohSourcePeer> {
-    let incoming = endpoint
-        .accept()
-        .await
-        .context("Iroh endpoint closed before accepting a peer")?;
-    let connection = incoming.await.context("could not accept Iroh peer")?;
-    let (mut send, mut recv) = connection
-        .open_bi()
-        .await
-        .context("could not open Iroh control stream")?;
-    write_record(
-        &mut send,
-        &BootstrapOffer {
-            revision: ProtocolRevision::CURRENT,
-            role: PeerRole::Source,
-            mode: SurfaceMode::EncodedOpaque(codec),
-        },
+    let mut bootstrap = admission::accept_source(
+        &endpoint,
+        expected,
+        codec,
+        deadline.into(),
+        admission::ATTEMPT_TIMEOUT,
     )
     .await?;
-    let answer: BootstrapAnswer = read_record(&mut recv).await?;
-    ProtocolRevision::CURRENT.ensure_compatible(answer.revision)?;
-    if answer.role != PeerRole::Destination {
-        bail!("Iroh bootstrap peer returned the wrong role");
-    }
-    if let Some(rejection) = answer.rejection {
-        bail!("Iroh destination rejected the session: {rejection}");
-    }
-    let media = connection
-        .open_uni()
-        .await
-        .context("could not open Iroh media stream")?;
     let host = host
         .upgrade()
         .context("Iroh host was dropped during peer setup")?;
-    Ok(spawn_source_peer(
-        host, connection, send, recv, media, notifier, codec,
-    ))
+    let peer = spawn_source_peer(
+        host,
+        bootstrap.pending.connection.clone(),
+        bootstrap.send,
+        bootstrap.recv,
+        bootstrap.media,
+        notifier,
+        codec,
+    );
+    bootstrap.pending.hand_off();
+    Ok(peer)
 }
 
 async fn connect_destination(
@@ -319,103 +336,24 @@ async fn connect_destination(
     endpoint: Endpoint,
     ticket: EndpointTicket,
     supported_codecs: Vec<VideoCodec>,
+    deadline: Instant,
     notifier: ClientRuntimeNotifier,
 ) -> Result<IrohDestinationPeer> {
-    let connection = endpoint
-        .connect(ticket.endpoint_addr().clone(), WELD_ALPN)
-        .await
-        .context("could not connect to Iroh source")?;
-    let (mut send, mut recv) = connection
-        .accept_bi()
-        .await
-        .context("could not accept Iroh control stream")?;
-    let offer: BootstrapOffer = read_record(&mut recv).await?;
-    let codec = match offer.mode {
-        SurfaceMode::EncodedOpaque(codec) => Some(codec),
-        SurfaceMode::Native => None,
-    };
-    let rejection = validate_offer(&offer, &supported_codecs)
-        .err()
-        .map(|error| error.to_string());
-    write_record(
-        &mut send,
-        &BootstrapAnswer {
-            revision: ProtocolRevision::CURRENT,
-            role: PeerRole::Destination,
-            rejection: rejection.clone(),
-        },
-    )
-    .await?;
-    if let Some(rejection) = rejection {
-        bail!("rejected Iroh source: {rejection}");
-    }
-    let codec = codec.context("accepted Iroh offer did not select an encoded codec")?;
-    let media = connection
-        .accept_uni()
-        .await
-        .context("could not accept Iroh media stream")?;
+    let mut bootstrap =
+        admission::connect_destination(&endpoint, ticket, &supported_codecs, deadline.into())
+            .await?;
     let host = host
         .upgrade()
         .context("Iroh host was dropped during peer setup")?;
-    Ok(spawn_destination_peer(
-        host, connection, send, recv, media, notifier, codec,
-    ))
-}
-
-fn validate_offer(offer: &BootstrapOffer, supported_codecs: &[VideoCodec]) -> Result<()> {
-    ProtocolRevision::CURRENT.ensure_compatible(offer.revision)?;
-    if offer.role != PeerRole::Source {
-        bail!("Iroh bootstrap peer has the wrong role");
-    }
-    let SurfaceMode::EncodedOpaque(codec) = offer.mode else {
-        bail!("Iroh source selected an unsupported surface mode");
-    };
-    if !supported_codecs.contains(&codec) {
-        bail!("Iroh source selected an unsupported codec");
-    }
-    Ok(())
-}
-
-fn publish_ticket(path: &Path, ticket: &str) -> Result<()> {
-    let file_name = path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .context("Iroh ticket path has no UTF-8 file name")?;
-    let temporary = path.with_file_name(format!(".{file_name}.tmp-{}", std::process::id()));
-    let mut file = OpenOptions::new()
-        .create_new(true)
-        .write(true)
-        .open(&temporary)
-        .with_context(|| format!("could not create Iroh ticket {}", temporary.display()))?;
-    let result = (|| {
-        file.write_all(ticket.as_bytes())?;
-        file.write_all(b"\n")?;
-        file.sync_all()?;
-        std::fs::rename(&temporary, path)?;
-        Ok::<_, std::io::Error>(())
-    })();
-    if result.is_err() {
-        let _ = std::fs::remove_file(&temporary);
-    }
-    result.with_context(|| format!("could not publish Iroh ticket {}", path.display()))
-}
-
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-enum PeerRole {
-    Source,
-    Destination,
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-struct BootstrapOffer {
-    revision: ProtocolRevision,
-    role: PeerRole,
-    mode: SurfaceMode,
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-struct BootstrapAnswer {
-    revision: ProtocolRevision,
-    role: PeerRole,
-    rejection: Option<String>,
+    let peer = spawn_destination_peer(
+        host,
+        bootstrap.pending.connection.clone(),
+        bootstrap.send,
+        bootstrap.recv,
+        bootstrap.media,
+        notifier,
+        bootstrap.codec,
+    );
+    bootstrap.pending.hand_off();
+    Ok(peer)
 }
