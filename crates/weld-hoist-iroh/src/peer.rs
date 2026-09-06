@@ -7,6 +7,7 @@ use std::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
     },
+    time::Instant,
 };
 
 use anyhow::{Context, Result, ensure};
@@ -15,16 +16,17 @@ use tokio::sync::mpsc;
 use weld_core::host::ClientRuntimeNotifier;
 use weld_hoist_core::{HoistPortError, HoistPortResult};
 use weld_hoist_encoded::{
-    EncodedDestinationTransport, EncodedSourceTransport, SourceTransportPacket,
+    EncodedDestinationTransport, EncodedSourceTransport, SourceTransportPacket, TransportSnapshot,
 };
 use weld_hoist_protocol::{DestinationEnvelope, SourceEnvelope};
-use weld_media::EncodedAccessUnit;
 use weld_media::VideoCodec;
 
 use crate::{
     IrohPeerIdentity,
-    framing::{read_media, read_record, write_media, write_record},
+    diagnostics::PathMonitor,
+    framing::{read_media, read_record, write_record},
     host::HostLifetime,
+    media_queue::{MediaSender, QueuedMedia, write_media_queue},
 };
 
 const QUEUE_CAPACITY: usize = 256;
@@ -119,7 +121,8 @@ impl<T> PeerState<T> {
 pub struct IrohSourcePeer {
     state: Arc<PeerState<DestinationEnvelope>>,
     control: mpsc::Sender<SourceEnvelope<weld_hoist_protocol::EncodedBuffer>>,
-    media: mpsc::Sender<weld_hoist_protocol::MediaEnvelope<EncodedAccessUnit>>,
+    media: MediaSender,
+    path: PathMonitor,
     identity: IrohPeerIdentity,
     codec: VideoCodec,
     _host: Arc<HostLifetime>,
@@ -161,6 +164,18 @@ impl EncodedSourceTransport for IrohSourcePeer {
 
     fn disconnect(&self) {
         self.state.fail();
+    }
+
+    fn observations(&self, now: Instant) -> Option<TransportSnapshot> {
+        Some(TransportSnapshot {
+            observed_at: now,
+            media: self.media.snapshot(now)?,
+            path: if self.state.is_available() {
+                self.path.snapshot()
+            } else {
+                None
+            },
+        })
     }
 }
 
@@ -214,11 +229,11 @@ pub(crate) fn spawn_source_peer(
     notifier: ClientRuntimeNotifier,
     codec: VideoCodec,
 ) -> IrohSourcePeer {
-    crate::diagnostics::observe(&connection);
+    let path = crate::diagnostics::observe(&connection);
     let identity = IrohPeerIdentity(connection.remote_id().to_string());
     let state = Arc::new(PeerState::new(connection.clone(), notifier));
     let (control_tx, control_rx) = mpsc::channel(QUEUE_CAPACITY);
-    let (media_tx, media_rx) = mpsc::channel(QUEUE_CAPACITY);
+    let (media_tx, media_rx) = MediaSender::channel(QUEUE_CAPACITY);
     tokio::spawn(run_source_peer(
         state.clone(),
         control_send,
@@ -231,6 +246,7 @@ pub(crate) fn spawn_source_peer(
         state,
         control: control_tx,
         media: media_tx,
+        path,
         identity,
         codec,
         _host: host,
@@ -272,7 +288,7 @@ async fn run_source_peer(
     control_recv: RecvStream,
     mut outgoing_control: mpsc::Receiver<SourceEnvelope<weld_hoist_protocol::EncodedBuffer>>,
     mut media_send: SendStream,
-    mut outgoing_media: mpsc::Receiver<weld_hoist_protocol::MediaEnvelope<EncodedAccessUnit>>,
+    mut outgoing_media: mpsc::Receiver<QueuedMedia>,
 ) {
     let control_writer = async move {
         while let Some(packet) = outgoing_control.recv().await {
@@ -286,9 +302,7 @@ async fn run_source_peer(
             .write_all(&MEDIA_STREAM_MAGIC)
             .await
             .context("could not initialize Iroh media stream")?;
-        while let Some(packet) = outgoing_media.recv().await {
-            write_media(&mut media_send, packet).await?;
-        }
+        write_media_queue(&mut media_send, &mut outgoing_media).await?;
         Ok::<(), anyhow::Error>(())
     };
     if let Err(error) = tokio::try_join!(control_writer, control_reader, media_writer) {

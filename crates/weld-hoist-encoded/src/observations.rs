@@ -30,14 +30,19 @@ pub(super) enum SourceObservation {
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub(super) struct TimingSummary {
+/// Bounded cumulative timing observations, measured on one local clock.
+pub struct TimingSummary {
+    /// Number of recorded operations.
     pub samples: u64,
+    /// Sum of their durations, saturating on overflow.
     pub total: Duration,
+    /// Longest recorded duration.
     pub maximum: Duration,
 }
 
 impl TimingSummary {
-    pub(super) fn record(&mut self, duration: Duration) {
+    /// Record an operation without retaining per-operation history.
+    pub fn record(&mut self, duration: Duration) {
         self.samples = self.samples.saturating_add(1);
         self.total = self.total.saturating_add(duration);
         self.maximum = self.maximum.max(duration);

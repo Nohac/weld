@@ -4,6 +4,12 @@ mod codec;
 mod destination_observations;
 mod observations;
 mod state;
+mod transport_observations;
+
+pub use observations::TimingSummary;
+pub use transport_observations::{
+    MediaSendCounters, MediaSendSnapshot, NetworkPathSnapshot, TransportSnapshot,
+};
 
 pub use codec::{
     DecodeBackend, DecodeCompletion, DecodeRequest, DecodedFrame, EncodeBackend, EncodeCompletion,

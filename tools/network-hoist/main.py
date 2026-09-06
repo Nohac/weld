@@ -52,7 +52,7 @@ def execute_user(path, role):
     environment.update({"GDK_BACKEND": "wayland", "QT_QPA_PLATFORM": "wayland",
                         "WINIT_UNIX_BACKEND": "wayland", "MOZ_ENABLE_WAYLAND": "1",
                         "XDG_SESSION_TYPE": "wayland"})
-    environment.setdefault("RUST_LOG", "warn,weldwm=info,weld_core=info,weld_network_diag=debug")
+    environment.setdefault("RUST_LOG", "warn,weldwm=info,weld_core=info,weld_network_diag=debug,weld_media_diag=debug")
     args = [config["runtime"]["binary"], "--backend", "nested", "--wayland-socket",
             f"weld-net-{config['id'][:12]}-{role}", "--hoist-iroh-network", "n0",
             "--hoist-iroh-timeout", str(config["startup_seconds"])]

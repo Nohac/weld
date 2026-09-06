@@ -406,8 +406,11 @@ class UserBoundaryTests(unittest.TestCase):
             self.assertEqual(args[-2:], ["--", "foot"])
             self.assertEqual(environment["LD_LIBRARY_PATH"], "/user/libs")
             self.assertEqual(environment["WINIT_UNIX_BACKEND"], "wayland")
+            self.assertIn("weld_media_diag=debug", environment["RUST_LOG"])
+            config["runtime"]["environment"]["RUST_LOG"] = "error"
             main.execute_user("/private/run.json", "destination")
             self.assertIn("--hoist-iroh-publish-identity", execute.call_args.args[1])
+            self.assertEqual(execute.call_args.args[2]["RUST_LOG"], "error")
             with patch.object(os, "geteuid", return_value=0), self.assertRaises(Refused):
                 main.execute_user("/private/run.json", "source")
 

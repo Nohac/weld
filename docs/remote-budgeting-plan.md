@@ -2,8 +2,8 @@
 
 ## Status and scope
 
-The source- and receiver-observation sub-batches below are implemented; the budgeting and
-adaptation batches remain a proposed implementation sequence. The design has
+The source, receiver, and Iroh transport observations below are implemented;
+the budgeting and adaptation batches remain a proposed implementation sequence. The design has
 been peer reviewed; implementation may proceed in the order below. The broader
 [budgeting specification](spec/remote-budgeting.md) remains Direction, not a
 checklist to implement wholesale.
@@ -70,10 +70,45 @@ Like source observations, collection is independent from tracing and creates
 no new timer or compositor wake. A failing decode drain emits a partial summary
 before propagating its error, with a best-effort final summary on ordinary Drop.
 
-The transport measurement split, reasoned wire feedback, preferences and actual
-budget enforcement remain subsequent work. These receiver observations do not
-change scheduling or the protocol. No data-saving or hard-cap option is exposed
-before it can be enforced.
+### Implemented: Iroh send and selected-path observations
+
+Encoded source transports can now provide an optional owned `TransportSnapshot`.
+The source consumes it on the existing source-report cadence and clock, without
+another host timer, history queue, or compositor wake. The Unix binding currently
+reports unavailable; it does not invent QUIC-shaped measurements. Reasoned wire
+feedback, receiver allowances, and actual budget enforcement remain subsequent
+work. No data-saving or hard-cap option is exposed before it can be enforced.
+
+The Iroh media queue records accepted, fully written, and cancelled record and
+payload-byte totals, admission-to-write wait, successful framed-write wall time,
+pending record/payload bytes and oldest age, and active-write age. Metadata is
+bounded by the channel capacity plus its one active record. A record remains
+fully charged until its complete write finishes; these gauges are not counts
+of bytes still unsent inside QUIC. Completion means the transport API accepted
+the record, not remote receipt, acknowledgement, decode, or presentation. Write
+wall time includes framing and task scheduling, not just congestion blocking.
+Teardown and failed writes release accounting through record ownership without
+classifying cancellation as congestion loss. Unavailable/poisoned measurement
+state does not change the existing transport failure or delivery semantics.
+
+One weak-connection observer per Iroh peer now samples selected-path statistics
+once per second independently from tracing. It retains only an owned latest
+snapshot with local sample time, RTT, congestion window, UDP byte totals, loss
+totals, and congestion-event totals. Selection changes, uncertain event history,
+and counter rollback change its connection-local epoch; consumers must rebaseline
+and check freshness, not subtract totals from different epochs. Missing or closed
+paths have no usable snapshot. These counters include connection traffic beyond
+media payloads and are not available-bandwidth or carrier-billing estimates.
+The opt-in periodic `weld_network_diag` log remains at five seconds; media
+summaries include path sample age and epoch on the existing source cadence.
+The observer wakes Tokio, not Bevy or the compositor host.
+
+`run-network-hoist` now enables `weld_media_diag=debug` in its default filter and
+preserves an explicit `RUST_LOG`. No protocol, codec settings, scheduling,
+network-interface handling, or GPU lifetime behavior changes in this sub-batch.
+Local transport attribution, coordinated feedback/preferences, the bitrate
+actuator, and budget enforcement are still pending. The codec-pool and alpha-atlas
+explorations in the specifications do not expand this initial implementation.
 
 ## Verified starting point
 

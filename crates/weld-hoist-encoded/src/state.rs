@@ -27,6 +27,7 @@ use weld_hoist_protocol::{
 };
 use weld_media::{EncodedAccessUnit, MediaFrameId, MediaStreamId, StreamGeneration, VideoCodec};
 
+use crate::TransportSnapshot;
 use crate::codec::{
     DecodeBackend, DecodeRequest, EncodeBackend, EncodeInput, EncodeRequest, SubmitError,
 };
@@ -46,6 +47,11 @@ pub trait EncodedSourceTransport {
     fn send(&self, packet: SourceTransportPacket) -> HoistPortResult<()>;
     fn drain(&self) -> HoistPortResult<Vec<DestinationEnvelope>>;
     fn disconnect(&self);
+    /// Return locally measured, owned send state at `now`, or None when unavailable.
+    /// Callers must not interpret unavailable observations as zero pressure.
+    fn observations(&self, _now: Instant) -> Option<TransportSnapshot> {
+        None
+    }
 }
 
 /// Nonblocking transport half used by the encoded destination port.
@@ -369,7 +375,11 @@ impl EncodedSourceState {
         Ok(())
     }
 
-    fn report_observations(&mut self, final_report: bool) {
+    fn report_observations(
+        &mut self,
+        final_report: bool,
+        transport: impl FnOnce(Instant) -> Option<TransportSnapshot>,
+    ) {
         let now = Instant::now();
         if !self.observations.report_due(now, final_report) {
             return;
@@ -393,6 +403,9 @@ impl EncodedSourceState {
         };
         if let Some(report) = self.observations.take_report(now, gauges, final_report) {
             report.emit();
+            if let Some(snapshot) = transport(now) {
+                snapshot.emit();
+            }
         }
     }
 
@@ -775,7 +788,7 @@ impl EncodedSourceState {
 impl Drop for EncodedSourceState {
     fn drop(&mut self) {
         // Best effort before ordinary teardown; process abort/SIGKILL may skip it.
-        self.report_observations(true);
+        self.report_observations(true, |_| None);
     }
 }
 
@@ -868,7 +881,7 @@ impl<T: EncodedSourceTransport> HoistSourcePort for EncodedSourcePort<T> {
             .as_mut()
             .ok_or_else(|| protocol_error("encoded source port is disconnected"))?;
         state.drain().map_err(protocol_error)?;
-        state.report_observations(false);
+        state.report_observations(false, |now| self.transport.observations(now));
         self.flush()?;
         self.transport.drain()
     }
@@ -3350,5 +3363,34 @@ mod tests {
         assert_eq!(report.counters.applied_credit_turnaround.samples, 0);
         assert_eq!(report.counters.credits_cancelled, 0);
         assert_eq!(report.counters.stale_credit_outcomes, 0);
+    }
+
+    #[test]
+    fn transport_collection_shares_source_report_gating_and_clock() {
+        let (mut source, _) = source();
+        let calls = Cell::new(0);
+        source.report_observations(true, |_| {
+            calls.set(calls.get() + 1);
+            None
+        });
+        assert_eq!(
+            calls.get(),
+            0,
+            "idle source does not request a transport report"
+        );
+        source
+            .observations
+            .record(SourceObservation::CommitReceived);
+        let before = Instant::now();
+        source.report_observations(true, |now| {
+            assert!(now >= before && now <= Instant::now());
+            calls.set(calls.get() + 1);
+            Some(TransportSnapshot {
+                observed_at: now,
+                media: Default::default(),
+                path: None,
+            })
+        });
+        assert_eq!(calls.get(), 1);
     }
 }
