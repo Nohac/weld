@@ -24,6 +24,9 @@ Implementation ideas retained from comparisons with related projects live in
 [Possible future improvements](../possible-future-improvements.md); that note is
 exploratory rather than an additional roadmap.
 
+The [streaming-budget plan](../remote-budgeting-plan.md) records the
+bounded implementation sequence for shared budgets and adaptive bitrate.
+
 ## Subjects
 
 | Document | Scope |

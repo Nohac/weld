@@ -32,6 +32,10 @@ No budgeting implementation or calibrated hardware model exists yet. The
 rules below constrain the first tracer without promising exact limits before
 measurement.
 
+The next bounded implementation sequence is recorded in the
+[streaming-budget plan](../remote-budgeting-plan.md), separate from this broader
+Direction material.
+
 Each peer runs budgeting for its own physical media devices. Under the
 [complete-path
 ownership](remote-protocol.md#complete-path-selection--direction),
@@ -313,6 +317,38 @@ stream may be cheap to encode but expensive on the link, or the inverse. The
 transport reports congestion; budgeting chooses per-stream recommendations;
 the protocol performs any resulting profile or rendition change.
 
+## User data preferences and adaptive recovery — Direction
+
+User policy limits what adaptation may spend. Resolve defaults, a selected
+network profile and explicit peer/session preferences without allowing a local
+override or remote report to silently exceed a hard aggregate upload/download
+ceiling. Receiver allowances and sender limits both apply, and connections share
+their local network-scope allowance rather than each receiving its full value.
+Those pools are distinct from per-device encode/decode work limits.
+
+Users may choose a lower ceiling for mobile data than for home Wi-Fi. Metering
+is explicit or comes from a trusted optional OS hint; neither Wi-Fi nor cellular
+implies a particular billing policy, and Iroh IP/relay paths do not identify the
+access technology. Unknown stays unknown. Keep network identities and profile
+selection local; communicate accepted numeric limits and necessary intent.
+Media bitrate accounting does not equal the carrier's billed bytes or a monthly
+quota, because retransmissions, transport overhead and unrelated traffic differ.
+
+Sustained pressure-related deadline misses or dropped work should reduce offered
+bitrate. Count reasons: normal coalescing, deliberate cadence reduction, hidden
+presentations, idle time and lifecycle cancellation are not congestion drops.
+In a credit-limited path, inflated turnaround and queue age may expose pressure
+before drops occur. Separate link pressure from slow encode/decode and from a
+stable protocol-imposed cadence limit.
+
+Recovery probes increase quality cautiously after healthy, fresh observations
+and cooldown, only when real demand can exercise the increase. Hold on idle or
+stale evidence, roll back harmful probes, and rebaseline on path or preference
+changes. Never probe beyond the user's ceiling or receiver/backend allowance.
+An explicit preference can disable upward probing. Requested and applied codec
+rates remain separately observable; reduced cadence alone is not proof of an
+applied bitrate reduction. Quantitative thresholds require measurement.
+
 ## Fairness, recency, and stability — Direction
 
 Focus is a strong default signal, not the only entitlement. Explicit calls,
@@ -477,7 +513,8 @@ stack. They do not become universal vendor promises.
 - Establish policy for conflicting user-pinned or guaranteed quality floors.
 - Define atomic reconciliation and rollback when source and destination local
   admission results change concurrently.
-- Validate whether link fairness and media-device fairness need one coordinator
-  or cooperating peer-local budgeting authorities.
+- Validate the shared peer-local coordinator's network-scope pools and distinct
+  media-device limits across multiple ports; do not replicate a full link budget
+  inside each device or connection. Cross-process coordination remains open.
 
 [protocol-stream-topology]: remote-protocol.md#surface-graph-and-media-stream-topology--direction

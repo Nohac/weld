@@ -5,9 +5,13 @@
 The read-only inventory helper, intended-peer admission, opt-in path diagnostics,
 and `scripts/run-network-hoist` launcher are implemented. The launcher's policy
 and recovery sequencing have automated tests and its read-only preflight passed
-on the selected host. The privileged lifecycle and real internet hoist still need
-manual validation; this is not a completed Wi-Fi/5G test. The same-namespace
-launcher does not prove that path either.
+on the selected host. A subsequent isolated AV1 run established a direct IPv4
+connection and streamed until a GPU video-engine failure before the watchdog.
+The launcher enforces interface separation and checks that the receiver has
+only loopback plus the tether before starting peers. Together with the selected
+path, this demonstrates operation across the isolated uplinks, not a completed
+stability/recovery acceptance suite. The same-namespace launcher alone does not
+prove that path.
 The [implemented Iroh binding](iroh-hoisting.md) remains the baseline.
 
 The first privileged attempt reached dhcpcd but aborted before launching either
@@ -282,6 +286,28 @@ restoration plan. Implementation and read-only validation change none of that
 system state.
 
 ## Batch 3: prove the route, then exercise hoisting
+
+### Observed isolated AV1 failure
+
+Run `8e5554535a2344529337be5d5c6552d3`, with logs in
+`target/validation/network-hoist-4933rv7l`, connected at about 15:34:32 UTC on
+September 6. Iroh selected direct IPv4, usually around 25–35 ms RTT, with
+occasional higher samples. At 15:36:19 the kernel reported a `vcn_unified_0`
+timeout attributed to `weldwm` and reset the ring. FFmpeg then reported AV1
+output-buffer mapping/submission I/O failure, the source relay failed, and the
+destination observed peer closure. This was about 108 seconds after startup,
+before the 120-second session watchdog. DHCP was stopped during the resulting
+teardown, not as the initial failure.
+
+No relay-selected interval was observed in this particular run; that is not a
+claim about other runs. User confirmation that phone Wi-Fi is off remains part
+of interpreting the topology. The root cause of the GPU fault is unresolved:
+the logs do not distinguish a driver defect from a buffer/synchronization or
+workload-timing problem. Budgeting may reduce pressure but is not a proven fix.
+The [streaming-budget plan](remote-budgeting-plan.md) keeps this investigation
+separate.
+
+### Remaining acceptance work
 
 Before launching media, verify the source namespace has no tether and the
 receiver has only loopback plus tether. Verify routing/DNS separately, phone

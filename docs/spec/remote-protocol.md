@@ -446,6 +446,11 @@ window, authorize input, or reveal raw eye coordinates unnecessarily.
 
 ## Runtime adaptation and renegotiation — Direction
 
+The [streaming-budget plan](../remote-budgeting-plan.md) defines
+the next bounded feedback/allowance and rate-actuation slice. Applied media and
+actual presentation must remain distinct observations; reasoned pressure
+feedback must not reinterpret surface cancellation as network loss.
+
 Bitrate, quantization, and resolution should adapt within the selected codec
 before replacing it. Sustained bandwidth, decoder, thermal, session-budget,
 target, alpha, or hardware failure may require a new path.

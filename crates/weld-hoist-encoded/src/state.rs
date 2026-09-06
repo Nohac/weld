@@ -30,6 +30,7 @@ use weld_media::{EncodedAccessUnit, MediaFrameId, MediaStreamId, StreamGeneratio
 use crate::codec::{
     DecodeBackend, DecodeRequest, EncodeBackend, EncodeInput, EncodeRequest, SubmitError,
 };
+use crate::observations::{SourceGauges, SourceObservation, SourceObservations};
 
 /// One packet sent from an encoded source to its destination.
 pub enum SourceTransportPacket {
@@ -195,10 +196,12 @@ struct EncodedSourceState {
     started_at: Instant,
     last_timestamp_micros: u64,
     dump: Option<AccessUnitDump>,
+    observations: SourceObservations,
 }
 
 impl EncodedSourceState {
     fn new(backend: Box<dyn EncodeBackend>) -> Self {
+        let started_at = Instant::now();
         Self {
             backend,
             output: VecDeque::new(),
@@ -210,9 +213,10 @@ impl EncodedSourceState {
             in_flight: None,
             next_stream: Some(1),
             next_token: Some(1),
-            started_at: Instant::now(),
+            started_at,
             last_timestamp_micros: 0,
             dump: None,
+            observations: SourceObservations::new(started_at),
         }
     }
 
@@ -227,6 +231,7 @@ impl EncodedSourceState {
 
     fn enqueue(&mut self, session: HoistSessionId, mut event: ClientSurfaceEvent) -> Result<()> {
         if let ClientSurfaceEventKind::Commit(commit) = &mut event.kind {
+            self.observations.record(SourceObservation::CommitReceived);
             // The selected encoded path has no alpha, including on retained commits.
             commit.alpha_mode = SurfaceAlphaMode::Discarded;
         }
@@ -285,7 +290,11 @@ impl EncodedSourceState {
                 "encoder completed an unexpected source event"
             );
             drop(batch.active.retained_dmabuf_lease.take());
+            if completion.result.is_err() {
+                self.observations.record(SourceObservation::CodecFailed);
+            }
             if batch.cancelled {
+                self.observations.record(SourceObservation::BatchCancelled);
                 if let Err(error) = completion.result {
                     tracing::debug!(frame = ?batch.active.frame, error = %format_args!("{error:#}"),
                         "discarded cancelled encode failure");
@@ -304,12 +313,21 @@ impl EncodedSourceState {
             }
             let revision = commit_revision(&batch.event)
                 .context("encoded batch control event was not a commit")?;
+            let batch_wall_time = batch.started_at.elapsed();
+            let payload_bytes = batch.completed.iter().fold(0_u64, |total, unit| {
+                total.saturating_add(u64::try_from(unit.payload.len()).unwrap_or(u64::MAX))
+            });
+            self.observations.record(SourceObservation::BatchCompleted {
+                layer_frames: batch.completed.len(),
+                payload_bytes,
+                wall_time: batch_wall_time,
+            });
             tracing::trace!(
                 surface = ?batch.surface,
                 ?revision,
                 frames = batch.completed.len(),
-                payload_bytes = batch.completed.iter().map(|unit| unit.payload.len()).sum::<usize>(),
-                encode_batch_micros = batch.started_at.elapsed().as_micros(),
+                payload_bytes,
+                encode_batch_micros = batch_wall_time.as_micros(),
                 pending_events = self.pending.values().map(VecDeque::len).sum::<usize>(),
                 "completed encoded source batch"
             );
@@ -348,11 +366,40 @@ impl EncodedSourceState {
         Ok(())
     }
 
+    fn report_observations(&mut self, final_report: bool) {
+        let now = Instant::now();
+        if !self.observations.report_due(now, final_report) {
+            return;
+        }
+        let gauges = SourceGauges {
+            pending_events: self.pending.values().map(VecDeque::len).sum(),
+            awaiting_credit: self.awaiting_credit.len(),
+            active_streams: self.streams.len(),
+            encode_in_flight: self.in_flight.is_some(),
+            oldest_credit_age: self
+                .awaiting_credit
+                .values()
+                .map(|credit| now.saturating_duration_since(credit.sent_at))
+                .max()
+                .unwrap_or_default(),
+            active_batch_age: self
+                .in_flight
+                .as_ref()
+                .map(|batch| now.saturating_duration_since(batch.started_at))
+                .unwrap_or_default(),
+        };
+        if let Some(report) = self.observations.take_report(now, gauges, final_report) {
+            report.emit();
+        }
+    }
+
     fn cancel_surface(&mut self, surface: ClientSurfaceId) -> Result<()> {
         self.pending.remove(&surface);
         self.pending_order.retain(|candidate| *candidate != surface);
         self.resizing.remove(&surface);
-        self.awaiting_credit.remove(&surface);
+        if self.awaiting_credit.remove(&surface).is_some() {
+            self.observations.record(SourceObservation::CreditCancelled);
+        }
         if let Some(in_flight) = self.in_flight.as_mut()
             && in_flight.surface == surface
         {
@@ -370,6 +417,8 @@ impl EncodedSourceState {
         outcome: EncodedCommitOutcome,
     ) -> Result<()> {
         let Some(expected) = self.awaiting_credit.get(&surface) else {
+            self.observations
+                .record(SourceObservation::StaleCreditOutcome);
             tracing::trace!(?surface, ?revision, "ignored stale encoded commit outcome");
             return Ok(());
         };
@@ -381,11 +430,16 @@ impl EncodedSourceState {
             .awaiting_credit
             .remove(&surface)
             .context("encoded destination credit disappeared")?;
+        let turnaround = credit.sent_at.elapsed();
+        self.observations.record(match outcome {
+            EncodedCommitOutcome::Applied => SourceObservation::CreditApplied(turnaround),
+            EncodedCommitOutcome::Dropped => SourceObservation::CreditCancelled,
+        });
         tracing::trace!(
             ?surface,
             ?revision,
             ?outcome,
-            credit_round_trip_micros = credit.sent_at.elapsed().as_micros(),
+            credit_round_trip_micros = turnaround.as_micros(),
             pending_events = self.pending.values().map(VecDeque::len).sum::<usize>(),
             "finished encoded destination credit"
         );
@@ -411,6 +465,7 @@ impl EncodedSourceState {
         {
             current.carry_unobserved_content_from(previous);
             queue.pop_back();
+            self.observations.record(SourceObservation::CommitCoalesced);
             replaced_previous_commit = true;
             tracing::trace!(?surface, "coalesced an unobserved encoded source commit");
         }
@@ -714,6 +769,13 @@ impl EncodedSourceState {
     }
 }
 
+impl Drop for EncodedSourceState {
+    fn drop(&mut self) {
+        // Best effort before ordinary teardown; process abort/SIGKILL may skip it.
+        self.report_observations(true);
+    }
+}
+
 /// Source relay port that schedules encoded commits over a binding-owned transport.
 pub struct EncodedSourcePort<T> {
     transport: T,
@@ -798,11 +860,12 @@ impl<T: EncodedSourceTransport> HoistSourcePort for EncodedSourcePort<T> {
     }
 
     fn poll(&mut self) -> HoistPortResult<Vec<DestinationEnvelope>> {
-        self.state
+        let state = self
+            .state
             .as_mut()
-            .ok_or_else(|| protocol_error("encoded source port is disconnected"))?
-            .drain()
-            .map_err(protocol_error)?;
+            .ok_or_else(|| protocol_error("encoded source port is disconnected"))?;
+        state.drain().map_err(protocol_error)?;
+        state.report_observations(false);
         self.flush()?;
         self.transport.drain()
     }
@@ -2826,6 +2889,14 @@ mod tests {
             output_kinds(&source.output),
             vec!["media", "media", "control"]
         );
+        let report = source
+            .observations
+            .take_report(Instant::now(), SourceGauges::default(), true)
+            .expect("observations");
+        assert_eq!(report.counters.batches_completed, 1);
+        assert_eq!(report.counters.layer_frames_completed, 2);
+        assert_eq!(report.counters.encoded_payload_bytes, 2);
+        assert_eq!(report.counters.batch_wall.samples, 1);
     }
 
     #[test]
@@ -2909,5 +2980,132 @@ mod tests {
             )
             .expect("first credit");
         assert_eq!(fake.borrow().submitted.len(), 2);
+        let report = source
+            .observations
+            .take_report(Instant::now(), SourceGauges::default(), true)
+            .expect("applied credit observations");
+        assert_eq!(report.counters.applied_credit_turnaround.samples, 1);
+        assert_eq!(report.counters.credits_cancelled, 0);
+    }
+
+    #[test]
+    fn source_observations_separate_coalescing_cancellation_and_late_credit() {
+        let (mut source, fake) = source();
+        let source_id = ClientSourceId::new(1);
+        let surface = surface(source_id, 2, 3);
+        let session = HoistSessionId::new(4);
+        let metadata = ClientBufferMetadata::new(Extent::new(1, 1), true);
+        source
+            .enqueue(
+                session,
+                one_buffer_commit(surface, 1, 1, shm_lease(source_id, 5, 10, metadata)),
+            )
+            .expect("first commit");
+        let (token, frame, _) = fake.borrow().submitted[0].clone();
+        complete(&fake, token, frame, 1);
+        source.drain().expect("encode completion");
+        for revision in [2, 3] {
+            source
+                .enqueue(
+                    session,
+                    one_buffer_commit(
+                        surface,
+                        revision,
+                        1,
+                        shm_lease(source_id, revision + 5, 20, metadata),
+                    ),
+                )
+                .expect("credit-blocked commit");
+        }
+        assert_eq!(fake.borrow().submitted.len(), 1);
+        source.cancel_surface(surface).expect("withdraw credit");
+        source
+            .finish_remote_commit(
+                surface,
+                ClientCommitRevision::new(1),
+                EncodedCommitOutcome::Applied,
+            )
+            .expect("late reply");
+        let report = source
+            .observations
+            .take_report(Instant::now(), SourceGauges::default(), true)
+            .expect("observations");
+        assert_eq!(report.counters.commits_received, 3);
+        assert_eq!(report.counters.commits_coalesced, 1);
+        assert_eq!(report.counters.batches_completed, 1);
+        assert_eq!(report.counters.credits_cancelled, 1);
+        assert_eq!(report.counters.stale_credit_outcomes, 1);
+        assert_eq!(report.counters.applied_credit_turnaround.samples, 0);
+        assert!(source.pending.is_empty());
+        assert!(source.awaiting_credit.is_empty());
+    }
+
+    #[test]
+    fn source_observations_count_failures_even_on_cancelled_encodes() {
+        for cancelled in [false, true] {
+            let (mut source, fake) = source();
+            let source_id = ClientSourceId::new(1);
+            let surface = surface(source_id, 2, 3);
+            let session = HoistSessionId::new(4);
+            let metadata = ClientBufferMetadata::new(Extent::new(1, 1), true);
+            source
+                .enqueue(
+                    session,
+                    one_buffer_commit(surface, 1, 1, shm_lease(source_id, 5, 10, metadata)),
+                )
+                .expect("commit");
+            let token = fake.borrow().submitted[0].0;
+            if cancelled {
+                source.cancel_surface(surface).expect("cancel encode");
+            }
+            fake.borrow_mut().completions.push(EncodeCompletion {
+                token,
+                result: Err(anyhow::anyhow!("fake codec failure")),
+            });
+            assert_eq!(source.drain().is_ok(), cancelled);
+            let report = source
+                .observations
+                .take_report(Instant::now(), SourceGauges::default(), true)
+                .expect("failure observations");
+            assert_eq!(report.counters.codec_failures, 1);
+            assert_eq!(report.counters.batches_cancelled, u64::from(cancelled));
+            assert_eq!(report.counters.batches_completed, 0);
+            assert_eq!(report.counters.encoded_payload_bytes, 0);
+        }
+    }
+
+    #[test]
+    fn source_observations_do_not_accept_a_mismatched_credit_revision() {
+        let (mut source, fake) = source();
+        let source_id = ClientSourceId::new(1);
+        let surface = surface(source_id, 2, 3);
+        let session = HoistSessionId::new(4);
+        let metadata = ClientBufferMetadata::new(Extent::new(1, 1), true);
+        source
+            .enqueue(
+                session,
+                one_buffer_commit(surface, 1, 1, shm_lease(source_id, 5, 10, metadata)),
+            )
+            .expect("commit");
+        let (token, frame, _) = fake.borrow().submitted[0].clone();
+        complete(&fake, token, frame, 1);
+        source.drain().expect("completion");
+        assert!(
+            source
+                .finish_remote_commit(
+                    surface,
+                    ClientCommitRevision::new(99),
+                    EncodedCommitOutcome::Applied
+                )
+                .is_err()
+        );
+        assert!(source.awaiting_credit.contains_key(&surface));
+        let report = source
+            .observations
+            .take_report(Instant::now(), SourceGauges::default(), true)
+            .expect("observations");
+        assert_eq!(report.counters.applied_credit_turnaround.samples, 0);
+        assert_eq!(report.counters.credits_cancelled, 0);
+        assert_eq!(report.counters.stale_credit_outcomes, 0);
     }
 }
