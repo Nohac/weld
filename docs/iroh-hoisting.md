@@ -44,10 +44,12 @@ The current tracer has deliberate limits:
 - Control and input share one reliable bidirectional QUIC stream. Encoded
   access units use a separate source-to-destination stream so media flow
   control cannot block lifecycle or input records.
-- The encoded tracer permits one outstanding destination commit per surface
-  and one global in-flight encode. This bounds memory and stale frames, but its
-  throughput is currently coupled to round-trip time. Later media budgeting
-  and feedback may widen or replace that credit policy based on measurements.
+- Encoded commits have no application ACK. One global in-flight encode uses
+  local media headroom, with ownership-preserving Busy admission and independent
+  bounded control/media queues. The receiver reserves media capacity before
+  allocating payloads and pauses admission when full. Write completion wakes
+  static sources. QUIC reliability and congestion control remain unchanged;
+  [these bounds](ack-free-streaming-plan.md) are not latency guarantees.
 
 ## Intended-peer admission
 
@@ -190,7 +192,8 @@ separate follow-up work; this fix does not enable unconditional callbacks.
 The September 5 popup investigation reproduced a teardown deadlock: the source
 relay removed a destroyed popup's route, while the encoded scheduler queued its
 destruction behind an acknowledgement that could no longer pass that route.
-Destruction now cancels pending frames and bypasses frame credit. Codec work
+That original fix let destruction bypass credit; commit ACKs have since been
+removed entirely. Destruction cancels unpublished pending frames. Codec work
 already submitted retains its input lease until completion, then discards the
 obsolete result and retires the active generation. Retirement must not race
 ahead of a job that can still create that generation.
@@ -202,7 +205,7 @@ the session merely because obsolete codec work returned an error. Completion
 tokens and late-media session identities are still validated.
 
 Regression tests exercise 160 consecutive surface teardowns, including
-withheld frame acknowledgements and partial multi-layer decoding. For live
+pending media and partial multi-layer decoding, without commit ACKs. For live
 validation, repeatedly move between Firefox tabs to open and dismiss previews,
 then exercise menus, resize, and reclaim. Old previews should disappear and
 the hoist should remain connected.

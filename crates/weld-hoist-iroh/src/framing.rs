@@ -9,7 +9,7 @@ use weld_hoist_protocol::{EncodedAccessUnitHeader, MediaEnvelope};
 use weld_media::EncodedAccessUnit;
 
 pub(crate) const MAX_CONTROL_BYTES: usize = 192 * 1024;
-pub(crate) const MAX_MEDIA_BYTES: usize = 32 * 1024 * 1024;
+pub(crate) const MAX_MEDIA_BYTES: usize = weld_hoist_protocol::MAX_ENCODED_ACCESS_UNIT_BYTES;
 
 pub(crate) async fn write_record<W: AsyncWrite + Unpin>(
     writer: &mut W,

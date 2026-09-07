@@ -42,7 +42,6 @@ pub use weld_hoist_encoded::{
 pub(crate) use wire::{LocalBootstrapAcknowledgement, LocalBootstrapOffer};
 pub use wire::{
     LocalBuffer, LocalBufferContent, LocalDestinationMessage, LocalDestinationPacket, LocalDmabuf,
-    LocalDmabufPlane, LocalEncodedAccessUnit, LocalEncodedBuffer, LocalEncodedCommitOutcome,
-    LocalEncodedSourcePacket, LocalMediaPacket, LocalShm, LocalSourceMessage, LocalSourcePacket,
-    LocalSurfaceMode,
+    LocalDmabufPlane, LocalEncodedAccessUnit, LocalEncodedBuffer, LocalEncodedSourcePacket,
+    LocalMediaPacket, LocalShm, LocalSourceMessage, LocalSourcePacket, LocalSurfaceMode,
 };

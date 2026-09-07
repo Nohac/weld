@@ -11,10 +11,11 @@ use tokio::{
 use weld_core::host::ClientRuntimeNotifier;
 use weld_hoist_core::{HoistPortError, HoistPortResult};
 use weld_hoist_encoded::{
-    EncodedDestinationTransport, EncodedSourceTransport, SourceTransportPacket, TransportSnapshot,
+    EncodedDestinationTransport, EncodedSourceTransport, ReceiveBudget, SendStatus,
+    SourceTransportPacket, TransportSnapshot,
 };
-use weld_hoist_protocol::{DestinationEnvelope, SourceEnvelope};
-use weld_media::VideoCodec;
+use weld_hoist_protocol::{DestinationEnvelope, EncodedBuffer, MediaEnvelope, SourceEnvelope};
+use weld_media::{EncodedAccessUnit, VideoCodec};
 
 use crate::{
     IrohPeerIdentity,
@@ -32,13 +33,15 @@ const MEDIA_STREAM_MAGIC: [u8; 8] = *b"weldmed1";
 struct PeerState<T> {
     incoming: IncomingQueue<T>,
     connection: Connection,
+    notifier: ClientRuntimeNotifier,
 }
 
 impl<T> PeerState<T> {
     fn new(connection: Connection, notifier: ClientRuntimeNotifier) -> Self {
         Self {
-            incoming: IncomingQueue::new(notifier),
+            incoming: IncomingQueue::new(notifier.clone()),
             connection,
+            notifier,
         }
     }
 
@@ -84,19 +87,44 @@ impl IrohSourcePeer {
 }
 
 impl EncodedSourceTransport for IrohSourcePeer {
-    fn send(&self, packet: SourceTransportPacket) -> HoistPortResult<()> {
-        match packet {
+    fn try_send(
+        &self,
+        packet: SourceTransportPacket,
+    ) -> HoistPortResult<SendStatus<SourceTransportPacket>> {
+        let result = match packet {
             SourceTransportPacket::Control(packet) => {
-                self.control.try_send(packet).map_err(|error| {
-                    self.state.fail();
-                    peer_error(format!("could not queue Iroh source control: {error}"))
+                self.control.try_send(packet).map_err(|error| match error {
+                    mpsc::error::TrySendError::Full(packet) => {
+                        mpsc::error::TrySendError::Full(SourceTransportPacket::Control(packet))
+                    }
+                    mpsc::error::TrySendError::Closed(packet) => {
+                        mpsc::error::TrySendError::Closed(SourceTransportPacket::Control(packet))
+                    }
                 })
             }
-            SourceTransportPacket::Media(packet) => self.media.try_send(packet).map_err(|error| {
+            SourceTransportPacket::Media(packet) => {
+                self.media.try_send(packet).map_err(|error| match error {
+                    mpsc::error::TrySendError::Full(packet) => {
+                        mpsc::error::TrySendError::Full(SourceTransportPacket::Media(packet))
+                    }
+                    mpsc::error::TrySendError::Closed(packet) => {
+                        mpsc::error::TrySendError::Closed(SourceTransportPacket::Media(packet))
+                    }
+                })
+            }
+        };
+        match result {
+            Ok(()) => Ok(SendStatus::Sent),
+            Err(mpsc::error::TrySendError::Full(packet)) => Ok(SendStatus::Busy(packet)),
+            Err(mpsc::error::TrySendError::Closed(_)) => {
                 self.state.fail();
-                peer_error(format!("could not queue Iroh source media: {error}"))
-            }),
+                Err(peer_error("Iroh source send channel closed"))
+            }
         }
+    }
+
+    fn media_headroom(&self) -> bool {
+        self.media.headroom()
     }
 
     fn drain(&self) -> HoistPortResult<Vec<DestinationEnvelope>> {
@@ -123,7 +151,8 @@ impl EncodedSourceTransport for IrohSourcePeer {
 /// Destination-facing half of one authenticated Iroh peer connection.
 #[derive(Clone)]
 pub struct IrohDestinationPeer {
-    state: Arc<PeerState<SourceTransportPacket>>,
+    state: Arc<PeerState<SourceEnvelope<EncodedBuffer>>>,
+    media: Arc<IncomingQueue<MediaEnvelope<EncodedAccessUnit>>>,
     control: Arc<InputOutbox>,
     identity: IrohPeerIdentity,
     codec: VideoCodec,
@@ -152,12 +181,46 @@ impl EncodedDestinationTransport for IrohDestinationPeer {
         })
     }
 
-    fn drain(&self) -> HoistPortResult<Vec<SourceTransportPacket>> {
-        self.state.drain()
+    fn drain(&self, mut budget: ReceiveBudget) -> HoistPortResult<Vec<SourceTransportPacket>> {
+        let mut packets = self
+            .state
+            .incoming
+            .drain_matching(budget.control_records, |_| true)
+            .map_err(peer_error)?
+            .into_iter()
+            .map(SourceTransportPacket::Control)
+            .collect::<Vec<_>>();
+        packets.extend(
+            self.media
+                .drain_matching(budget.media_records, |packet| {
+                    if packet.access_unit.payload.len() > budget.media_bytes {
+                        return false;
+                    }
+                    budget.media_bytes -= packet.access_unit.payload.len();
+                    true
+                })
+                .map_err(peer_error)?
+                .into_iter()
+                .map(SourceTransportPacket::Media),
+        );
+        Ok(packets)
+    }
+
+    fn wake_if_readable(&self, budget: ReceiveBudget) -> HoistPortResult<()> {
+        self.state
+            .incoming
+            .wake_if(|_| budget.control_records > 0)
+            .map_err(peer_error)?;
+        self.media
+            .wake_if(|packet| {
+                budget.media_records > 0 && packet.access_unit.payload.len() <= budget.media_bytes
+            })
+            .map_err(peer_error)
     }
 
     fn disconnect(&self) {
         self.control.close();
+        self.media.fail();
         self.state.fail();
     }
 }
@@ -206,17 +269,22 @@ pub(crate) fn spawn_destination_peer(
 ) -> IrohDestinationPeer {
     crate::diagnostics::observe(&connection);
     let identity = IrohPeerIdentity(connection.remote_id().to_string());
-    let state = Arc::new(PeerState::new(connection.clone(), notifier));
+    let state = Arc::new(PeerState::new(connection.clone(), notifier.clone()));
+    // Two maximum-sized AUs fit in 64 MiB. Reserve before reading a body so
+    // an additional blocked reader cannot allocate a third AU outside the bound.
+    let media = Arc::new(IncomingQueue::with_capacity(notifier, 2));
     let control = Arc::new(InputOutbox::default());
     tokio::spawn(run_destination_peer(
         state.clone(),
         control_send,
         control_recv,
         control.clone(),
+        media.clone(),
         media_recv,
     ));
     IrohDestinationPeer {
         state,
+        media,
         control,
         identity,
         codec,
@@ -232,9 +300,12 @@ async fn run_source_peer(
     mut media_send: SendStream,
     mut outgoing_media: mpsc::Receiver<QueuedMedia>,
 ) {
+    let control_writable = state.notifier.clone();
+    let media_writable = state.notifier.clone();
     let control_writer = async move {
         while let Some(packet) = outgoing_control.recv().await {
             write_record(&mut control_send, &packet).await?;
+            control_writable.notify()?;
         }
         Ok::<(), anyhow::Error>(())
     };
@@ -244,7 +315,10 @@ async fn run_source_peer(
             .write_all(&MEDIA_STREAM_MAGIC)
             .await
             .context("could not initialize Iroh media stream")?;
-        write_media_queue(&mut media_send, &mut outgoing_media).await?;
+        write_media_queue(&mut media_send, &mut outgoing_media, || {
+            Ok(media_writable.notify()?)
+        })
+        .await?;
         Ok::<(), anyhow::Error>(())
     };
     tokio::select! {
@@ -261,15 +335,16 @@ async fn run_source_peer(
 }
 
 async fn run_destination_peer(
-    state: Arc<PeerState<SourceTransportPacket>>,
+    state: Arc<PeerState<SourceEnvelope<EncodedBuffer>>>,
     mut control_send: SendStream,
     control_recv: RecvStream,
     outgoing_control: Arc<InputOutbox>,
+    incoming_media: Arc<IncomingQueue<MediaEnvelope<EncodedAccessUnit>>>,
     media_recv: RecvStream,
 ) {
     let control_writer = write_destination_control(&outgoing_control, &mut control_send);
     let control_reader = read_source_control(&state.incoming, control_recv);
-    let media = read_source_media(&state.incoming, media_recv);
+    let media = read_source_media(&incoming_media, media_recv);
     tokio::select! {
         result = async { tokio::try_join!(control_writer, control_reader, media) } => {
             if let Err(error) = result {
@@ -281,6 +356,7 @@ async fn run_destination_peer(
         }
     }
     outgoing_control.close();
+    incoming_media.fail();
     state.fail();
 }
 
@@ -306,21 +382,16 @@ pub(super) async fn write_destination_control<W: AsyncWrite + Unpin>(
 }
 
 async fn read_source_control<R: AsyncRead + Unpin>(
-    incoming: &IncomingQueue<SourceTransportPacket>,
+    incoming: &IncomingQueue<SourceEnvelope<EncodedBuffer>>,
     mut stream: R,
 ) -> anyhow::Result<()> {
     loop {
-        incoming
-            .push(SourceTransportPacket::Control(
-                read_record::<_, SourceEnvelope<weld_hoist_protocol::EncodedBuffer>>(&mut stream)
-                    .await?,
-            ))
-            .await?;
+        incoming.push(read_record(&mut stream).await?).await?;
     }
 }
 
 async fn read_source_media<R: AsyncRead + Unpin>(
-    incoming: &IncomingQueue<SourceTransportPacket>,
+    incoming: &IncomingQueue<MediaEnvelope<EncodedAccessUnit>>,
     mut stream: R,
 ) -> anyhow::Result<()> {
     let mut magic = [0; MEDIA_STREAM_MAGIC.len()];
@@ -330,9 +401,8 @@ async fn read_source_media<R: AsyncRead + Unpin>(
         .context("could not initialize Iroh media stream")?;
     ensure!(magic == MEDIA_STREAM_MAGIC, "invalid Iroh media stream");
     loop {
-        incoming
-            .push(SourceTransportPacket::Media(read_media(&mut stream).await?))
-            .await?;
+        let admission = incoming.reserve().await?;
+        admission.send(read_media(&mut stream).await?)?;
     }
 }
 

@@ -6,7 +6,7 @@ use weld_hoist_protocol::{
 
 pub use weld_hoist_protocol::{
     DestinationEnvelope as LocalDestinationPacket, DestinationMessage as LocalDestinationMessage,
-    EncodedCommitOutcome as LocalEncodedCommitOutcome, SurfaceMode as LocalSurfaceMode,
+    SurfaceMode as LocalSurfaceMode,
 };
 
 #[derive(Debug, Deserialize, Serialize)]

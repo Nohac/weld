@@ -8,17 +8,20 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 use weld_client::{
-    ClientBufferId, ClientBufferUseId, ClientCommitRevision, ClientInputEvent, ClientRequest,
-    ClientSurfaceId, WireClientInputEvent, WireClientSurfaceEvent,
+    ClientBufferId, ClientBufferUseId, ClientInputEvent, ClientRequest, ClientSurfaceId,
+    WireClientInputEvent, WireClientSurfaceEvent,
 };
 use weld_media::{EncodedFrameKind, MediaFrameId, VideoCodec};
+
+/// Sanity bound shared by encoded framing and payload admission.
+pub const MAX_ENCODED_ACCESS_UNIT_BYTES: usize = 32 * 1024 * 1024;
 
 /// Exact pre-1.0 protocol revision understood by this build.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ProtocolRevision(u32);
 
 impl ProtocolRevision {
-    pub const CURRENT: Self = Self(3);
+    pub const CURRENT: Self = Self(4);
 
     pub const fn new(raw: u32) -> Self {
         Self(raw)
@@ -96,7 +99,7 @@ pub enum SourceMessage<B> {
     Mapped {
         surface: ClientSurfaceId,
     },
-    /// Lossless cursor feedback, independent of encoded surface-frame credit.
+    /// Lossless cursor feedback, independent of encoded surface frames.
     Cursor {
         update: weld_client::ClientCursorUpdate,
         sequence: u64,
@@ -118,11 +121,6 @@ pub enum DestinationMessage {
         use_id: ClientBufferUseId,
     },
     Reclaim,
-    EncodedCommitFinished {
-        surface: ClientSurfaceId,
-        revision: ClientCommitRevision,
-        outcome: EncodedCommitOutcome,
-    },
     /// Acknowledges receipt, not visibility or presentation of the cursor.
     CursorReceived {
         surface: ClientSurfaceId,
@@ -141,16 +139,9 @@ impl DestinationMessage {
             Self::Input(_) => "input",
             Self::BufferReleased { .. } => "buffer-released",
             Self::Reclaim => "reclaim",
-            Self::EncodedCommitFinished { .. } => "encoded-commit-finished",
             Self::CursorReceived { .. } => "cursor-received",
         }
     }
-}
-
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub enum EncodedCommitOutcome {
-    Applied,
-    Dropped,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]

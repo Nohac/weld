@@ -235,11 +235,6 @@ impl HoistSourcePort for LocalSourcePort {
                     warn!(?use_id, session = ?envelope.session, "ignored an unknown local hoist buffer release");
                 }
             }
-            DestinationMessage::EncodedCommitFinished { .. } => {
-                return Err(protocol_error(
-                    "native hoist peer sent an encoded commit outcome",
-                ));
-            }
             DestinationMessage::Request(_)
             | DestinationMessage::Input(_)
             | DestinationMessage::Reclaim

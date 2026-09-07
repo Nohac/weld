@@ -6,15 +6,13 @@ use std::{
 
 use anyhow::{Context, Result, ensure};
 use smithay::utils::SealedFile;
-use weld_hoist_protocol::EncodedAccessUnitHeader;
+use weld_hoist_protocol::{EncodedAccessUnitHeader, MAX_ENCODED_ACCESS_UNIT_BYTES};
 use weld_media::EncodedAccessUnit;
 
 use crate::{LocalEncodedAccessUnit, ensure_descriptors_consumed};
 
-const MAX_ENCODED_ACCESS_UNIT_BYTES: usize = 32 * 1024 * 1024;
-
 pub(crate) fn export_access_unit(
-    access_unit: EncodedAccessUnit,
+    access_unit: &EncodedAccessUnit,
 ) -> Result<(LocalEncodedAccessUnit, Vec<OwnedFd>)> {
     ensure!(
         !access_unit.payload.is_empty()
@@ -110,7 +108,7 @@ mod tests {
     #[test]
     fn sealed_access_unit_roundtrips_with_exact_length() {
         let expected = access_unit();
-        let (record, descriptors) = export_access_unit(expected.clone()).expect("export");
+        let (record, descriptors) = export_access_unit(&expected).expect("export");
 
         let imported = import_access_unit(record, descriptors).expect("import");
 
@@ -119,7 +117,7 @@ mod tests {
 
     #[test]
     fn access_unit_rejects_unsealed_and_mismatched_descriptors() {
-        let (mut record, descriptors) = export_access_unit(access_unit()).expect("export");
+        let (mut record, descriptors) = export_access_unit(&access_unit()).expect("export");
         record.header.payload_bytes += 1;
         assert!(import_access_unit(record, descriptors).is_err());
 

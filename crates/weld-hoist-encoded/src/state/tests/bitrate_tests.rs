@@ -51,18 +51,13 @@ fn finish(source: &mut EncodedSourceState, fake: &Rc<RefCell<FakeEncoderState>>,
     source.drain().expect("completion");
 }
 
-fn credit(source: &mut EncodedSourceState, revision: u64) {
-    source
-        .finish_remote_commit(
-            source_surface(),
-            ClientCommitRevision::new(revision),
-            EncodedCommitOutcome::Applied,
-        )
-        .expect("credit");
+fn deliver_output(source: &mut EncodedSourceState) {
+    source.take_output();
+    source.schedule().expect("local output capacity recovered");
 }
 
 #[test]
-fn multilayer_batch_stays_frozen_and_next_credit_admits_latest_rates() {
+fn multilayer_batch_stays_frozen_and_next_admission_admits_latest_rates() {
     let (mut source, fake, control) = controlled_source();
     enqueue(&mut source, 1, &[1, 2], 1).expect("first batch");
     let streams = control.streams().expect("registered streams");
@@ -86,7 +81,7 @@ fn multilayer_batch_stays_frozen_and_next_credit_admits_latest_rates() {
     assert_eq!(
         fake.borrow().submitted.len(),
         2,
-        "credit still blocks next batch"
+        "unsent completed output blocks next batch"
     );
     for status in control.streams().expect("old rates") {
         assert_eq!(
@@ -94,7 +89,7 @@ fn multilayer_batch_stays_frozen_and_next_credit_admits_latest_rates() {
             8000
         );
     }
-    credit(&mut source, 1);
+    deliver_output(&mut source);
     assert_eq!(fake.borrow().submitted_bitrates[2], Some(4000));
     assert_eq!(fake.borrow().retirements.len(), 2);
     finish(&mut source, &fake, 2);
@@ -116,7 +111,7 @@ fn multilayer_batch_stays_frozen_and_next_credit_admits_latest_rates() {
         2,
         "no overlapping encoder generations"
     );
-    credit(&mut source, 2);
+    deliver_output(&mut source);
     enqueue(&mut source, 3, &[1], 1).expect("remove second layer");
     assert!(control.request(second, 2000).is_err());
     assert_eq!(control.streams().expect("only live streams").len(), 1);
@@ -127,7 +122,7 @@ fn resize_and_rate_rotate_once_and_identical_requests_do_not_churn() {
     let (mut source, fake, control) = controlled_source();
     enqueue(&mut source, 1, &[1], 1).expect("initial");
     finish(&mut source, &fake, 0);
-    credit(&mut source, 1);
+    deliver_output(&mut source);
     let stream = control.streams().expect("stream")[0].stream;
     let request = control.request(stream, 4000).expect("lower");
     assert_eq!(fake.borrow().submitted.len(), 1, "no fabricated pixels");
@@ -135,7 +130,7 @@ fn resize_and_rate_rotate_once_and_identical_requests_do_not_churn() {
     assert_eq!(fake.borrow().submitted[1].1.generation.raw(), 2);
     assert_eq!(fake.borrow().retirements.len(), 1);
     finish(&mut source, &fake, 1);
-    credit(&mut source, 2);
+    deliver_output(&mut source);
     assert_eq!(control.request(stream, 4000).expect("same rate"), request);
     enqueue(&mut source, 3, &[1], 2).expect("same configuration");
     assert_eq!(fake.borrow().submitted[2].1.generation.raw(), 2);
@@ -156,6 +151,7 @@ fn cancellation_retires_control_and_disconnect_expires_all_handles() {
     assert!(control.streams().expect("late completion").is_empty());
     let transport = FakeSourceTransport(Rc::new(RefCell::new(FakeSourceTransportState::default())));
     let mut port = EncodedSourcePort {
+        output: SourceOutput::default(),
         transport,
         state: Some(source),
     };
@@ -171,7 +167,7 @@ fn failed_or_mismatched_replacement_never_becomes_applied() {
         let (mut source, fake, control) = controlled_source();
         enqueue(&mut source, 1, &[1], 1).expect("initial");
         finish(&mut source, &fake, 0);
-        credit(&mut source, 1);
+        deliver_output(&mut source);
         let previous = control.streams().expect("initial status")[0];
         let requested = control.request(previous.stream, 4000).expect("lower");
         enqueue(&mut source, 2, &[1], 1).expect("replacement");
@@ -214,7 +210,7 @@ fn rejected_submission_clears_pending_confirmation_without_claiming_application(
     let (mut source, fake, control) = controlled_source();
     enqueue(&mut source, 1, &[1], 1).expect("initial");
     finish(&mut source, &fake, 0);
-    credit(&mut source, 1);
+    deliver_output(&mut source);
     let previous = control.streams().expect("initial status")[0];
     control.request(previous.stream, 4000).expect("lower");
     fake.borrow_mut().generation_limit = Some(0);
@@ -229,12 +225,12 @@ fn absent_registry_entry_keeps_frozen_rate_instead_of_backend_default() {
     let (mut source, fake, control) = controlled_source();
     enqueue(&mut source, 1, &[1], 1).expect("initial");
     finish(&mut source, &fake, 0);
-    credit(&mut source, 1);
+    deliver_output(&mut source);
     let stream = control.streams().expect("stream")[0].stream;
     control.request(stream, 4000).expect("lower");
     enqueue(&mut source, 2, &[1], 1).expect("rate replacement");
     finish(&mut source, &fake, 1);
-    credit(&mut source, 2);
+    deliver_output(&mut source);
     source.rates.as_ref().expect("rates").remove(stream);
     enqueue(&mut source, 3, &[1], 1).expect("keep frozen configuration");
     assert_eq!(fake.borrow().submitted_bitrates[2], Some(4000));

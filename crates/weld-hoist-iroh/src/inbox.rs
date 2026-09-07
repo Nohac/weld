@@ -1,5 +1,5 @@
 //! Bounded async admission into the compositor's synchronously drained inbox.
-//! Control and media share destination capacity; draining never waits on a codec.
+//! Each channel owns its capacity; draining never waits on a codec.
 
 use std::{
     collections::VecDeque,
@@ -22,6 +22,30 @@ pub(super) struct IncomingQueue<T> {
     values: Mutex<QueueState<T>>,
     notifier: ClientRuntimeNotifier,
     pressure: Pressure,
+}
+
+/// Reserves storage before a stream reader allocates its next bounded payload.
+pub(super) struct Admission<'a, T> {
+    queue: &'a IncomingQueue<T>,
+    permit: OwnedSemaphorePermit,
+}
+
+impl<T> Admission<'_, T> {
+    pub fn send(self, value: T) -> Result<()> {
+        {
+            let mut values = self
+                .queue
+                .values
+                .lock()
+                .map_err(|_| anyhow::anyhow!("Iroh peer input queue lock is poisoned"))?;
+            ensure!(self.queue.is_available(), "Iroh peer is unavailable");
+            values.records.push_back((value, self.permit));
+        }
+        self.queue
+            .notifier
+            .notify()
+            .context("could not wake Weld for Iroh input")
+    }
 }
 
 struct QueueState<T> {
@@ -54,9 +78,13 @@ impl Drop for Parked<'_> {
 
 impl<T> IncomingQueue<T> {
     pub fn new(notifier: ClientRuntimeNotifier) -> Self {
+        Self::with_capacity(notifier, QUEUE_CAPACITY)
+    }
+
+    pub fn with_capacity(notifier: ClientRuntimeNotifier, capacity: usize) -> Self {
         Self {
             available: AtomicBool::new(true),
-            capacity: Arc::new(Semaphore::new(QUEUE_CAPACITY)),
+            capacity: Arc::new(Semaphore::new(capacity)),
             values: Mutex::new(QueueState {
                 records: VecDeque::new(),
                 last_report: Instant::now(),
@@ -68,6 +96,10 @@ impl<T> IncomingQueue<T> {
     }
 
     pub async fn push(&self, value: T) -> Result<()> {
+        self.reserve().await?.send(value)
+    }
+
+    pub async fn reserve(&self) -> Result<Admission<'_, T>> {
         let permit = match self.capacity.clone().try_acquire_owned() {
             Ok(permit) => permit,
             Err(TryAcquireError::Closed) => anyhow::bail!("Iroh peer is unavailable"),
@@ -85,22 +117,17 @@ impl<T> IncomingQueue<T> {
                     .context("Iroh peer is unavailable")?
             }
         };
-        {
-            let mut values = self
-                .values
-                .lock()
-                .map_err(|_| anyhow::anyhow!("Iroh peer input queue lock is poisoned"))?;
-            ensure!(self.is_available(), "Iroh peer is unavailable");
-            values.records.push_back((value, permit));
-        }
-        // Keep the level-triggered eventfd wake for every admission. A parked
-        // reader must not depend on future traffic to repair a missed host wake.
-        self.notifier
-            .notify()
-            .context("could not wake Weld for Iroh input")
+        Ok(Admission {
+            queue: self,
+            permit,
+        })
     }
 
     pub fn drain(&self) -> Result<Vec<T>> {
+        self.drain_matching(usize::MAX, |_| true)
+    }
+
+    pub fn drain_matching(&self, limit: usize, mut fits: impl FnMut(&T) -> bool) -> Result<Vec<T>> {
         let (records, report) = {
             let mut values = self
                 .values
@@ -129,11 +156,17 @@ impl<T> IncomingQueue<T> {
             };
             // This is the only owner that releases admitted records' permits.
             // Cancelled admission futures release their unqueued permits by RAII.
-            let records = values
-                .records
-                .drain(..)
-                .map(|(record, _permit)| record)
-                .collect();
+            let mut records = Vec::new();
+            while records.len() < limit
+                && values
+                    .records
+                    .front()
+                    .is_some_and(|(record, _)| fits(record))
+            {
+                if let Some((record, _permit)) = values.records.pop_front() {
+                    records.push(record);
+                }
+            }
             (records, report)
         };
         if let Some((parked_admissions, currently_parked, longest_completed_wait_us)) = report {
@@ -141,6 +174,20 @@ impl<T> IncomingQueue<T> {
                 longest_completed_wait_us, "Iroh incoming queue pressure");
         }
         Ok(records)
+    }
+
+    pub fn wake_if(&self, fits: impl FnOnce(&T) -> bool) -> Result<()> {
+        let ready = self
+            .values
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Iroh peer input queue lock is poisoned"))?
+            .records
+            .front()
+            .is_some_and(|(record, _)| fits(record));
+        if ready {
+            self.notifier.notify()?;
+        }
+        Ok(())
     }
 
     pub fn is_available(&self) -> bool {
@@ -168,6 +215,48 @@ mod tests {
     fn queue() -> IncomingQueue<usize> {
         let (notifier, _wake) = client_runtime_notifier().expect("notifier");
         IncomingQueue::new(notifier)
+    }
+
+    #[tokio::test]
+    async fn reservation_precedes_payload_and_partial_drain_preserves_fifo() {
+        let (notifier, _wake) = client_runtime_notifier().expect("notifier");
+        let media = IncomingQueue::with_capacity(notifier, 2);
+        media
+            .reserve()
+            .await
+            .expect("first body slot")
+            .send(7)
+            .expect("publish");
+        media
+            .reserve()
+            .await
+            .expect("second body slot")
+            .send(3)
+            .expect("publish");
+        let mut third = Box::pin(media.reserve());
+        assert!(poll_once(third.as_mut()).await.is_none());
+        assert!(
+            media
+                .drain_matching(2, |size| *size <= 3)
+                .expect("head does not fit")
+                .is_empty()
+        );
+        assert!(poll_once(third.as_mut()).await.is_none());
+        assert_eq!(
+            media.drain_matching(1, |_| true).expect("one record"),
+            vec![7]
+        );
+        poll_once(third.as_mut())
+            .await
+            .expect("body slot freed")
+            .expect("reserve")
+            .send(5)
+            .expect("publish");
+        assert_eq!(
+            media.drain_matching(2, |_| true).expect("remaining order"),
+            vec![3, 5]
+        );
+        assert_eq!(media.capacity.available_permits(), 2);
     }
 
     #[tokio::test]

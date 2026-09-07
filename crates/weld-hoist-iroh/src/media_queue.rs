@@ -8,7 +8,10 @@ use std::{
 };
 
 use anyhow::Result;
-use tokio::{io::AsyncWrite, sync::mpsc};
+use tokio::{
+    io::AsyncWrite,
+    sync::{OwnedSemaphorePermit, Semaphore, mpsc},
+};
 use weld_hoist_encoded::{MediaSendCounters, MediaSendSnapshot};
 use weld_hoist_protocol::MediaEnvelope;
 use weld_media::EncodedAccessUnit;
@@ -16,11 +19,15 @@ use weld_media::EncodedAccessUnit;
 use crate::framing::write_media;
 
 type MediaPacket = MediaEnvelope<EncodedAccessUnit>;
+const MAX_PENDING_BYTES: usize = 64 * 1024 * 1024;
 
 #[derive(Clone)]
 pub(crate) struct MediaSender {
     sender: mpsc::Sender<QueuedMedia>,
     accounting: Arc<Mutex<Accounting>>,
+    bytes: Arc<Semaphore>,
+    records: Arc<Semaphore>,
+    maximum: usize,
 }
 
 struct PendingRecord {
@@ -41,6 +48,8 @@ struct Accounting {
 pub(crate) struct QueuedMedia {
     packet: MediaPacket,
     ticket: SendTicket,
+    _bytes: OwnedSemaphorePermit,
+    _record: OwnedSemaphorePermit,
 }
 
 struct SendTicket {
@@ -60,12 +69,41 @@ impl MediaSender {
             pending: VecDeque::with_capacity(maximum),
             counters: MediaSendCounters::default(),
         }));
-        (Self { sender, accounting }, receiver)
+        (
+            Self {
+                sender,
+                accounting,
+                bytes: Arc::new(Semaphore::new(MAX_PENDING_BYTES)),
+                records: Arc::new(Semaphore::new(maximum)),
+                maximum,
+            },
+            receiver,
+        )
     }
 
-    pub fn try_send(&self, packet: MediaPacket) -> Result<(), mpsc::error::TrySendError<()>> {
+    pub fn try_send(
+        &self,
+        packet: MediaPacket,
+    ) -> Result<(), mpsc::error::TrySendError<MediaPacket>> {
         // Rejected records never enter accounting. Preserve Full/Closed semantics.
-        let permit = self.sender.try_reserve()?;
+        let permit = match self.sender.try_reserve() {
+            Ok(permit) => permit,
+            Err(mpsc::error::TrySendError::Full(())) => {
+                return Err(mpsc::error::TrySendError::Full(packet));
+            }
+            Err(mpsc::error::TrySendError::Closed(())) => {
+                return Err(mpsc::error::TrySendError::Closed(packet));
+            }
+        };
+        let Ok(bytes) = u32::try_from(packet.access_unit.payload.len()) else {
+            return Err(mpsc::error::TrySendError::Full(packet));
+        };
+        let Ok(byte_permit) = self.bytes.clone().try_acquire_many_owned(bytes) else {
+            return Err(mpsc::error::TrySendError::Full(packet));
+        };
+        let Ok(record_permit) = self.records.clone().try_acquire_owned() else {
+            return Err(mpsc::error::TrySendError::Full(packet));
+        };
         let mut accounting = self.accounting.lock().ok();
         let id = accounting.as_mut().and_then(|state| {
             if !state.valid {
@@ -96,6 +134,8 @@ impl MediaSender {
         // lock instead sends unaccounted; snapshots remain unavailable thereafter.
         permit.send(QueuedMedia {
             packet,
+            _bytes: byte_permit,
+            _record: record_permit,
             ticket: SendTicket {
                 accounting: self.accounting.clone(),
                 id,
@@ -103,6 +143,13 @@ impl MediaSender {
         });
         drop(accounting);
         Ok(())
+    }
+
+    pub fn headroom(&self) -> bool {
+        self.maximum
+            .saturating_sub(self.records.available_permits())
+            < 4
+            && MAX_PENDING_BYTES.saturating_sub(self.bytes.available_permits()) < 8 * 1024 * 1024
     }
 
     pub fn snapshot(&self, now: Instant) -> Option<MediaSendSnapshot> {
@@ -198,18 +245,27 @@ impl Drop for SendTicket {
 pub(crate) async fn write_media_queue<W: AsyncWrite + Unpin>(
     writer: &mut W,
     receiver: &mut mpsc::Receiver<QueuedMedia>,
+    writable: impl Fn() -> Result<()>,
 ) -> Result<()> {
-    while let Some(QueuedMedia { packet, mut ticket }) = receiver.recv().await {
+    while let Some(QueuedMedia {
+        packet,
+        mut ticket,
+        _bytes,
+        _record,
+    }) = receiver.recv().await
+    {
         ticket.started(Instant::now());
         write_media(writer, packet).await?;
         ticket.finish(Some(Instant::now()));
+        drop((_bytes, _record));
+        writable()?;
     }
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
+    use std::{cell::Cell, time::Duration};
 
     use futures_lite::future::poll_once;
     use tokio::io::duplex;
@@ -238,7 +294,7 @@ mod tests {
         sender.try_send(packet(32)).expect("first");
         sender.try_send(packet(64)).expect("second");
         let (mut writer, _reader) = duplex(1);
-        let mut job = Box::pin(write_media_queue(&mut writer, &mut receiver));
+        let mut job = Box::pin(write_media_queue(&mut writer, &mut receiver, || Ok(())));
         assert!(poll_once(job.as_mut()).await.is_none());
         let blocked = sender
             .snapshot(Instant::now())
@@ -269,11 +325,18 @@ mod tests {
         sender.try_send(packet(64)).expect("admit");
         receiver.close();
         let (mut writer, mut reader) = duplex(8);
+        let wakes = Cell::new(0);
         let (sent, received) = tokio::join!(
-            write_media_queue(&mut writer, &mut receiver),
+            write_media_queue(&mut writer, &mut receiver, || {
+                assert_eq!(sender.records.available_permits(), sender.maximum);
+                assert_eq!(sender.bytes.available_permits(), MAX_PENDING_BYTES);
+                wakes.set(wakes.get() + 1);
+                Ok(())
+            }),
             read_media(&mut reader)
         );
         sent.expect("write");
+        assert_eq!(wakes.get(), 1);
         assert_eq!(received.expect("read").access_unit.payload, vec![7; 64]);
         let snapshot = sender.snapshot(Instant::now()).expect("completed");
         assert_eq!(snapshot.pending_records, 0);
@@ -290,7 +353,11 @@ mod tests {
         sender.try_send(packet(10)).expect("admit");
         let (mut writer, reader) = duplex(1);
         drop(reader);
-        assert!(write_media_queue(&mut writer, &mut receiver).await.is_err());
+        assert!(
+            write_media_queue(&mut writer, &mut receiver, || Ok(()))
+                .await
+                .is_err()
+        );
         let snapshot = sender.snapshot(Instant::now()).expect("failed");
         assert_eq!(snapshot.pending_records, 0);
         assert_eq!(snapshot.counters.cancelled_records, 1);
@@ -345,6 +412,32 @@ mod tests {
                 .accepted_records,
             2
         );
+    }
+
+    #[tokio::test]
+    async fn byte_admission_returns_the_owned_packet_and_ignores_broken_diagnostics() {
+        let (sender, receiver) = MediaSender::channel(8);
+        sender.accounting.lock().expect("accounting").valid = false;
+        // Hold capacity without allocating large synthetic frames.
+        let held = sender
+            .bytes
+            .clone()
+            .try_acquire_many_owned((MAX_PENDING_BYTES - 1) as u32)
+            .expect("reserve bytes");
+        let packet = packet(2);
+        let pointer = packet.access_unit.payload.as_ptr();
+        let rejected = match sender.try_send(packet) {
+            Err(mpsc::error::TrySendError::Full(packet)) => packet,
+            _ => panic!("byte bound must return Busy ownership"),
+        };
+        assert_eq!(rejected.access_unit.payload.as_ptr(), pointer);
+        assert!(!sender.headroom());
+        drop(held);
+        assert!(sender.headroom());
+        sender.try_send(rejected).expect("resume");
+        assert_eq!(sender.bytes.available_permits(), MAX_PENDING_BYTES - 2);
+        drop(receiver);
+        assert_eq!(sender.bytes.available_permits(), MAX_PENDING_BYTES);
     }
 
     #[tokio::test]

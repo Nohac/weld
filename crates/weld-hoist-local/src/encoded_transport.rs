@@ -3,9 +3,10 @@
 use tracing::warn;
 use weld_hoist_core::{HoistPortError, HoistPortResult};
 use weld_hoist_encoded::{
-    EncodedDestinationTransport, EncodedSourceTransport, SourceTransportPacket,
+    EncodedDestinationTransport, EncodedSourceTransport, ReceiveBudget, SendStatus,
+    SourceTransportPacket,
 };
-use weld_hoist_protocol::DestinationEnvelope;
+use weld_hoist_protocol::{DestinationEnvelope, MAX_ENCODED_ACCESS_UNIT_BYTES};
 
 use crate::{
     LocalDestinationPacket, LocalEncodedSourcePacket, LocalMediaPacket, LocalPacketConnection,
@@ -24,22 +25,42 @@ impl LocalEncodedSourceTransport {
 }
 
 impl EncodedSourceTransport for LocalEncodedSourceTransport {
-    fn send(&self, packet: SourceTransportPacket) -> HoistPortResult<()> {
-        let result = match packet {
-            SourceTransportPacket::Control(packet) => self.control.queue(&packet, Vec::new()),
+    fn try_send(
+        &self,
+        packet: SourceTransportPacket,
+    ) -> HoistPortResult<SendStatus<SourceTransportPacket>> {
+        if let SourceTransportPacket::Media(media) = &packet
+            && !self
+                .media
+                .can_queue(1, media.access_unit.payload.len().saturating_add(1024))
+        {
+            return Ok(SendStatus::Busy(packet));
+        }
+        let result = match &packet {
+            SourceTransportPacket::Control(packet) => self.control.try_queue(packet, Vec::new(), 0),
             SourceTransportPacket::Media(packet) => {
-                let (access_unit, descriptors) = export_access_unit(packet.access_unit)
+                let (access_unit, descriptors) = export_access_unit(&packet.access_unit)
                     .map_err(|error| TransportError::Protocol(error.to_string()))?;
-                self.media.queue(
+                self.media.try_queue(
                     &LocalMediaPacket {
                         session: packet.session,
                         access_unit,
                     },
                     descriptors,
+                    packet.access_unit.payload.len(),
                 )
             }
         };
-        result.map_err(transport_error)
+        match result {
+            Ok(()) => Ok(SendStatus::Sent),
+            Err(TransportError::SendQueueFull { .. }) => Ok(SendStatus::Busy(packet)),
+            Err(error) => Err(transport_error(error)),
+        }
+    }
+
+    fn media_headroom(&self) -> bool {
+        let (records, bytes) = self.media.send_backlog();
+        records < 4 && bytes < 8 * 1024 * 1024
     }
 
     fn drain(&self) -> HoistPortResult<Vec<DestinationEnvelope>> {
@@ -76,8 +97,13 @@ pub(crate) struct LocalEncodedDestinationTransport {
 }
 
 impl LocalEncodedDestinationTransport {
-    pub(crate) fn new(control: LocalPacketConnection, media: LocalPacketConnection) -> Self {
-        Self { control, media }
+    pub(crate) fn new(
+        control: LocalPacketConnection,
+        media: LocalPacketConnection,
+    ) -> Result<Self, TransportError> {
+        // At most two sealed payload descriptors wait outside decoder admission.
+        media.set_receive_limit(2)?;
+        Ok(Self { control, media })
     }
 }
 
@@ -88,14 +114,18 @@ impl EncodedDestinationTransport for LocalEncodedDestinationTransport {
             .map_err(transport_error)
     }
 
-    fn drain(&self) -> HoistPortResult<Vec<SourceTransportPacket>> {
+    fn drain(&self, budget: ReceiveBudget) -> HoistPortResult<Vec<SourceTransportPacket>> {
         let control = self
             .control
-            .drain::<LocalEncodedSourcePacket>()
+            .drain_limited::<LocalEncodedSourcePacket>(budget.control_records)
             .map_err(transport_error)?;
         let media = self
             .media
-            .drain::<LocalMediaPacket>()
+            .drain_limited::<LocalMediaPacket>(
+                budget
+                    .media_records
+                    .min(budget.media_bytes / MAX_ENCODED_ACCESS_UNIT_BYTES),
+            )
             .map_err(transport_error)?;
         let mut packets = Vec::with_capacity(control.len() + media.len());
         for packet in control {
@@ -118,6 +148,16 @@ impl EncodedDestinationTransport for LocalEncodedDestinationTransport {
             ));
         }
         Ok(packets)
+    }
+
+    fn wake_if_readable(&self, budget: ReceiveBudget) -> HoistPortResult<()> {
+        if budget.control_records > 0 {
+            self.control.wake_buffered().map_err(transport_error)?;
+        }
+        if budget.media_records > 0 && budget.media_bytes >= MAX_ENCODED_ACCESS_UNIT_BYTES {
+            self.media.wake_buffered().map_err(transport_error)?;
+        }
+        Ok(())
     }
 
     fn disconnect(&self) {
@@ -162,6 +202,17 @@ mod tests {
 
     use super::*;
 
+    fn send_source(
+        source: &impl EncodedSourceTransport,
+        packet: SourceTransportPacket,
+    ) -> weld_hoist_core::HoistPortResult<()> {
+        assert!(matches!(
+            source.try_send(packet)?,
+            weld_hoist_encoded::SendStatus::Sent
+        ));
+        Ok(())
+    }
+
     #[test]
     fn unix_binding_translates_independent_control_and_media_packets() {
         let (source_control, destination_control) =
@@ -171,13 +222,15 @@ mod tests {
         let destination = LocalEncodedDestinationTransport::new(
             destination_control.clone(),
             destination_media.clone(),
-        );
+        )
+        .expect("destination transport");
         let session = HoistSessionId::new(1);
         let surface = ClientSurfaceId::new(ClientId::new(ClientSourceId::new(0), 2), 3);
         let frame = MediaFrameId::new(MediaStreamId::new(4), StreamGeneration::new(5), 6);
 
-        source
-            .send(SourceTransportPacket::Media(MediaEnvelope {
+        send_source(
+            &source,
+            SourceTransportPacket::Media(MediaEnvelope {
                 session,
                 access_unit: EncodedAccessUnit {
                     frame,
@@ -186,10 +239,12 @@ mod tests {
                     timestamp_micros: 7,
                     payload: vec![8, 9],
                 },
-            }))
-            .expect("media");
-        source
-            .send(SourceTransportPacket::Control(SourceEnvelope {
+            }),
+        )
+        .expect("media");
+        send_source(
+            &source,
+            SourceTransportPacket::Control(SourceEnvelope {
                 session,
                 message: SourceMessage::Surface(weld_client::WireClientSurfaceEvent {
                     surface,
@@ -215,12 +270,15 @@ mod tests {
                         },
                     ),
                 }),
-            }))
-            .expect("control");
+            }),
+        )
+        .expect("control");
         source_control.pump().expect("control pump");
         source_media.pump().expect("media pump");
 
-        let packets = destination.drain().expect("destination packets");
+        let packets = destination
+            .drain(ReceiveBudget::ALL)
+            .expect("destination packets");
         assert_eq!(packets.len(), 2);
         assert!(
             matches!(&packets[0], SourceTransportPacket::Control(SourceEnvelope {
@@ -241,8 +299,9 @@ mod tests {
         let replies = source.drain().expect("source replies");
         assert!(matches!(replies[0].message, DestinationMessage::Reclaim));
 
-        source
-            .send(SourceTransportPacket::Control(SourceEnvelope {
+        send_source(
+            &source,
+            SourceTransportPacket::Control(SourceEnvelope {
                 session,
                 message: SourceMessage::Cursor {
                     update: weld_client::ClientCursorUpdate {
@@ -251,11 +310,15 @@ mod tests {
                     },
                     sequence: 1,
                 },
-            }))
-            .expect("cursor");
+            }),
+        )
+        .expect("cursor");
         source_control.pump().expect("cursor pump");
         assert!(matches!(
-            destination.drain().expect("cursor delivery").as_slice(),
+            destination
+                .drain(ReceiveBudget::ALL)
+                .expect("cursor delivery")
+                .as_slice(),
             [SourceTransportPacket::Control(SourceEnvelope {
                 message: SourceMessage::Cursor { sequence: 1, .. },
                 ..

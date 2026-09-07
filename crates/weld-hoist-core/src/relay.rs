@@ -401,9 +401,7 @@ impl SourceRelayAdapter {
                 self.remote_input.observe_input(&input);
                 self.effects.push(ClientAdapterEffect::Input(input));
             }
-            DestinationMessage::BufferReleased { .. }
-            | DestinationMessage::Reclaim
-            | DestinationMessage::EncodedCommitFinished { .. } => {}
+            DestinationMessage::BufferReleased { .. } | DestinationMessage::Reclaim => {}
             DestinationMessage::CursorReceived { .. } => {}
         }
         true
@@ -915,7 +913,6 @@ fn destination_message_surface(message: &DestinationMessage) -> Option<ClientSur
     match message {
         DestinationMessage::Request(request) => request_surface(request),
         DestinationMessage::Input(input) => Some(input.target.surface()),
-        DestinationMessage::EncodedCommitFinished { surface, .. } => Some(*surface),
         DestinationMessage::BufferReleased { .. }
         | DestinationMessage::Reclaim
         | DestinationMessage::CursorReceived { .. } => None,

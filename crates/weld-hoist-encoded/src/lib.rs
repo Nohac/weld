@@ -4,6 +4,7 @@ mod bitrate;
 mod codec;
 mod destination_observations;
 mod observations;
+mod output;
 mod state;
 mod transport_observations;
 
@@ -24,5 +25,5 @@ pub use codec::{
 pub use codec::{decode_backend, encode_backend};
 pub use state::{
     EncodedDestinationPort, EncodedDestinationTransport, EncodedSourcePort, EncodedSourceTransport,
-    SourceTransportPacket,
+    ReceiveBudget, SendStatus, SourceTransportPacket,
 };

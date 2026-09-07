@@ -22,8 +22,8 @@ use weld_hoist_core::{
     HoistPortError, HoistPortResult, HoistSessionId, HoistSourcePort, SourcePortCommand,
 };
 use weld_hoist_protocol::{
-    DestinationEnvelope, DestinationMessage, EncodedBuffer, EncodedCommitOutcome, MediaEnvelope,
-    SourceEnvelope, SourceMessage,
+    DestinationEnvelope, DestinationMessage, EncodedBuffer, MAX_ENCODED_ACCESS_UNIT_BYTES,
+    MediaEnvelope, SourceEnvelope, SourceMessage,
 };
 use weld_media::{
     EncodedAccessUnit, EncodedFrameKind, MediaFrameId, MediaStreamId, StreamGeneration, VideoCodec,
@@ -38,6 +38,7 @@ use crate::destination_observations::{
     DestinationGauges, DestinationObservation, DestinationObservations,
 };
 use crate::observations::{SourceGauges, SourceObservation, SourceObservations};
+use crate::output::SourceOutput;
 
 /// One packet sent from an encoded source to its destination.
 pub enum SourceTransportPacket {
@@ -47,7 +48,13 @@ pub enum SourceTransportPacket {
 
 /// Nonblocking transport half used by the encoded source port.
 pub trait EncodedSourceTransport {
-    fn send(&self, packet: SourceTransportPacket) -> HoistPortResult<()>;
+    /// Busy returns the exact unsent record; it is not a connection failure.
+    fn try_send(
+        &self,
+        packet: SourceTransportPacket,
+    ) -> HoistPortResult<SendStatus<SourceTransportPacket>>;
+    /// Local transport room for another batch, not remote presentation feedback.
+    fn media_headroom(&self) -> bool;
     fn drain(&self) -> HoistPortResult<Vec<DestinationEnvelope>>;
     fn disconnect(&self);
     /// Return locally measured, owned send state at `now`, or None when unavailable.
@@ -57,18 +64,46 @@ pub trait EncodedSourceTransport {
     }
 }
 
+/// Ownership-preserving nonblocking admission into a transport queue.
+pub enum SendStatus<T> {
+    Sent,
+    Busy(T),
+}
+
 /// Nonblocking transport half used by the encoded destination port.
 pub trait EncodedDestinationTransport {
     fn send(&self, packet: DestinationEnvelope) -> HoistPortResult<()>;
-    fn drain(&self) -> HoistPortResult<Vec<SourceTransportPacket>>;
+    fn drain(&self, budget: ReceiveBudget) -> HoistPortResult<Vec<SourceTransportPacket>>;
+    /// Rearm buffered work after the consumer advances and recomputes its room.
+    /// A zero budget must not repeatedly wake the compositor.
+    fn wake_if_readable(&self, budget: ReceiveBudget) -> HoistPortResult<()>;
     fn disconnect(&self);
 }
 
-const MAX_PENDING_SOURCE_EVENTS: usize = 128;
+/// Independent local admission limits; these are not credits sent to a peer.
+#[derive(Clone, Copy, Debug)]
+pub struct ReceiveBudget {
+    pub control_records: usize,
+    pub media_records: usize,
+    pub media_bytes: usize,
+}
+
+impl ReceiveBudget {
+    /// Drain the binding's already bounded inboxes, useful outside a codec port.
+    pub const ALL: Self = Self {
+        control_records: usize::MAX,
+        media_records: usize::MAX,
+        media_bytes: usize::MAX,
+    };
+}
+
+pub(super) const MAX_PENDING_SOURCE_EVENTS: usize = 128;
 const MAX_DESTINATION_EVENTS: usize = 128;
-const MAX_REPLACEMENTS_PER_COMMIT: usize = 16;
+pub(super) const MAX_REPLACEMENTS_PER_COMMIT: usize = 16;
 const MAX_PENDING_MEDIA_FRAMES: usize = 128;
-const MAX_CANCELLED_MEDIA_FRAMES: usize = 128;
+// Must admit at least one whole MAX_REPLACEMENTS_PER_COMMIT reference reservation.
+const MAX_REFERENCED_FRAMES: usize = 128;
+const MAX_PENDING_MEDIA_BYTES: usize = 64 * 1024 * 1024;
 // This intentionally mirrors the current VA worker budget. Exceeding it while
 // diagnostics are enabled indicates that stream retirement has fallen behind,
 // so failing the requested diagnostic session is preferable to leaking files.
@@ -106,11 +141,6 @@ struct InFlightEncodeBatch {
     completed: Vec<weld_media::EncodedAccessUnit>,
     cancelled: bool,
     started_at: Instant,
-}
-
-struct OutstandingCredit {
-    revision: ClientCommitRevision,
-    sent_at: Instant,
 }
 
 struct AccessUnitDump {
@@ -200,10 +230,11 @@ fn dump_path(
 struct EncodedSourceState {
     backend: Box<dyn EncodeBackend>,
     output: VecDeque<SourceTransportPacket>,
+    transport_blocked: bool,
+    retained_output_records: usize,
     pending: HashMap<ClientSurfaceId, VecDeque<(HoistSessionId, ClientSurfaceEvent)>>,
     pending_order: VecDeque<ClientSurfaceId>,
     resizing: HashSet<ClientSurfaceId>,
-    awaiting_credit: HashMap<ClientSurfaceId, OutstandingCredit>,
     streams: HashMap<(ClientSurfaceId, SurfaceLayerId), SourceStream>,
     in_flight: Option<InFlightEncodeBatch>,
     next_stream: Option<u64>,
@@ -222,10 +253,11 @@ impl EncodedSourceState {
         Self {
             backend,
             output: VecDeque::new(),
+            transport_blocked: false,
+            retained_output_records: 0,
             pending: HashMap::new(),
             pending_order: VecDeque::new(),
             resizing: HashSet::new(),
-            awaiting_credit: HashMap::new(),
             streams: HashMap::new(),
             in_flight: None,
             next_stream: Some(1),
@@ -255,7 +287,6 @@ impl EncodedSourceState {
         }
         let surface = event.surface;
         let surface_busy = self.pending.contains_key(&surface)
-            || self.awaiting_credit.contains_key(&surface)
             || self
                 .in_flight
                 .as_ref()
@@ -263,7 +294,9 @@ impl EncodedSourceState {
         match &event.kind {
             ClientSurfaceEventKind::Commit(_) => {
                 if self.resizing.contains(&surface)
-                    || self.awaiting_credit.contains_key(&surface)
+                    || !self.pending.is_empty()
+                    || self.transport_blocked
+                    || !self.output.is_empty()
                     || self.in_flight.is_some()
                 {
                     self.queue_event(session, event)?;
@@ -272,7 +305,7 @@ impl EncodedSourceState {
                 }
             }
             ClientSurfaceEventKind::Destroyed => {
-                // The relay has removed this route, so no further credit can arrive.
+                // Destruction cancels unpublished work but preserves published media.
                 self.cancel_surface(surface)?;
                 self.send_without_buffer(session, event)?;
             }
@@ -337,6 +370,11 @@ impl EncodedSourceState {
             }
             let access_unit = completion.result?;
             ensure!(
+                !access_unit.payload.is_empty()
+                    && access_unit.payload.len() <= MAX_ENCODED_ACCESS_UNIT_BYTES,
+                "encoder returned an invalid access-unit length"
+            );
+            ensure!(
                 valid_packet,
                 "encoder returned an unexpected frame or a non-keyframe at generation start"
             );
@@ -379,18 +417,6 @@ impl EncodedSourceState {
                         access_unit,
                     }));
             }
-            ensure!(
-                self.awaiting_credit
-                    .insert(
-                        batch.surface,
-                        OutstandingCredit {
-                            revision,
-                            sent_at: Instant::now(),
-                        },
-                    )
-                    .is_none(),
-                "encoded surface already held destination credit"
-            );
             self.output
                 .push_back(SourceTransportPacket::Control(SourceEnvelope {
                     session: batch.session,
@@ -412,15 +438,10 @@ impl EncodedSourceState {
         }
         let gauges = SourceGauges {
             pending_events: self.pending.values().map(VecDeque::len).sum(),
-            awaiting_credit: self.awaiting_credit.len(),
+            retained_output_records: self.retained_output_records,
+            transport_blocked: self.transport_blocked,
             active_streams: self.streams.len(),
             encode_in_flight: self.in_flight.is_some(),
-            oldest_credit_age: self
-                .awaiting_credit
-                .values()
-                .map(|credit| now.saturating_duration_since(credit.sent_at))
-                .max()
-                .unwrap_or_default(),
             active_batch_age: self
                 .in_flight
                 .as_ref()
@@ -443,9 +464,8 @@ impl EncodedSourceState {
         self.pending.remove(&surface);
         self.pending_order.retain(|candidate| *candidate != surface);
         self.resizing.remove(&surface);
-        if self.awaiting_credit.remove(&surface).is_some() {
-            self.observations.record(SourceObservation::CreditCancelled);
-        }
+        self.observations
+            .record(SourceObservation::SurfaceCancelled);
         if let Some(in_flight) = self.in_flight.as_mut()
             && in_flight.surface == surface
         {
@@ -454,42 +474,6 @@ impl EncodedSourceState {
             in_flight.completed.clear();
         }
         self.retire_surface_streams(surface)
-    }
-
-    fn finish_remote_commit(
-        &mut self,
-        surface: ClientSurfaceId,
-        revision: ClientCommitRevision,
-        outcome: EncodedCommitOutcome,
-    ) -> Result<()> {
-        let Some(expected) = self.awaiting_credit.get(&surface) else {
-            self.observations
-                .record(SourceObservation::StaleCreditOutcome);
-            tracing::trace!(?surface, ?revision, "ignored stale encoded commit outcome");
-            return Ok(());
-        };
-        ensure!(
-            expected.revision == revision,
-            "encoded commit outcome revision did not match outstanding credit"
-        );
-        let credit = self
-            .awaiting_credit
-            .remove(&surface)
-            .context("encoded destination credit disappeared")?;
-        let turnaround = credit.sent_at.elapsed();
-        self.observations.record(match outcome {
-            EncodedCommitOutcome::Applied => SourceObservation::CreditApplied(turnaround),
-            EncodedCommitOutcome::Dropped => SourceObservation::CreditCancelled,
-        });
-        tracing::trace!(
-            ?surface,
-            ?revision,
-            ?outcome,
-            credit_round_trip_micros = turnaround.as_micros(),
-            pending_events = self.pending.values().map(VecDeque::len).sum::<usize>(),
-            "finished encoded destination credit"
-        );
-        self.schedule()
     }
 
     fn queue_event(
@@ -529,7 +513,7 @@ impl EncodedSourceState {
     }
 
     fn schedule(&mut self) -> Result<()> {
-        if self.in_flight.is_some() {
+        if self.in_flight.is_some() || self.transport_blocked || !self.output.is_empty() {
             return Ok(());
         }
         let mut blocked_surfaces = 0;
@@ -544,9 +528,8 @@ impl EncodedSourceState {
                 self.pending.remove(&surface);
                 continue;
             };
-            if self.awaiting_credit.contains_key(&surface)
-                || (self.resizing.contains(&surface)
-                    && matches!(event.kind, ClientSurfaceEventKind::Commit(_)))
+            if self.resizing.contains(&surface)
+                && matches!(event.kind, ClientSurfaceEventKind::Commit(_))
             {
                 self.pending_order.push_back(surface);
                 blocked_surfaces += 1;
@@ -864,6 +847,7 @@ impl Drop for EncodedSourceState {
 pub struct EncodedSourcePort<T> {
     transport: T,
     state: Option<EncodedSourceState>,
+    output: SourceOutput,
 }
 
 impl<T: EncodedSourceTransport> EncodedSourcePort<T> {
@@ -871,6 +855,7 @@ impl<T: EncodedSourceTransport> EncodedSourcePort<T> {
         Self {
             transport,
             state: Some(EncodedSourceState::new(backend)),
+            output: SourceOutput::default(),
         }
     }
 
@@ -902,22 +887,40 @@ impl<T: EncodedSourceTransport> EncodedSourcePort<T> {
             .state
             .as_mut()
             .ok_or_else(|| protocol_error("encoded source port is disconnected"))?;
-        for packet in state.take_output() {
-            self.transport.send(packet)?;
+        loop {
+            for packet in state.take_output() {
+                self.output.push(packet).map_err(protocol_error)?;
+            }
+            self.output.flush(&self.transport)?;
+            state.retained_output_records = self.output.pending_records();
+            state.transport_blocked = !self.output.is_empty() || !self.transport.media_headroom();
+            state.schedule().map_err(protocol_error)?;
+            if state.output.is_empty() {
+                break;
+            }
         }
         Ok(())
+    }
+
+    fn refresh_admission(&mut self) {
+        if let Some(state) = &mut self.state {
+            state.transport_blocked = !self.output.is_empty() || !self.transport.media_headroom();
+        }
     }
 }
 
 impl<T: EncodedSourceTransport> HoistSourcePort for EncodedSourcePort<T> {
     fn submit(&mut self, command: SourcePortCommand) -> HoistPortResult<()> {
+        self.refresh_admission();
         match command {
             SourcePortCommand::MapSurface { session, surface } => {
-                self.transport
-                    .send(SourceTransportPacket::Control(SourceEnvelope {
+                self.output
+                    .push(SourceTransportPacket::Control(SourceEnvelope {
                         session,
                         message: SourceMessage::Mapped { surface },
                     }))
+                    .map_err(protocol_error)?;
+                self.flush()
             }
             SourcePortCommand::Surface { session, event } => {
                 self.state
@@ -928,32 +931,38 @@ impl<T: EncodedSourceTransport> HoistSourcePort for EncodedSourcePort<T> {
                 self.flush()
             }
             SourcePortCommand::WithdrawSurface { session, surface } => {
-                self.transport
-                    .send(SourceTransportPacket::Control(SourceEnvelope {
+                self.output
+                    .push(SourceTransportPacket::Control(SourceEnvelope {
                         session,
                         message: SourceMessage::Withdraw { surface },
-                    }))?;
+                    }))
+                    .map_err(protocol_error)?;
                 self.state
                     .as_mut()
                     .ok_or_else(|| protocol_error("encoded source port is disconnected"))?
                     .cancel_surface(surface)
-                    .map_err(protocol_error)
+                    .map_err(protocol_error)?;
+                self.flush()
             }
             SourcePortCommand::RetireUpstreamBuffer(_) => Ok(()),
             SourcePortCommand::Cursor {
                 session,
                 update,
                 sequence,
-            } => self
-                .transport
-                .send(SourceTransportPacket::Control(SourceEnvelope {
-                    session,
-                    message: SourceMessage::Cursor { update, sequence },
-                })),
+            } => {
+                self.output
+                    .push(SourceTransportPacket::Control(SourceEnvelope {
+                        session,
+                        message: SourceMessage::Cursor { update, sequence },
+                    }))
+                    .map_err(protocol_error)?;
+                self.flush()
+            }
         }
     }
 
     fn poll(&mut self) -> HoistPortResult<Vec<DestinationEnvelope>> {
+        self.refresh_admission();
         let state = self
             .state
             .as_mut()
@@ -977,16 +986,6 @@ impl<T: EncodedSourceTransport> HoistSourcePort for EncodedSourcePort<T> {
                         .map_err(protocol_error)?;
                 }
             }
-            DestinationMessage::EncodedCommitFinished {
-                surface,
-                revision,
-                outcome,
-            } => self
-                .state
-                .as_mut()
-                .ok_or_else(|| protocol_error("encoded source port is disconnected"))?
-                .finish_remote_commit(*surface, *revision, *outcome)
-                .map_err(protocol_error)?,
             DestinationMessage::BufferReleased { .. } => {
                 return Err(protocol_error(
                     "encoded peer sent a native buffer-release record",
@@ -1005,6 +1004,7 @@ impl<T: EncodedSourceTransport> HoistSourcePort for EncodedSourcePort<T> {
     fn disconnect(&mut self) {
         self.transport.disconnect();
         self.state = None;
+        self.output = SourceOutput::default();
     }
 }
 
@@ -1026,13 +1026,6 @@ struct EncodedDestinationEvent {
     event: ClientSurfaceEvent,
 }
 
-struct EncodedCommitOutcomeRecord {
-    session: HoistSessionId,
-    surface: ClientSurfaceId,
-    revision: ClientCommitRevision,
-    outcome: EncodedCommitOutcome,
-}
-
 struct InFlightDecode {
     token: u64,
     frame: MediaFrameId,
@@ -1050,7 +1043,7 @@ struct EncodedDestinationState {
     decode_in_flight: Option<InFlightDecode>,
     cancelled_frames: HashMap<MediaFrameId, HoistSessionId>,
     streams: HashMap<(ClientSurfaceId, SurfaceLayerId), EncodedGeneration>,
-    outcomes: Vec<EncodedCommitOutcomeRecord>,
+    pending_retirement: HashSet<EncodedGeneration>,
     next_token: Option<u64>,
     next_buffer: Option<u64>,
     next_use: Option<u64>,
@@ -1081,7 +1074,7 @@ impl EncodedDestinationState {
             decode_in_flight: None,
             cancelled_frames: HashMap::new(),
             streams: HashMap::new(),
-            outcomes: Vec::new(),
+            pending_retirement: HashSet::new(),
             next_token: Some(1),
             next_buffer: Some(1),
             next_use: Some(1),
@@ -1104,6 +1097,10 @@ impl EncodedDestinationState {
         output: &mut Vec<EncodedDestinationEvent>,
     ) -> Result<()> {
         let source_surface = event.surface;
+        ensure!(
+            encoded_frames(&event).len() <= MAX_REPLACEMENTS_PER_COMMIT,
+            "encoded commit exceeds the replacement-frame limit"
+        );
         if let WireClientSurfaceEventKind::Commit(commit) = &event.kind {
             ensure!(
                 commit.alpha_mode == SurfaceAlphaMode::Discarded,
@@ -1152,8 +1149,37 @@ impl EncodedDestinationState {
         self.advance(output)
     }
 
-    fn take_outcomes(&mut self) -> Vec<EncodedCommitOutcomeRecord> {
-        std::mem::take(&mut self.outcomes)
+    fn receive_budget(&self) -> ReceiveBudget {
+        let mut referenced = self.cancelled_frames.len();
+        let mut events = 0_usize;
+        for queued in self.queues.values().flatten() {
+            events += 1;
+            if let WireClientSurfaceEventKind::Commit(commit) = &queued.event.kind {
+                referenced = referenced.saturating_add(
+                    commit
+                        .buffers
+                        .iter()
+                        .filter(|buffer| {
+                            matches!(buffer.change, WireSurfaceBufferChange::Replaced { .. })
+                        })
+                        .count(),
+                );
+            }
+        }
+        let media_bytes = self.media_frames.values().fold(0_usize, |total, packet| {
+            total.saturating_add(packet.access_unit.payload.len())
+        });
+        // Admit a prefix of control and media independently. Every control slot
+        // reserves a whole maximum-sized commit, so no deferred record is needed.
+        // Needed media precedes any media for unadmitted control; tombstones must
+        // never subtract from MEDIA room, since their late media frees reference room.
+        ReceiveBudget {
+            control_records: (MAX_REFERENCED_FRAMES.saturating_sub(referenced)
+                / MAX_REPLACEMENTS_PER_COMMIT)
+                .min(MAX_DESTINATION_EVENTS.saturating_sub(events)),
+            media_records: MAX_PENDING_MEDIA_FRAMES.saturating_sub(self.media_frames.len()),
+            media_bytes: MAX_PENDING_MEDIA_BYTES.saturating_sub(media_bytes),
+        }
     }
 
     fn enqueue_media(&mut self, packet: MediaEnvelope<EncodedAccessUnit>) -> Result<()> {
@@ -1171,6 +1197,10 @@ impl EncodedDestinationState {
         ensure!(
             self.media_frames.len() < MAX_PENDING_MEDIA_FRAMES,
             "encoded destination media-frame bound exceeded"
+        );
+        ensure!(
+            packet.access_unit.payload.len() <= self.receive_budget().media_bytes,
+            "encoded destination payload-byte bound exceeded"
         );
         let payload_bytes = u64::try_from(packet.access_unit.payload.len()).unwrap_or(u64::MAX);
         ensure!(
@@ -1212,8 +1242,8 @@ impl EncodedDestinationState {
                     tracing::debug!(frame = ?in_flight.frame, error = %format_args!("{error:#}"),
                         "discarded cancelled decode failure");
                 }
-                self.backend
-                    .retire(in_flight.frame.stream, in_flight.frame.generation)?;
+                self.pending_retirement
+                    .insert((in_flight.frame.stream, in_flight.frame.generation));
                 continue;
             }
             let frames = completion.result?;
@@ -1247,6 +1277,8 @@ impl EncodedDestinationState {
             for event in queue {
                 let frames = encoded_frames(&event.event);
                 for frame in &frames {
+                    self.pending_retirement
+                        .insert((frame.stream, frame.generation));
                     let media_was_pending = self.media_frames.remove(frame).is_some();
                     let was_decoded = self.decoded.remove(frame).is_some();
                     let in_flight = self
@@ -1258,28 +1290,20 @@ impl EncodedDestinationState {
                     } else if !media_was_pending && !was_decoded {
                         // Only media that has never arrived needs a tombstone.
                         ensure!(
-                            self.cancelled_frames.len() < MAX_CANCELLED_MEDIA_FRAMES,
+                            self.cancelled_frames.len() < MAX_REFERENCED_FRAMES,
                             "encoded destination cancelled-frame bound exceeded"
                         );
                         self.cancelled_frames.insert(*frame, event.session);
                     }
                 }
                 if !frames.is_empty() {
-                    let revision = commit_revision(&event.event)
-                        .context("encoded destination event was not a commit")?;
-                    self.outcomes.push(EncodedCommitOutcomeRecord {
-                        session: event.session,
-                        surface: event.source_surface,
-                        revision,
-                        outcome: EncodedCommitOutcome::Dropped,
-                    });
                     self.observations
                         .record(DestinationObservation::CommitCancelled);
                 }
             }
         }
         self.retire_surface_generations(surface)?;
-        Ok(())
+        self.sweep_retirement()
     }
 
     fn update_stream_generations(
@@ -1289,9 +1313,8 @@ impl EncodedDestinationState {
         let WireClientSurfaceEventKind::Commit(commit) = &event.kind else {
             return Ok(());
         };
-        // Commits carry complete inventories. Credit orders them after the
-        // previous decode; cancellation already extracts any active generation
-        // from this map and defers its retirement to the matching completion.
+        // Inventories may advance ahead of decode. Retirement waits for all
+        // references to the previous generation, not just the latest inventory.
         let retired = self
             .streams
             .extract_if(|(surface, layer), _| {
@@ -1304,7 +1327,7 @@ impl EncodedDestinationState {
             .map(|(_, generation)| generation)
             .collect::<Vec<_>>();
         for (stream, generation) in retired {
-            self.backend.retire(stream, generation)?;
+            self.pending_retirement.insert((stream, generation));
         }
         for update in &commit.buffers {
             let key = (event.surface, update.layer);
@@ -1318,7 +1341,7 @@ impl EncodedDestinationState {
             if let Some(previous) = self.streams.remove(&key)
                 && Some(previous) != next
             {
-                self.backend.retire(previous.0, previous.1)?;
+                self.pending_retirement.insert(previous);
             }
             if let Some(next) = next {
                 self.streams.insert(key, next);
@@ -1334,20 +1357,46 @@ impl EncodedDestinationState {
             .map(|(_, generation)| generation)
             .collect::<Vec<_>>();
         for (stream, generation) in generations {
-            // A cancelled job can still create its generation after submission.
-            // Defer that retirement to its matching completion.
-            if self.decode_in_flight.as_ref().is_some_and(|active| {
-                active.cancelled
-                    && (active.frame.stream, active.frame.generation) == (stream, generation)
-            }) {
-                continue;
-            }
+            self.pending_retirement.insert((stream, generation));
+        }
+        Ok(())
+    }
+
+    fn sweep_retirement(&mut self) -> Result<()> {
+        if self.pending_retirement.is_empty() {
+            return Ok(());
+        }
+        let mut referenced = self.streams.values().copied().collect::<HashSet<_>>();
+        referenced.extend(
+            self.queues
+                .values()
+                .flatten()
+                .flat_map(|queued| encoded_frames(&queued.event))
+                .map(|frame| (frame.stream, frame.generation)),
+        );
+        referenced.extend(
+            self.media_frames
+                .keys()
+                .chain(self.decoded.keys())
+                .map(|frame| (frame.stream, frame.generation)),
+        );
+        if let Some(active) = &self.decode_in_flight {
+            referenced.insert((active.frame.stream, active.frame.generation));
+        }
+        let ready = self
+            .pending_retirement
+            .difference(&referenced)
+            .copied()
+            .collect::<Vec<_>>();
+        for (stream, generation) in ready {
             self.backend.retire(stream, generation)?;
+            self.pending_retirement.remove(&(stream, generation));
         }
         Ok(())
     }
 
     fn advance(&mut self, output: &mut Vec<EncodedDestinationEvent>) -> Result<()> {
+        self.sweep_retirement()?;
         loop {
             let surfaces = self.queues.keys().copied().collect::<Vec<_>>();
             let mut progressed = false;
@@ -1384,12 +1433,6 @@ impl EncodedDestinationState {
                         session: queued.session,
                         event,
                     });
-                    self.outcomes.push(EncodedCommitOutcomeRecord {
-                        session: queued.session,
-                        surface: queued.source_surface,
-                        revision,
-                        outcome: EncodedCommitOutcome::Applied,
-                    });
                     self.observations
                         .record(DestinationObservation::CommitApplied {
                             wall_time: queued.received_at.elapsed(),
@@ -1416,10 +1459,11 @@ impl EncodedDestinationState {
                 break;
             }
         }
-        Ok(())
+        self.sweep_retirement()
     }
 
     fn schedule_decode(&mut self, frame: MediaFrameId, session: HoistSessionId) -> Result<()> {
+        self.sweep_retirement()?;
         if self.decode_in_flight.is_some() {
             return Ok(());
         }
@@ -1638,30 +1682,17 @@ impl<T: EncodedDestinationTransport> EncodedDestinationPort<T> {
         }
         Ok(())
     }
-
-    fn flush_outcomes(&mut self) -> HoistPortResult<()> {
-        let state = self
-            .state
-            .as_mut()
-            .ok_or_else(|| protocol_error("encoded destination port is disconnected"))?;
-        for outcome in state.take_outcomes() {
-            self.transport.send(DestinationEnvelope {
-                session: outcome.session,
-                message: DestinationMessage::EncodedCommitFinished {
-                    surface: outcome.surface,
-                    revision: outcome.revision,
-                    outcome: outcome.outcome,
-                },
-            })?;
-        }
-        Ok(())
-    }
 }
 
 impl<T: EncodedDestinationTransport> HoistDestinationPort for EncodedDestinationPort<T> {
     fn poll(&mut self) -> HoistPortResult<Vec<DestinationPortRecord>> {
+        let budget = self
+            .state
+            .as_ref()
+            .ok_or_else(|| protocol_error("encoded destination port is disconnected"))?
+            .receive_budget();
         let mut records = Vec::new();
-        for packet in self.transport.drain()? {
+        for packet in self.transport.drain(budget)? {
             self.apply_source_packet(packet, &mut records)?;
         }
         let mut decoded = Vec::new();
@@ -1673,7 +1704,7 @@ impl<T: EncodedDestinationTransport> HoistDestinationPort for EncodedDestination
         state.report_observations(result.is_err());
         result.map_err(protocol_error)?;
         extend_encoded_records(&mut records, decoded);
-        self.flush_outcomes()?;
+        self.transport.wake_if_readable(state.receive_budget())?;
         Ok(records)
     }
 
@@ -1812,15 +1843,32 @@ mod tests {
         sent: Vec<SourceTransportPacket>,
         incoming: VecDeque<DestinationEnvelope>,
         disconnected: bool,
+        block_control: bool,
+        block_media: bool,
     }
 
     #[derive(Clone)]
     struct FakeSourceTransport(Rc<RefCell<FakeSourceTransportState>>);
 
     impl EncodedSourceTransport for FakeSourceTransport {
-        fn send(&self, packet: SourceTransportPacket) -> HoistPortResult<()> {
+        fn try_send(
+            &self,
+            packet: SourceTransportPacket,
+        ) -> HoistPortResult<SendStatus<SourceTransportPacket>> {
+            let state = self.0.borrow();
+            if match &packet {
+                SourceTransportPacket::Control(_) => state.block_control,
+                SourceTransportPacket::Media(_) => state.block_media,
+            } {
+                return Ok(SendStatus::Busy(packet));
+            }
+            drop(state);
             self.0.borrow_mut().sent.push(packet);
-            Ok(())
+            Ok(SendStatus::Sent)
+        }
+
+        fn media_headroom(&self) -> bool {
+            !self.0.borrow().block_media
         }
 
         fn drain(&self) -> HoistPortResult<Vec<DestinationEnvelope>> {
@@ -1848,8 +1896,39 @@ mod tests {
             Ok(())
         }
 
-        fn drain(&self) -> HoistPortResult<Vec<SourceTransportPacket>> {
-            Ok(self.0.borrow_mut().incoming.drain(..).collect())
+        fn drain(&self, mut budget: ReceiveBudget) -> HoistPortResult<Vec<SourceTransportPacket>> {
+            let mut state = self.0.borrow_mut();
+            let mut packets = Vec::new();
+            let mut retained = VecDeque::new();
+            let mut media_blocked = false;
+            for packet in state.incoming.drain(..) {
+                match &packet {
+                    SourceTransportPacket::Control(_) if budget.control_records > 0 => {
+                        budget.control_records -= 1;
+                        packets.push(packet);
+                    }
+                    SourceTransportPacket::Media(media)
+                        if !media_blocked
+                            && budget.media_records > 0
+                            && media.access_unit.payload.len() <= budget.media_bytes =>
+                    {
+                        budget.media_records -= 1;
+                        budget.media_bytes -= media.access_unit.payload.len();
+                        packets.push(packet);
+                    }
+                    SourceTransportPacket::Media(_) => {
+                        media_blocked = true;
+                        retained.push_back(packet);
+                    }
+                    _ => retained.push_back(packet),
+                }
+            }
+            state.incoming = retained;
+            Ok(packets)
+        }
+
+        fn wake_if_readable(&self, _budget: ReceiveBudget) -> HoistPortResult<()> {
+            Ok(())
         }
 
         fn disconnect(&self) {
@@ -2026,7 +2105,7 @@ mod tests {
     }
 
     #[test]
-    fn cursor_overtaking_credit_blocked_unmap_remap_keeps_its_newer_preference() {
+    fn cursor_overtaking_resize_blocked_unmap_remap_keeps_its_newer_preference() {
         let (mut source, transport, encoder) = source_port();
         let (destination, incoming, _) = destination_port();
         let source_id = ClientSourceId::new(1);
@@ -2045,17 +2124,15 @@ mod tests {
             .expect("first frame");
         let (token, frame, _) = encoder.borrow().submitted[0].clone();
         complete(&encoder, token, frame, 10);
-        source.poll().expect("park first frame in credit");
-        assert!(
-            source
-                .state
-                .as_ref()
-                .expect("state")
-                .awaiting_credit
-                .contains_key(&surface)
-        );
+        source.poll().expect("publish first frame");
+        source
+            .state
+            .as_mut()
+            .expect("state")
+            .set_resizing(surface, true)
+            .expect("resize");
 
-        // Model an already-displayed first frame while withholding its credit.
+        // Model an already-displayed first frame while resizing blocks commits.
         // Strip only its GPU payload: this test exercises cursor/lifecycle order,
         // not decoding or native buffer import.
         for packet in transport.borrow_mut().sent.drain(..) {
@@ -2096,7 +2173,7 @@ mod tests {
         for event in [unmap, commit(surface, 3, Vec::new())] {
             source
                 .submit(SourcePortCommand::Surface { session, event })
-                .expect("credit-blocked lifecycle");
+                .expect("locally blocked lifecycle");
         }
         assert!(transport.borrow().sent.is_empty());
         let cursor = weld_client::ClientCursor::Named(weld_client::CursorIcon::Text);
@@ -2118,15 +2195,12 @@ mod tests {
         assert_eq!(runtime.pointer_cursor(), Some((relocated, cursor.clone())));
 
         source
-            .accept_destination(&DestinationEnvelope {
-                session,
-                message: DestinationMessage::EncodedCommitFinished {
-                    surface,
-                    revision: ClientCommitRevision::new(1),
-                    outcome: EncodedCommitOutcome::Applied,
-                },
-            })
-            .expect("release frame credit");
+            .state
+            .as_mut()
+            .expect("state")
+            .set_resizing(surface, false)
+            .expect("end resize");
+        source.flush().expect("flush lifecycle");
         let delayed = std::mem::take(&mut transport.borrow_mut().sent);
         assert_eq!(delayed.len(), 2);
         for (index, packet) in delayed.into_iter().enumerate() {
@@ -2291,7 +2365,7 @@ mod tests {
     }
 
     #[test]
-    fn destroyed_relay_surfaces_do_not_wait_for_credit_or_leak_streams() {
+    fn destroyed_relay_surfaces_do_not_leak_streams() {
         let (port, transport, encoder) = source_port();
         let source_id = ClientSourceId::new(1);
         let session = HoistSessionId::new(1);
@@ -2327,18 +2401,7 @@ mod tests {
             assert!(transport.borrow().sent.iter().any(|packet| matches!(packet,
                 SourceTransportPacket::Control(SourceEnvelope { message: SourceMessage::Surface(event), .. })
                     if event.surface == surface && matches!(event.kind, WireClientSurfaceEventKind::Destroyed)
-            )), "destruction must bypass the now-unroutable credit");
-            transport
-                .borrow_mut()
-                .incoming
-                .push_back(DestinationEnvelope {
-                    session,
-                    message: DestinationMessage::EncodedCommitFinished {
-                        surface,
-                        revision: ClientCommitRevision::new(1),
-                        outcome: EncodedCommitOutcome::Applied,
-                    },
-                });
+            )), "destruction must remain deliverable");
             relay.drain_events(&mut ClientEventQueue::default());
             assert!(!transport.borrow().disconnected);
             assert_eq!(encoder.borrow().retirements.len(), local as usize);
@@ -2407,8 +2470,10 @@ mod tests {
             encoder.borrow().retirements,
             vec![(frame.stream, frame.generation)]
         );
-        assert_eq!(encoder.borrow().submitted.len(), 2);
         assert_eq!(output_kinds(&source.output), vec!["control"]);
+        source.take_output();
+        source.schedule().expect("destruction output delivered");
+        assert_eq!(encoder.borrow().submitted.len(), 2);
     }
 
     #[test]
@@ -2528,7 +2593,6 @@ mod tests {
             assert!(state.cancelled_frames.is_empty());
             assert!(state.decoded.is_empty());
             assert!(state.media_frames.is_empty());
-            state.take_outcomes();
         }
         let report = state
             .observations
@@ -2567,15 +2631,9 @@ mod tests {
                 destination
                     .update_stream_generations(&event)
                     .expect("receiver inventory");
-                if let Some(revision) = commit_revision(&event) {
-                    source
-                        .finish_remote_commit(
-                            event.surface,
-                            revision,
-                            EncodedCommitOutcome::Applied,
-                        )
-                        .expect("credit");
-                }
+                destination
+                    .sweep_retirement()
+                    .expect("retire unreferenced inventory");
             }
         }
     }
@@ -2797,15 +2855,6 @@ mod tests {
         let (token, frame, _) = encoder.borrow().submitted[0].clone();
         complete(&encoder, token, frame, 1);
         assert!(port.poll().expect("complete frame").is_empty());
-        port.accept_destination(&DestinationEnvelope {
-            session,
-            message: DestinationMessage::EncodedCommitFinished {
-                surface,
-                revision: ClientCommitRevision::new(5),
-                outcome: EncodedCommitOutcome::Applied,
-            },
-        })
-        .expect("return destination credit");
 
         let sent = &transport.borrow().sent;
         assert_eq!(sent.len(), 4);
@@ -2956,7 +3005,7 @@ mod tests {
     }
 
     #[test]
-    fn destination_flushes_dropped_commit_outcomes() {
+    fn destination_cancels_without_sending_commit_acknowledgements() {
         let (mut port, transport, _decoder) = destination_port();
         let session = HoistSessionId::new(1);
         let surface = surface(ClientSourceId::new(2), 3, 4);
@@ -2980,17 +3029,7 @@ mod tests {
                 ..
             }] if *observed == surface
         ));
-        assert!(matches!(
-            transport.borrow().sent.as_slice(),
-            [DestinationEnvelope {
-                message: DestinationMessage::EncodedCommitFinished {
-                    surface: observed,
-                    revision,
-                    outcome: EncodedCommitOutcome::Dropped,
-                },
-                ..
-            }] if *observed == surface && *revision == ClientCommitRevision::new(8)
-        ));
+        assert!(transport.borrow().sent.is_empty());
         let state = port.state.as_mut().expect("state");
         let report = state
             .observations
@@ -3291,65 +3330,221 @@ mod tests {
     }
 
     #[test]
-    fn destination_credit_blocks_only_its_surface() {
-        let (mut source, fake) = source();
+    fn multiple_same_surface_batches_progress_without_any_reverse_messages() {
+        let (mut port, transport, encoder) = source_port();
         let source_id = ClientSourceId::new(1);
-        let first = surface(source_id, 2, 3);
-        let second = surface(source_id, 4, 5);
-        let session = HoistSessionId::new(6);
+        let surface = surface(source_id, 2, 3);
+        let session = HoistSessionId::new(4);
         let metadata = ClientBufferMetadata::new(Extent::new(1, 1), true);
-
-        source
-            .enqueue(
+        for revision in 1..=20 {
+            port.submit(SourcePortCommand::Surface {
                 session,
-                one_buffer_commit(first, 1, 1, shm_lease(source_id, 7, 10, metadata)),
-            )
-            .expect("first surface");
-        let (token, frame, _) = fake.borrow().submitted[0].clone();
-        complete(&fake, token, frame, 1);
-        source.drain().expect("first completion");
-        source.take_output();
-
-        for (local, pixel) in [(8, 20), (9, 30)] {
-            source
-                .enqueue(
-                    session,
-                    one_buffer_commit(
-                        first,
-                        local,
-                        1,
-                        shm_lease(source_id, local, pixel, metadata),
-                    ),
-                )
-                .expect("coalesced first surface");
+                event: one_buffer_commit(
+                    surface,
+                    revision,
+                    1,
+                    shm_lease(source_id, revision, 10, metadata),
+                ),
+            })
+            .expect("submit without reverse traffic");
+            let (token, frame, _) = encoder.borrow().submitted.last().expect("encode").clone();
+            complete(&encoder, token, frame, 1);
+            assert!(port.poll().expect("complete").is_empty());
         }
-        source
-            .enqueue(
-                session,
-                one_buffer_commit(second, 10, 1, shm_lease(source_id, 10, 40, metadata)),
-            )
-            .expect("second surface");
-        assert_eq!(fake.borrow().submitted.len(), 2);
-        assert_eq!(fake.borrow().submitted[1].2, vec![40, 40, 40, 255]);
-
-        source
-            .finish_remote_commit(
-                first,
-                ClientCommitRevision::new(1),
-                EncodedCommitOutcome::Applied,
-            )
-            .expect("first credit");
-        assert_eq!(fake.borrow().submitted.len(), 2);
-        let report = source
-            .observations
-            .take_report(Instant::now(), SourceGauges::default(), true)
-            .expect("applied credit observations");
-        assert_eq!(report.counters.applied_credit_turnaround.samples, 1);
-        assert_eq!(report.counters.credits_cancelled, 0);
+        assert_eq!(encoder.borrow().submitted.len(), 20);
+        assert_eq!(transport.borrow().sent.len(), 40);
+        assert!(transport.borrow().incoming.is_empty());
     }
 
     #[test]
-    fn source_observations_separate_coalescing_cancellation_and_late_credit() {
+    fn blocked_media_survives_withdrawal_and_does_not_block_cursor_control() {
+        let (mut port, transport, encoder) = source_port();
+        let source_id = ClientSourceId::new(1);
+        let surface = surface(source_id, 2, 3);
+        let session = HoistSessionId::new(4);
+        let metadata = ClientBufferMetadata::new(Extent::new(1, 1), true);
+        port.submit(SourcePortCommand::Surface {
+            session,
+            event: one_buffer_commit(surface, 1, 1, shm_lease(source_id, 1, 10, metadata)),
+        })
+        .expect("start encode");
+        transport.borrow_mut().block_media = true;
+        let (token, frame, _) = encoder.borrow().submitted[0].clone();
+        complete(&encoder, token, frame, 37);
+        port.poll().expect("retain completed media");
+        port.submit(SourcePortCommand::Cursor {
+            session,
+            update: weld_client::ClientCursorUpdate {
+                surface,
+                cursor: weld_client::ClientCursor::Hidden,
+            },
+            sequence: 1,
+        })
+        .expect("cursor while media blocked");
+        port.submit(SourcePortCommand::WithdrawSurface { session, surface })
+            .expect("withdraw");
+        assert_eq!(transport.borrow().sent.len(), 3);
+        assert!(matches!(
+            &transport.borrow().sent[1],
+            SourceTransportPacket::Control(SourceEnvelope {
+                message: SourceMessage::Cursor { .. },
+                ..
+            })
+        ));
+        assert_eq!(port.output.pending_records(), 1);
+        transport.borrow_mut().block_media = false;
+        port.poll()
+            .expect("writable wake without a client commit or ACK");
+        assert!(port.output.is_empty());
+        assert!(
+            matches!(&transport.borrow().sent[3], SourceTransportPacket::Media(packet)
+            if packet.access_unit.frame == frame && packet.access_unit.payload == [37])
+        );
+        assert!(!transport.borrow().disconnected);
+    }
+
+    #[test]
+    fn retained_control_keeps_commit_before_withdrawal() {
+        let (mut port, transport, encoder) = source_port();
+        let source_id = ClientSourceId::new(1);
+        let surface = surface(source_id, 2, 3);
+        let session = HoistSessionId::new(4);
+        let metadata = ClientBufferMetadata::new(Extent::new(1, 1), true);
+        port.submit(SourcePortCommand::Surface {
+            session,
+            event: one_buffer_commit(surface, 1, 1, shm_lease(source_id, 1, 10, metadata)),
+        })
+        .expect("encode");
+        transport.borrow_mut().block_control = true;
+        let (token, frame, _) = encoder.borrow().submitted[0].clone();
+        complete(&encoder, token, frame, 1);
+        port.poll().expect("control busy");
+        port.submit(SourcePortCommand::WithdrawSurface { session, surface })
+            .expect("retain withdraw");
+        assert_eq!(port.output.pending_records(), 2);
+        transport.borrow_mut().block_control = false;
+        port.poll().expect("control writable");
+        assert!(matches!(
+            &transport.borrow().sent[1],
+            SourceTransportPacket::Control(SourceEnvelope {
+                message: SourceMessage::Surface(_),
+                ..
+            })
+        ));
+        assert!(matches!(
+            &transport.borrow().sent[2],
+            SourceTransportPacket::Control(SourceEnvelope {
+                message: SourceMessage::Withdraw { .. },
+                ..
+            })
+        ));
+        assert!(port.output.is_empty());
+    }
+
+    #[test]
+    fn new_commit_on_capacity_recovery_coalesces_without_overtaking_pending_content() {
+        let (mut port, transport, encoder) = source_port();
+        let source_id = ClientSourceId::new(1);
+        let surface = surface(source_id, 2, 3);
+        let session = HoistSessionId::new(4);
+        let metadata = ClientBufferMetadata::new(Extent::new(1, 1), true);
+        transport.borrow_mut().block_media = true;
+        for revision in 1..=2 {
+            port.submit(SourcePortCommand::Surface {
+                session,
+                event: one_buffer_commit(
+                    surface,
+                    revision,
+                    1,
+                    shm_lease(source_id, revision, revision as u8, metadata),
+                ),
+            })
+            .expect("queue while busy");
+        }
+        assert!(encoder.borrow().submitted.is_empty());
+        transport.borrow_mut().block_media = false;
+        port.submit(SourcePortCommand::Surface {
+            session,
+            event: one_buffer_commit(surface, 3, 1, shm_lease(source_id, 3, 3, metadata)),
+        })
+        .expect("new commit races writable notification");
+        assert_eq!(encoder.borrow().submitted.len(), 1);
+        assert_eq!(encoder.borrow().submitted[0].2, vec![3, 3, 3, 255]);
+        let (token, frame, _) = encoder.borrow().submitted[0].clone();
+        complete(&encoder, token, frame, 3);
+        port.poll().expect("publish latest only");
+        assert_eq!(encoder.borrow().submitted.len(), 1);
+        assert!(port.state.as_ref().expect("state").pending.is_empty());
+    }
+
+    #[test]
+    fn full_reference_budget_still_admits_late_tombstone_media() {
+        let (mut port, _, _) = destination_port();
+        let state = port.state.as_mut().expect("state");
+        let session = HoistSessionId::new(1);
+        for index in 0..MAX_REFERENCED_FRAMES as u64 {
+            let frame = MediaFrameId::new(MediaStreamId::new(1), StreamGeneration::new(1), index);
+            state.cancelled_frames.insert(frame, session);
+        }
+        assert_eq!(state.receive_budget().control_records, 0);
+        assert_eq!(
+            state.receive_budget().media_records,
+            MAX_PENDING_MEDIA_FRAMES
+        );
+        for index in 0..MAX_REPLACEMENTS_PER_COMMIT as u64 {
+            state
+                .enqueue_media(encoded_media(
+                    session,
+                    MediaFrameId::new(MediaStreamId::new(1), StreamGeneration::new(1), index),
+                ))
+                .expect("late cancelled frame");
+        }
+        assert_eq!(state.receive_budget().control_records, 1);
+        assert!(state.media_frames.is_empty());
+    }
+
+    #[test]
+    fn queued_resize_generations_do_not_retire_an_active_or_queued_decode() {
+        let (mut port, _, decoder) = destination_port();
+        let state = port.state.as_mut().expect("state");
+        let session = HoistSessionId::new(1);
+        let surface = surface(ClientSourceId::new(1), 2, 3);
+        let first = MediaFrameId::new(MediaStreamId::new(1), StreamGeneration::new(1), 0);
+        let second = MediaFrameId::new(MediaStreamId::new(1), StreamGeneration::new(2), 0);
+        state
+            .enqueue_media(encoded_media(session, first))
+            .expect("first media");
+        state
+            .enqueue(session, encoded_commit(surface, 1, first), &mut Vec::new())
+            .expect("first decode");
+        state
+            .enqueue_media(encoded_media(session, second))
+            .expect("second media");
+        state
+            .enqueue(session, encoded_commit(surface, 2, second), &mut Vec::new())
+            .expect("new metadata while decoding");
+        assert!(decoder.borrow().retirements.is_empty());
+        assert_eq!(decoder.borrow().submitted, vec![first]);
+        state
+            .cancel_surface(surface)
+            .expect("cancel both generations");
+        assert_eq!(
+            decoder.borrow().retirements,
+            vec![(second.stream, second.generation)]
+        );
+        let token = decoder.borrow().tokens[0];
+        decoder.borrow_mut().completions.push(DecodeCompletion {
+            token,
+            result: Ok(Vec::new()),
+        });
+        state.drain(&mut Vec::new()).expect("cancelled completion");
+        assert_eq!(decoder.borrow().retirements.len(), 2);
+        assert!(state.pending_retirement.is_empty());
+        assert!(state.media_frames.is_empty());
+    }
+
+    #[test]
+    fn source_observations_separate_coalescing_and_cancellation() {
         let (mut source, fake) = source();
         let source_id = ClientSourceId::new(1);
         let surface = surface(source_id, 2, 3);
@@ -3375,17 +3570,10 @@ mod tests {
                         shm_lease(source_id, revision + 5, 20, metadata),
                     ),
                 )
-                .expect("credit-blocked commit");
+                .expect("locally blocked commit");
         }
         assert_eq!(fake.borrow().submitted.len(), 1);
-        source.cancel_surface(surface).expect("withdraw credit");
-        source
-            .finish_remote_commit(
-                surface,
-                ClientCommitRevision::new(1),
-                EncodedCommitOutcome::Applied,
-            )
-            .expect("late reply");
+        source.cancel_surface(surface).expect("withdraw surface");
         let report = source
             .observations
             .take_report(Instant::now(), SourceGauges::default(), true)
@@ -3393,11 +3581,8 @@ mod tests {
         assert_eq!(report.counters.commits_received, 3);
         assert_eq!(report.counters.commits_coalesced, 1);
         assert_eq!(report.counters.batches_completed, 1);
-        assert_eq!(report.counters.credits_cancelled, 1);
-        assert_eq!(report.counters.stale_credit_outcomes, 1);
-        assert_eq!(report.counters.applied_credit_turnaround.samples, 0);
+        assert_eq!(report.counters.surfaces_cancelled, 1);
         assert!(source.pending.is_empty());
-        assert!(source.awaiting_credit.is_empty());
     }
 
     #[test]
@@ -3432,41 +3617,6 @@ mod tests {
             assert_eq!(report.counters.batches_completed, 0);
             assert_eq!(report.counters.encoded_payload_bytes, 0);
         }
-    }
-
-    #[test]
-    fn source_observations_do_not_accept_a_mismatched_credit_revision() {
-        let (mut source, fake) = source();
-        let source_id = ClientSourceId::new(1);
-        let surface = surface(source_id, 2, 3);
-        let session = HoistSessionId::new(4);
-        let metadata = ClientBufferMetadata::new(Extent::new(1, 1), true);
-        source
-            .enqueue(
-                session,
-                one_buffer_commit(surface, 1, 1, shm_lease(source_id, 5, 10, metadata)),
-            )
-            .expect("commit");
-        let (token, frame, _) = fake.borrow().submitted[0].clone();
-        complete(&fake, token, frame, 1);
-        source.drain().expect("completion");
-        assert!(
-            source
-                .finish_remote_commit(
-                    surface,
-                    ClientCommitRevision::new(99),
-                    EncodedCommitOutcome::Applied
-                )
-                .is_err()
-        );
-        assert!(source.awaiting_credit.contains_key(&surface));
-        let report = source
-            .observations
-            .take_report(Instant::now(), SourceGauges::default(), true)
-            .expect("observations");
-        assert_eq!(report.counters.applied_credit_turnaround.samples, 0);
-        assert_eq!(report.counters.credits_cancelled, 0);
-        assert_eq!(report.counters.stale_credit_outcomes, 0);
     }
 
     #[test]

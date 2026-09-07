@@ -41,7 +41,7 @@ Weld is a workspace of reusable layers and one standard distribution:
   source-authoritative identity relocation, popup and parent relationships,
   scale reset, focus, and remote-input cleanup.
 - `weld-hoist-encoded` owns transport-neutral encoded commit scheduling,
-  per-surface credit, resize coalescing, codec worker contracts, and decoded
+  local backpressure, resize coalescing, codec worker contracts, and decoded
   DMA-BUF import. Codec and DMA-BUF work stays on the compositor thread while
   bindings move only control records and compressed access units.
 - `weld-hoist-local` owns the Linux-local Postcard/Unix-seqpacket binding,
@@ -519,7 +519,7 @@ plane; the existing composition blitter supplies the GPU fallback. Cursor-only
 motion does not dirty the Bevy scene.
 
 All hoist bindings carry cursor feedback over control, independently of codec
-credit. One cursor update may be outstanding per connection; subsequent updates
+work. One cursor update may be outstanding per connection; subsequent updates
 retain the newest desired image per surface until `CursorReceived` acknowledges
 receipt, not display. Identical state is suppressed. Withdrawal does not free the
 slot prematurely: the receiver acknowledges late feedback without resurrecting
@@ -592,8 +592,18 @@ updates; native and loopback relays preserve that declaration. The encoded
 destination rejects commits that do not declare the selected opaque mode.
 `ClientBufferMetadata::opaque` and `MappedSurface::opaque` instead describe
 pixel sampling and do not select a frame policy. The wire change uses exact
-protocol revision 3 (including cursor feedback), so both endpoints must run the
-matching build.
+protocol revision 4 (removing commit ACKs, retaining cursor feedback), so both
+endpoints must run the matching build.
+
+Encoded commits have no application ACK or per-surface stop-and-wait gate.
+One encode batch runs at a time. Local media headroom admits the next batch;
+pressure coalesces unencoded commits while ordered control and completed media
+remain independently bounded. Transport write completion wakes static sources.
+The receiver independently budgets control references and compressed bytes,
+and retires decoder generations only after their queued, active and decoded
+references are gone. Withdrawal preserves already-published media to resolve
+late cancelled references. Native buffer release and cursor ACKs are unchanged.
+See [ACK-free streaming](ack-free-streaming-plan.md) for bounds and limitations.
 
 The default UI policy presents alpha-discarded toplevels with destination SSD
 and a `WindowGeometry` content mount, retaining the source client's decoration

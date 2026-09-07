@@ -18,10 +18,10 @@ Hardware faults remain fatal diagnostic events, not congestion samples.
 
 `weld-hoist-encoded` now maintains fixed-size interval counters for received and
 coalesced commits, completed batches/layer frames and encoded bytes, cancelled
-batches, codec failures, applied/cancelled credits, and stale credit replies.
-It records total/max completed batch wall time and applied-credit turnaround,
-plus gauges for pending events, active logical streams, the active batch, and
-outstanding credits/oldest age. This is one source-port aggregate, not a
+batches, codec failures, and surface cancellations.
+It records total/max completed batch wall time, plus gauges for pending events,
+active logical streams, the active batch, retained output and transport blockage.
+This is one source-port aggregate, not a
 per-window budget or measured network capacity.
 
 Collection is independent of logging. Set
@@ -30,15 +30,14 @@ approved validation run to see the summaries. They emit at most once per second
 when the port is polled and work occurred or remains, plus a best-effort partial
 summary before ordinary teardown. There is no diagnostic timer, forced Bevy
 update, idle log stream, or guarantee of a final sample after abort/SIGKILL.
-An outstanding stalled credit remains work, even with no completed frames.
+Blocked local output remains work, even with no completed frames.
 
-Counters describe events, not disjoint outcomes: a cancelled credit may later
-produce a stale reply. Batch wall time includes sequential layers and host
-completion draining; credit turnaround includes local send queues, network,
-receiver processing and host scheduling. Neither is GPU-only time, RTT, or
+Counters describe events, not disjoint outcomes. Batch wall time includes
+sequential layers and host completion draining, not GPU-only time or
 presentation latency. Encoded-byte counts are produced payloads, not delivered
-or carrier-billed bytes. These observations do not change scheduling, codec
-parameters, credit policy, or source-buffer lifetime.
+or carrier-billed bytes. Collection does not alter codec settings or leases.
+Application commit ACKs and their turnaround counters have been removed;
+[ACK-free streaming](ack-free-streaming-plan.md) describes local admission.
 
 ### Implemented: receiver observations
 
@@ -50,7 +49,7 @@ media is counted separately, not as accepted media or congestion loss. An
 obsolete decode can count both a cancellation and a codec error; invalid tokens
 and failed results never count as successful decodes. Received commits include
 metadata-only commits, while applied/cancelled counters cover commits carrying
-encoded replacements and their credit outcomes.
+encoded replacements and their local outcomes.
 
 Timestamps occupy existing bounded queue entries. The locally measured stages
 are deliberately distinct and **overlap**, so do not add them:
@@ -135,7 +134,7 @@ Every prepared job freezes its bitrate. Later requests cannot rewrite an active
 multi-layer batch. A changed bitrate or extent uses the existing single
 generation-rotation point after old prepared work completes; changing both
 rotates once. Old encoder generations are retired before replacement and never
-resubmitted. Existing surface credit still orders receiver processing. A matching
+resubmitted. Receiver retirement now follows queued and active references. A matching
 codec packet confirms application; sequence zero must be a keyframe. Applied
 means codec output exists, not receiver display or measured wire bitrate.
 Failed, rejected, mismatched, and cancelled work never confirms a new rate.
@@ -170,16 +169,14 @@ caps, receiver allowances, and decrease/recovery policy remain pending.
   `weld-media-vaapi` workers. Defaults are AV1 8 Mbps and H.264 16 Mbps **per
   layer encoder**, not per connection. Both support opaque output only.
 - Each encoded source port has one active encode batch, with sequential layer
-  encoding, and one outstanding destination credit per client surface. This
-  already throttles delivery at higher RTT; reducing bitrate cannot remove a
-  stable stop-and-wait cadence limit.
-- `EncodedCommitOutcome::Applied` means decoded/imported and queued into the
-  client adapter, not displayed. `Dropped` currently originates in surface
-  cancellation. It is **not** an existing congestion/drop-rate signal. Several
-  queue/resource failures instead terminate the session.
+  encoding, and no commit ACK gate. Local send headroom and bounded receiver
+  admission replace stop-and-wait. Published codec references remain ordered.
+- Applied/cancelled receiver observations are local counters, not congestion
+  feedback messages. Persistent non-coalescible control overload still terminates
+  the session; ordinary media pressure pauses admission.
 - Source DMA-BUF leases remain held through encode completion, independently
   of receiver acknowledgement. Pending unencoded commits can retain leases
-  while awaiting credit and coalesce with newer commits.
+  while awaiting local capacity and coalesce with newer commits.
 - Iroh currently sends all encoded surfaces and layers through **one reliable,
   ordered media stream**, separate from control. A large background access unit
   can delay focused media. Priority can choose what enters that stream next;
@@ -260,27 +257,27 @@ Collect bounded, locally monotonic observations:
 - Source demand, admission/coalescing decisions, pending-frame age, encode
   duration, active generations, and actual encoded bytes.
 - Connection-wide encoded queue bytes/oldest age, write-blocked time, write
-  completion, and credit turnaround. Write completion is not remote receipt.
+  completion, and receiver feedback age. Write completion is not remote receipt.
 - Receiver receipt, queue/decode durations, decoded/applied outcome and cause.
   Presentation timing remains unavailable unless a real presentation observer
   is added; do not relabel `Applied` or subtract unsynchronized peer clocks.
 - Drop/skip reasons distinguishing cadence policy, hidden state, newer-state
   coalescing, lifecycle retirement, pressure-related lateness, and codec failure.
-  Do not reinterpret today's lifecycle `Dropped` records as network pressure.
+  Do not reinterpret lifecycle cancellation counters as network pressure.
 
 Use eligible active demand as the denominator for pressure misses. Idle windows,
 intentional FPS gating, hidden windows, normal coalescing and retired-generation
-traffic are not congestion drops. Preserve exact lifecycle/credit completion
+traffic are not congestion drops. Preserve exact lifecycle and buffer-release
 semantics while adding reasoned observations. Feedback and receiver allowances
 belong to one coordinated protocol revision change, not separate bumps for each
 new record; verify both bindings' actual bootstrap behavior when wiring it.
 
-For the current self-throttling pipeline, **inflated credit turnaround** is a
-primary end-to-end pressure observation, even when no frames are dropped. Split
-source queuing/write delay and receiver queue/decode time before attributing it
-to the link. Stable RTT-limited cadence alone is not congestion. Sustained
-unintentional deadline misses/drops, queue growth, and loss provide additional
-evidence. Record attribution as unknown when it is not identifiable.
+There is no commit-ACK turnaround signal in the current pipeline. Use bounded
+source queuing/write delay and receiver queue/decode observations, with explicit
+feedback freshness, before attributing pressure to the link. Stable high RTT
+alone is not congestion. Sustained unintentional deadline misses/drops, queue
+growth, and loss provide additional evidence. Record attribution as unknown
+when it is not identifiable.
 
 Iroh 1.1.0 provides `Connection::stats()`, selected-path events, and
 `Connection::paths()` / `Path::stats()` with RTT, congestion window, lost bytes
@@ -415,7 +412,7 @@ First use deterministic fake clocks, transports and codecs. Cover:
 
 - sustained bandwidth fall, stable constrained operation, recovery probing and
   rollback; packet loss without lateness; stable high RTT without congestion;
-- decoder/encoder overload separately from write/credit delay; stale, duplicate,
+- decoder/encoder overload separately from write/receiver-queue delay; stale, duplicate,
   malformed, wrong-session and wrong-generation feedback;
 - idle/static demand, intentional skips versus deadline misses, and the last
   pending frame waking without another client update;
@@ -444,10 +441,10 @@ memory and generations. The existing VCN hang remains an independent open issue.
 ## Deferred work and implementation boundary
 
 No resolution adaptation, atlas/composed-stream redesign, alpha/stereo/foveation,
-deadline datagrams, multi-frame credit pipeline, hardware calibration, global
+deadline datagrams, hardware calibration, global
 cross-process GPU allocator, data-quota billing, or phone UI in this pass.
-The reliable-stream and stop-and-wait limitations stay visible rather than being
-hidden by ever-larger queues or bitrate changes.
+The reliable-stream head-of-line limitation stays visible rather than being
+hidden by ever-larger queues or bitrate changes. Commit stop-and-wait is removed.
 
 Expected changes stay in `weld-hoist-encoded`, `weld-hoist-protocol`, binding
 observation adapters, and `weld-media-vaapi` for rate actuation, with small

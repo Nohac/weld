@@ -138,15 +138,19 @@ pub fn encoded_destination_registration_with_backend(
     destination_source: ClientSourceId,
     dmabuf: DmabufContext,
     backend: Box<dyn crate::LocalDecodeBackend>,
-) -> ClientAdapterRegistration {
+) -> anyhow::Result<ClientAdapterRegistration> {
     let descriptor = ClientSourceDescriptor::new(destination_source, ClientProvenance::Relocated);
-    let transport = LocalEncodedDestinationTransport::new(control, media);
+    let transport = LocalEncodedDestinationTransport::new(control, media)?;
     let adapter = DestinationRelayAdapter::new(
         upstream_source,
         descriptor,
         EncodedDestinationPort::new(transport, backend, descriptor, dmabuf),
     );
-    ClientAdapterRegistration::new(descriptor, adapter, DirectClientBufferImporter)
+    Ok(ClientAdapterRegistration::new(
+        descriptor,
+        adapter,
+        DirectClientBufferImporter,
+    ))
 }
 
 #[cfg(feature = "encoded-vaapi")]
@@ -241,7 +245,7 @@ pub fn encoded_destination_registration(
         destination_source,
         dmabuf,
         backend,
-    );
+    )?;
     Ok((
         registration,
         vec![

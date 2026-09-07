@@ -1,10 +1,7 @@
 //! Bounded source-port diagnostics, independent of the logging filter.
 //!
-//! These are event counts, not partitions of issued frames or credits: a locally
-//! cancelled credit can later produce a stale reply. Normal coalescing and
-//! lifecycle cancellation are not congestion drops. Batch wall time includes
-//! sequential layer work and host polling; credit turnaround also includes local
-//! send queues and remote processing. Neither measures GPU-only time or RTT.
+//! Coalescing and lifecycle cancellation are not congestion drops. Batch wall
+//! time includes sequential layer work and host polling, not just GPU time.
 
 use std::{
     mem,
@@ -24,9 +21,7 @@ pub(super) enum SourceObservation {
     },
     BatchCancelled,
     CodecFailed,
-    CreditApplied(Duration),
-    CreditCancelled,
-    StaleCreditOutcome,
+    SurfaceCancelled,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -58,25 +53,26 @@ pub(super) struct SourceCounters {
     pub encoded_payload_bytes: u64,
     pub batches_cancelled: u64,
     pub codec_failures: u64,
-    pub credits_cancelled: u64,
-    pub stale_credit_outcomes: u64,
+    pub surfaces_cancelled: u64,
     pub batch_wall: TimingSummary,
-    pub applied_credit_turnaround: TimingSummary,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
 pub(super) struct SourceGauges {
     pub pending_events: usize,
-    pub awaiting_credit: usize,
+    pub retained_output_records: usize,
+    pub transport_blocked: bool,
     pub active_streams: usize,
     pub encode_in_flight: bool,
-    pub oldest_credit_age: Duration,
     pub active_batch_age: Duration,
 }
 
 impl SourceGauges {
     fn has_work(self) -> bool {
-        self.pending_events != 0 || self.awaiting_credit != 0 || self.encode_in_flight
+        self.pending_events != 0
+            || self.retained_output_records != 0
+            || self.transport_blocked
+            || self.encode_in_flight
     }
 }
 
@@ -106,19 +102,15 @@ impl SourceReport {
             encoded_payload_bytes = counters.encoded_payload_bytes,
             batches_cancelled = counters.batches_cancelled,
             codec_failures = counters.codec_failures,
-            credits_applied = counters.applied_credit_turnaround.samples,
-            credits_cancelled = counters.credits_cancelled,
-            stale_credit_outcomes = counters.stale_credit_outcomes,
+            surfaces_cancelled = counters.surfaces_cancelled,
             batch_wall_samples = counters.batch_wall.samples,
             batch_wall_total_us = counters.batch_wall.total.as_micros(),
             batch_wall_max_us = counters.batch_wall.maximum.as_micros(),
-            credit_turnaround_total_us = counters.applied_credit_turnaround.total.as_micros(),
-            credit_turnaround_max_us = counters.applied_credit_turnaround.maximum.as_micros(),
             pending_events = gauges.pending_events,
-            awaiting_credit = gauges.awaiting_credit,
+            retained_output_records = gauges.retained_output_records,
+            transport_blocked = gauges.transport_blocked,
             active_streams = gauges.active_streams,
             encode_in_flight = gauges.encode_in_flight,
-            oldest_credit_age_us = gauges.oldest_credit_age.as_micros(),
             active_batch_age_us = gauges.active_batch_age.as_micros(),
             "encoded source observations"
         );
@@ -167,14 +159,8 @@ impl SourceObservations {
             SourceObservation::CodecFailed => {
                 counters.codec_failures = counters.codec_failures.saturating_add(1);
             }
-            SourceObservation::CreditApplied(turnaround) => {
-                counters.applied_credit_turnaround.record(turnaround);
-            }
-            SourceObservation::CreditCancelled => {
-                counters.credits_cancelled = counters.credits_cancelled.saturating_add(1);
-            }
-            SourceObservation::StaleCreditOutcome => {
-                counters.stale_credit_outcomes = counters.stale_credit_outcomes.saturating_add(1);
+            SourceObservation::SurfaceCancelled => {
+                counters.surfaces_cancelled = counters.surfaces_cancelled.saturating_add(1);
             }
         }
     }
@@ -240,7 +226,7 @@ mod tests {
     }
 
     #[test]
-    fn idle_streams_are_quiet_but_credit_and_pending_work_are_not() {
+    fn idle_streams_are_quiet_but_blocked_and_pending_work_are_not() {
         let start = Instant::now();
         let mut observations = SourceObservations::new(start);
         let idle = SourceGauges {
@@ -253,14 +239,14 @@ mod tests {
                 .is_none()
         );
         let stalled = SourceGauges {
-            awaiting_credit: 1,
-            oldest_credit_age: Duration::from_secs(2),
+            retained_output_records: 1,
+            transport_blocked: true,
             ..idle
         };
         let report = observations
             .take_report(start + REPORT_INTERVAL * 2, stalled, false)
             .expect("stalled report");
-        assert_eq!(report.gauges.oldest_credit_age, Duration::from_secs(2));
+        assert!(report.gauges.transport_blocked);
         assert_eq!(report.counters, SourceCounters::default());
         let pending = SourceGauges {
             pending_events: 1,
@@ -274,22 +260,12 @@ mod tests {
     }
 
     #[test]
-    fn cancellation_and_stale_events_do_not_become_turnaround_samples() {
+    fn cancellation_is_separate_from_coalescing() {
         let mut observations = SourceObservations::new(Instant::now());
-        observations.record(SourceObservation::CreditApplied(Duration::from_millis(40)));
-        observations.record(SourceObservation::CreditCancelled);
-        observations.record(SourceObservation::StaleCreditOutcome);
+        observations.record(SourceObservation::SurfaceCancelled);
         observations.record(SourceObservation::CommitCoalesced);
-        let counters = observations.counters;
-        assert_eq!(counters.applied_credit_turnaround.samples, 1);
-        assert_eq!(
-            counters.applied_credit_turnaround.total,
-            Duration::from_millis(40)
-        );
-        // One withdrawn credit can cause both events; they are not disjoint outcomes.
-        assert_eq!(counters.credits_cancelled, 1);
-        assert_eq!(counters.stale_credit_outcomes, 1);
-        assert_eq!(counters.commits_coalesced, 1);
+        assert_eq!(observations.counters.surfaces_cancelled, 1);
+        assert_eq!(observations.counters.commits_coalesced, 1);
     }
 
     #[test]

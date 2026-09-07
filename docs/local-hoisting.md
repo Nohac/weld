@@ -68,13 +68,13 @@ codec path:
 - Resize commits coalesce while the destination reports an active resize. The
   last decoded frame scales with the Weld window, and the newest settled
   client commit starts the replacement codec generation.
-- The destination returns one credit after an atomic encoded commit enters its
-  `ClientEventQueue`. Each surface may have one unacknowledged commit; newer
-  commits coalesce at the source while raw input continues immediately. This
-  bounds decode backlog and favors current pixels over catch-up latency, but a
-  one-credit window can reduce frame rate when a complete encode/decode round
-  trip exceeds the frame interval. Credit does not acknowledge final renderer
-  presentation or extend decoded-buffer lifetime.
+- Encoded commits require no application acknowledgement. Local send capacity
+  admits new encode batches; pressure coalesces superseded unencoded commits.
+  Completed media retains codec order, while control has its own FIFO.
+  Independently bounded receiver admission pauses reads until decoding frees
+  room. Decoder generation retirement follows remaining references rather than
+  arrival of later resize metadata. These bounds are not latency guarantees;
+  see [ACK-free streaming](ack-free-streaming-plan.md).
 - Destination control packets flush immediately through the nonblocking Unix
   socket when it is writable. `EAGAIN` leaves them in a bounded 256-packet
   userspace queue for calloop; reaching that bound remains a fatal stalled-peer
@@ -106,7 +106,7 @@ retaining 192x64 as its authoritative visible geometry.
 The source compositor still completes Wayland frame callbacks according to its
 own mapped-surface presentation cadence. A transported surface should
 eventually inherit demand and cadence from its destination instead; source
-credit currently prevents that mismatch from becoming unbounded media work but
+local backpressure prevents that mismatch from becoming unbounded media work but
 does not yet stop the hidden source client from rendering coalesced frames.
 
 An August 31, 2026 Blender input-stress trace on the Radeon 880M validated the
@@ -329,8 +329,8 @@ scripts/run-local-hoist --codec h264 --dump-encoded blender
 ```
 
 `--trace-media` keeps ordinary dependencies at `info` while enabling structured
-source-batch, destination-decode, coalescing, and credit timing for the encoded
-boundary. For example, 60 surface-tree commits
+source-batch, destination-decode, coalescing, and local queue timing for the
+encoded boundary. For example, 60 surface-tree commits
 per second with two changed
 layers requests 120 sequential codec frames per second in the current tracer;
 the trace records both the commit and layer counts so that multiplication is
@@ -358,7 +358,7 @@ sequence 300, every thirtieth encoded frame writes a
 `stream-N-generation-N-sequence-N-source.ppm` file. FFmpeg owns the normalized
 NV12 hardware frame, so Weld no longer duplicates that stage solely for a
 diagnostic image. Stage capture performs synchronous VPP work and file writes
-in the encoder worker, so timing and credit traces from dump runs must not be
+in the encoder worker, so timing traces from dump runs must not be
 used as ordinary performance measurements.
 
 The eventual one-frame-per-surface-tree path must not use a repacked atlas on

@@ -21,7 +21,7 @@ pub(super) struct InputOutbox {
 struct State {
     closed: bool,
     records: VecDeque<DestinationEnvelope>,
-    received: [u64; 6],
+    received: [u64; 5],
     coalesced: u64,
 }
 
@@ -35,10 +35,9 @@ impl InputOutbox {
         let kind = match packet.message {
             DestinationMessage::Input(_) => 0,
             DestinationMessage::Request(_) => 1,
-            DestinationMessage::EncodedCommitFinished { .. } => 2,
-            DestinationMessage::CursorReceived { .. } => 3,
-            DestinationMessage::BufferReleased { .. } => 4,
-            DestinationMessage::Reclaim => 5,
+            DestinationMessage::CursorReceived { .. } => 2,
+            DestinationMessage::BufferReleased { .. } => 3,
+            DestinationMessage::Reclaim => 4,
         };
         state.received[kind] = state.received[kind].saturating_add(1);
         if let Some(previous) = state.records.back_mut()
@@ -52,7 +51,7 @@ impl InputOutbox {
         // for sustained discrete/control overload rather than lose a release.
         ensure!(
             state.records.len() < QUEUE_CAPACITY,
-            "Iroh destination control backlog exhausted: {} queued; received [input, request, frame-ack, cursor-ack, buffer-release, reclaim]={:?}; coalesced_motions={}",
+            "Iroh destination control backlog exhausted: {} queued; received [input, request, cursor-ack, buffer-release, reclaim]={:?}; coalesced_motions={}",
             state.records.len(),
             state.received,
             state.coalesced

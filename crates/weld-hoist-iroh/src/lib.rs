@@ -36,7 +36,7 @@ mod tests {
 
     use weld_client::{ClientId, ClientSourceId, ClientSurfaceId};
     use weld_hoist_encoded::{
-        EncodedDestinationTransport, EncodedSourceTransport, SourceTransportPacket,
+        EncodedDestinationTransport, EncodedSourceTransport, ReceiveBudget, SourceTransportPacket,
     };
     use weld_hoist_protocol::{
         DestinationEnvelope, DestinationMessage, HoistSessionId, MediaEnvelope, SourceEnvelope,
@@ -48,6 +48,17 @@ mod tests {
     };
 
     use super::*;
+
+    fn send_source(
+        source: &impl EncodedSourceTransport,
+        packet: SourceTransportPacket,
+    ) -> weld_hoist_core::HoistPortResult<()> {
+        assert!(matches!(
+            source.try_send(packet)?,
+            weld_hoist_encoded::SendStatus::Sent
+        ));
+        Ok(())
+    }
 
     #[test]
     fn direct_hosts_exchange_independent_control_and_media() {
@@ -92,13 +103,20 @@ mod tests {
 
         let session = HoistSessionId::new(1);
         let surface = ClientSurfaceId::new(ClientId::new(ClientSourceId::new(0), 2), 3);
-        source
-            .send(SourceTransportPacket::Control(SourceEnvelope {
+        send_source(
+            &source,
+            SourceTransportPacket::Control(SourceEnvelope {
                 session,
                 message: SourceMessage::Mapped { surface },
-            }))
-            .expect("source control");
-        let received = wait_for(|| destination.drain().ok().filter(|items| !items.is_empty()));
+            }),
+        )
+        .expect("source control");
+        let received = wait_for(|| {
+            destination
+                .drain(ReceiveBudget::ALL)
+                .ok()
+                .filter(|items| !items.is_empty())
+        });
         assert!(matches!(
             &received[0],
             SourceTransportPacket::Control(SourceEnvelope {
@@ -119,8 +137,9 @@ mod tests {
         let cursor = weld_client::ClientCursor::Image(
             weld_client::ClientCursorImage::new(2, 1, (1, 0), vec![255; 8]).expect("cursor"),
         );
-        source
-            .send(SourceTransportPacket::Control(SourceEnvelope {
+        send_source(
+            &source,
+            SourceTransportPacket::Control(SourceEnvelope {
                 session,
                 message: SourceMessage::Cursor {
                     update: weld_client::ClientCursorUpdate {
@@ -129,9 +148,15 @@ mod tests {
                     },
                     sequence: 1,
                 },
-            }))
-            .expect("cursor control");
-        let received = wait_for(|| destination.drain().ok().filter(|items| !items.is_empty()));
+            }),
+        )
+        .expect("cursor control");
+        let received = wait_for(|| {
+            destination
+                .drain(ReceiveBudget::ALL)
+                .ok()
+                .filter(|items| !items.is_empty())
+        });
         assert!(
             matches!(&received[0], SourceTransportPacket::Control(SourceEnvelope {
             message: SourceMessage::Cursor { update, sequence: 1 }, .. }) if update.cursor == cursor)
@@ -158,13 +183,20 @@ mod tests {
             timestamp_micros: 7,
             payload: vec![8, 9, 10],
         };
-        source
-            .send(SourceTransportPacket::Media(MediaEnvelope {
+        send_source(
+            &source,
+            SourceTransportPacket::Media(MediaEnvelope {
                 session,
                 access_unit: access_unit.clone(),
-            }))
-            .expect("source media");
-        let received = wait_for(|| destination.drain().ok().filter(|items| !items.is_empty()));
+            }),
+        )
+        .expect("source media");
+        let received = wait_for(|| {
+            destination
+                .drain(ReceiveBudget::ALL)
+                .ok()
+                .filter(|items| !items.is_empty())
+        });
         assert!(matches!(
             &received[0],
             SourceTransportPacket::Media(MediaEnvelope {
@@ -173,6 +205,29 @@ mod tests {
             }) if *observed_session == session && *observed == access_unit
         ));
 
+        // No reverse message is sent for any of these media records. Admission
+        // is local, and the receiver's two-record inbox is drained in FIFO order.
+        for sequence in 7..27 {
+            let mut unit = access_unit.clone();
+            unit.frame.sequence = sequence;
+            send_source(
+                &source,
+                SourceTransportPacket::Media(MediaEnvelope {
+                    session,
+                    access_unit: unit,
+                }),
+            )
+            .expect("next frame without ACK");
+            let received = wait_for(|| {
+                destination
+                    .drain(ReceiveBudget::ALL)
+                    .ok()
+                    .filter(|items| !items.is_empty())
+            });
+            assert!(
+                matches!(&received[0], SourceTransportPacket::Media(packet) if packet.access_unit.frame.sequence == sequence)
+            );
+        }
         source.disconnect();
         wait_for(|| (!destination.is_available()).then_some(()));
         let _ = std::fs::remove_file(ticket);

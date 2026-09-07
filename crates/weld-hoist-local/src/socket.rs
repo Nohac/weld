@@ -11,7 +11,7 @@ use std::{
 use calloop::{Interest, Mode, generic::Generic};
 use rustix::{
     buffer::spare_capacity,
-    event::epoll,
+    event::{EventfdFlags, epoll, eventfd},
     io::{Errno, ioctl_fionbio},
     net::{
         AddressFamily, RecvAncillaryBuffer, RecvAncillaryMessage, RecvFlags, ReturnFlags,
@@ -25,7 +25,10 @@ const MAX_PACKET_BYTES: usize = 192 * 1024;
 const MAX_PACKET_FDS: usize = 16;
 const MAX_QUEUED_PACKETS: usize = 256;
 const MAX_QUEUED_FILE_DESCRIPTORS: usize = 128;
+const MAX_QUEUED_BYTES: usize = 64 * 1024 * 1024;
+const RECEIVE_FD_HEADROOM: usize = MAX_QUEUED_FILE_DESCRIPTORS.saturating_sub(MAX_PACKET_FDS);
 const SOCKET_EVENT: epoll::EventData = epoll::EventData::new_u64(1);
+const BUFFERED_EVENT: epoll::EventData = epoll::EventData::new_u64(2);
 
 #[derive(Debug)]
 pub enum TransportError {
@@ -130,6 +133,8 @@ impl From<postcard::Error> for TransportError {
 struct LocalPacket {
     bytes: Vec<u8>,
     file_descriptors: Vec<OwnedFd>,
+    // Send-queue accounting only; receive queues are bounded by records and FDs.
+    charge_bytes: usize,
 }
 
 impl LocalPacket {
@@ -140,6 +145,7 @@ impl LocalPacket {
         let bytes = postcard::to_allocvec(message)?;
         validate_packet(&bytes, &file_descriptors)?;
         Ok(Self {
+            charge_bytes: bytes.len(),
             bytes,
             file_descriptors,
         })
@@ -242,6 +248,7 @@ pub struct LocalPacketConnection(Arc<LocalPacketConnectionInner>);
 struct LocalPacketConnectionInner {
     socket: OwnedFd,
     epoll: OwnedFd,
+    buffered: OwnedFd,
     local_role: LocalPeerRole,
     state: Mutex<ConnectionState>,
 }
@@ -250,7 +257,10 @@ struct LocalPacketConnectionInner {
 struct ConnectionState {
     outgoing: VecDeque<LocalPacket>,
     queued_file_descriptors: usize,
+    queued_bytes: usize,
     received: VecDeque<LocalPacket>,
+    received_file_descriptors: usize,
+    receive_limit: usize,
     disconnected: bool,
     registered: bool,
     failure: Option<TransportError>,
@@ -323,14 +333,18 @@ impl LocalPacketConnection {
         }
         ioctl_fionbio(&socket, true)?;
         let epoll = epoll::create(epoll::CreateFlags::CLOEXEC)?;
+        let buffered = eventfd(0, EventfdFlags::CLOEXEC | EventfdFlags::NONBLOCK)?;
         epoll::add(&epoll, &socket, SOCKET_EVENT, receive_event_flags())?;
+        epoll::add(&epoll, &buffered, BUFFERED_EVENT, epoll::EventFlags::IN)?;
         Ok(Self(Arc::new(LocalPacketConnectionInner {
             socket,
             epoll,
+            buffered,
             local_role,
             state: Mutex::new(ConnectionState {
                 receive_scratch: vec![0_u8; MAX_PACKET_BYTES],
                 registered: true,
+                receive_limit: MAX_QUEUED_PACKETS,
                 ..ConnectionState::default()
             }),
         })))
@@ -346,13 +360,42 @@ impl LocalPacketConnection {
         message: &impl Serialize,
         file_descriptors: Vec<OwnedFd>,
     ) -> Result<(), TransportError> {
-        let packet = LocalPacket::encode(
+        let result = self.try_queue(message, file_descriptors, 0);
+        if let Err(error @ TransportError::SendQueueFull { .. }) = &result {
+            self.record_outgoing_failure(error);
+        }
+        result
+    }
+
+    pub(crate) fn send_backlog(&self) -> (usize, usize) {
+        let state = self.state();
+        (state.outgoing.len(), state.queued_bytes)
+    }
+
+    pub(crate) fn can_queue(&self, descriptors: usize, bytes: usize) -> bool {
+        let state = self.state();
+        state.outgoing.len() < MAX_QUEUED_PACKETS
+            && state.queued_file_descriptors.saturating_add(descriptors)
+                <= MAX_QUEUED_FILE_DESCRIPTORS
+            && state.queued_bytes.saturating_add(bytes) <= MAX_QUEUED_BYTES
+    }
+
+    /// Full is retryable here. Native `queue` deliberately retains its original
+    /// terminal-overflow contract; encoded ports retain their unsent packet.
+    pub(crate) fn try_queue(
+        &self,
+        message: &impl Serialize,
+        file_descriptors: Vec<OwnedFd>,
+        payload_bytes: usize,
+    ) -> Result<(), TransportError> {
+        let mut packet = LocalPacket::encode(
             &AuthenticatedPacket {
                 role: self.0.local_role,
                 message,
             },
             file_descriptors,
         )?;
+        packet.charge_bytes = packet.charge_bytes.saturating_add(payload_bytes);
         let preflush = match self.send_ready() {
             Ok(status) => status,
             Err(error) => {
@@ -375,15 +418,9 @@ impl LocalPacketConnection {
             })?;
         if state.outgoing.len() >= MAX_QUEUED_PACKETS
             || queued_file_descriptors > MAX_QUEUED_FILE_DESCRIPTORS
+            || state.queued_bytes.saturating_add(packet.charge_bytes) > MAX_QUEUED_BYTES
         {
             let packets = state.outgoing.len();
-            drop(state);
-            self.record_failure(TransportError::SendQueueFull {
-                packets,
-                file_descriptors: queued_file_descriptors,
-                preflush_sent: preflush.sent_packets,
-                preflush_blocked: preflush.blocked,
-            });
             return Err(TransportError::SendQueueFull {
                 packets,
                 file_descriptors: queued_file_descriptors,
@@ -392,6 +429,7 @@ impl LocalPacketConnection {
             });
         }
         state.queued_file_descriptors = queued_file_descriptors;
+        state.queued_bytes += packet.charge_bytes;
         state.outgoing.push_back(packet);
         drop(state);
         if let Err(error) = self.send_ready() {
@@ -416,6 +454,13 @@ impl LocalPacketConnection {
         for event in events.drain(..) {
             let data = event.data;
             let flags = event.flags;
+            if data == BUFFERED_EVENT {
+                match rustix::io::read(&self.0.buffered, &mut [0_u8; 8]) {
+                    Ok(_) | Err(Errno::AGAIN) => {}
+                    Err(error) => return Err(error.into()),
+                }
+                continue;
+            }
             if data != SOCKET_EVENT {
                 continue;
             }
@@ -442,6 +487,34 @@ impl LocalPacketConnection {
     pub fn drain<T: DeserializeOwned>(
         &self,
     ) -> Result<Vec<ReceivedLocalPacket<T>>, TransportError> {
+        self.drain_limited(usize::MAX)
+    }
+
+    pub(crate) fn set_receive_limit(&self, records: usize) -> Result<(), TransportError> {
+        if records == 0 || records > MAX_QUEUED_PACKETS {
+            return Err(TransportError::Protocol(
+                "invalid local receive limit".into(),
+            ));
+        }
+        self.state().receive_limit = records;
+        self.update_interest()
+    }
+
+    /// Used after codec advancement, only when it has room for another record.
+    pub(crate) fn wake_buffered(&self) -> Result<(), TransportError> {
+        if !self.state().received.is_empty() {
+            match rustix::io::write(&self.0.buffered, &1_u64.to_ne_bytes()) {
+                Ok(_) | Err(Errno::AGAIN) => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn drain_limited<T: DeserializeOwned>(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<ReceivedLocalPacket<T>>, TransportError> {
         let pump_result = self.pump();
         let mut state = self.state();
         if state.received.is_empty() {
@@ -450,13 +523,25 @@ impl LocalPacketConnection {
             }
             pump_result?;
         }
-        state
-            .received
-            .drain(..)
+        let count = limit.min(state.received.len());
+        let packets = state.received.drain(..count).collect::<Vec<_>>();
+        state.received_file_descriptors = state.received_file_descriptors.saturating_sub(
+            packets
+                .iter()
+                .map(|packet| packet.file_descriptors.len())
+                .sum::<usize>(),
+        );
+        drop(state);
+        if count != 0 {
+            self.update_interest()?;
+        }
+        packets
+            .into_iter()
             .map(|packet| {
                 let LocalPacket {
                     bytes,
                     file_descriptors,
+                    ..
                 } = packet;
                 let packet = postcard::from_bytes::<AuthenticatedPacket<T>>(&bytes)?;
                 let expected = self.0.local_role.peer();
@@ -544,9 +629,10 @@ impl LocalPacketConnection {
                 SendFlags::NOSIGNAL,
             ) {
                 Ok(sent) if sent == packet.bytes.len() => {
-                    state.queued_file_descriptors = state
-                        .queued_file_descriptors
-                        .saturating_sub(packet.file_descriptors.len());
+                    let descriptors = packet.file_descriptors.len();
+                    state.queued_bytes = state.queued_bytes.saturating_sub(packet.charge_bytes);
+                    state.queued_file_descriptors =
+                        state.queued_file_descriptors.saturating_sub(descriptors);
                     state.outgoing.pop_front();
                     status.sent_packets = status.sent_packets.saturating_add(1);
                 }
@@ -568,7 +654,9 @@ impl LocalPacketConnection {
 
     fn receive_ready(&self) -> Result<(), TransportError> {
         let mut state = self.state();
-        loop {
+        while state.received.len() < state.receive_limit
+            && state.received_file_descriptors <= RECEIVE_FD_HEADROOM
+        {
             let mut bytes = std::mem::take(&mut state.receive_scratch);
             let mut control_space =
                 [MaybeUninit::uninit(); rustix::cmsg_space!(ScmRights(MAX_PACKET_FDS))];
@@ -614,7 +702,9 @@ impl LocalPacketConnection {
                 }
             }
             validate_packet(&packet_bytes, &file_descriptors)?;
+            state.received_file_descriptors += file_descriptors.len();
             state.received.push_back(LocalPacket {
+                charge_bytes: packet_bytes.len(),
                 bytes: packet_bytes,
                 file_descriptors,
             });
@@ -623,11 +713,17 @@ impl LocalPacketConnection {
     }
 
     fn update_interest(&self) -> Result<(), TransportError> {
-        if !self.state().registered {
+        let state = self.state();
+        if !state.registered {
             return Ok(());
         }
         let mut flags = receive_event_flags();
-        if !self.state().outgoing.is_empty() {
+        if state.received.len() >= state.receive_limit
+            || state.received_file_descriptors > RECEIVE_FD_HEADROOM
+        {
+            flags.remove(epoll::EventFlags::IN);
+        }
+        if !state.outgoing.is_empty() {
             flags |= epoll::EventFlags::OUT;
         }
         epoll::modify(&self.0.epoll, &self.0.socket, SOCKET_EVENT, flags)?;
@@ -643,6 +739,7 @@ impl LocalPacketConnection {
         state.registered = false;
         state.outgoing.clear();
         state.queued_file_descriptors = 0;
+        state.queued_bytes = 0;
         Ok(())
     }
 
@@ -652,6 +749,7 @@ impl LocalPacketConnection {
         state.disconnected = true;
         state.outgoing.clear();
         state.queued_file_descriptors = 0;
+        state.queued_bytes = 0;
         let registered = state.registered;
         state.registered = false;
         drop(state);
@@ -663,6 +761,17 @@ impl LocalPacketConnection {
 
     fn record_outgoing_failure(&self, error: &TransportError) {
         let recorded = match error {
+            TransportError::SendQueueFull {
+                packets,
+                file_descriptors,
+                preflush_sent,
+                preflush_blocked,
+            } => TransportError::SendQueueFull {
+                packets: *packets,
+                file_descriptors: *file_descriptors,
+                preflush_sent: *preflush_sent,
+                preflush_blocked: *preflush_blocked,
+            },
             TransportError::Io(error) => {
                 let error = error.raw_os_error().map_or_else(
                     || std::io::Error::new(error.kind(), error.to_string()),
@@ -875,6 +984,74 @@ mod tests {
             } if file_descriptors == MAX_QUEUED_FILE_DESCRIPTORS + 1
         ));
         assert!(sender.is_disconnected());
+    }
+
+    #[test]
+    fn encoded_busy_is_nonfatal_and_byte_charges_leave_with_sent_records() {
+        let (sender, receiver) = LocalPacketConnection::pair().expect("pair");
+        constrain_socket_buffers(&sender, &receiver);
+        let mut admitted = 0_u64;
+        loop {
+            match sender.try_queue(&admitted, Vec::new(), MAX_QUEUED_BYTES / 2 - 1024) {
+                Ok(()) => admitted += 1,
+                Err(TransportError::SendQueueFull { .. }) => break,
+                Err(error) => panic!("unexpected send error: {error}"),
+            }
+            assert!(admitted < 100);
+        }
+        assert!(!sender.is_disconnected());
+        assert!(sender.send_backlog().1 <= MAX_QUEUED_BYTES);
+        let mut received = Vec::new();
+        for _ in 0..100 {
+            received.extend(
+                receiver
+                    .drain::<u64>()
+                    .expect("receive")
+                    .into_iter()
+                    .map(|packet| packet.message),
+            );
+            sender.pump().expect("writable");
+            if received.len() == admitted as usize {
+                break;
+            }
+        }
+        assert_eq!(received, (0..admitted).collect::<Vec<_>>());
+        assert_eq!(sender.send_backlog(), (0, 0));
+        sender
+            .try_queue(&admitted, Vec::new(), 0)
+            .expect("resumed without reconnect");
+    }
+
+    #[test]
+    fn partial_receive_drain_rearms_buffered_records_without_new_socket_input() {
+        let (sender, receiver) = LocalPacketConnection::pair().expect("pair");
+        receiver.set_receive_limit(2).expect("two records");
+        for value in 0..4_u64 {
+            sender.queue(&value, Vec::new()).expect("send");
+        }
+        receiver.pump().expect("fill inbox");
+        assert_eq!(receiver.state().received.len(), 2);
+        assert!(
+            receiver
+                .drain_limited::<u64>(0)
+                .expect("no capacity")
+                .is_empty()
+        );
+        let first = receiver.drain_limited::<u64>(1).expect("one record");
+        assert_eq!(first[0].message, 0);
+        receiver.wake_buffered().expect("rearm buffered record");
+        let mut received = Vec::new();
+        for _ in 0..3 {
+            received.extend(
+                receiver
+                    .drain_limited::<u64>(1)
+                    .expect("next")
+                    .into_iter()
+                    .map(|packet| packet.message),
+            );
+        }
+        assert_eq!(received, vec![1, 2, 3]);
+        assert!(receiver.state().received.is_empty());
     }
 
     fn constrain_socket_buffers(sender: &LocalPacketConnection, receiver: &LocalPacketConnection) {
