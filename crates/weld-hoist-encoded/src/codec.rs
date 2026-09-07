@@ -3,7 +3,7 @@
 use crate::EncoderBitrateLimits;
 use anyhow::Result;
 use weld_core::dmabuf::ExternalDmabuf;
-use weld_media::{EncodedAccessUnit, MediaFrameId, MediaStreamId, StreamGeneration};
+use weld_media::{DecodeTiming, EncodedAccessUnit, MediaFrameId, MediaStreamId, StreamGeneration};
 
 pub enum EncodeInput {
     Dmabuf(ExternalDmabuf),
@@ -43,6 +43,7 @@ pub struct DecodedFrame {
 pub struct DecodeCompletion {
     pub token: u64,
     pub result: Result<Vec<DecodedFrame>>,
+    pub timing: Option<DecodeTiming>,
 }
 
 pub enum SubmitError<T> {
@@ -62,8 +63,16 @@ pub trait EncodeBackend {
 }
 
 pub trait DecodeBackend {
+    /// Nonblocking, bounded admission. Busy returns the exact owned request and
+    /// must arrange a host wake when capacity becomes available. Callers submit
+    /// in stream order; independent streams may complete in any order.
     fn try_submit(&mut self, request: DecodeRequest) -> Result<(), SubmitError<DecodeRequest>>;
-    fn drain(&mut self) -> Vec<DecodeCompletion>;
+    /// Return all completed work alongside any terminal failure. Each successful
+    /// output owns stable storage independent of the codec context, so retiring
+    /// that context cannot invalidate or overwrite a returned image.
+    fn drain(&mut self) -> (Vec<DecodeCompletion>, Option<anyhow::Error>);
+    /// Idempotent retirement; completion releases context capacity and wakes the
+    /// host even if there are no subsequent frames. Never retire an active job.
     fn retire(&mut self, stream: MediaStreamId, generation: StreamGeneration) -> Result<()>;
 }
 
@@ -194,6 +203,7 @@ mod vaapi {
                         .map_err(SubmitError::Rejected)?;
                     Err(SubmitError::Stopped(request))
                 }
+                Err(VaapiWorkerSubmitError::Rejected(error)) => Err(SubmitError::Rejected(error)),
             }
         }
 
@@ -290,14 +300,17 @@ mod vaapi {
                     visible_width: request.visible_width,
                     visible_height: request.visible_height,
                 }),
+                VaapiWorkerSubmitError::Rejected(error) => SubmitError::Rejected(error),
             })
         }
 
-        fn drain(&mut self) -> Vec<DecodeCompletion> {
-            self.worker
-                .drain()
+        fn drain(&mut self) -> (Vec<DecodeCompletion>, Option<anyhow::Error>) {
+            let (completions, failure) = self.worker.drain();
+            let completions = completions
+                .into_iter()
                 .map(|completion| DecodeCompletion {
                     token: completion.token,
+                    timing: completion.timing,
                     result: completion.result.and_then(|frames| {
                         frames
                             .into_iter()
@@ -310,15 +323,12 @@ mod vaapi {
                             .collect()
                     }),
                 })
-                .collect()
+                .collect();
+            (completions, failure)
         }
 
         fn retire(&mut self, stream: MediaStreamId, generation: StreamGeneration) -> Result<()> {
-            ensure!(
-                self.worker.try_retire(stream, generation),
-                "VA-API decoder worker stopped before retirement"
-            );
-            Ok(())
+            self.worker.retire(stream, generation)
         }
     }
 

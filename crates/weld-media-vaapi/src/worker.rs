@@ -16,8 +16,8 @@ use anyhow::{Context, Result, ensure};
 use weld_media::{EncodedAccessUnit, MediaFrameId, MediaStreamId, StreamGeneration};
 
 use crate::{
-    FfmpegDecoder, FfmpegEncodeDevice, FfmpegEncoder, FfmpegVaapiDevice, VaapiDevice, VaapiDmabuf,
-    VaapiEncodeGeometry, VaapiEncoderSettings, VppConverter,
+    FfmpegEncodeDevice, FfmpegEncoder, VaapiDevice, VaapiDmabuf, VaapiEncodeGeometry,
+    VaapiEncoderSettings, VppConverter,
 };
 
 const WORK_QUEUE_CAPACITY: usize = 1;
@@ -61,28 +61,12 @@ pub struct VaapiEncodeCompletion {
     pub result: Result<EncodedAccessUnit>,
 }
 
-pub struct VaapiDecodeRequest {
-    pub token: u64,
-    pub access_unit: EncodedAccessUnit,
-    pub visible_width: u32,
-    pub visible_height: u32,
-    pub xrgb_modifiers: Vec<u64>,
-}
-
-pub struct VaapiDecodedFrame {
-    pub frame: MediaFrameId,
-    pub dmabuf: VaapiDmabuf,
-}
-
-pub struct VaapiDecodeCompletion {
-    pub token: u64,
-    pub result: Result<Vec<VaapiDecodedFrame>>,
-}
-
-/// A bounded worker rejected work without consuming it.
+/// Busy and stopped admission return the owned request; terminal rejection
+/// preserves its failure diagnostic instead.
 pub enum VaapiWorkerSubmitError<T> {
     Busy(Box<T>),
     Stopped(Box<T>),
+    Rejected(anyhow::Error),
 }
 
 impl<T> fmt::Debug for VaapiWorkerSubmitError<T> {
@@ -90,6 +74,10 @@ impl<T> fmt::Debug for VaapiWorkerSubmitError<T> {
         match self {
             Self::Busy(_) => formatter.write_str("VaapiWorkerSubmitError::Busy"),
             Self::Stopped(_) => formatter.write_str("VaapiWorkerSubmitError::Stopped"),
+            Self::Rejected(error) => formatter
+                .debug_tuple("VaapiWorkerSubmitError::Rejected")
+                .field(error)
+                .finish(),
         }
     }
 }
@@ -171,82 +159,6 @@ impl Drop for VaapiEncodeWorker {
             && thread.join().is_err()
         {
             tracing::error!("VA-API encoder worker panicked");
-        }
-    }
-}
-
-pub struct VaapiDecodeWorker {
-    commands: Option<SyncSender<VaapiDecodeRequest>>,
-    retirements: Arc<Mutex<HashSet<GenerationKey>>>,
-    completions: Receiver<VaapiDecodeCompletion>,
-    thread: Option<JoinHandle<()>>,
-}
-
-impl VaapiDecodeWorker {
-    pub fn spawn(render_node: PathBuf, notify: impl Fn() + Send + Sync + 'static) -> Result<Self> {
-        let (command_sender, command_receiver) = mpsc::sync_channel(WORK_QUEUE_CAPACITY);
-        let (completion_sender, completions) = mpsc::channel();
-        let retirements = Arc::new(Mutex::new(HashSet::new()));
-        let worker_retirements = retirements.clone();
-        let notifier: CompletionNotifier = Arc::new(notify);
-        let thread = thread::Builder::new()
-            .name("weld-vaapi-decode".to_owned())
-            .spawn(move || {
-                decode_worker_loop(
-                    render_node,
-                    command_receiver,
-                    completion_sender,
-                    notifier,
-                    worker_retirements,
-                );
-            })
-            .context("could not spawn VA-API decoder worker")?;
-        Ok(Self {
-            commands: Some(command_sender),
-            retirements,
-            completions,
-            thread: Some(thread),
-        })
-    }
-
-    pub fn try_decode(
-        &self,
-        request: VaapiDecodeRequest,
-    ) -> Result<(), VaapiWorkerSubmitError<VaapiDecodeRequest>> {
-        let Some(commands) = &self.commands else {
-            return Err(VaapiWorkerSubmitError::Stopped(Box::new(request)));
-        };
-        match commands.try_send(request) {
-            Ok(()) => Ok(()),
-            Err(TrySendError::Full(request)) => {
-                Err(VaapiWorkerSubmitError::Busy(Box::new(request)))
-            }
-            Err(TrySendError::Disconnected(request)) => {
-                Err(VaapiWorkerSubmitError::Stopped(Box::new(request)))
-            }
-        }
-    }
-
-    pub fn try_retire(&self, stream: MediaStreamId, generation: StreamGeneration) -> bool {
-        self.retirements
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert((stream, generation));
-        self.commands.is_some()
-    }
-
-    pub fn drain(&self) -> impl Iterator<Item = VaapiDecodeCompletion> + '_ {
-        self.completions.try_iter()
-    }
-}
-
-impl Drop for VaapiDecodeWorker {
-    fn drop(&mut self) {
-        self.commands.take();
-        if let Some(thread) = self.thread.take()
-            && thread.join().is_err()
-        {
-            tracing::error!("VA-API decoder worker panicked");
         }
     }
 }
@@ -448,126 +360,6 @@ fn dump_encode_source(
         &directory.join(format!("{stem}-source.ppm")),
     )?;
     Ok(())
-}
-
-struct DecoderSession {
-    decoder: FfmpegDecoder,
-    codec: weld_media::VideoCodec,
-    pending: HashMap<u64, PendingDecodedFrame>,
-}
-
-struct PendingDecodedFrame {
-    frame: MediaFrameId,
-    visible_width: u32,
-    visible_height: u32,
-}
-
-fn decode_worker_loop(
-    render_node: PathBuf,
-    commands: Receiver<VaapiDecodeRequest>,
-    completions: mpsc::Sender<VaapiDecodeCompletion>,
-    notify: CompletionNotifier,
-    retirements: Arc<Mutex<HashSet<GenerationKey>>>,
-) {
-    let runtime = VaapiDevice::open(&render_node).and_then(|device| {
-        Ok((
-            device.vpp_converter()?,
-            FfmpegVaapiDevice::open(&render_node)?,
-        ))
-    });
-    let mut sessions = HashMap::<GenerationKey, DecoderSession>::new();
-    while let Ok(request) = commands.recv() {
-        apply_retirements(&retirements, &mut sessions);
-        let token = request.token;
-        let result = runtime
-            .as_ref()
-            .map_err(|error| anyhow::anyhow!(error.to_string()))
-            .and_then(|(vpp, ffmpeg_device)| {
-                decode_one(vpp, ffmpeg_device, &mut sessions, request)
-            });
-        if completions
-            .send(VaapiDecodeCompletion { token, result })
-            .is_err()
-        {
-            break;
-        }
-        notify();
-    }
-}
-
-fn decode_one(
-    vpp: &VppConverter,
-    ffmpeg_device: &FfmpegVaapiDevice,
-    sessions: &mut HashMap<GenerationKey, DecoderSession>,
-    request: VaapiDecodeRequest,
-) -> Result<Vec<VaapiDecodedFrame>> {
-    let key = (
-        request.access_unit.frame.stream,
-        request.access_unit.frame.generation,
-    );
-    if reserve_generation(sessions, key, "VA-API decoder layer-stream limit reached")? {
-        sessions.insert(
-            key,
-            DecoderSession {
-                decoder: FfmpegDecoder::new(request.access_unit.codec, ffmpeg_device)?,
-                codec: request.access_unit.codec,
-                pending: HashMap::new(),
-            },
-        );
-    }
-    let session = sessions
-        .get_mut(&key)
-        .context("VA-API decoder session disappeared")?;
-    ensure!(
-        session.codec == request.access_unit.codec,
-        "encoded stream generation changed codec without retirement"
-    );
-    ensure!(
-        session
-            .pending
-            .insert(
-                request.access_unit.timestamp_micros,
-                PendingDecodedFrame {
-                    frame: request.access_unit.frame,
-                    visible_width: request.visible_width,
-                    visible_height: request.visible_height,
-                },
-            )
-            .is_none(),
-        "encoded frame timestamp was reused within one generation"
-    );
-    let decoded = match session.decoder.decode_and_convert(
-        &request.access_unit.payload,
-        request.access_unit.timestamp_micros,
-        request.visible_width,
-        request.visible_height,
-        &request.xrgb_modifiers,
-        vpp,
-    ) {
-        Ok(decoded) => decoded,
-        Err(error) => {
-            sessions.remove(&key);
-            return Err(error);
-        }
-    };
-    decoded
-        .into_iter()
-        .map(|decoded| {
-            let pending = session
-                .pending
-                .remove(&decoded.timestamp_micros)
-                .context("decoder returned an unknown frame timestamp")?;
-            ensure!(
-                pending.visible_width == decoded.dmabuf.width
-                    && pending.visible_height == decoded.dmabuf.height,
-                "decoded output extent differs from its transported visible extent"
-            );
-            Ok(VaapiDecodedFrame {
-                frame: pending.frame,
-                dmabuf: decoded.dmabuf,
-            })
-        })
-        .collect()
 }
 
 fn apply_retirements<T>(

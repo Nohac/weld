@@ -31,6 +31,9 @@ and 37.6 ms commit acknowledgement turnaround in its busy segment.
    metadata. Keep inventories current, defer retirement while a generation is
    referenced by queued control, pending media, an active decode or
    decoded-but-unconsumed output, and sweep on every poll including cancellation.
+   The subsequent [decoder pool](receiver-decoder-pool.md) refines this: once
+   decoded into independent XRGB storage, output no longer protects its obsolete
+   codec context; undecoded references and active jobs still do.
 4. Delete commit ACK records, outcomes, credit gates and credit-specific
    observations; bump the exact protocol revision to 4. Update tests and current
    architecture/budget documentation together. Preserve native and cursor flows.
@@ -114,9 +117,9 @@ of hardware decoder throughput:
   prove Blender alone commits above 60 Hz. Codec configuration's 60 fps is not
   a submission timer.
 
-Investigate receiver work distribution first: there is one outstanding decode
-per connection and one worker thread, despite separate per-generation decoder
-contexts. Each result allocates fresh XRGB output and performs synchronous VPP
+At the time of this run there was one outstanding decode per connection and
+one worker thread, despite separate per-generation decoder contexts. Each
+result allocates fresh XRGB output and performs synchronous VPP
 conversion before notifying the host. Bounded pipelining, stream-affine worker
 concurrency, and safe conversion-resource reuse are candidates; preserve codec
 reference order and buffer lifetimes. Neither larger queues nor a per-commit
@@ -124,5 +127,7 @@ network ACK addresses that local serialization.
 
 After measuring that path, local latest-state frame pacing and an aggregate
 work budget may use periodic asynchronous receiver feedback. Such feedback
-would guide admission rather than gate each commit on a reply. No decoder
-pool, new feedback protocol or adaptive pacing is included in this commit.
+would guide admission rather than gate each commit on a reply. The following
+[decoder-pool slice](receiver-decoder-pool.md) implements bounded stream-affine
+concurrency and local timing splits. Conversion-resource reuse, new feedback
+protocols and adaptive pacing remain separate work.

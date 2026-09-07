@@ -123,10 +123,11 @@ automatic adaptive bitrate is implied; see the
 
 Hardware-device ownership is per worker rather than per stream generation. The
 encode worker opens one FFmpeg DRM device and derives one FFmpeg VA-API device;
-the decode worker opens one FFmpeg VA-API device. Generation-specific filters
-and codecs retain references to those devices instead of reopening the render
-node during resize. The cros-libva VPP converter owns one additional VA display
-in each worker. The hardware round-trip probe rotates 16 encoder generations
+each lazily created decode worker opens one FFmpeg VA-API device.
+Generation-specific filters and codecs retain references to those devices
+instead of reopening the render node during resize. The cros-libva VPP converter
+owns one additional VA display in each worker. The hardware round-trip probe
+rotates 16 encoder generations
 and requires the process descriptor count to remain unchanged.
 
 Encoder coded extents come from the selected VA profile and entrypoint's
@@ -599,9 +600,16 @@ Encoded commits have no application ACK or per-surface stop-and-wait gate.
 One encode batch runs at a time. Local media headroom admits the next batch;
 pressure coalesces unencoded commits while ordered control and completed media
 remain independently bounded. Transport write completion wakes static sources.
-The receiver independently budgets control references and compressed bytes,
-and retires decoder generations only after their queued, active and decoded
-references are gone. Withdrawal preserves already-published media to resolve
+The receiver independently budgets control references and compressed bytes.
+Its stream-affine decoder pool grows on actual work, up to four workers and
+four outstanding jobs, with sixteen decoder generations shared across the pool.
+Front commits receive round-robin submission turns; independent layers can
+decode concurrently, but each commit applies atomically. Retirement protects
+inventory, pending media, undecoded references and active jobs. Converted XRGB
+output owns separate storage and does not keep an obsolete codec context alive.
+Reservations remain charged until the worker acknowledges retirement.
+See [receiver decoder pooling](receiver-decoder-pool.md) for lifecycle and limits.
+Withdrawal preserves already-published media to resolve
 late cancelled references. Native buffer release and cursor ACKs are unchanged.
 See [ACK-free streaming](ack-free-streaming-plan.md) for bounds and limitations.
 

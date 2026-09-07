@@ -17,12 +17,25 @@ use crate::observations::{REPORT_INTERVAL, TimingSummary};
 #[derive(Clone, Copy, Debug)]
 pub(super) enum DestinationObservation {
     CommitReceived,
-    MediaReceived { payload_bytes: u64 },
-    DecodeSubmitted { media_wait: Duration },
-    DecodeCompleted { wall_time: Duration },
+    MediaReceived {
+        payload_bytes: u64,
+    },
+    DecodeSubmitted {
+        media_wait: Duration,
+    },
+    DecodeCompleted {
+        wall_time: Duration,
+    },
+    WorkerTiming {
+        queue_wait: Duration,
+        execution: Duration,
+        handoff: Duration,
+    },
     DecodeCancelled,
     CodecFailed,
-    CommitApplied { wall_time: Duration },
+    CommitApplied {
+        wall_time: Duration,
+    },
     CommitCancelled,
     LateCancelledMedia,
 }
@@ -38,6 +51,9 @@ pub(super) struct DestinationCounters {
     pub late_cancelled_media: u64,
     pub media_wait: TimingSummary,
     pub decode_wall: TimingSummary,
+    pub worker_queue: TimingSummary,
+    pub worker_execution: TimingSummary,
+    pub completion_handoff: TimingSummary,
     pub commit_wall: TimingSummary,
 }
 
@@ -49,6 +65,7 @@ pub(super) struct DestinationGauges {
     pub decoded_frames: usize,
     pub active_streams: usize,
     pub decode_in_flight: bool,
+    pub decode_jobs_in_flight: usize,
     pub oldest_control_age: Duration,
     pub oldest_media_age: Duration,
     pub active_decode_age: Duration,
@@ -96,6 +113,13 @@ impl DestinationReport {
             media_wait_max_us = counters.media_wait.maximum.as_micros(),
             decode_wall_total_us = counters.decode_wall.total.as_micros(),
             decode_wall_max_us = counters.decode_wall.maximum.as_micros(),
+            worker_timing_samples = counters.worker_execution.samples,
+            worker_queue_total_us = counters.worker_queue.total.as_micros(),
+            worker_queue_max_us = counters.worker_queue.maximum.as_micros(),
+            worker_execution_total_us = counters.worker_execution.total.as_micros(),
+            worker_execution_max_us = counters.worker_execution.maximum.as_micros(),
+            completion_handoff_total_us = counters.completion_handoff.total.as_micros(),
+            completion_handoff_max_us = counters.completion_handoff.maximum.as_micros(),
             commit_wall_total_us = counters.commit_wall.total.as_micros(),
             commit_wall_max_us = counters.commit_wall.maximum.as_micros(),
             pending_events = gauges.pending_events,
@@ -104,6 +128,7 @@ impl DestinationReport {
             decoded_frames = gauges.decoded_frames,
             active_streams = gauges.active_streams,
             decode_in_flight = gauges.decode_in_flight,
+            decode_jobs_in_flight = gauges.decode_jobs_in_flight,
             oldest_control_age_us = gauges.oldest_control_age.as_micros(),
             oldest_media_age_us = gauges.oldest_media_age.as_micros(),
             active_decode_age_us = gauges.active_decode_age.as_micros(),
@@ -143,6 +168,15 @@ impl DestinationObservations {
             }
             DestinationObservation::DecodeCompleted { wall_time } => {
                 counters.decode_wall.record(wall_time)
+            }
+            DestinationObservation::WorkerTiming {
+                queue_wait,
+                execution,
+                handoff,
+            } => {
+                counters.worker_queue.record(queue_wait);
+                counters.worker_execution.record(execution);
+                counters.completion_handoff.record(handoff);
             }
             DestinationObservation::DecodeCancelled => {
                 counters.decodes_cancelled = counters.decodes_cancelled.saturating_add(1);

@@ -3,6 +3,7 @@
 //! FFmpeg and libva values remain inside this crate. Consumers select a
 //! truthful capability and exchange only [`weld_media`] values.
 
+mod decoder_pool;
 mod device;
 mod dmabuf;
 mod ffmpeg;
@@ -12,6 +13,10 @@ mod probe;
 mod vpp;
 mod worker;
 
+pub use decoder_pool::{
+    DecodePoolLimits, VaapiDecodeCompletion, VaapiDecodeRequest, VaapiDecodeWorker,
+    VaapiDecodedFrame,
+};
 pub use device::VaapiDevice;
 pub use dmabuf::{VaapiDmabuf, VaapiDmabufObject, VaapiDmabufPlane};
 pub use ffmpeg::{
@@ -28,7 +33,6 @@ pub use probe::{
 };
 pub use vpp::{VppConverter, VppOutput};
 pub use worker::{
-    VaapiDecodeCompletion, VaapiDecodeRequest, VaapiDecodeWorker, VaapiDecodedFrame,
     VaapiEncodeCompletion, VaapiEncodeInput, VaapiEncodeRequest, VaapiEncodeWorker,
     VaapiWorkerSubmitError,
 };

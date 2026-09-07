@@ -58,14 +58,20 @@ are deliberately distinct and **overlap**, so do not add them:
   including any wait for control metadata and earlier work;
 - `decode_wall`: accepted submission to matching successful completion drain,
   including worker processing and host polling;
+- `worker_queue`, `worker_execution`, and `completion_handoff`: optional local
+  worker timing splits, respectively accepted worker enqueue to execution start,
+  execution including decode/VPP, and completion to host drain. These split the
+  local path, not GPU-only time or network latency; compare their sample count
+  with successful decodes before interpreting totals;
 - `commit_wall`: control ingress through decoded-buffer import and queuing the
   adapter event. This is not actual presentation or acknowledgement delivery.
 
 Ingress here is not socket receipt: time in the binding's receive queue is not
 included. Gauges report queued control events, pending media frames/bytes,
-decoded frames, logical streams, the active decode, and oldest control/media
-and active-decode ages. Queue scans happen only when a summary is due. Idle
-mapped streams do not emit continuously; pending work can still report a stall.
+decoded frames, logical streams, the active decode job count, and oldest
+control/media and active-decode ages. Queue scans happen only when a summary is
+due. Idle mapped streams do not emit continuously; pending work can still
+report a stall.
 Like source observations, collection is independent from tracing and creates
 no new timer or compositor wake. A failing decode drain emits a partial summary
 before propagating its error, with a best-effort final summary on ordinary Drop.
@@ -323,7 +329,10 @@ Fallback replacement is explicit and serialized:
    context. Preserve decoding order and reject stale-generation re-entry.
 5. Activate the new decoded presentation atomically, keeping the previous
    displayed allocation valid until replacement import/GPU consumption permits
-   release. Do not assume two decoder generations coexist in the current worker.
+   release. Decoder generations can coexist within the receiver pool's shared
+   limit; retirement acknowledgements release those reservations. Converted
+   XRGB output does not itself retain an obsolete decoder context. See
+   [receiver decoder pooling](receiver-decoder-pool.md).
 
 Changes are bounded by meaningful rate steps, dwell/cooldown, and one coalesced
 pending target—not a context recreation on every controller tick or focus move.

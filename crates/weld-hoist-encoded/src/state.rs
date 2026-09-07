@@ -1027,7 +1027,6 @@ struct EncodedDestinationEvent {
 }
 
 struct InFlightDecode {
-    token: u64,
     frame: MediaFrameId,
     cancelled: bool,
     submitted_at: Instant,
@@ -1040,7 +1039,10 @@ struct EncodedDestinationState {
     queues: HashMap<ClientSurfaceId, VecDeque<QueuedDestinationEvent>>,
     media_frames: HashMap<MediaFrameId, PendingMedia>,
     decoded: HashMap<MediaFrameId, weld_core::dmabuf::ExternalDmabuf>,
-    decode_in_flight: Option<InFlightDecode>,
+    decode_in_flight: HashMap<u64, InFlightDecode>,
+    ready_surfaces: VecDeque<ClientSurfaceId>,
+    #[cfg(test)]
+    fake_import: bool,
     cancelled_frames: HashMap<MediaFrameId, HoistSessionId>,
     streams: HashMap<(ClientSurfaceId, SurfaceLayerId), EncodedGeneration>,
     pending_retirement: HashSet<EncodedGeneration>,
@@ -1071,7 +1073,10 @@ impl EncodedDestinationState {
             queues: HashMap::new(),
             media_frames: HashMap::new(),
             decoded: HashMap::new(),
-            decode_in_flight: None,
+            decode_in_flight: HashMap::new(),
+            ready_surfaces: VecDeque::new(),
+            #[cfg(test)]
+            fake_import: false,
             cancelled_frames: HashMap::new(),
             streams: HashMap::new(),
             pending_retirement: HashSet::new(),
@@ -1137,15 +1142,16 @@ impl EncodedDestinationState {
             self.observations
                 .record(DestinationObservation::CommitReceived);
         }
-        self.queues
-            .entry(source_surface)
-            .or_default()
-            .push_back(QueuedDestinationEvent {
-                session,
-                source_surface,
-                event,
-                received_at: Instant::now(),
-            });
+        let queue = self.queues.entry(source_surface).or_default();
+        if queue.is_empty() {
+            self.ready_surfaces.push_back(source_surface);
+        }
+        queue.push_back(QueuedDestinationEvent {
+            session,
+            source_surface,
+            event,
+            received_at: Instant::now(),
+        });
         self.advance(output)
     }
 
@@ -1222,15 +1228,14 @@ impl EncodedDestinationState {
     }
 
     fn drain(&mut self, output: &mut Vec<EncodedDestinationEvent>) -> Result<()> {
-        for completion in self.backend.drain() {
-            let in_flight = self
-                .decode_in_flight
-                .take()
-                .context("decoder completed without an in-flight frame")?;
-            ensure!(
-                completion.token == in_flight.token,
-                "decoder completed an unexpected token"
-            );
+        let (completions, mut failure) = self.backend.drain();
+        for completion in completions {
+            let Some(in_flight) = self.decode_in_flight.remove(&completion.token) else {
+                failure.get_or_insert_with(|| {
+                    anyhow::anyhow!("decoder completed an unexpected token")
+                });
+                continue;
+            };
             if completion.result.is_err() {
                 self.observations
                     .record(DestinationObservation::CodecFailed);
@@ -1246,33 +1251,54 @@ impl EncodedDestinationState {
                     .insert((in_flight.frame.stream, in_flight.frame.generation));
                 continue;
             }
-            let frames = completion.result?;
-            ensure!(
-                frames.len() == 1,
-                "low-delay decoder did not return exactly one frame"
-            );
-            let frame = frames
-                .into_iter()
-                .next()
-                .context("low-delay decoder returned no frame")?;
-            ensure!(
-                frame.frame == in_flight.frame,
-                "low-delay decoder returned another frame"
-            );
-            let wall_time = in_flight.submitted_at.elapsed();
-            self.observations
-                .record(DestinationObservation::DecodeCompleted { wall_time });
-            tracing::trace!(
-                frame = ?frame.frame,
-                decode_micros = wall_time.as_micros(),
-                "completed encoded destination decode"
-            );
-            self.decoded.insert(frame.frame, frame.dmabuf);
+            let result = (|| -> Result<()> {
+                let frames = completion.result?;
+                ensure!(
+                    frames.len() == 1,
+                    "low-delay decoder did not return exactly one frame"
+                );
+                let frame = frames
+                    .into_iter()
+                    .next()
+                    .context("low-delay decoder returned no frame")?;
+                ensure!(
+                    frame.frame == in_flight.frame,
+                    "low-delay decoder returned another frame"
+                );
+                let now = Instant::now();
+                let wall_time = now.saturating_duration_since(in_flight.submitted_at);
+                self.observations
+                    .record(DestinationObservation::DecodeCompleted { wall_time });
+                if let Some(timing) = completion.timing {
+                    self.observations
+                        .record(DestinationObservation::WorkerTiming {
+                            queue_wait: timing
+                                .started_at
+                                .saturating_duration_since(timing.queued_at),
+                            execution: timing
+                                .completed_at
+                                .saturating_duration_since(timing.started_at),
+                            handoff: now.saturating_duration_since(timing.completed_at),
+                        });
+                }
+                tracing::trace!(frame = ?frame.frame, decode_micros = wall_time.as_micros(),
+                    "completed encoded destination decode");
+                self.decoded.insert(frame.frame, frame.dmabuf);
+                Ok(())
+            })();
+            if let Err(error) = result {
+                failure.get_or_insert(error);
+            }
+        }
+        if let Some(error) = failure {
+            return Err(error);
         }
         self.advance(output)
     }
 
     fn cancel_surface(&mut self, surface: ClientSurfaceId) -> Result<()> {
+        self.ready_surfaces
+            .retain(|candidate| *candidate != surface);
         if let Some(queue) = self.queues.remove(&surface) {
             for event in queue {
                 let frames = encoded_frames(&event.event);
@@ -1283,8 +1309,8 @@ impl EncodedDestinationState {
                     let was_decoded = self.decoded.remove(frame).is_some();
                     let in_flight = self
                         .decode_in_flight
-                        .as_mut()
-                        .filter(|submitted| submitted.frame == *frame);
+                        .values_mut()
+                        .find(|submitted| submitted.frame == *frame);
                     if let Some(in_flight) = in_flight {
                         in_flight.cancelled = true;
                     } else if !media_was_pending && !was_decoded {
@@ -1367,20 +1393,23 @@ impl EncodedDestinationState {
             return Ok(());
         }
         let mut referenced = self.streams.values().copied().collect::<HashSet<_>>();
+        // Converted XRGB allocations outlive their decoder context. Only an
+        // undecoded queued reference needs that context kept alive; otherwise
+        // a multilayer resize can pin all old generations until it deadlocks.
         referenced.extend(
             self.queues
                 .values()
                 .flatten()
                 .flat_map(|queued| encoded_frames(&queued.event))
+                .filter(|frame| !self.decoded.contains_key(frame))
                 .map(|frame| (frame.stream, frame.generation)),
         );
         referenced.extend(
             self.media_frames
                 .keys()
-                .chain(self.decoded.keys())
                 .map(|frame| (frame.stream, frame.generation)),
         );
-        if let Some(active) = &self.decode_in_flight {
+        for active in self.decode_in_flight.values() {
             referenced.insert((active.frame.stream, active.frame.generation));
         }
         let ready = self
@@ -1398,8 +1427,9 @@ impl EncodedDestinationState {
     fn advance(&mut self, output: &mut Vec<EncodedDestinationEvent>) -> Result<()> {
         self.sweep_retirement()?;
         loop {
-            let surfaces = self.queues.keys().copied().collect::<Vec<_>>();
+            let surfaces = self.ready_surfaces.iter().copied().collect::<Vec<_>>();
             let mut progressed = false;
+            let mut last_submitted = None;
             for surface in surfaces {
                 let Some(front) = self.queues.get(&surface).and_then(|queue| queue.front()) else {
                     continue;
@@ -1447,14 +1477,33 @@ impl EncodedDestinationState {
                     progressed = true;
                     continue;
                 }
-                if let Some(frame) = frames
-                    .into_iter()
-                    .find(|frame| !self.decoded.contains_key(frame))
-                {
-                    self.schedule_decode(frame, front.session)?;
+                let session = front.session;
+                for frame in frames {
+                    if self.decoded.contains_key(&frame)
+                        || self.decode_in_flight.values().any(|job| job.frame == frame)
+                    {
+                        continue;
+                    }
+                    if self.schedule_decode(frame, session)? {
+                        progressed = true;
+                        last_submitted = Some(surface);
+                        break;
+                    }
                 }
             }
             self.queues.retain(|_, queue| !queue.is_empty());
+            self.ready_surfaces
+                .retain(|surface| self.queues.contains_key(surface));
+            // A full scan may end in Busy. Resume after the last ACCEPTED job,
+            // not at the same privileged prefix of backlogged surfaces.
+            if let Some(surface) = last_submitted
+                && let Some(index) = self
+                    .ready_surfaces
+                    .iter()
+                    .position(|candidate| *candidate == surface)
+            {
+                self.ready_surfaces.rotate_left(index + 1);
+            }
             if !progressed {
                 break;
             }
@@ -1462,13 +1511,9 @@ impl EncodedDestinationState {
         self.sweep_retirement()
     }
 
-    fn schedule_decode(&mut self, frame: MediaFrameId, session: HoistSessionId) -> Result<()> {
-        self.sweep_retirement()?;
-        if self.decode_in_flight.is_some() {
-            return Ok(());
-        }
+    fn schedule_decode(&mut self, frame: MediaFrameId, session: HoistSessionId) -> Result<bool> {
         let Some(media) = self.media_frames.remove(&frame) else {
-            return Ok(());
+            return Ok(false);
         };
         ensure!(
             media.session == session,
@@ -1494,16 +1539,30 @@ impl EncodedDestinationState {
                     .record(DestinationObservation::DecodeSubmitted {
                         media_wait: submitted_at.saturating_duration_since(media.received_at),
                     });
-                self.decode_in_flight = Some(InFlightDecode {
+                self.decode_in_flight.insert(
                     token,
-                    frame,
-                    cancelled: false,
-                    submitted_at,
-                });
-                Ok(())
+                    InFlightDecode {
+                        frame,
+                        cancelled: false,
+                        submitted_at,
+                    },
+                );
+                Ok(true)
             }
-            Err(SubmitError::Busy(_)) => {
-                bail!("decoder queue was busy without an in-flight frame")
+            Err(SubmitError::Busy(request)) => {
+                ensure!(
+                    request.token == token && request.access_unit.frame == frame,
+                    "decoder returned a different Busy request"
+                );
+                self.media_frames.insert(
+                    frame,
+                    PendingMedia {
+                        session,
+                        access_unit: request.access_unit,
+                        received_at: media.received_at,
+                    },
+                );
+                Ok(false)
             }
             Err(SubmitError::Stopped(_)) => bail!("decoder worker stopped"),
             Err(SubmitError::Rejected(error)) => Err(error),
@@ -1528,7 +1587,8 @@ impl EncodedDestinationState {
             }),
             decoded_frames: self.decoded.len(),
             active_streams: self.streams.len(),
-            decode_in_flight: self.decode_in_flight.is_some(),
+            decode_in_flight: !self.decode_in_flight.is_empty(),
+            decode_jobs_in_flight: self.decode_in_flight.len(),
             oldest_control_age: self
                 .queues
                 .values()
@@ -1544,8 +1604,9 @@ impl EncodedDestinationState {
                 .unwrap_or_default(),
             active_decode_age: self
                 .decode_in_flight
-                .as_ref()
+                .values()
                 .map(|active| now.saturating_duration_since(active.submitted_at))
+                .max()
                 .unwrap_or_default(),
         }
     }
@@ -1565,6 +1626,22 @@ impl EncodedDestinationState {
         &mut self,
         dmabuf: weld_core::dmabuf::ExternalDmabuf,
     ) -> Result<ClientBufferLease> {
+        #[cfg(test)]
+        if self.fake_import {
+            return Ok(ClientBufferLease::new(
+                ClientBufferId::new(
+                    self.descriptor.id,
+                    take_counter(&mut self.next_buffer, "test decoded buffer")?,
+                ),
+                ClientBufferUseId::new(
+                    self.descriptor.id,
+                    take_counter(&mut self.next_use, "test decoded use")?,
+                ),
+                ClientBufferMetadata::new(dmabuf.extent, true),
+                std::rc::Rc::new(dmabuf),
+                |_| {},
+            )?);
+        }
         let context = self
             .dmabuf
             .as_ref()
@@ -1821,6 +1898,7 @@ fn take_counter(counter: &mut Option<u64>, name: &str) -> Result<u64> {
 #[cfg(test)]
 mod tests {
     mod bitrate_tests;
+    mod decode_tests;
     use std::{
         cell::{Cell, RefCell},
         rc::Rc,
@@ -2011,6 +2089,13 @@ mod tests {
 
     #[derive(Default)]
     struct FakeDecoderState {
+        capacity: Option<usize>,
+        active_tokens: HashSet<u64>,
+        terminal_failure: Option<anyhow::Error>,
+        generation_limit: Option<usize>,
+        generations: HashSet<EncodedGeneration>,
+        defer_retirement: bool,
+        retirement_acks: HashSet<EncodedGeneration>,
         submitted: Vec<MediaFrameId>,
         tokens: Vec<u64>,
         completions: Vec<DecodeCompletion>,
@@ -2021,6 +2106,24 @@ mod tests {
 
     impl DecodeBackend for FakeDecoder {
         fn try_submit(&mut self, request: DecodeRequest) -> Result<(), SubmitError<DecodeRequest>> {
+            let mut state = self.0.borrow_mut();
+            if state.active_tokens.len() >= state.capacity.unwrap_or(1) {
+                return Err(SubmitError::Busy(request));
+            }
+            let key = (
+                request.access_unit.frame.stream,
+                request.access_unit.frame.generation,
+            );
+            if !state.generations.contains(&key)
+                && state
+                    .generation_limit
+                    .is_some_and(|limit| state.generations.len() >= limit)
+            {
+                return Err(SubmitError::Busy(request));
+            }
+            state.generations.insert(key);
+            state.active_tokens.insert(request.token);
+            drop(state);
             self.0.borrow_mut().tokens.push(request.token);
             self.0
                 .borrow_mut()
@@ -2029,12 +2132,27 @@ mod tests {
             Ok(())
         }
 
-        fn drain(&mut self) -> Vec<DecodeCompletion> {
-            std::mem::take(&mut self.0.borrow_mut().completions)
+        fn drain(&mut self) -> (Vec<DecodeCompletion>, Option<anyhow::Error>) {
+            let mut state = self.0.borrow_mut();
+            for key in std::mem::take(&mut state.retirement_acks) {
+                state.generations.remove(&key);
+            }
+            let completions = std::mem::take(&mut state.completions);
+            for completion in &completions {
+                state.active_tokens.remove(&completion.token);
+            }
+            (completions, state.terminal_failure.take())
         }
 
         fn retire(&mut self, stream: MediaStreamId, generation: StreamGeneration) -> Result<()> {
-            self.0.borrow_mut().retirements.push((stream, generation));
+            let mut state = self.0.borrow_mut();
+            let key = (stream, generation);
+            if state.defer_retirement {
+                state.retirement_acks.insert(key);
+            } else {
+                state.generations.remove(&key);
+            }
+            state.retirements.push(key);
             Ok(())
         }
     }
@@ -2507,10 +2625,11 @@ mod tests {
             state.cancel_surface(first).expect("cancel");
             assert!(decoder.borrow().retirements.is_empty());
             let token = decoder.borrow().tokens[0];
-            decoder
-                .borrow_mut()
-                .completions
-                .push(DecodeCompletion { token, result });
+            decoder.borrow_mut().completions.push(DecodeCompletion {
+                token,
+                result,
+                timing: None,
+            });
             state.drain(&mut output).expect("discard obsolete result");
             assert!(output.is_empty());
             assert!(state.cancelled_frames.is_empty());
@@ -2567,6 +2686,7 @@ mod tests {
             let token = *decoder.borrow().tokens.last().expect("submitted decode");
             // Held for the second layer, then cancelled. Never imported.
             decoder.borrow_mut().completions.push(DecodeCompletion {
+                timing: None,
                 token,
                 result: Ok(vec![DecodedFrame {
                     frame,
@@ -2805,6 +2925,7 @@ mod tests {
         state.cancel_surface(surface).expect("cancel decode");
         let token = decoder.borrow().tokens[0];
         decoder.borrow_mut().completions.push(DecodeCompletion {
+            timing: None,
             token: token + 1,
             result: Err(anyhow::anyhow!("obsolete decode failed")),
         });
@@ -3077,7 +3198,8 @@ mod tests {
         state.advance(&mut output).expect("submit");
         state
             .decode_in_flight
-            .as_mut()
+            .values_mut()
+            .next()
             .expect("decode")
             .submitted_at = start;
         let gauges = state.observation_gauges(now);
@@ -3103,6 +3225,7 @@ mod tests {
             .expect("control");
         let token = decoder.borrow().tokens[0];
         decoder.borrow_mut().completions.push(DecodeCompletion {
+            timing: None,
             token,
             result: Err(anyhow::anyhow!("fake decode failure")),
         });
@@ -3534,6 +3657,7 @@ mod tests {
         );
         let token = decoder.borrow().tokens[0];
         decoder.borrow_mut().completions.push(DecodeCompletion {
+            timing: None,
             token,
             result: Ok(Vec::new()),
         });
