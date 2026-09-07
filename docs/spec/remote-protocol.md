@@ -621,6 +621,11 @@ work.
 - Define binding-independent device proof over transport session transcripts.
 - Define logical-seat, focus-epoch, pointer-mode, and bidirectional cursor-state
   records for destination-led focus with source- or destination-attached input.
+- Include application-requested pointer lock/confinement, relative deltas,
+  activation/denial/revocation and safe escape/reclaim/disconnect behavior in
+  that input contract. Cursor hiding alone is not capture. Blender's held-LMB
+  numeric-value drag is a concrete validation case; see
+  [pointer capture](surfaces-and-input.md#pointer-capture-and-relative-motion--direction).
 - Define fixed and tracked view-set records, relative reference spaces,
   view-request deadlines, rendered-pose acknowledgement, and synchronized
   color/alpha/depth frame groups.

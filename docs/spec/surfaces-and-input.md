@@ -116,6 +116,41 @@ The nested Linux backend does not receive equivalent gesture events from
 Winit; finger scrolling remains ordinary axis input rather than being guessed
 into a higher-level gesture.
 
+## Pointer capture and relative motion — Direction
+
+Support application-requested pointer locking and confinement as general input
+capabilities, independently from ordinary button grabs and compositor window
+move/resize interactions. The motivating report is Blender's numeric-value
+drag: holding LMB hides and locks the cursor while motion continues changing
+the value without hitting desktop edges. Confirm the exact client protocol
+requests when implementing; this is a recorded gap, not an implemented feature
+or a confirmed Blender-specific defect.
+
+Use Smithay's relative-pointer and pointer-constraint support at the Wayland
+adapter boundary. Preserve accelerated and unaccelerated motion deltas and
+timestamps from input adapters rather than reconstructing them from absolute
+positions, output traversal or clamped coordinates. Cursor visibility, locked
+versus confined motion, constraint region and position hints are distinct state.
+Ordinary LMB release must continue reaching the client while capture is active.
+
+The protocol-neutral client/seat contract must express capture requests and
+activation/revocation outcomes. A focused authorized client may request capture;
+the presentation/input host grants or denies it and always retains a local
+escape. Nested presentation requires cooperating with its host compositor,
+not merely stopping updates to Weld's own cursor image.
+
+Hoisting must forward the request to the device supplying pointer input and
+return its activation state to the source client. Scope it to the authorized
+seat, surface and focus/session epoch; reject delayed requests after focus
+changes. On focus loss, surface destruction, reclaim, disconnect, VT/session
+loss or emergency escape, release the active constraint, restore appropriate
+cursor visibility/location and reconcile held buttons. Persistent requests may
+reactivate only under the client protocol's lifetime rules and fresh policy
+authorization. A destination that cannot provide capture must report that
+limitation, not pretend hiding the cursor supplies unbounded relative motion.
+
+See [remote protocol](remote-protocol.md) for transport-neutral input records.
+
 ## Seats and devices — Direction
 
 A seat is a logical collection of input capabilities, not a synonym for one
