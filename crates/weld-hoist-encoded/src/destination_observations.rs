@@ -28,8 +28,14 @@ pub(super) enum DestinationObservation {
     },
     WorkerTiming {
         queue_wait: Duration,
-        execution: Duration,
+        residence: Duration,
         handoff: Duration,
+    },
+    PipelineTiming {
+        submission: Duration,
+        pending: Duration,
+        finish: Duration,
+        overlapped: bool,
     },
     DecodeCancelled,
     CodecFailed,
@@ -52,7 +58,11 @@ pub(super) struct DestinationCounters {
     pub media_wait: TimingSummary,
     pub decode_wall: TimingSummary,
     pub worker_queue: TimingSummary,
-    pub worker_execution: TimingSummary,
+    pub worker_residence: TimingSummary,
+    pub worker_submission: TimingSummary,
+    pub worker_pending: TimingSummary,
+    pub worker_finish: TimingSummary,
+    pub overlapped_submissions: u64,
     pub completion_handoff: TimingSummary,
     pub commit_wall: TimingSummary,
 }
@@ -113,11 +123,19 @@ impl DestinationReport {
             media_wait_max_us = counters.media_wait.maximum.as_micros(),
             decode_wall_total_us = counters.decode_wall.total.as_micros(),
             decode_wall_max_us = counters.decode_wall.maximum.as_micros(),
-            worker_timing_samples = counters.worker_execution.samples,
+            worker_timing_samples = counters.worker_residence.samples,
             worker_queue_total_us = counters.worker_queue.total.as_micros(),
             worker_queue_max_us = counters.worker_queue.maximum.as_micros(),
-            worker_execution_total_us = counters.worker_execution.total.as_micros(),
-            worker_execution_max_us = counters.worker_execution.maximum.as_micros(),
+            worker_residence_total_us = counters.worker_residence.total.as_micros(),
+            worker_residence_max_us = counters.worker_residence.maximum.as_micros(),
+            pipeline_samples = counters.worker_submission.samples,
+            overlapped_submissions = counters.overlapped_submissions,
+            worker_submission_total_us = counters.worker_submission.total.as_micros(),
+            worker_submission_max_us = counters.worker_submission.maximum.as_micros(),
+            worker_pending_total_us = counters.worker_pending.total.as_micros(),
+            worker_pending_max_us = counters.worker_pending.maximum.as_micros(),
+            worker_finish_total_us = counters.worker_finish.total.as_micros(),
+            worker_finish_max_us = counters.worker_finish.maximum.as_micros(),
             completion_handoff_total_us = counters.completion_handoff.total.as_micros(),
             completion_handoff_max_us = counters.completion_handoff.maximum.as_micros(),
             commit_wall_total_us = counters.commit_wall.total.as_micros(),
@@ -171,12 +189,25 @@ impl DestinationObservations {
             }
             DestinationObservation::WorkerTiming {
                 queue_wait,
-                execution,
+                residence,
                 handoff,
             } => {
                 counters.worker_queue.record(queue_wait);
-                counters.worker_execution.record(execution);
+                counters.worker_residence.record(residence);
                 counters.completion_handoff.record(handoff);
+            }
+            DestinationObservation::PipelineTiming {
+                submission,
+                pending,
+                finish,
+                overlapped,
+            } => {
+                counters.worker_submission.record(submission);
+                counters.worker_pending.record(pending);
+                counters.worker_finish.record(finish);
+                counters.overlapped_submissions = counters
+                    .overlapped_submissions
+                    .saturating_add(u64::from(overlapped));
             }
             DestinationObservation::DecodeCancelled => {
                 counters.decodes_cancelled = counters.decodes_cancelled.saturating_add(1);

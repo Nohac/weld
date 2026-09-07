@@ -11,11 +11,15 @@ tokens, cancellation and atomic application. Its backend interface returns Busy
 with the original owned request. It does not expose worker counts or force the
 port to guess whether a backend has room. Each pass offers at most one job per
 ready surface, then rotates after the last successful submission. Passes repeat
-while submission or application makes progress. Only the front commit of each
-surface is eligible; independent layers of that commit can run together.
+while submission or application makes progress. The front commit and at most
+one compatible successor are eligible; only the front is applied. Lookahead
+requires all earlier replacements to be submitted or decoded, mapped commits
+in the same session, unchanged presentation topology/metadata and successor
+replacement stream/generation keys present in the front replacements. Missing
+media, metadata-only commits, unmap, new layers and generation changes stop it.
 
 `weld-media-vaapi::VaapiDecodeWorker` is the nonblocking facade over a lazy pool.
-Default limits are four workers, four outstanding jobs and sixteen owned stream
+Default limits are four workers, eight outstanding jobs and sixteen owned stream
 generations shared across that connection. `DecodePoolLimits` can lower those
 limits; they are not discovered hardware capabilities or a physical-device-wide
 allocator. Workers grow only when real work arrives. A stream stays assigned
@@ -23,9 +27,15 @@ while any of its generations is owned, including retiring generations. Native
 FFmpeg devices, decoder contexts and VPP converters are created and used on
 their worker thread; no unsafe thread-transfer assertion is added.
 
-Each worker accepts one outstanding job, including a completed but undrained
-result. A lone stream still runs serially; this slice does not add same-stream
-prefetch or batch several pictures into one GPU submission. Unassigned parked
+Each worker accepts up to two outstanding jobs, including completed but undrained
+results. Its explicit depth (one or two) also reserves that many extra caller-held
+hardware frames in FFmpeg before the decoder opens. The worker submits available
+packets before finishing the oldest hardware frame, then refills its pipeline.
+It never waits to fill a batch: a single frame progresses immediately. This
+overlaps already-available work, including consecutive frames of one stream,
+without requiring a host drain between those two jobs. Submission and completion
+remain FIFO per worker; this is not a multi-picture GPU submission API.
+Unassigned parked
 workers are reused before spawning. At the cap, new streams use an available
 worker with the fewest owned generations. Idle threads remain until connection
 drop, but obsolete codec contexts retire promptly. There is no thread migration
@@ -49,36 +59,52 @@ creating the context. A matching active job delays retirement publication.
 Cancelling a surface marks its jobs obsolete but retains them until completion;
 late results cannot resurrect the surface.
 
-A coalescing retirement set is published before a bounded wake command. A full
-wake queue means a queued command will check the set. Receiving even a stale
+A coalescing retirement set is published before a bounded wake command. A
+SeqCst flag permits only one queued Wake, and the channel reserves depth plus
+one slots so wakes cannot consume the decode budget. The worker clears that
+flag before locking the set, checks retirements before blocking and after each
+received command. Receiving even a stale
 wake signals host capacity recovery directly. Completion, retirement and worker
 failure also wake the host; a static last pending frame needs no new input or
 client commit to retry. Busy capacity is not inferred to be fatal from a local
 snapshot: retirement acknowledgements or media/control can still arrive.
 
 The result channel uses an unbounded channel type but cannot accumulate arbitrary
-events: four outstanding jobs, sixteen owned retirement keys and four one-shot
-worker failures bound it to twenty-four events at the default limits. Wake
+events: eight outstanding jobs, sixteen owned retirement keys and four one-shot
+worker failures bound it to twenty-eight events at the default limits. Wake
 receipt does not enqueue a result event. Initialization errors and panics become
 sticky terminal failures, not per-frame worker respawns. Draining returns all
 available completions alongside an optional failure so another worker's error
-does not hide completed jobs or break cancellation accounting.
+does not hide completed jobs or break cancellation accounting. Per-job submission
+errors occupy their FIFO slot rather than overtaking earlier results. A poisoned
+native generation rejects further submissions into ordered error slots; its
+context is reset only when its pending native FIFO entries have drained. Pending
+AVFrames own their references independently and drop before codec/device fields.
 
 ## Limits and measurements
 
 The existing 128-reference/output bound and compressed-byte admission remain.
 These are not a GPU byte-residency budget: codec DPBs, padded frames, VPP output
-and renderer-held leases have additional costs. Multiple connections each have
+and renderer-held leases have additional costs. Lookahead can approximately
+double decoded-image residency per surface; extra hardware-frame slots also
+increase decoder memory requirements. Multiple connections each have
 their own pool. A topology that cannot fit its required generations can remain
 Busy; a future admission controller must reject or adapt it with actual budget
 knowledge. Larger queues and speculative fatal-capacity checks are not used.
-Drop closes command queues and joins workers; a native GPU call that never
-returns still cannot be recovered by this pool.
+Drop closes command queues and joins workers. Once closure is observed, remaining
+native frames are released without XRGB conversion. A full pipeline can finish
+its front job before observing closure; an already-running native GPU call that
+never returns still cannot be recovered by this pool.
 
-Receiver summaries add worker queue wait, execution (decode plus conversion),
-completion-to-host-drain timing and outstanding job count. These are local
+Receiver summaries report worker queue wait, residence, completion-to-host-drain,
+submission wall, pending-before-finish, finish wall and outstanding job count.
+`worker_residence` replaces the former `worker_execution` name because it now
+includes time overlapping other jobs. `overlapped_submissions` counts successful
+jobs submitted with an earlier native job pending, not measured GPU concurrency.
+These are local
 `Instant` measurements, never wire timestamps. Existing `decode_wall` includes
-the whole service path. Execution is not GPU-only time. Debug ownership records
+the whole service path. None of these are GPU-only counters; overlapping job
+durations must not be summed as device/CPU utilization. Debug ownership records
 report worker/generation distribution on ownership changes, not every frame.
 
 ## Validation
@@ -97,13 +123,33 @@ These validate Weld policy and lifecycle, not FFmpeg or Smithay implementations.
 
 Re-run the existing AV1 local and isolated network hoist scripts with Blender
 and Firefox video. Compare the same workload's pending media, media/commit age,
-worker execution and completion-handoff timings against the ACK-free baseline.
+worker residence and completion-handoff timings against the ACK-free baseline.
 Check menus, resize, reclaim and disconnect. Do not infer GPU capacity by dividing
 a multi-stream peak by an unrelated whole-run decode average. No transport,
 encoder pacing, protocol revision, network ACK or dynamic bitrate change is
 part of this slice.
 
-## September 7 WAN validation
+For a bounded native comparison, run `scripts/run-vaapi-roundtrip-probe`. It
+pre-encodes eight identical inputs per codec, replays depths one, two, two, one
+with pass labels to compare both arm orders,
+then validates every output's timestamp, size, format and sampled pixels. The
+last prefetched frame is explicitly finished. Each frame reports submission,
+pending, decoded-surface sync, VPP setup/submission and VPP output-sync wall time.
+Pixel readback and printing are outside replay timing. Frame zero is marked as
+startup; this small, always-backlogged test is not a steady-state 60fps benchmark.
+Depth one reserves one extra hardware frame and is therefore not byte-identical
+to the previous binary. Repeat runs before interpreting small differences.
+
+The pipeline retains both explicit GPU waits, the separate VA displays, fresh
+XRGB allocations and per-frame VPP contexts. It changes when waits occur relative
+to later decode submissions, not their correctness requirements. Packet wrappers
+are reused, but padded compressed payload allocation/copy remains. Output/context
+recycling, transfer-buffer reuse and fully asynchronous conversion are separate
+work. Stage measurements will determine their priority. GPU utilization or a
+speedup is not guaranteed when no next frame is available. No hardware run of
+the decode-ahead change has been performed by the agent.
+
+## September 7 WAN validation (before decode-ahead)
 
 Run `network-hoist-tmk2tipk` used AV1 over the isolated Wi-Fi/5G setup. The user
 reported much snappier Blender camera movement alongside BBB 4K60 in a Firefox

@@ -4,6 +4,7 @@ use std::{
     os::fd::{AsRawFd, FromRawFd, OwnedFd},
     path::Path,
     ptr,
+    time::{Duration, Instant},
 };
 
 use crate::{
@@ -245,16 +246,81 @@ pub struct DecodedPacket {
     pub coded_width: u32,
     pub coded_height: u32,
     pub dmabuf: VaapiDmabuf,
+    pub timing: DecodeConversionTiming,
+}
+
+/// Wall time inside the native finish path, not GPU execution counters.
+#[derive(Clone, Copy, Debug)]
+pub struct DecodeConversionTiming {
+    pub decode_sync: Duration,
+    pub conversion_setup: Duration,
+    pub conversion_sync: Duration,
+}
+
+/// Owns an FFmpeg hardware frame until conversion finishes. It stays on the
+/// decoder thread; dropping it releases FFmpeg's reference, not copied pixels.
+pub struct PendingDecodedFrame {
+    frame: Frame,
+    timestamp_micros: u64,
+}
+
+impl PendingDecodedFrame {
+    pub fn finish(
+        self,
+        visible_width: u32,
+        visible_height: u32,
+        xrgb_modifiers: &[u64],
+        vpp: &VppConverter,
+    ) -> Result<DecodedPacket> {
+        let sync_started = Instant::now();
+        self.frame.sync_vaapi()?;
+        let decode_sync = sync_started.elapsed();
+        let source = self.frame.export_vaapi_dmabuf()?;
+        ensure!(
+            visible_width <= source.width && visible_height <= source.height,
+            "decoded extent is smaller than its transported visible extent"
+        );
+        // Keep the AVFrame and exported input alive through VPP completion.
+        let (dmabuf, timing) = vpp.convert_scaled_timed(
+            &source,
+            visible_width,
+            visible_height,
+            visible_width,
+            visible_height,
+            VppOutput::Xrgb8888 {
+                modifiers: xrgb_modifiers.to_vec(),
+            },
+        )?;
+        Ok(DecodedPacket {
+            timestamp_micros: self.timestamp_micros,
+            coded_width: source.width,
+            coded_height: source.height,
+            dmabuf,
+            timing: DecodeConversionTiming {
+                decode_sync,
+                conversion_setup: timing.setup,
+                conversion_sync: timing.sync,
+            },
+        })
+    }
 }
 
 pub struct FfmpegDecoder {
-    codec_kind: CodecKind,
     context: *mut ffi::AVCodecContext,
     _vaapi_device: BufferRef,
+    packet: Packet,
 }
 
 impl FfmpegDecoder {
-    pub fn new(codec: VideoCodec, device: &FfmpegVaapiDevice) -> Result<Self> {
+    /// `depth` is the maximum caller-held hardware-frame count. Reserve it in
+    /// FFmpeg's hardware pool before opening, independently of codec DPB needs.
+    pub fn new(codec: VideoCodec, device: &FfmpegVaapiDevice, depth: usize) -> Result<Self> {
+        ensure!(
+            (1..=2).contains(&depth),
+            "unsupported decoder pipeline depth"
+        );
+        let extra_hw_frames = i32::try_from(depth)?;
+        let packet = Packet::new()?;
         let codec_kind = CodecKind::try_from(codec)?;
         let vaapi_device = device.0.try_clone()?;
         // SAFETY: decoder_name is a static null-terminated FFmpeg decoder name.
@@ -283,6 +349,7 @@ impl FfmpegDecoder {
                     den: 1_000_000,
                 };
                 (*context).thread_count = 1;
+                (*context).extra_hw_frames = extra_hw_frames;
                 (*context).get_format = Some(select_vaapi_format);
                 (*context).hw_device_ctx = ffi::av_buffer_ref(vaapi_device.0);
             }
@@ -302,28 +369,23 @@ impl FfmpegDecoder {
             return Err(error);
         }
         Ok(Self {
-            codec_kind,
             context,
             _vaapi_device: vaapi_device,
+            packet,
         })
     }
 
-    pub fn decode_and_convert(
-        &mut self,
-        payload: &[u8],
-        timestamp_micros: u64,
-        visible_width: u32,
-        visible_height: u32,
-        xrgb_modifiers: &[u64],
-        vpp: &VppConverter,
-    ) -> Result<Vec<DecodedPacket>> {
-        let mut packet = Packet::from_bytes(payload, timestamp_micros)?;
+    /// Submit one low-delay access unit and retain its hardware output without
+    /// explicitly synchronizing it. Driver/API calls may still block. Keep at
+    /// most the configured depth of outputs; later submissions may precede finish.
+    pub fn submit(&mut self, payload: &[u8], timestamp_micros: u64) -> Result<PendingDecodedFrame> {
+        self.packet.set_bytes(payload, timestamp_micros)?;
         // SAFETY: context is open and packet owns a padded FFmpeg allocation.
-        let result = unsafe { ffi::avcodec_send_packet(self.context, packet.0) };
+        let result = unsafe { ffi::avcodec_send_packet(self.context, self.packet.0) };
+        self.packet.clear();
         check(result, "could not submit packet to FFmpeg decoder")?;
-        packet.clear();
 
-        let mut output = Vec::new();
+        let mut output = None;
         loop {
             let mut decoded = Frame::new()?;
             // SAFETY: context is open and decoded is an empty writable frame.
@@ -331,37 +393,23 @@ impl FfmpegDecoder {
             match status(result)? {
                 CallStatus::Ready => {
                     let decoded_timestamp = decoded.timestamp()?;
-                    let source = decoded.export_vaapi_dmabuf()?;
-                    let coded_width = source.width;
-                    let coded_height = source.height;
                     ensure!(
-                        visible_width <= source.width && visible_height <= source.height,
-                        "decoded {} extent is smaller than its transported visible extent",
-                        self.codec_kind.name()
+                        output.is_none(),
+                        "low-delay decoder returned more than one frame"
                     );
-                    // Keep the decoded AVFrame alive until the synchronous VPP
-                    // operation has copied its exported surface into fresh XRGB storage.
-                    let dmabuf = vpp.convert_scaled(
-                        &source,
-                        visible_width,
-                        visible_height,
-                        visible_width,
-                        visible_height,
-                        VppOutput::Xrgb8888 {
-                            modifiers: xrgb_modifiers.to_vec(),
-                        },
-                    )?;
-                    output.push(DecodedPacket {
-                        timestamp_micros: decoded_timestamp,
-                        coded_width,
-                        coded_height,
-                        dmabuf,
+                    ensure!(
+                        decoded_timestamp == timestamp_micros,
+                        "decoder returned an unexpected timestamp"
+                    );
+                    output = Some(PendingDecodedFrame {
+                        frame: decoded,
+                        timestamp_micros,
                     });
                 }
                 CallStatus::Again | CallStatus::End => break,
             }
         }
-        Ok(output)
+        output.context("low-delay decoder returned no frame")
     }
 }
 
@@ -631,21 +679,21 @@ impl Packet {
         Ok(Self(packet))
     }
 
-    fn from_bytes(payload: &[u8], timestamp_micros: u64) -> Result<Self> {
-        let packet = Self::new()?;
+    fn set_bytes(&mut self, payload: &[u8], timestamp_micros: u64) -> Result<()> {
+        self.clear();
         let length = i32::try_from(payload.len())?;
         // SAFETY: packet is empty and av_new_packet allocates payload plus the
         // padding required by FFmpeg bitstream readers.
-        let result = unsafe { ffi::av_new_packet(packet.0, length) };
+        let result = unsafe { ffi::av_new_packet(self.0, length) };
         check(result, "could not allocate FFmpeg decoder packet")?;
         // SAFETY: av_new_packet allocated at least payload.len() writable bytes.
         unsafe {
-            ptr::copy_nonoverlapping(payload.as_ptr(), (*packet.0).data, payload.len());
+            ptr::copy_nonoverlapping(payload.as_ptr(), (*self.0).data, payload.len());
             let timestamp = i64::try_from(timestamp_micros)?;
-            (*packet.0).pts = timestamp;
-            (*packet.0).dts = timestamp;
+            (*self.0).pts = timestamp;
+            (*self.0).dts = timestamp;
         }
-        Ok(packet)
+        Ok(())
     }
 
     fn bytes(&self) -> Result<&[u8]> {
@@ -770,7 +818,7 @@ impl Frame {
         Ok(u64::try_from(timestamp)?)
     }
 
-    fn export_vaapi_dmabuf(&self) -> Result<VaapiDmabuf> {
+    fn vaapi_surface(&self) -> Result<(cros_libva::VADisplay, cros_libva::VASurfaceID)> {
         // SAFETY: self.0 is a live decoded frame while this method runs.
         let frame = unsafe { &*self.0 };
         ensure!(
@@ -807,18 +855,29 @@ impl Frame {
         ensure!(!frame.data[3].is_null(), "VA-API frame has no surface ID");
         // FFmpeg stores the VASurfaceID value itself in the data[3] pointer slot.
         let surface = cros_libva::VASurfaceID::try_from(frame.data[3] as usize)?;
+        Ok((vaapi.display, surface))
+    }
+
+    fn sync_vaapi(&self) -> Result<()> {
+        let (display, surface) = self.vaapi_surface()?;
         // SAFETY: display and surface belong to this live decoded frame.
-        let status = unsafe { cros_libva::vaSyncSurface(vaapi.display, surface) };
+        let status = unsafe { cros_libva::vaSyncSurface(display, surface) };
         ensure!(
             status as u32 == cros_libva::VA_STATUS_SUCCESS,
             "could not synchronize decoded VA surface"
         );
+        Ok(())
+    }
+
+    // Only called after sync_vaapi, while this AVFrame still owns the surface.
+    fn export_vaapi_dmabuf(&self) -> Result<VaapiDmabuf> {
+        let (display, surface) = self.vaapi_surface()?;
         let mut descriptor = cros_libva::VADRMPRIMESurfaceDescriptor::default();
         // SAFETY: descriptor is writable, display and surface are live, and
         // libva transfers ownership of exported file descriptors on success.
         let status = unsafe {
             cros_libva::vaExportSurfaceHandle(
-                vaapi.display,
+                display,
                 surface,
                 cros_libva::VA_SURFACE_ATTRIB_MEM_TYPE_DRM_PRIME_2,
                 cros_libva::VA_EXPORT_SURFACE_READ_ONLY

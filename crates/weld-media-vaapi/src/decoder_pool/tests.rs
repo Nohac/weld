@@ -16,6 +16,9 @@ struct State {
     native: HashSet<(ThreadId, GenerationKey)>,
     max_native: usize,
     retired: Vec<GenerationKey>,
+    block_init: bool,
+    fail_tokens: HashSet<u64>,
+    steps: Vec<(&'static str, u64)>,
 }
 
 #[derive(Default)]
@@ -27,10 +30,11 @@ struct Control {
 struct FakeProcessor {
     control: Arc<Control>,
     owner: ThreadId,
+    pending: VecDeque<(u64, bool)>,
 }
 
 impl Processor for FakeProcessor {
-    fn decode(&mut self, request: VaapiDecodeRequest) -> Result<Vec<VaapiDecodedFrame>> {
+    fn submit(&mut self, request: VaapiDecodeRequest) {
         let key = (
             request.access_unit.frame.stream,
             request.access_unit.frame.generation,
@@ -39,17 +43,27 @@ impl Processor for FakeProcessor {
         state.native.insert((self.owner, key));
         state.max_native = state.max_native.max(state.native.len());
         state.started.push((request.token, key.0, self.owner));
+        state.steps.push(("submit", request.token));
         let should_panic = state.panic_tokens.contains(&request.token);
         self.control.changed.notify_all();
         if should_panic {
             drop(state);
             panic!("fake worker panic");
         }
+        self.pending
+            .push_back((request.token, state.fail_tokens.contains(&request.token)));
+    }
+
+    fn complete(&mut self) -> Result<Vec<VaapiDecodedFrame>> {
+        let (token, failed) = self.pending.pop_front().expect("pending fake frame");
+        let mut state = self.control.state.lock().expect("state");
+        state.steps.push(("finish", token));
+        self.control.changed.notify_all();
         let (state, timeout) = self
             .control
             .changed
             .wait_timeout_while(state, Duration::from_secs(2), |state| {
-                !state.release_all && !state.released.contains(&request.token)
+                !state.release_all && !state.released.contains(&token)
             })
             .expect("wait");
         ensure!(
@@ -57,6 +71,7 @@ impl Processor for FakeProcessor {
             "fake processor timed out waiting for test release"
         );
         drop(state);
+        ensure!(!failed, "fake submit failed");
         Ok(Vec::new())
     }
 
@@ -96,10 +111,16 @@ impl Fixture {
                 let mut state = factory_control.state.lock().expect("state");
                 state.created += 1;
                 ensure!(!state.fail_init, "fake render node unavailable");
+                let (state, timeout) = factory_control
+                    .changed
+                    .wait_timeout_while(state, Duration::from_secs(2), |state| state.block_init)
+                    .expect("init gate");
+                ensure!(!timeout.timed_out(), "fake init gate timed out");
                 drop(state);
                 Ok(Box::new(FakeProcessor {
                     control: factory_control.clone(),
                     owner: thread::current().id(),
+                    pending: VecDeque::new(),
                 }))
             }),
             Arc::new(move || {
@@ -191,7 +212,11 @@ impl Fixture {
 impl Drop for Fixture {
     fn drop(&mut self) {
         // Runs before the pool field's Drop, including on a failed assertion.
-        self.control.state.lock().expect("state").release_all = true;
+        {
+            let mut state = self.control.state.lock().expect("state");
+            state.release_all = true;
+            state.block_init = false;
+        }
         self.control.changed.notify_all();
     }
 }
@@ -225,15 +250,18 @@ fn key(stream: u64, generation: u64) -> GenerationKey {
 
 #[test]
 fn limits_reject_empty_or_inconsistent_execution_budgets() {
-    assert!(DecodePoolLimits::try_new(0, 1, 16).is_err());
-    assert!(DecodePoolLimits::try_new(2, 3, 16).is_err());
-    assert!(DecodePoolLimits::try_new(4, 2, 3).is_err());
-    assert!(DecodePoolLimits::try_new(4, 2, 16).is_ok());
+    assert!(DecodePoolLimits::try_new(0, 1, 16, 1).is_err());
+    assert!(DecodePoolLimits::try_new(2, 3, 16, 1).is_err());
+    assert!(DecodePoolLimits::try_new(4, 2, 3, 1).is_err());
+    assert!(DecodePoolLimits::try_new(4, 2, 16, 1).is_ok());
+    assert!(DecodePoolLimits::try_new(4, 8, 16, 2).is_ok());
+    assert!(DecodePoolLimits::try_new(4, 9, 16, 2).is_err());
+    assert!(DecodePoolLimits::try_new(4, 4, 16, 3).is_err());
 }
 
 #[test]
 fn lazy_growth_is_bounded_and_independent_streams_complete_out_of_order() {
-    let mut fixture = Fixture::new(DecodePoolLimits::try_new(3, 3, 6).expect("limits"));
+    let mut fixture = Fixture::new(DecodePoolLimits::try_new(3, 3, 6, 1).expect("limits"));
     for stream in 1..=100 {
         fixture
             .pool
@@ -275,7 +303,7 @@ fn lazy_growth_is_bounded_and_independent_streams_complete_out_of_order() {
 
 #[test]
 fn retirement_is_idempotent_and_waits_for_active_jobs_before_releasing_capacity() {
-    let mut fixture = Fixture::new(DecodePoolLimits::try_new(1, 1, 1).expect("limits"));
+    let mut fixture = Fixture::new(DecodePoolLimits::try_new(1, 1, 1, 1).expect("limits"));
     fixture.pool.try_decode(request(1, 1, 1)).expect("admit");
     fixture
         .pool
@@ -357,8 +385,8 @@ fn generation_budget_is_shared_across_workers_and_rotations_wait_for_ack() {
 }
 
 #[test]
-fn full_wake_channel_still_retires_idle_keys_after_the_active_decode() {
-    let mut fixture = Fixture::new(DecodePoolLimits::try_new(1, 1, 2).expect("limits"));
+fn coalesced_wake_leaves_decode_capacity_and_retires_after_the_active_decode() {
+    let mut fixture = Fixture::new(DecodePoolLimits::try_new(1, 2, 3, 2).expect("limits"));
     fixture
         .pool
         .try_decode(request(1, 1, 1))
@@ -370,20 +398,22 @@ fn full_wake_channel_still_retires_idle_keys_after_the_active_decode() {
         .try_decode(request(2, 2, 1))
         .expect("second context");
     fixture.started(2);
-    assert!(
-        fixture.pool.workers[0]
-            .commands
-            .as_ref()
-            .expect("sender")
-            .try_send(Command::Wake)
-            .is_ok()
-    );
     fixture
         .pool
         .retire(key(1, 1).0, key(1, 1).1)
-        .expect("Wake Full is covered");
-    fixture.release(&[2]);
-    fixture.take(1);
+        .expect("queue one Wake");
+    for _ in 0..10 {
+        fixture
+            .pool
+            .retire(key(1, 1).0, key(1, 1).1)
+            .expect("coalesced retirement");
+    }
+    fixture
+        .pool
+        .try_decode(request(3, 2, 1))
+        .expect("second job fits alongside Wake");
+    fixture.release(&[2, 3]);
+    fixture.take(2);
     fixture.retire_to(1);
     assert_eq!(
         fixture.control.state.lock().expect("state").retired,
@@ -393,7 +423,7 @@ fn full_wake_channel_still_retires_idle_keys_after_the_active_decode() {
 
 #[test]
 fn initialization_failure_is_sticky_and_keeps_original_diagnostic() {
-    let mut fixture = Fixture::new(DecodePoolLimits::try_new(1, 1, 1).expect("limits"));
+    let mut fixture = Fixture::new(DecodePoolLimits::try_new(1, 1, 1, 1).expect("limits"));
     fixture.control.state.lock().expect("state").fail_init = true;
     fixture
         .pool
@@ -420,7 +450,7 @@ fn initialization_failure_is_sticky_and_keeps_original_diagnostic() {
 
 #[test]
 fn worker_panic_does_not_hide_another_workers_completion() {
-    let mut fixture = Fixture::new(DecodePoolLimits::try_new(2, 2, 2).expect("limits"));
+    let mut fixture = Fixture::new(DecodePoolLimits::try_new(2, 2, 2, 1).expect("limits"));
     {
         let mut state = fixture.control.state.lock().expect("state");
         state.panic_tokens.insert(1);
@@ -456,13 +486,13 @@ fn worker_panic_does_not_hide_another_workers_completion() {
             .pool
             .workers
             .iter()
-            .all(|worker| worker.job.is_none())
+            .all(|worker| worker.jobs.is_empty())
     );
 }
 
 #[test]
 fn completed_but_undrained_jobs_stay_charged_and_shutdown_never_waits_for_a_consumer() {
-    let mut fixture = Fixture::new(DecodePoolLimits::try_new(2, 2, 2).expect("limits"));
+    let mut fixture = Fixture::new(DecodePoolLimits::try_new(2, 2, 2, 1).expect("limits"));
     fixture.control.state.lock().expect("state").release_all = true;
     fixture.pool.try_decode(request(1, 1, 1)).expect("first");
     fixture.pool.try_decode(request(2, 2, 1)).expect("second");
@@ -479,4 +509,160 @@ fn completed_but_undrained_jobs_stay_charged_and_shutdown_never_waits_for_a_cons
     let control = fixture.control.clone();
     drop(fixture);
     assert!(control.state.lock().expect("state").native.is_empty());
+}
+
+#[test]
+fn queued_frames_submit_before_finishing_and_complete_without_a_host_roundtrip() {
+    for fail_second in [false, true] {
+        let mut fixture = Fixture::new(DecodePoolLimits::try_new(1, 2, 1, 2).expect("limits"));
+        {
+            let mut state = fixture.control.state.lock().expect("state");
+            state.block_init = true;
+            state.release_all = true;
+            if fail_second {
+                state.fail_tokens.insert(2);
+            }
+        }
+        fixture.pool.try_decode(request(1, 1, 1)).expect("first");
+        fixture
+            .pool
+            .try_decode(request(2, 1, 1))
+            .expect("lookahead");
+        assert!(matches!(
+            fixture.pool.try_decode(request(3, 1, 1)),
+            Err(VaapiWorkerSubmitError::Busy(_))
+        ));
+        fixture.control.state.lock().expect("state").block_init = false;
+        fixture.control.changed.notify_all();
+        for _ in 0..2 {
+            fixture
+                .wakes
+                .recv_timeout(Duration::from_secs(2))
+                .expect("both completed without drain");
+        }
+        assert_eq!(
+            fixture.control.state.lock().expect("state").steps,
+            vec![("submit", 1), ("submit", 2), ("finish", 1), ("finish", 2)]
+        );
+        let (completed, error) = fixture.pool.drain();
+        assert!(error.is_none());
+        assert_eq!(
+            completed.iter().map(|done| done.token).collect::<Vec<_>>(),
+            vec![1, 2]
+        );
+        assert!(completed[0].result.is_ok());
+        assert_eq!(completed[1].result.is_err(), fail_second);
+        assert!(
+            completed[1]
+                .timing
+                .expect("timing")
+                .pipeline
+                .expect("pipeline")
+                .had_pending_frame
+        );
+    }
+}
+
+#[test]
+fn retirement_waits_for_every_same_generation_job() {
+    let mut fixture = Fixture::new(DecodePoolLimits::try_new(1, 2, 1, 2).expect("limits"));
+    fixture.control.state.lock().expect("state").block_init = true;
+    fixture.pool.try_decode(request(1, 1, 1)).expect("first");
+    fixture.pool.try_decode(request(2, 1, 1)).expect("second");
+    fixture
+        .pool
+        .retire(key(1, 1).0, key(1, 1).1)
+        .expect("retire");
+    fixture.control.state.lock().expect("state").block_init = false;
+    fixture.control.changed.notify_all();
+    fixture.started(2);
+    fixture.release(&[1]);
+    assert_eq!(fixture.take(1)[0].token, 1);
+    assert!(!fixture.pool.generations[&key(1, 1)].retirement_sent);
+    assert!(
+        fixture
+            .control
+            .state
+            .lock()
+            .expect("state")
+            .retired
+            .is_empty()
+    );
+    fixture.release(&[2]);
+    assert_eq!(fixture.take(1)[0].token, 2);
+    fixture.retire_to(0);
+    assert_eq!(
+        fixture.control.state.lock().expect("state").retired,
+        vec![key(1, 1)]
+    );
+}
+
+#[test]
+fn panic_with_prefetched_work_accounts_for_every_token() {
+    let mut fixture = Fixture::new(DecodePoolLimits::try_new(1, 2, 1, 2).expect("limits"));
+    {
+        let mut state = fixture.control.state.lock().expect("state");
+        state.block_init = true;
+        state.panic_tokens.insert(2);
+    }
+    fixture.pool.try_decode(request(1, 1, 1)).expect("first");
+    fixture.pool.try_decode(request(2, 1, 1)).expect("second");
+    fixture.control.state.lock().expect("state").block_init = false;
+    fixture.control.changed.notify_all();
+    fixture
+        .wakes
+        .recv_timeout(Duration::from_secs(2))
+        .expect("failure wake");
+    let (completed, failure) = fixture.pool.drain();
+    assert!(failure.is_some());
+    assert_eq!(completed.len(), 2);
+    assert!(
+        completed
+            .iter()
+            .all(|completion| completion.result.is_err())
+    );
+    assert!(fixture.pool.workers[0].jobs.is_empty());
+}
+
+#[test]
+fn depth_two_does_not_wait_for_a_second_frame_or_for_host_drain_on_shutdown() {
+    let mut fixture = Fixture::new(DecodePoolLimits::try_new(1, 2, 1, 2).expect("limits"));
+    fixture.release(&[1]);
+    fixture
+        .pool
+        .try_decode(request(1, 1, 1))
+        .expect("single frame");
+    assert_eq!(fixture.take(1)[0].token, 1);
+    fixture.pool.try_decode(request(2, 1, 1)).expect("active");
+    fixture
+        .pool
+        .try_decode(request(3, 1, 1))
+        .expect("prefetched");
+    let control = fixture.control.clone();
+    drop(fixture); // Releases blocked fake work before joining the worker.
+    assert!(control.state.lock().expect("state").native.is_empty());
+}
+
+#[test]
+fn observed_shutdown_releases_prefetched_frames_without_conversion() {
+    let fixture = Fixture::new(DecodePoolLimits::default());
+    let (sender, receiver) = mpsc::sync_channel(3);
+    sender
+        .send(Command::Decode(request(1, 1, 1), Instant::now()))
+        .expect("queued frame");
+    drop(sender);
+    worker_loop(
+        0,
+        receiver,
+        &RetirementMailbox::default(),
+        &fixture.pool.event_sender,
+        &fixture.pool.notify,
+        &fixture.pool.factory,
+        2,
+    )
+    .expect("shutdown");
+    let state = fixture.control.state.lock().expect("state");
+    assert_eq!(state.steps, vec![("submit", 1)]);
+    assert!(state.native.is_empty());
+    assert!(fixture.pool.events.try_recv().is_err());
 }

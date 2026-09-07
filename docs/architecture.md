@@ -602,9 +602,11 @@ pressure coalesces unencoded commits while ordered control and completed media
 remain independently bounded. Transport write completion wakes static sources.
 The receiver independently budgets control references and compressed bytes.
 Its stream-affine decoder pool grows on actual work, up to four workers and
-four outstanding jobs, with sixteen decoder generations shared across the pool.
-Front commits receive round-robin submission turns; independent layers can
-decode concurrently, but each commit applies atomically. Retirement protects
+eight outstanding jobs (two per worker), with sixteen decoder generations shared
+across the pool. Round-robin turns admit front commits and at most one compatible
+successor per surface. Workers submit available packets before waiting on older
+frames; FFmpeg reserves extra frame slots for the explicit pipeline depth. Each
+commit still applies atomically in FIFO order. Retirement protects
 inventory, pending media, undecoded references and active jobs. Converted XRGB
 output owns separate storage and does not keep an obsolete codec context alive.
 Reservations remain charged until the worker acknowledges retirement.

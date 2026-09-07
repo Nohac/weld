@@ -307,7 +307,7 @@ fn sixteen_streams_rotate_while_backlogged_without_exceeding_context_budget() {
 }
 
 #[test]
-fn local_worker_timing_separates_execution_from_host_handoff() {
+fn local_worker_timing_separates_residence_and_pipeline_stages_from_host_handoff() {
     let (mut port, transport, decoder) = destination_port();
     port.state.as_mut().expect("state").fake_import = true;
     queue(
@@ -331,6 +331,11 @@ fn local_worker_timing_separates_execution_from_host_handoff() {
         queued_at: start + Duration::from_millis(1),
         started_at: start + Duration::from_millis(2),
         completed_at: start + Duration::from_millis(5),
+        pipeline: Some(weld_media::DecodePipelineTiming {
+            submitted_at: start + Duration::from_millis(3),
+            finishing_at: start + Duration::from_millis(4),
+            had_pending_frame: true,
+        }),
     });
     port.poll().expect("apply");
     let report = port
@@ -342,11 +347,24 @@ fn local_worker_timing_separates_execution_from_host_handoff() {
         .expect("report");
     assert_eq!(report.counters.worker_queue.total, Duration::from_millis(1));
     assert_eq!(
-        report.counters.worker_execution.total,
+        report.counters.worker_residence.total,
         Duration::from_millis(3)
     );
     assert!(report.counters.completion_handoff.total >= Duration::from_millis(95));
     assert!(report.counters.decode_wall.total >= Duration::from_millis(100));
+    assert_eq!(
+        report.counters.worker_submission.total,
+        Duration::from_millis(1)
+    );
+    assert_eq!(
+        report.counters.worker_pending.total,
+        Duration::from_millis(1)
+    );
+    assert_eq!(
+        report.counters.worker_finish.total,
+        Duration::from_millis(1)
+    );
+    assert_eq!(report.counters.overlapped_submissions, 1);
 }
 
 #[test]
@@ -443,4 +461,175 @@ fn destroyed_or_withdrawn_surface_can_reenter_ready_queue_exactly_once() {
                 .is_empty()
         );
     }
+}
+
+#[test]
+fn lookahead_is_one_commit_and_out_of_order_results_still_apply_in_order() {
+    let (mut port, transport, decoder) = destination_port();
+    decoder.borrow_mut().capacity = Some(8);
+    port.state.as_mut().expect("state").fake_import = true;
+    let surface = surface(ClientSourceId::new(1), 1, 1);
+    for sequence in 0..3 {
+        queue(&transport, surface, sequence + 1, &[frame(1, 1, sequence)]);
+    }
+    port.poll().expect("lookahead");
+    assert_eq!(
+        decoder.borrow().submitted,
+        vec![frame(1, 1, 0), frame(1, 1, 1)]
+    );
+    complete_decode(&decoder, 1);
+    assert!(port.poll().expect("hold future result").is_empty());
+    assert_eq!(decoder.borrow().submitted.len(), 2);
+    complete_decode(&decoder, 0);
+    let records = port.poll().expect("apply ordered prefix");
+    let revisions = records
+        .iter()
+        .map(|record| match &record.event {
+            DestinationPortEvent::Surface(ClientSurfaceEvent {
+                kind: ClientSurfaceEventKind::Commit(commit),
+                ..
+            }) => commit.revision,
+            _ => panic!("unexpected event"),
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        revisions,
+        vec![ClientCommitRevision::new(1), ClientCommitRevision::new(2)]
+    );
+    assert_eq!(decoder.borrow().submitted[2], frame(1, 1, 2));
+    port.state
+        .as_mut()
+        .expect("state")
+        .cancel_surface(surface)
+        .expect("cancel last frame");
+    complete_decode(&decoder, 2);
+    assert!(
+        port.poll()
+            .expect("discard cancelled completion")
+            .is_empty()
+    );
+}
+
+#[test]
+fn lookahead_never_passes_missing_media_or_structural_barriers() {
+    for barrier in 0..6 {
+        let (mut port, transport, decoder) = destination_port();
+        decoder.borrow_mut().capacity = Some(8);
+        let surface = surface(ClientSourceId::new(1), 1, 1);
+        queue(&transport, surface, 1, &[frame(1, 1, 0)]);
+        queue(&transport, surface, 2, &[frame(1, 1, 1)]);
+        queue(&transport, surface, 3, &[frame(1, 1, 2)]);
+        if barrier == 0 {
+            let missing = transport
+                .borrow_mut()
+                .incoming
+                .remove(1)
+                .expect("first media");
+            port.poll().expect("media missing");
+            assert!(decoder.borrow().submitted.is_empty());
+            transport.borrow_mut().incoming.push_back(missing);
+            port.poll().expect("late earlier media enables lookahead");
+            assert_eq!(decoder.borrow().submitted.len(), 2);
+        } else {
+            {
+                let mut incoming = transport.borrow_mut();
+                let SourceTransportPacket::Control(SourceEnvelope {
+                    message: SourceMessage::Surface(event),
+                    ..
+                }) = &mut incoming.incoming[2]
+                else {
+                    panic!("second control");
+                };
+                let WireClientSurfaceEventKind::Commit(commit) = &mut event.kind else {
+                    panic!("commit");
+                };
+                match barrier {
+                    1 => commit.mapped = false,
+                    2 => {
+                        commit.buffers[0].change = WireSurfaceBufferChange::Retained {
+                            metadata: ClientBufferMetadata::new(Extent::new(1, 1), true),
+                        }
+                    }
+                    3 => commit.buffers[0].layer = SurfaceLayerId::new(2),
+                    4 => {
+                        if let WireSurfaceBufferChange::Replaced { buffer, .. } =
+                            &mut commit.buffers[0].change
+                        {
+                            buffer.frame = frame(1, 2, 0);
+                        }
+                    }
+                    5 => {
+                        if let WireSurfaceBufferChange::Replaced { metadata, .. } =
+                            &mut commit.buffers[0].change
+                        {
+                            *metadata = ClientBufferMetadata::new(Extent::new(2, 1), true);
+                        }
+                    }
+                    _ => panic!("case"),
+                }
+            }
+            port.poll().expect("stop at barrier");
+            assert_eq!(decoder.borrow().submitted, vec![frame(1, 1, 0)]);
+        }
+    }
+}
+
+#[test]
+fn non_commit_successor_is_not_decode_lookahead() {
+    let surface = surface(ClientSourceId::new(1), 1, 1);
+    let first = tree(surface, 1, &[frame(1, 1, 0)]);
+    let next = WireClientSurfaceEvent {
+        surface,
+        kind: WireClientSurfaceEventKind::Destroyed,
+    };
+    assert!(!compatible_decode_lookahead(&first, &next));
+}
+
+#[test]
+fn lookahead_preserves_round_robin_and_cancels_all_prefetched_frames() {
+    let (mut port, transport, decoder) = destination_port();
+    decoder.borrow_mut().capacity = Some(0);
+    for sequence in 0..2 {
+        for stream in 1..=3 {
+            queue(
+                &transport,
+                surface(ClientSourceId::new(1), 1, stream),
+                sequence + 1,
+                &[frame(stream, 1, sequence)],
+            );
+        }
+    }
+    port.poll().expect("all backlogged");
+    decoder.borrow_mut().capacity = Some(8);
+    port.poll().expect("two fair passes");
+    assert_eq!(
+        decoder.borrow().submitted,
+        vec![
+            frame(1, 1, 0),
+            frame(2, 1, 0),
+            frame(3, 1, 0),
+            frame(1, 1, 1),
+            frame(2, 1, 1),
+            frame(3, 1, 1)
+        ]
+    );
+    for stream in 1..=3 {
+        port.state
+            .as_mut()
+            .expect("state")
+            .cancel_surface(surface(ClientSourceId::new(1), 1, stream))
+            .expect("cancel");
+    }
+    for index in (0..6).rev() {
+        complete_decode(&decoder, index);
+    }
+    assert!(port.poll().expect("cancelled lookahead").is_empty());
+    assert!(port.state.as_ref().expect("state").decoded.is_empty());
+    assert!(
+        port.state
+            .as_ref()
+            .expect("state")
+            .decode_in_flight
+            .is_empty()
+    );
 }

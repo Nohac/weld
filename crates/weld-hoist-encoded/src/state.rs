@@ -13,8 +13,8 @@ use weld_client::{
     ClientBufferId, ClientBufferLease, ClientBufferMetadata, ClientBufferUseId,
     ClientCommitRevision, ClientRequest, ClientSourceDescriptor, ClientSurfaceEvent,
     ClientSurfaceEventKind, ClientSurfaceId, ClientSurfaceRequestKind, SurfaceAlphaMode,
-    SurfaceBufferChange, SurfaceLayerId, WireClientSurfaceEvent, WireClientSurfaceEventKind,
-    WireSurfaceBufferChange,
+    SurfaceBufferChange, SurfaceLayerId, WireClientSurfaceCommit, WireClientSurfaceEvent,
+    WireClientSurfaceEventKind, WireSurfaceBufferChange,
 };
 use weld_core::dmabuf::{DirectClientBufferAccess, DmabufContext, export_client_dmabuf};
 use weld_hoist_core::{
@@ -1275,11 +1275,26 @@ impl EncodedDestinationState {
                             queue_wait: timing
                                 .started_at
                                 .saturating_duration_since(timing.queued_at),
-                            execution: timing
+                            residence: timing
                                 .completed_at
                                 .saturating_duration_since(timing.started_at),
                             handoff: now.saturating_duration_since(timing.completed_at),
                         });
+                    if let Some(pipeline) = timing.pipeline {
+                        self.observations
+                            .record(DestinationObservation::PipelineTiming {
+                                submission: pipeline
+                                    .submitted_at
+                                    .saturating_duration_since(timing.started_at),
+                                pending: pipeline
+                                    .finishing_at
+                                    .saturating_duration_since(pipeline.submitted_at),
+                                finish: timing
+                                    .completed_at
+                                    .saturating_duration_since(pipeline.finishing_at),
+                                overlapped: pipeline.had_pending_frame,
+                            });
+                    }
                 }
                 tracing::trace!(frame = ?frame.frame, decode_micros = wall_time.as_micros(),
                     "completed encoded destination decode");
@@ -1478,6 +1493,23 @@ impl EncodedDestinationState {
                     continue;
                 }
                 let session = front.session;
+                // One successor may be decoded ahead, never applied ahead. Do
+                // not bypass missing earlier media or a structural boundary.
+                let frames = if frames.iter().all(|frame| {
+                    self.decoded.contains_key(frame)
+                        || self
+                            .decode_in_flight
+                            .values()
+                            .any(|job| job.frame == *frame)
+                }) && let Some(next) =
+                    self.queues.get(&surface).and_then(|queue| queue.get(1))
+                    && next.session == session
+                    && compatible_decode_lookahead(&front.event, &next.event)
+                {
+                    encoded_frames(&next.event)
+                } else {
+                    frames
+                };
                 for frame in frames {
                     if self.decoded.contains_key(&frame)
                         || self.decode_in_flight.values().any(|job| job.frame == frame)
@@ -1887,6 +1919,71 @@ fn mark_encoded_buffers_opaque(event: &mut WireClientSurfaceEvent<EncodedBuffer>
             metadata.opaque = true;
         }
     }
+}
+
+fn compatible_decode_lookahead(
+    first: &WireClientSurfaceEvent<EncodedBuffer>,
+    next: &WireClientSurfaceEvent<EncodedBuffer>,
+) -> bool {
+    let (WireClientSurfaceEventKind::Commit(first), WireClientSurfaceEventKind::Commit(next)) =
+        (&first.kind, &next.kind)
+    else {
+        return false;
+    };
+    // Exhaustive bindings force new wire fields to receive a policy decision.
+    // enqueue already requires Discarded alpha; revision changes are expected.
+    let WireClientSurfaceCommit {
+        revision: _,
+        alpha_mode: _,
+        mapped,
+        root,
+        window_geometry,
+        overlays,
+        inputs,
+        buffers,
+    } = first;
+    let WireClientSurfaceCommit {
+        revision: _,
+        alpha_mode: _,
+        mapped: next_mapped,
+        root: next_root,
+        window_geometry: next_geometry,
+        overlays: next_overlays,
+        inputs: next_inputs,
+        buffers: next_buffers,
+    } = next;
+    *mapped
+        && *next_mapped
+        && root == next_root
+        && window_geometry == next_geometry
+        && overlays == next_overlays
+        && inputs == next_inputs
+        && buffers.len() == next_buffers.len()
+        && buffers.iter().zip(next_buffers).all(|(first, next)| {
+            first.layer == next.layer
+                && match (&first.change, &next.change) {
+                    (
+                        WireSurfaceBufferChange::Replaced {
+                            metadata: old,
+                            buffer: old_frame,
+                        },
+                        WireSurfaceBufferChange::Replaced {
+                            metadata: new,
+                            buffer: new_frame,
+                        },
+                    ) => {
+                        old == new
+                            && old_frame.frame.stream == new_frame.frame.stream
+                            && old_frame.frame.generation == new_frame.frame.generation
+                    }
+                    (
+                        WireSurfaceBufferChange::Replaced { metadata: old, .. }
+                        | WireSurfaceBufferChange::Retained { metadata: old },
+                        WireSurfaceBufferChange::Retained { metadata: new },
+                    ) => old == new,
+                    _ => false,
+                }
+        })
 }
 
 fn take_counter(counter: &mut Option<u64>, name: &str) -> Result<u64> {

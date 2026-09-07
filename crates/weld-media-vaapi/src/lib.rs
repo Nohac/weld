@@ -20,8 +20,8 @@ pub use decoder_pool::{
 pub use device::VaapiDevice;
 pub use dmabuf::{VaapiDmabuf, VaapiDmabufObject, VaapiDmabufPlane};
 pub use ffmpeg::{
-    DecodedPacket, EncodedPacket, FfmpegDecoder, FfmpegEncodeDevice, FfmpegEncoder,
-    FfmpegVaapiDevice, VaapiEncoderSettings,
+    DecodeConversionTiming, DecodedPacket, EncodedPacket, FfmpegDecoder, FfmpegEncodeDevice,
+    FfmpegEncoder, FfmpegVaapiDevice, PendingDecodedFrame, VaapiEncoderSettings,
 };
 #[cfg(feature = "diagnostic")]
 pub use h264::{

@@ -6,6 +6,7 @@ use std::{
     path::Path,
     ptr,
     rc::Rc,
+    time::{Duration, Instant},
 };
 
 use anyhow::{Context, Result, ensure};
@@ -43,6 +44,11 @@ struct VppGeometry {
     output_region: (u32, u32),
 }
 
+pub(crate) struct VppStageTiming {
+    pub setup: Duration,
+    pub sync: Duration,
+}
+
 impl VppConverter {
     pub(crate) fn new(display: Rc<Display>) -> Result<Self> {
         let config = display
@@ -76,6 +82,26 @@ impl VppConverter {
         output_height: u32,
         output: VppOutput,
     ) -> Result<VaapiDmabuf> {
+        self.convert_scaled_timed(
+            input,
+            source_width,
+            source_height,
+            output_width,
+            output_height,
+            output,
+        )
+        .map(|(dmabuf, _)| dmabuf)
+    }
+
+    pub(crate) fn convert_scaled_timed(
+        &self,
+        input: &VaapiDmabuf,
+        source_width: u32,
+        source_height: u32,
+        output_width: u32,
+        output_height: u32,
+        output: VppOutput,
+    ) -> Result<(VaapiDmabuf, VppStageTiming)> {
         self.convert_regions(
             input,
             VppGeometry {
@@ -110,6 +136,7 @@ impl VppConverter {
             },
             output,
         )
+        .map(|(dmabuf, _)| dmabuf)
     }
 
     fn convert_regions(
@@ -117,7 +144,8 @@ impl VppConverter {
         input: &VaapiDmabuf,
         geometry: VppGeometry,
         output: VppOutput,
-    ) -> Result<VaapiDmabuf> {
+    ) -> Result<(VaapiDmabuf, VppStageTiming)> {
+        let started_at = Instant::now();
         let (source_width, source_height) = geometry.source;
         let (output_width, output_height) = geometry.output;
         let (output_region_width, output_region_height) = geometry.output_region;
@@ -171,10 +199,10 @@ impl VppConverter {
                 self.process(
                     input_surface,
                     output_surface,
-                    (source_width, source_height),
-                    (output_region_width, output_region_height),
+                    geometry,
                     VA_COLOR_SRGB,
                     VA_COLOR_BT709,
+                    started_at,
                 )
             }
             VppOutput::Xrgb8888 { modifiers } => {
@@ -196,10 +224,10 @@ impl VppConverter {
                 self.process(
                     input_surface,
                     output_surface,
-                    (source_width, source_height),
-                    (output_region_width, output_region_height),
+                    geometry,
                     VA_COLOR_BT709,
                     VA_COLOR_SRGB,
+                    started_at,
                 )
             }
         }
@@ -449,15 +477,17 @@ impl VppConverter {
         &self,
         input: Surface<I>,
         output: Vec<Surface<O>>,
-        source_size: (u32, u32),
-        output_region_size: (u32, u32),
+        geometry: VppGeometry,
         input_color_standard: u32,
         output_color_standard: u32,
-    ) -> Result<VaapiDmabuf>
+        started_at: Instant,
+    ) -> Result<(VaapiDmabuf, VppStageTiming)>
     where
         I: SurfaceMemoryDescriptor,
         O: SurfaceMemoryDescriptor,
     {
+        let source_size = geometry.source;
+        let output_region_size = geometry.output_region;
         let output_surface = output
             .first()
             .context("VA-API did not create a VPP output surface")?;
@@ -532,14 +562,20 @@ impl VppConverter {
         // SAFETY: the matching picture was begun above and all resources remain live.
         check_status(unsafe { vaEndPicture(self.display.as_raw(), context.as_raw()) })
             .context("could not end VPP picture")?;
+        let sync_started = Instant::now();
         output_surface
             .sync()
             .context("could not synchronize VPP output")?;
-        VaapiDmabuf::from_prime(
+        let timing = VppStageTiming {
+            setup: sync_started.saturating_duration_since(started_at),
+            sync: sync_started.elapsed(),
+        };
+        let dmabuf = VaapiDmabuf::from_prime(
             output_surface
                 .export_prime()
                 .context("could not export VPP output DMA-BUF")?,
-        )
+        )?;
+        Ok((dmabuf, timing))
     }
 }
 

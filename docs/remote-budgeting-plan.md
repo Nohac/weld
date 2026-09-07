@@ -58,11 +58,13 @@ are deliberately distinct and **overlap**, so do not add them:
   including any wait for control metadata and earlier work;
 - `decode_wall`: accepted submission to matching successful completion drain,
   including worker processing and host polling;
-- `worker_queue`, `worker_execution`, and `completion_handoff`: optional local
-  worker timing splits, respectively accepted worker enqueue to execution start,
-  execution including decode/VPP, and completion to host drain. These split the
-  local path, not GPU-only time or network latency; compare their sample count
-  with successful decodes before interpreting totals;
+- `worker_queue`, `worker_residence`, and `completion_handoff`: optional local
+  worker timing splits, respectively accepted enqueue to submission start,
+  residence through completion, and completion to host drain. Residence replaces
+  the former execution field because decode-ahead overlaps jobs. Pipeline samples
+  additionally report submission, pending-before-finish and finish wall times,
+  plus submissions made with an older native job pending. These are not GPU-only
+  counters; compare sample counts and never sum overlapping jobs as utilization;
 - `commit_wall`: control ingress through decoded-buffer import and queuing the
   adapter event. This is not actual presentation or acknowledgement delivery.
 

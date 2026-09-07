@@ -1,10 +1,10 @@
-use std::path::PathBuf;
+use std::{collections::VecDeque, path::PathBuf, time::Instant};
 
 use anyhow::{Context, Result, ensure};
 use weld_media::{EncodedFrameKind, VideoCodec};
 use weld_media_vaapi::{
-    FfmpegDecoder, FfmpegEncodeDevice, FfmpegEncoder, FfmpegVaapiDevice, VaapiDevice, VaapiDmabuf,
-    VaapiEncoderSettings, VppConverter,
+    EncodedPacket, FfmpegDecoder, FfmpegEncodeDevice, FfmpegEncoder, FfmpegVaapiDevice,
+    VaapiDevice, VaapiDmabuf, VaapiEncoderSettings, VppConverter,
 };
 
 const WIDTH: u32 = 944;
@@ -31,8 +31,7 @@ fn main() -> Result<()> {
         let settings = VaapiEncoderSettings::try_new(codec, bitrate, 60, 32)?;
         let geometry = device.encode_geometry(codec)?;
         let mut encoder = FfmpegEncoder::new(settings, geometry, &ffmpeg_encode, WIDTH, HEIGHT)?;
-        let mut decoder = FfmpegDecoder::new(codec, &ffmpeg_vaapi)?;
-        let mut decoded_count = 0;
+        let mut packets = Vec::new();
 
         for sequence in 0..FRAME_COUNT {
             let source = device.create_xrgb_probe_frame(
@@ -55,56 +54,105 @@ fn main() -> Result<()> {
                     "new codec generation did not begin with a keyframe"
                 );
             }
-            let decoded = decoder.decode_and_convert(
-                &packet.payload,
-                packet.timestamp_micros,
-                WIDTH,
-                HEIGHT,
-                &[0],
-                &vpp,
-            )?;
-            ensure!(
-                decoded.len() == 1,
-                "{codec:?} did not produce exactly one decoded frame per packet"
-            );
-            let frame = decoded.into_iter().next().context("decoded frame absent")?;
-            ensure!(
-                frame.timestamp_micros == timestamp_micros,
-                "decoder changed the frame timestamp"
-            );
-            ensure!(
-                frame.dmabuf.width == WIDTH && frame.dmabuf.height == HEIGHT,
-                "decoder did not crop coded storage to the visible extent"
-            );
-            ensure!(
-                frame.dmabuf.fourcc == DRM_FORMAT_XRGB8888,
-                "decoder VPP output is not XRGB8888"
-            );
-            validate_pixels(
-                &vpp,
-                &frame.dmabuf,
-                WIDTH,
-                HEIGHT,
-                u8::try_from(sequence * 17)?,
-            )?;
-            decoded_count += 1;
-            println!(
-                "codec={codec:?} frame={sequence} kind={:?} bytes={}",
-                packet.kind,
-                packet.payload.len()
-            );
+            packets.push(packet);
         }
-        ensure!(
-            decoded_count == FRAME_COUNT,
-            "{codec:?} round trip lost frames"
-        );
         println!(
-            "codec={codec:?} one-packet-per-frame=true decoded-frames={decoded_count} visible={WIDTH}x{HEIGHT}"
+            "codec={codec:?} A/B: identical pre-encoded packets, depths1,2,2,1 to compare both orders; always-backlogged best case, NOT 60fps pacing or a full benchmark. Depth1 reserves one extra hardware frame, so is NOT the previous binary. Decoder open excluded; frame0 includes startup allocations. Pixel readback/printing excluded from replay time."
         );
+        for (pass, depth) in [1, 2, 2, 1].into_iter().enumerate() {
+            replay(&packets, codec, pass, depth, &ffmpeg_vaapi, &vpp)?;
+        }
     }
 
     validate_small_av1_popup(&device, &vpp, &ffmpeg_encode, &ffmpeg_vaapi)?;
     validate_encoder_generation_reuse(&device, &ffmpeg_encode)?;
+    Ok(())
+}
+
+fn replay(
+    packets: &[EncodedPacket],
+    codec: VideoCodec,
+    pass: usize,
+    depth: usize,
+    device: &FfmpegVaapiDevice,
+    vpp: &VppConverter,
+) -> Result<()> {
+    let mut decoder = FfmpegDecoder::new(codec, device, depth)?;
+    let mut pending = VecDeque::new();
+    let mut output = Vec::new();
+    let replay_started = Instant::now();
+    for (sequence, packet) in packets.iter().enumerate() {
+        let started = Instant::now();
+        let frame = decoder.submit(&packet.payload, packet.timestamp_micros)?;
+        let submitted = Instant::now();
+        pending.push_back((sequence, frame, started, submitted));
+        if pending.len() == depth {
+            let (sequence, frame, started, submitted) =
+                pending.pop_front().context("pending frame missing")?;
+            let finishing = Instant::now();
+            let decoded = frame.finish(WIDTH, HEIGHT, &[0], vpp)?;
+            output.push((
+                sequence,
+                decoded,
+                submitted.duration_since(started),
+                finishing.duration_since(submitted),
+                started.elapsed(),
+            ));
+        }
+    }
+    // Includes the final prefetched frame, with exactly the same validation.
+    for (sequence, frame, started, submitted) in pending {
+        let finishing = Instant::now();
+        let decoded = frame.finish(WIDTH, HEIGHT, &[0], vpp)?;
+        output.push((
+            sequence,
+            decoded,
+            submitted.duration_since(started),
+            finishing.duration_since(submitted),
+            started.elapsed(),
+        ));
+    }
+    let elapsed = replay_started.elapsed();
+    ensure!(
+        output.len() == packets.len(),
+        "{codec:?} depth{depth} lost frames"
+    );
+    for (sequence, frame, submission, pending, residence) in output {
+        ensure!(
+            frame.timestamp_micros == packets[sequence].timestamp_micros,
+            "decoder changed timestamp"
+        );
+        ensure!(
+            frame.dmabuf.width == WIDTH && frame.dmabuf.height == HEIGHT,
+            "decoder changed visible extent"
+        );
+        ensure!(
+            frame.dmabuf.fourcc == DRM_FORMAT_XRGB8888,
+            "decoder VPP output is not XRGB8888"
+        );
+        validate_pixels(
+            vpp,
+            &frame.dmabuf,
+            WIDTH,
+            HEIGHT,
+            u8::try_from(sequence * 17)?,
+        )?;
+        println!(
+            "codec={codec:?} pass={pass} depth={depth} frame={sequence} startup={} submission_us={} pending_us={} decode_sync_us={} conversion_setup_us={} conversion_sync_us={} residence_us={} pixels_valid=true",
+            sequence == 0,
+            submission.as_micros(),
+            pending.as_micros(),
+            frame.timing.decode_sync.as_micros(),
+            frame.timing.conversion_setup.as_micros(),
+            frame.timing.conversion_sync.as_micros(),
+            residence.as_micros()
+        );
+    }
+    println!(
+        "codec={codec:?} pass={pass} depth={depth} decoded_frames={} replay_us={} visible={WIDTH}x{HEIGHT}",
+        packets.len(),
+        elapsed.as_micros()
+    );
     Ok(())
 }
 
@@ -157,22 +205,12 @@ fn validate_small_av1_popup(
     let settings = VaapiEncoderSettings::try_new(VideoCodec::Av1, 8_000_000, 60, 32)?;
     let geometry = device.encode_geometry(VideoCodec::Av1)?;
     let mut encoder = FfmpegEncoder::new(settings, geometry, ffmpeg_encode, WIDTH, HEIGHT)?;
-    let mut decoder = FfmpegDecoder::new(VideoCodec::Av1, ffmpeg_vaapi)?;
+    let mut decoder = FfmpegDecoder::new(VideoCodec::Av1, ffmpeg_vaapi, 1)?;
     let source = device.create_xrgb_probe_frame(WIDTH, HEIGHT, vec![0], SEED)?;
     let packet = encoder.encode(source, 0)?;
-    let decoded = decoder.decode_and_convert(
-        &packet.payload,
-        packet.timestamp_micros,
-        WIDTH,
-        HEIGHT,
-        &[0],
-        vpp,
-    )?;
-    ensure!(
-        decoded.len() == 1,
-        "small AV1 popup did not produce exactly one decoded frame"
-    );
-    let frame = decoded.into_iter().next().context("decoded frame absent")?;
+    let frame = decoder
+        .submit(&packet.payload, packet.timestamp_micros)?
+        .finish(WIDTH, HEIGHT, &[0], vpp)?;
     ensure!(
         frame.coded_width == WIDTH && frame.coded_height == 128,
         "small AV1 popup was not padded to the expected hardware coded extent"

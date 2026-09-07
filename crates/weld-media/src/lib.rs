@@ -10,4 +10,4 @@ mod timing;
 
 pub use frame::{EncodedAccessUnit, EncodedFrameKind, VideoCodec};
 pub use id::{MediaFrameId, MediaStreamId, StreamGeneration};
-pub use timing::DecodeTiming;
+pub use timing::{DecodePipelineTiming, DecodeTiming};

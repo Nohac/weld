@@ -4,12 +4,13 @@
 //! their codec contexts retire promptly without needing another frame.
 
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, VecDeque},
     panic::{AssertUnwindSafe, catch_unwind},
     path::PathBuf,
     sync::{
         Arc, Mutex,
-        mpsc::{self, Receiver, Sender, SyncSender, TrySendError},
+        atomic::{AtomicBool, Ordering},
+        mpsc::{self, Receiver, Sender, SyncSender, TryRecvError, TrySendError},
     },
     thread::{self, JoinHandle},
     time::Instant,
@@ -17,12 +18,13 @@ use std::{
 
 use anyhow::{Context, Result, ensure};
 use weld_media::{
-    DecodeTiming, EncodedAccessUnit, MediaFrameId, MediaStreamId, StreamGeneration, VideoCodec,
+    DecodePipelineTiming, DecodeTiming, EncodedAccessUnit, MediaFrameId, MediaStreamId,
+    StreamGeneration, VideoCodec,
 };
 
 use crate::{
-    FfmpegDecoder, FfmpegVaapiDevice, VaapiDevice, VaapiDmabuf, VaapiWorkerSubmitError,
-    VppConverter,
+    FfmpegDecoder, FfmpegVaapiDevice, PendingDecodedFrame, VaapiDevice, VaapiDmabuf,
+    VaapiWorkerSubmitError, VppConverter,
 };
 
 type GenerationKey = (MediaStreamId, StreamGeneration);
@@ -31,28 +33,42 @@ type Factory = Arc<dyn Fn() -> Result<Box<dyn Processor>> + Send + Sync>;
 
 /// Conservative execution limits for ONE connection, not calibrated hardware
 /// capacity. Multiple connections multiply these limits. `max_jobs` can reduce
-/// concurrency below the worker count; each worker accepts only one job at once.
+/// concurrency below workers * depth. Completed but undrained jobs stay charged.
 #[derive(Clone, Copy, Debug)]
 pub struct DecodePoolLimits {
     max_workers: usize,
     max_jobs: usize,
     max_generations: usize,
+    depth: usize,
 }
 
 impl DecodePoolLimits {
-    pub fn try_new(max_workers: usize, max_jobs: usize, max_generations: usize) -> Result<Self> {
+    pub fn try_new(
+        max_workers: usize,
+        max_jobs: usize,
+        max_generations: usize,
+        depth: usize,
+    ) -> Result<Self> {
         ensure!(
             max_workers > 0 && max_jobs > 0 && max_generations > 0,
             "decoder pool limits must be positive"
         );
         ensure!(
-            max_jobs <= max_workers && max_workers <= max_generations,
-            "decoder pool requires jobs <= workers <= generations"
+            (1..=2).contains(&depth),
+            "decoder pipeline depth must be one or two"
+        );
+        let capacity = max_workers
+            .checked_mul(depth)
+            .context("decoder job capacity overflow")?;
+        ensure!(
+            max_jobs <= capacity && max_workers <= max_generations,
+            "decoder pool requires jobs <= workers * depth and workers <= generations"
         );
         Ok(Self {
             max_workers,
             max_jobs,
             max_generations,
+            depth,
         })
     }
 }
@@ -61,8 +77,9 @@ impl Default for DecodePoolLimits {
     fn default() -> Self {
         Self {
             max_workers: 4,
-            max_jobs: 4,
+            max_jobs: 8,
             max_generations: 16,
+            depth: 2,
         }
     }
 }
@@ -99,9 +116,15 @@ struct Generation {
 
 struct Worker {
     commands: Option<SyncSender<Command>>,
-    retirements: Arc<Mutex<HashSet<GenerationKey>>>,
-    job: Option<Job>,
+    retirements: Arc<RetirementMailbox>,
+    jobs: VecDeque<Job>,
     thread: Option<JoinHandle<()>>,
+}
+
+#[derive(Default)]
+struct RetirementMailbox {
+    keys: Mutex<HashSet<GenerationKey>>,
+    wake_queued: AtomicBool,
 }
 
 enum Command {
@@ -116,7 +139,9 @@ enum Event {
 }
 
 trait Processor {
-    fn decode(&mut self, request: VaapiDecodeRequest) -> Result<Vec<VaapiDecodedFrame>>;
+    // Every submission occupies one FIFO slot, including failed submissions.
+    fn submit(&mut self, request: VaapiDecodeRequest);
+    fn complete(&mut self) -> Result<Vec<VaapiDecodedFrame>>;
     fn retire(&mut self, key: GenerationKey);
 }
 
@@ -153,6 +178,9 @@ impl VaapiDecodeWorker {
                     vpp: device.vpp_converter()?,
                     device: FfmpegVaapiDevice::open(&render_node)?,
                     sessions: HashMap::new(),
+                    pending: VecDeque::new(),
+                    poisoned: HashMap::new(),
+                    depth: limits.depth,
                 }))
             }),
             Arc::new(notify),
@@ -197,8 +225,8 @@ impl VaapiDecodeWorker {
             || self
                 .workers
                 .iter()
-                .filter(|worker| worker.job.is_some())
-                .count()
+                .map(|worker| worker.jobs.len())
+                .sum::<usize>()
                 >= self.limits.max_jobs
             || (!self.generations.contains_key(&key)
                 && self.generations.len() >= self.limits.max_generations)
@@ -222,7 +250,7 @@ impl VaapiDecodeWorker {
                 }
             },
         };
-        if self.workers[worker].job.is_some() {
+        if self.workers[worker].jobs.len() >= self.limits.depth {
             return Err(VaapiWorkerSubmitError::Busy(Box::new(request)));
         }
         let job = Job {
@@ -234,7 +262,7 @@ impl VaapiDecodeWorker {
         };
         match sender.try_send(Command::Decode(request, Instant::now())) {
             Ok(()) => {
-                self.workers[worker].job = Some(job);
+                self.workers[worker].jobs.push_back(job);
                 let inserted = self
                     .generations
                     .insert(
@@ -279,12 +307,14 @@ impl VaapiDecodeWorker {
         }
         if self.workers.len() < self.limits.max_workers {
             let index = self.workers.len();
-            let (sender, receiver) = mpsc::sync_channel(1);
-            let retirements = Arc::new(Mutex::new(HashSet::new()));
+            // One additional slot is exclusively headroom for the coalesced Wake.
+            let (sender, receiver) = mpsc::sync_channel(self.limits.depth + 1);
+            let retirements = Arc::new(RetirementMailbox::default());
             let worker_retirements = retirements.clone();
             let events = self.event_sender.clone();
             let notify = self.notify.clone();
             let factory = self.factory.clone();
+            let depth = self.limits.depth;
             let thread = thread::Builder::new()
                 .name(format!("weld-vaapi-decode-{index}"))
                 .spawn(move || {
@@ -296,6 +326,7 @@ impl VaapiDecodeWorker {
                             &events,
                             &notify,
                             &factory,
+                            depth,
                         )
                     }));
                     let error = match result {
@@ -312,7 +343,7 @@ impl VaapiDecodeWorker {
             self.workers.push(Worker {
                 commands: Some(sender),
                 retirements,
-                job: None,
+                jobs: VecDeque::new(),
                 thread: Some(thread),
             });
             Ok(Some(index))
@@ -320,7 +351,7 @@ impl VaapiDecodeWorker {
             Ok(owned
                 .iter()
                 .enumerate()
-                .filter(|(index, _)| self.workers[*index].job.is_none())
+                .filter(|(index, _)| self.workers[*index].jobs.len() < self.limits.depth)
                 .min_by_key(|(_, count)| **count)
                 .map(|(index, _)| index))
         }
@@ -345,9 +376,9 @@ impl VaapiDecodeWorker {
             if !generation.retiring
                 || generation.retirement_sent
                 || self.workers[generation.worker]
-                    .job
-                    .as_ref()
-                    .is_some_and(|job| (job.frame.stream, job.frame.generation) == key)
+                    .jobs
+                    .iter()
+                    .any(|job| (job.frame.stream, job.frame.generation) == key)
             {
                 continue;
             }
@@ -356,16 +387,29 @@ impl VaapiDecodeWorker {
             // command guarantees a retirement check before the next recv wait.
             worker
                 .retirements
+                .keys
                 .lock()
                 .map_err(|_| anyhow::anyhow!("decoder retirement lock poisoned"))?
                 .insert(key);
             generation.retirement_sent = true;
+            // Publish under the Mutex before signalling. Worker clears this
+            // SeqCst flag before locking/draining, so racing inserts cannot sleep.
+            if worker.retirements.wake_queued.swap(true, Ordering::SeqCst) {
+                continue;
+            }
             let sender = worker
                 .commands
                 .as_ref()
                 .context("decoder worker stopped before retirement")?;
             match sender.try_send(Command::Wake) {
-                Ok(()) | Err(TrySendError::Full(_)) => {}
+                Ok(()) => {}
+                Err(TrySendError::Full(_)) => {
+                    // Defensive only: <= depth Decodes + one coalesced Wake fit.
+                    worker
+                        .retirements
+                        .wake_queued
+                        .store(false, Ordering::SeqCst);
+                }
                 // A terminal event is forthcoming; drain preserves its full
                 // error rather than replacing it with a generic channel error.
                 Err(TrySendError::Disconnected(_)) => {}
@@ -384,10 +428,10 @@ impl VaapiDecodeWorker {
                     let valid = self
                         .workers
                         .get(worker)
-                        .and_then(|worker| worker.job.as_ref())
+                        .and_then(|worker| worker.jobs.front())
                         .is_some_and(|job| job.token == completion.token);
                     if valid {
-                        self.workers[worker].job = None;
+                        self.workers[worker].jobs.pop_front();
                         completions.push(completion);
                     } else {
                         self.fail(anyhow::anyhow!(
@@ -410,16 +454,14 @@ impl VaapiDecodeWorker {
                     }
                 }
                 Event::Failed(worker, error) => {
-                    if let Some(job) = self
-                        .workers
-                        .get_mut(worker)
-                        .and_then(|worker| worker.job.take())
-                    {
-                        completions.push(VaapiDecodeCompletion {
-                            token: job.token,
-                            result: Err(anyhow::anyhow!(format!("{error:#}"))),
-                            timing: None,
-                        });
+                    if let Some(worker) = self.workers.get_mut(worker) {
+                        for job in worker.jobs.drain(..) {
+                            completions.push(VaapiDecodeCompletion {
+                                token: job.token,
+                                result: Err(anyhow::anyhow!(format!("{error:#}"))),
+                                timing: None,
+                            });
+                        }
                     }
                     self.fail(error);
                 }
@@ -456,7 +498,7 @@ impl VaapiDecodeWorker {
             })
             .collect::<Vec<_>>();
         tracing::debug!(target: "weld_media_diag", workers = self.workers.len(),
-            max_workers = self.limits.max_workers, max_jobs = self.limits.max_jobs,
+            max_workers = self.limits.max_workers, max_jobs = self.limits.max_jobs, depth = self.limits.depth,
             generations = self.generations.len(), ?owned, "decoder pool ownership");
     }
 }
@@ -481,44 +523,82 @@ impl Drop for VaapiDecodeWorker {
 fn worker_loop(
     index: usize,
     commands: Receiver<Command>,
-    retirements: &Mutex<HashSet<GenerationKey>>,
+    retirements: &RetirementMailbox,
     events: &Sender<Event>,
     notify: &Notifier,
     factory: &Factory,
+    depth: usize,
 ) -> Result<()> {
     let mut processor = factory().context("could not initialize VA-API decoder worker")?;
+    let mut pending = VecDeque::new();
+    let mut closed = false;
     loop {
         apply_retirements(index, &mut *processor, retirements, events, notify)?;
-        let Ok(command) = commands.recv() else {
-            return Ok(());
-        };
-        apply_retirements(index, &mut *processor, retirements, events, notify)?;
-        match command {
-            Command::Wake => notify(), // Capacity recovered even for a stale Wake.
-            Command::Decode(request, queued_at) => {
-                let token = request.token;
-                let started_at = Instant::now();
-                let result = processor.decode(request);
-                let completed_at = Instant::now();
-                if events
-                    .send(Event::Decoded(
-                        index,
-                        VaapiDecodeCompletion {
-                            token,
-                            result,
-                            timing: Some(DecodeTiming {
-                                queued_at,
-                                started_at,
-                                completed_at,
-                            }),
-                        },
-                    ))
-                    .is_err()
-                {
-                    return Ok(());
+        while pending.len() < depth && !closed {
+            let command = if pending.is_empty() {
+                commands.recv().ok()
+            } else {
+                match commands.try_recv() {
+                    Ok(command) => Some(command),
+                    Err(TryRecvError::Empty) => break, // Never wait to fill a batch.
+                    Err(TryRecvError::Disconnected) => None,
                 }
-                notify();
+            };
+            let Some(command) = command else {
+                closed = true;
+                break;
+            };
+            if matches!(&command, Command::Wake) {
+                retirements.wake_queued.store(false, Ordering::SeqCst);
             }
+            apply_retirements(index, &mut *processor, retirements, events, notify)?;
+            match command {
+                Command::Wake => notify(),
+                Command::Decode(request, queued_at) => {
+                    let token = request.token;
+                    let started_at = Instant::now();
+                    processor.submit(request);
+                    pending.push_back((
+                        token,
+                        queued_at,
+                        started_at,
+                        DecodePipelineTiming {
+                            submitted_at: Instant::now(),
+                            finishing_at: started_at,
+                            had_pending_frame: !pending.is_empty(),
+                        },
+                    ));
+                }
+            }
+        }
+        // Closure means the owner is dropping and will never drain results.
+        // Retained AVFrames can be released without allocating/converting XRGB.
+        if closed {
+            return Ok(());
+        }
+        if let Some((token, queued_at, started_at, mut pipeline)) = pending.pop_front() {
+            pipeline.finishing_at = Instant::now();
+            let result = processor.complete();
+            let completed_at = Instant::now();
+            if events
+                .send(Event::Decoded(
+                    index,
+                    VaapiDecodeCompletion {
+                        token,
+                        result,
+                        timing: Some(DecodeTiming {
+                            queued_at,
+                            started_at,
+                            completed_at,
+                            pipeline: Some(pipeline),
+                        }),
+                    },
+                ))
+                .is_err()
+            {
+                return Ok(());
+            }
+            notify();
         }
     }
 }
@@ -526,11 +606,12 @@ fn worker_loop(
 fn apply_retirements(
     index: usize,
     processor: &mut dyn Processor,
-    retirements: &Mutex<HashSet<GenerationKey>>,
+    retirements: &RetirementMailbox,
     events: &Sender<Event>,
     notify: &Notifier,
 ) -> Result<()> {
     let keys = retirements
+        .keys
         .lock()
         .map_err(|_| anyhow::anyhow!("decoder retirement lock poisoned"))?
         .drain()
@@ -546,9 +627,22 @@ fn apply_retirements(
 }
 
 struct NativeProcessor {
+    // Hardware frames are released before the codec/device owners on shutdown.
+    pending: VecDeque<NativePending>,
+    poisoned: HashMap<GenerationKey, String>,
+    sessions: HashMap<GenerationKey, NativeSession>,
     vpp: VppConverter,
     device: FfmpegVaapiDevice,
-    sessions: HashMap<GenerationKey, NativeSession>,
+    depth: usize,
+}
+
+struct NativePending {
+    key: GenerationKey,
+    frame: MediaFrameId,
+    width: u32,
+    height: u32,
+    modifiers: Vec<u64>,
+    result: Result<PendingDecodedFrame>,
 }
 
 struct NativeSession {
@@ -556,13 +650,16 @@ struct NativeSession {
     codec: VideoCodec,
 }
 
-impl Processor for NativeProcessor {
-    fn decode(&mut self, request: VaapiDecodeRequest) -> Result<Vec<VaapiDecodedFrame>> {
+impl NativeProcessor {
+    fn prepare(&mut self, request: &VaapiDecodeRequest) -> Result<PendingDecodedFrame> {
         let frame = request.access_unit.frame;
         let key = (frame.stream, frame.generation);
+        if let Some(error) = self.poisoned.get(&key) {
+            anyhow::bail!(error.clone());
+        }
         if let std::collections::hash_map::Entry::Vacant(entry) = self.sessions.entry(key) {
             entry.insert(NativeSession {
-                decoder: FfmpegDecoder::new(request.access_unit.codec, &self.device)?,
+                decoder: FfmpegDecoder::new(request.access_unit.codec, &self.device, self.depth)?,
                 codec: request.access_unit.codec,
             });
         }
@@ -574,47 +671,67 @@ impl Processor for NativeProcessor {
             session.codec == request.access_unit.codec,
             "encoded stream generation changed codec without retirement"
         );
-        let result = session.decoder.decode_and_convert(
+        session.decoder.submit(
             &request.access_unit.payload,
             request.access_unit.timestamp_micros,
-            request.visible_width,
-            request.visible_height,
-            &request.xrgb_modifiers,
-            &self.vpp,
-        );
-        let decoded = match result {
-            Ok(decoded) => decoded,
-            Err(error) => {
-                self.sessions.remove(&key);
-                return Err(error);
-            }
-        };
-        ensure!(
-            decoded.len() == 1,
-            "low-delay decoder did not return exactly one frame"
-        );
-        decoded
-            .into_iter()
-            .map(|decoded| {
-                ensure!(
-                    decoded.timestamp_micros == request.access_unit.timestamp_micros,
-                    "decoder returned an unexpected timestamp"
-                );
-                ensure!(
-                    decoded.dmabuf.width == request.visible_width
-                        && decoded.dmabuf.height == request.visible_height,
-                    "decoded output extent differs from transported visible extent"
-                );
-                Ok(VaapiDecodedFrame {
-                    frame,
-                    dmabuf: decoded.dmabuf,
-                })
-            })
-            .collect()
+        )
+    }
+}
+
+impl Processor for NativeProcessor {
+    fn submit(&mut self, request: VaapiDecodeRequest) {
+        let frame = request.access_unit.frame;
+        let key = (frame.stream, frame.generation);
+        let result = self.prepare(&request);
+        if let Err(error) = &result {
+            self.poisoned
+                .entry(key)
+                .or_insert_with(|| format!("{error:#}"));
+        }
+        self.pending.push_back(NativePending {
+            key,
+            frame,
+            width: request.visible_width,
+            height: request.visible_height,
+            modifiers: request.xrgb_modifiers,
+            result,
+        });
+    }
+
+    fn complete(&mut self) -> Result<Vec<VaapiDecodedFrame>> {
+        let pending = self
+            .pending
+            .pop_front()
+            .context("native decoder FIFO is empty")?;
+        let result = pending.result.and_then(|frame| {
+            let decoded =
+                frame.finish(pending.width, pending.height, &pending.modifiers, &self.vpp)?;
+            ensure!(
+                decoded.dmabuf.width == pending.width && decoded.dmabuf.height == pending.height,
+                "decoded output extent differs from transported visible extent"
+            );
+            Ok(vec![VaapiDecodedFrame {
+                frame: pending.frame,
+                dmabuf: decoded.dmabuf,
+            }])
+        });
+        if let Err(error) = &result {
+            self.poisoned
+                .entry(pending.key)
+                .or_insert_with(|| format!("{error:#}"));
+        }
+        if self.poisoned.contains_key(&pending.key)
+            && !self.pending.iter().any(|queued| queued.key == pending.key)
+        {
+            self.sessions.remove(&pending.key);
+            self.poisoned.remove(&pending.key);
+        }
+        result
     }
 
     fn retire(&mut self, key: GenerationKey) {
         self.sessions.remove(&key);
+        self.poisoned.remove(&key);
     }
 }
 
