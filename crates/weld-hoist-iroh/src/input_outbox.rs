@@ -2,7 +2,11 @@
 //! Like ApplicationInputBuffer, only adjacent absolute motions can coalesce.
 //! Every other record (including PointerLeft) is an ordering barrier.
 
-use std::{collections::VecDeque, sync::Mutex};
+use std::{
+    collections::VecDeque,
+    sync::Mutex,
+    time::{Duration, Instant},
+};
 
 use anyhow::{Result, ensure};
 use tokio::sync::Notify;
@@ -17,16 +21,52 @@ pub(super) struct InputOutbox {
     ready: Notify,
 }
 
-#[derive(Default)]
 struct State {
     closed: bool,
-    records: VecDeque<DestinationEnvelope>,
+    records: VecDeque<QueuedRecord>,
     received: [u64; 5],
     coalesced: u64,
+    observations: InputObservations,
+    started: Instant,
+    last_report: Instant,
+}
+
+struct QueuedRecord {
+    packet: DestinationEnvelope,
+    /// Age of the latest retained event, not the first superseded motion.
+    enqueued_at: Instant,
+}
+
+#[derive(Clone, Copy, Default)]
+struct InputObservations {
+    motions_received: u64,
+    dequeued: u64,
+    writes_completed: u64,
+    motions_written: u64,
+    framed_bytes: u64,
+    queue_high_water: usize,
+    retained_wait_max: Duration,
+    write_wall_max: Duration,
+}
+
+impl Default for State {
+    fn default() -> Self {
+        let now = Instant::now();
+        Self {
+            closed: false,
+            records: VecDeque::new(),
+            received: [0; 5],
+            coalesced: 0,
+            observations: InputObservations::default(),
+            started: now,
+            last_report: now,
+        }
+    }
 }
 
 impl InputOutbox {
     pub fn push(&self, packet: DestinationEnvelope) -> Result<()> {
+        let enqueued_at = Instant::now();
         let mut state = self
             .state
             .lock()
@@ -40,10 +80,17 @@ impl InputOutbox {
             DestinationMessage::Reclaim => 4,
         };
         state.received[kind] = state.received[kind].saturating_add(1);
+        if is_pointer_motion(&packet) {
+            state.observations.motions_received =
+                state.observations.motions_received.saturating_add(1);
+        }
         if let Some(previous) = state.records.back_mut()
-            && compatible_motion(previous, &packet)
+            && compatible_motion(&previous.packet, &packet)
         {
-            *previous = packet;
+            *previous = QueuedRecord {
+                packet,
+                enqueued_at,
+            };
             state.coalesced = state.coalesced.saturating_add(1);
             return Ok(());
         }
@@ -57,7 +104,12 @@ impl InputOutbox {
             state.coalesced
         );
         let wake = state.records.is_empty();
-        state.records.push_back(packet);
+        state.records.push_back(QueuedRecord {
+            packet,
+            enqueued_at,
+        });
+        state.observations.queue_high_water =
+            state.observations.queue_high_water.max(state.records.len());
         drop(state);
         if wake {
             self.ready.notify_one();
@@ -76,12 +128,68 @@ impl InputOutbox {
                     .map_err(|_| anyhow::anyhow!("Iroh input outbox lock is poisoned"))?;
                 ensure!(!state.closed, "Iroh input outbox is closed");
                 if let Some(packet) = state.records.pop_front() {
-                    return Ok(packet);
+                    state.observations.dequeued = state.observations.dequeued.saturating_add(1);
+                    state.observations.retained_wait_max = state
+                        .observations
+                        .retained_wait_max
+                        .max(packet.enqueued_at.elapsed());
+                    return Ok(packet.packet);
                 }
             }
             // notify_one stores a permit if push/close races this await.
             self.ready.notified().await;
         }
+    }
+
+    /// Completion is local stream acceptance, not peer receipt or application.
+    /// Failed writes do not count. Diagnostics never change transport outcomes.
+    pub fn record_written(&self, packet: &DestinationEnvelope, bytes: usize, wall: Duration) {
+        let diagnostics_enabled =
+            tracing::enabled!(target: "weld_network_diag", tracing::Level::DEBUG);
+        let report = {
+            let Ok(mut state) = self.state.lock() else {
+                return;
+            };
+            let observations = &mut state.observations;
+            observations.writes_completed = observations.writes_completed.saturating_add(1);
+            if is_pointer_motion(packet) {
+                observations.motions_written = observations.motions_written.saturating_add(1);
+            }
+            observations.framed_bytes = observations
+                .framed_bytes
+                .saturating_add(u64::try_from(bytes).unwrap_or(u64::MAX));
+            observations.write_wall_max = observations.write_wall_max.max(wall);
+            let now = Instant::now();
+            if now.duration_since(state.last_report) < Duration::from_secs(1)
+                || !diagnostics_enabled
+            {
+                return;
+            }
+            state.last_report = now;
+            (
+                state.received,
+                state.coalesced,
+                state.observations,
+                state.records.len(),
+                now.duration_since(state.started),
+            )
+        };
+        let (received, coalesced, observations, queued, uptime) = report;
+        // All counts and maxima are cumulative per outbox. Emission requires
+        // successful traffic, so neither idle nor blocked writes start a timer.
+        tracing::debug!(target: "weld_network_diag",
+            uptime_ms = uptime.as_millis(),
+            received_by_kind_total = ?received,
+            motions_received_total = observations.motions_received,
+            motions_coalesced_total = coalesced,
+            dequeued_total = observations.dequeued,
+            writes_completed_total = observations.writes_completed,
+            motions_written_total = observations.motions_written,
+            framed_bytes_total = observations.framed_bytes,
+            queued, queue_high_water = observations.queue_high_water,
+            retained_wait_max_us = observations.retained_wait_max.as_micros(),
+            write_wall_max_us = observations.write_wall_max.as_micros(),
+            "Iroh outgoing input summary");
     }
 
     pub fn close(&self) {
@@ -91,6 +199,11 @@ impl InputOutbox {
         }
         self.ready.notify_one();
     }
+}
+
+fn is_pointer_motion(packet: &DestinationEnvelope) -> bool {
+    matches!(&packet.message, DestinationMessage::Input(input)
+        if matches!(input.event, InputEventKind::PointerMotion { .. }))
 }
 
 fn compatible_motion(previous: &DestinationEnvelope, next: &DestinationEnvelope) -> bool {
@@ -132,6 +245,60 @@ mod tests {
                 time,
             }),
         }
+    }
+
+    #[tokio::test]
+    async fn observations_distinguish_coalescing_dequeue_and_completed_writes() {
+        let queue = InputOutbox::default();
+        queue.push(motion(1)).expect("first");
+        let old_enqueued = Instant::now() - Duration::from_secs(1);
+        queue
+            .state
+            .lock()
+            .expect("state")
+            .records
+            .front_mut()
+            .expect("first")
+            .enqueued_at = old_enqueued;
+        queue.push(motion(2)).expect("replacement");
+        {
+            let state = queue.state.lock().expect("state");
+            assert!(state.records.front().expect("replacement").enqueued_at > old_enqueued);
+        }
+        queue
+            .push(DestinationEnvelope {
+                session: HoistSessionId::new(1),
+                message: DestinationMessage::Reclaim,
+            })
+            .expect("barrier");
+        let packet = queue.recv().await.expect("motion");
+        {
+            let state = queue.state.lock().expect("state");
+            assert_eq!(state.received, [2, 0, 0, 0, 1]);
+            assert_eq!(state.coalesced, 1);
+            assert_eq!(state.observations.motions_received, 2);
+            assert_eq!(state.observations.dequeued, 1);
+            assert_eq!(state.observations.writes_completed, 0);
+            assert_eq!(state.observations.queue_high_water, 2);
+        }
+        queue.record_written(&packet, 60, Duration::from_millis(2));
+        queue
+            .state
+            .lock()
+            .expect("state")
+            .records
+            .front_mut()
+            .expect("reclaim")
+            .enqueued_at = Instant::now() - Duration::from_secs(2);
+        let packet = queue.recv().await.expect("reclaim");
+        queue.record_written(&packet, 8, Duration::from_millis(1));
+        let state = queue.state.lock().expect("state");
+        assert_eq!(state.observations.dequeued, 2);
+        assert_eq!(state.observations.writes_completed, 2);
+        assert_eq!(state.observations.motions_written, 1);
+        assert_eq!(state.observations.framed_bytes, 68);
+        assert!(state.observations.retained_wait_max >= Duration::from_secs(2));
+        assert_eq!(state.observations.write_wall_max, Duration::from_millis(2));
     }
 
     #[tokio::test]

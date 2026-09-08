@@ -20,7 +20,7 @@ use weld_media::{EncodedAccessUnit, VideoCodec};
 use crate::{
     IrohPeerIdentity,
     diagnostics::PathMonitor,
-    framing::{read_media, read_record, write_record},
+    framing::{read_media, read_record_buffered, write_record_buffered},
     host::HostLifetime,
     inbox::IncomingQueue,
     input_outbox::InputOutbox,
@@ -303,8 +303,9 @@ async fn run_source_peer(
     let control_writable = state.notifier.clone();
     let media_writable = state.notifier.clone();
     let control_writer = async move {
+        let mut scratch = Vec::new();
         while let Some(packet) = outgoing_control.recv().await {
-            write_record(&mut control_send, &packet).await?;
+            write_record_buffered(&mut control_send, &packet, &mut scratch).await?;
             control_writable.notify()?;
         }
         Ok::<(), anyhow::Error>(())
@@ -364,9 +365,10 @@ async fn read_destination_control<R: AsyncRead + Unpin>(
     incoming: &IncomingQueue<DestinationEnvelope>,
     mut stream: R,
 ) -> anyhow::Result<()> {
+    let mut scratch = Vec::new();
     loop {
         incoming
-            .push(read_record::<_, DestinationEnvelope>(&mut stream).await?)
+            .push(read_record_buffered::<_, DestinationEnvelope>(&mut stream, &mut scratch).await?)
             .await?;
     }
 }
@@ -375,9 +377,12 @@ pub(super) async fn write_destination_control<W: AsyncWrite + Unpin>(
     outgoing: &InputOutbox,
     writer: &mut W,
 ) -> Result<()> {
+    let mut scratch = Vec::new();
     loop {
         let packet = outgoing.recv().await?;
-        write_record(writer, &packet).await?;
+        let started = Instant::now();
+        let bytes = write_record_buffered(writer, &packet, &mut scratch).await?;
+        outgoing.record_written(&packet, bytes, started.elapsed());
     }
 }
 
@@ -385,8 +390,11 @@ async fn read_source_control<R: AsyncRead + Unpin>(
     incoming: &IncomingQueue<SourceEnvelope<EncodedBuffer>>,
     mut stream: R,
 ) -> anyhow::Result<()> {
+    let mut scratch = Vec::new();
     loop {
-        incoming.push(read_record(&mut stream).await?).await?;
+        incoming
+            .push(read_record_buffered(&mut stream, &mut scratch).await?)
+            .await?;
     }
 }
 
@@ -423,6 +431,7 @@ impl std::error::Error for PeerError {}
 
 #[cfg(test)]
 mod tests {
+    use crate::framing::{read_record, write_record};
     use futures_lite::future::poll_once;
     use weld_core::host::client_runtime_notifier;
     use weld_hoist_protocol::{DestinationMessage, HoistSessionId};

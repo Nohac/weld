@@ -85,11 +85,11 @@ is needed: the existing exact revision, role, and codec checks remain in place.
 
 ### Queue pressure
 
-Iroh ingress admits at most 256 records per peer inbox. A full inbox now parks
+Iroh control ingress admits at most 256 records per peer inbox. A full inbox parks
 the async reader until the compositor drains a batch; it does not disconnect.
 Each record owns its capacity permit, and terminal peer closure wakes parked
-readers. Destination control and media share this inbox, so control admission
-can wait behind media pressure, but draining never waits for decode completion.
+readers. Encoded media has a separate two-record admission queue; control does
+not share those permits. Draining never waits for decode completion.
 Opposite-direction stream work remains independently polled. Host notifications
 remain level-triggered eventfd writes for every admitted record.
 
@@ -111,8 +111,36 @@ that all network stalls or overloads are solved.
 `weld_network_diag` reports parked incoming admissions, currently parked readers
 and the longest **completed or cancelled** admission wait, at most once per
 second when the host drains and pressure changed or readers remain parked.
-That completed-wait maximum does not measure an ongoing wait. No additional
-timer, input payload logging or video trace is enabled.
+That completed-wait maximum does not measure an ongoing wait.
+
+`Iroh outgoing input summary` reports cumulative counters per destination
+outbox, at most once per second on successful writes:
+
+- Received records by kind: input, request, cursor acknowledgement, buffer
+  release, reclaim; received, coalesced, and successfully written motions.
+- Dequeued records versus completed writes, and completed framed bytes
+  (including the four-byte length, excluding QUIC/IP overhead).
+- Current queue depth and lifetime queue high-water, excluding the one
+  in-flight record.
+- Maximum retained-event wait before dequeue. Coalescing replaces the age as
+  well as the position, so this measures the newest retained event, not the
+  oldest superseded position.
+- Maximum local serialization/write wall time for a completed record. QUIC
+  accepting a write does not mean remote receipt, client dispatch, or display;
+  this is not RTT. A still-blocked or failed write does not enter that maximum.
+
+Subtract counters and `uptime_ms` between summaries to calculate interval
+rates. Maxima are lifetime maxima, not per-second samples. A short burst
+followed by idle may leave its final partial second unreported. There is no
+idle reporting timer, input payload logging, or video trace.
+
+Both control readers and writers reuse their framing scratch buffers, growing
+only to the largest record seen; writers submit header and body together.
+Decoded records own their contents before the read buffer is reused. Wire
+format, input ordering, coalescing and notification behavior are unchanged.
+There is still no motion-rate cap: a fast writer can forward device-rate input.
+The next pacing decision should use these measured rates and queue delays;
+neither display cadence nor a proposed 4 ms interval has been imposed here.
 
 ### Selected paths
 
