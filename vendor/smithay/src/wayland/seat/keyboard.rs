@@ -1,4 +1,4 @@
-use std::{cell::RefCell, fmt};
+use std::{cell::RefCell, fmt, sync::atomic::Ordering};
 
 use tracing::{instrument, trace, warn};
 use wayland_server::{
@@ -300,11 +300,30 @@ impl<D: SeatHandler + 'static> KeyboardTarget<D> for WlSurface {
         serial: Serial,
         time: InputTime,
     ) {
+        // The keyboard-state lock is already held by input dispatch. Read the
+        // derived flag, never re-lock internal from this target callback.
+        let emulate = state == KeyEvent::Repeated
+            && seat
+                .get_keyboard()
+                .is_some_and(|keyboard| keyboard.arc.emulate_legacy_repeats.load(Ordering::Relaxed));
         for_each_focused_kbds(seat, self, |kbd| {
-            // Repeat-rate/held-key checks run under KeyboardInnerHandle's lock.
-            // Do not reacquire it from this callback. Legacy keyboards have no
-            // repeated pseudo-state and retain their configured repeat behavior.
             if state == KeyEvent::Repeated && kbd.version() < 10 {
+                if kbd.version() >= 4 && emulate {
+                    // One logical repeat, one serial/time. Only the wire sees
+                    // these edges; XKB and server held-key sets remain unchanged.
+                    kbd.key(
+                        serial.into(),
+                        time.millis(),
+                        key.raw_code().raw() - 8,
+                        WlKeyState::Released,
+                    );
+                    kbd.key(
+                        serial.into(),
+                        time.millis(),
+                        key.raw_code().raw() - 8,
+                        WlKeyState::Pressed,
+                    );
+                }
                 return;
             }
             kbd.key(

@@ -5,7 +5,10 @@ use crate::utils::{IsAlive, SERIAL_COUNTER, Serial};
 use downcast_rs::{Downcast, impl_downcast};
 use std::collections::{HashMap, HashSet};
 #[cfg(feature = "wayland_frontend")]
-use std::sync::RwLock;
+use std::sync::{
+    RwLock,
+    atomic::{AtomicBool, Ordering},
+};
 use std::{
     default::Default,
     fmt, io,
@@ -41,11 +44,26 @@ pub enum RepeatMode {
     #[default]
     Client,
     /// The compositor supplies repeats to v10 keyboards. Older keyboards and
-    /// input-method grabs optionally retain their own timers.
+    /// input-method grabs use the selected compatibility policy.
     Compositor {
-        /// Allow clients without v10 repeat support to keep their own timers.
-        legacy_repeat: bool,
+        /// Repeat behavior for clients without v10 repeat support.
+        legacy_repeat: LegacyRepeat,
     },
+}
+
+/// Compatibility policy for recipients without the repeated pseudo-state.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum LegacyRepeat {
+    /// Retain client-side timers instead of forwarding explicit repeats.
+    #[default]
+    Client,
+    /// Disable client timers and drop explicit repeats.
+    Disabled,
+    /// Disable client timers and deliver each repeat as a wire release/press pair.
+    ///
+    /// This preserves server-side held state, but clients observe fresh key edges.
+    /// Keyboards older than v4 cannot disable their timers and are not emulated.
+    Emulated,
 }
 
 /// Trait representing object that can receive keyboard interactions
@@ -396,7 +414,9 @@ impl<D: SeatHandler + 'static> KbdInternal<D> {
     #[cfg(feature = "wayland_frontend")]
     pub(crate) fn legacy_repeat_rate(&self) -> i32 {
         match self.repeat_mode {
-            RepeatMode::Compositor { legacy_repeat: false } => 0,
+            RepeatMode::Compositor {
+                legacy_repeat: LegacyRepeat::Disabled | LegacyRepeat::Emulated,
+            } => 0,
             _ => self.repeat_rate,
         }
     }
@@ -487,6 +507,12 @@ pub(crate) struct KbdRc<D: SeatHandler> {
     pub(crate) span: tracing::Span,
     #[cfg(feature = "wayland_frontend")]
     pub(crate) active_keymap: RwLock<KeymapFileId>,
+    // Derived from internal.repeat_mode under the internal lock, which also
+    // serializes dispatch. Wire callbacks cannot re-lock internal; IME callbacks
+    // read the authority directly through KeyboardInnerHandle instead. This flag
+    // publishes no other data, so Relaxed accesses suffice.
+    #[cfg(feature = "wayland_frontend")]
+    pub(crate) emulate_legacy_repeats: AtomicBool,
 }
 
 #[cfg(not(feature = "wayland_frontend"))]
@@ -829,6 +855,9 @@ impl<D: SeatHandler + 'static> KeyboardHandle<D> {
                 last_enter: Mutex::new(None),
                 #[cfg(feature = "wayland_frontend")]
                 active_keymap: RwLock::new(active_keymap),
+                // KbdInternal::new starts in RepeatMode::Client.
+                #[cfg(feature = "wayland_frontend")]
+                emulate_legacy_repeats: AtomicBool::new(false),
                 span,
             }),
         })
@@ -1412,8 +1441,9 @@ impl<D: SeatHandler + 'static> KeyboardHandle<D> {
     ///
     /// Call outside keyboard callbacks. Switching between client and compositor
     /// ownership while keys are held can create competing timers; select ownership
-    /// at startup or after all held input has been released. Changing only the
-    /// legacy fallback cannot enable compositor repeats for legacy recipients.
+    /// at startup or after all held input has been released. Prefer changing the
+    /// legacy fallback after held input is released too, to avoid changing a
+    /// client's repeat behavior partway through a hold.
     pub fn change_repeat_mode(&self, data: &mut D, mode: RepeatMode) {
         let Ok(mut guard) = self.arc.internal.lock() else {
             tracing::error!("Cannot change repeat mode after keyboard state was poisoned");
@@ -1425,6 +1455,15 @@ impl<D: SeatHandler + 'static> KeyboardHandle<D> {
         guard.repeat_mode = mode;
         #[cfg(feature = "wayland_frontend")]
         {
+            self.arc.emulate_legacy_repeats.store(
+                matches!(
+                    mode,
+                    RepeatMode::Compositor {
+                        legacy_repeat: LegacyRepeat::Emulated
+                    }
+                ),
+                Ordering::Relaxed,
+            );
             let Ok(keyboards) = self.arc.known_kbds.lock() else {
                 tracing::error!("Cannot update repeat mode after keyboard registry was poisoned");
                 return;
@@ -1649,6 +1688,16 @@ impl<D: SeatHandler + 'static> KeyboardInnerHandle<'_, D> {
     /// Get the current modifiers state
     pub fn modifier_state(&self) -> ModifiersState {
         self.inner.mods_state
+    }
+
+    #[cfg(feature = "wayland_frontend")]
+    pub(crate) fn emulate_legacy_repeats(&self) -> bool {
+        matches!(
+            self.inner.repeat_mode,
+            RepeatMode::Compositor {
+                legacy_repeat: LegacyRepeat::Emulated
+            }
+        )
     }
 
     /// Send the input to the focused keyboards

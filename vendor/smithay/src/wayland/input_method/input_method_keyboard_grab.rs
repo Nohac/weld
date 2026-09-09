@@ -41,16 +41,16 @@ where
     fn input(
         &mut self,
         _data: &mut D,
-        _handle: &mut KeyboardInnerHandle<'_, D>,
+        handle: &mut KeyboardInnerHandle<'_, D>,
         keycode: Keycode,
         key_state: KeyEvent,
         modifiers: Option<ModifiersState>,
         serial: Serial,
         time: InputTime,
     ) {
-        // This protocol has no keyboard-v10 repeat negotiation. The input method
-        // retains its advertised client-side repeat behavior; never send state 2.
-        if key_state == KeyEvent::Repeated {
+        // This protocol has repeat_info but no state 2. Only the explicit
+        // emulation policy replaces a repeat with wire edges, never XKB updates.
+        if key_state == KeyEvent::Repeated && !handle.emulate_legacy_repeats() {
             return;
         }
         let inner = self.inner.lock().unwrap();
@@ -58,7 +58,17 @@ where
         inner
             .text_input_handle
             .active_text_input_serial_or_default(serial.0, |serial| {
-                keyboard.key(serial, time.millis(), keycode.raw() - 8, key_state.into());
+                if key_state == KeyEvent::Repeated {
+                    keyboard.key(
+                        serial,
+                        time.millis(),
+                        keycode.raw() - 8,
+                        KeyEvent::Released.into(),
+                    );
+                    keyboard.key(serial, time.millis(), keycode.raw() - 8, KeyEvent::Pressed.into());
+                } else {
+                    keyboard.key(serial, time.millis(), keycode.raw() - 8, key_state.into());
+                }
                 if let Some(serialized) = modifiers.map(|m| m.serialized) {
                     keyboard.modifiers(
                         serial,
