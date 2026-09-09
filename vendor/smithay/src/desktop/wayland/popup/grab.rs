@@ -6,7 +6,7 @@ use std::{
 use wayland_server::{Resource, protocol::wl_surface::WlSurface};
 
 use crate::{
-    backend::input::{ButtonState, InputTime, KeyState, Keycode},
+    backend::input::{ButtonState, InputTime, KeyEvent, Keycode},
     input::{
         SeatHandler,
         keyboard::{
@@ -443,7 +443,7 @@ where
         data: &mut D,
         handle: &mut KeyboardInnerHandle<'_, D>,
         keycode: Keycode,
-        state: KeyState,
+        state: KeyEvent,
         modifiers: Option<ModifiersState>,
         serial: Serial,
         time: InputTime,

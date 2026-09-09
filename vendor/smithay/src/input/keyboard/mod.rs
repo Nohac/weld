@@ -1,6 +1,6 @@
 //! Keyboard-related types for smithay's input abstraction
 
-use crate::backend::input::{InputTime, KeyState};
+use crate::backend::input::{InputTime, KeyEvent, KeyState};
 use crate::utils::{IsAlive, SERIAL_COUNTER, Serial};
 use downcast_rs::{Downcast, impl_downcast};
 use std::collections::{HashMap, HashSet};
@@ -41,13 +41,16 @@ where
     fn enter(&self, seat: &Seat<D>, data: &mut D, keys: Vec<KeysymHandle<'_>>, serial: Serial);
     /// The keyboard focus of a given seat left this handler
     fn leave(&self, seat: &Seat<D>, data: &mut D, serial: Serial);
-    /// A key was pressed on a keyboard from a given seat
+    /// A key was pressed, released, or repeated on a keyboard from a given seat.
+    ///
+    /// Callers bypassing [`KeyboardInnerHandle::input`] must uphold its repeat
+    /// preconditions, including a zero configured repeat rate and a held key.
     fn key(
         &self,
         seat: &Seat<D>,
         data: &mut D,
         key: KeysymHandle<'_>,
-        state: KeyState,
+        state: KeyEvent,
         serial: Serial,
         time: InputTime,
     );
@@ -298,14 +301,20 @@ impl<D: SeatHandler + 'static> KbdInternal<D> {
     }
 
     // Feed a key event from `source` into the shared seat state. Returns
-    // `(modifiers_changed, leds_changed, is_transition)`.
+    // `(modifiers_changed, leds_changed, should_process)`.
     //
-    // `is_transition` is `true` only when this event actually changes the combined pressed set
-    // i.e. the first source to press a keycode, or the last source to release it.
-    fn key_input(&mut self, source: KeyboardSource, keycode: Keycode, state: KeyState) -> (bool, bool, bool) {
+    // Process only a combined held-state transition or a valid explicit repeat.
+    fn key_input(&mut self, source: KeyboardSource, keycode: Keycode, state: KeyEvent) -> (bool, bool, bool) {
         // track pressed keys per source, the seat xkb only follows the *combined* set
         let direction = match state {
-            KeyState::Pressed => {
+            KeyEvent::Repeated => {
+                let held_by_source = self
+                    .key_sources
+                    .get(&keycode)
+                    .is_some_and(|holders| holders.contains(&source));
+                return (false, false, held_by_source && self.can_repeat(keycode));
+            }
+            KeyEvent::Pressed => {
                 let holders = self.key_sources.entry(keycode).or_default();
                 let was_held = !holders.is_empty();
                 holders.insert(source);
@@ -316,7 +325,7 @@ impl<D: SeatHandler + 'static> KbdInternal<D> {
                 self.pressed_keys.insert(keycode);
                 xkb::KeyDirection::Down
             }
-            KeyState::Released => {
+            KeyEvent::Released => {
                 match self.key_sources.get_mut(&keycode) {
                     Some(holders) => {
                         holders.remove(&source);
@@ -347,6 +356,14 @@ impl<D: SeatHandler + 'static> KbdInternal<D> {
         (modifiers_changed, leds_changed, true)
     }
 
+    // Called under the keyboard-state lock. Never retain the XKB guard across callbacks.
+    fn can_repeat(&self, keycode: Keycode) -> bool {
+        self.repeat_rate == 0
+            && self.pressed_keys.contains(&keycode)
+            && self.forwarded_pressed_keys.contains(&keycode)
+            && self.xkb.lock().is_ok_and(|xkb| xkb.keymap.key_repeats(keycode))
+    }
+
     /// Release every keycode currently held by `source`, as if the source sent a release for
     /// each. A keycode only actually transitions up (and gets forwarded) if no other source is
     /// still holding it. Returns the keycodes that transitioned up, so the caller can forward
@@ -360,7 +377,7 @@ impl<D: SeatHandler + 'static> KbdInternal<D> {
             .collect();
         let mut transitioned = Vec::new();
         for keycode in held {
-            let (_, _, is_transition) = self.key_input(source, keycode, KeyState::Released);
+            let (_, _, is_transition) = self.key_input(source, keycode, KeyEvent::Released);
             if is_transition {
                 transitioned.push(keycode);
             }
@@ -674,7 +691,7 @@ pub trait KeyboardGrab<D: SeatHandler>: Downcast {
         data: &mut D,
         handle: &mut KeyboardInnerHandle<'_, D>,
         keycode: Keycode,
-        state: KeyState,
+        state: KeyEvent,
         modifiers: Option<ModifiersState>,
         serial: Serial,
         time: InputTime,
@@ -1014,6 +1031,11 @@ impl<D: SeatHandler + 'static> KeyboardHandle<D> {
     /// All keystrokes from the input backend should be fed _in order_ to this method of the
     /// keyboard handler. It will internally track the state of the keymap.
     ///
+    /// Explicit [`KeyEvent::Repeated`] events require a zero configured repeat rate,
+    /// a repeatable key held by this source, and a previously forwarded press. They
+    /// do not update XKB or the held-key sets. This method does not generate repeats;
+    /// the caller owns repeat timing and cancellation when its input context changes.
+    ///
     /// The `filter` argument is expected to be a closure which will peek at the generated input
     /// as interpreted by the keymap before it is forwarded to the focused client. If this closure
     /// returns [`FilterResult::Forward`], the input will be sent to the client. If it returns
@@ -1027,7 +1049,7 @@ impl<D: SeatHandler + 'static> KeyboardHandle<D> {
         &self,
         data: &mut D,
         keycode: Keycode,
-        state: KeyState,
+        state: impl Into<KeyEvent> + fmt::Debug,
         serial: Serial,
         time: InputTime,
         filter: F,
@@ -1045,7 +1067,7 @@ impl<D: SeatHandler + 'static> KeyboardHandle<D> {
         source: KeyboardSource,
         data: &mut D,
         keycode: Keycode,
-        state: KeyState,
+        state: impl Into<KeyEvent>,
         serial: Serial,
         time: InputTime,
         filter: F,
@@ -1053,10 +1075,11 @@ impl<D: SeatHandler + 'static> KeyboardHandle<D> {
     where
         F: FnOnce(&mut D, &ModifiersState, KeysymHandle<'_>) -> FilterResult<T>,
     {
+        let state = state.into();
         trace!("Handling keystroke");
 
         let mut guard = self.arc.internal.lock().unwrap();
-        let (mods_changed, leds_changed, is_transition) = guard.key_input(source, keycode, state);
+        let (mods_changed, leds_changed, should_process) = guard.key_input(source, keycode, state);
         let led_state = guard.led_state;
         let mods_state = guard.mods_state;
         let xkb = guard.xkb.clone();
@@ -1067,9 +1090,8 @@ impl<D: SeatHandler + 'static> KeyboardHandle<D> {
             data.led_state_changed(&seat, led_state);
         }
 
-        // The event was absorbed because another source is holding this keycode: don't
-        // double-run the filter (avoids re-triggering shortcuts) and don't forward a duplicate.
-        if !is_transition {
+        // Absorb duplicate transitions and invalid repeats before running the filter.
+        if !should_process {
             return None;
         }
 
@@ -1101,7 +1123,7 @@ impl<D: SeatHandler + 'static> KeyboardHandle<D> {
         for keycode in transitioned {
             // modifiers may have changed as a modifier key was released; let input_forward
             // re-derive and send the current state.
-            self.input_forward(data, keycode, KeyState::Released, serial, time, true);
+            self.input_forward(data, keycode, KeyEvent::Released, serial, time, true);
         }
     }
 
@@ -1112,6 +1134,8 @@ impl<D: SeatHandler + 'static> KeyboardHandle<D> {
     ///
     /// Prefer using [`KeyboardHandle::input`] if this decision can be done synchronously
     /// in the `filter` closure.
+    /// This split interception API accepts only physical transitions; source-aware
+    /// repeats must use [`KeyboardHandle::input_from_source`].
     pub fn input_intercept<T, F>(
         &self,
         data: &mut D,
@@ -1126,7 +1150,7 @@ impl<D: SeatHandler + 'static> KeyboardHandle<D> {
 
         let mut guard = self.arc.internal.lock().unwrap();
         let (mods_changed, leds_changed, _is_transition) =
-            guard.key_input(KeyboardSource::MAIN, keycode, state);
+            guard.key_input(KeyboardSource::MAIN, keycode, state.into());
         let led_state = guard.led_state;
         let mods_state = guard.mods_state;
         let xkb = guard.xkb.clone();
@@ -1148,22 +1172,31 @@ impl<D: SeatHandler + 'static> KeyboardHandle<D> {
     /// Forward a key event to the focused client
     ///
     /// Useful in conjunction with [`KeyboardHandle::input_intercept`].
+    /// Repeats leave the held-key sets unchanged and require a zero repeat rate and
+    /// an already-held, forwarded, repeatable key. This low-level API does not check
+    /// source ownership; use [`KeyboardHandle::input_from_source`] for that check.
     pub fn input_forward(
         &self,
         data: &mut D,
         keycode: Keycode,
-        state: KeyState,
+        state: impl Into<KeyEvent>,
         serial: Serial,
         time: InputTime,
         mods_changed: bool,
     ) {
+        let state = state.into();
         let mut guard = self.arc.internal.lock().unwrap();
         match state {
-            KeyState::Pressed => {
+            KeyEvent::Pressed => {
                 guard.forwarded_pressed_keys.insert(keycode);
             }
-            KeyState::Released => {
+            KeyEvent::Released => {
                 guard.forwarded_pressed_keys.remove(&keycode);
+            }
+            KeyEvent::Repeated => {
+                if !guard.can_repeat(keycode) {
+                    return;
+                }
             }
         };
 
@@ -1318,6 +1351,10 @@ impl<D: SeatHandler + 'static> KeyboardHandle<D> {
     }
 
     /// Change the repeat info configured for this keyboard
+    ///
+    /// A zero rate disables client-generated repeats. It also permits explicitly
+    /// supplied repeats for keyboard v10 clients; older clients receive no repeats
+    /// in that mode. No timer is installed by this method.
     #[instrument(parent = &self.arc.span, skip(self))]
     pub fn change_repeat_info(&self, rate: i32, delay: i32) {
         let mut guard = self.arc.internal.lock().unwrap();
@@ -1435,11 +1472,11 @@ where
             let release = SERIAL_COUNTER.next_serial();
             if let Some((focus, _)) = guard.focus.as_mut() {
                 let handle = KeysymHandle { xkb: &xkb, keycode };
-                focus.key(&seat, data, handle, KeyState::Pressed, press, InputTime::now());
+                focus.key(&seat, data, handle, KeyEvent::Pressed, press, InputTime::now());
             }
             if let Some((focus, _)) = guard.focus.as_mut() {
                 let handle = KeysymHandle { xkb: &xkb, keycode };
-                focus.key(&seat, data, handle, KeyState::Released, release, InputTime::now());
+                focus.key(&seat, data, handle, KeyEvent::Released, release, InputTime::now());
             }
         }
 
@@ -1541,11 +1578,14 @@ impl<D: SeatHandler + 'static> KeyboardInnerHandle<'_, D> {
         &mut self,
         data: &mut D,
         keycode: Keycode,
-        key_state: KeyState,
+        key_state: KeyEvent,
         modifiers: Option<ModifiersState>,
         serial: Serial,
         time: InputTime,
     ) {
+        if key_state == KeyEvent::Repeated && !self.inner.can_repeat(keycode) {
+            return;
+        }
         let (focus, _) = match self.inner.focus.as_mut() {
             Some(focus) => focus,
             None => return,
@@ -1651,7 +1691,7 @@ impl<D: SeatHandler + 'static> KeyboardGrab<D> for DefaultGrab {
         data: &mut D,
         handle: &mut KeyboardInnerHandle<'_, D>,
         keycode: Keycode,
-        state: KeyState,
+        state: KeyEvent,
         modifiers: Option<ModifiersState>,
         serial: Serial,
         time: InputTime,

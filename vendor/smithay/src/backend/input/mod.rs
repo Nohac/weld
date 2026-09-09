@@ -130,6 +130,28 @@ pub enum KeyState {
     Pressed,
 }
 
+/// Logical keyboard event, including compositor-generated repetition.
+///
+/// Unlike [`KeyState`], a repetition does not change the held-key or XKB state.
+#[derive(Debug, PartialEq, Eq, Clone, Copy, Hash)]
+pub enum KeyEvent {
+    /// Key was released.
+    Released,
+    /// Key was pressed.
+    Pressed,
+    /// A held key was repeated without another physical transition.
+    Repeated,
+}
+
+impl From<KeyState> for KeyEvent {
+    fn from(state: KeyState) -> Self {
+        match state {
+            KeyState::Released => Self::Released,
+            KeyState::Pressed => Self::Pressed,
+        }
+    }
+}
+
 /// Trait for keyboard event
 pub trait KeyboardKeyEvent<B: InputBackend>: Event<B> {
     /// Returns the numerical button code of the keyboard button.

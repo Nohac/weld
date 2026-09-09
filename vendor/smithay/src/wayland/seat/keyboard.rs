@@ -12,7 +12,7 @@ use wayland_server::{
 
 use super::WaylandFocus;
 use crate::{
-    backend::input::{InputTime, KeyState, Keycode},
+    backend::input::{InputTime, KeyEvent, KeyState, Keycode},
     input::{
         Seat, SeatHandler, WeakSeat,
         keyboard::{KeyboardHandle, KeyboardTarget, KeysymHandle, ModifiersState},
@@ -296,11 +296,17 @@ impl<D: SeatHandler + 'static> KeyboardTarget<D> for WlSurface {
         seat: &Seat<D>,
         _data: &mut D,
         key: KeysymHandle<'_>,
-        state: KeyState,
+        state: KeyEvent,
         serial: Serial,
         time: InputTime,
     ) {
         for_each_focused_kbds(seat, self, |kbd| {
+            // Repeat-rate/held-key checks run under KeyboardInnerHandle's lock.
+            // Do not reacquire it from this callback. Legacy keyboards have no
+            // repeated pseudo-state and retain their configured repeat behavior.
+            if state == KeyEvent::Repeated && kbd.version() < 10 {
+                return;
+            }
             kbd.key(
                 serial.into(),
                 time.millis(),
@@ -321,6 +327,29 @@ impl<D: SeatHandler + 'static> KeyboardTarget<D> for WlSurface {
                 modifiers.layout_effective,
             );
         })
+    }
+}
+
+impl From<KeyEvent> for WlKeyState {
+    fn from(event: KeyEvent) -> Self {
+        match event {
+            KeyEvent::Released => Self::Released,
+            KeyEvent::Pressed => Self::Pressed,
+            KeyEvent::Repeated => Self::Repeated,
+        }
+    }
+}
+
+impl TryFrom<WlKeyState> for KeyEvent {
+    type Error = UnknownKeyState;
+
+    fn try_from(state: WlKeyState) -> Result<Self, Self::Error> {
+        match state {
+            WlKeyState::Released => Ok(Self::Released),
+            WlKeyState::Pressed => Ok(Self::Pressed),
+            WlKeyState::Repeated => Ok(Self::Repeated),
+            state => Err(UnknownKeyState(state)),
+        }
     }
 }
 

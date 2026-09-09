@@ -11,7 +11,7 @@
 //!
 //! use smithay::wayland::cursor_shape::CursorShapeManagerState;
 //!
-//! # use smithay::backend::input::{InputTime, KeyState, TabletToolDescriptor};
+//! # use smithay::backend::input::{InputTime, KeyEvent, TabletToolDescriptor};
 //! # use smithay::input::{
 //! #   pointer::{PointerTarget, AxisFrame, MotionEvent, ButtonEvent, RelativeMotionEvent,
 //! #             GestureSwipeBeginEvent, GestureSwipeUpdateEvent, GestureSwipeEndEvent,
@@ -62,7 +62,7 @@
 //! #       seat: &Seat<State>,
 //! #       data: &mut State,
 //! #       key: KeysymHandle<'_>,
-//! #       state: KeyState,
+//! #       state: KeyEvent,
 //! #       serial: Serial,
 //! #       time: InputTime,
 //! #   ) {}

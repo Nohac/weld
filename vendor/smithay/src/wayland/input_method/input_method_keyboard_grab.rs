@@ -17,7 +17,7 @@ use crate::input::{
 };
 use crate::wayland::text_input::TextInputHandle;
 use crate::{
-    backend::input::{InputTime, KeyState, Keycode},
+    backend::input::{InputTime, KeyEvent, Keycode},
     utils::Serial,
     wayland::Dispatch2,
 };
@@ -43,11 +43,16 @@ where
         _data: &mut D,
         _handle: &mut KeyboardInnerHandle<'_, D>,
         keycode: Keycode,
-        key_state: KeyState,
+        key_state: KeyEvent,
         modifiers: Option<ModifiersState>,
         serial: Serial,
         time: InputTime,
     ) {
+        // This protocol has no keyboard-v10 repeat negotiation. The input method
+        // retains its advertised client-side repeat behavior; never send state 2.
+        if key_state == KeyEvent::Repeated {
+            return;
+        }
         let inner = self.inner.lock().unwrap();
         let keyboard = inner.grab.as_ref().unwrap();
         inner

@@ -8,7 +8,7 @@
 //! extern crate smithay;
 //!
 //! use smithay::wayland::relative_pointer::RelativePointerManagerState;
-//! # use smithay::backend::input::{InputTime, KeyState};
+//! # use smithay::backend::input::{InputTime, KeyEvent};
 //! # use smithay::input::{
 //! #   pointer::{PointerTarget, AxisFrame, MotionEvent, ButtonEvent, RelativeMotionEvent,
 //! #             GestureSwipeBeginEvent, GestureSwipeUpdateEvent, GestureSwipeEndEvent,
@@ -50,7 +50,7 @@
 //! #       seat: &Seat<State>,
 //! #       data: &mut State,
 //! #       key: KeysymHandle<'_>,
-//! #       state: KeyState,
+//! #       state: KeyEvent,
 //! #       serial: Serial,
 //! #       time: InputTime,
 //! #   ) {}

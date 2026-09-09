@@ -1,6 +1,6 @@
 use crate::{
     backend::{
-        input::{InputTime, KeyState},
+        input::{InputTime, KeyEvent},
         renderer::utils::RendererSurfaceStateUserData,
     },
     input::{
@@ -2219,7 +2219,7 @@ impl<D: SeatHandler + 'static> KeyboardTarget<D> for X11Surface {
         seat: &Seat<D>,
         data: &mut D,
         key: KeysymHandle<'_>,
-        state: KeyState,
+        state: KeyEvent,
         serial: Serial,
         time: InputTime,
     ) {
@@ -2227,8 +2227,11 @@ impl<D: SeatHandler + 'static> KeyboardTarget<D> for X11Surface {
         if let Some(surface) = xstate.wl_surface.as_ref() {
             KeyboardTarget::key(surface, seat, data, key, state, serial, time)
         } else if let Some((_, keys, _, pending_serial)) = xstate.pending_enter.as_mut() {
+            if state == KeyEvent::Repeated {
+                return;
+            }
             let raw = key.raw_code();
-            if state == KeyState::Released {
+            if state == KeyEvent::Released {
                 keys.retain(|c| *c != raw);
             } else {
                 keys.push(raw);
