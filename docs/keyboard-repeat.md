@@ -14,6 +14,7 @@ Repeat ownership is stable for the whole native seat, selected at startup:
 | `client` | Client timer | Client timer |
 | `compositor`, legacy `client` | Explicit upstream repeats | Client timer |
 | `compositor`, legacy `disabled` | Explicit upstream repeats | No repeat |
+| `compositor`, legacy `emulated` | Explicit upstream repeats | Wire release/press pairs, client timer disabled |
 
 Nested hosts default to `compositor`: Winit supplies upstream cadence. DRM
 hosts default to `client`: libinput supplies transitions, and this slice adds
@@ -34,12 +35,36 @@ WELD_LEGACY_KEY_REPEAT=disabled scripts/run-network-hoist --host wlp194s0 --clie
 before opening a host. The setting matters on the instance hosting the Wayland
 application; these launchers pass the environment to both test instances.
 It affects legacy recipients in `compositor` mode, not native `client` mode.
-Selecting `disabled` in `client` mode emits a warning rather than silently
+Selecting `disabled` or `emulated` in `client` mode emits a warning rather than silently
 appearing to enable the workaround.
-No fake release/press emulation is used.
 Keyboard versions below 4 have no `repeat_info` event, so Weld cannot configure
-their client timers with this workaround. The version diagnostic makes that
+their client timers and does not emulate repeats for them. The version diagnostic makes that
 limitation visible; the legacy policy table assumes version 4 or newer.
+
+### Emulated legacy repeats
+
+To retain hold-to-repeat without letting a legacy client's timer run across
+network-delayed releases, opt into the blanket fallback on the application host:
+
+```sh
+cargo run -- --legacy-key-repeat emulated
+WELD_LEGACY_KEY_REPEAT=emulated scripts/run-iroh-hoist --codec av1
+WELD_LEGACY_KEY_REPEAT=emulated scripts/run-network-hoist --host wlp194s0 --client enp197s0f0u1i1
+```
+
+Each accepted upstream repeat becomes a release followed immediately by a press
+only at the legacy Wayland delivery boundary. Both events use the original
+repeat's timestamp and serial. Input-method grabs use their existing mapped
+serial. No new timer, synthetic physical input, or transport message is added;
+Weld and Smithay retain the real held key until its actual release. Keyboard-v10
+resources continue to receive `Repeated`, even alongside legacy resources.
+
+This is not equivalent to a real hold for every application: games, push-to-talk,
+double-tap detection, release-bound shortcuts and IM composition may react to
+the extra edges. It remains opt-in; per-application match rules are future work.
+Change the setting with keys released to avoid switching behavior mid-hold.
+The user confirmed the emulated mode works, including through network hoisting;
+the validation matrix below retains the broader compatibility checks.
 
 Use `--keyboard-repeat-mode client` if the parent supplies no cadence, or when
 a source is driven by a DRM receiver without a repeat scheduler. A DRM source
@@ -51,8 +76,12 @@ arbitration.
 Winit exposes no accessor for its parent's repeat settings. A parent advertising
 rate zero provides no repeat cadence. Winit currently binds the legacy Wayland
 seat path, so outer Weld must retain legacy `client` repeat for an inner Weld
-to receive cadence. Selecting `disabled` on the outer removes it. The explicit
-client-mode override is the escape hatch; Weld installs no hidden second timer.
+to receive cadence. Selecting `disabled` on the outer removes it. Selecting
+`emulated` on the outer instead delivers real press/release transitions to the
+inner Winit instance, not explicit repeats; these can retrigger inner shortcuts
+and propagate key edges through another hoist. Keep the outer on legacy `client`
+for this topology. The explicit client-mode override is the escape hatch when
+there is no upstream cadence; Weld installs no hidden second timer.
 
 `weld-app::input::KeyboardSettings` is reloadable. Replacing `legacy_repeat`
 emits a changed typed host command and updates bound legacy keyboards and an
@@ -90,7 +119,22 @@ cleanup, wire ordering, shortcuts and live settings. They do not re-test
 Smithay's implementation. Its enabled library/examples are compile-checked;
 optional Anvil/XWayland builds are outside this run.
 
-Manual acceptance is pending: test short taps, held text/backspace, modifiers,
+The user confirmed that legacy `disabled` removed duplicate characters, but
+also removed hold-to-repeat. The focused application's log reported keyboard
+version 8. The user subsequently confirmed successful emulated repeats,
+including through network hoisting. This validates the reported legacy-client
+case, not every recipient or lifecycle scenario below:
+
+| Recipient / case | Expected with `compositor` + `emulated` |
+| --- | --- |
+| foot / keyboard v4–9 | Taps once; held text/backspace repeat; release stops repetition |
+| Keyboard v10 client | Actual `Repeated`, timer zero; no synthetic key edges |
+| Keyboard v1–3, if available | No emulated events; cannot disable its client timer |
+| Input-method grab | Release/press pairs without state 2; verify composition behavior |
+| Outer emulated Weld → nested Weld | Inner sees physical edges, not repeat cadence; use outer `client` instead |
+| Focus loss / reclaim / disconnect | No repeat after invalidation; held-key cleanup still releases once |
+
+Also test short taps, held text/backspace, modifiers,
 focus-away-and-back, popup grabs, reclaim and disconnect. Check the logged bound
-version before attributing repetition to v10. Compare legacy `client` and
-`disabled` to validate the compatibility tradeoff.
+version before attributing repetition to v10. Compare legacy `client`,
+`disabled` and `emulated` to validate the compatibility tradeoff.

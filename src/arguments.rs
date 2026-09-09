@@ -14,6 +14,7 @@ pub enum LegacyKeyRepeatArgument {
     #[default]
     Client,
     Disabled,
+    Emulated,
 }
 
 impl From<LegacyKeyRepeatArgument> for weld_app::input::LegacyKeyRepeat {
@@ -21,6 +22,7 @@ impl From<LegacyKeyRepeatArgument> for weld_app::input::LegacyKeyRepeat {
         match value {
             LegacyKeyRepeatArgument::Client => Self::Client,
             LegacyKeyRepeatArgument::Disabled => Self::Disabled,
+            LegacyKeyRepeatArgument::Emulated => Self::Emulated,
         }
     }
 }
@@ -134,7 +136,7 @@ impl BackendKind {
     ]).multiple(false))
 )]
 pub struct AppArguments {
-    /// Legacy repeat fallback: client timers or disabled. Defaults to client;
+    /// Legacy repeat fallback: client timers, disabled, or emulated key edges. Defaults to client;
     /// WELD_LEGACY_KEY_REPEAT supplies a default when this option is absent.
     #[arg(long, value_enum)]
     pub(crate) legacy_key_repeat: Option<LegacyKeyRepeatArgument>,

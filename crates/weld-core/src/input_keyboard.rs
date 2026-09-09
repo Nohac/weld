@@ -21,6 +21,9 @@ pub enum LegacyKeyRepeat {
     Client,
     /// Disable legacy timers without emulating repeats as press/release pairs.
     Disabled,
+    /// Disable legacy timers and emit wire release/press pairs for upstream repeats.
+    /// Client-visible key edges differ from a true hold; opt in for compatible apps.
+    Emulated,
 }
 
 struct HeldKey {

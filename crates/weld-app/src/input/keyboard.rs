@@ -45,13 +45,17 @@ mod tests {
             Some(HostCommand::SetLegacyKeyRepeat(LegacyKeyRepeat::Client))
         );
         assert_eq!(take_settings_command(app.world_mut()), None);
-        app.insert_resource(KeyboardSettings {
-            legacy_repeat: LegacyKeyRepeat::Disabled,
-        });
-        assert_eq!(
-            take_settings_command(app.world_mut()),
-            Some(HostCommand::SetLegacyKeyRepeat(LegacyKeyRepeat::Disabled))
-        );
-        assert_eq!(take_settings_command(app.world_mut()), None);
+        for legacy_repeat in [
+            LegacyKeyRepeat::Disabled,
+            LegacyKeyRepeat::Emulated,
+            LegacyKeyRepeat::Client,
+        ] {
+            app.insert_resource(KeyboardSettings { legacy_repeat });
+            assert_eq!(
+                take_settings_command(app.world_mut()),
+                Some(HostCommand::SetLegacyKeyRepeat(legacy_repeat))
+            );
+            assert_eq!(take_settings_command(app.world_mut()), None);
+        }
     }
 }

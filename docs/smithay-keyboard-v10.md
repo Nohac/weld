@@ -7,7 +7,8 @@ This is a partial local backport of
 The upstream refresh preceding it passed the user's end-to-end Iroh check.
 The subsequent [explicit-repeat integration](keyboard-repeat.md) uses this
 foundation and adds stable seat-wide `RepeatMode` with a per-version legacy
-fallback. The sections below record the original backport's scope.
+fallback, including opt-in wire release/press emulation for legacy recipients.
+The sections below record the original backport's scope, not the later policy.
 
 ## Included
 
@@ -25,7 +26,9 @@ fallback. The sections below record the original backport's scope.
   the temporary XKB guard before any callback. The Wayland target checks only
   the bound resource version, avoiding recursive keyboard-state locking.
 - Suppress `Repeated` for pre-v10 keyboard resources and input-method grabs;
-  ignore it in X11 pending-enter bookkeeping. No fake release/press fallback.
+  ignore it in X11 pending-enter bookkeeping. The original backport had no
+  release/press fallback; the subsequent integration adds an optional one at
+  the legacy wire boundary, without changing XKB or held-key state.
 
 The eligibility gate also applies to non-Wayland keyboard targets. Direct
 `KeyboardTarget::key` callers must uphold the documented preconditions just

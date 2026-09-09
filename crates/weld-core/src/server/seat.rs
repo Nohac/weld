@@ -7,7 +7,7 @@ use smithay::{
     input::{
         Seat, SeatHandler,
         dnd::{DnDGrab, DndGrabHandler, GrabType, Source},
-        keyboard::{FilterResult, KeyboardSource, RepeatMode},
+        keyboard::{FilterResult, KeyboardSource, LegacyRepeat, RepeatMode},
         pointer::{
             AxisFrame, ButtonEvent, CursorImageStatus, Focus, GestureHoldBeginEvent,
             GestureHoldEndEvent, GesturePinchBeginEvent, GesturePinchEndEvent,
@@ -183,11 +183,12 @@ impl ServerState {
         if self.legacy_key_repeat != legacy {
             self.legacy_key_repeat = legacy;
             self.keyboard_diagnostic_dirty = true;
-            if legacy == LegacyKeyRepeat::Disabled
+            if legacy != LegacyKeyRepeat::Client
                 && self.keyboard_repeat_mode == KeyboardRepeatMode::Client
             {
                 warn!(
-                    "legacy-key-repeat=disabled has no effect in client repeat mode; the workaround requires compositor repeat mode"
+                    ?legacy,
+                    "legacy repeat fallback has no effect in client repeat mode; the workaround requires compositor repeat mode"
                 );
             }
             self.configure_keyboard_repeat();
@@ -201,7 +202,11 @@ impl ServerState {
         let mode = match self.keyboard_repeat_mode {
             KeyboardRepeatMode::Client => RepeatMode::Client,
             KeyboardRepeatMode::Compositor => RepeatMode::Compositor {
-                legacy_repeat: self.legacy_key_repeat == LegacyKeyRepeat::Client,
+                legacy_repeat: match self.legacy_key_repeat {
+                    LegacyKeyRepeat::Client => LegacyRepeat::Client,
+                    LegacyKeyRepeat::Disabled => LegacyRepeat::Disabled,
+                    LegacyKeyRepeat::Emulated => LegacyRepeat::Emulated,
+                },
             },
         };
         keyboard.change_repeat_mode(self, mode);

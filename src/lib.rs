@@ -355,6 +355,15 @@ mod tests {
             Ok(LegacyKeyRepeatArgument::Disabled)
         );
         assert!(resolve_legacy_repeat(None, Some("typo")).is_err());
+        assert_eq!(
+            resolve_legacy_repeat(None, Some("emulated")),
+            Ok(LegacyKeyRepeatArgument::Emulated)
+        );
+        let emulated = arguments(&["--legacy-key-repeat", "emulated"]);
+        assert_eq!(
+            resolve_legacy_repeat(emulated.legacy_key_repeat, Some("disabled")),
+            Ok(LegacyKeyRepeatArgument::Emulated)
+        );
         let options = arguments(&[
             "--legacy-key-repeat",
             "client",
