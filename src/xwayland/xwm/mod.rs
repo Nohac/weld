@@ -42,6 +42,7 @@
 //! #     }
 //! # }
 //! # use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
+//! # use smithay::wayland::pointer_constraints::PointerConstraintsHandler;
 //! # use smithay::input::{Seat, SeatState, SeatHandler, pointer::CursorImageStatus, dnd::DndGrabHandler};
 //! # use smithay::backend::input::KeyState;
 //! # use smithay::input::{
@@ -69,6 +70,7 @@
 //! #     fn focus_changed(&mut self, seat: &Seat<Self>, focused: Option<&Target>) {}
 //! #     fn cursor_image(&mut self, seat: &Seat<Self>, image: CursorImageStatus) {}
 //! # }
+//! # impl PointerConstraintsHandler for State {}
 //! # impl DndGrabHandler for State {}
 //! # impl DataDeviceHandler for State {
 //! #     fn data_device_state(&mut self) -> &mut DataDeviceState { unreachable!() }
@@ -1382,6 +1384,23 @@ impl X11Wm {
         Ok(())
     }
 
+    /// Removes settings from XSETTINGS.
+    pub fn remove_xsettings(&mut self, names: impl Iterator<Item = String>) -> Result<(), ConnectionError> {
+        let removed = names.fold(false, |any_removed, name| {
+            self.xsettings.remove(&name).is_some() | any_removed
+        });
+        if removed {
+            self.xsettings.update(&self.conn)?;
+        }
+        Ok(())
+    }
+
+    /// Clears all settings from XSETTINGS.
+    pub fn clear_xsettings(&mut self) -> Result<(), ConnectionError> {
+        self.xsettings.clear();
+        self.xsettings.update(&self.conn)
+    }
+
     /// Gets the current primary output as advertised by xrandr
     pub fn get_randr_primary_output(&self) -> Result<Option<String>, ReplyError> {
         let current_primary = self
@@ -2052,12 +2071,12 @@ where
                         .reply_unchecked()?
                     {
                         let type_ = prop.type_;
-                        transfer.read_selection_prop(prop);
                         if type_ == xwm.atoms.INCR {
                             transfer.incr = true;
                             return Ok(());
-                        } else if let Some(token) = transfer.token.as_ref() {
-                            let _ = loop_handle.enable(token);
+                        } else if transfer.token.is_some() {
+                            transfer.read_selection_prop(prop);
+                            let _ = loop_handle.enable(transfer.token.as_ref().unwrap());
                         } else {
                             selection.incoming.remove(&n.requestor);
                         }

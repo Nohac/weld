@@ -3,7 +3,7 @@ use std::sync::Arc;
 use ::winit::event_loop::pump_events::PumpStatus;
 use smithay::{
     backend::{
-        input::{InputEvent, KeyboardKeyEvent},
+        input::{InputEvent, InputTime, KeyboardKeyEvent},
         renderer::{
             Color32F, Frame, Renderer,
             element::{
@@ -24,6 +24,7 @@ use smithay::{
             CompositorClientState, CompositorHandler, CompositorState, SurfaceAttributes, TraversalAction,
             with_surface_tree_downward,
         },
+        pointer_constraints::PointerConstraintsHandler,
         selection::{
             SelectionHandler,
             data_device::{DataDeviceHandler, DataDeviceState, WaylandDndGrabHandler},
@@ -116,6 +117,8 @@ impl SeatHandler for App {
     fn cursor_image(&mut self, _seat: &Seat<Self>, _image: smithay::input::pointer::CursorImageStatus) {}
 }
 
+impl PointerConstraintsHandler for App {}
+
 struct App {
     compositor_state: CompositorState,
     xdg_shell_state: XdgShellState,
@@ -178,7 +181,7 @@ pub fn run_winit() -> Result<(), Box<dyn std::error::Error>> {
                         event.key_code(),
                         event.state(),
                         0.into(),
-                        0,
+                        InputTime::now(),
                         |_, _, _| {
                             //
                             FilterResult::Forward

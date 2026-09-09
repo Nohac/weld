@@ -17,7 +17,7 @@
 //!
 //! ```
 //! use smithay::input::{Seat, SeatState, SeatHandler, pointer::CursorImageStatus};
-//! # use smithay::backend::input::KeyState;
+//! # use smithay::backend::input::{InputTime, KeyState};
 //! # use smithay::input::{
 //! #   pointer::{PointerTarget, AxisFrame, MotionEvent, ButtonEvent, RelativeMotionEvent,
 //! #             GestureSwipeBeginEvent, GestureSwipeUpdateEvent, GestureSwipeEndEvent,
@@ -52,7 +52,7 @@
 //! #   fn button(&self, seat: &Seat<State>, data: &mut State, event: &ButtonEvent) {}
 //! #   fn axis(&self, seat: &Seat<State>, data: &mut State, frame: AxisFrame) {}
 //! #   fn frame(&self, seat: &Seat<State>, data: &mut State) {}
-//! #   fn leave(&self, seat: &Seat<State>, data: &mut State, serial: Serial, time: u32) {}
+//! #   fn leave(&self, seat: &Seat<State>, data: &mut State, serial: Serial, time: InputTime) {}
 //! #   fn gesture_swipe_begin(&self, seat: &Seat<State>, data: &mut State, event: &GestureSwipeBeginEvent) {}
 //! #   fn gesture_swipe_update(&self, seat: &Seat<State>, data: &mut State, event: &GestureSwipeUpdateEvent) {}
 //! #   fn gesture_swipe_end(&self, seat: &Seat<State>, data: &mut State, event: &GestureSwipeEndEvent) {}
@@ -72,7 +72,7 @@
 //! #       key: KeysymHandle<'_>,
 //! #       state: KeyState,
 //! #       serial: Serial,
-//! #       time: u32,
+//! #       time: InputTime,
 //! #   ) {}
 //! #   fn modifiers(&self, seat: &Seat<State>, data: &mut State, modifiers: ModifiersState, serial: Serial) {}
 //! # }
@@ -138,7 +138,10 @@ use self::{
     touch::TouchGrab,
 };
 use crate::{
-    input::pointer::{ClickGrab, GrabStartData as PointerGrabStartData, PointerGrab},
+    input::{
+        pointer::{ClickGrab, GrabStartData as PointerGrabStartData, PointerGrab},
+        touch::{GrabStartData as TouchGrabStartData, TouchDownGrab},
+    },
     utils::{Serial, user_data::UserDataMap},
 };
 
@@ -176,6 +179,15 @@ pub trait SeatHandler: Sized + 'static {
     /// return your own [`PointerGrab`] implementation.
     fn click_grab(&mut self, start_data: PointerGrabStartData<Self>) -> impl PointerGrab<Self> {
         ClickGrab::new(start_data)
+    }
+
+    /// Provides the implicit touch grab for down events
+    ///
+    /// When the user presses down on the touchscreen, an implicit grab is installed. If your
+    /// compositor needs custom behavior for this grab, you can implement this trait item and
+    /// return your own [`TouchGrab`] implementation.
+    fn touch_down_grab(&mut self, start_data: TouchGrabStartData<Self>) -> impl TouchGrab<Self> {
+        TouchDownGrab::new(start_data)
     }
 }
 /// Delegate type for all [Seat] globals.
@@ -378,7 +390,7 @@ impl<D: SeatHandler + 'static> Seat<D> {
     ///
     /// ```no_run
     /// # use smithay::input::{Seat, SeatState, SeatHandler, pointer::CursorImageStatus};
-    /// # use smithay::backend::input::KeyState;
+    /// # use smithay::backend::input::{InputTime, KeyState};
     /// # use smithay::input::{
     /// #   pointer::{PointerTarget, AxisFrame, MotionEvent, ButtonEvent, RelativeMotionEvent,
     /// #             GestureSwipeBeginEvent, GestureSwipeUpdateEvent, GestureSwipeEndEvent,
@@ -401,7 +413,7 @@ impl<D: SeatHandler + 'static> Seat<D> {
     /// #   fn button(&self, seat: &Seat<State>, data: &mut State, event: &ButtonEvent) {}
     /// #   fn axis(&self, seat: &Seat<State>, data: &mut State, frame: AxisFrame) {}
     /// #   fn frame(&self, seat: &Seat<State>, data: &mut State) {}
-    /// #   fn leave(&self, seat: &Seat<State>, data: &mut State, serial: Serial, time: u32) {}
+    /// #   fn leave(&self, seat: &Seat<State>, data: &mut State, serial: Serial, time: InputTime) {}
     /// #   fn gesture_swipe_begin(&self, seat: &Seat<State>, data: &mut State, event: &GestureSwipeBeginEvent) {}
     /// #   fn gesture_swipe_update(&self, seat: &Seat<State>, data: &mut State, event: &GestureSwipeUpdateEvent) {}
     /// #   fn gesture_swipe_end(&self, seat: &Seat<State>, data: &mut State, event: &GestureSwipeEndEvent) {}
@@ -421,7 +433,7 @@ impl<D: SeatHandler + 'static> Seat<D> {
     /// #       key: KeysymHandle<'_>,
     /// #       state: KeyState,
     /// #       serial: Serial,
-    /// #       time: u32,
+    /// #       time: InputTime,
     /// #   ) {}
     /// #   fn modifiers(&self, seat: &Seat<State>, data: &mut State, modifiers: ModifiersState, serial: Serial) {}
     /// # }
@@ -500,7 +512,7 @@ impl<D: SeatHandler + 'static> Seat<D> {
     ///
     /// ```no_run
     /// # use smithay::input::{Seat, SeatState, SeatHandler, keyboard::XkbConfig, pointer::CursorImageStatus};
-    /// # use smithay::backend::input::KeyState;
+    /// # use smithay::backend::input::{InputTime, KeyState};
     /// # use smithay::input::{
     /// #   pointer::{PointerTarget, AxisFrame, MotionEvent, ButtonEvent, RelativeMotionEvent,
     /// #             GestureSwipeBeginEvent, GestureSwipeUpdateEvent, GestureSwipeEndEvent,
@@ -523,7 +535,7 @@ impl<D: SeatHandler + 'static> Seat<D> {
     /// #   fn button(&self, seat: &Seat<State>, data: &mut State, event: &ButtonEvent) {}
     /// #   fn axis(&self, seat: &Seat<State>, data: &mut State, frame: AxisFrame) {}
     /// #   fn frame(&self, seat: &Seat<State>, data: &mut State) {}
-    /// #   fn leave(&self, seat: &Seat<State>, data: &mut State, serial: Serial, time: u32) {}
+    /// #   fn leave(&self, seat: &Seat<State>, data: &mut State, serial: Serial, time: InputTime) {}
     /// #   fn gesture_swipe_begin(&self, seat: &Seat<State>, data: &mut State, event: &GestureSwipeBeginEvent) {}
     /// #   fn gesture_swipe_update(&self, seat: &Seat<State>, data: &mut State, event: &GestureSwipeUpdateEvent) {}
     /// #   fn gesture_swipe_end(&self, seat: &Seat<State>, data: &mut State, event: &GestureSwipeEndEvent) {}
@@ -543,7 +555,7 @@ impl<D: SeatHandler + 'static> Seat<D> {
     /// #       key: KeysymHandle<'_>,
     /// #       state: KeyState,
     /// #       serial: Serial,
-    /// #       time: u32,
+    /// #       time: InputTime,
     /// #   ) {}
     /// #   fn modifiers(&self, seat: &Seat<State>, data: &mut State, modifiers: ModifiersState, serial: Serial) {}
     /// # }
@@ -655,6 +667,7 @@ impl<D: SeatHandler + 'static> Seat<D> {
     ///
     /// ```no_run
     /// # use smithay::wayland::compositor::{CompositorHandler, CompositorState, CompositorClientState};
+    /// # use smithay::wayland::pointer_constraints::PointerConstraintsHandler;
     /// # use smithay::input::{Seat, SeatState, SeatHandler, pointer::CursorImageStatus};
     /// # use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
     /// #
@@ -672,6 +685,7 @@ impl<D: SeatHandler + 'static> Seat<D> {
     /// #     fn focus_changed(&mut self, seat: &Seat<Self>, focused: Option<&WlSurface>) { unimplemented!() }
     /// #     fn cursor_image(&mut self, seat: &Seat<Self>, image: CursorImageStatus) { unimplemented!() }
     /// # }
+    /// # impl PointerConstraintsHandler for State {}
     /// # let mut seat: Seat<State> = unimplemented!();
     /// let touch_handle = seat.add_touch();
     /// ```

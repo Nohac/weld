@@ -30,17 +30,32 @@ use crate::{
 
 const VERSION: u32 = 1;
 
+/// Reason for Constraint remove
+#[derive(Debug)]
+pub enum ConstraintRemove {
+    /// Client call destroy
+    Destroyed(PointerConstraint),
+    /// Compositor pointer leave surface
+    PointerLeave(Option<RegionAttributes>),
+}
+
 /// Handler for pointer constraints
 pub trait PointerConstraintsHandler: SeatHandler {
     /// Pointer lock or confinement constraint created for `pointer` on `surface`
     ///
     /// Use [`with_pointer_constraint`] to access the constraint.
-    fn new_constraint(&mut self, surface: &WlSurface, pointer: &PointerHandle<Self>);
+    fn new_constraint(&mut self, _surface: &WlSurface, _pointer: &PointerHandle<Self>) {}
 
-    /// Constraint removed for `pointer` on `surface`
+    /// Pointer constraint removed for `pointer` on `surface`
     ///
     /// Use [`with_pointer_constraint`] to access the constraint.
-    fn remove_constraint(&mut self, surface: &WlSurface, pointer: &PointerHandle<Self>);
+    fn remove_constraint(
+        &mut self,
+        _surface: &WlSurface,
+        _pointer: &PointerHandle<Self>,
+        _constraint_remove: ConstraintRemove,
+    ) {
+    }
 
     /// The client holding a LockedPointer has committed a cursor position hint.
     ///
@@ -49,10 +64,11 @@ pub trait PointerConstraintsHandler: SeatHandler {
     /// Use [`with_pointer_constraint`] to access the constraint and check if it is active.
     fn cursor_position_hint(
         &mut self,
-        surface: &WlSurface,
-        pointer: &PointerHandle<Self>,
-        location: Point<f64, Logical>,
-    );
+        _surface: &WlSurface,
+        _pointer: &PointerHandle<Self>,
+        _location: Point<f64, Logical>,
+    ) {
+    }
 }
 
 /// Constraint confining pointer to a region of the surface
@@ -121,7 +137,7 @@ impl<D: SeatHandler + 'static> ops::Deref for PointerConstraintRef<'_, D> {
     }
 }
 
-impl<D: SeatHandler + 'static> PointerConstraintRef<'_, D> {
+impl<D: SeatHandler + PointerConstraintsHandler + 'static> PointerConstraintRef<'_, D> {
     /// Send `locked`/`unlocked`
     ///
     /// This is not sent automatically since compositors may have different
@@ -356,15 +372,15 @@ fn remove_constraint<D: SeatHandler + PointerConstraintsHandler + 'static>(
 ) {
     let is_removed = with_constraint_data::<D, _, _>(surface, |data| {
         if let Some(data) = data {
-            if let Some(_constraint) = data.constraints.remove(pointer) {
-                return true;
+            if let Some(constraint) = data.constraints.remove(pointer) {
+                return Some(constraint);
             }
         }
-        false
+        None
     });
 
-    if is_removed {
-        state.remove_constraint(surface, pointer);
+    if let Some(constraint) = is_removed {
+        state.remove_constraint(surface, pointer, ConstraintRemove::Destroyed(constraint));
     }
 }
 
@@ -476,7 +492,8 @@ where
 
 impl<D> Dispatch2<ZwpConfinedPointerV1, D> for PointerConstraintUserData<D>
 where
-    D: SeatHandler + PointerConstraintsHandler,
+    D: SeatHandler,
+    D: PointerConstraintsHandler,
     D: 'static,
 {
     fn request(
@@ -523,7 +540,8 @@ where
 
 impl<D> Dispatch2<ZwpLockedPointerV1, D> for PointerConstraintUserData<D>
 where
-    D: SeatHandler + PointerConstraintsHandler,
+    D: SeatHandler,
+    D: PointerConstraintsHandler,
     D: 'static,
 {
     fn request(

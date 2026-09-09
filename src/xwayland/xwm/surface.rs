@@ -1,5 +1,8 @@
 use crate::{
-    backend::{input::KeyState, renderer::utils::RendererSurfaceStateUserData},
+    backend::{
+        input::{InputTime, KeyState},
+        renderer::utils::RendererSurfaceStateUserData,
+    },
     input::{
         Seat, SeatHandler,
         keyboard::{KeyboardTarget, KeysymHandle, ModifiersState},
@@ -17,6 +20,7 @@ use crate::{
     },
     wayland::{
         compositor::{self, CompositorHandler, RectangleKind, RegionAttributes, SurfaceAttributes},
+        pointer_constraints::PointerConstraintsHandler,
         seat::{WaylandFocus, keyboard::enter_internal},
     },
     xwayland::xwm::MwmHints,
@@ -289,6 +293,9 @@ pub enum WmWindowProperty {
     Pid,
     Opacity,
     FrameExtents,
+    /// An unrecognized atom changed; forwarded so the compositor can react to
+    /// compositor/application-specific properties.
+    Other(Atom),
 }
 
 /// https://x.org/releases/X11R7.6/doc/xorg-docs/specs/ICCCM/icccm.html#input_focus
@@ -1608,7 +1615,7 @@ impl X11Surface {
                 Ok(Some(WmWindowProperty::FrameExtents))
             }
 
-            _ => Ok(None), // unknown
+            _ => Ok(Some(WmWindowProperty::Other(atom))),
         }
     }
 
@@ -2214,7 +2221,7 @@ impl<D: SeatHandler + 'static> KeyboardTarget<D> for X11Surface {
         key: KeysymHandle<'_>,
         state: KeyState,
         serial: Serial,
-        time: u32,
+        time: InputTime,
     ) {
         let mut xstate = self.state.lock().unwrap();
         if let Some(surface) = xstate.wl_surface.as_ref() {
@@ -2241,7 +2248,7 @@ impl<D: SeatHandler + 'static> KeyboardTarget<D> for X11Surface {
     }
 }
 
-impl<D: SeatHandler + 'static> PointerTarget<D> for X11Surface {
+impl<D: SeatHandler + PointerConstraintsHandler + 'static> PointerTarget<D> for X11Surface {
     fn enter(&self, seat: &Seat<D>, data: &mut D, event: &MotionEvent) {
         if let Some(surface) = self.state.lock().unwrap().wl_surface.as_ref() {
             PointerTarget::enter(surface, seat, data, event);
@@ -2278,7 +2285,7 @@ impl<D: SeatHandler + 'static> PointerTarget<D> for X11Surface {
         }
     }
 
-    fn leave(&self, seat: &Seat<D>, data: &mut D, serial: Serial, time: u32) {
+    fn leave(&self, seat: &Seat<D>, data: &mut D, serial: Serial, time: InputTime) {
         if let Some(surface) = self.state.lock().unwrap().wl_surface.as_ref() {
             PointerTarget::leave(surface, seat, data, serial, time);
         }
@@ -2475,7 +2482,7 @@ impl<D: TabletSeatHandler + CompositorHandler + 'static> TabletToolTarget<D> for
         seat: &Seat<D>,
         data: &mut D,
         tool_descriptor: &crate::backend::input::TabletToolDescriptor,
-        time: u32,
+        time: InputTime,
     ) {
         if let Some(surface) = self.state.lock().unwrap().wl_surface.as_ref() {
             TabletToolTarget::frame(surface, seat, data, tool_descriptor, time);
