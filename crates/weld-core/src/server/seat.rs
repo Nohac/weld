@@ -1,7 +1,9 @@
 //! Smithay seat delivery and protocol focus application.
 
 use smithay::{
-    backend::input::{Axis, AxisSource, ButtonState as SmithayButtonState, KeyState, Keycode},
+    backend::input::{
+        Axis, AxisSource, ButtonState as SmithayButtonState, InputTime, KeyState, Keycode,
+    },
     input::{
         Seat, SeatHandler,
         dnd::{DnDGrab, DndGrabHandler, GrabType, Source},
@@ -23,6 +25,7 @@ use smithay::{
     },
     utils::{Logical, SERIAL_COUNTER},
     wayland::{
+        pointer_constraints::PointerConstraintsHandler,
         seat::WaylandFocus,
         selection::{
             SelectionHandler,
@@ -145,7 +148,7 @@ impl ServerState {
             Keycode::new(keycode),
             smithay_key_state(state),
             SERIAL_COUNTER.next_serial(),
-            time,
+            InputTime::from_millis(time),
             |_, _, _| FilterResult::Forward,
         );
     }
@@ -317,7 +320,7 @@ impl ServerState {
             &MotionEvent {
                 location: compositor_point(position),
                 serial: SERIAL_COUNTER.next_serial(),
-                time,
+                time: InputTime::from_millis(time),
             },
         );
         pointer.frame(self);
@@ -362,7 +365,7 @@ impl ServerState {
             &MotionEvent {
                 location: compositor_point(position),
                 serial,
-                time,
+                time: InputTime::from_millis(time),
             },
         );
         match state {
@@ -385,7 +388,7 @@ impl ServerState {
             self,
             &ButtonEvent {
                 serial,
-                time,
+                time: InputTime::from_millis(time),
                 button,
                 state: smithay_button_state(state),
             },
@@ -428,7 +431,7 @@ impl ServerState {
                     self,
                     &GestureSwipeBeginEvent {
                         serial: SERIAL_COUNTER.next_serial(),
-                        time,
+                        time: InputTime::from_millis(time),
                         fingers,
                     },
                 );
@@ -437,7 +440,7 @@ impl ServerState {
                 pointer.gesture_swipe_update(
                     self,
                     &GestureSwipeUpdateEvent {
-                        time,
+                        time: InputTime::from_millis(time),
                         delta: gesture_delta(delta),
                     },
                 );
@@ -447,7 +450,7 @@ impl ServerState {
                     self,
                     &GestureSwipeEndEvent {
                         serial: SERIAL_COUNTER.next_serial(),
-                        time,
+                        time: InputTime::from_millis(time),
                         cancelled,
                     },
                 );
@@ -457,7 +460,7 @@ impl ServerState {
                     self,
                     &GesturePinchBeginEvent {
                         serial: SERIAL_COUNTER.next_serial(),
-                        time,
+                        time: InputTime::from_millis(time),
                         fingers,
                     },
                 );
@@ -470,7 +473,7 @@ impl ServerState {
                 pointer.gesture_pinch_update(
                     self,
                     &GesturePinchUpdateEvent {
-                        time,
+                        time: InputTime::from_millis(time),
                         delta: gesture_delta(delta),
                         scale,
                         rotation,
@@ -482,7 +485,7 @@ impl ServerState {
                     self,
                     &GesturePinchEndEvent {
                         serial: SERIAL_COUNTER.next_serial(),
-                        time,
+                        time: InputTime::from_millis(time),
                         cancelled,
                     },
                 );
@@ -492,7 +495,7 @@ impl ServerState {
                     self,
                     &GestureHoldBeginEvent {
                         serial: SERIAL_COUNTER.next_serial(),
-                        time,
+                        time: InputTime::from_millis(time),
                         fingers,
                     },
                 );
@@ -502,7 +505,7 @@ impl ServerState {
                     self,
                     &GestureHoldEndEvent {
                         serial: SERIAL_COUNTER.next_serial(),
-                        time,
+                        time: InputTime::from_millis(time),
                         cancelled,
                     },
                 );
@@ -551,7 +554,7 @@ impl ServerState {
                     self,
                     &ButtonEvent {
                         serial,
-                        time,
+                        time: InputTime::from_millis(time),
                         button,
                         state: SmithayButtonState::Released,
                     },
@@ -563,7 +566,7 @@ impl ServerState {
                 &MotionEvent {
                     location: compositor_point(self.pointer_position),
                     serial,
-                    time,
+                    time: InputTime::from_millis(time),
                 },
             );
             pointer.frame(self);
@@ -605,7 +608,7 @@ impl ServerState {
                 &MotionEvent {
                     location: compositor_point(self.pointer_position),
                     serial,
-                    time,
+                    time: InputTime::from_millis(time),
                 },
             );
             pointer.frame(self);
@@ -827,6 +830,9 @@ fn set_activated(surface: &ToplevelSurface, activated: bool) {
     surface.send_pending_configure();
 }
 
+// Required by Smithay's WlSurface pointer target; no constraints global is advertised yet.
+impl PointerConstraintsHandler for ServerState {}
+
 impl SeatHandler for ServerState {
     type KeyboardFocus = WlSurface;
     type PointerFocus = WlSurface;
@@ -930,7 +936,7 @@ fn smithay_axis_frame(axis: RawScrollFrame, time: u32) -> Option<AxisFrame> {
         RawScrollSource::Finger => AxisSource::Finger,
         RawScrollSource::Continuous => AxisSource::Continuous,
     };
-    let mut frame = AxisFrame::new(time).source(source);
+    let mut frame = AxisFrame::new(InputTime::from_millis(time)).source(source);
     if axis.horizontal != 0.0 {
         frame = frame.value(Axis::Horizontal, axis.horizontal);
     }

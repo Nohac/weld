@@ -74,7 +74,7 @@ impl LibinputAdapter {
                                 KeyState::Released => WeldButtonState::Released,
                             },
                         },
-                        event.time_msec(),
+                        event.time().millis(),
                     )
                 }))
             }
@@ -91,7 +91,7 @@ impl LibinputAdapter {
                     RawSeatEventKind::PointerMotion {
                         position: self.pointer,
                     },
-                    event.time_msec(),
+                    event.time().millis(),
                 )))
             }
             InputEvent::PointerMotionAbsolute { event, .. } => {
@@ -108,7 +108,7 @@ impl LibinputAdapter {
                     RawSeatEventKind::PointerMotion {
                         position: self.pointer,
                     },
-                    event.time_msec(),
+                    event.time().millis(),
                 )))
             }
             InputEvent::PointerButton { event, .. } => single_event(Some(RawSeatEvent::new(
@@ -120,7 +120,7 @@ impl LibinputAdapter {
                         ButtonState::Released => WeldButtonState::Released,
                     },
                 },
-                event.time_msec(),
+                event.time().millis(),
             ))),
             InputEvent::PointerAxis { event, .. } => {
                 let source = match event.source() {
@@ -139,32 +139,32 @@ impl LibinputAdapter {
                             event.amount_v120(Axis::Vertical),
                         ),
                     },
-                    event.time_msec(),
+                    event.time().millis(),
                 )))
             }
             InputEvent::GestureSwipeBegin { event } => self.active_gesture.transition(
                 PointerGesture::Swipe(TouchpadSwipe::Begin {
                     fingers: event.fingers(),
                 }),
-                event.time_msec(),
+                event.time().millis(),
             ),
             InputEvent::GestureSwipeUpdate { event } => self.active_gesture.transition(
                 PointerGesture::Swipe(TouchpadSwipe::Update {
                     delta: InputDelta::new(event.delta_x(), event.delta_y()),
                 }),
-                event.time_msec(),
+                event.time().millis(),
             ),
             InputEvent::GestureSwipeEnd { event } => self.active_gesture.transition(
                 PointerGesture::Swipe(TouchpadSwipe::End {
                     cancelled: event.cancelled(),
                 }),
-                event.time_msec(),
+                event.time().millis(),
             ),
             InputEvent::GesturePinchBegin { event } => self.active_gesture.transition(
                 PointerGesture::Pinch(TouchpadPinch::Begin {
                     fingers: event.fingers(),
                 }),
-                event.time_msec(),
+                event.time().millis(),
             ),
             InputEvent::GesturePinchUpdate { event } => self.active_gesture.transition(
                 PointerGesture::Pinch(TouchpadPinch::Update {
@@ -172,25 +172,25 @@ impl LibinputAdapter {
                     scale: event.scale(),
                     rotation: event.rotation(),
                 }),
-                event.time_msec(),
+                event.time().millis(),
             ),
             InputEvent::GesturePinchEnd { event } => self.active_gesture.transition(
                 PointerGesture::Pinch(TouchpadPinch::End {
                     cancelled: event.cancelled(),
                 }),
-                event.time_msec(),
+                event.time().millis(),
             ),
             InputEvent::GestureHoldBegin { event } => self.active_gesture.transition(
                 PointerGesture::Hold(TouchpadHold::Begin {
                     fingers: event.fingers(),
                 }),
-                event.time_msec(),
+                event.time().millis(),
             ),
             InputEvent::GestureHoldEnd { event } => self.active_gesture.transition(
                 PointerGesture::Hold(TouchpadHold::End {
                     cancelled: event.cancelled(),
                 }),
-                event.time_msec(),
+                event.time().millis(),
             ),
             _ => empty_batch(),
         };

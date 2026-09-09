@@ -1,5 +1,5 @@
 repository = "https://github.com/Smithay/smithay.git"
 branch = "master"
-revision = "5fb12b87407b3680135c45d94214c5f1b1d0fbea"
-update_command = "git subtree pull --prefix=vendor/smithay https://github.com/Smithay/smithay.git master --squash"
+revision = "0ff00983b6007257a7a161a4fe8b14a778e2ac8f"
+update_command = "git subtree pull --prefix=vendor/smithay https://github.com/Smithay/smithay.git 0ff00983b6007257a7a161a4fe8b14a778e2ac8f --squash"
 local_patch = "vendor/smithay/Cargo.toml omits Smithay's workspace table so the vendored package can live below Weld's workspace root; DrmDeviceFd::new_unprivileged wraps render nodes without attempting DRM master so they can import explicit-sync timelines without a misleading warning; reapply both after subtree updates"

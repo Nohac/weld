@@ -1,6 +1,7 @@
 //! XDG popup registration, committed geometry, surface trees, and explicit grabs.
 
 use smithay::{
+    backend::input::InputTime,
     desktop::{
         PopupKeyboardGrab, PopupKind, PopupManager, PopupPointerGrab, PopupUngrabStrategy,
         find_popup_root_surface,
@@ -266,7 +267,11 @@ impl ServerState {
             if let Some(pointer) = self.seat.get_pointer()
                 && popup_grab_matches(serial, previous_serial, |serial| pointer.has_grab(serial))
             {
-                pointer.unset_grab(self, SERIAL_COUNTER.next_serial(), time);
+                pointer.unset_grab(
+                    self,
+                    SERIAL_COUNTER.next_serial(),
+                    InputTime::from_millis(time),
+                );
             }
             if let Some(keyboard) = self.seat.get_keyboard()
                 && popup_grab_matches(serial, previous_serial, |serial| keyboard.has_grab(serial))
