@@ -55,6 +55,20 @@ pub struct InputMethodHandle {
 }
 
 impl InputMethodHandle {
+    pub(crate) fn change_repeat_info(&self, rate: i32, delay: i32) {
+        let Ok(inner) = self.inner.lock() else {
+            warn!("Cannot update poisoned input-method repeat state");
+            return;
+        };
+        let Ok(keyboard) = inner.keyboard_grab.inner.lock() else {
+            warn!("Cannot update poisoned input-method keyboard grab");
+            return;
+        };
+        if let Some(grab) = &keyboard.grab {
+            grab.repeat_info(rate, delay);
+        }
+    }
+
     pub(super) fn add_instance(&self, instance: &ZwpInputMethodV2) {
         let mut inner = self.inner.lock().unwrap();
         if let Some(instance) = inner.instance.as_mut() {
@@ -291,7 +305,7 @@ where
                 keyboard.grab = Some(instance.clone());
                 keyboard.text_input_handle = self.text_input_handle.clone();
                 let guard = self.keyboard_handle.arc.internal.lock().unwrap();
-                instance.repeat_info(guard.repeat_rate, guard.repeat_delay);
+                instance.repeat_info(guard.legacy_repeat_rate(), guard.repeat_delay);
                 let keymap_file = self.keyboard_handle.arc.keymap.lock().unwrap();
                 let res = keymap_file.with_fd(false, |fd, size| {
                     instance.keymap(KeymapFormat::XkbV1, fd, size as u32);

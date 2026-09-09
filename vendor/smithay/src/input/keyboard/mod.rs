@@ -20,6 +20,8 @@ pub use xkbcommon::xkb::{self, ContextFlags, Keycode, Keysym, keysyms};
 use super::{GrabStatus, Seat, SeatHandler};
 
 #[cfg(feature = "wayland_frontend")]
+use crate::wayland::input_method::InputMethodSeat;
+#[cfg(feature = "wayland_frontend")]
 use wayland_server::{Resource, Weak};
 #[cfg(feature = "wayland_frontend")]
 mod keymap_file;
@@ -31,6 +33,20 @@ pub use modifiers_state::{ModifiersState, SerializedMods};
 
 mod xkb_config;
 pub use xkb_config::XkbConfig;
+
+/// Seat-wide repeat ownership. Select a mode before input starts, not per key.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum RepeatMode {
+    /// Every client generates its own repeat cadence.
+    #[default]
+    Client,
+    /// The compositor supplies repeats to v10 keyboards. Older keyboards and
+    /// input-method grabs optionally retain their own timers.
+    Compositor {
+        /// Allow clients without v10 repeat support to keep their own timers.
+        legacy_repeat: bool,
+    },
+}
 
 /// Trait representing object that can receive keyboard interactions
 pub trait KeyboardTarget<D>: IsAlive + fmt::Debug + Send
@@ -44,7 +60,8 @@ where
     /// A key was pressed, released, or repeated on a keyboard from a given seat.
     ///
     /// Callers bypassing [`KeyboardInnerHandle::input`] must uphold its repeat
-    /// preconditions, including a zero configured repeat rate and a held key.
+    /// preconditions, including compositor ownership (or a zero configured rate)
+    /// and a held, repeatable key.
     fn key(
         &self,
         seat: &Seat<D>,
@@ -236,6 +253,7 @@ pub(crate) struct KbdInternal<D: SeatHandler> {
     pub(crate) mods_state: ModifiersState,
     xkb: Arc<Mutex<Xkb>>,
     pub(crate) repeat_rate: i32,
+    repeat_mode: RepeatMode,
     pub(crate) repeat_delay: i32,
     led_mapping: LedMapping,
     pub(crate) led_state: LedState,
@@ -253,6 +271,7 @@ impl<D: SeatHandler> fmt::Debug for KbdInternal<D> {
             .field("mods_state", &self.mods_state)
             .field("xkb", &self.xkb)
             .field("repeat_rate", &self.repeat_rate)
+            .field("repeat_mode", &self.repeat_mode)
             .field("repeat_delay", &self.repeat_delay)
             .finish()
     }
@@ -294,6 +313,7 @@ impl<D: SeatHandler + 'static> KbdInternal<D> {
             })),
             repeat_rate,
             repeat_delay,
+            repeat_mode: RepeatMode::Client,
             led_mapping,
             led_state,
             grab: GrabStatus::None,
@@ -358,10 +378,27 @@ impl<D: SeatHandler + 'static> KbdInternal<D> {
 
     // Called under the keyboard-state lock. Never retain the XKB guard across callbacks.
     fn can_repeat(&self, keycode: Keycode) -> bool {
-        self.repeat_rate == 0
+        (self.repeat_rate == 0 || matches!(self.repeat_mode, RepeatMode::Compositor { .. }))
             && self.pressed_keys.contains(&keycode)
             && self.forwarded_pressed_keys.contains(&keycode)
             && self.xkb.lock().is_ok_and(|xkb| xkb.keymap.key_repeats(keycode))
+    }
+
+    #[cfg(feature = "wayland_frontend")]
+    pub(crate) fn repeat_rate_for_version(&self, version: u32) -> i32 {
+        if version >= 10 && matches!(self.repeat_mode, RepeatMode::Compositor { .. }) {
+            0
+        } else {
+            self.legacy_repeat_rate()
+        }
+    }
+
+    #[cfg(feature = "wayland_frontend")]
+    pub(crate) fn legacy_repeat_rate(&self) -> i32 {
+        match self.repeat_mode {
+            RepeatMode::Compositor { legacy_repeat: false } => 0,
+            _ => self.repeat_rate,
+        }
     }
 
     /// Release every keycode currently held by `source`, as if the source sent a release for
@@ -1031,7 +1068,7 @@ impl<D: SeatHandler + 'static> KeyboardHandle<D> {
     /// All keystrokes from the input backend should be fed _in order_ to this method of the
     /// keyboard handler. It will internally track the state of the keymap.
     ///
-    /// Explicit [`KeyEvent::Repeated`] events require a zero configured repeat rate,
+    /// Explicit [`KeyEvent::Repeated`] events require compositor repeat mode or a zero configured rate,
     /// a repeatable key held by this source, and a previously forwarded press. They
     /// do not update XKB or the held-key sets. This method does not generate repeats;
     /// the caller owns repeat timing and cancellation when its input context changes.
@@ -1172,7 +1209,7 @@ impl<D: SeatHandler + 'static> KeyboardHandle<D> {
     /// Forward a key event to the focused client
     ///
     /// Useful in conjunction with [`KeyboardHandle::input_intercept`].
-    /// Repeats leave the held-key sets unchanged and require a zero repeat rate and
+    /// Repeats leave the held-key sets unchanged and require compositor mode or a zero rate and
     /// an already-held, forwarded, repeatable key. This low-level API does not check
     /// source ownership; use [`KeyboardHandle::input_from_source`] for that check.
     pub fn input_forward(
@@ -1366,9 +1403,50 @@ impl<D: SeatHandler + 'static> KeyboardHandle<D> {
                 continue;
             };
             if kbd.version() >= 4 {
-                kbd.repeat_info(rate, delay);
+                kbd.repeat_info(guard.repeat_rate_for_version(kbd.version()), delay);
             }
         }
+    }
+
+    /// Changes seat-wide repeat ownership and updates every bound keyboard.
+    ///
+    /// Call outside keyboard callbacks. Switching between client and compositor
+    /// ownership while keys are held can create competing timers; select ownership
+    /// at startup or after all held input has been released. Changing only the
+    /// legacy fallback cannot enable compositor repeats for legacy recipients.
+    pub fn change_repeat_mode(&self, data: &mut D, mode: RepeatMode) {
+        let Ok(mut guard) = self.arc.internal.lock() else {
+            tracing::error!("Cannot change repeat mode after keyboard state was poisoned");
+            return;
+        };
+        if guard.repeat_mode == mode {
+            return;
+        }
+        guard.repeat_mode = mode;
+        #[cfg(feature = "wayland_frontend")]
+        {
+            let Ok(keyboards) = self.arc.known_kbds.lock() else {
+                tracing::error!("Cannot update repeat mode after keyboard registry was poisoned");
+                return;
+            };
+            for keyboard in &*keyboards {
+                if let Ok(keyboard) = keyboard.upgrade()
+                    && keyboard.version() >= 4
+                {
+                    keyboard.repeat_info(
+                        guard.repeat_rate_for_version(keyboard.version()),
+                        guard.repeat_delay,
+                    );
+                }
+            }
+            let rate = guard.legacy_repeat_rate();
+            let delay = guard.repeat_delay;
+            drop(keyboards);
+            drop(guard);
+            self.get_seat(data).input_method().change_repeat_info(rate, delay);
+        }
+        #[cfg(not(feature = "wayland_frontend"))]
+        let _ = data;
     }
 
     /// Access the [`Serial`] of the last `keyboard_enter` event, if that focus is still active.
