@@ -32,6 +32,7 @@
 //! use smithay::wayland::selection::data_device::{WaylandDndGrabHandler, DataDeviceState, DataDeviceHandler};
 //! # use smithay::input::{Seat, SeatState, SeatHandler, pointer::CursorImageStatus};
 //! # use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
+//! # use smithay::wayland::pointer_constraints::PointerConstraintsHandler;
 //!
 //! # struct State { data_device_state: DataDeviceState }
 //! # let mut display = wayland_server::Display::<State>::new().unwrap();
@@ -57,6 +58,7 @@
 //! #     fn focus_changed(&mut self, seat: &Seat<Self>, focused: Option<&WlSurface>) { unimplemented!() }
 //! #     fn cursor_image(&mut self, seat: &Seat<Self>, image: CursorImageStatus) { unimplemented!() }
 //! # }
+//! # impl PointerConstraintsHandler for State {}
 //! impl WaylandDndGrabHandler for State {
 //!     // ... implement `dnd_requested` to handle drag&drop operations
 //! }
@@ -95,6 +97,7 @@ use wayland_server::{
 };
 
 use crate::{
+    backend::input::InputTime,
     input::{
         Seat, SeatHandler,
         dnd::{DndAction, DndFocus, GrabType, OfferData, Source},
@@ -256,13 +259,13 @@ fn handle_dnd<D, S>(
     match request {
         Request::Accept { mime_type, .. } => {
             if let Some(source) = source.as_ref() {
-                if let Some(mtype) = mime_type {
-                    data.accepted = source
+                data.accepted = match &mime_type {
+                    Some(mtype) => source
                         .metadata()
-                        .is_some_and(|meta| meta.mime_types.contains(&mtype));
-                } else {
-                    data.accepted = false;
-                }
+                        .is_some_and(|meta| meta.mime_types.contains(mtype)),
+                    None => false,
+                };
+                source.accepted(mime_type);
             } else if data.finished {
                 offer.post_error(
                     wl_data_offer::Error::InvalidFinish,
@@ -501,7 +504,7 @@ impl<D: SeatHandler + DataDeviceHandler + 'static> DndFocus<D> for WlSurface {
         offer: Option<&mut WlOfferData<S>>,
         seat: &Seat<D>,
         location: Point<f64, Logical>,
-        time: u32,
+        time: InputTime,
     ) {
         let seat_data = seat
             .user_data()
@@ -525,7 +528,7 @@ impl<D: SeatHandler + DataDeviceHandler + 'static> DndFocus<D> for WlSurface {
 
         for device in seat_data.known_data_devices() {
             if device.id().same_client_as(&self.id()) {
-                device.motion(time, location.x, location.y);
+                device.motion(time.millis(), location.x, location.y);
             }
         }
     }

@@ -3,6 +3,7 @@ use std::fmt;
 use downcast_rs::{Downcast, impl_downcast};
 
 use crate::{
+    backend::input::InputTime,
     input::{
         pointer::Focus,
         tablet::{
@@ -125,7 +126,7 @@ pub trait TabletToolGrab<D: TabletSeatHandler + 'static>: Send + Downcast {
     /// End of a tablet tool frame
     ///
     /// A frame groups associated events. This terminate the frame.
-    fn frame(&mut self, data: &mut D, handle: &mut TabletToolInnerHandle<'_, D>, time: u32);
+    fn frame(&mut self, data: &mut D, handle: &mut TabletToolInnerHandle<'_, D>, time: InputTime);
 
     /// The grab has been unset or replaced with another grab.
     fn unset(&mut self, data: &mut D);
@@ -207,21 +208,12 @@ impl<D: TabletSeatHandler + 'static> TabletToolGrab<D> for DefaultGrab {
     fn down(&mut self, data: &mut D, handle: &mut TabletToolInnerHandle<'_, D>, event: &DownEvent) {
         handle.down(data, event);
 
-        handle.set_grab(
-            self,
-            data,
-            event.time,
-            event.serial,
-            Focus::Keep,
-            DownGrab {
-                start_data: GrabStartData {
-                    focus: handle.current_focus(),
-                    trigger: GrabTrigger::Tip,
-                    location: handle.current_location(),
-                },
-                focus: handle.current_focus(),
-            },
-        );
+        let grab = data.down_grab(GrabStartData {
+            focus: handle.current_focus(),
+            trigger: GrabTrigger::Tip,
+            location: handle.current_location(),
+        });
+        handle.set_grab(self, data, event.time, event.serial, Focus::Keep, grab);
     }
 
     fn up(&mut self, data: &mut D, handle: &mut TabletToolInnerHandle<'_, D>, event: &UpEvent) {
@@ -236,7 +228,7 @@ impl<D: TabletSeatHandler + 'static> TabletToolGrab<D> for DefaultGrab {
         handle.axis(data, frame);
     }
 
-    fn frame(&mut self, data: &mut D, handle: &mut TabletToolInnerHandle<'_, D>, time: u32) {
+    fn frame(&mut self, data: &mut D, handle: &mut TabletToolInnerHandle<'_, D>, time: InputTime) {
         handle.frame(data, time);
     }
 
@@ -248,6 +240,15 @@ impl<D: TabletSeatHandler + 'static> TabletToolGrab<D> for DefaultGrab {
 pub struct DownGrab<D: TabletSeatHandler> {
     start_data: GrabStartData<D>,
     focus: Option<(<D as TabletSeatHandler>::ToolFocus, Point<f64, Logical>)>,
+}
+
+impl<D: TabletSeatHandler> DownGrab<D> {
+    pub(in crate::input) fn new(start_data: GrabStartData<D>) -> Self {
+        Self {
+            focus: start_data.focus.clone(),
+            start_data,
+        }
+    }
 }
 
 impl<D: TabletSeatHandler + 'static> fmt::Debug for DownGrab<D> {
@@ -317,7 +318,7 @@ impl<D: TabletSeatHandler + 'static> TabletToolGrab<D> for DownGrab<D> {
         handle.axis(data, frame);
     }
 
-    fn frame(&mut self, data: &mut D, handle: &mut TabletToolInnerHandle<'_, D>, time: u32) {
+    fn frame(&mut self, data: &mut D, handle: &mut TabletToolInnerHandle<'_, D>, time: InputTime) {
         handle.frame(data, time);
     }
 
