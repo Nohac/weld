@@ -46,7 +46,15 @@ impl ApplicationInputBuffer {
                 "host pointer button filtered"
             );
         }
-        self.push(event);
+        if !matches!(
+            event.event,
+            RawSeatEventKind::Keyboard {
+                state: weld_core::input::KeyboardKeyState::Repeated,
+                ..
+            }
+        ) {
+            self.push(event);
+        }
         !consumed
     }
 

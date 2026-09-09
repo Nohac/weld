@@ -5,6 +5,9 @@ This is a partial local backport of
 `20d0e7fddd3038c0ee7bbfb6d7a7f65810f104e6`, onto upstream
 `0ff00983b6007257a7a161a4fe8b14a778e2ac8f`.
 The upstream refresh preceding it passed the user's end-to-end Iroh check.
+The subsequent [explicit-repeat integration](keyboard-repeat.md) uses this
+foundation and adds stable seat-wide `RepeatMode` with a per-version legacy
+fallback. The sections below record the original backport's scope.
 
 ## Included
 
@@ -42,7 +45,7 @@ client-generated repeat continues, and explicit compositor repeats are rejected.
 The separate temporary rate-zero diagnostic disables client repeat. Under that
 diagnostic, legacy keyboards and input-method grabs have no repeat at all.
 
-This foundation does **not** restore hold-to-repeat in Weld's diagnostic mode:
+This foundation alone did **not** restore hold-to-repeat in Weld's diagnostic mode:
 there is no repeat generator, receiver-authority policy, or new hoist input
 message yet. Those belong to the next input batch. It must choose the repeat
 owner, forward explicit repeats, cancel them on release/focus/session changes,

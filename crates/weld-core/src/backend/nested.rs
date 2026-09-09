@@ -156,6 +156,9 @@ pub(crate) fn prepare(options: RunOptions, signals: Signals) -> Result<PreparedH
                     dmabuf_capabilities: renderer.dmabuf_capabilities(),
                     dmabuf_sources: renderer.dmabuf_sources(),
                     socket_name: options.socket_name.as_deref(),
+                    keyboard_repeat_mode: options
+                        .keyboard_repeat_mode
+                        .unwrap_or(crate::input::KeyboardRepeatMode::Compositor),
                 },
             )?;
             let mut loop_data = LoopData::new(server);
@@ -425,7 +428,7 @@ pub(crate) fn prepare(options: RunOptions, signals: Signals) -> Result<PreparedH
                         loop_data.server.apply_pending_client_work();
                         for command in host_commands {
                             command_exit_requested |=
-                                apply_host_command(&mut children, &loop_data.server, command)?;
+                                apply_host_command(&mut children, &mut loop_data.server, command)?;
                         }
                     }
                     if let Some(appearance) = cursor_update.appearance {
@@ -549,7 +552,7 @@ pub(crate) fn prepare(options: RunOptions, signals: Signals) -> Result<PreparedH
                     match event {
                         NestedEvent::Command(command) => {
                             exit_requested |=
-                                apply_host_command(&mut children, &loop_data.server, command)?;
+                                apply_host_command(&mut children, &mut loop_data.server, command)?;
                         }
                     }
                 }
@@ -565,11 +568,15 @@ pub(crate) fn prepare(options: RunOptions, signals: Signals) -> Result<PreparedH
 
 fn apply_host_command(
     children: &mut ChildProcesses,
-    server: &ServerState,
+    server: &mut ServerState,
     command: HostCommand,
 ) -> Result<bool> {
     match children.apply(server, command)? {
         HostCommandEffect::Continue => Ok(false),
+        HostCommandEffect::SetLegacyKeyRepeat(legacy) => {
+            server.set_legacy_key_repeat(legacy);
+            Ok(false)
+        }
         HostCommandEffect::Exit => Ok(true),
         HostCommandEffect::AdjustOutputScale(adjustment) => {
             warn!(

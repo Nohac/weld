@@ -73,6 +73,7 @@ pub struct WeldAppBuilder {
     remote_debug: Option<String>,
     scale: Option<OutputScale>,
     socket_name: Option<String>,
+    keyboard_repeat_mode: Option<weld_core::input::KeyboardRepeatMode>,
 }
 
 impl WeldAppBuilder {
@@ -116,6 +117,15 @@ impl WeldAppBuilder {
         self
     }
 
+    /// Selects stable seat-wide repeat ownership; `None` uses the backend default.
+    pub fn keyboard_repeat_mode(
+        mut self,
+        mode: Option<weld_core::input::KeyboardRepeatMode>,
+    ) -> Self {
+        self.keyboard_repeat_mode = mode;
+        self
+    }
+
     /// Open the selected native host and create its configurable Bevy application.
     ///
     /// An exceptional nested-host exit during the initial blocking window pump
@@ -139,6 +149,7 @@ impl WeldAppBuilder {
             .remote_debug_enabled(self.remote_debug.is_some())
             .output_scale(self.scale)
             .socket_name(self.socket_name)
+            .keyboard_repeat_mode(self.keyboard_repeat_mode)
             .prepare()?;
 
         let context = prepared.render_context();

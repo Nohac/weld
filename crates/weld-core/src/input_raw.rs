@@ -3,9 +3,9 @@
 use winit::keyboard::Key;
 
 pub use weld_client::{
-    ButtonState, InputDelta, InputPosition, LinuxButtonCode, LinuxKeycode, PointerGesture,
-    PointerGestureKind, RawScrollFrame, RawScrollPhase, RawScrollSource, TouchpadHold,
-    TouchpadPinch, TouchpadSwipe,
+    ButtonState, InputDelta, InputPosition, KeyboardKeyState, LinuxButtonCode, LinuxKeycode,
+    PointerGesture, PointerGestureKind, RawScrollFrame, RawScrollPhase, RawScrollSource,
+    TouchpadHold, TouchpadPinch, TouchpadSwipe,
 };
 
 /// One ordered input transition from a nested or standalone seat backend.
@@ -87,7 +87,7 @@ pub enum RawSeatEventKind {
     Keyboard {
         keycode: LinuxKeycode,
         logical_key: Option<Key>,
-        state: ButtonState,
+        state: KeyboardKeyState,
     },
     HostFocusLost,
 }

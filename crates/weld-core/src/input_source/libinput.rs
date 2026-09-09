@@ -12,9 +12,9 @@ use smithay::reexports::input::{ClickMethod, ClickfingerButtonMap, Device, TapBu
 use tracing::{debug, trace, warn};
 
 use crate::input::{
-    ButtonState as WeldButtonState, InputDelta, InputPosition, LinuxButtonCode, LinuxKeycode,
-    PointerGesture, PointerGestureKind, RawScrollFrame, RawScrollPhase, RawScrollSource,
-    RawSeatEvent, RawSeatEventKind, TouchpadHold, TouchpadPinch, TouchpadSwipe,
+    ButtonState as WeldButtonState, InputDelta, InputPosition, KeyboardKeyState, LinuxButtonCode,
+    LinuxKeycode, PointerGesture, PointerGestureKind, RawScrollFrame, RawScrollPhase,
+    RawScrollSource, RawSeatEvent, RawSeatEventKind, TouchpadHold, TouchpadPinch, TouchpadSwipe,
 };
 use crate::output::OutputTopology;
 
@@ -70,8 +70,8 @@ impl LibinputAdapter {
                             keycode: LinuxKeycode(keycode),
                             logical_key: None,
                             state: match event.state() {
-                                KeyState::Pressed => WeldButtonState::Pressed,
-                                KeyState::Released => WeldButtonState::Released,
+                                KeyState::Pressed => KeyboardKeyState::Pressed,
+                                KeyState::Released => KeyboardKeyState::Released,
                             },
                         },
                         event.time().millis(),

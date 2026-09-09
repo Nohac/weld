@@ -256,6 +256,11 @@ pub(crate) fn filter_global_shortcut_event(world: &mut World, event: &RawSeatEve
         return false;
     };
 
+    let Some(state) = state.transition() else {
+        return world
+            .get_resource::<ConsumedShortcutKeys>()
+            .is_some_and(|consumed| consumed.0.contains(keycode));
+    };
     let (host_command, application_shortcut) = {
         let Some(mut shortcuts) = world.get_resource_mut::<RawGlobalShortcutState>() else {
             return false;
@@ -319,7 +324,7 @@ pub(crate) fn filter_global_shortcut_event(world: &mut World, event: &RawSeatEve
         true
     } else {
         if consumed
-            && *state == ButtonState::Released
+            && state == ButtonState::Released
             && let Some(mut consumed) = world.get_resource_mut::<ConsumedShortcutKeys>()
         {
             consumed.0.remove(keycode);
@@ -334,7 +339,7 @@ fn modifier_pressed(pressed: &HashSet<LinuxKeycode>, keycodes: &[u32]) -> bool {
         .any(|keycode| pressed.contains(&LinuxKeycode(*keycode)))
 }
 
-pub(crate) fn take_host_commands(world: &mut World) -> Vec<HostCommand> {
+pub(super) fn take_shortcut_commands(world: &mut World) -> Vec<HostCommand> {
     world
         .get_resource_mut::<GlobalHostCommands>()
         .map(|mut commands| commands.0.drain(..).collect())

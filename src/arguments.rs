@@ -10,6 +10,49 @@ use weld_media::VideoCodec;
 const DEFAULT_REMOTE_ADDRESS: &str = "127.0.0.1:15702";
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, ValueEnum)]
+pub enum LegacyKeyRepeatArgument {
+    #[default]
+    Client,
+    Disabled,
+}
+
+impl From<LegacyKeyRepeatArgument> for weld_app::input::LegacyKeyRepeat {
+    fn from(value: LegacyKeyRepeatArgument) -> Self {
+        match value {
+            LegacyKeyRepeatArgument::Client => Self::Client,
+            LegacyKeyRepeatArgument::Disabled => Self::Disabled,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+pub enum KeyboardRepeatModeArgument {
+    Client,
+    Compositor,
+}
+
+impl From<KeyboardRepeatModeArgument> for weld_app::input::KeyboardRepeatMode {
+    fn from(value: KeyboardRepeatModeArgument) -> Self {
+        match value {
+            KeyboardRepeatModeArgument::Client => Self::Client,
+            KeyboardRepeatModeArgument::Compositor => Self::Compositor,
+        }
+    }
+}
+
+pub(crate) fn resolve_legacy_repeat(
+    argument: Option<LegacyKeyRepeatArgument>,
+    environment: Option<&str>,
+) -> Result<LegacyKeyRepeatArgument, String> {
+    if let Some(argument) = argument {
+        return Ok(argument);
+    }
+    environment.map_or(Ok(LegacyKeyRepeatArgument::default()), |value| {
+        LegacyKeyRepeatArgument::from_str(value, false)
+    })
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, ValueEnum)]
 pub enum BackendKind {
     #[default]
     Auto,
@@ -91,6 +134,15 @@ impl BackendKind {
     ]).multiple(false))
 )]
 pub struct AppArguments {
+    /// Legacy repeat fallback: client timers or disabled. Defaults to client;
+    /// WELD_LEGACY_KEY_REPEAT supplies a default when this option is absent.
+    #[arg(long, value_enum)]
+    pub(crate) legacy_key_repeat: Option<LegacyKeyRepeatArgument>,
+
+    /// Stable repeat owner. Defaults to compositor for nested, client for DRM.
+    /// Use client if the parent compositor supplies no repeat cadence.
+    #[arg(long, value_enum)]
+    pub(crate) keyboard_repeat_mode: Option<KeyboardRepeatModeArgument>,
     /// Host backend. Auto uses a nested host when available and DRM on a TTY.
     #[arg(long, value_enum, default_value_t)]
     pub(crate) backend: BackendKind,

@@ -10,6 +10,7 @@ use std::{
 
 use anyhow::{Context, Result};
 
+use crate::input::LegacyKeyRepeat;
 use crate::server::ServerState;
 
 pub(crate) const FRAME_INTERVAL: Duration = Duration::from_micros(16_667);
@@ -51,6 +52,7 @@ pub enum HostCommand {
     },
     AdjustOutputScale(OutputScaleAdjustment),
     MatchOutputPhysicalScale,
+    SetLegacyKeyRepeat(LegacyKeyRepeat),
     Exit,
 }
 
@@ -60,6 +62,7 @@ pub(crate) enum HostCommandEffect {
     Exit,
     AdjustOutputScale(OutputScaleAdjustment),
     MatchOutputPhysicalScale,
+    SetLegacyKeyRepeat(LegacyKeyRepeat),
 }
 
 #[derive(Default)]
@@ -95,6 +98,9 @@ impl ChildProcesses {
                 Ok(HostCommandEffect::MatchOutputPhysicalScale)
             }
             HostCommand::Exit => Ok(HostCommandEffect::Exit),
+            HostCommand::SetLegacyKeyRepeat(legacy) => {
+                Ok(HostCommandEffect::SetLegacyKeyRepeat(legacy))
+            }
         }
     }
 

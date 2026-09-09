@@ -10,6 +10,36 @@ pub enum ButtonState {
     Released,
 }
 
+/// Keyboard transitions and explicit repetition from the input controller.
+/// A repeat does not press a key again or release its captured route.
+#[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum KeyboardKeyState {
+    Pressed,
+    Released,
+    Repeated,
+}
+
+impl KeyboardKeyState {
+    /// Returns the physical transition, if this is not a repeat notification.
+    pub const fn transition(self) -> Option<ButtonState> {
+        match self {
+            Self::Pressed => Some(ButtonState::Pressed),
+            Self::Released => Some(ButtonState::Released),
+            Self::Repeated => None,
+        }
+    }
+}
+
+impl From<ButtonState> for KeyboardKeyState {
+    fn from(state: ButtonState) -> Self {
+        match state {
+            ButtonState::Pressed => Self::Pressed,
+            ButtonState::Released => Self::Released,
+        }
+    }
+}
+
 /// A position in Weld compositor or client-local coordinates.
 #[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -286,7 +316,7 @@ pub enum InputEventKind {
     },
     Keyboard {
         keycode: LinuxKeycode,
-        state: ButtonState,
+        state: KeyboardKeyState,
     },
 }
 

@@ -52,6 +52,11 @@ pub(crate) fn filter_virtual_terminal_event(world: &mut World, event: &RawSeatEv
         }
         return false;
     };
+    let Some(state) = state.transition() else {
+        return world
+            .get_resource::<ConsumedShortcutKeys>()
+            .is_some_and(|consumed| consumed.0.contains(keycode));
+    };
     let should_switch = {
         let Some(mut keys) = world.get_resource_mut::<RawVirtualTerminalState>() else {
             return false;
@@ -91,7 +96,7 @@ pub(crate) fn filter_virtual_terminal_event(world: &mut World, event: &RawSeatEv
         .get_resource::<ConsumedShortcutKeys>()
         .is_some_and(|consumed| consumed.0.contains(keycode));
     if consumed
-        && *state == ButtonState::Released
+        && state == ButtonState::Released
         && let Some(mut consumed) = world.get_resource_mut::<ConsumedShortcutKeys>()
     {
         consumed.0.remove(keycode);

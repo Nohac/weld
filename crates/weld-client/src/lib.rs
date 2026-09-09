@@ -36,9 +36,9 @@ pub use id::{
 pub use input::{
     ButtonState, ClientInputEvent, ClientInputTarget, ClientKeyboardRoute, ClientPointerRoute,
     ClientPointerRouteUpdate, InputDelta, InputEventKind, InputPosition, InputTransform,
-    LinuxButtonCode, LinuxKeycode, PointerGesture, PointerGestureKind, RawScrollFrame,
-    RawScrollPhase, RawScrollSource, RuntimeInputEvent, RuntimeInputEventKind, TouchpadHold,
-    TouchpadPinch, TouchpadSwipe,
+    KeyboardKeyState, LinuxButtonCode, LinuxKeycode, PointerGesture, PointerGestureKind,
+    RawScrollFrame, RawScrollPhase, RawScrollSource, RuntimeInputEvent, RuntimeInputEventKind,
+    TouchpadHold, TouchpadPinch, TouchpadSwipe,
 };
 pub use surface::{
     ClientCommitRevision, ClientEventQueue, ClientFocusRequest, ClientRequest, ClientSurfaceCommit,

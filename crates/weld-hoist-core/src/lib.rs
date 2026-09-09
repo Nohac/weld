@@ -147,14 +147,13 @@ mod tests {
     use std::{cell::RefCell, rc::Rc};
 
     use weld_client::{
-        ButtonState, ClientAdapter, ClientAdapterCommandEnvelope, ClientBufferId,
-        ClientBufferLease, ClientBufferMetadata, ClientBufferUseId, ClientCommitRevision,
-        ClientEventQueue, ClientFocusRequest, ClientInputEvent, ClientProvenance, ClientRequest,
-        ClientRuntime, ClientRuntimeAdapter, ClientSourceDescriptor, ClientSourceId,
-        ClientSurfaceCommit, ClientSurfaceEvent, ClientSurfaceEventKind, ClientSurfaceRequest,
-        ClientSurfaceRequestKind, ClientSurfaceRole, InputEventKind, LinuxKeycode, PopupState,
-        SurfaceBufferChange, SurfaceBufferUpdate, ToplevelInteractionRequestKind, ToplevelState,
-        WindowDecoration,
+        ClientAdapter, ClientAdapterCommandEnvelope, ClientBufferId, ClientBufferLease,
+        ClientBufferMetadata, ClientBufferUseId, ClientCommitRevision, ClientEventQueue,
+        ClientFocusRequest, ClientInputEvent, ClientProvenance, ClientRequest, ClientRuntime,
+        ClientRuntimeAdapter, ClientSourceDescriptor, ClientSourceId, ClientSurfaceCommit,
+        ClientSurfaceEvent, ClientSurfaceEventKind, ClientSurfaceRequest, ClientSurfaceRequestKind,
+        ClientSurfaceRole, InputEventKind, LinuxKeycode, PopupState, SurfaceBufferChange,
+        SurfaceBufferUpdate, ToplevelInteractionRequestKind, ToplevelState, WindowDecoration,
     };
 
     use super::*;
@@ -530,7 +529,7 @@ mod tests {
             runtime.dispatch_unconsumed_input(weld_client::RuntimeInputEvent::new(
                 weld_client::RuntimeInputEventKind::Input(InputEventKind::Keyboard {
                     keycode: LinuxKeycode(1),
-                    state: ButtonState::Pressed,
+                    state: weld_client::KeyboardKeyState::Pressed,
                 }),
                 1,
             )),

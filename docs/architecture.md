@@ -548,8 +548,11 @@ DRM cursor selection runs outside the Bevy frame gate. See
 [Cursor feedback](cursor-feedback.md) for validation and limitations.
 
 Raw input is forwarded to the focused client in order and retained for the next
-refresh-paced application update. That contract lets client delivery run at
-device-event pace without running Bevy schedules at the device polling rate.
+refresh-paced application update. Explicit keyboard repeats bypass the physical
+input projection buffer; see [Keyboard repeats](keyboard-repeat.md) for stable
+cadence ownership and the reloadable legacy fallback. This contract lets client
+delivery run at device-event pace without running Bevy schedules at the device
+polling rate.
 The standalone libinput adapter preserves accelerated and unaccelerated motion,
 scroll phases, gestures, clickfinger policy, and timestamps as protocol-neutral
 events. The DRM host connects it to Smithay's session and seat lifecycle while
@@ -593,8 +596,8 @@ updates; native and loopback relays preserve that declaration. The encoded
 destination rejects commits that do not declare the selected opaque mode.
 `ClientBufferMetadata::opaque` and `MappedSurface::opaque` instead describe
 pixel sampling and do not select a frame policy. The wire change uses exact
-protocol revision 4 (removing commit ACKs, retaining cursor feedback), so both
-endpoints must run the matching build.
+protocol revision 5 (explicit keyboard repeats, no commit ACKs, retained cursor
+feedback), so both endpoints must run the matching build.
 
 Encoded commits have no application ACK or per-surface stop-and-wait gate.
 One encode batch runs at a time. Local media headroom admits the next batch;

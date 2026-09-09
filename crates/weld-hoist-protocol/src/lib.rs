@@ -21,7 +21,7 @@ pub const MAX_ENCODED_ACCESS_UNIT_BYTES: usize = 32 * 1024 * 1024;
 pub struct ProtocolRevision(u32);
 
 impl ProtocolRevision {
-    pub const CURRENT: Self = Self(4);
+    pub const CURRENT: Self = Self(5);
 
     pub const fn new(raw: u32) -> Self {
         Self(raw)
@@ -168,6 +168,59 @@ pub struct MediaEnvelope<A> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn key_press_repeat_release_roundtrip_in_order_without_state_collapse() {
+        use weld_client::{
+            ClientId, ClientInputTarget, ClientSourceId, InputEventKind, KeyboardKeyState,
+            LinuxKeycode,
+        };
+        let surface = ClientSurfaceId::new(ClientId::new(ClientSourceId::new(1), 1), 1);
+        let states = [
+            KeyboardKeyState::Pressed,
+            KeyboardKeyState::Repeated,
+            KeyboardKeyState::Repeated,
+            KeyboardKeyState::Released,
+        ];
+        let events: Vec<_> = states
+            .into_iter()
+            .enumerate()
+            .map(|(time, state)| DestinationEnvelope {
+                session: HoistSessionId::new(1),
+                message: DestinationMessage::input(ClientInputEvent {
+                    target: ClientInputTarget::Keyboard { surface },
+                    host_position: None,
+                    event: InputEventKind::Keyboard {
+                        keycode: LinuxKeycode(30),
+                        state,
+                    },
+                    time: time as u32,
+                }),
+            })
+            .collect();
+        let bytes = postcard::to_allocvec(&events).expect("encode input burst");
+        let decoded: Vec<DestinationEnvelope> =
+            postcard::from_bytes(&bytes).expect("decode input burst");
+        for ((index, envelope), state) in decoded.into_iter().enumerate().zip(states) {
+            let DestinationMessage::Input(input) = envelope.message else {
+                panic!("input record");
+            };
+            let input = input.into_client_event();
+            assert_eq!(
+                input.event,
+                InputEventKind::Keyboard {
+                    keycode: LinuxKeycode(30),
+                    state
+                }
+            );
+            assert_eq!(input.time, index as u32);
+        }
+        assert!(
+            ProtocolRevision::CURRENT
+                .ensure_compatible(ProtocolRevision::new(4))
+                .is_err()
+        );
+    }
 
     #[test]
     fn cursor_feedback_roundtrips_losslessly_and_rejects_invalid_rasters() {

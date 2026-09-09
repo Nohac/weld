@@ -28,7 +28,8 @@ use super::{
         ButtonState, InputDelta, InputPosition, LinuxButtonCode, LinuxKeycode, PointerGesture,
         RawSeatEvent, RawSeatEventKind, TouchpadPinch,
     },
-    take_host_commands, take_input_effects, take_virtual_terminal_switch_request,
+    shortcuts::take_shortcut_commands as take_host_commands,
+    take_input_effects, take_virtual_terminal_switch_request,
 };
 use crate::ActiveBackend;
 use weld_core::{
@@ -97,6 +98,75 @@ fn shortcut_test_app(backend: ActiveBackend) -> App {
     app
 }
 
+#[test]
+fn upstream_repeats_preserve_bevy_held_state_without_new_presses() {
+    let mut app = shortcut_test_app(ActiveBackend::Nested);
+    let event = |state| {
+        RawSeatEvent::new(
+            RawSeatEventKind::Keyboard {
+                keycode: LinuxKeycode(30),
+                logical_key: None,
+                state,
+            },
+            10,
+        )
+    };
+    enqueue_host_input(&mut app, event(weld_client::KeyboardKeyState::Pressed));
+    app.update();
+    assert!(
+        app.world()
+            .resource::<bevy::input::ButtonInput<KeyCode>>()
+            .pressed(KeyCode::KeyA)
+    );
+    enqueue_host_input(&mut app, event(weld_client::KeyboardKeyState::Repeated));
+    app.update();
+    let keys = app.world().resource::<bevy::input::ButtonInput<KeyCode>>();
+    assert!(keys.pressed(KeyCode::KeyA));
+    assert!(!keys.just_pressed(KeyCode::KeyA));
+    enqueue_host_input(&mut app, event(weld_client::KeyboardKeyState::Released));
+    app.update();
+    assert!(
+        !app.world()
+            .resource::<bevy::input::ButtonInput<KeyCode>>()
+            .pressed(KeyCode::KeyA)
+    );
+}
+
+#[test]
+fn shortcut_repeats_are_consumed_without_retriggering_or_buffering() {
+    let mut app = shortcut_test_app(ActiveBackend::Nested);
+    let mut buffer = ApplicationInputBuffer::default();
+    let event = |keycode, state| {
+        RawSeatEvent::new(
+            RawSeatEventKind::Keyboard {
+                keycode: LinuxKeycode(keycode),
+                logical_key: None,
+                state,
+            },
+            10,
+        )
+    };
+    assert!(buffer.enqueue(
+        app.world_mut(),
+        event(125, weld_client::KeyboardKeyState::Pressed)
+    ));
+    assert!(!buffer.enqueue(
+        app.world_mut(),
+        event(33, weld_client::KeyboardKeyState::Pressed)
+    ));
+    assert_eq!(take_host_commands(app.world_mut()).len(), 1);
+    assert!(!buffer.enqueue(
+        app.world_mut(),
+        event(33, weld_client::KeyboardKeyState::Repeated)
+    ));
+    assert!(take_host_commands(app.world_mut()).is_empty());
+    assert_eq!(buffer.len(), 2);
+    assert!(!buffer.enqueue(
+        app.world_mut(),
+        event(33, weld_client::KeyboardKeyState::Released)
+    ));
+}
+
 fn enqueue_host_input(app: &mut App, event: RawSeatEvent) -> bool {
     let consumed = filter_global_shortcut_event(app.world_mut(), &event)
         | filter_virtual_terminal_event(app.world_mut(), &event)
@@ -126,7 +196,7 @@ fn raw_keyboard_input_reaches_leafwing_on_the_next_frame() {
             RawSeatEventKind::Keyboard {
                 keycode: LinuxKeycode(33),
                 logical_key: Some(Key::Character("f".into())),
-                state: ButtonState::Pressed,
+                state: weld_client::KeyboardKeyState::Pressed,
             },
             41,
         ),
@@ -265,7 +335,7 @@ fn global_shortcut_is_consumed_before_the_frame_and_still_buffered() {
         RawSeatEventKind::Keyboard {
             keycode: LinuxKeycode(125),
             logical_key: None,
-            state: ButtonState::Pressed,
+            state: weld_client::KeyboardKeyState::Pressed,
         },
         10,
     );
@@ -273,7 +343,7 @@ fn global_shortcut_is_consumed_before_the_frame_and_still_buffered() {
         RawSeatEventKind::Keyboard {
             keycode: LinuxKeycode(33),
             logical_key: None,
-            state: ButtonState::Pressed,
+            state: weld_client::KeyboardKeyState::Pressed,
         },
         11,
     );
@@ -296,7 +366,7 @@ fn global_shortcut_is_consumed_before_the_frame_and_still_buffered() {
         RawSeatEventKind::Keyboard {
             keycode: LinuxKeycode(33),
             logical_key: None,
-            state: ButtonState::Released,
+            state: weld_client::KeyboardKeyState::Released,
         },
         12,
     );
@@ -307,7 +377,7 @@ fn global_shortcut_is_consumed_before_the_frame_and_still_buffered() {
             RawSeatEventKind::Keyboard {
                 keycode: LinuxKeycode(125),
                 logical_key: None,
-                state: ButtonState::Released,
+                state: weld_client::KeyboardKeyState::Released,
             },
             13,
         )
@@ -318,7 +388,7 @@ fn global_shortcut_is_consumed_before_the_frame_and_still_buffered() {
             RawSeatEventKind::Keyboard {
                 keycode: LinuxKeycode(33),
                 logical_key: None,
-                state: ButtonState::Pressed,
+                state: weld_client::KeyboardKeyState::Pressed,
             },
             14,
         )
@@ -334,7 +404,7 @@ fn output_scale_shortcuts_are_enabled_only_for_drm() {
                 RawSeatEventKind::Keyboard {
                     keycode: LinuxKeycode(125),
                     logical_key: None,
-                    state: ButtonState::Pressed,
+                    state: weld_client::KeyboardKeyState::Pressed,
                 },
                 10,
             ),
@@ -342,7 +412,7 @@ fn output_scale_shortcuts_are_enabled_only_for_drm() {
                 RawSeatEventKind::Keyboard {
                     keycode: LinuxKeycode(13),
                     logical_key: None,
-                    state: ButtonState::Pressed,
+                    state: weld_client::KeyboardKeyState::Pressed,
                 },
                 11,
             ),
@@ -374,7 +444,7 @@ fn physical_scale_match_shortcut_is_enabled_only_for_drm() {
                 RawSeatEventKind::Keyboard {
                     keycode: LinuxKeycode(125),
                     logical_key: None,
-                    state: ButtonState::Pressed,
+                    state: weld_client::KeyboardKeyState::Pressed,
                 },
                 10,
             ),
@@ -382,7 +452,7 @@ fn physical_scale_match_shortcut_is_enabled_only_for_drm() {
                 RawSeatEventKind::Keyboard {
                     keycode: LinuxKeycode(42),
                     logical_key: None,
-                    state: ButtonState::Pressed,
+                    state: weld_client::KeyboardKeyState::Pressed,
                 },
                 11,
             ),
@@ -390,7 +460,7 @@ fn physical_scale_match_shortcut_is_enabled_only_for_drm() {
                 RawSeatEventKind::Keyboard {
                     keycode: LinuxKeycode(32),
                     logical_key: None,
-                    state: ButtonState::Pressed,
+                    state: weld_client::KeyboardKeyState::Pressed,
                 },
                 12,
             ),
@@ -428,7 +498,7 @@ fn application_global_shortcut_is_consumed_without_becoming_a_host_command() {
                     RawSeatEventKind::Keyboard {
                         keycode: LinuxKeycode(keycode),
                         logical_key: None,
-                        state: ButtonState::Pressed,
+                        state: weld_client::KeyboardKeyState::Pressed,
                     },
                     time,
                 ),
@@ -468,7 +538,7 @@ fn application_shortcut_registration_survives_later_global_plugin_setup() {
                 RawSeatEventKind::Keyboard {
                     keycode: LinuxKeycode(keycode),
                     logical_key: None,
-                    state: ButtonState::Pressed,
+                    state: weld_client::KeyboardKeyState::Pressed,
                 },
                 keycode,
             ),
@@ -499,7 +569,7 @@ fn drm_virtual_terminal_shortcut_is_consumed_before_the_frame() {
                     RawSeatEventKind::Keyboard {
                         keycode: LinuxKeycode(keycode),
                         logical_key: None,
-                        state: ButtonState::Pressed,
+                        state: weld_client::KeyboardKeyState::Pressed,
                     },
                     time,
                 ),
@@ -564,7 +634,7 @@ fn host_focus_loss_releases_leafwing_inputs() {
             RawSeatEventKind::Keyboard {
                 keycode: LinuxKeycode(33),
                 logical_key: Some(Key::Character("f".into())),
-                state: ButtonState::Pressed,
+                state: weld_client::KeyboardKeyState::Pressed,
             },
             1,
         ),

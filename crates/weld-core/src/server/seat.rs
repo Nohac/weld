@@ -2,12 +2,12 @@
 
 use smithay::{
     backend::input::{
-        Axis, AxisSource, ButtonState as SmithayButtonState, InputTime, KeyState, Keycode,
+        Axis, AxisSource, ButtonState as SmithayButtonState, InputTime, KeyEvent, Keycode,
     },
     input::{
         Seat, SeatHandler,
         dnd::{DnDGrab, DndGrabHandler, GrabType, Source},
-        keyboard::{FilterResult, KeyboardSource},
+        keyboard::{FilterResult, KeyboardSource, RepeatMode},
         pointer::{
             AxisFrame, ButtonEvent, CursorImageStatus, Focus, GestureHoldBeginEvent,
             GestureHoldEndEvent, GesturePinchBeginEvent, GesturePinchEndEvent,
@@ -37,12 +37,13 @@ use smithay::{
     },
 };
 use tracing::{debug, trace, warn};
-use weld_client::{ClientInputEvent, ClientInputTarget, InputEventKind};
+use weld_client::{ClientInputEvent, ClientInputTarget, InputEventKind, KeyboardKeyState};
 
 use crate::{
     input::{
-        ButtonState, InputDelta, InputPosition, PointerGesture, RawScrollFrame, RawScrollSource,
-        SurfaceHit, TouchpadHold, TouchpadPinch, TouchpadSwipe,
+        ButtonState, InputDelta, InputPosition, KeyboardRepeatMode, LegacyKeyRepeat,
+        PointerGesture, RawScrollFrame, RawScrollSource, SurfaceHit, TouchpadHold, TouchpadPinch,
+        TouchpadSwipe,
     },
     surface::{SurfaceId, WindowDecoration, WindowInteractionRequestKind, WindowResizeEdge},
 };
@@ -116,9 +117,10 @@ impl ServerState {
             (ClientInputTarget::Pointer { .. }, InputEventKind::PointerGesture { gesture }) => {
                 self.apply_pointer_gesture(gesture, time)
             }
-            (ClientInputTarget::Keyboard { .. }, InputEventKind::Keyboard { keycode, state }) => {
-                self.apply_keyboard_input(keycode, state, time)
-            }
+            (
+                ClientInputTarget::Keyboard { surface },
+                InputEventKind::Keyboard { keycode, state },
+            ) => self.apply_keyboard_input(surface, keycode, state, time),
             (target, event) => {
                 warn!(
                     ?target,
@@ -131,11 +133,12 @@ impl ServerState {
 
     fn apply_keyboard_input(
         &mut self,
+        surface: SurfaceId,
         keycode: crate::input::LinuxKeycode,
-        state: ButtonState,
+        state: KeyboardKeyState,
         time: u32,
     ) {
-        let Some(keycode) = keycode.0.checked_add(8) else {
+        let Some(native_keycode) = keycode.0.checked_add(8) else {
             warn!(keycode = keycode.0, "ignored an overflowing keyboard code");
             return;
         };
@@ -143,14 +146,65 @@ impl ServerState {
             warn!("ignored keyboard input because the seat has no keyboard");
             return;
         };
+        if !self.keyboard_repeats.observe(surface, keycode, state)
+            || (state == KeyboardKeyState::Repeated
+                && self.keyboard_repeat_mode != KeyboardRepeatMode::Compositor)
+        {
+            trace!(
+                ?surface,
+                "ignored keyboard repeat outside its original input context"
+            );
+            return;
+        }
+        if self.keyboard_diagnostic_dirty
+            && let Some(client) = keyboard
+                .current_focus()
+                .and_then(|surface| surface.client())
+        {
+            let versions: Vec<_> = keyboard
+                .client_keyboards(&client)
+                .map(|keyboard| keyboard.version())
+                .collect();
+            tracing::info!(?surface, ?versions, repeat_mode = ?self.keyboard_repeat_mode,
+                legacy_repeat = ?self.legacy_key_repeat, "focused client keyboard repeat support");
+            self.keyboard_diagnostic_dirty = false;
+        }
         keyboard.input::<(), _>(
             self,
-            Keycode::new(keycode),
+            Keycode::new(native_keycode),
             smithay_key_state(state),
             SERIAL_COUNTER.next_serial(),
             InputTime::from_millis(time),
             |_, _, _| FilterResult::Forward,
         );
+    }
+
+    pub(crate) fn set_legacy_key_repeat(&mut self, legacy: LegacyKeyRepeat) {
+        if self.legacy_key_repeat != legacy {
+            self.legacy_key_repeat = legacy;
+            self.keyboard_diagnostic_dirty = true;
+            if legacy == LegacyKeyRepeat::Disabled
+                && self.keyboard_repeat_mode == KeyboardRepeatMode::Client
+            {
+                warn!(
+                    "legacy-key-repeat=disabled has no effect in client repeat mode; the workaround requires compositor repeat mode"
+                );
+            }
+            self.configure_keyboard_repeat();
+        }
+    }
+
+    pub(super) fn configure_keyboard_repeat(&mut self) {
+        let Some(keyboard) = self.seat.get_keyboard() else {
+            return;
+        };
+        let mode = match self.keyboard_repeat_mode {
+            KeyboardRepeatMode::Client => RepeatMode::Client,
+            KeyboardRepeatMode::Compositor => RepeatMode::Compositor {
+                legacy_repeat: self.legacy_key_repeat == LegacyKeyRepeat::Client,
+            },
+        };
+        keyboard.change_repeat_mode(self, mode);
     }
 
     pub(super) fn focus_toplevel(&mut self, requested: Option<SurfaceId>) {
@@ -542,6 +596,7 @@ impl ServerState {
     }
 
     pub(super) fn release_host_input(&mut self, time: u32) {
+        self.keyboard_repeats.clear();
         // Ordinary focus clearing is intentionally ignored by active popup
         // grabs. End the protocol grab first so losing nested host focus cannot
         // leave a client menu open and holding Weld's seat.
@@ -843,6 +898,8 @@ impl SeatHandler for ServerState {
     }
 
     fn focus_changed(&mut self, seat: &Seat<Self>, focused: Option<&WlSurface>) {
+        self.keyboard_repeats.focus_changed();
+        self.keyboard_diagnostic_dirty = true;
         let client = focused.and_then(|surface| self.display_handle.get_client(surface.id()).ok());
         set_data_device_focus(&self.display_handle, seat, client);
     }
@@ -907,10 +964,11 @@ fn gesture_delta(delta: InputDelta) -> smithay::utils::Point<f64, Logical> {
     (delta.x, delta.y).into()
 }
 
-const fn smithay_key_state(state: ButtonState) -> KeyState {
+const fn smithay_key_state(state: KeyboardKeyState) -> KeyEvent {
     match state {
-        ButtonState::Pressed => KeyState::Pressed,
-        ButtonState::Released => KeyState::Released,
+        KeyboardKeyState::Pressed => KeyEvent::Pressed,
+        KeyboardKeyState::Released => KeyEvent::Released,
+        KeyboardKeyState::Repeated => KeyEvent::Repeated,
     }
 }
 

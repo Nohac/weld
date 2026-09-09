@@ -12,8 +12,8 @@ use weld_client::{
     ClientEventQueue, ClientInputEvent, ClientInputTarget, ClientRequest, ClientRouteAliasUpdate,
     ClientSourceDescriptor, ClientSourceId, ClientSurfaceCommit, ClientSurfaceEvent,
     ClientSurfaceEventKind, ClientSurfaceId, ClientSurfaceRequestKind, InputEventKind,
-    InputPosition, LinuxButtonCode, LinuxKeycode, PointerGestureKind, RawScrollPhase,
-    RawScrollSource,
+    InputPosition, KeyboardKeyState, LinuxButtonCode, LinuxKeycode, PointerGestureKind,
+    RawScrollPhase, RawScrollSource,
 };
 use weld_hoist_protocol::{DestinationEnvelope, DestinationMessage, HoistSessionId};
 
@@ -398,8 +398,9 @@ impl SourceRelayAdapter {
             }
             DestinationMessage::Input(input) => {
                 let input = input.into_client_event();
-                self.remote_input.observe_input(&input);
-                self.effects.push(ClientAdapterEffect::Input(input));
+                if self.remote_input.observe_input(&input) {
+                    self.effects.push(ClientAdapterEffect::Input(input));
+                }
             }
             DestinationMessage::BufferReleased { .. } | DestinationMessage::Reclaim => {}
             DestinationMessage::CursorReceived { .. } => {}
@@ -872,7 +873,9 @@ impl ClientAdapter for DestinationRelayAdapter {
         let Some(session) = self.sessions.get(&source).copied() else {
             return;
         };
-        self.input.observe_input(&event);
+        if !self.input.observe_input(&event) {
+            return;
+        }
         event.target = match event.target {
             ClientInputTarget::Pointer { layer, .. } => ClientInputTarget::Pointer {
                 surface: source,
@@ -951,12 +954,17 @@ fn rewrite_request_surface(request: &mut ClientRequest, source: ClientSurfaceId)
 
 #[derive(Default)]
 struct RemoteInputState {
-    keys: HashMap<LinuxKeycode, ClientInputTarget>,
+    keys: HashMap<LinuxKeycode, RemoteKeyCapture>,
     buttons: HashMap<LinuxButtonCode, (ClientInputTarget, Option<InputPosition>)>,
     gestures: Vec<(PointerGestureKind, ClientInputTarget)>,
     finger_scroll: Option<RemoteFingerScroll>,
     keyboard_focus: Option<ClientSurfaceId>,
     last_time: u32,
+}
+
+struct RemoteKeyCapture {
+    target: ClientInputTarget,
+    repeat_allowed: bool,
 }
 
 struct RemoteFingerScroll {
@@ -968,11 +976,30 @@ struct RemoteFingerScroll {
 impl RemoteInputState {
     fn observe_request(&mut self, request: &ClientRequest) {
         if let ClientRequest::Focus(focus) = request {
+            if self.keyboard_focus != focus.surface {
+                for capture in self.keys.values_mut() {
+                    capture.repeat_allowed = false;
+                }
+            }
             self.keyboard_focus = focus.surface;
         }
     }
 
-    fn observe_input(&mut self, input: &ClientInputEvent) {
+    fn observe_input(&mut self, input: &ClientInputEvent) -> bool {
+        if let InputEventKind::Keyboard {
+            keycode,
+            state: KeyboardKeyState::Repeated,
+        } = input.event
+        {
+            let eligible = self
+                .keys
+                .get(&keycode)
+                .is_some_and(|capture| capture.repeat_allowed && capture.target == input.target);
+            if eligible {
+                self.last_time = input.time;
+            }
+            return eligible;
+        }
         self.last_time = input.time;
         match &input.event {
             InputEventKind::PointerButton {
@@ -1017,12 +1044,19 @@ impl RemoteInputState {
                 }
             }
             InputEventKind::Keyboard { keycode, state } => match state {
-                weld_client::ButtonState::Pressed => {
-                    self.keys.insert(*keycode, input.target);
+                KeyboardKeyState::Pressed => {
+                    self.keys.insert(
+                        *keycode,
+                        RemoteKeyCapture {
+                            target: input.target,
+                            repeat_allowed: true,
+                        },
+                    );
                 }
-                weld_client::ButtonState::Released => {
+                KeyboardKeyState::Released => {
                     self.keys.remove(keycode);
                 }
+                KeyboardKeyState::Repeated => {}
             },
             InputEventKind::PointerMotion { position } => {
                 for (target, last_position) in self.buttons.values_mut() {
@@ -1033,6 +1067,7 @@ impl RemoteInputState {
             }
             InputEventKind::PointerLeft { .. } | InputEventKind::PointerAxis { .. } => {}
         }
+        true
     }
 
     fn release_effects(
@@ -1060,14 +1095,14 @@ impl RemoteInputState {
         );
         effects.extend(
             self.keys
-                .extract_if(|_, target| should_release(target.surface()))
-                .map(|(keycode, target)| {
+                .extract_if(|_, capture| should_release(capture.target.surface()))
+                .map(|(keycode, capture)| {
                     ClientAdapterEffect::Input(ClientInputEvent {
-                        target,
+                        target: capture.target,
                         host_position: None,
                         event: InputEventKind::Keyboard {
                             keycode,
-                            state: weld_client::ButtonState::Released,
+                            state: KeyboardKeyState::Released,
                         },
                         time,
                     })
@@ -1132,6 +1167,102 @@ mod tests {
     };
 
     use super::*;
+
+    #[test]
+    fn relay_forwards_repeats_without_growing_the_release_ledger() {
+        let (mut relay, _, surface, session) = mapped_source();
+        let input = |state| DestinationEnvelope {
+            session,
+            message: DestinationMessage::input(ClientInputEvent {
+                target: ClientInputTarget::Keyboard { surface },
+                host_position: None,
+                event: InputEventKind::Keyboard {
+                    keycode: LinuxKeycode(30),
+                    state,
+                },
+                time: if state == KeyboardKeyState::Repeated {
+                    100
+                } else {
+                    10
+                },
+            }),
+        };
+        relay.effects.clear();
+        assert!(relay.accept_destination(input(KeyboardKeyState::Repeated)));
+        assert!(relay.effects.is_empty());
+        assert_eq!(
+            relay.remote_input.last_time, 0,
+            "invalid repeat does not advance input time"
+        );
+        for state in [
+            KeyboardKeyState::Pressed,
+            KeyboardKeyState::Repeated,
+            KeyboardKeyState::Repeated,
+        ] {
+            assert!(relay.accept_destination(input(state)));
+        }
+        assert_eq!(relay.effects.len(), 3);
+        assert_eq!(relay.remote_input.keys.len(), 1);
+        relay.effects.clear();
+        relay.fail("test disconnect");
+        let releases = relay
+            .effects
+            .iter()
+            .filter(|effect| {
+                matches!(
+                    effect,
+                    ClientAdapterEffect::Input(ClientInputEvent {
+                        event: InputEventKind::Keyboard {
+                            state: KeyboardKeyState::Released,
+                            ..
+                        },
+                        ..
+                    })
+                )
+            })
+            .count();
+        assert_eq!(releases, 1);
+        assert!(
+            relay.effects.iter().any(|effect| matches!(
+                effect,
+                ClientAdapterEffect::Input(ClientInputEvent {
+                    event: InputEventKind::Keyboard {
+                        state: KeyboardKeyState::Released,
+                        ..
+                    },
+                    time: 100,
+                    ..
+                })
+            )),
+            "release uses the latest accepted repeat timestamp"
+        );
+    }
+
+    #[test]
+    fn relay_focus_change_cancels_repeat_but_keeps_the_release() {
+        let mut input = RemoteInputState::default();
+        let surface = surface(ClientSourceId::new(1), 1);
+        let focus = |surface| {
+            ClientRequest::Focus(ClientFocusRequest {
+                source: ClientSourceId::new(1),
+                surface,
+            })
+        };
+        input.observe_request(&focus(Some(surface)));
+        let mut event = key_input(surface, 30, ButtonState::Pressed);
+        assert!(input.observe_input(&event));
+        event.event = InputEventKind::Keyboard {
+            keycode: LinuxKeycode(30),
+            state: KeyboardKeyState::Repeated,
+        };
+        assert!(input.observe_input(&event));
+        input.observe_request(&focus(None));
+        input.observe_request(&focus(Some(surface)));
+        assert!(!input.observe_input(&event));
+        assert_eq!(input.keys.len(), 1);
+        assert!(input.observe_input(&key_input(surface, 30, ButtonState::Released)));
+        assert!(input.keys.is_empty());
+    }
 
     #[derive(Default)]
     struct FakeSourceState {
@@ -1453,7 +1584,7 @@ mod tests {
             host_position: None,
             event: InputEventKind::Keyboard {
                 keycode: LinuxKeycode(keycode),
-                state,
+                state: state.into(),
             },
             time: 15,
         }
@@ -1643,7 +1774,7 @@ mod tests {
                     effect,
                     ClientAdapterEffect::Input(ClientInputEvent {
                         event: InputEventKind::Keyboard {
-                            state: ButtonState::Released,
+                            state: weld_client::KeyboardKeyState::Released,
                             ..
                         },
                         ..
@@ -1686,7 +1817,7 @@ mod tests {
             host_position: None,
             event: InputEventKind::Keyboard {
                 keycode: LinuxKeycode(30),
-                state: ButtonState::Pressed,
+                state: weld_client::KeyboardKeyState::Pressed,
             },
             time: 12,
         };
@@ -1823,7 +1954,7 @@ mod tests {
                     host_position: None,
                     event: InputEventKind::Keyboard {
                         keycode: LinuxKeycode(30),
-                        state: ButtonState::Pressed,
+                        state: weld_client::KeyboardKeyState::Pressed,
                     },
                     time: 15,
                 }),
@@ -1843,7 +1974,7 @@ mod tests {
             ClientAdapterEffect::Input(ClientInputEvent {
                 event: InputEventKind::Keyboard {
                     keycode: LinuxKeycode(30),
-                    state: ButtonState::Released,
+                    state: weld_client::KeyboardKeyState::Released,
                 },
                 ..
             })

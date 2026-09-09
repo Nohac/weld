@@ -176,6 +176,9 @@ pub(super) fn run(
             dmabuf_capabilities: dmabuf_capabilities.as_ref(),
             dmabuf_sources,
             socket_name: options.socket_name.as_deref(),
+            keyboard_repeat_mode: options
+                .keyboard_repeat_mode
+                .unwrap_or(crate::input::KeyboardRepeatMode::Client),
         },
     )?;
     let mut loop_data = LoopData::new(server);
@@ -474,6 +477,9 @@ pub(super) fn run(
             for command in application.take_host_commands() {
                 match children.apply(&loop_data.server, command)? {
                     HostCommandEffect::Continue => {}
+                    HostCommandEffect::SetLegacyKeyRepeat(legacy) => {
+                        loop_data.server.set_legacy_key_repeat(legacy)
+                    }
                     HostCommandEffect::Exit => exit_requested = true,
                     HostCommandEffect::AdjustOutputScale(adjustment) => {
                         let output = input.output_at_pointer().or_else(|| {

@@ -356,13 +356,16 @@ fn project_raw_input(
                 logical_key,
                 state,
             } => {
+                let Some(state) = state.transition() else {
+                    continue;
+                };
                 messages.keyboard_input.write(KeyboardInput {
                     key_code: bevy_keycode(*keycode),
                     logical_key: logical_key
                         .as_ref()
                         .map(convert_logical_key)
                         .unwrap_or(Key::Unidentified(NativeKey::Unidentified)),
-                    state: bevy_button_state(*state),
+                    state: bevy_button_state(state),
                     text: None,
                     repeat: false,
                     window: INPUT_WINDOW,

@@ -346,7 +346,15 @@ mod tests {
             },
             InputEventKind::Keyboard {
                 keycode: LinuxKeycode(30),
-                state: ButtonState::Pressed,
+                state: weld_client::KeyboardKeyState::Pressed,
+            },
+            InputEventKind::Keyboard {
+                keycode: LinuxKeycode(30),
+                state: weld_client::KeyboardKeyState::Repeated,
+            },
+            InputEventKind::Keyboard {
+                keycode: LinuxKeycode(30),
+                state: weld_client::KeyboardKeyState::Released,
             },
             InputEventKind::PointerAxis {
                 position: None,

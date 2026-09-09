@@ -7,6 +7,7 @@
 //! pace. Smithay resources never enter the application world.
 
 mod ingress;
+mod keyboard;
 mod pointer_shortcuts;
 mod projection;
 mod routing;
@@ -21,9 +22,10 @@ pub(crate) mod raw {
 use bevy::{
     app::{App, Plugin},
     camera::NormalizedRenderTarget,
-    ecs::schedule::SystemSet,
+    ecs::{schedule::SystemSet, world::World},
 };
 use weld_core::OutputConfiguration;
+use weld_core::runtime::HostCommand;
 
 #[derive(Clone)]
 pub(crate) struct InputOutputTarget {
@@ -32,6 +34,7 @@ pub(crate) struct InputOutputTarget {
 }
 
 pub(crate) use ingress::ApplicationInputBuffer;
+pub use keyboard::{KeyboardRepeatMode, KeyboardSettings, LegacyKeyRepeat};
 pub(crate) use pointer_shortcuts::filter_pointer_shortcut_event;
 pub use pointer_shortcuts::{
     PointerShortcut, PointerShortcutAppExt, PointerShortcutId, PointerShortcutModifiers,
@@ -45,11 +48,11 @@ pub(crate) use projection::enqueue_raw_input;
 pub(crate) use projection::enqueue_raw_input_batch;
 pub(crate) use projection::update_output_configurations;
 pub(crate) use routing::take_input_effects;
+pub(crate) use shortcuts::filter_global_shortcut_event;
 pub use shortcuts::{
     GlobalShortcut, GlobalShortcutAppExt, GlobalShortcutId, GlobalShortcutModifiers,
     GlobalShortcutPlugin, GlobalShortcutPressed,
 };
-pub(crate) use shortcuts::{filter_global_shortcut_event, take_host_commands};
 pub(crate) use state::set_input_update_time;
 pub use virtual_terminal::VirtualTerminalShortcutPlugin;
 pub(crate) use virtual_terminal::{
@@ -58,6 +61,13 @@ pub(crate) use virtual_terminal::{
 pub use weld_client::{
     InputDelta, PointerGesture, PointerGestureKind, TouchpadHold, TouchpadPinch, TouchpadSwipe,
 };
+
+/// Collect input policy commands: queued shortcuts and changed keyboard settings.
+pub(crate) fn take_host_commands(world: &mut World) -> Vec<HostCommand> {
+    let mut commands = shortcuts::take_shortcut_commands(world);
+    commands.extend(keyboard::take_settings_command(world));
+    commands
+}
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq, SystemSet)]
 pub(crate) enum InputSystems {
@@ -82,6 +92,7 @@ impl InputBridgePlugin {
 impl Plugin for InputBridgePlugin {
     fn build(&self, app: &mut App) {
         state::register(app);
+        keyboard::register(app);
         projection::register(app, self.targets.clone());
         routing::register(app);
     }

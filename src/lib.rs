@@ -82,7 +82,14 @@ pub fn run(arguments: AppArguments) -> Result<()> {
         .remote_debug(arguments.remote_debug)
         .scale(arguments.scale)
         .socket_name(arguments.wayland_socket)
+        .keyboard_repeat_mode(arguments.keyboard_repeat_mode.map(Into::into))
         .build()?;
+    app.insert_resource(weld_app::input::KeyboardSettings {
+        legacy_repeat: arguments
+            .legacy_key_repeat
+            .map(Into::into)
+            .unwrap_or_default(),
+    });
     let mut enable_hoist_policy = true;
     match pending_transport {
         Some(PendingHoistTransport::LocalSource(listener)) => {
@@ -311,7 +318,20 @@ fn validate_encoded_capabilities(
 }
 
 pub fn run_from_env() -> Result<()> {
-    run(AppArguments::parse())
+    let mut arguments = AppArguments::parse();
+    if arguments.legacy_key_repeat.is_none() {
+        let environment = match std::env::var("WELD_LEGACY_KEY_REPEAT") {
+            Ok(value) => Some(value),
+            Err(std::env::VarError::NotPresent) => None,
+            Err(error) => return Err(error).context("invalid WELD_LEGACY_KEY_REPEAT"),
+        };
+        arguments.legacy_key_repeat = Some(
+            arguments::resolve_legacy_repeat(None, environment.as_deref())
+                .map_err(anyhow::Error::msg)
+                .context("invalid WELD_LEGACY_KEY_REPEAT")?,
+        );
+    }
+    run(arguments)
 }
 
 #[cfg(test)]
@@ -321,6 +341,31 @@ mod tests {
     fn arguments(values: &[&str]) -> AppArguments {
         AppArguments::try_parse_from(std::iter::once("weldwm").chain(values.iter().copied()))
             .expect("valid command line")
+    }
+
+    #[test]
+    fn keyboard_repeat_configuration_is_explicit_and_cli_wins() {
+        use crate::arguments::{LegacyKeyRepeatArgument, resolve_legacy_repeat};
+        assert_eq!(
+            resolve_legacy_repeat(None, None),
+            Ok(LegacyKeyRepeatArgument::Client)
+        );
+        assert_eq!(
+            resolve_legacy_repeat(None, Some("disabled")),
+            Ok(LegacyKeyRepeatArgument::Disabled)
+        );
+        assert!(resolve_legacy_repeat(None, Some("typo")).is_err());
+        let options = arguments(&[
+            "--legacy-key-repeat",
+            "client",
+            "--keyboard-repeat-mode",
+            "client",
+        ]);
+        assert_eq!(
+            resolve_legacy_repeat(options.legacy_key_repeat, Some("disabled")),
+            Ok(LegacyKeyRepeatArgument::Client)
+        );
+        assert!(options.keyboard_repeat_mode.is_some());
     }
 
     #[test]

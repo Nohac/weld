@@ -144,6 +144,9 @@ pub(super) fn register(app: &mut App) {
 pub(crate) fn filter_pointer_shortcut_event(world: &mut World, event: &RawSeatEvent) -> bool {
     match event.event {
         RawSeatEventKind::Keyboard { keycode, state, .. } => {
+            let Some(state) = state.transition() else {
+                return false;
+            };
             if let Some(mut registry) = world.get_resource_mut::<PointerShortcutRegistry>() {
                 match state {
                     ButtonState::Pressed => {
@@ -276,7 +279,7 @@ mod tests {
             RawSeatEventKind::Keyboard {
                 keycode: LinuxKeycode(keycode),
                 logical_key: None,
-                state,
+                state: state.into(),
             },
             1,
         )

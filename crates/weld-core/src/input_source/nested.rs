@@ -10,8 +10,8 @@ use winit::{
 };
 
 use crate::input::{
-    ButtonState, InputPosition, LinuxButtonCode, LinuxKeycode, RawScrollFrame, RawScrollPhase,
-    RawScrollSource, RawSeatEvent, RawSeatEventKind,
+    ButtonState, InputPosition, KeyboardKeyState, LinuxButtonCode, LinuxKeycode, RawScrollFrame,
+    RawScrollPhase, RawScrollSource, RawSeatEvent, RawSeatEventKind,
 };
 
 #[derive(Default)]
@@ -84,13 +84,13 @@ impl NestedAdapter {
                 event,
                 is_synthetic,
                 ..
-            } if !is_synthetic && !event.repeat => {
+            } if !is_synthetic => {
                 if let Some(keycode) = event.physical_key.to_scancode() {
                     self.events.push_back(RawSeatEvent::new(
                         RawSeatEventKind::Keyboard {
                             keycode: LinuxKeycode(keycode),
                             logical_key: Some(event.logical_key.clone()),
-                            state: button_state(event.state),
+                            state: keyboard_state(event.state, event.repeat),
                         },
                         time,
                     ));
@@ -115,6 +115,14 @@ impl NestedAdapter {
             time,
         ));
         self.active_scroll_axes = ActiveScrollAxes::default();
+    }
+}
+
+fn keyboard_state(state: ElementState, repeat: bool) -> KeyboardKeyState {
+    match (state, repeat) {
+        (ElementState::Pressed, true) => KeyboardKeyState::Repeated,
+        (ElementState::Pressed, false) => KeyboardKeyState::Pressed,
+        (ElementState::Released, _) => KeyboardKeyState::Released,
     }
 }
 
@@ -201,6 +209,37 @@ fn logical_input_position(position: PhysicalPosition<f64>, scale_factor: f64) ->
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn upstream_repeat_remains_a_repeat_through_runtime_translation() {
+        use crate::input::{KeyboardKeyState, LinuxKeycode, RawSeatEvent, RawSeatEventKind};
+        use winit::event::ElementState;
+        let state = super::keyboard_state(ElementState::Pressed, true);
+        let runtime = RawSeatEvent::new(
+            RawSeatEventKind::Keyboard {
+                keycode: LinuxKeycode(30),
+                logical_key: None,
+                state,
+            },
+            123,
+        )
+        .into_runtime();
+        assert_eq!(
+            runtime.event,
+            weld_client::RuntimeInputEventKind::Input(weld_client::InputEventKind::Keyboard {
+                keycode: LinuxKeycode(30),
+                state: KeyboardKeyState::Repeated
+            })
+        );
+        assert_eq!(runtime.time, 123);
+        assert_eq!(
+            super::keyboard_state(ElementState::Pressed, false),
+            KeyboardKeyState::Pressed
+        );
+        assert_eq!(
+            super::keyboard_state(ElementState::Released, false),
+            KeyboardKeyState::Released
+        );
+    }
     use winit::{
         dpi::PhysicalPosition,
         event::{MouseButton, MouseScrollDelta, TouchPhase},

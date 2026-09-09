@@ -15,7 +15,7 @@ use weld_client::{ClientAdapterRegistration, ClientBufferUseId, ClientRuntimeAda
 
 use crate::{
     dmabuf::DmabufContext,
-    input::RawSeatEvent,
+    input::{KeyboardRepeatMode, RawSeatEvent},
     output::{OutputConfiguration, OutputHead, OutputId, OutputScale},
     runtime::HostCommand,
     surface::Extent,
@@ -30,6 +30,7 @@ pub(crate) struct RunOptions {
     pub(crate) remote_debug_enabled: bool,
     pub(crate) output_scale: OutputScale,
     pub(crate) socket_name: Option<String>,
+    pub(crate) keyboard_repeat_mode: Option<KeyboardRepeatMode>,
 }
 
 /// Native host selected before an application is constructed.
@@ -91,6 +92,13 @@ impl HostBuilder {
     /// Selects an explicit Wayland socket name for this compositor instance.
     pub fn socket_name(mut self, socket_name: Option<String>) -> Self {
         self.options.socket_name = socket_name;
+        self
+    }
+
+    /// Overrides repeat ownership. Nested defaults to upstream/compositor repeats;
+    /// DRM defaults to client timers until a native repeat scheduler is available.
+    pub fn keyboard_repeat_mode(mut self, mode: Option<KeyboardRepeatMode>) -> Self {
+        self.options.keyboard_repeat_mode = mode;
         self
     }
 

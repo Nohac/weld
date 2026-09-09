@@ -68,7 +68,7 @@ use weld_client::{
 use crate::{
     OutputId,
     dmabuf::{DmabufCapabilities, DmabufEvent, DmabufReleaseId, DmabufSourceCache},
-    input::InputPosition,
+    input::{InputPosition, KeyboardRepeatMode, KeyboardRepeatTracker, LegacyKeyRepeat},
     surface::{SurfaceId, WindowInteractionRequestKind},
 };
 use cursor::CursorSurfaceStore;
@@ -109,6 +109,10 @@ pub struct ServerState {
     popup_manager: PopupManager,
     popup_grab: Option<PopupGrab<Self>>,
     focused_toplevel: Option<SurfaceId>,
+    keyboard_repeat_mode: KeyboardRepeatMode,
+    legacy_key_repeat: LegacyKeyRepeat,
+    keyboard_repeats: KeyboardRepeatTracker,
+    keyboard_diagnostic_dirty: bool,
     pending_focus: Option<Option<SurfaceId>>,
     pending_resizes: PendingResizeRequests,
     pending_surface_events: WaylandClientBridge,
@@ -141,6 +145,7 @@ pub(crate) struct ServerOptions<'a> {
     pub(crate) dmabuf_capabilities: Option<&'a DmabufCapabilities>,
     pub(crate) dmabuf_sources: DmabufSourceCache,
     pub(crate) socket_name: Option<&'a str>,
+    pub(crate) keyboard_repeat_mode: KeyboardRepeatMode,
 }
 
 struct ServerOutput {
@@ -165,6 +170,7 @@ impl ServerState {
             dmabuf_capabilities,
             dmabuf_sources,
             socket_name: requested_socket_name,
+            keyboard_repeat_mode,
         } = options;
         let display_handle = display.handle();
         let compositor_state = CompositorState::new::<Self>(&display_handle);
@@ -323,7 +329,7 @@ impl ServerState {
             }) as Box<dyn Fn(DrmSyncPointSource, Client) -> bool>
         });
 
-        Ok(Self {
+        let mut state = Self {
             display_handle,
             socket_name,
             compositor_state,
@@ -349,6 +355,10 @@ impl ServerState {
             popup_manager: PopupManager::default(),
             popup_grab: None,
             focused_toplevel: None,
+            keyboard_repeat_mode,
+            legacy_key_repeat: LegacyKeyRepeat::default(),
+            keyboard_repeats: KeyboardRepeatTracker::default(),
+            keyboard_diagnostic_dirty: true,
             pending_focus: None,
             pending_resizes: PendingResizeRequests::default(),
             pending_surface_events: client_bridge,
@@ -370,7 +380,9 @@ impl ServerState {
             shell_cursor_override: false,
             dmabuf_blocker_installer,
             syncobj_blocker_installer,
-        })
+        };
+        state.configure_keyboard_repeat();
+        Ok(state)
     }
 
     pub(crate) fn update_output_metrics(

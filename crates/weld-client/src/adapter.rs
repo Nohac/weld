@@ -10,8 +10,8 @@ use crate::{
     ButtonState, ClientCursor, ClientCursorUpdate, ClientEventQueue, ClientInputEvent,
     ClientInputTarget, ClientKeyboardRoute, ClientPointerRoute, ClientPointerRouteUpdate,
     ClientRequest, ClientSourceDescriptor, ClientSourceId, ClientSurfaceId, InputEventKind,
-    LinuxButtonCode, LinuxKeycode, PointerGesture, PointerGestureKind, RawScrollFrame,
-    RawScrollPhase, RawScrollSource, RuntimeInputEvent, RuntimeInputEventKind,
+    KeyboardKeyState, LinuxButtonCode, LinuxKeycode, PointerGesture, PointerGestureKind,
+    RawScrollFrame, RawScrollPhase, RawScrollSource, RuntimeInputEvent, RuntimeInputEventKind,
 };
 
 /// One client source driven by the native runtime.
@@ -325,6 +325,12 @@ struct ClientCursorState {
     cursor: ClientCursor,
 }
 
+#[derive(Clone, Copy)]
+struct KeyboardCapture {
+    route: ClientKeyboardRoute,
+    repeat_allowed: bool,
+}
+
 /// Registry above all client adapters in one native backend loop.
 ///
 /// [`Self::dispatch_unconsumed_input`] must be called only after application
@@ -350,7 +356,7 @@ pub struct ClientRuntime {
     pending_pointer_route: Option<Option<ClientPointerRoute>>,
     keyboard_route: Option<ClientKeyboardRoute>,
     // Resolve once on press: focus/alias changes must not strand the release.
-    keyboard_captures: HashMap<LinuxKeycode, ClientKeyboardRoute>,
+    keyboard_captures: HashMap<LinuxKeycode, KeyboardCapture>,
     pointer_capture: PointerCapture,
     gesture_capture: Option<GestureCapture>,
     finger_scroll_capture: Option<FingerScrollCapture>,
@@ -380,14 +386,22 @@ impl ClientRuntime {
 
     pub fn set_route_alias(&mut self, destination: ClientSurfaceId, source: ClientSurfaceId) {
         if destination != source {
+            let previous = self.resolved_keyboard_route(self.keyboard_route);
             self.aliases.insert(destination, source);
             self.retired_aliases.remove(&destination);
+            if previous != self.resolved_keyboard_route(self.keyboard_route) {
+                self.invalidate_keyboard_repeats();
+            }
         }
     }
 
     pub fn remove_route_alias(&mut self, destination: ClientSurfaceId) {
+        let previous = self.resolved_keyboard_route(self.keyboard_route);
         if self.aliases.remove(&destination).is_some() {
             self.retired_aliases.insert(destination);
+            if previous != self.resolved_keyboard_route(self.keyboard_route) {
+                self.invalidate_keyboard_repeats();
+            }
         }
     }
 
@@ -446,7 +460,16 @@ impl ClientRuntime {
     }
 
     pub fn set_keyboard_route(&mut self, route: Option<ClientKeyboardRoute>) {
+        if self.keyboard_route != route {
+            self.invalidate_keyboard_repeats();
+        }
         self.keyboard_route = route;
+    }
+
+    fn invalidate_keyboard_repeats(&mut self) {
+        for capture in self.keyboard_captures.values_mut() {
+            capture.repeat_allowed = false;
+        }
     }
 
     pub fn drain_events(
@@ -657,10 +680,13 @@ impl ClientRuntime {
                 return true;
             };
             let source = route.surface.source();
+            if !self.adapters.contains_key(&source) {
+                return false;
+            }
+            self.set_keyboard_route(None);
             let Some(adapter) = self.adapters.get_mut(&source) else {
                 return false;
             };
-            self.keyboard_route = None;
             adapter
                 .driver
                 .apply_request(ClientRequest::Focus(crate::ClientFocusRequest {
@@ -699,7 +725,9 @@ impl ClientRuntime {
                     .keyboard_route
                     .is_some_and(|route| route.surface.source() == source)
             {
-                self.keyboard_route = focus.surface.map(|surface| ClientKeyboardRoute { surface });
+                self.set_keyboard_route(
+                    focus.surface.map(|surface| ClientKeyboardRoute { surface }),
+                );
             }
         } else {
             let Some(adapter) = self.adapters.get_mut(&source) else {
@@ -806,18 +834,30 @@ impl ClientRuntime {
             }
             RuntimeInputEventKind::Input(InputEventKind::Keyboard { keycode, state }) => {
                 let captured = match state {
-                    ButtonState::Pressed => {
+                    KeyboardKeyState::Repeated => {
+                        let Some(capture) = self.keyboard_captures.get(&keycode).copied() else {
+                            return ClientInputDispatchResult::NoRoute;
+                        };
+                        if !capture.repeat_allowed
+                            || self.resolved_keyboard_route(self.keyboard_route)
+                                != Ok(Some(capture.route))
+                        {
+                            return ClientInputDispatchResult::NoRoute;
+                        }
+                        Some(capture.route)
+                    }
+                    KeyboardKeyState::Pressed => {
                         if let Some(previous) = self.keyboard_captures.remove(&keycode) {
                             self.dispatch_to(
-                                previous.surface.source(),
+                                previous.route.surface.source(),
                                 ClientInputEvent {
                                     target: ClientInputTarget::Keyboard {
-                                        surface: previous.surface,
+                                        surface: previous.route.surface,
                                     },
                                     host_position: None,
                                     event: InputEventKind::Keyboard {
                                         keycode,
-                                        state: ButtonState::Released,
+                                        state: KeyboardKeyState::Released,
                                     },
                                     time,
                                 },
@@ -825,7 +865,10 @@ impl ClientRuntime {
                         }
                         None
                     }
-                    ButtonState::Released => self.keyboard_captures.remove(&keycode),
+                    KeyboardKeyState::Released => self
+                        .keyboard_captures
+                        .remove(&keycode)
+                        .map(|capture| capture.route),
                 };
                 let route = if let Some(route) = captured {
                     route
@@ -847,8 +890,16 @@ impl ClientRuntime {
                         time,
                     },
                 );
-                if state == ButtonState::Pressed && result == ClientInputDispatchResult::Delivered {
-                    self.keyboard_captures.insert(keycode, route);
+                if state == KeyboardKeyState::Pressed
+                    && result == ClientInputDispatchResult::Delivered
+                {
+                    self.keyboard_captures.insert(
+                        keycode,
+                        KeyboardCapture {
+                            route,
+                            repeat_allowed: true,
+                        },
+                    );
                 }
                 result
             }
@@ -1134,8 +1185,8 @@ impl ClientRuntime {
         let destroyed_keys = self
             .keyboard_captures
             .iter()
-            .filter_map(|(key, route)| {
-                self.surface_resolves_to(route.surface, surface)
+            .filter_map(|(key, capture)| {
+                self.surface_resolves_to(capture.route.surface, surface)
                     .then_some(*key)
             })
             .collect::<Vec<_>>();
@@ -1498,35 +1549,237 @@ mod tests {
         runtime.set_keyboard_route(Some(ClientKeyboardRoute {
             surface: surface(1, 1, 1),
         }));
-        runtime.dispatch_unconsumed_input(key(ButtonState::Pressed));
+        runtime.dispatch_unconsumed_input(key(KeyboardKeyState::Pressed));
         runtime.set_keyboard_route(Some(ClientKeyboardRoute {
             surface: surface(2, 1, 1),
         }));
-        runtime.dispatch_unconsumed_input(key(ButtonState::Pressed));
+        runtime.dispatch_unconsumed_input(key(KeyboardKeyState::Pressed));
         assert_eq!(
             first.borrow().inputs.len(),
             2,
             "old press must be released immediately"
         );
-        runtime.dispatch_unconsumed_input(key(ButtonState::Released));
+        runtime.dispatch_unconsumed_input(key(KeyboardKeyState::Released));
         for record in [first, second] {
             let record = record.borrow();
             assert_eq!(record.inputs.len(), 2);
             assert!(matches!(
                 record.inputs[0].event,
                 InputEventKind::Keyboard {
-                    state: ButtonState::Pressed,
+                    state: crate::KeyboardKeyState::Pressed,
                     ..
                 }
             ));
             assert!(matches!(
                 record.inputs[1].event,
                 InputEventKind::Keyboard {
-                    state: ButtonState::Released,
+                    state: crate::KeyboardKeyState::Released,
                     ..
                 }
             ));
         }
+    }
+
+    #[test]
+    fn repeats_keep_one_capture_without_synthetic_transitions() {
+        let mut runtime = ClientRuntime::default();
+        let record = register(&mut runtime, 1);
+        runtime.set_keyboard_route(Some(ClientKeyboardRoute {
+            surface: surface(1, 1, 1),
+        }));
+        let event = |state| {
+            RuntimeInputEvent::new(
+                RuntimeInputEventKind::Input(InputEventKind::Keyboard {
+                    keycode: LinuxKeycode(30),
+                    state,
+                }),
+                10,
+            )
+        };
+        assert_eq!(
+            runtime.dispatch_unconsumed_input(event(KeyboardKeyState::Repeated)),
+            ClientInputDispatchResult::NoRoute
+        );
+        let states = [
+            KeyboardKeyState::Pressed,
+            KeyboardKeyState::Repeated,
+            KeyboardKeyState::Repeated,
+            KeyboardKeyState::Released,
+        ];
+        for state in states {
+            assert_eq!(
+                runtime.dispatch_unconsumed_input(event(state)),
+                ClientInputDispatchResult::Delivered
+            );
+        }
+        assert!(runtime.keyboard_captures.is_empty());
+        assert_eq!(
+            record
+                .borrow()
+                .inputs
+                .iter()
+                .map(|input| input.event.clone())
+                .collect::<Vec<_>>(),
+            states.map(|state| InputEventKind::Keyboard {
+                keycode: LinuxKeycode(30),
+                state
+            })
+        );
+        assert_eq!(
+            runtime.dispatch_unconsumed_input(event(KeyboardKeyState::Repeated)),
+            ClientInputDispatchResult::NoRoute
+        );
+    }
+
+    #[test]
+    fn repeats_do_not_follow_focus_away_and_back_or_host_focus_loss() {
+        let mut runtime = ClientRuntime::default();
+        let first = register(&mut runtime, 1);
+        let second = register(&mut runtime, 2);
+        let original = Some(ClientKeyboardRoute {
+            surface: surface(1, 1, 1),
+        });
+        let event = |state| {
+            RuntimeInputEvent::new(
+                RuntimeInputEventKind::Input(InputEventKind::Keyboard {
+                    keycode: LinuxKeycode(30),
+                    state,
+                }),
+                10,
+            )
+        };
+        runtime.set_keyboard_route(original);
+        runtime.dispatch_unconsumed_input(event(KeyboardKeyState::Pressed));
+        runtime.set_keyboard_route(Some(ClientKeyboardRoute {
+            surface: surface(2, 1, 1),
+        }));
+        assert_eq!(
+            runtime.dispatch_unconsumed_input(event(KeyboardKeyState::Repeated)),
+            ClientInputDispatchResult::NoRoute
+        );
+        runtime.set_keyboard_route(original);
+        assert_eq!(
+            runtime.dispatch_unconsumed_input(event(KeyboardKeyState::Repeated)),
+            ClientInputDispatchResult::NoRoute
+        );
+        runtime.dispatch_unconsumed_input(event(KeyboardKeyState::Released));
+        assert_eq!(first.borrow().inputs.len(), 2);
+        assert!(second.borrow().inputs.is_empty());
+        runtime.dispatch_unconsumed_input(event(KeyboardKeyState::Pressed));
+        runtime.host_focus_lost(11);
+        runtime.set_keyboard_route(original);
+        assert_eq!(
+            runtime.dispatch_unconsumed_input(event(KeyboardKeyState::Repeated)),
+            ClientInputDispatchResult::NoRoute
+        );
+    }
+
+    #[test]
+    fn alias_replacement_and_destruction_cancel_repeat_without_recapturing() {
+        let mut runtime = ClientRuntime::default();
+        let first = register(&mut runtime, 1);
+        register(&mut runtime, 2);
+        let original = surface(1, 1, 1);
+        let alias = surface(3, 1, 1);
+        runtime.set_route_alias(alias, original);
+        runtime.set_keyboard_route(Some(ClientKeyboardRoute { surface: alias }));
+        let event = |state| {
+            RuntimeInputEvent::new(
+                RuntimeInputEventKind::Input(InputEventKind::Keyboard {
+                    keycode: LinuxKeycode(30),
+                    state,
+                }),
+                10,
+            )
+        };
+        runtime.dispatch_unconsumed_input(event(KeyboardKeyState::Pressed));
+        runtime.set_route_alias(alias, surface(2, 1, 1));
+        runtime.set_route_alias(alias, original);
+        assert_eq!(
+            runtime.dispatch_unconsumed_input(event(KeyboardKeyState::Repeated)),
+            ClientInputDispatchResult::NoRoute
+        );
+        runtime.dispatch_unconsumed_input(event(KeyboardKeyState::Released));
+        assert_eq!(first.borrow().inputs.len(), 2);
+        runtime.dispatch_unconsumed_input(event(KeyboardKeyState::Pressed));
+        runtime.forget_surface(original);
+        assert_eq!(
+            runtime.dispatch_unconsumed_input(event(KeyboardKeyState::Repeated)),
+            ClientInputDispatchResult::NoRoute
+        );
+    }
+
+    #[test]
+    fn production_focus_requests_cancel_repeats_and_preserve_the_release_route() {
+        let original = surface(1, 1, 1);
+        let other = surface(2, 1, 1);
+        let focus = |surface: ClientSurfaceId| {
+            ClientRequest::Focus(crate::ClientFocusRequest {
+                source: surface.source(),
+                surface: Some(surface),
+            })
+        };
+        let event = |state| {
+            RuntimeInputEvent::new(
+                RuntimeInputEventKind::Input(InputEventKind::Keyboard {
+                    keycode: LinuxKeycode(30),
+                    state,
+                }),
+                10,
+            )
+        };
+        for clear in [
+            ClientRequest::ClearFocus,
+            ClientRequest::Focus(crate::ClientFocusRequest {
+                source: original.source(),
+                surface: None,
+            }),
+        ] {
+            let mut runtime = ClientRuntime::default();
+            let first = register(&mut runtime, 1);
+            let second = register(&mut runtime, 2);
+            assert!(runtime.apply_request(focus(original)));
+            runtime.dispatch_unconsumed_input(event(KeyboardKeyState::Pressed));
+            assert!(runtime.apply_request(focus(other)));
+            assert!(runtime.apply_request(focus(original)));
+            assert_eq!(
+                runtime.dispatch_unconsumed_input(event(KeyboardKeyState::Repeated)),
+                ClientInputDispatchResult::NoRoute
+            );
+            assert_eq!(
+                runtime.dispatch_unconsumed_input(event(KeyboardKeyState::Released)),
+                ClientInputDispatchResult::Delivered
+            );
+            runtime.dispatch_unconsumed_input(event(KeyboardKeyState::Pressed));
+            assert!(runtime.apply_request(clear));
+            assert!(runtime.apply_request(focus(original)));
+            assert_eq!(
+                runtime.dispatch_unconsumed_input(event(KeyboardKeyState::Repeated)),
+                ClientInputDispatchResult::NoRoute
+            );
+            runtime.dispatch_unconsumed_input(event(KeyboardKeyState::Released));
+            assert_eq!(first.borrow().inputs.len(), 4);
+            assert!(
+                first
+                    .borrow()
+                    .inputs
+                    .iter()
+                    .all(|input| input.target == ClientInputTarget::Keyboard { surface: original })
+            );
+            assert!(second.borrow().inputs.is_empty());
+            assert!(runtime.keyboard_captures.is_empty());
+        }
+    }
+
+    #[test]
+    fn failed_focus_clear_preserves_the_existing_route() {
+        let mut runtime = ClientRuntime::default();
+        let route = Some(ClientKeyboardRoute {
+            surface: surface(7, 1, 1),
+        });
+        runtime.set_keyboard_route(route);
+        assert!(!runtime.apply_request(ClientRequest::ClearFocus));
+        assert_eq!(runtime.keyboard_route, route);
     }
 
     #[test]
@@ -1550,14 +1803,14 @@ mod tests {
             runtime.set_route_alias(alias, original);
             runtime.set_keyboard_route(Some(ClientKeyboardRoute { surface: alias }));
             assert_eq!(
-                runtime.dispatch_unconsumed_input(key(ButtonState::Pressed)),
+                runtime.dispatch_unconsumed_input(key(KeyboardKeyState::Pressed)),
                 ClientInputDispatchResult::Delivered
             );
             runtime.remove_route_alias(alias);
             runtime.forget_surface(alias);
             runtime.set_keyboard_route(focus);
             assert_eq!(
-                runtime.dispatch_unconsumed_input(key(ButtonState::Released)),
+                runtime.dispatch_unconsumed_input(key(KeyboardKeyState::Released)),
                 ClientInputDispatchResult::Delivered
             );
         }
@@ -1592,7 +1845,7 @@ mod tests {
                     host_position: None,
                     event: InputEventKind::Keyboard {
                         keycode: LinuxKeycode(4),
-                        state: ButtonState::Pressed,
+                        state: crate::KeyboardKeyState::Pressed,
                     },
                     time: 7,
                 }))),
@@ -1643,7 +1896,7 @@ mod tests {
             runtime.dispatch_unconsumed_input(RuntimeInputEvent::new(
                 RuntimeInputEventKind::Input(InputEventKind::Keyboard {
                     keycode: LinuxKeycode(1),
-                    state: ButtonState::Pressed,
+                    state: crate::KeyboardKeyState::Pressed,
                 }),
                 1,
             )),
@@ -1828,7 +2081,7 @@ mod tests {
             runtime.dispatch_unconsumed_input(RuntimeInputEvent::new(
                 RuntimeInputEventKind::Input(InputEventKind::Keyboard {
                     keycode: LinuxKeycode(1),
-                    state: ButtonState::Pressed,
+                    state: crate::KeyboardKeyState::Pressed,
                 }),
                 2,
             )),
@@ -2228,7 +2481,7 @@ mod tests {
         runtime.dispatch_unconsumed_input(RuntimeInputEvent::new(
             RuntimeInputEventKind::Input(InputEventKind::Keyboard {
                 keycode: LinuxKeycode(30),
-                state: ButtonState::Pressed,
+                state: crate::KeyboardKeyState::Pressed,
             }),
             2,
         ));
@@ -2264,7 +2517,7 @@ mod tests {
         runtime.dispatch_unconsumed_input(RuntimeInputEvent::new(
             RuntimeInputEventKind::Input(InputEventKind::Keyboard {
                 keycode: LinuxKeycode(30),
-                state: ButtonState::Pressed,
+                state: crate::KeyboardKeyState::Pressed,
             }),
             2,
         ));
@@ -2297,7 +2550,7 @@ mod tests {
         runtime.dispatch_unconsumed_input(RuntimeInputEvent::new(
             RuntimeInputEventKind::Input(InputEventKind::Keyboard {
                 keycode: LinuxKeycode(30),
-                state: ButtonState::Released,
+                state: crate::KeyboardKeyState::Released,
             }),
             43,
         ));
