@@ -28,9 +28,9 @@ asks the user under
 [Media admission and
 degradation](remote-hoisting.md#media-admission-and-degradation--direction).
 
-No budgeting implementation or calibrated hardware model exists yet. The
-rules below constrain the first tracer without promising exact limits before
-measurement.
+The first [shared encoder-target allocator](../shared-bitrate-targets.md) exists;
+the broader resource policy below and a calibrated hardware model remain future
+work. These rules do not promise exact limits before measurement.
 
 The next bounded implementation sequence is recorded in the
 [streaming-budget plan](../remote-budgeting-plan.md), separate from this broader
@@ -339,6 +339,32 @@ than one accidental highest-resolution stream for every consumer.
 Visibility and workspace changes trigger scheduling work directly. The
 scheduler does not poll ECS state to rediscover them.
 
+### Exclusive fullscreen allocation — Direction
+
+When trusted window/presentation policy grants exclusive fullscreen on a target,
+suspend other regular streams competing for that target and give the fullscreen
+presentation the target's available media budget. Do not merely give it a larger
+weight while continuing to encode hidden background windows. This is explicit
+exclusivity, not an inference from a window's size or an application claiming
+focus.
+
+The fullscreen presentation includes its required popups and auxiliary layers;
+essential shell/security overlays and control, input, authorization, and reclaim
+must remain functional. Allocation still respects user ceilings, receiver
+allowances, backend limits, and required control/transition headroom: "everything"
+does not mean exceeding those limits or reserving resources the window cannot use.
+
+Exclusivity is scoped to the affected presentation target, not the whole source
+machine. A stream still needed on another active output/target or by another peer
+cannot be stopped globally; use the union of remaining demand. Entering fullscreen
+stops new background media admission safely, without discarding dependent encoded
+frames or bytes already submitted to a reliable transport. Exiting fullscreen or
+losing the exclusive owner restores ordinary allocation and resumes suspended
+presentations with recoverable content. Windows remain hoisted throughout.
+
+Implement this alongside exclusive-fullscreen and explicit suspension support;
+it is not part of the current interaction-weighted bitrate slice.
+
 ## Quality tiers and degradation order — Direction
 
 When demand exceeds capacity, default policy releases the least valuable work
@@ -365,6 +391,64 @@ stream may be cheap to encode but expensive on the link, or the inverse. The
 transport reports congestion; budgeting chooses per-stream recommendations;
 the protocol performs any resulting profile or rendition change.
 
+## Content demand and per-update quality — Direction
+
+Allocate according to useful demand as well as attention. An idle presentation
+should not indefinitely reserve capacity that another presentation can use, but
+must regain an appropriate quality/latency allowance when interaction resumes.
+The configured total is room to improve quality, not a traffic-consumption goal;
+low usage with good responsiveness is valuable on metered links.
+
+Raw commit count is not a bandwidth entitlement. A cursor blink, scrolling
+terminal, static UI change, video frame and animated 3D viewport can have very
+different costs. Consider useful frame cadence after coalescing, actual encoded
+bytes, pending work age, requested versus applied settings, and evidence that
+quality is constrained by the current target. Focus and authorized input remain
+attention signals rather than substitutes for measured demand. Do not reward an
+application merely for submitting redundant commits faster.
+
+Distinguish bits per useful update from bits per second. A terminal can need an
+occasional expensive, high-quality update to preserve text while consuming little
+on average. Video or animation needs frequent updates but may predict efficiently
+between frames. These are examples, not fixed content rules: scrolling text,
+scene changes and noisy motion can reverse the comparison. Preserve clarity,
+latency and cadence goals rather than assuming one content category is cheap.
+
+Explore a sustained-rate allowance plus a bounded per-update burst allowance.
+An interactive sparse update may spend more without permanently reserving a high
+sustained rate. Bursts must still respect aggregate admission, application/user
+ceilings, queue-age limits and transition headroom; idle credit cannot accumulate
+without bound. Large sharp frames must not create enough transmission delay to
+defeat responsiveness. Distinguish a sustained-rate cap from an instantaneous
+wire cap explicitly when offering burst policy to users.
+
+Redistribute unused capacity to eligible demand and leave it unused when no
+presentation benefits. Smooth estimates, use hysteresis, and account for encoder
+replacement cost rather than changing codec settings on every commit. Maintain
+bounded service for other presentations and prompt recovery for newly active
+ones. This extends the existing activity-weighted allocator; demand estimation,
+burst admission and per-content quality control are not implemented yet.
+
+### Learned allocation policy — Exploration
+
+A small learned policy could eventually combine content hints, useful update
+cadence, encoder output/quality statistics, focus, input and optional gaze with
+network, device, power and user constraints. Its recommendations might cover
+bitrate, extent, cadence and admission priority: immediate crisp UI updates,
+sustained video cadence, or responsive motion followed by sharper settled detail.
+These benefits remain hypotheses to compare with a deterministic baseline.
+
+Start with explicit rules and measurements. Prefer existing update and codec
+statistics before adding pixel inspection, inference copies or heavyweight
+classification. Content analysis has CPU/GPU, latency and privacy costs; remote
+content collection or model training is not implied by permission to hoist.
+
+Any learned policy supplies bounded recommendations inside deterministic safety
+and resource limits. It cannot override user/application caps or authorization,
+starve input/control, or grow queues without bounds. Retain a deterministic
+fallback, observable decisions and a way to disable the policy. Adopt learning
+only if repeatable comparisons show a worthwhile quality/latency/resource gain.
+
 ## User data preferences and adaptive recovery — Direction
 
 User policy limits what adaptation may spend. Resolve defaults, a selected
@@ -373,6 +457,28 @@ override or remote report to silently exceed a hard aggregate upload/download
 ceiling. Receiver allowances and sender limits both apply, and connections share
 their local network-scope allowance rather than each receiving its full value.
 Those pools are distinct from per-device encode/decode work limits.
+
+User-selected per-application ceilings also constrain allocation independently
+of the aggregate total. For example, with an 8 or 16 Mbps total and a 4 Mbps
+application ceiling, that application receives at most 4 Mbps even when it is
+the only active application. Other eligible applications may use the remaining
+capacity; otherwise it remains unused. Focus, interaction, exclusive fullscreen,
+or an upward recovery probe cannot override the application ceiling.
+
+Apply this reservation to the selected application's related windows, popups,
+and layer streams collectively, not once per surface. The future preference
+model must make the matched application/instance and receiving scope explicit;
+do not guess shared application ownership from a title or let a client bypass
+its ceiling by opening more surfaces. Offer per-window overrides separately if
+needed, without allowing them to exceed their enclosing application and total
+ceilings. The tightest applicable user, receiver, and backend limit wins, with
+capped allocation redistributing excess only to eligible consumers.
+
+Describe whether a setting limits encoder targets or enforces transport-level
+media admission. The current shared encoder target is not an instantaneous
+wire-rate cap; queued data, keyframe bursts and protocol overhead require the
+separate admission/accounting policy. Per-application preferences and their
+matching/UI remain future work, outside the current interaction-weighted slice.
 
 Users may choose a lower ceiling for mobile data than for home Wi-Fi. Metering
 is explicit or comes from a trusted optional OS hint; neither Wi-Fi nor cellular
