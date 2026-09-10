@@ -33,6 +33,42 @@ def physical():
 
 
 class PolicyTests(unittest.TestCase):
+    def test_traffic_summary_labels_direction_units_scope_and_measured_average(self):
+        before = {role: {"at": 10, "ifindex": 7, "rx": 100, "tx": 200} for role in ("host", "client")}
+        after = {
+            "client": {"at": 130, "ifindex": 7, "rx": 24624285, "tx": 2423861},
+            "host": {"at": 130, "ifindex": 7, "rx": 200000100, "tx": 25000200},
+        }
+        output = "\n".join(lifecycle.traffic_summary({"host": "wifi0", "client": "usb0"}, before, after))
+        self.assertIn("Receiver/tether [usb0], measured 120.0s", output)
+        self.assertIn("24.62 MB  (24,624,185 bytes), average 1.642 Mbps", output)
+        self.assertIn("27.05 MB  (27,047,846 bytes), average 1.803 Mbps", output)
+        self.assertIn("Sender/host uplink [wifi0]", output)
+        self.assertIn("ALL traffic", output)
+        self.assertIn("combines both Weld instances", output)
+        self.assertIn("Do not add", output)
+
+    def test_traffic_summary_does_not_report_negative_or_invented_usage(self):
+        sample = {"at": 10, "ifindex": 7, "rx": 100, "tx": 200}
+        for last in (None, sample, sample | {"at": 20, "rx": 0}, sample | {"at": 20, "ifindex": 8}):
+            output = "\n".join(lifecycle.traffic_summary({"host": "wifi0", "client": "usb0"},
+                {"host": sample, "client": sample}, {"host": last, "client": last}))
+            self.assertEqual(output.count(": unavailable"), 2)
+            self.assertNotIn("average", output)
+
+    def test_traffic_samples_use_each_namespace_and_fail_independently(self):
+        state = {"namespace": "weld-test", "config": {"host": "wifi0", "client": "usb0"}}
+        link = {"ifindex": 7, "stats64": {"rx": {"bytes": 10}, "tx": {"bytes": 20}}}
+        with patch.object(lifecycle, "query", side_effect=[OSError("host unavailable"), [link]]) as query:
+            samples = lifecycle.sample_traffic(state)
+        self.assertIsNone(samples["host"])
+        self.assertEqual(samples["client"]["rx"], 10)
+        self.assertEqual(query.call_args_list[0].args, ("ip", "-s", "-j", "link", "show", "dev", "wifi0"))
+        self.assertEqual(query.call_args_list[1].args, ("ip", "-n", "weld-test", "-s", "-j", "link", "show", "dev", "usb0"))
+
+    def test_shared_bitrate_preference_is_preserved_for_isolated_runs(self):
+        self.assertIn("WELD_HOIST_BITRATE_TARGET_MBPS", main.ENVIRONMENT)
+
     def test_profile_must_remain_unambiguous_persistent_and_safe(self):
         validate_profile(safe_profile())
         changes = {"unsaved": True, "flags": 2, "filename": "/run/NetworkManager/temporary",

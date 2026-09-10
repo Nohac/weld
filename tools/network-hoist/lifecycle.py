@@ -487,7 +487,7 @@ def service(identifier):
         if {link["ifname"] for link in links} != {"lo", client}:
             raise Refused("receiver namespace contains an unexpected interface")
         route_check(config["host"], client)
-        counters_before = counters(state)
+        counters_before = sample_traffic(state)
         source = subprocess.Popen(user_command(state, "source"), env=ROOT_ENV)
         destination = subprocess.Popen([executable("unshare"), "--mount", "--propagation", "private",
                                         str(helper), "_receiver", identifier], env=ROOT_ENV)
@@ -511,8 +511,8 @@ def service(identifier):
             if lease_status(directory).get("error") or not unit_active(state["dhcp_unit"]):
                 raise Refused("receiver lease was lost")
             time.sleep(1)
-        after = counters(state)
-        report(f"Client-interface byte delta (includes DHCP/N0): RX {after[0] - counters_before[0]}, TX {after[1] - counters_before[1]}")
+        for line in traffic_summary(config, counters_before, sample_traffic(state)):
+            report(line)
         report("Run finished; systemd will stop this run's processes before restoring the tether.")
     return 0
 
@@ -521,10 +521,48 @@ def unit_active(name):
     return command("systemctl", "is-active", "--quiet", name, check=False).returncode == 0
 
 
-def counters(state):
-    info = query("ip", "-n", state["namespace"], "-s", "-j", "link", "show", "dev", state["config"]["client"])[0]
-    stats = info.get("stats64", info.get("stats", {}))
-    return stats["rx"]["bytes"], stats["tx"]["bytes"]
+def sample_traffic(state):
+    """Best-effort read-only diagnostics must never prevent normal restoration."""
+    samples = {}
+    for role in ("host", "client"):
+        namespace = ("-n", state["namespace"]) if role == "client" else ()
+        try:
+            info = query("ip", *namespace, "-s", "-j", "link", "show", "dev", state["config"][role])[0]
+            stats = info.get("stats64", info.get("stats", {}))
+            samples[role] = {"at": time.monotonic(), "ifindex": info["ifindex"],
+                             "rx": stats["rx"]["bytes"], "tx": stats["tx"]["bytes"]}
+        except (Refused, OSError, ValueError, KeyError, IndexError, TypeError, subprocess.SubprocessError):
+            samples[role] = None
+    return samples
+
+
+def traffic_summary(config, before, after):
+    """Keep interface usage distinct from payloads and whole-unit IP accounting."""
+    lines = ["Network usage (decimal MB; Mbps = megabits/second):"]
+    for role, label in (("client", "Receiver/tether"), ("host", "Sender/host uplink")):
+        first, last = before.get(role), after.get(role)
+        heading = f"  {label} [{config[role]}]"
+        if (first is None or last is None or first["ifindex"] != last["ifindex"]
+                or last["at"] <= first["at"] or last["rx"] < first["rx"] or last["tx"] < first["tx"]):
+            lines.append(heading + ": unavailable (missing/reset counters or changed interface)")
+            continue
+        elapsed = last["at"] - first["at"]
+        received, sent = last["rx"] - first["rx"], last["tx"] - first["tx"]
+        lines.append(f"{heading}, measured {elapsed:.1f}s:")
+        for direction, amount in (("Received (RX)", received), ("Sent (TX)", sent), ("Total RX + TX", received + sent)):
+            lines.append(f"    {direction:15s} {amount / 1_000_000:9.2f} MB  ({amount:,} bytes), average {amount * 8 / elapsed / 1_000_000:.3f} Mbps")
+    lines += [
+        "  Window: after initial DHCP acquisition/before Weld startup to this pre-stop snapshot.",
+        "  Receiver RX includes hoisted video; TX includes input and transport acknowledgements.",
+        "  Tether totals also include protocol overhead, retransmissions, DNS/N0 and later DHCP traffic.",
+        "  Host totals include ALL traffic on that interface, including application downloads and unrelated apps.",
+        "  These are interface totals, not exact per-Weld-process or carrier-billed usage.",
+        "  Do not add host and receiver totals as unique data: the same hoist traffic crosses both interfaces.",
+        "  systemd's IP Traffic below combines both Weld instances and their child apps (e.g. Firefox downloads).",
+        "  It covers the service lifetime, not this sampling window, and is NOT the sender's upload/receiver's download.",
+        "  systemd's IO Bytes are storage I/O, not network traffic.",
+    ]
+    return lines
 
 
 def lease_status(directory):
