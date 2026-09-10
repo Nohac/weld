@@ -117,8 +117,12 @@ locks never span codec work. Requested/submitted/applied revisions distinguish
 intent from matching codec output, not remote presentation or measured bitrate.
 Retirement removes control entries and owner closure invalidates handles.
 VA-API supports lowering and restoring the validated startup rate by constructing
-a replacement encoder, not by mutating a live context. No aggregate budget or
-automatic adaptive bitrate is implied; see the
+a replacement encoder, not by mutating a live context. The distribution now
+injects one host-owned `SharedBitrateBudget` across its encoded source streams;
+custom multi-port distributions can share the same handle. It distributes desired
+encoder targets by presentation group and buffer area, outside codec and
+transport ownership. It does not police wire throughput or adapt to congestion.
+See [shared encoder targets](shared-bitrate-targets.md) and the
 [streaming-budget plan](remote-budgeting-plan.md).
 
 Hardware-device ownership is per worker rather than per stream generation. The

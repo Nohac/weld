@@ -13,6 +13,7 @@ use weld_hoist_core::{
 };
 use weld_hoist_encoded::{
     DecodeBackend, EncodeBackend, EncodedDestinationPort, EncodedSourcePort, EncoderRateControl,
+    SharedBitrateBudget,
 };
 use weld_media::VideoCodec;
 
@@ -79,6 +80,7 @@ pub struct IrohSourceRegistrationOptions<'a> {
     pub capabilities: &'a ExternalDmabufCapabilities,
     pub codec: VideoCodec,
     pub dump_directory: Option<PathBuf>,
+    pub bitrate_budget: Option<SharedBitrateBudget>,
 }
 
 pub fn source_registration_with_backend(
@@ -88,9 +90,13 @@ pub fn source_registration_with_backend(
     destination_source: ClientSourceId,
     backend: Box<dyn EncodeBackend>,
     dump_directory: Option<(PathBuf, VideoCodec)>,
+    bitrate_budget: Option<SharedBitrateBudget>,
 ) -> anyhow::Result<(ClientAdapterRegistration, IrohDestinationEndpoint)> {
     let descriptor = ClientSourceDescriptor::new(adapter_source, ClientProvenance::Relocated);
     let mut port = EncodedSourcePort::new(peer.clone(), backend);
+    if let Some(budget) = bitrate_budget {
+        port = port.with_bitrate_budget(budget)?;
+    }
     if let Some((directory, codec)) = dump_directory {
         port = port.with_access_unit_dump_directory(directory, codec)?;
     }
@@ -155,6 +161,7 @@ pub fn source_registration(
         options
             .dump_directory
             .map(|directory| (directory, options.codec)),
+        options.bitrate_budget,
     )?;
     Ok((registration, endpoint, wake))
 }

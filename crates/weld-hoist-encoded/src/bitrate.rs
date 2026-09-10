@@ -124,6 +124,7 @@ struct Registry {
 #[derive(Debug)]
 struct RegistryState {
     open: bool,
+    managed: bool,
     streams: BTreeMap<MediaStreamId, StreamRate>,
 }
 
@@ -174,10 +175,47 @@ impl EncoderRateControl {
 
     /// Request a validated rate for an existing stream. Duplicates reuse a revision.
     /// Invalid targets, retired streams and exhausted revisions leave intent intact.
+    /// A shared-budget-managed port rejects manual requests, including old handles.
     pub fn request(&self, stream: MediaStreamId, bits_per_second: u64) -> Result<BitrateRequest> {
+        self.request_inner(stream, bits_per_second, false)
+    }
+
+    pub(crate) fn manage(&self) -> Result<()> {
+        let registry = self.registry()?;
+        let mut state = registry.state()?;
+        ensure!(
+            !state.managed,
+            "encoder rate control already has a budget owner"
+        );
+        ensure!(
+            state.streams.is_empty(),
+            "attach bitrate budget before registering streams"
+        );
+        state.managed = true;
+        Ok(())
+    }
+
+    pub(crate) fn request_managed(
+        &self,
+        stream: MediaStreamId,
+        bitrate: u64,
+    ) -> Result<BitrateRequest> {
+        self.request_inner(stream, bitrate, true)
+    }
+
+    fn request_inner(
+        &self,
+        stream: MediaStreamId,
+        bits_per_second: u64,
+        managed: bool,
+    ) -> Result<BitrateRequest> {
         let registry = self.registry()?;
         registry.limits.validate(bits_per_second)?;
         let mut state = registry.state()?;
+        ensure!(
+            state.managed == managed,
+            "encoder rate requests belong to the shared bitrate budget"
+        );
         let entry = state
             .streams
             .get_mut(&stream)
@@ -207,6 +245,7 @@ impl EncoderRates {
             limits,
             state: Mutex::new(RegistryState {
                 open: true,
+                managed: false,
                 streams: BTreeMap::new(),
             }),
         }))

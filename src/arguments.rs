@@ -212,6 +212,10 @@ pub struct AppArguments {
     #[arg(long, value_enum, value_name = "CODEC")]
     pub(crate) hoist_codec: Option<HoistCodec>,
 
+    /// Shared encoder target, not a bandwidth cap (AV1: 8 Mbps; H.264: 16 Mbps).
+    #[arg(long, value_name = "MBPS", value_parser = clap::value_parser!(u64).range(1..=u64::MAX / 1_000_000))]
+    pub(crate) hoist_bitrate_target_mbps: Option<u64>,
+
     /// Record source encoded stream generations before transport.
     #[arg(long, value_name = "DIR")]
     pub(crate) hoist_encoded_dump_dir: Option<PathBuf>,

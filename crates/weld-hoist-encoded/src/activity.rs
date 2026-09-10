@@ -58,7 +58,7 @@ impl Priority {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub(crate) struct Group {
     pub session: HoistSessionId,
     pub root: ClientSurfaceId,

@@ -3,7 +3,10 @@
 ## Status and scope
 
 The source, receiver, and Iroh transport observations and the first bitrate
-actuator below are implemented. Shared budgeting and adaptation remain proposed
+actuator below are implemented. The first
+[shared encoder-target slice](shared-bitrate-targets.md) is now implemented and
+enabled by default for encoded sources. Adaptive control, hard media admission,
+receiver allowances and activity-weighted bitrate allocation remain proposed
 work. The actuator precedes the combined feedback/allowance wire change so those
 controls have a real consumer. The design has been peer reviewed. The broader
 [budgeting specification](spec/remote-budgeting.md) remains Direction, not a
@@ -131,8 +134,8 @@ these weak handles; native-buffer hoisting and custom backends without rate
 control return None. Callers can list live stream identities and source
 surface/layer mappings, request a rate, and inspect revisioned requested,
 submitted, and applied state. No new knobs enter the generic window/client/hoist
-protocol. The standard distribution does not yet drive this automatically or
-expose a new bitrate/cap flag.
+protocol. The standard distribution now drives it through the shared-target
+allocator and exposes a bitrate-target override, not a bandwidth-cap flag.
 
 Handles are safe to retain across threads; selection, codec work, and application
 remain host-owned. Short mutex sections protect only numeric state, never
@@ -165,8 +168,8 @@ its startup rate. Mandatory budget admission must later treat unavailable
 control as unavailable, not assume a cap was enforced.
 
 The VA-API adapter permits lowering and restoring its validated startup bitrate:
-AV1 8 Mbps or H.264 16 Mbps per layer. The positive lower bound is numeric
-validation, not a usable quality floor or hardware-capacity claim.
+AV1 8 Mbps or H.264 16 Mbps per layer. The control lower bound is now a
+provisional 128 kbit/s, not a usable quality floor or discovered hardware limit.
 `VaapiEncoderSettings::with_bitrate` revalidates overrides while preserving codec,
 cadence, and GOP. FFmpeg constructs the replacement with target, minimum, maximum,
 and CBR reservoir updated together. No live-context mutation or hot retuning is
@@ -179,8 +182,10 @@ caps, receiver allowances, and decrease/recovery policy remain pending.
 ## Verified starting point
 
 - Unix encoded hoisting and Iroh use the same `weld-hoist-encoded` ports and
-  `weld-media-vaapi` workers. Defaults are AV1 8 Mbps and H.264 16 Mbps **per
-  layer encoder**, not per connection. Both support opaque output only.
+  `weld-media-vaapi` workers. Backend startup ceilings are AV1 8 Mbps and H.264
+  16 Mbps per layer. The standard distribution now shares those totals across
+  its encoded source, with 5% headroom and target rounding. Both support opaque
+  output only.
 - Each encoded source port has one active encode batch, with sequential layer
   encoding, and no commit ACK gate. Local send headroom and bounded receiver
   admission replace stop-and-wait. Published codec references remain ordered.
@@ -353,8 +358,10 @@ fallback or unbounded retry loop.
 
 Use the actuator to enforce a fixed aggregate media budget before enabling
 automatic capacity probing. A conservative 8 Mbps aggregate AV1 test ceiling is
-an initial experiment, replacing today's 8 Mbps per layer—not a universal
-network default. Explicit user preferences can select a lower cap. Track both
+an initial experiment, replacing 8 Mbps per layer—not a universal network
+recommendation. This target is now default-on for development testing by explicit
+user choice, not yet a hard admission ceiling. Explicit user preferences can
+select a lower target. Track both
 allocated targets and observed output; keyframe/CBR bursts require bounded
 headroom, not a claim of an exact instantaneous bitrate ceiling.
 

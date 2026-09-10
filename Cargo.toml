@@ -94,6 +94,7 @@ weld-ssd = { path = "crates/weld-ssd" }
 weld-float = { path = "crates/weld-float" }
 weld-hoist = { path = "crates/weld-hoist" }
 weld-hoist-iroh = { path = "crates/weld-hoist-iroh", features = ["vaapi"] }
+weld-hoist-encoded = { path = "crates/weld-hoist-encoded" }
 weld-hoist-local = { path = "crates/weld-hoist-local", features = ["encoded-vaapi"] }
 weld-media = { path = "crates/weld-media" }
 weld-media-vaapi = { path = "crates/weld-media-vaapi" }

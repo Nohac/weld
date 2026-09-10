@@ -10,7 +10,9 @@ use weld_hoist_core::{
     DestinationRelayAdapter, HoistEndpoint, HoistEndpointCommand, HoistSessionId,
     SourceRelayAdapter, relocated_surface,
 };
-use weld_hoist_encoded::{EncodedDestinationPort, EncodedSourcePort, EncoderRateControl};
+use weld_hoist_encoded::{
+    EncodedDestinationPort, EncodedSourcePort, EncoderRateControl, SharedBitrateBudget,
+};
 
 use crate::{
     LocalPacketConnection,
@@ -114,13 +116,17 @@ pub fn encoded_source_registration_with_backend(
     adapter_source: ClientSourceId,
     destination_source: ClientSourceId,
     backend: Box<dyn crate::LocalEncodeBackend>,
-) -> (ClientAdapterRegistration, LocalDestinationEndpoint) {
+    bitrate_budget: Option<SharedBitrateBudget>,
+) -> anyhow::Result<(ClientAdapterRegistration, LocalDestinationEndpoint)> {
     let descriptor = ClientSourceDescriptor::new(adapter_source, ClientProvenance::Relocated);
     let transport = LocalEncodedSourceTransport::new(control.clone(), media);
-    let port = EncodedSourcePort::new(transport, backend);
+    let mut port = EncodedSourcePort::new(transport, backend);
+    if let Some(budget) = bitrate_budget {
+        port = port.with_bitrate_budget(budget)?;
+    }
     let rate_control = port.encoder_rate_control();
     let adapter = SourceRelayAdapter::new(upstream_source, port);
-    (
+    Ok((
         ClientAdapterRegistration::new(descriptor, adapter, ControlOnlyClientImporter),
         LocalDestinationEndpoint {
             adapter_source,
@@ -128,7 +134,7 @@ pub fn encoded_source_registration_with_backend(
             connection: control,
             rate_control,
         },
-    )
+    ))
 }
 
 pub fn encoded_destination_registration_with_backend(
@@ -161,6 +167,7 @@ pub struct EncodedSourceRegistrationOptions<'a> {
     pub capabilities: &'a weld_core::dmabuf::ExternalDmabufCapabilities,
     pub codec: weld_media::VideoCodec,
     pub dump_directory: Option<PathBuf>,
+    pub bitrate_budget: Option<SharedBitrateBudget>,
 }
 
 #[cfg(feature = "encoded-vaapi")]
@@ -180,6 +187,7 @@ pub fn encoded_source_registration(
         capabilities,
         codec,
         dump_directory,
+        bitrate_budget,
     } = options;
     let (notifier, worker_wake) = weld_core::host::client_runtime_notifier()?;
     let backend = encode_backend(
@@ -195,6 +203,9 @@ pub fn encoded_source_registration(
     let descriptor = ClientSourceDescriptor::new(adapter_source, ClientProvenance::Relocated);
     let transport = LocalEncodedSourceTransport::new(control.clone(), media.clone());
     let mut port = EncodedSourcePort::new(transport, backend);
+    if let Some(budget) = bitrate_budget {
+        port = port.with_bitrate_budget(budget)?;
+    }
     if let Some(directory) = dump_directory {
         port = port.with_access_unit_dump_directory(directory, codec)?;
     }

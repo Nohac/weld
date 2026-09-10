@@ -2,6 +2,7 @@
 
 mod activity;
 mod bitrate;
+mod budget;
 mod codec;
 mod destination_observations;
 mod observations;
@@ -15,6 +16,7 @@ pub use bitrate::{
     BitrateRequest, EncoderBitrateLimits, EncoderRateApplication, EncoderRateControl,
     EncoderStreamStatus,
 };
+pub use budget::{BitrateBudgetSnapshot, InsufficientBitrateBudget, SharedBitrateBudget};
 pub use observations::TimingSummary;
 pub use transport_observations::{
     MediaSendCounters, MediaSendSnapshot, NetworkPathSnapshot, TransportSnapshot,

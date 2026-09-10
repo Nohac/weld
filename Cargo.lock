@@ -7976,6 +7976,7 @@ dependencies = [
  "weld-core",
  "weld-float",
  "weld-hoist",
+ "weld-hoist-encoded",
  "weld-hoist-iroh",
  "weld-hoist-local",
  "weld-media",

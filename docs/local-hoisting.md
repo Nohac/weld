@@ -89,13 +89,16 @@ codec path:
 - Unsupported hardware, y-inverted input, or a commit beyond those explicit
   bounds fails the session; there is no silent native or software fallback.
 
-H.264 currently uses constrained baseline at 16 Mbps. AV1 uses Main at 8 Mbps;
+H.264 uses constrained baseline with a 16 Mbps backend startup ceiling. AV1
+uses Main with an 8 Mbps ceiling;
 the settings type rejects higher AV1 bitrates because a supervised 64 Mbps
 radeonsi probe reset the VCN context. Both paths use a microsecond time base,
 one-packet-per-frame low-delay encoding, and the exact visible extent carried
-by the client protocol. The bitrate applies to each current surface-tree layer
-stream, not once across an entire hoisted top-level; composition and shared
-budgeting remain future work. In particular, AV1 may decode into 960x496 coded
+by the client protocol. The standard distribution now divides one
+[shared encoder target](shared-bitrate-targets.md) across its source windows and
+layers (8 Mbps AV1 or 16 Mbps H.264, with headroom and rounding). Composition,
+adaptive network budgeting and hard bandwidth admission remain future work.
+In particular, AV1 may decode into 960x496 coded
 storage for a 944x484 client surface; destination VPP crops that storage rather
 than allowing coded padding to affect window geometry. The backend queries the
 selected VA profile and entrypoint's minimum and maximum surface geometry. If
@@ -215,8 +218,9 @@ scripts/run-ffmpeg-vaapi-probe --codec h264
 scripts/run-ffmpeg-vaapi-probe --codec h264 --bitrate-mbps 8
 ```
 
-The default is the validated 8 Mbps AV1 path. H.264 defaults to Weld's 16 Mbps
-production setting. The runner refuses other AV1 bitrates unless
+The probe default is the validated 8 Mbps AV1 path. H.264 defaults to the 16 Mbps
+backend startup setting; this standalone probe does not use the production
+shared-target allocator. The runner refuses other AV1 bitrates unless
 `WELD_FFMPEG_ALLOW_UNSAFE_AV1_BITRATE=1` is set because the first 64 Mbps AV1
 experiment caused radeonsi to declare the VCN context guilty and perform a hard
 GPU recovery after frame 16. This override is for supervised driver diagnosis,

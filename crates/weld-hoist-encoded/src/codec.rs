@@ -97,6 +97,9 @@ mod vaapi {
 
     const H264_BITRATE: u64 = 16_000_000;
     const AV1_BITRATE: u64 = 8_000_000;
+    /// Provisional control floor, not a probed device limit or quality guarantee.
+    /// Avoid tiny area-weighted targets and correspondingly tiny CBR reservoirs.
+    const MINIMUM_CONTROL_BITRATE: u64 = 128_000;
     const DEFAULT_FRAMES_PER_SECOND: u32 = 60;
     const DEFAULT_KEYFRAME_INTERVAL: u32 = 32;
     const DRM_FORMAT_XRGB8888: u32 = u32::from_le_bytes(*b"XR24");
@@ -110,8 +113,7 @@ mod vaapi {
         let settings = encoder_settings(codec)?;
         // This control surface permits lowering and restoring the validated
         // startup rate, not discovering a device's maximum operating rate.
-        let limits =
-            EncoderBitrateLimits::try_new(1, settings.bitrate_bits(), settings.bitrate_bits())?;
+        let limits = encoder_bitrate_limits(settings)?;
         Ok(Box::new(VaapiEncoder {
             worker: VaapiEncodeWorker::spawn(render_node, dump_directory, notify)?,
             settings,
@@ -249,6 +251,14 @@ mod vaapi {
             input,
             bitrate_bits_per_second,
         })
+    }
+
+    fn encoder_bitrate_limits(settings: VaapiEncoderSettings) -> Result<EncoderBitrateLimits> {
+        EncoderBitrateLimits::try_new(
+            MINIMUM_CONTROL_BITRATE,
+            settings.bitrate_bits(),
+            settings.bitrate_bits(),
+        )
     }
 
     fn encoder_settings(codec: VideoCodec) -> Result<VaapiEncoderSettings> {
@@ -395,6 +405,19 @@ mod vaapi {
     mod tests {
         use super::*;
         use weld_media::MediaFrameId;
+
+        #[test]
+        fn adapter_control_floor_does_not_restrict_general_encoder_settings() {
+            for (codec, startup) in [(VideoCodec::Av1, 8_000_000), (VideoCodec::H264, 16_000_000)] {
+                let settings = encoder_settings(codec).expect("settings");
+                let limits = encoder_bitrate_limits(settings).expect("limits");
+                assert_eq!(
+                    (limits.minimum(), limits.initial(), limits.maximum()),
+                    (128_000, startup, startup)
+                );
+                assert!(settings.with_bitrate(64_000).is_ok());
+            }
+        }
 
         #[test]
         fn rejected_worker_request_conversion_preserves_the_original_override() {

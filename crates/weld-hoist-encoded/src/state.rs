@@ -1,5 +1,7 @@
 //! Encoded hoist state machines, independent from transport and hardware backend.
 
+mod source_budget;
+
 use std::{
     collections::{HashMap, HashSet, VecDeque},
     fs::{self, File, OpenOptions},
@@ -32,6 +34,7 @@ use weld_media::{
 use crate::TransportSnapshot;
 use crate::activity::{Activity, SchedulingPolicy};
 use crate::bitrate::{BitrateRequest, EncoderRateApplication, EncoderRateControl, EncoderRates};
+use crate::budget::{BudgetMembership, SharedBitrateBudget};
 use crate::codec::{
     DecodeBackend, DecodeRequest, EncodeBackend, EncodeInput, EncodeRequest, SubmitError,
 };
@@ -230,6 +233,8 @@ fn dump_path(
 }
 
 struct EncodedSourceState {
+    // Release numeric reservations before closing the actuator/backend.
+    budget: Option<BudgetMembership>,
     admission_deferred: bool,
     activity: Activity,
     scheduler: Scheduler,
@@ -257,6 +262,7 @@ impl EncodedSourceState {
         let started_at = Instant::now();
         let rates = backend.bitrate_limits().map(EncoderRates::new);
         Self {
+            budget: None,
             backend,
             activity: Activity::default(),
             admission_deferred: false,
@@ -292,7 +298,10 @@ impl EncodedSourceState {
     fn enqueue(&mut self, session: HoistSessionId, mut event: ClientSurfaceEvent) -> Result<()> {
         self.activity.register(session, event.surface);
         match &event.kind {
-            ClientSurfaceEventKind::Role(role) => self.activity.role(event.surface, *role),
+            ClientSurfaceEventKind::Role(role) => {
+                self.activity.role(event.surface, *role);
+                self.update_budget(None)?;
+            }
             ClientSurfaceEventKind::Commit(commit) => {
                 self.activity.mapped(event.surface, commit.mapped)
             }
@@ -591,16 +600,18 @@ impl EncodedSourceState {
     }
 
     fn submit_or_send(&mut self, session: HoistSessionId, event: ClientSurfaceEvent) -> Result<()> {
+        let replaced = replaced_buffer_count(&event);
+        ensure!(
+            replaced <= MAX_REPLACEMENTS_PER_COMMIT,
+            "encoded commit replaces {replaced} buffers, exceeding the {MAX_REPLACEMENTS_PER_COMMIT}-layer batch limit"
+        );
         // Reconcile only when this snapshot is scheduled, not while a queued
         // snapshot may still be coalesced or an older encode is using its layers.
-        self.reconcile_streams(&event)?;
-        let replaced = replaced_buffer_count(&event);
-        match replaced {
-            0 => self.send_without_buffer(session, event),
-            count if count <= MAX_REPLACEMENTS_PER_COMMIT => self.submit_batch(session, event),
-            count => bail!(
-                "encoded commit replaces {count} buffers, exceeding the {MAX_REPLACEMENTS_PER_COMMIT}-layer batch limit"
-            ),
+        self.prepare_streams(&event)?;
+        if replaced == 0 {
+            self.send_without_buffer(session, event)
+        } else {
+            self.submit_batch(session, event)
         }
     }
 
@@ -744,24 +755,6 @@ impl EncodedSourceState {
             "encoded extent is zero"
         );
         let key = (surface, layer);
-        if !self.streams.contains_key(&key) {
-            let stream = take_counter(&mut self.next_stream, "encoded stream")?;
-            let stream = MediaStreamId::new(stream);
-            let frozen_rate = self
-                .rates
-                .as_ref()
-                .and_then(|rates| rates.register(stream, surface, layer));
-            self.streams.insert(
-                key,
-                SourceStream {
-                    stream,
-                    generation: StreamGeneration::new(1),
-                    visible_extent,
-                    next_sequence: Some(0),
-                    frozen_rate,
-                },
-            );
-        }
         let (frame, rate, retired) = {
             let stream = self
                 .streams
@@ -770,13 +763,20 @@ impl EncodedSourceState {
             let rate = self
                 .rates
                 .as_ref()
-                .and_then(|rates| rates.select(stream.stream, Instant::now()))
-                .or(stream.frozen_rate);
+                .and_then(|rates| rates.select(stream.stream, Instant::now()));
+            ensure!(
+                self.budget.is_none() || rate.is_some(),
+                "managed encoder rate registry is unavailable"
+            );
+            let rate = rate.or(stream.frozen_rate);
             // Scheduling admits a new batch only after every old PreparedEncode
             // has finished. Never rotate by rewriting a job in that old batch.
+            // Before the first frame there is no encoder to replace: it will be
+            // created directly at the selected rate for sequence zero.
             let retired = if stream.visible_extent != visible_extent
-                || rate.map(|value| value.bits_per_second)
-                    != stream.frozen_rate.map(|value| value.bits_per_second)
+                || (stream.next_sequence != Some(0)
+                    && rate.map(|value| value.bits_per_second)
+                        != stream.frozen_rate.map(|value| value.bits_per_second))
             {
                 let retired = (stream.stream, stream.generation);
                 stream.generation = StreamGeneration::new(
@@ -807,6 +807,8 @@ impl EncodedSourceState {
     }
 
     fn reconcile_streams(&mut self, event: &ClientSurfaceEvent) -> Result<()> {
+        // Caller must publish the new budget inventory after this removal, with
+        // no intervening coordinator call against the retired registry entries.
         let ClientSurfaceEventKind::Commit(commit) = &event.kind else {
             return Ok(());
         };
@@ -831,6 +833,8 @@ impl EncodedSourceState {
     }
 
     fn retire_surface_streams(&mut self, surface: ClientSurfaceId) -> Result<()> {
+        // Keep registry removal and budget inventory publication adjacent: a
+        // publication targeting a removed entry is an actuator contract failure.
         let streams = self
             .streams
             .extract_if(|(candidate, _), _| *candidate == surface)
@@ -842,7 +846,7 @@ impl EncodedSourceState {
             }
             self.retire_generation(stream.stream, stream.generation)?;
         }
-        Ok(())
+        self.update_budget(None)
     }
 
     fn retire_generation(
@@ -902,6 +906,26 @@ impl<T: EncodedSourceTransport> EncodedSourcePort<T> {
             .rates
             .as_ref()
             .map(EncoderRates::control)
+    }
+
+    /// Attach before any stream is registered. All participating ports must use
+    /// clones of the same host-thread-owned budget, not one budget per port.
+    pub fn with_bitrate_budget(mut self, budget: SharedBitrateBudget) -> Result<Self> {
+        let state = self
+            .state
+            .as_mut()
+            .context("encoded source is disconnected")?;
+        ensure!(
+            state.budget.is_none(),
+            "encoded source already has a bitrate budget"
+        );
+        let control = state
+            .rates
+            .as_ref()
+            .context("encoder does not support bitrate control")?
+            .control();
+        state.budget = Some(budget.attach(control)?);
+        Ok(self)
     }
 
     /// Select local queue policy without changing codec or transport budgets.
@@ -2146,6 +2170,7 @@ mod tests {
     mod bitrate_tests;
     mod decode_tests;
     mod priority_tests;
+    mod shared_budget_tests;
     use std::{
         cell::{Cell, RefCell},
         rc::Rc,
@@ -3551,6 +3576,10 @@ mod tests {
         let surface = surface(source_id, 2, 3);
         let layer = SurfaceLayerId::new(4);
         let metadata = |width| ClientBufferMetadata::new(Extent::new(width, 480), true);
+
+        source
+            .register_stream(surface, layer, metadata(484))
+            .expect("stream");
 
         let (first, _) = source
             .allocate_frame(surface, layer, metadata(484))

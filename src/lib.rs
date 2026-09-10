@@ -1,6 +1,7 @@
 //! Standard Weld compositor distribution and backend selection.
 
 mod arguments;
+mod bitrate_budget;
 mod overlay;
 mod telemetry;
 
@@ -34,6 +35,7 @@ pub fn run(arguments: AppArguments) -> Result<()> {
     telemetry::initialize()?;
     validate_hoist_arguments(&arguments)?;
     let hoist_codec = arguments.hoist_codec.unwrap_or_default();
+    let bitrate_budget = bitrate_budget::for_source(&arguments)?;
     let iroh_timeout = Duration::from_secs(arguments.hoist_iroh_timeout.unwrap_or(120));
 
     enum PendingHoistTransport {
@@ -127,6 +129,7 @@ pub fn run(arguments: AppArguments) -> Result<()> {
                             capabilities: &capabilities,
                             codec,
                             dump_directory: arguments.hoist_encoded_dump_dir,
+                            bitrate_budget,
                         },
                     )?;
                     for wake in wakes {
@@ -209,6 +212,7 @@ pub fn run(arguments: AppArguments) -> Result<()> {
                     capabilities: &capabilities,
                     codec,
                     dump_directory: arguments.hoist_encoded_dump_dir,
+                    bitrate_budget,
                 },
             )?;
             app.add_client_wake_source(network_wake)
@@ -280,10 +284,14 @@ fn validate_hoist_arguments(arguments: &AppArguments) -> Result<()> {
     let encoded_source = arguments.hoist_iroh_listen.is_some()
         || (arguments.hoist_listen.is_some()
             && arguments.hoist_surface_mode == Some(arguments::HoistSurfaceMode::EncodedOpaque));
-    if (arguments.hoist_codec.is_some() || arguments.hoist_encoded_dump_dir.is_some())
+    if (arguments.hoist_codec.is_some()
+        || arguments.hoist_encoded_dump_dir.is_some()
+        || arguments.hoist_bitrate_target_mbps.is_some())
         && !encoded_source
     {
-        anyhow::bail!("codec and encoded diagnostics require an encoded hoist source");
+        anyhow::bail!(
+            "codec, bitrate target and encoded diagnostics require an encoded hoist source"
+        );
     }
     Ok(())
 }
