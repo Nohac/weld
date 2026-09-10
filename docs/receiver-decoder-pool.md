@@ -9,9 +9,11 @@ controlled before/after speedup.
 `weld-hoist-encoded` owns ordered per-surface commits, pending media, decode job
 tokens, cancellation and atomic application. Its backend interface returns Busy
 with the original owned request. It does not expose worker counts or force the
-port to guess whether a backend has room. Each pass offers at most one job per
-ready surface, then rotates after the last successful submission. Passes repeat
-while submission or application makes progress. The front commit and at most
+port to guess whether a backend has room. Admission now uses
+[interaction-weighted presentation groups](interaction-scheduling.md), with
+stable member rotation and age-based service. Metadata and already-decoded
+commit application remain unweighted. Passes repeat while work progresses.
+The front commit and at most
 one compatible successor are eligible; only the front is applied. Lookahead
 requires all earlier replacements to be submitted or decoded, mapped commits
 in the same session, unchanged presentation topology/metadata and successor

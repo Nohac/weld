@@ -29,6 +29,7 @@ struct LoopbackSourcePort {
 impl HoistSourcePort for LoopbackSourcePort {
     fn submit(&mut self, command: SourcePortCommand) -> HoistPortResult<()> {
         let record = match command {
+            SourcePortCommand::FocusCleared => return Ok(()),
             SourcePortCommand::Cursor {
                 session,
                 update,
@@ -72,6 +73,10 @@ impl HoistSourcePort for LoopbackSourcePort {
     }
 
     fn effects_drained(&mut self) {}
+
+    fn progress_after_destination(&mut self) -> HoistPortResult<()> {
+        Ok(())
+    }
 
     fn disconnect(&mut self) {
         let mut queues = self.queues.borrow_mut();
@@ -138,6 +143,7 @@ impl HoistDestinationPort for LoopbackDestinationPort {
 
     fn submit(&mut self, command: DestinationPortCommand) -> HoistPortResult<()> {
         match command {
+            DestinationPortCommand::FocusCleared => {}
             DestinationPortCommand::Message(envelope) => self
                 .queues
                 .borrow_mut()

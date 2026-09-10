@@ -1,13 +1,16 @@
 //! Transport-neutral encoded hoist scheduling and codec integration.
 
+mod activity;
 mod bitrate;
 mod codec;
 mod destination_observations;
 mod observations;
 mod output;
+mod scheduling;
 mod state;
 mod transport_observations;
 
+pub use activity::SchedulingPolicy;
 pub use bitrate::{
     BitrateRequest, EncoderBitrateLimits, EncoderRateApplication, EncoderRateControl,
     EncoderStreamStatus,

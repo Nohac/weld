@@ -9,6 +9,11 @@ controls have a real consumer. The design has been peer reviewed. The broader
 [budgeting specification](spec/remote-budgeting.md) remains Direction, not a
 checklist to implement wholesale.
 
+The narrower [interaction-aware scheduling slice](interaction-scheduling.md)
+now implements per-port queued-work priority. It does not complete the shared
+bitrate/FPS budgets or adaptation proposed below. Focus alone is a modest
+baseline; trusted interaction grants the stronger, decaying boost.
+
 This pass adds shared media budgets, user/network preferences, focus-aware frame
 admission, and adaptive bitrate reduction **and recovery**. It does not promise
 to fix the GPU hang recorded in [network validation](network-validation.md).

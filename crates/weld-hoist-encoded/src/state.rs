@@ -30,6 +30,7 @@ use weld_media::{
 };
 
 use crate::TransportSnapshot;
+use crate::activity::{Activity, SchedulingPolicy};
 use crate::bitrate::{BitrateRequest, EncoderRateApplication, EncoderRateControl, EncoderRates};
 use crate::codec::{
     DecodeBackend, DecodeRequest, EncodeBackend, EncodeInput, EncodeRequest, SubmitError,
@@ -39,6 +40,7 @@ use crate::destination_observations::{
 };
 use crate::observations::{SourceGauges, SourceObservation, SourceObservations};
 use crate::output::SourceOutput;
+use crate::scheduling::Scheduler;
 
 /// One packet sent from an encoded source to its destination.
 pub enum SourceTransportPacket {
@@ -228,6 +230,10 @@ fn dump_path(
 }
 
 struct EncodedSourceState {
+    admission_deferred: bool,
+    activity: Activity,
+    scheduler: Scheduler,
+    policy: SchedulingPolicy,
     backend: Box<dyn EncodeBackend>,
     output: VecDeque<SourceTransportPacket>,
     transport_blocked: bool,
@@ -252,6 +258,10 @@ impl EncodedSourceState {
         let rates = backend.bitrate_limits().map(EncoderRates::new);
         Self {
             backend,
+            activity: Activity::default(),
+            admission_deferred: false,
+            scheduler: Scheduler::default(),
+            policy: SchedulingPolicy::default(),
             output: VecDeque::new(),
             transport_blocked: false,
             retained_output_records: 0,
@@ -280,6 +290,14 @@ impl EncodedSourceState {
     }
 
     fn enqueue(&mut self, session: HoistSessionId, mut event: ClientSurfaceEvent) -> Result<()> {
+        self.activity.register(session, event.surface);
+        match &event.kind {
+            ClientSurfaceEventKind::Role(role) => self.activity.role(event.surface, *role),
+            ClientSurfaceEventKind::Commit(commit) => {
+                self.activity.mapped(event.surface, commit.mapped)
+            }
+            _ => {}
+        }
         if let ClientSurfaceEventKind::Commit(commit) = &mut event.kind {
             self.observations.record(SourceObservation::CommitReceived);
             // The selected encoded path has no alpha, including on retained commits.
@@ -294,6 +312,7 @@ impl EncodedSourceState {
         match &event.kind {
             ClientSurfaceEventKind::Commit(_) => {
                 if self.resizing.contains(&surface)
+                    || self.admission_deferred
                     || !self.pending.is_empty()
                     || self.transport_blocked
                     || !self.output.is_empty()
@@ -325,7 +344,6 @@ impl EncodedSourceState {
             self.resizing.insert(surface);
         } else {
             self.resizing.remove(&surface);
-            self.schedule()?;
         }
         Ok(())
     }
@@ -365,7 +383,6 @@ impl EncodedSourceState {
                 }
                 self.retire_generation(batch.active.frame.stream, batch.active.frame.generation)?;
                 drop(batch.pending);
-                self.schedule()?;
                 continue;
             }
             let access_unit = completion.result?;
@@ -422,7 +439,6 @@ impl EncodedSourceState {
                     session: batch.session,
                     message: SourceMessage::Surface(batch.event),
                 }));
-            self.schedule()?;
         }
         Ok(())
     }
@@ -461,6 +477,8 @@ impl EncodedSourceState {
     }
 
     fn cancel_surface(&mut self, surface: ClientSurfaceId) -> Result<()> {
+        self.scheduler.forget(&self.activity, surface);
+        self.activity.remove(surface);
         self.pending.remove(&surface);
         self.pending_order.retain(|candidate| *candidate != surface);
         self.resizing.remove(&surface);
@@ -513,29 +531,43 @@ impl EncodedSourceState {
     }
 
     fn schedule(&mut self) -> Result<()> {
-        if self.in_flight.is_some() || self.transport_blocked || !self.output.is_empty() {
+        if self.admission_deferred
+            || self.in_flight.is_some()
+            || self.transport_blocked
+            || !self.output.is_empty()
+        {
             return Ok(());
         }
-        let mut blocked_surfaces = 0;
-        while blocked_surfaces < self.pending_order.len() {
-            let Some(surface) = self.pending_order.pop_front() else {
+        loop {
+            let candidates = self
+                .pending_order
+                .iter()
+                .copied()
+                .filter(|surface| {
+                    self.pending
+                        .get(surface)
+                        .and_then(|queue| queue.front())
+                        .is_some_and(|(_, event)| {
+                            !self.resizing.contains(surface)
+                                || !matches!(event.kind, ClientSurfaceEventKind::Commit(_))
+                        })
+                })
+                .collect::<Vec<_>>();
+            let now = Instant::now();
+            let Some(selection) =
+                self.scheduler
+                    .select(&candidates, &[], &self.activity, self.policy, now)
+            else {
                 break;
             };
+            let surface = selection.surface;
             let Some(queue) = self.pending.get_mut(&surface) else {
-                continue;
+                break;
             };
-            let Some((session, event)) = queue.front() else {
+            let Some((session, _)) = queue.front() else {
                 self.pending.remove(&surface);
                 continue;
             };
-            if self.resizing.contains(&surface)
-                && matches!(event.kind, ClientSurfaceEventKind::Commit(_))
-            {
-                self.pending_order.push_back(surface);
-                blocked_surfaces += 1;
-                continue;
-            }
-            blocked_surfaces = 0;
             let session = *session;
             let event = queue
                 .pop_front()
@@ -544,11 +576,14 @@ impl EncodedSourceState {
             let queue_empty = queue.is_empty();
             if queue_empty {
                 self.pending.remove(&surface);
-            } else {
+            }
+            self.pending_order.retain(|candidate| *candidate != surface);
+            if !queue_empty {
                 self.pending_order.push_back(surface);
             }
             self.submit_or_send(session, event)?;
             if self.in_flight.is_some() {
+                self.scheduler.accepted(selection, now);
                 return Ok(());
             }
         }
@@ -869,6 +904,14 @@ impl<T: EncodedSourceTransport> EncodedSourcePort<T> {
             .map(EncoderRates::control)
     }
 
+    /// Select local queue policy without changing codec or transport budgets.
+    pub fn with_scheduling_policy(mut self, policy: SchedulingPolicy) -> Self {
+        if let Some(state) = &mut self.state {
+            state.policy = policy;
+        }
+        self
+    }
+
     pub fn with_access_unit_dump_directory(
         mut self,
         directory: PathBuf,
@@ -887,13 +930,22 @@ impl<T: EncodedSourceTransport> EncodedSourcePort<T> {
             .state
             .as_mut()
             .ok_or_else(|| protocol_error("encoded source port is disconnected"))?;
+        for packet in state.take_output() {
+            self.output.push(packet).map_err(protocol_error)?;
+        }
+        self.output.flush(&self.transport)?;
+        state.retained_output_records = self.output.pending_records();
+        state.transport_blocked = !self.output.is_empty() || !self.transport.media_headroom();
+        Ok(())
+    }
+
+    fn progress(&mut self) -> HoistPortResult<()> {
         loop {
-            for packet in state.take_output() {
-                self.output.push(packet).map_err(protocol_error)?;
-            }
-            self.output.flush(&self.transport)?;
-            state.retained_output_records = self.output.pending_records();
-            state.transport_blocked = !self.output.is_empty() || !self.transport.media_headroom();
+            self.flush()?;
+            let state = self
+                .state
+                .as_mut()
+                .ok_or_else(|| protocol_error("encoded source port is disconnected"))?;
             state.schedule().map_err(protocol_error)?;
             if state.output.is_empty() {
                 break;
@@ -913,14 +965,23 @@ impl<T: EncodedSourceTransport> HoistSourcePort for EncodedSourcePort<T> {
     fn submit(&mut self, command: SourcePortCommand) -> HoistPortResult<()> {
         self.refresh_admission();
         match command {
+            SourcePortCommand::FocusCleared => {
+                if let Some(state) = &mut self.state {
+                    state.activity.clear_focus();
+                }
+                Ok(())
+            }
             SourcePortCommand::MapSurface { session, surface } => {
+                if let Some(state) = &mut self.state {
+                    state.activity.register(session, surface);
+                }
                 self.output
                     .push(SourceTransportPacket::Control(SourceEnvelope {
                         session,
                         message: SourceMessage::Mapped { surface },
                     }))
                     .map_err(protocol_error)?;
-                self.flush()
+                self.progress()
             }
             SourcePortCommand::Surface { session, event } => {
                 self.state
@@ -928,7 +989,7 @@ impl<T: EncodedSourceTransport> HoistSourcePort for EncodedSourcePort<T> {
                     .ok_or_else(|| protocol_error("encoded source port is disconnected"))?
                     .enqueue(session, event)
                     .map_err(protocol_error)?;
-                self.flush()
+                self.progress()
             }
             SourcePortCommand::WithdrawSurface { session, surface } => {
                 self.output
@@ -942,7 +1003,7 @@ impl<T: EncodedSourceTransport> HoistSourcePort for EncodedSourcePort<T> {
                     .ok_or_else(|| protocol_error("encoded source port is disconnected"))?
                     .cancel_surface(surface)
                     .map_err(protocol_error)?;
-                self.flush()
+                self.progress()
             }
             SourcePortCommand::RetireUpstreamBuffer(_) => Ok(()),
             SourcePortCommand::Cursor {
@@ -956,7 +1017,7 @@ impl<T: EncodedSourceTransport> HoistSourcePort for EncodedSourcePort<T> {
                         message: SourceMessage::Cursor { update, sequence },
                     }))
                     .map_err(protocol_error)?;
-                self.flush()
+                self.progress()
             }
         }
     }
@@ -967,6 +1028,9 @@ impl<T: EncodedSourceTransport> HoistSourcePort for EncodedSourcePort<T> {
             .state
             .as_mut()
             .ok_or_else(|| protocol_error("encoded source port is disconnected"))?;
+        // Cursor acknowledgements can submit another cursor during relay input
+        // processing. Even those output flushes must not select a new batch.
+        state.admission_deferred = true;
         state.drain().map_err(protocol_error)?;
         state.report_observations(false, |now| self.transport.observations(now));
         self.flush()?;
@@ -974,6 +1038,14 @@ impl<T: EncodedSourceTransport> HoistSourcePort for EncodedSourcePort<T> {
     }
 
     fn accept_destination(&mut self, envelope: &DestinationEnvelope) -> HoistPortResult<()> {
+        if let Some(state) = &mut self.state {
+            state.activity.observe(
+                envelope.session,
+                &envelope.message,
+                Instant::now(),
+                state.policy,
+            );
+        }
         match &envelope.message {
             DestinationMessage::Request(ClientRequest::Surface(request))
                 if matches!(request.kind, ClientSurfaceRequestKind::Configure { .. }) =>
@@ -1000,6 +1072,17 @@ impl<T: EncodedSourceTransport> HoistSourcePort for EncodedSourcePort<T> {
     }
 
     fn effects_drained(&mut self) {}
+
+    fn progress_after_destination(&mut self) -> HoistPortResult<()> {
+        if let Some(state) = &mut self.state {
+            state.admission_deferred = false;
+        }
+        self.progress()?;
+        if let Some(state) = &mut self.state {
+            state.scheduler.report("source", Instant::now());
+        }
+        Ok(())
+    }
 
     fn disconnect(&mut self) {
         self.transport.disconnect();
@@ -1033,6 +1116,9 @@ struct InFlightDecode {
 }
 
 struct EncodedDestinationState {
+    activity: Activity,
+    scheduler: Scheduler,
+    policy: SchedulingPolicy,
     backend: Box<dyn DecodeBackend>,
     descriptor: ClientSourceDescriptor,
     dmabuf: Option<DmabufContext>,
@@ -1069,6 +1155,9 @@ impl EncodedDestinationState {
         Self {
             backend,
             descriptor,
+            activity: Activity::default(),
+            scheduler: Scheduler::default(),
+            policy: SchedulingPolicy::default(),
             dmabuf,
             queues: HashMap::new(),
             media_frames: HashMap::new(),
@@ -1102,6 +1191,14 @@ impl EncodedDestinationState {
         output: &mut Vec<EncodedDestinationEvent>,
     ) -> Result<()> {
         let source_surface = event.surface;
+        self.activity.register(session, source_surface);
+        match &event.kind {
+            WireClientSurfaceEventKind::Role(role) => self.activity.role(source_surface, *role),
+            WireClientSurfaceEventKind::Commit(commit) => {
+                self.activity.mapped(source_surface, commit.mapped)
+            }
+            _ => {}
+        }
         ensure!(
             encoded_frames(&event).len() <= MAX_REPLACEMENTS_PER_COMMIT,
             "encoded commit exceeds the replacement-frame limit"
@@ -1152,7 +1249,7 @@ impl EncodedDestinationState {
             event,
             received_at: Instant::now(),
         });
-        self.advance(output)
+        self.publish_ready(output)
     }
 
     fn receive_budget(&self) -> ReceiveBudget {
@@ -1314,6 +1411,8 @@ impl EncodedDestinationState {
     fn cancel_surface(&mut self, surface: ClientSurfaceId) -> Result<()> {
         self.ready_surfaces
             .retain(|candidate| *candidate != surface);
+        self.scheduler.forget(&self.activity, surface);
+        self.activity.remove(surface);
         if let Some(queue) = self.queues.remove(&surface) {
             for event in queue {
                 let frames = encoded_frames(&event.event);
@@ -1439,12 +1538,11 @@ impl EncodedDestinationState {
         Ok(())
     }
 
-    fn advance(&mut self, output: &mut Vec<EncodedDestinationEvent>) -> Result<()> {
+    fn publish_ready(&mut self, output: &mut Vec<EncodedDestinationEvent>) -> Result<()> {
         self.sweep_retirement()?;
         loop {
             let surfaces = self.ready_surfaces.iter().copied().collect::<Vec<_>>();
             let mut progressed = false;
-            let mut last_submitted = None;
             for surface in surfaces {
                 let Some(front) = self.queues.get(&surface).and_then(|queue| queue.front()) else {
                     continue;
@@ -1492,52 +1590,78 @@ impl EncodedDestinationState {
                     progressed = true;
                     continue;
                 }
-                let session = front.session;
-                // One successor may be decoded ahead, never applied ahead. Do
-                // not bypass missing earlier media or a structural boundary.
-                let frames = if frames.iter().all(|frame| {
-                    self.decoded.contains_key(frame)
-                        || self
-                            .decode_in_flight
-                            .values()
-                            .any(|job| job.frame == *frame)
-                }) && let Some(next) =
-                    self.queues.get(&surface).and_then(|queue| queue.get(1))
-                    && next.session == session
-                    && compatible_decode_lookahead(&front.event, &next.event)
-                {
-                    encoded_frames(&next.event)
-                } else {
-                    frames
-                };
-                for frame in frames {
-                    if self.decoded.contains_key(&frame)
-                        || self.decode_in_flight.values().any(|job| job.frame == frame)
-                    {
-                        continue;
-                    }
-                    if self.schedule_decode(frame, session)? {
-                        progressed = true;
-                        last_submitted = Some(surface);
-                        break;
-                    }
-                }
             }
             self.queues.retain(|_, queue| !queue.is_empty());
             self.ready_surfaces
                 .retain(|surface| self.queues.contains_key(surface));
-            // A full scan may end in Busy. Resume after the last ACCEPTED job,
-            // not at the same privileged prefix of backlogged surfaces.
-            if let Some(surface) = last_submitted
-                && let Some(index) = self
+            if !progressed {
+                break;
+            }
+        }
+        self.sweep_retirement()
+    }
+
+    fn decode_candidate(&self, surface: ClientSurfaceId) -> Option<(HoistSessionId, MediaFrameId)> {
+        let queue = self.queues.get(&surface)?;
+        let front = queue.front()?;
+        let frames = encoded_frames(&front.event);
+        let submitted = |frame: &MediaFrameId| {
+            self.decoded.contains_key(frame)
+                || self
+                    .decode_in_flight
+                    .values()
+                    .any(|job| job.frame == *frame)
+        };
+        // A successor can decode ahead only after every front replacement was
+        // submitted. It never publishes ahead or crosses a structural boundary.
+        let frames = if !frames.is_empty()
+            && frames.iter().all(submitted)
+            && let Some(next) = queue.get(1)
+            && next.session == front.session
+            && compatible_decode_lookahead(&front.event, &next.event)
+        {
+            encoded_frames(&next.event)
+        } else {
+            frames
+        };
+        frames
+            .into_iter()
+            .find(|frame| !submitted(frame) && self.media_frames.contains_key(frame))
+            .map(|frame| (front.session, frame))
+    }
+
+    fn advance(&mut self, output: &mut Vec<EncodedDestinationEvent>) -> Result<()> {
+        self.publish_ready(output)?;
+        let mut busy = Vec::new();
+        loop {
+            let candidates = self
+                .ready_surfaces
+                .iter()
+                .copied()
+                .filter(|surface| self.decode_candidate(*surface).is_some())
+                .collect::<Vec<_>>();
+            let now = Instant::now();
+            let Some(selection) =
+                self.scheduler
+                    .select(&candidates, &busy, &self.activity, self.policy, now)
+            else {
+                break;
+            };
+            let surface = selection.surface;
+            let Some((session, frame)) = self.decode_candidate(surface) else {
+                break;
+            };
+            if self.schedule_decode(frame, session)? {
+                self.scheduler.accepted(selection, now);
+                if let Some(index) = self
                     .ready_surfaces
                     .iter()
                     .position(|candidate| *candidate == surface)
-            {
-                self.ready_surfaces.rotate_left(index + 1);
-            }
-            if !progressed {
-                break;
+                {
+                    self.ready_surfaces.rotate_left(index + 1);
+                }
+            } else {
+                busy.push(surface);
             }
         }
         self.sweep_retirement()
@@ -1722,6 +1846,14 @@ impl<T: EncodedDestinationTransport> EncodedDestinationPort<T> {
         }
     }
 
+    /// Select local admission policy; accepted worker jobs retain FIFO ownership.
+    pub fn with_scheduling_policy(mut self, policy: SchedulingPolicy) -> Self {
+        if let Some(state) = &mut self.state {
+            state.policy = policy;
+        }
+        self
+    }
+
     #[cfg(test)]
     fn new_without_dmabuf(
         transport: T,
@@ -1811,6 +1943,7 @@ impl<T: EncodedDestinationTransport> HoistDestinationPort for EncodedDestination
             .ok_or_else(|| protocol_error("encoded destination port is disconnected"))?;
         let result = state.drain(&mut decoded);
         state.report_observations(result.is_err());
+        state.scheduler.report("destination", Instant::now());
         result.map_err(protocol_error)?;
         extend_encoded_records(&mut records, decoded);
         self.transport.wake_if_readable(state.receive_budget())?;
@@ -1819,7 +1952,23 @@ impl<T: EncodedDestinationTransport> HoistDestinationPort for EncodedDestination
 
     fn submit(&mut self, command: DestinationPortCommand) -> HoistPortResult<()> {
         match command {
-            DestinationPortCommand::Message(envelope) => self.transport.send(envelope),
+            DestinationPortCommand::FocusCleared => {
+                if let Some(state) = &mut self.state {
+                    state.activity.clear_focus();
+                }
+                Ok(())
+            }
+            DestinationPortCommand::Message(envelope) => {
+                if let Some(state) = &mut self.state {
+                    state.activity.observe(
+                        envelope.session,
+                        &envelope.message,
+                        Instant::now(),
+                        state.policy,
+                    );
+                }
+                self.transport.send(envelope)
+            }
             DestinationPortCommand::RouteMapped { .. }
             | DestinationPortCommand::RouteUnmapped { .. } => Ok(()),
         }
@@ -1996,6 +2145,7 @@ fn take_counter(counter: &mut Option<u64>, name: &str) -> Result<u64> {
 mod tests {
     mod bitrate_tests;
     mod decode_tests;
+    mod priority_tests;
     use std::{
         cell::{Cell, RefCell},
         rc::Rc,
@@ -2415,7 +2565,9 @@ mod tests {
             .expect("state")
             .set_resizing(surface, false)
             .expect("end resize");
-        source.flush().expect("flush lifecycle");
+        source
+            .progress_after_destination()
+            .expect("resume lifecycle");
         let delayed = std::mem::take(&mut transport.borrow_mut().sent);
         assert_eq!(delayed.len(), 2);
         for (index, packet) in delayed.into_iter().enumerate() {
@@ -2713,6 +2865,7 @@ mod tests {
             state
                 .enqueue(session, encoded_commit(first, 1, frame), &mut output)
                 .expect("commit");
+            state.advance(&mut output).expect("admit front decode");
             state
                 .enqueue_media(encoded_media(session, next))
                 .expect("next media");
@@ -2780,6 +2933,7 @@ mod tests {
             state
                 .enqueue(session, event, &mut Vec::new())
                 .expect("commit");
+            state.advance(&mut Vec::new()).expect("admit first layer");
             let token = *decoder.borrow().tokens.last().expect("submitted decode");
             // Held for the second layer, then cancelled. Never imported.
             decoder.borrow_mut().completions.push(DecodeCompletion {
@@ -2967,6 +3121,7 @@ mod tests {
         state
             .enqueue(session, encoded_commit(active, 1, first), &mut Vec::new())
             .expect("active commit");
+        state.advance(&mut Vec::new()).expect("admit active decode");
         state
             .enqueue_media(encoded_media(session, second))
             .expect("pending media");
@@ -3019,6 +3174,7 @@ mod tests {
         state
             .enqueue(session, encoded_commit(surface, 1, frame), &mut Vec::new())
             .expect("decode");
+        state.advance(&mut Vec::new()).expect("admit decode");
         state.cancel_surface(surface).expect("cancel decode");
         let token = decoder.borrow().tokens[0];
         decoder.borrow_mut().completions.push(DecodeCompletion {
@@ -3073,6 +3229,8 @@ mod tests {
         let (token, frame, _) = encoder.borrow().submitted[0].clone();
         complete(&encoder, token, frame, 1);
         assert!(port.poll().expect("complete frame").is_empty());
+        port.progress_after_destination()
+            .expect("empty input batch still progresses");
 
         let sent = &transport.borrow().sent;
         assert_eq!(sent.len(), 4);
@@ -3320,6 +3478,7 @@ mod tests {
         state
             .enqueue(session, encoded_commit(surface, 8, frame), &mut Vec::new())
             .expect("control");
+        state.advance(&mut Vec::new()).expect("admit decode");
         let token = decoder.borrow().tokens[0];
         decoder.borrow_mut().completions.push(DecodeCompletion {
             timing: None,
@@ -3443,6 +3602,7 @@ mod tests {
         assert!(fake.borrow().submitted.is_empty());
 
         source.set_resizing(surface, false).expect("end resize");
+        source.schedule().expect("post-input admission");
         let (token, frame, pixels) = fake.borrow().submitted[0].clone();
         assert_eq!(pixels, vec![20, 20, 20, 255]);
         complete(&fake, token, frame, 1);
@@ -3570,6 +3730,8 @@ mod tests {
             let (token, frame, _) = encoder.borrow().submitted.last().expect("encode").clone();
             complete(&encoder, token, frame, 1);
             assert!(port.poll().expect("complete").is_empty());
+            port.progress_after_destination()
+                .expect("empty control batch");
         }
         assert_eq!(encoder.borrow().submitted.len(), 20);
         assert_eq!(transport.borrow().sent.len(), 40);
@@ -3737,6 +3899,7 @@ mod tests {
         state
             .enqueue(session, encoded_commit(surface, 1, first), &mut Vec::new())
             .expect("first decode");
+        state.advance(&mut Vec::new()).expect("admit first decode");
         state
             .enqueue_media(encoded_media(session, second))
             .expect("second media");

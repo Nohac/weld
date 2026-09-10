@@ -23,6 +23,8 @@ pub type HoistPortError = Box<dyn Error + Send + Sync>;
 pub type HoistPortResult<T> = Result<T, HoistPortError>;
 
 pub enum SourcePortCommand {
+    /// Local observation: a trusted focus request no longer names a mapped target.
+    FocusCleared,
     MapSurface {
         session: HoistSessionId,
         surface: ClientSurfaceId,
@@ -51,6 +53,8 @@ pub trait HoistSourcePort {
     fn submit(&mut self, command: SourcePortCommand) -> HoistPortResult<()>;
     fn poll(&mut self) -> HoistPortResult<Vec<DestinationEnvelope>>;
     fn accept_destination(&mut self, envelope: &DestinationEnvelope) -> HoistPortResult<()>;
+    /// Admit new work after the complete received control batch was validated.
+    fn progress_after_destination(&mut self) -> HoistPortResult<()>;
     fn effects_drained(&mut self);
     fn disconnect(&mut self);
 }
@@ -72,6 +76,8 @@ pub enum DestinationPortEvent {
 }
 
 pub enum DestinationPortCommand {
+    /// Local observation only; do not manufacture a wire request for an absent target.
+    FocusCleared,
     Message(DestinationEnvelope),
     RouteMapped {
         source: ClientSurfaceId,
@@ -330,6 +336,11 @@ impl SourceRelayAdapter {
                 break;
             }
         }
+        if !self.failed
+            && let Err(error) = self.port.progress_after_destination()
+        {
+            self.fail(error);
+        }
     }
 
     fn accept_destination(&mut self, envelope: DestinationEnvelope) -> bool {
@@ -380,12 +391,32 @@ impl SourceRelayAdapter {
                     return false;
                 }
                 None => {
+                    // A live session on this peer may clear attention even if
+                    // its newly requested target is not mapped yet. Unknown
+                    // sessions cannot change another session's attention.
+                    if matches!(
+                        &envelope.message,
+                        DestinationMessage::Request(ClientRequest::Focus(_))
+                    ) && self
+                        .mappings
+                        .values()
+                        .any(|session| *session == envelope.session)
+                        && let Err(error) = self.port.submit(SourcePortCommand::FocusCleared)
+                    {
+                        self.fail(error);
+                        return false;
+                    }
                     tracing::debug!(?surface, session = ?envelope.session,
                         message_kind = envelope.message.kind(),
                         "ignored destination message for an unmapped surface");
                     return true;
                 }
             }
+        }
+        if let DestinationMessage::Input(input) = &envelope.message
+            && !self.remote_input.accepts_input(&input.target, &input.event)
+        {
+            return true;
         }
         if let Err(error) = self.port.accept_destination(&envelope) {
             self.fail(error);
@@ -848,6 +879,11 @@ impl ClientAdapter for DestinationRelayAdapter {
             return;
         };
         let Some(session) = self.sessions.get(&source).copied() else {
+            if matches!(&request, ClientRequest::Focus(focus) if focus.source == self.descriptor.id)
+                && let Err(error) = self.port.submit(DestinationPortCommand::FocusCleared)
+            {
+                self.fail(error);
+            }
             return;
         };
         self.input.observe_request(&request);
@@ -974,6 +1010,21 @@ struct RemoteFingerScroll {
 }
 
 impl RemoteInputState {
+    // Eligibility must not add releases to the teardown ledger before the port
+    // accepts delivery. In particular, a failed press was never forwarded.
+    fn accepts_input(&self, target: &ClientInputTarget, event: &InputEventKind) -> bool {
+        match event {
+            InputEventKind::Keyboard {
+                keycode,
+                state: KeyboardKeyState::Repeated,
+            } => self
+                .keys
+                .get(keycode)
+                .is_some_and(|capture| capture.repeat_allowed && capture.target == *target),
+            _ => true,
+        }
+    }
+
     fn observe_request(&mut self, request: &ClientRequest) {
         if let ClientRequest::Focus(focus) = request {
             if self.keyboard_focus != focus.surface {
@@ -987,14 +1038,11 @@ impl RemoteInputState {
 
     fn observe_input(&mut self, input: &ClientInputEvent) -> bool {
         if let InputEventKind::Keyboard {
-            keycode,
             state: KeyboardKeyState::Repeated,
+            ..
         } = input.event
         {
-            let eligible = self
-                .keys
-                .get(&keycode)
-                .is_some_and(|capture| capture.repeat_allowed && capture.target == input.target);
+            let eligible = self.accepts_input(&input.target, &input.event);
             if eligible {
                 self.last_time = input.time;
             }
@@ -1170,7 +1218,7 @@ mod tests {
 
     #[test]
     fn relay_forwards_repeats_without_growing_the_release_ledger() {
-        let (mut relay, _, surface, session) = mapped_source();
+        let (mut relay, port, surface, session) = mapped_source();
         let input = |state| DestinationEnvelope {
             session,
             message: DestinationMessage::input(ClientInputEvent {
@@ -1190,6 +1238,11 @@ mod tests {
         relay.effects.clear();
         assert!(relay.accept_destination(input(KeyboardKeyState::Repeated)));
         assert!(relay.effects.is_empty());
+        assert_eq!(
+            port.borrow().accepted,
+            0,
+            "invalid repeats never reach port activity"
+        );
         assert_eq!(
             relay.remote_input.last_time, 0,
             "invalid repeat does not advance input time"
@@ -1269,7 +1322,9 @@ mod tests {
         inbound: Vec<DestinationEnvelope>,
         submitted: Vec<SourcePortCommand>,
         accepted: usize,
+        progress_counts: Vec<usize>,
         fail_poll: bool,
+        fail_accept: bool,
         fail_withdraw: bool,
         disconnected: bool,
     }
@@ -1376,11 +1431,21 @@ mod tests {
         }
 
         fn accept_destination(&mut self, _envelope: &DestinationEnvelope) -> HoistPortResult<()> {
+            if self.0.borrow().fail_accept {
+                return Err(Box::new(FakePortFailure));
+            }
             self.0.borrow_mut().accepted += 1;
             Ok(())
         }
 
         fn effects_drained(&mut self) {}
+
+        fn progress_after_destination(&mut self) -> HoistPortResult<()> {
+            let mut state = self.0.borrow_mut();
+            let accepted = state.accepted;
+            state.progress_counts.push(accepted);
+            Ok(())
+        }
 
         fn disconnect(&mut self) {
             self.0.borrow_mut().disconnected = true;
@@ -1410,6 +1475,92 @@ mod tests {
             },
         ));
         (adapter, state, surface, session)
+    }
+
+    #[test]
+    fn progress_runs_after_all_accepted_input_and_on_empty_polls_but_not_failure() {
+        let (mut relay, port, surface, session) = mapped_source();
+        for key in [30, 31] {
+            port.borrow_mut().inbound.push(DestinationEnvelope {
+                session,
+                message: DestinationMessage::input(key_input(surface, key, ButtonState::Pressed)),
+            });
+        }
+        relay.poll();
+        relay.poll();
+        assert_eq!(port.borrow().progress_counts, vec![2, 2]);
+        port.borrow_mut().fail_poll = true;
+        relay.poll();
+        assert_eq!(port.borrow().progress_counts, vec![2, 2]);
+        assert!(port.borrow().disconnected);
+    }
+
+    #[test]
+    fn failed_press_does_not_generate_a_release_for_an_undelivered_key() {
+        let (mut relay, port, surface, session) = mapped_source();
+        relay.effects.clear();
+        port.borrow_mut().fail_accept = true;
+        assert!(!relay.accept_destination(DestinationEnvelope {
+            session,
+            message: DestinationMessage::input(key_input(surface, 30, ButtonState::Pressed))
+        }));
+        assert!(relay.remote_input.keys.is_empty());
+        assert!(
+            !relay
+                .effects
+                .iter()
+                .any(|effect| matches!(effect, ClientAdapterEffect::Input(_)))
+        );
+    }
+
+    #[test]
+    fn destination_unmapped_focus_is_a_local_observation_not_a_wire_request() {
+        let upstream = ClientSourceId::new(1);
+        let destination = ClientSourceId::new(2);
+        let port = Rc::new(RefCell::new(FakeDestinationState::default()));
+        let mut relay = DestinationRelayAdapter::new(
+            upstream,
+            ClientSourceDescriptor::new(destination, ClientProvenance::Relocated),
+            FakeDestinationPort(port.clone()),
+        );
+        relay.apply_request(ClientRequest::Focus(ClientFocusRequest {
+            source: destination,
+            surface: Some(surface(destination, 99)),
+        }));
+        assert_eq!(port.borrow().outbound.len(), 1);
+        assert!(matches!(
+            port.borrow().outbound[0],
+            DestinationPortCommand::FocusCleared
+        ));
+        assert!(relay.input.keyboard_focus.is_none());
+    }
+
+    #[test]
+    fn only_a_live_peer_session_can_clear_activity_for_an_unmapped_focus_target() {
+        let (mut relay, port, mapped, session) = mapped_source();
+        let missing = surface(mapped.source(), 99);
+        for (session, expected) in [(HoistSessionId::new(999), 0), (session, 1)] {
+            assert!(relay.accept_destination(DestinationEnvelope {
+                session,
+                message: DestinationMessage::Request(ClientRequest::Focus(ClientFocusRequest {
+                    source: mapped.source(),
+                    surface: Some(missing)
+                }))
+            }));
+            assert_eq!(
+                port.borrow()
+                    .submitted
+                    .iter()
+                    .filter(|command| matches!(command, SourcePortCommand::FocusCleared))
+                    .count(),
+                expected
+            );
+        }
+        assert_eq!(
+            port.borrow().accepted,
+            0,
+            "unknown focus is never installed"
+        );
     }
 
     #[test]

@@ -166,6 +166,7 @@ impl LocalSourcePort {
 impl HoistSourcePort for LocalSourcePort {
     fn submit(&mut self, command: SourcePortCommand) -> HoistPortResult<()> {
         match command {
+            SourcePortCommand::FocusCleared => Ok(()),
             SourcePortCommand::MapSurface { session, surface } => self.queue_source(
                 SourceEnvelope {
                     session,
@@ -247,6 +248,10 @@ impl HoistSourcePort for LocalSourcePort {
         for use_id in self.retirements.drain(..) {
             self.pending_uses.remove(&use_id);
         }
+    }
+
+    fn progress_after_destination(&mut self) -> HoistPortResult<()> {
+        Ok(())
     }
 
     fn disconnect(&mut self) {

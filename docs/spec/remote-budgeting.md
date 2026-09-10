@@ -239,8 +239,11 @@ first, are:
 
 1. **Guaranteed or pinned** — an explicit user, accessibility, recording,
    game, call, or distribution policy promises a quality floor.
-2. **Interactive** — the presentation is focused or receiving current trusted
-   interaction on an active target.
+2. **Interactive** — the presentation is receiving current trusted interaction
+   on an active target. Focus alone receives a modest baseline boost, not this
+   maximum class. Clicks, scrolling, keyboard input and active drags promote
+   immediately; focused pointer movement promotes rapidly based on elapsed
+   movement time rather than device event frequency. Boosts decay when idle.
 3. **Recent** — it was focused recently and remains part of the likely working
    set.
 4. **Visible background** — it is visibly presented but not currently focused.
@@ -396,7 +399,7 @@ applied bitrate reduction. Quantitative thresholds require measurement.
 
 ## Fairness, recency, and stability — Direction
 
-Focus is a strong default signal, not the only entitlement. Explicit calls,
+Focus is a baseline attention signal, not maximum priority or the only entitlement. Explicit calls,
 audio-linked visuals, games, recording, accessibility, user pins, and guaranteed
 background work can retain a floor without focus. These policies are visible
 and revocable rather than inferred from an application identity.

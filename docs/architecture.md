@@ -606,8 +606,11 @@ remain independently bounded. Transport write completion wakes static sources.
 The receiver independently budgets control references and compressed bytes.
 Its stream-affine decoder pool grows on actual work, up to four workers and
 eight outstanding jobs (two per worker), with sixteen decoder generations shared
-across the pool. Round-robin turns admit front commits and at most one compatible
-successor per surface. Workers submit available packets before waiting on older
+across the pool. Interaction-weighted group turns admit front commits and at most
+one compatible successor per surface; age-based service prevents permanent
+background starvation at available admission opportunities. Focus alone has
+less weight than active input. See [interaction scheduling](interaction-scheduling.md)
+for policy, ordering, and per-port scope. Workers submit available packets before waiting on older
 frames; FFmpeg reserves extra frame slots for the explicit pipeline depth. Each
 commit still applies atomically in FIFO order. Retirement protects
 inventory, pending media, undecoded references and active jobs. Converted XRGB

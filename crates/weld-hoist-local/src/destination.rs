@@ -292,6 +292,7 @@ impl HoistDestinationPort for LocalDestinationPort {
 
     fn submit(&mut self, command: DestinationPortCommand) -> HoistPortResult<()> {
         match command {
+            DestinationPortCommand::FocusCleared => Ok(()),
             DestinationPortCommand::Message(envelope) => {
                 let message_kind = envelope.message.kind();
                 self.connection
