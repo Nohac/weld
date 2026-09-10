@@ -71,6 +71,7 @@ struct Attention {
     layer: Option<SurfaceLayerId>,
     motion_start: Option<Instant>,
     motion_last: Option<Instant>,
+    quality_motion: Option<Instant>,
     buttons: HashSet<LinuxButtonCode>,
     resizing: bool,
 }
@@ -88,11 +89,46 @@ pub(crate) struct Activity {
     focus: Option<ClientSurfaceId>,
 }
 
-/// Reusable selection scratch, rebuilt as time-dependent priorities decay.
+/// Aggregated trusted observations. Consumers choose their own grace periods;
+/// sustained motion is classified once using the window interaction policy.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct GroupAttention {
+    pub focused: bool,
+    pub interaction: Option<Instant>,
+    pub sustained_motion: Option<Instant>,
+    pub motion: Option<Instant>,
+    /// Historical dwell-qualified motion, retained across continuity resets.
+    pub quality_motion: Option<Instant>,
+}
+
+impl GroupAttention {
+    pub(crate) fn priority(
+        self,
+        now: Instant,
+        interaction_grace: Duration,
+        motion_grace: Duration,
+    ) -> Priority {
+        let fresh = |at: Option<Instant>, grace| {
+            at.is_some_and(|at| now.saturating_duration_since(at) < grace)
+        };
+        if fresh(self.interaction, interaction_grace) || fresh(self.sustained_motion, motion_grace)
+        {
+            Priority::Interactive
+        } else if fresh(self.motion, motion_grace) {
+            Priority::Moving
+        } else if self.focused {
+            Priority::Focused
+        } else {
+            Priority::Background
+        }
+    }
+}
+
+/// Reusable group observations; unmapped groups have no attention entry.
 #[derive(Default)]
 pub(crate) struct ActivitySnapshot {
     pub groups: HashMap<ClientSurfaceId, Group>,
-    pub priorities: HashMap<Group, Priority>,
+    pub attention: HashMap<Group, GroupAttention>,
 }
 
 impl Activity {
@@ -223,14 +259,9 @@ impl Activity {
         Some(fallback)
     }
 
-    pub(crate) fn snapshot(
-        &self,
-        now: Instant,
-        policy: SchedulingPolicy,
-        snapshot: &mut ActivitySnapshot,
-    ) {
+    pub(crate) fn snapshot(&self, policy: SchedulingPolicy, snapshot: &mut ActivitySnapshot) {
         snapshot.groups.clear();
-        snapshot.priorities.clear();
+        snapshot.attention.clear();
         for surface in self.surfaces.keys() {
             if let Some(group) = self.group(*surface) {
                 snapshot.groups.insert(*surface, group);
@@ -244,37 +275,24 @@ impl Activity {
             let Some(group) = snapshot.groups.get(surface).copied() else {
                 continue;
             };
-            let priority = snapshot
-                .priorities
-                .entry(group)
-                .or_insert(Priority::Background);
             if !entry.mapped {
                 continue;
             }
-            if focused == Some(group) {
-                *priority = (*priority).max(Priority::Focused);
-            }
+            let summary = snapshot.attention.entry(group).or_default();
+            summary.focused |= focused == Some(group);
             let attention = &entry.attention;
-            if attention
-                .interaction
-                .is_some_and(|at| now.saturating_duration_since(at) < policy.interaction_grace)
-            {
-                *priority = Priority::Interactive;
-            } else if attention
-                .motion_last
-                .is_some_and(|at| now.saturating_duration_since(at) < policy.motion_grace)
-            {
-                let sustained = attention
-                    .motion_start
-                    .zip(attention.motion_last)
-                    .is_some_and(|(start, last)| {
-                        last.saturating_duration_since(start) >= policy.motion_dwell
-                    });
-                *priority = (*priority).max(if sustained {
-                    Priority::Interactive
-                } else {
-                    Priority::Moving
+            summary.interaction = summary.interaction.max(attention.interaction);
+            summary.quality_motion = summary.quality_motion.max(attention.quality_motion);
+            let sustained = attention
+                .motion_start
+                .zip(attention.motion_last)
+                .is_some_and(|(start, last)| {
+                    last.saturating_duration_since(start) >= policy.motion_dwell
                 });
+            if sustained {
+                summary.sustained_motion = summary.sustained_motion.max(attention.motion_last);
+            } else {
+                summary.motion = summary.motion.max(attention.motion_last);
             }
         }
     }
@@ -376,6 +394,11 @@ impl Activity {
                                 attention.motion_start = Some(now);
                             }
                             attention.motion_last = Some(now);
+                            if attention.motion_start.is_some_and(|start| {
+                                now.saturating_duration_since(start) >= policy.motion_dwell
+                            }) {
+                                attention.quality_motion = Some(now);
+                            }
                         }
                     }
                     InputEventKind::PointerLeft { .. } => {

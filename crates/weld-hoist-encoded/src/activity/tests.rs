@@ -65,8 +65,14 @@ pub(crate) fn press(activity: &mut Activity, local: u64, now: Instant) {
 }
 fn priority(activity: &Activity, local: u64, now: Instant) -> Priority {
     let mut snapshot = ActivitySnapshot::default();
-    activity.snapshot(now, SchedulingPolicy::default(), &mut snapshot);
-    snapshot.priorities[&activity.group(surface(local)).expect("registered")]
+    let policy = SchedulingPolicy::default();
+    activity.snapshot(policy, &mut snapshot);
+    snapshot
+        .attention
+        .get(&activity.group(surface(local)).expect("registered"))
+        .copied()
+        .unwrap_or_default()
+        .priority(now, policy.interaction_grace, policy.motion_grace)
 }
 fn motion(activity: &mut Activity, local: u64, x: f64, now: Instant) {
     input(

@@ -1,5 +1,5 @@
 //! Two-level capped allocation with asymmetric churn suppression. Recomputed on
-//! inventory/target changes, never on input events or frame cadence.
+//! inventory/target or effective priority changes, not every input event.
 
 use std::collections::BTreeMap;
 
@@ -15,6 +15,7 @@ pub(super) struct AllocationInput {
     pub pixels: u64,
     pub limits: EncoderBitrateLimits,
     pub current: Option<u64>,
+    pub weight: u64,
 }
 
 struct Share {
@@ -104,7 +105,11 @@ pub(super) fn allocate(target: u64, inputs: &[AllocationInput]) -> Result<Vec<u6
             Ok(Share {
                 minimum: u64::try_from(minimum)?,
                 maximum: u64::try_from(maximum.min(u128::from(target)))?,
-                weight: 1,
+                weight: members
+                    .iter()
+                    .map(|index| inputs[*index].weight)
+                    .max()
+                    .unwrap_or(1),
             })
         })
         .collect::<Result<Vec<_>>>()?;
@@ -146,8 +151,21 @@ pub(super) fn allocate(target: u64, inputs: &[AllocationInput]) -> Result<Vec<u6
         .map(|(input, ideal)| input.current.unwrap_or(*ideal))
         .collect::<Vec<_>>();
     let mut total = rates.iter().map(|rate| u128::from(*rate)).sum::<u128>();
-    // Required decreases first. Ignore tiny optional downward adjustments while
-    // they fit in the spare headroom, avoiding parent keyframes for tiny popups.
+    let increases = rates
+        .iter()
+        .zip(&ideal)
+        .map(|(current, ideal)| {
+            let extra = ideal.saturating_sub(*current);
+            if extra >= RATE_STEP.max(current.div_ceil(4)) {
+                u128::from(extra)
+            } else {
+                0
+            }
+        })
+        .sum::<u128>();
+    // Free room for meaningful increases even when the old total still fits.
+    // Ignore other tiny downward adjustments that fit in spare headroom, avoiding
+    // parent keyframes for tiny popups.
     let mut donors = (0..inputs.len())
         .filter(|index| rates[*index] > ideal[*index])
         .collect::<Vec<_>>();
@@ -158,7 +176,7 @@ pub(super) fn allocate(target: u64, inputs: &[AllocationInput]) -> Result<Vec<u6
         )
     });
     for index in donors {
-        if total <= u128::from(target) {
+        if total + increases <= u128::from(target) {
             break;
         }
         // This donor already pays for an encoder replacement. Move fully to its
@@ -168,7 +186,7 @@ pub(super) fn allocate(target: u64, inputs: &[AllocationInput]) -> Result<Vec<u6
         total -= u128::from(reduction);
     }
     ensure!(
-        total <= u128::from(target),
+        total + increases <= u128::from(target),
         "shared bitrate targets could not fit"
     );
     for (index, input) in inputs.iter().enumerate() {

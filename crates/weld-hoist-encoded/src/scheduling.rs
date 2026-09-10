@@ -44,7 +44,7 @@ impl Scheduler {
         policy: SchedulingPolicy,
         now: Instant,
     ) -> Option<Selection> {
-        activity.snapshot(now, policy, &mut self.snapshot);
+        activity.snapshot(policy, &mut self.snapshot);
         let snapshot = &self.snapshot;
         self.groups.retain(|group, _| {
             candidates
@@ -60,10 +60,11 @@ impl Scheduler {
         for surface in candidates {
             if let Some(group) = snapshot.groups.get(surface).copied() {
                 let priority = snapshot
-                    .priorities
+                    .attention
                     .get(&group)
                     .copied()
-                    .unwrap_or(Priority::Background);
+                    .unwrap_or_default()
+                    .priority(now, policy.interaction_grace, policy.motion_grace);
                 let entry = self.groups.entry(group).or_insert_with(|| Service {
                     finish: floor,
                     ..Default::default()

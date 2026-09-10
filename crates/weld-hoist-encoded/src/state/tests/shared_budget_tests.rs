@@ -229,7 +229,7 @@ fn tiny_popup_open_close_and_owner_changes_use_the_existing_group_relationship()
         .expect("exercise regrouped ideals");
     let after = control.streams().expect("regrouped targets");
     assert_eq!(after.len(), before.len());
-    assert_eq!(after[0].requested.bits_per_second, 3_776_000);
+    assert_eq!(after[0].requested.bits_per_second, 3_648_000);
     assert_eq!(after[1].requested.bits_per_second, 128_000);
     assert_eq!(fake.borrow().submitted.len(), 4);
     assert_eq!(before.len(), 2);

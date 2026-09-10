@@ -29,8 +29,8 @@ adaptation, receiver allowance, FPS admission or carrier data quota is added her
 
 ## Allocation and churn
 
-Equal-weight presentation groups share the target. Each toplevel's layers and
-owned popups form one group; independently managed dialogs form another. Groups
+Activity-weighted presentation groups share the target. Each toplevel's layers
+and owned popups form one group; independently managed dialogs form another. Groups
 are scoped by source-port membership and hoist session. Layers divide their group
 by full input-buffer pixel area, not logical/cropped window geometry. Codec
 padding is not exposed here and is not included in that estimate.
@@ -41,7 +41,8 @@ down to 64,000 bit/s steps, then avoids small optional changes. With a single
 layer, the initial desired rates are therefore **7.552 Mbps AV1** and
 **15.168 Mbps H.264**.
 
-Existing targets are reduced only when needed to fit the configured total.
+Existing targets are reduced when needed to fit the configured total or make
+room for meaningful increases in other streams, including interaction boosts.
 Donors with the largest excess over their ideal are reduced first, with port and
 stream IDs breaking ties. Each selected donor moves fully to its ideal: it pays
 for an encoder switch anyway, and this restores room for later small streams.
@@ -58,10 +59,32 @@ shares can also persist while the total fits. Idle/static windows retain shares
 even while producing no traffic. A larger target can approximate the old
 per-layer behavior, while each encoder remains bounded by its backend maximum.
 
-The existing interaction scheduler still prioritizes queued work. Focus and
-input do **not** change bitrate allocations in this slice. Activity-weighted
-quality allocation is the next separate policy change, with encoder-switch
-churn to consider explicitly.
+The allocator reuses the scheduler's trusted input recognition and popup grouping,
+but quality changes use a longer hold than queue priority. The default
+`BitrateAllocationPolicy` weights are background **1**, settled focus **2**,
+initial motion **2**, and interaction **12**. Discrete input and sustained motion
+retain their boost for **10 seconds** after the last qualifying input. Real input
+can promote immediately; focus alone settles for **500 ms**. During a focus-only
+handoff the old bonus remains until the new one settles, so rapid refocusing does
+not create intermediate encoder switches. Returning to the old group cancels
+the handoff; explicit focus clear or unmapping clears that focus bonus immediately.
+Initial motion does not bypass focus settling. Sustained motion uses the existing
+scheduler's dwell recognition, not a second quality-specific motion timer.
+
+Recent interaction can leave several groups boosted temporarily. This is
+intentional to avoid oscillating quality between input bursts; the ratios are
+weights on capacity remaining after minima, not promised percentages or calibrated
+readability guarantees. A single group still receives the same total allocation
+regardless of its class. Each source port has independent focus observations.
+
+Input timestamps extend holds without reallocating while effective classes remain
+unchanged. Expiry is checked across participating ports on ordinary admission,
+completed input batches and budget operations, including for idle peers. No timer,
+synthetic frame or new wire event is introduced. The existing two-second encoder
+switch dwell can delay applying a new target; requested priority is not proof
+that the next displayed frame already uses that quality. Background FPS reduction,
+per-application ceilings, fullscreen suspension and congestion adaptation remain
+future work.
 
 ## Ownership and failure boundaries
 
@@ -112,12 +135,36 @@ totals can therefore tear down a session. Targeted pause/refusal UI is deferred.
 Deterministic tests cover both-level caps, wide arithmetic, popup grouping,
 first-frame allocation, frozen batches, generation changes, unchanged/focused
 inventory, retirement, cross-port identity isolation, manual-actuator exclusion,
-impossible minima and borrowed-drop recovery. No Smithay or codec internals are
-unit-tested by these cases.
+impossible minima, borrowed-drop recovery, boost/decay, atomic focus handoff,
+cross-port expiry and complete input-batch allocation before admission. No
+Smithay or codec internals are unit-tested by these cases.
 
-Hardware validation is pending. Run short AV1 and H.264 sessions, add/remove
-windows, open/close popups, resize and reclaim; stop at the first GPU fault. The
+The user reported a successful 120-second isolated AV1 network run on
+2026-09-10, with multiple applications feeling responsive. The retained run
+`network-hoist-z5p_dpb4` recorded roughly 25.31 MB of encoded video at both
+endpoints and 30.76 MB of receiver-interface RX over about 122 seconds. Source
+logs show activity-dependent group target redistribution; their sampled codec
+failure counters sum to zero. This is acceptance evidence for that workload,
+not a general hardware guarantee or a controlled quality comparison.
+
+The 8 Mbps target would represent 120 MB over 120 seconds if continuously used.
+These counters confirm lower actual traffic, not its complete cause: sparse
+updates, compression demand, delivered cadence, unapplied targets and encoder
+undershoot must be distinguished before attributing the gap to efficiency.
+Per-group logs currently show requested/applied targets, not actual per-app
+payload totals. Shutdown also produced client teardown errors; those are not
+evidence of a fault-free application shutdown.
+
+Broader hardware validation remains pending. Run short AV1 and H.264 sessions,
+add/remove windows, open/close popups, resize and reclaim; stop at the first GPU fault. The
 default-on change makes runtime encoder replacement a normal path and is not
 evidence that the previously observed VCN fault is resolved. Review
 `weld_media_diag` requested/applied sums separately rather than interpreting
-either as measured wire throughput.
+either as measured wire throughput. Its source-side `encoded window bitrate`
+records group identity, allocation priority, layer count, input pixels,
+requested/applied targets and pending stream count on the existing reporting
+cadence. No titles, key codes or input text are included. Compare Blender, BBB and
+foot together: typing or sustained motion should transfer quality to the active
+group, while focus alone gives a modest bonus. Also check brief pauses, rapid
+focus changes and tiny popups without assuming every policy revision implies
+an encoder replacement.

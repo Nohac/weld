@@ -120,6 +120,11 @@ progress, and queue age under the same workload. Check focus changes without
 input, sustained movement/typing, popups, resize, reclaim, and disconnect.
 Do not interpret a successful session as proof of a speedup.
 
-Shared bitrate/FPS allocation, user network preferences, physical-device
+The [shared encoder-target allocator](shared-bitrate-targets.md) now reuses these
+attention signals with separate quality weights and longer holds. Queue policy
+and its timing are unchanged; allocation runs after the complete source input
+batch and before new admission.
+
+FPS allocation, user network preferences, physical-device
 admission, more detailed latency tracing, and changes to decoder-worker
 placement remain subsequent slices.

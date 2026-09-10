@@ -2,19 +2,26 @@
 //! numeric inventory only; weak actuators never retain codecs or client buffers.
 
 mod allocation;
+mod attention;
 
 use std::{
     cell::{Cell, RefCell},
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, HashMap},
     fmt,
     rc::{Rc, Weak},
+    time::Instant,
 };
 
 use anyhow::{Context, Result, ensure};
 use weld_media::MediaStreamId;
 
-use crate::{EncoderBitrateLimits, EncoderRateControl, activity::Group};
+use crate::{
+    EncoderBitrateLimits, EncoderRateControl,
+    activity::{Group, GroupAttention, Priority},
+};
 use allocation::{AllocationInput, allocate};
+pub use attention::BitrateAllocationPolicy;
+use attention::QualityFocus;
 
 type StreamKey = (u64, MediaStreamId);
 
@@ -61,9 +68,11 @@ struct Coordinator {
 
 struct BudgetState {
     target: u64,
+    policy: BitrateAllocationPolicy,
     next_port: Option<u64>,
     ports: BTreeMap<u64, PortInventory>,
     targets: BTreeMap<StreamKey, u64>,
+    priorities: BTreeMap<(u64, Group), Priority>,
 }
 
 struct PortInventory {
@@ -71,6 +80,8 @@ struct PortInventory {
     control: EncoderRateControl,
     limits: EncoderBitrateLimits,
     demands: Vec<StreamDemand>,
+    attention: BTreeMap<Group, GroupAttention>,
+    focus: QualityFocus,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -89,6 +100,12 @@ pub(crate) struct BudgetMembership {
 
 impl SharedBitrateBudget {
     pub fn new(bits_per_second: u64) -> Result<Self> {
+        Self::with_policy(bits_per_second, BitrateAllocationPolicy::default())
+    }
+
+    /// Validate and inject quality policy for all ports sharing this pool.
+    pub fn with_policy(bits_per_second: u64, policy: BitrateAllocationPolicy) -> Result<Self> {
+        policy.validate()?;
         ensure!(
             bits_per_second > 0,
             "shared bitrate target must be positive"
@@ -96,9 +113,11 @@ impl SharedBitrateBudget {
         Ok(Self(Rc::new(Coordinator {
             state: RefCell::new(BudgetState {
                 target: bits_per_second,
+                policy,
                 next_port: Some(1),
                 ports: BTreeMap::new(),
                 targets: BTreeMap::new(),
+                priorities: BTreeMap::new(),
             }),
             dirty: Cell::new(false),
         })))
@@ -107,11 +126,12 @@ impl SharedBitrateBudget {
     /// Set a runtime target. Existing jobs remain frozen and switches apply lazily.
     /// An impossible target leaves the previous configuration intact.
     pub fn set_target(&self, bits_per_second: u64) -> Result<()> {
+        let now = Instant::now();
         ensure!(
             bits_per_second > 0,
             "shared bitrate target must be positive"
         );
-        self.refresh()?;
+        self.refresh_at(now)?;
         {
             let mut state = self.0.state.try_borrow_mut()?;
             state.check_minimum(bits_per_second, None)?;
@@ -120,11 +140,11 @@ impl SharedBitrateBudget {
                 self.0.dirty.set(true);
             }
         }
-        self.refresh()
+        self.refresh_at(now)
     }
 
     pub fn snapshot(&self) -> Result<BitrateBudgetSnapshot> {
-        self.refresh()?;
+        self.refresh_at(Instant::now())?;
         let state = self.0.state.try_borrow()?;
         Ok(BitrateBudgetSnapshot {
             target: state.target,
@@ -134,7 +154,7 @@ impl SharedBitrateBudget {
     }
 
     pub(crate) fn attach(&self, control: EncoderRateControl) -> Result<BudgetMembership> {
-        self.refresh()?;
+        self.refresh_at(Instant::now())?;
         let limits = control.limits()?;
         let live = Rc::new(());
         let mut state = self.0.state.try_borrow_mut()?;
@@ -150,6 +170,8 @@ impl SharedBitrateBudget {
                 control,
                 limits,
                 demands: Vec::new(),
+                attention: BTreeMap::new(),
+                focus: QualityFocus::default(),
             },
         );
         Ok(BudgetMembership {
@@ -159,14 +181,52 @@ impl SharedBitrateBudget {
         })
     }
 
-    fn refresh(&self) -> Result<()> {
-        if !self.0.dirty.get() {
-            return Ok(());
-        }
+    fn refresh_at(&self, now: Instant) -> Result<()> {
+        let original_targets = {
+            let mut state = self.0.state.try_borrow_mut()?;
+            let policy = state.policy;
+            for port in state.ports.values_mut() {
+                port.focus.advance(now, policy.focus_settle);
+            }
+            // Ordinary host ticks only compare existing group entries. Refreshed
+            // input timestamps extend leases without allocating or rebalancing.
+            let changed = state.ports.iter().any(|(id, port)| {
+                port.attention.iter().any(|(group, attention)| {
+                    state.priorities.get(&(*id, *group))
+                        != Some(&policy.priority(
+                            *attention,
+                            port.focus.settled == Some(*group),
+                            now,
+                        ))
+                })
+            });
+            if !self.0.dirty.get() && !changed {
+                return Ok(());
+            }
+            self.0.dirty.set(true);
+            state.targets.clone()
+        };
         loop {
-            let publications = {
+            let (publications, targets, priorities) = {
                 let mut state = self.0.state.try_borrow_mut()?;
                 state.ports.retain(|_, port| port.live.strong_count() > 0);
+                let policy = state.policy;
+                let priorities = state
+                    .ports
+                    .iter()
+                    .flat_map(|(id, port)| {
+                        port.attention.iter().map(move |(group, attention)| {
+                            (
+                                (*id, *group),
+                                policy.priority(
+                                    *attention,
+                                    port.focus.settled == Some(*group),
+                                    now,
+                                ),
+                            )
+                        })
+                    })
+                    .collect::<BTreeMap<_, _>>();
                 let inputs = state
                     .ports
                     .iter()
@@ -176,7 +236,14 @@ impl SharedBitrateBudget {
                             group: (*id, demand.group),
                             pixels: demand.pixels,
                             limits: port.limits,
-                            current: state.targets.get(&(*id, demand.stream)).copied(),
+                            current: original_targets.get(&(*id, demand.stream)).copied(),
+                            weight: u64::from(
+                                policy.weights[priorities
+                                    .get(&(*id, demand.group))
+                                    .copied()
+                                    .unwrap_or(Priority::Background)
+                                    .index()],
+                            ),
                         })
                     })
                     .collect::<Vec<_>>();
@@ -192,12 +259,12 @@ impl SharedBitrateBudget {
                         Ok((input.key.0, port.control.clone(), input.key.1, *rate))
                     })
                     .collect::<Result<Vec<_>>>()?;
-                state.targets = inputs
+                let targets = inputs
                     .iter()
                     .zip(targets)
                     .map(|(input, rate)| (input.key, rate))
                     .collect();
-                publications
+                (publications, targets, priorities)
             };
             // No coordinator borrow or native work spans these numeric registry writes.
             // A failed actuator belongs to one source, not every peer in the pool.
@@ -214,12 +281,17 @@ impl SharedBitrateBudget {
                 }
             }
             if failed.is_empty() {
+                let mut state = self.0.state.try_borrow_mut()?;
+                state.targets = targets;
+                state.priorities = priorities;
                 self.0.dirty.set(false);
                 return Ok(());
             }
             let mut state = self.0.state.try_borrow_mut()?;
             for port in failed {
                 state.ports.remove(&port);
+                state.targets.retain(|(id, _), _| *id != port);
+                state.priorities.retain(|(id, _), _| *id != port);
             }
             // Every unsuccessful pass removes at least one member. Allocation errors
             // propagate above without removing members or silently overcommitting.
@@ -249,8 +321,8 @@ impl BudgetState {
 
 impl BudgetMembership {
     /// Preflight before source IDs/registry entries are allocated.
-    pub(crate) fn preflight(&self, count: usize) -> Result<()> {
-        self.budget.refresh()?;
+    pub(crate) fn preflight(&self, count: usize, now: Instant) -> Result<()> {
+        self.budget.refresh_at(now)?;
         let state = self.budget.0.state.try_borrow()?;
         ensure!(
             state.ports.contains_key(&self.id),
@@ -259,7 +331,8 @@ impl BudgetMembership {
         state.check_minimum(state.target, Some((self.id, count)))
     }
 
-    pub(crate) fn update(&self, demands: Vec<StreamDemand>) -> Result<()> {
+    /// Reconcile only structural changes, then publish attention before refreshing.
+    pub(crate) fn update_inventory(&self, demands: Vec<StreamDemand>) -> Result<()> {
         {
             let mut state = self.budget.0.state.try_borrow_mut()?;
             state.check_minimum(state.target, Some((self.id, demands.len())))?;
@@ -268,11 +341,36 @@ impl BudgetMembership {
                 .get_mut(&self.id)
                 .context("bitrate budget membership retired")?;
             if port.demands != demands {
+                port.attention
+                    .retain(|group, _| demands.iter().any(|demand| demand.group == *group));
+                for demand in &demands {
+                    port.attention.entry(demand.group).or_default();
+                }
                 port.demands = demands;
                 self.budget.0.dirty.set(true);
             }
         }
-        self.budget.refresh()?;
+        Ok(())
+    }
+
+    pub(crate) fn update_attention(
+        &self,
+        attention: &HashMap<Group, GroupAttention>,
+        now: Instant,
+    ) -> Result<()> {
+        {
+            let mut state = self.budget.0.state.try_borrow_mut()?;
+            let policy = state.policy;
+            let port = state
+                .ports
+                .get_mut(&self.id)
+                .context("bitrate budget membership retired")?;
+            port.focus.observe(attention, now, policy);
+            for (group, value) in &mut port.attention {
+                *value = attention.get(group).copied().unwrap_or_default();
+            }
+        }
+        self.budget.refresh_at(now)?;
         ensure!(
             self.budget
                 .0
@@ -284,6 +382,18 @@ impl BudgetMembership {
         );
         Ok(())
     }
+
+    /// Last successfully allocated class; reporting must not drive allocation.
+    pub(crate) fn priority(&self, group: Group) -> Option<Priority> {
+        self.budget
+            .0
+            .state
+            .try_borrow()
+            .ok()?
+            .priorities
+            .get(&(self.id, group))
+            .copied()
+    }
 }
 
 impl Drop for BudgetMembership {
@@ -293,7 +403,7 @@ impl Drop for BudgetMembership {
         // A borrowed coordinator is repaired on the next plain admission, update,
         // or snapshot. Never keep a dead port's demand waiting for a layout change.
         if self.budget.0.state.try_borrow_mut().is_ok()
-            && let Err(error) = self.budget.refresh()
+            && let Err(error) = self.budget.refresh_at(Instant::now())
         {
             tracing::warn!(%error, "could not release shared bitrate reservation");
         }

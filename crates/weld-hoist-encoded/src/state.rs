@@ -32,7 +32,7 @@ use weld_media::{
 };
 
 use crate::TransportSnapshot;
-use crate::activity::{Activity, SchedulingPolicy};
+use crate::activity::{Activity, ActivitySnapshot, SchedulingPolicy};
 use crate::bitrate::{BitrateRequest, EncoderRateApplication, EncoderRateControl, EncoderRates};
 use crate::budget::{BudgetMembership, SharedBitrateBudget};
 use crate::codec::{
@@ -235,6 +235,7 @@ fn dump_path(
 struct EncodedSourceState {
     // Release numeric reservations before closing the actuator/backend.
     budget: Option<BudgetMembership>,
+    budget_activity: ActivitySnapshot,
     admission_deferred: bool,
     activity: Activity,
     scheduler: Scheduler,
@@ -263,6 +264,7 @@ impl EncodedSourceState {
         let rates = backend.bitrate_limits().map(EncoderRates::new);
         Self {
             budget: None,
+            budget_activity: ActivitySnapshot::default(),
             backend,
             activity: Activity::default(),
             admission_deferred: false,
@@ -300,7 +302,7 @@ impl EncodedSourceState {
         match &event.kind {
             ClientSurfaceEventKind::Role(role) => {
                 self.activity.role(event.surface, *role);
-                self.update_budget(None)?;
+                self.update_budget(None, Instant::now())?;
             }
             ClientSurfaceEventKind::Commit(commit) => {
                 self.activity.mapped(event.surface, commit.mapped)
@@ -476,6 +478,9 @@ impl EncodedSourceState {
         let report = self.observations.take_report(now, gauges, final_report);
         if let Some(rates) = &self.rates {
             rates.report(report.is_some() || final_report);
+        }
+        if report.is_some() || final_report {
+            self.report_budget();
         }
         if let Some(report) = report {
             report.emit();
@@ -846,7 +851,7 @@ impl EncodedSourceState {
             }
             self.retire_generation(stream.stream, stream.generation)?;
         }
-        self.update_budget(None)
+        self.update_budget(None, Instant::now())
     }
 
     fn retire_generation(
@@ -992,6 +997,9 @@ impl<T: EncodedSourceTransport> HoistSourcePort for EncodedSourcePort<T> {
             SourcePortCommand::FocusCleared => {
                 if let Some(state) = &mut self.state {
                     state.activity.clear_focus();
+                    state
+                        .refresh_budget_attention(Instant::now())
+                        .map_err(protocol_error)?;
                 }
                 Ok(())
             }
@@ -1099,6 +1107,11 @@ impl<T: EncodedSourceTransport> HoistSourcePort for EncodedSourcePort<T> {
 
     fn progress_after_destination(&mut self) -> HoistPortResult<()> {
         if let Some(state) = &mut self.state {
+            // Observe the entire validated input batch before reallocating, just
+            // as admission waits for it before selecting another encode batch.
+            state
+                .refresh_budget_attention(Instant::now())
+                .map_err(protocol_error)?;
             state.admission_deferred = false;
         }
         self.progress()?;

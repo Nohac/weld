@@ -1,6 +1,7 @@
 //! Register a complete scheduled layer inventory before freezing any frame rate.
 
 use anyhow::{Context, Result, ensure};
+use std::{collections::BTreeMap, time::Instant};
 use weld_client::{
     ClientBufferMetadata, ClientSurfaceEvent, ClientSurfaceEventKind, ClientSurfaceId,
     SurfaceBufferChange, SurfaceLayerId,
@@ -10,10 +11,20 @@ use weld_media::{MediaStreamId, StreamGeneration};
 use super::{EncodedSourceState, SourceStream, take_counter};
 use crate::budget::StreamDemand;
 
+#[derive(Default)]
+struct GroupRates {
+    streams: usize,
+    pixels: u64,
+    requested: u64,
+    applied: u64,
+    pending: usize,
+}
+
 impl EncodedSourceState {
     pub(super) fn prepare_streams(&mut self, event: &ClientSurfaceEvent) -> Result<()> {
+        let now = Instant::now();
         let ClientSurfaceEventKind::Commit(commit) = &event.kind else {
-            return self.update_budget(None);
+            return self.update_budget(None, now);
         };
         let mut replacements = Vec::new();
         for update in &commit.buffers {
@@ -46,13 +57,14 @@ impl EncodedSourceState {
                 retained_streams
                     .checked_add(new_streams)
                     .context("stream count overflow")?,
+                now,
             )?;
         }
         self.reconcile_streams(event)?;
         for (layer, metadata) in replacements {
             self.register_stream(event.surface, layer, metadata)?;
         }
-        self.update_budget(Some(event))
+        self.update_budget(Some(event), now)
     }
 
     pub(super) fn register_stream(
@@ -88,7 +100,11 @@ impl EncodedSourceState {
         Ok(())
     }
 
-    pub(super) fn update_budget(&self, event: Option<&ClientSurfaceEvent>) -> Result<()> {
+    pub(super) fn update_budget(
+        &mut self,
+        event: Option<&ClientSurfaceEvent>,
+        now: Instant,
+    ) -> Result<()> {
         let Some(budget) = &self.budget else {
             return Ok(());
         };
@@ -129,6 +145,57 @@ impl EncodedSourceState {
             })
             .collect::<Result<Vec<_>>>()?;
         demands.sort_by_key(|demand| demand.stream);
-        budget.update(demands)
+        self.activity
+            .snapshot(self.policy, &mut self.budget_activity);
+        budget.update_inventory(demands)?;
+        budget.update_attention(&self.budget_activity.attention, now)
+    }
+
+    pub(super) fn refresh_budget_attention(&mut self, now: Instant) -> Result<()> {
+        let Some(budget) = &self.budget else {
+            return Ok(());
+        };
+        self.activity
+            .snapshot(self.policy, &mut self.budget_activity);
+        budget.update_attention(&self.budget_activity.attention, now)
+    }
+
+    pub(super) fn report_budget(&self) {
+        let (Some(budget), Some(rates)) = (&self.budget, &self.rates) else {
+            return;
+        };
+        let Ok(streams) = rates.control().streams() else {
+            return;
+        };
+        let mut groups = BTreeMap::new();
+        for status in streams {
+            let Some(group) = self.activity.group(status.surface) else {
+                continue;
+            };
+            let value = groups.entry(group).or_insert_with(GroupRates::default);
+            value.streams += 1;
+            if let Some(stream) = self.streams.get(&(status.surface, status.layer)) {
+                value.pixels = value.pixels.saturating_add(
+                    u64::from(stream.visible_extent.0) * u64::from(stream.visible_extent.1),
+                );
+            }
+            value.requested = value
+                .requested
+                .saturating_add(status.requested.bits_per_second);
+            if let Some(applied) = status.applied {
+                value.applied = value
+                    .applied
+                    .saturating_add(applied.request.bits_per_second);
+            }
+            value.pending +=
+                usize::from(status.applied.map(|value| value.request) != Some(status.requested));
+        }
+        for (group, value) in groups {
+            tracing::debug!(target: "weld_media_diag", session = ?group.session, root = ?group.root,
+                allocation_priority = ?budget.priority(group), streams = value.streams,
+                input_pixels = value.pixels, requested_bitrate = value.requested,
+                applied_bitrate = value.applied, pending_streams = value.pending,
+                "encoded window bitrate");
+        }
     }
 }

@@ -120,8 +120,13 @@ VA-API supports lowering and restoring the validated startup rate by constructin
 a replacement encoder, not by mutating a live context. The distribution now
 injects one host-owned `SharedBitrateBudget` across its encoded source streams;
 custom multi-port distributions can share the same handle. It distributes desired
-encoder targets by presentation group and buffer area, outside codec and
+encoder targets by activity-weighted presentation group and buffer area, outside codec and
 transport ownership. It does not police wire throughput or adapt to congestion.
+Trusted activity is shared with queue scheduling, but quality holds and atomic
+focus settling suppress repeated encoder replacements. Input timestamps do not
+change structural inventory; allocation follows the complete authorized input
+batch, before admitting another encode. Expiry uses ordinary shared-budget work,
+not a new timer or synthetic client commit.
 See [shared encoder targets](shared-bitrate-targets.md) and the
 [streaming-budget plan](remote-budgeting-plan.md).
 

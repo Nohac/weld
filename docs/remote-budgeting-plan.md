@@ -6,8 +6,10 @@ The source, receiver, and Iroh transport observations and the first bitrate
 actuator below are implemented. The first
 [shared encoder-target slice](shared-bitrate-targets.md) is now implemented and
 enabled by default for encoded sources. Adaptive control, hard media admission,
-receiver allowances and activity-weighted bitrate allocation remain proposed
-work. The actuator precedes the combined feedback/allowance wire change so those
+and receiver allowances remain proposed work. Activity-weighted bitrate allocation
+now uses the scheduler's trusted attention with separate quality holds and atomic
+focus settling; see the shared-target document for implemented tuning and limits.
+The actuator precedes the combined feedback/allowance wire change so those
 controls have a real consumer. The design has been peer reviewed. The broader
 [budgeting specification](spec/remote-budgeting.md) remains Direction, not a
 checklist to implement wholesale.
