@@ -1,9 +1,25 @@
 //! Real pool threads with a fake processor: no VA display, codec or GPU calls.
 
+use crate::{EncodedAccessUnit, EncodedFrameKind, VideoCodec};
 use std::{sync::Condvar, thread::ThreadId, time::Duration};
-use weld_media::{EncodedFrameKind, VideoCodec};
 
 use super::*;
+
+struct FakeRequest {
+    token: u64,
+    access_unit: EncodedAccessUnit,
+}
+
+impl DecodeJob for FakeRequest {
+    fn token(&self) -> u64 {
+        self.token
+    }
+    fn frame(&self) -> MediaFrameId {
+        self.access_unit.frame
+    }
+}
+
+type FakeCompletion = DecodeCompletion<()>;
 
 #[derive(Default)]
 struct State {
@@ -33,8 +49,11 @@ struct FakeProcessor {
     pending: VecDeque<(u64, bool)>,
 }
 
-impl Processor for FakeProcessor {
-    fn submit(&mut self, request: VaapiDecodeRequest) {
+impl DecodeProcessor for FakeProcessor {
+    type Request = FakeRequest;
+    type Output = ();
+
+    fn submit(&mut self, request: FakeRequest) {
         let key = (
             request.access_unit.frame.stream,
             request.access_unit.frame.generation,
@@ -54,7 +73,7 @@ impl Processor for FakeProcessor {
             .push_back((request.token, state.fail_tokens.contains(&request.token)));
     }
 
-    fn complete(&mut self) -> Result<Vec<VaapiDecodedFrame>> {
+    fn complete(&mut self) -> Result<Vec<()>> {
         let (token, failed) = self.pending.pop_front().expect("pending fake frame");
         let mut state = self.control.state.lock().expect("state");
         state.steps.push(("finish", token));
@@ -75,7 +94,8 @@ impl Processor for FakeProcessor {
         Ok(Vec::new())
     }
 
-    fn retire(&mut self, key: GenerationKey) {
+    fn retire(&mut self, stream: MediaStreamId, generation: StreamGeneration) {
+        let key = (stream, generation);
         let mut state = self.control.state.lock().expect("state");
         state.native.remove(&(self.owner, key));
         state.retired.push(key);
@@ -95,7 +115,7 @@ impl Drop for FakeProcessor {
 }
 
 struct Fixture {
-    pool: VaapiDecodeWorker,
+    pool: DecodePool<FakeProcessor>,
     control: Arc<Control>,
     wakes: Receiver<()>,
 }
@@ -105,9 +125,9 @@ impl Fixture {
         let control = Arc::new(Control::default());
         let factory_control = control.clone();
         let (sender, wakes) = mpsc::channel();
-        let pool = VaapiDecodeWorker::with_factory(
+        let pool = DecodePool::new(
             limits,
-            Arc::new(move || {
+            move || {
                 let mut state = factory_control.state.lock().expect("state");
                 state.created += 1;
                 ensure!(!state.fail_init, "fake render node unavailable");
@@ -117,15 +137,15 @@ impl Fixture {
                     .expect("init gate");
                 ensure!(!timeout.timed_out(), "fake init gate timed out");
                 drop(state);
-                Ok(Box::new(FakeProcessor {
+                Ok(FakeProcessor {
                     control: factory_control.clone(),
                     owner: thread::current().id(),
                     pending: VecDeque::new(),
-                }))
-            }),
-            Arc::new(move || {
+                })
+            },
+            move || {
                 let _ = sender.send(());
-            }),
+            },
         );
         Self {
             pool,
@@ -156,7 +176,7 @@ impl Fixture {
         self.control.changed.notify_all();
     }
 
-    fn take(&mut self, count: usize) -> Vec<VaapiDecodeCompletion> {
+    fn take(&mut self, count: usize) -> Vec<FakeCompletion> {
         let mut output = Vec::new();
         while output.len() < count {
             let (completed, failure) = self.pool.drain();
@@ -171,15 +191,11 @@ impl Fixture {
         output
     }
 
-    fn submit(
-        &mut self,
-        mut request: VaapiDecodeRequest,
-        completed: &mut Vec<VaapiDecodeCompletion>,
-    ) {
+    fn submit(&mut self, mut request: FakeRequest, completed: &mut Vec<FakeCompletion>) {
         loop {
             match self.pool.try_decode(request) {
                 Ok(()) => return,
-                Err(VaapiWorkerSubmitError::Busy(pending)) => request = *pending,
+                Err(WorkerSubmitError::Busy(pending)) => request = *pending,
                 Err(error) => panic!("unexpected submission failure: {error:?}"),
             }
             let generations = self.pool.generations.len();
@@ -221,8 +237,8 @@ impl Drop for Fixture {
     }
 }
 
-fn request(token: u64, stream: u64, generation: u64) -> VaapiDecodeRequest {
-    VaapiDecodeRequest {
+fn request(token: u64, stream: u64, generation: u64) -> FakeRequest {
+    FakeRequest {
         token,
         access_unit: EncodedAccessUnit {
             frame: MediaFrameId::new(
@@ -235,9 +251,6 @@ fn request(token: u64, stream: u64, generation: u64) -> VaapiDecodeRequest {
             timestamp_micros: token,
             payload: vec![1, 2, 3],
         },
-        visible_width: 1,
-        visible_height: 1,
-        xrgb_modifiers: vec![0],
     }
 }
 
@@ -281,7 +294,7 @@ fn lazy_growth_is_bounded_and_independent_streams_complete_out_of_order() {
     let fourth = request(4, 4, 1);
     let pointer = fourth.access_unit.payload.as_ptr();
     let fourth = match fixture.pool.try_decode(fourth) {
-        Err(VaapiWorkerSubmitError::Busy(request)) => request,
+        Err(WorkerSubmitError::Busy(request)) => request,
         _ => panic!("job cap must return Busy"),
     };
     assert_eq!(fourth.access_unit.payload.as_ptr(), pointer);
@@ -289,7 +302,7 @@ fn lazy_growth_is_bounded_and_independent_streams_complete_out_of_order() {
     assert_eq!(fixture.take(1)[0].token, 3);
     assert!(matches!(
         fixture.pool.try_decode(request(5, 1, 1)),
-        Err(VaapiWorkerSubmitError::Busy(_))
+        Err(WorkerSubmitError::Busy(_))
     ));
     fixture
         .pool
@@ -328,7 +341,7 @@ fn retirement_is_idempotent_and_waits_for_active_jobs_before_releasing_capacity(
     fixture.take(1);
     assert!(matches!(
         fixture.pool.try_decode(request(2, 1, 2)),
-        Err(VaapiWorkerSubmitError::Busy(_))
+        Err(WorkerSubmitError::Busy(_))
     ));
     fixture
         .pool
@@ -365,7 +378,7 @@ fn generation_budget_is_shared_across_workers_and_rotations_wait_for_ack() {
                 fixture
                     .pool
                     .try_decode(request(generation * 100, 1, generation)),
-                Err(VaapiWorkerSubmitError::Busy(_))
+                Err(WorkerSubmitError::Busy(_))
             ));
         }
         for stream in 1..=16 {
@@ -504,7 +517,7 @@ fn completed_but_undrained_jobs_stay_charged_and_shutdown_never_waits_for_a_cons
     }
     assert!(matches!(
         fixture.pool.try_decode(request(3, 1, 1)),
-        Err(VaapiWorkerSubmitError::Busy(_))
+        Err(WorkerSubmitError::Busy(_))
     ));
     let control = fixture.control.clone();
     drop(fixture);
@@ -530,7 +543,7 @@ fn queued_frames_submit_before_finishing_and_complete_without_a_host_roundtrip()
             .expect("lookahead");
         assert!(matches!(
             fixture.pool.try_decode(request(3, 1, 1)),
-            Err(VaapiWorkerSubmitError::Busy(_))
+            Err(WorkerSubmitError::Busy(_))
         ));
         fixture.control.state.lock().expect("state").block_init = false;
         fixture.control.changed.notify_all();

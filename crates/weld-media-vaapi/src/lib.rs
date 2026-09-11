@@ -32,7 +32,5 @@ pub use probe::{
     probe_vaapi_device,
 };
 pub use vpp::{VppConverter, VppOutput};
-pub use worker::{
-    VaapiEncodeCompletion, VaapiEncodeInput, VaapiEncodeRequest, VaapiEncodeWorker,
-    VaapiWorkerSubmitError,
-};
+pub use weld_media::WorkerSubmitError as VaapiWorkerSubmitError;
+pub use worker::{VaapiEncodeCompletion, VaapiEncodeInput, VaapiEncodeRequest, VaapiEncodeWorker};

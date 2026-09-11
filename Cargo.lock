@@ -7911,7 +7911,9 @@ dependencies = [
 name = "weld-media"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "serde",
+ "tracing",
 ]
 
 [[package]]

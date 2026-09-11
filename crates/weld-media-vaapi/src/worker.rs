@@ -2,7 +2,6 @@
 
 use std::{
     collections::{HashMap, HashSet},
-    fmt,
     path::PathBuf,
     sync::{
         Arc, Mutex,
@@ -17,7 +16,7 @@ use weld_media::{EncodedAccessUnit, MediaFrameId, MediaStreamId, StreamGeneratio
 
 use crate::{
     FfmpegEncodeDevice, FfmpegEncoder, VaapiDevice, VaapiDmabuf, VaapiEncodeGeometry,
-    VaapiEncoderSettings, VppConverter,
+    VaapiEncoderSettings, VaapiWorkerSubmitError, VppConverter,
 };
 
 const WORK_QUEUE_CAPACITY: usize = 1;
@@ -59,27 +58,6 @@ pub struct VaapiEncodeRequest {
 pub struct VaapiEncodeCompletion {
     pub token: u64,
     pub result: Result<EncodedAccessUnit>,
-}
-
-/// Busy and stopped admission return the owned request; terminal rejection
-/// preserves its failure diagnostic instead.
-pub enum VaapiWorkerSubmitError<T> {
-    Busy(Box<T>),
-    Stopped(Box<T>),
-    Rejected(anyhow::Error),
-}
-
-impl<T> fmt::Debug for VaapiWorkerSubmitError<T> {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Busy(_) => formatter.write_str("VaapiWorkerSubmitError::Busy"),
-            Self::Stopped(_) => formatter.write_str("VaapiWorkerSubmitError::Stopped"),
-            Self::Rejected(error) => formatter
-                .debug_tuple("VaapiWorkerSubmitError::Rejected")
-                .field(error)
-                .finish(),
-        }
-    }
 }
 
 pub struct VaapiEncodeWorker {

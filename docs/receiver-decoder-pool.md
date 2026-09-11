@@ -20,7 +20,8 @@ in the same session, unchanged presentation topology/metadata and successor
 replacement stream/generation keys present in the front replacements. Missing
 media, metadata-only commits, unmap, new layers and generation changes stop it.
 
-`weld-media-vaapi::VaapiDecodeWorker` is the nonblocking facade over a lazy pool.
+`weld-media-vaapi::VaapiDecodeWorker` supplies the native factory for
+`weld-media::decode::DecodePool`, the shared nonblocking lazy pool.
 Default limits are four workers, eight outstanding jobs and sixteen owned stream
 generations shared across that connection. `DecodePoolLimits` can lower those
 limits; they are not discovered hardware capabilities or a physical-device-wide
@@ -28,6 +29,71 @@ allocator. Workers grow only when real work arrives. A stream stays assigned
 while any of its generations is owned, including retiring generations. Native
 FFmpeg devices, decoder contexts and VPP converters are created and used on
 their worker thread; no unsafe thread-transfer assertion is added.
+
+## Portable execution boundary
+
+The `weld-media` crate's additive `decode` feature contains the existing pool,
+not a second executor. It adds only anyhow and tracing to the neutral media
+contracts; neither Linux graphics nor FFmpeg is required. The original thirteen
+pool tests now live with that implementation. A public-API integration test uses
+an `Rc`-owned processor and Send-but-not-Sync output leases to check same-thread
+creation/use/destruction, a movable pool, multiple outputs per completion and
+output lifetime beyond generation retirement and pool destruction.
+
+`DecodeJob` reveals only stable token and frame identity. The backend keeps its
+payload, target configuration and output types. `DecodeProcessor` runs entirely
+on its creating worker thread, including destruction. Each submit occupies one
+FIFO completion slot, even on failure. A completion may return zero or more
+outputs, but must finish in bounded time without waiting for a future submit.
+The pool never polls an idle processor. Holding the last output until another
+input arrives would strand a static window and violates this low-delay contract.
+Retirement runs only after all jobs for that generation have been completed and
+drained; it must not invalidate outputs already handed to the consumer. An
+unresponsive native driver call still cannot be interrupted by the pool.
+
+Native VA-API request and output types remain in `weld-media-vaapi`, together
+with its FFmpeg device/session setup, GPU waits and VPP conversion. Its completion
+and submit-error names re-export shared representations. The root-level
+`weld_media::WorkerSubmitError` is also enabled by `decode` and reused by the
+native encoder. The similar, unboxed `weld-hoist-encoded::SubmitError` remains a
+later unification candidate, not a second change in this extraction.
+
+The Android ARM64 check verifies this portable library and dependency closure,
+not hardware decoding or APK integration. `apps/weld-vr/rust` remains a separate
+workspace and has no media dependency yet. No Android backend or new FFmpeg
+feature is advertised by this slice.
+
+### Follow-on slices (planned, not implemented)
+
+1. Separate reusable hoist receiver policy and Iroh connectivity from Linux
+   native import and source-adapter dependencies. Preserve current admission,
+   atomic commit, input, budgeting and disconnect behavior. The phone should
+   consume existing receiver mechanisms, not a Godot-specific implementation.
+2. Reuse/generalize the existing FFmpeg machinery for an Android MediaCodec
+   backend. Validate actual hardware codec selection and buffered-output progress
+   before claiming compatibility with the pool. The presenter owns the native
+   output target; decoder configuration borrows/retains the necessary lifetime.
+   Replacing that target may require a decoder restart. Native synchronization
+   and output release must stay explicit, with no raw-pixel CPU readback.
+3. Present one real hoisted window on the phone over Iroh on local Wi-Fi. Prove
+   GPU-native Godot presentation, input, resize and Android pause/resume; inspect
+   direct-versus-relay state rather than assuming LAN connectivity is direct.
+   Godot Vulkan import remains a capability/ownership gate, not a solved task.
+4. Add a real headless source entrypoint that launches a configured app session
+   without a host window or physical display. On an authorized receiver's
+   connection, automatically hoist that session's existing and new windows,
+   including related popups/dialogs. Retain apps on disconnect, release remote
+   input and suspend unnecessary streaming; reconnect re-presents live windows.
+   Virtual output defaults precede destination-controlled size/scale. Headless
+   mode needs no desktop placeholders and must not capture unrelated apps.
+5. Reuse the phone path in the Pico OpenXR shell, without Pico vendor SDK/login.
+   Verify headset rendering and lifecycle separately from phone success.
+
+These are ordered follow-ups, not implemented features or authority to create
+placeholder backends. The initial target is one authorized receiver; multi-peer
+ownership and richer discovery remain separate work.
+
+## Decode-ahead execution
 
 Each worker accepts up to two outstanding jobs, including completed but undrained
 results. Its explicit depth (one or two) also reserves that many extra caller-held

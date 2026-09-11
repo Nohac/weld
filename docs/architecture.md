@@ -59,12 +59,14 @@ Weld is a workspace of reusable layers and one standard distribution:
   each new family. It does not own client buffers, ordinary receiver
   presentation, a network transport, or a media codec.
 - `weld-media` owns transport- and platform-neutral media identities and
-  encoded payload contracts. It owns no native graphics API, codec backend,
-  transport, worker thread, Smithay, or Bevy object.
+  encoded payload contracts. Its additive `decode` feature owns bounded,
+  stream-affine worker execution with backend-defined requests and outputs.
+  It owns no native graphics API, codec backend, transport, Smithay, or Bevy
+  object. Consumers of only the media records do not enable worker dependencies.
 - `weld-media-vaapi` owns Linux FFmpeg/VA-API capability discovery and hardware
   media stages behind `weld-media` contracts. FFmpeg and libva types do not
-  cross that boundary; bounded worker ownership belongs here when the first
-  streaming path is connected.
+  cross that boundary. Its native decoder processor runs inside
+  `weld-media::decode::DecodePool`; native encoding remains in this crate.
 - `weldwm` is the standard distribution. It requests a backend, configures the
   `WeldApp` returned by the builder with plugins and shortcuts, and supplies
   the executable. It is one possible assembly of the reusable crates, not the
@@ -157,6 +159,25 @@ VPP-converts it into fresh XRGB storage at the authoritative transported
 visible extent. Duplicating an exported descriptor alone is not considered
 sufficient lifetime because FFmpeg may recycle the underlying decode surface.
 Only the fresh XRGB allocation escapes the media worker.
+
+The decode pool is reusable separately from that native implementation through
+`weld-media`'s `decode` feature. `DecodeJob` exposes only stable job/frame identity;
+`DecodeProcessor` owns its concrete request and output representations. Its
+factory creates each processor on its worker thread, and the processor need
+not implement `Send`. Only requests and outputs cross the queue boundary. The
+pool itself remains movable between host threads. Existing limits, stream
+affinity, FIFO pipelining, retirement acknowledgements and wake behavior are
+shared rather than reimplemented by a platform frontend.
+
+This is a low-delay execution boundary: completing a job must make bounded
+progress without requiring a future submission, and there is no idle decoder
+polling. Backend outputs must retain their storage independently of subsequent
+decodes or retirement. These are backend obligations, not a claim that arbitrary
+FFmpeg buffering or an Android MediaCodec output index satisfies them.
+The portable library checks for Android; the Godot project's separate workspace
+does not yet consume it. FFmpeg codec setup, native output handling and the hoist
+receiver's DMA-BUF coupling remain Linux-specific. See
+[decoder reuse and follow-ups](receiver-decoder-pool.md#portable-execution-boundary).
 
 FFmpeg and cros-libva intentionally own separate VA displays on the same render
 node in this first implementation. Frames cross that boundary through PRIME.
