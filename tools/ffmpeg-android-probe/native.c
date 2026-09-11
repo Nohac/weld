@@ -1,10 +1,6 @@
 /* Diagnostic-only glue for APIs absent from ffmpeg-sys-next bindings.
  * Compiled against the same headers as the Android FFmpeg libraries. */
-#include <libavcodec/mediacodec.h>
-#include <libavutil/frame.h>
 #include <libavutil/log.h>
-#include <libavutil/pixfmt.h>
-#include <errno.h>
 #include <pthread.h>
 #include <stdio.h>
 #include <string.h>
@@ -50,10 +46,4 @@ void weld_probe_codec_name(char *output, size_t size) {
     pthread_mutex_lock(&log_lock);
     if (size) snprintf(output, size, "%s", codec_name);
     pthread_mutex_unlock(&log_lock);
-}
-
-int weld_probe_render_frame(AVFrame *frame) {
-    if (!frame || frame->format != AV_PIX_FMT_MEDIACODEC || !frame->data[3])
-        return AVERROR(EINVAL);
-    return av_mediacodec_release_buffer((AVMediaCodecBuffer *)frame->data[3], 1);
 }

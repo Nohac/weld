@@ -11,7 +11,7 @@ diagnostic = ["dep:cros-codecs"]
 anyhow.workspace = true
 cros-codecs = { workspace = true, optional = true }
 cros-libva.workspace = true
-ffmpeg-next.workspace = true
+ffmpeg-next = { workspace = true, features = ["filter"] }
 libc.workspace = true
 weld-media = { path = "../weld-media", features = ["decode"] }
 tracing.workspace = true

@@ -12,6 +12,7 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 anyhow = "1"
 weld-media = { path = "../../crates/weld-media" }
+weld-media-android = { path = "../../crates/weld-media-android" }
 
 [target.'cfg(target_os = "android")'.dependencies]
 ffmpeg-next = { version = "=9.0.0", default-features = false, features = ["codec", "format"] }

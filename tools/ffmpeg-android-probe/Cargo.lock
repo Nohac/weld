@@ -122,6 +122,7 @@ dependencies = [
  "libc",
  "ndk",
  "weld-media",
+ "weld-media-android",
 ]
 
 [[package]]
@@ -547,6 +548,21 @@ dependencies = [
 [[package]]
 name = "weld-media"
 version = "0.1.0"
+dependencies = [
+ "anyhow",
+]
+
+[[package]]
+name = "weld-media-android"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "cc",
+ "ffmpeg-next",
+ "libc",
+ "ndk",
+ "weld-media",
+]
 
 [[package]]
 name = "winapi-util"
