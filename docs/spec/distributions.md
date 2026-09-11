@@ -118,6 +118,15 @@ Suggested validation order:
    mono window with controller interaction. Validate headset-specific surfaces,
    frame pacing and resume independently; phone success is not XR validation.
 
+The Pico experiment must use Godot's standard OpenXR integration, not the Pico
+XR Godot extension or a Pico-specific SDK. Building and running this client must
+not depend on a Pico developer account or vendor login. Validate the required
+OpenXR loader, Android packaging and runtime capabilities on the headset before
+building on them. Optional OpenXR features must be capability-gated; if a path
+requires the excluded vendor integration, report that limitation and use a
+standard OpenXR alternative or defer the feature rather than add that dependency.
+The phone-first validation order remains unchanged.
+
 For the phone, investigate MediaCodec output through Godot's [ExternalTexture]
 or another native GPU presentation adapter. For XR, also evaluate Godot's
 [OpenXR composition layers], including their Android Surface path. That path
