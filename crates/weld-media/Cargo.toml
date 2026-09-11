@@ -6,6 +6,7 @@ publish.workspace = true
 
 [features]
 serde = ["dep:serde"]
+config = ["dep:anyhow"]
 # Also exposes the shared worker admission error used by native encoders.
 decode = ["dep:anyhow", "dep:tracing"]
 

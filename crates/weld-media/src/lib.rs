@@ -13,7 +13,11 @@ mod submit;
 #[cfg(feature = "decode")]
 pub use submit::WorkerSubmitError;
 
+#[cfg(feature = "config")]
+mod config;
 mod frame;
+#[cfg(feature = "config")]
+pub use config::DecoderConfig;
 mod id;
 mod timing;
 
