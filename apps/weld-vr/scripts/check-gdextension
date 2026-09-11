@@ -1,0 +1,48 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+project_directory=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+"$project_directory/scripts/build-gdextension" desktop
+
+work_directory=$(mktemp -d "${TMPDIR:-/tmp}/weld-vr-check.XXXXXX")
+trap 'rm -rf -- "$work_directory"' EXIT
+mkdir -p "$work_directory/project"
+# Do not copy editor state, Cargo outputs, export presets or signing credentials.
+cp -a -- "$project_directory/project.godot" "$project_directory/icon.svg" \
+  "$project_directory/weld_vr.gdextension" "$project_directory/scenes" \
+  "$project_directory/tests" "$project_directory/addons" "$project_directory/bin" \
+  "$work_directory/project/"
+
+run_godot() {
+  env XDG_CONFIG_HOME="$work_directory/config" XDG_DATA_HOME="$work_directory/data" \
+    XDG_CACHE_HOME="$work_directory/cache" \
+    ADB_SERVER_SOCKET="localfilesystem:$work_directory/adb.sock" \
+    timeout 90s godot --headless --path "$work_directory/project" "$@"
+}
+
+check_log() {
+  if grep -nE 'SCRIPT ERROR:|(^|[[:space:]])ERROR:' "$1"; then
+    printf '%s\n' 'Godot reported an error despite its process exit status.' >&2
+    exit 1
+  fi
+}
+
+# Bootstrap the UID database before asking a fresh editor to resolve the main
+# scene. Only the disposable copy omits this setting during its first import.
+sed -i '/^run\/main_scene=/d' "$work_directory/project/project.godot"
+if ! run_godot --import > "$work_directory/import.log" 2>&1; then
+  cat "$work_directory/import.log" >&2
+  exit 1
+fi
+check_log "$work_directory/import.log"
+cp -- "$project_directory/project.godot" "$work_directory/project/project.godot"
+if ! run_godot --script res://tests/gdextension_smoke.gd > "$work_directory/test.log" 2>&1; then
+  cat "$work_directory/test.log" >&2
+  exit 1
+fi
+check_log "$work_directory/test.log"
+cat "$work_directory/test.log"
+if ! grep -qx 'WELD_VR_GDEXTENSION_SMOKE_OK' "$work_directory/test.log"; then
+  printf '%s\n' 'Godot did not report successful completion of the integration check.' >&2
+  exit 1
+fi

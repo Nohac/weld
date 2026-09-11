@@ -5,6 +5,8 @@
 /android/
 /build/
 /target/
+/rust/target/
+/bin/
 *.apk
 *.aab
 *.keystore

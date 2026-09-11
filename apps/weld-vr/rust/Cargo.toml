@@ -1,0 +1,27 @@
+[package]
+name = "weld-vr"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.94"
+publish = false
+
+[lib]
+name = "weld_vr"
+crate-type = ["cdylib"]
+
+[dependencies]
+godot = { version = "=0.5.5", default-features = false, features = ["api-4-7"] }
+
+# Keep the Android client build independent of the Linux compositor workspace.
+# Reusable Weld crates can still be added as explicit path dependencies.
+[workspace]
+
+[profile.dev]
+debug = 1
+incremental = false
+
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+
+[lints.clippy]
+undocumented_unsafe_blocks = "deny"

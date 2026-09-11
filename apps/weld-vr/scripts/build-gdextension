@@ -1,0 +1,66 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+  printf '%s\n' \
+    'Usage: build-gdextension [desktop|android]' \
+    'Builds and stages debug GDExtension libraries. Default: desktop.' \
+    'android builds both the Linux editor library and Android ARM64 library.' \
+    'Run from the shared Rust development shell; no device is installed or started.'
+}
+
+mode=${1:-desktop}
+if [[ $# -gt 1 ]]; then usage >&2; exit 2; fi
+case "$mode" in
+  desktop|android) ;;
+  --help|-h) usage; exit 0 ;;
+  *) usage >&2; exit 2 ;;
+esac
+
+project_directory=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+rust_directory="$project_directory/rust"
+target_directory="$rust_directory/target"
+if [[ $(uname -s) != Linux || $(uname -m) != x86_64 ]]; then
+  printf '%s\n' 'This initial build helper supports Linux x86_64 hosts only.' >&2
+  exit 1
+fi
+if [[ "$mode" == android ]]; then
+  if [[ -z ${ANDROID_NDK_HOME:-${ANDROID_NDK_ROOT:-}} ]]; then
+    printf '%s\n' 'Missing Android NDK environment. Reload the shared Rust shell.' >&2
+    exit 1
+  fi
+  if ! command -v cargo-ndk >/dev/null; then
+    printf '%s\n' 'Missing cargo-ndk. Reload the shared Rust shell.' >&2
+    exit 1
+  fi
+fi
+
+mkdir -p "$project_directory/bin"
+staging_directory=$(mktemp -d "$project_directory/bin/.stage.XXXXXX")
+cleanup() {
+  rm -f -- "$staging_directory/libweld_vr.so"
+  rmdir -- "$staging_directory"
+}
+trap cleanup EXIT
+
+stage_library() {
+  local source=$1 destination=$2
+  mkdir -p -- "$(dirname -- "$destination")"
+  install -m 755 -- "$source" "$staging_directory/libweld_vr.so"
+  # Rename, rather than truncate a library potentially mapped by the editor.
+  mv -f -- "$staging_directory/libweld_vr.so" "$destination"
+  printf 'Staged %s\n' "$destination"
+}
+
+cd -- "$rust_directory"
+cargo build --locked --jobs 2 --target x86_64-unknown-linux-gnu \
+  --target-dir "$target_directory"
+stage_library "$target_directory/x86_64-unknown-linux-gnu/debug/libweld_vr.so" \
+  "$project_directory/bin/linux/debug/libweld_vr.so"
+
+if [[ "$mode" == android ]]; then
+  cargo ndk -t arm64-v8a --platform 24 build --locked --jobs 2 \
+    --target-dir "$target_directory"
+  stage_library "$target_directory/aarch64-linux-android/debug/libweld_vr.so" \
+    "$project_directory/bin/android/debug/libweld_vr.so"
+fi
