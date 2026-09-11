@@ -2,15 +2,26 @@
 set -euo pipefail
 
 project_directory=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
-"$project_directory/scripts/build-gdextension" desktop
+case "${1:-}" in
+  '') build_target=desktop ;;
+  --android-export) build_target=android ;;
+  *) printf '%s\n' 'Usage: check-gdextension [--android-export]' >&2; exit 2 ;;
+esac
+if [[ $# -gt 1 ]]; then
+  printf '%s\n' 'Usage: check-gdextension [--android-export]' >&2
+  exit 2
+fi
+"$project_directory/scripts/build-gdextension" "$build_target"
 
 work_directory=$(mktemp -d "${TMPDIR:-/tmp}/weld-vr-check.XXXXXX")
 trap 'rm -rf -- "$work_directory"' EXIT
 mkdir -p "$work_directory/project"
 # Do not copy editor state, Cargo outputs, export presets or signing credentials.
 cp -a -- "$project_directory/project.godot" "$project_directory/icon.svg" \
-  "$project_directory/weld_vr.gdextension" "$project_directory/scenes" \
+  "$project_directory/weld_vr.gdextension" "$project_directory/weld_vr.gdextension.uid" \
+  "$project_directory/scenes" \
   "$project_directory/tests" "$project_directory/addons" "$project_directory/bin" \
+  "$project_directory/scripts" \
   "$work_directory/project/"
 
 run_godot() {
@@ -45,4 +56,64 @@ cat "$work_directory/test.log"
 if ! grep -qx 'WELD_VR_GDEXTENSION_SMOKE_OK' "$work_directory/test.log"; then
   printf '%s\n' 'Godot did not report successful completion of the integration check.' >&2
   exit 1
+fi
+
+# Exercise target selection and a failed compiler without changing real sources
+# or libraries. Exercise the shared runner without opening an editor UI.
+cp -- "$project_directory/tests/fixtures/build-gdextension" \
+  "$work_directory/project/scripts/build-gdextension"
+if ! run_godot --script res://tests/build_hook_smoke.gd > "$work_directory/hooks.log" 2>&1; then
+  cat "$work_directory/hooks.log" >&2
+  exit 1
+fi
+cat "$work_directory/hooks.log"
+grep -qx 'WELD_BUILD_HOOK_SMOKE_OK' "$work_directory/hooks.log"
+check_log "$work_directory/hooks.log"
+
+if [[ "$build_target" == android ]]; then
+  template_version=$(godot --version | cut -d. -f1-4)
+  template_directory="${XDG_DATA_HOME:-$HOME/.local/share}/godot/export_templates/$template_version"
+  if [[ ! -f "$template_directory/android_debug.apk" ]]; then
+    printf 'Missing Godot Android export template: %s\n' "$template_directory" >&2
+    exit 1
+  fi
+  mkdir -p "$work_directory/data/godot/export_templates"
+  ln -s -- "$template_directory" "$work_directory/data/godot/export_templates/$template_version"
+  cp -- "$project_directory/export_presets.cfg" "$work_directory/project/export_presets.cfg"
+  # Use no signing credentials, and do not enumerate/deploy to attached devices.
+  sed -i -e 's/^package\/signed=true$/package\/signed=false/' \
+    -e '/^\[runnable_presets\]$/,/^\[preset\.0\]$/ { /^\[preset\.0\]$/!d; }' \
+    -e 's/^export_filter="all_resources"$/export_filter="scenes"\nexport_files=PackedStringArray("res:\/\/scenes\/main.tscn")/' \
+    -e 's/^include_filter=""$/include_filter="*.gdextension,addons\/weld-rust-build\/*,tests\/*"/' \
+    "$work_directory/project/export_presets.cfg"
+  # Export the tested scene and its dependencies, including autoloads. Unused
+  # upstream XR Tools scenes have independent 4.7 import/export errors.
+  for outcome in success failure; do
+    if [[ "$outcome" == failure ]]; then
+      touch "$work_directory/project/scripts/fail-build"
+    fi
+    if ! run_godot --export-debug 'Android Phone' "$work_directory/$outcome.apk" \
+      > "$work_directory/$outcome.log" 2>&1; then
+      cat "$work_directory/$outcome.log" >&2
+      exit 1
+    fi
+    if [[ "$outcome" == success ]]; then
+      check_log "$work_directory/$outcome.log"
+      grep -Fq '[Weld Rust] Checking android debug build...' "$work_directory/$outcome.log"
+    else
+      # Godot exits 0 despite an export-plugin error. Assert the warning and
+      # preserved library, never interpret that exit status as a fresh build.
+      grep -q 'Weld Rust android build failed (exit 23)' "$work_directory/$outcome.log"
+      grep -q 'Godot may still deploy the previous library' "$work_directory/$outcome.log"
+    fi
+    unzip -p "$work_directory/$outcome.apk" lib/arm64-v8a/libweld_vr.so \
+      | cmp - "$project_directory/bin/android/debug/libweld_vr.so"
+    unzip -Z1 "$work_directory/$outcome.apk" > "$work_directory/$outcome-files"
+    grep -q '^assets/addons/godot-xr-tools/' "$work_directory/$outcome-files"
+    if grep -E '^assets/(tests/|addons/weld-rust-build/)' "$work_directory/$outcome-files"; then
+      printf '%s\n' 'Editor/test code leaked into the APK.' >&2
+      exit 1
+    fi
+  done
+  printf '%s\n' 'WELD_ANDROID_EXPORT_HOOK_OK (including expected soft failure)'
 fi

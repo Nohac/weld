@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Installed only into the disposable test project, never used by the editor.
+fixture_directory=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+printf '%s\n' "$1" >> "$fixture_directory/build-modes"
+if [[ -f "$fixture_directory/fail-build" ]]; then
+  printf '%s\n' 'WELD_EXPECTED_COMPILER_FAILURE' >&2
+  exit 23
+fi

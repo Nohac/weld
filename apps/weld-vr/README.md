@@ -70,19 +70,38 @@ directories are ignored by Git, and `.gdignore` keeps Cargo sources and outputs
 out of Godot's resource import. The main scene keeps its UID reference so Godot
 can track scene moves and renames.
 
-Godot selects the matching staged library using `weld_vr.gdextension`, but it
-does **not** rebuild Rust automatically. Run the helper again after Rust edits,
-using `android` before phone deployment. Target-aware editor build hooks are not
-installed. The companion [Godot Rust Tools](https://github.com/ttencate/godot_rust_tools)
-currently invokes ordinary Cargo builds and ignores the export target, so it is
-not a replacement for Android cross-compilation setup.
+After the initial build, the **Weld Rust Build** editor addon runs the same helper
+automatically: desktop Play builds Linux, and Android debug export/Run on Device
+builds Android ARM64 plus the editor library. Cargo decides what needs rebuilding;
+unchanged libraries are not re-staged, avoiding needless hot reloads. Android
+export is checked even when Deploy with Remote Debug is off. Other export
+platforms are untouched. No compilation happens merely from opening the editor.
+Exporting a PCK/ZIP with the Android preset runs the same Android build hook.
+
+Start Godot from the shared Rust development shell so its child Cargo process
+inherits the toolchain environment. Builds are synchronous: the editor waits,
+then prints compiler output in the Output panel. Unsupported Android profiles
+or architectures produce an export error instead of attempting a different build.
+
+A failed desktop build stops Play. A failed Android build adds an **export error**
+with its exit code and compiler diagnostics, but Godot 4.7.1 may still install
+the last successful library. The native deploy result dialog reports this after
+the run. Fix the error and deploy again; do not interpret the old app launching
+as a successful rebuild. With remote debugging on, a preliminary desktop build
+failure also does not stop Android deployment; the Android export hook reports
+the failure again. The addon never deletes the last good library.
+
+This is a Godot API limitation: `_export_begin` cannot return failure, and native
+deployment does not propagate `_build` failure. CLI export can likewise exit 0
+despite the plugin error. For automation that requires a hard failure, run
+`build-gdextension android` successfully **before** invoking Godot export.
 
 Only Linux x86_64 and Android ARM64 **debug** mappings are provided. Release
 exports and other architectures are not supported by this bootstrap.
 
 ### Phone validation
 
-After building with `android`, use the existing **Android Phone** preset and
+After the initial build, use the existing **Android Phone** preset and
 Godot's debug export/one-click deployment, just as for the original Hello World.
 Godot can use its existing default debug keystore; no new manual key setup is
 needed. Never use that development key for production releases.
@@ -109,6 +128,8 @@ headset behavior still need separate validation.
 
 ```sh
 apps/weld-vr/scripts/check-gdextension
+# Also exercise real unsigned APK exports with a simulated compiler:
+apps/weld-vr/scripts/check-gdextension --android-export
 cargo fmt --manifest-path apps/weld-vr/rust/Cargo.toml --check
 cargo clippy --manifest-path apps/weld-vr/rust/Cargo.toml \
   --locked --jobs 2 --all-targets -- -D warnings
@@ -122,6 +143,14 @@ button-to-Rust-to-label connection and fresh state after scene recreation,
 checking both process status and Godot error output. Temporary copies are
 removed on exit; your editor cache, export credentials and connected devices
 are not used.
+
+The check also exercises target selection and compiler diagnostics with a helper
+fixture. The optional Android export checks use the installed matching export
+template and SDK/JDK, no signing key or device. They export the main scene,
+autoload dependencies and GDExtension, avoiding unrelated unused XR scenes.
+They verify both normal export and the expected soft failure with a good library
+already staged: the error must be logged, the library preserved, and editor/test
+scripts excluded. These checks do not exercise the editor's device-result dialog.
 
 Desktop and ARM64 builds, Clippy and the headless integration check pass with
 Godot 4.7.1 and Rust 1.95. An exported Android debug APK contains the exact staged

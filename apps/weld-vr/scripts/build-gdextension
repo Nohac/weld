@@ -45,6 +45,10 @@ trap cleanup EXIT
 
 stage_library() {
   local source=$1 destination=$2
+  if cmp -s -- "$source" "$destination"; then
+    printf 'Unchanged %s\n' "$destination"
+    return
+  fi
   mkdir -p -- "$(dirname -- "$destination")"
   install -m 755 -- "$source" "$staging_directory/libweld_vr.so"
   # Rename, rather than truncate a library potentially mapped by the editor.
