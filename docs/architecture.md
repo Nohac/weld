@@ -72,6 +72,11 @@ Weld is a workspace of reusable layers and one standard distribution:
   media stages behind `weld-media` contracts. FFmpeg and libva types do not
   cross that boundary. Its native decoder processor runs inside
   `weld-media::decode::DecodePool`; native encoding remains in this crate.
+- `weld-media-android` owns FFmpeg/NDK decoding to acquired native-image leases.
+  Its single-producer target and retained ImageReader ownership are independent
+  of Godot, transport and the decoder context lifetime. Both the diagnostic probe
+  and Godot's Android provider use it. Portable codec configuration lives in
+  `weld-media`'s light `config` feature.
 - `weldwm` is the standard distribution. It requests a backend, configures the
   `WeldApp` returned by the builder with plugins and shortcuts, and supplies
   the executable. It is one possible assembly of the reusable crates, not the
@@ -181,9 +186,12 @@ decodes, retirement or backend destruction. Unpublished outputs may be dropped
 after the backend, so releasing them must not require that backend to remain
 alive. These are backend obligations, not a claim that arbitrary
 FFmpeg buffering or an Android MediaCodec output index satisfies them.
-The portable media, encoded-port and Iroh libraries check for Android ARM64;
-the Godot project's separate workspace does not yet consume them. FFmpeg codec
-setup and the implemented native output backend remain Linux-specific. See
+The portable media, encoded-port and Iroh libraries check for Android ARM64.
+Godot's separate workspace now consumes the media configuration and Linux/Android
+native decoders for a bounded AV1 fixture; it does not yet consume the network
+receiver or shared decode pool. Its playback and GLES/EGL presenter are shared,
+with platform-selected decoder/native-buffer providers. See
+[Godot native video](godot-native-video.md) and
 [decoder reuse and follow-ups](receiver-decoder-pool.md#portable-execution-boundary).
 
 `DecodeBackend::Output` and `DecodedFramePublisher::Buffer` bind the decoder to
@@ -208,8 +216,9 @@ completes, without changing the existing source-lease release point.
 are released. Linux adapts its existing eventfd notifier; other hosts supply
 their own wake mechanism. This changes neither Iroh queue admission nor the
 independent control/media tasks. Android checks establish compilation and the
-absence of compositor dependencies, not device execution, native decoding,
-Godot presentation or platform runtime initialization.
+absence of compositor dependencies, not network execution on Android. Separate
+device probes and the Godot fixture validate native decoding/presentation, not
+end-to-end phone hoisting or XR runtime initialization.
 
 FFmpeg and cros-libva intentionally own separate VA displays on the same render
 node in this first implementation. Frames cross that boundary through PRIME.

@@ -1,0 +1,56 @@
+[gd_scene load_steps=2 format=3 uid="uid://bjii61v6tg6cf"]
+
+[ext_resource type="Script" uid="uid://ugdo0vpc0wqs" path="res://scenes/video_panel.gd" id="1"]
+
+[node name="VideoPanel" type="Control"]
+layout_mode = 3
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+mouse_filter = 2
+script = ExtResource("1")
+
+[node name="VideoFrame" type="AspectRatioContainer" parent="."]
+layout_mode = 0
+anchor_left = 0.08
+anchor_top = 0.06
+anchor_right = 0.92
+anchor_bottom = 0.48
+ratio = 1.7777778
+stretch_mode = 2
+mouse_filter = 2
+
+[node name="Video" type="ColorRect" parent="VideoFrame"]
+layout_mode = 2
+color = Color(0.04, 0.04, 0.04, 1)
+mouse_filter = 2
+
+[node name="Status" type="Label" parent="."]
+layout_mode = 0
+anchor_left = 0.08
+anchor_top = 0.49
+anchor_right = 0.92
+anchor_bottom = 0.59
+theme_override_font_sizes/font_size = 20
+text = "Native AV1 video - red top, blue bottom, white upper-left corner"
+autowrap_mode = 2
+
+[node name="Play" type="Button" parent="."]
+layout_mode = 0
+anchor_left = 0.08
+anchor_top = 0.60
+anchor_right = 0.49
+anchor_bottom = 0.71
+theme_override_font_sizes/font_size = 26
+text = "Play AV1"
+
+[node name="Stop" type="Button" parent="."]
+layout_mode = 0
+anchor_left = 0.51
+anchor_top = 0.60
+anchor_right = 0.92
+anchor_bottom = 0.71
+theme_override_font_sizes/font_size = 26
+text = "Stop"

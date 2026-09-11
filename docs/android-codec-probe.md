@@ -1,6 +1,6 @@
 # Android native-buffer codec qualification
 
-Implemented diagnostic, not a production Android decoder or Godot presenter.
+Implemented diagnostic, now using the reusable `weld-media-android` backend.
 The portable receiver/worker extraction remains unchanged. This probe answers
 whether the selected FFmpeg MediaCodec decoder can produce independently
 acquired Android native images without Weld reading pixels back to the CPU.
@@ -47,8 +47,9 @@ behavior.
   production, with only codec/format features. It uses `weld-media` codec
   identities, not Linux compositor/VA-API dependencies. Native prefix and bindgen
   sysroot are explicit; host FFmpeg libraries must not enter the Android link.
-- These API28 libraries are **not** promised loadable in the current API24
-  Godot app. Decide the production minimum API before packaging them there.
+- These API28 libraries are now packaged in the development Godot fixture APK,
+  which must only run on ARM64/API28+ despite its prebuilt manifest declaring
+  API24. Resolve that manifest minimum before distribution.
 - Fixtures are regenerated from `testsrc2`, 320x180, twelve low-delay access
   units each: AV1 Main, H.264 Constrained Baseline and VP9 Profile 0. The host
   FFmpeg version is recorded beside them. Software fixture encoding avoids
@@ -83,9 +84,10 @@ the next ImageReader image, waits its acquire fence and checks timestamp,
 hardware-buffer metadata and crop. It never maps planes, locks pixels, copies
 YUV/RGB or calls a hardware-frame download API. A failed fence wait transfers
 that fence back with the image rather than discarding producer readiness.
-Images and frames do not escape the session. Destruction releases these before
-the decoder, device reference, retained native window and reader. No GPU sampling
-is submitted, so this does **not** validate a presenter's GPU release fence.
+The final acquired image is retained after decoder/session destruction and its
+buffer metadata is checked again. Image leases keep the reader alive independently
+of the decoder, device and retained native window. No GPU sampling is submitted
+by this probe, so it does **not** validate a presenter's GPU release fence.
 
 The native codec name comes from FFmpeg's success log. MIME-name fallbacks are
 unknown, known software prefixes are reported as software, and every other name
@@ -111,7 +113,7 @@ an image without subsequent input/EOS for all three codecs. Their startup times
 are not steady-state frame latency; this short sequence proves neither 60-fps
 throughput, multi-stream capacity nor sustained resource stability.
 
-No Pico decoder was exercised. No image was displayed in Godot, and color,
+At this initial checkpoint no Pico decoder was exercised or image displayed in Godot. Color,
 orientation, visual crop accuracy, renderer synchronization and pause/resume
 remain unvalidated. No production codec, transport or wire behavior changed.
 
@@ -129,14 +131,13 @@ Host tests cover timestamp bookkeeping, limits and conservative name
 classification without linking FFmpeg. Android build/Clippy check real native
 code; the device runs above are separate execution evidence.
 
-Next, use this evidence to generalize existing FFmpeg session/packet handling
-and provide an Android output adapter. The production worker must accommodate
-delayed output without requiring another client commit. Published native-image
-leases must remain valid through renderer use and backend retirement, not merely
-retain an opaque codec output index. Prove Godot GPU-native presentation before
-claiming a working phone hoist; its current Vulkan import remains a separate
-capability and ownership gate. Keep this probe isolated until that reusable
-backend can replace its diagnostic session code.
+On 2026-09-12 all three codecs passed again after replacing diagnostic session
+handling with `weld-media-android`. AV1 deliberately omits separate extradata to
+qualify in-band initialization; the retained-image-after-decoder-drop check also
+passes. The [Godot native-video fixture](godot-native-video.md) separately proves
+GLES/EGL presentation and basic phone lifecycle. Vulkan import and a production
+Android receiver/worker adapter remain follow-ups; neither finite probe proves
+that arbitrary codec buffering satisfies the shared low-delay completion contract.
 
 Source references: [pinned FFmpeg MediaCodec decoder](https://github.com/FFmpeg/FFmpeg/blob/38b88335f99e76ed89ff3c93f877fdefce736c13/libavcodec/mediacodecdec.c),
 [Android runtime bootstrap](https://android.googlesource.com/platform/frameworks/base/+/refs/heads/main/cmds/app_process/app_main.cpp),

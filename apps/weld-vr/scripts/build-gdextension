@@ -19,6 +19,7 @@ esac
 
 project_directory=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 rust_directory="$project_directory/rust"
+repository_directory=$(cd -- "$project_directory/../.." && pwd)
 target_directory="$rust_directory/target"
 if [[ $(uname -s) != Linux || $(uname -m) != x86_64 ]]; then
   printf '%s\n' 'This initial build helper supports Linux x86_64 hosts only.' >&2
@@ -63,8 +64,18 @@ stage_library "$target_directory/x86_64-unknown-linux-gnu/debug/libweld_vr.so" \
   "$project_directory/bin/linux/debug/libweld_vr.so"
 
 if [[ "$mode" == android ]]; then
-  cargo ndk -t arm64-v8a --platform 24 build --locked --jobs 2 \
+  "$repository_directory/scripts/build-android-ffmpeg"
+  export FFMPEG_DIR
+  FFMPEG_DIR=$("$repository_directory/scripts/build-android-ffmpeg" --print-prefix)
+  export PKG_CONFIG_LIBDIR=
+  ndk_directory=${ANDROID_NDK_HOME:-${ANDROID_NDK_ROOT:-}}
+  export BINDGEN_EXTRA_CLANG_ARGS_aarch64_linux_android="--sysroot=$ndk_directory/toolchains/llvm/prebuilt/linux-x86_64/sysroot --target=aarch64-linux-android28"
+  cargo ndk -t arm64-v8a --platform 28 build --locked --jobs 2 \
     --target-dir "$target_directory"
   stage_library "$target_directory/aarch64-linux-android/debug/libweld_vr.so" \
     "$project_directory/bin/android/debug/libweld_vr.so"
+  for dependency in avutil avcodec avformat; do
+    stage_library "$FFMPEG_DIR/lib/lib$dependency.so" \
+      "$project_directory/bin/android/debug/lib$dependency.so"
+  done
 fi

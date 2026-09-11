@@ -8,3 +8,11 @@ reloadable = true
 
 linux.debug.x86_64 = "res://bin/linux/debug/libweld_vr.so"
 android.debug.arm64 = "res://bin/android/debug/libweld_vr.so"
+
+[dependencies]
+
+android.debug.arm64 = {
+    "res://bin/android/debug/libavutil.so": "",
+    "res://bin/android/debug/libavcodec.so": "",
+    "res://bin/android/debug/libavformat.so": ""
+}

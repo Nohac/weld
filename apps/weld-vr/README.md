@@ -4,7 +4,14 @@ Godot shell for Weld's VR client, initially developed on an Android phone.
 Keep the Godot project and Rust GDExtension together here; reuse existing
 Weld crates rather than duplicating protocol, transport or media logic.
 
-The project uses the Mobile renderer. Godot XR Tools is enabled, including its
+The project uses Compatibility/OpenGL ES for native decoded-buffer import.
+Linux selects `opengl3_es`; Android uses its native GLES driver. Godot 4.7.1
+cannot opt into the Vulkan device extensions needed by our external-memory
+path; track [Godot PR #114940](https://github.com/godotengine/godot/pull/114940).
+That PR enables extension selection, not a complete video importer. Vulkan
+will still need native-buffer import, synchronization and lifetime handling.
+
+Godot XR Tools is enabled, including its
 user-settings and rumble-manager autoloads. OpenXR startup is not enabled yet:
 phone-first setup does not require a headset runtime. Headset support must use
 standard OpenXR, without a Pico SDK, Pico XR plugin or developer-account login.
@@ -34,11 +41,13 @@ autoloads. See the shared shell's README for SDK/NDK and export-template setup.
 ## Rust bridge
 
 `rust/` is a small, independent Cargo workspace, pinned to `godot` 0.5.5 with
-Godot 4.7 API bindings. It does not join the Linux compositor workspace or change
-its lockfile. The reduced binding set is sufficient for our `WeldBridge` node;
-GDScript owns the button and label. Rust owns the response counter and logs node
-entry/exit and application pause/resume. There is no per-frame polling, worker,
-networking, media decoder or XR runtime integration in this slice.
+Godot 4.7 API bindings. It remains separate from the Linux compositor workspace,
+with shared crates added as explicit path dependencies. The reduced bindings support the original `WeldBridge`
+button and shared `WeldVideoPlayer`. Playback, admission and EGL presentation
+are shared; module-level platform selection chooses the existing Linux VA-API
+provider or Android MediaCodec provider via workspace path dependencies.
+There is no networking or XR startup yet. See
+[native video validation](../../docs/godot-native-video.md) for ownership and limits.
 
 This follows the working
 [Android build comment](https://github.com/godot-rust/gdext/issues/470#issuecomment-4587348846):
@@ -59,7 +68,7 @@ apps/weld-vr/scripts/build-gdextension
 # Linux editor library plus Android ARM64 library:
 apps/weld-vr/scripts/build-gdextension android
 
-godot --editor --path apps/weld-vr
+godot --editor --display-driver wayland --rendering-driver opengl3_es --path apps/weld-vr
 ```
 
 Build before opening a fresh checkout, so Godot can register the native class.
@@ -99,6 +108,19 @@ despite the plugin error. For automation that requires a hard failure, run
 Only Linux x86_64 and Android ARM64 **debug** mappings are provided. Release
 exports and other architectures are not supported by this bootstrap.
 
+Cargo's `build.rs` generates a finite 320x180 AV1 clip (120 frames at 30 fps) in
+`OUT_DIR`, so a clean Cargo build needs no pre-generated fixture. The helper
+stages Android FFmpeg dependencies. Fixture generation requires host FFmpeg with
+`libaom-av1`; generated video and `.so` files are ignored. Linux requires EGL/GLES
+development libraries and AV1 VA-API decode/VPP support. `WELD_VR_RENDER_NODE`
+selects the render node (default `/dev/dri/renderD128`).
+
+**The development Android APK requires ARM64/API28+, despite its manifest still
+declaring API24.** Godot's prebuilt exporter does not apply the minimum SDK
+override without Gradle. Do not distribute this APK to older devices; resolve
+the manifest minimum before distribution. Unsupported native stacks fail
+explicitly, without silently downloading pixels to the CPU.
+
 ### Phone validation
 
 After the initial build, use the existing **Android Phone** preset and
@@ -106,23 +128,30 @@ Godot's debug export/one-click deployment, just as for the original Hello World.
 Godot can use its existing default debug keystore; no new manual key setup is
 needed. Never use that development key for production releases.
 
-1. Launch the app and tap **Call Rust**. The label should show `Hello from Rust!`
+1. Tap **Play AV1**: manual start, not autoplay. Expect a red top bar, blue
+   bottom bar and white upper-left marker. The four-second clip retains its
+   final image; tap Play again to replay.
+2. Background during playback, then resume. Playback must remain stopped until
+   explicit replay. Tap **Stop** before testing the original bridge label.
+3. Tap **Call Rust**. The label should show `Hello from Rust!`
    and `Tap count: 1`; further taps increment the count.
-2. Background and resume the app, then tap again. If Android retained the process,
+4. Background and resume the app, then tap again. If Android retained the process,
    the count should continue. Rust logs the pause/resume notifications.
-3. Close and relaunch the app. A new bridge starts its count at zero.
-4. Inspect `adb logcat -s godot` for the `weld-vr:` lifecycle and button messages.
+5. Close and relaunch the app. A new bridge starts its count at zero.
+6. Inspect app-scoped `adb logcat --pid=PID` for lifecycle/decoder errors.
 
 The build helper never installs, launches or stops an app on a device. Godot
 4.7.1 exposes APK export through its CLI, but not the editor's combined one-click
 deploy action; command-line deployment uses export, `adb install -r`, and
 `adb shell am start` separately.
 
-Validated on a Pixel 8 Pro on 2026-09-11: the debug APK updated the existing app
+Initial bridge validation on a Pixel 8 Pro on 2026-09-11: the debug APK updated the existing app
 using its existing debug key, launched with the Mobile Vulkan renderer, loaded
 the ARM64 Rust bridge, and displayed incrementing responses to touch input.
-The user confirmed the interaction worked. Android background/resume and
-headset behavior still need separate validation.
+The user confirmed the interaction worked. On 2026-09-12 the GLES/native-video
+build displayed AV1 on this phone (120 decoded/120 presented), including active
+playback pause, resume without autoplay, replay and graceful Back exit. The user
+confirmed visible video. Pico/OpenXR and rotation remain unvalidated.
 
 ### Automated checks
 
@@ -155,8 +184,10 @@ scripts excluded. These checks do not exercise the editor's device-result dialog
 Desktop and ARM64 builds, Clippy and the headless integration check pass with
 Godot 4.7.1 and Rust 1.95. An exported Android debug APK contains the exact staged
 ARM64 `libweld_vr.so`, including `gdext_rust_init`, and no desktop copy of that
-library. The root Weld Cargo manifest, lockfile and build configuration are
-unchanged.
+library. Native-video exports also include `libavcodec`, `libavformat` and
+`libavutil`. Checks verify the panel and XR global-class dependencies: a
+scene-only export silently omitted them, leaving the old layout visible after
+the new main script failed to load on-device.
 
 For headless APK export, import resources before exporting. A combined first
 import/export produced errors from unused XR Tools resources and exit-time

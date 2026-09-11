@@ -1,4 +1,9 @@
-//! Minimal Godot bridge used to validate desktop and Android GDExtension builds.
+//! Godot shell bridge and shared GPU-native video fixture.
+
+mod fixture;
+mod native;
+mod playback;
+mod video;
 
 use godot::{
     classes::{INode, Node, notify::NodeNotification},
@@ -7,8 +12,9 @@ use godot::{
 
 struct WeldVrExtension;
 
-// SAFETY: gdext generates the entry point and registers the classes in this
-// library. We use its default initialization, with no custom raw FFI or threads.
+// SAFETY: gdext generates the entry point and registers this library's classes.
+// Native video workers are owned by scene nodes and joined before node teardown
+// completes; opening the editor does not start native work.
 #[gdextension]
 unsafe impl ExtensionLibrary for WeldVrExtension {}
 

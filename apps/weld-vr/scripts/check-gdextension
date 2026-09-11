@@ -83,11 +83,9 @@ if [[ "$build_target" == android ]]; then
   # Use no signing credentials, and do not enumerate/deploy to attached devices.
   sed -i -e 's/^package\/signed=true$/package\/signed=false/' \
     -e '/^\[runnable_presets\]$/,/^\[preset\.0\]$/ { /^\[preset\.0\]$/!d; }' \
-    -e 's/^export_filter="all_resources"$/export_filter="scenes"\nexport_files=PackedStringArray("res:\/\/scenes\/main.tscn")/' \
-    -e 's/^include_filter=""$/include_filter="*.gdextension,addons\/weld-rust-build\/*,tests\/*"/' \
     "$work_directory/project/export_presets.cfg"
-  # Export the tested scene and its dependencies, including autoloads. Unused
-  # upstream XR Tools scenes have independent 4.7 import/export errors.
+  # Use the real resource selection: a scene-only export omitted GDScript
+  # preloads and XR global classes even though the export process succeeded.
   for outcome in success failure; do
     if [[ "$outcome" == failure ]]; then
       touch "$work_directory/project/scripts/fail-build"
@@ -109,6 +107,16 @@ if [[ "$build_target" == android ]]; then
     unzip -p "$work_directory/$outcome.apk" lib/arm64-v8a/libweld_vr.so \
       | cmp - "$project_directory/bin/android/debug/libweld_vr.so"
     unzip -Z1 "$work_directory/$outcome.apk" > "$work_directory/$outcome-files"
+    for library in weld_vr avutil avcodec avformat; do
+      grep -qx "lib/arm64-v8a/lib$library.so" "$work_directory/$outcome-files"
+    done
+    for resource in scenes/video_panel.tscn.remap \
+      addons/godot-xr-tools/xr_tools.gd.remap \
+      addons/godot-xr-tools/user_settings/user_settings.gd.remap \
+      addons/godot-xr-tools/rumble/rumble_manager_queue.gd.remap \
+      .godot/global_script_class_cache.cfg; do
+      grep -qx "assets/$resource" "$work_directory/$outcome-files"
+    done
     grep -q '^assets/addons/godot-xr-tools/' "$work_directory/$outcome-files"
     if grep -E '^assets/(tests/|addons/weld-rust-build/)' "$work_directory/$outcome-files"; then
       printf '%s\n' 'Editor/test code leaked into the APK.' >&2
