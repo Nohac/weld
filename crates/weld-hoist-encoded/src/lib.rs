@@ -5,6 +5,8 @@ mod bitrate;
 mod budget;
 mod codec;
 mod destination_observations;
+#[cfg(feature = "native")]
+pub mod native;
 mod observations;
 mod output;
 mod scheduling;
@@ -25,8 +27,8 @@ pub use transport_observations::{
 };
 
 pub use codec::{
-    DecodeBackend, DecodeCompletion, DecodeRequest, DecodedFrame, EncodeBackend, EncodeCompletion,
-    EncodeInput, EncodeRequest, SubmitError,
+    DecodeBackend, DecodeCompletion, DecodeRequest, DecodedFrame, DecodedFramePublisher,
+    EncodeBackend, EncodeCompletion, EncodeInput, EncodeRequest, PreparedEncodeInput, SubmitError,
 };
 #[cfg(feature = "vaapi")]
 pub use codec::{decode_backend, encode_backend};

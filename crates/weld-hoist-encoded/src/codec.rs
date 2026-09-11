@@ -1,17 +1,32 @@
 //! Codec-independent hoist adapter contracts and optional VA-API binding.
 
-use crate::EncoderBitrateLimits;
+use std::any::Any;
+
 use anyhow::Result;
+use weld_client::{ClientBufferId, ClientBufferLease, ClientBufferUseId};
+#[cfg(feature = "native")]
 use weld_core::dmabuf::ExternalDmabuf;
 use weld_media::{DecodeTiming, EncodedAccessUnit, MediaFrameId, MediaStreamId, StreamGeneration};
 
+use crate::EncoderBitrateLimits;
+
+/// Prepared encoder input. Native integrations may add representations.
+#[non_exhaustive]
 pub enum EncodeInput {
+    #[cfg(feature = "native")]
     Dmabuf(ExternalDmabuf),
     PackedBgra {
         width: u32,
         height: u32,
         pixels: Vec<u8>,
     },
+}
+
+/// Backend-prepared input and any source consumer needed through completion.
+/// Copied pixels need no retained lease; borrowed native storage does.
+pub struct PreparedEncodeInput {
+    pub input: EncodeInput,
+    pub retained_lease: Option<ClientBufferLease>,
 }
 
 pub struct EncodeRequest {
@@ -35,14 +50,14 @@ pub struct DecodeRequest {
     pub visible_height: u32,
 }
 
-pub struct DecodedFrame {
+pub struct DecodedFrame<O> {
     pub frame: MediaFrameId,
-    pub dmabuf: ExternalDmabuf,
+    pub buffer: O,
 }
 
-pub struct DecodeCompletion {
+pub struct DecodeCompletion<O> {
     pub token: u64,
-    pub result: Result<Vec<DecodedFrame>>,
+    pub result: Result<Vec<DecodedFrame<O>>>,
     pub timing: Option<DecodeTiming>,
 }
 
@@ -53,6 +68,10 @@ pub enum SubmitError<T> {
 }
 
 pub trait EncodeBackend {
+    /// Resolve this adapter's source access without exposing native types to
+    /// scheduling. Retain a lease whenever asynchronous work borrows its storage.
+    fn prepare_input(&self, lease: &ClientBufferLease) -> Result<PreparedEncodeInput>;
+
     /// Optional rate control through generation replacement, not hot retuning.
     fn bitrate_limits(&self) -> Option<EncoderBitrateLimits> {
         None
@@ -63,6 +82,12 @@ pub trait EncodeBackend {
 }
 
 pub trait DecodeBackend {
+    /// Owned output that stays valid until published or dropped, independently
+    /// of subsequent submissions, generation retirement and backend destruction.
+    /// Unpublished outputs may be dropped after this backend; releasing them must
+    /// not require a live backend. Retain any necessary native owners in the output.
+    type Output: 'static;
+
     /// Nonblocking, bounded admission. Busy returns the exact owned request and
     /// must arrange a host wake when capacity becomes available. Callers submit
     /// in stream order; independent streams may complete in any order.
@@ -70,10 +95,32 @@ pub trait DecodeBackend {
     /// Return all completed work alongside any terminal failure. Each successful
     /// output owns stable storage independent of the codec context, so retiring
     /// that context cannot invalidate or overwrite a returned image.
-    fn drain(&mut self) -> (Vec<DecodeCompletion>, Option<anyhow::Error>);
+    fn drain(&mut self) -> (Vec<DecodeCompletion<Self::Output>>, Option<anyhow::Error>);
     /// Idempotent retirement; completion releases context capacity and wakes the
     /// host even if there are no subsequent frames. Never retire an active job.
     fn retire(&mut self, stream: MediaStreamId, generation: StreamGeneration) -> Result<()>;
+}
+
+/// Converts a completed native output into a client lease at atomic publication,
+/// not at decode completion. Dropping an unpublished [`Self::Buffer`] must release it.
+/// This is distinct from the app-side client importer that consumes the lease.
+pub trait DecodedFramePublisher: 'static {
+    /// Backend-owned decoded allocation, retained until publication or cancellation.
+    type Buffer: 'static;
+    /// App-side importer matching the access payload placed in published leases.
+    type ClientImporter: Any;
+    /// Supply the app-side intake matching this publisher's lease payloads.
+    fn client_importer(&self) -> Self::ClientImporter;
+    /// IDs belong to the destination adapter. Returned leases and release
+    /// closures own all required state and must outlive this publisher/port.
+    /// Failure may consume IDs and is terminal through the destination relay.
+    /// On failure, release any native resources allocated by this call.
+    fn publish(
+        &mut self,
+        buffer: Self::Buffer,
+        id: ClientBufferId,
+        use_id: ClientBufferUseId,
+    ) -> Result<ClientBufferLease>;
 }
 
 #[cfg(feature = "vaapi")]
@@ -89,11 +136,13 @@ mod vaapi {
         VaapiWorkerSubmitError,
     };
 
+    use weld_client::ClientBufferLease;
+
     use super::{
         DecodeBackend, DecodeCompletion, DecodeRequest, DecodedFrame, EncodeBackend,
         EncodeCompletion, EncodeInput, EncodeRequest, SubmitError,
     };
-    use crate::EncoderBitrateLimits;
+    use crate::{EncoderBitrateLimits, PreparedEncodeInput, native::prepare_input};
 
     const H264_BITRATE: u64 = 16_000_000;
     const AV1_BITRATE: u64 = 8_000_000;
@@ -125,7 +174,7 @@ mod vaapi {
         capabilities: &ExternalDmabufCapabilities,
         codec: VideoCodec,
         notify: impl Fn() + Send + Sync + 'static,
-    ) -> Result<Box<dyn DecodeBackend>> {
+    ) -> Result<Box<dyn DecodeBackend<Output = ExternalDmabuf>>> {
         let xrgb_modifiers = capabilities
             .formats
             .iter()
@@ -149,6 +198,10 @@ mod vaapi {
     }
 
     impl EncodeBackend for VaapiEncoder {
+        fn prepare_input(&self, lease: &ClientBufferLease) -> Result<PreparedEncodeInput> {
+            prepare_input(lease)
+        }
+
         fn bitrate_limits(&self) -> Option<EncoderBitrateLimits> {
             Some(self.limits)
         }
@@ -282,6 +335,8 @@ mod vaapi {
     }
 
     impl DecodeBackend for VaapiDecoder {
+        type Output = ExternalDmabuf;
+
         fn try_submit(&mut self, request: DecodeRequest) -> Result<(), SubmitError<DecodeRequest>> {
             if request.access_unit.codec != self.codec {
                 return Err(SubmitError::Rejected(anyhow::anyhow!(
@@ -314,7 +369,7 @@ mod vaapi {
             })
         }
 
-        fn drain(&mut self) -> (Vec<DecodeCompletion>, Option<anyhow::Error>) {
+        fn drain(&mut self) -> (Vec<DecodeCompletion<ExternalDmabuf>>, Option<anyhow::Error>) {
             let (completions, failure) = self.worker.drain();
             let completions = completions
                 .into_iter()
@@ -327,7 +382,7 @@ mod vaapi {
                             .map(|frame| {
                                 Ok(DecodedFrame {
                                     frame: frame.frame,
-                                    dmabuf: from_vaapi_dmabuf(frame.dmabuf)?,
+                                    buffer: from_vaapi_dmabuf(frame.dmabuf)?,
                                 })
                             })
                             .collect()

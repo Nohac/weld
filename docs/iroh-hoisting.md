@@ -5,6 +5,39 @@ over an authenticated and encrypted Iroh connection. The source and
 destination use the same transport-neutral relay and encoded scheduling as the
 Unix validation path; only connectivity and framing differ.
 
+## Portable library boundary
+
+`weld-hoist-iroh` and `weld-hoist-encoded` have compositor-free default dependency
+graphs. `IrohNotifier` accepts the host's nonblocking, fallible wake callback;
+the native feature adapts the existing Linux eventfd notifier. Input/control,
+media framing, queue budgets and authentication use the same implementations.
+This is not a new transport or a polling-based receiver.
+
+`destination_registration_with_backend` accepts a decoder and matching
+`DecodedFramePublisher`. The publisher supplies the app-side importer marker and
+owns native lease construction; shared scheduling retains its typed decoded
+buffers until atomic publication. The `native` feature adds Linux integration;
+`vaapi` implies `native` and supplies the existing hardware-codec conveniences.
+The standard distribution continues enabling VA-API, while an Android consumer
+can depend on the default libraries without Smithay, Bevy, wgpu or libva.
+
+Validation includes native-host tests with portable fake buffers and an Android
+ARM64 compile check:
+
+```sh
+cargo ndk -t arm64-v8a --platform 24 check --locked \
+  -p weld-hoist-encoded -p weld-hoist-iroh -j 2
+cargo tree -p weld-hoist-encoded -p weld-hoist-iroh --target aarch64-linux-android
+```
+
+These are cross-compilation checks, not ARM64 test execution or hardware decode.
+The existing private-file ticket/identity exchange remains; QR/bootstrap UI,
+Android runtime initialization and APK packaging, MediaCodec output and Godot
+GPU presentation are still separate work. The Godot workspace is not yet wired
+to these libraries.
+
+## Same-machine validation
+
 Run the same-machine tracer with:
 
 ```sh

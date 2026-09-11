@@ -10,8 +10,11 @@ use weld_hoist_core::{
     DestinationRelayAdapter, HoistEndpoint, HoistEndpointCommand, HoistSessionId,
     SourceRelayAdapter, relocated_surface,
 };
+#[cfg(feature = "encoded-vaapi")]
+use weld_hoist_encoded::native::DecodedDmabufPublisher;
 use weld_hoist_encoded::{
-    EncodedDestinationPort, EncodedSourcePort, EncoderRateControl, SharedBitrateBudget,
+    DecodedFramePublisher, EncodedDestinationPort, EncodedSourcePort, EncoderRateControl,
+    SharedBitrateBudget,
 };
 
 use crate::{
@@ -137,25 +140,24 @@ pub fn encoded_source_registration_with_backend(
     ))
 }
 
-pub fn encoded_destination_registration_with_backend(
+pub fn encoded_destination_registration_with_backend<P: DecodedFramePublisher>(
     control: LocalPacketConnection,
     media: LocalPacketConnection,
     upstream_source: ClientSourceId,
     destination_source: ClientSourceId,
-    dmabuf: DmabufContext,
-    backend: Box<dyn crate::LocalDecodeBackend>,
+    publisher: P,
+    backend: Box<dyn crate::LocalDecodeBackend<Output = P::Buffer>>,
 ) -> anyhow::Result<ClientAdapterRegistration> {
     let descriptor = ClientSourceDescriptor::new(destination_source, ClientProvenance::Relocated);
     let transport = LocalEncodedDestinationTransport::new(control, media)?;
+    let importer = publisher.client_importer();
     let adapter = DestinationRelayAdapter::new(
         upstream_source,
         descriptor,
-        EncodedDestinationPort::new(transport, backend, descriptor, dmabuf),
+        EncodedDestinationPort::new(transport, backend, descriptor, publisher),
     );
     Ok(ClientAdapterRegistration::new(
-        descriptor,
-        adapter,
-        DirectClientBufferImporter,
+        descriptor, adapter, importer,
     ))
 }
 
@@ -254,7 +256,7 @@ pub fn encoded_destination_registration(
         media.clone(),
         upstream_source,
         destination_source,
-        dmabuf,
+        DecodedDmabufPublisher::new(dmabuf),
         backend,
     )?;
     Ok((

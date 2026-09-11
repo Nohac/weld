@@ -90,9 +90,11 @@ The proposed split keeps protocol/session/input mechanisms in reusable Weld Rust
 code, exposes a small Godot-facing integration, and keeps Android codec and
 presentation objects behind a platform adapter. Godot supplies shell scenes,
 layout and eventual OpenXR integration; most behavior may be written in Rust.
-The existing encoded/Iroh crates still depend on `weld-core`, so their reusable
-client path must be separated from Linux compositor dependencies as concretely
-needed. Do not ship Smithay/DRM/VA-API host machinery just to reuse hoist policy.
+The encoded/Iroh libraries now have compositor-free default dependency graphs;
+Linux native integration is opt-in. See the implemented
+[portable receiver boundary](../receiver-decoder-pool.md#portable-encoded-receiver-and-iroh-binding).
+The Godot shell is not yet wired to those libraries. Do not ship
+Smithay/DRM/VA-API host machinery just to reuse hoist policy.
 
 The [godot-rust Android guide] and the user's supplied [Android build report]
 provide a starting point: an ARM64 Rust `cdylib`, `cargo-ndk`, Godot's Android

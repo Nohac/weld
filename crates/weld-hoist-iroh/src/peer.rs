@@ -8,7 +8,6 @@ use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWrite},
     sync::mpsc,
 };
-use weld_core::host::ClientRuntimeNotifier;
 use weld_hoist_core::{HoistPortError, HoistPortResult};
 use weld_hoist_encoded::{
     EncodedDestinationTransport, EncodedSourceTransport, ReceiveBudget, SendStatus,
@@ -18,7 +17,7 @@ use weld_hoist_protocol::{DestinationEnvelope, EncodedBuffer, MediaEnvelope, Sou
 use weld_media::{EncodedAccessUnit, VideoCodec};
 
 use crate::{
-    IrohPeerIdentity,
+    IrohNotifier, IrohPeerIdentity,
     diagnostics::PathMonitor,
     framing::{read_media, read_record_buffered, write_record_buffered},
     host::HostLifetime,
@@ -33,11 +32,11 @@ const MEDIA_STREAM_MAGIC: [u8; 8] = *b"weldmed1";
 struct PeerState<T> {
     incoming: IncomingQueue<T>,
     connection: Connection,
-    notifier: ClientRuntimeNotifier,
+    notifier: IrohNotifier,
 }
 
 impl<T> PeerState<T> {
-    fn new(connection: Connection, notifier: ClientRuntimeNotifier) -> Self {
+    fn new(connection: Connection, notifier: IrohNotifier) -> Self {
         Self {
             incoming: IncomingQueue::new(notifier.clone()),
             connection,
@@ -231,7 +230,7 @@ pub(crate) fn spawn_source_peer(
     control_send: SendStream,
     control_recv: RecvStream,
     media_send: SendStream,
-    notifier: ClientRuntimeNotifier,
+    notifier: IrohNotifier,
     codec: VideoCodec,
 ) -> IrohSourcePeer {
     let path = crate::diagnostics::observe(&connection);
@@ -264,7 +263,7 @@ pub(crate) fn spawn_destination_peer(
     control_send: SendStream,
     control_recv: RecvStream,
     media_recv: RecvStream,
-    notifier: ClientRuntimeNotifier,
+    notifier: IrohNotifier,
     codec: VideoCodec,
 ) -> IrohDestinationPeer {
     crate::diagnostics::observe(&connection);
@@ -433,14 +432,13 @@ impl std::error::Error for PeerError {}
 mod tests {
     use crate::framing::{read_record, write_record};
     use futures_lite::future::poll_once;
-    use weld_core::host::client_runtime_notifier;
     use weld_hoist_protocol::{DestinationMessage, HoistSessionId};
 
     use super::*;
 
     #[tokio::test]
     async fn saturated_stream_reader_does_not_block_opposite_control_writer() {
-        let (notifier, _wake) = client_runtime_notifier().expect("notifier");
+        let notifier = IrohNotifier::new(|| Ok(()));
         let inbox = IncomingQueue::new(notifier);
         let (mut input, reader) = tokio::io::duplex(8192);
         for sequence in 0..QUEUE_CAPACITY + 1 {

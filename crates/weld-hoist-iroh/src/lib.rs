@@ -8,6 +8,7 @@ mod host;
 mod inbox;
 mod input_outbox;
 mod media_queue;
+mod notifier;
 mod peer;
 mod rendezvous;
 
@@ -18,6 +19,7 @@ pub use adapter::{
 #[cfg(feature = "vaapi")]
 pub use adapter::{IrohSourceRegistrationOptions, destination_registration, source_registration};
 pub use host::{IrohHost, IrohNetwork};
+pub use notifier::IrohNotifier;
 pub use peer::{IrohDestinationPeer, IrohSourcePeer};
 
 /// Authenticated Iroh endpoint identity, kept opaque to Weld policy.
@@ -32,6 +34,7 @@ impl IrohPeerIdentity {
 
 #[cfg(test)]
 mod tests {
+    mod portable_receiver;
     use std::{path::Path, thread, time::Duration};
 
     use weld_client::{ClientId, ClientSourceId, ClientSurfaceId};
@@ -70,10 +73,8 @@ mod tests {
         destination_host
             .publish_identity(&expected)
             .expect("approved destination identity");
-        let (source_notifier, _source_wake) =
-            weld_core::host::client_runtime_notifier().expect("source notifier");
-        let (destination_notifier, _destination_wake) =
-            weld_core::host::client_runtime_notifier().expect("destination notifier");
+        let source_notifier = IrohNotifier::new(|| Ok(()));
+        let destination_notifier = IrohNotifier::new(|| Ok(()));
         let source_ticket = ticket.clone();
         let source = thread::spawn(move || {
             source_host
@@ -228,6 +229,7 @@ mod tests {
                 matches!(&received[0], SourceTransportPacket::Media(packet) if packet.access_unit.frame.sequence == sequence)
             );
         }
+        portable_receiver::check_registration(&source, destination.clone());
         source.disconnect();
         wait_for(|| (!destination.is_available()).then_some(()));
         let _ = std::fs::remove_file(ticket);
@@ -248,7 +250,7 @@ mod tests {
         let expected = directory.0.join("invalid.identity");
         rendezvous::publish(&expected, "not-an-endpoint-id").expect("invalid identity fixture");
         let host = IrohHost::bind(IrohNetwork::Direct).expect("host");
-        let (notifier, _wake) = weld_core::host::client_runtime_notifier().expect("notifier");
+        let notifier = IrohNotifier::new(|| Ok(()));
         let error = host
             .accept_source(
                 directory.0.join("source.ticket"),

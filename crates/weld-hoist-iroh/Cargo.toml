@@ -6,7 +6,8 @@ publish.workspace = true
 
 [features]
 default = []
-vaapi = ["weld-hoist-encoded/vaapi"]
+native = ["dep:weld-core", "weld-hoist-encoded/native"]
+vaapi = ["native", "weld-hoist-encoded/vaapi"]
 
 [dependencies]
 anyhow.workspace = true
@@ -19,7 +20,7 @@ serde.workspace = true
 tokio = { workspace = true, features = ["macros"] }
 tracing.workspace = true
 weld-client = { path = "../weld-client" }
-weld-core = { path = "../weld-core" }
+weld-core = { path = "../weld-core", optional = true }
 weld-hoist-core = { path = "../weld-hoist-core" }
 weld-hoist-encoded = { path = "../weld-hoist-encoded" }
 weld-hoist-protocol = { path = "../weld-hoist-protocol" }

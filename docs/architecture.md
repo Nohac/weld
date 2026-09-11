@@ -41,9 +41,13 @@ Weld is a workspace of reusable layers and one standard distribution:
   source-authoritative identity relocation, popup and parent relationships,
   scale reset, focus, and remote-input cleanup.
 - `weld-hoist-encoded` owns transport-neutral encoded commit scheduling,
-  local backpressure, resize coalescing, codec worker contracts, and decoded
-  DMA-BUF import. Codec and DMA-BUF work stays on the compositor thread while
-  bindings move only control records and compressed access units.
+  local backpressure, resize coalescing, codec worker contracts, and atomic
+  decoded-frame publication. Its default dependency graph has no compositor or
+  native graphics dependency. The optional `native` integration supplies Linux
+  buffer preparation and DMA-BUF publication; `vaapi` additionally supplies the
+  hardware codec binding. Port policy and publication run on the caller thread;
+  native codecs run on bounded workers. Bindings move only control records and
+  compressed access units.
 - `weld-hoist-local` owns the Linux-local Postcard/Unix-seqpacket binding,
   SCM_RIGHTS native-buffer transfer, optional opaque encoded-media binding,
   and source/destination relay ports. It depends on core's native import
@@ -52,7 +56,8 @@ Weld is a workspace of reusable layers and one standard distribution:
 - `weld-hoist-iroh` owns the authenticated Iroh endpoint host, peer
   connections, endpoint-ticket rendezvous, bounded Postcard framing, and the
   independent QUIC control and encoded-media streams. Iroh and Tokio types do
-  not cross its registration boundary.
+  not cross its registration boundary. Its default graph is compositor-free;
+  optional native/VA-API registration uses the same portable peer machinery.
 - `weld-hoist-ui` owns source placeholders, reclaim and closed-tombstone UI.
 - `weld-hoist` owns Bevy window-family admission and reclaim orchestration. It
   also owns the process-local endpoint registry used to select an endpoint for
@@ -172,12 +177,39 @@ shared rather than reimplemented by a platform frontend.
 This is a low-delay execution boundary: completing a job must make bounded
 progress without requiring a future submission, and there is no idle decoder
 polling. Backend outputs must retain their storage independently of subsequent
-decodes or retirement. These are backend obligations, not a claim that arbitrary
+decodes, retirement or backend destruction. Unpublished outputs may be dropped
+after the backend, so releasing them must not require that backend to remain
+alive. These are backend obligations, not a claim that arbitrary
 FFmpeg buffering or an Android MediaCodec output index satisfies them.
-The portable library checks for Android; the Godot project's separate workspace
-does not yet consume it. FFmpeg codec setup, native output handling and the hoist
-receiver's DMA-BUF coupling remain Linux-specific. See
+The portable media, encoded-port and Iroh libraries check for Android ARM64;
+the Godot project's separate workspace does not yet consume them. FFmpeg codec
+setup and the implemented native output backend remain Linux-specific. See
 [decoder reuse and follow-ups](receiver-decoder-pool.md#portable-execution-boundary).
+
+`DecodeBackend::Output` and `DecodedFramePublisher::Buffer` bind the decoder to
+a caller-owned publication adapter without making native buffers a protocol
+type. The shared receiver retains decoded outputs until all layers of their
+commit are ready. Only then does the publisher construct ordinary
+`ClientBufferLease` values. Cancelled outputs drop without import. The publisher
+also supplies its matching app-side client importer marker, so registrations
+cannot independently choose an incompatible intake marker.
+
+The Linux `DecodedDmabufPublisher` preserves core's external import, lease and
+cache-removal path. Leases retain their own native state beyond publisher/port
+lifetime. Destination-owned buffer/use IDs are allocated before publication;
+a failed publication may consume IDs but never reuses them. A publication error
+discards all results from that poll, including earlier complete commits, and the
+destination relay disconnects, releasing the remaining unpublished outputs.
+`EncodeBackend::prepare_input` similarly hides source access from scheduling:
+the Linux backend copies SHM pixels or retains a DMA-BUF consumer until encoding
+completes, without changing the existing source-lease release point.
+
+`IrohNotifier` is a cloneable fallible wake callback, invoked after queue locks
+are released. Linux adapts its existing eventfd notifier; other hosts supply
+their own wake mechanism. This changes neither Iroh queue admission nor the
+independent control/media tasks. Android checks establish compilation and the
+absence of compositor dependencies, not device execution, native decoding,
+Godot presentation or platform runtime initialization.
 
 FFmpeg and cros-libva intentionally own separate VA displays on the same render
 node in this first implementation. Frames cross that boundary through PRIME.

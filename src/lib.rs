@@ -193,7 +193,7 @@ pub fn run(arguments: AppArguments) -> Result<()> {
                     .as_ref()
                     .context("Iroh source needs an approved peer identity path")?,
                 codec,
-                network_notifier,
+                network_notifier.into(),
                 iroh_timeout,
             )?;
             tracing::info!(
@@ -234,8 +234,12 @@ pub fn run(arguments: AppArguments) -> Result<()> {
                 media.vendor
             );
             let (network_notifier, network_wake) = weld_core::host::client_runtime_notifier()?;
-            let peer =
-                host.connect_destination(ticket, supported_codecs, network_notifier, iroh_timeout)?;
+            let peer = host.connect_destination(
+                ticket,
+                supported_codecs,
+                network_notifier.into(),
+                iroh_timeout,
+            )?;
             let codec = peer.codec();
             tracing::info!(
                 peer = peer.identity().as_str(),

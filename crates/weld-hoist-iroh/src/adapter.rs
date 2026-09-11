@@ -6,14 +6,15 @@ use weld_client::{
     ClientAdapterCommandEnvelope, ClientAdapterRegistration, ClientProvenance,
     ClientSourceDescriptor, ClientSourceId, ClientSurfaceId, ControlOnlyClientImporter,
 };
-use weld_core::dmabuf::{DirectClientBufferImporter, DmabufContext};
+#[cfg(feature = "vaapi")]
+use weld_core::dmabuf::DmabufContext;
 use weld_hoist_core::{
     DestinationRelayAdapter, HoistEndpoint, HoistEndpointCommand, HoistSessionId,
     SourceRelayAdapter, relocated_surface,
 };
 use weld_hoist_encoded::{
-    DecodeBackend, EncodeBackend, EncodedDestinationPort, EncodedSourcePort, EncoderRateControl,
-    SharedBitrateBudget,
+    DecodeBackend, DecodedFramePublisher, EncodeBackend, EncodedDestinationPort, EncodedSourcePort,
+    EncoderRateControl, SharedBitrateBudget,
 };
 use weld_media::VideoCodec;
 
@@ -22,7 +23,7 @@ use crate::{IrohDestinationPeer, IrohSourcePeer};
 #[cfg(feature = "vaapi")]
 use weld_core::dmabuf::ExternalDmabufCapabilities;
 #[cfg(feature = "vaapi")]
-use weld_hoist_encoded::{decode_backend, encode_backend};
+use weld_hoist_encoded::{decode_backend, encode_backend, native::DecodedDmabufPublisher};
 
 /// Source policy endpoint associated with one remote Iroh destination.
 #[derive(Clone)]
@@ -113,22 +114,23 @@ pub fn source_registration_with_backend(
     ))
 }
 
-pub fn destination_registration_with_backend(
+pub fn destination_registration_with_backend<P: DecodedFramePublisher>(
     peer: IrohDestinationPeer,
     upstream_source: ClientSourceId,
     destination_source: ClientSourceId,
-    dmabuf: DmabufContext,
-    backend: Box<dyn DecodeBackend>,
+    publisher: P,
+    backend: Box<dyn DecodeBackend<Output = P::Buffer>>,
 ) -> ClientAdapterRegistration {
     let descriptor = ClientSourceDescriptor::new(destination_source, ClientProvenance::Relocated);
+    let importer = publisher.client_importer();
     ClientAdapterRegistration::new(
         descriptor,
         DestinationRelayAdapter::new(
             upstream_source,
             descriptor,
-            EncodedDestinationPort::new(peer, backend, descriptor, dmabuf),
+            EncodedDestinationPort::new(peer, backend, descriptor, publisher),
         ),
-        DirectClientBufferImporter,
+        importer,
     )
 }
 
@@ -189,7 +191,7 @@ pub fn destination_registration(
             peer,
             upstream_source,
             destination_source,
-            dmabuf,
+            DecodedDmabufPublisher::new(dmabuf),
             backend,
         ),
         wake,

@@ -12,11 +12,10 @@ use anyhow::{Context, Result, bail};
 use iroh::{Endpoint, EndpointId, RelayMode, Watcher, endpoint::presets};
 use iroh_tickets::endpoint::EndpointTicket;
 use tokio::sync::mpsc;
-use weld_core::host::ClientRuntimeNotifier;
 use weld_media::VideoCodec;
 
 use crate::{
-    IrohDestinationPeer, IrohSourcePeer,
+    IrohDestinationPeer, IrohNotifier, IrohSourcePeer,
     admission::{self, WELD_ALPN},
     peer::{spawn_destination_peer, spawn_source_peer},
     rendezvous,
@@ -84,7 +83,7 @@ impl IrohHost {
         ticket_path: impl AsRef<Path>,
         expected_peer_path: impl AsRef<Path>,
         codec: VideoCodec,
-        notifier: ClientRuntimeNotifier,
+        notifier: IrohNotifier,
         startup_timeout: Duration,
     ) -> Result<IrohSourcePeer> {
         let deadline = Instant::now()
@@ -125,7 +124,7 @@ impl IrohHost {
         &self,
         ticket_path: impl AsRef<Path>,
         supported_codecs: Vec<VideoCodec>,
-        notifier: ClientRuntimeNotifier,
+        notifier: IrohNotifier,
         startup_timeout: Duration,
     ) -> Result<IrohDestinationPeer> {
         let deadline = Instant::now()
@@ -202,7 +201,7 @@ enum HostCommand {
         codec: VideoCodec,
         expected: EndpointId,
         deadline: Instant,
-        notifier: ClientRuntimeNotifier,
+        notifier: IrohNotifier,
         reply: std_mpsc::SyncSender<Result<IrohSourcePeer, String>>,
     },
     ConnectDestination {
@@ -210,7 +209,7 @@ enum HostCommand {
         ticket: EndpointTicket,
         supported_codecs: Vec<VideoCodec>,
         deadline: Instant,
-        notifier: ClientRuntimeNotifier,
+        notifier: IrohNotifier,
         reply: std_mpsc::SyncSender<Result<IrohDestinationPeer, String>>,
     },
     Shutdown,
@@ -305,7 +304,7 @@ async fn accept_source(
     expected: EndpointId,
     codec: VideoCodec,
     deadline: Instant,
-    notifier: ClientRuntimeNotifier,
+    notifier: IrohNotifier,
 ) -> Result<IrohSourcePeer> {
     let mut bootstrap = admission::accept_source(
         &endpoint,
@@ -337,7 +336,7 @@ async fn connect_destination(
     ticket: EndpointTicket,
     supported_codecs: Vec<VideoCodec>,
     deadline: Instant,
-    notifier: ClientRuntimeNotifier,
+    notifier: IrohNotifier,
 ) -> Result<IrohDestinationPeer> {
     let mut bootstrap =
         admission::connect_destination(&endpoint, ticket, &supported_codecs, deadline.into())

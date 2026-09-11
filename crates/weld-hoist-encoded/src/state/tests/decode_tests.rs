@@ -10,7 +10,7 @@ fn frame(stream: u64, generation: u64, sequence: u64) -> MediaFrameId {
     )
 }
 
-fn tree(
+pub(super) fn tree(
     surface: ClientSurfaceId,
     revision: u64,
     frames: &[MediaFrameId],
@@ -63,13 +63,7 @@ fn complete_decode(decoder: &Rc<RefCell<FakeDecoderState>>, index: usize) {
         timing: None,
         result: Ok(vec![DecodedFrame {
             frame,
-            dmabuf: weld_core::dmabuf::ExternalDmabuf {
-                extent: Extent::new(1, 1),
-                format: 0,
-                modifier: 0,
-                flags: 0,
-                planes: Vec::new(),
-            },
+            buffer: Extent::new(1, 1),
         }]),
     });
 }
@@ -78,7 +72,7 @@ fn complete_decode(decoder: &Rc<RefCell<FakeDecoderState>>, index: usize) {
 fn one_four_layer_commit_fills_four_slots_and_applies_atomically() {
     let (mut port, transport, decoder) = destination_port();
     decoder.borrow_mut().capacity = Some(4);
-    port.state.as_mut().expect("state").fake_import = true;
+    port.state.as_mut().expect("state").publisher.enabled = true;
     let surface = surface(ClientSourceId::new(1), 1, 1);
     let frames = (1..=4)
         .map(|stream| frame(stream, 1, 0))
@@ -115,7 +109,7 @@ fn one_four_layer_commit_fills_four_slots_and_applies_atomically() {
 fn three_backlogged_surfaces_get_fair_turns_without_advancing_their_commit_order() {
     let (mut port, transport, decoder) = destination_port();
     decoder.borrow_mut().capacity = Some(0);
-    port.state.as_mut().expect("state").fake_import = true;
+    port.state.as_mut().expect("state").publisher.enabled = true;
     for sequence in 0..2 {
         for stream in 1..=3 {
             queue(
@@ -152,7 +146,7 @@ fn three_backlogged_surfaces_get_fair_turns_without_advancing_their_commit_order
 #[test]
 fn busy_preserves_payload_allocation_ingress_time_and_last_pending_work() {
     let (mut port, transport, decoder) = destination_port();
-    port.state.as_mut().expect("state").fake_import = true;
+    port.state.as_mut().expect("state").publisher.enabled = true;
     let surface = surface(ClientSourceId::new(1), 1, 1);
     let frames = [frame(1, 1, 0), frame(2, 1, 0)];
     queue(&transport, surface, 1, &frames);
@@ -181,7 +175,7 @@ fn busy_preserves_payload_allocation_ingress_time_and_last_pending_work() {
 #[test]
 fn obsolete_context_retires_while_its_completed_output_waits_for_atomic_application() {
     let (mut port, transport, decoder) = destination_port();
-    port.state.as_mut().expect("state").fake_import = true;
+    port.state.as_mut().expect("state").publisher.enabled = true;
     let surface = surface(ClientSourceId::new(1), 1, 1);
     let old = [frame(1, 1, 0), frame(2, 1, 0)];
     let new = [frame(1, 2, 0), frame(2, 2, 0)];
@@ -276,7 +270,7 @@ fn sixteen_streams_rotate_while_backlogged_without_exceeding_context_budget() {
         decoder.capacity = Some(4);
         decoder.generation_limit = Some(16);
     }
-    port.state.as_mut().expect("state").fake_import = true;
+    port.state.as_mut().expect("state").publisher.enabled = true;
     let surface = surface(ClientSourceId::new(1), 1, 1);
     for (revision, generation, sequence) in [(1, 1, 0), (2, 1, 1), (3, 2, 0)] {
         let frames = (1..=16)
@@ -309,7 +303,7 @@ fn sixteen_streams_rotate_while_backlogged_without_exceeding_context_budget() {
 #[test]
 fn local_worker_timing_separates_residence_and_pipeline_stages_from_host_handoff() {
     let (mut port, transport, decoder) = destination_port();
-    port.state.as_mut().expect("state").fake_import = true;
+    port.state.as_mut().expect("state").publisher.enabled = true;
     queue(
         &transport,
         surface(ClientSourceId::new(1), 1, 1),
@@ -375,7 +369,7 @@ fn deferred_retirement_ack_releases_busy_request_without_new_transport_input() {
         decoder.generation_limit = Some(1);
         decoder.defer_retirement = true;
     }
-    port.state.as_mut().expect("state").fake_import = true;
+    port.state.as_mut().expect("state").publisher.enabled = true;
     let surface = surface(ClientSourceId::new(1), 1, 1);
     let old = frame(1, 1, 0);
     let new = frame(1, 2, 0);
@@ -415,7 +409,7 @@ fn destroyed_or_withdrawn_surface_can_reenter_ready_queue_exactly_once() {
     for destroyed in [true, false] {
         let (mut port, transport, decoder) = destination_port();
         decoder.borrow_mut().capacity = Some(0);
-        port.state.as_mut().expect("state").fake_import = true;
+        port.state.as_mut().expect("state").publisher.enabled = true;
         let surface = surface(ClientSourceId::new(1), 1, 1);
         queue(&transport, surface, 1, &[frame(1, 1, 0)]);
         port.poll().expect("first queued surface");
@@ -467,7 +461,7 @@ fn destroyed_or_withdrawn_surface_can_reenter_ready_queue_exactly_once() {
 fn lookahead_is_one_commit_and_out_of_order_results_still_apply_in_order() {
     let (mut port, transport, decoder) = destination_port();
     decoder.borrow_mut().capacity = Some(8);
-    port.state.as_mut().expect("state").fake_import = true;
+    port.state.as_mut().expect("state").publisher.enabled = true;
     let surface = surface(ClientSourceId::new(1), 1, 1);
     for sequence in 0..3 {
         queue(&transport, surface, sequence + 1, &[frame(1, 1, sequence)]);

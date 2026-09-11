@@ -12,15 +12,14 @@ use std::{
 
 use anyhow::{Context, Result, ensure};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, TryAcquireError};
-use weld_core::host::ClientRuntimeNotifier;
 
-use crate::peer::QUEUE_CAPACITY;
+use crate::{IrohNotifier, peer::QUEUE_CAPACITY};
 
 pub(super) struct IncomingQueue<T> {
     available: AtomicBool,
     capacity: Arc<Semaphore>,
     values: Mutex<QueueState<T>>,
-    notifier: ClientRuntimeNotifier,
+    notifier: IrohNotifier,
     pressure: Pressure,
 }
 
@@ -77,11 +76,11 @@ impl Drop for Parked<'_> {
 }
 
 impl<T> IncomingQueue<T> {
-    pub fn new(notifier: ClientRuntimeNotifier) -> Self {
+    pub fn new(notifier: IrohNotifier) -> Self {
         Self::with_capacity(notifier, QUEUE_CAPACITY)
     }
 
-    pub fn with_capacity(notifier: ClientRuntimeNotifier, capacity: usize) -> Self {
+    pub fn with_capacity(notifier: IrohNotifier, capacity: usize) -> Self {
         Self {
             available: AtomicBool::new(true),
             capacity: Arc::new(Semaphore::new(capacity)),
@@ -208,18 +207,68 @@ impl<T> IncomingQueue<T> {
 #[cfg(test)]
 mod tests {
     use futures_lite::future::poll_once;
-    use weld_core::host::client_runtime_notifier;
+    use std::{
+        io,
+        sync::{OnceLock, Weak},
+    };
 
     use super::*;
 
     fn queue() -> IncomingQueue<usize> {
-        let (notifier, _wake) = client_runtime_notifier().expect("notifier");
+        let notifier = IrohNotifier::new(|| Ok(()));
         IncomingQueue::new(notifier)
     }
 
     #[tokio::test]
+    async fn wake_runs_after_publication_without_holding_the_queue_lock() {
+        let slot = Arc::new(OnceLock::<Weak<IncomingQueue<usize>>>::new());
+        let observed = Arc::new(Mutex::new(Vec::new()));
+        let callback_slot = slot.clone();
+        let callback_observed = observed.clone();
+        let notifier = IrohNotifier::new(move || {
+            let queue = callback_slot.get().and_then(Weak::upgrade).expect("queue");
+            // Fail rather than hang if publication starts retaining this lock.
+            let values = queue.values.try_lock().expect("queue unlocked during wake");
+            let records = values.records.iter().map(|(record, _)| *record);
+            callback_observed.lock().expect("observed").extend(records);
+            Ok(())
+        });
+        let queue = Arc::new(IncomingQueue::with_capacity(notifier, 1));
+        assert!(slot.set(Arc::downgrade(&queue)).is_ok());
+        queue.push(7).await.expect("publish and wake");
+        assert_eq!(*observed.lock().expect("observed"), [7]);
+        assert_eq!(queue.drain().expect("drain"), [7]);
+        assert_eq!(queue.capacity.available_permits(), 1);
+    }
+
+    #[tokio::test]
+    async fn failed_wake_preserves_queued_data_and_budgeted_rearming() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let callback_calls = calls.clone();
+        let queue = IncomingQueue::with_capacity(
+            IrohNotifier::new(move || {
+                callback_calls.fetch_add(1, Ordering::SeqCst);
+                Err(io::Error::other("test wake unavailable"))
+            }),
+            1,
+        );
+        let error = queue.push(7).await.expect_err("wake failure propagates");
+        assert!(format!("{error:#}").contains("test wake unavailable"));
+        assert_eq!(queue.capacity.available_permits(), 0);
+        assert!(queue.wake_if(|_| false).is_ok());
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert!(queue.wake_if(|_| true).is_err());
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert_eq!(queue.drain().expect("queued record survives"), [7]);
+        assert_eq!(queue.capacity.available_permits(), 1);
+        assert!(queue.fail());
+        assert!(!queue.fail());
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test]
     async fn reservation_precedes_payload_and_partial_drain_preserves_fifo() {
-        let (notifier, _wake) = client_runtime_notifier().expect("notifier");
+        let notifier = IrohNotifier::new(|| Ok(()));
         let media = IncomingQueue::with_capacity(notifier, 2);
         media
             .reserve()

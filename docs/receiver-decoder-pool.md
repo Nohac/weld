@@ -58,35 +58,59 @@ and submit-error names re-export shared representations. The root-level
 native encoder. The similar, unboxed `weld-hoist-encoded::SubmitError` remains a
 later unification candidate, not a second change in this extraction.
 
-The Android ARM64 check verifies this portable library and dependency closure,
+The Android ARM64 check verifies the portable libraries and dependency closure,
 not hardware decoding or APK integration. `apps/weld-vr/rust` remains a separate
-workspace and has no media dependency yet. No Android backend or new FFmpeg
-feature is advertised by this slice.
+workspace and has no media dependency yet. No Android codec backend or new
+FFmpeg feature is advertised by these extractions.
+
+### Portable encoded receiver and Iroh binding
+
+`weld-hoist-encoded` and `weld-hoist-iroh` now build without `weld-core` by default.
+The decoded-buffer representation is an associated type shared by `DecodeBackend`
+and a `DecodedFramePublisher`. Publication remains at the existing atomic commit
+boundary, not at worker completion. The publisher creates a `ClientBufferLease`
+and supplies the matching app-side importer marker to both local and Iroh
+registrations. Linux supplies `DecodedDmabufPublisher` under `native`; `vaapi`
+implies `native` and adds the codec dependency. The Unix binding enables native
+integration explicitly. Source preparation is also a backend operation, keeping
+Linux DMA-BUF/SHM access out of shared scheduling.
+
+Test-only missing-context and fake-import branches were removed from production
+state. The ordinary publisher interface now supports portable test buffers.
+Tests cover cancellation before publication, independent lease lifetime, failure
+after partial multi-layer publication, release of earlier complete commits from
+the same failed poll, and relay-driven disconnect cleanup. Failed publication
+may consume monotonic buffer/use IDs; they are not reused. There is no partial
+commit delivery or new per-commit failure isolation.
+
+Iroh wake integration takes a fallible callback instead of requiring the Linux
+host notifier. The optional native adapter uses the existing eventfd. Queue
+capacities, admission, wake placement, independent stream tasks, authentication
+and wire records remain unchanged. Tests exercise callbacks after queue
+publication and outside locks, wake failure/rearming, and a real direct Iroh
+exchange through public receiver registration with a fake decoder/publisher.
+That last test validates plumbing, not an actual video bitstream or GPU decode.
 
 ### Follow-on slices (planned, not implemented)
 
-1. Separate reusable hoist receiver policy and Iroh connectivity from Linux
-   native import and source-adapter dependencies. Preserve current admission,
-   atomic commit, input, budgeting and disconnect behavior. The phone should
-   consume existing receiver mechanisms, not a Godot-specific implementation.
-2. Reuse/generalize the existing FFmpeg machinery for an Android MediaCodec
+1. Reuse/generalize the existing FFmpeg machinery for an Android MediaCodec
    backend. Validate actual hardware codec selection and buffered-output progress
    before claiming compatibility with the pool. The presenter owns the native
    output target; decoder configuration borrows/retains the necessary lifetime.
    Replacing that target may require a decoder restart. Native synchronization
    and output release must stay explicit, with no raw-pixel CPU readback.
-3. Present one real hoisted window on the phone over Iroh on local Wi-Fi. Prove
+2. Present one real hoisted window on the phone over Iroh on local Wi-Fi. Prove
    GPU-native Godot presentation, input, resize and Android pause/resume; inspect
    direct-versus-relay state rather than assuming LAN connectivity is direct.
    Godot Vulkan import remains a capability/ownership gate, not a solved task.
-4. Add a real headless source entrypoint that launches a configured app session
+3. Add a real headless source entrypoint that launches a configured app session
    without a host window or physical display. On an authorized receiver's
    connection, automatically hoist that session's existing and new windows,
    including related popups/dialogs. Retain apps on disconnect, release remote
    input and suspend unnecessary streaming; reconnect re-presents live windows.
    Virtual output defaults precede destination-controlled size/scale. Headless
    mode needs no desktop placeholders and must not capture unrelated apps.
-5. Reuse the phone path in the Pico OpenXR shell, without Pico vendor SDK/login.
+4. Reuse the phone path in the Pico OpenXR shell, without Pico vendor SDK/login.
    Verify headset rendering and lifecycle separately from phone success.
 
 These are ordered follow-ups, not implemented features or authority to create

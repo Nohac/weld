@@ -18,6 +18,6 @@ smithay = { workspace = true, features = ["wayland_frontend"] }
 weld-client = { path = "../weld-client", features = ["serde"] }
 weld-core = { path = "../weld-core" }
 weld-hoist-core = { path = "../weld-hoist-core" }
-weld-hoist-encoded = { path = "../weld-hoist-encoded" }
+weld-hoist-encoded = { path = "../weld-hoist-encoded", features = ["native"] }
 weld-hoist-protocol = { path = "../weld-hoist-protocol" }
 weld-media = { path = "../weld-media", features = ["serde"] }

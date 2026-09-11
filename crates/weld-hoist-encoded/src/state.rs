@@ -18,7 +18,6 @@ use weld_client::{
     SurfaceBufferChange, SurfaceLayerId, WireClientSurfaceCommit, WireClientSurfaceEvent,
     WireClientSurfaceEventKind, WireSurfaceBufferChange,
 };
-use weld_core::dmabuf::{DirectClientBufferAccess, DmabufContext, export_client_dmabuf};
 use weld_hoist_core::{
     DestinationPortCommand, DestinationPortEvent, DestinationPortRecord, HoistDestinationPort,
     HoistPortError, HoistPortResult, HoistSessionId, HoistSourcePort, SourcePortCommand,
@@ -36,7 +35,8 @@ use crate::activity::{Activity, ActivitySnapshot, SchedulingPolicy};
 use crate::bitrate::{BitrateRequest, EncoderRateApplication, EncoderRateControl, EncoderRates};
 use crate::budget::{BudgetMembership, SharedBitrateBudget};
 use crate::codec::{
-    DecodeBackend, DecodeRequest, EncodeBackend, EncodeInput, EncodeRequest, SubmitError,
+    DecodeBackend, DecodeRequest, DecodedFramePublisher, EncodeBackend, EncodeRequest,
+    PreparedEncodeInput, SubmitError,
 };
 use crate::destination_observations::{
     DestinationGauges, DestinationObservation, DestinationObservations,
@@ -126,14 +126,14 @@ struct SourceStream {
 
 struct PreparedEncode {
     request: EncodeRequest,
-    retained_dmabuf_lease: Option<ClientBufferLease>,
+    retained_input_lease: Option<ClientBufferLease>,
     rate: Option<BitrateRequest>,
 }
 
 struct ActiveEncode {
     token: u64,
     frame: MediaFrameId,
-    retained_dmabuf_lease: Option<ClientBufferLease>,
+    retained_input_lease: Option<ClientBufferLease>,
     rate: Option<BitrateRequest>,
 }
 
@@ -369,7 +369,7 @@ impl EncodedSourceState {
                 completion.token == batch.active.token,
                 "encoder completed an unexpected source event"
             );
-            drop(batch.active.retained_dmabuf_lease.take());
+            drop(batch.active.retained_input_lease.take());
             let valid_packet = completion.result.as_ref().is_ok_and(|unit| {
                 unit.frame == batch.active.frame
                     && (unit.frame.sequence != 0 || unit.kind == EncodedFrameKind::Keyframe)
@@ -643,27 +643,10 @@ impl EncodedSourceState {
         let mut prepared = VecDeque::new();
         let event = WireClientSurfaceEvent::try_from_client_with_layer(event, |layer, lease| {
             let (frame, rate) = self.allocate_frame(surface, layer, lease.metadata())?;
-            let access = lease
-                .access::<DirectClientBufferAccess>()
-                .context("client-buffer lease does not contain direct native access")?;
-            let (input, retained_dmabuf_lease) = match access {
-                DirectClientBufferAccess::Dmabuf(_) => {
-                    let dmabuf = export_client_dmabuf(&lease)?;
-                    ensure!(
-                        !dmabuf.is_y_inverted(),
-                        "encoded tracer does not support y-inverted DMA-BUF input"
-                    );
-                    (EncodeInput::Dmabuf(dmabuf), Some(lease.clone()))
-                }
-                DirectClientBufferAccess::Shm(shm) => (
-                    EncodeInput::PackedBgra {
-                        width: lease.metadata().extent.width,
-                        height: lease.metadata().extent.height,
-                        pixels: shm.bgra_pixels.clone(),
-                    },
-                    None,
-                ),
-            };
+            let PreparedEncodeInput {
+                input,
+                retained_lease: retained_input_lease,
+            } = self.backend.prepare_input(&lease)?;
             let token = take_counter(&mut self.next_token, "encoded source token")?;
             let timestamp_micros = self.next_timestamp()?;
             prepared.push_back(PreparedEncode {
@@ -674,7 +657,7 @@ impl EncodedSourceState {
                     input,
                     bitrate_bits_per_second: rate.map(|value| value.bits_per_second),
                 },
-                retained_dmabuf_lease,
+                retained_input_lease,
                 rate,
             });
             Ok::<_, anyhow::Error>(EncodedBuffer { frame })
@@ -718,7 +701,7 @@ impl EncodedSourceState {
     fn submit_prepared(&mut self, prepared: PreparedEncode) -> Result<ActiveEncode> {
         let PreparedEncode {
             request,
-            retained_dmabuf_lease,
+            retained_input_lease,
             rate,
         } = prepared;
         let token = request.token;
@@ -737,7 +720,7 @@ impl EncodedSourceState {
             Ok(()) => Ok(ActiveEncode {
                 token,
                 frame,
-                retained_dmabuf_lease,
+                retained_input_lease,
                 rate,
             }),
             Err(SubmitError::Busy(_)) => {
@@ -1152,20 +1135,18 @@ struct InFlightDecode {
     submitted_at: Instant,
 }
 
-struct EncodedDestinationState {
+struct EncodedDestinationState<P: DecodedFramePublisher> {
     activity: Activity,
     scheduler: Scheduler,
     policy: SchedulingPolicy,
-    backend: Box<dyn DecodeBackend>,
+    backend: Box<dyn DecodeBackend<Output = P::Buffer>>,
     descriptor: ClientSourceDescriptor,
-    dmabuf: Option<DmabufContext>,
+    publisher: P,
     queues: HashMap<ClientSurfaceId, VecDeque<QueuedDestinationEvent>>,
     media_frames: HashMap<MediaFrameId, PendingMedia>,
-    decoded: HashMap<MediaFrameId, weld_core::dmabuf::ExternalDmabuf>,
+    decoded: HashMap<MediaFrameId, P::Buffer>,
     decode_in_flight: HashMap<u64, InFlightDecode>,
     ready_surfaces: VecDeque<ClientSurfaceId>,
-    #[cfg(test)]
-    fake_import: bool,
     cancelled_frames: HashMap<MediaFrameId, HoistSessionId>,
     streams: HashMap<(ClientSurfaceId, SurfaceLayerId), EncodedGeneration>,
     pending_retirement: HashSet<EncodedGeneration>,
@@ -1175,19 +1156,11 @@ struct EncodedDestinationState {
     observations: DestinationObservations,
 }
 
-impl EncodedDestinationState {
+impl<P: DecodedFramePublisher> EncodedDestinationState<P> {
     fn new(
-        backend: Box<dyn DecodeBackend>,
+        backend: Box<dyn DecodeBackend<Output = P::Buffer>>,
         descriptor: ClientSourceDescriptor,
-        dmabuf: DmabufContext,
-    ) -> Self {
-        Self::new_with_dmabuf(backend, descriptor, Some(dmabuf))
-    }
-
-    fn new_with_dmabuf(
-        backend: Box<dyn DecodeBackend>,
-        descriptor: ClientSourceDescriptor,
-        dmabuf: Option<DmabufContext>,
+        publisher: P,
     ) -> Self {
         Self {
             backend,
@@ -1195,14 +1168,12 @@ impl EncodedDestinationState {
             activity: Activity::default(),
             scheduler: Scheduler::default(),
             policy: SchedulingPolicy::default(),
-            dmabuf,
+            publisher,
             queues: HashMap::new(),
             media_frames: HashMap::new(),
             decoded: HashMap::new(),
             decode_in_flight: HashMap::new(),
             ready_surfaces: VecDeque::new(),
-            #[cfg(test)]
-            fake_import: false,
             cancelled_frames: HashMap::new(),
             streams: HashMap::new(),
             pending_retirement: HashSet::new(),
@@ -1211,14 +1182,6 @@ impl EncodedDestinationState {
             next_use: Some(1),
             observations: DestinationObservations::new(Instant::now()),
         }
-    }
-
-    #[cfg(test)]
-    fn new_without_dmabuf(
-        backend: Box<dyn DecodeBackend>,
-        descriptor: ClientSourceDescriptor,
-    ) -> Self {
-        Self::new_with_dmabuf(backend, descriptor, None)
     }
 
     fn enqueue(
@@ -1432,7 +1395,7 @@ impl EncodedDestinationState {
                 }
                 tracing::trace!(frame = ?frame.frame, decode_micros = wall_time.as_micros(),
                     "completed encoded destination decode");
-                self.decoded.insert(frame.frame, frame.dmabuf);
+                self.decoded.insert(frame.frame, frame.buffer);
                 Ok(())
             })();
             if let Err(error) = result {
@@ -1603,11 +1566,11 @@ impl EncodedDestinationState {
                     let revision = commit_revision(&queued.event)
                         .context("decoded destination event was not a commit")?;
                     let event = queued.event.try_into_client(|buffer, _| {
-                        let dmabuf = self
+                        let decoded = self
                             .decoded
                             .remove(&buffer.frame)
                             .context("decoded layer frame disappeared")?;
-                        self.import_decoded(dmabuf)
+                        self.publish_decoded(decoded)
                     })?;
                     output.push(EncodedDestinationEvent {
                         session: queued.session,
@@ -1815,34 +1778,9 @@ impl EncodedDestinationState {
         }
     }
 
-    fn import_decoded(
-        &mut self,
-        dmabuf: weld_core::dmabuf::ExternalDmabuf,
-    ) -> Result<ClientBufferLease> {
-        #[cfg(test)]
-        if self.fake_import {
-            return Ok(ClientBufferLease::new(
-                ClientBufferId::new(
-                    self.descriptor.id,
-                    take_counter(&mut self.next_buffer, "test decoded buffer")?,
-                ),
-                ClientBufferUseId::new(
-                    self.descriptor.id,
-                    take_counter(&mut self.next_use, "test decoded use")?,
-                ),
-                ClientBufferMetadata::new(dmabuf.extent, true),
-                std::rc::Rc::new(dmabuf),
-                |_| {},
-            )?);
-        }
-        let context = self
-            .dmabuf
-            .as_ref()
-            .context("DMA-BUF import is unavailable in this encoded destination")?;
-        let metadata = ClientBufferMetadata::new(dmabuf.extent, true);
-        let access = context.import_external(dmabuf)?;
-        let access_for_release = access.clone();
-        let dmabuf_for_release = context.clone();
+    fn publish_decoded(&mut self, decoded: P::Buffer) -> Result<ClientBufferLease> {
+        // IDs remain monotonic even when publication fails. The relay treats
+        // failure as terminal; no renderer allocation precedes ID exhaustion.
         let buffer = ClientBufferId::new(
             self.descriptor.id,
             take_counter(&mut self.next_buffer, "decoded buffer")?,
@@ -1851,13 +1789,11 @@ impl EncodedDestinationState {
             self.descriptor.id,
             take_counter(&mut self.next_use, "decoded buffer use")?,
         );
-        context.lease_external(buffer, use_id, metadata, access, move |_| {
-            dmabuf_for_release.remove_external(&access_for_release)
-        })
+        self.publisher.publish(decoded, buffer, use_id)
     }
 }
 
-impl Drop for EncodedDestinationState {
+impl<P: DecodedFramePublisher> Drop for EncodedDestinationState<P> {
     fn drop(&mut self) {
         // Best effort before ordinary teardown; process abort/SIGKILL may skip it.
         self.report_observations(true);
@@ -1865,21 +1801,21 @@ impl Drop for EncodedDestinationState {
 }
 
 /// Destination relay port that reconstructs decoded client commits.
-pub struct EncodedDestinationPort<T> {
+pub struct EncodedDestinationPort<T, P: DecodedFramePublisher> {
     transport: T,
-    state: Option<EncodedDestinationState>,
+    state: Option<EncodedDestinationState<P>>,
 }
 
-impl<T: EncodedDestinationTransport> EncodedDestinationPort<T> {
+impl<T: EncodedDestinationTransport, P: DecodedFramePublisher> EncodedDestinationPort<T, P> {
     pub fn new(
         transport: T,
-        backend: Box<dyn DecodeBackend>,
+        backend: Box<dyn DecodeBackend<Output = P::Buffer>>,
         descriptor: ClientSourceDescriptor,
-        dmabuf: DmabufContext,
+        publisher: P,
     ) -> Self {
         Self {
             transport,
-            state: Some(EncodedDestinationState::new(backend, descriptor, dmabuf)),
+            state: Some(EncodedDestinationState::new(backend, descriptor, publisher)),
         }
     }
 
@@ -1889,20 +1825,6 @@ impl<T: EncodedDestinationTransport> EncodedDestinationPort<T> {
             state.policy = policy;
         }
         self
-    }
-
-    #[cfg(test)]
-    fn new_without_dmabuf(
-        transport: T,
-        backend: Box<dyn DecodeBackend>,
-        descriptor: ClientSourceDescriptor,
-    ) -> Self {
-        Self {
-            transport,
-            state: Some(EncodedDestinationState::new_without_dmabuf(
-                backend, descriptor,
-            )),
-        }
     }
 
     fn apply_source_packet(
@@ -1962,7 +1884,9 @@ impl<T: EncodedDestinationTransport> EncodedDestinationPort<T> {
     }
 }
 
-impl<T: EncodedDestinationTransport> HoistDestinationPort for EncodedDestinationPort<T> {
+impl<T: EncodedDestinationTransport, P: DecodedFramePublisher> HoistDestinationPort
+    for EncodedDestinationPort<T, P>
+{
     fn poll(&mut self) -> HoistPortResult<Vec<DestinationPortRecord>> {
         let budget = self
             .state
@@ -2183,6 +2107,7 @@ mod tests {
     mod bitrate_tests;
     mod decode_tests;
     mod priority_tests;
+    mod publication_tests;
     mod shared_budget_tests;
     use std::{
         cell::{Cell, RefCell},
@@ -2199,7 +2124,7 @@ mod tests {
     use weld_media::EncodedFrameKind;
 
     use super::*;
-    use crate::codec::{DecodeCompletion, DecodedFrame, EncodeCompletion};
+    use crate::codec::{DecodeCompletion, DecodedFrame, EncodeCompletion, EncodeInput};
 
     #[derive(Default)]
     struct FakeSourceTransportState {
@@ -2314,14 +2239,33 @@ mod tests {
     struct FakeEncoder(Rc<RefCell<FakeEncoderState>>);
 
     impl EncodeBackend for FakeEncoder {
+        fn prepare_input(&self, lease: &ClientBufferLease) -> Result<PreparedEncodeInput> {
+            let pixels = lease
+                .access::<Vec<u8>>()
+                .context("test pixel lease")?
+                .clone();
+            Ok(PreparedEncodeInput {
+                input: EncodeInput::PackedBgra {
+                    width: lease.metadata().extent.width,
+                    height: lease.metadata().extent.height,
+                    pixels,
+                },
+                retained_lease: None,
+            })
+        }
+
         fn bitrate_limits(&self) -> Option<crate::EncoderBitrateLimits> {
             self.0.borrow().bitrate_limits
         }
         fn try_submit(&mut self, request: EncodeRequest) -> Result<(), SubmitError<EncodeRequest>> {
-            let EncodeInput::PackedBgra { pixels, .. } = request.input else {
-                return Err(SubmitError::Rejected(anyhow::anyhow!(
-                    "test expected packed BGRA"
-                )));
+            let pixels = match request.input {
+                EncodeInput::PackedBgra { pixels, .. } => pixels,
+                #[cfg(feature = "native")]
+                EncodeInput::Dmabuf(_) => {
+                    return Err(SubmitError::Rejected(anyhow::anyhow!(
+                        "test expected packed BGRA"
+                    )));
+                }
             };
             let mut state = self.0.borrow_mut();
             let generation = (request.frame.stream, request.frame.generation);
@@ -2383,13 +2327,45 @@ mod tests {
         retirement_acks: HashSet<EncodedGeneration>,
         submitted: Vec<MediaFrameId>,
         tokens: Vec<u64>,
-        completions: Vec<DecodeCompletion>,
+        completions: Vec<DecodeCompletion<Extent>>,
         retirements: Vec<(MediaStreamId, StreamGeneration)>,
     }
 
     struct FakeDecoder(Rc<RefCell<FakeDecoderState>>);
 
+    struct TestClientImporter;
+
+    #[derive(Default)]
+    struct TestPublisher {
+        enabled: bool,
+    }
+
+    impl DecodedFramePublisher for TestPublisher {
+        type Buffer = Extent;
+        type ClientImporter = TestClientImporter;
+        fn client_importer(&self) -> TestClientImporter {
+            TestClientImporter
+        }
+        fn publish(
+            &mut self,
+            extent: Extent,
+            buffer: ClientBufferId,
+            use_id: ClientBufferUseId,
+        ) -> Result<ClientBufferLease> {
+            ensure!(self.enabled, "test decoded publication is unavailable");
+            Ok(ClientBufferLease::new(
+                buffer,
+                use_id,
+                ClientBufferMetadata::new(extent, true),
+                Rc::new(extent),
+                |_| {},
+            )?)
+        }
+    }
+
     impl DecodeBackend for FakeDecoder {
+        type Output = Extent;
+
         fn try_submit(&mut self, request: DecodeRequest) -> Result<(), SubmitError<DecodeRequest>> {
             let mut state = self.0.borrow_mut();
             if state.active_tokens.len() >= state.capacity.unwrap_or(1) {
@@ -2417,7 +2393,7 @@ mod tests {
             Ok(())
         }
 
-        fn drain(&mut self) -> (Vec<DecodeCompletion>, Option<anyhow::Error>) {
+        fn drain(&mut self) -> (Vec<DecodeCompletion<Extent>>, Option<anyhow::Error>) {
             let mut state = self.0.borrow_mut();
             for key in std::mem::take(&mut state.retirement_acks) {
                 state.generations.remove(&key);
@@ -2618,8 +2594,10 @@ mod tests {
         }
     }
 
+    type TestDestinationPort = EncodedDestinationPort<FakeDestinationTransport, TestPublisher>;
+
     fn destination_port() -> (
-        EncodedDestinationPort<FakeDestinationTransport>,
+        TestDestinationPort,
         Rc<RefCell<FakeDestinationTransportState>>,
         Rc<RefCell<FakeDecoderState>>,
     ) {
@@ -2630,10 +2608,11 @@ mod tests {
             weld_client::ClientProvenance::Relocated,
         );
         (
-            EncodedDestinationPort::new_without_dmabuf(
+            EncodedDestinationPort::new(
                 FakeDestinationTransport(transport.clone()),
                 Box::new(FakeDecoder(decoder.clone())),
                 descriptor,
+                TestPublisher::default(),
             ),
             transport,
             decoder,
@@ -2654,11 +2633,7 @@ mod tests {
             ClientBufferId::new(source, local),
             ClientBufferUseId::new(source, local),
             metadata,
-            Rc::new(DirectClientBufferAccess::Shm(
-                weld_core::dmabuf::WaylandShmBuffer {
-                    bgra_pixels: vec![pixel, pixel, pixel, 255],
-                },
-            )),
+            Rc::new(vec![pixel, pixel, pixel, 255]),
             |_| {},
         )
         .expect("matching source")
@@ -2835,7 +2810,7 @@ mod tests {
             .as_mut()
             .expect("active")
             .active
-            .retained_dmabuf_lease = Some(
+            .retained_input_lease = Some(
             ClientBufferLease::new(
                 ClientBufferId::new(source_id, 2),
                 ClientBufferUseId::new(source_id, 2),
@@ -2979,13 +2954,7 @@ mod tests {
                 token,
                 result: Ok(vec![DecodedFrame {
                     frame,
-                    dmabuf: weld_core::dmabuf::ExternalDmabuf {
-                        extent: Extent::new(1, 1),
-                        format: 0,
-                        modifier: 0,
-                        flags: 0,
-                        planes: Vec::new(),
-                    },
+                    buffer: Extent::new(1, 1),
                 }]),
             });
             state.drain(&mut Vec::new()).expect("first decoded layer");
@@ -3025,7 +2994,7 @@ mod tests {
     fn finish_snapshot(
         source: &mut EncodedSourceState,
         encoder: &Rc<RefCell<FakeEncoderState>>,
-        destination: &mut EncodedDestinationState,
+        destination: &mut EncodedDestinationState<TestPublisher>,
     ) {
         while let Some(batch) = &source.in_flight {
             complete(encoder, batch.active.token, batch.active.frame, 10);

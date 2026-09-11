@@ -5,14 +5,15 @@ edition.workspace = true
 publish.workspace = true
 
 [features]
-vaapi = ["dep:weld-media-vaapi"]
+native = ["dep:weld-core"]
+vaapi = ["native", "dep:weld-media-vaapi", "dep:rustix"]
 
 [dependencies]
 anyhow.workspace = true
-rustix.workspace = true
+rustix = { workspace = true, optional = true }
 tracing.workspace = true
 weld-client = { path = "../weld-client" }
-weld-core = { path = "../weld-core" }
+weld-core = { path = "../weld-core", optional = true }
 weld-hoist-core = { path = "../weld-hoist-core" }
 weld-hoist-protocol = { path = "../weld-hoist-protocol" }
 weld-media = { path = "../weld-media" }
