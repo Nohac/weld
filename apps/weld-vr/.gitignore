@@ -1,0 +1,12 @@
+# Godot's regenerable import cache and local editor state.
+/.godot/
+
+# Local Android build/export artifacts and signing keys.
+/android/
+/build/
+/target/
+*.apk
+*.aab
+*.keystore
+*.jks
+export_credentials.cfg
