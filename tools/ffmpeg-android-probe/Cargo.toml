@@ -1,0 +1,33 @@
+[package]
+name = "ffmpeg-android-probe"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[workspace]
+
+[dependencies]
+anyhow = "1"
+weld-media = { path = "../../crates/weld-media" }
+
+[target.'cfg(target_os = "android")'.dependencies]
+ffmpeg-next = { version = "=9.0.0", default-features = false, features = ["codec", "format"] }
+jni = "=0.21.1"
+libc = "0.2"
+ndk = { version = "=0.9.0", default-features = false, features = ["media", "nativewindow", "api-level-28"] }
+
+[build-dependencies]
+cc = "1"
+
+[profile.dev]
+debug = 1
+incremental = false
+
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+
+[lints.clippy]
+undocumented_unsafe_blocks = "deny"

@@ -1,0 +1,93 @@
+#!/usr/bin/env bash
+# Isolated API-28 ARM64 diagnostic build, not the API-24 Godot app toolchain.
+set -euo pipefail
+
+if [[ $# -gt 1 || ( $# == 1 && $1 != --print-prefix && $1 != --help ) ]]; then
+  echo 'Usage: build-android-ffmpeg [--print-prefix|--help]' >&2; exit 2
+fi
+if [[ ${1:-} == --help ]]; then
+  echo 'Build pinned FFmpeg shared libraries for the Android probe (two jobs).'
+  echo '--print-prefix prints the cache path without downloading or building.'
+  exit 0
+fi
+root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+ndk=${ANDROID_NDK_HOME:-${ANDROID_NDK_ROOT:-}}
+[[ -n $ndk && -f $ndk/source.properties ]] || { echo 'Android NDK environment missing.' >&2; exit 1; }
+toolchain="$ndk/toolchains/llvm/prebuilt/linux-x86_64"
+[[ -x $toolchain/bin/aarch64-linux-android28-clang ]] || { echo 'Linux x86_64 NDK toolchain missing.' >&2; exit 1; }
+revision=38b88335f99e76ed89ff3c93f877fdefce736c13
+checksum=2ae7e42343cfffb811d15cfe98b6d005f082595fcdf034d30a4ff90cfed9f9c6
+cache="$root/target/android-ffmpeg"
+# The script includes all configure flags; SDK path/revision and API are also keyed.
+key=$( { sha256sum < "$root/scripts/build-android-ffmpeg"; sha256sum < "$ndk/source.properties"; printf '%s\n' "$ndk" "$checksum" 'arm64-v8a-api28'; } | sha256sum | cut -c1-24)
+prefix="$cache/$key"
+if [[ ${1:-} == --print-prefix ]]; then printf '%s\n' "$prefix"; exit 0; fi
+mkdir -p "$cache"
+exec 9>"$cache/build.lock"
+flock 9
+if [[ -f $prefix/complete ]]; then echo "Cached Android FFmpeg: $prefix"; exit 0; fi
+available=$(df -Pk "$cache" | awk 'NR==2 {print $4}')
+(( available >= 4194304 )) || { echo 'Need at least 4 GiB free for bounded build.' >&2; exit 1; }
+archive="$cache/$revision.tar.gz"
+if [[ ! -f $archive ]]; then
+  download=$(mktemp "$cache/download.XXXXXX")
+  curl --fail --location --max-time 120 --max-filesize 25000000 \
+    "https://codeload.github.com/FFmpeg/FFmpeg/tar.gz/$revision" --output "$download"
+  printf '%s  %s\n' "$checksum" "$download" | sha256sum --check
+  mv "$download" "$archive"
+fi
+printf '%s  %s\n' "$checksum" "$archive" | sha256sum --check
+stage=$(mktemp -d "$cache/stage.XXXXXX")
+echo "Building FFmpeg 8.1.2, ARM64/API28, two jobs. Logs: $stage"
+tar -xzf "$archive" -C "$stage"
+source_directory="$stage/FFmpeg-$revision"
+mkdir "$stage/build"
+cd "$stage/build"
+export PATH="$toolchain/bin:$PATH"
+export PKG_CONFIG_LIBDIR= PKG_CONFIG_PATH=
+"$source_directory/configure" \
+  --prefix="$stage/install" --target-os=android --arch=aarch64 --enable-cross-compile \
+  --cc="$toolchain/bin/aarch64-linux-android28-clang" \
+  --cxx="$toolchain/bin/aarch64-linux-android28-clang++" \
+  --ar="$toolchain/bin/llvm-ar" --ranlib="$toolchain/bin/llvm-ranlib" \
+  --strip="$toolchain/bin/llvm-strip" --nm="$toolchain/bin/llvm-nm" \
+  --sysroot="$toolchain/sysroot" --disable-autodetect --disable-everything \
+  --disable-programs --disable-doc --disable-debug --disable-static --enable-shared \
+  --disable-avdevice --disable-avfilter --disable-swscale --disable-swresample \
+  --enable-avcodec --enable-avformat --enable-avutil --enable-jni --enable-mediacodec \
+  --enable-pthreads --enable-decoder=h264_mediacodec,av1_mediacodec,vp9_mediacodec \
+  --enable-parser=h264,av1,vp9 --enable-demuxer=h264,ivf --enable-protocol=file \
+  --enable-bsf=h264_mp4toannexb,extract_extradata > "$stage/configure.log" 2>&1 || {
+    tail -60 "$stage/configure.log" >&2; exit 1;
+  }
+for component in MEDIACODEC H264_MEDIACODEC_DECODER AV1_MEDIACODEC_DECODER \
+  VP9_MEDIACODEC_DECODER H264_DEMUXER IVF_DEMUXER H264_PARSER FILE_PROTOCOL \
+  H264_MP4TOANNEXB_BSF EXTRACT_EXTRADATA_BSF; do
+  grep -Eq "^#define CONFIG_${component} 1$" config.h config_components.h || {
+    echo "FFmpeg silently omitted $component" >&2; exit 1;
+  }
+done
+for license in GPL NONFREE VERSION3; do
+  grep -qx "#define CONFIG_${license} 0" config.h || { echo "Unexpected $license build." >&2; exit 1; }
+done
+timeout 900s make -j2 > "$stage/build.log" 2>&1 || { tail -60 "$stage/build.log" >&2; exit 1; }
+make install > "$stage/install.log" 2>&1
+for library in avutil avcodec avformat; do
+  file="$stage/install/lib/lib$library.so"
+  "$toolchain/bin/llvm-readelf" -h -d "$file" > "$stage/$library.elf.txt"
+  grep -q 'Machine:.*AArch64' "$stage/$library.elf.txt"
+  grep -q "(SONAME).*\[lib$library.so\]" "$stage/$library.elf.txt"
+  while read -r dependency; do
+    case "$dependency" in
+      libavutil.so|libavcodec.so|libavformat.so|libc.so|libm.so|libdl.so|liblog.so|libandroid.so|libmediandk.so) ;;
+      *) echo "Unexpected Android dependency: $dependency" >&2; exit 1 ;;
+    esac
+  done < <(sed -n 's/.*(NEEDED).*\[\(.*\)\].*/\1/p' "$stage/$library.elf.txt")
+done
+cp config.h config_components.h "$stage/install/"
+cp "$source_directory/COPYING.LGPLv2.1" "$stage/install/"
+printf 'FFmpeg=8.1.2\nrevision=%s\nsha256=%s\nABI=arm64-v8a\nAPI=28\nNDK=%s\n' \
+  "$revision" "$checksum" "$ndk" > "$stage/install/complete"
+mv "$stage/install" "$prefix"
+echo "Android FFmpeg ready: $prefix"
+echo "Intermediate files retained in $stage; no automatic cleanup was performed."

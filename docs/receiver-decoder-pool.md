@@ -93,6 +93,12 @@ That last test validates plumbing, not an actual video bitstream or GPU decode.
 
 ### Follow-on slices (planned, not implemented)
 
+The first [Android codec qualification](android-codec-probe.md) now verifies
+FFmpeg/NDK AV1, H.264 and VP9 delivery to GPU-sampleable native images on a
+Pixel 8 Pro. It is an isolated diagnostic, not the reusable backend or Godot
+presenter below. The user also revalidated end-to-end Linux AV1 with
+`scripts/run-iroh-hoist --codec av1` after the portable receiver extraction.
+
 1. Reuse/generalize the existing FFmpeg machinery for an Android MediaCodec
    backend. Validate actual hardware codec selection and buffered-output progress
    before claiming compatibility with the pool. The presenter owns the native
