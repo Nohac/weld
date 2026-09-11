@@ -601,9 +601,12 @@ After the local tracer:
    pairing model or an enforced admission proof. Record establishment time,
    round-trip time, throughput, path changes, reconnect, and input-sized
    messages.
-3. Replace the Weld destination with a minimal Android destination on 5G.
-   Decode into an Android hardware buffer and compare a custom WGPU paint
-   source with a native EGL surface. Reject per-frame raw CPU readback.
+3. Replace the Weld destination with a minimal Android destination, initially
+   on a convenient local network. The current preferred experiment is
+   [Godot/Rust on a phone before XR](distributions.md#godotrust-phone-first-xr-client).
+   Validate native decoded-buffer presentation without per-frame raw CPU
+   readback, then repeat on 5G. Godot external textures, a native surface, or a
+   later alternative shell must remain behind the same destination contract.
 4. Validate destination-driven size, scale, orientation, input, reclaim, loss
    recovery, and thermal or software-decoder renegotiation while the phone
    remains on 5G.

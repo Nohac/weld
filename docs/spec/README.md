@@ -44,4 +44,5 @@ bounded implementation sequence for shared budgets and adaptive bitrate.
 | [Remote budgeting](remote-budgeting.md) | Media-device admission, reservations, prioritization, resize scheduling, and fairness |
 | [Gaming sandbox](gaming-sandbox.md) | Gamescope-inspired isolation, virtual outputs, launchers, and game input |
 | [Distributions](distributions.md) | Reusable crates and proposed Weld assemblies |
+| [Wayland proxy](wayland-proxy.md) | Hoisting through existing compositors while preserving local window slots |
 | [Platform completeness](platform-completeness.md) | Protocol coverage, XWayland, resilience, diagnostics, and validation |

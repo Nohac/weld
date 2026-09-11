@@ -42,7 +42,8 @@ A phone and tablet assembly could combine the
 [identity
 wallet](identity-and-meshes.md#device-wallet-and-pairing--exploration),
 remote application discovery, and one or more destination presentations. The
-first native-shell experiment should use
+current first experiment is the Godot/Rust phone-first client below. The earlier
+native-shell candidate remains
 [the Dioxus project](https://github.com/DioxusLabs/dioxus) with its Native
 renderer and [Blitz](https://github.com/DioxusLabs/blitz). Dioxus Native remains
 an experimental candidate rather than a protocol or library boundary.
@@ -56,8 +57,8 @@ one unified path.
 The assembly should hide its UI and media integration behind a
 destination-owned view that presents one remote window's decoded media and
 forwards input against stable protocol identities. A custom WGPU paint source
-is the preferred Blitz experiment. A native Android EGL surface embedded in
-the shell remains a valid hardware path, and the Dioxus web renderer is an
+is a candidate for a later Blitz experiment. A native Android EGL surface
+embedded in the shell remains a valid hardware path, and the Dioxus web renderer is an
 acceptable fallback if it can present encoded video without per-frame
 raw-pixel CPU readback. Changing among those paths must not affect pairing,
 mesh authorization, hoist lifecycle, or the wire contract.
@@ -76,6 +77,85 @@ follow the Direction-level
 [presentation-target input
 contract](remote-presentation.md#presentation-target-model--direction)
 rather than being defined by the mobile assembly.
+
+### Godot/Rust phone-first XR client
+
+As of 2026-09-11, the next intended client experiment uses Godot with
+[godot-rust/gdext](https://github.com/godot-rust/gdext). Begin on an Android phone
+even though a headset is available: build/deploy, logs, input and lifecycle are
+easier to iterate on without repeatedly entering and leaving VR. This is an
+Exploration, not an installed toolchain or an implemented Android client.
+
+The proposed split keeps protocol/session/input mechanisms in reusable Weld Rust
+code, exposes a small Godot-facing integration, and keeps Android codec and
+presentation objects behind a platform adapter. Godot supplies shell scenes,
+layout and eventual OpenXR integration; most behavior may be written in Rust.
+The existing encoded/Iroh crates still depend on `weld-core`, so their reusable
+client path must be separated from Linux compositor dependencies as concretely
+needed. Do not ship Smithay/DRM/VA-API host machinery just to reuse hoist policy.
+
+The [godot-rust Android guide] and the user's supplied [Android build report]
+provide a starting point: an ARM64 Rust `cdylib`, `cargo-ndk`, Godot's Android
+export templates, and APK packaging/signing. Pin compatible Godot, gdext,
+SDK/NDK and JDK versions when implementing, rather than blindly copying the
+report's SDK 37 example. Package the library inside the Godot project, keep
+signing secrets out of version control, and avoid release builds or broad
+dependency rebuilds for ordinary iteration.
+
+Suggested validation order:
+
+1. A minimal phone APK that calls Rust through GDExtension, with repeatable debug
+   build/deploy and lifecycle logging.
+2. One hardware-decoded video panel, preferably AV1 when exposed by the device.
+   Probe MediaCodec format/profile/extent support and real decode-to-presentation
+   behavior; software fallback or H.264 must be an explicit result, not a hidden
+   substitute for validating the selected hardware path.
+3. One real Iroh hoist session with resize, scale, basic input, reclaim,
+   disconnect and Android pause/resume. Keep networking and codec work off the
+   shell's frame-critical path. Start on a convenient local network; repeat
+   isolated mobile-network validation after the client itself is dependable.
+4. Reuse the client/Android work in a Pico OpenXR shell, first as one ordinary
+   mono window with controller interaction. Validate headset-specific surfaces,
+   frame pacing and resume independently; phone success is not XR validation.
+
+For the phone, investigate MediaCodec output through Godot's [ExternalTexture]
+or another native GPU presentation adapter. For XR, also evaluate Godot's
+[OpenXR composition layers], including their Android Surface path. That path
+could avoid a CPU pixel download and potentially an extra shell composition
+pass, but runtime support, synchronization, buffer lifetime and layer limits
+must be demonstrated. No per-frame raw-pixel CPU readback in the intended path.
+
+Pico advertises [AV1 decoding on the Pico 4 Ultra]; usable profiles, cadence and
+concurrent decoders still require on-device validation. Do not assume identical
+capabilities on the phone or other Pico models. The Ultra does not have built-in
+eye tracking; [Pico's tracking compatibility] lists other eye-equipped models.
+Head/controller-directed regions can exercise the foveated-media mechanics,
+but cannot validate eye-gaze accuracy or gaze-to-quality latency.
+
+This sequence takes precedence over the earlier Dioxus/Blitz-first experiment;
+those remain alternatives, including for a future device-wallet UI. Stereo
+application protocols, gaze-driven enhancement, full workspace takeover and a
+complete spatial window manager are not prerequisites for the first panel.
+
+[godot-rust Android guide]: https://godot-rust.github.io/book/toolchain/export-android.html
+[Android build report]: https://github.com/godot-rust/gdext/issues/470#issuecomment-4587348846
+[ExternalTexture]: https://docs.godotengine.org/en/4.6/classes/class_externaltexture.html
+[OpenXR composition layers]: https://docs.godotengine.org/en/4.6/classes/class_openxrcompositionlayer.html
+[AV1 decoding on the Pico 4 Ultra]: https://www.picoxr.com/global/products/pico4-ultra
+[Pico's tracking compatibility]: https://developer.picoxr.com/blog/native-sdk-3/
+
+### Existing-compositor hoisting proxy
+
+The [Wayland proxy exploration](wayland-proxy.md) would expose Weld's hoisting
+while Sway, Hyprland or another compositor retains desktop management. Its goal
+is daily use of networking/convergence without first completing Weld's own WM.
+It is separate future work, not a prerequisite for the phone/headset experiment.
+
+Its host-window presenter should also support a receiver-only assembly: connect
+to remote Weld instances and display their windows in the existing compositor,
+without hosting local applications or offering source/onward hoisting. The
+[presenter boundary](wayland-proxy.md#reusable-presenter-and-receiver-only-assembly--direction)
+keeps that mode independent of the local application proxy.
 
 ### Linux-native XR desktop
 

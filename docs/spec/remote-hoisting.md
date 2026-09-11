@@ -184,7 +184,7 @@ per-window identity, placeholder behavior, or reclaim guarantees.
 Mobile, browser, and native shells remain destination adapters rather than
 special protocol roles. Their target layout, geometry, scale, quality, input,
 and presentation behavior is specified in
-[Remote presentation targets and quality](remote-presentation.md). Dioxus,
+[Remote presentation targets and quality](remote-presentation.md). Godot, Dioxus,
 Android view, MediaCodec, `AHardwareBuffer`, EGL, and wgpu types remain behind
 those adapters.
 

@@ -108,6 +108,18 @@ are target-local observations under the same trust and optional-disclosure rules
 as ordinary destination visibility. Head pose changes spatial composition at
 the destination and do not become application pointer motion.
 
+Eye tracking is optional, not implied by an XR target. Head/controller-directed
+regions can prototype enhancement placement without being treated as eye-gaze
+measurements.
+
+Readability requires separate controls for panel angular size (physical size and
+distance), client logical/UI scale, and encoded pixel extent/quality. A high
+resolution stream on a visually tiny panel can still have unreadable text;
+enlarging a low-resolution texture cannot restore missing detail. Use projected
+pixel demand and user preferences to request an appropriate client scale and
+stream quality. An optional reading mode may enlarge or reposition a panel, but
+avoid involuntary movement or application relayout on every focus change.
+
 Eye tracking introduces an **attention** observation, which is distinct from
 application input and keyboard focus. By default, raw gaze coordinates remain
 on the headset. The destination may instead report a coarse presentation ID,
