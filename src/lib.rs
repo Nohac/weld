@@ -14,7 +14,7 @@ use weld_app::{
     input::{GlobalShortcutPlugin, VirtualTerminalShortcutPlugin},
 };
 use weld_core::{
-    session_host::{SessionHost, SessionHostConfig},
+    runtime::{HostRuntime, RuntimeOptions},
     surface::Extent,
 };
 use weld_float::FloatPlugin;
@@ -43,7 +43,7 @@ pub fn run(arguments: AppArguments) -> Result<()> {
         arguments::HostSelection::Headless => {
             // Validation and construction are one path: no transport can bind
             // and no Bevy renderer can start before the session-only branch.
-            return SessionHost::prepare(session_config(&arguments)?)?.run();
+            return HostRuntime::prepare(runtime_options(&arguments)?)?.run();
         }
     };
     validate_hoist_arguments(&arguments)?;
@@ -322,8 +322,8 @@ fn validate_session_arguments(arguments: &AppArguments) -> Result<()> {
     Ok(())
 }
 
-fn session_config(arguments: &AppArguments) -> Result<SessionHostConfig> {
-    Ok(SessionHostConfig::new(
+fn runtime_options(arguments: &AppArguments) -> Result<RuntimeOptions> {
+    Ok(RuntimeOptions::new(
         arguments.headless_output.unwrap_or(Extent::new(1920, 1080)),
         arguments.scale.unwrap_or_default(),
         arguments.headless_refresh.unwrap_or(60),
@@ -439,7 +439,7 @@ mod tests {
             "1.5",
         ]);
         validate_session_arguments(&args).expect("headless arguments");
-        session_config(&args).expect("headless configuration");
+        runtime_options(&args).expect("headless configuration");
     }
 
     #[test]

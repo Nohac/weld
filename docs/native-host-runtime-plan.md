@@ -1,8 +1,9 @@
 # Shared native host runtime
 
-Status: reviewed implementation plan, not implemented. This supersedes the
-proposal to extend the dedicated `SessionHost` loop with Iroh orchestration.
-The foundation committed in `df171cd1` remains the current implementation.
+Status: implementation in progress. The tracked regression fixture, common
+runtime, optional policy/composition split and shared callback ledger are
+implemented. The dedicated `SessionHost` loop is removed. Physical inactive
+composition optimization, live Iroh admission and reconnect remain follow-ups.
 
 See [current headless hosting](headless-host.md) for shipped behavior and
 [receiver follow-ups](receiver-decoder-pool.md#portable-execution-boundary) for
@@ -26,11 +27,11 @@ compose or stream a whole logical output.
 
 ## Evidence and responsibility boundaries
 
-Today `backend/nested.rs`, `backend/drm/host.rs`, and `session_host.rs` each own
+Before this refactor, `backend/nested.rs`, `backend/drm/host.rs`, and `session_host.rs` each owned
 an outer loop, `ClientRuntime`, dispatch, shutdown and child maintenance.
-`runtime::service_client_adapters` shares ingress ordering, not runtime
-ownership. `CompositionHost` combines policy, rendering, capture and native-use
-completion. `RenderContext` requires graphics resources even though hosting
+`runtime::service_client_adapters` shared ingress ordering, not runtime
+ownership. `CompositionHost` combined policy, rendering, capture and native-use
+completion. `RenderContext` required graphics resources even though hosting
 clients does not always require them.
 
 DRM already preserves logical output configuration through session pause and
@@ -50,12 +51,18 @@ No new crate is required by this plan. Native driver contracts remain internal
 unless an actual external consumer needs one. Interface names below describe
 responsibilities, not a mandate to add one public trait per row.
 
-Design assessment of the current boundary: 6/8 checklist rows, approximately
+Pre-refactor design assessment: 6/8 checklist rows, approximately
 7.5/10. The failed rows are a single describable module responsibility (each
 backend mixes driver work with host lifecycle) and changing an implementation
 without affecting callers (service changes must be coordinated across loops).
 Common runtime ownership and the policy/composition split address those gaps;
-the score is not a claim that the refactor is already implemented or verified.
+the score was not a claim that the refactor was already implemented or verified.
+
+The implemented runtime boundary now satisfies those two ownership checks:
+8/8 rows for this slice. Backend code no longer owns independent client-service
+loops, and policy/rendering borrow one integration owner. This design assessment
+does not substitute for runtime tests or claim the deferred output and transport
+work is finished.
 
 ## One loop, preserving actual backend ordering
 
@@ -180,6 +187,15 @@ producer progress without local composition. There is no new continuous render
 loop, and physical refresh is not imposed on protocol/input processing.
 
 ## Implementation sequence and acceptance gates
+
+Steps 1 and 2 are implemented, along with the ledger extraction in step 3 and
+CLI migration in step 4. The existing separation of logical `ServerOutput`
+configuration from native output resources/availability remains intact.
+DRM's inactive-owned rendering is deliberately preserved until renderer-held
+leases can be retired safely without composition; this optimization is not
+claimed by the runtime extraction. The presenter-free path never renders,
+including when an application policy owner is installed. Steps 5 and 6 have
+not started.
 
 1. **Tracked regression fixture, before production refactoring.** Replace the
    temporary C-only evidence with a reproducible subprocess Wayland fixture and

@@ -15,12 +15,11 @@ pub mod output;
 pub mod renderer;
 pub mod runtime;
 pub mod server;
-pub mod session_host;
 pub mod surface;
 
 pub use host::{
-    CompositionDemand, CompositionHost, HostBackend, HostBuilder, PreparedHost, PreparedRuntime,
-    RenderContext,
+    ApplicationHost, CompositionDemand, CompositionHost, HostBackend, HostBuilder, HostPolicy,
+    PreparedHost, PreparedRuntime, RenderContext,
 };
 pub use output::{
     OutputConfiguration, OutputFootprint, OutputFootprintProvenance, OutputHead, OutputId,

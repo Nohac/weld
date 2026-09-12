@@ -1,4 +1,4 @@
-//! Presentation-free Wayland session hosting (`--backend headless`).
+//! Assembly of ordinary client hosting without a local presenter.
 //!
 //! Unlike Weld's offscreen-render benchmarks, this host does not compose a
 //! desktop, allocate a render target, or require Bevy. A GPU is optional and is
@@ -11,38 +11,30 @@ use std::{
 };
 
 use anyhow::{Context, Result, ensure};
-use calloop::{
-    EventLoop, channel,
-    signals::{Signal, Signals},
-};
-use smithay::{
-    output::{PhysicalProperties, Subpixel},
-    reexports::wayland_server::Display,
-};
+use calloop::signals::{Signal, Signals};
+use smithay::output::{PhysicalProperties, Subpixel};
 use tracing::{info, warn};
-use weld_client::{ClientAdapterRegistration, ClientEventQueue, ClientRuntime, Extent};
+use weld_client::{ClientAdapterRegistration, Extent};
 
 use crate::{
     OutputId, OutputScale,
-    dmabuf::{
-        DmabufCapabilities, DmabufContext, DmabufSourceCache, ExternalDmabufCapabilities,
-        request_weld_device,
-    },
-    host::{ClientRuntimeWakeSource, register_client_wake_sources},
+    dmabuf::{DmabufContext, DmabufSourceCache, ExternalDmabufCapabilities},
+    host::{ApplicationHost, ClientRuntimeWakeSource, register_client_wake_sources},
     input::{KeyboardRepeatMode, LegacyKeyRepeat},
-    runtime::{ChildProcesses, LoopData, server_mut, service_client_adapters},
+    runtime::{
+        gpu::{NativeGpu, import_channel},
+        native::{NativeRuntime, RuntimeIntegration, RuntimeSetup},
+    },
     server::{
-        OutputDescriptor, OutputMetrics, ServerOptions, ServerOutputDefinition, ServerState,
+        OutputDescriptor, OutputMetrics, ServerOptions, ServerOutputDefinition,
         WaylandClientBridge, client_registration,
     },
 };
 
-const MAINTENANCE_INTERVAL: Duration = Duration::from_secs(1);
-
 /// Validated virtual output and startup window policy. Window sizes are logical
 /// pixels; output extent is physical pixels. Neither is an encoder resolution.
 /// The output describes a virtual display, not a bound on window geometry.
-pub struct SessionHostConfig {
+pub struct RuntimeOptions {
     output: OutputMetrics,
     initial_window_size: Extent,
     frame_interval: Duration,
@@ -52,7 +44,7 @@ pub struct SessionHostConfig {
     legacy_repeat: LegacyKeyRepeat,
 }
 
-impl SessionHostConfig {
+impl RuntimeOptions {
     /// Creates a virtual output with a bounded 1..240 Hz callback cadence.
     /// Extents are bounded to 8192 per axis; native client constraints may still
     /// require a different initial window size.
@@ -64,11 +56,11 @@ impl SessionHostConfig {
     ) -> Result<Self> {
         ensure!(
             (1..=240).contains(&refresh_hz),
-            "headless refresh must be between 1 and 240 Hz"
+            "virtual refresh must be between 1 and 240 Hz"
         );
         ensure!(
             output.width <= 8192 && output.height <= 8192,
-            "headless output exceeds 8192 pixels per axis"
+            "virtual output exceeds 8192 pixels per axis"
         );
         ensure!(
             (1..=8192).contains(&initial_window_size.width)
@@ -94,7 +86,7 @@ impl SessionHostConfig {
         self
     }
 
-    /// Launches one command on this session's socket when [`SessionHost::run`]
+    /// Launches one command on this session's socket when [`HostRuntime::run`]
     /// starts. Other clients may connect using the same private socket.
     pub fn launch(mut self, command: Vec<OsString>) -> Self {
         self.client = command;
@@ -112,55 +104,45 @@ impl SessionHostConfig {
 /// A same-thread Wayland host ready for adapter registration, without local
 /// presentation. Preparation and execution must occur on the process main
 /// thread so newly created GPU/network workers inherit the shutdown signal mask.
-pub struct SessionHost {
-    event_loop: EventLoop<'static, LoopData<()>>,
-    data: LoopData<()>,
-    clients: ClientRuntime,
+pub struct HostRuntime {
+    runtime: NativeRuntime<()>,
     context: DmabufContext,
-    config: SessionHostConfig,
+    config: RuntimeOptions,
     _gpu: Option<ImportGpu>,
+    policy: Option<Box<dyn ApplicationHost>>,
 }
 
-impl SessionHost {
+impl HostRuntime {
     /// Opens the virtual Wayland host and optional GPU imports on the main thread.
-    pub fn prepare(config: SessionHostConfig) -> Result<Self> {
+    pub fn prepare(config: RuntimeOptions) -> Result<Self> {
         let signals = Signals::new(&[Signal::SIGINT, Signal::SIGTERM])
             .context("failed to initialize process signal handling")?;
         let started_at = Instant::now();
         let gpu = ImportGpu::open().map(Some).unwrap_or_else(|error| {
-            warn!(%error, "headless GPU import unavailable; serving SHM clients only");
+            warn!(%error, "virtual GPU import unavailable; serving SHM clients only");
             None
         });
         let sources = gpu
             .as_ref()
             .map_or_else(DmabufSourceCache::unavailable, |gpu| {
-                DmabufSourceCache::new(&gpu.device)
+                gpu.resources.sources.clone()
             });
-        let capabilities = gpu.as_ref().and_then(|gpu| gpu.capabilities.clone());
-        let (release_sender, release_source) = channel::channel();
-        let context = DmabufContext::new(release_sender, sources.clone(), capabilities.clone());
-        let event_loop = EventLoop::try_new().context("failed to create headless event loop")?;
+        let capabilities = gpu
+            .as_ref()
+            .and_then(|gpu| gpu.resources.capabilities.clone());
+        let (context, release_source) = import_channel(sources.clone(), capabilities.clone());
         let bridge = WaylandClientBridge::default();
-        let mut clients = ClientRuntime::default();
-        clients.register(
-            client_registration(bridge.clone(), context.clone())
-                .into_parts()
-                .runtime,
-        )?;
-        let display = Display::<ServerState>::new().context("failed to create Wayland display")?;
-        let mut server = ServerState::new(
-            &event_loop.handle(),
-            display,
-            release_source,
-            bridge,
-            server_mut::<()>,
-            ServerOptions {
+        let registration = client_registration(bridge.clone(), context.clone())
+            .into_parts()
+            .runtime;
+        let mut runtime = NativeRuntime::prepare(RuntimeSetup {
+            server: ServerOptions {
                 started_at,
                 seat_name: "weld-seat0",
                 outputs: vec![ServerOutputDefinition {
                     id: OutputId::new(1),
                     descriptor: OutputDescriptor {
-                        name: "weld-headless".to_owned(),
+                        name: "weld-virtual".to_owned(),
                         physical_properties: PhysicalProperties {
                             size: (0, 0).into(),
                             subpixel: Subpixel::Unknown,
@@ -179,35 +161,40 @@ impl SessionHost {
                 keyboard_repeat_mode: config.keyboard_repeat,
                 initial_toplevel_size: Some(config.initial_window_size),
             },
-        )?;
-        server.set_legacy_key_repeat(config.legacy_repeat);
-        event_loop
-            .handle()
-            .insert_source(signals, |event, _, data| {
-                data.events.push_back(());
-                tracing::debug!(signal = ?event.signal(), "received headless shutdown signal");
-            })
-            .context("failed to register process signals")?;
+            releases: release_source,
+            bridge,
+            adapters: vec![registration],
+            wakes: Vec::new(),
+            signals,
+            shutdown_event: || (),
+        })?;
+        runtime
+            .state
+            .data
+            .server
+            .set_legacy_key_repeat(config.legacy_repeat);
         Ok(Self {
-            event_loop,
-            data: LoopData::new(server),
-            clients,
+            runtime,
             context,
             config,
             _gpu: gpu,
+            policy: None,
         })
     }
 
     /// Adds a source/relay adapter; no image importer is needed without a local
     /// presenter. Runtime registration still enforces source namespace uniqueness.
     pub fn add_client_adapter(&mut self, adapter: ClientAdapterRegistration) -> Result<&mut Self> {
-        self.clients.register(adapter.into_parts().runtime)?;
+        self.runtime
+            .state
+            .clients
+            .register(adapter.into_parts().runtime)?;
         Ok(self)
     }
 
     /// Registers adapter readiness with the same native event loop as Wayland.
     pub fn add_client_wake_source(&mut self, source: ClientRuntimeWakeSource) -> Result<&mut Self> {
-        register_client_wake_sources(&self.event_loop.handle(), vec![source])?;
+        register_client_wake_sources(&self.runtime.event_loop.handle(), vec![source])?;
         Ok(self)
     }
 
@@ -221,63 +208,35 @@ impl SessionHost {
         self.context.external_imports()
     }
 
+    /// Installs application policy without requiring a local compositor renderer.
+    /// The same owner may expose composition, but no output is rendered here.
+    pub fn with_policy(mut self, policy: impl ApplicationHost + 'static) -> Self {
+        self.policy = Some(Box::new(policy));
+        self
+    }
+
     /// Serves clients until SIGINT/SIGTERM, even with no connected applications.
     /// Closing the display disconnects clients; this is not a process supervisor
     /// and does not kill arbitrary descendants of the launched command.
     pub fn run(mut self) -> Result<()> {
-        let mut children = ChildProcesses::default();
-        children.spawn_requested(&self.data.server, &self.config.client)?;
-        let mut events = ClientEventQueue::default();
-        let mut invalid_events = Vec::new();
-        let mut invalid_effects = Vec::new();
-        let mut clock = CallbackClock::new(self.config.frame_interval);
-        info!(socket = ?self.data.server.socket_name, width = self.config.output.physical_width(), height = self.config.output.physical_height(), scale = self.config.output.scale_factor(), "Weld headless session is ready");
-        loop {
-            let timeout = clock.timeout(
-                Instant::now(),
-                self.data.server.has_pending_frame_callbacks(),
-            );
-            self.event_loop
-                .dispatch(Some(timeout), &mut self.data)
-                .context("headless calloop dispatch failed")?;
-            if !self.data.events.is_empty() {
-                break;
-            }
-            service_client_adapters(
-                &mut self.data.server,
-                &mut self.clients,
-                &mut events,
-                &mut invalid_events,
-                &mut invalid_effects,
-                |_| {
-                    // No local renderer acquires GPU uses in this host.
-                },
-            );
-            // Adapters observed the commits during drain. Without a local
-            // presenter, no extra consumer should hold their buffer leases.
-            while let Some(event) = events.pop_front() {
-                drop(event);
-            }
-            let now = Instant::now();
-            if self.data.server.has_pending_frame_callbacks() && clock.timeout(now, true).is_zero()
-            {
-                let frame = self.data.server.stage_frame_callbacks();
-                self.data.server.complete_frame_callbacks(frame);
-                clock.completed(now);
-            }
-            self.data.server.flush_clients();
-            children.reap();
-        }
-        Ok(())
+        self.runtime
+            .state
+            .children
+            .spawn_requested(&self.runtime.state.data.server, &self.config.client)?;
+        info!(socket = ?self.runtime.state.data.server.socket_name, width = self.config.output.physical_width(), height = self.config.output.physical_height(), scale = self.config.output.scale_factor(), "Weld client host is ready");
+        self.runtime.run(
+            RuntimeIntegration::Unpresented {
+                application: self.policy,
+            },
+            self.config.frame_interval,
+        )
     }
 }
 
 struct ImportGpu {
     _instance: wgpu::Instance,
     _adapter: wgpu::Adapter,
-    device: wgpu::Device,
-    _queue: wgpu::Queue,
-    capabilities: Option<DmabufCapabilities>,
+    resources: NativeGpu,
 }
 
 impl ImportGpu {
@@ -291,52 +250,25 @@ impl ImportGpu {
             force_fallback_adapter: false,
             apply_limit_buckets: false,
         }))
-        .context("no Vulkan adapter for headless client imports")?;
-        let (device, queue, capabilities) = request_weld_device(&adapter, "Weld session imports")?;
+        .context("no Vulkan adapter for virtual client imports")?;
+        let resources = NativeGpu::request(&adapter, "Weld client imports")?;
         Ok(Self {
             _instance: instance,
             _adapter: adapter,
-            device,
-            _queue: queue,
-            capabilities,
+            resources,
         })
-    }
-}
-
-struct CallbackClock {
-    interval: Duration,
-    last: Option<Instant>,
-}
-
-impl CallbackClock {
-    const fn new(interval: Duration) -> Self {
-        Self {
-            interval,
-            last: None,
-        }
-    }
-
-    fn timeout(&self, now: Instant, pending: bool) -> Duration {
-        if !pending {
-            return MAINTENANCE_INTERVAL;
-        }
-        self.last.map_or(Duration::ZERO, |last| {
-            (last + self.interval).saturating_duration_since(now)
-        })
-    }
-
-    fn completed(&mut self, now: Instant) {
-        self.last = Some(now);
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::runtime::MAINTENANCE_INTERVAL;
+    use crate::runtime::native::CallbackClock;
 
     #[test]
-    fn headless_output_and_window_coordinates_are_independent() {
-        let config = SessionHostConfig::new(
+    fn virtual_output_and_window_coordinates_are_independent() {
+        let config = RuntimeOptions::new(
             Extent::new(1920, 1080),
             OutputScale::new(1.5).expect("scale"),
             90,
@@ -348,7 +280,7 @@ mod tests {
         assert_eq!(config.initial_window_size, Extent::new(960, 640));
         assert_eq!(config.frame_interval, Duration::from_secs_f64(1.0 / 90.0));
         assert_eq!(config.keyboard_repeat, KeyboardRepeatMode::Client);
-        let larger_window = SessionHostConfig::new(
+        let larger_window = RuntimeOptions::new(
             Extent::new(640, 480),
             OutputScale::default(),
             60,
@@ -359,25 +291,22 @@ mod tests {
     }
 
     #[test]
-    fn headless_refresh_and_initial_policy_are_bounded() {
+    fn virtual_refresh_and_initial_policy_are_bounded() {
         let output = Extent::new(1920, 1080);
         for refresh in [0, 241, u32::MAX] {
-            assert!(
-                SessionHostConfig::new(output, OutputScale::default(), refresh, output).is_err()
-            );
+            assert!(RuntimeOptions::new(output, OutputScale::default(), refresh, output).is_err());
         }
         assert!(
-            SessionHostConfig::new(output, OutputScale::default(), 60, Extent::new(0, 640))
-                .is_err()
+            RuntimeOptions::new(output, OutputScale::default(), 60, Extent::new(0, 640)).is_err()
         );
         assert!(
-            SessionHostConfig::new(output, OutputScale::default(), 60, Extent::new(8193, 640))
+            RuntimeOptions::new(output, OutputScale::default(), 60, Extent::new(8193, 640))
                 .is_err()
         );
     }
 
     #[test]
-    fn headless_callbacks_do_not_poll_at_refresh_while_idle_or_catch_up_in_bursts() {
+    fn virtual_callbacks_do_not_poll_at_refresh_while_idle_or_catch_up_in_bursts() {
         let start = Instant::now();
         let interval = Duration::from_millis(10);
         let mut clock = CallbackClock::new(interval);

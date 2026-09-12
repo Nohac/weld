@@ -1,5 +1,11 @@
 //! Shared host-runtime policy and process lifecycle.
 
+mod assembly;
+pub(crate) mod callbacks;
+pub(crate) mod gpu;
+pub(crate) mod native;
+pub use assembly::{HostRuntime, RuntimeOptions};
+
 use std::{
     collections::VecDeque,
     ffi::{OsStr, OsString},
@@ -18,6 +24,7 @@ use crate::input::LegacyKeyRepeat;
 use crate::server::ServerState;
 
 pub(crate) const FRAME_INTERVAL: Duration = Duration::from_micros(16_667);
+pub(crate) const MAINTENANCE_INTERVAL: Duration = Duration::from_secs(1);
 pub(crate) const REMOTE_DEBUG_MAINTENANCE_INTERVAL: Duration = Duration::from_millis(100);
 pub(crate) const CAPTURE_DEADLINE: Duration = Duration::from_secs(10);
 pub(crate) const BEVY_SETTLE_COMPOSITIONS: u8 = 5;

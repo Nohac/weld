@@ -1,9 +1,8 @@
 # Headless application hosting
 
-The next architectural step is the reviewed [shared native runtime
-plan](native-host-runtime-plan.md): headless becomes an entrypoint assembly of
-the common host, not a separate runtime. The foundation described below remains
-the implemented behavior until that refactor lands. Iroh demo work follows it.
+Headless is now an entrypoint assembly of the common native host, not a separate
+runtime. See the [shared native runtime plan](native-host-runtime-plan.md) for
+remaining output-demand and Iroh admission work.
 
 ## Session-host foundation — Implemented
 
@@ -62,11 +61,23 @@ Wayland session; like the existing launcher, it is not a process supervisor and
 does not kill arbitrary descendants of a launched script. Apps normally exit
 when their Wayland connection closes.
 
-`weld-core::session_host::SessionHost` owns calloop and protocol state. Pre-run
+`weld-core::runtime::HostRuntime` prepares the common runtime without a native
+presenter. Nested and DRM use that same runtime loop and completion ledger. Pre-run
 registration accepts ordinary client adapters and readiness sources, and
 exposes the existing DMA-BUF capability for codec bindings. It has no dummy
-`CompositionHost` implementation. All three native hosts share the same
-completion, ingress, effect and resize-service ordering.
+`CompositionHost` implementation. Optional policy and composition borrow one
+integration owner through `ApplicationHost`; `HostRuntime::with_policy` can run
+policy without rendering at all. Unsupported capture returns an explicit error.
+Native drivers retain Winit/DRM timing and native effects, including cursor and
+VT ordering. GPU bootstrap shares device/import setup without changing each
+driver's adapter-selection requirements.
+
+Presenter-free policy advances initially, on client events, or while its
+`advance_main` return requests another paced update. Returning false with no
+client traffic lets it sleep; there is no arbitrary-deadline API or implicit
+Bevy startup-settle sequence. Adapter timers/readiness remain serviced by
+calloop independently. Future policy-owned retention/reclaim timers must either
+request continued updates or add an explicit deadline contract.
 
 ## Live headless hoisting — Next batch / agreed policy
 
@@ -105,8 +116,12 @@ for the phone/Godot and OpenXR sequence.
 
 ## Validation — 2026-09-12
 
+`scripts/check-host-runtime --policy-only --shm-only` also exercises a non-Bevy
+policy owner with no native presenter: events and main advances are serviced,
+no rendering occurs, and a capture request fails explicitly.
+
 - `cargo check -p weld-core -p weldwm -j2` passed.
-- `cargo test -p weld-core --features test-support -j2`: 118 tests passed.
+- `cargo test -p weld-core --features test-support -j2`: 122 tests passed.
   Core's existing test helpers require `test-support`; without it the test
   target fails to compile at existing `SurfaceId::for_test` calls.
 - `cargo test -p weldwm --lib -j2`: 10 tests passed.

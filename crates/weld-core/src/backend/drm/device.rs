@@ -3,7 +3,7 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
-use calloop::channel::{self, Channel};
+use calloop::channel::Channel;
 use smithay::{
     backend::{
         allocator::{
@@ -26,9 +26,11 @@ use smithay::{
 };
 
 use crate::{
-    dmabuf::{DmabufCapabilities, DmabufEvent, DmabufSourceCache, request_weld_device},
+    dmabuf::{DmabufCapabilities, DmabufEvent, DmabufSourceCache},
     host::{RenderContext, RunOptions},
 };
+
+use crate::runtime::gpu::{NativeGpu, import_channel};
 
 use super::{
     output::{SelectedOutput, select_outputs},
@@ -90,8 +92,12 @@ pub(super) fn prepare(options: &RunOptions) -> Result<DrmBootstrap> {
     if scanout_formats.is_empty() {
         bail!("selected Vulkan adapter exposes no explicit sRGB scanout modifier");
     }
-    let (device, queue, dmabuf_capabilities) = request_weld_device(&adapter, "Weld DRM device")?;
-    let dmabuf_sources = DmabufSourceCache::new(&device);
+    let NativeGpu {
+        device,
+        queue,
+        capabilities: dmabuf_capabilities,
+        sources: dmabuf_sources,
+    } = NativeGpu::request(&adapter, "Weld DRM device")?;
     let render_state = DrmRenderState::new(device.clone(), queue.clone(), scanout_formats.clone())?;
 
     let (drm_device, drm_notifier) =
@@ -110,17 +116,14 @@ pub(super) fn prepare(options: &RunOptions) -> Result<DrmBootstrap> {
         [Fourcc::Argb8888],
         scanout_formats,
     );
-    let (release_sender, dmabuf_release_source) = channel::channel();
+    let (dmabuf, dmabuf_release_source) =
+        import_channel(dmabuf_sources.clone(), dmabuf_capabilities.clone());
     let render_context = RenderContext {
         instance,
         adapter,
         device,
         queue,
-        dmabuf: crate::dmabuf::DmabufContext::new(
-            release_sender,
-            dmabuf_sources.clone(),
-            dmabuf_capabilities.clone(),
-        ),
+        dmabuf,
         output_heads: selected_outputs
             .iter()
             .map(|output| output.head.clone())

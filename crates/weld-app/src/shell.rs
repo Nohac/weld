@@ -70,8 +70,8 @@ use weld_core::input::RawSeatEvent;
 use weld_core::runtime::HostCommand;
 use weld_core::surface::Extent;
 use weld_core::{
-    CompositionDemand, CompositionHost, OutputConfiguration, OutputHead,
-    dmabuf::DirectClientBufferAccess,
+    ApplicationHost, CompositionDemand, CompositionHost, HostPolicy, OutputConfiguration,
+    OutputHead, dmabuf::DirectClientBufferAccess,
 };
 
 #[cfg(test)]
@@ -905,7 +905,7 @@ fn spawn_compositor_camera(
     camera.id()
 }
 
-impl CompositionHost for AppShell {
+impl HostPolicy for AppShell {
     fn enqueue_client_event(&mut self, event: ClientSurfaceEvent) -> CompositionDemand {
         AppShell::enqueue_client_event(self, event)
     }
@@ -920,14 +920,6 @@ impl CompositionHost for AppShell {
 
     fn service_remote_debug(&mut self) {
         AppShell::service_remote_debug(self);
-    }
-
-    fn render_outputs(
-        &mut self,
-        requests: &[CompositionOutputRequest],
-        frames: &mut Vec<CompositionOutputFrame>,
-    ) -> Result<()> {
-        AppShell::render_outputs(self, requests, frames)
     }
 
     fn update_output_topology(&mut self, outputs: &[OutputConfiguration]) {
@@ -961,6 +953,16 @@ impl CompositionHost for AppShell {
     fn take_adapter_commands(&mut self) -> Vec<weld_client::ClientAdapterCommandEnvelope> {
         AppShell::take_adapter_commands(self)
     }
+}
+
+impl CompositionHost for AppShell {
+    fn render_outputs(
+        &mut self,
+        requests: &[CompositionOutputRequest],
+        frames: &mut Vec<CompositionOutputFrame>,
+    ) -> Result<()> {
+        AppShell::render_outputs(self, requests, frames)
+    }
 
     fn complete_dmabuf_uses(&mut self, uses: &[weld_client::ClientBufferUseId]) {
         AppShell::complete_dmabuf_uses(self, uses);
@@ -976,6 +978,12 @@ impl CompositionHost for AppShell {
 
     fn complete_capture(&mut self, request_id: u64, result: Result<(), String>) {
         AppShell::complete_capture(self, request_id, result);
+    }
+}
+
+impl ApplicationHost for AppShell {
+    fn composition(&mut self) -> Option<&mut dyn CompositionHost> {
+        Some(self)
     }
 }
 

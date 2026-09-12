@@ -38,6 +38,10 @@ scripts/profiling/report-trace target/traces/CAPTURE.tracy --self --filter weld_
 
 Use self time to separate wrapper spans from their children. Inclusive calloop
 wait zones include time asleep and should not be interpreted as CPU use.
+All native assemblies expose the shared zones `weld_calloop_wait_and_dispatch`,
+`weld_host_client_ingress`, `weld_apply_policy_results`, and
+`weld_flush_wayland_clients` on the `weld_profile` target. These replace the
+former nested-only service zones and match the `--filter weld_` example above.
 
 ## Headless benchmarks
 

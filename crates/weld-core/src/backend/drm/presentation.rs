@@ -1,10 +1,6 @@
 //! Shared Smithay output-manager ownership and batched physical presentation.
 
-use std::{
-    collections::{HashMap, HashSet, VecDeque},
-    path::Path,
-    time::Duration,
-};
+use std::{collections::HashMap, path::Path, time::Duration};
 
 use anyhow::{Context, Result};
 use smithay::{
@@ -24,6 +20,8 @@ use crate::{
     input::InputPosition,
     server::ServerState,
 };
+
+use crate::runtime::callbacks::{CallbackLedger, complete_callback_batches, stage_callback_batch};
 
 use super::{
     cursor::{CursorResources, CursorState},
@@ -104,81 +102,10 @@ struct PhysicalOutputState {
     available: bool,
 }
 
-#[derive(Debug)]
-struct CallbackBatch {
-    id: u64,
-    pending_outputs: HashSet<OutputId>,
-}
-
-#[derive(Default, Debug)]
-struct CallbackLedger {
-    batches: VecDeque<CallbackBatch>,
-}
-
-impl CallbackLedger {
-    fn push(&mut self, id: u64, outputs: impl IntoIterator<Item = OutputId>) -> Vec<u64> {
-        let pending_outputs = outputs.into_iter().collect::<HashSet<_>>();
-        self.batches.push_back(CallbackBatch {
-            id,
-            pending_outputs,
-        });
-        self.take_completed_prefix()
-    }
-
-    fn retire(&mut self, id: u64, output: OutputId) -> Vec<u64> {
-        if let Some(batch) = self.batches.iter_mut().find(|batch| batch.id == id) {
-            batch.pending_outputs.remove(&output);
-        }
-        self.take_completed_prefix()
-    }
-
-    fn remove_output(&mut self, output: OutputId) -> Vec<u64> {
-        for batch in &mut self.batches {
-            batch.pending_outputs.remove(&output);
-        }
-        self.take_completed_prefix()
-    }
-
-    fn take_completed_prefix(&mut self) -> Vec<u64> {
-        let mut completed = Vec::new();
-        while self
-            .batches
-            .front()
-            .is_some_and(|batch| batch.pending_outputs.is_empty())
-        {
-            if let Some(batch) = self.batches.pop_front() {
-                completed.push(batch.id);
-            }
-        }
-        completed
-    }
-}
-
-fn complete_callback_batches(server: &mut ServerState, batches: impl IntoIterator<Item = u64>) {
-    for id in batches {
-        server.complete_frame_callbacks(id);
-    }
-}
-
-fn stage_callback_batch(
-    ledger: &mut CallbackLedger,
-    server: &mut ServerState,
-    outputs: impl IntoIterator<Item = OutputId>,
-) -> Option<u64> {
-    if !server.presentation_requested() {
-        return None;
-    }
-    let id = server.stage_frame_callbacks();
-    let completed = ledger.push(id, outputs);
-    complete_callback_batches(server, completed);
-    Some(id)
-}
-
 pub(super) struct PhysicalDesktop {
     manager: OutputManager,
     render_state: DrmRenderState,
     outputs: Vec<PhysicalOutputState>,
-    callbacks: CallbackLedger,
 }
 
 impl PhysicalDesktop {
@@ -246,7 +173,6 @@ impl PhysicalDesktop {
             manager,
             render_state,
             outputs,
-            callbacks: CallbackLedger::default(),
         })
     }
 
@@ -307,6 +233,7 @@ impl PhysicalDesktop {
         requested_outputs: &[OutputId],
         host: &mut dyn CompositionHost,
         server: &mut ServerState,
+        callbacks: &mut CallbackLedger,
         vblank_phases: &HashMap<OutputId, Duration>,
         stage_callbacks: bool,
     ) -> Result<PhysicalRenderOutcome> {
@@ -357,7 +284,7 @@ impl PhysicalDesktop {
             .map(|frame| self.outputs[frame.index].id)
             .collect::<Vec<_>>();
         let presentation_id = stage_callbacks
-            .then(|| stage_callback_batch(&mut self.callbacks, server, candidates.iter().copied()))
+            .then(|| stage_callback_batch(callbacks, server, candidates.iter().copied()))
             .flatten();
         for frame in prepared {
             let output = &mut self.outputs[frame.index];
@@ -386,17 +313,17 @@ impl PhysicalDesktop {
                 }
                 Err(FrameError::EmptyFrame) => {
                     outcome.empty.push(output.id);
-                    let completed = self.callbacks.remove_output(output.id);
+                    let completed = callbacks.remove_output(output.id);
                     complete_callback_batches(server, completed);
                 }
                 Err(FrameError::DrmError(DrmError::DeviceInactive)) => {
                     outcome.inactive = true;
-                    let completed = self.callbacks.remove_output(output.id);
+                    let completed = callbacks.remove_output(output.id);
                     complete_callback_batches(server, completed);
                 }
                 Err(error) => {
                     output.available = false;
-                    let completed = self.callbacks.remove_output(output.id);
+                    let completed = callbacks.remove_output(output.id);
                     complete_callback_batches(server, completed);
                     warn!(output = ?output.id, ?error, "disabled a failed physical output");
                 }
@@ -462,6 +389,7 @@ impl PhysicalDesktop {
         &mut self,
         crtc: crtc::Handle,
         server: &mut ServerState,
+        callbacks: &mut CallbackLedger,
     ) -> Result<Option<(OutputId, RetiredFrame)>> {
         let Some(output) = self.outputs.iter_mut().find(|output| output.crtc == crtc) else {
             return Ok(None);
@@ -486,7 +414,7 @@ impl PhysicalDesktop {
             );
         }
         if let Some(id) = submitted.presentation_id.or(admission.presentation_id) {
-            let completed = self.callbacks.retire(id, output.id);
+            let completed = callbacks.retire(id, output.id);
             complete_callback_batches(server, completed);
         }
         Ok(Some((output.id, admission)))
@@ -496,7 +424,11 @@ impl PhysicalDesktop {
         self.manager.pause();
     }
 
-    pub(super) fn activate(&mut self, server: &mut ServerState) -> Result<()> {
+    pub(super) fn activate(
+        &mut self,
+        server: &mut ServerState,
+        callbacks: &mut CallbackLedger,
+    ) -> Result<()> {
         self.manager
             .lock()
             .activate(true)
@@ -505,7 +437,7 @@ impl PhysicalDesktop {
             if let Some(frame) = output.admission.retire()
                 && let Some(id) = frame.presentation_id
             {
-                let completed = self.callbacks.retire(id, output.id);
+                let completed = callbacks.retire(id, output.id);
                 complete_callback_batches(server, completed);
             }
             output.composition.mark_dirty();
@@ -537,21 +469,4 @@ struct PreparedOutput {
 enum PrepareBatch {
     Ready(Vec<PreparedOutput>),
     Inactive,
-}
-
-#[cfg(test)]
-mod tests {
-    use crate::OutputId;
-
-    use super::CallbackLedger;
-
-    #[test]
-    fn a_completed_later_batch_waits_for_the_pending_prefix() {
-        let first = OutputId::new(1);
-        let mut ledger = CallbackLedger::default();
-        assert!(ledger.push(10, [first]).is_empty());
-        assert!(ledger.push(11, []).is_empty());
-
-        assert_eq!(ledger.retire(10, first), vec![10, 11]);
-    }
 }

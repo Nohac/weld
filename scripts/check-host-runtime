@@ -20,9 +20,12 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--shm-only", action="store_true", help="force Vulkan unavailable")
     parser.add_argument("--nested", action="store_true", help="check native nested screenshot capture instead")
+    parser.add_argument("--policy-only", action="store_true", help="exercise application policy without a local presenter")
     args = parser.parse_args()
     if args.nested and args.shm_only:
         parser.error("--nested requires GPU rendering; cannot combine with --shm-only")
+    if args.nested and args.policy_only:
+        parser.error("--policy-only cannot use a native presenter")
     if args.nested and (not (os.environ.get("WAYLAND_DISPLAY") or os.environ.get("DISPLAY")) or not shutil.which("foot")):
         print("SKIP nested capture: requires a parent display and foot")
         return
@@ -30,6 +33,8 @@ def main():
     resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
     subprocess.run(["cargo", "build", "--bin", "weldwm", "-j2"], cwd=root, check=True)
     subprocess.run(["cargo", "build", "-p", "weld-core", "--example", "wayland_session_probe", "-j2"], cwd=root, check=True)
+    if args.policy_only:
+        subprocess.run(["cargo", "build", "-p", "weld-core", "--example", "policy_host_probe", "-j2"], cwd=root, check=True)
     validation = root / "target/validation"
     validation.mkdir(parents=True, exist_ok=True)
     run = Path(tempfile.mkdtemp(prefix="host-runtime-", dir=validation))
@@ -48,15 +53,18 @@ def main():
     print(f"Logs: {run}", flush=True)
     with (run / "host.log").open("w") as log:
         # cargo supplies Bevy's dynamic-library search path and execs Weld.
-        host = subprocess.Popen([
+        host_command = [
             "cargo", "run", "--quiet", "--", "--backend", "headless",
             "--wayland-socket", "weld-probe", "--headless-output", "640x480",
             "--scale", "1.5",
-        ], cwd=root, env=environment, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
+        ]
+        if args.policy_only:
+            host_command = [str(root / "target/debug/examples/policy_host_probe"), "--socket", "weld-probe"]
+        host = subprocess.Popen(host_command, cwd=root, env=environment, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
         try:
             deadline = time.monotonic() + 30
             socket = runtime / "weld-probe"
-            while not socket.exists():
+            while not socket.exists() or (args.policy_only and "POLICY_IDLE_TICKS_READY" not in (run / "host.log").read_text()):
                 if host.poll() is not None or time.monotonic() >= deadline:
                     raise RuntimeError("host did not become ready; see host.log")
                 time.sleep(0.02)

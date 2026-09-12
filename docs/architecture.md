@@ -258,18 +258,25 @@ around the real Bevy `App`. The distribution may add ordinary Bevy plugins,
 systems, and resources before calling `run()`. `ActiveBackend` is inserted
 before plugin construction, and `WeldAppExt` lets any standard Bevy plugin
 inspect it without requiring a separate Weld plugin trait. The low-level
-`HostBuilder` and `CompositionHost` contract remain available for non-Bevy
-composition hosts; backend module entry points are implementation details.
+`HostBuilder` and `ApplicationHost` contract remain available for non-Bevy
+hosts. `HostPolicy` supplies policy and `CompositionHost` supplies optional
+rendering/capture, borrowed sequentially from that one owner. Backend module
+entry points are implementation details.
 
-Presentation-free sessions use `weld-core::session_host::SessionHost` instead.
+Presentation-free assembly uses `weld-core::runtime::HostRuntime`.
 The explicit `--backend headless` assembly bypasses `WeldApp`; it does not
 instantiate a no-op renderer or an invisible nested window. Calloop, the
 Wayland adapter, optional GPU import capability and a virtual output remain
-alive without a local presentation. The client-service sequence is shared with
-nested and DRM hosts. Startup logical sizes configure once through native
+alive without local presentation. All three assemblies use `NativeRuntime`'s
+outer loop, display/client ownership, signal and readiness registration, ordered
+client effects, child maintenance and callback ledger. Nested/DRM drivers retain
+their native event ordering, presentation deadlines, cursors and GPU submission.
+Logical outputs remain separate from native attachment resources and availability.
+Startup logical sizes configure once through native
 constraints, and mapped frame callbacks use a demand-driven virtual clock,
 independent of buffer-consumer release. SHM-only startup is valid without a
-Vulkan adapter. Adapter/wake registration is available to library consumers,
+Vulkan adapter. `HostRuntime::with_policy` runs policy without drawing an output;
+capture without a presenter fails explicitly. Adapter/wake registration is available to library consumers,
 but live admission, automatic session hoisting and reconnect are the next batch,
 not exposed by the headless CLI yet. See [Headless application hosting](headless-host.md).
 

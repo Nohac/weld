@@ -175,7 +175,7 @@ pub struct RenderContext {
 
 type RunPreparedHost = Box<
     dyn FnOnce(
-        Box<dyn CompositionHost>,
+        Box<dyn ApplicationHost>,
         Vec<ClientRuntimeAdapter>,
         Vec<ClientRuntimeWakeSource>,
     ) -> Result<()>,
@@ -290,7 +290,7 @@ pub struct PreparedRuntime {
 impl PreparedRuntime {
     pub(crate) fn new(
         run: impl FnOnce(
-            Box<dyn CompositionHost>,
+            Box<dyn ApplicationHost>,
             Vec<ClientRuntimeAdapter>,
             Vec<ClientRuntimeWakeSource>,
         ) -> Result<()>
@@ -304,7 +304,7 @@ impl PreparedRuntime {
     /// This must run on the thread that prepared the host.
     pub fn run(
         self,
-        host: impl CompositionHost + 'static,
+        host: impl ApplicationHost + 'static,
         adapters: Vec<ClientRuntimeAdapter>,
         wake_sources: Vec<ClientRuntimeWakeSource>,
     ) -> Result<()> {
@@ -324,7 +324,7 @@ impl PreparedHost {
         context: RenderContext,
         client_adapters: Vec<ClientAdapterRegistration>,
         run: impl FnOnce(
-            Box<dyn CompositionHost>,
+            Box<dyn ApplicationHost>,
             Vec<ClientRuntimeAdapter>,
             Vec<ClientRuntimeWakeSource>,
         ) -> Result<()>
@@ -369,25 +369,19 @@ pub enum CompositionDemand {
     Settle,
 }
 
-/// Bevy-independent interface through which a backend drives application policy and composition.
-pub trait CompositionHost {
+/// Application policy, independent of whether the host renders locally.
+pub trait HostPolicy {
     fn enqueue_client_event(&mut self, event: ClientSurfaceEvent) -> CompositionDemand;
     /// Buffers an input event for the next application frame and returns
     /// whether core should also forward it to the focused client immediately.
     fn enqueue_input_event(&mut self, event: RawSeatEvent) -> bool;
+    /// Advances policy and requests another paced update when returning true.
+    /// With a local presenter this also requests composition. A presenter-free
+    /// host does not render or impose Bevy's startup-settle passes.
     fn advance_main(&mut self, input_time: u32) -> bool;
     /// Services the restricted remote-control schedule without advancing the
     /// application world.
     fn service_remote_debug(&mut self);
-    /// Fills `frames` with the completed outputs.
-    ///
-    /// The buffer is cleared before rendering, retains its allocation between
-    /// calls, and contains a complete composition only when this returns `Ok`.
-    fn render_outputs(
-        &mut self,
-        requests: &[CompositionOutputRequest],
-        frames: &mut Vec<CompositionOutputFrame>,
-    ) -> Result<()>;
     /// Reconciles enabled output geometry before the next main advance.
     fn update_output_topology(&mut self, outputs: &[OutputConfiguration]);
     fn should_exit(&self) -> bool;
@@ -397,10 +391,29 @@ pub trait CompositionHost {
     fn take_virtual_terminal_switch_request(&mut self) -> Option<i32>;
     fn take_client_requests(&mut self) -> Vec<ClientRequest>;
     fn take_adapter_commands(&mut self) -> Vec<weld_client::ClientAdapterCommandEnvelope>;
+}
+
+/// Optional local rendering and capture capability. One application may supply
+/// both this interface and [`HostPolicy`], borrowed sequentially by the runtime.
+pub trait CompositionHost {
+    /// Fills `frames` with the completed outputs.
+    ///
+    /// The buffer is cleared before rendering, retains its allocation between
+    /// calls, and contains a complete composition only when this returns `Ok`.
+    fn render_outputs(
+        &mut self,
+        requests: &[CompositionOutputRequest],
+        frames: &mut Vec<CompositionOutputFrame>,
+    ) -> Result<()>;
     fn complete_dmabuf_uses(&mut self, uses: &[ClientBufferUseId]);
     fn has_surface_frame(&self) -> bool;
     fn take_capture_request(&mut self) -> Option<CaptureRequest>;
     fn complete_capture(&mut self, request_id: u64, result: Result<(), String>);
+}
+
+/// One owner of policy and optional local composition; never two owners of an app.
+pub trait ApplicationHost: HostPolicy {
+    fn composition(&mut self) -> Option<&mut dyn CompositionHost>;
 }
 
 /// One concrete GPU view selected for the next application composition.

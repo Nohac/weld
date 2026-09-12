@@ -1,5 +1,10 @@
 //! Nested Winit validation backend for Weld's Smithay, Bevy, and wgpu boundary.
 
+use crate::host::CompositionOutputFrame;
+use crate::runtime::native::{
+    HostState, NativeDriver, NativeRuntime, PolicyFrame, RuntimeIntegration, RuntimeSetup,
+};
+
 use std::{
     os::fd::{BorrowedFd, OwnedFd},
     sync::Arc,
@@ -11,8 +16,7 @@ use crate::renderer::NestedRenderer;
 #[cfg(test)]
 use crate::runtime::{BEVY_SETTLE_COMPOSITIONS, FRAME_INTERVAL, IterationWork};
 use crate::runtime::{
-    ChildProcesses, FrameState, HostCommand, HostCommandEffect, LoopData, PendingCapture,
-    iteration_work, server_mut,
+    ChildProcesses, FrameState, HostCommand, HostCommandEffect, PendingCapture, iteration_work,
 };
 use crate::server::{
     OutputDescriptor, OutputMetrics, ServerOptions, ServerOutputDefinition, ServerState,
@@ -21,20 +25,15 @@ use crate::{
     OutputConfiguration, OutputHead, OutputId, OutputScale,
     cursor::CursorImage,
     host::{
-        CompositionDemand, CompositionDestination, CompositionFrame, CompositionOutputRequest,
-        PreparedHost, RenderContext, RunOptions,
+        ApplicationHost, CompositionDemand, CompositionDestination, CompositionFrame,
+        CompositionOutputRequest, PreparedHost, RenderContext, RunOptions,
     },
     surface::LogicalPoint,
 };
 use anyhow::{Context, Result, anyhow, bail};
-use calloop::channel;
 use calloop::signals::Signals;
-use smithay::reexports::{
-    calloop::{EventLoop as CalloopEventLoop, Interest, Mode, PostAction, generic::Generic},
-    wayland_server::Display,
-};
+use smithay::reexports::calloop::{Interest, Mode, PostAction, generic::Generic};
 use tracing::{info, warn};
-use weld_client::{ClientEventQueue, ClientRuntime};
 use winit::{
     application::ApplicationHandler,
     dpi::{LogicalSize, PhysicalSize},
@@ -82,15 +81,18 @@ pub(crate) fn prepare(options: RunOptions, signals: Signals) -> Result<PreparedH
         .pending_scale_factor
         .take()
         .unwrap_or_else(|| window.scale_factor());
-    let mut output_metrics = OutputMetrics::new(
+    let output_metrics = OutputMetrics::new(
         initial_size.width,
         initial_size.height,
         OutputScale::new(initial_scale_factor)?,
     )?;
     let display_handle = host_event_loop.owned_display_handle();
     let host_wake_fd = host_display_wake_fd(&display_handle)?;
-    let mut renderer = NestedRenderer::new(window, display_handle, initial_size)?;
-    let (dmabuf_release_sender, dmabuf_release_source) = channel::channel();
+    let renderer = NestedRenderer::new(window, display_handle, initial_size)?;
+    let (dmabuf, dmabuf_release_source) = crate::runtime::gpu::import_channel(
+        renderer.dmabuf_sources(),
+        renderer.dmabuf_capabilities().cloned(),
+    );
     let initial_extent = crate::surface::Extent::new(initial_size.width, initial_size.height);
     let nested_output = OutputConfiguration::new(
         OutputId::new(1),
@@ -105,11 +107,7 @@ pub(crate) fn prepare(options: RunOptions, signals: Signals) -> Result<PreparedH
         adapter: renderer.adapter().clone(),
         device: renderer.device().clone(),
         queue: renderer.queue().clone(),
-        dmabuf: crate::dmabuf::DmabufContext::new(
-            dmabuf_release_sender,
-            renderer.dmabuf_sources(),
-            renderer.dmabuf_capabilities().cloned(),
-        ),
+        dmabuf,
         output_heads: vec![OutputHead::new(OutputId::new(1), "weld-nested", None)],
         outputs: vec![nested_output],
         composition_format: wgpu::TextureFormat::Rgba8UnormSrgb,
@@ -122,28 +120,8 @@ pub(crate) fn prepare(options: RunOptions, signals: Signals) -> Result<PreparedH
         context,
         vec![client_registration],
         move |application, adapters, wake_sources| {
-            let mut shell = application;
-            let mut clients = ClientRuntime::default();
-            for adapter in adapters {
-                clients.register(adapter).map_err(anyhow::Error::new)?;
-            }
-            let mut client_events = ClientEventQueue::default();
-            let mut invalid_client_events = Vec::new();
-            let mut invalid_client_effects = Vec::new();
-
-            let mut calloop: CalloopEventLoop<'static, LoopData<NestedEvent>> =
-                CalloopEventLoop::try_new()
-                    .context("failed to create the Smithay calloop event loop")?;
-            crate::host::register_client_wake_sources(&calloop.handle(), wake_sources)?;
-            let display =
-                Display::<ServerState>::new().context("failed to create the Wayland display")?;
-            let server = ServerState::new(
-                &calloop.handle(),
-                display,
-                dmabuf_release_source,
-                client_bridge,
-                server_mut::<NestedEvent>,
-                ServerOptions {
+            let mut runtime = NativeRuntime::prepare(RuntimeSetup {
+                server: ServerOptions {
                     initial_toplevel_size: None,
                     started_at,
                     seat_name: "weld-seat0",
@@ -161,20 +139,18 @@ pub(crate) fn prepare(options: RunOptions, signals: Signals) -> Result<PreparedH
                         .keyboard_repeat_mode
                         .unwrap_or(crate::input::KeyboardRepeatMode::Compositor),
                 },
-            )?;
-            let mut loop_data = LoopData::new(server);
-            calloop
-                .handle()
-                .insert_source(signals, |event, _, data| {
-                    data.events
-                        .push_back(NestedEvent::Command(HostCommand::Exit));
-                    tracing::debug!(signal = ?event.signal(), "received shutdown signal");
-                })
-                .context("failed to register process signals")?;
+                releases: dmabuf_release_source,
+                bridge: client_bridge,
+                adapters,
+                wakes: wake_sources,
+                signals,
+                shutdown_event: || NestedEvent::Command(HostCommand::Exit),
+            })?;
             if let Some(host_wake_fd) = host_wake_fd {
                 // Winit remains the sole reader. The duplicate descriptor only wakes
                 // calloop so the next outer-loop iteration can pump host events.
-                calloop
+                runtime
+                    .event_loop
                     .handle()
                     .insert_source(
                         // Edge mode prevents an unread backend-internal Wayland event
@@ -185,379 +161,402 @@ pub(crate) fn prepare(options: RunOptions, signals: Signals) -> Result<PreparedH
                     )
                     .context("failed to register the nested host display wake source")?;
             }
-            let mut children = ChildProcesses::default();
-            let child_requested = children.spawn_requested(&loop_data.server, &options.client)?;
-            let remote_debug_enabled = options.remote_debug_enabled;
-            let mut pending_capture = options
-                .screenshot
-                .map(|path| PendingCapture::startup(path, child_requested));
-            let mut frame_state = FrameState::default();
-            let mut completed_composition: Option<CompositionFrame> = None;
-            let composition_requests = [CompositionOutputRequest {
-                output: OutputId::new(1),
-                destination: CompositionDestination::Owned,
-            }];
-            let mut composition_frames = Vec::with_capacity(composition_requests.len());
-            let mut next_remote_service = Instant::now();
-            let mut pending_presentation_id = None;
-
-            info!(socket = ?loop_data.server.socket_name, "Weld nested compositor is ready");
-            loop {
-                let pump_status = {
-                    let _pump_span =
-                        tracing::trace_span!(target: crate::PROFILE_TARGET, "winit_pump_events")
-                            .entered();
-                    host_event_loop.pump_app_events(Some(Duration::ZERO), &mut host)
-                };
-                let host_exited =
-                    matches!(pump_status, PumpStatus::Exit(_)) || host.close_requested;
-                host.refresh_scale_factor();
-                if host_exited {
-                    if pending_capture
-                        .as_ref()
-                        .is_some_and(PendingCapture::is_startup)
-                    {
-                        bail!("nested host closed before the startup screenshot completed");
-                    }
-                    break;
-                }
-
-                let input_pending = host.input.has_pending();
-                let host_work_drained = host_work_drained(
-                    input_pending,
-                    host.pending_size.is_some(),
-                    host.pending_scale_factor.is_some(),
-                );
-                if std::mem::take(&mut host.redraw_requested) {
-                    frame_state.request_present();
-                }
-                if input_pending {
-                    frame_state.request_update();
-                    let _input_span = tracing::trace_span!(
-                        target: crate::PROFILE_TARGET,
-                        "nested_host_input_ingress"
-                    )
-                    .entered();
-                    let mut event_count = 0_usize;
-                    for event in host.input.drain() {
-                        if shell.enqueue_input_event(event.clone()) {
-                            clients.dispatch_unconsumed_input(event.into_runtime());
-                            loop_data.server.apply_pending_client_work();
-                        }
-                        event_count += 1;
-                    }
-                    tracing::trace!(
-                        target: crate::PROFILE_TARGET,
-                        event_count,
-                        "host input batch"
-                    );
-                }
-                let pending_size = host.pending_size.take();
-                let pending_scale_factor = host.pending_scale_factor.take();
-                let mut metrics_changed = false;
-                let mut physical_size = PhysicalSize::new(
-                    output_metrics.physical_width(),
-                    output_metrics.physical_height(),
-                );
-                let mut scale_factor = output_metrics.scale_factor();
-                if let Some(size) = pending_size
-                    && size.width > 0
-                    && size.height > 0
-                    && size != physical_size
-                {
-                    physical_size = size;
-                    metrics_changed = true;
-                }
-                if let Some(pending_scale_factor) = pending_scale_factor
-                    && pending_scale_factor != scale_factor
-                {
-                    scale_factor = pending_scale_factor;
-                    metrics_changed = true;
-                }
-                if metrics_changed {
-                    let candidate = OutputScale::new(scale_factor).and_then(|scale| {
-                        OutputMetrics::new(physical_size.width, physical_size.height, scale)
-                    });
-                    match candidate {
-                        Ok(candidate) => {
-                            if physical_size.width != output_metrics.physical_width()
-                                || physical_size.height != output_metrics.physical_height()
-                            {
-                                renderer.resize(physical_size);
-                            }
-                            output_metrics = candidate;
-                            loop_data.server.update_output_metrics(
-                                OutputId::new(1),
-                                output_metrics,
-                                (0, 0),
-                            );
-                            let configuration = OutputConfiguration::new(
-                                OutputId::new(1),
-                                crate::surface::Extent::new(
-                                    physical_size.width,
-                                    physical_size.height,
-                                ),
-                                OutputScale::new(scale_factor)?,
-                                LogicalPoint::ZERO,
-                                true,
-                                None,
-                            )?;
-                            shell.update_output_topology(&[configuration]);
-                            frame_state.request_composition();
-                        }
-                        Err(error) => warn!(
-                            width = physical_size.width,
-                            height = physical_size.height,
-                            scale_factor,
-                            %error,
-                            "ignored invalid nested output geometry"
-                        ),
-                    }
-                }
-
-                let timeout = dispatch_timeout(host_work_drained, &frame_state, Instant::now());
-                {
-                    let _dispatch_span = tracing::trace_span!(
-                        target: crate::PROFILE_TARGET,
-                        "nested_calloop_wait_and_dispatch"
-                    )
-                    .entered();
-                    calloop
-                        .dispatch(Some(timeout), &mut loop_data)
-                        .context("Smithay calloop dispatch failed")?;
-                }
-                crate::runtime::service_client_adapters(
-                    &mut loop_data.server,
-                    &mut clients,
-                    &mut client_events,
-                    &mut invalid_client_events,
-                    &mut invalid_client_effects,
-                    |uses| shell.complete_dmabuf_uses(uses),
-                );
-                if !client_events.is_empty() {
-                    let _surface_span = tracing::trace_span!(
-                        target: crate::PROFILE_TARGET,
-                        "nested_host_surface_ingress"
-                    )
-                    .entered();
-                    let mut event_count = 0_usize;
-                    while let Some(event) = client_events.pop_front() {
-                        match shell.enqueue_client_event(event) {
-                            CompositionDemand::Ordinary => frame_state.request_composition(),
-                            CompositionDemand::Settle => frame_state.request_settled_composition(),
-                        }
-                        event_count += 1;
-                    }
-                    tracing::trace!(
-                        target: crate::PROFILE_TARGET,
-                        event_count,
-                        "host surface batch"
-                    );
-                }
-                if loop_data.server.presentation_requested() {
-                    frame_state.request_present();
-                }
-
-                let update_now = Instant::now();
-                if remote_debug_enabled && update_now >= next_remote_service {
-                    shell.service_remote_debug();
-                    next_remote_service =
-                        update_now + crate::runtime::REMOTE_DEBUG_MAINTENANCE_INTERVAL;
-                }
-
-                let mut work = iteration_work(
-                    frame_state.update_due(update_now),
-                    frame_state.composition_due(update_now),
-                );
-                let mut request_next_composition = false;
-                let mut command_exit_requested = false;
-                if work.advance_main {
-                    let bevy_requested_redraw =
-                        shell.advance_main(started_at.elapsed().as_millis() as u32);
-                    if bevy_requested_redraw {
-                        frame_state.request_composition();
-                        work.render_composition = true;
-                    }
-                    let client_requests = shell.take_client_requests();
-                    let pointer_routes = shell.take_pointer_route_updates();
-                    let adapter_commands = shell.take_adapter_commands();
-                    let host_commands = shell.take_host_commands();
-                    let cursor_update = shell.take_cursor_update();
-                    if !client_requests.is_empty()
-                        || !pointer_routes.is_empty()
-                        || !adapter_commands.is_empty()
-                        || !host_commands.is_empty()
-                    {
-                        let _results_span = tracing::trace_span!(
-                            target: crate::PROFILE_TARGET,
-                            "nested_apply_ecs_results"
-                        )
-                        .entered();
-                        tracing::trace!(
-                            target: crate::PROFILE_TARGET,
-                            client_requests = client_requests.len(),
-                            pointer_routes = pointer_routes.len(),
-                            adapter_commands = adapter_commands.len(),
-                            host_commands = host_commands.len(),
-                            "ECS result batch"
-                        );
-                        // ECS focus policy is authoritative and must be applied before the matching
-                        // pointer press establishes Smithay's implicit grab. Requests made during an
-                        // older grab are queued by the host and retried when that grab ends.
-                        for request in client_requests {
-                            if !clients.apply_request(request) {
-                                warn!("ignored a request for an unregistered client source");
-                            }
-                        }
-                        loop_data.server.apply_pending_client_work();
-                        for route in pointer_routes {
-                            clients.publish_pointer_route(route);
-                        }
-                        loop_data.server.apply_pending_client_work();
-                        for command in adapter_commands {
-                            if !clients.apply_command(command) {
-                                warn!("ignored a command for an unregistered client source");
-                            }
-                        }
-                        loop_data.server.apply_pending_client_work();
-                        for command in host_commands {
-                            command_exit_requested |=
-                                apply_host_command(&mut children, &mut loop_data.server, command)?;
-                        }
-                    }
-                    if let Some(appearance) = cursor_update.appearance {
-                        loop_data.server.set_shell_cursor(appearance);
-                    }
-                    if let Some(active) = cursor_update.override_client {
-                        loop_data.server.set_shell_cursor_override(active);
-                    }
-                    if let Some(configuration) = cursor_update.configuration {
-                        host.cursor_configuration = configuration;
-                        host.cursor_dirty = true;
-                    }
-                    if shell.should_exit() {
-                        if pending_capture
-                            .as_ref()
-                            .is_some_and(PendingCapture::is_startup)
-                        {
-                            bail!("Bevy exited before the startup screenshot completed");
-                        }
-                        break;
-                    }
-                    if command_exit_requested {
-                        break;
-                    }
-                    loop_data.server.flush_pending_resizes();
-                    if work.render_composition {
-                        shell.render_outputs(&composition_requests, &mut composition_frames)?;
-                        let composition = composition_frames
-                            .pop()
-                            .context("nested composition returned no output frame")?;
-                        debug_assert!(composition_frames.is_empty());
-                        completed_composition = Some(composition.frame);
-                        pending_presentation_id = Some(loop_data.server.stage_frame_callbacks());
-                        frame_state.composition_rendered(update_now);
-                        request_next_composition = bevy_requested_redraw;
-                    } else {
-                        frame_state.application_advanced(update_now);
-                    }
-                }
-
-                apply_nested_cursor(
-                    &mut host,
-                    &host_event_loop,
-                    loop_data.server.take_cursor_image(&clients),
-                );
-
-                if pending_capture.is_none()
-                    && let Some(request) = shell.take_capture_request()
-                {
-                    pending_capture =
-                        Some(PendingCapture::remote(request.request_id, request.path));
-                    frame_state.request_present();
-                }
-                if pending_capture
-                    .as_ref()
-                    .is_some_and(|capture| capture.deadline <= Instant::now())
-                    && let Some(capture) = pending_capture.take()
-                {
-                    let error =
-                        "screenshot timed out before a presentable frame was available".to_owned();
-                    if let Some(request_id) = capture.remote_request_id {
-                        shell.complete_capture(request_id, Err(error));
-                    } else {
-                        bail!("startup {error}");
-                    }
-                }
-
-                let capture_path = pending_capture.as_ref().and_then(|capture| {
-                    let client_ready = !capture.wait_for_client || shell.has_surface_frame();
-                    client_ready.then_some(capture.path.as_path())
-                });
-                if capture_path.is_some() {
-                    frame_state.request_present();
-                }
-                if frame_state.presentation_due()
-                    && let Some(composition) = completed_composition.as_ref()
-                {
-                    let frame = renderer.render(composition.target().view(), capture_path)?;
-                    if frame.presented {
-                        frame_state.presented();
-                        if let Some(presentation_id) = pending_presentation_id.take() {
-                            loop_data.server.complete_frame_callbacks(presentation_id);
-                        }
-                    }
-                    if let Some(capture_result) = frame.capture
-                        && let Some(capture) = pending_capture.take()
-                    {
-                        match capture.remote_request_id {
-                            Some(request_id) => {
-                                if let Err(error) = &capture_result {
-                                    warn!(request_id, %error, "remote screenshot failed");
-                                }
-                                shell.complete_capture(request_id, capture_result);
-                            }
-                            None => match capture_result {
-                                Ok(()) => {
-                                    info!(path = %capture.path.display(), "startup screenshot saved");
-                                    return Ok(());
-                                }
-                                Err(error) => bail!("startup screenshot failed: {error}"),
-                            },
-                        }
-                    }
-                }
-                // Keep this below presentation: a redraw requested while producing the
-                // current frame schedules the next frame, but must not make the current
-                // completed composition ineligible to present.
-                if request_next_composition {
-                    frame_state.request_composition();
-                }
-                {
-                    let _flush_span = tracing::trace_span!(
-                        target: crate::PROFILE_TARGET,
-                        "nested_flush_wayland_clients"
-                    )
-                    .entered();
-                    loop_data.server.flush_clients();
-                }
-                let mut exit_requested = false;
-                while let Some(event) = loop_data.events.pop_front() {
-                    match event {
-                        NestedEvent::Command(command) => {
-                            exit_requested |=
-                                apply_host_command(&mut children, &mut loop_data.server, command)?;
-                        }
-                    }
-                }
-                children.reap();
-                if exit_requested {
-                    break;
-                }
-            }
-            Ok(())
+            let child_requested = runtime
+                .state
+                .children
+                .spawn_requested(&runtime.state.data.server, &options.client)?;
+            let driver = NestedDriver {
+                host_event_loop,
+                host,
+                renderer,
+                output_metrics,
+                started_at,
+                frame_state: FrameState::default(),
+                pending_capture: options
+                    .screenshot
+                    .map(|path| PendingCapture::startup(path, child_requested)),
+                remote_debug_enabled: options.remote_debug_enabled,
+                completed_composition: None,
+                composition_requests: [CompositionOutputRequest {
+                    output: OutputId::new(1),
+                    destination: CompositionDestination::Owned,
+                }],
+                composition_frames: Vec::with_capacity(1),
+                next_remote_service: Instant::now(),
+                pending_presentation_id: None,
+                host_work_drained: false,
+            };
+            info!(socket = ?runtime.state.data.server.socket_name, "Weld nested compositor is ready");
+            runtime.run(
+                RuntimeIntegration::Native {
+                    application,
+                    driver: Box::new(driver),
+                },
+                crate::runtime::FRAME_INTERVAL,
+            )
         },
     ))
+}
+
+struct NestedDriver {
+    host_event_loop: EventLoop<()>,
+    host: NestedHost,
+    renderer: NestedRenderer,
+    output_metrics: OutputMetrics,
+    started_at: Instant,
+    frame_state: FrameState,
+    pending_capture: Option<PendingCapture>,
+    remote_debug_enabled: bool,
+    completed_composition: Option<CompositionFrame>,
+    composition_requests: [CompositionOutputRequest; 1],
+    composition_frames: Vec<CompositionOutputFrame>,
+    next_remote_service: Instant,
+    pending_presentation_id: Option<u64>,
+    host_work_drained: bool,
+}
+
+impl NativeDriver<NestedEvent> for NestedDriver {
+    fn prepare_dispatch(
+        &mut self,
+        state: &mut HostState<NestedEvent>,
+        shell: &mut dyn ApplicationHost,
+    ) -> Result<bool> {
+        let pump_status = {
+            let _pump_span =
+                tracing::trace_span!(target: crate::PROFILE_TARGET, "winit_pump_events").entered();
+            self.host_event_loop
+                .pump_app_events(Some(Duration::ZERO), &mut self.host)
+        };
+        let host_exited = matches!(pump_status, PumpStatus::Exit(_)) || self.host.close_requested;
+        self.host.refresh_scale_factor();
+        if host_exited {
+            if self
+                .pending_capture
+                .as_ref()
+                .is_some_and(PendingCapture::is_startup)
+            {
+                bail!("nested host closed before the startup screenshot completed");
+            }
+            return Ok(false);
+        }
+
+        let input_pending = self.host.input.has_pending();
+        self.host_work_drained = host_work_drained(
+            input_pending,
+            self.host.pending_size.is_some(),
+            self.host.pending_scale_factor.is_some(),
+        );
+        if std::mem::take(&mut self.host.redraw_requested) {
+            self.frame_state.request_present();
+        }
+        if input_pending {
+            self.frame_state.request_update();
+            let _input_span = tracing::trace_span!(
+                target: crate::PROFILE_TARGET,
+                "nested_host_input_ingress"
+            )
+            .entered();
+            let mut event_count = 0_usize;
+            for event in self.host.input.drain() {
+                if shell.enqueue_input_event(event.clone()) {
+                    state
+                        .clients
+                        .dispatch_unconsumed_input(event.into_runtime());
+                    state.data.server.apply_pending_client_work();
+                }
+                event_count += 1;
+            }
+            tracing::trace!(
+                target: crate::PROFILE_TARGET,
+                event_count,
+                "host input batch"
+            );
+        }
+        let pending_size = self.host.pending_size.take();
+        let pending_scale_factor = self.host.pending_scale_factor.take();
+        let mut metrics_changed = false;
+        let mut physical_size = PhysicalSize::new(
+            self.output_metrics.physical_width(),
+            self.output_metrics.physical_height(),
+        );
+        let mut scale_factor = self.output_metrics.scale_factor();
+        if let Some(size) = pending_size
+            && size.width > 0
+            && size.height > 0
+            && size != physical_size
+        {
+            physical_size = size;
+            metrics_changed = true;
+        }
+        if let Some(pending_scale_factor) = pending_scale_factor
+            && pending_scale_factor != scale_factor
+        {
+            scale_factor = pending_scale_factor;
+            metrics_changed = true;
+        }
+        if metrics_changed {
+            let candidate = OutputScale::new(scale_factor).and_then(|scale| {
+                OutputMetrics::new(physical_size.width, physical_size.height, scale)
+            });
+            match candidate {
+                Ok(candidate) => {
+                    if physical_size.width != self.output_metrics.physical_width()
+                        || physical_size.height != self.output_metrics.physical_height()
+                    {
+                        self.renderer.resize(physical_size);
+                    }
+                    self.output_metrics = candidate;
+                    state.data.server.update_output_metrics(
+                        OutputId::new(1),
+                        self.output_metrics,
+                        (0, 0),
+                    );
+                    let configuration = OutputConfiguration::new(
+                        OutputId::new(1),
+                        crate::surface::Extent::new(physical_size.width, physical_size.height),
+                        OutputScale::new(scale_factor)?,
+                        LogicalPoint::ZERO,
+                        true,
+                        None,
+                    )?;
+                    shell.update_output_topology(&[configuration]);
+                    self.frame_state.request_composition();
+                }
+                Err(error) => warn!(
+                    width = physical_size.width,
+                    height = physical_size.height,
+                    scale_factor,
+                    %error,
+                    "ignored invalid nested output geometry"
+                ),
+            }
+        }
+
+        Ok(true)
+    }
+    fn timeout(&self, now: Instant) -> Duration {
+        dispatch_timeout(self.host_work_drained, &self.frame_state, now)
+    }
+    fn dispatched(
+        &mut self,
+        _: &mut HostState<NestedEvent>,
+        _: &mut dyn ApplicationHost,
+    ) -> Result<()> {
+        Ok(())
+    }
+    fn client_demand(&mut self, demand: CompositionDemand) {
+        match demand {
+            CompositionDemand::Ordinary => self.frame_state.request_composition(),
+            CompositionDemand::Settle => self.frame_state.request_settled_composition(),
+        }
+    }
+    fn policy_frame(
+        &mut self,
+        state: &mut HostState<NestedEvent>,
+        shell: &mut dyn ApplicationHost,
+    ) -> PolicyFrame {
+        if state.data.server.presentation_requested() {
+            self.frame_state.request_present();
+        }
+
+        let update_now = Instant::now();
+        if self.remote_debug_enabled && update_now >= self.next_remote_service {
+            shell.service_remote_debug();
+            self.next_remote_service =
+                update_now + crate::runtime::REMOTE_DEBUG_MAINTENANCE_INTERVAL;
+        }
+
+        PolicyFrame {
+            now: update_now,
+            work: iteration_work(
+                self.frame_state.update_due(update_now),
+                self.frame_state.composition_due(update_now),
+            ),
+            redraw: false,
+            input_time: self.started_at.elapsed().as_millis() as u32,
+        }
+    }
+    fn apply_native_effects(
+        &mut self,
+        state: &mut HostState<NestedEvent>,
+        shell: &mut dyn ApplicationHost,
+        frame: &mut PolicyFrame,
+    ) -> Result<bool> {
+        let mut command_exit_requested = false;
+        if frame.redraw {
+            self.frame_state.request_composition();
+            frame.work.render_composition = true;
+        }
+        for command in shell.take_host_commands() {
+            command_exit_requested |=
+                apply_host_command(&mut state.children, &mut state.data.server, command)?;
+        }
+        let cursor_update = shell.take_cursor_update();
+        if let Some(appearance) = cursor_update.appearance {
+            state.data.server.set_shell_cursor(appearance);
+        }
+        if let Some(active) = cursor_update.override_client {
+            state.data.server.set_shell_cursor_override(active);
+        }
+        if let Some(configuration) = cursor_update.configuration {
+            self.host.cursor_configuration = configuration;
+            self.host.cursor_dirty = true;
+        }
+        if shell.should_exit() {
+            if self
+                .pending_capture
+                .as_ref()
+                .is_some_and(PendingCapture::is_startup)
+            {
+                bail!("Bevy exited before the startup screenshot completed");
+            }
+            return Ok(false);
+        }
+        if command_exit_requested {
+            return Ok(false);
+        }
+        state.data.server.flush_pending_resizes();
+        Ok(true)
+    }
+    fn present(
+        &mut self,
+        state: &mut HostState<NestedEvent>,
+        shell: &mut dyn ApplicationHost,
+        frame: PolicyFrame,
+    ) -> Result<bool> {
+        let mut request_next_composition = false;
+        if frame.work.advance_main {
+            if frame.work.render_composition {
+                shell
+                    .composition()
+                    .context("native presenter requires local composition")?
+                    .render_outputs(&self.composition_requests, &mut self.composition_frames)?;
+                let composition = self
+                    .composition_frames
+                    .pop()
+                    .context("nested composition returned no output frame")?;
+                debug_assert!(self.composition_frames.is_empty());
+                self.completed_composition = Some(composition.frame);
+                self.pending_presentation_id =
+                    Some(crate::runtime::callbacks::stage_composition_callbacks(
+                        &mut state.callbacks,
+                        &mut state.data.server,
+                        [OutputId::new(1)],
+                    ));
+                self.frame_state.composition_rendered(frame.now);
+                request_next_composition = frame.redraw;
+            } else {
+                self.frame_state.application_advanced(frame.now);
+            }
+        }
+
+        apply_nested_cursor(
+            &mut self.host,
+            &self.host_event_loop,
+            state.data.server.take_cursor_image(&state.clients),
+        );
+
+        if self.pending_capture.is_none()
+            && let Some(request) = shell
+                .composition()
+                .context("native presenter requires local composition")?
+                .take_capture_request()
+        {
+            self.pending_capture = Some(PendingCapture::remote(request.request_id, request.path));
+            self.frame_state.request_present();
+        }
+        if self
+            .pending_capture
+            .as_ref()
+            .is_some_and(|capture| capture.deadline <= Instant::now())
+            && let Some(capture) = self.pending_capture.take()
+        {
+            let error = "screenshot timed out before a presentable frame was available".to_owned();
+            if let Some(request_id) = capture.remote_request_id {
+                shell
+                    .composition()
+                    .context("native presenter requires local composition")?
+                    .complete_capture(request_id, Err(error));
+            } else {
+                bail!("startup {error}");
+            }
+        }
+
+        let capture_path = self.pending_capture.as_ref().and_then(|capture| {
+            let client_ready = !capture.wait_for_client
+                || shell
+                    .composition()
+                    .is_some_and(|composition| composition.has_surface_frame());
+            client_ready.then_some(capture.path.as_path())
+        });
+        if capture_path.is_some() {
+            self.frame_state.request_present();
+        }
+        if self.frame_state.presentation_due()
+            && let Some(composition) = self.completed_composition.as_ref()
+        {
+            let frame = self
+                .renderer
+                .render(composition.target().view(), capture_path)?;
+            if frame.presented {
+                self.frame_state.presented();
+                if let Some(presentation_id) = self.pending_presentation_id.take() {
+                    let completed = state
+                        .callbacks
+                        .retire_through(presentation_id, OutputId::new(1));
+                    crate::runtime::callbacks::complete_callback_batches(
+                        &mut state.data.server,
+                        completed,
+                    );
+                }
+            }
+            if let Some(capture_result) = frame.capture
+                && let Some(capture) = self.pending_capture.take()
+            {
+                match capture.remote_request_id {
+                    Some(request_id) => {
+                        if let Err(error) = &capture_result {
+                            warn!(request_id, %error, "remote screenshot failed");
+                        }
+                        shell
+                            .composition()
+                            .context("native presenter requires local composition")?
+                            .complete_capture(request_id, capture_result);
+                    }
+                    None => match capture_result {
+                        Ok(()) => {
+                            info!(path = %capture.path.display(), "startup screenshot saved");
+                            return Ok(false);
+                        }
+                        Err(error) => bail!("startup screenshot failed: {error}"),
+                    },
+                }
+            }
+        }
+        // Keep this below presentation: a redraw requested while producing the
+        // current frame schedules the next frame, but must not make the current
+        // completed composition ineligible to present.
+        if request_next_composition {
+            self.frame_state.request_composition();
+        }
+        Ok(true)
+    }
+    fn reap_before_flush(&self) -> bool {
+        false
+    }
+    fn after_flush(&mut self, state: &mut HostState<NestedEvent>) -> Result<bool> {
+        let mut exit_requested = false;
+        while let Some(event) = state.data.events.pop_front() {
+            match event {
+                NestedEvent::Command(command) => {
+                    exit_requested |=
+                        apply_host_command(&mut state.children, &mut state.data.server, command)?;
+                }
+            }
+        }
+        Ok(!exit_requested)
+    }
+    fn shutdown(&mut self) {}
 }
 
 fn apply_host_command(

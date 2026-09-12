@@ -17,8 +17,9 @@ use tracing::warn;
 use winit::event_loop::OwnedDisplayHandle;
 use winit::{dpi::PhysicalSize, window::Window};
 
-use crate::dmabuf::{DmabufCapabilities, DmabufSourceCache, request_weld_device};
+use crate::dmabuf::{DmabufCapabilities, DmabufSourceCache};
 use crate::host::CompositionFrame;
+use crate::runtime::gpu::NativeGpu;
 
 mod composite;
 
@@ -64,10 +65,13 @@ impl NestedRenderer {
             apply_limit_buckets: false,
         }))
         .context("no Vulkan adapter can present to the nested window")?;
-        let (device, queue, dmabuf_capabilities) =
-            request_weld_device(&adapter, "weld nested device")
-                .context("failed to create the nested wgpu device")?;
-        let dmabuf_sources = DmabufSourceCache::new(&device);
+        let NativeGpu {
+            device,
+            queue,
+            capabilities: dmabuf_capabilities,
+            sources: dmabuf_sources,
+        } = NativeGpu::request(&adapter, "weld nested device")
+            .context("failed to create the nested wgpu device")?;
 
         let mut surface_config = surface
             .get_default_config(&adapter, size.width.max(1), size.height.max(1))

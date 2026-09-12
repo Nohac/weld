@@ -555,7 +555,7 @@ impl ServerState {
     }
 
     /// Frame requests eligible for a virtual presentation opportunity. As on
-    /// physical backends, never-mapped surfaces are not considered visible.
+    /// physical backends, currently unmapped surfaces are not considered visible.
     pub(crate) fn has_pending_frame_callbacks(&self) -> bool {
         self.mapped_frame_surfaces().any(|surface| {
             with_states(&surface, |states| {
