@@ -1,5 +1,10 @@
 # Headless application hosting
 
+The next architectural step is the reviewed [shared native runtime
+plan](native-host-runtime-plan.md): headless becomes an entrypoint assembly of
+the common host, not a separate runtime. The foundation described below remains
+the implemented behavior until that refactor lands. Iroh demo work follows it.
+
 ## Session-host foundation — Implemented
 
 `weldwm --backend headless` runs a Wayland session without a nested window,
@@ -42,7 +47,7 @@ another frame, not confirmation that a remote screen displayed it. No new
 display-feedback or network-ACK semantics are introduced. Without pending
 mapped callbacks, calloop waits on its sources with a one-second child-reaping
 maintenance timeout, rather than waking at the refresh rate. Callbacks on
-never-mapped surfaces remain ineligible, as in the existing hosts.
+currently unmapped surfaces remain ineligible, as in the existing hosts.
 
 Vulkan supplies the existing native DMA-BUF import capability when available.
 If adapter/device initialization fails, the host warns and serves SHM clients
