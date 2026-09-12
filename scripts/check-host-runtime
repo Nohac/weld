@@ -21,11 +21,14 @@ def main():
     parser.add_argument("--shm-only", action="store_true", help="force Vulkan unavailable")
     parser.add_argument("--nested", action="store_true", help="check native nested screenshot capture instead")
     parser.add_argument("--policy-only", action="store_true", help="exercise application policy without a local presenter")
+    parser.add_argument("--frame-timings", action="store_true", help="record callback and buffer-release delay per SHM probe frame")
     args = parser.parse_args()
     if args.nested and args.shm_only:
         parser.error("--nested requires GPU rendering; cannot combine with --shm-only")
     if args.nested and args.policy_only:
         parser.error("--policy-only cannot use a native presenter")
+    if args.nested and args.frame_timings:
+        parser.error("--frame-timings requires the protocol probe, not nested screenshot capture")
     if args.nested and (not (os.environ.get("WAYLAND_DISPLAY") or os.environ.get("DISPLAY")) or not shutil.which("foot")):
         print("SKIP nested capture: requires a parent display and foot")
         return
@@ -72,7 +75,8 @@ def main():
                 try:
                     subprocess.run([str(root / "target/debug/examples/wayland_session_probe"),
                                     "--expected-output", "640x480", "--expected-scale", "2",
-                                    "--expected-size", "1100x300"], cwd=root,
+                                    "--expected-size", "1100x300",
+                                    *(["--frame-timings"] if args.frame_timings else [])], cwd=root,
                                    env={**environment, "WAYLAND_DISPLAY": "weld-probe"},
                                    stdout=client_log, stderr=subprocess.STDOUT, timeout=10, check=True)
                 except (subprocess.CalledProcessError, subprocess.TimeoutExpired):

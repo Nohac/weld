@@ -220,10 +220,10 @@ pub fn run(arguments: AppArguments) -> Result<()> {
             let adapter_source = weld_client::ClientSourceId::new(1);
             let (adapter, endpoint, codec_wake) = iroh_source_registration(
                 peer,
+                adapter_source,
                 IrohSourceRegistrationOptions {
                     upstream_source: weld_core::WAYLAND_CLIENT_SOURCE,
                     adapter_source,
-                    destination_source: adapter_source,
                     capabilities: &capabilities,
                     codec,
                     dump_directory: arguments.hoist_encoded_dump_dir,

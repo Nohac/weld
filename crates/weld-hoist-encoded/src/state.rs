@@ -877,8 +877,39 @@ pub struct EncodedSourcePort<T> {
     output: SourceOutput,
 }
 
+/// Transport-independent source setup, applied before any stream is admitted.
+#[derive(Default)]
+pub struct EncodedSourceOptions {
+    pub bitrate_budget: Option<SharedBitrateBudget>,
+    pub access_unit_dump: Option<(PathBuf, VideoCodec)>,
+}
+
 impl<T: EncodedSourceTransport> EncodedSourcePort<T> {
-    pub fn new(transport: T, backend: Box<dyn EncodeBackend>) -> Self {
+    /// The sole public constructor for a source on any transport. Failure closes the supplied
+    /// transport, including failures after a pending peer has been admitted.
+    pub fn configured(
+        transport: T,
+        backend: Box<dyn EncodeBackend>,
+        options: EncodedSourceOptions,
+    ) -> Result<Self> {
+        let mut port = Self::new(transport, backend);
+        let configured = (|| -> Result<()> {
+            if let Some(budget) = options.bitrate_budget {
+                port.set_bitrate_budget(budget)?;
+            }
+            if let Some((directory, codec)) = options.access_unit_dump {
+                port.set_access_unit_dump_directory(directory, codec)?;
+            }
+            Ok(())
+        })();
+        if let Err(error) = configured {
+            port.disconnect();
+            return Err(error);
+        }
+        Ok(port)
+    }
+
+    fn new(transport: T, backend: Box<dyn EncodeBackend>) -> Self {
         Self {
             transport,
             state: Some(EncodedSourceState::new(backend)),
@@ -896,9 +927,7 @@ impl<T: EncodedSourceTransport> EncodedSourcePort<T> {
             .map(EncoderRates::control)
     }
 
-    /// Attach before any stream is registered. All participating ports must use
-    /// clones of the same host-thread-owned budget, not one budget per port.
-    pub fn with_bitrate_budget(mut self, budget: SharedBitrateBudget) -> Result<Self> {
+    fn set_bitrate_budget(&mut self, budget: SharedBitrateBudget) -> Result<()> {
         let state = self
             .state
             .as_mut()
@@ -913,7 +942,7 @@ impl<T: EncodedSourceTransport> EncodedSourcePort<T> {
             .context("encoder does not support bitrate control")?
             .control();
         state.budget = Some(budget.attach(control)?);
-        Ok(self)
+        Ok(())
     }
 
     /// Select local queue policy without changing codec or transport budgets.
@@ -924,17 +953,17 @@ impl<T: EncodedSourceTransport> EncodedSourcePort<T> {
         self
     }
 
-    pub fn with_access_unit_dump_directory(
-        mut self,
+    fn set_access_unit_dump_directory(
+        &mut self,
         directory: PathBuf,
         codec: VideoCodec,
-    ) -> Result<Self> {
+    ) -> Result<()> {
         let state = self
             .state
             .take()
             .context("encoded source state disappeared")?;
         self.state = Some(state.with_access_unit_dump_directory(directory, codec)?);
-        Ok(self)
+        Ok(())
     }
 
     fn flush(&mut self) -> HoistPortResult<()> {
@@ -2105,6 +2134,7 @@ fn take_counter(counter: &mut Option<u64>, name: &str) -> Result<u64> {
 #[cfg(test)]
 mod tests {
     mod bitrate_tests;
+    mod configuration_tests;
     mod decode_tests;
     mod priority_tests;
     mod publication_tests;
@@ -2226,6 +2256,7 @@ mod tests {
 
     #[derive(Default)]
     struct FakeEncoderState {
+        retain_input: bool,
         submitted: Vec<(u64, MediaFrameId, Vec<u8>)>,
         completions: Vec<EncodeCompletion>,
         retirements: Vec<(MediaStreamId, StreamGeneration)>,
@@ -2250,7 +2281,7 @@ mod tests {
                     height: lease.metadata().extent.height,
                     pixels,
                 },
-                retained_lease: None,
+                retained_lease: self.0.borrow().retain_input.then(|| lease.clone()),
             })
         }
 

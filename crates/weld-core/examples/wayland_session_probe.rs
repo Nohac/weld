@@ -1,7 +1,12 @@
 //! Subprocess regression fixture for `scripts/check-host-runtime`.
 //! Real protocol traffic, independent of core's internal test helpers.
 
-use std::{fs::File, io::Write, os::fd::AsFd, time::Instant};
+use std::{
+    fs::File,
+    io::Write,
+    os::fd::AsFd,
+    time::{Duration, Instant},
+};
 
 use anyhow::{Context, Result, ensure};
 use clap::Parser;
@@ -28,10 +33,21 @@ struct Probe {
     releases: usize,
     output: (i32, i32, i32),
     scale: i32,
+    frame_by_slot: [Option<usize>; 2],
+    timings: Vec<FrameTiming>,
+}
+
+struct FrameTiming {
+    committed: Instant,
+    callback: Option<Duration>,
+    released: Option<Duration>,
 }
 
 #[derive(Parser)]
 struct Expectations {
+    /// Print bounded per-frame timings on the producer's own clock.
+    #[arg(long)]
+    frame_timings: bool,
     #[arg(long, value_parser = parse_extent)]
     expected_output: (i32, i32),
     #[arg(long)]
@@ -131,9 +147,15 @@ fn main() -> Result<()> {
             .position(|busy| !busy)
             .context("both SHM buffers retained")?;
         probe.busy[slot] = true;
+        probe.frame_by_slot[slot] = Some(frame);
+        probe.timings.push(FrameTiming {
+            committed: Instant::now(),
+            callback: None,
+            released: None,
+        });
         surface.attach(Some(&buffers[slot]), 0, 0);
         surface.damage(0, 0, width, height);
-        surface.frame(&handle, ());
+        surface.frame(&handle, Some(frame));
         surface.commit();
         while probe.frames == frame {
             queue.blocking_dispatch(&mut probe)?;
@@ -141,6 +163,16 @@ fn main() -> Result<()> {
         }
     }
     queue.roundtrip(&mut probe)?;
+    if expected.frame_timings {
+        for (frame, timing) in probe.timings.iter().enumerate() {
+            println!(
+                "frame={} callback_us={:?} buffer_release_us={:?}",
+                frame + 1,
+                timing.callback.map(|duration| duration.as_micros()),
+                timing.released.map(|duration| duration.as_micros())
+            );
+        }
+    }
     let elapsed = started.elapsed().as_millis();
     println!(
         "frames={} releases={} elapsed_ms={elapsed}",
@@ -174,7 +206,7 @@ fn main() -> Result<()> {
     );
     surface.attach(Some(&buffers[0]), 0, 0);
     surface.damage(0, 0, width, height);
-    surface.frame(&handle, ());
+    surface.frame(&handle, None);
     surface.commit();
     while probe.frames == 60 {
         queue.blocking_dispatch(&mut probe)?;
@@ -265,16 +297,20 @@ impl Dispatch<xdg_toplevel::XdgToplevel, ()> for Probe {
     }
 }
 
-impl Dispatch<wl_callback::WlCallback, ()> for Probe {
+impl Dispatch<wl_callback::WlCallback, Option<usize>> for Probe {
     fn event(
         state: &mut Self,
         _: &wl_callback::WlCallback,
         _: wl_callback::Event,
-        _: &(),
+        frame: &Option<usize>,
         _: &Connection,
         _: &QueueHandle<Self>,
     ) {
         state.frames += 1;
+        if let Some(frame) = frame {
+            let timing = &mut state.timings[*frame];
+            timing.callback = Some(timing.committed.elapsed());
+        }
     }
 }
 
@@ -289,6 +325,10 @@ impl Dispatch<wl_buffer::WlBuffer, usize> for Probe {
     ) {
         state.busy[*slot] = false;
         state.releases += 1;
+        if let Some(frame) = state.frame_by_slot[*slot].take() {
+            let timing = &mut state.timings[frame];
+            timing.released = Some(timing.committed.elapsed());
+        }
     }
 }
 

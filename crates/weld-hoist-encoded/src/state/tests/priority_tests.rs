@@ -103,12 +103,15 @@ fn source_input_batch_reallocates_quality_before_next_admission_not_mid_batch() 
         ),
         ..Default::default()
     }));
-    let mut port = EncodedSourcePort::new(
+    let mut port = EncodedSourcePort::configured(
         FakeSourceTransport(transport.clone()),
         Box::new(FakeEncoder(encoder.clone())),
+        EncodedSourceOptions {
+            bitrate_budget: Some(SharedBitrateBudget::new(8_000_000).expect("budget")),
+            access_unit_dump: None,
+        },
     )
-    .with_bitrate_budget(SharedBitrateBudget::new(8_000_000).expect("budget"))
-    .expect("attach")
+    .expect("configured")
     .with_scheduling_policy(stable_policy());
     let control = port.encoder_rate_control().expect("rate control");
     let source = ClientSourceId::new(1);

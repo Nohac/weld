@@ -13,8 +13,8 @@ use weld_hoist_core::{
 #[cfg(feature = "encoded-vaapi")]
 use weld_hoist_encoded::native::DecodedDmabufPublisher;
 use weld_hoist_encoded::{
-    DecodedFramePublisher, EncodedDestinationPort, EncodedSourcePort, EncoderRateControl,
-    SharedBitrateBudget,
+    DecodedFramePublisher, EncodedDestinationPort, EncodedSourceOptions, EncodedSourcePort,
+    EncoderRateControl, SharedBitrateBudget,
 };
 
 use crate::{
@@ -121,12 +121,32 @@ pub fn encoded_source_registration_with_backend(
     backend: Box<dyn crate::LocalEncodeBackend>,
     bitrate_budget: Option<SharedBitrateBudget>,
 ) -> anyhow::Result<(ClientAdapterRegistration, LocalDestinationEndpoint)> {
+    configured_source_registration(
+        control,
+        media,
+        upstream_source,
+        adapter_source,
+        destination_source,
+        backend,
+        EncodedSourceOptions {
+            bitrate_budget,
+            access_unit_dump: None,
+        },
+    )
+}
+
+fn configured_source_registration(
+    control: LocalPacketConnection,
+    media: LocalPacketConnection,
+    upstream_source: ClientSourceId,
+    adapter_source: ClientSourceId,
+    destination_source: ClientSourceId,
+    backend: Box<dyn crate::LocalEncodeBackend>,
+    options: EncodedSourceOptions,
+) -> anyhow::Result<(ClientAdapterRegistration, LocalDestinationEndpoint)> {
     let descriptor = ClientSourceDescriptor::new(adapter_source, ClientProvenance::Relocated);
     let transport = LocalEncodedSourceTransport::new(control.clone(), media);
-    let mut port = EncodedSourcePort::new(transport, backend);
-    if let Some(budget) = bitrate_budget {
-        port = port.with_bitrate_budget(budget)?;
-    }
+    let port = EncodedSourcePort::configured(transport, backend, options)?;
     let rate_control = port.encoder_rate_control();
     let adapter = SourceRelayAdapter::new(upstream_source, port);
     Ok((
@@ -202,25 +222,18 @@ pub fn encoded_source_registration(
             }
         },
     )?;
-    let descriptor = ClientSourceDescriptor::new(adapter_source, ClientProvenance::Relocated);
-    let transport = LocalEncodedSourceTransport::new(control.clone(), media.clone());
-    let mut port = EncodedSourcePort::new(transport, backend);
-    if let Some(budget) = bitrate_budget {
-        port = port.with_bitrate_budget(budget)?;
-    }
-    if let Some(directory) = dump_directory {
-        port = port.with_access_unit_dump_directory(directory, codec)?;
-    }
-    let rate_control = port.encoder_rate_control();
-    let adapter = SourceRelayAdapter::new(upstream_source, port);
-    let registration =
-        ClientAdapterRegistration::new(descriptor, adapter, ControlOnlyClientImporter);
-    let endpoint = LocalDestinationEndpoint {
+    let (registration, endpoint) = configured_source_registration(
+        control.clone(),
+        media.clone(),
+        upstream_source,
         adapter_source,
         destination_source,
-        connection: control.clone(),
-        rate_control,
-    };
+        backend,
+        EncodedSourceOptions {
+            bitrate_budget,
+            access_unit_dump: dump_directory.map(|directory| (directory, codec)),
+        },
+    )?;
     Ok((
         registration,
         endpoint,

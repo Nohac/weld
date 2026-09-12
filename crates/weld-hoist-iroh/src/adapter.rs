@@ -6,24 +6,17 @@ use weld_client::{
     ClientAdapterCommandEnvelope, ClientAdapterRegistration, ClientProvenance,
     ClientSourceDescriptor, ClientSourceId, ClientSurfaceId, ControlOnlyClientImporter,
 };
-#[cfg(feature = "vaapi")]
-use weld_core::dmabuf::DmabufContext;
 use weld_hoist_core::{
     DestinationRelayAdapter, HoistEndpoint, HoistEndpointCommand, HoistSessionId,
     SourceRelayAdapter, relocated_surface,
 };
 use weld_hoist_encoded::{
-    DecodeBackend, DecodedFramePublisher, EncodeBackend, EncodedDestinationPort, EncodedSourcePort,
-    EncoderRateControl, SharedBitrateBudget,
+    DecodeBackend, DecodedFramePublisher, EncodeBackend, EncodedDestinationPort,
+    EncodedSourceOptions, EncodedSourcePort, EncoderRateControl, SharedBitrateBudget,
 };
 use weld_media::VideoCodec;
 
 use crate::{IrohDestinationPeer, IrohSourcePeer};
-
-#[cfg(feature = "vaapi")]
-use weld_core::dmabuf::ExternalDmabufCapabilities;
-#[cfg(feature = "vaapi")]
-use weld_hoist_encoded::{decode_backend, encode_backend, native::DecodedDmabufPublisher};
 
 /// Source policy endpoint associated with one remote Iroh destination.
 #[derive(Clone)]
@@ -73,17 +66,6 @@ impl HoistEndpoint for IrohDestinationEndpoint {
     }
 }
 
-#[cfg(feature = "vaapi")]
-pub struct IrohSourceRegistrationOptions<'a> {
-    pub upstream_source: ClientSourceId,
-    pub adapter_source: ClientSourceId,
-    pub destination_source: ClientSourceId,
-    pub capabilities: &'a ExternalDmabufCapabilities,
-    pub codec: VideoCodec,
-    pub dump_directory: Option<PathBuf>,
-    pub bitrate_budget: Option<SharedBitrateBudget>,
-}
-
 pub fn source_registration_with_backend(
     peer: IrohSourcePeer,
     upstream_source: ClientSourceId,
@@ -94,13 +76,14 @@ pub fn source_registration_with_backend(
     bitrate_budget: Option<SharedBitrateBudget>,
 ) -> anyhow::Result<(ClientAdapterRegistration, IrohDestinationEndpoint)> {
     let descriptor = ClientSourceDescriptor::new(adapter_source, ClientProvenance::Relocated);
-    let mut port = EncodedSourcePort::new(peer.clone(), backend);
-    if let Some(budget) = bitrate_budget {
-        port = port.with_bitrate_budget(budget)?;
-    }
-    if let Some((directory, codec)) = dump_directory {
-        port = port.with_access_unit_dump_directory(directory, codec)?;
-    }
+    let port = EncodedSourcePort::configured(
+        peer.clone(),
+        backend,
+        EncodedSourceOptions {
+            bitrate_budget,
+            access_unit_dump: dump_directory,
+        },
+    )?;
     let rate_control = port.encoder_rate_control();
     let adapter = SourceRelayAdapter::new(upstream_source, port);
     Ok((
@@ -132,68 +115,4 @@ pub fn destination_registration_with_backend<P: DecodedFramePublisher>(
         ),
         importer,
     )
-}
-
-#[cfg(feature = "vaapi")]
-pub fn source_registration(
-    peer: IrohSourcePeer,
-    options: IrohSourceRegistrationOptions<'_>,
-) -> anyhow::Result<(
-    ClientAdapterRegistration,
-    IrohDestinationEndpoint,
-    weld_core::host::ClientRuntimeWakeSource,
-)> {
-    let (notifier, wake) = weld_core::host::client_runtime_notifier()?;
-    let backend = encode_backend(
-        options.capabilities.render_node.clone(),
-        options.codec,
-        options.dump_directory.clone(),
-        move || {
-            if let Err(error) = notifier.notify() {
-                tracing::error!(%error, "could not wake Weld for encoded Iroh output");
-            }
-        },
-    )?;
-    let (registration, endpoint) = source_registration_with_backend(
-        peer,
-        options.upstream_source,
-        options.adapter_source,
-        options.destination_source,
-        backend,
-        options
-            .dump_directory
-            .map(|directory| (directory, options.codec)),
-        options.bitrate_budget,
-    )?;
-    Ok((registration, endpoint, wake))
-}
-
-#[cfg(feature = "vaapi")]
-pub fn destination_registration(
-    peer: IrohDestinationPeer,
-    upstream_source: ClientSourceId,
-    destination_source: ClientSourceId,
-    dmabuf: DmabufContext,
-    capabilities: &ExternalDmabufCapabilities,
-    codec: VideoCodec,
-) -> anyhow::Result<(
-    ClientAdapterRegistration,
-    weld_core::host::ClientRuntimeWakeSource,
-)> {
-    let (notifier, wake) = weld_core::host::client_runtime_notifier()?;
-    let backend = decode_backend(capabilities, codec, move || {
-        if let Err(error) = notifier.notify() {
-            tracing::error!(%error, "could not wake Weld for decoded Iroh output");
-        }
-    })?;
-    Ok((
-        destination_registration_with_backend(
-            peer,
-            upstream_source,
-            destination_source,
-            DecodedDmabufPublisher::new(dmabuf),
-            backend,
-        ),
-        wake,
-    ))
 }

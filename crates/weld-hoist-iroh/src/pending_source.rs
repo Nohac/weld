@@ -3,7 +3,6 @@
 
 use std::path::PathBuf;
 
-use anyhow::Context;
 use weld_client::{
     ClientAdapterRegistration, ClientProvenance, ClientSourceDescriptor, ClientSourceId,
     ControlOnlyClientImporter,
@@ -12,7 +11,8 @@ use weld_hoist_core::{
     HoistPortResult, HoistSourcePort, SourceAdmission, SourcePortCommand, SourceRelayAdapter,
 };
 use weld_hoist_encoded::{
-    EncodeBackend, EncodedSourcePort, EncodedSourceTransport, SharedBitrateBudget,
+    EncodeBackend, EncodedSourceOptions, EncodedSourcePort, EncodedSourceTransport,
+    SharedBitrateBudget,
 };
 use weld_hoist_protocol::DestinationEnvelope;
 use weld_media::VideoCodec;
@@ -86,28 +86,24 @@ impl HoistSourcePort for PendingPort {
             && let Some(peer) = pending.poll()?
         {
             tracing::info!(peer = peer.identity().as_str(), codec = ?peer.codec(), "Iroh source admission completed");
-            let cleanup = peer.clone();
-            let connected = (|| -> HoistPortResult<_> {
-                let mut port = EncodedSourcePort::new(
-                    peer,
-                    backend
-                        .take()
-                        .context("pending encoder was already consumed")?,
-                );
-                if let Some(budget) = self.budget.take() {
-                    port = port.with_bitrate_budget(budget)?;
-                }
-                if let Some((path, codec)) = self.dump.take() {
-                    port = port.with_access_unit_dump_directory(path, codec)?;
-                }
-                Ok(port)
-            })();
+            let Some(backend) = backend.take() else {
+                peer.disconnect();
+                self.state = PortState::Closed;
+                return Err(std::io::Error::other("pending encoder was already consumed").into());
+            };
+            let connected = EncodedSourcePort::configured(
+                peer,
+                backend,
+                EncodedSourceOptions {
+                    bitrate_budget: self.budget.take(),
+                    access_unit_dump: self.dump.take(),
+                },
+            );
             match connected {
                 Ok(port) => self.state = PortState::Connected(Box::new(port)),
                 Err(error) => {
-                    cleanup.disconnect();
                     self.state = PortState::Closed;
-                    return Err(error);
+                    return Err(error.into());
                 }
             }
         }

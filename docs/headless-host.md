@@ -136,6 +136,13 @@ profiles are untouched. There is no automatic reconnect in this slice.
 
 ## Retention and reconnect — Follow-up
 
+Source construction is now shared across the Unix, connected Iroh and pending
+Iroh paths. `EncodedSourcePort::configured` owns budget/dump configuration and
+disconnects the supplied transport if setup fails. Native Iroh paths use one
+`IrohSourceRegistrationOptions` and backend/wake factory; only the manual
+endpoint needs a destination namespace. This removes duplicated setup, not the
+remaining pacing difference between presentation-driven and virtual callbacks.
+
 The next policy slice should preserve apps and their last effective size/scale
 in memory on disconnect, release remote input, suspend unnecessary streaming,
 and let an authorized reconnecting receiver supply new preferences without
@@ -227,3 +234,27 @@ the codec pipeline. The existing `--hoist-encoded-dump-dir` source option can
 separate source bitstream corruption from transport or presentation. Lease
 retention and admission ordering checks have not identified a cause; a kernel
 timeout alone does not prove a driver-only defect.
+
+## Source assembly unification — First batch
+
+- The common constructor is used by both Unix source factories and by ready
+  and pending Iroh registration. Existing Unix dump availability is preserved;
+  no new transport flag, codec setting or wire message is introduced.
+- Portable tests compare ready/pending first-frame traffic (normalizing only
+  timestamps and independent-stream arrival order), enforce budget application
+  before the first frame, and check transport closure on configuration errors.
+- A fake encoder with explicitly retained input leases progresses identically
+  with no presentation consumer and with one holding every input lease. Final
+  buffer release still waits for all consumers. This tests the ownership
+  contract, not real GPU synchronization or performance.
+- `scripts/check-host-runtime --shm-only --frame-timings` records separate
+  producer-clock delays for each of 60 callbacks and `wl_buffer.release` events.
+  Run `host-runtime-_1lbjv51` completed 60 frames in 988 ms: after startup,
+  callbacks were roughly 16.6–17.3 ms after commit, while SHM releases were
+  roughly 0.2–0.85 ms after commit. These are SHM-copy releases, not DMA-BUF
+  encoder completion, and no encoder ran during this probe.
+
+The renderer-present/absent runtime comparison and any callback-ownership
+change remain the next batch. In particular, moving the working nested path to
+the current headless clock is not accepted as a latency fix without evidence.
+The repeated headless AV1 VCN resets and H.264 input-to-frame lag remain open.

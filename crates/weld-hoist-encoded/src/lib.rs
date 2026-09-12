@@ -33,6 +33,6 @@ pub use codec::{
 #[cfg(feature = "vaapi")]
 pub use codec::{decode_backend, encode_backend};
 pub use state::{
-    EncodedDestinationPort, EncodedDestinationTransport, EncodedSourcePort, EncodedSourceTransport,
-    ReceiveBudget, SendStatus, SourceTransportPacket,
+    EncodedDestinationPort, EncodedDestinationTransport, EncodedSourceOptions, EncodedSourcePort,
+    EncodedSourceTransport, ReceiveBudget, SendStatus, SourceTransportPacket,
 };

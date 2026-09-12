@@ -8,10 +8,10 @@ mod host;
 mod inbox;
 mod input_outbox;
 mod media_queue;
+#[cfg(feature = "vaapi")]
+mod native;
 mod notifier;
 mod peer;
-#[cfg(feature = "vaapi")]
-mod pending_native;
 mod pending_source;
 mod rendezvous;
 
@@ -19,13 +19,14 @@ pub use adapter::{
     IrohDestinationEndpoint, destination_registration_with_backend,
     source_registration_with_backend,
 };
-#[cfg(feature = "vaapi")]
-pub use adapter::{IrohSourceRegistrationOptions, destination_registration, source_registration};
 pub use host::{IrohHost, IrohNetwork, PendingSourceAdmission};
+#[cfg(feature = "vaapi")]
+pub use native::{
+    IrohSourceRegistrationOptions, destination_registration, pending_source_registration,
+    source_registration,
+};
 pub use notifier::IrohNotifier;
 pub use peer::{IrohDestinationPeer, IrohSourcePeer};
-#[cfg(feature = "vaapi")]
-pub use pending_native::{PendingSourceRegistrationOptions, pending_source_registration};
 pub use pending_source::pending_source_registration_with_backend;
 
 /// Authenticated Iroh endpoint identity, kept opaque to Weld policy.
@@ -41,6 +42,7 @@ impl IrohPeerIdentity {
 #[cfg(test)]
 mod tests {
     mod portable_receiver;
+    mod portable_source;
     use std::{path::Path, thread, time::Duration};
 
     use weld_client::{ClientId, ClientSourceId, ClientSurfaceId};

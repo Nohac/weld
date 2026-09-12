@@ -4,7 +4,7 @@
 use anyhow::{Context, Result};
 use weld_client::ClientSourceId;
 use weld_core::{host::client_runtime_notifier, runtime::HostRuntime};
-use weld_hoist_iroh::{IrohHost, PendingSourceRegistrationOptions, pending_source_registration};
+use weld_hoist_iroh::{IrohHost, IrohSourceRegistrationOptions, pending_source_registration};
 
 use crate::{
     AppArguments, MediaOperation, bitrate_budget, runtime_options, validate_encoded_capabilities,
@@ -36,7 +36,7 @@ pub(crate) fn run(arguments: AppArguments) -> Result<()> {
     )?;
     let (adapter, codec_wake) = pending_source_registration(
         pending,
-        PendingSourceRegistrationOptions {
+        IrohSourceRegistrationOptions {
             upstream_source: weld_core::WAYLAND_CLIENT_SOURCE,
             adapter_source: ClientSourceId::new(1),
             capabilities: &capabilities,

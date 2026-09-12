@@ -812,6 +812,17 @@ SHM allocations are neither advertised as DMA-BUF nor entered into the
 bind-once DMA-BUF cache. The send queue bounds descriptor ownership so a
 stalled peer cannot retain an unbounded number of per-commit SHM files.
 
+Encoded Unix sources, connected Iroh sources and pending Iroh sources all use
+`EncodedSourcePort::configured` with the same transport-neutral options. Budget
+attachment, access-unit dump setup and disconnect-on-configuration-failure live
+in `weld-hoist-encoded`, not in each transport. Native Iroh assembly shares one
+backend/wake constructor and source options type; destination namespace mapping
+is an argument to the manual policy endpoint, not encoder configuration.
+The pending wrapper owns authorization readiness only. Callback pacing still
+differs between local presentation and the virtual host clock; consolidating
+construction does not claim presentation-independent timing or fix the observed
+headless latency/AV1 failures.
+
 Destination requests and already-addressed input re-enter `ClientRuntime`
 immediately after transport ingress, outside Bevy's paced frame gate. Foreign
 output IDs never reach the source. Instead, destination output membership

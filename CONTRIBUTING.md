@@ -40,6 +40,8 @@ hosting without Vulkan, or `--nested` to check native screenshot capture with
 foot on an existing desktop. `--policy-only --shm-only` also checks non-Bevy
 policy servicing with no presenter or rendering. Python provides process-group ownership
 and bounded waits for these subprocess tests. Logs remain in `target/validation`.
+Add `--frame-timings` to a protocol-probe run to distinguish frame-callback
+delay from SHM buffer-release delay; this is not an encoder or GPU latency test.
 
 Use debug-profile commands during normal development. Run the narrowest useful
 check first, then widen as the change warrants:
