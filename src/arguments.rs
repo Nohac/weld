@@ -165,7 +165,7 @@ pub struct AppArguments {
     #[arg(long, value_name = "WIDTHxHEIGHT", value_parser = parse_extent)]
     pub(crate) headless_window_size: Option<weld_core::surface::Extent>,
 
-    /// Headless virtual frame callback rate (default 60 Hz).
+    /// Virtual output refresh and policy cadence (default 60 Hz); no drawing without a presenter.
     #[arg(long, value_name = "HZ", value_parser = clap::value_parser!(u32).range(1..=240))]
     pub(crate) headless_refresh: Option<u32>,
 

@@ -5,6 +5,7 @@ mod cursor;
 mod dmabuf;
 mod output;
 mod popup;
+mod presentation;
 mod resize;
 mod seat;
 mod shm;
@@ -42,7 +43,6 @@ use smithay::{
         wayland_server::{
             Client, Display, DisplayHandle,
             backend::{ClientData, ClientId as WaylandClientId, DisconnectReason},
-            protocol::wl_callback::WlCallback,
         },
     },
     utils::Transform,
@@ -119,7 +119,9 @@ pub struct ServerState {
     pending_surface_events: WaylandClientBridge,
     presentation_requested: bool,
     next_presentation_id: u64,
-    staged_frame_callbacks: VecDeque<(u64, Vec<WlCallback>)>,
+    staged_frame_callbacks: VecDeque<(u64, Vec<presentation::SurfaceCallbacks>)>,
+    presentation_claims: presentation::PresentationClaims,
+    independent_callbacks: HashMap<SurfaceId, Vec<presentation::SurfaceCallbacks>>,
     next_surface_id: Option<u64>,
     next_client_id: Option<u64>,
     started_at: Instant,
@@ -369,6 +371,8 @@ impl ServerState {
             presentation_requested: false,
             next_presentation_id: 1,
             staged_frame_callbacks: VecDeque::new(),
+            presentation_claims: presentation::PresentationClaims::default(),
+            independent_callbacks: HashMap::new(),
             next_surface_id: Some(1),
             next_client_id: Some(1),
             started_at,
@@ -471,6 +475,9 @@ impl ServerState {
                 WaylandClientWork::Request(request) => self.apply_client_request(request),
                 WaylandClientWork::Input(event) => self.apply_client_input(event),
                 WaylandClientWork::HostFocusLost(time) => self.release_host_input(time),
+                WaylandClientWork::Presentation(claimant, update) => {
+                    self.apply_presentation_claim(claimant, update)
+                }
             }
         }
     }
@@ -509,6 +516,9 @@ impl ServerState {
                 }
                 ClientSurfaceRequestKind::SetPreferredScale { scale_120 } => {
                     self.set_toplevel_preferred_scale(request.surface, scale_120);
+                }
+                ClientSurfaceRequestKind::SetPresentation { .. } => {
+                    warn!(surface = ?request.surface, "presentation request requires an authorized presenter claim");
                 }
             },
             ClientRequest::Focus(request) => {

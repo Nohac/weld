@@ -269,12 +269,13 @@ instantiate a no-op renderer or an invisible nested window. Calloop, the
 Wayland adapter, optional GPU import capability and a virtual output remain
 alive without local presentation. All three assemblies use `NativeRuntime`'s
 outer loop, display/client ownership, signal and readiness registration, ordered
-client effects, child maintenance and callback ledger. Nested/DRM drivers retain
-their native event ordering, presentation deadlines, cursors and GPU submission.
+client effects, child maintenance and independent presentation demand. Nested/DRM drivers retain
+their native event ordering, local callback ledger, presentation deadlines, cursors and GPU submission.
 Logical outputs remain separate from native attachment resources and availability.
 Startup logical sizes configure once through native
-constraints, and mapped frame callbacks use a demand-driven virtual clock,
-independent of buffer-consumer release. SHM-only startup is valid without a
+constraints. Presenter claims drive per-root frame callbacks through one shared
+scheduler, independent of local composition and buffer-consumer release. No
+presenter means no periodic draw opportunities. SHM-only startup is valid without a
 Vulkan adapter. `HostRuntime::with_policy` runs policy without drawing an output;
 capture without a presenter fails explicitly. Adapter/wake registration is available to library consumers,
 and the headless distribution installs a pending Iroh source before running it.
@@ -286,7 +287,7 @@ Reconnect and retained presentation preferences remain a separate follow-up.
 See [Headless application hosting](headless-host.md).
 
 `weld-app` represents application-visible outputs as `WeldOutput` entities.
-`OutputGeometry` carries pixel size and logical scale. `OutputPosition` locates
+`OutputGeometry` carries pixel size, logical scale and nominal presentation rate. `OutputPosition` locates
 the output in compositor-wide logical space, while the separate
 `OutputPlacement` carries its scale-independent physical footprint in
 millimeters and records whether those dimensions were measured or assumed.
@@ -818,10 +819,22 @@ attachment, access-unit dump setup and disconnect-on-configuration-failure live
 in `weld-hoist-encoded`, not in each transport. Native Iroh assembly shares one
 backend/wake constructor and source options type; destination namespace mapping
 is an argument to the manual policy endpoint, not encoder configuration.
-The pending wrapper owns authorization readiness only. Callback pacing still
-differs between local presentation and the virtual host clock; consolidating
-construction does not claim presentation-independent timing or fix the observed
-headless latency/AV1 failures.
+The pending wrapper owns authorization readiness only. Presentation claims are
+separate from source construction: the source relay claims each mapped root,
+and receiver output preferences supply its cadence. `ClientRuntime` validates
+the claimant's declared upstream and routes its identity to the owning local
+adapter. The Wayland bridge applies the claim in `ServerState`, where each
+rate-less claim can be resolved against the root's preferred output before
+choosing the fastest active consumer. Claimed roots bypass the native callback
+ledger; a local display cannot delay their draw opportunities. Manual commands
+route claims before native staging, and automatic admission routes them after
+ordinary ingress. Local roots still use actual native presentation completion.
+
+The mental model is moving a window between monitors: size, scale and cadence
+follow the presenter. Foreign output IDs do not become local native outputs.
+No per-frame acknowledgement is added, and callback completion never releases
+a GPU lease. This boundary correction alone does not diagnose the observed
+headless latency or AV1 VCN resets.
 
 Destination requests and already-addressed input re-enter `ClientRuntime`
 immediately after transport ingress, outside Bevy's paced frame gate. Foreign

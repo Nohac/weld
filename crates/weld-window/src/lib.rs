@@ -662,6 +662,7 @@ struct PublishedOutputMembership {
     outputs: Vec<OutputId>,
     preferred: Option<OutputId>,
     preferred_scale_120: Option<u32>,
+    presentation_rate: Option<weld_app::output::PresentationRate>,
 }
 
 #[derive(Resource, Default)]
@@ -708,12 +709,30 @@ fn publish_window_output_memberships(
         if memberships.is_empty() {
             continue;
         }
+        let presentation_rate = (client.provenance() == ClientProvenance::Relocated)
+            .then(|| {
+                preferred
+                    .and_then(|preferred| {
+                        outputs.iter().find_map(|(output, geometry)| {
+                            (output.id == preferred).then(|| geometry.presentation_rate())
+                        })
+                    })
+                    .or_else(|| {
+                        outputs
+                            .iter()
+                            .filter(|(output, _)| memberships.contains(&output.id))
+                            .map(|(_, geometry)| geometry.presentation_rate())
+                            .max()
+                    })
+            })
+            .flatten();
         published.scratch.insert(
             client.surface(),
             PublishedOutputMembership {
                 outputs: memberships,
                 preferred,
                 preferred_scale_120,
+                presentation_rate,
             },
         );
     }
@@ -757,6 +776,12 @@ fn publish_window_output_memberships(
             preferred: membership.preferred,
             preferred_scale_120: membership.preferred_scale_120,
         });
+        if let Some(rate) = membership.presentation_rate {
+            actions.push(SurfaceAction::SetPresentation {
+                surface,
+                rate: Some(rate),
+            });
+        }
     }
 
     // Empty assignments cannot yet express leave-all: weld-core rejects them.
@@ -1303,6 +1328,67 @@ mod tests {
             .init_resource::<EndedInteractions>()
             .add_observer(record_ended_interaction);
         app
+    }
+
+    #[test]
+    fn relocated_window_republishes_cadence_when_its_output_rate_changes() {
+        let mut app = test_app();
+        let surface = SurfaceId::for_test(98);
+        let client = mapped_toplevel(&mut app, surface);
+        app.world_mut()
+            .get_mut::<ClientSource>(client)
+            .expect("source")
+            .provenance = ClientProvenance::Relocated;
+        let output = app
+            .world_mut()
+            .spawn((
+                WeldOutput {
+                    id: OutputId::new(1),
+                },
+                PrimaryOutput,
+                OutputGeometry::new(weld_core::surface::Extent::new(1920, 1080), 1.0),
+                OutputPosition(Vec2::ZERO),
+            ))
+            .id();
+        app.update();
+        let window = app.world().get::<OccupiesWindow>(client).expect("window").0;
+        app.world_mut()
+            .entity_mut(window)
+            .insert(WindowOutput(output));
+        app.update();
+        assert!(
+            take_surface_actions(app.world_mut()).contains(&SurfaceAction::SetPresentation {
+                surface,
+                rate: Some(weld_app::output::PresentationRate::HZ_60),
+            })
+        );
+        let rate = weld_app::output::PresentationRate::try_from(90_000).expect("rate");
+        let configuration = weld_core::OutputConfiguration::new(
+            OutputId::new(1),
+            weld_core::surface::Extent::new(1920, 1080),
+            weld_core::OutputScale::default(),
+            weld_core::surface::LogicalPoint::ZERO,
+            true,
+            None,
+        )
+        .expect("output")
+        .with_presentation_rate(rate);
+        app.world_mut()
+            .entity_mut(output)
+            .insert(OutputGeometry::from_configuration(configuration));
+        app.update();
+        assert!(
+            take_surface_actions(app.world_mut()).contains(&SurfaceAction::SetPresentation {
+                surface,
+                rate: Some(rate)
+            })
+        );
+        app.update();
+        assert!(
+            !take_surface_actions(app.world_mut())
+                .iter()
+                .any(|action| matches!(action, SurfaceAction::SetPresentation { .. }))
+        );
     }
 
     fn mapped_toplevel(app: &mut App, surface: SurfaceId) -> Entity {

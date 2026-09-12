@@ -9,11 +9,11 @@ use std::{
 
 use weld_client::{
     ClientAdapter, ClientAdapterCommandEnvelope, ClientAdapterEffect, ClientBufferId,
-    ClientEventQueue, ClientInputEvent, ClientInputTarget, ClientRequest, ClientRouteAliasUpdate,
-    ClientSourceDescriptor, ClientSourceId, ClientSurfaceCommit, ClientSurfaceEvent,
-    ClientSurfaceEventKind, ClientSurfaceId, ClientSurfaceRequestKind, InputEventKind,
-    InputPosition, KeyboardKeyState, LinuxButtonCode, LinuxKeycode, PointerGestureKind,
-    RawScrollPhase, RawScrollSource,
+    ClientEventQueue, ClientInputEvent, ClientInputTarget, ClientPresentationClaim,
+    ClientPresentationUpdate, ClientRequest, ClientRouteAliasUpdate, ClientSourceDescriptor,
+    ClientSourceId, ClientSurfaceCommit, ClientSurfaceEvent, ClientSurfaceEventKind,
+    ClientSurfaceId, ClientSurfaceRequestKind, InputEventKind, InputPosition, KeyboardKeyState,
+    LinuxButtonCode, LinuxKeycode, PointerGestureKind, RawScrollPhase, RawScrollSource,
 };
 use weld_hoist_protocol::{DestinationEnvelope, DestinationMessage, HoistSessionId};
 
@@ -144,6 +144,8 @@ pub struct SourceRelayAdapter {
     admission: SourceAdmission,
     next_session: Option<u64>,
     admission_started: bool,
+    presentations: HashMap<ClientSurfaceId, ClientPresentationClaim>,
+    presentation_updates: Vec<ClientPresentationUpdate>,
 }
 
 impl SourceRelayAdapter {
@@ -170,6 +172,8 @@ impl SourceRelayAdapter {
             admission,
             next_session: Some(1),
             admission_started: false,
+            presentations: HashMap::new(),
+            presentation_updates: Vec::new(),
         }
     }
 
@@ -182,6 +186,17 @@ impl SourceRelayAdapter {
             return;
         }
         self.mappings.insert(source, session);
+        let claim = self
+            .cache
+            .get(&source)
+            .and_then(|cached| match cached.role {
+                Some(weld_client::ClientSurfaceRole::Popup(popup)) => {
+                    self.presentations.get(&popup.owner).copied()
+                }
+                _ => None,
+            })
+            .unwrap_or(ClientPresentationClaim::Active { rate: None });
+        self.set_presentation(source, claim);
         tracing::info!(?source, ?session, "admitted hoist surface");
         if let Err(error) = self.port.submit(SourcePortCommand::MapSurface {
             session,
@@ -272,6 +287,7 @@ impl SourceRelayAdapter {
         let Some(session) = self.mappings.remove(&source) else {
             return;
         };
+        self.release_presentation(source);
         self.pending_cursors.retain(|surface| *surface != source);
         if let Some(cached) = self.cache.get_mut(&source) {
             cached.sent_cursor = None;
@@ -363,6 +379,22 @@ impl SourceRelayAdapter {
                 }
             }
             ClientSurfaceEventKind::Destroyed => {
+                let children = self
+                    .cache
+                    .iter()
+                    .filter_map(|(surface, cached)| match cached.role {
+                        Some(weld_client::ClientSurfaceRole::Popup(popup))
+                            if popup.owner == source =>
+                        {
+                            Some(*surface)
+                        }
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>();
+                for child in children {
+                    self.unmap(child);
+                }
+                self.release_presentation(source);
                 self.effects.extend(
                     self.remote_input
                         .release_effects(self.upstream_source, |surface| surface == source),
@@ -510,6 +542,24 @@ impl SourceRelayAdapter {
         }
         match envelope.message {
             DestinationMessage::Request(request) => {
+                match &request {
+                    ClientRequest::Surface(surface) => match surface.kind {
+                        ClientSurfaceRequestKind::SetPresentation { rate } => {
+                            self.set_presentation(
+                                surface.surface,
+                                rate.map_or(ClientPresentationClaim::Paused, |rate| {
+                                    ClientPresentationClaim::Active { rate: Some(rate) }
+                                }),
+                            );
+                            return true;
+                        }
+                        ClientSurfaceRequestKind::Close
+                        | ClientSurfaceRequestKind::Configure { .. }
+                        | ClientSurfaceRequestKind::SetOutputs { .. }
+                        | ClientSurfaceRequestKind::SetPreferredScale { .. } => {}
+                    },
+                    ClientRequest::Focus(_) | ClientRequest::ClearFocus => {}
+                }
                 self.remote_input.observe_request(&request);
                 self.effects.push(ClientAdapterEffect::Request(request));
             }
@@ -530,6 +580,12 @@ impl SourceRelayAdapter {
             return;
         }
         self.failed = true;
+        for (surface, _) in self.presentations.drain() {
+            self.presentation_updates.push(ClientPresentationUpdate {
+                surface,
+                claim: ClientPresentationClaim::Release,
+            });
+        }
         self.cursor_in_flight = None;
         self.pending_cursors.clear();
         tracing::warn!(source = ?self.upstream_source, error = %reason, "hoist source relay failed");
@@ -551,6 +607,41 @@ impl SourceRelayAdapter {
 }
 
 impl SourceRelayAdapter {
+    fn set_presentation(&mut self, source: ClientSurfaceId, claim: ClientPresentationClaim) {
+        if self.failed || !self.mappings.contains_key(&source) {
+            return;
+        }
+        if self.presentations.insert(source, claim) == Some(claim) {
+            return;
+        }
+        self.presentation_updates.push(ClientPresentationUpdate {
+            surface: source,
+            claim,
+        });
+        let children = self
+            .cache
+            .iter()
+            .filter_map(|(surface, cached)| match cached.role {
+                Some(weld_client::ClientSurfaceRole::Popup(popup)) if popup.owner == source => {
+                    Some(*surface)
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        for child in children {
+            self.set_presentation(child, claim);
+        }
+    }
+
+    fn release_presentation(&mut self, surface: ClientSurfaceId) {
+        if self.presentations.remove(&surface).is_some() {
+            self.presentation_updates.push(ClientPresentationUpdate {
+                surface,
+                claim: ClientPresentationClaim::Release,
+            });
+        }
+    }
+
     fn queue_cursor(&mut self, surface: ClientSurfaceId) {
         if !self.mappings.contains_key(&surface) || self.failed {
             return;
@@ -608,6 +699,13 @@ impl SourceRelayAdapter {
 }
 
 impl ClientAdapter for SourceRelayAdapter {
+    fn presentation_source(&self) -> Option<ClientSourceId> {
+        Some(self.upstream_source)
+    }
+
+    fn drain_presentation_claims(&mut self, updates: &mut Vec<ClientPresentationUpdate>) {
+        updates.append(&mut self.presentation_updates);
+    }
     fn observe_cursor_update(&mut self, update: &weld_client::ClientCursorUpdate) {
         if update.surface.source() != self.upstream_source || self.failed {
             return;
@@ -1293,6 +1391,7 @@ impl RemoteInputState {
 
 #[cfg(test)]
 mod tests {
+    mod presentation_tests;
     use std::{cell::RefCell, fmt, rc::Rc};
 
     use weld_client::{

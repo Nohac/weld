@@ -4,6 +4,7 @@ use bevy::{
     ecs::{component::Component, entity::Entity},
     math::{UVec2, Vec2},
 };
+pub use weld_client::PresentationRate;
 use weld_core::{OutputConfiguration, OutputHead, surface::Extent};
 pub use weld_core::{OutputFootprintProvenance, OutputId};
 
@@ -64,6 +65,7 @@ pub struct PrimaryOutput;
 pub struct OutputGeometry {
     physical_size: UVec2,
     scale_factor: f32,
+    presentation_rate: weld_client::PresentationRate,
 }
 
 /// Scale-independent placement used for physical output adjacency.
@@ -104,10 +106,21 @@ impl OutputPlacement {
 }
 
 impl OutputGeometry {
+    pub fn from_configuration(configuration: OutputConfiguration) -> Self {
+        let mut geometry = Self::new(configuration.extent(), configuration.scale().value());
+        geometry.presentation_rate = configuration.presentation_rate();
+        geometry
+    }
+
+    pub const fn presentation_rate(self) -> weld_client::PresentationRate {
+        self.presentation_rate
+    }
+
     pub fn new(extent: Extent, scale_factor: f64) -> Self {
         Self {
             physical_size: UVec2::new(extent.width, extent.height),
             scale_factor: valid_scale_factor(scale_factor),
+            presentation_rate: weld_client::PresentationRate::HZ_60,
         }
     }
 

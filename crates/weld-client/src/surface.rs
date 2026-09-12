@@ -292,6 +292,10 @@ pub enum ClientSurfaceRequestKind {
     SetPreferredScale {
         scale_120: Option<u32>,
     },
+    /// Presenter cadence; `None` explicitly suspends frame opportunities.
+    SetPresentation {
+        rate: Option<crate::PresentationRate>,
+    },
 }
 
 /// Source-addressed keyboard focus request; `None` clears that source's focus.

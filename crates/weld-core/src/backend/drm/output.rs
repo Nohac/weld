@@ -86,6 +86,11 @@ pub(super) fn select_outputs(
                 index == 0,
                 physical_size,
             )?;
+            let rate = weld_client::PresentationRate::try_from(u32::try_from(
+                SmithayMode::from(mode).refresh,
+            )?)
+            .map_err(anyhow::Error::msg)?;
+            let configuration = configuration.with_presentation_rate(rate);
             Ok::<_, anyhow::Error>((connector, crtc, mode, name, physical_size, configuration))
         })
         .collect::<Result<Vec<_>>>()?;

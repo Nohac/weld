@@ -45,6 +45,9 @@ struct FrameTiming {
 
 #[derive(Parser)]
 struct Expectations {
+    /// A host without a presenter must accept commits/releases but not pace frames.
+    #[arg(long)]
+    dormant: bool,
     /// Print bounded per-frame timings on the producer's own clock.
     #[arg(long)]
     frame_timings: bool,
@@ -140,6 +143,25 @@ fn main() -> Result<()> {
     pool.destroy();
     drop(storage);
     let started = Instant::now();
+    if expected.dormant {
+        surface.attach(Some(&buffers[0]), 0, 0);
+        surface.frame(&handle, None);
+        surface.commit();
+        while started.elapsed() < Duration::from_millis(300) {
+            queue.roundtrip(&mut probe)?;
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        ensure!(
+            probe.frames == 0,
+            "unviewed surface received a frame callback"
+        );
+        ensure!(
+            probe.releases > 0,
+            "buffer release incorrectly depends on frame callbacks"
+        );
+        println!("PASS dormant: commits serviced, buffers released, zero frame callbacks");
+        return Ok(());
+    }
     for frame in 0..60 {
         let slot = probe
             .busy
@@ -174,6 +196,7 @@ fn main() -> Result<()> {
         }
     }
     let elapsed = started.elapsed().as_millis();
+    ensure!(probe.frames == 60, "callbacks duplicated during handoff");
     println!(
         "frames={} releases={} elapsed_ms={elapsed}",
         probe.frames, probe.releases
@@ -212,6 +235,7 @@ fn main() -> Result<()> {
         queue.blocking_dispatch(&mut probe)?;
         ensure!(!probe.closed, "unexpected close after remap");
     }
+    ensure!(probe.frames == 61, "callbacks duplicated during remap");
     println!(
         "PASS configure={width}x{height} output={:?} scale={} frames={} releases={} elapsed_ms={elapsed} remap=0x0",
         probe.output, probe.scale, probe.frames, probe.releases

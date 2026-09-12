@@ -40,3 +40,11 @@ clap.workspace = true
 tracing-subscriber.workspace = true
 wayland-client = "=0.31.15"
 wayland-protocols = { version = "=0.32.13", features = ["client"] }
+
+[[example]]
+name = "presentation_host_probe"
+required-features = ["test-support"]
+
+[[example]]
+name = "policy_host_probe"
+required-features = ["test-support"]

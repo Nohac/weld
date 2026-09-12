@@ -7963,6 +7963,7 @@ dependencies = [
  "bevy",
  "tracing",
  "weld-app",
+ "weld-core",
 ]
 
 [[package]]

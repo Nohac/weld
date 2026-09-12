@@ -90,7 +90,7 @@ enum ResizeSource {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct SurfaceOutputAssignment {
     memberships: Vec<OutputId>,
-    preferred: OutputId,
+    pub(super) preferred: OutputId,
 }
 
 impl SurfaceOutputAssignment {
@@ -534,14 +534,19 @@ impl ServerState {
         }
     }
 
-    fn mapped_frame_surfaces(&self) -> impl Iterator<Item = WlSurface> + '_ {
+    pub(super) fn mapped_frame_roots(&self) -> impl Iterator<Item = (SurfaceId, WlSurface)> + '_ {
         self.toplevels
             .values()
             .filter(|toplevel| {
                 let root = toplevel.surface.wl_surface();
                 toplevel.surface.alive() && toplevel.tree.client_mapped(root)
             })
-            .flat_map(|toplevel| collect_surfaces(toplevel.surface.wl_surface()))
+            .filter_map(|toplevel| {
+                let root = toplevel.surface.wl_surface();
+                self.toplevels
+                    .id_for_surface(root)
+                    .map(|id| (id, root.clone()))
+            })
             .chain(
                 self.popups
                     .values()
@@ -549,24 +554,14 @@ impl ServerState {
                         let root = popup.surface.wl_surface();
                         popup.surface.alive() && popup.tree.client_mapped(root)
                     })
-                    .flat_map(|popup| collect_surfaces(popup.surface.wl_surface())),
+                    .filter_map(|popup| {
+                        let root = popup.surface.wl_surface();
+                        self.popups
+                            .id_for_surface(root)
+                            .map(|id| (id, root.clone()))
+                    }),
             )
-            .filter(Resource::is_alive)
-    }
-
-    /// Frame requests eligible for a virtual presentation opportunity. As on
-    /// physical backends, currently unmapped surfaces are not considered visible.
-    pub(crate) fn has_pending_frame_callbacks(&self) -> bool {
-        self.mapped_frame_surfaces().any(|surface| {
-            with_states(&surface, |states| {
-                !states
-                    .cached_state
-                    .get::<SurfaceAttributes>()
-                    .current()
-                    .frame_callbacks
-                    .is_empty()
-            })
-        })
+            .filter(|(_, root)| root.is_alive())
     }
 
     pub(crate) fn stage_frame_callbacks(&mut self) -> u64 {
@@ -574,19 +569,10 @@ impl ServerState {
         let presentation_id = self.next_presentation_id;
         self.next_presentation_id = self.next_presentation_id.saturating_add(1);
         let mut callbacks = Vec::new();
-        for surface in self.mapped_frame_surfaces() {
-            with_states(&surface, |states| {
-                let mut attributes = states.cached_state.get::<SurfaceAttributes>();
-                if !attributes.current().frame_callbacks.is_empty() {
-                    tracing::trace!(
-                        target: "weld_surface_diag",
-                        presentation_id, surface = ?surface.id(),
-                        count = attributes.current().frame_callbacks.len(),
-                        "staged frame callbacks"
-                    );
-                }
-                callbacks.append(&mut attributes.current().frame_callbacks);
-            });
+        for (id, root) in self.mapped_frame_roots() {
+            if !self.presentation_claims.claimed(id) {
+                callbacks.extend(super::presentation::take_callbacks(id, &root));
+            }
         }
         self.staged_frame_callbacks
             .push_back((presentation_id, callbacks));
@@ -606,8 +592,8 @@ impl ServerState {
             if !callbacks.is_empty() {
                 tracing::trace!(target: "weld_surface_diag", presentation_id, time, count = callbacks.len(), "completed frame callbacks");
             }
-            for callback in callbacks {
-                callback.done(time);
+            for group in callbacks {
+                group.complete(time);
             }
         }
     }
@@ -939,6 +925,7 @@ impl XdgShellHandler for ServerState {
         let Some((id, _state)) = self.toplevels.remove_surface(wl_surface) else {
             return;
         };
+        self.forget_presentation(id);
         self.clear_input_focus_for_surface(wl_surface, self.event_time());
         self.leave_all_outputs(wl_surface);
         if self.focused_toplevel == Some(id) {

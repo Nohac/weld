@@ -4,6 +4,8 @@ mod assembly;
 pub(crate) mod callbacks;
 pub(crate) mod gpu;
 pub(crate) mod native;
+#[cfg(feature = "test-support")]
+pub use assembly::probe as presentation_probe;
 pub use assembly::{HostRuntime, RuntimeOptions};
 
 use std::{
@@ -69,6 +71,7 @@ pub(crate) fn service_client_adapters(
         tracing::warn!(%invalid, "client adapter published an invalid event");
     }
     clients.apply_pending_effects(invalid_effects);
+    clients.apply_pending_presentations(invalid_effects);
     for invalid in invalid_effects.drain(..) {
         tracing::warn!(%invalid, "client adapter published an invalid effect");
     }

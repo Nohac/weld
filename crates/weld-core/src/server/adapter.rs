@@ -73,6 +73,10 @@ pub(crate) enum WaylandClientWork {
     Request(ClientRequest),
     Input(ClientInputEvent),
     HostFocusLost(u32),
+    Presentation(
+        weld_client::ClientSourceId,
+        weld_client::ClientPresentationUpdate,
+    ),
 }
 
 /// Marker paired with the built-in adapter for application-side buffer import.
@@ -306,6 +310,14 @@ fn translate_non_commit_event(event: PendingSurfaceEvent) -> Option<ClientSurfac
 }
 
 impl ClientAdapter for WaylandClientAdapter {
+    fn apply_presentation(
+        &mut self,
+        claimant: weld_client::ClientSourceId,
+        update: weld_client::ClientPresentationUpdate,
+    ) {
+        self.bridge
+            .push_work(WaylandClientWork::Presentation(claimant, update));
+    }
     fn drain_cursor_updates(&mut self, updates: &mut Vec<weld_client::ClientCursorUpdate>) {
         updates.extend(
             self.bridge

@@ -177,6 +177,7 @@ impl ServerState {
         let Some((id, _state)) = self.popups.remove_surface(wl_surface) else {
             return;
         };
+        self.forget_presentation(id);
         self.clear_input_focus_for_surface(wl_surface, self.event_time());
         self.leave_all_outputs(wl_surface);
         self.presentation_requested = true;

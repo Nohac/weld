@@ -277,7 +277,7 @@ impl Plugin for WeldAppPlugin {
             let mut entity = app.world_mut().spawn((
                 WeldOutput { id: output.id() },
                 self.output_info[&output.id()].clone(),
-                OutputGeometry::new(output.extent(), output.scale().value()),
+                OutputGeometry::from_configuration(*output),
                 OutputPlacement::from_configuration(*output),
                 OutputPosition(Vec2::new(output.position().x, output.position().y)),
             ));
@@ -601,10 +601,7 @@ impl AppShell {
                 .world_mut()
                 .get_mut::<OutputGeometry>(output.entity)
             {
-                geometry.set_if_neq(OutputGeometry::new(
-                    configuration.extent(),
-                    configuration.scale().value(),
-                ));
+                geometry.set_if_neq(OutputGeometry::from_configuration(*configuration));
             }
             if let Some(mut position) = self
                 .app
@@ -1036,6 +1033,12 @@ fn app_input_placement(
 
 fn client_request(action: SurfaceAction) -> ClientRequest {
     match action {
+        SurfaceAction::SetPresentation { surface, rate } => {
+            ClientRequest::Surface(ClientSurfaceRequest {
+                surface,
+                kind: ClientSurfaceRequestKind::SetPresentation { rate },
+            })
+        }
         SurfaceAction::Close { surface } => ClientRequest::Surface(ClientSurfaceRequest {
             surface,
             kind: ClientSurfaceRequestKind::Close,

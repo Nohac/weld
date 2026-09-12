@@ -37,7 +37,13 @@ or lifecycle boundaries.
 `scripts/check-host-runtime` is a bounded real-Wayland regression runner
 (Python 3, supplied by the development shell). Use `--shm-only` to exercise
 hosting without Vulkan, or `--nested` to check native screenshot capture with
-foot on an existing desktop. `--policy-only --shm-only` also checks non-Bevy
+foot on an existing desktop. The default protocol fixture installs an explicit
+test presentation consumer. `--stalled-presenter --shm-only` verifies it can
+progress even when a fake native display never completes a frame;
+`--dormant --shm-only` checks the production headless host without any viewer.
+`--reclaim-presenter --shm-only` checks that returning callback ownership
+restarts local composition without another client commit or UI redraw.
+`--policy-only --shm-only` also checks non-Bevy
 policy servicing with no presenter or rendering. Python provides process-group ownership
 and bounded waits for these subprocess tests. Logs remain in `target/validation`.
 Add `--frame-timings` to a protocol-probe run to distinguish frame-callback

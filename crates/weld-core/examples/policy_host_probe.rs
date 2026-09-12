@@ -44,7 +44,7 @@ struct Policy {
 fn main() -> Result<()> {
     let arguments = Arguments::parse();
     let observations = Arc::new(Observations::default());
-    HostRuntime::prepare(
+    let mut host = HostRuntime::prepare(
         RuntimeOptions::new(
             Extent::new(640, 480),
             OutputScale::new(1.5)?,
@@ -52,8 +52,9 @@ fn main() -> Result<()> {
             Extent::new(960, 640),
         )?
         .socket_name(Some(arguments.socket)),
-    )?
-    .with_policy(Policy {
+    )?;
+    weld_core::runtime::presentation_probe::register_consumer(&mut host)?;
+    host.with_policy(Policy {
         observations: observations.clone(),
         capture_requested: false,
     })

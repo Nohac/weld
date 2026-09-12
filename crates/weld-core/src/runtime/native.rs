@@ -17,7 +17,7 @@ use crate::{
     server::{ServerOptions, ServerState, WaylandClientBridge},
 };
 
-use super::callbacks::{CallbackLedger, stage_callback_batch};
+use super::callbacks::CallbackLedger;
 use super::{ChildProcesses, HostCommandEffect, LoopData, server_mut, service_client_adapters};
 
 pub(crate) struct RuntimeSetup<'a, Event> {
@@ -182,25 +182,31 @@ impl<Event: 'static> NativeRuntime<Event> {
         let mut events = ClientEventQueue::default();
         let mut invalid_events = Vec::new();
         let mut invalid_effects = Vec::new();
-        let mut clock = CallbackClock::new(interval);
-        let mut policy_clock = CallbackClock::new(interval);
+        let mut policy_clock = PolicyClock::new(interval);
         let mut policy_dirty = integration.application().is_some();
         let started_at = Instant::now();
         loop {
+            let local_callback_demand = self.state.data.server.take_local_callback_demand();
+            if local_callback_demand && let Some((driver, _)) = integration.native() {
+                driver.client_demand(CompositionDemand::Ordinary);
+            }
             if let Some((driver, app)) = integration.native()
                 && !driver.prepare_dispatch(&mut self.state, app)?
             {
                 break;
             }
             let mut timeout = integration.driver().map_or_else(
-                || {
-                    clock.timeout(
-                        Instant::now(),
-                        self.state.data.server.has_pending_frame_callbacks(),
-                    )
-                },
+                || super::MAINTENANCE_INTERVAL,
                 |driver| driver.timeout(Instant::now()),
             );
+            if let Some(deadline) = self
+                .state
+                .data
+                .server
+                .independent_callback_timeout(Instant::now())
+            {
+                timeout = timeout.min(deadline);
+            }
             if integration.driver().is_none() && integration.application().is_some() {
                 timeout = timeout.min(policy_clock.timeout(Instant::now(), policy_dirty));
             }
@@ -246,6 +252,10 @@ impl<Event: 'static> NativeRuntime<Event> {
                     }
                 }
             }
+            self.state
+                .data
+                .server
+                .service_independent_callbacks(Instant::now());
             if let Some((driver, app)) = integration.native() {
                 let mut frame = driver.policy_frame(&mut self.state, app);
                 if frame.work.advance_main {
@@ -308,16 +318,6 @@ impl<Event: 'static> NativeRuntime<Event> {
                         break;
                     }
                 }
-                if self.state.data.server.has_pending_frame_callbacks()
-                    && clock.timeout(now, true).is_zero()
-                {
-                    stage_callback_batch(
-                        &mut self.state.callbacks,
-                        &mut self.state.data.server,
-                        [],
-                    );
-                    clock.completed(now);
-                }
             }
             let reap_first = integration
                 .driver()
@@ -367,15 +367,20 @@ pub(crate) fn apply_policy_requests<Event>(
             tracing::warn!("ignored a command for an unregistered client source");
         }
     }
+    let mut invalid = Vec::new();
+    state.clients.apply_pending_presentations(&mut invalid);
+    for error in invalid {
+        tracing::warn!(%error, "invalid presentation claim");
+    }
     state.data.server.apply_pending_client_work();
 }
 
-pub(crate) struct CallbackClock {
+pub(crate) struct PolicyClock {
     interval: Duration,
     last: Option<Instant>,
 }
 
-impl CallbackClock {
+impl PolicyClock {
     pub const fn new(interval: Duration) -> Self {
         Self {
             interval,

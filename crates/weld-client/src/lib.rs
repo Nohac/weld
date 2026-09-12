@@ -11,6 +11,7 @@ mod cursor;
 mod geometry;
 mod id;
 mod input;
+mod presentation;
 mod surface;
 #[cfg(feature = "serde")]
 mod wire;
@@ -40,6 +41,7 @@ pub use input::{
     RawScrollFrame, RawScrollPhase, RawScrollSource, RuntimeInputEvent, RuntimeInputEventKind,
     TouchpadHold, TouchpadPinch, TouchpadSwipe,
 };
+pub use presentation::{ClientPresentationClaim, ClientPresentationUpdate, PresentationRate};
 pub use surface::{
     ClientCommitRevision, ClientEventQueue, ClientFocusRequest, ClientRequest, ClientSurfaceCommit,
     ClientSurfaceEvent, ClientSurfaceEventKind, ClientSurfaceRequest, ClientSurfaceRequestKind,

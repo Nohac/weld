@@ -10,4 +10,5 @@ tracing.workspace = true
 weld-app = { path = "../weld-app" }
 
 [dev-dependencies]
+weld-core = { path = "../weld-core", features = ["test-support"] }
 weld-app = { path = "../weld-app", features = ["test-support"] }

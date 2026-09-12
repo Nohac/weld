@@ -19,8 +19,8 @@ No visible window is expected from that command alone. Local hoist transports,
 Iroh destination mode, screenshots and Bevy remote debugging are rejected. An
 Iroh source is supported with explicit whole-session consent, as described below.
 
-Defaults are a 1920×1080 physical virtual output, scale 1, a 60 Hz virtual frame
-opportunity, and 960×640 logical initial toplevels. Configure them independently:
+Defaults are a 1920×1080 physical virtual output, scale 1, a nominal 60 Hz
+advertised refresh, and 960×640 logical initial toplevels. Configure them independently:
 
 ```sh
 cargo run -- --backend headless --wayland-socket weld-server \
@@ -40,13 +40,27 @@ into a desktop layout. An unbounded workspace does not require advertising an
 enormous monitor or allocating an enormous framebuffer. Native buffer and codec
 limits still apply to individual surfaces independently of that workspace.
 
-Mapped surfaces receive frame callbacks at no more than the configured 1–240 Hz
-rate, without catch-up bursts after delays. This is an opportunity to produce
-another frame, not confirmation that a remote screen displayed it. No new
-display-feedback or network-ACK semantics are introduced. Without pending
-mapped callbacks, calloop waits on its sources with a one-second child-reaping
-maintenance timeout, rather than waking at the refresh rate. Callbacks on
-currently unmapped surfaces remain ineligible, as in the existing hosts.
+Without a presenter, mapped surfaces receive no periodic frame callbacks.
+Applications may still commit independently; their buffers and protocol work
+are processed normally. Claiming a surface activates the same per-surface
+callback scheduler used when hoisting from a desktop Weld. Until the receiver
+supplies its rate, the claimed surface uses its source output's advertised
+refresh. `--headless-refresh` controls that advertised fallback and optional
+policy update cadence, not a free-running drawing timer.
+
+The receiver's `SetPresentation` request updates that demand; `None` explicitly
+pauses it. Popups inherit their owner's demand. Independent presenter claims
+are combined at the source, using the fastest active rate, and releasing one
+claim does not erase another. The last release returns callback ownership to
+local presentation, or leaves the surface dormant if no local presenter exists.
+No catch-up bursts, per-frame network ACKs or GPU buffer-release semantics are
+introduced. Without eligible callbacks, calloop waits on its sources with a
+one-second child-reaping maintenance timeout. Unmapped roots remain ineligible.
+
+Presentation preferences accept 1–1000 Hz so fast physical displays do not fail
+startup or get silently reduced to the source's refresh. The shared callback
+clock honors that demand; codec FPS/admission and bitrate limits remain separate
+and unchanged. Advertised cadence is not a guarantee of achieved frame rate.
 
 Vulkan supplies the existing native DMA-BUF import capability when available.
 If adapter/device initialization fails, the host warns and serves SHM clients
@@ -254,7 +268,49 @@ timeout alone does not prove a driver-only defect.
   roughly 0.2–0.85 ms after commit. These are SHM-copy releases, not DMA-BUF
   encoder completion, and no encoder ran during this probe.
 
-The renderer-present/absent runtime comparison and any callback-ownership
-change remain the next batch. In particular, moving the working nested path to
-the current headless clock is not accepted as a latency fix without evidence.
-The repeated headless AV1 VCN resets and H.264 input-to-frame lag remain open.
+## Presentation handoff — Runtime ownership
+
+Previously, source hoisting and local display completion were separate systems:
+the relay knew the window was remote, but local callback staging still collected
+every mapped surface. Without a renderer, another branch supplied virtual ticks.
+The receiver also supplied size/scale but no refresh preference.
+
+The relay now claims pacing through the neutral client adapter boundary. The
+receiver sends nominal output cadence separately from local output IDs. The
+native runtime services those claims before presentation in every host mode.
+Claimed roots, including their subsurface callbacks, are excluded from native
+staging; callbacks already staged for an old display transfer to the new owner
+without waiting on its ledger. Reclaim restores callbacks to their original
+Wayland surfaces in order. Buffer readiness and consumer leases are unchanged.
+If callbacks are pending when the last claim releases, the shared runtime asks
+the native driver for composition, not just presentation of an old frame. This
+restarts both nested and DRM callback staging without waiting for a new client
+commit or a UI redraw. Re-claim in the same turn cancels that local demand.
+
+The CPU-only `presentation_host_probe` installs an explicit test consumer. The
+`--stalled-presenter` variant stages callbacks in a native driver that never
+completes presentation, while the same protocol producer must keep progressing.
+`scripts/check-host-runtime --dormant --shm-only` instead uses the production
+headless entrypoint and verifies zero callbacks with normal buffer releases.
+These fixtures do not establish GPU correctness or subjective latency. The
+repeated headless AV1 VCN resets and H.264 input-to-frame lag still require
+hardware validation; this ownership correction is not claimed as their diagnosis.
+
+CPU-only validation on 2026-09-12:
+
+- `host-runtime-7i6vdp9r`: explicit independent consumer, 60 callbacks and releases
+  in 994 ms, then remap and clean shutdown.
+- `host-runtime-0_1rpb1c`: a native callback was deliberately staged without
+  display completion. After the fixture's one-second delayed claim, callbacks
+  ran at roughly 16.6–17.3 ms intervals. Claim/release/re-claim preserved each
+  callback exactly once; remap and shutdown passed. The first-second stall is
+  injected by the fixture, not a measured hoist latency.
+- `host-runtime-9j1vft1m`: production host without a viewer, zero callbacks over
+  300 ms with successful SHM release and protocol roundtrips.
+- `host-runtime-sx93sj3u`: policy-only host plus independent test consumer,
+  60 callbacks/releases in 988 ms; no rendering, and unsupported capture rejected.
+- `host-runtime-293tfu8l`: `--reclaim-presenter --shm-only` transferred a staged
+  callback back to local ownership. The fake native driver resumed only after
+  the runtime requested composition, without another application commit or UI
+  redraw. The injected initial stall was one second; 60 callbacks/releases,
+  remap, host lifetime and shutdown passed in 1992 ms for the frame phase.

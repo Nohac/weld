@@ -22,7 +22,12 @@ def main():
     parser.add_argument("--nested", action="store_true", help="check native nested screenshot capture instead")
     parser.add_argument("--policy-only", action="store_true", help="exercise application policy without a local presenter")
     parser.add_argument("--frame-timings", action="store_true", help="record callback and buffer-release delay per SHM probe frame")
+    parser.add_argument("--stalled-presenter", action="store_true", help="test independent pacing while native presentation never completes (no GPU)")
+    parser.add_argument("--dormant", action="store_true", help="test the production headless host without any viewer")
+    parser.add_argument("--reclaim-presenter", action="store_true", help="test reclaim resumes native composition without another client commit (no GPU)")
     args = parser.parse_args()
+    if sum((args.nested, args.policy_only, args.stalled_presenter, args.dormant, args.reclaim_presenter)) > 1:
+        parser.error("choose only one host mode")
     if args.nested and args.shm_only:
         parser.error("--nested requires GPU rendering; cannot combine with --shm-only")
     if args.nested and args.policy_only:
@@ -36,8 +41,10 @@ def main():
     resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
     subprocess.run(["cargo", "build", "--bin", "weldwm", "-j2"], cwd=root, check=True)
     subprocess.run(["cargo", "build", "-p", "weld-core", "--example", "wayland_session_probe", "-j2"], cwd=root, check=True)
+    if not args.nested and not args.dormant:
+        subprocess.run(["cargo", "build", "-p", "weld-core", "--features", "test-support", "--example", "presentation_host_probe", "-j2"], cwd=root, check=True)
     if args.policy_only:
-        subprocess.run(["cargo", "build", "-p", "weld-core", "--example", "policy_host_probe", "-j2"], cwd=root, check=True)
+        subprocess.run(["cargo", "build", "-p", "weld-core", "--features", "test-support", "--example", "policy_host_probe", "-j2"], cwd=root, check=True)
     validation = root / "target/validation"
     validation.mkdir(parents=True, exist_ok=True)
     run = Path(tempfile.mkdtemp(prefix="host-runtime-", dir=validation))
@@ -63,6 +70,10 @@ def main():
         ]
         if args.policy_only:
             host_command = [str(root / "target/debug/examples/policy_host_probe"), "--socket", "weld-probe"]
+        elif not args.dormant:
+            host_command = [str(root / "target/debug/examples/presentation_host_probe"), "--socket", "weld-probe",
+                            *(["--stalled-presenter"] if args.stalled_presenter else []),
+                            *(["--reclaim-presenter"] if args.reclaim_presenter else [])]
         host = subprocess.Popen(host_command, cwd=root, env=environment, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
         try:
             deadline = time.monotonic() + 30
@@ -76,6 +87,7 @@ def main():
                     subprocess.run([str(root / "target/debug/examples/wayland_session_probe"),
                                     "--expected-output", "640x480", "--expected-scale", "2",
                                     "--expected-size", "1100x300",
+                                    *(["--dormant"] if args.dormant else []),
                                     *(["--frame-timings"] if args.frame_timings else [])], cwd=root,
                                    env={**environment, "WAYLAND_DISPLAY": "weld-probe"},
                                    stdout=client_log, stderr=subprocess.STDOUT, timeout=10, check=True)
@@ -84,6 +96,10 @@ def main():
                     raise
             if host.poll() is not None:
                 raise RuntimeError("host exited when its last client disconnected")
+            if args.stalled_presenter and "STALLED_NATIVE_CALLBACKS" not in (run / "host.log").read_text():
+                raise RuntimeError("stalled fixture did not stage a callback before ownership transfer")
+            if args.reclaim_presenter and "RECLAIM_NATIVE_COMPOSITION" not in (run / "host.log").read_text():
+                raise RuntimeError("reclaim did not request native composition")
             os.killpg(host.pid, signal.SIGTERM)
             if host.wait(timeout=5) != 0:
                 raise RuntimeError("host did not shut down cleanly")

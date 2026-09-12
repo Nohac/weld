@@ -243,6 +243,7 @@ pub struct OutputConfiguration {
     position: LogicalPoint,
     footprint: OutputFootprint,
     primary: bool,
+    presentation_rate: weld_client::PresentationRate,
 }
 
 impl OutputConfiguration {
@@ -264,6 +265,7 @@ impl OutputConfiguration {
             position,
             footprint: OutputFootprint::from_mode(extent, physical_size),
             primary,
+            presentation_rate: weld_client::PresentationRate::HZ_60,
         };
         configuration.validate()?;
         Ok(configuration)
@@ -291,6 +293,15 @@ impl OutputConfiguration {
 
     pub const fn id(self) -> OutputId {
         self.id
+    }
+
+    pub const fn with_presentation_rate(mut self, rate: weld_client::PresentationRate) -> Self {
+        self.presentation_rate = rate;
+        self
+    }
+
+    pub const fn presentation_rate(self) -> weld_client::PresentationRate {
+        self.presentation_rate
     }
 
     pub const fn extent(self) -> Extent {

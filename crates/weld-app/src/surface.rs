@@ -230,6 +230,10 @@ pub struct SurfaceNode {
 /// Protocol-neutral request emitted by ECS policy for the host to apply.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum SurfaceAction {
+    SetPresentation {
+        surface: SurfaceId,
+        rate: Option<weld_client::PresentationRate>,
+    },
     Close {
         surface: SurfaceId,
     },

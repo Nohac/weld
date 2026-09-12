@@ -170,6 +170,26 @@ mod tests {
     use super::*;
 
     #[test]
+    fn presentation_rate_is_validated_on_the_wire() {
+        for raw in [0_u32, 999, 1_000_001, u32::MAX] {
+            let bytes = postcard::to_allocvec(&raw).expect("encode raw rate");
+            assert!(postcard::from_bytes::<weld_client::PresentationRate>(&bytes).is_err());
+        }
+        for rate in [
+            None,
+            Some(weld_client::PresentationRate::try_from(90_000).expect("rate")),
+        ] {
+            let request = weld_client::ClientSurfaceRequestKind::SetPresentation { rate };
+            let bytes = postcard::to_allocvec(&request).expect("encode request");
+            assert_eq!(
+                postcard::from_bytes::<weld_client::ClientSurfaceRequestKind>(&bytes)
+                    .expect("decode request"),
+                request
+            );
+        }
+    }
+
+    #[test]
     fn key_press_repeat_release_roundtrip_in_order_without_state_collapse() {
         use weld_client::{
             ClientId, ClientInputTarget, ClientSourceId, InputEventKind, KeyboardKeyState,

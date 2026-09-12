@@ -5,6 +5,9 @@
 //! used only for the ordinary native client-buffer import capability. Adapters
 //! consume client events independently of virtual frame-callback pacing.
 
+#[cfg(feature = "test-support")]
+pub mod probe;
+
 use std::{
     ffi::OsString,
     time::{Duration, Instant},
@@ -45,7 +48,9 @@ pub struct RuntimeOptions {
 }
 
 impl RuntimeOptions {
-    /// Creates a virtual output with a bounded 1..240 Hz callback cadence.
+    /// Creates a virtual output with a bounded 1..240 Hz advertised refresh.
+    /// This supplies the initial claimed-presentation fallback and optional
+    /// policy cadence; without a presenter it does not generate frame callbacks.
     /// Extents are bounded to 8192 per axis; native client constraints may still
     /// require a different initial window size.
     pub fn new(
@@ -264,7 +269,7 @@ impl ImportGpu {
 mod tests {
     use super::*;
     use crate::runtime::MAINTENANCE_INTERVAL;
-    use crate::runtime::native::CallbackClock;
+    use crate::runtime::native::PolicyClock;
 
     #[test]
     fn virtual_output_and_window_coordinates_are_independent() {
@@ -306,10 +311,10 @@ mod tests {
     }
 
     #[test]
-    fn virtual_callbacks_do_not_poll_at_refresh_while_idle_or_catch_up_in_bursts() {
+    fn policy_ticks_do_not_poll_while_idle_or_catch_up_in_bursts() {
         let start = Instant::now();
         let interval = Duration::from_millis(10);
-        let mut clock = CallbackClock::new(interval);
+        let mut clock = PolicyClock::new(interval);
         assert_eq!(clock.timeout(start, false), MAINTENANCE_INTERVAL);
         assert_eq!(clock.timeout(start, true), Duration::ZERO);
         clock.completed(start);

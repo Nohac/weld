@@ -1,5 +1,8 @@
 //! Caller-driven adapter registry and device-paced input routing.
 
+#[cfg(test)]
+mod presentation_tests;
+
 use std::{
     any::Any,
     collections::{BTreeMap, HashMap, HashSet},
@@ -46,6 +49,21 @@ pub trait ClientAdapter {
 
     /// Observes retirement from another local-provenance adapter.
     fn observe_retired_buffer(&mut self, _buffer: crate::ClientBufferId) {}
+
+    /// Trusted registration-time scope for presentation claims from this adapter.
+    fn presentation_source(&self) -> Option<ClientSourceId> {
+        None
+    }
+
+    fn drain_presentation_claims(&mut self, _updates: &mut Vec<crate::ClientPresentationUpdate>) {}
+
+    /// Delivered only to the owning local source, with runtime-assigned claimant identity.
+    fn apply_presentation(
+        &mut self,
+        _claimant: ClientSourceId,
+        _update: crate::ClientPresentationUpdate,
+    ) {
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -661,6 +679,33 @@ impl ClientRuntime {
             };
             if !applied {
                 invalid.push(ClientRuntimeEffectError { adapter, target });
+            }
+        }
+    }
+
+    /// Also called after policy commands, before any local callback staging.
+    /// Kept separate from effects so this cannot advance codec/input admission.
+    pub fn apply_pending_presentations(&mut self, invalid: &mut Vec<ClientRuntimeEffectError>) {
+        let mut updates = Vec::new();
+        let mut sourced = Vec::new();
+        for (claimant, adapter) in &mut self.adapters {
+            let scope = adapter.driver.presentation_source();
+            adapter.driver.drain_presentation_claims(&mut updates);
+            sourced.extend(updates.drain(..).map(|update| (*claimant, scope, update)));
+        }
+        for (claimant, scope, update) in sourced {
+            let target = update.surface.source();
+            let valid = scope == Some(target)
+                && self.adapters.get(&target).is_some_and(|adapter| {
+                    adapter.descriptor.provenance == crate::ClientProvenance::Local
+                });
+            if valid && let Some(adapter) = self.adapters.get_mut(&target) {
+                adapter.driver.apply_presentation(claimant, update);
+            } else {
+                invalid.push(ClientRuntimeEffectError {
+                    adapter: claimant,
+                    target: Some(target),
+                });
             }
         }
     }
