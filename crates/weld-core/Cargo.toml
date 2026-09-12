@@ -38,3 +38,5 @@ xcursor.workspace = true
 [dev-dependencies]
 clap.workspace = true
 tracing-subscriber.workspace = true
+wayland-client = "=0.31.15"
+wayland-protocols = { version = "=0.32.13", features = ["client"] }

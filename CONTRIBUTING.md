@@ -34,6 +34,12 @@ or lifecycle boundaries.
 
 ## Running tools
 
+`scripts/check-host-runtime` is a bounded real-Wayland regression runner
+(Python 3, supplied by the development shell). Use `--shm-only` to exercise
+hosting without Vulkan, or `--nested` to check native screenshot capture with
+foot on an existing desktop. Python provides explicit process-group ownership
+and bounded waits for these subprocess tests. Logs remain in `target/validation`.
+
 Use debug-profile commands during normal development. Run the narrowest useful
 check first, then widen as the change warrants:
 

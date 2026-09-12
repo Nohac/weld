@@ -1,0 +1,116 @@
+#!/usr/bin/env python3
+"""Bounded real-Wayland regression; requires the normal Weld development shell.
+
+Python 3 provides explicit process-session ownership and bounded subprocess waits.
+Unlike shell setsid wrappers, start_new_session guarantees PID == process group ID.
+"""
+
+import argparse
+import os
+from pathlib import Path
+import resource
+import signal
+import shutil
+import subprocess
+import tempfile
+import time
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--shm-only", action="store_true", help="force Vulkan unavailable")
+    parser.add_argument("--nested", action="store_true", help="check native nested screenshot capture instead")
+    args = parser.parse_args()
+    if args.nested and args.shm_only:
+        parser.error("--nested requires GPU rendering; cannot combine with --shm-only")
+    if args.nested and (not (os.environ.get("WAYLAND_DISPLAY") or os.environ.get("DISPLAY")) or not shutil.which("foot")):
+        print("SKIP nested capture: requires a parent display and foot")
+        return
+    root = Path(__file__).resolve().parent.parent
+    resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
+    subprocess.run(["cargo", "build", "--bin", "weldwm", "-j2"], cwd=root, check=True)
+    subprocess.run(["cargo", "build", "-p", "weld-core", "--example", "wayland_session_probe", "-j2"], cwd=root, check=True)
+    validation = root / "target/validation"
+    validation.mkdir(parents=True, exist_ok=True)
+    run = Path(tempfile.mkdtemp(prefix="host-runtime-", dir=validation))
+    runtime = run / "runtime"
+    runtime.mkdir(mode=0o700)
+    environment = os.environ.copy()
+    if args.nested:
+        nested_capture(root, run, environment)
+        return
+    for key in ("DISPLAY", "WAYLAND_DISPLAY", "WAYLAND_SOCKET"):
+        environment.pop(key, None)
+    environment["XDG_RUNTIME_DIR"] = str(runtime)
+    if args.shm_only:
+        environment["VK_DRIVER_FILES"] = str(run / "absent-vulkan-driver.json")
+        environment["VK_ICD_FILENAMES"] = environment["VK_DRIVER_FILES"]
+    print(f"Logs: {run}", flush=True)
+    with (run / "host.log").open("w") as log:
+        # cargo supplies Bevy's dynamic-library search path and execs Weld.
+        host = subprocess.Popen([
+            "cargo", "run", "--quiet", "--", "--backend", "headless",
+            "--wayland-socket", "weld-probe", "--headless-output", "640x480",
+            "--scale", "1.5",
+        ], cwd=root, env=environment, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
+        try:
+            deadline = time.monotonic() + 30
+            socket = runtime / "weld-probe"
+            while not socket.exists():
+                if host.poll() is not None or time.monotonic() >= deadline:
+                    raise RuntimeError("host did not become ready; see host.log")
+                time.sleep(0.02)
+            with (run / "client.log").open("w") as client_log:
+                try:
+                    subprocess.run([str(root / "target/debug/examples/wayland_session_probe"),
+                                    "--expected-output", "640x480", "--expected-scale", "2",
+                                    "--expected-size", "1100x300"], cwd=root,
+                                   env={**environment, "WAYLAND_DISPLAY": "weld-probe"},
+                                   stdout=client_log, stderr=subprocess.STDOUT, timeout=10, check=True)
+                except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
+                    print((run / "client.log").read_text(), end="", flush=True)
+                    raise
+            if host.poll() is not None:
+                raise RuntimeError("host exited when its last client disconnected")
+            os.killpg(host.pid, signal.SIGTERM)
+            if host.wait(timeout=5) != 0:
+                raise RuntimeError("host did not shut down cleanly")
+            if socket.exists():
+                raise RuntimeError("host left its Wayland socket behind")
+            print((run / "client.log").read_text(), end="")
+            print("PASS client exit, host lifetime, SIGTERM shutdown, socket cleanup")
+        finally:
+            if host.poll() is None:
+                os.killpg(host.pid, signal.SIGKILL)
+                host.wait(timeout=5)
+
+
+def nested_capture(root, run, environment):
+    socket = run / "nested"
+    screenshot = run / "capture.png"
+    print(f"Logs: {run}", flush=True)
+    with (run / "host.log").open("w") as log:
+        host = subprocess.Popen(["cargo", "run", "--quiet", "--", "--backend", "nested",
+                                 "--wayland-socket", str(socket), "--screenshot", str(screenshot),
+                                 "--", "foot"], cwd=root, env=environment, stdout=log,
+                                stderr=subprocess.STDOUT, start_new_session=True)
+        try:
+            if host.wait(timeout=30) != 0:
+                raise RuntimeError("nested capture failed; see host.log")
+            contents = screenshot.read_bytes()
+            if not contents.startswith(b"\x89PNG\r\n\x1a\n") or len(contents) < 100:
+                raise RuntimeError("capture did not produce a nonempty PNG")
+            if socket.exists():
+                raise RuntimeError("nested host left its socket behind")
+            print("PASS nested client composition, screenshot and socket cleanup")
+        finally:
+            # Even success can leave a child after the compositor exits.
+            try:
+                os.killpg(host.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            host.wait(timeout=5)
+
+
+if __name__ == "__main__":
+    main()

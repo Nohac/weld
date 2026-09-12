@@ -112,20 +112,22 @@ for the phone/Godot and OpenXR sequence.
 - `cargo test -p weldwm --lib -j2`: 10 tests passed.
 - `cargo clippy -p weld-core -p weldwm --all-targets --features weld-core/test-support -j2 -- -D warnings`
   and formatting/whitespace checks passed.
-- An external C/Wayland SHM diagnostic ran in a private temporary
+- The tracked `scripts/check-host-runtime` subprocess fixture runs in a private
   `XDG_RUNTIME_DIR`, with inherited display variables removed and an external
-  SIGTERM watchdog. GPU-backed startup advertised native imports; forced
-  no-Vulkan startup continued without them. Both configured 1100×300 from
-  the client's min/max constraints and completed 60 callbacks/60 buffer
+  timeout. Run it normally and with `--shm-only`. GPU-backed startup advertised
+  native imports; forced no-Vulkan startup continued without them. Both configured
+  1100×300 from the client's min/max constraints and completed 60 callbacks/60 buffer
   releases in approximately 0.99 seconds. Hosts outlived the client and exited
   normally on SIGTERM, removing their sockets.
 - The no-Vulkan remap check advertised 640×480 at 60 Hz and integer scale 2
   for fractional scale 1.5, without constraining the larger window. After
   unmapping and clearing client constraints, the next configure was 0×0
   (client choice), not the startup default.
-- A bounded nested/foot screenshot run exited successfully and produced a
-  client frame and shell. It still logged the Vulkan acquire-fence validation
-  message also present in the earlier user reports; this batch does not fix it.
+- `scripts/check-host-runtime --nested` checks a bounded nested/foot screenshot
+  (explicitly skipped without a parent display or foot). The baseline run exited
+  successfully and produced a client frame and shell. It still logged the Vulkan
+  acquire-fence validation message also present in the earlier user reports;
+  this batch does not fix it.
 
 These checks do not validate hardware DMA-BUF client rendering in the new host,
 DRM scanout, remote input, encoded hoisting or reconnect.
