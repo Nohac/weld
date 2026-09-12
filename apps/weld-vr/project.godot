@@ -36,13 +36,7 @@ enabled=PackedStringArray("res://addons/godot-xr-tools/plugin.cfg", "res://addon
 [rendering]
 
 rendering_device/driver.windows="d3d12"
-; Compatibility/OpenGL enables EGLImage import of native decoder buffers without
-; CPU pixel readback. Godot 4.7.1 lacks the Vulkan device-extension opt-in needed
-; for our external-memory path; revisit when this upstream work is available:
-; https://github.com/godotengine/godot/pull/114940
-; That PR enables requesting extensions, not a complete video importer. Vulkan
-; will still need native-buffer import, synchronization and lifetime handling.
+gl_compatibility/driver.linuxbsd="opengl3_es"
 renderer/rendering_method="gl_compatibility"
 renderer/rendering_method.mobile="gl_compatibility"
-gl_compatibility/driver.linuxbsd="opengl3_es"
 textures/vram_compression/import_etc2_astc=true
