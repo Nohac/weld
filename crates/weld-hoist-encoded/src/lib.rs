@@ -9,6 +9,7 @@ mod destination_observations;
 pub mod native;
 mod observations;
 mod output;
+mod pacing;
 mod scheduling;
 mod state;
 mod transport_observations;

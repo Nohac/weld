@@ -7,6 +7,7 @@ use std::{
     any::Any,
     collections::{BTreeMap, HashMap, HashSet},
     fmt,
+    time::Instant,
 };
 
 use crate::{
@@ -22,6 +23,12 @@ use crate::{
 /// Implementations are deliberately caller-driven. They must not start their
 /// own application loop or assume an async runtime.
 pub trait ClientAdapter {
+    /// Next caller-driven service deadline, or None when ordinary external
+    /// wakes suffice. An overdue deadline requires immediate drain_events work;
+    /// servicing must consume it or move it forward, never leave a busy loop.
+    fn next_deadline(&self) -> Option<Instant> {
+        None
+    }
     fn drain_events(&mut self, events: &mut ClientEventQueue);
     fn apply_request(&mut self, request: ClientRequest);
     fn apply_input(&mut self, event: ClientInputEvent);
@@ -386,6 +393,13 @@ pub struct ClientRuntime {
 }
 
 impl ClientRuntime {
+    /// Earliest deadline across registered adapters, independent of presentation.
+    pub fn next_deadline(&self) -> Option<Instant> {
+        self.adapters
+            .values()
+            .filter_map(|adapter| adapter.driver.next_deadline())
+            .min()
+    }
     pub fn register(
         &mut self,
         adapter: ClientRuntimeAdapter,

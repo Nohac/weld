@@ -71,3 +71,42 @@ fn transport_failure_releases_claim_and_late_requests_cannot_reactivate_it() {
     );
     assert!(relay.presentations.is_empty());
 }
+
+#[test]
+fn accepted_callback_rate_keeps_requested_popup_preference_and_deadline_forwarding() {
+    let source = ClientSourceId::new(1);
+    let root = surface(source, 1);
+    let popup = surface(source, 2);
+    let session = HoistSessionId::new(1);
+    let deadline = Instant::now();
+    let state = Rc::new(RefCell::new(FakeSourceState {
+        ceiling: Some(PresentationRate::HZ_60),
+        deadline: Some(deadline),
+        ..Default::default()
+    }));
+    let mut relay = SourceRelayAdapter::new(source, FakeSourcePort(state.clone()));
+    relay.map(session, root);
+    relay.presentation_updates.clear();
+    let requested = ClientPresentationClaim::Active {
+        rate: Some(PresentationRate::try_from(120_000).expect("rate")),
+    };
+    relay.set_presentation(root, requested);
+    relay.observe(&ClientSurfaceEvent {
+        surface: popup,
+        kind: ClientSurfaceEventKind::Role(ClientSurfaceRole::Popup(PopupState {
+            owner: root,
+            position: LogicalPoint::ZERO,
+            stack_index: 1,
+        })),
+    });
+    assert_eq!(relay.presentations[&root], requested);
+    assert_eq!(relay.presentations[&popup], requested);
+    assert!(relay.presentation_updates.iter().all(|update| update.claim
+        == ClientPresentationClaim::Active {
+            rate: Some(PresentationRate::HZ_60)
+        }));
+    assert!(state.borrow().presentations.contains(&(popup, requested)));
+    assert_eq!(relay.next_deadline(), Some(deadline));
+    relay.fail("disconnected");
+    assert!(relay.next_deadline().is_none());
+}

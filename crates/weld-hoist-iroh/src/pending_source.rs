@@ -1,11 +1,11 @@
 //! Install a source observer before pairing, then attach its real encoded port
 //! only after authorization. There is no pre-admission media queue.
 
-use std::path::PathBuf;
+use std::{path::PathBuf, time::Instant};
 
 use weld_client::{
-    ClientAdapterRegistration, ClientProvenance, ClientSourceDescriptor, ClientSourceId,
-    ControlOnlyClientImporter,
+    ClientAdapterRegistration, ClientPresentationClaim, ClientProvenance, ClientSourceDescriptor,
+    ClientSourceId, ClientSurfaceId, ControlOnlyClientImporter,
 };
 use weld_hoist_core::{
     HoistPortResult, HoistSourcePort, SourceAdmission, SourcePortCommand, SourceRelayAdapter,
@@ -67,6 +67,22 @@ struct PendingPort {
 }
 
 impl HoistSourcePort for PendingPort {
+    fn next_deadline(&self) -> Option<Instant> {
+        match &self.state {
+            PortState::Connected(port) => port.next_deadline(),
+            _ => None,
+        }
+    }
+    fn set_presentation(
+        &mut self,
+        surface: ClientSurfaceId,
+        claim: ClientPresentationClaim,
+    ) -> HoistPortResult<ClientPresentationClaim> {
+        match &mut self.state {
+            PortState::Connected(port) => port.set_presentation(surface, claim),
+            _ => Err(std::io::Error::other("presentation preceded authorization").into()),
+        }
+    }
     fn ready(&self) -> bool {
         matches!(self.state, PortState::Connected(_))
     }

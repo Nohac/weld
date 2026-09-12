@@ -120,6 +120,49 @@ source client-buffer lease until its matching packet exists without an
 unbounded delayed-frame table. The CBR reservoir controls rate accounting; it
 does not add a software frame queue or frame reordering.
 
+Encoded source admission is paced in `weld-hoist-encoded`, independently of
+local composition and identically for local and Iroh transports. A presenter's
+`SetPresentation` preference selects at most the backend's configured frame-rate
+ceiling. The current VA-API backend uses the same 60 fps constant for that ceiling
+and FFmpeg configuration; this is not a probed hardware or codec maximum.
+A 120 Hz presenter therefore currently receives at most a nominal 60 fps stream,
+without changing its display refresh. Backends with 90 or 120 fps operating
+ceilings can accept those rates through the same policy. Full capability/answer
+feedback to the destination is not implemented by this slice: requested,
+configured and effective rates are logged on the source under `weld_media_diag`.
+
+Frame slots are per surface-tree snapshot, not per input event or layer. New
+commits replace superseded not-yet-encoded content with the existing complete
+inventory merge; encoded reference dependencies are never discarded arbitrarily.
+The first pending frame can start immediately, subsequent admissions follow the
+selected cadence, and missed whole intervals do not accumulate catch-up credits.
+No work is generated for an idle surface. Caller-driven adapter deadlines reduce
+the shared native runtime's dispatch timeout, so the final coalesced frame does
+not wait for another client commit, input event, local redraw or 1s maintenance
+tick. Worker completion and transport-capacity wakes remain responsible for their
+own blockers. Finite cadence exclusions retain weighted-scheduler service debt;
+fully excluded groups do not accrue starvation age.
+
+Input and cursor traffic is not paced by video admission. Explicit callback
+claims are clamped to the accepted rate, while a rate-less claim keeps the
+source-output fallback (encode bootstrap still defaults to at most 60 fps).
+This does not force application commit cadence: other presentation owners and
+clients committing without frame callbacks can still produce more work.
+Paused streams retain bounded latest unobserved buffer leases for correct resume;
+they have no periodic encode deadline. Full unmaps discard unpublished pixels,
+preserve intervening control order, and suppress cancelled in-flight output;
+in-flight source leases still await codec completion. Unmaps carrying retained
+buffer inventory drain their ordered dependencies without a cadence wait.
+
+This corrects measured overproduction: a large headless Blender window supplied
+about 210 encoded frames/s to a receive/decode path completing about 140-150/s,
+reaching 126 pending **destination media frames** and roughly 1s pre-decode wait.
+The normal source also overproduced, with a smaller measured backlog. Adaptive
+lowering and recovery of the selected rate based on observed encode/decode
+performance, aggregate codec throughput budgets, and destination rate-feedback
+UI remain separate slices. An advertised/configured ceiling is not a guarantee
+that every resolution or concurrent workload can sustain it.
+
 `weld-hoist-encoded` owns an optional bitrate actuator for live layer streams.
 Its weak `EncoderRateControl` is safe to retain in the thread-safe concrete
 local/Iroh endpoint handles; only the host selects settings and submits codec

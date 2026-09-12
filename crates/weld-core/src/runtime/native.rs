@@ -199,6 +199,7 @@ impl<Event: 'static> NativeRuntime<Event> {
                 || super::MAINTENANCE_INTERVAL,
                 |driver| driver.timeout(Instant::now()),
             );
+            timeout = adapter_dispatch_timeout(&self.state.clients, timeout, Instant::now());
             if let Some(deadline) = self
                 .state
                 .data
@@ -375,6 +376,12 @@ pub(crate) fn apply_policy_requests<Event>(
     state.data.server.apply_pending_client_work();
 }
 
+fn adapter_dispatch_timeout(clients: &ClientRuntime, timeout: Duration, now: Instant) -> Duration {
+    clients.next_deadline().map_or(timeout, |deadline| {
+        timeout.min(deadline.saturating_duration_since(now))
+    })
+}
+
 pub(crate) struct PolicyClock {
     interval: Duration,
     last: Option<Instant>,
@@ -397,5 +404,76 @@ impl PolicyClock {
     }
     pub fn completed(&mut self, now: Instant) {
         self.last = Some(now);
+    }
+}
+
+#[cfg(test)]
+mod deadline_tests {
+    use super::*;
+    use std::{cell::Cell, rc::Rc};
+    use weld_client::{
+        ClientAdapter, ClientAdapterCommandEnvelope, ClientInputEvent, ClientProvenance,
+        ClientRequest, ClientSourceDescriptor, ClientSourceId,
+    };
+
+    struct DeadlineOnly {
+        deadline: Option<Instant>,
+        serviced: Rc<Cell<bool>>,
+    }
+    impl ClientAdapter for DeadlineOnly {
+        fn next_deadline(&self) -> Option<Instant> {
+            self.deadline
+        }
+        fn drain_events(&mut self, _: &mut ClientEventQueue) {
+            if self
+                .deadline
+                .is_some_and(|deadline| Instant::now() >= deadline)
+            {
+                self.deadline = None;
+                self.serviced.set(true);
+            }
+        }
+        fn apply_request(&mut self, _: ClientRequest) {}
+        fn apply_input(&mut self, _: ClientInputEvent) {}
+        fn apply_command(&mut self, _: ClientAdapterCommandEnvelope) {}
+        fn host_focus_lost(&mut self, _: u32) {}
+    }
+
+    #[test]
+    fn adapter_deadline_wakes_without_input_display_or_worker_events() {
+        let mut clients = ClientRuntime::default();
+        let serviced = Rc::new(Cell::new(false));
+        let start = Instant::now();
+        let deadline = start + Duration::from_millis(20);
+        clients
+            .register(ClientRuntimeAdapter::new(
+                ClientSourceDescriptor::new(ClientSourceId::new(99), ClientProvenance::Relocated),
+                DeadlineOnly {
+                    deadline: Some(deadline),
+                    serviced: serviced.clone(),
+                },
+            ))
+            .expect("register");
+        let mut event_loop = EventLoop::<()>::try_new().expect("event loop");
+        while !serviced.get() && start.elapsed() < Duration::from_millis(500) {
+            let timeout = adapter_dispatch_timeout(
+                &clients,
+                super::super::MAINTENANCE_INTERVAL,
+                Instant::now(),
+            );
+            // Deliberately install no other sources. A missing deadline would
+            // sleep for the 1s maintenance interval and fail the bound below.
+            event_loop
+                .dispatch(Some(timeout), &mut ())
+                .expect("dispatch");
+            clients.drain_events(&mut ClientEventQueue::default(), &mut Vec::new());
+        }
+        assert!(serviced.get());
+        assert!(start.elapsed() < Duration::from_millis(500));
+        assert!(clients.next_deadline().is_none());
+        assert_eq!(
+            adapter_dispatch_timeout(&clients, Duration::from_secs(1), Instant::now()),
+            Duration::from_secs(1)
+        );
     }
 }

@@ -50,6 +50,20 @@ pub enum SourcePortCommand {
 /// Implementations own buffer export, codecs, serialization, queues, and
 /// binding feedback. The relay owns surface admission and authorization.
 pub trait HoistSourcePort {
+    /// Optional local service deadline; no transport roundtrip is implied.
+    fn next_deadline(&self) -> Option<Instant> {
+        None
+    }
+    /// Apply an authorized presentation preference and return the accepted
+    /// upstream callback claim. Encoded ports may lower an explicit rate to
+    /// their operating ceiling. Native forwarding uses the claim unchanged.
+    fn set_presentation(
+        &mut self,
+        _surface: ClientSurfaceId,
+        claim: ClientPresentationClaim,
+    ) -> HoistPortResult<ClientPresentationClaim> {
+        Ok(claim)
+    }
     /// Whether authorization/bootstrap has completed and mapping may begin.
     fn ready(&self) -> bool {
         true
@@ -614,9 +628,16 @@ impl SourceRelayAdapter {
         if self.presentations.insert(source, claim) == Some(claim) {
             return;
         }
+        let accepted = match self.port.set_presentation(source, claim) {
+            Ok(accepted) => accepted,
+            Err(error) => {
+                self.fail(error);
+                return;
+            }
+        };
         self.presentation_updates.push(ClientPresentationUpdate {
             surface: source,
-            claim,
+            claim: accepted,
         });
         let children = self
             .cache
@@ -699,6 +720,13 @@ impl SourceRelayAdapter {
 }
 
 impl ClientAdapter for SourceRelayAdapter {
+    fn next_deadline(&self) -> Option<Instant> {
+        if self.failed {
+            None
+        } else {
+            self.port.next_deadline()
+        }
+    }
     fn presentation_source(&self) -> Option<ClientSourceId> {
         Some(self.upstream_source)
     }
@@ -1516,6 +1544,9 @@ mod tests {
         fail_accept: bool,
         fail_withdraw: bool,
         disconnected: bool,
+        ceiling: Option<weld_client::PresentationRate>,
+        presentations: Vec<(ClientSurfaceId, ClientPresentationClaim)>,
+        deadline: Option<Instant>,
     }
 
     struct FakeSourcePort(Rc<RefCell<FakeSourceState>>);
@@ -1601,6 +1632,25 @@ mod tests {
     impl Error for FakePortFailure {}
 
     impl HoistSourcePort for FakeSourcePort {
+        fn next_deadline(&self) -> Option<Instant> {
+            self.0.borrow().deadline
+        }
+        fn set_presentation(
+            &mut self,
+            surface: ClientSurfaceId,
+            claim: ClientPresentationClaim,
+        ) -> HoistPortResult<ClientPresentationClaim> {
+            let mut state = self.0.borrow_mut();
+            state.presentations.push((surface, claim));
+            Ok(match claim {
+                ClientPresentationClaim::Active { rate: Some(rate) } => {
+                    ClientPresentationClaim::Active {
+                        rate: Some(state.ceiling.map_or(rate, |ceiling| ceiling.min(rate))),
+                    }
+                }
+                other => other,
+            })
+        }
         fn ready(&self) -> bool {
             !self.0.borrow().not_ready
         }

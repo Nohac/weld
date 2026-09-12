@@ -65,6 +65,14 @@ fn waiting_port_discards_retirement_but_rejects_mapping_without_touching_encoder
     };
     let source = ClientSourceId::new(1);
     assert!(!port.ready());
+    assert!(port.next_deadline().is_none());
+    assert!(
+        port.set_presentation(
+            ClientSurfaceId::new(ClientId::new(source, 1), 1),
+            ClientPresentationClaim::Active { rate: None }
+        )
+        .is_err()
+    );
     port.submit(SourcePortCommand::RetireUpstreamBuffer(
         ClientBufferId::new(source, 1),
     ))

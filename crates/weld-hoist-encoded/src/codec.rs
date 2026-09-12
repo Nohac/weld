@@ -3,7 +3,7 @@
 use std::any::Any;
 
 use anyhow::Result;
-use weld_client::{ClientBufferId, ClientBufferLease, ClientBufferUseId};
+use weld_client::{ClientBufferId, ClientBufferLease, ClientBufferUseId, PresentationRate};
 #[cfg(feature = "native")]
 use weld_core::dmabuf::ExternalDmabuf;
 use weld_media::{DecodeTiming, EncodedAccessUnit, MediaFrameId, MediaStreamId, StreamGeneration};
@@ -68,6 +68,11 @@ pub enum SubmitError<T> {
 }
 
 pub trait EncodeBackend {
+    /// Optional configured operating ceiling, not necessarily a probed device
+    /// maximum. Presenter preferences are independently enforced by the port.
+    fn frame_rate_limit(&self) -> Option<PresentationRate> {
+        None
+    }
     /// Resolve this adapter's source access without exposing native types to
     /// scheduling. Retain a lease whenever asynchronous work borrows its storage.
     fn prepare_input(&self, lease: &ClientBufferLease) -> Result<PreparedEncodeInput>;
@@ -136,7 +141,7 @@ mod vaapi {
         VaapiWorkerSubmitError,
     };
 
-    use weld_client::ClientBufferLease;
+    use weld_client::{ClientBufferLease, PresentationRate};
 
     use super::{
         DecodeBackend, DecodeCompletion, DecodeRequest, DecodedFrame, EncodeBackend,
@@ -149,7 +154,8 @@ mod vaapi {
     /// Provisional control floor, not a probed device limit or quality guarantee.
     /// Avoid tiny area-weighted targets and correspondingly tiny CBR reservoirs.
     const MINIMUM_CONTROL_BITRATE: u64 = 128_000;
-    const DEFAULT_FRAMES_PER_SECOND: u32 = 60;
+    const CONFIGURED_FRAME_RATE: PresentationRate = PresentationRate::HZ_60;
+    const DEFAULT_FRAMES_PER_SECOND: u32 = CONFIGURED_FRAME_RATE.millihertz() / 1000;
     const DEFAULT_KEYFRAME_INTERVAL: u32 = 32;
     const DRM_FORMAT_XRGB8888: u32 = u32::from_le_bytes(*b"XR24");
 
@@ -198,6 +204,10 @@ mod vaapi {
     }
 
     impl EncodeBackend for VaapiEncoder {
+        fn frame_rate_limit(&self) -> Option<PresentationRate> {
+            // Matches DEFAULT_FRAMES_PER_SECOND and the FFmpeg CBR configuration.
+            Some(CONFIGURED_FRAME_RATE)
+        }
         fn prepare_input(&self, lease: &ClientBufferLease) -> Result<PreparedEncodeInput> {
             prepare_input(lease)
         }

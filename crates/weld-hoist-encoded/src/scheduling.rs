@@ -69,7 +69,15 @@ impl Scheduler {
                     finish: floor,
                     ..Default::default()
                 });
-                entry.waiting.get_or_insert(now);
+                // Temporary exclusions retain service debt, but unavailable
+                // groups (including paused presentations) must not accrue age.
+                if candidates.iter().any(|candidate| {
+                    !excluded.contains(candidate) && snapshot.groups.get(candidate) == Some(&group)
+                }) {
+                    entry.waiting.get_or_insert(now);
+                } else {
+                    entry.waiting = None;
+                }
                 if entry.priority.is_none_or(|previous| priority > previous) {
                     entry.finish = floor;
                 }
@@ -167,6 +175,34 @@ impl Scheduler {
 mod tests {
     use super::*;
     use crate::activity::tests::{focus, mapped, press, surface};
+
+    #[test]
+    fn excluded_groups_keep_service_debt_without_accruing_starvation_age() {
+        let now = Instant::now();
+        let mut activity = mapped();
+        focus(&mut activity, 1, now);
+        press(&mut activity, 1, now);
+        let policy = SchedulingPolicy::default();
+        let mut scheduler = Scheduler::default();
+        let candidates = [surface(2), surface(1)];
+        let selected = scheduler
+            .select(&candidates, &[], &activity, policy, now)
+            .expect("selected");
+        scheduler.accepted(selected, now);
+        let group = activity.group(surface(1)).expect("group");
+        let debt = scheduler.groups[&group].finish;
+        let later = now + Duration::from_millis(50);
+        scheduler
+            .select(&candidates, &[surface(1)], &activity, policy, later)
+            .expect("other group");
+        assert_eq!(scheduler.groups[&group].finish, debt);
+        assert!(scheduler.groups[&group].waiting.is_none());
+        scheduler
+            .select(&candidates, &[], &activity, policy, later)
+            .expect("resume");
+        assert_eq!(scheduler.groups[&group].finish, debt);
+        assert_eq!(scheduler.groups[&group].waiting, Some(later));
+    }
 
     #[test]
     fn priority_decay_keeps_service_debt_even_across_repeated_scans() {

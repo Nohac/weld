@@ -13,10 +13,10 @@ use std::{
 use anyhow::{Context, Result, bail, ensure};
 use weld_client::{
     ClientBufferId, ClientBufferLease, ClientBufferMetadata, ClientBufferUseId,
-    ClientCommitRevision, ClientRequest, ClientSourceDescriptor, ClientSurfaceEvent,
-    ClientSurfaceEventKind, ClientSurfaceId, ClientSurfaceRequestKind, SurfaceAlphaMode,
-    SurfaceBufferChange, SurfaceLayerId, WireClientSurfaceCommit, WireClientSurfaceEvent,
-    WireClientSurfaceEventKind, WireSurfaceBufferChange,
+    ClientCommitRevision, ClientPresentationClaim, ClientRequest, ClientSourceDescriptor,
+    ClientSurfaceEvent, ClientSurfaceEventKind, ClientSurfaceId, ClientSurfaceRequestKind,
+    SurfaceAlphaMode, SurfaceBufferChange, SurfaceLayerId, WireClientSurfaceCommit,
+    WireClientSurfaceEvent, WireClientSurfaceEventKind, WireSurfaceBufferChange,
 };
 use weld_hoist_core::{
     DestinationPortCommand, DestinationPortEvent, DestinationPortRecord, HoistDestinationPort,
@@ -43,6 +43,7 @@ use crate::destination_observations::{
 };
 use crate::observations::{SourceGauges, SourceObservation, SourceObservations};
 use crate::output::SourceOutput;
+use crate::pacing::SourcePacing;
 use crate::scheduling::Scheduler;
 
 /// One packet sent from an encoded source to its destination.
@@ -240,6 +241,7 @@ struct EncodedSourceState {
     activity: Activity,
     scheduler: Scheduler,
     policy: SchedulingPolicy,
+    pacing: SourcePacing,
     backend: Box<dyn EncodeBackend>,
     output: VecDeque<SourceTransportPacket>,
     transport_blocked: bool,
@@ -262,6 +264,7 @@ impl EncodedSourceState {
     fn new(backend: Box<dyn EncodeBackend>) -> Self {
         let started_at = Instant::now();
         let rates = backend.bitrate_limits().map(EncoderRates::new);
+        let pacing = SourcePacing::new(backend.frame_rate_limit());
         Self {
             budget: None,
             budget_activity: ActivitySnapshot::default(),
@@ -270,6 +273,7 @@ impl EncodedSourceState {
             admission_deferred: false,
             scheduler: Scheduler::default(),
             policy: SchedulingPolicy::default(),
+            pacing,
             output: VecDeque::new(),
             transport_blocked: false,
             retained_output_records: 0,
@@ -315,6 +319,22 @@ impl EncodedSourceState {
             commit.alpha_mode = SurfaceAlphaMode::Discarded;
         }
         let surface = event.surface;
+        if matches!(&event.kind, ClientSurfaceEventKind::Commit(commit)
+            if !commit.mapped && commit.buffers.is_empty())
+        {
+            // A full unmap supersedes unpublished pixels, even while paused.
+            // Preserve intervening control order but never publish an old mapped
+            // completion after this unmap. In-flight leases still await completion.
+            let pending = self.pending.remove(&surface).unwrap_or_default();
+            self.cancel_encode(surface)?;
+            self.pacing.reset(surface);
+            for (session, event) in pending {
+                if !matches!(event.kind, ClientSurfaceEventKind::Commit(_)) {
+                    self.send_without_buffer(session, event)?;
+                }
+            }
+            return self.send_without_buffer(session, event);
+        }
         let surface_busy = self.pending.contains_key(&surface)
             || self
                 .in_flight
@@ -328,6 +348,7 @@ impl EncodedSourceState {
                     || self.transport_blocked
                     || !self.output.is_empty()
                     || self.in_flight.is_some()
+                    || (needs_pacing(&event) && !self.pacing.ready(surface, Instant::now()))
                 {
                     self.queue_event(session, event)?;
                 } else {
@@ -493,6 +514,11 @@ impl EncodedSourceState {
     fn cancel_surface(&mut self, surface: ClientSurfaceId) -> Result<()> {
         self.scheduler.forget(&self.activity, surface);
         self.activity.remove(surface);
+        self.pacing.forget(surface);
+        self.cancel_encode(surface)
+    }
+
+    fn cancel_encode(&mut self, surface: ClientSurfaceId) -> Result<()> {
         self.pending.remove(&surface);
         self.pending_order.retain(|candidate| *candidate != surface);
         self.resizing.remove(&surface);
@@ -545,6 +571,10 @@ impl EncodedSourceState {
     }
 
     fn schedule(&mut self) -> Result<()> {
+        self.schedule_at(Instant::now())
+    }
+
+    fn schedule_at(&mut self, now: Instant) -> Result<()> {
         if self.admission_deferred
             || self.in_flight.is_some()
             || self.transport_blocked
@@ -567,10 +597,23 @@ impl EncodedSourceState {
                         })
                 })
                 .collect::<Vec<_>>();
-            let now = Instant::now();
+            let excluded = candidates
+                .iter()
+                .copied()
+                .filter(|surface| {
+                    self.pending
+                        .get(surface)
+                        .and_then(|queue| queue.front())
+                        .is_some_and(|(_, event)| {
+                            needs_pacing(event)
+                                && !self.pacing.ready(*surface, now)
+                                && !self.has_unmap_barrier(*surface)
+                        })
+                })
+                .collect::<Vec<_>>();
             let Some(selection) =
                 self.scheduler
-                    .select(&candidates, &[], &self.activity, self.policy, now)
+                    .select(&candidates, &excluded, &self.activity, self.policy, now)
             else {
                 break;
             };
@@ -595,7 +638,7 @@ impl EncodedSourceState {
             if !queue_empty {
                 self.pending_order.push_back(surface);
             }
-            self.submit_or_send(session, event)?;
+            self.submit_or_send_at(session, event, now)?;
             if self.in_flight.is_some() {
                 self.scheduler.accepted(selection, now);
                 return Ok(());
@@ -605,6 +648,15 @@ impl EncodedSourceState {
     }
 
     fn submit_or_send(&mut self, session: HoistSessionId, event: ClientSurfaceEvent) -> Result<()> {
+        self.submit_or_send_at(session, event, Instant::now())
+    }
+
+    fn submit_or_send_at(
+        &mut self,
+        session: HoistSessionId,
+        event: ClientSurfaceEvent,
+        now: Instant,
+    ) -> Result<()> {
         let replaced = replaced_buffer_count(&event);
         ensure!(
             replaced <= MAX_REPLACEMENTS_PER_COMMIT,
@@ -616,8 +668,46 @@ impl EncodedSourceState {
         if replaced == 0 {
             self.send_without_buffer(session, event)
         } else {
-            self.submit_batch(session, event)
+            let surface = event.surface;
+            self.submit_batch(session, event)?;
+            self.pacing.admitted(surface, now);
+            Ok(())
         }
+    }
+
+    fn has_unmap_barrier(&self, surface: ClientSurfaceId) -> bool {
+        // An unmap retaining buffer inventory must preserve those dependencies.
+        // Drain its ordered segment without cadence delay rather than discard
+        // pixels that a later retained/remapped inventory may still reference.
+        self.pending.get(&surface).is_some_and(|queue| {
+            queue.iter().any(|(_, event)| {
+            matches!(&event.kind, ClientSurfaceEventKind::Commit(commit) if !commit.mapped)
+        })
+        })
+    }
+
+    fn next_deadline(&self) -> Option<Instant> {
+        if self.admission_deferred
+            || self.in_flight.is_some()
+            || self.transport_blocked
+            || !self.output.is_empty()
+        {
+            return None;
+        }
+        self.pending
+            .iter()
+            .filter_map(|(surface, queue)| {
+                let (_, event) = queue.front()?;
+                if !needs_pacing(event)
+                    || self.resizing.contains(surface)
+                    || self.pacing.paused(*surface)
+                {
+                    return None;
+                }
+                // An overdue value is intentional: the next drain can admit it.
+                self.pacing.deadline(*surface)
+            })
+            .min()
     }
 
     fn send_without_buffer(
@@ -1003,6 +1093,26 @@ impl<T: EncodedSourceTransport> EncodedSourcePort<T> {
 }
 
 impl<T: EncodedSourceTransport> HoistSourcePort for EncodedSourcePort<T> {
+    fn next_deadline(&self) -> Option<Instant> {
+        if !self.output.is_empty() || !self.transport.media_headroom() {
+            return None;
+        }
+        self.state
+            .as_ref()
+            .and_then(EncodedSourceState::next_deadline)
+    }
+
+    fn set_presentation(
+        &mut self,
+        surface: ClientSurfaceId,
+        claim: ClientPresentationClaim,
+    ) -> HoistPortResult<ClientPresentationClaim> {
+        let state = self
+            .state
+            .as_mut()
+            .ok_or_else(|| protocol_error("encoded source is disconnected"))?;
+        Ok(state.pacing.set(surface, claim))
+    }
     fn submit(&mut self, command: SourcePortCommand) -> HoistPortResult<()> {
         self.refresh_admission();
         match command {
@@ -1980,6 +2090,11 @@ fn extend_encoded_records(
     }));
 }
 
+fn needs_pacing(event: &ClientSurfaceEvent) -> bool {
+    matches!(&event.kind, ClientSurfaceEventKind::Commit(commit) if commit.mapped)
+        && replaced_buffer_count(event) > 0
+}
+
 fn protocol_error(error: impl std::fmt::Display) -> HoistPortError {
     Box::new(EncodedPortError(format!("{error:#}")))
 }
@@ -2136,6 +2251,7 @@ mod tests {
     mod bitrate_tests;
     mod configuration_tests;
     mod decode_tests;
+    mod pacing_tests;
     mod priority_tests;
     mod publication_tests;
     mod shared_budget_tests;
@@ -2515,7 +2631,7 @@ mod tests {
     }
 
     #[test]
-    fn cursor_overtaking_resize_blocked_unmap_remap_keeps_its_newer_preference() {
+    fn cursor_overtaking_delayed_unmap_remap_keeps_its_newer_preference() {
         let (mut source, transport, encoder) = source_port();
         let (destination, incoming, _) = destination_port();
         let source_id = ClientSourceId::new(1);
@@ -2585,7 +2701,20 @@ mod tests {
                 .submit(SourcePortCommand::Surface { session, event })
                 .expect("locally blocked lifecycle");
         }
-        assert!(transport.borrow().sent.is_empty());
+        source
+            .state
+            .as_mut()
+            .expect("state")
+            .set_resizing(surface, false)
+            .expect("end resize");
+        source
+            .progress_after_destination()
+            .expect("publish lifecycle");
+        // Delay lifecycle delivery independently of source admission: a full
+        // unmap now bypasses pacing/resize waits, but cursor overtaking still
+        // must be handled by the receiver's queued publication path.
+        let delayed = std::mem::take(&mut transport.borrow_mut().sent);
+        assert_eq!(delayed.len(), 2);
         let cursor = weld_client::ClientCursor::Named(weld_client::CursorIcon::Text);
         source
             .submit(SourcePortCommand::Cursor {
@@ -2613,8 +2742,7 @@ mod tests {
         source
             .progress_after_destination()
             .expect("resume lifecycle");
-        let delayed = std::mem::take(&mut transport.borrow_mut().sent);
-        assert_eq!(delayed.len(), 2);
+        assert!(transport.borrow().sent.is_empty());
         for (index, packet) in delayed.into_iter().enumerate() {
             incoming.borrow_mut().incoming.push_back(packet);
             runtime.drain_events(&mut ClientEventQueue::default(), &mut Vec::new());

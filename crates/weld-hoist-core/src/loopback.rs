@@ -184,6 +184,9 @@ struct LoopbackClientAdapter {
 }
 
 impl ClientAdapter for LoopbackClientAdapter {
+    fn next_deadline(&self) -> Option<std::time::Instant> {
+        self.source.next_deadline()
+    }
     fn observe_cursor_update(&mut self, update: &weld_client::ClientCursorUpdate) {
         self.source.observe_cursor_update(update);
         self.destination.drain_events(&mut self.events);

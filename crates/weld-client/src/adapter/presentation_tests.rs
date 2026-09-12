@@ -7,6 +7,7 @@ struct Record {
     updates: Vec<ClientPresentationUpdate>,
     received: Vec<(ClientSourceId, ClientPresentationUpdate)>,
     effect_drains: usize,
+    deadline: Option<Instant>,
 }
 
 struct Adapter {
@@ -14,6 +15,9 @@ struct Adapter {
     record: Rc<RefCell<Record>>,
 }
 impl ClientAdapter for Adapter {
+    fn next_deadline(&self) -> Option<Instant> {
+        self.record.borrow().deadline
+    }
     fn drain_events(&mut self, _: &mut ClientEventQueue) {}
     fn apply_input(&mut self, _: ClientInputEvent) {}
     fn apply_request(&mut self, _: ClientRequest) {}
@@ -35,6 +39,37 @@ impl ClientAdapter for Adapter {
     fn drain_effects(&mut self, _: &mut Vec<ClientAdapterEffect>) {
         self.record.borrow_mut().effect_drains += 1;
     }
+}
+
+#[test]
+fn adapter_deadlines_aggregate_and_disappear_when_work_is_consumed() {
+    let mut runtime = ClientRuntime::default();
+    let records = (0..3)
+        .map(|_| Rc::new(RefCell::new(Record::default())))
+        .collect::<Vec<_>>();
+    let now = Instant::now();
+    for (id, record) in records.iter().enumerate() {
+        runtime
+            .register(ClientRuntimeAdapter::new(
+                ClientSourceDescriptor::new(
+                    ClientSourceId::new(id as u64),
+                    ClientProvenance::Relocated,
+                ),
+                Adapter {
+                    scope: None,
+                    record: record.clone(),
+                },
+            ))
+            .expect("register");
+    }
+    assert!(runtime.next_deadline().is_none());
+    records[0].borrow_mut().deadline = Some(now + std::time::Duration::from_secs(2));
+    records[2].borrow_mut().deadline = Some(now);
+    assert_eq!(runtime.next_deadline(), Some(now));
+    records[2].borrow_mut().deadline = None;
+    assert_eq!(runtime.next_deadline(), records[0].borrow().deadline);
+    records[0].borrow_mut().deadline = None;
+    assert!(runtime.next_deadline().is_none());
 }
 
 #[test]
