@@ -21,10 +21,10 @@ use weld_app::{
     output::{OutputGeometry, OutputId, OutputPosition, PrimaryOutput, WeldOutput},
     surface::{
         ClientProvenance, ClientSource, ClientToplevel, HostSurfaceEvent, HostSurfaceEventKind,
-        SurfaceAction, SurfaceBufferContent, SurfaceBufferUpdate, SurfaceContentView, SurfaceId,
-        SurfaceLayerId, SurfaceLayerPlacement, SurfacePlugin, SurfaceTreeSnapshot,
-        SurfaceWindowGeometry, ToplevelInteractionRequestKind, WindowDecoration,
-        enqueue_surface_event, register_client_source, take_surface_actions,
+        SurfaceAction, SurfaceBufferContent, SurfaceBufferUpdate, SurfaceCommitRevisions,
+        SurfaceContentView, SurfaceId, SurfaceLayerId, SurfaceLayerPlacement, SurfacePlugin,
+        SurfaceTreeSnapshot, SurfaceWindowGeometry, ToplevelInteractionRequestKind,
+        WindowDecoration, enqueue_surface_event, register_client_source, take_surface_actions,
     },
 };
 use weld_client::{
@@ -34,8 +34,9 @@ use weld_client::{
 use weld_float::FloatPlugin;
 use weld_ssd::SsdPlugin;
 use weld_window::{
-    OccupiesWindow, PrimaryWindowPresentation, WindowAdmissionHold, WindowGeometry,
-    WindowInteractionKind, WindowInteractionSession, WindowOccupant, WindowOutput, WindowPlugin,
+    ClientResizeState, OccupiesWindow, PrimaryWindowPresentation, WindowAdmissionHold,
+    WindowGeometry, WindowInteractionKind, WindowInteractionSession, WindowOccupant, WindowOutput,
+    WindowPlugin,
 };
 use weld_window_ui::WindowUiPlugin;
 
@@ -958,6 +959,59 @@ fn receiver_loss_uses_ordered_unmap_before_restoring_the_source() {
             .iter(app.world())
             .count(),
         0
+    );
+}
+
+#[test]
+fn remote_admission_requests_its_size_without_a_preserved_source_window() {
+    let (mut app, _) = test_app();
+    let destination = surface(LOOPBACK_SOURCE, 99);
+    let client = map_surface(&mut app, destination, None, WindowDecoration::ServerSide);
+    let window = window_for_client(&mut app, client);
+    app.update();
+    assert_eq!(
+        take_surface_actions(app.world_mut())
+            .into_iter()
+            .filter(|action| matches!(action, SurfaceAction::Resize { .. }))
+            .collect::<Vec<_>>(),
+        vec![SurfaceAction::Resize {
+            surface: destination,
+            logical_size: UVec2::new(320, 240),
+            resizing: false,
+        }]
+    );
+    let geometry = *app.world().get::<WindowGeometry>(window).expect("geometry");
+    let after_revision = app
+        .world()
+        .get::<ClientResizeState>(window)
+        .expect("resize state")
+        .pending_after_revision(destination)
+        .expect("initial configure should await a commit");
+
+    // A client can commit a different size while processing startup configures
+    // or enforcing constraints. It must not silently change the window's choice
+    // or cause us to resend the same configure on every reconciliation pass.
+    commit_surface(&mut app, destination, UVec2::new(160, 120));
+    app.update();
+    app.update();
+    assert!(
+        app.world()
+            .resource::<SurfaceCommitRevisions>()
+            .revision(destination)
+            > after_revision
+    );
+    assert_eq!(app.world().get::<WindowGeometry>(window), Some(&geometry));
+    assert_eq!(
+        app.world()
+            .get::<ClientResizeState>(window)
+            .expect("resize state")
+            .pending_after_revision(destination),
+        None
+    );
+    assert!(
+        take_surface_actions(app.world_mut())
+            .iter()
+            .all(|action| !matches!(action, SurfaceAction::Resize { .. }))
     );
 }
 

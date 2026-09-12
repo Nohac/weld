@@ -1016,10 +1016,9 @@ fn admit_mapped_toplevels(
             .entered();
     let mut unclaimed = surfaces.iter().collect::<Vec<_>>();
     unclaimed.sort_unstable_by_key(|(_, toplevel, _)| toplevel.surface);
-    for (surface_entity, toplevel, mapped) in unclaimed {
+    for (surface_entity, _, mapped) in unclaimed {
         let managed = registry.allocate();
         let id = managed.id;
-        let client_size = rounded_client_size(mapped.logical_size);
         let window = commands
             .spawn((
                 managed,
@@ -1031,12 +1030,9 @@ fn admit_mapped_toplevels(
                 WindowZOrder::default(),
                 WindowVacancy::Remove,
                 AppliedPresentationInsets::default(),
-                ClientResizeState {
-                    surface: Some(toplevel.surface),
-                    requested_size: client_size,
-                    requested_resizing: false,
-                    pending: None,
-                },
+                // Observed buffer geometry is not a configure we have sent.
+                // Reconciliation must request the window's selected size once.
+                ClientResizeState::default(),
             ))
             .id();
         commands
@@ -1616,6 +1612,43 @@ mod tests {
                 .map(WindowOccupant::entity),
             Some(surface)
         );
+    }
+
+    #[test]
+    fn admission_requests_the_selected_client_size_exactly_once() {
+        for provenance in [ClientProvenance::Local, ClientProvenance::Relocated] {
+            let mut app = test_app();
+            let surface = SurfaceId::for_test(99);
+            let client = mapped_toplevel(&mut app, surface);
+            app.world_mut()
+                .get_mut::<ClientSource>(client)
+                .expect("client source")
+                .provenance = provenance;
+
+            app.update();
+            app.update();
+            let requests = take_surface_actions(app.world_mut())
+                .into_iter()
+                .filter(|action| matches!(action, SurfaceAction::Resize { .. }))
+                .collect::<Vec<_>>();
+            assert_eq!(
+                requests,
+                vec![SurfaceAction::Resize {
+                    surface,
+                    logical_size: UVec2::new(320, 240),
+                    resizing: false,
+                }],
+                "admission must actually request its selected size for {provenance:?}"
+            );
+            let window = app.world().get::<OccupiesWindow>(client).expect("window").0;
+            assert_eq!(
+                app.world()
+                    .get::<ClientResizeState>(window)
+                    .expect("resize state")
+                    .pending_after_revision(surface),
+                Some(0)
+            );
+        }
     }
 
     #[test]
