@@ -84,6 +84,7 @@ impl VaapiEncoderSettings {
         // Radeon VCN lost its context while probing AV1 above this validated
         // operating point. Capability negotiation can raise the ceiling once
         // the active driver has been tested safely.
+        // Evidence and removal criteria: docs/vaapi-workarounds.md.
         ensure!(
             codec != VideoCodec::Av1 || bitrate_bits <= 8_000_000,
             "AV1 bitrate exceeds the validated 8 Mbps VA-API ceiling"

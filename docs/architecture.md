@@ -200,6 +200,11 @@ guarded 128x128 fallback established by the radeonsi failure; a missing H.264
 minimum means no padding. Visible geometry above the maximum fails before the
 codec opens. Smaller valid windows retain exact transported visible geometry
 while `pad_vaapi` expands only their coded NV12 storage.
+AV1 coded dimensions are then rounded upward to even numbers and checked
+against the maximum again, avoiding an observed Mesa VCN padding-bound defect.
+This does not change visible geometry or H.264 sizing. Driver evidence,
+upstream status and guard removal criteria live in
+[VA-API workarounds](vaapi-workarounds.md).
 
 Run the bounded H.264 and AV1 production round trip with
 `scripts/run-vaapi-roundtrip-probe`. It lives in `weld-media-vaapi` so codec
@@ -280,6 +285,7 @@ The local encoded binding carries raw H.264 access units or low-overhead AV1
 OBUs in sealed descriptors on a media seqpacket channel separate from control.
 AV1 is currently capped at the validated 8 Mbps operating point because a
 64 Mbps radeonsi experiment reset the VCN context. H.264 defaults to 16 Mbps.
+This is a backend safeguard, not an AV1 limit; see [VA-API workarounds](vaapi-workarounds.md).
 There is no software fallback. Source DMA-BUF leases complete after hardware
 encoding, while decoded DMA-BUF leases remain live through destination GPU
 use. Decoder output allocation is not yet pooled, so the current path still

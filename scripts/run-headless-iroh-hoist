@@ -169,8 +169,8 @@ def main(argv):
     if args.network == "n0":
         print("This mode contacts N0 discovery/relay services over the Internet.")
     if args.codec == "av1":
-        print("WARNING: AV1 triggered an AMD VCN GPU reset in this demo's initial test.")
-        print("The cause is unresolved; --codec h264 is the currently validated choice.")
+        print("AV1 uses conservative padding for an observed AMD VCN reset; see docs/vaapi-workarounds.md.")
+        print("Other driver failures remain possible; --codec h264 is an alternative.")
     root = Path(__file__).resolve().parent.parent
     resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
     subprocess.run(["cargo", "build", "--bin", "weldwm", "-j2"], cwd=root, check=True)

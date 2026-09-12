@@ -1,6 +1,6 @@
 use std::{error::Error, fmt, path::Path};
 
-use anyhow::ensure;
+use anyhow::{Context, ensure};
 use cros_libva::{
     Config, Display, GenericValue, VA_STATUS_ERROR_UNSUPPORTED_PROFILE, VAEntrypoint, VAProfile,
     VASurfaceAttribType, VaError,
@@ -27,9 +27,10 @@ impl VaapiEncodeEntrypoint {
     }
 }
 
-/// Codec geometry accepted by one selected VA-API encoder entrypoint.
+/// Queried encoder limits plus Weld's conservative coded-geometry policy.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct VaapiEncodeGeometry {
+    codec: VideoCodec,
     entrypoint: VaapiEncodeEntrypoint,
     minimum_width: Option<u32>,
     minimum_height: Option<u32>,
@@ -53,12 +54,24 @@ impl VaapiEncodeGeometry {
             self.maximum_width,
             self.maximum_height
         );
-        let coded_width = self
+        let mut coded_width = self
             .minimum_width
             .map_or(visible_width, |minimum| visible_width.max(minimum));
-        let coded_height = self
+        let mut coded_height = self
             .minimum_height
             .map_or(visible_height, |minimum| visible_height.max(minimum));
+        if self.codec == VideoCodec::Av1 {
+            // Mesa can re-raise AV1 padding beyond its checked align-2 bound.
+            // Even NV12 picture dimensions avoid that path on both VCN4 and
+            // VCN5. This is backend policy, not an AV1 bitstream restriction.
+            // pad_vaapi preserves the visible rectangle; see docs/vaapi-workarounds.md.
+            coded_width = coded_width
+                .checked_next_multiple_of(2)
+                .context("AV1 coded width alignment overflow")?;
+            coded_height = coded_height
+                .checked_next_multiple_of(2)
+                .context("AV1 coded height alignment overflow")?;
+        }
         ensure!(
             coded_width <= self.maximum_width && coded_height <= self.maximum_height,
             "coded extent {coded_width}x{coded_height} exceeds VA-API encoder maximum {}x{}",
@@ -219,6 +232,7 @@ pub(crate) fn query_encode_geometry(
         );
     }
     Ok(VaapiEncodeGeometry {
+        codec,
         entrypoint,
         minimum_width,
         minimum_height,
@@ -275,6 +289,7 @@ mod tests {
     #[test]
     fn encode_geometry_pads_to_minimum_and_rejects_maximum() {
         let geometry = VaapiEncodeGeometry {
+            codec: VideoCodec::Av1,
             entrypoint: VaapiEncodeEntrypoint::Slice,
             minimum_width: Some(128),
             minimum_height: Some(128),
@@ -295,6 +310,7 @@ mod tests {
     #[test]
     fn absent_minimum_preserves_visible_extent() {
         let geometry = VaapiEncodeGeometry {
+            codec: VideoCodec::H264,
             entrypoint: VaapiEncodeEntrypoint::Slice,
             minimum_width: None,
             minimum_height: None,
@@ -305,6 +321,93 @@ mod tests {
             geometry.coded_extent(7, 5).expect("unrestricted minimum"),
             (7, 5)
         );
+    }
+
+    fn av1_geometry() -> VaapiEncodeGeometry {
+        VaapiEncodeGeometry {
+            codec: VideoCodec::Av1,
+            entrypoint: VaapiEncodeEntrypoint::Slice,
+            minimum_width: Some(128),
+            minimum_height: Some(128),
+            maximum_width: 8192,
+            maximum_height: 4352,
+        }
+    }
+
+    #[test]
+    fn av1_coded_geometry_rounds_odd_dimensions_without_changing_even_ones() {
+        for (visible, expected) in [
+            ((1280, 833), (1280, 834)),
+            ((1281, 833), (1282, 834)),
+            ((960, 637), (960, 638)),
+            ((1280, 834), (1280, 834)),
+            ((192, 64), (192, 128)),
+            ((8192, 4352), (8192, 4352)),
+        ] {
+            assert_eq!(
+                av1_geometry()
+                    .coded_extent(visible.0, visible.1)
+                    .expect("extent"),
+                expected,
+                "visible={visible:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn av1_alignment_applies_after_minimum_and_rechecks_maximum() {
+        let geometry = VaapiEncodeGeometry {
+            minimum_width: Some(129),
+            minimum_height: Some(131),
+            ..av1_geometry()
+        };
+        assert_eq!(geometry.coded_extent(1, 1).expect("minimum"), (130, 132));
+        for geometry in [
+            VaapiEncodeGeometry {
+                maximum_width: 1281,
+                ..av1_geometry()
+            },
+            VaapiEncodeGeometry {
+                maximum_height: 833,
+                ..av1_geometry()
+            },
+        ] {
+            assert!(geometry.coded_extent(1281, 833).is_err());
+        }
+        assert!(geometry.coded_extent(0, 1).is_err());
+        assert!(geometry.coded_extent(1, 0).is_err());
+    }
+
+    #[test]
+    fn av1_alignment_rejects_overflow_in_either_dimension() {
+        let geometry = VaapiEncodeGeometry {
+            maximum_width: u32::MAX,
+            maximum_height: u32::MAX,
+            ..av1_geometry()
+        };
+        assert!(geometry.coded_extent(u32::MAX, 128).is_err());
+        assert!(geometry.coded_extent(128, u32::MAX).is_err());
+    }
+
+    #[test]
+    fn even_av1_pictures_stay_within_vcn_padding_bounds() {
+        for dimension in 128..=1024 {
+            let (width, height) = av1_geometry()
+                .coded_extent(dimension, dimension)
+                .expect("bounded extent");
+            for (width_alignment, height_alignment) in [(64, 16), (8, 2)] {
+                assert!(width.next_multiple_of(width_alignment) - width <= width_alignment - 2);
+                assert!(height.next_multiple_of(height_alignment) - height <= height_alignment - 2);
+            }
+            // The older VCN special case for h % 16 == 8 uses h+2 instead;
+            // its padding is also within the bound. This is not a Mesa emulator.
+            let legacy_height = if height % 16 == 8 {
+                height + 2
+            } else {
+                height.next_multiple_of(16)
+            };
+            assert!(legacy_height - height <= 14);
+        }
     }
 
     #[test]
