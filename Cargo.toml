@@ -41,6 +41,7 @@ edition = "2024"
 publish = false
 
 [workspace.dependencies]
+zeroize = "1"
 anyhow = "1.0.100"
 ash = "0.38.0"
 bevy = { version = "=0.19.1", default-features = false, features = [

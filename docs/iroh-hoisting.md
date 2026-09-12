@@ -31,10 +31,68 @@ cargo tree -p weld-hoist-encoded -p weld-hoist-iroh --target aarch64-linux-andro
 ```
 
 These are cross-compilation checks, not ARM64 test execution or hardware decode.
-The existing private-file ticket/identity exchange remains; QR/bootstrap UI,
-Android runtime initialization and APK packaging, MediaCodec output and Godot
-GPU presentation are still separate work. The Godot workspace is not yet wired
-to these libraries.
+The existing private-file ticket/identity exchange remains available alongside
+the persistent-device APIs below. QR/bootstrap UI and runtime reconnect policy
+are separate work. Godot's native video fixture supports Android decoding and
+GPU presentation, but its workspace is not yet wired to these receiver libraries.
+
+## Persistent devices and saved connections
+
+The shared library can retain the same authenticated identity across endpoint
+restarts. `IrohDeviceIdentity::load_or_create` owns a private device directory and
+its raw 32-byte `device.key`; `IrohHost::bind_with_identity` uses that key. Only
+the public `IrohPeerIdentity` is exposed to callers or debug formatting. Existing
+`IrohHost::bind` calls still generate an ephemeral identity; the validation
+launchers have not switched to persistent enrollment.
+
+The device directory must be current-user-owned with mode 0700, and the key
+must be a regular current-user-owned mode-0600 file. Only the final directory
+component is created; its parent must already exist. Symlink keys/directories,
+special files, incorrect permissions and malformed key lengths fail closed.
+Missing keys are atomically created without overwrite and synced to storage;
+concurrent initializers use the winning key. Existing invalid keys are never
+silently replaced. Secret read/write buffers are zeroized, not formatted as text.
+This is same-OS-user trust, not secure-hardware storage or device attestation:
+any well-formed 32 bytes is a valid key, and another process acting as that user
+can replace it. Remote identity pinning then rejects the changed identity.
+Back up or deliberately re-enroll a lost identity rather than bypassing pinning.
+
+`IrohConnectionProfile` pins the source identity independently of address hints.
+Its bounded text format is:
+
+```text
+peer=SOURCE_PUBLIC_ENDPOINT_ID
+network=n0
+address=192.0.2.10:4242
+address=[2001:db8::10]:4242
+```
+
+Replace the example identity and addresses with the intended source's values.
+`network=direct` requires at least one address; `network=n0` permits an ID-only
+profile with discovery and relay fallback, and also honors optional address hints.
+Current hosts bind ephemeral UDP ports: a Direct profile must be refreshed when
+the source rebinds or its address changes. A stable identity alone does not make
+those addresses stable; use N0 discovery for saved connections across restarts.
+A bound host must use the profile's
+network preset: loading a profile cannot silently turn on public discovery.
+Persistent N0 identities are durable, linkable network-published identifiers.
+Address hints never substitute for authentication or prove authorization.
+Profiles reject unknown fields, repeated singleton fields, missing required
+fields, more than 32 addresses and input exceeding 4096 bytes. `load` uses the
+same verified private-file rules as rendezvous; `save_new` is atomic and refuses
+to replace an existing profile. Deliberate profile updates/enrollment remain
+the application's responsibility.
+
+`begin_accept_trusted_source` accepts an explicit `IrohTrustedPeers` allowlist
+(1–32 supplied identities), checking authenticated identity before sending any
+Weld offer. `begin_connect_profile` returns a nonblocking, pollable
+`PendingDestinationConnection`. Both admission and connection are deadline-bound
+and cancellable; dropping an unclaimed successful result disconnects it too.
+Only one incoming admission may be pending per host. The application still owns
+active-viewer limits, retry/backoff, relay re-registration and cached-surface
+replay. These APIs enable that policy without introducing a Godot-specific
+transport or changing the wire protocol; they do not implement auto-reconnect
+on their own.
 
 ## Same-machine validation
 
@@ -69,7 +127,8 @@ The current tracer has deliberate limits:
   admits only the intended destination identity supplied through a trusted
   local file; the destination authenticates the source identity from its
   trusted ticket. This is one-run transport identity approval, not the future
-  Weld device proof, pairing UI, or mesh grants. Secret keys are ephemeral.
+  Weld device proof, pairing UI, or mesh grants. These launchers still use
+  ephemeral secret keys; the library's persistent-device API is opt-in.
 - Only opaque encoded surfaces are supported. The source selects AV1 or H.264;
   the destination accepts it only when its hardware decoder and video
   processing path support that codec. Native file descriptors cannot cross the

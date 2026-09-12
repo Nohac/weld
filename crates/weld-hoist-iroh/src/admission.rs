@@ -3,10 +3,13 @@
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail, ensure};
+#[cfg(test)]
+use iroh::EndpointId;
 use iroh::{
-    Endpoint, EndpointId,
+    Endpoint, EndpointAddr,
     endpoint::{Connection, RecvStream, SendStream},
 };
+#[cfg(test)]
 use iroh_tickets::endpoint::EndpointTicket;
 use serde::{Deserialize, Serialize};
 use tokio::{
@@ -16,6 +19,9 @@ use tokio::{
 use weld_hoist_protocol::{ProtocolRevision, SurfaceMode};
 use weld_media::VideoCodec;
 
+#[cfg(test)]
+use crate::IrohPeerIdentity;
+use crate::IrohTrustedPeers;
 use crate::framing::{read_record, write_record};
 
 pub(crate) const WELD_ALPN: &[u8] = b"weld/hoist/1";
@@ -65,9 +71,27 @@ pub(crate) struct DestinationBootstrap {
     pub codec: VideoCodec,
 }
 
+#[cfg(test)]
 pub(crate) async fn accept_source(
     endpoint: &Endpoint,
     expected: EndpointId,
+    codec: VideoCodec,
+    deadline: Instant,
+    attempt_timeout: Duration,
+) -> Result<SourceBootstrap> {
+    accept_trusted_source(
+        endpoint,
+        IrohTrustedPeers::new(vec![IrohPeerIdentity(expected.to_string())])?,
+        codec,
+        deadline,
+        attempt_timeout,
+    )
+    .await
+}
+
+pub(crate) async fn accept_trusted_source(
+    endpoint: &Endpoint,
+    expected: IrohTrustedPeers,
     codec: VideoCodec,
     deadline: Instant,
     attempt_timeout: Duration,
@@ -83,10 +107,11 @@ pub(crate) async fn accept_source(
                 let Some(incoming) = incoming else {
                     break Err(anyhow::anyhow!("Iroh endpoint closed before peer admission"));
                 };
+                let expected = expected.clone();
                 candidates.spawn(async move {
                     timeout(attempt_timeout, async move {
                         let pending = PendingConnection::new(incoming.await.context("could not authenticate Iroh peer")?);
-                        ensure!(pending.connection.remote_id() == expected, "Iroh peer is not the approved destination");
+                        ensure!(expected.contains(&pending.connection.remote_id()), "Iroh peer is not an approved destination");
                         // No Weld offer or metadata may precede this identity check.
                         let (mut send, mut recv) = pending.connection.open_bi().await?;
                         write_record(&mut send, &BootstrapOffer {
@@ -133,16 +158,32 @@ pub(crate) async fn accept_source(
     result
 }
 
+#[cfg(test)]
 pub(crate) async fn connect_destination(
     endpoint: &Endpoint,
     ticket: EndpointTicket,
     supported_codecs: &[VideoCodec],
     deadline: Instant,
 ) -> Result<DestinationBootstrap> {
+    connect_address(
+        endpoint,
+        ticket.endpoint_addr().clone(),
+        supported_codecs,
+        deadline,
+    )
+    .await
+}
+
+pub(crate) async fn connect_address(
+    endpoint: &Endpoint,
+    address: EndpointAddr,
+    supported_codecs: &[VideoCodec],
+    deadline: Instant,
+) -> Result<DestinationBootstrap> {
     timeout_at(deadline, async {
         let pending = PendingConnection::new(
             endpoint
-                .connect(ticket.endpoint_addr().clone(), WELD_ALPN)
+                .connect(address, WELD_ALPN)
                 .await
                 .context("could not connect to the approved Iroh source")?,
         );

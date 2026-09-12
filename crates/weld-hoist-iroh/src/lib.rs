@@ -2,6 +2,7 @@
 
 mod adapter;
 mod admission;
+mod device;
 mod diagnostics;
 mod framing;
 mod host;
@@ -13,13 +14,15 @@ mod native;
 mod notifier;
 mod peer;
 mod pending_source;
+mod private_file;
 mod rendezvous;
 
 pub use adapter::{
     IrohDestinationEndpoint, destination_registration_with_backend,
     source_registration_with_backend,
 };
-pub use host::{IrohHost, IrohNetwork, PendingSourceAdmission};
+pub use device::{IrohConnectionProfile, IrohDeviceIdentity, IrohTrustedPeers};
+pub use host::{IrohHost, IrohNetwork, PendingDestinationConnection, PendingSourceAdmission};
 #[cfg(feature = "vaapi")]
 pub use native::{
     IrohSourceRegistrationOptions, destination_registration, pending_source_registration,

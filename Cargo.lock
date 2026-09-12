@@ -7869,6 +7869,7 @@ dependencies = [
  "weld-hoist-encoded",
  "weld-hoist-protocol",
  "weld-media",
+ "zeroize",
 ]
 
 [[package]]
