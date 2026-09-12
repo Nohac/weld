@@ -22,7 +22,9 @@ scripts/run-network-hoist --help
 No namespace creation or interface mutation is part of those checks. Read-only
 preflight additionally requires a real host terminal, not a container or the
 agent's process-isolated sandbox. The privileged path still requires manual
-validation and explicit approval of the exact interface move.
+validation. Explicit `--host` and `--client` arguments authorize the exact
+interface move without a separate confirmation prompt; sudo and all preflight
+and recovery safeguards remain in place.
 
 The final traffic summary shows RX, TX, combined bytes (decimal MB), and average
 Mbps separately for the receiver interface and the host uplink. Samples start

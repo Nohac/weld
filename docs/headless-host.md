@@ -86,7 +86,7 @@ request continued updates or add an explicit deadline contract.
 ```sh
 scripts/run-headless-iroh-hoist
 # A small, bounded run using the currently validated codec:
-scripts/run-headless-iroh-hoist --codec h264 --app foot --seconds 15 --yes
+scripts/run-headless-iroh-hoist --codec h264 --app foot --seconds 15
 ```
 
 The launcher starts foot running htop, Blender and a private-profile Firefox in
@@ -100,15 +100,15 @@ AV1 and direct Iroh are the defaults (`--codec h264` is also supported).
 VCN video-engine timeout/reset, followed by an invalid AV1 packet and loss of
 the source GPU context. Another GPU client was affected too. The trigger remains
 unresolved; the subsequent H.264 foot/htop run succeeded. Use `--codec h264`
-for the currently validated path. The launcher warns before confirming AV1.
+for the currently validated path. The launcher prints this warning before starting AV1.
 `--network n0` explicitly enables Internet discovery/relay services; this launcher
 does not isolate interfaces or change routes. Both endpoints otherwise run in
 the current network namespace. The default has **no runtime timer**. `--seconds`
 adds one after receiver startup; `--ticket-timeout` separately bounds pairing.
 `--receiver-delay` is a diagnostic to exercise hosting before pairing completes.
 
-The confirmation prompt authorizes every existing and future window in this
-new session. `--yes` bypasses the prompt for automation. The source CLI separately
+Invoking the launcher authorizes every existing and future window in its new,
+isolated session; it starts without an interactive prompt. The source CLI separately
 requires `--backend headless --hoist-all` with `--hoist-iroh-listen` and
 `--hoist-iroh-expect-peer`. Each run uses fresh private ticket/identity files;
 mutual Iroh identity authorization and the existing codec handshake precede any

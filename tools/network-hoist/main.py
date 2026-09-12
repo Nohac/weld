@@ -98,7 +98,6 @@ def launch():
     parser.add_argument("--startup-seconds", type=seconds, default=120)
     parser.add_argument("--codec", choices=("av1", "h264"), default="av1")
     parser.add_argument("--dry-run", action="store_true", help="read-only preflight; no build, sudo, or network changes")
-    parser.add_argument("--yes", action="store_true", help="confirm the displayed interface move and that phone Wi-Fi is off")
     parser.add_argument("--recover", type=run_id, metavar="RUN_ID", help="retry the same privileged cleanup for an interrupted run")
     parser.add_argument("command", nargs=argparse.REMAINDER, help="source application after -- (default foot)")
     args = parser.parse_args()
@@ -117,8 +116,6 @@ def launch():
     if args.dry_run:
         print("Preflight passed. No build, elevation, interfaces, namespaces, or services were changed.")
         return 0
-    if not args.yes and input(f"Type '{args.client}' to confirm this temporary move: ") != args.client:
-        raise Refused("network test was not confirmed")
     repository = Path(__file__).resolve().parents[2]
     validation = repository / "target" / "validation"
     validation.mkdir(parents=True, exist_ok=True)

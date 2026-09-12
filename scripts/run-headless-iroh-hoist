@@ -125,7 +125,6 @@ def parse_arguments(argv):
     parser.add_argument("--ticket-timeout", type=positive_seconds, default=120)
     parser.add_argument("--receiver-delay", type=positive_seconds,
                         help="diagnostic delay before receiver startup to exercise pending admission")
-    parser.add_argument("--yes", action="store_true", help="approve whole-session auto-hoisting without a prompt")
     return parser.parse_args(argv)
 
 
@@ -172,8 +171,6 @@ def main(argv):
     if args.codec == "av1":
         print("WARNING: AV1 triggered an AMD VCN GPU reset in this demo's initial test.")
         print("The cause is unresolved; --codec h264 is the currently validated choice.")
-    if not args.yes and input("Start this session? Type yes: ").strip() != "yes":
-        return 0
     root = Path(__file__).resolve().parent.parent
     resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
     subprocess.run(["cargo", "build", "--bin", "weldwm", "-j2"], cwd=root, check=True)

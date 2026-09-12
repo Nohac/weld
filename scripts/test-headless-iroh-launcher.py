@@ -30,9 +30,9 @@ class LauncherTests(unittest.TestCase):
                 environment = {**os.environ, "PATH": str(binaries) + os.pathsep + os.environ["PATH"],
                                "WAYLAND_DISPLAY": "fake", "WELD_LAUNCHER_TEST_MODE": mode}
                 with (root / "launcher.log").open("w+") as log:
-                    parent = subprocess.Popen([sys.executable, str(launcher), "--yes", "--app", "foot",
+                    parent = subprocess.Popen([sys.executable, str(launcher), "--app", "foot",
                                                "--codec", "h264"], env=environment,
-                                              stdout=log, stderr=subprocess.STDOUT)
+                                              stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT)
                     try:
                         deadline = time.monotonic() + 10
                         if mode.startswith("cancel"):

@@ -550,6 +550,22 @@ class DhcpHookTests(unittest.TestCase):
 
 
 class UserBoundaryTests(unittest.TestCase):
+    def test_explicit_interfaces_proceed_without_a_confirmation_prompt(self):
+        class BuildPreparationReached(Exception):
+            pass
+
+        with patch.object(sys, "argv", ["launcher", "--host", "wifi0", "--client", "usb0",
+                                       "--dhcpcd", "/test/dhcpcd"]), \
+             patch.object(os, "geteuid", return_value=1000), \
+             patch.object(lifecycle, "preflight", return_value={}) as preflight, \
+             patch("builtins.input", side_effect=AssertionError("unexpected confirmation")), \
+             patch.object(Path, "mkdir"), \
+             patch.object(main.tempfile, "mkdtemp", side_effect=BuildPreparationReached), \
+             contextlib.redirect_stdout(io.StringIO()):
+            with self.assertRaises(BuildPreparationReached):
+                main.launch()
+        preflight.assert_called_once_with("wifi0", "usb0", "/test/dhcpcd")
+
     def test_recovery_executes_validated_helper_shebang_not_caller_python(self):
         identifier = "a" * 32
         process = Mock()

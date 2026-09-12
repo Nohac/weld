@@ -145,11 +145,11 @@ users) repeat after elevation, before the move. The path above is a host
 observation, not embedded in the launcher; use your installed dhcpcd elsewhere.
 
 After reviewing the interface move and recovery behavior below, remove
-`--dry-run` to authorize the actual test. The launcher asks you to type the
-client interface, builds once without changing the Cargo profile or target
-directory, and then asks for sudo. `--yes` supplies the same explicit interface
-and phone-Wi-Fi-off confirmation for a noninteractive launch; it does not bypass
-sudo or any checks. Both Weld processes and the source application run as you,
+`--dry-run` to authorize the actual test on the explicit `--host` and `--client`
+interfaces. There is no interface-name confirmation prompt. The launcher builds
+once without changing the Cargo profile or target directory, then asks for sudo.
+Interface validation, recovery safeguards and the phone-Wi-Fi-off requirement
+are unchanged. Both Weld processes and the source application run as you,
 not as root. The runtime uses N0 discovery/relay services over the Internet.
 
 The default is AV1 with foot, 120 seconds of startup budget and 120 seconds
@@ -250,7 +250,8 @@ belong to only one at a time.
 
 The launcher must:
 
-- Require explicit confirmation of the tether and host uplink. Reject an
+- Require explicit selection of the tether and host uplink via `--client` and
+  `--host`; invoking the launcher authorizes the move. Reject an
   unexpected device, occupied namespace name, unsupported manager, or ambiguous
   ownership. Capture the tether profile/management state and host routes/DNS.
 - Build once as the normal user before touching networking. Create a private
