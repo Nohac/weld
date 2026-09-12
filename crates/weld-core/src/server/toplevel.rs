@@ -56,6 +56,8 @@ pub(super) struct ToplevelState {
     pub(super) outputs: SurfaceOutputAssignment,
     pub(super) preferred_scale_120: Option<u32>,
     resize_sources: ToplevelResizeSources,
+    // Consumed on first configure, not reapplied when this toplevel remaps.
+    initial_size: Option<Extent>,
 }
 
 #[derive(Default)]
@@ -532,12 +534,8 @@ impl ServerState {
         }
     }
 
-    pub(crate) fn stage_frame_callbacks(&mut self) -> u64 {
-        self.presentation_requested = false;
-        let presentation_id = self.next_presentation_id;
-        self.next_presentation_id = self.next_presentation_id.saturating_add(1);
-        let surfaces = self
-            .toplevels
+    fn mapped_frame_surfaces(&self) -> impl Iterator<Item = WlSurface> + '_ {
+        self.toplevels
             .values()
             .filter(|toplevel| {
                 let root = toplevel.surface.wl_surface();
@@ -554,9 +552,29 @@ impl ServerState {
                     .flat_map(|popup| collect_surfaces(popup.surface.wl_surface())),
             )
             .filter(Resource::is_alive)
-            .collect::<Vec<_>>();
+    }
+
+    /// Frame requests eligible for a virtual presentation opportunity. As on
+    /// physical backends, never-mapped surfaces are not considered visible.
+    pub(crate) fn has_pending_frame_callbacks(&self) -> bool {
+        self.mapped_frame_surfaces().any(|surface| {
+            with_states(&surface, |states| {
+                !states
+                    .cached_state
+                    .get::<SurfaceAttributes>()
+                    .current()
+                    .frame_callbacks
+                    .is_empty()
+            })
+        })
+    }
+
+    pub(crate) fn stage_frame_callbacks(&mut self) -> u64 {
+        self.presentation_requested = false;
+        let presentation_id = self.next_presentation_id;
+        self.next_presentation_id = self.next_presentation_id.saturating_add(1);
         let mut callbacks = Vec::new();
-        for surface in surfaces {
+        for surface in self.mapped_frame_surfaces() {
             with_states(&surface, |states| {
                 let mut attributes = states.cached_state.get::<SurfaceAttributes>();
                 if !attributes.current().frame_callbacks.is_empty() {
@@ -777,6 +795,16 @@ impl CompositorHandler for ServerState {
             return;
         };
         if !toplevel.surface.is_initial_configure_sent() {
+            let initial_size = self
+                .toplevels
+                .get_mut(surface_id)
+                .and_then(|state| state.initial_size.take());
+            if let Some(size) = initial_size {
+                self.stage_toplevel_size(surface_id, size);
+            }
+            let Some(toplevel) = self.toplevels.get(surface_id) else {
+                return;
+            };
             toplevel.surface.send_configure();
             return;
         }
@@ -831,6 +859,7 @@ impl XdgShellHandler for ServerState {
             outputs: SurfaceOutputAssignment::primary(self.primary_output),
             preferred_scale_120: None,
             resize_sources: ToplevelResizeSources::default(),
+            initial_size: self.initial_toplevel_size,
         };
         if !self.toplevels.insert(id, state) {
             warn!(?id, "refused a duplicate xdg-toplevel registration");

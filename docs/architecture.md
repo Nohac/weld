@@ -259,7 +259,19 @@ systems, and resources before calling `run()`. `ActiveBackend` is inserted
 before plugin construction, and `WeldAppExt` lets any standard Bevy plugin
 inspect it without requiring a separate Weld plugin trait. The low-level
 `HostBuilder` and `CompositionHost` contract remain available for non-Bevy
-application hosts; backend module entry points are implementation details.
+composition hosts; backend module entry points are implementation details.
+
+Presentation-free sessions use `weld-core::session_host::SessionHost` instead.
+The explicit `--backend headless` assembly bypasses `WeldApp`; it does not
+instantiate a no-op renderer or an invisible nested window. Calloop, the
+Wayland adapter, optional GPU import capability and a virtual output remain
+alive without a local presentation. The client-service sequence is shared with
+nested and DRM hosts. Startup logical sizes configure once through native
+constraints, and mapped frame callbacks use a demand-driven virtual clock,
+independent of buffer-consumer release. SHM-only startup is valid without a
+Vulkan adapter. Adapter/wake registration is available to library consumers,
+but live admission, automatic session hoisting and reconnect are the next batch,
+not exposed by the headless CLI yet. See [Headless application hosting](headless-host.md).
 
 `weld-app` represents application-visible outputs as `WeldOutput` entities.
 `OutputGeometry` carries pixel size and logical scale. `OutputPosition` locates
@@ -555,8 +567,9 @@ policy; it does not own window placement, stacking, or decoration. The nested
 final wgpu pass presents or captures Bevy's completed texture. The application
 keeps a stable manual texture-view handle so a future physical adapter can
 substitute a Smithay-leased output allocation without retargeting cameras, UI,
-picking, or plugins. An owned target remains necessary for capture, headless
-operation, streaming, and composition while a physical session is inactive.
+picking, or plugins. An owned target remains necessary for capture, offscreen
+composition, composed-desktop streaming, and composition while a physical
+session is inactive. Presentation-free application hosting needs no such target.
 The removed DRM presenter is not a fallback. The DRM host substitutes a
 Smithay-leased view while active and the same output's owned view while
 inactive or capturing. Detailed follow-up sequencing is tracked in the

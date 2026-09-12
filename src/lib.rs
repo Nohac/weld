@@ -13,6 +13,10 @@ use weld_app::{
     WeldApp,
     input::{GlobalShortcutPlugin, VirtualTerminalShortcutPlugin},
 };
+use weld_core::{
+    session_host::{SessionHost, SessionHostConfig},
+    surface::Extent,
+};
 use weld_float::FloatPlugin;
 use weld_hoist::{HoistEndpointRegistry, HoistPlugin, loopback_registration};
 use weld_hoist_iroh::{
@@ -33,6 +37,15 @@ pub use arguments::{AppArguments, BackendKind};
 
 pub fn run(arguments: AppArguments) -> Result<()> {
     telemetry::initialize()?;
+    validate_session_arguments(&arguments)?;
+    let backend = match arguments.backend.selection() {
+        arguments::HostSelection::Bevy(backend) => backend,
+        arguments::HostSelection::Headless => {
+            // Validation and construction are one path: no transport can bind
+            // and no Bevy renderer can start before the session-only branch.
+            return SessionHost::prepare(session_config(&arguments)?)?.run();
+        }
+    };
     validate_hoist_arguments(&arguments)?;
     let hoist_codec = arguments.hoist_codec.unwrap_or_default();
     let bitrate_budget = bitrate_budget::for_source(&arguments)?;
@@ -78,7 +91,7 @@ pub fn run(arguments: AppArguments) -> Result<()> {
     };
 
     let mut app = WeldApp::builder()
-        .backend(arguments.backend.as_backend())
+        .backend(backend)
         .launch(arguments.client)
         .screenshot(arguments.screenshot)
         .remote_debug(arguments.remote_debug)
@@ -284,6 +297,54 @@ pub fn run(arguments: AppArguments) -> Result<()> {
     app.run()
 }
 
+fn validate_session_arguments(arguments: &AppArguments) -> Result<()> {
+    if arguments.backend != BackendKind::Headless {
+        anyhow::ensure!(
+            arguments.headless_output.is_none()
+                && arguments.headless_window_size.is_none()
+                && arguments.headless_refresh.is_none(),
+            "headless output/window/refresh options require --backend headless"
+        );
+        return Ok(());
+    }
+    anyhow::ensure!(
+        arguments.screenshot.is_none() && arguments.remote_debug.is_none(),
+        "headless sessions do not provide screenshots or Bevy remote debugging"
+    );
+    anyhow::ensure!(
+        arguments.hoist_listen.is_none()
+            && arguments.hoist_connect.is_none()
+            && arguments.hoist_iroh_listen.is_none()
+            && arguments.hoist_iroh_connect.is_none(),
+        "headless live hoist admission is not implemented yet"
+    );
+    validate_hoist_arguments(arguments)?;
+    Ok(())
+}
+
+fn session_config(arguments: &AppArguments) -> Result<SessionHostConfig> {
+    Ok(SessionHostConfig::new(
+        arguments.headless_output.unwrap_or(Extent::new(1920, 1080)),
+        arguments.scale.unwrap_or_default(),
+        arguments.headless_refresh.unwrap_or(60),
+        arguments
+            .headless_window_size
+            .unwrap_or(Extent::new(960, 640)),
+    )?
+    .socket_name(arguments.wayland_socket.clone())
+    .launch(arguments.client.clone())
+    .keyboard_repeat(
+        arguments
+            .keyboard_repeat_mode
+            .map(Into::into)
+            .unwrap_or(weld_core::input::KeyboardRepeatMode::Client),
+        arguments
+            .legacy_key_repeat
+            .map(Into::into)
+            .unwrap_or_default(),
+    ))
+}
+
 fn validate_hoist_arguments(arguments: &AppArguments) -> Result<()> {
     let encoded_source = arguments.hoist_iroh_listen.is_some()
         || (arguments.hoist_listen.is_some()
@@ -353,6 +414,65 @@ mod tests {
     fn arguments(values: &[&str]) -> AppArguments {
         AppArguments::try_parse_from(std::iter::once("weldwm").chain(values.iter().copied()))
             .expect("valid command line")
+    }
+
+    #[test]
+    fn headless_cli_selects_a_session_without_changing_auto() {
+        assert!(matches!(
+            BackendKind::Auto.selection(),
+            arguments::HostSelection::Bevy(weld_app::Backend::Auto)
+        ));
+        assert!(matches!(
+            BackendKind::Headless.selection(),
+            arguments::HostSelection::Headless
+        ));
+        let args = arguments(&[
+            "--backend",
+            "headless",
+            "--headless-output",
+            "2560x1440",
+            "--headless-window-size",
+            "1280x720",
+            "--headless-refresh",
+            "90",
+            "--scale",
+            "1.5",
+        ]);
+        validate_session_arguments(&args).expect("headless arguments");
+        session_config(&args).expect("headless configuration");
+    }
+
+    #[test]
+    fn headless_cli_rejects_unsupported_presenters_and_transports_before_startup() {
+        for flags in [
+            vec!["--headless-refresh", "90"],
+            vec!["--backend", "nested", "--headless-output", "1920x1080"],
+            vec!["--backend", "headless", "--screenshot", "unused.png"],
+            vec!["--backend", "headless", "--remote-debug"],
+            vec!["--backend", "headless", "--hoist-listen", "unused.sock"],
+            vec![
+                "--backend",
+                "headless",
+                "--hoist-iroh-listen",
+                "ticket",
+                "--hoist-iroh-expect-peer",
+                "peer",
+            ],
+        ] {
+            assert!(
+                validate_session_arguments(&arguments(&flags)).is_err(),
+                "{flags:?}"
+            );
+        }
+        for flags in [
+            vec!["--headless-output", "0x1080"],
+            vec!["--headless-window-size", "9000x10"],
+            vec!["--headless-output", "1920x1080x1"],
+            vec!["--headless-refresh", "0"],
+            vec!["--headless-refresh", "241"],
+        ] {
+            assert!(AppArguments::try_parse_from(std::iter::once("weldwm").chain(flags)).is_err());
+        }
     }
 
     #[test]

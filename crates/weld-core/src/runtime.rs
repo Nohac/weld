@@ -9,6 +9,10 @@ use std::{
 };
 
 use anyhow::{Context, Result};
+use weld_client::{
+    ClientBufferUseId, ClientEventQueue, ClientRuntime, ClientRuntimeEffectError,
+    ClientRuntimeEventError,
+};
 
 use crate::input::LegacyKeyRepeat;
 use crate::server::ServerState;
@@ -36,6 +40,33 @@ impl<Event> LoopData<Event> {
 
 pub(crate) fn server_mut<Event>(data: &mut LoopData<Event>) -> &mut ServerState {
     &mut data.server
+}
+
+/// Preserve completion-before-ingress and input-before-resize ordering across
+/// native hosts. Remote effects are serviced here, outside composition pacing.
+pub(crate) fn service_client_adapters(
+    server: &mut ServerState,
+    clients: &mut ClientRuntime,
+    events: &mut ClientEventQueue,
+    invalid_events: &mut Vec<ClientRuntimeEventError>,
+    invalid_effects: &mut Vec<ClientRuntimeEffectError>,
+    mut complete_uses: impl FnMut(&[ClientBufferUseId]),
+) {
+    let completed = server.take_completed_dmabuf_uses();
+    if !completed.is_empty() {
+        complete_uses(&completed);
+    }
+    server.flush_cursor_feedback();
+    clients.drain_events(events, invalid_events);
+    for invalid in invalid_events.drain(..) {
+        tracing::warn!(%invalid, "client adapter published an invalid event");
+    }
+    clients.apply_pending_effects(invalid_effects);
+    for invalid in invalid_effects.drain(..) {
+        tracing::warn!(%invalid, "client adapter published an invalid effect");
+    }
+    server.apply_pending_client_work();
+    server.flush_pending_resizes();
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

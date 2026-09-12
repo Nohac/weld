@@ -167,6 +167,7 @@ pub(super) fn run(
         client_bridge,
         server_mut::<HostEvent>,
         ServerOptions {
+            initial_toplevel_size: None,
             started_at,
             seat_name: "weld-seat0",
             outputs: selected_outputs
@@ -399,21 +400,14 @@ pub(super) fn run(
             }
         }
 
-        let completed_dmabuf_uses = loop_data.server.take_completed_dmabuf_uses();
-        if !completed_dmabuf_uses.is_empty() {
-            application.complete_dmabuf_uses(&completed_dmabuf_uses);
-        }
-        loop_data.server.flush_cursor_feedback();
-        clients.drain_events(&mut client_events, &mut invalid_client_events);
-        for invalid in invalid_client_events.drain(..) {
-            warn!(%invalid, "client adapter published an invalid event");
-        }
-        clients.apply_pending_effects(&mut invalid_client_effects);
-        for invalid in invalid_client_effects.drain(..) {
-            warn!(%invalid, "client adapter published an invalid effect");
-        }
-        loop_data.server.apply_pending_client_work();
-        loop_data.server.flush_pending_resizes();
+        crate::runtime::service_client_adapters(
+            &mut loop_data.server,
+            &mut clients,
+            &mut client_events,
+            &mut invalid_client_events,
+            &mut invalid_client_effects,
+            |uses| application.complete_dmabuf_uses(uses),
+        );
         if !client_events.is_empty() {
             while let Some(event) = client_events.pop_front() {
                 let demand = application.enqueue_client_event(event);

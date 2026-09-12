@@ -144,6 +144,7 @@ pub(crate) fn prepare(options: RunOptions, signals: Signals) -> Result<PreparedH
                 client_bridge,
                 server_mut::<NestedEvent>,
                 ServerOptions {
+                    initial_toplevel_size: None,
                     started_at,
                     seat_name: "weld-seat0",
                     outputs: vec![ServerOutputDefinition {
@@ -325,21 +326,14 @@ pub(crate) fn prepare(options: RunOptions, signals: Signals) -> Result<PreparedH
                         .dispatch(Some(timeout), &mut loop_data)
                         .context("Smithay calloop dispatch failed")?;
                 }
-                let completed_dmabuf_uses = loop_data.server.take_completed_dmabuf_uses();
-                if !completed_dmabuf_uses.is_empty() {
-                    shell.complete_dmabuf_uses(&completed_dmabuf_uses);
-                }
-                loop_data.server.flush_cursor_feedback();
-                clients.drain_events(&mut client_events, &mut invalid_client_events);
-                for invalid in invalid_client_events.drain(..) {
-                    warn!(%invalid, "client adapter published an invalid event");
-                }
-                clients.apply_pending_effects(&mut invalid_client_effects);
-                for invalid in invalid_client_effects.drain(..) {
-                    warn!(%invalid, "client adapter published an invalid effect");
-                }
-                loop_data.server.apply_pending_client_work();
-                loop_data.server.flush_pending_resizes();
+                crate::runtime::service_client_adapters(
+                    &mut loop_data.server,
+                    &mut clients,
+                    &mut client_events,
+                    &mut invalid_client_events,
+                    &mut invalid_client_effects,
+                    |uses| shell.complete_dmabuf_uses(uses),
+                );
                 if !client_events.is_empty() {
                     let _surface_span = tracing::trace_span!(
                         target: crate::PROFILE_TARGET,

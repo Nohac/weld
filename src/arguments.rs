@@ -60,6 +60,13 @@ pub enum BackendKind {
     Auto,
     Nested,
     Drm,
+    Headless,
+}
+
+/// The session-only host deliberately does not construct a Bevy application.
+pub(crate) enum HostSelection {
+    Bevy(Backend),
+    Headless,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
@@ -110,11 +117,12 @@ impl HoistSurfaceMode {
 }
 
 impl BackendKind {
-    pub(crate) fn as_backend(self) -> Backend {
+    pub(crate) fn selection(self) -> HostSelection {
         match self {
-            Self::Auto => Backend::Auto,
-            Self::Nested => Backend::Nested,
-            Self::Drm => Backend::Drm,
+            Self::Auto => HostSelection::Bevy(Backend::Auto),
+            Self::Nested => HostSelection::Bevy(Backend::Nested),
+            Self::Drm => HostSelection::Bevy(Backend::Drm),
+            Self::Headless => HostSelection::Headless,
         }
     }
 }
@@ -141,13 +149,25 @@ pub struct AppArguments {
     #[arg(long, value_enum)]
     pub(crate) legacy_key_repeat: Option<LegacyKeyRepeatArgument>,
 
-    /// Stable repeat owner. Defaults to compositor for nested, client for DRM.
+    /// Stable repeat owner. Defaults to compositor for nested, client for DRM/headless.
     /// Use client if the parent compositor supplies no repeat cadence.
     #[arg(long, value_enum)]
     pub(crate) keyboard_repeat_mode: Option<KeyboardRepeatModeArgument>,
     /// Host backend. Auto uses a nested host when available and DRM on a TTY.
     #[arg(long, value_enum, default_value_t)]
     pub(crate) backend: BackendKind,
+
+    /// Headless virtual output in physical pixels (default 1920x1080).
+    #[arg(long, value_name = "WIDTHxHEIGHT", value_parser = parse_extent)]
+    pub(crate) headless_output: Option<weld_core::surface::Extent>,
+
+    /// Headless initial toplevel size in logical pixels (default 960x640).
+    #[arg(long, value_name = "WIDTHxHEIGHT", value_parser = parse_extent)]
+    pub(crate) headless_window_size: Option<weld_core::surface::Extent>,
+
+    /// Headless virtual frame callback rate (default 60 Hz).
+    #[arg(long, value_name = "HZ", value_parser = clap::value_parser!(u32).range(1..=240))]
+    pub(crate) headless_refresh: Option<u32>,
 
     /// Enable the restricted Bevy Remote Protocol endpoint.
     #[arg(
@@ -163,7 +183,7 @@ pub struct AppArguments {
     #[arg(long, value_name = "PATH")]
     pub(crate) screenshot: Option<PathBuf>,
 
-    /// Standalone DRM output scale. Fractional values are supported; clients
+    /// DRM or headless output scale. Fractional values are supported; clients
     /// without fractional-scale support receive the rounded Wayland scale.
     #[arg(long, value_name = "FACTOR")]
     pub(crate) scale: Option<OutputScale>,
@@ -223,4 +243,14 @@ pub struct AppArguments {
     /// Optional client program followed by its arguments.
     #[arg(value_name = "CLIENT_AND_ARGS", allow_hyphen_values = true)]
     pub(crate) client: Vec<OsString>,
+}
+
+fn parse_extent(value: &str) -> Result<weld_core::surface::Extent, String> {
+    let (width, height) = value.split_once('x').ok_or("expected WIDTHxHEIGHT")?;
+    let width = width.parse::<u32>().map_err(|_| "invalid width")?;
+    let height = height.parse::<u32>().map_err(|_| "invalid height")?;
+    if !(1..=8192).contains(&width) || !(1..=8192).contains(&height) {
+        return Err("dimensions must be between 1 and 8192".to_owned());
+    }
+    Ok(weld_core::surface::Extent::new(width, height))
 }

@@ -104,6 +104,11 @@ cargo run -- --backend nested
 Backend selection defaults to `auto`. Use an explicit backend when validating
 host-specific behavior so the environment cannot change the target silently.
 
+`--backend headless` runs the presentation-free Wayland session host. It has
+configurable virtual output and initial window sizes, but does not yet accept
+hoist transports in the executable. See [Headless application hosting](docs/headless-host.md)
+for commands, limits and the next live-admission batch. `auto` never selects it.
+
 Pass a program and arguments to launch it against Weld's private Wayland
 socket. The verified smoke test uses foot:
 

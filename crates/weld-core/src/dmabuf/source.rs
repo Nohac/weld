@@ -23,7 +23,7 @@ pub(crate) struct ImportedDmabufSource {
 
 #[derive(Clone)]
 pub(crate) struct DmabufSourceCache {
-    device: wgpu::Device,
+    device: Option<wgpu::Device>,
     max_dimension: u32,
     imported: Rc<RefCell<HashMap<Dmabuf, Rc<ImportedDmabufSource>>>>,
     next_import_id: Rc<Cell<Option<u64>>>,
@@ -32,8 +32,18 @@ pub(crate) struct DmabufSourceCache {
 impl DmabufSourceCache {
     pub(crate) fn new(device: &wgpu::Device) -> Self {
         Self {
-            device: device.clone(),
+            device: Some(device.clone()),
             max_dimension: device.limits().max_texture_dimension_2d,
+            imported: Rc::new(RefCell::new(HashMap::new())),
+            next_import_id: Rc::new(Cell::new(Some(1))),
+        }
+    }
+
+    /// No GPU import capability. Paired with an absent linux-dmabuf global.
+    pub(crate) fn unavailable() -> Self {
+        Self {
+            device: None,
+            max_dimension: 0,
             imported: Rc::new(RefCell::new(HashMap::new())),
             next_import_id: Rc::new(Cell::new(Some(1))),
         }
@@ -41,6 +51,10 @@ impl DmabufSourceCache {
 
     /// Validate and import a protocol buffer before acknowledging its creation.
     pub(crate) fn import(&self, dmabuf: &Dmabuf) -> Result<Rc<ImportedDmabufSource>> {
+        let device = self
+            .device
+            .as_ref()
+            .context("DMA-BUF import is unavailable")?;
         if let Some(imported) = self.imported.borrow().get(dmabuf).cloned() {
             return Ok(imported);
         }
@@ -90,8 +104,7 @@ impl DmabufSourceCache {
         // duplicated fd and supplied layout describe that plane; Vulkan
         // consumes only the duplicate, never Smithay's original fd.
         let hal_texture = unsafe {
-            let raw = self
-                .device
+            let raw = device
                 .as_hal::<wgpu::hal::api::Vulkan>()
                 .context("DMA-BUF device is not backed by Vulkan")?;
             raw.texture_from_dmabuf_fd(
@@ -116,12 +129,11 @@ impl DmabufSourceCache {
         // matching descriptor. The first foreign acquire establishes the
         // RESOURCE layout before any tracked wgpu access.
         let texture = unsafe {
-            self.device
-                .create_texture_from_hal::<wgpu::hal::api::Vulkan>(
-                    hal_texture,
-                    &descriptor,
-                    wgpu::TextureUses::RESOURCE,
-                )
+            device.create_texture_from_hal::<wgpu::hal::api::Vulkan>(
+                hal_texture,
+                &descriptor,
+                wgpu::TextureUses::RESOURCE,
+            )
         };
         // SAFETY: the HAL guard remains live while its opaque image handle is
         // copied. Cache ownership keeps the texture alive until wl_buffer

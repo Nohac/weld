@@ -15,6 +15,7 @@ pub mod output;
 pub mod renderer;
 pub mod runtime;
 pub mod server;
+pub mod session_host;
 pub mod surface;
 
 pub use host::{

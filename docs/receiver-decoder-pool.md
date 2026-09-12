@@ -109,8 +109,9 @@ presenter below. The user also revalidated end-to-end Linux AV1 with
    GPU-native Godot presentation, input, resize and Android pause/resume; inspect
    direct-versus-relay state rather than assuming LAN connectivity is direct.
    Godot Vulkan import remains a capability/ownership gate, not a solved task.
-3. Add a real headless source entrypoint that launches a configured app session
-   without a host window or physical display. On an authorized receiver's
+3. The [headless session-host foundation](headless-host.md) now launches an app
+   without a host window, physical display or compositor renderer. Live
+   admission and automatic hoisting remain the next batch: on an authorized receiver's
    connection, automatically hoist that session's existing and new windows,
    including related popups/dialogs. Retain apps on disconnect, release remote
    input and suspend unnecessary streaming; reconnect re-presents live windows.
@@ -119,8 +120,10 @@ presenter below. The user also revalidated end-to-end Linux AV1 with
 4. Reuse the phone path in the Pico OpenXR shell, without Pico vendor SDK/login.
    Verify headset rendering and lifecycle separately from phone success.
 
-These are ordered follow-ups, not implemented features or authority to create
-placeholder backends. The initial target is one authorized receiver; multi-peer
+Except for the explicitly linked implemented foundations, these are follow-ups,
+not implemented features or authority to create placeholder backends. The source
+host is being prepared before wiring the Godot network receiver. The initial
+target is one authorized receiver; multi-peer
 ownership and richer discovery remain separate work.
 
 ## Decode-ahead execution

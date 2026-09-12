@@ -104,6 +104,7 @@ pub struct ServerState {
     seat: Seat<Self>,
     outputs: HashMap<OutputId, ServerOutput>,
     primary_output: OutputId,
+    initial_toplevel_size: Option<crate::surface::Extent>,
     toplevels: ToplevelStore,
     popups: PopupStore,
     popup_manager: PopupManager,
@@ -146,6 +147,7 @@ pub(crate) struct ServerOptions<'a> {
     pub(crate) dmabuf_sources: DmabufSourceCache,
     pub(crate) socket_name: Option<&'a str>,
     pub(crate) keyboard_repeat_mode: KeyboardRepeatMode,
+    pub(crate) initial_toplevel_size: Option<crate::surface::Extent>,
 }
 
 struct ServerOutput {
@@ -171,6 +173,7 @@ impl ServerState {
             dmabuf_sources,
             socket_name: requested_socket_name,
             keyboard_repeat_mode,
+            initial_toplevel_size,
         } = options;
         let display_handle = display.handle();
         let compositor_state = CompositorState::new::<Self>(&display_handle);
@@ -350,6 +353,7 @@ impl ServerState {
             seat,
             outputs: installed_outputs,
             primary_output,
+            initial_toplevel_size,
             toplevels: ToplevelStore::default(),
             popups: PopupStore::default(),
             popup_manager: PopupManager::default(),
