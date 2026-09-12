@@ -2,6 +2,7 @@
 
 mod arguments;
 mod bitrate_budget;
+mod headless;
 mod overlay;
 mod telemetry;
 
@@ -13,10 +14,7 @@ use weld_app::{
     WeldApp,
     input::{GlobalShortcutPlugin, VirtualTerminalShortcutPlugin},
 };
-use weld_core::{
-    runtime::{HostRuntime, RuntimeOptions},
-    surface::Extent,
-};
+use weld_core::{runtime::RuntimeOptions, surface::Extent};
 use weld_float::FloatPlugin;
 use weld_hoist::{HoistEndpointRegistry, HoistPlugin, loopback_registration};
 use weld_hoist_iroh::{
@@ -43,7 +41,7 @@ pub fn run(arguments: AppArguments) -> Result<()> {
         arguments::HostSelection::Headless => {
             // Validation and construction are one path: no transport can bind
             // and no Bevy renderer can start before the session-only branch.
-            return HostRuntime::prepare(runtime_options(&arguments)?)?.run();
+            return headless::run(arguments);
         }
     };
     validate_hoist_arguments(&arguments)?;
@@ -159,7 +157,11 @@ pub fn run(arguments: AppArguments) -> Result<()> {
             let capabilities = app.external_dmabuf_capabilities()?;
             let transport = bootstrap_destination(control, |mode| {
                 if let LocalSurfaceMode::EncodedOpaque(codec) = mode {
-                    validate_encoded_capabilities(capabilities.as_ref(), codec)?;
+                    validate_encoded_capabilities(
+                        capabilities.as_ref(),
+                        codec,
+                        MediaOperation::Decode,
+                    )?;
                 }
                 Ok(())
             })?;
@@ -300,6 +302,10 @@ pub fn run(arguments: AppArguments) -> Result<()> {
 fn validate_session_arguments(arguments: &AppArguments) -> Result<()> {
     if arguments.backend != BackendKind::Headless {
         anyhow::ensure!(
+            !arguments.hoist_all,
+            "--hoist-all requires --backend headless"
+        );
+        anyhow::ensure!(
             arguments.headless_output.is_none()
                 && arguments.headless_window_size.is_none()
                 && arguments.headless_refresh.is_none(),
@@ -314,9 +320,12 @@ fn validate_session_arguments(arguments: &AppArguments) -> Result<()> {
     anyhow::ensure!(
         arguments.hoist_listen.is_none()
             && arguments.hoist_connect.is_none()
-            && arguments.hoist_iroh_listen.is_none()
             && arguments.hoist_iroh_connect.is_none(),
-        "headless live hoist admission is not implemented yet"
+        "headless sessions support only an Iroh source transport"
+    );
+    anyhow::ensure!(
+        arguments.hoist_iroh_listen.is_some() == arguments.hoist_all,
+        "headless Iroh hosting requires explicit --hoist-all consent"
     );
     validate_hoist_arguments(arguments)?;
     Ok(())
@@ -334,15 +343,22 @@ fn runtime_options(arguments: &AppArguments) -> Result<RuntimeOptions> {
     .socket_name(arguments.wayland_socket.clone())
     .launch(arguments.client.clone())
     .keyboard_repeat(
-        arguments
-            .keyboard_repeat_mode
-            .map(Into::into)
-            .unwrap_or(weld_core::input::KeyboardRepeatMode::Client),
+        headless_repeat_mode(arguments),
         arguments
             .legacy_key_repeat
             .map(Into::into)
             .unwrap_or_default(),
     ))
+}
+
+fn headless_repeat_mode(arguments: &AppArguments) -> weld_core::input::KeyboardRepeatMode {
+    arguments.keyboard_repeat_mode.map(Into::into).unwrap_or(
+        if arguments.hoist_iroh_listen.is_some() {
+            weld_core::input::KeyboardRepeatMode::Compositor
+        } else {
+            weld_core::input::KeyboardRepeatMode::Client
+        },
+    )
 }
 
 fn validate_hoist_arguments(arguments: &AppArguments) -> Result<()> {
@@ -370,21 +386,40 @@ fn required_external_capabilities(
 
 fn validate_encoded_media(app: &WeldApp, codec: weld_media::VideoCodec) -> Result<()> {
     let capabilities = required_external_capabilities(app)?;
-    validate_encoded_capabilities(Some(&capabilities), codec)
+    validate_encoded_capabilities(Some(&capabilities), codec, MediaOperation::Encode)
+}
+
+#[derive(Clone, Copy, Debug)]
+enum MediaOperation {
+    Encode,
+    Decode,
+}
+
+fn media_supported(
+    media: &weld_media_vaapi::VaapiCapabilities,
+    codec: weld_media::VideoCodec,
+    operation: MediaOperation,
+) -> bool {
+    match operation {
+        MediaOperation::Encode => media.supports_encode(codec),
+        MediaOperation::Decode => media.supports_decode(codec),
+    }
 }
 
 fn validate_encoded_capabilities(
     capabilities: Option<&weld_core::dmabuf::ExternalDmabufCapabilities>,
     codec: weld_media::VideoCodec,
+    operation: MediaOperation,
 ) -> Result<()> {
     let capabilities =
-        capabilities.context("selected Weld GPU cannot import DMA-BUFs for decoded video")?;
+        capabilities.context("selected Weld GPU cannot import DMA-BUFs for encoded hoisting")?;
     let media = weld_media_vaapi::probe_vaapi_device(&capabilities.render_node)
         .map_err(anyhow::Error::new)?;
     anyhow::ensure!(
-        media.supports_round_trip(codec),
-        "{} exposes no complete hardware {:?} and VPP path",
+        media_supported(&media, codec, operation),
+        "{} exposes no hardware {:?} {:?} and VPP path",
         media.vendor,
+        operation,
         codec,
     );
     Ok(())
@@ -440,6 +475,69 @@ mod tests {
         ]);
         validate_session_arguments(&args).expect("headless arguments");
         runtime_options(&args).expect("headless configuration");
+    }
+
+    #[test]
+    fn headless_iroh_requires_whole_session_consent_and_owns_repeat_by_default() {
+        let flags = [
+            "--backend",
+            "headless",
+            "--hoist-iroh-listen",
+            "ticket",
+            "--hoist-iroh-expect-peer",
+            "peer",
+            "--hoist-all",
+        ];
+        let args = arguments(&flags);
+        validate_session_arguments(&args).expect("explicit session consent");
+        runtime_options(&args).expect("runtime options");
+        assert_eq!(
+            headless_repeat_mode(&args),
+            weld_core::input::KeyboardRepeatMode::Compositor
+        );
+        let explicit =
+            arguments(&[flags.as_slice(), &["--keyboard-repeat-mode", "client"]].concat());
+        assert_eq!(
+            headless_repeat_mode(&explicit),
+            weld_core::input::KeyboardRepeatMode::Client
+        );
+        let mut nested = args;
+        nested.backend = BackendKind::Nested;
+        assert!(validate_session_arguments(&nested).is_err());
+    }
+
+    #[test]
+    fn encoded_capability_gates_are_role_specific() {
+        let mut media = weld_media_vaapi::VaapiCapabilities {
+            vendor: "test".to_owned(),
+            h264_decode: false,
+            av1_decode: false,
+            h264_encode: Some(weld_media_vaapi::VaapiEncodeEntrypoint::Slice),
+            av1_encode: None,
+            video_processing: true,
+        };
+        assert!(media_supported(
+            &media,
+            weld_media::VideoCodec::H264,
+            MediaOperation::Encode
+        ));
+        assert!(!media_supported(
+            &media,
+            weld_media::VideoCodec::H264,
+            MediaOperation::Decode
+        ));
+        media.h264_encode = None;
+        media.h264_decode = true;
+        assert!(media_supported(
+            &media,
+            weld_media::VideoCodec::H264,
+            MediaOperation::Decode
+        ));
+        assert!(!media_supported(
+            &media,
+            weld_media::VideoCodec::H264,
+            MediaOperation::Encode
+        ));
     }
 
     #[test]

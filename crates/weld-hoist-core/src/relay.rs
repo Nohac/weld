@@ -50,6 +50,10 @@ pub enum SourcePortCommand {
 /// Implementations own buffer export, codecs, serialization, queues, and
 /// binding feedback. The relay owns surface admission and authorization.
 pub trait HoistSourcePort {
+    /// Whether authorization/bootstrap has completed and mapping may begin.
+    fn ready(&self) -> bool {
+        true
+    }
     fn submit(&mut self, command: SourcePortCommand) -> HoistPortResult<()>;
     fn poll(&mut self) -> HoistPortResult<Vec<DestinationEnvelope>>;
     fn accept_destination(&mut self, envelope: &DestinationEnvelope) -> HoistPortResult<()>;
@@ -116,6 +120,15 @@ struct CursorInFlight {
     warned: bool,
 }
 
+/// Constructor-time consent policy; automatic admission cannot be toggled by commands.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum SourceAdmission {
+    #[default]
+    Manual,
+    /// Explicit consent to forward every mapped toplevel, including future ones.
+    AllToplevels,
+}
+
 /// One source-side relay shared by loopback and external bindings.
 pub struct SourceRelayAdapter {
     upstream_source: ClientSourceId,
@@ -128,10 +141,21 @@ pub struct SourceRelayAdapter {
     pending_cursors: VecDeque<ClientSurfaceId>,
     cursor_in_flight: Option<CursorInFlight>,
     next_cursor_sequence: Option<u64>,
+    admission: SourceAdmission,
+    next_session: Option<u64>,
+    admission_started: bool,
 }
 
 impl SourceRelayAdapter {
     pub fn new(upstream_source: ClientSourceId, port: impl HoistSourcePort + 'static) -> Self {
+        Self::with_admission(upstream_source, port, SourceAdmission::Manual)
+    }
+
+    pub fn with_admission(
+        upstream_source: ClientSourceId,
+        port: impl HoistSourcePort + 'static,
+        admission: SourceAdmission,
+    ) -> Self {
         Self {
             upstream_source,
             cache: HashMap::new(),
@@ -143,14 +167,22 @@ impl SourceRelayAdapter {
             pending_cursors: VecDeque::new(),
             cursor_in_flight: None,
             next_cursor_sequence: Some(1),
+            admission,
+            next_session: Some(1),
+            admission_started: false,
         }
     }
 
     fn map(&mut self, session: HoistSessionId, source: ClientSurfaceId) {
-        if source.source() != self.upstream_source || self.mappings.contains_key(&source) {
+        if self.failed
+            || !self.port.ready()
+            || source.source() != self.upstream_source
+            || self.mappings.contains_key(&source)
+        {
             return;
         }
         self.mappings.insert(source, session);
+        tracing::info!(?source, ?session, "admitted hoist surface");
         if let Err(error) = self.port.submit(SourcePortCommand::MapSurface {
             session,
             surface: source,
@@ -186,6 +218,10 @@ impl SourceRelayAdapter {
         let popups = self
             .cache
             .iter()
+            .filter(|(_, cached)| {
+                self.admission == SourceAdmission::Manual
+                    || cached.commit.as_ref().is_some_and(|commit| commit.mapped)
+            })
             .filter_map(|(surface, cached)| match cached.role {
                 Some(weld_client::ClientSurfaceRole::Popup(popup)) if popup.owner == source => {
                     Some(*surface)
@@ -196,6 +232,40 @@ impl SourceRelayAdapter {
         for popup in popups {
             self.map(session, popup);
         }
+    }
+
+    fn admit(&mut self, source: ClientSurfaceId) {
+        if self.admission != SourceAdmission::AllToplevels
+            || self.failed
+            || !self.port.ready()
+            || self.mappings.contains_key(&source)
+        {
+            return;
+        }
+        let Some(cached) = self.cache.get(&source) else {
+            return;
+        };
+        if !cached.commit.as_ref().is_some_and(|commit| commit.mapped) {
+            return;
+        }
+        let session = match cached.role {
+            Some(weld_client::ClientSurfaceRole::Toplevel(_)) => {
+                let Some(next) = self.next_session else {
+                    self.fail("hoist session identifiers exhausted");
+                    return;
+                };
+                self.next_session = next.checked_add(1);
+                HoistSessionId::new(next)
+            }
+            Some(weld_client::ClientSurfaceRole::Popup(popup)) => {
+                let Some(session) = self.mappings.get(&popup.owner) else {
+                    return;
+                };
+                *session
+            }
+            None => return,
+        };
+        self.map(session, source);
     }
 
     fn unmap(&mut self, source: ClientSurfaceId) {
@@ -252,10 +322,13 @@ impl SourceRelayAdapter {
                 // Only the initial map replays the cached role itself.
                 if let Some(session) = self.mappings.get(&source).copied() {
                     self.send_surface(session, event.clone());
-                } else if let weld_client::ClientSurfaceRole::Popup(popup) = role
+                } else if self.admission == SourceAdmission::Manual
+                    && let weld_client::ClientSurfaceRole::Popup(popup) = role
                     && let Some(session) = self.mappings.get(&popup.owner).copied()
                 {
                     self.map(session, source);
+                } else {
+                    self.admit(source);
                 }
             }
             ClientSurfaceEventKind::Commit(commit) => {
@@ -279,6 +352,9 @@ impl SourceRelayAdapter {
                             kind: ClientSurfaceEventKind::Commit(outgoing),
                         },
                     );
+                } else {
+                    // map() replays the just-cached commit: do not send it twice.
+                    self.admit(source);
                 }
             }
             ClientSurfaceEventKind::Interaction(_) => {
@@ -331,6 +407,16 @@ impl SourceRelayAdapter {
                 return;
             }
         };
+        if self.admission == SourceAdmission::AllToplevels
+            && !self.admission_started
+            && self.port.ready()
+        {
+            self.admission_started = true;
+            let surfaces = self.cache.keys().copied().collect::<Vec<_>>();
+            for surface in surfaces {
+                self.admit(surface);
+            }
+        }
         for envelope in envelopes {
             if !self.accept_destination(envelope) {
                 break;
@@ -541,6 +627,9 @@ impl ClientAdapter for SourceRelayAdapter {
     fn apply_input(&mut self, _event: ClientInputEvent) {}
 
     fn apply_command(&mut self, command: ClientAdapterCommandEnvelope) {
+        if self.admission != SourceAdmission::Manual {
+            return;
+        }
         let Ok(command) = command.downcast::<HoistEndpointCommand>() else {
             return;
         };
@@ -1319,6 +1408,7 @@ mod tests {
 
     #[derive(Default)]
     struct FakeSourceState {
+        not_ready: bool,
         inbound: Vec<DestinationEnvelope>,
         submitted: Vec<SourcePortCommand>,
         accepted: usize,
@@ -1412,6 +1502,9 @@ mod tests {
     impl Error for FakePortFailure {}
 
     impl HoistSourcePort for FakeSourcePort {
+        fn ready(&self) -> bool {
+            !self.0.borrow().not_ready
+        }
         fn submit(&mut self, command: SourcePortCommand) -> HoistPortResult<()> {
             if self.0.borrow().fail_withdraw
                 && matches!(&command, SourcePortCommand::WithdrawSurface { .. })
@@ -1454,6 +1547,207 @@ mod tests {
 
     fn surface(source: ClientSourceId, local: u64) -> ClientSurfaceId {
         ClientSurfaceId::new(ClientId::new(source, 1), local)
+    }
+
+    fn auto_source() -> (SourceRelayAdapter, Rc<RefCell<FakeSourceState>>) {
+        let port = Rc::new(RefCell::new(FakeSourceState {
+            not_ready: true,
+            ..Default::default()
+        }));
+        (
+            SourceRelayAdapter::with_admission(
+                ClientSourceId::new(1),
+                FakeSourcePort(port.clone()),
+                SourceAdmission::AllToplevels,
+            ),
+            port,
+        )
+    }
+
+    fn top_role(parent: Option<ClientSurfaceId>) -> ClientSurfaceEventKind {
+        ClientSurfaceEventKind::Role(ClientSurfaceRole::Toplevel(weld_client::ToplevelState {
+            parent,
+            decoration: weld_client::WindowDecoration::ServerSide,
+        }))
+    }
+
+    fn commit(revision: u64, mapped: bool) -> ClientSurfaceEventKind {
+        ClientSurfaceEventKind::Commit(ClientSurfaceCommit {
+            revision: weld_client::ClientCommitRevision::new(revision),
+            alpha_mode: weld_client::SurfaceAlphaMode::Preserved,
+            mapped,
+            root: None,
+            window_geometry: None,
+            overlays: Vec::new(),
+            inputs: Vec::new(),
+            buffers: Vec::new(),
+        })
+    }
+
+    fn observe(
+        relay: &mut SourceRelayAdapter,
+        surface: ClientSurfaceId,
+        kind: ClientSurfaceEventKind,
+    ) {
+        relay.observe_event(&ClientSurfaceEvent { surface, kind });
+    }
+
+    #[test]
+    fn automatic_admission_replays_only_latest_state_once_after_authorization() {
+        let (mut relay, port) = auto_source();
+        let window = surface(ClientSourceId::new(1), 1);
+        observe(&mut relay, window, top_role(None));
+        for revision in 1..=60 {
+            observe(&mut relay, window, commit(revision, true));
+            relay.poll();
+        }
+        assert!(port.borrow().submitted.is_empty());
+        assert!(relay.mappings.is_empty());
+        port.borrow_mut().not_ready = false;
+        relay.poll();
+        relay.poll();
+        let state = port.borrow();
+        assert_eq!(state.submitted.len(), 3, "one map, role and latest commit");
+        assert!(matches!(&state.submitted[2], SourcePortCommand::Surface {
+            event: ClientSurfaceEvent { kind: ClientSurfaceEventKind::Commit(commit), .. }, ..
+        } if commit.revision == weld_client::ClientCommitRevision::new(60)));
+    }
+
+    #[test]
+    fn pending_admission_retains_only_the_current_buffer_use_per_layer() {
+        let (mut relay, port) = auto_source();
+        let source = ClientSourceId::new(1);
+        let window = surface(source, 1);
+        let released = Rc::new(RefCell::new(Vec::new()));
+        let metadata = weld_client::ClientBufferMetadata::new(weld_client::Extent::new(1, 1), true);
+        observe(&mut relay, window, top_role(None));
+        for revision in 1..=60 {
+            let released = released.clone();
+            let lease = weld_client::ClientBufferLease::new(
+                ClientBufferId::new(source, revision),
+                weld_client::ClientBufferUseId::new(source, revision),
+                metadata,
+                Rc::new(()),
+                move |_| released.borrow_mut().push(revision),
+            )
+            .expect("owned fixture use");
+            let ClientSurfaceEventKind::Commit(mut changed) = commit(revision, true) else {
+                panic!("commit fixture");
+            };
+            changed.buffers.push(weld_client::SurfaceBufferUpdate {
+                layer: weld_client::SurfaceLayerId::new(1),
+                change: weld_client::SurfaceBufferChange::Replaced {
+                    metadata,
+                    buffer: lease,
+                },
+            });
+            observe(&mut relay, window, ClientSurfaceEventKind::Commit(changed));
+        }
+        assert_eq!(*released.borrow(), (1..60).collect::<Vec<_>>());
+        assert!(port.borrow().submitted.is_empty());
+        // A later metadata-only commit must not lose the cached pixels.
+        let ClientSurfaceEventKind::Commit(mut retained) = commit(61, true) else {
+            panic!("commit fixture");
+        };
+        retained.buffers.push(weld_client::SurfaceBufferUpdate {
+            layer: weld_client::SurfaceLayerId::new(1),
+            change: weld_client::SurfaceBufferChange::Retained { metadata },
+        });
+        observe(&mut relay, window, ClientSurfaceEventKind::Commit(retained));
+        assert_eq!(released.borrow().len(), 59);
+        port.borrow_mut().not_ready = false;
+        relay.poll();
+        observe(&mut relay, window, ClientSurfaceEventKind::Destroyed);
+        assert_eq!(
+            released.borrow().len(),
+            59,
+            "port still owns the replayed use"
+        );
+        port.borrow_mut().submitted.clear();
+        assert_eq!(released.borrow().len(), 60);
+    }
+
+    #[test]
+    fn automatic_admission_maps_dialogs_separately_and_popups_with_their_owner() {
+        let (mut relay, port) = auto_source();
+        let owner = surface(ClientSourceId::new(1), 1);
+        let popup = surface(ClientSourceId::new(1), 2);
+        let dialog = surface(ClientSourceId::new(1), 3);
+        observe(
+            &mut relay,
+            popup,
+            ClientSurfaceEventKind::Role(ClientSurfaceRole::Popup(PopupState {
+                owner,
+                position: LogicalPoint::new(20.0, 30.0),
+                stack_index: 0,
+            })),
+        );
+        observe(&mut relay, popup, commit(1, true));
+        observe(&mut relay, owner, top_role(None));
+        observe(&mut relay, owner, commit(1, true));
+        port.borrow_mut().not_ready = false;
+        relay.poll();
+        assert_eq!(relay.mappings.get(&owner), relay.mappings.get(&popup));
+        assert!(relay.mappings.contains_key(&owner));
+        // Commit before role is also supported, including after the initial sweep.
+        observe(&mut relay, dialog, commit(1, true));
+        assert!(!relay.mappings.contains_key(&dialog));
+        port.borrow_mut().submitted.clear();
+        observe(&mut relay, dialog, top_role(Some(owner)));
+        assert_ne!(relay.mappings.get(&owner), relay.mappings.get(&dialog));
+        assert_eq!(
+            port.borrow().submitted.len(),
+            3,
+            "admitting commit emitted exactly once"
+        );
+        observe(&mut relay, popup, ClientSurfaceEventKind::Destroyed);
+        assert!(!relay.mappings.contains_key(&popup));
+        assert!(!relay.cache.contains_key(&popup));
+        assert!(relay.mappings.contains_key(&owner));
+    }
+
+    #[test]
+    fn automatic_admission_ignores_unmapped_destroyed_foreign_and_manual_targets() {
+        let (mut relay, port) = auto_source();
+        let unmapped = surface(ClientSourceId::new(1), 1);
+        let destroyed = surface(ClientSourceId::new(1), 2);
+        let foreign = surface(ClientSourceId::new(2), 1);
+        for window in [unmapped, destroyed, foreign] {
+            observe(&mut relay, window, top_role(None));
+            observe(&mut relay, window, commit(1, window != unmapped));
+        }
+        observe(&mut relay, destroyed, ClientSurfaceEventKind::Destroyed);
+        port.borrow_mut().not_ready = false;
+        relay.apply_command(ClientAdapterCommandEnvelope::new(
+            ClientSourceId::new(1),
+            HoistEndpointCommand::Map {
+                session: HoistSessionId::new(99),
+                source: unmapped,
+            },
+        ));
+        relay.poll();
+        assert!(relay.mappings.is_empty());
+        observe(&mut relay, unmapped, commit(2, true));
+        assert_eq!(relay.mappings.get(&unmapped), Some(&HoistSessionId::new(1)));
+    }
+
+    #[test]
+    fn failed_admission_never_restarts_or_wraps_session_ids() {
+        let (mut relay, port) = auto_source();
+        port.borrow_mut().not_ready = false;
+        relay.next_session = Some(u64::MAX);
+        for index in 1..=2 {
+            let window = surface(ClientSourceId::new(1), index);
+            observe(&mut relay, window, top_role(None));
+            observe(&mut relay, window, commit(1, true));
+        }
+        assert!(relay.failed);
+        let count = port.borrow().submitted.len();
+        let third = surface(ClientSourceId::new(1), 3);
+        observe(&mut relay, third, top_role(None));
+        observe(&mut relay, third, commit(1, true));
+        relay.poll();
+        assert_eq!(port.borrow().submitted.len(), count);
     }
 
     fn mapped_source() -> (

@@ -277,8 +277,13 @@ constraints, and mapped frame callbacks use a demand-driven virtual clock,
 independent of buffer-consumer release. SHM-only startup is valid without a
 Vulkan adapter. `HostRuntime::with_policy` runs policy without drawing an output;
 capture without a presenter fails explicitly. Adapter/wake registration is available to library consumers,
-but live admission, automatic session hoisting and reconnect are the next batch,
-not exposed by the headless CLI yet. See [Headless application hosting](headless-host.md).
+and the headless distribution installs a pending Iroh source before running it.
+Authorization wakes the ordinary relay, whose constructor-time `AllToplevels`
+policy admits existing and future mapped windows with one session per toplevel
+and owner-session popups. Latest-state replay includes static windows; no
+pre-admission media queue exists. Core has no hoist-specific lifecycle branch.
+Reconnect and retained presentation preferences remain a separate follow-up.
+See [Headless application hosting](headless-host.md).
 
 `weld-app` represents application-visible outputs as `WeldOutput` entities.
 `OutputGeometry` carries pixel size and logical scale. `OutputPosition` locates

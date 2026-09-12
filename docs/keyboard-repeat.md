@@ -18,7 +18,12 @@ Repeat ownership is stable for the whole native seat, selected at startup:
 
 Nested hosts default to `compositor`: Winit supplies upstream cadence. DRM
 hosts default to `client`: libinput supplies transitions, and this slice adds
-no DRM repeat scheduler. Mode never changes on a key press. The application
+no DRM repeat scheduler. A headless Iroh source defaults to `compositor` because
+the receiver supplies cadence; a plain headless host defaults to `client`.
+The headless Iroh demo launcher explicitly selects `emulated` legacy fallback
+for foot and other pre-v10 clients. Explicit CLI/environment fallback settings
+retain their usual precedence when launching Weld directly.
+Mode never changes on a key press. The application
 host's mode must match the input controller; automatic arbitration between
 heterogeneous controllers is not implemented.
 

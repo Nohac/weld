@@ -93,6 +93,14 @@ pub struct VaapiCapabilities {
 }
 
 impl VaapiCapabilities {
+    pub const fn supports_encode(&self, codec: VideoCodec) -> bool {
+        let encoder = match codec {
+            VideoCodec::H264 => self.h264_encode.is_some(),
+            VideoCodec::Av1 => self.av1_encode.is_some(),
+            VideoCodec::Vp9 => false,
+        };
+        encoder && self.video_processing
+    }
     pub const fn supports_decode(&self, codec: VideoCodec) -> bool {
         let decoder = match codec {
             VideoCodec::H264 => self.h264_decode,
@@ -313,5 +321,24 @@ mod tests {
         assert!(!capabilities.supports_decode(VideoCodec::Av1));
         capabilities.video_processing = false;
         assert!(!capabilities.supports_decode(VideoCodec::H264));
+    }
+
+    #[test]
+    fn encoder_support_does_not_require_a_decoder_but_does_require_vpp() {
+        let mut capabilities = VaapiCapabilities {
+            vendor: "test".to_owned(),
+            h264_decode: false,
+            av1_decode: false,
+            h264_encode: Some(VaapiEncodeEntrypoint::Slice),
+            av1_encode: Some(VaapiEncodeEntrypoint::LowPowerSlice),
+            video_processing: true,
+        };
+        for codec in [VideoCodec::H264, VideoCodec::Av1] {
+            assert!(capabilities.supports_encode(codec));
+            assert!(!capabilities.supports_decode(codec));
+        }
+        assert!(!capabilities.supports_encode(VideoCodec::Vp9));
+        capabilities.video_processing = false;
+        assert!(!capabilities.supports_encode(VideoCodec::Av1));
     }
 }

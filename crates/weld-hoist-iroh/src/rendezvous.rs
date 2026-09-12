@@ -5,11 +5,11 @@
 //! same OS user. Stale publications are never replaced: each launch needs fresh paths.
 
 use std::{
-    ffi::OsStr,
+    ffi::{OsStr, OsString},
     fs::File,
     io::{Read, Write},
     os::unix::fs::MetadataExt,
-    path::Path,
+    path::{Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},
     thread,
     time::{Duration, Instant},
@@ -86,51 +86,74 @@ pub(crate) fn publish(path: &Path, value: &str) -> Result<()> {
     cleanup.context("could not remove temporary Iroh publication")
 }
 
-/// Wait only for an absent file. Invalid permissions, type, or contents fail immediately.
-pub(crate) fn read(path: &Path, deadline: Instant) -> Result<String> {
-    let (directory, name) = private_parent(path)?;
-    let file = loop {
-        match openat(
-            &directory,
-            name,
+/// A checked, pinned directory and publication name shared by blocking and
+/// nonblocking admission. Only an absent file is retryable.
+pub(crate) struct PublicationReader {
+    directory: File,
+    name: OsString,
+    path: PathBuf,
+}
+
+impl PublicationReader {
+    pub fn new(path: &Path) -> Result<Self> {
+        let (directory, name) = private_parent(path)?;
+        Ok(Self {
+            directory,
+            name: name.to_owned(),
+            path: path.to_owned(),
+        })
+    }
+    pub fn try_read(&self) -> Result<Option<String>> {
+        let file = match openat(
+            &self.directory,
+            &self.name,
             OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
             Mode::empty(),
         ) {
-            Ok(fd) => break File::from(fd),
-            Err(Errno::NOENT) if Instant::now() < deadline => {
-                thread::sleep(
-                    Duration::from_millis(20)
-                        .min(deadline.saturating_duration_since(Instant::now())),
-                );
-            }
-            Err(Errno::NOENT) => {
-                anyhow::bail!("timed out waiting for Iroh publication {}", path.display())
-            }
+            Ok(fd) => File::from(fd),
+            Err(Errno::NOENT) => return Ok(None),
             Err(error) => {
                 return Err(error).with_context(|| {
-                    format!("could not read Iroh publication {}", path.display())
+                    format!("could not read Iroh publication {}", self.path.display())
                 });
             }
+        };
+        let metadata = file.metadata()?;
+        ensure!(
+            metadata.is_file()
+                && metadata.uid() == geteuid().as_raw()
+                && metadata.mode() & 0o777 == 0o600,
+            "Iroh publication must be a regular file owned by the current user with mode 0600: {}",
+            self.path.display()
+        );
+        let mut value = String::new();
+        file.take(u64::try_from(MAX_PUBLICATION_BYTES + 1)?)
+            .read_to_string(&mut value)
+            .context("could not read UTF-8 Iroh publication")?;
+        ensure!(
+            value.len() <= MAX_PUBLICATION_BYTES,
+            "Iroh publication exceeds 4096 bytes"
+        );
+        ensure!(!value.trim().is_empty(), "Iroh publication is empty");
+        Ok(Some(value))
+    }
+}
+
+/// Wait only for an absent file. Invalid permissions, type, or contents fail immediately.
+pub(crate) fn read(path: &Path, deadline: Instant) -> Result<String> {
+    let reader = PublicationReader::new(path)?;
+    loop {
+        if let Some(value) = reader.try_read()? {
+            return Ok(value);
         }
-    };
-    let metadata = file.metadata()?;
-    ensure!(
-        metadata.is_file()
-            && metadata.uid() == geteuid().as_raw()
-            && metadata.mode() & 0o777 == 0o600,
-        "Iroh publication must be a regular file owned by the current user with mode 0600: {}",
-        path.display()
-    );
-    let mut value = String::new();
-    file.take(u64::try_from(MAX_PUBLICATION_BYTES + 1)?)
-        .read_to_string(&mut value)
-        .context("could not read UTF-8 Iroh publication")?;
-    ensure!(
-        value.len() <= MAX_PUBLICATION_BYTES,
-        "Iroh publication exceeds 4096 bytes"
-    );
-    ensure!(!value.trim().is_empty(), "Iroh publication is empty");
-    Ok(value)
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        ensure!(
+            !remaining.is_zero(),
+            "timed out waiting for Iroh publication {}",
+            path.display()
+        );
+        thread::sleep(Duration::from_millis(20).min(remaining));
+    }
 }
 
 #[cfg(test)]

@@ -1,0 +1,261 @@
+#!/usr/bin/env python3
+"""Launch a private headless app session and automatically hoist it to nested Weld.
+
+Direct Iroh is local-network only; --network n0 enables Internet discovery/relays.
+No interfaces, routes or existing desktop applications are changed.
+"""
+
+import argparse
+import json
+import os
+from pathlib import Path
+import resource
+import selectors
+import shutil
+import signal
+import subprocess
+import sys
+import tempfile
+import time
+
+
+SHUTDOWN_SIGNALS = (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
+
+
+def reset_signals():
+    signal.pthread_sigmask(signal.SIG_UNBLOCK, SHUTDOWN_SIGNALS)
+    for sig in SHUTDOWN_SIGNALS:
+        signal.signal(sig, signal.SIG_DFL)
+
+
+def applications(names, profile):
+    commands = {
+        "foot": ["foot", "-e", "htop"],
+        "blender": ["blender"],
+        "firefox": ["firefox", "--no-remote", "--profile", str(profile)],
+    }
+    return [commands[name] for name in dict.fromkeys(names)]
+
+
+def run_apps(config):
+    # The host deliberately blocks shutdown signals before spawning workers.
+    # Applications must not inherit that mask (nor Python's ignored SIGINT).
+    reset_signals()
+    children = [subprocess.Popen(command, stdin=subprocess.DEVNULL)
+                for command in applications(config["apps"], config["profile"])]
+    return max((child.wait() != 0 for child in children), default=0)
+
+
+def supervise(command, status):
+    """Pin this run's process-group identity until the owner closes its pipe.
+
+    Keeping the leader alive also lets cleanup kill descendants after Weld exits.
+    EOF handles unexpected launcher death, not just its normal finally block.
+    """
+    reset_signals()
+    for sig in SHUTDOWN_SIGNALS:
+        signal.signal(sig, signal.SIG_IGN)
+    selector = selectors.DefaultSelector()
+    selector.register(sys.stdin, selectors.EVENT_READ)
+    child = subprocess.Popen(["env", "--default-signal=INT,TERM,HUP", *command],
+                             stdin=subprocess.DEVNULL)
+    reported = False
+    while not selector.select(timeout=0.05):
+        result = child.poll()
+        if result is not None and not reported:
+            final = Path(status)
+            temporary = final.with_suffix(".pending")
+            temporary.write_text(json.dumps({"exit_code": result}))
+            temporary.replace(final)
+            reported = True
+    os.killpg(os.getpgrp(), signal.SIGTERM)
+    # The supervisor ignores TERM and remains the group leader until KILL.
+    # This bounds cleanup even when an application ignores termination.
+    time.sleep(3)
+    os.killpg(os.getpgrp(), signal.SIGKILL)
+
+
+class OwnedHost:
+    def __init__(self, role, command, environment, root, run):
+        self.role = role
+        self.status = run / (role + ".exit.json")
+        self.log = run / (role + ".log")
+        with self.log.open("w") as log:
+            self.process = subprocess.Popen(
+                [sys.executable, "-I", str(Path(__file__).resolve()), "_supervise",
+                 str(self.status), *command], cwd=root, env=environment,
+                stdin=subprocess.PIPE, stdout=log, stderr=subprocess.STDOUT,
+                start_new_session=True)
+        if os.getpgid(self.process.pid) != self.process.pid:
+            raise RuntimeError("supervisor did not create its own process group")
+
+    def exited(self):
+        if self.status.exists():
+            return True
+        return self.process.poll() is not None
+
+    def close(self):
+        if self.process.stdin:
+            self.process.stdin.close()
+        try:
+            self.process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            # A live, unreaped supervisor pins PID/PGID against reuse.
+            if os.getpgid(self.process.pid) != self.process.pid:
+                raise RuntimeError("refusing to signal a process group we no longer own")
+            os.killpg(self.process.pid, signal.SIGKILL)
+            self.process.wait(timeout=5)
+
+
+def positive_seconds(value):
+    number = int(value)
+    if not 1 <= number <= 3600:
+        raise argparse.ArgumentTypeError("expected 1..3600 seconds")
+    return number
+
+
+def parse_arguments(argv):
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--codec", choices=("av1", "h264"), default="av1")
+    parser.add_argument("--network", choices=("direct", "n0"), default="direct")
+    parser.add_argument("--app", action="append", choices=("foot", "blender", "firefox"),
+                        help="repeat to select apps; default: all three (foot runs htop)")
+    parser.add_argument("--seconds", type=positive_seconds,
+                        help="optional test timer after receiver startup; otherwise run until closed")
+    parser.add_argument("--ticket-timeout", type=positive_seconds, default=120)
+    parser.add_argument("--receiver-delay", type=positive_seconds,
+                        help="diagnostic delay before receiver startup to exercise pending admission")
+    parser.add_argument("--yes", action="store_true", help="approve whole-session auto-hoisting without a prompt")
+    return parser.parse_args(argv)
+
+
+def commands(args, run):
+    common = ["--hoist-iroh-network", args.network,
+              "--hoist-iroh-timeout", str(args.ticket_timeout)]
+    ticket = str(run / "source.ticket")
+    identity = str(run / "destination.identity")
+    source = ["cargo", "run", "--quiet", "--", "--backend", "headless",
+              "--wayland-socket", "source", "--hoist-all",
+              "--hoist-iroh-listen", ticket, "--hoist-iroh-expect-peer", identity,
+              "--hoist-codec", args.codec, "--keyboard-repeat-mode", "compositor",
+              "--legacy-key-repeat", "emulated", *common, "--",
+              sys.executable, "-I", str(Path(__file__).resolve()), "_apps", str(run / "apps.json")]
+    destination = ["cargo", "run", "--quiet", "--", "--backend", "nested",
+                   "--wayland-socket", str(run / "destination"),
+                   "--hoist-iroh-connect", ticket,
+                   "--hoist-iroh-publish-identity", identity, *common]
+    return source, destination
+
+
+def wait_for(predicate, hosts, deadline):
+    while not predicate():
+        if any(host.exited() for host in hosts):
+            raise RuntimeError("Weld exited during startup; see source/destination logs")
+        if time.monotonic() >= deadline:
+            raise RuntimeError("startup timed out; see source/destination logs")
+        time.sleep(0.05)
+
+
+def main(argv):
+    args = parse_arguments(argv)
+    names = args.app or ["foot", "blender", "firefox"]
+    if not (os.environ.get("WAYLAND_DISPLAY") or os.environ.get("DISPLAY")):
+        raise RuntimeError("the receiver requires an existing desktop display")
+    for tool in ["cargo", "env", *names, *(["htop"] if "foot" in names else [])]:
+        if not shutil.which(tool):
+            raise RuntimeError(f"missing required tool: {tool}")
+    print(f"New headless session: {', '.join(names)}; {args.codec} over Iroh {args.network}.")
+    print("Every window in this NEW session, including future dialogs, will auto-hoist.")
+    print("Closing the receiver or Ctrl+C stops this run and its demo applications.")
+    if args.network == "n0":
+        print("This mode contacts N0 discovery/relay services over the Internet.")
+    if args.codec == "av1":
+        print("WARNING: AV1 triggered an AMD VCN GPU reset in this demo's initial test.")
+        print("The cause is unresolved; --codec h264 is the currently validated choice.")
+    if not args.yes and input("Start this session? Type yes: ").strip() != "yes":
+        return 0
+    root = Path(__file__).resolve().parent.parent
+    resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
+    subprocess.run(["cargo", "build", "--bin", "weldwm", "-j2"], cwd=root, check=True)
+    validation = root / "target/validation"
+    validation.mkdir(parents=True, exist_ok=True)
+    run = Path(tempfile.mkdtemp(prefix="headless-iroh-", dir=validation))
+    runtime, profile = run / "runtime", run / "firefox-profile"
+    runtime.mkdir(mode=0o700)
+    profile.mkdir(mode=0o700)
+    (run / "apps.json").write_text(json.dumps({"apps": names, "profile": str(profile)}))
+    source_env = os.environ.copy()
+    for key in ("DISPLAY", "WAYLAND_DISPLAY", "WAYLAND_SOCKET"):
+        source_env.pop(key, None)
+    source_env["XDG_RUNTIME_DIR"] = str(runtime)
+    source_command, destination_command = commands(args, run)
+    hosts = []
+    stopping = False
+
+    def request_stop(_signal, _frame):
+        nonlocal stopping
+        stopping = True
+
+    previous = {sig: signal.signal(sig, request_stop) for sig in SHUTDOWN_SIGNALS}
+
+    def check_stop():
+        if stopping:
+            raise InterruptedError("test cancelled")
+
+    def ready(path):
+        check_stop()
+        return path.exists()
+
+    def start(role, command, environment):
+        hosts.append(OwnedHost(role, command, environment, root, run))
+        (run / "processes.json").write_text(json.dumps([
+            {"role": host.role, "pid": host.process.pid, "pgid": host.process.pid}
+            for host in hosts], indent=2))
+
+    print(f"Logs and process ownership: {run}", flush=True)
+    try:
+        start("source", source_command, source_env)
+        deadline = time.monotonic() + args.ticket_timeout + 30
+        wait_for(lambda: ready(run / "source.ticket"), hosts, deadline)
+        if args.receiver_delay:
+            delayed_until = time.monotonic() + args.receiver_delay
+            wait_for(lambda: (check_stop() or time.monotonic() >= delayed_until), hosts, deadline)
+        start("destination", destination_command, os.environ.copy())
+        wait_for(lambda: ready(run / "destination"), hosts, deadline)
+        print("Both Weld instances ready. Windows auto-hoist; no Super+H required.", flush=True)
+        print(f"Runtime: {str(args.seconds) + ' seconds' if args.seconds else 'until receiver closes or Ctrl+C'}.", flush=True)
+        stop_at = time.monotonic() + args.seconds if args.seconds else None
+        while not stopping and not any(host.exited() for host in hosts):
+            if stop_at is not None and time.monotonic() >= stop_at:
+                print("Requested test duration reached.", flush=True)
+                break
+            time.sleep(0.1)
+        for host in hosts:
+            if host.exited():
+                result = (json.loads(host.status.read_text())["exit_code"]
+                          if host.status.exists() else host.process.returncode)
+                print(f"{host.role} exited: {result}; see {host.log}", flush=True)
+                if result != 0:
+                    raise RuntimeError(f"{host.role} failed with exit code {result}")
+    except InterruptedError:
+        print("Cancelled; stopping this run.", flush=True)
+    finally:
+        for host in reversed(hosts):
+            host.close()
+        for sig, handler in previous.items():
+            signal.signal(sig, handler)
+        print(f"Demo processes stopped. Logs retained at {run}", flush=True)
+    return 0
+
+
+if __name__ == "__main__":
+    if len(sys.argv) > 1 and sys.argv[1] == "_supervise":
+        supervise(sys.argv[3:], sys.argv[2])
+    elif len(sys.argv) > 1 and sys.argv[1] == "_apps":
+        sys.exit(run_apps(json.loads(Path(sys.argv[2]).read_text())))
+    else:
+        try:
+            sys.exit(main(sys.argv[1:]))
+        except (RuntimeError, subprocess.CalledProcessError, KeyboardInterrupt) as error:
+            print(f"Headless Iroh test stopped: {error}", file=sys.stderr)
+            sys.exit(1)

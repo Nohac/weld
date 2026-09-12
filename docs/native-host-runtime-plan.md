@@ -3,7 +3,8 @@
 Status: implementation in progress. The tracked regression fixture, common
 runtime, optional policy/composition split and shared callback ledger are
 implemented. The dedicated `SessionHost` loop is removed. Physical inactive
-composition optimization, live Iroh admission and reconnect remain follow-ups.
+composition optimization and reconnect remain follow-ups. Step 5 adds live Iroh
+admission and the headless-to-nested demo without changing the common core loop.
 
 See [current headless hosting](headless-host.md) for shipped behavior and
 [receiver follow-ups](receiver-decoder-pool.md#portable-execution-boundary) for
@@ -194,8 +195,8 @@ configuration from native output resources/availability remains intact.
 DRM's inactive-owned rendering is deliberately preserved until renderer-held
 leases can be retired safely without composition; this optimization is not
 claimed by the runtime extraction. The presenter-free path never renders,
-including when an application policy owner is installed. Steps 5 and 6 have
-not started.
+including when an application policy owner is installed. Step 5 is implemented;
+step 6 has not started.
 
 1. **Tracked regression fixture, before production refactoring.** Replace the
    temporary C-only evidence with a reproducible subprocess Wayland fixture and

@@ -2,7 +2,7 @@
 
 Headless is now an entrypoint assembly of the common native host, not a separate
 runtime. See the [shared native runtime plan](native-host-runtime-plan.md) for
-remaining output-demand and Iroh admission work.
+remaining output-demand and reconnect work.
 
 ## Session-host foundation — Implemented
 
@@ -15,9 +15,9 @@ never selects it.
 cargo run -- --backend headless --wayland-socket weld-server -- foot
 ```
 
-No visible window is expected yet. This first batch deliberately rejects local
-and Iroh hoist flags, screenshots and Bevy remote debugging. It prepares the
-source host; it is not yet an end-to-end remote session launcher.
+No visible window is expected from that command alone. Local hoist transports,
+Iroh destination mode, screenshots and Bevy remote debugging are rejected. An
+Iroh source is supported with explicit whole-session consent, as described below.
 
 Defaults are a 1920×1080 physical virtual output, scale 1, a 60 Hz virtual frame
 opportunity, and 960×640 logical initial toplevels. Configure them independently:
@@ -55,7 +55,9 @@ copy per commit. Unconsumed leases release without local GPU sampling. GPU
 import support alone is not evidence that a hardware codec is available.
 
 The Wayland seat exists, but this assembly has no local input source or focus
-policy. Repeat ownership defaults to client timers. The host stays alive when
+policy. Without a remote receiver, repeat ownership defaults to client timers.
+An Iroh source defaults to compositor-owned repeats supplied by the receiver;
+explicit CLI settings still win. The host stays alive when
 its launched command or last application exits. SIGINT/SIGTERM closes the
 Wayland session; like the existing launcher, it is not a process supervisor and
 does not kill arbitrary descendants of a launched script. Apps normally exit
@@ -79,20 +81,66 @@ Bevy startup-settle sequence. Adapter timers/readiness remain serviced by
 calloop independently. Future policy-owned retention/reclaim timers must either
 request continued updates or add an explicit deadline contract.
 
-## Live headless hoisting — Next batch / agreed policy
+## Live headless Iroh demo
 
-The executable's current transport setup blocks for one startup peer. Headless
-mode must replace that with live admission while applications keep running.
-The Bevy-free hoist/session policy, not desktop layout or placeholder UI, will:
+```sh
+scripts/run-headless-iroh-hoist
+# A small, bounded run using the currently validated codec:
+scripts/run-headless-iroh-hoist --codec h264 --app foot --seconds 15 --yes
+```
 
-- automatically present the selected session's existing and new windows,
-  including related dialogs and popups, only after receiver authorization;
-- let the active receiver request logical size, scale and presentation state,
-  with application constraints still enforced by the host;
-- preserve apps and their last effective size/scale in memory on disconnect,
-  release remote input, and suspend unnecessary streaming;
-- let an authorized reconnecting receiver supply new preferences without
-  restoring startup dimensions first.
+The launcher starts foot running htop, Blender and a private-profile Firefox in
+a new, presentation-free host. A nested Weld receiver opens on your existing
+desktop. All mapped toplevels auto-hoist, including future dialogs; popups stay
+in their owner's session. No source desktop, placeholder UI or Super+H is needed.
+Use repeated `--app` options to select fewer applications.
+
+AV1 and direct Iroh are the defaults (`--codec h264` is also supported).
+**Hardware warning:** the initial AV1 run on this Radeon system triggered a
+VCN video-engine timeout/reset, followed by an invalid AV1 packet and loss of
+the source GPU context. Another GPU client was affected too. The trigger remains
+unresolved; the subsequent H.264 foot/htop run succeeded. Use `--codec h264`
+for the currently validated path. The launcher warns before confirming AV1.
+`--network n0` explicitly enables Internet discovery/relay services; this launcher
+does not isolate interfaces or change routes. Both endpoints otherwise run in
+the current network namespace. The default has **no runtime timer**. `--seconds`
+adds one after receiver startup; `--ticket-timeout` separately bounds pairing.
+`--receiver-delay` is a diagnostic to exercise hosting before pairing completes.
+
+The confirmation prompt authorizes every existing and future window in this
+new session. `--yes` bypasses the prompt for automation. The source CLI separately
+requires `--backend headless --hoist-all` with `--hoist-iroh-listen` and
+`--hoist-iroh-expect-peer`. Each run uses fresh private ticket/identity files;
+mutual Iroh identity authorization and the existing codec handshake precede any
+surface metadata, pixels or input. This is one peer, not unattended discovery.
+
+Source preparation installs a pending port before running the common host.
+The trusted identity-file wait and peer admission are asynchronous, cancellable
+on drop, and share one timeout. Until authorization, the relay retains only
+latest surface state/leases, not a queue of historical frames. On readiness it
+replays static windows even if they never commit again. Actual encoder sessions
+are allocated only when encoding begins. Source capability checks require the
+encoder plus VPP; receiver checks require the decoder plus VPP, independently.
+
+Receiver size/scale/input requests use the existing client relay and native
+application constraints. Repeat ownership defaults to `compositor` on this
+source; the launcher also selects `--legacy-key-repeat emulated` for clients
+such as foot. See [keyboard repeat policy](keyboard-repeat.md).
+
+Ctrl+C or closing either host stops **this run's** process groups and demo apps,
+including descendants left after Weld exits. Supervisors pin those group IDs
+until cleanup and also stop them if the launcher disappears. Core dumps are
+disabled. Logs, process IDs and the private Firefox profile remain under the
+printed `target/validation/headless-iroh-*` directory. Existing desktop apps and
+profiles are untouched. There is no automatic reconnect in this slice.
+
+## Retention and reconnect — Follow-up
+
+The next policy slice should preserve apps and their last effective size/scale
+in memory on disconnect, release remote input, suspend unnecessary streaming,
+and let an authorized reconnecting receiver supply new preferences without
+restoring startup dimensions first. Currently the standalone source remains
+alive after peer failure, but the demo launcher stops it when the receiver exits.
 
 Retention needs an explicit relay policy: the existing source relay resets
 preferred scale on withdrawal or failure. Do not remove desktop restoration
@@ -114,7 +162,7 @@ presentation preferences directly without inventing an output/monitor object.
 See the [portable receiver follow-ups](receiver-decoder-pool.md#portable-execution-boundary)
 for the phone/Godot and OpenXR sequence.
 
-## Validation — 2026-09-12
+## Native-runtime foundation validation — 2026-09-12
 
 `scripts/check-host-runtime --policy-only --shm-only` also exercises a non-Bevy
 policy owner with no native presenter: events and main advances are serviced,
@@ -146,3 +194,36 @@ no rendering occurs, and a capture request fails explicitly.
 
 These checks do not validate hardware DMA-BUF client rendering in the new host,
 DRM scanout, remote input, encoded hoisting or reconnect.
+
+## Headless Iroh launcher validation — 2026-09-12
+
+- Hoist-core's 34 tests cover mapped-only admission, separate dialog sessions,
+  owner-session popups, exactly-once replay, checked IDs, manual-command rejection
+  and retaining only the latest buffer use while waiting.
+- Iroh's 44 portable tests include asynchronous pairing, timeout, exclusive
+  admission, cancellation during handshake, abandoned ready-peer cleanup,
+  pre-ready port isolation and failure while configuring an admitted port.
+- VA-API's 8 policy tests and the distribution's 12 tests passed, including
+  independent source/receiver capability gates and explicit session consent.
+- Core's 122 existing tests passed. Both `scripts/check-host-runtime --shm-only`
+  and `--policy-only --shm-only` passed again: 60 callbacks/releases in about
+  0.99 seconds, remap behavior, host lifetime, signal shutdown and socket removal.
+- `python3 scripts/test-headless-iroh-launcher.py` uses subprocess fixtures, not
+  GPU/network work, for process ownership, inherited signal masks, Ctrl+C during
+  startup/running, and receiver exit/failure cleanup.
+- Live H.264 foot/htop over direct Iroh with a two-second receiver delay paired,
+  auto-mapped, and accepted user input. The source logged `repeat_mode=Compositor`
+  and `legacy_repeat=Emulated` for foot's keyboard v8. Logs:
+  `target/validation/headless-iroh-0wdwace4`.
+- The preceding AV1 attempt **failed** with the VCN reset described above:
+  `target/validation/headless-iroh-7mx14q11`. Hardware testing was paused;
+  three-app live validation, a repeat AV1 test, and native GPU/nested regression
+  reruns are not claimed for this batch. Neither DRM nor real-network/5G testing
+  nor reconnect was performed.
+
+The AV1 investigation should compare a cached first frame with a live first
+frame, and delayed pairing with delayed application startup, before changing
+the codec pipeline. The existing `--hoist-encoded-dump-dir` source option can
+separate source bitstream corruption from transport or presentation. Lease
+retention and admission ordering checks have not identified a cause; a kernel
+timeout alone does not prove a driver-only defect.

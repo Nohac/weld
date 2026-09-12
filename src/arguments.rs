@@ -149,7 +149,7 @@ pub struct AppArguments {
     #[arg(long, value_enum)]
     pub(crate) legacy_key_repeat: Option<LegacyKeyRepeatArgument>,
 
-    /// Stable repeat owner. Defaults to compositor for nested, client for DRM/headless.
+    /// Stable repeat owner. Defaults to compositor for nested/headless Iroh, client otherwise.
     /// Use client if the parent compositor supplies no repeat cadence.
     #[arg(long, value_enum)]
     pub(crate) keyboard_repeat_mode: Option<KeyboardRepeatModeArgument>,
@@ -203,6 +203,10 @@ pub struct AppArguments {
     /// Publish an Iroh ticket and accept one encoded Weld destination.
     #[arg(long, value_name = "PATH", requires = "hoist_iroh_expect_peer")]
     pub(crate) hoist_iroh_listen: Option<PathBuf>,
+
+    /// Consent to hoist every existing and future window in a new headless session.
+    #[arg(long, requires = "hoist_iroh_listen")]
+    pub(crate) hoist_all: bool,
 
     /// Import encoded windows from the Weld source named by an Iroh ticket.
     #[arg(long, value_name = "PATH", requires = "hoist_iroh_publish_identity")]

@@ -3,7 +3,11 @@
 use std::{
     path::Path,
     str::FromStr,
-    sync::{Arc, Mutex, Weak, mpsc as std_mpsc},
+    sync::{
+        Arc, Mutex, Weak,
+        atomic::{AtomicBool, Ordering},
+        mpsc as std_mpsc,
+    },
     thread,
     time::{Duration, Instant},
 };
@@ -11,7 +15,8 @@ use std::{
 use anyhow::{Context, Result, bail};
 use iroh::{Endpoint, EndpointId, RelayMode, Watcher, endpoint::presets};
 use iroh_tickets::endpoint::EndpointTicket;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
+use weld_hoist_encoded::EncodedSourceTransport;
 use weld_media::VideoCodec;
 
 use crate::{
@@ -23,6 +28,10 @@ use crate::{
 
 const SHUTDOWN_WAIT: Duration = Duration::from_secs(3);
 const N0_ONLINE_WAIT: Duration = Duration::from_secs(30);
+
+#[cfg(test)]
+#[path = "host_tests.rs"]
+mod tests;
 
 /// Network services enabled for one Iroh endpoint.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -68,6 +77,7 @@ impl IrohHost {
                 commands,
                 worker: Mutex::new(Some(worker)),
                 done: Mutex::new(done_rx),
+                accepting: Arc::new(AtomicBool::new(false)),
             }),
             ticket,
         })
@@ -86,15 +96,38 @@ impl IrohHost {
         notifier: IrohNotifier,
         startup_timeout: Duration,
     ) -> Result<IrohSourcePeer> {
+        self.begin_accept_source(
+            ticket_path,
+            expected_peer_path,
+            codec,
+            notifier,
+            startup_timeout,
+        )?
+        .wait()
+    }
+
+    /// Begins one cancellable admission without waiting for the approved identity
+    /// or peer. Poll from the host loop when the supplied notifier becomes ready.
+    pub fn begin_accept_source(
+        &self,
+        ticket_path: impl AsRef<Path>,
+        expected_peer_path: impl AsRef<Path>,
+        codec: VideoCodec,
+        notifier: IrohNotifier,
+        startup_timeout: Duration,
+    ) -> Result<PendingSourceAdmission> {
         let deadline = Instant::now()
             .checked_add(startup_timeout)
             .context("Iroh startup timeout exceeds clock range")?;
+        self.lifetime
+            .accepting
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .map_err(|_| anyhow::anyhow!("an Iroh source admission is already pending"))?;
+        let guard = AcceptGuard(self.lifetime.accepting.clone());
+        let expected = rendezvous::PublicationReader::new(expected_peer_path.as_ref())?;
         rendezvous::publish(ticket_path.as_ref(), &self.ticket)?;
-        let expected = rendezvous::read(expected_peer_path.as_ref(), deadline)?;
-        let expected = EndpointId::from_str(expected.trim())
-            .context("approved Iroh peer identity is invalid")?;
-        tracing::info!(path = %ticket_path.as_ref().display(), "waiting for an Iroh hoist destination");
-        let (reply, result) = std_mpsc::sync_channel(1);
+        let (reply, result) = oneshot::channel();
+        let (cancel, cancelled) = oneshot::channel();
         self.lifetime
             .commands
             .send(HostCommand::AcceptSource {
@@ -104,12 +137,16 @@ impl IrohHost {
                 deadline,
                 notifier,
                 reply,
+                cancelled,
+                guard,
             })
             .map_err(|_| anyhow::anyhow!("Iroh host is unavailable"))?;
-        result
-            .recv()
-            .context("Iroh host stopped while accepting a peer")?
-            .map_err(anyhow::Error::msg)
+        tracing::info!(path = %ticket_path.as_ref().display(), "waiting for an Iroh hoist destination");
+        Ok(PendingSourceAdmission {
+            result: Some(result),
+            cancel: Some(cancel),
+            _host: self.lifetime.clone(),
+        })
     }
 
     /// Publishes this process's ephemeral public identity before it waits for a source.
@@ -160,6 +197,7 @@ pub(crate) struct HostLifetime {
     commands: mpsc::UnboundedSender<HostCommand>,
     worker: Mutex<Option<thread::JoinHandle<()>>>,
     done: Mutex<std_mpsc::Receiver<()>>,
+    accepting: Arc<AtomicBool>,
 }
 
 impl Drop for HostLifetime {
@@ -195,14 +233,78 @@ impl Drop for HostLifetime {
     }
 }
 
+/// A single admission result. Dropping an unfinished or unclaimed result cancels
+/// it; an already-connected but unclaimed peer is explicitly disconnected.
+pub struct PendingSourceAdmission {
+    result: Option<oneshot::Receiver<Result<IrohSourcePeer, String>>>,
+    cancel: Option<oneshot::Sender<()>>,
+    _host: Arc<HostLifetime>,
+}
+
+impl PendingSourceAdmission {
+    pub fn poll(&mut self) -> Result<Option<IrohSourcePeer>> {
+        let result = self
+            .result
+            .as_mut()
+            .context("Iroh admission result was already consumed")?;
+        match result.try_recv() {
+            Ok(result) => {
+                self.result = None;
+                self.cancel = None;
+                result.map(Some).map_err(anyhow::Error::msg)
+            }
+            Err(oneshot::error::TryRecvError::Empty) => Ok(None),
+            Err(oneshot::error::TryRecvError::Closed) => {
+                self.result = None;
+                Err(anyhow::anyhow!("Iroh host stopped during admission"))
+            }
+        }
+    }
+    fn wait(mut self) -> Result<IrohSourcePeer> {
+        let result = self
+            .result
+            .take()
+            .context("Iroh admission result was already consumed")?
+            .blocking_recv()
+            .context("Iroh host stopped during admission")?;
+        self.cancel = None;
+        result.map_err(anyhow::Error::msg)
+    }
+    pub fn cancel(&mut self) {
+        if let Some(cancel) = self.cancel.take() {
+            let _ = cancel.send(());
+        }
+        if let Some(mut result) = self.result.take()
+            && let Ok(Ok(peer)) = result.try_recv()
+        {
+            peer.disconnect();
+        }
+    }
+}
+
+impl Drop for PendingSourceAdmission {
+    fn drop(&mut self) {
+        self.cancel();
+    }
+}
+
+struct AcceptGuard(Arc<AtomicBool>);
+impl Drop for AcceptGuard {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
+    }
+}
+
 enum HostCommand {
     AcceptSource {
         host: Weak<HostLifetime>,
         codec: VideoCodec,
-        expected: EndpointId,
+        expected: rendezvous::PublicationReader,
         deadline: Instant,
         notifier: IrohNotifier,
-        reply: std_mpsc::SyncSender<Result<IrohSourcePeer, String>>,
+        reply: oneshot::Sender<Result<IrohSourcePeer, String>>,
+        cancelled: oneshot::Receiver<()>,
+        guard: AcceptGuard,
     },
     ConnectDestination {
         host: Weak<HostLifetime>,
@@ -259,13 +361,40 @@ async fn run_host(
                 deadline,
                 notifier,
                 reply,
+                cancelled,
+                guard,
             } => {
                 let endpoint = endpoint.clone();
                 tokio::spawn(async move {
-                    let result = accept_source(host, endpoint, expected, codec, deadline, notifier)
-                        .await
-                        .map_err(|error| format!("{error:#}"));
-                    let _ = reply.send(result);
+                    let _guard = guard;
+                    let admitted = async {
+                        let expected = loop {
+                            if let Some(value) = expected.try_read()? {
+                                break EndpointId::from_str(value.trim())
+                                    .context("approved Iroh peer identity is invalid")?;
+                            }
+                            let remaining = deadline.saturating_duration_since(Instant::now());
+                            anyhow::ensure!(
+                                !remaining.is_zero(),
+                                "timed out waiting for approved Iroh identity"
+                            );
+                            tokio::time::sleep(Duration::from_millis(20).min(remaining)).await;
+                        };
+                        accept_source(host, endpoint, expected, codec, deadline, notifier.clone())
+                            .await
+                    };
+                    let result = tokio::select! {
+                        biased;
+                        _ = cancelled => Err(anyhow::anyhow!("Iroh admission cancelled")),
+                        result = admitted => result,
+                    }
+                    .map_err(|error| format!("{error:#}"));
+                    if let Err(Ok(peer)) = reply.send(result) {
+                        peer.disconnect();
+                    }
+                    if let Err(error) = notifier.notify() {
+                        tracing::warn!(%error, "could not wake host after Iroh admission");
+                    }
                 });
             }
             HostCommand::ConnectDestination {

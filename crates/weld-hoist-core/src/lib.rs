@@ -5,8 +5,8 @@ mod relay;
 
 pub use relay::{
     DestinationPortCommand, DestinationPortEvent, DestinationPortRecord, DestinationRelayAdapter,
-    HoistDestinationPort, HoistPortError, HoistPortResult, HoistSourcePort, SourcePortCommand,
-    SourceRelayAdapter,
+    HoistDestinationPort, HoistPortError, HoistPortResult, HoistSourcePort, SourceAdmission,
+    SourcePortCommand, SourceRelayAdapter,
 };
 use weld_client::{
     ClientAdapterCommandEnvelope, ClientAdapterRegistration, ClientProvenance,
