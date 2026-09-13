@@ -1,7 +1,7 @@
 # Godot native video
 
 Native presentation is shared by the bounded fixture and the
-[single-window Iroh viewer](godot-hoisting.md), not yet an XR session.
+[single-window Iroh viewer](godot-hoisting.md) and its [XR scene](godot-xr.md).
 Godot 4.7.1 Compatibility runs OpenGL ES on Linux and Android. The Linux
 `opengl3_es` override and runtime EGL/extension checks are deliberate: desktop
 core OpenGL/GLX is not the validated image-import route. Vulkan external-memory
@@ -111,7 +111,7 @@ devices** until the manifest minimum is corrected before distribution.
 The live viewer now connects the portable receiver and decode execution contracts
 to this target; see its bounds and validation in [Godot hoisting](godot-hoisting.md).
 Arbitrary negotiated codecs, multi-window presentation, rotation/context recreation
-recovery, Pico/OpenXR and Vulkan import remain separate work.
+recovery and Vulkan import remain separate work.
 
 ## Live-receiver regression checks: 2026-09-13
 

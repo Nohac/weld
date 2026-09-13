@@ -12,9 +12,11 @@ That PR enables extension selection, not a complete video importer. Vulkan
 will still need native-buffer import, synchronization and lifetime handling.
 
 Godot XR Tools is enabled, including its
-user-settings and rumble-manager autoloads. OpenXR startup is not enabled yet:
-phone-first setup does not require a headset runtime. Headset support must use
-standard OpenXR, without a Pico SDK, Pico XR plugin or developer-account login.
+user-settings and rumble-manager autoloads. The **Android Pico** export enables
+OpenXR and uses Gradle to include the standard Khronos loader. Successful XR
+initialization selects a head-tracked video panel with passthrough where supported;
+desktop/phone otherwise stay flat. See [XR setup](../../docs/godot-xr.md).
+No Pico SDK, Pico XR plugin or developer-account login is required.
 
 ## Godot XR Tools
 
@@ -42,11 +44,11 @@ autoloads. See the shared shell's README for SDK/NDK and export-template setup.
 
 `rust/` is a small, independent Cargo workspace, pinned to `godot` 0.5.5 with
 Godot 4.7 API bindings. It remains separate from the Linux compositor workspace,
-with shared crates added as explicit path dependencies. The reduced bindings support the original `WeldBridge`
-button and shared `WeldVideoPlayer`. Playback, admission and EGL presentation
+with shared crates added as explicit path dependencies. The reduced bindings support the diagnostic `WeldBridge`
+and shared `WeldVideoPlayer`. Playback, admission and EGL presentation
 are shared; module-level platform selection chooses the existing Linux VA-API
 provider or Android MediaCodec provider via workspace path dependencies.
-There is no networking or XR startup yet. See
+Live Iroh reception and XR scene selection are wired. See
 [native video validation](../../docs/godot-native-video.md) for ownership and limits.
 
 This follows the working
@@ -128,17 +130,14 @@ Godot's debug export/one-click deployment, just as for the original Hello World.
 Godot can use its existing default debug keystore; no new manual key setup is
 needed. Never use that development key for production releases.
 
-1. Tap **Play AV1**: manual start, not autoplay. Expect a red top bar, blue
-   bottom bar and white upper-left marker. The four-second clip retains its
-   final image; tap Play again to replay.
-2. Background during playback, then resume. Playback must remain stopped until
-   explicit replay. Tap **Stop** before testing the original bridge label.
-3. Tap **Call Rust**. The label should show `Hello from Rust!`
-   and `Tap count: 1`; further taps increment the count.
-4. Background and resume the app, then tap again. If Android retained the process,
-   the count should continue. Rust logs the pause/resume notifications.
-5. Close and relaunch the app. A new bridge starts its count at zero.
-6. Inspect app-scoped `adb logcat --pid=PID` for lifecycle/decoder errors.
+The normal scene now shows only video, automatically connecting to its saved
+source. Use `scripts/run-godot-hoist --serial DEVICE` for pairing and a bounded
+source session; see [live hoisting](../../docs/godot-hoisting.md). Backgrounding
+stops playback; restart the viewer and test source afterward.
+Fixture playback remains available with `-- --video-fixture` in the export's
+extra arguments. The four-second clip has red/blue bars and an upper-left white
+marker, and retains its final image. Restore those arguments afterward for live
+reception. Inspect app-scoped `adb logcat --pid=PID` for lifecycle/decoder errors.
 
 The build helper never installs, launches or stops an app on a device. Godot
 4.7.1 exposes APK export through its CLI, but not the editor's combined one-click
@@ -151,7 +150,8 @@ the ARM64 Rust bridge, and displayed incrementing responses to touch input.
 The user confirmed the interaction worked. On 2026-09-12 the GLES/native-video
 build displayed AV1 on this phone (120 decoded/120 presented), including active
 playback pause, resume without autoplay, replay and graceful Back exit. The user
-confirmed visible video. Pico/OpenXR and rotation remain unvalidated.
+confirmed visible video. See [XR validation](../../docs/godot-xr.md) for the
+subsequent Pico work; rotation recovery remains unvalidated.
 
 ### Automated checks
 
@@ -167,8 +167,8 @@ cargo clippy --manifest-path apps/weld-vr/rust/Cargo.toml \
 The integration check builds the desktop library and imports a temporary project
 copy with isolated Godot settings. Its first import omits the main-scene setting
 only in that copy to bootstrap the UID database, then restores the original
-configuration and loads the scene through its UID. It tests the real scene's
-button-to-Rust-to-label connection and fresh state after scene recreation,
+configuration and loads the startup scene. It tests flat scene selection,
+the XR camera/mono viewport setup, Rust calls and fresh state after recreation,
 checking both process status and Godot error output. Temporary copies are
 removed on exit; your editor cache, export credentials and connected devices
 are not used.

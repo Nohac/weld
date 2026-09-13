@@ -18,11 +18,7 @@ func _run() -> void:
 	var main := scene.instantiate()
 	root.add_child(main)
 	await process_frame
-	var panel := main.get_node("CanvasLayer/VideoPanel")
-	# Keep manual input from restarting a clip while automation owns the session.
-	panel.get_node("Play").disabled = true
-	panel.get_node("Stop").disabled = true
-	panel.get_node("Connect").disabled = true
+	var panel := main.get_node("VideoPanel")
 	# process_frame advances even when the display is not drawing. Do not start
 	# decoding until this real-window test has observed a render callback.
 	var waiting := Time.get_ticks_msec()

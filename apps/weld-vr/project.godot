@@ -11,7 +11,7 @@ config_version=5
 [application]
 
 config/name="WeldVR"
-run/main_scene="uid://d1bgda50xmko3"
+run/main_scene="res://scenes/startup.tscn"
 config/features=PackedStringArray("4.7", "GL Compatibility")
 config/icon="res://icon.svg"
 
@@ -40,3 +40,8 @@ gl_compatibility/driver.linuxbsd="opengl3_es"
 renderer/rendering_method="gl_compatibility"
 renderer/rendering_method.mobile="gl_compatibility"
 textures/vram_compression/import_etc2_astc=true
+
+[xr]
+
+shaders/enabled=true
+openxr/enabled.weld_xr=true

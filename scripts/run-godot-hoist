@@ -64,6 +64,20 @@ def close_source_for_restart(hosts):
     hosts.pop(0)
 
 
+def viewer_process(adb):
+    # Saved identity files can exist before Android starts a fresh process.
+    # XR launch prompts can also delay activity/process creation.
+    result = subprocess.run([*adb, "shell", "pidof", PACKAGE],
+                            text=True, capture_output=True, timeout=5)
+    if result.returncode == 1 and not result.stdout.strip():
+        return None
+    result.check_returncode()
+    pid = result.stdout.strip()
+    if not re.fullmatch(r"[0-9]+", pid):
+        raise RuntimeError("expected one Weld VR process")
+    return pid
+
+
 def stop_owned(hosts, stop_viewer=None):
     failures = []
     operations = [(host.role, host.close) for host in reversed(hosts)]
@@ -143,8 +157,11 @@ def main(argv=None):
 
     def wait(predicate, seconds=60):
         deadline = time.monotonic() + seconds
-        while not predicate():
+        while True:
             check()
+            result = predicate()
+            if result:
+                return result
             if time.monotonic() >= deadline:
                 raise RuntimeError(f"startup timed out; deploy the current debug APK and inspect {run}")
             time.sleep(0.1)
@@ -203,9 +220,7 @@ def main(argv=None):
             subprocess.run([*adb, "shell", "am", "start", "-n", activity], check=True, stdout=subprocess.DEVNULL, timeout=10)
             app_started = True
             wait(lambda: phone_read("public.identity") is not None)
-            phone_pid = subprocess.check_output([*adb, "shell", "pidof", PACKAGE], text=True, timeout=5).strip()
-            if not re.fullmatch(r"[0-9]+", phone_pid):
-                raise RuntimeError("expected one Weld VR process")
+            phone_pid = wait(lambda: viewer_process(adb))
             public = phone_read("public.identity")
             # App owns this directory/key. The fixed command installs PUBLIC data
             # only, atomically and with explicit private permissions.

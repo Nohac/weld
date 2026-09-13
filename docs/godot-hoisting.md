@@ -1,7 +1,8 @@
 # Godot live-window tracer
 
 Godot can receive one live AV1 window from headless Weld on Linux or Android.
-This is a bounded presentation slice, not the multi-window/XR shell. It uses
+This is a bounded presentation slice, not the multi-window/input shell. The
+[XR scene](godot-xr.md) can present the same stream on a headset. It uses
 the same `weld-hoist-iroh` transport, `weld-hoist-encoded` scheduling and
 `weld-media::decode::DecodePool` as the compositor receiver. No new wire protocol,
 application commit ACK, raw-frame upload or CPU pixel readback is introduced.
@@ -111,12 +112,12 @@ is pinned for that producer lifetime; edits require a new start.
   is an explicit low-delay error, not an empty completion or fabricated EOS.
 - Godot refresh is forwarded through existing `SetPresentation`; source pacing
   still clamps it to the encoder ceiling. There is no ACK roundtrip.
-- Stop/pause cancels production and performs GPU cleanup. Resume uses explicit
-  Connect with a fresh target. Source relay re-admission after viewer disconnect
+- Stop/pause cancels production and performs GPU cleanup. Relaunch the viewer
+  and source after pause. Source relay re-admission after viewer disconnect
   remains one-shot: restart the source for another connection. Detach/rejoin
   preserving the same live apps remains shared relay lifecycle work.
 - AV1 only is advertised. Input, multi-window layout, adaptive capability budgets,
-  automatic rotation recovery, Pico/OpenXR and Vulkan import remain separate work.
+  automatic rotation recovery and Vulkan import remain separate work.
 
 ## Physical evidence: 2026-09-12
 

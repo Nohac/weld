@@ -16,9 +16,6 @@ var log_elapsed := 0.0
 func _ready() -> void:
 	player = WeldVideoPlayer.new()
 	add_child(player)
-	$Play.pressed.connect(play)
-	$Stop.pressed.connect(stop)
-	$Connect.pressed.connect(connect_source)
 	RenderingServer.frame_pre_draw.connect(_before_draw)
 	# Explicit opt-in for the bounded physical presentation check.
 	if "--video-fixture" in OS.get_cmdline_user_args() or "--video-single-frame" in OS.get_cmdline_user_args():
@@ -63,6 +60,9 @@ void fragment() {
 	var started: bool
 	if network:
 		var refresh := DisplayServer.screen_get_refresh_rate()
+		var xr := XRServer.primary_interface
+		if xr != null and xr.is_initialized():
+			refresh = xr.get_display_refresh_rate()
 		if refresh <= 0.0:
 			refresh = 60.0
 		var directory := OS.get_environment("WELD_VR_DEVICE_DIR")
@@ -83,6 +83,7 @@ void fragment() {
 		network_active = network
 		playback_started.emit()
 	$Status.text = player.status()
+	$Status.show()
 
 
 func stop() -> void:
@@ -96,6 +97,7 @@ func stop() -> void:
 	video_material = null
 	video_texture = null
 	$Status.text = player.status()
+	$Status.show()
 	playback_stopped.emit()
 
 
@@ -109,6 +111,7 @@ func _process(delta: float) -> void:
 		status_elapsed = 0.0
 		$Status.text = player.status()
 		$VideoFrame.ratio = player.aspect()
+		$Status.visible = video_material == null or not video_material.get_shader_parameter("has_frame")
 	if network_active or "--video-single-frame" in OS.get_cmdline_user_args():
 		log_elapsed += delta
 		if log_elapsed >= 1.0:
@@ -120,8 +123,8 @@ func _notification(what: int) -> void:
 	if what == NOTIFICATION_APPLICATION_PAUSED:
 		stop()
 	elif what == NOTIFICATION_APPLICATION_RESUMED:
-		# The explicit Connect button starts a fresh GPU target after pause.
-		# Rejoining the same source still needs source-side re-admission.
+		# Relaunch the viewer/test after pause. Rejoining the same source still
+		# needs source-side re-admission; do not silently restart its producer.
 		stop()
 
 

@@ -1,14 +1,32 @@
 """Public pairing policy; process ownership is reused from the headless launcher."""
 from pathlib import Path
 import runpy
+import subprocess
 import tempfile
 import unittest
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 API = runpy.run_path(str(Path(__file__).with_name("run-godot-hoist")))
 
 
 class PairingTests(unittest.TestCase):
+    def test_android_process_may_appear_after_saved_identity(self):
+        with patch.object(API["subprocess"], "run", side_effect=[
+            subprocess.CompletedProcess([], 1, "", ""),
+            subprocess.CompletedProcess([], 0, "13766\n", ""),
+        ]):
+            self.assertIsNone(API["viewer_process"](["adb", "-s", "test-device"]))
+            self.assertEqual(API["viewer_process"](["adb", "-s", "test-device"]), "13766")
+
+    def test_android_process_probe_rejects_ambiguous_or_failed_results(self):
+        for result, error in (
+            (subprocess.CompletedProcess([], 0, "12 34\n", ""), RuntimeError),
+            (subprocess.CompletedProcess([], 2, "", "device offline"), subprocess.CalledProcessError),
+        ):
+            with self.subTest(result=result), patch.object(API["subprocess"], "run", return_value=result):
+                with self.assertRaises(error):
+                    API["viewer_process"](["adb"])
+
     def test_failed_restart_close_keeps_source_owned_for_cleanup(self):
         source = Mock(role="source")
         source.close.side_effect = [RuntimeError("close failed"), None]

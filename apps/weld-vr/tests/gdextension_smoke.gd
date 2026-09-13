@@ -18,30 +18,45 @@ func _run() -> void:
 	if packed == null:
 		_fail("Could not load the bridge scene")
 		return
-	var main := packed.instantiate()
-	root.add_child(main)
+	var startup := packed.instantiate()
+	root.add_child(startup)
 	await process_frame
-	var button := main.get_node_or_null("CanvasLayer/PingButton") as Button
-	var label := main.get_node_or_null("Label3D") as Label3D
-	if button == null or label == null:
-		_fail("Missing bridge UI nodes")
+	var main := startup.get_child(0)
+	if main.get_node_or_null("VideoPanel/VideoFrame/Video") == null or root.use_xr:
+		_fail("Startup did not select the flat video-only scene without OpenXR")
 		return
+	var bridge := WeldBridge.new()
+	main.add_child(bridge)
 	for count in range(1, 3):
-		button.pressed.emit()
-		if label.text != "Hello from Rust!\nTap count: %d" % count:
-			_fail("Godot -> Rust -> label response mismatch on press %d" % count)
+		if bridge.ping() != "Hello from Rust!\nTap count: %d" % count:
+			_fail("Godot -> Rust response mismatch on call %d" % count)
 			return
-	main.queue_free()
+	startup.queue_free()
 	await process_frame
 	# A fresh instance must own fresh state after the previous scene is freed.
-	main = packed.instantiate()
-	root.add_child(main)
+	startup = packed.instantiate()
+	root.add_child(startup)
 	await process_frame
-	main.get_node("CanvasLayer/PingButton").pressed.emit()
-	if main.get_node("Label3D").text != "Hello from Rust!\nTap count: 1":
+	main = startup.get_child(0)
+	bridge = WeldBridge.new()
+	main.add_child(bridge)
+	if bridge.ping() != "Hello from Rust!\nTap count: 1":
 		_fail("Rust bridge state leaked between scene instances")
 		return
-	main.queue_free()
+	startup.queue_free()
+	await process_frame
+	var xr: Node = load("res://scenes/xr.tscn").instantiate()
+	root.add_child(xr)
+	await process_frame
+	if not xr.get_node("XROrigin3D/XRCamera3D") is XRCamera3D:
+		_fail("XR scene is missing its head-tracked camera")
+		return
+	var viewport: SubViewport = xr.get_node("PanelViewport")
+	var screen: MeshInstance3D = xr.get_node("Screen")
+	if viewport.use_xr or screen.material_override.albedo_texture != viewport.get_texture():
+		_fail("XR panel must sample the shared mono video viewport")
+		return
+	xr.queue_free()
 	await process_frame
 	print("WELD_VR_GDEXTENSION_SMOKE_OK")
 	quit(0)
