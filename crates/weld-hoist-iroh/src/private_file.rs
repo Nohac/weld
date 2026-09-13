@@ -3,7 +3,7 @@
 
 use anyhow::{Context, Result, ensure};
 use rustix::{
-    fs::{AtFlags, Mode, OFlags, linkat, mkdirat, open, openat, unlinkat},
+    fs::{AtFlags, Mode, OFlags, RenameFlags, mkdirat, open, openat, renameat_with, unlinkat},
     io::Errno,
     process::geteuid,
 };
@@ -124,14 +124,25 @@ impl PrivateDirectory {
             );
             file.write_all(contents)?;
             file.sync_all()?;
-            match linkat(&self.0, &temporary, &self.0, name, AtFlags::empty()) {
+            // Android app SELinux policy permits rename in private storage but
+            // denies hard links. NOREPLACE preserves atomic first-writer wins.
+            match renameat_with(&self.0, &temporary, &self.0, name, RenameFlags::NOREPLACE) {
                 Ok(()) => Ok(true),
                 Err(Errno::EXIST) => Ok(false),
+                Err(error @ (Errno::INVAL | Errno::NOSYS)) => {
+                    Err(error).context("filesystem does not support atomic no-replace rename")
+                }
                 Err(error) => Err(error).context("could not publish private Iroh file"),
             }
         })();
-        let cleanup = unlinkat(&self.0, &temporary, AtFlags::empty());
-        // Persist both the published link and removal of temporary key material.
+        // A successful rename consumed our temporary name. Never unlink a new
+        // file that could subsequently occupy it.
+        let cleanup = if matches!(&result, Ok(true)) {
+            Ok(())
+        } else {
+            unlinkat(&self.0, &temporary, AtFlags::empty())
+        };
+        // Persist publication or removal of losing temporary key material.
         let synced = self.0.sync_all();
         let created = result?;
         cleanup.context("could not remove temporary Iroh file")?;
@@ -147,4 +158,38 @@ fn split_path(path: &Path) -> Result<(&Path, &OsStr)> {
         .filter(|parent| !parent.as_os_str().is_empty())
         .unwrap_or(Path::new("."));
     Ok((parent, name))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::rendezvous::tests::ExchangeDirectory;
+    use std::{fs, os::unix::fs::symlink};
+
+    #[test]
+    fn atomic_publication_consumes_only_its_own_temporary_and_never_replaces() {
+        let directory = ExchangeDirectory::new();
+        let storage = PrivateDirectory::open(&directory.0).expect("private directory");
+        let name = OsStr::new("record");
+        assert!(storage.create_new(name, b"first").expect("publish"));
+        assert!(!storage.create_new(name, b"second").expect("existing"));
+        assert_eq!(fs::read(directory.0.join(name)).expect("winner"), b"first");
+        assert_eq!(fs::read_dir(&directory.0).expect("entries").count(), 1);
+        symlink("record", directory.0.join("alias")).expect("symlink");
+        assert!(
+            !storage
+                .create_new(OsStr::new("alias"), b"third")
+                .expect("existing symlink")
+        );
+        assert_eq!(
+            fs::read(directory.0.join(name)).expect("unchanged"),
+            b"first"
+        );
+        assert_eq!(
+            fs::read_dir(&directory.0)
+                .expect("no orphan temporaries")
+                .count(),
+            2
+        );
+    }
 }

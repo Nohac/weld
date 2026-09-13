@@ -1,0 +1,198 @@
+//! Native output ownership and one global acquired-image budget, including GPU use.
+use crate::native::{Geometry, Image};
+use anyhow::{Result, ensure};
+use std::{
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
+    thread::Thread,
+};
+use weld_client::SurfaceContentView;
+
+const MAX_FRAMES: usize = 7;
+
+pub(super) struct FrameBudget {
+    outstanding: AtomicUsize,
+    receiver: Thread,
+}
+impl FrameBudget {
+    pub fn new(receiver: Thread) -> Arc<Self> {
+        Arc::new(Self {
+            outstanding: AtomicUsize::new(0),
+            receiver,
+        })
+    }
+    pub fn reserve(self: &Arc<Self>) -> Option<FrameCredit> {
+        self.outstanding
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
+                (count < MAX_FRAMES).then_some(count + 1)
+            })
+            .ok()
+            .map(|_| FrameCredit {
+                budget: self.clone(),
+                notify: true,
+            })
+    }
+}
+pub(super) struct FrameCredit {
+    budget: Arc<FrameBudget>,
+    notify: bool,
+}
+impl FrameCredit {
+    /// Failed admission cannot wake itself into a Busy retry loop.
+    pub fn cancel(mut self) {
+        self.notify = false;
+    }
+}
+impl Drop for FrameCredit {
+    fn drop(&mut self) {
+        self.budget.outstanding.fetch_sub(1, Ordering::AcqRel);
+        if self.notify {
+            self.budget.receiver.unpark();
+        }
+    }
+}
+
+/// Field order releases native storage before returning its admission credit.
+pub(super) struct Frame {
+    pub image: Image,
+    pub visible: [u32; 2],
+    pub credit: Option<FrameCredit>,
+}
+impl Frame {
+    pub fn fixture(image: Image) -> Self {
+        let geometry = image.geometry();
+        Self {
+            image,
+            visible: [
+                geometry.crop[2] - geometry.crop[0],
+                geometry.crop[3] - geometry.crop[1],
+            ],
+            credit: None,
+        }
+    }
+    pub fn crop(&self, view: Option<SurfaceContentView>) -> Result<([f32; 4], f32)> {
+        crop(self.image.geometry(), self.visible, view)
+    }
+    pub fn release(self, fence: std::os::fd::OwnedFd) {
+        self.image.release(fence);
+        drop(self.credit);
+    }
+}
+
+/// Intersect codec storage crop, transported visible extent, and window content.
+pub(super) fn crop(
+    geometry: Geometry,
+    visible: [u32; 2],
+    view: Option<SurfaceContentView>,
+) -> Result<([f32; 4], f32)> {
+    let [left, top, right, bottom] = geometry.crop;
+    ensure!(
+        left < right && top < bottom && right <= geometry.width && bottom <= geometry.height,
+        "invalid decoded image crop"
+    );
+    ensure!(
+        visible[0] > 0
+            && visible[1] > 0
+            && visible[0] <= right - left
+            && visible[1] <= bottom - top,
+        "decoded image does not cover transported visible extent"
+    );
+    let view = view.unwrap_or(SurfaceContentView {
+        source_x: 0.0,
+        source_y: 0.0,
+        source_width: visible[0] as f32,
+        source_height: visible[1] as f32,
+        logical_width: visible[0] as f32,
+        logical_height: visible[1] as f32,
+    });
+    ensure!(
+        [
+            view.source_x,
+            view.source_y,
+            view.source_width,
+            view.source_height,
+            view.logical_width,
+            view.logical_height
+        ]
+        .iter()
+        .all(|v| v.is_finite())
+            && view.source_x >= 0.0
+            && view.source_y >= 0.0
+            && view.source_width >= 1.0
+            && view.source_height >= 1.0
+            && view.logical_width > 0.0
+            && view.logical_height > 0.0,
+        "invalid transported content view"
+    );
+    let x_end = (view.source_x + view.source_width).min(visible[0] as f32);
+    let y_end = (view.source_y + view.source_height).min(visible[1] as f32);
+    ensure!(
+        x_end - view.source_x >= 1.0 && y_end - view.source_y >= 1.0,
+        "content view is outside decoded image"
+    );
+    Ok((
+        [
+            (left as f32 + view.source_x + 0.5) / geometry.width as f32,
+            (top as f32 + view.source_y + 0.5) / geometry.height as f32,
+            (left as f32 + x_end - 0.5) / geometry.width as f32,
+            (top as f32 + y_end - 0.5) / geometry.height as f32,
+        ],
+        view.logical_width / view.logical_height,
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn credits_bound_all_owned_outputs_and_failed_admission_returns_capacity() {
+        let budget = FrameBudget::new(std::thread::current());
+        let mut credits = (0..7)
+            .map(|_| budget.reserve().expect("credit"))
+            .collect::<Vec<_>>();
+        assert!(budget.reserve().is_none());
+        credits.pop().expect("reserved").cancel();
+        assert!(budget.reserve().is_some());
+        drop(credits);
+        assert_eq!(budget.outstanding.load(Ordering::Acquire), 0);
+    }
+    #[test]
+    fn odd_visible_height_excludes_av1_padding_and_respects_native_crop_origin() {
+        let (uv, _) = crop(
+            Geometry {
+                width: 1280,
+                height: 848,
+                crop: [0, 0, 1280, 834],
+            },
+            [1280, 833],
+            None,
+        )
+        .expect("crop");
+        assert!((uv[3] - 832.5 / 848.0).abs() < 0.00001);
+        let (uv, _) = crop(
+            Geometry {
+                width: 100,
+                height: 80,
+                crop: [4, 8, 96, 72],
+            },
+            [80, 60],
+            None,
+        )
+        .expect("offset");
+        assert_eq!(uv, [4.5 / 100.0, 8.5 / 80.0, 83.5 / 100.0, 67.5 / 80.0]);
+        assert!(
+            crop(
+                Geometry {
+                    width: 100,
+                    height: 80,
+                    crop: [4, 8, 96, 72]
+                },
+                [100, 80],
+                None
+            )
+            .is_err()
+        );
+    }
+}

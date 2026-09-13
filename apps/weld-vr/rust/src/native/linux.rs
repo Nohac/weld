@@ -10,6 +10,7 @@ use weld_media::DecoderConfig;
 use weld_media_vaapi::{FfmpegDecoder, FfmpegVaapiDevice, VaapiDevice, VaapiDmabuf, VppConverter};
 
 pub const TEXTURE_TARGET: u32 = 0x0de1; // GL_TEXTURE_2D
+#[derive(Clone)]
 pub struct Target {
     modifiers: Vec<u64>,
 }
@@ -80,7 +81,10 @@ impl Decoder {
             &self.target.modifiers,
             &self.vpp,
         )?;
-        self.pending = Some(Image(decoded.dmabuf));
+        self.pending = Some(Image {
+            buffer: decoded.dmabuf,
+            timestamp,
+        });
         Ok(true)
     }
     pub fn try_finish(&mut self) -> Result<bool> {
@@ -99,30 +103,36 @@ impl Decoder {
 }
 /// VPP creates an independent allocation and completes its writes before this
 /// export. Any future output pooling must wait for this lease to be released.
-pub struct Image(VaapiDmabuf);
+pub struct Image {
+    buffer: VaapiDmabuf,
+    timestamp: u64,
+}
 impl Image {
+    pub fn timestamp_micros(&self) -> u64 {
+        self.timestamp
+    }
     pub fn geometry(&self) -> Geometry {
         Geometry {
-            width: self.0.width,
-            height: self.0.height,
-            crop: [0, 0, self.0.width, self.0.height],
+            width: self.buffer.width,
+            height: self.buffer.height,
+            crop: [0, 0, self.buffer.width, self.buffer.height],
         }
     }
     /// Caller must retain this lease through GPU reads and supply its current
     /// EGL context. The returned image is owned by the render adapter.
     pub unsafe fn import(&self, context: NonNull<c_void>) -> Result<NonNull<c_void>> {
         ensure!(
-            self.0.fourcc == u32::from_le_bytes(*b"XR24") && self.0.planes.len() == 1,
+            self.buffer.fourcc == u32::from_le_bytes(*b"XR24") && self.buffer.planes.len() == 1,
             "expected one-plane XRGB output"
         );
-        let plane = &self.0.planes[0];
+        let plane = &self.buffer.planes[0];
         let object = self
-            .0
+            .buffer
             .objects
             .get(usize::from(plane.object_index))
             .context("missing DMA-BUF object")?;
-        let width = i32::try_from(self.0.width)?;
-        let height = i32::try_from(self.0.height)?;
+        let width = i32::try_from(self.buffer.width)?;
+        let height = i32::try_from(self.buffer.height)?;
         let offset = i32::try_from(plane.offset)?;
         let stride = i32::try_from(plane.stride)?;
         // SAFETY: descriptor remains owned by this lease; helper imports it without

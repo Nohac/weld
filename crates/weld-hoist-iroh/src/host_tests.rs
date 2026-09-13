@@ -21,12 +21,15 @@ fn notifier() -> IrohNotifier {
 fn profile(host: &IrohHost) -> IrohConnectionProfile {
     let ticket = EndpointTicket::from_str(host.ticket()).expect("ticket");
     let address = ticket.endpoint_addr();
-    IrohConnectionProfile::new(
+    let expected = IrohConnectionProfile::new(
         address.id.to_string().parse().expect("public identity"),
         IrohNetwork::Direct,
         address.ip_addrs().copied().collect(),
     )
-    .expect("direct profile")
+    .expect("direct profile");
+    let profile = host.connection_profile().expect("public profile API");
+    assert_eq!(profile, expected);
+    profile
 }
 
 #[test]
@@ -43,9 +46,13 @@ fn persisted_hosts_admit_each_trusted_device_after_restart() {
         let source = IrohHost::bind_with_identity(IrohNetwork::Direct, &source_identity)
             .expect("persistent source");
         assert_eq!(profile(&source).peer(), &source_identity.public_id());
-        for viewer in &viewers {
-            let destination = IrohHost::bind_with_identity(IrohNetwork::Direct, viewer)
-                .expect("persistent viewer");
+        for (viewer, dns) in viewers
+            .iter()
+            .zip([IrohDnsPolicy::System, IrohDnsPolicy::Public])
+        {
+            let destination =
+                IrohHost::bind_with_identity_and_dns(IrohNetwork::Direct, viewer, dns)
+                    .expect("persistent viewer with explicit DNS policy");
             assert_eq!(profile(&destination).peer(), &viewer.public_id());
             let mut accepting = source
                 .begin_accept_trusted_source(

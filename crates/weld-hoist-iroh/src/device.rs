@@ -57,6 +57,12 @@ impl IrohDeviceIdentity {
         IrohPeerIdentity(self.secret.public().to_string())
     }
 
+    /// Export only the public identity into a new verified private file.
+    /// Existing paths are never overwritten, including after a key change.
+    pub fn publish_identity(&self, path: impl AsRef<Path>) -> Result<()> {
+        rendezvous::publish(path.as_ref(), self.public_id().as_str())
+    }
+
     pub(crate) fn secret(&self) -> SecretKey {
         self.secret.clone()
     }
@@ -97,6 +103,17 @@ impl FromStr for IrohPeerIdentity {
     fn from_str(value: &str) -> Result<Self> {
         let id = EndpointId::from_str(value).context("invalid Iroh public identity")?;
         Ok(Self(id.to_string()))
+    }
+}
+
+impl IrohPeerIdentity {
+    /// Read an explicitly trusted public identity using the private-file rules.
+    pub fn load(path: impl AsRef<Path>) -> Result<Self> {
+        rendezvous::PublicationReader::new(path.as_ref())?
+            .try_read()?
+            .context("saved Iroh identity is absent")?
+            .trim()
+            .parse()
     }
 }
 

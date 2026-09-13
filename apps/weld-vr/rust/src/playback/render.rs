@@ -1,7 +1,8 @@
 //! Render-thread-only EGL imports. Godot retains ownership of the GL texture.
+use super::frame::Frame;
 use super::retirement::Retired;
 use super::{Shared, lock};
-use crate::native::{self, Image};
+use crate::native;
 use anyhow::{Context, Result, ensure};
 use godot::{
     builtin::{Callable, RustCallable, Variant},
@@ -147,7 +148,7 @@ impl RustCallable for RenderCall {
 
 struct Imported {
     egl_image: NonNull<c_void>,
-    lease: Option<Image>,
+    lease: Option<Frame>,
 }
 impl Drop for Imported {
     fn drop(&mut self) {
@@ -168,10 +169,10 @@ struct Presenter {
     spare: Option<Imported>,
 }
 impl Presenter {
-    fn present(&mut self, image: Image, shared: &Shared) -> Result<()> {
+    fn present(&mut self, image: Frame, shared: &Shared) -> Result<()> {
         ensure!(self.spare.is_none(), "previous import quarantined");
         // SAFETY: this provider lease is retained through every GPU read.
-        let egl_image = unsafe { image.import(self.context)? };
+        let egl_image = unsafe { image.image.import(self.context)? };
         self.spare = Some(Imported {
             egl_image,
             lease: Some(image),

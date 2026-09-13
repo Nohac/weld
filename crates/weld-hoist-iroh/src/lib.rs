@@ -22,7 +22,9 @@ pub use adapter::{
     source_registration_with_backend,
 };
 pub use device::{IrohConnectionProfile, IrohDeviceIdentity, IrohTrustedPeers};
-pub use host::{IrohHost, IrohNetwork, PendingDestinationConnection, PendingSourceAdmission};
+pub use host::{
+    IrohDnsPolicy, IrohHost, IrohNetwork, PendingDestinationConnection, PendingSourceAdmission,
+};
 #[cfg(feature = "vaapi")]
 pub use native::{
     IrohSourceRegistrationOptions, destination_registration, pending_source_registration,

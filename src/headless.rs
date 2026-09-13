@@ -4,7 +4,7 @@
 use anyhow::{Context, Result};
 use weld_client::ClientSourceId;
 use weld_core::{host::client_runtime_notifier, runtime::HostRuntime};
-use weld_hoist_iroh::{IrohHost, IrohSourceRegistrationOptions, pending_source_registration};
+use weld_hoist_iroh::{IrohSourceRegistrationOptions, pending_source_registration};
 
 use crate::{
     AppArguments, MediaOperation, bitrate_budget, runtime_options, validate_encoded_capabilities,
@@ -17,7 +17,7 @@ pub(crate) fn run(arguments: AppArguments) -> Result<()> {
     let Some(ticket) = &arguments.hoist_iroh_listen else {
         return runtime.run();
     };
-    let host = IrohHost::bind(arguments.hoist_iroh_network.unwrap_or_default().into())?;
+    let host = crate::iroh_host::bind(&arguments)?;
     let codec = arguments.hoist_codec.unwrap_or_default().into();
     let capabilities = runtime
         .external_dmabuf_capabilities()?

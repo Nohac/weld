@@ -93,6 +93,23 @@ fn peer() -> IrohPeerIdentity {
 }
 
 #[test]
+fn public_identity_export_is_bounded_private_and_never_overwritten() {
+    let directory = ExchangeDirectory::new();
+    let device = IrohDeviceIdentity::load_or_create(directory.0.join("device")).expect("device");
+    let path = directory.0.join("public.identity");
+    device
+        .publish_identity(&path)
+        .expect("publish public identity");
+    assert_eq!(
+        IrohPeerIdentity::load(&path).expect("read"),
+        device.public_id()
+    );
+    assert!(device.publish_identity(&path).is_err());
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).expect("insecure fixture");
+    assert!(IrohPeerIdentity::load(&path).is_err());
+}
+
+#[test]
 fn profiles_round_trip_and_never_replace_an_existing_profile() {
     let directory = ExchangeDirectory::new();
     let profile = IrohConnectionProfile::new(

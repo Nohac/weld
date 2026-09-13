@@ -1,6 +1,7 @@
 //! One long-lived Iroh endpoint with disposable peer connections.
 
 use std::{
+    net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
     path::Path,
     str::FromStr,
     sync::{
@@ -13,7 +14,11 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail};
-use iroh::{Endpoint, EndpointAddr, RelayMode, SecretKey, Watcher, endpoint::presets};
+use iroh::{
+    Endpoint, EndpointAddr, RelayMode, SecretKey, Watcher,
+    dns::{DnsProtocol, DnsResolver},
+    endpoint::presets,
+};
 use iroh_tickets::endpoint::EndpointTicket;
 use tokio::sync::{mpsc, oneshot};
 use weld_hoist_encoded::{EncodedDestinationTransport, EncodedSourceTransport};
@@ -44,6 +49,51 @@ pub enum IrohNetwork {
     N0,
 }
 
+/// DNS policy for N0 discovery/relay names. Direct mode sends no DNS queries.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum IrohDnsPolicy {
+    /// Iroh's system-aware resolver, including its upstream fallback policy.
+    #[default]
+    System,
+    /// Development policy: query public resolvers without reading system DNS.
+    /// Uses Google IPv4/IPv6 over UDP/TCP plus any upstream public fallbacks.
+    /// Does not respect Android Private DNS or a VPN's resolver configuration.
+    Public,
+}
+
+impl IrohDnsPolicy {
+    // The compositor locks iroh-dns 1.1; the standalone shell resolves 1.3.
+    // The replacement API is absent in 1.1. `expect` would warn there because
+    // no deprecation is emitted, so narrowly allow this compatibility call.
+    #[allow(
+        deprecated,
+        reason = "nameserver API shared by the two locked Iroh DNS versions"
+    )]
+    fn resolver(self) -> Option<DnsResolver> {
+        match self {
+            Self::System => None,
+            Self::Public => {
+                // Do not call with_system_defaults: Android's JNI context is not
+                // installed by GDExtension. Upstream otherwise detects that via
+                // a panic, which becomes fatal with panic=abort.
+                let addresses = [
+                    IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)),
+                    IpAddr::V4(Ipv4Addr::new(8, 8, 4, 4)),
+                    IpAddr::V6(Ipv6Addr::new(0x2001, 0x4860, 0x4860, 0, 0, 0, 0, 0x8888)),
+                    IpAddr::V6(Ipv6Addr::new(0x2001, 0x4860, 0x4860, 0, 0, 0, 0, 0x8844)),
+                ];
+                let mut resolver = DnsResolver::builder();
+                for address in addresses {
+                    resolver = resolver
+                        .with_nameserver(SocketAddr::new(address, 53), DnsProtocol::Udp)
+                        .with_nameserver(SocketAddr::new(address, 53), DnsProtocol::Tcp);
+                }
+                Some(resolver.build())
+            }
+        }
+    }
+}
+
 /// Long-lived Iroh endpoint host. Individual peers borrow its lifetime.
 pub struct IrohHost {
     lifetime: Arc<HostLifetime>,
@@ -53,16 +103,30 @@ pub struct IrohHost {
 
 impl IrohHost {
     pub fn bind(network: IrohNetwork) -> Result<Self> {
-        Self::bind_key(network, None)
+        Self::bind_key(network, None, IrohDnsPolicy::System)
     }
 
     /// Binds with a persisted local key. N0 publishes a stable, linkable endpoint
     /// identity; it does not make every discovered device an authorized peer.
     pub fn bind_with_identity(network: IrohNetwork, identity: &IrohDeviceIdentity) -> Result<Self> {
-        Self::bind_key(network, Some(identity.secret()))
+        Self::bind_with_identity_and_dns(network, identity, IrohDnsPolicy::System)
     }
 
-    fn bind_key(network: IrohNetwork, secret: Option<SecretKey>) -> Result<Self> {
+    /// Binds a stable identity with an explicit, process-local DNS policy.
+    /// The policy is not persisted in or accepted from a peer's public profile.
+    pub fn bind_with_identity_and_dns(
+        network: IrohNetwork,
+        identity: &IrohDeviceIdentity,
+        dns: IrohDnsPolicy,
+    ) -> Result<Self> {
+        Self::bind_key(network, Some(identity.secret()), dns)
+    }
+
+    fn bind_key(
+        network: IrohNetwork,
+        secret: Option<SecretKey>,
+        dns: IrohDnsPolicy,
+    ) -> Result<Self> {
         let (commands, receiver) = mpsc::unbounded_channel();
         let (started_tx, started_rx) = std_mpsc::sync_channel(1);
         let (done_tx, done_rx) = std_mpsc::sync_channel(1);
@@ -74,7 +138,7 @@ impl IrohHost {
                     .build()
                     .context("could not create Iroh Tokio runtime")
                     .and_then(|runtime| {
-                        runtime.block_on(run_host(network, secret, receiver, started_tx))
+                        runtime.block_on(run_host(network, secret, dns, receiver, started_tx))
                     });
                 if let Err(error) = result {
                     tracing::error!(%error, "Iroh host stopped");
@@ -293,6 +357,18 @@ impl IrohHost {
     pub fn ticket(&self) -> &str {
         &self.ticket
     }
+
+    /// Snapshot this endpoint's public identity and dialing hints. Direct hints
+    /// expire on rebind; N0 profiles can discover the same identity after restart.
+    pub fn connection_profile(&self) -> Result<IrohConnectionProfile> {
+        let ticket = EndpointTicket::from_str(&self.ticket).context("invalid local ticket")?;
+        let address = ticket.endpoint_addr();
+        IrohConnectionProfile::new(
+            IrohPeerIdentity(address.id.to_string()),
+            self.network,
+            address.ip_addrs().copied().collect(),
+        )
+    }
 }
 
 pub(crate) struct HostLifetime {
@@ -503,28 +579,24 @@ enum HostCommand {
 async fn run_host(
     network: IrohNetwork,
     secret: Option<SecretKey>,
+    dns: IrohDnsPolicy,
     mut commands: mpsc::UnboundedReceiver<HostCommand>,
     started: std_mpsc::SyncSender<Result<String, String>>,
 ) -> Result<()> {
     let secret = secret.unwrap_or_else(SecretKey::generate);
-    let endpoint = match network {
-        IrohNetwork::Direct => {
-            Endpoint::builder(presets::Minimal)
-                .secret_key(secret)
-                .relay_mode(RelayMode::Disabled)
-                .alpns(vec![WELD_ALPN.to_vec()])
-                .bind()
-                .await
-        }
-        IrohNetwork::N0 => {
-            Endpoint::builder(presets::N0)
-                .secret_key(secret)
-                .alpns(vec![WELD_ALPN.to_vec()])
-                .bind()
-                .await
-        }
+    let mut endpoint = match network {
+        IrohNetwork::Direct => Endpoint::builder(presets::Minimal).relay_mode(RelayMode::Disabled),
+        IrohNetwork::N0 => Endpoint::builder(presets::N0),
+    };
+    if let Some(resolver) = dns.resolver() {
+        endpoint = endpoint.dns_resolver(resolver);
     }
-    .map_err(anyhow::Error::from)?;
+    let endpoint = endpoint
+        .secret_key(secret)
+        .alpns(vec![WELD_ALPN.to_vec()])
+        .bind()
+        .await
+        .map_err(anyhow::Error::from)?;
     if network == IrohNetwork::N0 {
         tokio::time::timeout(N0_ONLINE_WAIT, endpoint.online())
             .await

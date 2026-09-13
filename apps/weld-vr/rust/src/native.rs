@@ -10,6 +10,7 @@ mod provider;
 compile_error!("Weld VR native video currently supports Linux and Android");
 pub use provider::{Decoder, Image, TEXTURE_TARGET, Target};
 
+#[derive(Clone, Copy)]
 pub struct Geometry {
     pub width: u32,
     pub height: u32,

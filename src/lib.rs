@@ -3,6 +3,7 @@
 mod arguments;
 mod bitrate_budget;
 mod headless;
+mod iroh_host;
 mod overlay;
 mod telemetry;
 
@@ -69,11 +70,11 @@ pub fn run(arguments: AppArguments) -> Result<()> {
         Some(PendingHoistTransport::LocalDestination(path.clone()))
     } else if let Some(ticket) = &arguments.hoist_iroh_listen {
         Some(PendingHoistTransport::IrohSource {
-            host: IrohHost::bind(arguments.hoist_iroh_network.unwrap_or_default().into())?,
+            host: iroh_host::bind(&arguments)?,
             ticket: ticket.clone(),
         })
     } else if let Some(ticket) = &arguments.hoist_iroh_connect {
-        let host = IrohHost::bind(arguments.hoist_iroh_network.unwrap_or_default().into())?;
+        let host = iroh_host::bind(&arguments)?;
         host.publish_identity(
             arguments
                 .hoist_iroh_publish_identity
@@ -667,6 +668,39 @@ mod tests {
         assert!(
             AppArguments::try_parse_from(["weldwm", "--hoist-iroh-network", "direct"]).is_err()
         );
+    }
+
+    #[test]
+    fn persistent_identity_and_profile_require_explicit_iroh_roles() {
+        for flag in ["--hoist-iroh-device-dir", "--hoist-iroh-publish-profile"] {
+            assert!(AppArguments::try_parse_from(["weldwm", flag, "/tmp/example"]).is_err());
+        }
+        for backend in ["nested", "headless"] {
+            let parsed = AppArguments::try_parse_from([
+                "weldwm",
+                "--backend",
+                backend,
+                "--hoist-iroh-listen",
+                "/tmp/ticket",
+                "--hoist-iroh-expect-peer",
+                "/tmp/approved",
+                "--hoist-iroh-device-dir",
+                "/tmp/device",
+                "--hoist-iroh-publish-profile",
+                "/tmp/profile",
+                "--hoist-iroh-network",
+                "n0",
+            ])
+            .expect("explicit persistent source");
+            assert_eq!(
+                parsed.hoist_iroh_device_dir.as_deref(),
+                Some(std::path::Path::new("/tmp/device"))
+            );
+            assert_eq!(
+                parsed.hoist_iroh_publish_profile.as_deref(),
+                Some(std::path::Path::new("/tmp/profile"))
+            );
+        }
     }
 
     #[test]

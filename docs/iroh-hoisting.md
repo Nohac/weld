@@ -34,7 +34,8 @@ These are cross-compilation checks, not ARM64 test execution or hardware decode.
 The existing private-file ticket/identity exchange remains available alongside
 the persistent-device APIs below. QR/bootstrap UI and runtime reconnect policy
 are separate work. Godot's native video fixture supports Android decoding and
-GPU presentation, but its workspace is not yet wired to these receiver libraries.
+GPU presentation; its [live-window viewer](godot-hoisting.md) now uses these same
+receiver libraries.
 
 ## Persistent devices and saved connections
 

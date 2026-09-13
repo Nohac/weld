@@ -1,6 +1,7 @@
 # Godot native video
 
-Implemented bounded fixture presentation, not a phone hoist or XR session.
+Native presentation is shared by the bounded fixture and the
+[single-window Iroh viewer](godot-hoisting.md), not yet an XR session.
 Godot 4.7.1 Compatibility runs OpenGL ES on Linux and Android. The Linux
 `opengl3_es` override and runtime EGL/extension checks are deliberate: desktop
 core OpenGL/GLX is not the validated image-import route. Vulkan external-memory
@@ -17,7 +18,8 @@ native import and synchronization still need implementation after that gate.
 - The Godot app's `native` module selects Android or Linux providers at module
   boundaries. Linux uses the existing `FfmpegDecoder` and VPP XRGB output;
   Android uses MediaCodec PRIVATE/GPU-sampleable images. Decoder construction,
-  calls and destruction all stay on the fixture worker.
+  calls and destruction stay on decoder workers (the fixture worker or shared
+  decode pool, depending on the producer).
 - `playback` shares the finite fixture driver, latest-output mailbox, pending
   presentation slot, counters and stop behavior. This fixture worker is not a
   replacement network scheduler or second multi-stream decode pool.
@@ -25,9 +27,8 @@ native import and synchronization still need implementation after that gate.
   Provider imports differ: Linux DMA-BUF plus queried XRGB modifiers, Android
   native buffer. Godot owns the texture; its storage/size must not be changed
   after native import. Linux samples a 2D texture, Android an external texture.
-  The current panel retains its ExternalTexture through stop; Rust retains the
-  material but receives the texture as a native ID. Before adding more callers,
-  make target-resource retention structural in the Rust presentation API.
+  Rust retains the ExternalTexture and material through stop and queries the
+  native ID itself; target-resource retention is structural in the Rust API.
 
 Compressed input is not dropped between dependent frames. Only fully decoded,
 never-presented outputs can be superseded in the one-slot latest mailbox. The
@@ -95,7 +96,11 @@ WELD_VR_VIDEO_CAPTURE=/tmp/weld-vr-video.png timeout 30s godot \
   --script res://tests/native_video_smoke.gd
 ```
 
-The desktop test plays twice, checks completion and exits. Its optional screenshot
+The desktop test first submits one AU without EOS, then plays two full clips,
+checks completion and exits. It records actual `frame_pre_draw` counts and
+waits for drawing before starting, because process ticks alone do not prove
+the window is being rendered. It still fails if no image is presented.
+Its optional screenshot
 is explicitly a diagnostic readback, not part of decoded-frame presentation.
 Cargo's build script generates at most 120 fixture frames in `OUT_DIR` (30-second,
 1 MiB limit) and records the encoder version; no video dumps or native
@@ -103,7 +108,38 @@ libraries are committed. Android API28 libraries are packaged in a development
 APK whose prebuilt Godot manifest still says API24: **only install on ARM64/API28+
 devices** until the manifest minimum is corrected before distribution.
 
-Next: connect the existing portable receiver/encoded-port and decode execution
-contracts to this presentation target. Networking, arbitrary negotiated codecs,
-multi-window presentation, dynamic extents, rotation/context recreation recovery,
-Pico/OpenXR and Vulkan import are outside this fixture slice.
+The live viewer now connects the portable receiver and decode execution contracts
+to this target; see its bounds and validation in [Godot hoisting](godot-hoisting.md).
+Arbitrary negotiated codecs, multi-window presentation, rotation/context recreation
+recovery, Pico/OpenXR and Vulkan import remain separate work.
+
+## Live-receiver regression checks: 2026-09-13
+
+The unchanged two-clip desktop smoke test passed at 120 decoded / 120 presented
+for each clip after two earlier runs reported 120 / 0. The earlier environment
+was not captured well enough to establish the cause. Disabling Godot's render
+loop deliberately reproduces the same 120 / 0 signature; this is evidence that
+the old assertion cannot distinguish missing draws from a presentation defect,
+not proof of what happened during the earlier runs. Manual desktop Iroh
+presentation was also confirmed by the user. No render-scheduler workaround was
+added on the basis of the failed automated runs.
+
+The updated test passed: single AU 1 decoded / 1 presented (10 draw callbacks),
+then both full clips 120 / 120 (249 draw callbacks each). Initial drawing was
+observed after 22 ms. The render-disabled negative control now fails before
+decoding with zero draw callbacks and an explicit render-loop/visibility error.
+These are one-run diagnostic observations, not timing guarantees.
+
+Desktop single-AU coverage validates fixture/presenter plumbing only. The Pixel
+was subsequently reconnected: a diagnostic APK with `-- --video-single-frame`
+in its export arguments also decoded and presented exactly one frame, without
+future input or EOS. Ordinary ADB intent extras did not work because Godot
+sanitizes command-line parameters on exported activities; the diagnostic used
+the existing fixture flag, not weakened intent sanitization. The normal export
+arguments were restored afterward.
+
+A fresh 45-second phone live run with the explicit public-DNS configuration
+completed at 28 decoded / 28 presented / zero superseded, without the earlier
+uninitialized `ndk-context` panic in the captured app log. This qualifies that
+configuration on the tested phone/network, not Android system/Private DNS,
+other hardware, all codecs or sustained high-frame-rate workloads.

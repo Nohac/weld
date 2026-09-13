@@ -1,13 +1,19 @@
-//! One finite fixture player. No Godot object crosses to codec/render threads.
+//! One GPU presentation session, fed by a fixture or the shared hoist receiver.
+//! No Godot object crosses to codec/network/render threads.
 //! The shared render adapter retains native images until GPU release fences
 //! signal. Unrecoverable context loss quarantines bounded leases and prohibits
 //! replay instead of risking buffer reuse.
+mod frame;
+mod receiver;
+mod receiver_decode;
 mod render;
 mod retirement;
 
+use frame::Frame;
+
 use crate::{
     fixture,
-    native::{self, Image, Progress},
+    native::{self, Progress},
 };
 use anyhow::{Context, Result, ensure};
 use godot::{
@@ -16,6 +22,7 @@ use godot::{
 };
 use retirement::Retired;
 use std::{
+    path::PathBuf,
     sync::{
         Arc, Mutex, MutexGuard,
         atomic::{AtomicBool, AtomicU64, Ordering},
@@ -23,19 +30,40 @@ use std::{
     thread::{self, JoinHandle},
     time::{Duration, Instant},
 };
+use weld_client::{PresentationRate, SurfaceContentView};
 
 static NEXT_SESSION: AtomicU64 = AtomicU64::new(1);
 const FIXTURE: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/panel-av1.ivf"));
+
+pub enum Source {
+    Fixture {
+        single_frame: bool,
+    },
+    Iroh {
+        directory: PathBuf,
+        rate: PresentationRate,
+    },
+}
+
+enum PresentationUpdate {
+    Frame {
+        frame: Frame,
+        view: Option<SurfaceContentView>,
+    },
+    View(SurfaceContentView),
+    Clear,
+}
 
 #[derive(Default)]
 struct Shared {
     cancelled: AtomicBool,
     queued: AtomicBool,
-    latest: Mutex<Option<Image>>,
+    latest: Mutex<Option<PresentationUpdate>>,
     retired: Mutex<Vec<Retired>>,
     target: Mutex<Option<native::Target>>,
-    pending: Mutex<Option<Image>>,
+    pending: Mutex<Option<Frame>>,
     error: Mutex<Option<String>>,
+    message: Mutex<Option<String>>,
     decoded: AtomicU64,
     presented: AtomicU64,
     replaced: AtomicU64,
@@ -43,6 +71,35 @@ struct Shared {
     decoder_ready: AtomicBool,
 }
 impl Shared {
+    fn publish(&self, frame: Frame, view: Option<SurfaceContentView>) {
+        if self.cancelled.load(Ordering::Acquire) {
+            return;
+        }
+        self.decoded.fetch_add(1, Ordering::Relaxed);
+        if matches!(
+            lock(&self.latest).replace(PresentationUpdate::Frame { frame, view }),
+            Some(PresentationUpdate::Frame { .. })
+        ) {
+            self.replaced.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+    fn set_view(&self, view: SurfaceContentView) {
+        let mut latest = lock(&self.latest);
+        match latest.as_mut() {
+            Some(PresentationUpdate::Frame { view: current, .. }) => *current = Some(view),
+            Some(PresentationUpdate::Clear) => {}
+            _ => *latest = Some(PresentationUpdate::View(view)),
+        }
+    }
+    fn clear(&self) {
+        *lock(&self.latest) = Some(PresentationUpdate::Clear);
+    }
+    fn message(&self, message: impl AsRef<str>) {
+        let mut current = lock(&self.message);
+        if current.as_deref() != Some(message.as_ref()) {
+            *current = Some(message.as_ref().to_owned());
+        }
+    }
     fn fail(&self, error: impl std::fmt::Display) {
         let mut slot = lock(&self.error);
         if slot.is_none() {
@@ -62,10 +119,13 @@ pub struct Controller {
     shared: Arc<Shared>,
     worker: Option<JoinHandle<()>>,
     material: Gd<Object>,
+    _texture: Gd<Object>,
+    current: Option<(native::Geometry, [u32; 2])>,
+    aspect: f32,
     stopped: bool,
 }
 impl Controller {
-    pub fn start(texture: i64, material: Gd<Object>) -> Result<Self> {
+    pub fn start(mut texture: Gd<Object>, material: Gd<Object>, source: Source) -> Result<Self> {
         ensure!(
             !Engine::singleton().is_editor_hint(),
             "video playback is disabled inside the editor"
@@ -74,14 +134,23 @@ impl Controller {
             material.is_class("ShaderMaterial"),
             "expected a ShaderMaterial"
         );
-        let texture = u32::try_from(texture)?;
-        ensure!(texture != 0, "external GL texture unavailable");
+        ensure!(
+            texture.is_class("ExternalTexture"),
+            "expected an ExternalTexture"
+        );
+        let texture_id = texture
+            .try_call("get_external_texture_id", &[])
+            .map_err(|error| anyhow::anyhow!("external texture: {error}"))?
+            .try_to::<i64>()
+            .map_err(|error| anyhow::anyhow!("invalid external texture ID: {error}"))?;
+        let texture_id = u32::try_from(texture_id)?;
+        ensure!(texture_id != 0, "external GL texture unavailable");
         let generation = NEXT_SESSION.fetch_add(1, Ordering::Relaxed);
         let shared = Arc::new(Shared::default());
         render::queue(
             generation,
             Arc::clone(&shared),
-            render::Operation::Open(texture),
+            render::Operation::Open(texture_id),
         );
         RenderingServer::singleton().force_sync();
         if let Some(error) = lock(&shared.error).as_ref() {
@@ -91,18 +160,25 @@ impl Controller {
             generation,
             shared,
             material,
+            _texture: texture,
+            current: None,
+            aspect: 16.0 / 9.0,
             worker: None,
             stopped: false,
         };
         let shared = Arc::clone(&controller.shared);
         controller.worker = Some(
             thread::Builder::new()
-                .name("weld-video-fixture".into())
+                .name("weld-video-source".into())
                 .spawn(move || {
-                    if let Err(error) = play(&shared)
+                    let result = match source {
+                        Source::Fixture { single_frame } => play(&shared, single_frame),
+                        Source::Iroh { directory, rate } => receiver::run(&shared, directory, rate),
+                    };
+                    if let Err(error) = result
                         && !shared.cancelled.load(Ordering::Acquire)
                     {
-                        shared.fail(format!("decode: {error:#}"));
+                        shared.fail(format!("video: {error:#}"));
                     }
                     shared.done.store(true, Ordering::Release);
                 })?,
@@ -127,21 +203,38 @@ impl Controller {
         if self.shared.queued.load(Ordering::Acquire) || lock(&self.shared.retired).len() >= 2 {
             return Ok(());
         }
-        let Some(image) = lock(&self.shared.latest).take() else {
+        let Some(update) = lock(&self.shared.latest).take() else {
             return Ok(());
         };
-        let info = image.geometry();
-        let [left, top, right, bottom] = info.crop;
-        // Crop belongs to this exact pending image, never a later mailbox value.
-        let crop = Vector4::new(
-            (left as f32 + 0.5) / info.width as f32,
-            (top as f32 + 0.5) / info.height as f32,
-            (right as f32 - 0.5) / info.width as f32,
-            (bottom as f32 - 0.5) / info.height as f32,
-        );
-        self.uniform("crop", crop.to_variant())?;
+        let (frame, crop, aspect) = match update {
+            PresentationUpdate::Clear => {
+                self.current = None;
+                self.uniform("has_frame", false.to_variant())?;
+                return Ok(());
+            }
+            PresentationUpdate::View(view) => {
+                let Some((geometry, visible)) = self.current else {
+                    return Ok(());
+                };
+                let (crop, aspect) = frame::crop(geometry, visible, Some(view))?;
+                (None, crop, aspect)
+            }
+            PresentationUpdate::Frame { frame, view } => {
+                let (crop, aspect) = frame.crop(view)?;
+                self.current = Some((frame.image.geometry(), frame.visible));
+                (Some(frame), crop, aspect)
+            }
+        };
+        self.aspect = aspect;
+        self.uniform(
+            "crop",
+            Vector4::new(crop[0], crop[1], crop[2], crop[3]).to_variant(),
+        )?;
         self.uniform("has_frame", true.to_variant())?;
-        *lock(&self.shared.pending) = Some(image);
+        let Some(frame) = frame else {
+            return Ok(());
+        };
+        *lock(&self.shared.pending) = Some(frame);
         self.shared.queued.store(true, Ordering::Release);
         render::queue(
             self.generation,
@@ -152,6 +245,9 @@ impl Controller {
     }
     pub fn stop(&mut self) {
         self.shared.cancelled.store(true, Ordering::Release);
+        if let Some(worker) = &self.worker {
+            worker.thread().unpark();
+        }
         if let Err(error) = self
             .uniform("has_frame", false.to_variant())
             .and_then(|()| self.uniform("video", Variant::nil()))
@@ -199,8 +295,11 @@ impl Controller {
         if let Some(error) = lock(&self.shared.error).as_ref() {
             return error.clone();
         }
+        let message = lock(&self.shared.message);
         let state = if self.stopped {
             "Stopped"
+        } else if let Some(message) = message.as_deref() {
+            message
         } else if self.shared.done.load(Ordering::Acquire) {
             "Finished - replay available"
         } else if !self.shared.decoder_ready.load(Ordering::Acquire) {
@@ -215,6 +314,9 @@ impl Controller {
             self.shared.replaced.load(Ordering::Relaxed)
         )
     }
+    pub fn aspect(&self) -> f32 {
+        self.aspect
+    }
 }
 impl Drop for Controller {
     fn drop(&mut self) {
@@ -227,7 +329,7 @@ impl Drop for Controller {
     }
 }
 
-fn play(shared: &Shared) -> Result<()> {
+fn play(shared: &Shared, single_frame: bool) -> Result<()> {
     let clip = fixture::parse(FIXTURE)?;
     let target = lock(&shared.target)
         .take()
@@ -235,7 +337,11 @@ fn play(shared: &Shared) -> Result<()> {
     let mut decoder = native::Decoder::new(&clip.config, target)?;
     shared.decoder_ready.store(true, Ordering::Release);
     let start = Instant::now();
-    for frame in &clip.frames {
+    for frame in clip
+        .frames
+        .iter()
+        .take(if single_frame { 1 } else { clip.frames.len() })
+    {
         let deadline = Instant::now() + Duration::from_secs(3);
         while !shared.cancelled.load(Ordering::Acquire) {
             if start.elapsed().as_micros() >= u128::from(frame.timestamp)
@@ -251,6 +357,22 @@ fn play(shared: &Shared) -> Result<()> {
             return Ok(());
         }
         drain(&mut decoder, shared)?;
+    }
+    if single_frame {
+        // Qualification: do not submit EOS or a second AU to coax out the first
+        // output. A static window must appear without a future client commit.
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while shared.decoded.load(Ordering::Acquire) == 0
+            && !shared.cancelled.load(Ordering::Acquire)
+        {
+            drain(&mut decoder, shared)?;
+            ensure!(
+                Instant::now() < deadline,
+                "single-AU decode needs future input; unsupported low-delay path"
+            );
+            thread::sleep(Duration::from_millis(1));
+        }
+        return Ok(());
     }
     let deadline = Instant::now() + Duration::from_secs(3);
     while !shared.cancelled.load(Ordering::Acquire) && !decoder.try_finish()? {
@@ -280,13 +402,7 @@ fn drain(decoder: &mut native::Decoder, shared: &Shared) -> Result<bool> {
             Progress::Pending => return Ok(false),
             Progress::End => return Ok(true),
             Progress::Image(image) => {
-                shared.decoded.fetch_add(1, Ordering::Relaxed);
-                if shared.cancelled.load(Ordering::Acquire) {
-                    return Ok(false);
-                }
-                if lock(&shared.latest).replace(image).is_some() {
-                    shared.replaced.fetch_add(1, Ordering::Relaxed);
-                }
+                shared.publish(Frame::fixture(image), None);
             }
         }
     }

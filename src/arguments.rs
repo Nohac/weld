@@ -216,9 +216,18 @@ pub struct AppArguments {
     #[arg(long, value_name = "PATH", requires = "hoist_iroh_listen")]
     pub(crate) hoist_iroh_expect_peer: Option<PathBuf>,
 
-    /// Publish this destination's ephemeral identity for explicit source approval.
+    /// Publish this destination's public identity for explicit source approval.
     #[arg(long, value_name = "PATH", requires = "hoist_iroh_connect")]
     pub(crate) hoist_iroh_publish_identity: Option<PathBuf>,
+
+    /// Retain this device's private Iroh key across runs (otherwise ephemeral).
+    #[arg(long, value_name = "DIRECTORY", requires = "hoist_iroh_peer")]
+    pub(crate) hoist_iroh_device_dir: Option<PathBuf>,
+
+    /// Publish a new private source profile. N0 supports rediscovery after restart;
+    /// Direct address hints must be refreshed after rebinding.
+    #[arg(long, value_name = "PATH", requires = "hoist_iroh_listen")]
+    pub(crate) hoist_iroh_publish_profile: Option<PathBuf>,
 
     /// Rendezvous and peer startup budget in seconds (default 120, maximum 3600).
     #[arg(long, value_name = "SECONDS", requires = "hoist_iroh_peer", value_parser = clap::value_parser!(u64).range(1..=3600))]

@@ -5,10 +5,12 @@ use weld_media::DecoderConfig;
 use weld_media_android::{AndroidDecoder, AndroidImage, AndroidImageTarget, DecodeProgress};
 
 pub const TEXTURE_TARGET: u32 = 0x8d65; // GL_TEXTURE_EXTERNAL_OES
-// Conservative bound: current/spare (2), steady retirements (2), pending (1),
-// latest (1), worker acquisition (1), plus one spare. Teardown moves imports
-// into retirement slots rather than duplicating their image leases.
+// Fixture holders: current/spare (2), retirements (2), pending (1), latest (1),
+// acquisition (1). Live receive additionally reserves one of seven global frame
+// credits BEFORE submission; the credit follows publication through GPU release.
+// Thus even pool completions/old-generation outputs cannot exhaust this reader.
 const MAX_ACQUIRED_IMAGES: i32 = 8;
+#[derive(Clone)]
 pub struct Target;
 impl Target {
     pub fn query(_context: NonNull<c_void>) -> Result<Self> {
@@ -40,6 +42,9 @@ impl Decoder {
 }
 pub struct Image(AndroidImage);
 impl Image {
+    pub fn timestamp_micros(&self) -> u64 {
+        self.0.info().timestamp_micros
+    }
     pub fn geometry(&self) -> Geometry {
         let info = self.0.info();
         Geometry {

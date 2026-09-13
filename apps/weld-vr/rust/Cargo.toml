@@ -12,7 +12,10 @@ crate-type = ["cdylib"]
 [dependencies]
 godot = { version = "=0.5.5", default-features = false, features = ["api-4-7"] }
 anyhow = "1"
-weld-media = { path = "../../../crates/weld-media", features = ["config"] }
+weld-media = { path = "../../../crates/weld-media", features = ["config", "decode"] }
+weld-client = { path = "../../../crates/weld-client" }
+weld-hoist-encoded = { path = "../../../crates/weld-hoist-encoded" }
+weld-hoist-iroh = { path = "../../../crates/weld-hoist-iroh" }
 libc = "0.2"
 
 [target.'cfg(target_os = "android")'.dependencies]

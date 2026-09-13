@@ -1,7 +1,7 @@
 //! Fence-gated output release. Normal ticks never wait for GPU work; only
 //! lifecycle stop waits up to two seconds, outside the render thread.
+use super::frame::Frame;
 use super::{Shared, lock};
-use crate::native::Image;
 use anyhow::{Context, Result, ensure};
 use std::{
     os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd},
@@ -10,11 +10,11 @@ use std::{
 };
 
 pub(super) struct Retired {
-    image: Option<Image>,
+    image: Option<Frame>,
     fence: Option<OwnedFd>,
 }
 impl Retired {
-    pub fn new(image: Image, fence: OwnedFd) -> Self {
+    pub fn new(image: Frame, fence: OwnedFd) -> Self {
         Self {
             image: Some(image),
             fence: Some(fence),

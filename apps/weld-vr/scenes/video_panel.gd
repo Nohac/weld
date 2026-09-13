@@ -1,5 +1,5 @@
 extends Control
-## Finite fixture UI; no network session or XR startup in this slice.
+## One GPU-native live window, with the finite AV1 fixture retained for diagnosis.
 
 signal playback_started
 signal playback_stopped
@@ -8,6 +8,8 @@ var player: WeldVideoPlayer
 var video_texture: ExternalTexture
 var video_material: ShaderMaterial
 var status_elapsed := 0.0
+var network_active := false
+var log_elapsed := 0.0
 @onready var view: ColorRect = $VideoFrame/Video
 
 
@@ -16,13 +18,24 @@ func _ready() -> void:
 	add_child(player)
 	$Play.pressed.connect(play)
 	$Stop.pressed.connect(stop)
+	$Connect.pressed.connect(connect_source)
 	RenderingServer.frame_pre_draw.connect(_before_draw)
 	# Explicit opt-in for the bounded physical presentation check.
-	if "--video-fixture" in OS.get_cmdline_user_args():
+	if "--video-fixture" in OS.get_cmdline_user_args() or "--video-single-frame" in OS.get_cmdline_user_args():
 		call_deferred("play")
+	elif DisplayServer.get_name() != "headless" and "--script" not in OS.get_cmdline_args():
+		call_deferred("connect_source")
 
 
 func play() -> void:
+	_start(false, "--video-single-frame" in OS.get_cmdline_user_args())
+
+
+func connect_source() -> void:
+	_start(true)
+
+
+func _start(network: bool, single_frame: bool = false) -> void:
 	stop()
 	if Engine.is_editor_hint() or DisplayServer.get_name() == "headless":
 		$Status.text = "Native video requires a running EGL display (not editor/headless)."
@@ -47,16 +60,33 @@ void fragment() {
 	video_material.shader = shader
 	video_material.set_shader_parameter("video", video_texture)
 	view.material = video_material
-	if not player.start(video_texture.get_external_texture_id(), video_material):
+	var started: bool
+	if network:
+		var refresh := DisplayServer.screen_get_refresh_rate()
+		if refresh <= 0.0:
+			refresh = 60.0
+		var directory := OS.get_environment("WELD_VR_DEVICE_DIR")
+		if directory.is_empty():
+			directory = ProjectSettings.globalize_path("user://weld-device")
+		started = player.start_stream(video_texture, video_material,
+			directory, int(clampf(refresh, 1.0, 1000.0) * 1000.0))
+	else:
+		if single_frame:
+			started = player.start_single_frame(video_texture, video_material)
+		else:
+			started = player.start(video_texture, video_material)
+	if not started:
 		view.material = null
 		video_material = null
 		video_texture = null
 	else:
+		network_active = network
 		playback_started.emit()
 	$Status.text = player.status()
 
 
 func stop() -> void:
+	network_active = false
 	if not is_instance_valid(player):
 		return
 	# Rust also clears the sampler, so native Node teardown is safe independently
@@ -78,13 +108,20 @@ func _process(delta: float) -> void:
 	if status_elapsed >= 0.25:
 		status_elapsed = 0.0
 		$Status.text = player.status()
+		$VideoFrame.ratio = player.aspect()
+	if network_active or "--video-single-frame" in OS.get_cmdline_user_args():
+		log_elapsed += delta
+		if log_elapsed >= 1.0:
+			log_elapsed = 0.0
+			print("WELD_HOIST_STATUS ", player.status())
 
 
 func _notification(what: int) -> void:
 	if what == NOTIFICATION_APPLICATION_PAUSED:
 		stop()
 	elif what == NOTIFICATION_APPLICATION_RESUMED:
-		# Resume never silently reconnects a producer or replaces the old context.
+		# The explicit Connect button starts a fresh GPU target after pause.
+		# Rejoining the same source still needs source-side re-admission.
 		stop()
 
 

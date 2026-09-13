@@ -265,8 +265,10 @@ are released. Linux adapts its existing eventfd notifier; other hosts supply
 their own wake mechanism. This changes neither Iroh queue admission nor the
 independent control/media tasks. Android checks establish compilation and the
 absence of compositor dependencies, not network execution on Android. Separate
-device probes and the Godot fixture validate native decoding/presentation, not
-end-to-end phone hoisting or XR runtime initialization.
+device probes and the Godot fixture validate native decoding/presentation. The
+[Godot live viewer](godot-hoisting.md) uses the same registration and pool with
+a native-image publisher; physical phone tests establish one live AV1 window
+and source-restart reconnection, not XR runtime initialization.
 
 FFmpeg and cros-libva intentionally own separate VA displays on the same render
 node in this first implementation. Frames cross that boundary through PRIME.
