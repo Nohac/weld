@@ -181,24 +181,134 @@ to inject input are separate states:
 - an input device sends events only through the seat and focus route to which it
   is assigned.
 
-This separation allows a hoisted window viewed in a headset to keep receiving a
-physical keyboard attached to either endpoint. A keyboard attached to the
-destination uses the ordered input flow. A keyboard attached to the source can
-reach the authoritative client directly, but follows the same destination-led
-focus state and seat assignment rather than the placeholder's local visual
-selection. Focus changes need an ordered epoch or equivalent stale-update guard,
-and one logical seat has at most one keyboard-focused surface. Headset focus
-loss, session revocation, or disconnect releases held input state and removes
-the route so keystrokes cannot leak into the previously viewed application.
+Source-attached laptop input and headset-attached input follow the shared
+[input-producer and remote-control contract](surfaces-and-input.md#input-producers-and-remote-control).
+The XR shell selects presentations and expresses focus intent; seat ownership,
+held input, repeat and revocation are not XR-specific implementations.
 
 An XR target may use a focused-window-relative pointer instead of projecting a
 mouse across one global desktop rectangle. The target negotiates whether a seat
 uses surface-local absolute coordinates, ray intersections projected into a
-surface, or relative deltas captured by the focused presentation. Focus and
-grab identity accompany that state, so changing panels cannot reinterpret an
-old delta or release against another window. The destination owns cursor
+surface, or relative deltas captured by the focused presentation, under the
+[pointer-capture contract](surfaces-and-input.md#pointer-capture-and-relative-motion--direction).
+The destination owns cursor
 placement in its spatial scene; the source still supplies client cursor shape
 and hotspot changes and validates input before delivery.
+
+### Initial ring workspace
+
+The initial layout candidate is a circular arrangement around the user, starting
+with a front-facing arc and stable slots rather than unrestricted free-form
+placement. Use a consistent viewing distance, face each panel toward the
+workspace's reference position, and allow a modest adjustable backward tilt
+(top edge farther away, like a laptop screen). Related menus, tooltips and
+dialogs remain attached to their application family rather than receiving
+unrelated ring slots. Independent placement can come later.
+
+Two session-local anchor modes are useful:
+
+- **Pinned:** the workspace stays at a chosen room position/orientation.
+- **Follow:** recenter around the user as they move, without rotating on every
+  head turn and making a looked-at window move away. The precise follow threshold
+  and smoothing need comfort testing. Freeze automatic relocation during an
+  interaction and provide an explicit recenter action.
+
+Persistent anchors across restarts, room changes and tracking relocalization
+are separate work. Neither mode rotates the camera or the perceived room to
+navigate applications. Head tracking and window layout remain separate.
+
+Ordinary physical-mouse motion uses a window-local cursor constrained to the
+focused application, with its previous position restored on return. This is
+not application-requested relative capture: Blender's hidden-cursor value drag
+still needs unbounded relative deltas and proper capture activation.
+
+For ring navigation, try holding a selected mouse side button and moving the
+mouse horizontally. Capture/hide the pointer, rotate the ring, and highlight a
+candidate without changing accepted application focus. Release requests focus
+and gently snaps that panel into place; Escape cancels to the previous choice.
+Start without inertia. Do not enter during an application drag/grab. Restore
+the selected window's cursor only after the transition is accepted.
+
+The binding is configurable and reserved only while session input capture is
+active. Detect the actual extra-button event; do not confuse Godot button
+numbers with native input codes. Consume both edges so the gesture cannot also
+send browser Back/Forward. Ctrl+Alt is a possible keyboard fallback, not a
+conflict-free guarantee. Alt alone conflicts with applications; Super may be
+owned by Sway and is a possible default only when the host configuration or
+Weld's full-stack ownership permits it. Head/controller pointing plus explicit
+confirmation and conventional task cycling remain alternative selection modes.
+
+### Controller interaction and virtual keyboards
+
+Start with controller-ray intersections mapped to application-local mouse
+coordinates: trigger for left press/drag/release, another button for right
+click, stick for scrolling, and configurable middle-button/modifier bindings.
+Mouse semantics preserve desktop hover and menus. Finger interaction may later
+use true touch when the end-to-end contact contract is supported; translating
+a tap into a mouse click must not advertise native touch support.
+
+A controller button explicitly toggles the XR keyboard initially. Automatic
+opening on application text-field focus is not required. Showing or pointing
+at the keyboard must preserve the intended application's keyboard target;
+closing it releases only its own held/latched inputs. The installed XR Tools
+keyboard scene is a UI candidate, not a ready-made remote keyboard adapter:
+its synthetic press handler requires balanced release, layout/modifier and
+repeat handling at Weld's input boundary.
+
+Phone on-screen controls and Android's native keyboard are later interaction
+work. Native keyboard availability does not supply remote IME composition,
+selection or text commit support; those follow the shared input capabilities,
+not guessed physical-key sequences.
+
+### Initial headset readability preference
+
+The vendor-reported [Pico 4 Ultra panel resolution](https://www.picoxr.com/uk/products/pico4-ultra)
+is 2160x2160 per eye, not a measured per-window raster budget. Headset render
+targets, lens projection, panel angular size and distance determine the useful
+window sampling density. Keep UI scale, encoded extent and apparent panel size
+independent; ordinary mono windows can be sampled into both eye views without
+requiring two separately encoded application images.
+
+Try an adjustable **1.8x application UI-scale preference**. For example, a
+2160x1440 source raster at that scale represents about 1200x800 logical units;
+do not force square windows just because the eye panels are square. This is an
+experiment, not a promise that every client honors an exact fractional scale,
+nor a requirement to encode every visible window near 2160 pixels.
+
+The current [Godot tracer](../godot-hoisting.md#pipeline-and-limits) rejects
+extents above 2048 per dimension or 1920x1080 total pixels. The example exceeds
+both deliberate admission limits; it requires decoder/capability/budget
+validation before raising them. They are not probed Pico or AV1 hardware limits.
+
+### Physical-monitor overlay and window detachment
+
+A much later presentation mode could replace the blurry passthrough image of
+a laptop screen or desktop monitor with a sharp digital workspace view aligned
+to the physical screen. The user begins at the familiar workstation, grabs an
+existing window out into XR space, then returns it when finished. This changes
+presentation ownership, not the identity or running instance of the application.
+Normal hoist/reclaim policy governs the transition and any source placeholder.
+
+A desktop video alone does not expose detachable application surfaces. The
+source also needs authorized stable window/output identities, geometry and
+relationships, provided by Weld hosting/proxy integration or another cooperating
+source. Screen detection aligns the physical plane; it does not infer permission
+or reconstruct a reliable client graph from rectangles in video. An overview
+stream versus destination composition of window streams is a later budgeting
+choice, not a new semantic hoist mode.
+
+Start with manually aligned and pinned screen corners. Later, an on-screen
+marker could identify/calibrate an output without bypassing pairing/consent.
+Automatic detection/tracking may eventually use OpenCV or similar libraries
+from Rust with camera feeds, under the
+[platform constraints](distributions.md#godotrust-phone-first-xr-client).
+Validate camera access/permissions, intrinsics, camera-to-headset extrinsics,
+timestamps, reference-space registration, latency and tracking-loss behavior;
+detecting a rectangle alone does not provide a stable XR pose. Hands/objects
+occluding the screen and alignment drift need independent treatment. Keep raw
+camera frames and room observations local unless explicitly authorized otherwise.
+This is screen perception layered on normal XR pose tracking, not a requirement
+to rebuild headset tracking, and is not a prerequisite for the first shell.
 
 ### Fixed and head-tracked spatial content
 

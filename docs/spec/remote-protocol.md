@@ -248,11 +248,9 @@ mode distinguishes target-absolute coordinates, surface-local projection, and
 relative deltas captured by the focused surface. Each focus transition carries
 an ordered epoch or equivalent generation; motion, buttons, grabs, and releases
 name that state so delayed input cannot land on a newly focused window. A
-source-attached device may deliver directly to the authoritative client while
-following destination-led focus, whereas a destination-attached device crosses
-the input flow. Both paths project the generic
-[logical-seat contract](surfaces-and-input.md#seats-and-devices--direction);
-the transport does not invent a second focus model.
+source- or destination-attached device follows the shared
+[input-producer contract](surfaces-and-input.md#input-producers-and-remote-control).
+The transport projects that seat/focus model; it does not invent another one.
 
 A session-wide handoff does not weaken input recovery. The source retains a
 local emergency reclaim action outside the transported shortcut namespace.
@@ -623,7 +621,8 @@ work.
   authorization, negotiated capabilities, recovery, and observability.
 - Define binding-independent device proof over transport session transcripts.
 - Define logical-seat, focus-epoch, pointer-mode, and bidirectional cursor-state
-  records for destination-led focus with source- or destination-attached input.
+  records for the shared [input-producer
+  contract](surfaces-and-input.md#input-producers-and-remote-control).
 - Include application-requested pointer lock/confinement, relative deltas,
   activation/denial/revocation and safe escape/reclaim/disconnect behavior in
   that input contract. Cursor hiding alone is not capture. Blender's held-LMB

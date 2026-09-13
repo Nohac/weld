@@ -200,6 +200,50 @@ tablet input, and global-shortcut protocols without exposing backend-specific
 events to plugins. Remote input must stay scoped to its authorized window or
 explicit remote seat.
 
+### Input producers and remote control
+
+Presentation ownership must not determine where physical input devices live.
+A source-attached keyboard or mouse may deliver directly to the source's
+authoritative client while following the destination's accepted focus selection
+and the seat assignment above. It must not bounce through the headset and back,
+or route by the source placeholder's visual selection. Destination-attached
+devices enter the same contract through ordered hoist input. Source policy
+validates focus requests; attention and an unaccepted focus candidate are not
+authority to receive input.
+
+The first mixed-device experiment may have a laptop keyboard/mouse and headset
+controller contributing to one logical seat. Track held keys, buttons and
+virtual modifiers per producer before aggregating seat state: one producer's
+release must not cancel another's hold. Keep terminating events tied to their
+original interaction, using the focus/grab and revocation rules above. Do not
+create another focus or pressed-state implementation inside each shell.
+
+An input-only control window is a candidate source adapter when another
+compositor, such as Sway, owns the desktop. It receives input while deliberately
+focused/captured, identifies the controlled application, and provides a local
+escape/reclaim action. It is not a video presenter and not an operating-system
+security lock screen. It must not imply global interception of another
+compositor's input or claim capture that the host refused. When Weld owns the
+desktop, its native input adapter can supply the same route without that window.
+Capture/focus loss follows the existing
+[cleanup contract](#pointer-capture-and-relative-motion--direction).
+
+Reuse [explicit keyboard repeats](../keyboard-repeat.md). Current repeat
+ownership is seat-wide and chosen at startup; automatic arbitration between
+heterogeneous controllers is not implemented. Supporting mixed producers needs
+an explicit compatible cadence policy, not a mode switch on each event or a
+second hidden repeat timer. Preserve balanced presses/releases and invalidate
+repeat for a revoked hold. Virtual-keyboard taps must not become indefinitely
+held physical keys.
+
+Physical key transitions and text/IME composition are different capabilities.
+An adapter must not reinterpret a Unicode character as a native keycode or
+assume autocorrection/preedit is a sequence of physical key presses. Similarly,
+touch-to-pointer translation is not native touch: real touch needs contact
+identity, down/move/up/cancel and frame semantics. Shell navigation remains
+separate from application input and must consume its complete gesture once
+claimed; the current gesture-consumption gap is not resolved by this Direction.
+
 ## Open work — Exploration
 
 - Define the smallest transport-neutral view-set metadata and the corresponding

@@ -80,11 +80,14 @@ rather than being defined by the mobile assembly.
 
 ### Godot/Rust phone-first XR client
 
-As of 2026-09-11, the next intended client experiment uses Godot with
-[godot-rust/gdext](https://github.com/godot-rust/gdext). Begin on an Android phone
-even though a headset is available: build/deploy, logs, input and lifecycle are
-easier to iterate on without repeatedly entering and leaving VR. This is an
-Exploration, not an installed toolchain or an implemented Android client.
+The client experiment uses Godot with
+[godot-rust/gdext](https://github.com/godot-rust/gdext), initially on a phone to
+iterate without repeatedly entering and leaving VR. As of 2026-09-13, debug
+build/export, native video presentation and one live Iroh window work on Linux
+and the tested Android phone. See [Godot hoisting](../godot-hoisting.md) and
+[native-video validation](../godot-native-video.md#live-receiver-regression-checks-2026-09-13)
+for implemented evidence and limits. The complete XR shell below remains an
+Exploration; phone success is not headset qualification.
 
 The proposed split keeps protocol/session/input mechanisms in reusable Weld Rust
 code, exposes a small Godot-facing integration, and keeps Android codec and
@@ -93,8 +96,8 @@ layout and eventual OpenXR integration; most behavior may be written in Rust.
 The encoded/Iroh libraries now have compositor-free default dependency graphs;
 Linux native integration is opt-in. See the implemented
 [portable receiver boundary](../receiver-decoder-pool.md#portable-encoded-receiver-and-iroh-binding).
-The Godot shell is not yet wired to those libraries. Do not ship
-Smithay/DRM/VA-API host machinery just to reuse hoist policy.
+The Godot shell now reuses those libraries with the Android media provider.
+Do not ship Smithay/DRM/VA-API host machinery just to reuse hoist policy.
 
 The [godot-rust Android guide] and the user's supplied [Android build report]
 provide a starting point: an ARM64 Rust `cdylib`, `cargo-ndk`, Godot's Android
@@ -104,33 +107,57 @@ report's SDK 37 example. Package the library inside the Godot project, keep
 signing secrets out of version control, and avoid release builds or broad
 dependency rebuilds for ordinary iteration.
 
-Suggested validation order:
+Suggested validation order, updated after the first live panel. This is a
+candidate sequence, not an implementation checklist:
 
-1. A minimal phone APK that calls Rust through GDExtension, with repeatable debug
-   build/deploy and lifecycle logging.
-2. One hardware-decoded video panel, preferably AV1 when exposed by the device.
+1. **Validated:** a minimal phone APK calling Rust through GDExtension, with
+   repeatable debug build/deploy and lifecycle logging.
+2. **Validated on the tested devices:** one native-decoded AV1 video panel.
    Probe MediaCodec format/profile/extent support and real decode-to-presentation
    behavior; software fallback or H.264 must be an explicit result, not a hidden
    substitute for validating the selected hardware path.
-3. One real Iroh hoist session with resize, scale, basic input, reclaim,
-   disconnect and Android pause/resume. Keep networking and codec work off the
-   shell's frame-critical path. Start on a convenient local network; repeat
-   isolated mobile-network validation after the client itself is dependable.
-4. Reuse the client/Android work in a Pico OpenXR shell, first as one ordinary
-   mono window with controller interaction. Validate headset-specific surfaces,
-   frame pacing and resume independently; phone success is not XR validation.
+3. **Partially validated:** real Iroh media, stable pairing and source-restart
+   reconnect. The current shell permits one media stream per connection and
+   has no remote input; viewer re-admission into the same running source is
+   still one-shot. The next candidate slice is desktop Godot single-window
+   mouse/keyboard input through the existing shared input/control path. Check
+   focus, coordinate mapping through crop/letterboxing, drags and release outside
+   the panel, modifiers, repeat ownership, and cleanup on focus loss, Stop and
+   disconnect. Preserve batching and independence from video completion; no new
+   per-frame ACK. Resize/scale negotiation and full lifecycle behavior remain
+   to be qualified, not inferred from a visible video panel.
+4. Add a source-side input-only capture adapter using the shared
+   [producer/seat contract](surfaces-and-input.md#input-producers-and-remote-control).
+   This enables a laptop keyboard/mouse to control a window viewed elsewhere.
+5. Reuse the client/Android work in a Pico standard-OpenXR shell, first as one
+   mono panel with controller interaction. Then qualify bounded multi-window
+   admission/decoder budgets before the [ring workspace](remote-presentation.md#initial-ring-workspace).
+   Add follow/pin/recenter and a controller-toggled XR keyboard. No free-form
+   placement or physical-monitor tracking is required. Validate headset-specific
+   surfaces, frame pacing and resume independently.
+6. Phone touchscreen gestures, native keyboard/IME and on-screen control polish
+   are lower priority than the XR interaction experiment. Phone-first media
+   validation does not require phone-first interaction polish. Repeat isolated
+   mobile-network validation after the interactive client is dependable.
 
 The Pico experiment must use Godot's standard OpenXR integration, not the Pico
 XR Godot extension or a Pico-specific SDK. Building and running this client must
-not depend on a Pico developer account or vendor login. Validate the required
+not depend on a Pico developer account, vendor login or paid tracking
+subscription. Validate the required
 OpenXR loader, Android packaging and runtime capabilities on the headset before
 building on them. Optional OpenXR features must be capability-gated; if a path
 requires the excluded vendor integration, report that limitation and use a
 standard OpenXR alternative or defer the feature rather than add that dependency.
-The phone-first validation order remains unchanged.
+The user reports that vendor tracking/perception features are subscription-gated
+while camera feeds are accessible. Treat this as motivation for independent
+screen perception, not proof of the available camera API, permission or metadata
+on the borrowed device, and not a claim that all standard OpenXR head/controller
+pose tracking is unavailable. Camera integration needs its own validation.
+The [monitor-overlay exploration](remote-presentation.md#physical-monitor-overlay-and-window-detachment)
+may use local computer vision rather than those vendor features, much later.
 
-For the phone, investigate MediaCodec output through Godot's [ExternalTexture]
-or another native GPU presentation adapter. For XR, also evaluate Godot's
+The tested phone path uses MediaCodec output through Godot's [ExternalTexture]
+and the native EGLImage adapter. For XR, also evaluate Godot's
 [OpenXR composition layers], including their Android Surface path. That path
 could avoid a CPU pixel download and potentially an extra shell composition
 pass, but runtime support, synchronization, buffer lifetime and layer limits
