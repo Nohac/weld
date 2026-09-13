@@ -87,6 +87,21 @@ pub(super) fn crop(
     visible: [u32; 2],
     view: Option<SurfaceContentView>,
 ) -> Result<([f32; 4], f32)> {
+    let display = display_geometry(geometry, visible, view)?;
+    Ok((display.crop, display.aspect))
+}
+
+pub(super) struct DisplayGeometry {
+    pub crop: [f32; 4],
+    pub aspect: f32,
+    pub logical_size: [f64; 2],
+}
+
+pub(super) fn display_geometry(
+    geometry: Geometry,
+    visible: [u32; 2],
+    view: Option<SurfaceContentView>,
+) -> Result<DisplayGeometry> {
     let [left, top, right, bottom] = geometry.crop;
     ensure!(
         left < right && top < bottom && right <= geometry.width && bottom <= geometry.height,
@@ -132,20 +147,52 @@ pub(super) fn crop(
         x_end - view.source_x >= 1.0 && y_end - view.source_y >= 1.0,
         "content view is outside decoded image"
     );
-    Ok((
-        [
+    Ok(DisplayGeometry {
+        crop: [
             (left as f32 + view.source_x + 0.5) / geometry.width as f32,
             (top as f32 + view.source_y + 0.5) / geometry.height as f32,
             (left as f32 + x_end - 0.5) / geometry.width as f32,
             (top as f32 + y_end - 0.5) / geometry.height as f32,
         ],
-        view.logical_width / view.logical_height,
-    ))
+        aspect: view.logical_width / view.logical_height,
+        // Sampling uses pixel centers; input covers the complete clipped pixel
+        // edges. Both use the same intersection, even during resize mismatch.
+        logical_size: [
+            f64::from(view.logical_width * (x_end - view.source_x) / view.source_width),
+            f64::from(view.logical_height * (y_end - view.source_y) / view.source_height),
+        ],
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn clipped_video_and_input_use_the_same_source_intersection() {
+        let display = display_geometry(
+            Geometry {
+                width: 100,
+                height: 80,
+                crop: [0, 0, 100, 80],
+            },
+            [100, 80],
+            Some(SurfaceContentView {
+                source_x: 20.0,
+                source_y: 10.0,
+                source_width: 100.0,
+                source_height: 100.0,
+                logical_width: 200.0,
+                logical_height: 200.0,
+            }),
+        )
+        .expect("display");
+        assert_eq!(display.logical_size, [160.0, 140.0]);
+        assert_eq!(display.aspect, 1.0);
+        assert_eq!(
+            display.crop,
+            [20.5 / 100.0, 10.5 / 80.0, 99.5 / 100.0, 79.5 / 80.0]
+        );
+    }
     #[test]
     fn credits_bound_all_owned_outputs_and_failed_admission_returns_capacity() {
         let budget = FrameBudget::new(std::thread::current());

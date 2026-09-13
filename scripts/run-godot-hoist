@@ -51,6 +51,7 @@ def write_new(path, text):
 def source_command(exchange, state, app):
     return ["cargo", "run", "--locked", "--quiet", "--", "--backend", "headless",
             "--wayland-socket", "source", "--hoist-all", "--headless-window-size", "960x640",
+            "--keyboard-repeat-mode", "compositor", "--legacy-key-repeat", "emulated",
             "--hoist-iroh-listen", str(exchange / "source.ticket"),
             "--hoist-iroh-expect-peer", str(exchange / "viewer.identity"),
             "--hoist-iroh-device-dir", str(state / "source"),
@@ -227,7 +228,7 @@ def main(argv=None):
             if existing is None:
                 phone_install(profile)
         write_new(run / "viewer.identity", identity(public) + "\n")
-        print(f"Viewer approved. Run for {args.seconds}s; Ctrl+C stops the demo. No remote input in this slice.", flush=True)
+        print(f"Viewer approved. Run for {args.seconds}s; Ctrl+C stops the demo. Desktop: click the image for mouse/keyboard input; XR/phone are view-only.", flush=True)
         deadline = time.monotonic() + args.seconds
         restart_at = time.monotonic() + args.restart_after if args.restart_after else None
         while not stopping and time.monotonic() < deadline:

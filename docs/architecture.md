@@ -235,12 +235,19 @@ after the backend, so releasing them must not require that backend to remain
 alive. These are backend obligations, not a claim that arbitrary
 FFmpeg buffering or an Android MediaCodec output index satisfies them.
 The portable media, encoded-port and Iroh libraries check for Android ARM64.
-Godot's separate workspace now consumes the media configuration and Linux/Android
-native decoders for a bounded AV1 fixture; it does not yet consume the network
-receiver or shared decode pool. Its playback and GLES/EGL presenter are shared,
+Godot's separate workspace consumes the media configuration and Linux/Android
+native decoders for a bounded AV1 fixture and a single-window Iroh receiver
+using the shared decode pool. Its playback and GLES/EGL presenter are shared,
 with platform-selected decoder/native-buffer providers. See
 [Godot native video](godot-native-video.md) and
 [decoder reuse and follow-ups](receiver-decoder-pool.md#portable-execution-boundary).
+The Godot receiver coordinator owns a `ClientRuntime` above its registration.
+Desktop input enters a separate bounded mailbox, with displayed-frame geometry
+and no native leases; the shared runtime owns route capture and adapter effects.
+Godot objects stay on the main thread, where a typed Rust node owns event
+extraction, physical-hold reconciliation and cursor presentation. GDScript only
+wires the presented control; it does not own input policy or a cursor protocol.
+See [Godot input](godot-hoisting.md#desktop-input).
 
 `DecodeBackend::Output` and `DecodedFramePublisher::Buffer` bind the decoder to
 a caller-owned publication adapter without making native buffers a protocol

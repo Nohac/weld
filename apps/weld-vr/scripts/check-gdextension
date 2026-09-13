@@ -2,13 +2,15 @@
 set -euo pipefail
 
 project_directory=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+desktop_cursor=false
 case "${1:-}" in
   '') build_target=desktop ;;
   --android-export) build_target=android ;;
-  *) printf '%s\n' 'Usage: check-gdextension [--android-export]' >&2; exit 2 ;;
+  --desktop-cursor) build_target=desktop; desktop_cursor=true ;;
+  *) printf '%s\n' 'Usage: check-gdextension [--android-export|--desktop-cursor]' >&2; exit 2 ;;
 esac
 if [[ $# -gt 1 ]]; then
-  printf '%s\n' 'Usage: check-gdextension [--android-export]' >&2
+  printf '%s\n' 'Usage: check-gdextension [--android-export|--desktop-cursor]' >&2
   exit 2
 fi
 "$project_directory/scripts/build-gdextension" "$build_target"
@@ -56,6 +58,23 @@ cat "$work_directory/test.log"
 if ! grep -qx 'WELD_VR_GDEXTENSION_SMOKE_OK' "$work_directory/test.log"; then
   printf '%s\n' 'Godot did not report successful completion of the integration check.' >&2
   exit 1
+fi
+
+if [[ "$desktop_cursor" == true ]]; then
+  # Opt-in real display check. Keep editor settings and ADB isolated, and
+  # --script prevents the production scene from auto-connecting to a source.
+  if ! env XDG_CONFIG_HOME="$work_directory/config" XDG_DATA_HOME="$work_directory/data" \
+    XDG_CACHE_HOME="$work_directory/cache" \
+    ADB_SERVER_SOCKET="localfilesystem:$work_directory/adb.sock" \
+    timeout 30s godot --path "$work_directory/project" \
+      --display-driver wayland --rendering-driver opengl3_es \
+      --script res://tests/cursor_smoke.gd > "$work_directory/cursor.log" 2>&1; then
+    cat "$work_directory/cursor.log" >&2
+    exit 1
+  fi
+  cat "$work_directory/cursor.log"
+  check_log "$work_directory/cursor.log"
+  grep -q '^WELD_CURSOR_SMOKE_OK display=' "$work_directory/cursor.log"
 fi
 
 # Exercise target selection and a failed compiler without changing real sources
@@ -111,6 +130,7 @@ if [[ "$build_target" == android ]]; then
       grep -qx "lib/arm64-v8a/lib$library.so" "$work_directory/$outcome-files"
     done
     for resource in scenes/video_panel.tscn.remap \
+      scenes/controller_pointer.tscn.remap \
       addons/godot-xr-tools/xr_tools.gd.remap \
       addons/godot-xr-tools/user_settings/user_settings.gd.remap \
       addons/godot-xr-tools/rumble/rumble_manager_queue.gd.remap \

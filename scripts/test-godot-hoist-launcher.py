@@ -10,6 +10,11 @@ API = runpy.run_path(str(Path(__file__).with_name("run-godot-hoist")))
 
 
 class PairingTests(unittest.TestCase):
+    def test_source_uses_explicit_repeat_with_legacy_emulation(self):
+        command = API["source_command"](Path("/run/test"), Path("/state"), ["blender"])
+        self.assertEqual(command[command.index("--keyboard-repeat-mode") + 1], "compositor")
+        self.assertEqual(command[command.index("--legacy-key-repeat") + 1], "emulated")
+
     def test_android_process_may_appear_after_saved_identity(self):
         with patch.object(API["subprocess"], "run", side_effect=[
             subprocess.CompletedProcess([], 1, "", ""),

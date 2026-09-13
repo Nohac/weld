@@ -43,5 +43,6 @@ textures/vram_compression/import_etc2_astc=true
 
 [xr]
 
+openxr/extensions/render_model=true
 shaders/enabled=true
 openxr/enabled.weld_xr=true

@@ -3,6 +3,7 @@
 use super::{
     Shared,
     frame::{Frame, FrameBudget},
+    input::{self, Target},
     lock,
     receiver_decode::Backend,
 };
@@ -17,9 +18,9 @@ use std::{
 };
 use weld_client::{
     ClientBufferId, ClientBufferLease, ClientBufferMetadata, ClientBufferUseId, ClientEventQueue,
-    ClientRequest, ClientSourceId, ClientSurfaceEvent, ClientSurfaceEventKind, ClientSurfaceId,
-    ClientSurfaceRequest, ClientSurfaceRequestKind, ClientSurfaceRole, Extent, PresentationRate,
-    SurfaceBufferChange,
+    ClientRequest, ClientRuntime, ClientSourceId, ClientSurfaceEvent, ClientSurfaceEventKind,
+    ClientSurfaceId, ClientSurfaceRequest, ClientSurfaceRequestKind, ClientSurfaceRole, Extent,
+    InputPosition, PresentationRate, SurfaceBufferChange, SurfaceInputGeometry,
 };
 use weld_hoist_encoded::{DecodedFramePublisher, EncodedDestinationTransport};
 use weld_hoist_iroh::{
@@ -140,32 +141,43 @@ pub(super) fn run(shared: &Arc<Shared>, directory: PathBuf, rate: PresentationRa
                     Publisher,
                     Box::new(backend),
                 );
-                let mut driver = registration.into_parts().runtime.driver;
+                let mut runtime = ClientRuntime::default();
+                runtime.register(registration.into_parts().runtime)?;
                 let mut events = ClientEventQueue::default();
-                let mut cursors = Vec::new();
+                let mut invalid_events = Vec::new();
+                let mut invalid_effects = Vec::new();
                 let mut selection = Selection::default();
                 shared.message("Connected; waiting for the first toplevel");
                 while !shared.cancelled.load(Ordering::Acquire) && connection.0.is_available() {
-                    driver.drain_events(&mut events);
+                    input::service(shared, &mut runtime);
+                    runtime.drain_events(&mut events, &mut invalid_events);
+                    runtime.apply_pending_effects(&mut invalid_effects);
+                    runtime.apply_pending_presentations(&mut invalid_effects);
+                    ensure!(
+                        invalid_events.is_empty() && invalid_effects.is_empty(),
+                        "invalid client runtime events/effects: {invalid_events:?} {invalid_effects:?}"
+                    );
                     while let Some(event) = events.pop_front() {
                         if selection.selects(&event) {
-                            // This is the registered adapter driver, not the
-                            // routing runtime; its request method returns ().
-                            driver.apply_request(ClientRequest::Surface(ClientSurfaceRequest {
-                                surface: event.surface,
-                                kind: ClientSurfaceRequestKind::SetPresentation {
-                                    rate: Some(rate),
-                                },
-                            }));
+                            ensure!(
+                                runtime.apply_request(ClientRequest::Surface(
+                                    ClientSurfaceRequest {
+                                        surface: event.surface,
+                                        kind: ClientSurfaceRequestKind::SetPresentation {
+                                            rate: Some(rate),
+                                        },
+                                    }
+                                )),
+                                "presentation request rejected"
+                            );
                         }
                         selection.present(event, shared)?;
                     }
-                    driver.drain_cursor_updates(&mut cursors);
-                    cursors.clear();
+                    input::service(shared, &mut runtime);
                     // Transport wake_if_readable and codec/credit notifications
                     // retain an unpark token even when they race this wait.
                     let wait =
-                        driver
+                        runtime
                             .next_deadline()
                             .map_or(Duration::from_millis(100), |deadline| {
                                 deadline
@@ -175,10 +187,11 @@ pub(super) fn run(shared: &Arc<Shared>, directory: PathBuf, rate: PresentationRa
                     thread::park_timeout(wait);
                 }
                 shared.clear();
+                input::service(shared, &mut runtime);
                 shared.message("Disconnected; waiting for source restart");
                 // Close transport before draining native worker lifetimes.
                 drop(connection);
-                drop(driver);
+                drop(runtime);
             }
             Err(error) => shared.message(format!("Waiting for source: {error:#}")),
         }
@@ -224,6 +237,39 @@ impl Selection {
                 let view = commit
                     .window_geometry
                     .map_or(root.view, |geometry| geometry.view);
+                let origin = commit
+                    .window_geometry
+                    .map_or(InputPosition::default(), |geometry| {
+                        InputPosition::new(
+                            f64::from(geometry.origin.x),
+                            f64::from(geometry.origin.y),
+                        )
+                    });
+                let inputs: Vec<_> = commit
+                    .inputs
+                    .into_iter()
+                    .filter(|input| input.layer == root.layer)
+                    .collect();
+                ensure!(
+                    inputs
+                        .iter()
+                        .map(|input| input.regions.len())
+                        .sum::<usize>()
+                        <= 1024,
+                    "displayed input region bound exceeded"
+                );
+                let input = Target {
+                    epoch: lock(&shared.input).epoch,
+                    geometry: SurfaceInputGeometry {
+                        surface: event.surface,
+                        origin,
+                        logical_size: [
+                            f64::from(view.logical_width),
+                            f64::from(view.logical_height),
+                        ],
+                        inputs,
+                    },
+                };
                 let buffer = commit
                     .buffers
                     .into_iter()
@@ -239,16 +285,16 @@ impl Selection {
                             .take()
                         {
                             frame.crop(Some(view))?;
-                            shared.publish(frame, Some(view));
+                            shared.publish_input(frame, Some(view), Some(input));
                             shared.message("Receiving AV1 window");
                         } else {
-                            shared.set_view(view);
+                            shared.set_view(view, input);
                         }
                         // Only this coordinator reads this one-shot payload. Its
                         // destination-owned native allocation/credit has moved to
                         // presentation; dropping the client lease cannot free it.
                     }
-                    Some(SurfaceBufferChange::Retained { .. }) => shared.set_view(view),
+                    Some(SurfaceBufferChange::Retained { .. }) => shared.set_view(view, input),
                     Some(SurfaceBufferChange::Removed) | None => shared.clear(),
                 }
             }

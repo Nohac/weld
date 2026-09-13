@@ -4,6 +4,8 @@ extends Control
 signal playback_started
 signal playback_stopped
 
+@export var desktop_input := false
+
 var player: WeldVideoPlayer
 var video_texture: ExternalTexture
 var video_material: ShaderMaterial
@@ -16,6 +18,7 @@ var log_elapsed := 0.0
 func _ready() -> void:
 	player = WeldVideoPlayer.new()
 	add_child(player)
+	player.configure_input(view, desktop_input)
 	RenderingServer.frame_pre_draw.connect(_before_draw)
 	# Explicit opt-in for the bounded physical presentation check.
 	if "--video-fixture" in OS.get_cmdline_user_args() or "--video-single-frame" in OS.get_cmdline_user_args():

@@ -14,6 +14,38 @@ The runtime's recenter signal places it again. Controller input, multi-window
 layout, application UI scaling and source keyboard capture are not implemented
 by this scene.
 
+## Controller models and pointers
+
+The OpenXR render-model extension is enabled. When available, Godot's
+`OpenXRRenderModelManager` loads the runtime's actual controller models,
+including their tracked poses and supported animations. This uses the standard
+[OpenXR render-model API](https://docs.godotengine.org/en/4.7/tutorials/xr/openxr_render_models.html),
+not a Pico SDK, login or imported system overlay. The manager is constructed
+only after XR initialization: constructing it in a flat/headless scene check
+otherwise produces Godot errors about a missing render-model extension.
+
+Left/right `XRController3D` nodes use the standard `aim` pose. Each owns a
+3 m laser with a small hit marker, clipped to the video panel by a layer-21
+collision target. `controller_pointer.tscn` owns the visual geometry and reuses
+the existing XR Tools pointer script; unused addon demo scenes remain excluded
+from both Android exports. The pointer is hidden and disabled without current
+tracking or while the XR session lacks focus, including system-menu display.
+Runtime-model support and availability are logged as `WELD_XR_CONTROLLERS`.
+Rays can work without runtime models when the headset does not expose them.
+
+These are **visuals only** for now. Pointer events are not forwarded to the
+hoisted application, and the panel collider is not an input authority. This
+does not expose Pico's home environments, change the system-menu button, or
+remove the controller-required launch warning.
+
+Scene/build-hook checks and Android export packaging passed for this setup.
+The updated Pico APK was installed, but its first live test timed out at Pico's
+controller-required system dialog before the Weld process started. Actual
+runtime-model availability and visual pointer alignment still need headset
+validation; the startup timeout is not evidence of a decoder failure.
+
+## Image quality
+
 The scene's `eye_render_scale` is currently **1.125** for the Pico quality trial,
 applied before the first XR viewport draw. It scales the runtime-recommended eye
 target, not the source video or the panel SubViewport. On the measured 1920x1920

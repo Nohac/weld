@@ -10,7 +10,7 @@ name = "weld_vr"
 crate-type = ["cdylib"]
 
 [dependencies]
-godot = { version = "=0.5.5", default-features = false, features = ["api-4-7"] }
+godot = { version = "=0.5.5", features = ["api-4-7"] }
 anyhow = "1"
 weld-media = { path = "../../../crates/weld-media", features = ["config", "decode"] }
 weld-client = { path = "../../../crates/weld-client" }

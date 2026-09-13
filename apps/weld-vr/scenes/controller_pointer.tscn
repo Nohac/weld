@@ -1,0 +1,53 @@
+[gd_scene load_steps=6 format=3]
+
+[ext_resource type="Script" uid="uid://cvnagt08r6ul4" path="res://addons/godot-xr-tools/functions/function_pointer.gd" id="1"]
+[ext_resource type="Material" path="res://addons/godot-xr-tools/materials/pointer.tres" id="2"]
+
+[sub_resource type="BoxMesh" id="LaserMesh"]
+resource_local_to_scene = true
+material = ExtResource("2")
+size = Vector3(0.002, 0.002, 3)
+subdivide_depth = 20
+
+[sub_resource type="SphereMesh" id="TargetMesh"]
+resource_local_to_scene = true
+material = ExtResource("2")
+radius = 0.005
+height = 0.01
+radial_segments = 16
+rings = 8
+
+[sub_resource type="SphereShape3D" id="SuppressShape"]
+radius = 0.2
+
+[node name="Pointer" type="Node3D"]
+script = ExtResource("1")
+enabled = false
+hand_offset_mode = 4
+y_offset = 0.0
+distance = 3.0
+laser_length = 1
+show_target = true
+target_radius = 0.005
+collision_mask = 1048576
+
+[node name="RayCast" type="RayCast3D" parent="."]
+target_position = Vector3(0, 0, -3)
+collision_mask = 1048576
+
+[node name="Laser" type="MeshInstance3D" parent="."]
+position = Vector3(0, 0, -1.5)
+cast_shadow = 0
+mesh = SubResource("LaserMesh")
+
+[node name="Target" type="MeshInstance3D" parent="."]
+visible = false
+cast_shadow = 0
+mesh = SubResource("TargetMesh")
+
+[node name="SuppressArea" type="Area3D" parent="."]
+collision_layer = 0
+collision_mask = 4194304
+
+[node name="CollisionShape3D" type="CollisionShape3D" parent="SuppressArea"]
+shape = SubResource("SuppressShape")

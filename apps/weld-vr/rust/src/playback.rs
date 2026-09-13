@@ -4,6 +4,7 @@
 //! signal. Unrecoverable context loss quarantines bounded leases and prohibits
 //! replay instead of risking buffer reuse.
 mod frame;
+mod input;
 mod receiver;
 mod receiver_decode;
 mod render;
@@ -30,7 +31,9 @@ use std::{
     thread::{self, JoinHandle},
     time::{Duration, Instant},
 };
-use weld_client::{PresentationRate, SurfaceContentView};
+use weld_client::{
+    ClientCursor, InputPosition, KeyboardKeyState, PresentationRate, SurfaceContentView,
+};
 
 static NEXT_SESSION: AtomicU64 = AtomicU64::new(1);
 const FIXTURE: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/panel-av1.ivf"));
@@ -49,13 +52,15 @@ enum PresentationUpdate {
     Frame {
         frame: Frame,
         view: Option<SurfaceContentView>,
+        input: Option<input::Target>,
     },
-    View(SurfaceContentView),
+    View(SurfaceContentView, input::Target),
     Clear,
 }
 
 #[derive(Default)]
 struct Shared {
+    input: Mutex<input::InputState>,
     cancelled: AtomicBool,
     queued: AtomicBool,
     latest: Mutex<Option<PresentationUpdate>>,
@@ -72,26 +77,42 @@ struct Shared {
 }
 impl Shared {
     fn publish(&self, frame: Frame, view: Option<SurfaceContentView>) {
+        self.publish_input(frame, view, None);
+    }
+    fn publish_input(
+        &self,
+        frame: Frame,
+        view: Option<SurfaceContentView>,
+        input: Option<input::Target>,
+    ) {
         if self.cancelled.load(Ordering::Acquire) {
             return;
         }
         self.decoded.fetch_add(1, Ordering::Relaxed);
         if matches!(
-            lock(&self.latest).replace(PresentationUpdate::Frame { frame, view }),
+            lock(&self.latest).replace(PresentationUpdate::Frame { frame, view, input }),
             Some(PresentationUpdate::Frame { .. })
         ) {
             self.replaced.fetch_add(1, Ordering::Relaxed);
         }
     }
-    fn set_view(&self, view: SurfaceContentView) {
+    fn set_view(&self, view: SurfaceContentView, input: input::Target) {
         let mut latest = lock(&self.latest);
         match latest.as_mut() {
-            Some(PresentationUpdate::Frame { view: current, .. }) => *current = Some(view),
+            Some(PresentationUpdate::Frame {
+                view: current,
+                input: current_input,
+                ..
+            }) => {
+                *current = Some(view);
+                *current_input = Some(input);
+            }
             Some(PresentationUpdate::Clear) => {}
-            _ => *latest = Some(PresentationUpdate::View(view)),
+            _ => *latest = Some(PresentationUpdate::View(view, input)),
         }
     }
     fn clear(&self) {
+        lock(&self.input).invalidate();
         *lock(&self.latest) = Some(PresentationUpdate::Clear);
     }
     fn message(&self, message: impl AsRef<str>) {
@@ -115,6 +136,7 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 }
 
 pub struct Controller {
+    input_target: Option<input::Target>,
     generation: u64,
     shared: Arc<Shared>,
     worker: Option<JoinHandle<()>>,
@@ -157,6 +179,7 @@ impl Controller {
             anyhow::bail!("{error}");
         }
         let mut controller = Self {
+            input_target: None,
             generation,
             shared,
             material,
@@ -206,31 +229,37 @@ impl Controller {
         let Some(update) = lock(&self.shared.latest).take() else {
             return Ok(());
         };
-        let (frame, crop, aspect) = match update {
+        let (frame, display, mut input) = match update {
             PresentationUpdate::Clear => {
                 self.current = None;
+                self.input_target = None;
                 self.uniform("has_frame", false.to_variant())?;
                 return Ok(());
             }
-            PresentationUpdate::View(view) => {
+            PresentationUpdate::View(view, input) => {
                 let Some((geometry, visible)) = self.current else {
                     return Ok(());
                 };
-                let (crop, aspect) = frame::crop(geometry, visible, Some(view))?;
-                (None, crop, aspect)
+                let display = frame::display_geometry(geometry, visible, Some(view))?;
+                (None, display, Some(input))
             }
-            PresentationUpdate::Frame { frame, view } => {
-                let (crop, aspect) = frame.crop(view)?;
+            PresentationUpdate::Frame { frame, view, input } => {
+                let display = frame::display_geometry(frame.image.geometry(), frame.visible, view)?;
                 self.current = Some((frame.image.geometry(), frame.visible));
-                (Some(frame), crop, aspect)
+                (Some(frame), display, input)
             }
         };
-        self.aspect = aspect;
+        self.aspect = display.aspect;
+        let crop = display.crop;
         self.uniform(
             "crop",
             Vector4::new(crop[0], crop[1], crop[2], crop[3]).to_variant(),
         )?;
         self.uniform("has_frame", true.to_variant())?;
+        if let Some(input) = input.as_mut() {
+            input.geometry.logical_size = display.logical_size;
+        }
+        self.input_target = input;
         let Some(frame) = frame else {
             return Ok(());
         };
@@ -244,6 +273,8 @@ impl Controller {
         Ok(())
     }
     pub fn stop(&mut self) {
+        self.reset_input();
+        self.input_target = None;
         self.shared.cancelled.store(true, Ordering::Release);
         if let Some(worker) = &self.worker {
             worker.thread().unpark();
@@ -316,6 +347,62 @@ impl Controller {
     }
     pub fn aspect(&self) -> f32 {
         self.aspect
+    }
+    pub fn pointer_input(
+        &self,
+        rectangle: [f64; 4],
+        position: InputPosition,
+        button: i64,
+        pressed: bool,
+    ) -> bool {
+        if self.stopped || self.shared.cancelled.load(Ordering::Acquire) {
+            return false;
+        }
+        // A release must always get through, even while a new image is binding.
+        if self.shared.queued.load(Ordering::Acquire) && (button == 0 || pressed) {
+            let handled = lock(&self.shared.input).during_bind(button, pressed);
+            self.wake_input();
+            return handled;
+        }
+        let handled = lock(&self.shared.input).pointer(
+            self.input_target.as_ref(),
+            rectangle,
+            position,
+            button,
+            pressed,
+        );
+        self.wake_input();
+        handled
+    }
+    pub fn key_input(&self, code: i64, location: i64, pressed: bool, echo: bool) -> bool {
+        if self.stopped || self.shared.cancelled.load(Ordering::Acquire) {
+            return false;
+        }
+        let Some(key) = input::physical_key(code, location) else {
+            return false;
+        };
+        let state = if !pressed {
+            KeyboardKeyState::Released
+        } else if echo {
+            KeyboardKeyState::Repeated
+        } else {
+            KeyboardKeyState::Pressed
+        };
+        let handled = lock(&self.shared.input).key(key, state);
+        self.wake_input();
+        handled
+    }
+    pub fn reset_input(&self) {
+        lock(&self.shared.input).reset();
+        self.wake_input();
+    }
+    fn wake_input(&self) {
+        if let Some(worker) = &self.worker {
+            worker.thread().unpark();
+        }
+    }
+    pub fn take_cursor(&self) -> Option<ClientCursor> {
+        lock(&self.shared.input).take_cursor()
     }
 }
 impl Drop for Controller {

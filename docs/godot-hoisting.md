@@ -1,7 +1,7 @@
 # Godot live-window tracer
 
 Godot can receive one live AV1 window from headless Weld on Linux or Android.
-This is a bounded presentation slice, not the multi-window/input shell. The
+This is a bounded single-window viewer, with basic input on desktop. The
 [XR scene](godot-xr.md) can present the same stream on a headset. It uses
 the same `weld-hoist-iroh` transport, `weld-hoist-encoded` scheduling and
 `weld-media::decode::DecodePool` as the compositor receiver. No new wire protocol,
@@ -25,7 +25,9 @@ Use an ARM64/API28+ USB-debugging device. This uses development signing and
 `--serial`. `--desktop` runs the same viewer on the laptop. Default: one foot/htop
 window at 960x640 for 120 seconds; `--seconds` changes the test timer.
 `--app blender` is another single-root test, not support for its extra dialogs.
-Remote input is not wired yet.
+On desktop, click the image to focus it, then use mouse buttons, wheel and
+physical keyboard keys. The source uses compositor-owned explicit repeats,
+with emulated repeats for legacy clients. Phone and XR remain view-only.
 Closing that window and creating a replacement also requires a new connection;
 the limit is one media-stream identity per connection, not merely one visible
 window at a time. Blender dialogs/popups exceed this initial limit.
@@ -84,7 +86,9 @@ is pinned for that producer lifetime; edits require a new start.
 
 - A coordinator thread owns the shared receiver registration and non-Send client
   leases. Transport, codec completion and returned frame credits unpark it
-  independently of Godot's frame cadence. No new unbounded media queue exists.
+  independently of Godot's frame cadence. It registers the adapter with
+  `ClientRuntime`, including event validation, effects, route aliases, cursor
+  feedback and retirement servicing. No new unbounded media queue exists.
 - Android still uses `weld-media-android`: FFmpeg/`ffmpeg-next`, `ndk_codec=1`,
   MediaCodec to acquired native ImageReader buffers. Linux uses existing
   FFmpeg/VA-API. Context construction/calls/destruction stay on pool workers.
@@ -116,8 +120,104 @@ is pinned for that producer lifetime; edits require a new start.
   and source after pause. Source relay re-admission after viewer disconnect
   remains one-shot: restart the source for another connection. Detach/rejoin
   preserving the same live apps remains shared relay lifecycle work.
-- AV1 only is advertised. Input, multi-window layout, adaptive capability budgets,
+- AV1 only is advertised. XR/phone input, multi-window layout, adaptive capability budgets,
   automatic rotation recovery and Vulkan import remain separate work.
+
+## Desktop input
+
+The Rust `WeldVideoPlayer` node receives typed Godot keyboard/mouse events and
+window notifications. Its main-thread input adapter owns physical observations,
+focus reconciliation and typed cursor presentation; GDScript has no input
+handlers, hold dictionaries, or cursor-data format. The scene only supplies its
+displayed `Control` and desktop-input setting. Normal `godot` bindings are
+enabled without changing dependency versions. Fixture playback, Android, editor
+and XR presentation do not enable this desktop input source. A freed input view
+resets and disables the input source safely.
+
+Physical observations remain separate from the playback mailbox's accepted and
+suppressed holds: even a rejected press may need release reconciliation. Only
+owned scalar values cross to the coordinator. A capacity-128 input mailbox wakes
+that thread independently of video. Adjacent motion coalesces only with an
+identical route/generation. Buttons, keys, focus and wheel events retain order.
+Overflow discards the pending batch and schedules a non-droppable focus reset;
+held controls cannot repeat/re-press until released. Focus regain reconciles
+known controls that Godot reports released while the viewer was unfocused.
+
+Input metadata travels with the displayed Frame or retained View update,
+without cloning native leases. Crop and effective logical input extent come
+from one geometry calculation. Hit testing excludes letterboxing and uses the
+window origin and displayed root's input regions (at most 1024 regions). A
+pending native bind discards motion and new positioned button presses rather
+than queuing a retry. Keys and releases bypass that gate; discrete wheel ticks
+use the last admitted hover/capture route without reading pending geometry.
+Unmap/destruction/disconnection invalidates the input generation immediately.
+ClientRuntime retains press routes through release, including drags outside the
+image. Input times use one monotonic process clock with normal u32 Wayland
+millisecond wrapping.
+A click in the letterbox deliberately clears remote focus and releases held
+input. Exceeding the input-region bound is a fail-closed tracer error that stops
+the session, not a partial hit-test policy.
+
+The Rust node handles events before Godot GUI navigation, so Tab, arrows, Enter
+and Escape can reach Blender. Wheel presses become signed v120/continuous
+scroll frames; wheel releases are ignored. Godot echo events become explicit
+repeats for known held keys, with no receiver repeat timer. Cursor feedback
+uses a latest-value mailbox and is applied on the main thread: named shapes,
+hidden state and bounded RGBA images. Unsupported named shapes use an arrow.
+
+All Controls in the flat video-only scene, including its outer `Flat` root,
+must use `MOUSE_FILTER_IGNORE`. Rust handles input before GUI navigation.
+Godot's default cursor setter refreshes through an internal mouse event; a
+hovered GUI Control can replace that shape with its own arrow. Repeating the
+same default shape does not refresh it again, so the wrong arrow can persist.
+See Godot 4.7's
+[default cursor setter](https://github.com/godotengine/godot/blob/a13da4feb/core/input/input.cpp#L1489)
+and [GUI cursor selection](https://github.com/godotengine/godot/blob/a13da4feb/scene/main/viewport.cpp#L2102).
+If interactive shell controls are added later, their cursor ownership must be
+scoped separately from the remote image, not inherited from this video-only
+scene. The viewer logs the first non-default named remote cursor once per
+process (`WELD_REMOTE_CURSOR`) to distinguish delivery from presentation.
+
+Run `apps/weld-vr/scripts/check-gdextension --desktop-cursor` on a real Wayland
+desktop for the cursor regression. It uses a disposable project without a
+network connection, checks displayed arrow/resize/text/crosshair shapes,
+reproduces the old outer-Control override as a negative control, restores the
+real configuration and checks Rust stop restores a visible arrow. This tests
+Godot cursor selection, not end-to-end delivery from an application.
+
+On 2026-09-13 this cursor regression passed on Sway with Godot 4.7.1,
+Compatibility/GLES and the Wayland display driver: arrow, horizontal/vertical
+resize, text and crosshair, including the negative control and stop cleanup.
+An initial XWayland run passed as well; the launcher now explicitly selects
+Wayland to match `run-godot-hoist --desktop`. The subsequent Blender run
+`godot-hoist-6fpqafxu` logged `WELD_REMOTE_CURSOR first_named=EwResize`, confirming
+that a non-default request traversed the transport into Rust presentation.
+The user confirmed that Blender's cursor now changes as expected in that run.
+
+This does not implement relative mouse locking, pointer warping, touch, IME,
+virtual keyboards, XR controller clicks, host-keyboard capture or extra windows.
+Blender interactions requiring cursor wrapping/locking still have that limit.
+
+Desktop input was manually exercised on 2026-09-13 with the Godot/Blender
+launcher (`godot-hoist-wclrwz_4`); the user reported that it works. The viewer
+reached 946 decoded / 922 presented / 23 superseded frames before a second
+Blender toplevel hit the existing single-stream admission limit and ended the
+connection. This is not multi-window qualification. The source log did not
+contain the focused-keyboard version diagnostic, so this run does not establish
+Blender's bound keyboard protocol version.
+
+After moving the Godot event adapter into Rust, the 2026-09-13 desktop
+Blender run (`godot-hoist-86v593rb`) completed its 120-second interval and
+cleanup. The user completed the requested mouse, keyboard and focus-switch
+checks. The viewer reached 1989 decoded / 1946 presented / 43 superseded
+frames; the host reported keyboard v9 with emulated repeats. This remains a
+single-window test, not XR input validation.
+
+The typed Rust adapter also passes 18 focused Rust tests, strict Clippy,
+Linux/Android debug builds and `check-gdextension --android-export`. The engine
+smoke check verifies inactive input gating and focus notifications, while the
+live run exercises the callbacks with an active stream. The export check does
+not deploy to a headset or qualify Android input.
 
 ## Physical evidence: 2026-09-12
 

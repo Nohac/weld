@@ -44,8 +44,10 @@ autoloads. See the shared shell's README for SDK/NDK and export-template setup.
 
 `rust/` is a small, independent Cargo workspace, pinned to `godot` 0.5.5 with
 Godot 4.7 API bindings. It remains separate from the Linux compositor workspace,
-with shared crates added as explicit path dependencies. The reduced bindings support the diagnostic `WeldBridge`
-and shared `WeldVideoPlayer`. Playback, admission and EGL presentation
+with shared crates added as explicit path dependencies. Normal Godot bindings
+provide typed input and cursor APIs. `WeldVideoPlayer` owns desktop input in
+Rust; scenes supply only the displayed control and presentation-mode setting.
+The diagnostic `WeldBridge` remains available. Playback, admission and EGL presentation
 are shared; module-level platform selection chooses the existing Linux VA-API
 provider or Android MediaCodec provider via workspace path dependencies.
 Live Iroh reception and XR scene selection are wired. See

@@ -7,10 +7,13 @@ extends Node3D
 var xr_interface: OpenXRInterface
 var placement_pending := true
 var passthrough_active := false
+var controller_models: OpenXRRenderModelManager
 
 @onready var camera: XRCamera3D = $XROrigin3D/XRCamera3D
 @onready var screen: MeshInstance3D = $Screen
 @onready var panel: Control = $PanelViewport/VideoPanel
+@onready var controllers: Array[XRController3D] = [
+	$XROrigin3D/LeftController, $XROrigin3D/RightController]
 
 
 func _ready() -> void:
@@ -39,6 +42,39 @@ func _ready() -> void:
 	xr_interface.instance_exiting.connect(_exit_xr)
 	_configure_passthrough()
 	_queue_render_diagnostics()
+	if Engine.has_singleton("OpenXRRenderModelExtension"):
+		# Godot's manager requires the initialized extension even in its
+		# constructor, so do not instantiate it during non-XR scene inspection.
+		controller_models = OpenXRRenderModelManager.new()
+		controller_models.name = "ControllerModels"
+		controller_models.visible = false
+		$XROrigin3D.add_child(controller_models)
+		var models := Engine.get_singleton("OpenXRRenderModelExtension")
+		models.render_model_added.connect(_log_controller_models)
+		models.render_model_removed.connect(_log_controller_models)
+		_log_controller_models()
+
+
+func _log_controller_models(_model: RID = RID()) -> void:
+	var models := Engine.get_singleton("OpenXRRenderModelExtension")
+	print("WELD_XR_CONTROLLERS runtime_models=", models.is_active(),
+		" count=", models.render_model_get_all().size())
+
+
+func _update_controllers() -> void:
+	var focused := xr_interface != null and xr_interface.is_initialized() \
+		and xr_interface.get_session_state() == OpenXRInterface.SESSION_STATE_FOCUSED
+	if controller_models != null:
+		controller_models.visible = focused
+	for controller in controllers:
+		var active := focused and controller.get_has_tracking_data()
+		var pointer: XRToolsFunctionPointer = controller.get_node("Pointer")
+		if pointer.enabled != active:
+			pointer.enabled = active
+			print("WELD_XR_CONTROLLERS tracker=", controller.tracker, " pointer=", active)
+		# XR Tools' disabled pointer can still draw its idle ray. Hide the whole
+		# controller subtree when tracking/focus is lost, including that ray.
+		controller.visible = active
 
 
 func _queue_render_diagnostics() -> void:
@@ -78,6 +114,7 @@ func _configure_passthrough() -> void:
 
 
 func _process(_delta: float) -> void:
+	_update_controllers()
 	if not placement_pending or xr_interface == null or not xr_interface.is_initialized():
 		return
 	var head := XRServer.get_tracker("head") as XRPositionalTracker
