@@ -250,15 +250,50 @@ a tap into a mouse click must not advertise native touch support.
 A controller button explicitly toggles the XR keyboard initially. Automatic
 opening on application text-field focus is not required. Showing or pointing
 at the keyboard must preserve the intended application's keyboard target;
-closing it releases only its own held/latched inputs. The installed XR Tools
-keyboard scene is a UI candidate, not a ready-made remote keyboard adapter:
-its synthetic press handler requires balanced release, layout/modifier and
+closing it releases only its own held/latched inputs. XR Tools keyboard
+components could be reintroduced as a UI candidate without restoring the whole
+addon; they are not a ready-made remote keyboard adapter:
+their synthetic key events require balanced release, layout/modifier and
 repeat handling at Weld's input boundary.
 
 Phone on-screen controls and Android's native keyboard are later interaction
 work. Native keyboard availability does not supply remote IME composition,
 selection or text commit support; those follow the shared input capabilities,
 not guessed physical-key sequences.
+
+### Hover haptics and target assistance — Exploration
+
+Explore optional controller assistance for small desktop controls in XR:
+
+- A short haptic pulse on entering a new known actionable control, with a
+  cooldown and target identity so boundary jitter does not repeatedly buzz.
+- Gentle attraction toward an eligible button or tab, plus hysteresis: use a
+  larger leave boundary than enter boundary to resist hand wobble. Deliberate
+  movement away must readily disengage assistance; never synthesize activation.
+- Keep raw aim distinct from assisted application-pointer coordinates, and
+  show feedback at the effective target so the visual does not mislead the user.
+  Do not apply attraction to free viewport motion, sliders, resize handles or
+  active drags. Assistance must not fight pointer capture or precision work.
+
+Cursor shape alone is insufficient: Blender can retain an arrow over buttons,
+and a text cursor does not establish editability. Investigate host-side
+accessibility hit testing (for example AT-SPI) for target role, bounds, state
+and identity. Blender's actual accessibility coverage remains unverified.
+Associating an accessibility object with a specific hosted surface and mapping
+its coordinates through crop/scale are prerequisites, not assumed capabilities.
+
+Any semantic feedback should be optional, scoped to the authorized window and
+queried asynchronously with bounded work. Never wait for an accessibility or
+network round trip before forwarding ordinary input. If target metadata is
+missing, stale or inconsistent with the current geometry, fall back to raw
+pointer behavior. Do not transmit text values or a whole accessibility tree
+merely to identify a button. User controls should include disabling assistance
+and tuning haptic strength and attraction.
+
+An earlier experiment could use mild, low-latency aim stabilization and a small
+pulse when the local input path accepts a trigger press. That pulse must not
+claim the remote application accepted or completed an action. Neither this
+experiment nor semantic assistance is implemented by the current pointer.
 
 ### Initial headset readability preference
 
