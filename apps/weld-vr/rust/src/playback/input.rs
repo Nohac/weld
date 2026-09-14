@@ -491,6 +491,12 @@ mod tests {
         }
         assert!(state.reset.is_some());
         assert!(state.queue.is_empty());
+        // XR retries unadmitted presses, but overflow deliberately suppresses
+        // the held button until release. Retrying must not resurrect it.
+        for _ in 0..100 {
+            assert!(!state.pointer(Some(&target), RECT, POINT, 1, true));
+        }
+        assert!(state.queue.is_empty());
         assert!(!state.key(LinuxKeycode(30), KeyboardKeyState::Repeated));
         assert!(!state.key(LinuxKeycode(30), KeyboardKeyState::Released));
         assert!(!state.pointer(Some(&target), RECT, POINT, 1, false));

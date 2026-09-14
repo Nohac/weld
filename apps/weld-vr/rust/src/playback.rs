@@ -374,6 +374,21 @@ impl Controller {
         self.wake_input();
         handled
     }
+    /// Identity of currently mapped input, not a native frame/buffer lease.
+    pub fn input_token(&self) -> Option<(u64, u64)> {
+        let target = self.input_target.as_ref()?;
+        (!self.stopped
+            && !self.shared.cancelled.load(Ordering::Acquire)
+            && target.epoch == lock(&self.shared.input).epoch)
+            .then_some((self.generation, target.epoch))
+    }
+    pub fn input_hit(&self, rectangle: [f64; 4], position: InputPosition) -> bool {
+        self.input_token().is_some()
+            && self
+                .input_target
+                .as_ref()
+                .is_some_and(|target| target.geometry.pointer_route(rectangle, position).is_some())
+    }
     pub fn key_input(&self, code: i64, location: i64, pressed: bool, echo: bool) -> bool {
         if self.stopped || self.shared.cancelled.load(Ordering::Acquire) {
             return false;

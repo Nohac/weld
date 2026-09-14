@@ -1,5 +1,6 @@
 //! Main-thread Godot API shared by all native providers.
 mod input;
+mod xr;
 
 use crate::playback::{Controller, Source};
 use godot::{
@@ -198,6 +199,13 @@ impl WeldVideoPlayer {
 }
 
 impl WeldVideoPlayer {
+    // XR owns its physical actions, but uses the same playback mailbox. It
+    // cannot compete with the desktop source or send input to a fixture.
+    fn xr_controller(&self) -> Option<&Controller> {
+        (self.live_source && self.desktop_input.is_none())
+            .then_some(self.controller.as_ref())
+            .flatten()
+    }
     fn update_processing(&mut self) {
         let enabled = self.live_source && self.desktop_input.is_some();
         self.base_mut().set_process_input(enabled);
