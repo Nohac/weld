@@ -1,90 +1,150 @@
 # Godot XR presentation
 
-The startup scene selects `xr.tscn` when Godot has initialized OpenXR, otherwise
-the flat viewer. Both show the same video-only panel and use the existing
-[Iroh receiver and native decoder](godot-hoisting.md). There is no second media
-pipeline or CPU video readback: XR samples a mono 1600x1000 GPU SubViewport on
-a quad in both eyes. This panel raster does not change source window size or
-the receiver's codec admission limits.
+The startup scene selects `xr.tscn` when OpenXR initializes, otherwise the flat
+viewer. Both use the same [Iroh receiver and native decoder](godot-hoisting.md).
+XR samples a mono 1600x1000 GPU SubViewport on a quad in both eyes; there is no
+second media pipeline or CPU video readback.
 
-The XR scene contains an `XROrigin3D` and `XRCamera3D`. After the first valid
-head pose, it places a 1.6 m wide panel 1.6 m ahead, slightly below eye level
-and tilted back. The panel remains pinned, not attached to head motion.
-The runtime's recenter signal places it again. Controller input, multi-window
-layout, application UI scaling and source keyboard capture are not implemented
-by this scene.
+The panel is 1.6 m wide, initially 1.6 m ahead and slightly below the tracked
+head, tilted back. It stays pinned rather than following head movement.
+Recenter places it again. Multi-window layout, application UI scaling and
+host-keyboard capture remain separate work.
 
-## Controller models and pointers
+## Controller presentation
 
-The OpenXR render-model extension is enabled. When available, Godot's
-`OpenXRRenderModelManager` loads the runtime's actual controller models,
-including their tracked poses and supported animations. This uses the standard
-[OpenXR render-model API](https://docs.godotengine.org/en/4.7/tutorials/xr/openxr_render_models.html),
-not a Pico SDK, login or imported system overlay. The manager is constructed
-only after XR initialization: constructing it in a flat/headless scene check
-otherwise produces Godot errors about a missing render-model extension.
+The runtime supplies controller models through Godot's standard
+[OpenXR render-model support](https://docs.godotengine.org/en/4.7/tutorials/xr/openxr_render_models.html).
+No Pico SDK, login, or system overlay is used. Managers are created only after
+XR initialization and filtered by hand:
 
-Left/right `XRController3D` nodes use the standard `aim` pose. Each owns a
-3 m laser with a small hit marker, clipped to the video panel by a layer-21
-collision target. `controller_pointer.tscn` owns the visual geometry and reuses
-the existing XR Tools pointer script; unused addon demo scenes remain excluded
-from both Android exports. The pointer is hidden and disabled without current
-tracking or while the XR session lacks focus, including system-menu display.
-Runtime-model support and availability are logged as `WELD_XR_CONTROLLERS`.
-Rays can work without runtime models when the headset does not expose them.
+```text
+XROrigin3D
+├── XRCamera3D
+├── ControllerModels (left)
+└── RightControllerRig
+    ├── ControllerModels (right)
+    ├── Grip (raw tracked pose)
+    └── Aim (raw tracked pose)
+        └── PointerTilt
+            └── WeldXrPointer (laser, hit marker and input projection)
+```
 
-These are **visuals only** for now. Pointer events are not forwarded to the
-hoisted application, and the panel collider is not an input authority. This
-does not expose Pico's home environments, change the system-menu button, or
-remove the controller-required launch warning.
+White ambient light and a shadow-free directional light illuminate the models.
+Video and pointer materials are unshaded, so lighting does not alter their
+colors. XR Tools and its autoloads are no longer used.
 
-Scene/build-hook checks and Android export packaging passed for this setup.
-The updated Pico APK was installed, but its first live test timed out at Pico's
-controller-required system dialog before the Weld process started. Actual
-runtime-model availability and visual pointer alignment still need headset
-validation; the startup timeout is not evidence of a decoder failure.
+### Offset and ergonomic tilt
+
+| Setting | Default | Android Pico preset |
+| --- | --- | --- |
+| `weld/xr/controller_aim_grip_offset` | false | true |
+| `weld/xr/pointer_tilt_degrees` | 5.0° downward | same |
+
+The `weld_pico` feature enables an **empirical right-controller correction**:
+the rig's position becomes raw `aim.position - grip.position`. It moves the
+model and actual pointer together, retaining their relative poses and runtime
+rotations. It does not overwrite either tracked pose or apply an accumulating
+per-frame translation. Disable the setting to use unmodified runtime placement.
+The left-hand model has no correction or input source in this slice.
+
+Model and diagnostic-marker alignment were visually validated on Pico 4 Ultra /
+Pico OS 5.15.7 with the video panel hidden. That does not validate actual input:
+the final tilted ray, hit marker and clicked point still await user confirmation.
+The original offset also reproduces in a standalone Godot 4.7.1 project without
+Weld, and with an explicit Pico 4 interaction profile. The precise Godot-versus-
+Pico cause remains unresolved; this is not a universal OpenXR calibration.
+The source-only [minimal reproduction](../tools/openxr-alignment-repro/README.md)
+preserves the upstream investigation without room screenshots, device dumps or
+generated binaries. Related [Pico profile work](https://github.com/godotengine/godot/pull/112424)
+is not a confirmed fix. A Vulkan comparison crashed inside Pico's XR runtime
+and did not produce alignment evidence.
+
+The separate tilt rotates only `PointerTilt` about local X. Positive degrees
+mean downward; values clamp to ±30°, with non-finite values treated as zero.
+The same transform drives the visible laser and Rust hit testing. Model
+orientation is unaffected. Both settings are also exposed on the rig for
+scene-level experiments. A value explicitly saved in the scene inspector takes
+precedence over the project setting and its device-feature overrides; the
+checked-in scene leaves these values unset.
+
+Native tracking/model nodes run at priority 0, the XR scene updates the rig at
+100, and Rust samples the pointer at 200. This is before the SceneTree flush
+that publishes transforms to rendering; `frame_pre_draw` is too late for
+ordinary Node3D corrections. The rig resets its translation and hides on
+focus/aim loss, and also on grip loss when correction requires it. The pointer
+checks ancestor visibility (not its own self-managed visibility), so this
+deactivates input without preventing later recovery. Both model managers are
+focus-gated; the right model additionally inherits the rig's tracking gate.
+
+## Right-hand input
+
+| Controller action | Application input |
+| --- | --- |
+| Aim at the displayed image | Pointer motion |
+| Trigger | Left click/drag |
+| Grip | Middle click/drag (Blender orbit) |
+| Thumbstick click | Right click |
+| Thumbstick up/down | Wheel up/down |
+
+Godot generates the default OpenXR action map. Binding names are `trigger`,
+`grip`, `primary_click` and `primary`, as in the
+[pinned Pico profile](https://github.com/godotengine/godot/blob/a13da4feb/modules/openxr/action_map/openxr_action_map.cpp#L307).
+Rust applies analog hysteresis (press at 0.75, release below 0.35), a thumbstick
+deadzone of 0.35, and an eight-tick/s scroll ceiling without catch-up bursts.
+
+One finite, front-facing ray/quad intersection within 3 m maps to **unclamped**
+mono-viewport pixels. The shared displayed-image geometry handles letterboxing,
+crop, input regions and capture outside the image. Missing intersections
+withdraw hover while retaining the last finite release position.
+
+Off-image presses require release before a new gesture. On-image presses
+refused during native frame binding retry once per process frame while held
+and still on-target. Mailbox overflow retains the shared reset/suppression
+policy; retries cannot revive a suppressed hold. Tracking/focus loss, pause,
+unmap, stream replacement and teardown cancel held input. Returning with a
+held button or deflected stick requires release/centering first.
+
+Godot objects and action sampling stay on the main thread. Owned events enter
+the existing bounded mailbox and `ClientRuntime`, independently of video work.
+Generation/epoch tokens contain no native leases. Desktop and XR cannot both
+own input for the same player. Presentation geometry may be one display frame
+old because publication occurs at `frame_pre_draw`; epoch checks reject stale
+targets.
+
+XR remote cursor shapes, relative pointer locking, virtual keyboard/IME,
+hand-gesture input and multiple presented windows are not implemented here.
 
 ## Image quality
 
-The scene's `eye_render_scale` is currently **1.125** for the Pico quality trial,
-applied before the first XR viewport draw. It scales the runtime-recommended eye
-target, not the source video or the panel SubViewport. On the measured 1920x1920
-recommendation this requests 2160x2160 per eye (about 27% more eye pixels).
-Set it back to 1.0 in the XR scene/script to compare the runtime default. This
-does not claim that matching physical panel dimensions is an optical-quality
-maximum; lens distortion, filtering and source resolution remain separate.
-The XR viewport also enables **4x MSAA** for geometric edge antialiasing. The
-flat viewer and mono panel SubViewport are unchanged. MSAA does not remove
-aliasing already inside the video texture.
+`eye_render_scale = 1.125` requests 2160x2160 per eye on the tested Pico's
+1920x1920 recommendation, with 4x MSAA. This scales the eye target, not the
+source video or 1600x1000 panel. Matching physical panel dimensions is not a
+claim of maximum optical quality. MSAA improves geometry edges, not aliasing
+already inside the video.
 
-For the quick texture-filter comparison, the XR script exposes
-`panel_texture_filter` and currently selects **Linear With Mipmaps Anisotropic**
-on the 3D panel material. The viewport has only its base level: this option does
-not generate mipmaps. Godot's GLES sampler falls back to level-zero linear
-filtering while requesting anisotropy where supported. This can help oblique
-sampling, but is not full mipmapped minification. Choose **Linear** to compare
-against base-level bilinear filtering. The external decoder texture already uses
-linear filtering and is unchanged; no readback, new texture allocation pipeline
-or source-resolution change is part of this trial.
+The panel uses Linear With Mipmaps Anisotropic filtering. Its viewport has only
+a base level: GLES falls back to level-zero linear filtering while requesting
+anisotropy. This is not full mipmapped minification. Source resolution, UI
+scaling and bitrate remain separate readability controls.
 
 ## Export and run on Pico
 
-Select **Android Pico** for editor device deployment. That preset has:
+Disable **Editor Settings > Export > Android > Shutdown ADB On Exit**
+(`export/android/shutdown_adb_on_exit = false`) when sharing ADB with other
+tools. Godot otherwise runs `adb kill-server` on exporter shutdown. This is
+an editor-local setting, not a project setting.
 
-- OpenXR mode and immersive fullscreen enabled;
-- `weld_xr`, which enables OpenXR at engine startup without requiring a runtime
-  for desktop or the separate **Android Phone** preset;
-- ARM64, API28 minimum and **Gradle build enabled**;
-- the existing debug Rust extension/build hook and Internet permission.
+The **Android Pico** preset enables `weld_xr,weld_pico`, ARM64, API28 minimum,
+Gradle and Internet access. The plain Phone preset does not enable the Pico
+correction or Pico manifest metadata. Gradle includes the standard Khronos
+OpenXR loader; generated files and native libraries remain ignored.
 
-Godot XR Tools supplies scene/script helpers, **not the native OpenXR loader**.
-With the tested Godot 4.7.1 template, the non-Gradle export omitted
-`libopenxr_loader.so`. Gradle automatically adds
-`org.khronos.openxr:openxr_loader_for_android:1.1.54`; the resulting APK contains
-the loader. No Pico SDK, vendor plugin, developer login or camera-feed permission
-is added. Generated Gradle files and binaries remain ignored.
-
-From the repository root:
+For Pico, the project requests OpenXR hand tracking and the export hook declares
+`controller=1` plus `handtracking=1` when enabled. This combination was verified
+to avoid the controller-required launch notice. It is not hands-only and does
+not implement hand gestures as remote input. Turning off the hand-tracking
+setting also removes that declaration. No vendor SDK or camera-feed permission
+is needed for alpha-blend passthrough.
 
 ```sh
 godot --headless --path apps/weld-vr --install-android-build-template \
@@ -93,76 +153,56 @@ adb -s PICO_SERIAL install -r apps/weld-vr/build/weld-vr-pico-debug.apk
 scripts/run-godot-hoist --serial PICO_SERIAL --app blender
 ```
 
-The first command installs the matching Godot Android build template if needed;
-Gradle may download dependencies on the first export. Android Studio is not
-required. Preserve app data when updating so the saved identity stays stable.
-For a desktop OpenXR runtime, launch Godot with `--xr-mode on`; ordinary desktop
-runs stay flat. XR selection is based on runtime initialization, not a headset
-model-name list. A failed XR initialization logs a warning and falls back flat.
+Preserve app data when reinstalling so pairing remains stable. Gradle may
+download dependencies on first use; Android Studio is not required.
+`WELD_XR_INPUT` logs the resolved offset and tilt configuration once at startup.
+Gradle strips the Pico library: its merged input was verified byte-for-byte
+against the staged Rust library, and the APK against Gradle's stripped output.
+The Phone export does not use Gradle and its library must match staging directly.
 
 ## Passthrough and lifecycle
 
-The scene requests `XR_ENV_BLEND_MODE_ALPHA_BLEND` only when advertised and
-makes the main viewport background transparent only after the runtime accepts
-the request. Otherwise it requests opaque VR. Passthrough is composed by the
-headset runtime, not a raw camera feed accessible to Weld. See Godot's
-[XRInterface blend modes](https://docs.godotengine.org/en/4.7/classes/class_xrinterface.html)
-and [Android XR export guidance](https://docs.godotengine.org/en/4.7/tutorials/xr/deploying_to_android.html).
+The scene requests alpha-blend passthrough only when advertised, otherwise
+opaque VR. The headset composes the camera background; Weld does not access
+raw camera frames. Headset rendering uses OpenXR synchronization rather than
+desktop vsync. The receiver requests the headset refresh rate through the
+shared presentation API, with source-side encoder limits still enforced.
 
-Headset rendering uses OpenXR's synchronization rather than desktop vsync.
-The receiver requests the reported headset refresh rate through the existing
-presentation API; the source still clamps it to encoder limits.
+Pause/session loss stops the video producer. Automatic resume/re-admission is
+not supported yet: relaunch the viewer/test source after pause. The normal UI
+shows connection status until video arrives. Existing `--video-fixture` and
+`--video-single-frame` diagnostics remain available through user arguments
+(Android uses export `command_line/extra_args`, not ADB intent extras).
 
-Stop/session loss and application pause stop the native video producer.
-Automatic resume/re-admission remains unsupported: relaunch the viewer and its
-test source after pause. The normal UI contains no test buttons; run with the
-existing `--video-fixture` or `--video-single-frame` user argument for diagnostics
-(on Android, use export `command_line/extra_args`, not ADB intent extras).
-Connection status is shown until a native image is available. Remote input and
-Blender dialogs/additional streams remain outside this presentation slice.
+## Validation
 
-## Validation: 2026-09-13
+Run the isolated `apps/weld-vr/scripts/check-gdextension --android-export` check
+for scene wiring, injected tracker loss/recovery, offset/tilt invariants, export
+hooks and the Phone manifest negative control. It does not validate physical
+pointing. The actual Pico export is checked separately with
+`apkanalyzer manifest print` for both capability entries, followed by a bounded
+live Blender test: the laser, hit marker and actual selected point must agree.
 
-On the connected Pico A9210, the corrected APK created OpenXR 1.1.54 on
-`Pico XRRuntime() 119.0.65537`, automatically selected XR, reported
-`passthrough=true blend_modes=[0, 2]`, and placed the panel from a tracked head
-pose. These logs confirm runtime acceptance, not visual passthrough quality.
-The live Blender test subsequently connected over Iroh and reported 7 decoded,
-3 presented and 4 superseded startup frames before the scene became static.
-The Pico preset needed its own Internet permission enabled. The launcher now
-waits for the new Android process as well as the persisted public identity file;
-an old identity file alone does not mean the new activity has started.
-Godot reported that rendering features disabled subsampled-image foveation;
-this is not implementation of Weld's proposed gaze-driven streaming.
+For this slice, both fresh isolated checks aborted during editor import before
+reaching their tests. Independent real-project scene and manifest checks, Rust
+tests, actual Phone/Pico exports and a bounded AV1 receive/presentation run are
+the available evidence. The live run ended cleanly, but physical pointing and
+click alignment remain pending user confirmation.
 
-A subsequent on-device `WELD_XR_RENDER` diagnostic, sampled after the first draw,
-reported **1920x1920 per eye**, two views, XR size multiplier 1.0, an actual main
-viewport texture of 1920x1920, viewport 3D scale 1.0, MSAA disabled (0), and a
-1600x1000 panel texture. This is the runtime-recommended eye target at default
-scale, not the headset's physical 2160x2160 panel resolution or its maximum
-supported render size. The reported refresh at this startup sample was 73 Hz;
-it is not a sustained refresh measurement. No quality settings were changed.
-The diagnostic logs once after startup/session-begin drawing and reads sizes
-only, without GPU pixel readback. Evidence: `godot-hoist-urijud6m/xr-render.log`
-under `target/validation`.
+Rust tests cover pointer policy and geometry, including downward tilt mapping
+to increasing image pixel Y. The scene test checks native/rig/input priority
+ordering, unchanged model transforms, non-accumulating offsets, finite/clamped
+tilt and tracking-loss cleanup.
 
-The 1.125-scale comparison then confirmed both the OpenXR eye target and actual
-viewport texture at **2160x2160**, with two views, 3D scale 1.0, MSAA still off
-and the panel still 1600x1000. AV1 reception/presentation continued. Evidence:
-`godot-hoist-hzbypnbg/xr-render.log`. This is startup/presentation validation,
-not a sustained performance or subjective sharpness result.
+### Editor import limitation
 
-The following 4x-MSAA trial reported `msaa_3d=2` (`Viewport.MSAA_4X`) with
-2160x2160 eye targets and the same 1600x1000 panel. The Blender AV1 stream still
-decoded and presented. Evidence: `godot-hoist-dwzgkjmw/xr-render.log`.
-
-The user confirmed clean panel edges with MSAA, and a modest improvement with
-the anisotropic-filter trial (`panel_filter=5`, `godot-hoist-cx1fo3n9`). Text and
-UI clarity remain limited; source resolution/UI scale and bitrate tuning are
-deferred. Pico's controller-required launch prompt also remains unresolved.
-
-The isolated integration checks pass for flat fallback, the XR camera and mono
-viewport/material connection, extension state and editor build hooks.
-The desktop native-video check stopped receiving draw callbacks after its first
-draw; the unchanged committed scene reproduced the same failure in an isolated
-checkout. Desktop playback is therefore not requalified by that test run.
+An earlier isolated Godot 4.7.1 import crash was traced to editor documentation
+shutdown: its stack reached `EditorHelp::_gen_extensions_docs` after cleanup
+freed documentation state, before XR scene execution. Six unconstrained
+baseline runs succeeded; this was not a measured failure rate.
+The two latest import aborts have no stack and cannot be attributed to that
+same cause from the available evidence.
+See the pinned [deferred documentation generation](https://github.com/godotengine/godot/blob/a13da4feb/editor/doc/editor_help.cpp#L3041)
+and [cleanup](https://github.com/godotengine/godot/blob/a13da4feb/editor/doc/editor_help.cpp#L3365).
+Checks must still fail on that error; no timing workaround or failure suppression
+is included. Core dumps are disabled to prevent oversized diagnostic files.

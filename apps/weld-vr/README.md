@@ -11,34 +11,19 @@ path; track [Godot PR #114940](https://github.com/godotengine/godot/pull/114940)
 That PR enables extension selection, not a complete video importer. Vulkan
 will still need native-buffer import, synchronization and lifetime handling.
 
-Godot XR Tools is enabled, including its
-user-settings and rumble-manager autoloads. The **Android Pico** export enables
+The **Android Pico** export enables
 OpenXR and uses Gradle to include the standard Khronos loader. Successful XR
 initialization selects a head-tracked video panel with passthrough where supported;
 desktop/phone otherwise stay flat. See [XR setup](../../docs/godot-xr.md).
 No Pico SDK, Pico XR plugin or developer-account login is required.
 
-## Godot XR Tools
+## XR support
 
-Vendored under `addons/godot-xr-tools/`. Upstream code and assets are unchanged;
-Godot 4.7 has updated the tracked `.import` metadata.
-
-- Release: [4.5.1](https://github.com/GodotVR/godot-xr-tools/releases/tag/4.5.1),
-  the latest stable release checked on 2026-09-11. This is the toolkit version,
-  not the Godot engine version (4.7.1 in the Android development shell).
-- Archive: [godot-xr-tools.zip](https://github.com/GodotVR/godot-xr-tools/releases/download/4.5.1/godot-xr-tools.zip).
-- SHA-256: `f60d15e6b1bc4e544947691cb8de73c483dfe9e9a4c4dad92511e0d8f575dcae`.
-- License: [MIT](addons/godot-xr-tools/LICENSE), with upstream asset notices
-  retained in the add-on.
-
-Only the add-on directory is installed, not the demo project or vendor plugins.
-For updates, use an explicit upstream stable release, verify its archive digest,
-and review the replacement before importing it with Godot. Keep upstream files
-unchanged; put Weld behavior outside the add-on.
-
-Open this directory from the Android development shell. If the editor was open
-during installation, reload the project so it discovers the add-on's classes and
-autoloads. See the shared shell's README for SDK/NDK and export-template setup.
+Godot supplies built-in OpenXR tracking, passthrough and runtime controller
+models. Rust owns the right-hand pointer and input mapping; the XR Tools addon
+and its autoloads are no longer needed. The Android native OpenXR loader still
+comes from Gradle, independently of scene helpers. See
+[XR input and validation](../../docs/godot-xr.md) for bindings and limits.
 
 ## Rust bridge
 
@@ -177,8 +162,9 @@ are not used.
 
 The check also exercises target selection and compiler diagnostics with a helper
 fixture. The optional Android export checks use the installed matching export
-template and SDK/JDK, no signing key or device. They export the main scene,
-autoload dependencies and GDExtension, avoiding unrelated unused XR scenes.
+template and SDK/JDK, including `apkanalyzer` from the SDK command-line tools
+on `PATH`, but no signing key or device. They export the main scene,
+owned XR pointer scene and GDExtension.
 They verify both normal export and the expected soft failure with a good library
 already staged: the error must be logged, the library preserved, and editor/test
 scripts excluded. These checks do not exercise the editor's device-result dialog.
@@ -187,12 +173,12 @@ Desktop and ARM64 builds, Clippy and the headless integration check pass with
 Godot 4.7.1 and Rust 1.95. An exported Android debug APK contains the exact staged
 ARM64 `libweld_vr.so`, including `gdext_rust_init`, and no desktop copy of that
 library. Native-video exports also include `libavcodec`, `libavformat` and
-`libavutil`. Checks verify the panel and XR global-class dependencies: a
-scene-only export silently omitted them, leaving the old layout visible after
-the new main script failed to load on-device.
+`libavutil`. Checks verify the panel and native XR pointer scene dependencies.
 
-For headless APK export, import resources before exporting. A combined first
+Historically, before XR Tools removal, a combined first
 import/export produced errors from unused XR Tools resources and exit-time
 resource cleanup; the same errors were reproduced from the pre-Rust checkpoint
 `d89f0aab`. The separate import and subsequent export used for the phone build
-completed without those errors. This does not validate the unused XR scenes.
+completed without those errors. The current lean project also exposes a
+Godot editor documentation shutdown race during isolated imports; see
+[the recorded engine limitation](../../docs/godot-xr.md#editor-import-limitation).

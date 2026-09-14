@@ -228,7 +228,7 @@ def main(argv=None):
             if existing is None:
                 phone_install(profile)
         write_new(run / "viewer.identity", identity(public) + "\n")
-        print(f"Viewer approved. Run for {args.seconds}s; Ctrl+C stops the demo. Desktop: click the image for mouse/keyboard input; XR/phone are view-only.", flush=True)
+        print(f"Viewer approved. Run for {args.seconds}s; Ctrl+C stops the demo. Desktop: click the image for mouse/keyboard input. XR: right-hand aim/trigger/grip/stick; flat phone is view-only.", flush=True)
         deadline = time.monotonic() + args.seconds
         restart_at = time.monotonic() + args.restart_after if args.restart_after else None
         while not stopping and time.monotonic() < deadline:

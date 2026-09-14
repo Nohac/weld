@@ -1,7 +1,8 @@
 # Godot live-window tracer
 
 Godot can receive one live AV1 window from headless Weld on Linux or Android.
-This is a bounded single-window viewer, with basic input on desktop. The
+This is a bounded single-window viewer, with desktop input and a first
+[right-hand XR pointer](godot-xr.md#right-hand-input). The
 [XR scene](godot-xr.md) can present the same stream on a headset. It uses
 the same `weld-hoist-iroh` transport, `weld-hoist-encoded` scheduling and
 `weld-media::decode::DecodePool` as the compositor receiver. No new wire protocol,
@@ -27,7 +28,8 @@ window at 960x640 for 120 seconds; `--seconds` changes the test timer.
 `--app blender` is another single-root test, not support for its extra dialogs.
 On desktop, click the image to focus it, then use mouse buttons, wheel and
 physical keyboard keys. The source uses compositor-owned explicit repeats,
-with emulated repeats for legacy clients. Phone and XR remain view-only.
+with emulated repeats for legacy clients. XR uses the right-hand controller
+pointer; the flat phone viewer remains view-only.
 Closing that window and creating a replacement also requires a new connection;
 the limit is one media-stream identity per connection, not merely one visible
 window at a time. Blender dialogs/popups exceed this initial limit.
@@ -120,7 +122,7 @@ is pinned for that producer lifetime; edits require a new start.
   and source after pause. Source relay re-admission after viewer disconnect
   remains one-shot: restart the source for another connection. Detach/rejoin
   preserving the same live apps remains shared relay lifecycle work.
-- AV1 only is advertised. XR/phone input, multi-window layout, adaptive capability budgets,
+- AV1 only is advertised. Phone input, multi-window layout, adaptive capability budgets,
   automatic rotation recovery and Vulkan import remain separate work.
 
 ## Desktop input

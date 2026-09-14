@@ -7,16 +7,20 @@ extends Node3D
 var xr_interface: OpenXRInterface
 var placement_pending := true
 var passthrough_active := false
-var controller_models: OpenXRRenderModelManager
+var controller_models: Array[OpenXRRenderModelManager] = []
+
+const ControllerRig = preload("res://scenes/controller_rig.gd")
 
 @onready var camera: XRCamera3D = $XROrigin3D/XRCamera3D
 @onready var screen: MeshInstance3D = $Screen
 @onready var panel: Control = $PanelViewport/VideoPanel
-@onready var controllers: Array[XRController3D] = [
-	$XROrigin3D/LeftController, $XROrigin3D/RightController]
+@onready var right_rig: ControllerRig = $XROrigin3D/RightControllerRig
 
 
 func _ready() -> void:
+	# Native pose/model updates run at 0; Rust pointer sampling runs at 200.
+	# Apply presentation transforms before both hit testing and renderer flush.
+	process_priority = 100
 	var material := StandardMaterial3D.new()
 	material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
 	# GLES falls back to level-zero filtering for this non-mipmapped viewport;
@@ -24,6 +28,8 @@ func _ready() -> void:
 	material.texture_filter = panel_texture_filter
 	material.albedo_texture = $PanelViewport.get_texture()
 	screen.material_override = material
+	$XROrigin3D/RightControllerRig/Aim/PointerTilt/Pointer.configure(panel.player,
+		right_rig.aim, screen, panel.view)
 	xr_interface = XRServer.find_interface("OpenXR") as OpenXRInterface
 	if xr_interface == null or not xr_interface.is_initialized():
 		# Scene inspection/tests can load the hierarchy without an XR runtime.
@@ -45,14 +51,23 @@ func _ready() -> void:
 	if Engine.has_singleton("OpenXRRenderModelExtension"):
 		# Godot's manager requires the initialized extension even in its
 		# constructor, so do not instantiate it during non-XR scene inspection.
-		controller_models = OpenXRRenderModelManager.new()
-		controller_models.name = "ControllerModels"
-		controller_models.visible = false
-		$XROrigin3D.add_child(controller_models)
+		_add_controller_models($XROrigin3D, OpenXRRenderModelManager.RENDER_MODEL_TRACKER_LEFT_HAND)
+		_add_controller_models(right_rig, OpenXRRenderModelManager.RENDER_MODEL_TRACKER_RIGHT_HAND)
 		var models := Engine.get_singleton("OpenXRRenderModelExtension")
 		models.render_model_added.connect(_log_controller_models)
 		models.render_model_removed.connect(_log_controller_models)
 		_log_controller_models()
+	print("WELD_XR_INPUT origin_offset=", right_rig.origin_offset_enabled,
+		" pointer_tilt_degrees=", right_rig.pointer_tilt_degrees)
+
+
+func _add_controller_models(parent: Node3D, hand: int) -> void:
+	var manager := OpenXRRenderModelManager.new()
+	manager.name = "ControllerModels"
+	manager.tracker = hand
+	manager.visible = false
+	parent.add_child(manager)
+	controller_models.append(manager)
 
 
 func _log_controller_models(_model: RID = RID()) -> void:
@@ -64,17 +79,9 @@ func _log_controller_models(_model: RID = RID()) -> void:
 func _update_controllers() -> void:
 	var focused := xr_interface != null and xr_interface.is_initialized() \
 		and xr_interface.get_session_state() == OpenXRInterface.SESSION_STATE_FOCUSED
-	if controller_models != null:
-		controller_models.visible = focused
-	for controller in controllers:
-		var active := focused and controller.get_has_tracking_data()
-		var pointer: XRToolsFunctionPointer = controller.get_node("Pointer")
-		if pointer.enabled != active:
-			pointer.enabled = active
-			print("WELD_XR_CONTROLLERS tracker=", controller.tracker, " pointer=", active)
-		# XR Tools' disabled pointer can still draw its idle ray. Hide the whole
-		# controller subtree when tracking/focus is lost, including that ray.
-		controller.visible = active
+	right_rig.update_tracking(focused)
+	for manager in controller_models:
+		manager.visible = focused
 
 
 func _queue_render_diagnostics() -> void:

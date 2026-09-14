@@ -248,6 +248,14 @@ Godot objects stay on the main thread, where a typed Rust node owns event
 extraction, physical-hold reconciliation and cursor presentation. GDScript only
 wires the presented control; it does not own input policy or a cursor protocol.
 See [Godot input](godot-hoisting.md#desktop-input).
+The XR scene configures a separate native Rust pointer node with typed player,
+controller and presentation references. It projects one right-hand aim ray
+through the displayed quad into the same image rectangle and input mailbox;
+it owns analog hysteresis, press retry/suppression and tracking/focus cleanup,
+not a second transport or decoder. Generation/epoch tokens contain no native
+leases. Only one desktop or XR input source may own a player. Godot retains
+headset presentation and runtime tracking/model support; XR Tools is unused
+and removed. See [XR input](godot-xr.md#right-hand-input).
 
 `DecodeBackend::Output` and `DecodedFramePublisher::Buffer` bind the decoder to
 a caller-owned publication adapter without making native buffers a protocol

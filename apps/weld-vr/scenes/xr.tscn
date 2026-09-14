@@ -3,15 +3,17 @@
 [ext_resource type="Script" path="res://scenes/xr.gd" id="1"]
 [ext_resource type="PackedScene" uid="uid://bjii61v6tg6cf" path="res://scenes/video_panel.tscn" id="2"]
 [ext_resource type="PackedScene" path="res://scenes/controller_pointer.tscn" id="3"]
+[ext_resource type="Script" path="res://scenes/controller_rig.gd" id="4"]
 
 [sub_resource type="Environment" id="Environment"]
 background_mode = 0
+ambient_light_source = 2
+ambient_light_color = Color(1, 1, 1, 1)
+ambient_light_energy = 0.6
+ambient_light_sky_contribution = 0.0
 
 [sub_resource type="QuadMesh" id="PanelMesh"]
 size = Vector2(1.6, 1.0)
-
-[sub_resource type="BoxShape3D" id="PanelShape"]
-size = Vector3(1.6, 1.0, 0.01)
 
 [node name="XR" type="Node3D"]
 script = ExtResource("1")
@@ -19,25 +21,32 @@ script = ExtResource("1")
 [node name="WorldEnvironment" type="WorldEnvironment" parent="."]
 environment = SubResource("Environment")
 
+[node name="ControllerLight" type="DirectionalLight3D" parent="."]
+rotation = Vector3(-0.8, -0.5, 0)
+light_energy = 1.2
+shadow_enabled = false
+
 [node name="XROrigin3D" type="XROrigin3D" parent="."]
 
 [node name="XRCamera3D" type="XRCamera3D" parent="XROrigin3D"]
 current = true
 near = 0.05
 
-[node name="LeftController" type="XRController3D" parent="XROrigin3D"]
+[node name="RightControllerRig" type="Node3D" parent="XROrigin3D"]
 visible = false
-tracker = &"left_hand"
-pose = &"aim"
+script = ExtResource("4")
 
-[node name="Pointer" parent="XROrigin3D/LeftController" instance=ExtResource("3")]
+[node name="Grip" type="XRController3D" parent="XROrigin3D/RightControllerRig"]
+tracker = &"right_hand"
+pose = &"grip"
 
-[node name="RightController" type="XRController3D" parent="XROrigin3D"]
-visible = false
+[node name="Aim" type="XRController3D" parent="XROrigin3D/RightControllerRig"]
 tracker = &"right_hand"
 pose = &"aim"
 
-[node name="Pointer" parent="XROrigin3D/RightController" instance=ExtResource("3")]
+[node name="PointerTilt" type="Node3D" parent="XROrigin3D/RightControllerRig/Aim"]
+
+[node name="Pointer" parent="XROrigin3D/RightControllerRig/Aim/PointerTilt" instance=ExtResource("3")]
 
 [node name="PanelViewport" type="SubViewport" parent="."]
 disable_3d = true
@@ -51,10 +60,3 @@ visible = false
 position = Vector3(0, 1.4, -1.6)
 cast_shadow = 0
 mesh = SubResource("PanelMesh")
-
-[node name="PointerTarget" type="StaticBody3D" parent="Screen"]
-collision_layer = 1048576
-collision_mask = 0
-
-[node name="CollisionShape3D" type="CollisionShape3D" parent="Screen/PointerTarget"]
-shape = SubResource("PanelShape")

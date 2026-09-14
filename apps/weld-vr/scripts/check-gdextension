@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
+# Failed native engine checks must not create multi-gigabyte core dumps.
+ulimit -c 0
 
 project_directory=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 desktop_cursor=false
@@ -12,6 +14,10 @@ esac
 if [[ $# -gt 1 ]]; then
   printf '%s\n' 'Usage: check-gdextension [--android-export|--desktop-cursor]' >&2
   exit 2
+fi
+if [[ "$build_target" == android ]] && ! command -v apkanalyzer >/dev/null 2>&1; then
+  printf '%s\n' 'Android export checks require apkanalyzer from the Android SDK command-line tools on PATH.' >&2
+  exit 1
 fi
 "$project_directory/scripts/build-gdextension" "$build_target"
 
@@ -79,6 +85,13 @@ fi
 
 # Exercise target selection and a failed compiler without changing real sources
 # or libraries. Exercise the shared runner without opening an editor UI.
+if ! run_godot --script res://tests/manifest_smoke.gd > "$work_directory/manifest.log" 2>&1; then
+  cat "$work_directory/manifest.log" >&2
+  exit 1
+fi
+check_log "$work_directory/manifest.log"
+cat "$work_directory/manifest.log"
+grep -qx 'WELD_MANIFEST_SMOKE_OK' "$work_directory/manifest.log"
 cp -- "$project_directory/tests/fixtures/build-gdextension" \
   "$work_directory/project/scripts/build-gdextension"
 if ! run_godot --script res://tests/build_hook_smoke.gd > "$work_directory/hooks.log" 2>&1; then
@@ -103,8 +116,7 @@ if [[ "$build_target" == android ]]; then
   sed -i -e 's/^package\/signed=true$/package\/signed=false/' \
     -e '/^\[runnable_presets\]$/,/^\[preset\.0\]$/ { /^\[preset\.0\]$/!d; }' \
     "$work_directory/project/export_presets.cfg"
-  # Use the real resource selection: a scene-only export omitted GDScript
-  # preloads and XR global classes even though the export process succeeded.
+  # Use the real resource selection, including the Rust-owned pointer scene.
   for outcome in success failure; do
     if [[ "$outcome" == failure ]]; then
       touch "$work_directory/project/scripts/fail-build"
@@ -126,19 +138,20 @@ if [[ "$build_target" == android ]]; then
     unzip -p "$work_directory/$outcome.apk" lib/arm64-v8a/libweld_vr.so \
       | cmp - "$project_directory/bin/android/debug/libweld_vr.so"
     unzip -Z1 "$work_directory/$outcome.apk" > "$work_directory/$outcome-files"
+    apkanalyzer manifest print "$work_directory/$outcome.apk" > "$work_directory/$outcome-manifest.xml"
+    grep -q 'package="com.example.weldvr"' "$work_directory/$outcome-manifest.xml"
+    if grep -q 'android:name="handtracking"' "$work_directory/$outcome-manifest.xml"; then
+      printf '%s\n' 'Phone export must not declare Pico hand-tracking capabilities.' >&2
+      exit 1
+    fi
     for library in weld_vr avutil avcodec avformat; do
       grep -qx "lib/arm64-v8a/lib$library.so" "$work_directory/$outcome-files"
     done
     for resource in scenes/video_panel.tscn.remap \
-      scenes/controller_pointer.tscn.remap \
-      addons/godot-xr-tools/xr_tools.gd.remap \
-      addons/godot-xr-tools/user_settings/user_settings.gd.remap \
-      addons/godot-xr-tools/rumble/rumble_manager_queue.gd.remap \
-      .godot/global_script_class_cache.cfg; do
+      scenes/controller_pointer.tscn.remap; do
       grep -qx "assets/$resource" "$work_directory/$outcome-files"
     done
-    grep -q '^assets/addons/godot-xr-tools/' "$work_directory/$outcome-files"
-    if grep -E '^assets/(tests/|addons/weld-rust-build/)' "$work_directory/$outcome-files"; then
+    if grep -E '^assets/(tests/|addons/weld-rust-build/|addons/godot-xr-tools/)' "$work_directory/$outcome-files"; then
       printf '%s\n' 'Editor/test code leaked into the APK.' >&2
       exit 1
     fi
