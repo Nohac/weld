@@ -2,6 +2,7 @@
 use crate::native::{Geometry, Image};
 use anyhow::{Result, ensure};
 use std::{
+    collections::HashMap,
     sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},
@@ -9,35 +10,48 @@ use std::{
     thread::Thread,
 };
 use weld_client::SurfaceContentView;
+use weld_media::MediaStreamId;
 
 const MAX_FRAMES: usize = 7;
+const MAX_TOTAL_FRAMES: usize = 32;
 
 pub(super) struct FrameBudget {
     outstanding: AtomicUsize,
     receiver: Thread,
+    streams: std::sync::Mutex<HashMap<MediaStreamId, usize>>,
 }
 impl FrameBudget {
     pub fn new(receiver: Thread) -> Arc<Self> {
         Arc::new(Self {
             outstanding: AtomicUsize::new(0),
             receiver,
+            streams: std::sync::Mutex::new(HashMap::new()),
         })
     }
-    pub fn reserve(self: &Arc<Self>) -> Option<FrameCredit> {
+    pub fn reserve(self: &Arc<Self>, stream: MediaStreamId) -> Option<FrameCredit> {
+        let mut streams = super::lock(&self.streams);
+        if streams.get(&stream).copied().unwrap_or(0) >= MAX_FRAMES {
+            return None;
+        }
         self.outstanding
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
-                (count < MAX_FRAMES).then_some(count + 1)
+                (count < MAX_TOTAL_FRAMES).then_some(count + 1)
             })
             .ok()
-            .map(|_| FrameCredit {
-                budget: self.clone(),
-                notify: true,
+            .map(|_| {
+                *streams.entry(stream).or_default() += 1;
+                FrameCredit {
+                    budget: self.clone(),
+                    notify: true,
+                    stream,
+                }
             })
     }
 }
 pub(super) struct FrameCredit {
     budget: Arc<FrameBudget>,
     notify: bool,
+    stream: MediaStreamId,
 }
 impl FrameCredit {
     /// Failed admission cannot wake itself into a Busy retry loop.
@@ -48,6 +62,14 @@ impl FrameCredit {
 impl Drop for FrameCredit {
     fn drop(&mut self) {
         self.budget.outstanding.fetch_sub(1, Ordering::AcqRel);
+        let mut streams = super::lock(&self.budget.streams);
+        if let Some(count) = streams.get_mut(&self.stream) {
+            *count -= 1;
+            if *count == 0 {
+                streams.remove(&self.stream);
+            }
+        }
+        drop(streams);
         if self.notify {
             self.budget.receiver.unpark();
         }
@@ -233,13 +255,32 @@ mod tests {
     fn credits_bound_all_owned_outputs_and_failed_admission_returns_capacity() {
         let budget = FrameBudget::new(std::thread::current());
         let mut credits = (0..7)
-            .map(|_| budget.reserve().expect("credit"))
+            .map(|_| budget.reserve(MediaStreamId::new(1)).expect("credit"))
             .collect::<Vec<_>>();
-        assert!(budget.reserve().is_none());
+        assert!(budget.reserve(MediaStreamId::new(1)).is_none());
         credits.pop().expect("reserved").cancel();
-        assert!(budget.reserve().is_some());
+        assert!(budget.reserve(MediaStreamId::new(1)).is_some());
         drop(credits);
         assert_eq!(budget.outstanding.load(Ordering::Acquire), 0);
+    }
+    #[test]
+    fn multiple_streams_share_total_budget_without_exhausting_any_reader() {
+        let budget = FrameBudget::new(std::thread::current());
+        let mut credits = Vec::new();
+        for stream in 0..4 {
+            for _ in 0..7 {
+                credits.push(budget.reserve(MediaStreamId::new(stream)).expect("credit"));
+            }
+            assert!(budget.reserve(MediaStreamId::new(stream)).is_none());
+        }
+        for _ in 0..4 {
+            credits.push(budget.reserve(MediaStreamId::new(4)).expect("credit"));
+        }
+        assert!(budget.reserve(MediaStreamId::new(5)).is_none());
+        credits.pop().expect("credit").cancel();
+        assert!(budget.reserve(MediaStreamId::new(5)).is_some());
+        drop(credits);
+        assert!(super::super::lock(&budget.streams).is_empty());
     }
     #[test]
     fn odd_visible_height_excludes_av1_padding_and_respects_native_crop_origin() {

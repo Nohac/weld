@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Pair a development Godot viewer and show one headless AV1 window over Iroh N0.
+"""Pair a development Godot viewer with headless AV1 windows over Iroh N0.
 
 The phone must already have the current debug APK installed. Only public files
 are exchanged; private keys remain in per-device storage outside build outputs.
@@ -125,7 +125,7 @@ def main(argv=None):
             serial = ready[0]
         adb = ["adb", "-s", serial]
         subprocess.run([*adb, "shell", "run-as", PACKAGE, "pwd"], check=True, stdout=subprocess.DEVNULL, timeout=5)
-    print("One live AV1 stream; extra windows/layers are not supported in this tracer.", flush=True)
+    print("Live AV1 window hierarchy; receiver limits are eight surfaces/layers and 32 in-flight images.", flush=True)
     print("Iroh N0 contacts Internet discovery/relay services; existing desktop apps and host routes are unchanged.", flush=True)
     if not args.desktop:
         print("Android development viewer uses public DNS (Google plus Iroh public fallbacks), not system/Private DNS.", flush=True)

@@ -9,9 +9,9 @@ use std::{
 };
 use weld_client::{
     ButtonState, ClientCursor, ClientFocusRequest, ClientPointerRoute, ClientPointerRouteUpdate,
-    ClientRequest, ClientRuntime, InputEventKind, InputPosition, KeyboardKeyState, LinuxButtonCode,
-    LinuxKeycode, RawScrollFrame, RawScrollPhase, RawScrollSource, RuntimeInputEvent,
-    RuntimeInputEventKind, SurfaceInputGeometry,
+    ClientRequest, ClientRuntime, ClientSurfaceId, InputEventKind, InputPosition, KeyboardKeyState,
+    LinuxButtonCode, LinuxKeycode, RawScrollFrame, RawScrollPhase, RawScrollSource,
+    RuntimeInputEvent, RuntimeInputEventKind, SurfaceInputGeometry,
 };
 
 pub(super) use keys::physical_key;
@@ -55,6 +55,8 @@ pub(super) struct InputState {
     suppressed_keys: HashSet<LinuxKeycode>,
     suppressed_buttons: HashSet<LinuxButtonCode>,
     keyboard_focus: bool,
+    focused_surface: Option<ClientSurfaceId>,
+    hidden: HashSet<ClientSurfaceId>,
     capture_route: Option<ClientPointerRoute>,
     cursor: ClientCursor,
     cursor_dirty: bool,
@@ -72,6 +74,8 @@ impl Default for InputState {
             suppressed_keys: HashSet::new(),
             suppressed_buttons: HashSet::new(),
             keyboard_focus: false,
+            focused_surface: None,
+            hidden: HashSet::new(),
             capture_route: None,
             cursor: ClientCursor::default(),
             cursor_dirty: true,
@@ -91,13 +95,55 @@ impl InputState {
         self.suppressed_keys.extend(self.keys.iter().copied());
         self.suppressed_buttons.extend(self.buttons.iter().copied());
         self.keyboard_focus = false;
+        self.focused_surface = None;
         self.capture_route = None;
         self.cached_pointer = None;
         self.set_cursor(ClientCursor::default());
     }
     pub fn invalidate(&mut self) {
+        self.hidden.clear();
         self.epoch = self.epoch.wrapping_add(1);
         self.reset();
+    }
+    pub fn remove_surface(&mut self, surface: ClientSurfaceId) {
+        self.hidden.remove(&surface);
+        if self.focused_surface == Some(surface)
+            || self
+                .capture_route
+                .is_some_and(|route| route.surface == surface)
+            || self
+                .cached_pointer
+                .is_some_and(|(route, _)| route.surface == surface)
+        {
+            self.reset();
+        }
+        self.queue.retain(|message| !matches!(&message.action, Action::Pointer { route: Some(route), .. } if route.surface == surface));
+    }
+    pub fn captures(&self, geometry: &SurfaceInputGeometry) -> bool {
+        self.capture_route.is_some_and(|route| {
+            route.surface == geometry.surface
+                && geometry
+                    .inputs
+                    .iter()
+                    .any(|input| input.layer == route.layer)
+        }) && self.has_admitted_buttons()
+    }
+    pub fn set_surface_visible(&mut self, surface: ClientSurfaceId, visible: bool) {
+        if visible {
+            self.hidden.remove(&surface);
+        } else if !self.hidden.contains(&surface) {
+            self.remove_surface(surface);
+            self.hidden.insert(surface);
+        }
+    }
+    pub fn surface_visible(&self, surface: ClientSurfaceId) -> bool {
+        !self.hidden.contains(&surface)
+    }
+    pub fn is_focused(&self, target: &Target) -> bool {
+        target.epoch == self.epoch
+            && self.keyboard_focus
+            && self.focused_surface == Some(target.geometry.surface)
+            && self.surface_visible(target.geometry.surface)
     }
     fn enqueue(&mut self, action: Action) -> bool {
         let pointer = match &action {
@@ -174,9 +220,11 @@ impl InputState {
             return false;
         }
         let hit = target
-            .filter(|target| target.epoch == self.epoch)
+            .filter(|target| {
+                target.epoch == self.epoch && self.surface_visible(target.geometry.surface)
+            })
             .and_then(|target| target.geometry.pointer_route(rectangle, position));
-        let route = hit.or(self.capture_route);
+        let route = self.capture_route.or(hit);
         if button_index == 0 {
             self.enqueue(Action::Pointer {
                 route,
@@ -206,6 +254,7 @@ impl InputState {
                 return false;
             }
             self.keyboard_focus = true;
+            self.focused_surface = route.map(|route| route.surface);
             if self.capture_route.is_none() {
                 self.capture_route = route;
             }
@@ -311,7 +360,7 @@ impl InputState {
 /// No mailbox lock is held while adapter callbacks run.
 pub(super) fn service(shared: &super::Shared, runtime: &mut ClientRuntime) {
     let (reset, messages, epoch) = {
-        let mut input = super::lock(&shared.input);
+        let mut input = super::lock(&shared.session.input);
         (
             input.reset.take(),
             input.queue.drain(..).collect::<Vec<_>>(),
@@ -358,7 +407,7 @@ pub(super) fn service(shared: &super::Shared, runtime: &mut ClientRuntime) {
             }
         }
     }
-    super::lock(&shared.input).set_cursor(
+    super::lock(&shared.session.input).set_cursor(
         runtime
             .pointer_cursor()
             .map_or_else(ClientCursor::default, |(_, cursor)| cursor),
@@ -396,6 +445,73 @@ mod tests {
     }
     const RECT: [f64; 4] = [0.0, 0.0, 200.0, 200.0];
     const POINT: InputPosition = InputPosition::new(50.0, 50.0);
+
+    #[test]
+    fn focus_indicator_follows_clicks_not_hover_and_clears_on_invalidation() {
+        let mut state = InputState::default();
+        let first = target(0);
+        let mut second = first.clone();
+        second.geometry.surface = ClientSurfaceId::new(first.geometry.surface.client(), 2);
+        assert!(!state.is_focused(&first));
+        state.pointer(Some(&first), RECT, POINT, 1, true);
+        state.pointer(Some(&first), RECT, POINT, 1, false);
+        state.pointer(Some(&second), RECT, POINT, 0, false);
+        assert!(state.is_focused(&first));
+        assert!(!state.is_focused(&second));
+        state.pointer(Some(&second), RECT, POINT, 1, true);
+        state.pointer(Some(&second), RECT, POINT, 1, false);
+        assert!(!state.is_focused(&first));
+        assert!(state.is_focused(&second));
+        state.set_surface_visible(second.geometry.surface, false);
+        state.set_surface_visible(second.geometry.surface, true);
+        assert!(!state.is_focused(&second));
+        state.pointer(Some(&first), RECT, POINT, 1, true);
+        state.pointer(Some(&first), RECT, POINT, 1, false);
+        state.reset();
+        assert!(!state.is_focused(&first));
+        state.pointer(Some(&first), RECT, POINT, 1, true);
+        state.pointer(Some(&first), RECT, POINT, 1, false);
+        state.invalidate();
+        assert!(!state.is_focused(&first));
+    }
+
+    #[test]
+    fn hiding_one_surface_preserves_sibling_focus_and_blocks_stale_hits() {
+        let mut state = InputState::default();
+        let first = target(0);
+        let mut second = first.clone();
+        second.geometry.surface = ClientSurfaceId::new(first.geometry.surface.client(), 2);
+        assert!(state.pointer(Some(&second), RECT, POINT, 1, true));
+        assert!(state.pointer(Some(&second), RECT, POINT, 1, false));
+        state.set_surface_visible(first.geometry.surface, false);
+        assert_eq!(state.focused_surface, Some(second.geometry.surface));
+        assert!(!state.pointer(Some(&first), RECT, POINT, 0, false));
+        assert!(state.pointer(Some(&second), RECT, POINT, 0, false));
+        state.set_surface_visible(first.geometry.surface, true);
+        assert!(state.pointer(Some(&first), RECT, POINT, 0, false));
+    }
+
+    #[test]
+    fn drag_does_not_retarget_to_another_window_until_release() {
+        let mut state = InputState::default();
+        let first = target(0);
+        let mut second = first.clone();
+        second.geometry.surface = ClientSurfaceId::new(first.geometry.surface.client(), 2);
+        assert!(state.pointer(Some(&first), RECT, POINT, 1, true));
+        assert!(state.pointer(Some(&second), RECT, POINT, 0, false));
+        assert_eq!(
+            state.cached_pointer.expect("capture").0.surface,
+            first.geometry.surface
+        );
+        assert!(state.pointer(Some(&second), RECT, POINT, 1, false));
+        assert!(state.pointer(Some(&second), RECT, POINT, 0, false));
+        assert_eq!(
+            state.cached_pointer.expect("hover").0.surface,
+            second.geometry.surface
+        );
+        state.set_surface_visible(second.geometry.surface, false);
+        assert!(state.capture_route.is_none());
+    }
 
     #[test]
     fn pending_bind_keeps_discrete_wheels_on_last_admitted_route() {
@@ -557,7 +673,7 @@ mod tests {
             .expect("register");
         let target = target(0);
         {
-            let mut input = super::super::lock(&shared.input);
+            let mut input = super::super::lock(&shared.session.input);
             input.pointer(Some(&target), RECT, POINT, 1, true);
             input.key(LinuxKeycode(30), KeyboardKeyState::Pressed);
             input.key(LinuxKeycode(30), KeyboardKeyState::Repeated);
@@ -601,7 +717,7 @@ mod tests {
         );
         assert!(record.events.iter().any(|event| matches!(event.event, InputEventKind::PointerButton { state: ButtonState::Released, position: Some(position), .. } if position.x == 150.0)));
         drop(record);
-        super::super::lock(&shared.input).reset();
+        super::super::lock(&shared.session.input).reset();
         service(&shared, &mut runtime);
         assert_eq!(observed.borrow().resets.len(), 1);
         assert!(runtime.pointer_cursor().is_none());

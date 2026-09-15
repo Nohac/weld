@@ -6,8 +6,8 @@ use weld_media_android::{AndroidDecoder, AndroidImage, AndroidImageTarget, Decod
 
 pub const TEXTURE_TARGET: u32 = 0x8d65; // GL_TEXTURE_EXTERNAL_OES
 // Fixture holders: current/spare (2), retirements (2), pending (1), latest (1),
-// acquisition (1). Live receive additionally reserves one of seven global frame
-// credits BEFORE submission; the credit follows publication through GPU release.
+// acquisition (1). Live receive reserves one of seven per-stream frame credits
+// and one of 32 session credits BEFORE submission, through GPU release.
 // Thus even pool completions/old-generation outputs cannot exhaust this reader.
 const MAX_ACQUIRED_IMAGES: i32 = 8;
 #[derive(Clone)]

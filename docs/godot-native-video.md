@@ -1,7 +1,7 @@
 # Godot native video
 
 Native presentation is shared by the bounded fixture and the
-[single-window Iroh viewer](godot-hoisting.md) and its [XR scene](godot-xr.md).
+[multi-window Iroh viewer](godot-hoisting.md) and its [XR scene](godot-xr.md).
 Godot 4.7.1 Compatibility runs OpenGL ES on Linux and Android. The Linux
 `opengl3_es` override and runtime EGL/extension checks are deliberate: desktop
 core OpenGL/GLX is not the validated image-import route. Vulkan external-memory
@@ -110,8 +110,21 @@ devices** until the manifest minimum is corrected before distribution.
 
 The live viewer now connects the portable receiver and decode execution contracts
 to this target; see its bounds and validation in [Godot hoisting](godot-hoisting.md).
-Arbitrary negotiated codecs, multi-window presentation, rotation/context recreation
+Arbitrary negotiated codecs, rotation/context recreation
 recovery and Vulkan import remain separate work.
+
+## Multi-window regression: 2026-09-15
+
+Each live layer has its own latest mailbox, texture/material and generation-keyed
+render presenter. The session owns one receiver coordinator and shared decode
+pool; closing a view does not stop sibling decoders or clear a sibling's render
+state. Unknown GPU completion remains a process-wide quarantine condition.
+The main thread admits the views of a committed tree together when each is ready.
+
+`tests/native_multi_video_smoke.gd` runs two native presenters concurrently,
+then stops the one-frame presenter while the other finishes its 120-frame clip.
+It passed on Linux/GLES, as did the existing single-frame and replay regression.
+This checks overlapping presenter lifetimes, not headset composition quality.
 
 ## Live-receiver regression checks: 2026-09-13
 

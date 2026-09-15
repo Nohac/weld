@@ -2,14 +2,40 @@
 
 The startup scene selects `xr.tscn` when OpenXR initializes, otherwise the flat
 viewer. Both use the same [Iroh receiver and native decoder](godot-hoisting.md).
-XR renders the shared mono GPU SubViewport into a native OpenXR quad
+XR renders each layer's mono GPU SubViewport into a native OpenXR quad
 composition layer when supported, with a Godot mesh fallback. There is no
 second media pipeline or CPU video readback.
 
 The panel fits the application's clipped logical aspect within a 1.6 m by 1 m
 envelope, initially 1.6 m ahead and slightly below the tracked head, tilted
 back. It stays pinned rather than following head movement. Recenter places it
-again. Multi-window layout and host-keyboard capture remain separate work.
+again. Host-keyboard capture remains separate work.
+
+## Window layout and decoration
+
+Independent applications occupy stable positions around the user. Related
+toplevels center over their owner, capped to 75% of its physical width/height
+with aspect preserved, and sit 8 cm forward. A second unparented toplevel from
+the same namespaced Wayland client also uses this placement; this is a shell
+grouping choice, not invented protocol parentage or modality. Menus, tooltips
+and subsurfaces retain the transported relative positions and stacking.
+
+Each native panel has the same pose and bounds as its Rust ray-input target.
+The ray selects the nearest hit, while an admitted drag keeps its captured
+layer through release. Creation/removal and ancestor visibility update views
+without reconnecting. Native visibility changes only on actual transitions:
+hiding/showing every frame recreates Godot composition layers and caused
+visible flicker in the initial multi-window test.
+
+Rounded video corners use viewport alpha; transparent corners reject new ray
+hits. A small scene-rendered outline and soft shadow surround toplevels/popups
+without enlarging the video or input rectangle. This shadow is a decorative
+fade, not a light-cast shadow onto another panel. The active input window gets
+a brighter blue border; inactive borders are muted gray. Rust reads existing
+input focus, including reset/unmap/disconnect, rather than inferring focus
+from scene order. Native video remains independently composed at full panel
+resolution. Window moving, closing, resizing and placement persistence are
+not implemented yet.
 
 ## Controller presentation
 
@@ -113,7 +139,7 @@ old because publication occurs at `frame_pre_draw`; epoch checks reject stale
 targets.
 
 XR remote cursor shapes, relative pointer locking, virtual keyboard/IME,
-hand-gesture input and multiple presented windows are not implemented here.
+hand-gesture input are not implemented here.
 
 ## Image quality
 
@@ -139,8 +165,9 @@ bind failure on the tested GLES runtime. Startup-only native presentation
 kept video live; the exact underlying GL failure remains unresolved. No error
 checks or native image lifetime protections were weakened.
 
-The layer uses hole punching and sort order -1 so scene controllers and the
-pointer can draw in front. Its pose and quad size follow the same `Screen`
+Live layers use hole punching and negative sort orders, ordered by hierarchy
+and stack, so scene controllers and the pointer can draw in front. The fixture
+uses sort order -1. Each pose and quad size follow the same panel-mesh
 geometry Rust uses for hit testing. That mesh stays logically visible but is
 excluded from rendering in native mode. Composition transforms update at
 priority 150, between scene layout at 100 and pointer sampling at 200.
@@ -159,7 +186,7 @@ target, projection, nominal panel distance and envelope, with sampling factor
 application reconfiguration. Logical application size, encoded pixels and
 physical panel dimensions remain distinct.
 
-The selected mapped root receives a bounded logical configure first, then a
+Each independent mapped root receives a bounded logical configure first, then a
 preferred-scale request only after a later safe commit. A later commit is not
 treated as a configure acknowledgement: both the observed root and pending
 target must fit, including decoration margins, existing HiDPI scale and the
@@ -246,7 +273,16 @@ AV1 run presented 1517x853 pixels for 843x474 logical content (approximately
 Those are pipeline counters, not a measured latency or frame-rate benchmark.
 The runtime reported three composition layers and 90 Hz rendering. Vendor
 metadata warnings remained; this does not establish behavior on other runtimes
-or long-session stability. Multi-window and popup presentation are still pending.
+or long-session stability.
+
+On 2026-09-15 the multi-window slice passed 40 Rust tests, strict Clippy,
+Linux/Android debug builds, scene smoke, simultaneous native-presenter and
+rounded-corner/border/shadow GPU tests, and Pico debug export. Desktop Blender
+Preferences, menus/tooltips and return to the main window were manually tested.
+On Pico, the user confirmed the corrected centered/smaller secondary window,
+absence of the earlier composition-layer flicker, and the decoration/focus
+highlight. These are bounded interactive checks, not qualification of arbitrary
+window hierarchies or sustained eight-layer headset workloads.
 
 Rust tests cover pointer policy and geometry, including downward tilt mapping
 to increasing image pixel Y. The scene test checks native/rig/input priority

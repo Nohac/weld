@@ -15,6 +15,7 @@ var status_elapsed := 0.0
 var network_active := false
 var log_elapsed := 0.0
 var waiting_message := ""
+var window_controls := {}
 @onready var view: ColorRect = $VideoFrame/Video
 
 
@@ -115,11 +116,13 @@ func _before_draw() -> void:
 
 func _process(delta: float) -> void:
 	layout_video()
+	if network_active and not spatial:
+		_layout_windows()
 	status_elapsed += delta
 	if status_elapsed >= 0.25:
 		status_elapsed = 0.0
 		$Status.text = waiting_message if not waiting_message.is_empty() else player.status()
-		$Status.visible = video_material == null or not video_material.get_shader_parameter("has_frame")
+		$Status.visible = not _has_window() if network_active else video_material == null or not video_material.get_shader_parameter("has_frame")
 	if network_active or "--video-single-frame" in OS.get_cmdline_user_args():
 		log_elapsed += delta
 		if log_elapsed >= 1.0:
@@ -128,8 +131,68 @@ func _process(delta: float) -> void:
 
 
 func layout_video() -> void:
+	if network_active:
+		view.hide()
+		return
+	view.show()
 	var bounds := Vector2(get_viewport().size) if spatial else size
 	player.layout_video(view, bounds, spatial)
+
+
+func _has_window() -> bool:
+	for surface in player.surfaces():
+		if surface.is_mapped():
+			return true
+	return false
+
+
+func _layout_windows() -> void:
+	var surfaces := player.surfaces()
+	var live := {}
+	var roots := {}
+	var independent: Array = []
+	for surface in surfaces:
+		var key := surface.surface_id()
+		live[key] = true
+		if not window_controls.has(key):
+			var control := ColorRect.new()
+			control.mouse_filter = Control.MOUSE_FILTER_IGNORE
+			control.material = surface.video_material()
+			add_child(control)
+			surface.bind_control(control)
+			window_controls[key] = control
+		window_controls[key].visible = surface.is_mapped()
+		if surface.kind() != 3:
+			roots[surface.window_id()] = surface
+		if surface.kind() == 0 and surface.is_mapped():
+			independent.append(surface.window_id())
+	for key in window_controls.keys():
+		if not live.has(key):
+			window_controls[key].queue_free()
+			window_controls.erase(key)
+	var placed := {}
+	for _pass in range(8):
+		for surface in surfaces:
+			var key := surface.surface_id()
+			if placed.has(key) or not surface.is_mapped():
+				continue
+			var control: ColorRect = window_controls[key]
+			var logical := surface.logical_size()
+			if surface.kind() == 0:
+				var slot := Vector2(size.x / maxi(1, independent.size()), size.y)
+				var factor := minf(slot.x / logical.x, slot.y / logical.y)
+				control.size = logical * factor
+				control.position = Vector2(slot.x * independent.find(surface.window_id()), 0) + (slot - control.size) * 0.5
+			else:
+				var parent = roots.get(surface.parent_id())
+				if parent == null or not placed.has(parent.surface_id()):
+					continue
+				var parent_control: ColorRect = window_controls[parent.surface_id()]
+				var factor: float = parent_control.size.x / parent.logical_size().x
+				control.size = logical * factor
+				control.position = parent_control.position + ((parent_control.size - control.size) * 0.5 if surface.kind() == 1 else surface.logical_position() * factor)
+			placed[key] = true
+			move_child(control, -1)
 
 
 func _notification(what: int) -> void:

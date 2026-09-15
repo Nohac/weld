@@ -163,6 +163,38 @@ func _run() -> void:
 		return
 	if not _check_controller_rig(xr):
 		return
+	var parent_logical := Vector2(800, 600)
+	var parent_size := Vector2(1.6, 1.2)
+	for logical in [Vector2(800, 600), Vector2(600, 1200), Vector2(100, 50)]:
+		var fitted: Vector2 = xr._secondary_size(logical, parent_logical, parent_size)
+		if fitted.x > parent_size.x * 0.75 + 0.00001 or fitted.y > parent_size.y * 0.75 + 0.00001 \
+			or not is_equal_approx(fitted.x / fitted.y, logical.x / logical.y):
+			_fail("Secondary XR windows must preserve aspect and leave the primary visible")
+			return
+	if not xr._secondary_size(Vector2(100, 50), parent_logical, parent_size).is_equal_approx(Vector2(0.2, 0.1)):
+		_fail("Small secondary XR windows must not be enlarged to the size limit")
+		return
+	# Visibility changes register/unregister native composition layers. A
+	# steady layout must not hide and re-show a layer every frame.
+	var probe_mesh := MeshInstance3D.new()
+	var probe_layer := Node3D.new()
+	probe_mesh.visible = false
+	probe_layer.visible = false
+	xr.add_child(probe_mesh)
+	xr.add_child(probe_layer)
+	var visibility_changes := [0]
+	probe_layer.visibility_changed.connect(func(): visibility_changes[0] += 1)
+	var entry := {"mesh": probe_mesh, "layer": probe_layer}
+	for _frame in range(5):
+		xr._set_entry_visible(entry, true)
+	if visibility_changes[0] != 1:
+		_fail("A visible XR layer must remain registered across steady frames")
+		return
+	xr._set_entry_visible(entry, false)
+	xr._set_entry_visible(entry, false)
+	if visibility_changes[0] != 2:
+		_fail("An XR layer must hide only once on unmap")
+		return
 	xr.queue_free()
 	await process_frame
 	print("WELD_VR_GDEXTENSION_SMOKE_OK")

@@ -9,13 +9,13 @@ mod receiver;
 mod receiver_decode;
 mod render;
 mod retirement;
+pub(crate) mod session;
 
 use frame::Frame;
 
 use crate::{
     fixture,
     native::{self, Progress},
-    presentation::XrPreferences,
 };
 use anyhow::{Context, Result, ensure};
 use godot::{
@@ -24,7 +24,6 @@ use godot::{
 };
 use retirement::Retired;
 use std::{
-    path::PathBuf,
     sync::{
         Arc, Mutex, MutexGuard,
         atomic::{AtomicBool, AtomicU64, Ordering},
@@ -32,22 +31,13 @@ use std::{
     thread::{self, JoinHandle},
     time::{Duration, Instant},
 };
-use weld_client::{
-    ClientCursor, InputPosition, KeyboardKeyState, PresentationRate, SurfaceContentView,
-};
+use weld_client::{ClientCursor, InputPosition, KeyboardKeyState, SurfaceContentView};
 
 static NEXT_SESSION: AtomicU64 = AtomicU64::new(1);
 const FIXTURE: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/panel-av1.ivf"));
 
 pub enum Source {
-    Fixture {
-        single_frame: bool,
-    },
-    Iroh {
-        directory: PathBuf,
-        rate: PresentationRate,
-        sizing: Option<XrPreferences>,
-    },
+    Fixture { single_frame: bool },
 }
 
 enum PresentationUpdate {
@@ -61,16 +51,24 @@ enum PresentationUpdate {
 }
 
 #[derive(Default)]
-struct Shared {
+struct SessionState {
     input: Mutex<input::InputState>,
     cancelled: AtomicBool,
+    error: Mutex<Option<String>>,
+    message: Mutex<Option<String>>,
+    wake: Mutex<Option<thread::Thread>>,
+}
+
+#[derive(Default)]
+struct Shared {
+    session: Arc<SessionState>,
+    closed: AtomicBool,
+    epoch: AtomicU64,
     queued: AtomicBool,
     latest: Mutex<Option<PresentationUpdate>>,
     retired: Mutex<Vec<Retired>>,
     target: Mutex<Option<native::Target>>,
     pending: Mutex<Option<Frame>>,
-    error: Mutex<Option<String>>,
-    message: Mutex<Option<String>>,
     decoded: AtomicU64,
     presented: AtomicU64,
     replaced: AtomicU64,
@@ -87,7 +85,7 @@ impl Shared {
         view: Option<SurfaceContentView>,
         input: Option<input::Target>,
     ) {
-        if self.cancelled.load(Ordering::Acquire) {
+        if self.session.cancelled.load(Ordering::Acquire) || self.closed.load(Ordering::Acquire) {
             return;
         }
         self.decoded.fetch_add(1, Ordering::Relaxed);
@@ -114,21 +112,21 @@ impl Shared {
         }
     }
     fn clear(&self) {
-        lock(&self.input).invalidate();
+        self.epoch.fetch_add(1, Ordering::AcqRel);
         *lock(&self.latest) = Some(PresentationUpdate::Clear);
     }
     fn message(&self, message: impl AsRef<str>) {
-        let mut current = lock(&self.message);
+        let mut current = lock(&self.session.message);
         if current.as_deref() != Some(message.as_ref()) {
             *current = Some(message.as_ref().to_owned());
         }
     }
     fn fail(&self, error: impl std::fmt::Display) {
-        let mut slot = lock(&self.error);
+        let mut slot = lock(&self.session.error);
         if slot.is_none() {
             *slot = Some(error.to_string());
         }
-        self.cancelled.store(true, Ordering::Release);
+        self.session.cancelled.store(true, Ordering::Release);
     }
 }
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -147,9 +145,31 @@ pub struct Controller {
     current: Option<(native::Geometry, [u32; 2])>,
     aspect: f32,
     stopped: bool,
+    presented_epoch: u64,
 }
 impl Controller {
-    pub fn start(mut texture: Gd<Object>, material: Gd<Object>, source: Source) -> Result<Self> {
+    pub fn start(texture: Gd<Object>, material: Gd<Object>, source: Source) -> Result<Self> {
+        let mut controller = Self::open(texture, material, Arc::new(Shared::default()))?;
+        let shared = Arc::clone(&controller.shared);
+        controller.worker = Some(
+            thread::Builder::new()
+                .name("weld-video-source".into())
+                .spawn(move || {
+                    *lock(&shared.session.wake) = Some(thread::current());
+                    let result = match source {
+                        Source::Fixture { single_frame } => play(&shared, single_frame),
+                    };
+                    if let Err(error) = result
+                        && !shared.session.cancelled.load(Ordering::Acquire)
+                    {
+                        shared.fail(format!("video: {error:#}"));
+                    }
+                    shared.done.store(true, Ordering::Release);
+                })?,
+        );
+        Ok(controller)
+    }
+    fn open(mut texture: Gd<Object>, material: Gd<Object>, shared: Arc<Shared>) -> Result<Self> {
         ensure!(
             !Engine::singleton().is_editor_hint(),
             "video playback is disabled inside the editor"
@@ -170,17 +190,16 @@ impl Controller {
         let texture_id = u32::try_from(texture_id)?;
         ensure!(texture_id != 0, "external GL texture unavailable");
         let generation = NEXT_SESSION.fetch_add(1, Ordering::Relaxed);
-        let shared = Arc::new(Shared::default());
         render::queue(
             generation,
             Arc::clone(&shared),
             render::Operation::Open(texture_id),
         );
         RenderingServer::singleton().force_sync();
-        if let Some(error) = lock(&shared.error).as_ref() {
+        if let Some(error) = lock(&shared.session.error).as_ref() {
             anyhow::bail!("{error}");
         }
-        let mut controller = Self {
+        let controller = Self {
             input_target: None,
             generation,
             shared,
@@ -190,28 +209,8 @@ impl Controller {
             aspect: 16.0 / 9.0,
             worker: None,
             stopped: false,
+            presented_epoch: 0,
         };
-        let shared = Arc::clone(&controller.shared);
-        controller.worker = Some(
-            thread::Builder::new()
-                .name("weld-video-source".into())
-                .spawn(move || {
-                    let result = match source {
-                        Source::Fixture { single_frame } => play(&shared, single_frame),
-                        Source::Iroh {
-                            directory,
-                            rate,
-                            sizing,
-                        } => receiver::run(&shared, directory, rate, sizing),
-                    };
-                    if let Err(error) = result
-                        && !shared.cancelled.load(Ordering::Acquire)
-                    {
-                        shared.fail(format!("video: {error:#}"));
-                    }
-                    shared.done.store(true, Ordering::Release);
-                })?,
-        );
         Ok(controller)
     }
     pub fn tick(&mut self) {
@@ -226,7 +225,7 @@ impl Controller {
             return Ok(());
         }
         retirement::reap(&self.shared)?;
-        if let Some(error) = lock(&self.shared.error).as_ref() {
+        if let Some(error) = lock(&self.shared.session.error).as_ref() {
             anyhow::bail!("{error}");
         }
         if self.shared.queued.load(Ordering::Acquire) || lock(&self.shared.retired).len() >= 2 {
@@ -235,6 +234,7 @@ impl Controller {
         let Some(update) = lock(&self.shared.latest).take() else {
             return Ok(());
         };
+        self.presented_epoch = self.shared.epoch.load(Ordering::Acquire);
         let (frame, display, mut input) = match update {
             PresentationUpdate::Clear => {
                 self.current = None;
@@ -279,9 +279,16 @@ impl Controller {
         Ok(())
     }
     pub fn stop(&mut self) {
-        self.reset_input();
+        if self.worker.is_some() {
+            self.reset_input();
+        } else if let Some(target) = &self.input_target {
+            lock(&self.shared.session.input).remove_surface(target.geometry.surface);
+        }
         self.input_target = None;
-        self.shared.cancelled.store(true, Ordering::Release);
+        self.shared.closed.store(true, Ordering::Release);
+        if self.worker.is_some() {
+            self.shared.session.cancelled.store(true, Ordering::Release);
+        }
         if let Some(worker) = &self.worker {
             worker.thread().unpark();
         }
@@ -329,10 +336,10 @@ impl Controller {
         self.worker.is_none()
     }
     pub fn status(&self) -> String {
-        if let Some(error) = lock(&self.shared.error).as_ref() {
+        if let Some(error) = lock(&self.shared.session.error).as_ref() {
             return error.clone();
         }
-        let message = lock(&self.shared.message);
+        let message = lock(&self.shared.session.message);
         let state = if self.stopped {
             "Stopped"
         } else if let Some(message) = message.as_deref() {
@@ -373,17 +380,18 @@ impl Controller {
         button: i64,
         pressed: bool,
     ) -> bool {
-        if self.stopped || self.shared.cancelled.load(Ordering::Acquire) {
+        if self.stopped || self.shared.session.cancelled.load(Ordering::Acquire) {
             return false;
         }
         // A release must always get through, even while a new image is binding.
         if self.shared.queued.load(Ordering::Acquire) && (button == 0 || pressed) {
-            let handled = lock(&self.shared.input).during_bind(button, pressed);
+            let handled = lock(&self.shared.session.input).during_bind(button, pressed);
             self.wake_input();
             return handled;
         }
-        let handled = lock(&self.shared.input).pointer(
-            self.input_target.as_ref(),
+        let valid = self.input_token().is_some();
+        let handled = lock(&self.shared.session.input).pointer(
+            self.input_target.as_ref().filter(|_| valid),
             rectangle,
             position,
             button,
@@ -395,10 +403,13 @@ impl Controller {
     /// Identity of currently mapped input, not a native frame/buffer lease.
     pub fn input_token(&self) -> Option<(u64, u64)> {
         let target = self.input_target.as_ref()?;
+        let input = lock(&self.shared.session.input);
         (!self.stopped
-            && !self.shared.cancelled.load(Ordering::Acquire)
-            && target.epoch == lock(&self.shared.input).epoch)
-            .then_some((self.generation, target.epoch))
+            && !self.shared.session.cancelled.load(Ordering::Acquire)
+            && target.epoch == input.epoch
+            && input.surface_visible(target.geometry.surface)
+            && self.presented_epoch == self.shared.epoch.load(Ordering::Acquire))
+        .then_some((self.generation, target.epoch))
     }
     pub fn input_hit(&self, rectangle: [f64; 4], position: InputPosition) -> bool {
         self.input_token().is_some()
@@ -408,7 +419,7 @@ impl Controller {
                 .is_some_and(|target| target.geometry.pointer_route(rectangle, position).is_some())
     }
     pub fn key_input(&self, code: i64, location: i64, pressed: bool, echo: bool) -> bool {
-        if self.stopped || self.shared.cancelled.load(Ordering::Acquire) {
+        if self.stopped || self.shared.session.cancelled.load(Ordering::Acquire) {
             return false;
         }
         let Some(key) = input::physical_key(code, location) else {
@@ -421,21 +432,45 @@ impl Controller {
         } else {
             KeyboardKeyState::Pressed
         };
-        let handled = lock(&self.shared.input).key(key, state);
+        let handled = lock(&self.shared.session.input).key(key, state);
         self.wake_input();
         handled
     }
     pub fn reset_input(&self) {
-        lock(&self.shared.input).reset();
+        lock(&self.shared.session.input).reset();
         self.wake_input();
     }
     fn wake_input(&self) {
-        if let Some(worker) = &self.worker {
-            worker.thread().unpark();
+        if let Some(worker) = lock(&self.shared.session.wake).as_ref() {
+            worker.unpark();
         }
     }
     pub fn take_cursor(&self) -> Option<ClientCursor> {
-        lock(&self.shared.input).take_cursor()
+        lock(&self.shared.session.input).take_cursor()
+    }
+    pub fn logical_size(&self) -> [f64; 2] {
+        self.input_target
+            .as_ref()
+            .map_or([1.0; 2], |target| target.geometry.logical_size)
+    }
+    pub fn captured(&self) -> bool {
+        self.input_target
+            .as_ref()
+            .is_some_and(|target| lock(&self.shared.session.input).captures(&target.geometry))
+    }
+    pub fn is_focused(&self) -> bool {
+        self.input_token().is_some()
+            && self
+                .input_target
+                .as_ref()
+                .is_some_and(|target| lock(&self.shared.session.input).is_focused(target))
+    }
+    pub fn ready(&self) -> bool {
+        if let Err(error) = retirement::reap(&self.shared) {
+            self.shared.fail(error);
+            return false;
+        }
+        !self.shared.queued.load(Ordering::Acquire) && lock(&self.shared.retired).len() < 2
     }
 }
 impl Drop for Controller {
@@ -463,7 +498,7 @@ fn play(shared: &Shared, single_frame: bool) -> Result<()> {
         .take(if single_frame { 1 } else { clip.frames.len() })
     {
         let deadline = Instant::now() + Duration::from_secs(3);
-        while !shared.cancelled.load(Ordering::Acquire) {
+        while !shared.session.cancelled.load(Ordering::Acquire) {
             if start.elapsed().as_micros() >= u128::from(frame.timestamp)
                 && decoder.try_send(frame.bytes, frame.timestamp)?
             {
@@ -473,7 +508,7 @@ fn play(shared: &Shared, single_frame: bool) -> Result<()> {
             ensure!(Instant::now() < deadline, "fixture submission timed out");
             thread::sleep(Duration::from_millis(1));
         }
-        if shared.cancelled.load(Ordering::Acquire) {
+        if shared.session.cancelled.load(Ordering::Acquire) {
             return Ok(());
         }
         drain(&mut decoder, shared)?;
@@ -483,7 +518,7 @@ fn play(shared: &Shared, single_frame: bool) -> Result<()> {
         // output. A static window must appear without a future client commit.
         let deadline = Instant::now() + Duration::from_secs(3);
         while shared.decoded.load(Ordering::Acquire) == 0
-            && !shared.cancelled.load(Ordering::Acquire)
+            && !shared.session.cancelled.load(Ordering::Acquire)
         {
             drain(&mut decoder, shared)?;
             ensure!(
@@ -495,7 +530,7 @@ fn play(shared: &Shared, single_frame: bool) -> Result<()> {
         return Ok(());
     }
     let deadline = Instant::now() + Duration::from_secs(3);
-    while !shared.cancelled.load(Ordering::Acquire) && !decoder.try_finish()? {
+    while !shared.session.cancelled.load(Ordering::Acquire) && !decoder.try_finish()? {
         drain(&mut decoder, shared)?;
         ensure!(
             Instant::now() < deadline,
@@ -504,7 +539,7 @@ fn play(shared: &Shared, single_frame: bool) -> Result<()> {
         thread::sleep(Duration::from_millis(1));
     }
     let deadline = Instant::now() + Duration::from_secs(3);
-    while !shared.cancelled.load(Ordering::Acquire) {
+    while !shared.session.cancelled.load(Ordering::Acquire) {
         if drain(&mut decoder, shared)? {
             return Ok(());
         }
@@ -516,7 +551,7 @@ fn play(shared: &Shared, single_frame: bool) -> Result<()> {
 fn drain(decoder: &mut native::Decoder, shared: &Shared) -> Result<bool> {
     loop {
         match decoder
-            .receive(|| shared.cancelled.load(Ordering::Acquire))
+            .receive(|| shared.session.cancelled.load(Ordering::Acquire))
             .context("receive image")?
         {
             Progress::Pending => return Ok(false),

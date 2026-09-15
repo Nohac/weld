@@ -8,6 +8,8 @@ extends Node3D
 @export var panel_envelope := Vector2(1.6, 1.0)
 @export_range(0.2, 10.0, 0.1) var panel_distance := 1.6
 @export var use_native_panel := true
+@export_range(0.4, 0.9, 0.05) var secondary_window_fraction := 0.75
+@export_range(0.02, 0.2, 0.01) var secondary_window_distance := 0.08
 
 var xr_interface: OpenXRInterface
 var placement_pending := true
@@ -16,6 +18,8 @@ var controller_models: Array[OpenXRRenderModelManager] = []
 var preferences_resolved := false
 var preferences_wait_started := Time.get_ticks_msec()
 var composition_panel: OpenXRCompositionLayerQuad
+var window_panels := {}
+var window_slots := {}
 
 const ControllerRig = preload("res://scenes/controller_rig.gd")
 
@@ -49,7 +53,10 @@ func _ready() -> void:
 	DisplayServer.window_set_vsync_mode(DisplayServer.VSYNC_DISABLED)
 	get_viewport().msaa_3d = Viewport.MSAA_4X
 	get_viewport().use_xr = true
-	_setup_panel_presentation()
+	if "--video-fixture" in OS.get_cmdline_user_args() or "--video-single-frame" in OS.get_cmdline_user_args():
+		_setup_panel_presentation()
+	else:
+		screen.layers = 0
 	xr_interface.session_begun.connect(_configure_passthrough)
 	xr_interface.session_begun.connect(_queue_render_diagnostics)
 	xr_interface.pose_recentered.connect(_recenter)
@@ -190,6 +197,9 @@ func _configure_resolution() -> void:
 
 
 func _update_panel_geometry() -> void:
+	if panel.network_active:
+		_update_windows()
+		return
 	var fitted: Vector2 = panel.player.xr_panel_size(panel_envelope)
 	if fitted.x > 0.0 and fitted.y > 0.0 and not screen.mesh.size.is_equal_approx(fitted):
 		screen.mesh.size = fitted
@@ -199,6 +209,164 @@ func _update_panel_geometry() -> void:
 	# Explicit synchronous full-viewport rect, also used analytically by Rust
 	# hit testing. No deferred Container sort can restore an old letterbox.
 	panel.layout_video()
+
+
+func _update_windows() -> void:
+	var surfaces: Array[WeldSurface] = panel.player.surfaces()
+	var live := {}
+	var roots := {}
+	var application_roots := {}
+	var application_parents := {}
+	for surface in surfaces:
+		var key := surface.surface_id()
+		live[key] = true
+		if surface.kind() != 3:
+			roots[surface.window_id()] = surface
+		# XR placement only: a second unparented window from the same Wayland
+		# client stays with its application. Do not invent protocol parentage
+		# or modality; actual popup/parent geometry still takes precedence.
+		# Keep the application anchor through temporary map/resize transitions;
+		# a secondary window must not briefly claim a separate carousel slot.
+		if surface.kind() == 0:
+			var application := surface.application_key()
+			if application_roots.has(application):
+				application_parents[surface.window_id()] = application_roots[application]
+			else:
+				application_roots[application] = surface
+		if not window_panels.has(key):
+			window_panels[key] = _create_window_panel(surface)
+	for key in window_panels.keys():
+		if not live.has(key):
+			var entry: Dictionary = window_panels[key]
+			if entry.layer != null:
+				entry.layer.queue_free()
+			entry.mesh.queue_free()
+			entry.viewport.queue_free()
+			window_panels.erase(key)
+	for key in window_slots.keys():
+		if not roots.has(key):
+			window_slots.erase(key)
+	var placed := {}
+	for _pass in range(8):
+		for surface in surfaces:
+			var key := surface.surface_id()
+			if placed.has(key):
+				continue
+			var entry: Dictionary = window_panels[key]
+			if not surface.is_mapped() or placement_pending:
+				continue
+			var logical := surface.logical_size()
+			var transform: Transform3D
+			var physical: Vector2
+			var parent = application_parents.get(surface.window_id()) if surface.kind() == 0 else roots.get(surface.parent_id())
+			if surface.kind() == 0 and parent == null:
+				if not window_slots.has(surface.window_id()):
+					var free_slot := 0
+					while free_slot in window_slots.values():
+						free_slot += 1
+					window_slots[surface.window_id()] = free_slot
+				var slot: int = window_slots[surface.window_id()]
+				var angle := deg_to_rad(65.0 * ceilf(slot / 2.0) * (1.0 if slot % 2 == 1 else -1.0))
+				transform = screen.global_transform
+				var pivot := transform.origin + transform.basis.z * panel_distance
+				transform.origin = pivot + (transform.origin - pivot).rotated(Vector3.UP, angle)
+				transform.basis = transform.basis.rotated(Vector3.UP, angle)
+				physical = surface.video_player().xr_panel_size(panel_envelope)
+				entry.depth = 0
+			else:
+				if parent == null or not placed.has(parent.surface_id()):
+					continue
+				var parent_mesh: MeshInstance3D = window_panels[parent.surface_id()].mesh
+				var factor: float = parent_mesh.mesh.size.x / parent.logical_size().x
+				physical = logical * factor
+				var centered := surface.kind() <= 1
+				if centered:
+					physical = _secondary_size(logical, parent.logical_size(), parent_mesh.mesh.size)
+				transform = parent_mesh.global_transform
+				var offset: Vector2 = Vector2.ZERO if centered else surface.logical_position() * factor + physical * 0.5 - parent_mesh.mesh.size * 0.5
+				var forward := secondary_window_distance if centered else 0.025 + maxf(surface.stack_index(), 0) * 0.001
+				transform.origin += transform.basis * Vector3(offset.x, -offset.y, forward)
+				entry.depth = window_panels[parent.surface_id()].depth + 1
+			if not entry.mesh.mesh.size.is_equal_approx(physical):
+				entry.mesh.mesh.size = physical
+			if not entry.mesh.global_transform.is_equal_approx(transform):
+				entry.mesh.global_transform = transform
+			surface.style_panel(physical)
+			var raster := surface.video_player().xr_viewport_size()
+			if raster.x > 0 and raster.y > 0 and entry.viewport.size != raster:
+				entry.viewport.size = raster
+			entry.video.size = entry.viewport.size
+			if entry.layer != null:
+				var order: int = -100 + entry.depth * 10 + clampi(surface.stack_index(), 0, 7)
+				if entry.layer.sort_order != order:
+					entry.layer.sort_order = order
+				if not entry.layer.global_transform.is_equal_approx(transform):
+					entry.layer.global_transform = transform
+				if not entry.layer.quad_size.is_equal_approx(physical):
+					entry.layer.quad_size = physical
+			placed[key] = true
+	# Visibility is a compositor lifecycle transition. Hiding and showing a
+	# native layer each frame tears it down and registers it again in Godot.
+	for key in window_panels:
+		_set_entry_visible(window_panels[key], placed.has(key))
+
+
+func _secondary_size(logical: Vector2, parent_logical: Vector2, parent_size: Vector2) -> Vector2:
+	# Uniform physical scaling only: keep the client pixels/aspect and the
+	# mesh used for ray input identical to the native composition layer.
+	var natural := logical * (parent_size.x / parent_logical.x)
+	var limit := parent_size * secondary_window_fraction
+	return natural * minf(1.0, minf(limit.x / natural.x, limit.y / natural.y))
+
+
+func _set_entry_visible(entry: Dictionary, shown: bool) -> void:
+	if entry.mesh.visible != shown:
+		entry.mesh.visible = shown
+	if entry.layer != null and entry.layer.visible != shown:
+		entry.layer.visible = shown
+
+
+func _create_window_panel(surface: WeldSurface) -> Dictionary:
+	var viewport := SubViewport.new()
+	viewport.disable_3d = true
+	viewport.transparent_bg = true
+	viewport.size = Vector2i(1024, 640)
+	viewport.render_target_update_mode = SubViewport.UPDATE_ALWAYS
+	add_child(viewport)
+	var mesh := MeshInstance3D.new()
+	mesh.mesh = QuadMesh.new()
+	mesh.visible = false
+	add_child(mesh)
+	var layer: OpenXRCompositionLayerQuad
+	if use_native_panel:
+		layer = OpenXRCompositionLayerQuad.new()
+		layer.visible = false
+		layer.alpha_blend = true
+		layer.enable_hole_punch = true
+		layer.sort_order = -1
+		layer.process_priority = 150
+		$XROrigin3D.add_child(layer)
+		if layer.is_natively_supported():
+			layer.layer_viewport = viewport
+			mesh.layers = 0
+		else:
+			layer.queue_free()
+			layer = null
+	var material := StandardMaterial3D.new()
+	material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	material.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	material.texture_filter = panel_texture_filter
+	material.albedo_texture = viewport.get_texture()
+	mesh.material_override = material
+	var video := ColorRect.new()
+	video.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	video.material = surface.video_material()
+	video.size = viewport.size
+	viewport.add_child(video)
+	surface.bind_control(video)
+	surface.bind_panel(mesh)
+	print("WELD_XR_WINDOW id=", surface.surface_id(), " parent=", surface.parent_id(), " native=", layer != null)
+	return {"viewport": viewport, "mesh": mesh, "video": video, "layer": layer, "depth": 0}
 
 
 func _setup_panel_presentation() -> void:

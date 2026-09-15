@@ -1,7 +1,7 @@
 # Godot live-window tracer
 
-Godot can receive one live AV1 window from headless Weld on Linux or Android.
-This is a bounded single-window viewer, with desktop input and a first
+Godot can receive live AV1 window hierarchies from headless Weld on Linux or Android.
+This is a bounded multi-window viewer, with desktop input and a first
 [right-hand XR pointer](godot-xr.md#right-hand-input). The
 [XR scene](godot-xr.md) can present the same stream on a headset. It uses
 the same `weld-hoist-iroh` transport, `weld-hoist-encoded` scheduling and
@@ -25,14 +25,14 @@ Use an ARM64/API28+ USB-debugging device. This uses development signing and
 `run-as`, not release enrollment. Exactly one authorized device can omit
 `--serial`. `--desktop` runs the same viewer on the laptop. Default: one foot/htop
 window at 960x640 for 120 seconds; `--seconds` changes the test timer.
-`--app blender` is another single-root test, not support for its extra dialogs.
+`--app blender` exercises its main window, Preferences and menus/tooltips.
 On desktop, click the image to focus it, then use mouse buttons, wheel and
 physical keyboard keys. The source uses compositor-owned explicit repeats,
 with emulated repeats for legacy clients. XR uses the right-hand controller
 pointer; the flat phone viewer remains view-only.
-Closing that window and creating a replacement also requires a new connection;
-the limit is one media-stream identity per connection, not merely one visible
-window at a time. Blender dialogs/popups exceed this initial limit.
+Window creation, removal and replacement share the same connection. Flat
+independent windows currently tile side by side; there are no shell close or
+move controls yet. See [XR window layout](godot-xr.md#window-layout-and-decoration).
 
 Iroh N0 contacts Internet discovery/relay services. No host network interfaces,
 routes or existing desktop apps are changed. The launcher reuses the tested
@@ -95,7 +95,7 @@ is pinned for that producer lifetime; edits require a new start.
   MediaCodec to acquired native ImageReader buffers. Linux uses existing
   FFmpeg/VA-API. Context construction/calls/destruction stay on pool workers.
 - Atomic commit publication creates a one-shot client-lease payload. Only the
-  committed root transfers its frame into the presentation mailbox. The emptied
+  replaced layer transfers its frame into its presentation mailbox. The emptied
   destination-owned client lease cannot free that native allocation; GPU fence
   retirement owns it. Retained commits can update crop without new pixels.
 - The existing EGLImage presenter retains texture and material in Rust. Texture
@@ -103,12 +103,13 @@ is pinned for that producer lifetime; edits require a new start.
   Panel aspect follows logical content dimensions. Per-request visible extent
   intersects codec crop and content view, excluding AV1 padding, including odd
   1280x833 content in larger coded storage. Unmap/destroy/disconnect clear the view.
-- One media stream per connection. Additional window/layer streams fail visibly
-  before native allocation, rather than silently decoding in the background.
-- Two generations, four jobs, depth two, up to two workers. Affinity places one
-  stream's generations on one worker; a third generation waits for retirement.
-- Seven global frame credits cover submitted jobs, completions, publication,
-  mailboxes, GPU imports and retirement. Credits return after native release.
+- Eight surfaces, eight retained layers and eight active media streams per
+  connection; excess inventory fails admission rather than allocating unbounded views.
+- Sixteen generations, four jobs, depth two, up to two workers in the existing
+  shared decode pool. Affinity keeps a stream's generations on one worker.
+- Seven frame credits per stream across generations, and 32 total per session,
+  cover submitted jobs, completions, publication, mailboxes, GPU imports and
+  retirement. Credits return after native release.
   Each Android reader permits eight acquired images. Old outputs may retain old
   readers after decoder retirement, also bounded by the frame credits.
 - Visible extent is at most 2048 per dimension and 1920x1080 total pixels. These
@@ -119,14 +120,14 @@ is pinned for that producer lifetime; edits require a new start.
 - Godot refresh is forwarded through existing `SetPresentation`; source pacing
   still clamps it to the encoder ceiling. There is no ACK roundtrip.
 - XR also sends bounded logical-size and preferred-scale requests for the
-  selected mapped root, based on stable headset presentation preferences.
+  independent mapped roots, based on stable headset presentation preferences.
   [Sizing and native composition](godot-xr.md#image-quality) preserve the same
   receive allocation ceiling and GPU frame-lifetime rules.
 - Stop/pause cancels production and performs GPU cleanup. Relaunch the viewer
   and source after pause. Source relay re-admission after viewer disconnect
   remains one-shot: restart the source for another connection. Detach/rejoin
   preserving the same live apps remains shared relay lifecycle work.
-- AV1 only is advertised. Phone input, multi-window layout, adaptive capability budgets,
+- AV1 only is advertised. Phone input, window-management controls, adaptive capability budgets,
   automatic rotation recovery and Vulkan import remain separate work.
 
 ## Desktop input
@@ -201,10 +202,11 @@ that a non-default request traversed the transport into Rust presentation.
 The user confirmed that Blender's cursor now changes as expected in that run.
 
 This does not implement relative mouse locking, pointer warping, touch, IME,
-virtual keyboards, XR controller clicks, host-keyboard capture or extra windows.
+virtual keyboards or host-keyboard capture. XR controller input is described
+in [XR presentation](godot-xr.md#right-hand-input).
 Blender interactions requiring cursor wrapping/locking still have that limit.
 
-Desktop input was manually exercised on 2026-09-13 with the Godot/Blender
+The earlier single-window desktop input was manually exercised on 2026-09-13 with the Godot/Blender
 launcher (`godot-hoist-wclrwz_4`); the user reported that it works. The viewer
 reached 946 decoded / 922 presented / 23 superseded frames before a second
 Blender toplevel hit the existing single-stream admission limit and ended the

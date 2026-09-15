@@ -1,7 +1,10 @@
 //! Main-thread Godot API shared by all native providers.
+mod decoration;
 mod input;
+mod workspace;
 mod xr;
 
+use crate::playback::session::Session;
 use crate::playback::{Controller, Source};
 use crate::presentation::{RasterSizing, XrPreferences, fit};
 use godot::{
@@ -12,16 +15,19 @@ use input::DesktopInput;
 use std::path::PathBuf;
 use std::time::Instant;
 use weld_client::PresentationRate;
+use workspace::{WeldSurface, Workspace};
 
 #[derive(GodotClass)]
 #[class(base=Node)]
 pub struct WeldVideoPlayer {
     controller: Option<Controller>,
+    workspace: Option<Workspace>,
     desktop_input: Option<DesktopInput>,
     live_source: bool,
     message: String,
     xr_preferences: Option<XrPreferences>,
     raster_sizing: RasterSizing,
+    shape: Option<decoration::Shape>,
     base: Base<Node>,
 }
 #[godot_api]
@@ -30,11 +36,13 @@ impl INode for WeldVideoPlayer {
         Self {
             base,
             controller: None,
+            workspace: None,
             desktop_input: None,
             live_source: false,
             message: "Native AV1 video fixture".into(),
             xr_preferences: None,
             raster_sizing: RasterSizing::default(),
+            shape: None,
         }
     }
     fn ready(&mut self) {
@@ -42,6 +50,27 @@ impl INode for WeldVideoPlayer {
     }
     fn input(&mut self, event: Gd<InputEvent>) {
         if !self.live_source || !self.validate_input_view() {
+            return;
+        }
+        let position = self
+            .base()
+            .get_viewport()
+            .map(|view| view.get_mouse_position())
+            .unwrap_or(Vector2::ZERO);
+        if let Some(workspace) = &mut self.workspace {
+            if let Some((player, view)) = workspace.pick(position) {
+                let player = player.bind();
+                if let (Some(input), Some(controller)) =
+                    (&mut self.desktop_input, &player.controller)
+                {
+                    input.set_view(view);
+                    if input.handle(event, controller)
+                        && let Some(mut viewport) = self.base().get_viewport()
+                    {
+                        viewport.set_input_as_handled();
+                    }
+                }
+            }
             return;
         }
         if let (Some(input), Some(controller)) = (&mut self.desktop_input, &self.controller)
@@ -55,6 +84,15 @@ impl INode for WeldVideoPlayer {
         if !self.live_source || !self.validate_input_view() {
             return;
         }
+        if let Some(workspace) = &self.workspace {
+            if let Some(player) = workspace.selected_player() {
+                let player = player.bind();
+                if let (Some(input), Some(controller)) = (&self.desktop_input, &player.controller) {
+                    input.update_cursor(controller);
+                }
+            }
+            return;
+        }
         if let (Some(input), Some(controller)) = (&self.desktop_input, &self.controller) {
             input.update_cursor(controller);
         }
@@ -65,6 +103,27 @@ impl INode for WeldVideoPlayer {
             return;
         }
         if !self.live_source || !self.validate_input_view() {
+            return;
+        }
+        if let Some(workspace) = &self.workspace {
+            if let Some(player) = workspace.selected_player() {
+                let player = player.bind();
+                if let (Some(input), Some(controller)) =
+                    (&mut self.desktop_input, &player.controller)
+                {
+                    match notification {
+                        NodeNotification::WM_WINDOW_FOCUS_OUT
+                        | NodeNotification::APPLICATION_FOCUS_OUT => {
+                            input.focus_lost(Some(controller))
+                        }
+                        NodeNotification::WM_WINDOW_FOCUS_IN => {
+                            input.reconcile_releases(controller)
+                        }
+                        NodeNotification::WM_MOUSE_EXIT => input.pointer_left(controller),
+                        _ => {}
+                    }
+                }
+            }
             return;
         }
         if let (Some(input), Some(controller)) = (&mut self.desktop_input, &self.controller) {
@@ -97,7 +156,7 @@ impl WeldVideoPlayer {
         scale: f64,
         sampling: f64,
     ) -> bool {
-        if self.controller.is_some() || projections.len() > 2 {
+        if self.controller.is_some() || self.workspace.is_some() || projections.len() > 2 {
             return false;
         }
         self.xr_preferences = XrPreferences::new(
@@ -206,15 +265,27 @@ impl WeldVideoPlayer {
             self.message = "Invalid presenter refresh rate".into();
             return false;
         };
-        self.start_source(
+        self.stop();
+        self.controller.take();
+        self.workspace.take();
+        match Session::start(
             texture,
             material,
-            Source::Iroh {
-                directory: PathBuf::from(directory.to_string()),
-                rate,
-                sizing: self.xr_preferences,
-            },
-        )
+            PathBuf::from(directory.to_string()),
+            rate,
+            self.xr_preferences,
+        ) {
+            Ok(session) => {
+                self.workspace = Some(Workspace::new(session, self.xr_preferences));
+                self.live_source = true;
+                self.update_processing();
+                true
+            }
+            Err(error) => {
+                self.message = format!("Receiver unavailable: {error:#}");
+                false
+            }
+        }
     }
     fn start_source(&mut self, texture: Gd<Object>, material: Gd<Object>, source: Source) -> bool {
         if let Some(controller) = self.controller.as_mut()
@@ -228,11 +299,10 @@ impl WeldVideoPlayer {
         self.controller.take();
         self.live_source = false;
         self.update_processing();
-        let live_source = matches!(&source, Source::Iroh { .. });
         match Controller::start(texture, material, source) {
             Ok(controller) => {
                 self.controller = Some(controller);
-                self.live_source = live_source;
+                self.live_source = false;
                 self.update_processing();
                 true
             }
@@ -245,12 +315,34 @@ impl WeldVideoPlayer {
     }
     #[func]
     fn tick(&mut self) {
+        if let Some(workspace) = self.workspace.as_mut()
+            && let Err(error) = workspace.tick()
+        {
+            self.message = format!("Presentation failed: {error:#}");
+            godot_error!("{}", self.message);
+            self.stop();
+        }
         if let Some(controller) = self.controller.as_mut() {
             controller.tick();
+        }
+        let children: Vec<_> = self.workspace.as_ref().map_or_else(Vec::new, |workspace| {
+            workspace
+                .panes
+                .values()
+                .map(|surface| surface.bind().player.clone())
+                .collect()
+        });
+        for child in children {
+            if child.is_instance_valid() && child.get_parent().is_none() {
+                self.base_mut().add_child(&child);
+            }
         }
     }
     #[func]
     fn stop(&mut self) {
+        if let Some(workspace) = self.workspace.as_mut() {
+            workspace.stop();
+        }
         self.live_source = false;
         self.update_processing();
         if let Some(input) = self.desktop_input.as_mut() {
@@ -262,6 +354,9 @@ impl WeldVideoPlayer {
     }
     #[func]
     fn status(&self) -> GString {
+        if let Some(workspace) = &self.workspace {
+            return workspace.session.status().as_str().into();
+        }
         self.controller
             .as_ref()
             .map_or_else(|| self.message.clone(), Controller::status)
@@ -274,9 +369,53 @@ impl WeldVideoPlayer {
             .as_ref()
             .map_or(16.0 / 9.0, Controller::aspect)
     }
+    #[func]
+    fn surfaces(&self) -> Array<Gd<WeldSurface>> {
+        self.workspace
+            .as_ref()
+            .map_or_else(Array::new, Workspace::surfaces)
+    }
 }
 
 impl WeldVideoPlayer {
+    fn for_surface(controller: Controller, preferences: Option<XrPreferences>) -> Gd<Self> {
+        Gd::from_init_fn(|base| Self {
+            base,
+            controller: Some(controller),
+            workspace: None,
+            desktop_input: None,
+            live_source: true,
+            message: String::new(),
+            xr_preferences: preferences,
+            raster_sizing: RasterSizing::default(),
+            shape: None,
+        })
+    }
+    fn xr_targets(
+        &self,
+    ) -> Vec<(
+        Gd<WeldVideoPlayer>,
+        Gd<godot::classes::MeshInstance3D>,
+        Gd<Control>,
+    )> {
+        self.workspace.as_ref().map_or_else(Vec::new, |workspace| {
+            workspace
+                .panes
+                .values()
+                .filter_map(|surface| {
+                    let surface = surface.bind();
+                    if !surface.is_mapped() {
+                        return None;
+                    }
+                    Some((
+                        surface.player.clone(),
+                        surface.panel.clone()?,
+                        surface.control.clone()?,
+                    ))
+                })
+                .collect()
+        })
+    }
     // XR owns its physical actions, but uses the same playback mailbox. It
     // cannot compete with the desktop source or send input to a fixture.
     fn xr_controller(&self) -> Option<&Controller> {

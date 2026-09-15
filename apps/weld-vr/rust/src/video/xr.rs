@@ -33,9 +33,10 @@ impl Configuration {
             && alive(&self.laser)
             && alive(&self.marker)
     }
-    fn reset(&self, position: InputPosition) {
-        if self.player.is_instance_valid() && !self.player.is_queued_for_deletion() {
-            let player = self.player.bind();
+    fn reset(&self, active: Option<&Gd<WeldVideoPlayer>>, position: InputPosition) {
+        let player = active.unwrap_or(&self.player);
+        if player.is_instance_valid() && !player.is_queued_for_deletion() {
+            let player = player.bind();
             if let Some(controller) = player.xr_controller() {
                 // Clear physical bookkeeping even if a prior press was rejected
                 // by overflow. The out-of-band reset owns remote release delivery.
@@ -52,7 +53,9 @@ fn alive<T: GodotClass + Inherits<Node>>(node: &Gd<T>) -> bool {
     node.is_instance_valid() && !node.upcast_ref::<Node>().is_queued_for_deletion()
 }
 
+#[derive(Clone)]
 struct Sample {
+    player: Gd<WeldVideoPlayer>,
     token: (u64, u64),
     rectangle: [f64; 4],
     position: InputPosition,
@@ -71,6 +74,7 @@ struct WeldXrPointer {
     last_position: InputPosition,
     started: Instant,
     application_active: bool,
+    active_player: Option<Gd<WeldVideoPlayer>>,
     base: Base<Node3D>,
 }
 
@@ -83,6 +87,7 @@ impl INode3D for WeldXrPointer {
             last_position: InputPosition::new(0.0, 0.0),
             started: Instant::now(),
             application_active: true,
+            active_player: None,
             base,
         }
     }
@@ -109,9 +114,10 @@ impl INode3D for WeldXrPointer {
         let scale = self.base().get_global_basis().col_c().length();
         if let Some(config) = self.configuration.as_mut() {
             if actions.reset {
-                config.reset(sample.position);
+                config.reset(self.active_player.as_ref(), sample.position);
             }
-            let player = config.player.bind();
+            self.active_player = Some(sample.player.clone());
+            let player = sample.player.bind();
             if let Some(controller) = player.xr_controller() {
                 controller.pointer_input(sample.rectangle, sample.position, 0, false);
                 for (index, edge) in actions.edges.into_iter().enumerate() {
@@ -210,8 +216,9 @@ impl WeldXrPointer {
         if self.policy.deactivate()
             && let Some(config) = &self.configuration
         {
-            config.reset(self.last_position);
+            config.reset(self.active_player.as_ref(), self.last_position);
         }
+        self.active_player = None;
         self.base_mut().hide();
     }
     fn sample(&self) -> Option<Sample> {
@@ -234,18 +241,69 @@ impl WeldXrPointer {
         if !xr.is_initialized()
             || xr.get_session_state() != SessionState::FOCUSED
             || !config.controller.get_has_tracking_data()
-            || !config.panel.is_visible_in_tree()
         {
             return None;
         }
-        let player = config.player.bind();
+        let mut targets = config.player.bind().xr_targets();
+        if targets.is_empty() && config.player.bind().xr_controller().is_some() {
+            targets.push((
+                config.player.clone(),
+                config.panel.clone(),
+                config.view.clone(),
+            ));
+        }
+        let mut nearest: Option<Sample> = None;
+        let mut previous = None;
+        for (player, panel, view) in targets {
+            if !alive(&player) || !alive(&panel) || !alive(&view) || !panel.is_visible_in_tree() {
+                continue;
+            }
+            let captured = player
+                .bind()
+                .xr_controller()
+                .is_some_and(crate::playback::Controller::captured);
+            if let Some(sample) = self.sample_panel(config, player, panel, view) {
+                if captured
+                    && self
+                        .active_player
+                        .as_ref()
+                        .is_some_and(|active| active == &sample.player)
+                {
+                    return Some(sample);
+                }
+                if self
+                    .active_player
+                    .as_ref()
+                    .is_some_and(|active| active == &sample.player)
+                {
+                    previous = Some(sample.clone());
+                }
+                if sample.hit
+                    && nearest
+                        .as_ref()
+                        .is_none_or(|old| sample.distance < old.distance)
+                {
+                    nearest = Some(sample);
+                }
+            }
+        }
+        nearest.or(previous)
+    }
+    fn sample_panel(
+        &self,
+        config: &Configuration,
+        player_node: Gd<WeldVideoPlayer>,
+        panel: Gd<MeshInstance3D>,
+        view: Gd<Control>,
+    ) -> Option<Sample> {
+        let player = player_node.bind();
         let controller = player.xr_controller()?;
         let token = controller.input_token()?;
-        let mesh = config.panel.get_mesh()?.try_cast::<QuadMesh>().ok()?;
+        let mesh = panel.get_mesh()?.try_cast::<QuadMesh>().ok()?;
         if mesh.get_orientation() != Orientation::Z {
             return None;
         }
-        let viewport = config.view.get_viewport()?.get_visible_rect();
+        let viewport = view.get_viewport()?.get_visible_rect();
         // XR fills its viewport explicitly. Do not depend on deferred Control
         // layout when the viewport and world-space quad are resized together.
         let rect = viewport;
@@ -261,7 +319,7 @@ impl WeldXrPointer {
             return None;
         }
         let intersection = geometry::Panel::new(
-            config.panel.get_global_transform(),
+            panel.get_global_transform(),
             mesh.get_center_offset(),
             mesh.get_size(),
             viewport.size,
@@ -277,7 +335,10 @@ impl WeldXrPointer {
             InputPosition::new(f64::from(hit.pixels.x), f64::from(hit.pixels.y))
         });
         let hit = intersection.as_ref().is_some_and(|hit| hit.inside)
-            && controller.input_hit(rectangle, position);
+            && controller.input_hit(rectangle, position)
+            && player
+                .shape
+                .is_none_or(|shape| shape.hit(rectangle, position));
         let distance = intersection
             .as_ref()
             .filter(|hit| hit.inside)
@@ -291,6 +352,7 @@ impl WeldXrPointer {
             return None;
         }
         Some(Sample {
+            player: player_node.clone(),
             token,
             rectangle: if intersection.is_some() {
                 rectangle

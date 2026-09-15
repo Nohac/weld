@@ -22,6 +22,9 @@ pub(super) struct DesktopInput {
 }
 
 impl DesktopInput {
+    pub fn set_view(&mut self, view: Gd<Control>) {
+        self.view = view;
+    }
     pub fn new(view: Gd<Control>) -> Self {
         Self {
             view,

@@ -7,7 +7,7 @@ use crate::native::{self, Progress};
 use crate::presentation::supported_extent;
 use anyhow::{Context, Result, ensure};
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
     sync::{Arc, atomic::Ordering},
     thread,
     time::{Duration, Instant},
@@ -26,8 +26,8 @@ pub(super) struct Backend {
     pool: DecodePool<Processor>,
     credits: Arc<FrameBudget>,
     shared: Arc<Shared>,
-    stream: Option<MediaStreamId>,
     codec: VideoCodec,
+    streams: HashMap<MediaStreamId, HashSet<StreamGeneration>>,
 }
 impl Backend {
     pub fn new(
@@ -40,7 +40,7 @@ impl Backend {
         let context = shared.clone();
         Ok(Self {
             pool: DecodePool::new(
-                DecodePoolLimits::try_new(2, 4, 2, 2)?,
+                DecodePoolLimits::try_new(2, 4, 16, 2)?,
                 move || {
                     Ok(Processor {
                         target: target.clone(),
@@ -54,7 +54,7 @@ impl Backend {
             shared,
             credits,
             codec,
-            stream: None,
+            streams: HashMap::new(),
         })
     }
     fn reject(&self, error: impl Into<String>) -> SubmitError<DecodeRequest> {
@@ -74,14 +74,13 @@ impl DecodeBackend for Backend {
                 .reject("phone tracer supports at most 2048 per dimension and 1920x1080 pixels"));
         }
         let stream = request.access_unit.frame.stream;
-        if self.stream.is_some_and(|active| active != stream) {
-            return Err(self
-                .reject("one media stream per connection: additional or replacement windows/layers require a new connection"));
+        let generation = request.access_unit.frame.generation;
+        if self.streams.len() >= 8 && !self.streams.contains_key(&stream) {
+            return Err(self.reject("receiver active stream budget exceeded (8)"));
         }
-        let Some(credit) = self.credits.reserve() else {
+        let Some(credit) = self.credits.reserve(stream) else {
             return Err(SubmitError::Busy(request));
         };
-        self.stream = Some(stream);
         self.pool
             .try_decode(Job { request, credit })
             .map_err(|error| match error {
@@ -101,7 +100,9 @@ impl DecodeBackend for Backend {
                 WorkerSubmitError::Rejected(error) => {
                     self.reject(format!("decoder admission: {error:#}"))
                 }
-            })
+            })?;
+        self.streams.entry(stream).or_default().insert(generation);
+        Ok(())
     }
     fn drain(&mut self) -> (Vec<DecodeCompletion<Frame>>, Option<anyhow::Error>) {
         let (completions, failure) = self.pool.drain();
@@ -124,7 +125,14 @@ impl DecodeBackend for Backend {
         (completions, failure)
     }
     fn retire(&mut self, stream: MediaStreamId, generation: StreamGeneration) -> Result<()> {
-        self.pool.retire(stream, generation)
+        self.pool.retire(stream, generation)?;
+        if let Some(generations) = self.streams.get_mut(&stream) {
+            generations.remove(&generation);
+            if generations.is_empty() {
+                self.streams.remove(&stream);
+            }
+        }
+        Ok(())
     }
 }
 
@@ -206,7 +214,7 @@ impl DecodeProcessor for Processor {
         let deadline = Instant::now() + Duration::from_secs(3);
         loop {
             ensure!(
-                !self.shared.cancelled.load(Ordering::Acquire),
+                !self.shared.session.cancelled.load(Ordering::Acquire),
                 "decode cancelled"
             );
             ensure!(
@@ -216,7 +224,7 @@ impl DecodeProcessor for Processor {
             if !accepted {
                 accepted = decoder.try_send(&request.access_unit.payload, frame.sequence)?;
             }
-            match decoder.receive(|| self.shared.cancelled.load(Ordering::Acquire))? {
+            match decoder.receive(|| self.shared.session.cancelled.load(Ordering::Acquire))? {
                 Progress::Pending => thread::sleep(Duration::from_millis(1)),
                 Progress::End => anyhow::bail!("unexpected decoder end during live stream"),
                 Progress::Image(image) => {

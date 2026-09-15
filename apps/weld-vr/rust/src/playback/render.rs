@@ -11,6 +11,7 @@ use godot::{
 };
 use std::{
     cell::RefCell,
+    collections::HashMap,
     ffi::{c_int, c_void},
     fmt,
     hash::{Hash, Hasher},
@@ -32,7 +33,7 @@ unsafe extern "C" {
     fn weld_egl_close(context: *mut c_void);
 }
 
-thread_local! { static PRESENTER: RefCell<Option<Presenter>> = RefCell::default(); }
+thread_local! { static PRESENTERS: RefCell<HashMap<u64, Presenter>> = RefCell::default(); }
 // Fail closed even if a replacement renderer starts on a different thread.
 static QUARANTINED: AtomicBool = AtomicBool::new(false);
 pub(super) fn quarantine() {
@@ -78,12 +79,14 @@ impl fmt::Display for RenderCall {
 }
 impl RustCallable for RenderCall {
     fn invoke(&mut self, _args: &[&Variant]) -> Variant {
-        let result = PRESENTER.with(|slot| -> Result<()> {
+        let result = PRESENTERS.with(|slot| -> Result<()> {
             let mut slot = slot.borrow_mut();
             match self.operation {
                 Operation::Open(texture) => {
                     ensure!(
-                        !QUARANTINED.load(Ordering::Acquire) && slot.is_none(),
+                        !QUARANTINED.load(Ordering::Acquire)
+                            && !slot.contains_key(&self.generation)
+                            && slot.len() < 17,
                         "native video restart required: previous render session retained"
                     );
                     // SAFETY: callback runs on the Godot render thread. Helper
@@ -102,14 +105,18 @@ impl RustCallable for RenderCall {
                         spare: None,
                     };
                     *lock(&self.shared.target) = Some(native::Target::query(context)?);
-                    *slot = Some(presenter);
+                    slot.insert(self.generation, presenter);
                 }
                 Operation::Present => {
-                    if self.shared.cancelled.load(Ordering::Acquire) {
+                    if self.shared.session.cancelled.load(Ordering::Acquire)
+                        || self.shared.closed.load(Ordering::Acquire)
+                    {
                         lock(&self.shared.pending).take();
                         return Ok(());
                     }
-                    let presenter = slot.as_mut().context("render session missing")?;
+                    let presenter = slot
+                        .get_mut(&self.generation)
+                        .context("render session missing")?;
                     ensure!(
                         presenter.generation == self.generation,
                         "stale render session"
@@ -123,7 +130,7 @@ impl RustCallable for RenderCall {
                     }
                 }
                 Operation::Close => {
-                    if let Some(presenter) = slot.as_mut() {
+                    if let Some(presenter) = slot.get_mut(&self.generation) {
                         if presenter.generation != self.generation {
                             return Ok(());
                         }
@@ -131,8 +138,9 @@ impl RustCallable for RenderCall {
                             QUARANTINED.store(true, Ordering::Release);
                             return Err(error.context("native video restart required"));
                         }
-                        slot.take();
-                        QUARANTINED.store(false, Ordering::Release);
+                        slot.remove(&self.generation);
+                        // A sibling may still hold quarantined storage. Only a
+                        // process restart can clear an uncertain GPU lifetime.
                     }
                 }
             }
