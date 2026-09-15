@@ -271,6 +271,13 @@ opaque VR. The headset composes the camera background; Weld does not access
 raw camera frames. Headset rendering uses OpenXR synchronization rather than
 desktop vsync. The receiver requests the headset refresh rate through the
 shared presentation API, with source-side encoder limits still enforced.
+It rechecks the reported rate every 250 ms and forwards only changes through
+the coordinator's latest-value mailbox. Existing and newly discovered windows
+use that preference without restarting the connection. Invalid samples retain
+the last preference; 60 Hz is only the initial fallback. `WELD_PRESENTER_RATE`
+logs screen and OpenXR readings alongside the selected milliHz, while the source
+logs each opened encoder generation under `weld_media_diag`. A reported rate is
+not a measurement of delivered video FPS or a guarantee of codec throughput.
 
 Pause/session loss stops the video producer. Automatic resume/re-admission is
 not supported yet: relaunch the viewer/test source after pause. The normal UI

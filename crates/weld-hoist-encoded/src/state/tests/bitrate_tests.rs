@@ -57,6 +57,144 @@ fn deliver_output(source: &mut EncodedSourceState) {
 }
 
 #[test]
+fn encoder_requests_use_bootstrap_or_negotiated_cadence_with_real_backend_limits() {
+    for (ceiling, requested, expected) in [
+        (None, None, 60_000),
+        (None, Some(30_000), 30_000),
+        (None, Some(90_000), 90_000),
+        (None, Some(120_000), 120_000),
+        (None, Some(59_940), 59_940),
+        (Some(PresentationRate::HZ_60), Some(90_000), 60_000),
+    ] {
+        let fake = Rc::new(RefCell::new(FakeEncoderState {
+            default_frame_rate: Some(PresentationRate::HZ_60),
+            frame_rate_limit: ceiling,
+            ..Default::default()
+        }));
+        let mut source = EncodedSourceState::new(Box::new(FakeEncoder(fake.clone())));
+        if let Some(requested) = requested {
+            source.pacing.set(
+                source_surface(),
+                ClientPresentationClaim::Active {
+                    rate: Some(PresentationRate::try_from(requested).expect("rate")),
+                },
+            );
+        }
+        enqueue(&mut source, 1, &[1], 1).expect("initial batch");
+        assert_eq!(
+            fake.borrow().submitted_frame_rates,
+            vec![Some(PresentationRate::try_from(expected).expect("rate"))]
+        );
+        assert!(
+            fake.borrow().retirements.is_empty(),
+            "initial negotiation does not rebuild"
+        );
+    }
+}
+
+#[test]
+fn cadence_changes_keep_prepared_layers_frozen_and_combine_with_resize_and_bitrate() {
+    let (mut source, fake, control) = controlled_source();
+    let initial = PresentationRate::try_from(90_000).expect("rate");
+    let latest = PresentationRate::try_from(59_940).expect("rate");
+    source.pacing.set(
+        source_surface(),
+        ClientPresentationClaim::Active {
+            rate: Some(initial),
+        },
+    );
+    enqueue(&mut source, 1, &[1, 2], 1).expect("first batch");
+    for stream in control.streams().expect("streams") {
+        control.request(stream.stream, 4000).expect("bitrate");
+    }
+    for rate in [PresentationRate::try_from(120_000).expect("rate"), latest] {
+        source.pacing.set(
+            source_surface(),
+            ClientPresentationClaim::Active { rate: Some(rate) },
+        );
+    }
+    enqueue(&mut source, 2, &[1, 2], 2).expect("next batch with resized layers");
+    finish(&mut source, &fake, 0);
+    assert_eq!(
+        fake.borrow().submitted_frame_rates,
+        vec![Some(initial), Some(initial)]
+    );
+    assert!(fake.borrow().retirements.is_empty());
+    finish(&mut source, &fake, 1);
+    source.pacing.reset(source_surface());
+    deliver_output(&mut source);
+    finish(&mut source, &fake, 2);
+    finish(&mut source, &fake, 3);
+    let encoder = fake.borrow();
+    assert_eq!(
+        encoder.submitted_frame_rates,
+        vec![Some(initial), Some(initial), Some(latest), Some(latest)]
+    );
+    assert_eq!(
+        encoder.submitted_bitrates,
+        vec![Some(8000), Some(8000), Some(4000), Some(4000)]
+    );
+    assert_eq!(
+        encoder
+            .submitted
+            .iter()
+            .map(|(_, frame, _)| frame.generation.raw())
+            .collect::<Vec<_>>(),
+        vec![1, 1, 2, 2]
+    );
+    assert_eq!(
+        encoder.retirements.len(),
+        2,
+        "one replacement per stream for all changes"
+    );
+}
+
+#[test]
+fn negotiated_cadence_survives_paused_hidden_buffers_without_generation_churn() {
+    let fake = Rc::new(RefCell::new(FakeEncoderState {
+        default_frame_rate: Some(PresentationRate::HZ_60),
+        ..Default::default()
+    }));
+    let mut source = EncodedSourceState::new(Box::new(FakeEncoder(fake.clone())));
+    let rate = PresentationRate::try_from(90_000).expect("rate");
+    let active = ClientPresentationClaim::Active { rate: Some(rate) };
+    source.pacing.set(source_surface(), active);
+    enqueue(&mut source, 1, &[1], 1).expect("initial");
+    finish(&mut source, &fake, 0);
+    deliver_output(&mut source);
+    for (index, claim) in [
+        ClientPresentationClaim::Paused,
+        ClientPresentationClaim::Release,
+        active,
+        active,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        source.pacing.set(source_surface(), claim);
+        let revision = index as u64 + 2;
+        let lease = shm_lease(
+            ClientSourceId::new(1),
+            revision,
+            10,
+            ClientBufferMetadata::new(Extent::new(1, 1), true),
+        );
+        let mut event = one_buffer_commit(source_surface(), revision, 1, lease);
+        if let ClientSurfaceEventKind::Commit(commit) = &mut event.kind {
+            commit.mapped = false;
+        }
+        source
+            .enqueue(HoistSessionId::new(1), event)
+            .expect("hidden replacement");
+        finish(&mut source, &fake, index + 1);
+        deliver_output(&mut source);
+    }
+    let encoder = fake.borrow();
+    assert_eq!(encoder.submitted_frame_rates, vec![Some(rate); 5]);
+    assert!(encoder.retirements.is_empty());
+}
+
+#[test]
 fn multilayer_batch_stays_frozen_and_next_admission_admits_latest_rates() {
     let (mut source, fake, control) = controlled_source();
     enqueue(&mut source, 1, &[1, 2], 1).expect("first batch");

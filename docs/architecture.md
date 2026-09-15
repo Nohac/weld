@@ -122,14 +122,25 @@ does not add a software frame queue or frame reordering.
 
 Encoded source admission is paced in `weld-hoist-encoded`, independently of
 local composition and identically for local and Iroh transports. A presenter's
-`SetPresentation` preference selects at most the backend's configured frame-rate
-ceiling. The current VA-API backend uses the same 60 fps constant for that ceiling
-and FFmpeg configuration; this is not a probed hardware or codec maximum.
-A 120 Hz presenter therefore currently receives at most a nominal 60 fps stream,
-without changing its display refresh. Backends with 90 or 120 fps operating
-ceilings can accept those rates through the same policy. Full capability/answer
-feedback to the destination is not implemented by this slice: requested,
-configured and effective rates are logged on the source under `weld_media_diag`.
+`SetPresentation` preference selects the encode cadence, clamped only when the
+backend supplies an operating ceiling. The VA-API backend defaults to 60 fps
+without a presenter preference; that bootstrap is not a ceiling. Explicit 90 or
+120 Hz claims configure both source admission and FFmpeg at that rate. The
+validated 1..1000 Hz protocol range is not a promise of hardware throughput;
+device-specific cadence limits have not been probed. Full capability/answer
+feedback to the destination remains separate. Requested and accepted rates,
+and the settings of each successfully opened encoder generation, are logged
+on the source under `weld_media_diag`.
+
+Cadence is frozen with bitrate and extent for each admitted multi-layer batch.
+A changed cadence replaces the encoder generation on the next admitted buffer
+replacement, after existing prepared jobs finish; simultaneous bitrate/size
+changes share that replacement. MilliHz preferences become reduced FFmpeg
+rationals without rounding to integer fps, while timestamps retain their
+microsecond time base. The GOP remains 32 **frames**, not a fixed duration, and
+the bitrate allocator is unchanged: higher cadence at the same target bitrate
+means fewer nominal bits per frame and more keyframes per second. The AV1
+8 Mbps per-stream workaround remains in force.
 
 Frame slots are per surface-tree snapshot, not per input event or layer. New
 commits replace superseded not-yet-encoded content with the existing complete
@@ -145,14 +156,16 @@ fully excluded groups do not accrue starvation age.
 
 Input and cursor traffic is not paced by video admission. Explicit callback
 claims are clamped to the accepted rate, while a rate-less claim keeps the
-source-output fallback (encode bootstrap still defaults to at most 60 fps).
+source-output fallback (VA-API encode bootstrap defaults to 60 fps).
 This does not force application commit cadence: other presentation owners and
 clients committing without frame callbacks can still produce more work.
 Paused streams retain bounded latest unobserved buffer leases for correct resume;
 they have no periodic encode deadline. Full unmaps discard unpublished pixels,
 preserve intervening control order, and suppress cancelled in-flight output;
 in-flight source leases still await codec completion. Unmaps carrying retained
-buffer inventory drain their ordered dependencies without a cadence wait.
+buffer inventory drain their ordered dependencies without a cadence wait,
+retaining the last active encoder cadence across pause/release instead of
+rebuilding at the bootstrap rate.
 
 This corrects measured overproduction: a large headless Blender window supplied
 about 210 encoded frames/s to a receive/decode path completing about 140-150/s,

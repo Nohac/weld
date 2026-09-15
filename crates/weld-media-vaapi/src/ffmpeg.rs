@@ -68,7 +68,7 @@ impl TryFrom<VideoCodec> for CodecKind {
 pub struct VaapiEncoderSettings {
     codec: VideoCodec,
     bitrate_bits: u64,
-    frames_per_second: u32,
+    frame_rate_millihertz: u32,
     keyframe_interval: u32,
 }
 
@@ -77,6 +77,22 @@ impl VaapiEncoderSettings {
         codec: VideoCodec,
         bitrate_bits: u64,
         frames_per_second: u32,
+        keyframe_interval: u32,
+    ) -> Result<Self> {
+        Self::try_new_millihertz(
+            codec,
+            bitrate_bits,
+            frames_per_second
+                .checked_mul(1000)
+                .context("encoder frame rate overflow")?,
+            keyframe_interval,
+        )
+    }
+
+    fn try_new_millihertz(
+        codec: VideoCodec,
+        bitrate_bits: u64,
+        frame_rate_millihertz: u32,
         keyframe_interval: u32,
     ) -> Result<Self> {
         CodecKind::try_from(codec)?;
@@ -89,12 +105,15 @@ impl VaapiEncoderSettings {
             codec != VideoCodec::Av1 || bitrate_bits <= 8_000_000,
             "AV1 bitrate exceeds the validated 8 Mbps VA-API ceiling"
         );
-        ensure!(frames_per_second > 0, "encoder frame rate must be positive");
+        ensure!(
+            (1_000..=1_000_000).contains(&frame_rate_millihertz),
+            "encoder frame rate must be between 1 and 1000 Hz"
+        );
         ensure!(keyframe_interval > 0, "keyframe interval must be positive");
         Ok(Self {
             codec,
             bitrate_bits,
-            frames_per_second,
+            frame_rate_millihertz,
             keyframe_interval,
         })
     }
@@ -107,13 +126,40 @@ impl VaapiEncoderSettings {
         self.bitrate_bits
     }
 
+    pub const fn frame_rate_millihertz(self) -> u32 {
+        self.frame_rate_millihertz
+    }
+
+    /// Configure a replacement generation at the exact presenter cadence.
+    /// The GOP remains measured in frames, and this never mutates a live context.
+    pub fn with_frame_rate_millihertz(self, millihertz: u32) -> Result<Self> {
+        Self::try_new_millihertz(
+            self.codec,
+            self.bitrate_bits,
+            millihertz,
+            self.keyframe_interval,
+        )
+    }
+
+    fn frame_rate(self) -> Result<ffi::AVRational> {
+        let mut numerator = self.frame_rate_millihertz;
+        let mut denominator = 1000;
+        while denominator != 0 {
+            (numerator, denominator) = (denominator, numerator % denominator);
+        }
+        Ok(ffi::AVRational {
+            num: i32::try_from(self.frame_rate_millihertz / numerator)?,
+            den: i32::try_from(1000 / numerator)?,
+        })
+    }
+
     /// Validate settings for a replacement encoder while preserving codec,
     /// nominal cadence and GOP. This does not mutate a live FFmpeg context.
     pub fn with_bitrate(self, bitrate_bits: u64) -> Result<Self> {
-        Self::try_new(
+        Self::try_new_millihertz(
             self.codec,
             bitrate_bits,
-            self.frames_per_second,
+            self.frame_rate_millihertz,
             self.keyframe_interval,
         )
     }
@@ -173,21 +219,21 @@ impl FfmpegEncoder {
         let (coded_width, coded_height) = geometry.coded_extent(width, height)?;
         let coded_width = i32::try_from(coded_width)?;
         let coded_height = i32::try_from(coded_height)?;
-        let frames_per_second = i32::try_from(settings.frames_per_second)?;
+        let frame_rate = settings.frame_rate()?;
         let filter = FilterPipeline::new(
             device,
             source_width,
             source_height,
             coded_width,
             coded_height,
-            frames_per_second,
+            frame_rate,
         )?;
         let codec = CodecContext::new(
             CodecParameters {
                 kind: codec_kind,
                 width: coded_width,
                 height: coded_height,
-                frames_per_second,
+                frame_rate,
                 bitrate: i64::try_from(settings.bitrate_bits)?,
                 keyframe_interval: i32::try_from(settings.keyframe_interval)?,
                 low_power: geometry.entrypoint().is_low_power(),
@@ -457,7 +503,7 @@ impl FilterPipeline {
         source_height: i32,
         coded_width: i32,
         coded_height: i32,
-        fps: i32,
+        frame_rate: ffi::AVRational,
     ) -> Result<Self> {
         let drm_device = device.drm.try_clone()?;
         let vaapi_device = device.vaapi.try_clone()?;
@@ -468,7 +514,7 @@ impl FilterPipeline {
 
         let setup = (|| {
             let source = allocate_filter(graph, c"buffer", c"weld-dmabuf-source")?;
-            configure_source(source, &drm_frames, source_width, source_height, fps)?;
+            configure_source(source, &drm_frames, source_width, source_height, frame_rate)?;
             // SAFETY: source has received all mandatory buffer parameters and is not initialized yet.
             let result = unsafe { ffi::avfilter_init_str(source, ptr::null()) };
             check(result, "could not initialize FFmpeg DMA-BUF source")?;
@@ -568,7 +614,7 @@ struct CodecParameters {
     kind: CodecKind,
     width: i32,
     height: i32,
-    frames_per_second: i32,
+    frame_rate: ffi::AVRational,
     bitrate: i64,
     keyframe_interval: i32,
     low_power: bool,
@@ -600,10 +646,7 @@ impl CodecContext {
                 num: 1,
                 den: 1_000_000,
             };
-            (*context).framerate = ffi::AVRational {
-                num: parameters.frames_per_second,
-                den: 1,
-            };
+            (*context).framerate = parameters.frame_rate;
             (*context).sample_aspect_ratio = ffi::AVRational { num: 1, den: 1 };
             (*context).pix_fmt = ffi::AVPixelFormat::AV_PIX_FMT_VAAPI;
             (*context).profile = parameters.kind.profile();
@@ -1123,7 +1166,7 @@ fn configure_source(
     frames: &BufferRef,
     width: i32,
     height: i32,
-    fps: i32,
+    frame_rate: ffi::AVRational,
 ) -> Result<()> {
     // SAFETY: source parameter allocation has no caller-side preconditions.
     let parameters = unsafe { ffi::av_buffersrc_parameters_alloc() };
@@ -1141,7 +1184,7 @@ fn configure_source(
         (*parameters).width = width;
         (*parameters).height = height;
         (*parameters).sample_aspect_ratio = ffi::AVRational { num: 1, den: 1 };
-        (*parameters).frame_rate = ffi::AVRational { num: fps, den: 1 };
+        (*parameters).frame_rate = frame_rate;
         (*parameters).hw_frames_ctx = frames.0;
         (*parameters).color_space = ffi::AVColorSpace::AVCOL_SPC_RGB;
         (*parameters).color_range = ffi::AVColorRange::AVCOL_RANGE_JPEG;
@@ -1254,12 +1297,49 @@ mod settings_tests {
     use super::*;
 
     #[test]
+    fn presenter_cadence_is_exact_rational_and_preserves_other_settings() {
+        let original =
+            VaapiEncoderSettings::try_new(VideoCodec::Av1, 8_000_000, 60, 32).expect("settings");
+        for (millihertz, numerator, denominator) in [
+            (30_000, 30, 1),
+            (60_000, 60, 1),
+            (90_000, 90, 1),
+            (120_000, 120, 1),
+            (59_940, 2997, 50),
+        ] {
+            let changed = original
+                .with_frame_rate_millihertz(millihertz)
+                .expect("cadence");
+            let rate = changed.frame_rate().expect("rational");
+            assert_eq!((rate.num, rate.den), (numerator, denominator));
+            assert_eq!(changed.frame_rate_millihertz(), millihertz);
+            assert_eq!(changed.bitrate_bits(), original.bitrate_bits());
+            assert_eq!(changed.keyframe_interval, original.keyframe_interval);
+            assert_eq!(
+                changed
+                    .with_bitrate(4_000_000)
+                    .expect("bitrate")
+                    .frame_rate_millihertz(),
+                millihertz
+            );
+        }
+        for invalid in [0, 999, 1_000_001, u32::MAX] {
+            assert!(original.with_frame_rate_millihertz(invalid).is_err());
+        }
+        assert!(VaapiEncoderSettings::try_new(VideoCodec::Av1, 8_000_000, u32::MAX, 32).is_err());
+        assert_eq!(original.frame_rate_millihertz(), 60_000);
+    }
+
+    #[test]
     fn replacement_rate_preserves_other_settings_and_revalidates_limits() {
         let original =
             VaapiEncoderSettings::try_new(VideoCodec::Av1, 8_000_000, 30, 60).expect("settings");
         let reduced = original.with_bitrate(4_000_000).expect("lower rate");
         assert_eq!(reduced.codec, original.codec);
-        assert_eq!(reduced.frames_per_second, original.frames_per_second);
+        assert_eq!(
+            reduced.frame_rate_millihertz,
+            original.frame_rate_millihertz
+        );
         assert_eq!(reduced.keyframe_interval, original.keyframe_interval);
         assert_eq!(reduced.bitrate_bits, 4_000_000);
         assert_eq!(original.bitrate_bits, 8_000_000);

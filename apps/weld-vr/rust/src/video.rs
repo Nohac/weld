@@ -17,6 +17,30 @@ use std::time::Instant;
 use weld_client::PresentationRate;
 use workspace::{WeldSurface, Workspace};
 
+fn presenter_rate(millihertz: i64) -> Option<PresentationRate> {
+    u32::try_from(millihertz)
+        .ok()
+        .and_then(|rate| PresentationRate::try_from(rate).ok())
+}
+
+#[cfg(test)]
+mod rate_tests {
+    use super::presenter_rate;
+
+    #[test]
+    fn invalid_refresh_samples_are_not_fallback_rate_changes() {
+        for invalid in [-1, 0, 999, 1_000_001, i64::MAX] {
+            assert!(presenter_rate(invalid).is_none());
+        }
+        for valid in [30_000, 59_940, 75_000, 90_000, 120_000] {
+            assert_eq!(
+                presenter_rate(valid).expect("rate").millihertz(),
+                valid as u32
+            );
+        }
+    }
+}
+
 #[derive(GodotClass)]
 #[class(base=Node)]
 pub struct WeldVideoPlayer {
@@ -251,6 +275,15 @@ impl WeldVideoPlayer {
         self.start_source(texture, material, Source::Fixture { single_frame: true })
     }
     #[func]
+    fn set_presenter_rate(&mut self, refresh_millihertz: i64) -> bool {
+        let Some(rate) = presenter_rate(refresh_millihertz) else {
+            return false;
+        };
+        self.workspace
+            .as_ref()
+            .is_some_and(|workspace| workspace.session.set_presentation_rate(rate))
+    }
+    #[func]
     fn start_stream(
         &mut self,
         texture: Gd<Object>,
@@ -258,9 +291,7 @@ impl WeldVideoPlayer {
         directory: GString,
         refresh_millihertz: i64,
     ) -> bool {
-        let rate = u32::try_from(refresh_millihertz)
-            .ok()
-            .and_then(|rate| PresentationRate::try_from(rate).ok());
+        let rate = presenter_rate(refresh_millihertz);
         let Some(rate) = rate else {
             self.message = "Invalid presenter refresh rate".into();
             return false;

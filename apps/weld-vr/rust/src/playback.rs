@@ -31,7 +31,9 @@ use std::{
     thread::{self, JoinHandle},
     time::{Duration, Instant},
 };
-use weld_client::{ClientCursor, InputPosition, KeyboardKeyState, SurfaceContentView};
+use weld_client::{
+    ClientCursor, InputPosition, KeyboardKeyState, PresentationRate, SurfaceContentView,
+};
 
 static NEXT_SESSION: AtomicU64 = AtomicU64::new(1);
 const FIXTURE: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/panel-av1.ivf"));
@@ -53,10 +55,27 @@ enum PresentationUpdate {
 #[derive(Default)]
 struct SessionState {
     input: Mutex<input::InputState>,
+    presentation_rate: Mutex<Option<PresentationRate>>,
     cancelled: AtomicBool,
     error: Mutex<Option<String>>,
     message: Mutex<Option<String>>,
     wake: Mutex<Option<thread::Thread>>,
+}
+
+impl SessionState {
+    fn set_presentation_rate(&self, rate: PresentationRate) -> bool {
+        {
+            let mut current = lock(&self.presentation_rate);
+            if *current == Some(rate) {
+                return false;
+            }
+            *current = Some(rate);
+        }
+        if let Some(worker) = lock(&self.wake).as_ref() {
+            worker.unpark();
+        }
+        true
+    }
 }
 
 #[derive(Default)]

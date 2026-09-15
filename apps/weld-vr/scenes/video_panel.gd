@@ -68,17 +68,17 @@ void fragment() {
 	view.material = video_material
 	var started: bool
 	if network:
-		var refresh := DisplayServer.screen_get_refresh_rate()
-		var xr := XRServer.primary_interface
-		if xr != null and xr.is_initialized():
-			refresh = xr.get_display_refresh_rate()
-		if refresh <= 0.0:
-			refresh = 60.0
+		var refresh := _presenter_refresh()
+		var rate := _valid_millihertz(refresh.selected)
+		if rate == 0:
+			rate = 60000
 		var directory := OS.get_environment("WELD_VR_DEVICE_DIR")
 		if directory.is_empty():
 			directory = ProjectSettings.globalize_path("user://weld-device")
 		started = player.start_stream(video_texture, video_material,
-			directory, int(clampf(refresh, 1.0, 1000.0) * 1000.0))
+			directory, rate)
+		if started:
+			_log_refresh(refresh, rate)
 	else:
 		if single_frame:
 			started = player.start_single_frame(video_texture, video_material)
@@ -114,6 +114,25 @@ func _before_draw() -> void:
 	player.tick()
 
 
+func _presenter_refresh() -> Dictionary:
+	var flat := DisplayServer.screen_get_refresh_rate()
+	var xr := XRServer.primary_interface
+	var immersive := xr != null and xr.is_initialized()
+	var headset: float = xr.get_display_refresh_rate() if immersive else 0.0
+	return {"screen": flat, "xr": headset, "selected": headset if immersive else flat}
+
+
+func _valid_millihertz(refresh: float) -> int:
+	if not is_finite(refresh) or refresh < 1.0 or refresh > 1000.0:
+		return 0
+	return roundi(refresh * 1000.0)
+
+
+func _log_refresh(sample: Dictionary, rate: int) -> void:
+	print("WELD_PRESENTER_RATE screen_hz=", sample.screen,
+		" xr_hz=", sample.xr, " selected_millihertz=", rate)
+
+
 func _process(delta: float) -> void:
 	layout_video()
 	if network_active and not spatial:
@@ -121,6 +140,11 @@ func _process(delta: float) -> void:
 	status_elapsed += delta
 	if status_elapsed >= 0.25:
 		status_elapsed = 0.0
+		if network_active:
+			var refresh := _presenter_refresh()
+			var rate := _valid_millihertz(refresh.selected)
+			if rate != 0 and player.set_presenter_rate(rate):
+				_log_refresh(refresh, rate)
 		$Status.text = waiting_message if not waiting_message.is_empty() else player.status()
 		$Status.visible = not _has_window() if network_active else video_material == null or not video_material.get_shader_parameter("has_frame")
 	if network_active or "--video-single-frame" in OS.get_cmdline_user_args():

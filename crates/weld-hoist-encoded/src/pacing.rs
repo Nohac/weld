@@ -11,17 +11,20 @@ struct Cadence {
     claim: Option<ClientPresentationClaim>,
     next: Option<Instant>,
     last_admission: Option<Instant>,
+    last_active_rate: Option<PresentationRate>,
 }
 
 pub(super) struct SourcePacing {
     ceiling: Option<PresentationRate>,
+    fallback: Option<PresentationRate>,
     surfaces: HashMap<ClientSurfaceId, Cadence>,
 }
 
 impl SourcePacing {
-    pub fn new(ceiling: Option<PresentationRate>) -> Self {
+    pub fn new(ceiling: Option<PresentationRate>, fallback: Option<PresentationRate>) -> Self {
         Self {
             ceiling,
+            fallback,
             surfaces: HashMap::new(),
         }
     }
@@ -45,6 +48,9 @@ impl SourcePacing {
         let cadence = self.surfaces.entry(surface).or_default();
         if cadence.claim != Some(accepted) {
             cadence.claim = Some(accepted);
+            if matches!(accepted, ClientPresentationClaim::Active { .. }) {
+                cadence.last_active_rate = effective_rate;
+            }
             cadence.next = cadence
                 .last_admission
                 .zip(effective_rate)
@@ -62,7 +68,17 @@ impl SourcePacing {
         accepted
     }
 
-    fn rate(&self, surface: ClientSurfaceId) -> Option<PresentationRate> {
+    pub fn rate(&self, surface: ClientSurfaceId) -> Option<PresentationRate> {
+        // Hidden commits can still contain replacement buffers. Pause must not
+        // silently reconfigure those encoders back to the bootstrap cadence.
+        if self.paused(surface)
+            && let Some(rate) = self
+                .surfaces
+                .get(&surface)
+                .and_then(|cadence| cadence.last_active_rate)
+        {
+            return Some(rate);
+        }
         self.rate_for_claim(
             self.surfaces
                 .get(&surface)
@@ -73,10 +89,13 @@ impl SourcePacing {
     fn rate_for_claim(&self, claim: Option<ClientPresentationClaim>) -> Option<PresentationRate> {
         match claim {
             Some(ClientPresentationClaim::Active { rate }) => {
-                let requested = rate.unwrap_or(PresentationRate::HZ_60);
+                let requested = rate.or(self.fallback).unwrap_or(PresentationRate::HZ_60);
                 Some(self.ceiling.map_or(requested, |limit| limit.min(requested)))
             }
-            _ => self.ceiling,
+            _ => self
+                .fallback
+                .or(self.ceiling)
+                .map(|rate| self.ceiling.map_or(rate, |limit| limit.min(rate))),
         }
     }
 
@@ -141,12 +160,75 @@ mod tests {
     }
 
     #[test]
+    fn bootstrap_is_not_a_ceiling_and_optional_backend_limits_are_preserved() {
+        for (ceiling, fallback, bootstrap, rateless) in [
+            (None, None, None, Some(rate(60))),
+            (Some(rate(90)), None, Some(rate(90)), Some(rate(60))),
+            (None, Some(rate(60)), Some(rate(60)), Some(rate(60))),
+            (
+                Some(rate(60)),
+                Some(rate(90)),
+                Some(rate(60)),
+                Some(rate(60)),
+            ),
+        ] {
+            let mut pacing = SourcePacing::new(ceiling, fallback);
+            assert_eq!(pacing.rate(surface()), bootstrap);
+            for claim in [
+                ClientPresentationClaim::Paused,
+                ClientPresentationClaim::Release,
+            ] {
+                pacing.set(surface(), claim);
+                assert_eq!(pacing.rate(surface()), bootstrap);
+            }
+            pacing.set(surface(), ClientPresentationClaim::Active { rate: None });
+            assert_eq!(pacing.rate(surface()), rateless);
+            for millihertz in [30_000, 60_000, 90_000, 120_000, 59_940] {
+                let requested = PresentationRate::try_from(millihertz).expect("rate");
+                let expected = ceiling.map_or(requested, |limit| limit.min(requested));
+                assert_eq!(
+                    pacing.set(
+                        surface(),
+                        ClientPresentationClaim::Active {
+                            rate: Some(requested)
+                        }
+                    ),
+                    ClientPresentationClaim::Active {
+                        rate: Some(expected)
+                    }
+                );
+                assert_eq!(pacing.rate(surface()), Some(expected));
+            }
+        }
+    }
+
+    #[test]
+    fn pause_and_release_retain_last_active_encoder_cadence() {
+        let mut pacing = SourcePacing::new(None, Some(rate(60)));
+        let active = ClientPresentationClaim::Active {
+            rate: Some(rate(90)),
+        };
+        pacing.set(surface(), active);
+        for claim in [
+            ClientPresentationClaim::Paused,
+            ClientPresentationClaim::Release,
+            active,
+            active,
+        ] {
+            pacing.set(surface(), claim);
+            assert_eq!(pacing.rate(surface()), Some(rate(90)));
+        }
+        pacing.forget(surface());
+        assert_eq!(pacing.rate(surface()), Some(rate(60)));
+    }
+
+    #[test]
     fn viewer_rate_is_clamped_to_backend_ceiling_without_a_universal_sixty_limit() {
         let now = Instant::now();
         for (requested, ceiling, expected) in
             [(120, 60, 60), (120, 90, 90), (120, 120, 120), (30, 60, 30)]
         {
-            let mut pacing = SourcePacing::new(Some(rate(ceiling)));
+            let mut pacing = SourcePacing::new(Some(rate(ceiling)), None);
             assert_eq!(
                 pacing.set(
                     surface(),
@@ -170,7 +252,7 @@ mod tests {
     fn cadence_keeps_latest_work_and_does_not_halve_a_matching_jittery_producer() {
         for (producer_hz, limit) in [(120, 60), (120, 90), (120, 120), (60, 60)] {
             let start = Instant::now();
-            let mut pacing = SourcePacing::new(Some(rate(limit)));
+            let mut pacing = SourcePacing::new(Some(rate(limit)), None);
             pacing.set(
                 surface(),
                 ClientPresentationClaim::Active {
@@ -210,7 +292,7 @@ mod tests {
     #[test]
     fn stalls_and_rate_toggles_do_not_mint_frame_credits() {
         let start = Instant::now();
-        let mut pacing = SourcePacing::new(Some(rate(60)));
+        let mut pacing = SourcePacing::new(Some(rate(60)), None);
         pacing.admitted(surface(), start);
         for requested in [30, 120, 30, 60] {
             pacing.set(
@@ -231,7 +313,7 @@ mod tests {
     #[test]
     fn rate_less_claims_keep_the_upstream_fallback_and_pauses_keep_no_credits() {
         let start = Instant::now();
-        let mut pacing = SourcePacing::new(Some(rate(90)));
+        let mut pacing = SourcePacing::new(Some(rate(90)), None);
         let claim = ClientPresentationClaim::Active { rate: None };
         assert_eq!(pacing.set(surface(), claim), claim);
         pacing.admitted(surface(), start);

@@ -49,6 +49,7 @@ struct Surface {
 pub(crate) struct Inventory {
     next_id: u64,
     surfaces: BTreeMap<ClientSurfaceId, Surface>,
+    presentation_rate: Option<PresentationRate>,
 }
 impl Inventory {
     fn id(&mut self) -> Result<u64> {
@@ -69,13 +70,29 @@ impl Inventory {
             }
         }
         self.surfaces.clear();
+        self.presentation_rate = None;
+    }
+    pub(super) fn set_presentation_rate(
+        &mut self,
+        rate: PresentationRate,
+    ) -> Vec<ClientSurfaceRequest> {
+        if self.presentation_rate == Some(rate) {
+            return Vec::new();
+        }
+        self.presentation_rate = Some(rate);
+        self.surfaces
+            .keys()
+            .map(|surface| ClientSurfaceRequest {
+                surface: *surface,
+                kind: ClientSurfaceRequestKind::SetPresentation { rate: Some(rate) },
+            })
+            .collect()
     }
     pub(super) fn apply(
         &mut self,
         event: ClientSurfaceEvent,
         session: &Shared,
         preferences: Option<XrPreferences>,
-        rate: PresentationRate,
     ) -> Result<Vec<ClientSurfaceRequest>> {
         let surface_id = event.surface;
         let mut requests = Vec::new();
@@ -102,7 +119,9 @@ impl Inventory {
                     );
                     requests.push(ClientSurfaceRequest {
                         surface: surface_id,
-                        kind: ClientSurfaceRequestKind::SetPresentation { rate: Some(rate) },
+                        kind: ClientSurfaceRequestKind::SetPresentation {
+                            rate: Some(self.presentation_rate.unwrap_or(PresentationRate::HZ_60)),
+                        },
                     });
                 }
             }
@@ -408,6 +427,7 @@ impl Session {
         sizing: Option<XrPreferences>,
     ) -> Result<Self> {
         let shared = Arc::new(Shared::default());
+        *lock(&shared.session.presentation_rate) = Some(rate);
         let bootstrap = Controller::open(texture, material, shared.clone())?;
         let inventory = Arc::new(Mutex::new(Inventory::default()));
         let state = inventory.clone();
@@ -430,6 +450,9 @@ impl Session {
     }
     pub fn panes(&self) -> Vec<Pane> {
         lock(&self.inventory).panes()
+    }
+    pub fn set_presentation_rate(&self, rate: PresentationRate) -> bool {
+        self.bootstrap.shared.session.set_presentation_rate(rate)
     }
     pub fn attach(
         &self,
@@ -547,9 +570,82 @@ mod tests {
                 },
                 shared,
                 None,
-                PresentationRate::try_from(60000).expect("rate"),
             )
             .expect("surface update");
+    }
+    #[test]
+    fn live_refresh_changes_coalesce_and_only_target_surviving_surfaces() {
+        let shared = Shared::default();
+        let mut inventory = Inventory::default();
+        let initial = PresentationRate::try_from(75_000).expect("rate");
+        let latest = PresentationRate::try_from(90_000).expect("rate");
+        assert!(inventory.set_presentation_rate(initial).is_empty());
+        for n in [1, 2] {
+            apply(
+                &mut inventory,
+                &shared,
+                n,
+                ClientSurfaceEventKind::Role(top(None)),
+            );
+        }
+        assert!(inventory.set_presentation_rate(initial).is_empty());
+        for rate in [PresentationRate::HZ_60, initial, latest] {
+            assert!(shared.session.set_presentation_rate(rate));
+        }
+        assert!(!shared.session.set_presentation_rate(latest));
+        apply(
+            &mut inventory,
+            &shared,
+            2,
+            ClientSurfaceEventKind::Destroyed,
+        );
+        let rate = lock(&shared.session.presentation_rate).expect("latest mailbox value");
+        let requests = inventory.set_presentation_rate(rate);
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].surface, id(1));
+        assert_eq!(
+            requests[0].kind,
+            ClientSurfaceRequestKind::SetPresentation { rate: Some(latest) }
+        );
+        assert!(inventory.set_presentation_rate(rate).is_empty());
+        let requests = inventory
+            .apply(
+                ClientSurfaceEvent {
+                    surface: id(3),
+                    kind: ClientSurfaceEventKind::Role(top(None)),
+                },
+                &shared,
+                None,
+            )
+            .expect("new surface");
+        assert_eq!(requests.len(), 1);
+        assert_eq!(
+            requests[0].kind,
+            ClientSurfaceRequestKind::SetPresentation { rate: Some(latest) }
+        );
+
+        inventory.clear();
+        assert_eq!(inventory.presentation_rate, None);
+        assert_eq!(
+            *lock(&shared.session.presentation_rate),
+            Some(latest),
+            "reconnect retains newest preference"
+        );
+        assert!(inventory.set_presentation_rate(latest).is_empty());
+        let requests = inventory
+            .apply(
+                ClientSurfaceEvent {
+                    surface: id(1),
+                    kind: ClientSurfaceEventKind::Role(top(None)),
+                },
+                &shared,
+                None,
+            )
+            .expect("reconnected surface");
+        assert_eq!(
+            requests[0].kind,
+            ClientSurfaceRequestKind::SetPresentation { rate: Some(latest) }
+        );
     }
     #[test]
     fn independent_windows_unmap_remap_and_destroy_without_touching_siblings() {
@@ -700,7 +796,6 @@ mod tests {
                     },
                     &shared,
                     None,
-                    PresentationRate::try_from(60000).expect("rate")
                 )
                 .is_err()
         );

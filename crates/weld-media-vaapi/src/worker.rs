@@ -238,6 +238,14 @@ fn encode_one(
             visible_width,
             visible_height,
         )?;
+        tracing::info!(target: "weld_media_diag",
+            stream = request.frame.stream.raw(),
+            generation = request.frame.generation.raw(),
+            codec = ?request.settings.codec(),
+            frame_rate_millihertz = request.settings.frame_rate_millihertz(),
+            bitrate_bits = request.settings.bitrate_bits(),
+            visible_width, visible_height,
+            "opened VA-API encoder generation");
         sessions.insert(
             key,
             EncoderSession {

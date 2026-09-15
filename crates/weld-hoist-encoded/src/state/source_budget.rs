@@ -95,6 +95,7 @@ impl EncodedSourceState {
                 visible_extent: (metadata.extent.width, metadata.extent.height),
                 next_sequence: Some(0),
                 frozen_rate,
+                frozen_frame_rate: None,
             },
         );
         Ok(())

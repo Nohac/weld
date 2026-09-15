@@ -149,6 +149,9 @@ pub(super) fn run_session(
                 );
                 let mut runtime = ClientRuntime::default();
                 runtime.register(registration.into_parts().runtime)?;
+                let latest_rate = lock(&shared.session.presentation_rate).unwrap_or(rate);
+                // No surfaces yet; establish the preference before their Role events.
+                lock(inventory).set_presentation_rate(latest_rate);
                 let mut events = ClientEventQueue::default();
                 let mut invalid_events = Vec::new();
                 let mut invalid_effects = Vec::new();
@@ -166,7 +169,7 @@ pub(super) fn run_session(
                         "invalid client runtime events/effects: {invalid_events:?} {invalid_effects:?}"
                     );
                     while let Some(event) = events.pop_front() {
-                        let requests = lock(inventory).apply(event, shared, sizing, rate)?;
+                        let requests = lock(inventory).apply(event, shared, sizing)?;
                         for request in requests {
                             ensure!(
                                 runtime.apply_request(ClientRequest::Surface(request)),
@@ -174,6 +177,16 @@ pub(super) fn run_session(
                             );
                         }
                         shared.message("Receiving AV1 windows");
+                    }
+                    // Drain destruction first so a changed preference only targets
+                    // the surviving inventory. The mailbox contains no queued history.
+                    let latest_rate = lock(&shared.session.presentation_rate).unwrap_or(rate);
+                    let requests = lock(inventory).set_presentation_rate(latest_rate);
+                    for request in requests {
+                        ensure!(
+                            runtime.apply_request(ClientRequest::Surface(request)),
+                            "presentation rate update rejected"
+                        );
                     }
                     input::service(shared, &mut runtime);
                     // Transport wake_if_readable and codec/credit notifications

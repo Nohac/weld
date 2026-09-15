@@ -36,6 +36,8 @@ pub struct EncodeRequest {
     pub input: EncodeInput,
     /// Frozen settings for this generation; None uses the backend's default.
     pub bitrate_bits_per_second: Option<u64>,
+    /// Frozen presentation cadence for this generation; None uses the backend default.
+    pub frame_rate: Option<PresentationRate>,
 }
 
 pub struct EncodeCompletion {
@@ -71,6 +73,10 @@ pub trait EncodeBackend {
     /// Optional configured operating ceiling, not necessarily a probed device
     /// maximum. Presenter preferences are independently enforced by the port.
     fn frame_rate_limit(&self) -> Option<PresentationRate> {
+        None
+    }
+    /// Bootstrap cadence when no presenter supplied one. This is not a ceiling.
+    fn default_frame_rate(&self) -> Option<PresentationRate> {
         None
     }
     /// Resolve this adapter's source access without exposing native types to
@@ -154,8 +160,8 @@ mod vaapi {
     /// Provisional control floor, not a probed device limit or quality guarantee.
     /// Avoid tiny area-weighted targets and correspondingly tiny CBR reservoirs.
     const MINIMUM_CONTROL_BITRATE: u64 = 128_000;
-    const CONFIGURED_FRAME_RATE: PresentationRate = PresentationRate::HZ_60;
-    const DEFAULT_FRAMES_PER_SECOND: u32 = CONFIGURED_FRAME_RATE.millihertz() / 1000;
+    const DEFAULT_FRAME_RATE: PresentationRate = PresentationRate::HZ_60;
+    const DEFAULT_FRAMES_PER_SECOND: u32 = DEFAULT_FRAME_RATE.millihertz() / 1000;
     const DEFAULT_KEYFRAME_INTERVAL: u32 = 32;
     const DRM_FORMAT_XRGB8888: u32 = u32::from_le_bytes(*b"XR24");
 
@@ -204,9 +210,10 @@ mod vaapi {
     }
 
     impl EncodeBackend for VaapiEncoder {
-        fn frame_rate_limit(&self) -> Option<PresentationRate> {
-            // Matches DEFAULT_FRAMES_PER_SECOND and the FFmpeg CBR configuration.
-            Some(CONFIGURED_FRAME_RATE)
+        fn default_frame_rate(&self) -> Option<PresentationRate> {
+            // A fallback until the presenter claims the surface, not a probed
+            // hardware maximum. Actual cadence is frozen in each request.
+            Some(DEFAULT_FRAME_RATE)
         }
         fn prepare_input(&self, lease: &ClientBufferLease) -> Result<PreparedEncodeInput> {
             prepare_input(lease)
@@ -223,6 +230,7 @@ mod vaapi {
                 timestamp_micros,
                 input,
                 bitrate_bits_per_second,
+                frame_rate,
             } = request;
             let settings = match bitrate_bits_per_second {
                 Some(bitrate) => {
@@ -234,6 +242,12 @@ mod vaapi {
                         .map_err(SubmitError::Rejected)?
                 }
                 None => self.settings,
+            };
+            let settings = match frame_rate {
+                Some(rate) => settings
+                    .with_frame_rate_millihertz(rate.millihertz())
+                    .map_err(SubmitError::Rejected)?,
+                None => settings,
             };
             let input = match input {
                 EncodeInput::Dmabuf(dmabuf) => VaapiEncodeInput::Dmabuf(
@@ -259,13 +273,15 @@ mod vaapi {
             match self.worker.try_encode(request) {
                 Ok(()) => Ok(()),
                 Err(VaapiWorkerSubmitError::Busy(request)) => {
-                    let request = from_vaapi_encode_request(*request, bitrate_bits_per_second)
-                        .map_err(SubmitError::Rejected)?;
+                    let request =
+                        from_vaapi_encode_request(*request, bitrate_bits_per_second, frame_rate)
+                            .map_err(SubmitError::Rejected)?;
                     Err(SubmitError::Busy(request))
                 }
                 Err(VaapiWorkerSubmitError::Stopped(request)) => {
-                    let request = from_vaapi_encode_request(*request, bitrate_bits_per_second)
-                        .map_err(SubmitError::Rejected)?;
+                    let request =
+                        from_vaapi_encode_request(*request, bitrate_bits_per_second, frame_rate)
+                            .map_err(SubmitError::Rejected)?;
                     Err(SubmitError::Stopped(request))
                 }
                 Err(VaapiWorkerSubmitError::Rejected(error)) => Err(SubmitError::Rejected(error)),
@@ -294,6 +310,7 @@ mod vaapi {
     fn from_vaapi_encode_request(
         request: VaapiEncodeRequest,
         bitrate_bits_per_second: Option<u64>,
+        frame_rate: Option<PresentationRate>,
     ) -> Result<EncodeRequest> {
         let input = match request.input {
             VaapiEncodeInput::Dmabuf(dmabuf) => EncodeInput::Dmabuf(from_vaapi_dmabuf(dmabuf)?),
@@ -313,6 +330,7 @@ mod vaapi {
             timestamp_micros: request.timestamp_micros,
             input,
             bitrate_bits_per_second,
+            frame_rate,
         })
     }
 
@@ -487,29 +505,44 @@ mod vaapi {
         #[test]
         fn rejected_worker_request_conversion_preserves_the_original_override() {
             for override_rate in [None, Some(4_000_000)] {
-                let settings = encoder_settings(VideoCodec::Av1).expect("settings");
-                let request = VaapiEncodeRequest {
-                    token: 3,
-                    frame: MediaFrameId::new(MediaStreamId::new(1), StreamGeneration::new(2), 0),
-                    timestamp_micros: 4,
-                    settings: settings
-                        .with_bitrate(override_rate.unwrap_or(settings.bitrate_bits()))
-                        .expect("rate"),
-                    input: VaapiEncodeInput::PackedBgra {
-                        width: 1,
-                        height: 1,
-                        pixels: vec![1, 2, 3, 4],
-                    },
-                };
-                let converted = from_vaapi_encode_request(request, override_rate)
-                    .expect("convert without hardware");
-                assert_eq!(converted.bitrate_bits_per_second, override_rate);
-                assert_eq!(converted.token, 3);
-                assert_eq!(converted.timestamp_micros, 4);
-                assert_eq!(converted.frame.generation.raw(), 2);
-                assert!(
-                    matches!(converted.input, EncodeInput::PackedBgra { width: 1, height: 1, pixels } if pixels == [1, 2, 3, 4])
-                );
+                for frame_rate in [
+                    None,
+                    Some(PresentationRate::try_from(59_940).expect("cadence")),
+                    Some(PresentationRate::try_from(90_000).expect("cadence")),
+                ] {
+                    let settings = encoder_settings(VideoCodec::Av1).expect("settings");
+                    let request = VaapiEncodeRequest {
+                        token: 3,
+                        frame: MediaFrameId::new(
+                            MediaStreamId::new(1),
+                            StreamGeneration::new(2),
+                            0,
+                        ),
+                        timestamp_micros: 4,
+                        settings: settings
+                            .with_bitrate(override_rate.unwrap_or(settings.bitrate_bits()))
+                            .expect("rate")
+                            .with_frame_rate_millihertz(
+                                frame_rate.unwrap_or(DEFAULT_FRAME_RATE).millihertz(),
+                            )
+                            .expect("cadence"),
+                        input: VaapiEncodeInput::PackedBgra {
+                            width: 1,
+                            height: 1,
+                            pixels: vec![1, 2, 3, 4],
+                        },
+                    };
+                    let converted = from_vaapi_encode_request(request, override_rate, frame_rate)
+                        .expect("convert without hardware");
+                    assert_eq!(converted.bitrate_bits_per_second, override_rate);
+                    assert_eq!(converted.frame_rate, frame_rate);
+                    assert_eq!(converted.token, 3);
+                    assert_eq!(converted.timestamp_micros, 4);
+                    assert_eq!(converted.frame.generation.raw(), 2);
+                    assert!(
+                        matches!(converted.input, EncodeInput::PackedBgra { width: 1, height: 1, pixels } if pixels == [1, 2, 3, 4])
+                    );
+                }
             }
         }
     }

@@ -15,8 +15,9 @@ use weld_client::{
     ClientBufferId, ClientBufferLease, ClientBufferMetadata, ClientBufferUseId,
     ClientCommitRevision, ClientPresentationClaim, ClientRequest, ClientSourceDescriptor,
     ClientSurfaceEvent, ClientSurfaceEventKind, ClientSurfaceId, ClientSurfaceRequestKind,
-    SurfaceAlphaMode, SurfaceBufferChange, SurfaceLayerId, WireClientSurfaceCommit,
-    WireClientSurfaceEvent, WireClientSurfaceEventKind, WireSurfaceBufferChange,
+    PresentationRate, SurfaceAlphaMode, SurfaceBufferChange, SurfaceLayerId,
+    WireClientSurfaceCommit, WireClientSurfaceEvent, WireClientSurfaceEventKind,
+    WireSurfaceBufferChange,
 };
 use weld_hoist_core::{
     DestinationPortCommand, DestinationPortEvent, DestinationPortRecord, HoistDestinationPort,
@@ -123,6 +124,7 @@ struct SourceStream {
     visible_extent: (u32, u32),
     next_sequence: Option<u64>,
     frozen_rate: Option<BitrateRequest>,
+    frozen_frame_rate: Option<PresentationRate>,
 }
 
 struct PreparedEncode {
@@ -264,7 +266,7 @@ impl EncodedSourceState {
     fn new(backend: Box<dyn EncodeBackend>) -> Self {
         let started_at = Instant::now();
         let rates = backend.bitrate_limits().map(EncoderRates::new);
-        let pacing = SourcePacing::new(backend.frame_rate_limit());
+        let pacing = SourcePacing::new(backend.frame_rate_limit(), backend.default_frame_rate());
         Self {
             budget: None,
             budget_activity: ActivitySnapshot::default(),
@@ -730,9 +732,11 @@ impl EncodedSourceState {
 
     fn submit_batch(&mut self, session: HoistSessionId, event: ClientSurfaceEvent) -> Result<()> {
         let surface = event.surface;
+        let frame_rate = self.pacing.rate(surface);
         let mut prepared = VecDeque::new();
         let event = WireClientSurfaceEvent::try_from_client_with_layer(event, |layer, lease| {
-            let (frame, rate) = self.allocate_frame(surface, layer, lease.metadata())?;
+            let (frame, rate) =
+                self.allocate_frame(surface, layer, lease.metadata(), frame_rate)?;
             let PreparedEncodeInput {
                 input,
                 retained_lease: retained_input_lease,
@@ -746,6 +750,7 @@ impl EncodedSourceState {
                     timestamp_micros,
                     input,
                     bitrate_bits_per_second: rate.map(|value| value.bits_per_second),
+                    frame_rate,
                 },
                 retained_input_lease,
                 rate,
@@ -826,6 +831,7 @@ impl EncodedSourceState {
         surface: ClientSurfaceId,
         layer: SurfaceLayerId,
         metadata: ClientBufferMetadata,
+        frame_rate: Option<PresentationRate>,
     ) -> Result<(MediaFrameId, Option<BitrateRequest>)> {
         let visible_extent = (metadata.extent.width, metadata.extent.height);
         ensure!(
@@ -853,8 +859,9 @@ impl EncodedSourceState {
             // created directly at the selected rate for sequence zero.
             let retired = if stream.visible_extent != visible_extent
                 || (stream.next_sequence != Some(0)
-                    && rate.map(|value| value.bits_per_second)
-                        != stream.frozen_rate.map(|value| value.bits_per_second))
+                    && (rate.map(|value| value.bits_per_second)
+                        != stream.frozen_rate.map(|value| value.bits_per_second)
+                        || frame_rate != stream.frozen_frame_rate))
             {
                 let retired = (stream.stream, stream.generation);
                 stream.generation = StreamGeneration::new(
@@ -871,6 +878,7 @@ impl EncodedSourceState {
                 None
             };
             stream.frozen_rate = rate;
+            stream.frozen_frame_rate = frame_rate;
             let sequence = take_counter(&mut stream.next_sequence, "encoded frame sequence")?;
             (
                 MediaFrameId::new(stream.stream, stream.generation, sequence),
@@ -2381,11 +2389,21 @@ mod tests {
         bitrate_limits: Option<crate::EncoderBitrateLimits>,
         submitted_bitrates: Vec<Option<u64>>,
         generation_bitrates: HashMap<EncodedGeneration, Option<u64>>,
+        frame_rate_limit: Option<PresentationRate>,
+        default_frame_rate: Option<PresentationRate>,
+        submitted_frame_rates: Vec<Option<PresentationRate>>,
+        generation_frame_rates: HashMap<EncodedGeneration, Option<PresentationRate>>,
     }
 
     struct FakeEncoder(Rc<RefCell<FakeEncoderState>>);
 
     impl EncodeBackend for FakeEncoder {
+        fn frame_rate_limit(&self) -> Option<PresentationRate> {
+            self.0.borrow().frame_rate_limit
+        }
+        fn default_frame_rate(&self) -> Option<PresentationRate> {
+            self.0.borrow().default_frame_rate
+        }
         fn prepare_input(&self, lease: &ClientBufferLease) -> Result<PreparedEncodeInput> {
             let pixels = lease
                 .access::<Vec<u8>>()
@@ -2420,6 +2438,10 @@ mod tests {
                 .generation_bitrates
                 .get(&generation)
                 .is_some_and(|rate| *rate != request.bitrate_bits_per_second)
+                || state
+                    .generation_frame_rates
+                    .get(&generation)
+                    .is_some_and(|rate| *rate != request.frame_rate)
             {
                 return Err(SubmitError::Rejected(anyhow::anyhow!(
                     "fake encoder settings changed within generation"
@@ -2436,6 +2458,10 @@ mod tests {
             }
             state.generations.insert(generation);
             state
+                .generation_frame_rates
+                .insert(generation, request.frame_rate);
+            state.submitted_frame_rates.push(request.frame_rate);
+            state
                 .generation_bitrates
                 .insert(generation, request.bitrate_bits_per_second);
             state
@@ -2450,6 +2476,10 @@ mod tests {
         }
 
         fn retire(&mut self, stream: MediaStreamId, generation: StreamGeneration) -> Result<()> {
+            self.0
+                .borrow_mut()
+                .generation_frame_rates
+                .remove(&(stream, generation));
             self.0
                 .borrow_mut()
                 .generation_bitrates
@@ -3723,16 +3753,16 @@ mod tests {
             .expect("stream");
 
         let (first, _) = source
-            .allocate_frame(surface, layer, metadata(484))
+            .allocate_frame(surface, layer, metadata(484), None)
             .expect("first frame");
         let (retained, _) = source
-            .allocate_frame(surface, layer, metadata(484))
+            .allocate_frame(surface, layer, metadata(484), None)
             .expect("retained extent");
         let (odd, _) = source
-            .allocate_frame(surface, layer, metadata(485))
+            .allocate_frame(surface, layer, metadata(485), None)
             .expect("odd extent");
         let (even, _) = source
-            .allocate_frame(surface, layer, metadata(486))
+            .allocate_frame(surface, layer, metadata(486), None)
             .expect("even extent");
 
         assert_eq!((first.generation.raw(), first.sequence), (1, 0));
