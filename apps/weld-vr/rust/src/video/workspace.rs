@@ -2,6 +2,7 @@
 //! presentation objects, never its own transport, decoder pool or input seat.
 use super::WeldVideoPlayer;
 use super::decoration::{Decoration, Shape};
+use super::xr::controls::{Bar, Part, Placement};
 use crate::{
     playback::{
         Controller,
@@ -26,6 +27,8 @@ pub struct WeldSurface {
     pub(super) control: Option<Gd<Control>>,
     pub(super) panel: Option<Gd<MeshInstance3D>>,
     decoration: Option<Decoration>,
+    bar: Option<Bar>,
+    placement: Placement,
 }
 
 #[godot_api]
@@ -135,6 +138,43 @@ impl WeldSurface {
                 .is_some_and(Controller::is_focused),
         );
         self.player.bind_mut().shape = Some(shape);
+        if self.pane.kind <= 1 {
+            self.bar
+                .get_or_insert_with(|| Bar::new(panel.clone()))
+                .place(physical_size.y);
+        }
+    }
+    #[func]
+    fn placed_transform(&mut self, base: Transform3D) -> Transform3D {
+        self.placement.apply(base)
+    }
+}
+
+impl WeldSurface {
+    pub(super) fn move_to(&mut self, world: Transform3D) {
+        self.placement.move_to(world);
+    }
+    pub(super) fn controls(
+        &mut self,
+        aim: Transform3D,
+        content_y: Option<f32>,
+    ) -> Option<(Part, f32)> {
+        let bar = self.bar.as_mut()?;
+        if let Some(y) = content_y {
+            let height = self.player.bind().shape?.size.y;
+            bar.approach(y, height);
+        }
+        let hit = bar.hit(aim);
+        bar.highlight(hit.map(|(part, _)| part));
+        hit
+    }
+    pub(super) fn movable(&self) -> bool {
+        self.pane.kind <= 1
+    }
+    pub(super) fn show_controls(&mut self, opacity: f32) {
+        if let Some(bar) = &mut self.bar {
+            bar.show(opacity);
+        }
     }
 }
 
@@ -204,6 +244,8 @@ impl Workspace {
                 control: None,
                 panel: None,
                 decoration: None,
+                bar: None,
+                placement: Placement::default(),
             });
             self.panes.insert(id, surface);
         }

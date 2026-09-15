@@ -287,6 +287,7 @@ func _update_windows() -> void:
 				var forward := secondary_window_distance if centered else 0.025 + maxf(surface.stack_index(), 0) * 0.001
 				transform.origin += transform.basis * Vector3(offset.x, -offset.y, forward)
 				entry.depth = window_panels[parent.surface_id()].depth + 1
+			transform = surface.placed_transform(transform)
 			if not entry.mesh.mesh.size.is_equal_approx(physical):
 				entry.mesh.mesh.size = physical
 			if not entry.mesh.global_transform.is_equal_approx(transform):

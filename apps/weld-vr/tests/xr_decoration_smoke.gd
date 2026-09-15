@@ -85,6 +85,31 @@ func _run() -> void:
 		push_error("Losing focus must restore the inactive border")
 		quit(1)
 		return
+	quad.size = Vector2(0.34, 0.05)
+	camera.size = 0.4
+	shader = Shader.new()
+	shader.code = FileAccess.get_file_as_string("res://rust/src/video/xr/controls.gdshader")
+	material = ShaderMaterial.new()
+	material.shader = shader
+	mesh.material_override = material
+	for index in range(4):
+		await process_frame
+		await RenderingServer.frame_post_draw
+	image = viewport.get_texture().get_image()
+	if image.get_pixel(128, 128).a < 0.95 or image.get_pixel(10, 10).a > 0.01 \
+		or image.get_pixel(156, 128).r <= image.get_pixel(128, 116).r \
+		or image.get_pixel(54, 128).r <= image.get_pixel(202, 128).r:
+		push_error("Window controls must render a rounded strip with a visible drag handle")
+		quit(1)
+		return
+	material.set_shader_parameter("opacity", 0.25)
+	for index in range(4):
+		await process_frame
+		await RenderingServer.frame_post_draw
+	if absf(viewport.get_texture().get_image().get_pixel(128, 128).a - 0.25) > 0.01:
+		push_error("Window controls must fade their background and icons together")
+		quit(1)
+		return
 	viewport.queue_free()
 	await process_frame
 	print("WELD_XR_DECORATION_SMOKE_OK")

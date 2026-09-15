@@ -10,6 +10,13 @@ API = runpy.run_path(str(Path(__file__).with_name("run-godot-hoist")))
 
 
 class PairingTests(unittest.TestCase):
+    def test_demo_bitrate_is_shared_explicit_and_defaults_to_sixteen(self):
+        self.assertEqual(API["parse_arguments"]([]).bitrate_mbps, 16)
+        self.assertEqual(API["parse_arguments"](["--bitrate-mbps", "24"]).bitrate_mbps, 24)
+        for bitrate in (8, 16, 24):
+            command = API["source_command"](Path("/run/test"), Path("/state"), ["blender"], bitrate)
+            self.assertEqual(command[command.index("--hoist-bitrate-target-mbps") + 1], str(bitrate))
+
     def test_source_uses_explicit_repeat_with_legacy_emulation(self):
         command = API["source_command"](Path("/run/test"), Path("/state"), ["blender"])
         self.assertEqual(command[command.index("--keyboard-repeat-mode") + 1], "compositor")

@@ -1,9 +1,14 @@
 //! A single tracked XR pointer. Godot objects stay on the main thread; only
 //! ordinary owned pointer input enters the existing playback mailbox.
+pub(super) mod controls;
 mod geometry;
+mod gesture;
 mod policy;
 
 use super::WeldVideoPlayer;
+use super::workspace::WeldSurface;
+use controls::Part;
+use gesture::Gesture;
 use godot::{
     classes::{
         Control, Engine, INode3D, MeshInstance3D, Node, Node3D, OpenXrInterface, QuadMesh,
@@ -56,6 +61,12 @@ fn alive<T: GodotClass + Inherits<Node>>(node: &Gd<T>) -> bool {
 #[derive(Clone)]
 struct Sample {
     player: Gd<WeldVideoPlayer>,
+    surface: Option<Gd<WeldSurface>>,
+    panel: Gd<MeshInstance3D>,
+    chrome: Option<Part>,
+    near_edge: bool,
+    edge_opacity: f32,
+    grip: f32,
     token: (u64, u64),
     rectangle: [f64; 4],
     position: InputPosition,
@@ -71,6 +82,7 @@ struct Sample {
 struct WeldXrPointer {
     configuration: Option<Configuration>,
     policy: Policy,
+    gesture: Gesture,
     last_position: InputPosition,
     started: Instant,
     application_active: bool,
@@ -84,6 +96,7 @@ impl INode3D for WeldXrPointer {
         Self {
             configuration: None,
             policy: Policy::default(),
+            gesture: Gesture::default(),
             last_position: InputPosition::new(0.0, 0.0),
             started: Instant::now(),
             application_active: true,
@@ -102,6 +115,27 @@ impl INode3D for WeldXrPointer {
             self.deactivate();
             return;
         };
+        let aim = self.base().get_global_transform();
+        let shell_input = self.gesture.step(&sample, aim);
+        let selected = (sample.near_edge || sample.chrome.is_some() || self.gesture.active())
+            .then_some(sample.surface.as_ref())
+            .flatten();
+        let opacity = if sample.chrome.is_some() || self.gesture.active() {
+            1.0
+        } else {
+            sample.edge_opacity
+        };
+        self.show_controls(selected, opacity);
+        if shell_input {
+            if self.policy.deactivate()
+                && let Some(config) = &self.configuration
+            {
+                config.reset(self.active_player.as_ref(), self.last_position);
+            }
+            self.active_player = Some(sample.player.clone());
+            self.draw_pointer(sample.distance, sample.chrome.is_some() || sample.hit);
+            return;
+        }
         let actions = self.policy.step(
             sample.token,
             sample.hit,
@@ -111,7 +145,6 @@ impl INode3D for WeldXrPointer {
             self.started.elapsed().as_secs_f64(),
         );
         self.last_position = sample.position;
-        let scale = self.base().get_global_basis().col_c().length();
         if let Some(config) = self.configuration.as_mut() {
             if actions.reset {
                 config.reset(self.active_player.as_ref(), sample.position);
@@ -119,6 +152,9 @@ impl INode3D for WeldXrPointer {
             self.active_player = Some(sample.player.clone());
             let player = sample.player.bind();
             if let Some(controller) = player.xr_controller() {
+                if actions.wheel == Some(0.0) {
+                    controller.scroll_input(0.0);
+                }
                 controller.pointer_input(sample.rectangle, sample.position, 0, false);
                 for (index, edge) in actions.edges.into_iter().enumerate() {
                     if let Some(pressed) = edge {
@@ -133,22 +169,12 @@ impl INode3D for WeldXrPointer {
                         }
                     }
                 }
-                if let Some(wheel) = actions.wheel {
-                    controller.pointer_input(sample.rectangle, sample.position, wheel, true);
+                if let Some(wheel) = actions.wheel.filter(|amount| *amount != 0.0) {
+                    controller.scroll_input(wheel);
                 }
             }
-            // The geometry helper's distance is world-space; meshes are local.
-            let length = sample.distance / scale;
-            config
-                .laser
-                .set_scale(Vector3::new(1.0, 1.0, length / geometry::RANGE));
-            config
-                .laser
-                .set_position(Vector3::new(0.0, 0.0, -length * 0.5));
-            config.marker.set_position(Vector3::new(0.0, 0.0, -length));
-            config.marker.set_visible(sample.hit);
         }
-        self.base_mut().show();
+        self.draw_pointer(sample.distance, sample.hit);
     }
     fn on_notification(&mut self, what: Node3DNotification) {
         if matches!(
@@ -166,6 +192,45 @@ impl INode3D for WeldXrPointer {
     }
     fn exit_tree(&mut self) {
         self.deactivate();
+    }
+}
+
+impl WeldXrPointer {
+    fn show_controls(&self, selected: Option<&Gd<WeldSurface>>, opacity: f32) {
+        let Some(config) = &self.configuration else {
+            return;
+        };
+        if !alive(&config.player) {
+            return;
+        }
+        if let Some(workspace) = &config.player.bind().workspace {
+            for surface in workspace.panes.values() {
+                surface
+                    .clone()
+                    .bind_mut()
+                    .show_controls(if selected == Some(surface) {
+                        opacity
+                    } else {
+                        0.0
+                    });
+            }
+        }
+    }
+    fn draw_pointer(&mut self, distance: f32, hit: bool) {
+        let scale = self.base().get_global_basis().col_c().length();
+        if let Some(config) = &mut self.configuration {
+            // The geometry helper's distance is world-space; meshes are local.
+            let length = distance / scale;
+            config
+                .laser
+                .set_scale(Vector3::new(1.0, 1.0, length / geometry::RANGE));
+            config
+                .laser
+                .set_position(Vector3::new(0.0, 0.0, -length * 0.5));
+            config.marker.set_position(Vector3::new(0.0, 0.0, -length));
+            config.marker.set_visible(hit);
+        }
+        self.base_mut().show();
     }
 }
 
@@ -213,6 +278,8 @@ impl WeldXrPointer {
 
 impl WeldXrPointer {
     fn deactivate(&mut self) {
+        self.show_controls(None, 0.0);
+        self.gesture.reset();
         if self.policy.deactivate()
             && let Some(config) = &self.configuration
         {
@@ -263,6 +330,9 @@ impl WeldXrPointer {
                 .xr_controller()
                 .is_some_and(crate::playback::Controller::captured);
             if let Some(sample) = self.sample_panel(config, player, panel, view) {
+                if self.gesture.owns(&sample) {
+                    return Some(sample);
+                }
                 if captured
                     && self
                         .active_player
@@ -278,7 +348,7 @@ impl WeldXrPointer {
                 {
                     previous = Some(sample.clone());
                 }
-                if sample.hit
+                if (sample.hit || sample.chrome.is_some() || sample.near_edge)
                     && nearest
                         .as_ref()
                         .is_none_or(|old| sample.distance < old.distance)
@@ -339,20 +409,57 @@ impl WeldXrPointer {
             && player
                 .shape
                 .is_none_or(|shape| shape.hit(rectangle, position));
-        let distance = intersection
+        let near_edge = intersection.as_ref().is_some_and(|intersection| {
+            controls::near_edge(intersection.pixels / rect.size, mesh.get_size())
+        });
+        let edge_opacity = intersection.as_ref().map_or(0.0, |intersection| {
+            controls::edge_opacity(intersection.pixels / rect.size, mesh.get_size())
+        });
+        let mut distance = intersection
             .as_ref()
-            .filter(|hit| hit.inside)
+            .filter(|hit| hit.inside || near_edge)
             .map_or(geometry::RANGE, |hit| hit.distance);
+        let surface = config
+            .player
+            .bind()
+            .workspace
+            .as_ref()
+            .and_then(|workspace| {
+                workspace
+                    .panes
+                    .values()
+                    .find(|surface| surface.bind().player == player_node)
+                    .cloned()
+            });
+        let chrome = surface.as_ref().and_then(|surface| {
+            let content_y =
+                (near_edge && !self.gesture.active()).then_some(position.y as f32 / rect.size.y);
+            surface.clone().bind_mut().controls(aim, content_y)
+        });
+        if let Some((_, chrome_distance)) = chrome {
+            distance = chrome_distance;
+        }
         let analog = [
+            if config.controller.is_button_pressed("ax_button") {
+                1.0
+            } else {
+                0.0
+            },
             config.controller.get_float("trigger"),
-            config.controller.get_float("grip"),
         ];
+        let grip = config.controller.get_float("grip");
         let axis = f64::from(config.controller.get_vector2("primary").y);
-        if !analog.into_iter().all(f32::is_finite) || !axis.is_finite() {
+        if !analog.into_iter().all(f32::is_finite) || !axis.is_finite() || !grip.is_finite() {
             return None;
         }
         Some(Sample {
             player: player_node.clone(),
+            surface,
+            panel,
+            chrome: chrome.map(|(part, _)| part),
+            near_edge,
+            edge_opacity,
+            grip,
             token,
             rectangle: if intersection.is_some() {
                 rectangle
@@ -363,7 +470,7 @@ impl WeldXrPointer {
             hit,
             distance,
             analog,
-            click: config.controller.is_button_pressed("primary_click"),
+            click: config.controller.is_button_pressed("by_button"),
             axis,
         })
     }

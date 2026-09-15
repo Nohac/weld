@@ -31,8 +31,13 @@ physical keyboard keys. The source uses compositor-owned explicit repeats,
 with emulated repeats for legacy clients. XR uses the right-hand controller
 pointer; the flat phone viewer remains view-only.
 Window creation, removal and replacement share the same connection. Flat
-independent windows currently tile side by side; there are no shell close or
-move controls yet. See [XR window layout](godot-xr.md#window-layout-and-decoration).
+independent windows currently tile side by side; flat mode has no shell close or
+move controls yet. XR has local close/drag controls; see
+[XR window layout](godot-xr.md#window-layout-and-decoration).
+
+`--bitrate-mbps 8|16|24` selects the shared AV1 encoder target, default 16 Mbps
+for this demo. The same target is retained across diagnostic source restarts.
+It is not a per-window rate, actual bandwidth cap or change to codec limits.
 
 Iroh N0 contacts Internet discovery/relay services. No host network interfaces,
 routes or existing desktop apps are changed. The launcher reuses the tested

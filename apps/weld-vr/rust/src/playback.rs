@@ -440,6 +440,22 @@ impl Controller {
         lock(&self.shared.session.input).reset();
         self.wake_input();
     }
+    pub fn scroll_input(&self, amount: f64) {
+        if self.stopped || self.shared.session.cancelled.load(Ordering::Acquire) {
+            return;
+        }
+        lock(&self.shared.session.input).scroll(amount);
+        self.wake_input();
+    }
+    pub fn close_window(&self) -> bool {
+        let accepted = self.input_token().is_some()
+            && self
+                .input_target
+                .as_ref()
+                .is_some_and(|target| lock(&self.shared.session.input).close(target));
+        self.wake_input();
+        accepted
+    }
     fn wake_input(&self) {
         if let Some(worker) = lock(&self.shared.session.wake).as_ref() {
             worker.unpark();

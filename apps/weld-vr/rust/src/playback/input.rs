@@ -9,9 +9,10 @@ use std::{
 };
 use weld_client::{
     ButtonState, ClientCursor, ClientFocusRequest, ClientPointerRoute, ClientPointerRouteUpdate,
-    ClientRequest, ClientRuntime, ClientSurfaceId, InputEventKind, InputPosition, KeyboardKeyState,
-    LinuxButtonCode, LinuxKeycode, RawScrollFrame, RawScrollPhase, RawScrollSource,
-    RuntimeInputEvent, RuntimeInputEventKind, SurfaceInputGeometry,
+    ClientRequest, ClientRuntime, ClientSurfaceId, ClientSurfaceRequest, ClientSurfaceRequestKind,
+    InputEventKind, InputPosition, KeyboardKeyState, LinuxButtonCode, LinuxKeycode, RawScrollFrame,
+    RawScrollPhase, RawScrollSource, RuntimeInputEvent, RuntimeInputEventKind,
+    SurfaceInputGeometry,
 };
 
 pub(super) use keys::physical_key;
@@ -26,6 +27,7 @@ pub(super) struct Target {
 
 #[derive(Clone, Debug)]
 enum Action {
+    Close(ClientSurfaceId),
     Pointer {
         route: Option<ClientPointerRoute>,
         position: InputPosition,
@@ -90,7 +92,10 @@ impl InputState {
         INPUT_CLOCK.get_or_init(Instant::now).elapsed().as_millis() as u32
     }
     pub fn reset(&mut self) {
-        self.queue.clear();
+        // Closing a window is not a held input gesture. Focus reconciliation
+        // must not erase an already admitted close request.
+        self.queue
+            .retain(|message| matches!(message.action, Action::Close(_)));
         self.reset = Some(self.time());
         self.suppressed_keys.extend(self.keys.iter().copied());
         self.suppressed_buttons.extend(self.buttons.iter().copied());
@@ -118,6 +123,9 @@ impl InputState {
             self.reset();
         }
         self.queue.retain(|message| !matches!(&message.action, Action::Pointer { route: Some(route), .. } if route.surface == surface));
+        self.queue.retain(
+            |message| !matches!(&message.action, Action::Close(target) if *target == surface),
+        );
     }
     pub fn captures(&self, geometry: &SurfaceInputGeometry) -> bool {
         self.capture_route.is_some_and(|route| {
@@ -147,6 +155,7 @@ impl InputState {
     }
     fn enqueue(&mut self, action: Action) -> bool {
         let pointer = match &action {
+            Action::Close(_) => self.cached_pointer,
             Action::Pointer {
                 route, position, ..
             } => route.map(|route| (route, *position)),
@@ -343,6 +352,41 @@ impl InputState {
             }),
         })
     }
+    pub fn close(&mut self, target: &Target) -> bool {
+        target.epoch == self.epoch
+            && self.surface_visible(target.geometry.surface)
+            && self.enqueue(Action::Close(target.geometry.surface))
+    }
+    pub fn scroll(&mut self, amount: f64) -> bool {
+        let Some((route, position)) = self.cached_pointer else {
+            return false;
+        };
+        if !amount.is_finite() || amount.abs() > 40.0 || !self.surface_visible(route.surface) {
+            return false;
+        }
+        self.enqueue(Action::Pointer {
+            route: Some(route),
+            position,
+            focus: false,
+            event: Some(InputEventKind::PointerAxis {
+                position: Some(position),
+                axis: RawScrollFrame {
+                    source: RawScrollSource::Continuous,
+                    phase: if amount == 0.0 {
+                        RawScrollPhase::Ended
+                    } else {
+                        RawScrollPhase::Moved
+                    },
+                    horizontal: 0.0,
+                    vertical: amount,
+                    horizontal_v120: None,
+                    vertical_v120: None,
+                    horizontal_stop: false,
+                    vertical_stop: amount == 0.0,
+                },
+            }),
+        })
+    }
     pub fn set_cursor(&mut self, cursor: ClientCursor) {
         if self.cursor != cursor {
             self.cursor = cursor;
@@ -375,6 +419,12 @@ pub(super) fn service(shared: &super::Shared, runtime: &mut ClientRuntime) {
             continue;
         }
         match message.action {
+            Action::Close(surface) => {
+                runtime.apply_request(ClientRequest::Surface(ClientSurfaceRequest {
+                    surface,
+                    kind: ClientSurfaceRequestKind::Close,
+                }));
+            }
             Action::Pointer {
                 route,
                 position,
@@ -445,6 +495,49 @@ mod tests {
     }
     const RECT: [f64; 4] = [0.0, 0.0, 200.0, 200.0];
     const POINT: InputPosition = InputPosition::new(50.0, 50.0);
+
+    #[test]
+    fn continuous_scroll_preserves_fractional_motion_and_explicit_stop() {
+        let mut state = InputState::default();
+        let target = target(0);
+        assert!(!state.scroll(1.0));
+        state.pointer(Some(&target), RECT, POINT, 0, false);
+        assert!(state.scroll(-0.125));
+        assert!(state.scroll(0.0));
+        assert!(!state.scroll(f64::NAN));
+        let axes: Vec<_> = state
+            .queue
+            .iter()
+            .filter_map(|message| match &message.action {
+                Action::Pointer {
+                    event: Some(InputEventKind::PointerAxis { axis, .. }),
+                    ..
+                } => Some(axis),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(axes.len(), 2);
+        assert_eq!(axes[0].vertical, -0.125);
+        assert_eq!(axes[0].source, RawScrollSource::Continuous);
+        assert_eq!(axes[0].vertical_v120, None);
+        assert!(axes[1].vertical_stop);
+        assert_eq!(axes[1].phase, RawScrollPhase::Ended);
+    }
+
+    #[test]
+    fn close_survives_input_reset_but_not_surface_removal() {
+        let mut state = InputState::default();
+        let target = target(0);
+        assert!(state.close(&target));
+        state.reset();
+        assert!(
+            matches!(state.queue.front().map(|message| &message.action), Some(Action::Close(surface)) if *surface == target.geometry.surface)
+        );
+        state.remove_surface(target.geometry.surface);
+        assert!(state.queue.is_empty());
+        state.invalidate();
+        assert!(!state.close(&target));
+    }
 
     #[test]
     fn focus_indicator_follows_clicks_not_hover_and_clears_on_invalidation() {

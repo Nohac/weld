@@ -1,9 +1,9 @@
 //! Physical XR observations are separate from mailbox admission. A rejected
 //! press can retry while held/on-target, but never after withdrawal or release.
-pub(super) const BUTTONS: [i64; 3] = [1, 3, 2]; // trigger, grip, stick click
+pub(super) const BUTTONS: [i64; 3] = [1, 3, 2]; // A, index trigger, B
 const PRESS: f32 = 0.75;
 const RELEASE: f32 = 0.35;
-const DEADZONE: f64 = 0.35;
+const DEADZONE: f64 = 0.2;
 
 #[derive(Default)]
 pub(super) struct Policy {
@@ -11,14 +11,16 @@ pub(super) struct Policy {
     physical: [bool; 3],
     pending: [bool; 3],
     wheel_armed: bool,
-    next_wheel: f64,
+    last_sample: f64,
+    scrolling: bool,
 }
 
 #[derive(Default, Debug)]
 pub(super) struct Actions {
     pub reset: bool,
     pub edges: [Option<bool>; 3],
-    pub wheel: Option<i64>,
+    /// Continuous vertical distance; zero ends the gesture.
+    pub wheel: Option<f64>,
 }
 
 impl Policy {
@@ -27,6 +29,7 @@ impl Policy {
         self.physical = [false; 3];
         self.pending = [false; 3];
         self.wheel_armed = false;
+        self.scrolling = false;
         active
     }
     pub fn step(
@@ -51,7 +54,8 @@ impl Policy {
             self.physical = [analog[0] > RELEASE, analog[1] > RELEASE, click];
             self.pending = [false; 3];
             self.wheel_armed = axis.abs() <= DEADZONE;
-            self.next_wheel = now;
+            self.last_sample = now;
+            self.scrolling = false;
             return Actions {
                 reset: true,
                 ..Actions::default()
@@ -81,9 +85,15 @@ impl Policy {
         if axis.abs() <= DEADZONE {
             self.wheel_armed = true;
         }
-        if hit && self.wheel_armed && axis.abs() > DEADZONE && now >= self.next_wheel {
-            actions.wheel = Some(if axis > 0.0 { 4 } else { 5 });
-            self.next_wheel = now + 0.125;
+        let elapsed = (now - self.last_sample).clamp(0.0, 1.0 / 30.0);
+        self.last_sample = now;
+        let speed = ((axis.abs().min(1.0) - DEADZONE) / (1.0 - DEADZONE)).max(0.0);
+        if hit && self.wheel_armed && speed > 0.0 {
+            actions.wheel = Some(-axis.signum() * speed * speed * 1200.0 * elapsed);
+            self.scrolling = true;
+        } else if self.scrolling {
+            actions.wheel = Some(0.0);
+            self.scrolling = false;
         }
         actions
     }
@@ -200,35 +210,58 @@ mod tests {
         );
     }
     #[test]
-    fn wheel_has_deadzone_direction_and_no_catchup_or_neutral_rate_bypass() {
+    fn scroll_speed_depends_on_deflection_and_elapsed_time_without_catchup() {
         let mut policy = Policy::default();
         neutral(&mut policy);
         assert_eq!(
-            policy.step((1, 0), true, [0.0; 2], false, 0.3, 0.01).wheel,
+            policy.step((1, 0), true, [0.0; 2], false, 0.1, 0.01).wheel,
             None
         );
         assert_eq!(
             policy.step((1, 0), true, [0.0; 2], false, 1.0, 0.02).wheel,
-            Some(4)
+            Some(-12.0)
         );
         policy.step((1, 0), true, [0.0; 2], false, 0.0, 0.03);
-        assert_eq!(
-            policy.step((1, 0), true, [0.0; 2], false, -1.0, 0.04).wheel,
-            None
-        );
+        let reverse = policy
+            .step((1, 0), true, [0.0; 2], false, -1.0, 0.04)
+            .wheel
+            .expect("reverse");
+        assert!((reverse - 12.0).abs() < 1e-9);
         assert_eq!(
             policy.step((1, 0), true, [0.0; 2], false, -1.0, 10.0).wheel,
-            Some(5)
+            Some(40.0)
         );
-        assert_eq!(
-            policy
-                .step((1, 0), true, [0.0; 2], false, -1.0, 10.001)
-                .wheel,
-            None
-        );
+        let fine = policy
+            .step((1, 0), true, [0.0; 2], false, -0.6, 10.01)
+            .wheel
+            .expect("fine scroll");
+        assert!((fine - 3.0).abs() < 1e-9);
         assert_eq!(
             policy.step((1, 0), false, [0.0; 2], false, 1.0, 11.0).wheel,
-            None
+            Some(0.0)
         );
+    }
+    #[test]
+    fn smooth_scroll_distance_is_independent_of_refresh_rate() {
+        for hz in [60, 72, 90, 120] {
+            let mut policy = Policy::default();
+            neutral(&mut policy);
+            let distance: f64 = (1..=hz)
+                .map(|tick| {
+                    policy
+                        .step(
+                            (1, 0),
+                            true,
+                            [0.0; 2],
+                            false,
+                            0.6,
+                            f64::from(tick) / f64::from(hz),
+                        )
+                        .wheel
+                        .unwrap_or(0.0)
+                })
+                .sum();
+            assert!((distance + 300.0).abs() < 1e-8);
+        }
     }
 }

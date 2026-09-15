@@ -1,0 +1,233 @@
+#!/usr/bin/env python3
+"""Check, build, install and launch the Pico XR demo in one command.
+
+Uses the current development shell and shared ADB server. The Godot export hook
+builds/stages both Rust targets. No editor settings, app data or pairing are reset.
+Only after all checks pass is the APK installed and the bounded demo launched.
+An existing workflow for the same device is stopped and cleaned up first.
+"""
+import argparse
+from dataclasses import dataclass
+import fcntl
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import resource
+import shutil
+import signal
+import subprocess
+import sys
+import tempfile
+import time
+
+ROOT = Path(__file__).resolve().parent.parent
+PROJECT = ROOT / "apps/weld-vr"
+MANIFEST = PROJECT / "rust/Cargo.toml"
+APK = PROJECT / "build/weld-vr-pico-debug.apk"
+ERROR = re.compile(r"(?:SCRIPT ERROR:|SHADER ERROR:|\bERROR:|Rust build failed|This is NOT a successful Rust build)")
+
+
+@dataclass(frozen=True)
+class Step:
+    name: str
+    command: list[str]
+    timeout: int
+    marker: str | None = None
+    engine: bool = False
+
+
+def steps():
+    cargo = ["--manifest-path", str(MANIFEST)]
+    godot = ["godot", "--path", str(PROJECT)]
+    return [
+        Step("format", ["cargo", "fmt", *cargo, "--check"], 60),
+        Step("rust-tests", ["cargo", "test", *cargo, "--locked", "-j2"], 600),
+        Step("clippy", ["cargo", "clippy", *cargo, "--all-targets", "--locked", "-j2", "--", "-D", "warnings"], 600),
+        # Export invokes the real build hook; do not build/stage a second time.
+        Step("pico-export", [*godot, "--headless", "--export-debug", "Android Pico", str(APK)], 600, engine=True),
+        Step("scene", [*godot, "--headless", "--script", "res://tests/gdextension_smoke.gd"], 35,
+             "WELD_VR_GDEXTENSION_SMOKE_OK", True),
+        Step("shaders", [*godot, "--display-driver", "wayland", "--rendering-driver", "opengl3_es",
+                         "--script", "res://tests/xr_decoration_smoke.gd"], 35,
+             "WELD_XR_DECORATION_SMOKE_OK", True),
+    ]
+
+
+def validate(step, code, path):
+    marker_found = step.marker is None
+    with path.open(errors="replace") as log:
+        for line in log:
+            if step.engine and ERROR.search(line):
+                raise RuntimeError(f"{step.name} reported an error; see {path}")
+            marker_found |= step.marker is not None and line.strip() == step.marker
+    if code != 0 or not marker_found:
+        raise RuntimeError(f"{step.name} failed (exit {code}, completion marker {marker_found}); see {path}")
+
+
+def run_step(step, directory, environment):
+    path = directory / (step.name + ".log")
+    print(f"Checking {step.name}...", flush=True)
+    with path.open("w") as output:
+        process = subprocess.Popen(step.command, cwd=ROOT, env=environment,
+                                   stdin=subprocess.DEVNULL, stdout=output, stderr=subprocess.STDOUT,
+                                   start_new_session=True)
+        try:
+            code = process.wait(timeout=step.timeout)
+        finally:
+            # A live, unreaped session leader pins this command's process group.
+            # Never signal the caller, another test or the shared ADB server.
+            if process.poll() is None:
+                os.killpg(process.pid, signal.SIGTERM)
+                try:
+                    process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    os.killpg(process.pid, signal.SIGKILL)
+                    process.wait(timeout=5)
+    validate(step, code, path)
+    print(f"  {step.name}: passed", flush=True)
+
+
+def seconds(value):
+    number = int(value)
+    if not 1 <= number <= 3600:
+        raise argparse.ArgumentTypeError("expected 1..3600 seconds")
+    return number
+
+
+def device_lock(serial):
+    runtime = Path(os.environ.get("XDG_RUNTIME_DIR", "/tmp"))
+    name = f"weld-xr-{os.getuid()}-{hashlib.sha256(serial.encode()).hexdigest()[:16]}.lock"
+    descriptor = os.open(runtime / name, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+    lock = os.fdopen(descriptor, "r+")
+    deadline = time.monotonic() + 45
+    stopped = set()
+    try:
+        while True:
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                lock.seek(0)
+                try:
+                    owner = json.loads(lock.read(4096))
+                except ValueError:
+                    owner = None
+                if isinstance(owner, dict):
+                    identity = (owner.get("pid"), owner.get("started"))
+                    if all(type(value) is int for value in identity) and identity not in stopped:
+                        request_stop(*identity)
+                        stopped.add(identity)
+                        print("Stopping previous XR run; waiting for its cleanup...", flush=True)
+                if time.monotonic() >= deadline:
+                    raise RuntimeError("previous XR run did not finish cleanup; no new run started (older helpers may need to be stopped manually)")
+                time.sleep(0.05)
+        lock.seek(0)
+        json.dump({"pid": os.getpid(), "started": process_start(os.getpid())}, lock)
+        lock.truncate()
+        lock.flush()
+    except BaseException:
+        lock.close()
+        raise
+    return lock
+
+
+def process_start(pid):
+    # Field 22 of /proc/PID/stat; the parenthesized command may contain spaces.
+    return int(Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[19])
+
+
+def request_stop(pid, started):
+    if pid <= 1 or pid == os.getpid():
+        raise RuntimeError("invalid previous XR owner; refusing to signal it")
+    try:
+        descriptor = os.pidfd_open(pid)
+    except ProcessLookupError:
+        return
+    try:
+        # Pin the process before validating its generation. Never signal a
+        # recycled PID or use a broad process-name/package kill as a fallback.
+        if Path(f"/proc/{pid}").stat().st_uid != os.getuid() or process_start(pid) != started:
+            raise RuntimeError("previous XR process identity changed; refusing to signal it")
+        signal.pidfd_send_signal(descriptor, signal.SIGTERM)
+    except (FileNotFoundError, ProcessLookupError):
+        pass  # It exited before the stop request; still wait for the lock.
+    finally:
+        os.close(descriptor)
+
+
+def launch_demo(command, environment):
+    process = subprocess.Popen(command, env=environment)
+    try:
+        return process.wait()
+    except KeyboardInterrupt:
+        # Scope mode runs the existing launcher, whose TERM handler cleans up
+        # its device/source. Keep the device lock until that cleanup finishes.
+        process.terminate()
+        process.wait(timeout=30)
+        raise
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--serial", help="Pico ADB serial; otherwise requires exactly one ready device")
+    parser.add_argument("--adb", default=os.environ.get("ADB", "adb"), help="shared ADB executable (default: ADB or PATH)")
+    parser.add_argument("--app", choices=("blender", "foot"), default="blender")
+    parser.add_argument("--seconds", type=seconds, default=180)
+    parser.add_argument("--bitrate-mbps", type=int, choices=(8, 16, 24), default=16,
+                        help="shared AV1 encoder target across windows (default: 16 Mbps)")
+    args = parser.parse_args(argv)
+    resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
+    adb = shutil.which(args.adb)
+    if adb is None:
+        raise RuntimeError("ADB is missing; enter the development shell or supply --adb")
+    environment = dict(os.environ)
+    environment["PATH"] = str(Path(adb).parent) + os.pathsep + environment.get("PATH", "")
+    devices = subprocess.check_output([adb, "devices"], text=True, timeout=10, env=environment)
+    ready = [line.split()[0] for line in devices.splitlines() if line.endswith("\tdevice")]
+    if args.serial is None and len(ready) != 1:
+        raise RuntimeError("connect one authorized Pico or pass --serial")
+    serial = args.serial or ready[0]
+    if serial not in ready:
+        raise RuntimeError(f"device {serial} is not ready; reconnect/authorize it before running")
+    with device_lock(serial):
+        return workflow(args, adb, serial, environment)
+
+
+def workflow(args, adb, serial, environment):
+    for executable in ["cargo", "godot", "systemd-run"]:
+        if shutil.which(executable, path=environment["PATH"]) is None:
+            raise RuntimeError(f"missing {executable}; enter the development shell")
+    validation = ROOT / "target/validation"
+    validation.mkdir(parents=True, exist_ok=True)
+    run = Path(tempfile.mkdtemp(prefix="godot-xr-", dir=validation))
+    APK.parent.mkdir(parents=True, exist_ok=True)
+    print(f"XR checks: {run}\nADB: {adb}\nDevice: {serial}", flush=True)
+    for step in steps():
+        run_step(step, run, environment)
+    if not APK.is_file():
+        raise RuntimeError("export did not produce the Pico APK")
+    run_step(Step("install", [adb, "-s", serial, "install", "-r", str(APK)], 120, "Success"), run, environment)
+    print("All checks passed. Starting the XR demo (12 GiB memory limit, no swap).", flush=True)
+    # The existing launcher owns demo cleanup, pairing and source supervision.
+    command = ["systemd-run", "--user", "--scope", "--quiet", "-p", "MemoryMax=12G", "-p", "MemorySwapMax=0",
+               str(ROOT / "scripts/run-godot-hoist"), "--serial", serial, "--app", args.app, "--seconds", str(args.seconds),
+               "--bitrate-mbps", str(args.bitrate_mbps)]
+    return launch_demo(command, environment)
+
+
+if __name__ == "__main__":
+    def interrupted(_signal, _frame):
+        raise KeyboardInterrupt
+
+    for shutdown_signal in (signal.SIGTERM, signal.SIGHUP):
+        signal.signal(shutdown_signal, interrupted)
+    try:
+        sys.exit(main())
+    except KeyboardInterrupt:
+        print("XR workflow stopped; cleanup completed.", file=sys.stderr)
+        sys.exit(130)
+    except (OSError, RuntimeError, subprocess.SubprocessError) as error:
+        print(f"XR preparation failed: {error}", file=sys.stderr)
+        sys.exit(1)

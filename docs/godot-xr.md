@@ -34,8 +34,19 @@ fade, not a light-cast shadow onto another panel. The active input window gets
 a brighter blue border; inactive borders are muted gray. Rust reads existing
 input focus, including reset/unmap/disconnect, rather than inferring focus
 from scene order. Native video remains independently composed at full panel
-resolution. Window moving, closing, resizing and placement persistence are
-not implemented yet.
+resolution.
+
+Only the pointed-at window reveals its slim close/drag strip, above or below
+the nearer horizontal edge. Opacity rises with proximity and reaches full at
+the edge; controls stay visible while hovered or dragged. The close button is
+on the left and activates on A release over it. A on the handle or the side
+grip over the window starts a captured shell drag. The window follows the ray
+anchor without changing its starting orientation. Parent-relative placement
+keeps attached windows/popups following their owner. Shell gestures do not
+forward clicks to the application underneath; tracking/focus loss cancels
+the gesture and requires held controls to be released before reuse.
+Closing sends the existing surface close request, not a process kill.
+Resizing and placement persistence are not implemented yet.
 
 ## Controller presentation
 
@@ -108,16 +119,19 @@ focus-gated; the right model additionally inherits the rig's tracking gate.
 | Controller action | Application input |
 | --- | --- |
 | Aim at the displayed image | Pointer motion |
-| Trigger | Left click/drag |
-| Grip | Middle click/drag (Blender orbit) |
-| Thumbstick click | Right click |
-| Thumbstick up/down | Wheel up/down |
+| A | Left click/drag, or activate shell controls |
+| B | Right click |
+| Index trigger | Middle click/drag (Blender orbit) |
+| Side grip | Move the pointed-at window |
+| Thumbstick up/down | Continuous variable-speed scrolling |
 
-Godot generates the default OpenXR action map. Binding names are `trigger`,
-`grip`, `primary_click` and `primary`, as in the
+Godot generates the default OpenXR action map. Binding names are `ax_button`,
+`by_button`, `trigger`, `grip` and `primary`, as in the
 [pinned Pico profile](https://github.com/godotengine/godot/blob/a13da4feb/modules/openxr/action_map/openxr_action_map.cpp#L307).
-Rust applies analog hysteresis (press at 0.75, release below 0.35), a thumbstick
-deadzone of 0.35, and an eight-tick/s scroll ceiling without catch-up bursts.
+Rust applies analog hysteresis (press at 0.75, release below 0.35). Scrolling
+uses a 0.2 dead zone and a quadratic deflection curve up to 1200 logical units/s,
+with explicit continuous-axis stop, no synthetic wheel ticks and no catch-up
+after a stall. Equal deflection travels the same distance at 60/72/90/120 Hz.
 
 One finite, front-facing ray/quad intersection within 3 m maps to **unclamped**
 mono-viewport pixels. The shared displayed-image geometry handles letterboxing,
@@ -202,6 +216,22 @@ frame establishes the initial size. Layout is synchronous, without deferred
 Container sorting. A resize can still have one frame of metadata/layout delay.
 
 ## Export and run on Pico
+
+From the shared development shell, `scripts/run-godot-xr` performs formatting,
+Rust tests, Clippy, Pico export (including the Rust build hook), scene and real
+GLES shader checks, then installs and launches Blender for three minutes. It
+stops on any failed step, including engine errors with a zero process exit code.
+Use `--app foot`, `--seconds`, `--serial`, or `--adb` as needed. Detailed check
+logs stay under `target/validation/godot-xr-*`.
+
+The shared AV1 target defaults to 16 Mbps; `--bitrate-mbps 8|16|24` selects the
+test's total encoder target, not a bandwidth cap or a per-window guarantee.
+Per-stream codec limits still apply. This does not change Weld's general default.
+Starting another helper on the same device requests a graceful stop of the
+recorded prior owner and waits for its lock to release after cleanup (up to
+45 seconds). PID generation is validated and signaling uses a pidfd. Other
+devices and the shared ADB server are untouched. A pre-upgrade helper lacking
+owner metadata may need to be stopped manually once.
 
 Disable **Editor Settings > Export > Android > Shutdown ADB On Exit**
 (`export/android/shutdown_adb_on_exit = false`) when sharing ADB with other
