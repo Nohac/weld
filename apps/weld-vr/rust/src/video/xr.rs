@@ -246,7 +246,9 @@ impl WeldXrPointer {
             return None;
         }
         let viewport = config.view.get_viewport()?.get_visible_rect();
-        let rect = config.view.get_global_rect();
+        // XR fills its viewport explicitly. Do not depend on deferred Control
+        // layout when the viewport and world-space quad are resized together.
+        let rect = viewport;
         if !rect.position.is_finite()
             || !rect.size.is_finite()
             || rect.size.x <= 0.0

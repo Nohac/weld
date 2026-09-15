@@ -2,13 +2,14 @@
 
 The startup scene selects `xr.tscn` when OpenXR initializes, otherwise the flat
 viewer. Both use the same [Iroh receiver and native decoder](godot-hoisting.md).
-XR samples a mono 1600x1000 GPU SubViewport on a quad in both eyes; there is no
+XR renders the shared mono GPU SubViewport into a native OpenXR quad
+composition layer when supported, with a Godot mesh fallback. There is no
 second media pipeline or CPU video readback.
 
-The panel is 1.6 m wide, initially 1.6 m ahead and slightly below the tracked
-head, tilted back. It stays pinned rather than following head movement.
-Recenter places it again. Multi-window layout, application UI scaling and
-host-keyboard capture remain separate work.
+The panel fits the application's clipped logical aspect within a 1.6 m by 1 m
+envelope, initially 1.6 m ahead and slightly below the tracked head, tilted
+back. It stays pinned rather than following head movement. Recenter places it
+again. Multi-window layout and host-keyboard capture remain separate work.
 
 ## Controller presentation
 
@@ -118,14 +119,60 @@ hand-gesture input and multiple presented windows are not implemented here.
 
 `eye_render_scale = 1.125` requests 2160x2160 per eye on the tested Pico's
 1920x1920 recommendation, with 4x MSAA. This scales the eye target, not the
-source video or 1600x1000 panel. Matching physical panel dimensions is not a
-claim of maximum optical quality. MSAA improves geometry edges, not aliasing
+source video. Matching physical panel dimensions is not a claim of maximum
+optical quality. MSAA improves geometry edges, not aliasing
 already inside the video.
 
-The panel uses Linear With Mipmaps Anisotropic filtering. Its viewport has only
-a base level: GLES falls back to level-zero linear filtering while requesting
+The preferred path is a native `OpenXRCompositionLayerQuad`: the headset
+compositor samples the panel separately from Godot's eye images, avoiding the
+mesh-to-eye resampling step. The same source stream looked substantially
+clearer in physical Pico testing. This agrees with Godot's
+[composition-layer guidance for text and UI](https://docs.godotengine.org/en/stable/tutorials/xr/openxr_composition_layers.html).
+It is not direct decoder-to-swapchain presentation: the native video texture
+still draws into the mono SubViewport first.
+
+`use_native_panel` defaults to true in `xr.gd`. Native support is checked
+explicitly; unsupported runtimes retain mesh presentation. Set it to false
+before startup for a mesh comparison. Do not switch during playback: the live
+A/B experiment produced a Godot render-target assertion and a native-image
+bind failure on the tested GLES runtime. Startup-only native presentation
+kept video live; the exact underlying GL failure remains unresolved. No error
+checks or native image lifetime protections were weakened.
+
+The layer uses hole punching and sort order -1 so scene controllers and the
+pointer can draw in front. Its pose and quad size follow the same `Screen`
+geometry Rust uses for hit testing. That mesh stays logically visible but is
+excluded from rendering in native mode. Composition transforms update at
+priority 150, between scene layout at 100 and pointer sampling at 200.
+
+The fallback mesh uses Linear With Mipmaps Anisotropic filtering. Its viewport
+has only a base level: GLES falls back to level-zero linear filtering while requesting
 anisotropy. This is not full mipmapped minification. Source resolution, UI
 scaling and bitrate remain separate readability controls.
+
+### Application and panel sizing
+
+Before connecting, XR waits for headset focus, tracking and valid per-eye
+projections. Rust derives a stable pixel-density preference from the eye
+target, projection, nominal panel distance and envelope, with sampling factor
+2.0 and preferred application scale 1.8. Head movement does not trigger
+application reconfiguration. Logical application size, encoded pixels and
+physical panel dimensions remain distinct.
+
+The selected mapped root receives a bounded logical configure first, then a
+preferred-scale request only after a later safe commit. A later commit is not
+treated as a configure acknowledgement: both the observed root and pending
+target must fit, including decoration margins, existing HiDPI scale and the
+rounded-up scale used by legacy clients. The receive ceiling remains 2048 per
+dimension and 1920x1080 total pixels; it is policy, not a hardware capability
+claim. Applications may choose a different size, and over-limit frames still
+fail admission rather than bypassing it.
+
+Visible panel geometry and input use the same clipped logical aspect, removing
+the old side borders. Viewport raster dimensions round down to 64-pixel buckets
+and wait 300 ms for subsequent size changes to stabilize; the first actual
+frame establishes the initial size. Layout is synchronous, without deferred
+Container sorting. A resize can still have one frame of metadata/layout delay.
 
 ## Export and run on Pico
 
@@ -183,11 +230,23 @@ pointing. The actual Pico export is checked separately with
 `apkanalyzer manifest print` for both capability entries, followed by a bounded
 live Blender test: the laser, hit marker and actual selected point must agree.
 
-For this slice, both fresh isolated checks aborted during editor import before
-reaching their tests. Independent real-project scene and manifest checks, Rust
+For the earlier controller slice, both fresh isolated checks aborted during
+editor import before reaching their tests. Independent real-project scene and manifest checks, Rust
 tests, actual Phone/Pico exports and a bounded AV1 receive/presentation run are
 the available evidence. The live run ended cleanly, but physical pointing and
 click alignment remain pending user confirmation.
+
+The sizing/native-layer slice passed 33 Rust tests, strict all-target Clippy,
+formatting, Linux/Android debug builds, the real-project scene smoke and Pico
+debug export. Desktop GPU fixture playback and cursor regression checks also
+passed. Physical Pico testing confirmed the side borders disappeared, followed
+by a pronounced clarity improvement with native composition. The final bounded
+AV1 run presented 1517x853 pixels for 843x474 logical content (approximately
+1.8 scale), reaching 2862 decoded / 2653 presented / 209 superseded frames.
+Those are pipeline counters, not a measured latency or frame-rate benchmark.
+The runtime reported three composition layers and 90 Hz rendering. Vendor
+metadata warnings remained; this does not establish behavior on other runtimes
+or long-session stability. Multi-window and popup presentation are still pending.
 
 Rust tests cover pointer policy and geometry, including downward tilt mapping
 to increasing image pixel Y. The scene test checks native/rig/input priority

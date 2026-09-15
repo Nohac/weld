@@ -15,6 +15,7 @@ use frame::Frame;
 use crate::{
     fixture,
     native::{self, Progress},
+    presentation::XrPreferences,
 };
 use anyhow::{Context, Result, ensure};
 use godot::{
@@ -45,6 +46,7 @@ pub enum Source {
     Iroh {
         directory: PathBuf,
         rate: PresentationRate,
+        sizing: Option<XrPreferences>,
     },
 }
 
@@ -196,7 +198,11 @@ impl Controller {
                 .spawn(move || {
                     let result = match source {
                         Source::Fixture { single_frame } => play(&shared, single_frame),
-                        Source::Iroh { directory, rate } => receiver::run(&shared, directory, rate),
+                        Source::Iroh {
+                            directory,
+                            rate,
+                            sizing,
+                        } => receiver::run(&shared, directory, rate, sizing),
                     };
                     if let Err(error) = result
                         && !shared.cancelled.load(Ordering::Acquire)
@@ -338,15 +344,27 @@ impl Controller {
         } else {
             "Playing AV1"
         };
+        let pixels = self.current.map_or([0; 2], |(_, visible)| visible);
+        let logical = self
+            .input_target
+            .as_ref()
+            .map_or([0.0; 2], |target| target.geometry.logical_size);
         format!(
-            "{state}: decoded {}, presented {}, superseded {}",
+            "{state}: decoded {}, presented {}, superseded {}, frame {}x{}, logical {:.0}x{:.0}",
             self.shared.decoded.load(Ordering::Relaxed),
             self.shared.presented.load(Ordering::Relaxed),
-            self.shared.replaced.load(Ordering::Relaxed)
+            self.shared.replaced.load(Ordering::Relaxed),
+            pixels[0],
+            pixels[1],
+            logical[0],
+            logical[1]
         )
     }
     pub fn aspect(&self) -> f32 {
         self.aspect
+    }
+    pub fn has_frame(&self) -> bool {
+        !self.stopped && self.current.is_some()
     }
     pub fn pointer_input(
         &self,

@@ -26,6 +26,19 @@ func _run() -> void:
 		_fail("Startup did not select the flat video-only scene without OpenXR")
 		return
 	var player: WeldVideoPlayer = main.get_node("VideoPanel").player
+	var frame: Control = main.get_node("VideoPanel/VideoFrame")
+	var view: Control = frame.get_node("Video")
+	if frame is Container:
+		_fail("Video geometry must not depend on deferred Container layout")
+		return
+	player.layout_video(view, Vector2(1000, 1000), false)
+	if not view.position.is_equal_approx(Vector2(0, 218.75)) or not view.size.is_equal_approx(Vector2(1000, 562.5)):
+		_fail("Flat letterbox fit must update synchronously")
+		return
+	player.layout_video(view, Vector2(600, 1000), true)
+	if not view.position.is_zero_approx() or not view.size.is_equal_approx(Vector2(600, 1000)):
+		_fail("Spatial video must fill the exact analytical input rectangle")
+		return
 	for removed in ["key_input", "pointer_input", "reset_input", "take_cursor"]:
 		if player.has_method(removed):
 			_fail("Temporary scalar/dictionary input API is still exposed: " + removed)
@@ -92,6 +105,27 @@ func _run() -> void:
 		_fail("XR scene is missing its head-tracked camera")
 		return
 	var viewport: SubViewport = xr.get_node("PanelViewport")
+	if not xr.use_native_panel or xr.composition_panel != null:
+		_fail("XR must prefer native layers but not instantiate them without OpenXR")
+		return
+	var video_panel := xr.get_node("PanelViewport/VideoPanel")
+	if video_panel.auto_connect or not video_panel.spatial:
+		_fail("XR must resolve headset preferences before connecting, with spatial layout")
+		return
+	video_panel._process(0.3)
+	if not "Waiting for headset" in video_panel.get_node("Status").text:
+		_fail("Headset waiting status must survive the periodic status refresh")
+		return
+	var projections: Array[Projection] = [Projection.create_perspective(90.0, 1.0, 0.05, 100.0)]
+	if not video_panel.player.configure_xr_presentation(Vector2(2160, 2160), projections,
+		Vector2(1.6, 1.0), 1.6, 1.8, 2.0) or video_panel.player.xr_viewport_size() != Vector2i.ZERO:
+		_fail("XR raster sizing must wait for actual content, not latch the default aspect")
+		return
+	viewport.size = Vector2i(800, 1200)
+	video_panel.layout_video()
+	if video_panel.view.size != Vector2(800, 1200) or not video_panel.view.position.is_zero_approx():
+		_fail("XR viewport resize must immediately update visible and input bounds")
+		return
 	if xr.get_node("PanelViewport/VideoPanel").player.is_processing_input():
 		_fail("XR video presentation must not enable desktop input")
 		return

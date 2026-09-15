@@ -3,11 +3,19 @@ extends Node3D
 
 @export_range(0.5, 2.0, 0.025) var eye_render_scale := 1.125
 @export var panel_texture_filter: BaseMaterial3D.TextureFilter = BaseMaterial3D.TEXTURE_FILTER_LINEAR_WITH_MIPMAPS_ANISOTROPIC
+@export_range(1.0, 3.0, 0.05) var application_scale := 1.8
+@export_range(0.5, 3.0, 0.1) var panel_sampling := 2.0
+@export var panel_envelope := Vector2(1.6, 1.0)
+@export_range(0.2, 10.0, 0.1) var panel_distance := 1.6
+@export var use_native_panel := true
 
 var xr_interface: OpenXRInterface
 var placement_pending := true
 var passthrough_active := false
 var controller_models: Array[OpenXRRenderModelManager] = []
+var preferences_resolved := false
+var preferences_wait_started := Time.get_ticks_msec()
+var composition_panel: OpenXRCompositionLayerQuad
 
 const ControllerRig = preload("res://scenes/controller_rig.gd")
 
@@ -18,6 +26,7 @@ const ControllerRig = preload("res://scenes/controller_rig.gd")
 
 
 func _ready() -> void:
+	panel.waiting_message = "Waiting for headset focus and tracking"
 	# Native pose/model updates run at 0; Rust pointer sampling runs at 200.
 	# Apply presentation transforms before both hit testing and renderer flush.
 	process_priority = 100
@@ -40,6 +49,7 @@ func _ready() -> void:
 	DisplayServer.window_set_vsync_mode(DisplayServer.VSYNC_DISABLED)
 	get_viewport().msaa_3d = Viewport.MSAA_4X
 	get_viewport().use_xr = true
+	_setup_panel_presentation()
 	xr_interface.session_begun.connect(_configure_passthrough)
 	xr_interface.session_begun.connect(_queue_render_diagnostics)
 	xr_interface.pose_recentered.connect(_recenter)
@@ -122,6 +132,9 @@ func _configure_passthrough() -> void:
 
 func _process(_delta: float) -> void:
 	_update_controllers()
+	_configure_resolution()
+	_update_panel_geometry()
+	_sync_composition_panel()
 	if not placement_pending or xr_interface == null or not xr_interface.is_initialized():
 		return
 	var head := XRServer.get_tracker("head") as XRPositionalTracker
@@ -136,11 +149,100 @@ func _process(_delta: float) -> void:
 	if forward.length_squared() < 0.001:
 		return
 	forward = forward.normalized()
-	screen.global_position = camera.global_position + forward * 1.6 + Vector3.DOWN * 0.15
+	screen.global_position = camera.global_position + forward * panel_distance + Vector3.DOWN * 0.15
 	screen.global_basis = Basis.looking_at(forward).rotated(forward.cross(Vector3.UP), -0.12)
 	screen.show()
+	_sync_composition_panel()
 	placement_pending = false
 	print("WELD_XR panel placed from tracked head pose")
+
+
+func _configure_resolution() -> void:
+	if preferences_resolved or xr_interface == null or not xr_interface.is_initialized():
+		return
+	if "--video-fixture" in OS.get_cmdline_user_args() or "--video-single-frame" in OS.get_cmdline_user_args():
+		preferences_resolved = true
+		panel.waiting_message = ""
+		return
+	if xr_interface.get_session_state() != OpenXRInterface.SESSION_STATE_FOCUSED:
+		return
+	var head := XRServer.get_tracker("head") as XRPositionalTracker
+	if head == null:
+		return
+	var pose := head.get_pose("default")
+	if pose == null or not pose.has_tracking_data:
+		return
+	if Time.get_ticks_msec() - preferences_wait_started >= 5000:
+		panel.waiting_message = "Waiting for valid headset projection and sizing preferences"
+	var eye := xr_interface.get_render_target_size()
+	if not eye.is_finite() or eye.x <= 0.0 or eye.y <= 0.0:
+		return
+	var projections: Array[Projection] = []
+	for index in range(xr_interface.get_view_count()):
+		projections.append(xr_interface.get_projection_for_view(index, eye.x / eye.y, camera.near, camera.far))
+	if not panel.player.configure_xr_presentation(eye, projections, panel_envelope,
+		panel_distance, application_scale, panel_sampling):
+		return
+	preferences_resolved = true
+	print("WELD_XR_SIZING eye=", eye, " scale=", application_scale,
+		" sampling=", panel_sampling, " envelope=", panel_envelope, " distance=", panel_distance)
+	panel.connect_source()
+
+
+func _update_panel_geometry() -> void:
+	var fitted: Vector2 = panel.player.xr_panel_size(panel_envelope)
+	if fitted.x > 0.0 and fitted.y > 0.0 and not screen.mesh.size.is_equal_approx(fitted):
+		screen.mesh.size = fitted
+	var raster: Vector2i = panel.player.xr_viewport_size()
+	if raster.x > 0 and raster.y > 0 and $PanelViewport.size != raster:
+		$PanelViewport.size = raster
+	# Explicit synchronous full-viewport rect, also used analytically by Rust
+	# hit testing. No deferred Container sort can restore an old letterbox.
+	panel.layout_video()
+
+
+func _setup_panel_presentation() -> void:
+	# Select once before video starts: replacing the viewport's XR render target
+	# during playback is not a safe live A/B switch on the tested GLES runtime.
+	if not use_native_panel:
+		print("WELD_XR_PANEL mode=mesh (startup selection)")
+		return
+	composition_panel = OpenXRCompositionLayerQuad.new()
+	composition_panel.name = "CompositionPanel"
+	composition_panel.visible = false
+	composition_panel.process_priority = 150
+	composition_panel.alpha_blend = true
+	composition_panel.enable_hole_punch = true
+	composition_panel.sort_order = -1
+	$XROrigin3D.add_child(composition_panel)
+	if not composition_panel.is_natively_supported():
+		composition_panel.queue_free()
+		composition_panel = null
+		use_native_panel = false
+		push_warning("Native OpenXR quad layer unsupported; using mesh presentation")
+	_apply_panel_mode()
+
+
+func _apply_panel_mode() -> void:
+	var native := use_native_panel and composition_panel != null
+	# Keep the mesh's transform/visibility as the existing Rust hit-test target,
+	# but exclude it from drawing when the compositor owns presentation.
+	screen.layers = 0 if native else 1
+	if composition_panel != null:
+		composition_panel.visible = false
+		composition_panel.layer_viewport = $PanelViewport if native else null
+	_sync_composition_panel()
+	print("WELD_XR_PANEL mode=", "native" if native else "mesh",
+		" native_supported=", composition_panel != null,
+		" eye=", xr_interface.get_render_target_size(), " panel=", $PanelViewport.size)
+
+
+func _sync_composition_panel() -> void:
+	if composition_panel == null:
+		return
+	composition_panel.global_transform = screen.global_transform
+	composition_panel.quad_size = screen.mesh.size
+	composition_panel.visible = use_native_panel and screen.visible
 
 
 func _recenter() -> void:

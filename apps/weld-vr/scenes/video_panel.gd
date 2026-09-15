@@ -5,6 +5,8 @@ signal playback_started
 signal playback_stopped
 
 @export var desktop_input := false
+@export var auto_connect := true
+@export var spatial := false
 
 var player: WeldVideoPlayer
 var video_texture: ExternalTexture
@@ -12,10 +14,12 @@ var video_material: ShaderMaterial
 var status_elapsed := 0.0
 var network_active := false
 var log_elapsed := 0.0
+var waiting_message := ""
 @onready var view: ColorRect = $VideoFrame/Video
 
 
 func _ready() -> void:
+	process_priority = 50
 	player = WeldVideoPlayer.new()
 	add_child(player)
 	player.configure_input(view, desktop_input)
@@ -23,7 +27,7 @@ func _ready() -> void:
 	# Explicit opt-in for the bounded physical presentation check.
 	if "--video-fixture" in OS.get_cmdline_user_args() or "--video-single-frame" in OS.get_cmdline_user_args():
 		call_deferred("play")
-	elif DisplayServer.get_name() != "headless" and "--script" not in OS.get_cmdline_args():
+	elif auto_connect and DisplayServer.get_name() != "headless" and "--script" not in OS.get_cmdline_args():
 		call_deferred("connect_source")
 
 
@@ -36,6 +40,7 @@ func connect_source() -> void:
 
 
 func _start(network: bool, single_frame: bool = false) -> void:
+	waiting_message = ""
 	stop()
 	if Engine.is_editor_hint() or DisplayServer.get_name() == "headless":
 		$Status.text = "Native video requires a running EGL display (not editor/headless)."
@@ -109,17 +114,22 @@ func _before_draw() -> void:
 
 
 func _process(delta: float) -> void:
+	layout_video()
 	status_elapsed += delta
 	if status_elapsed >= 0.25:
 		status_elapsed = 0.0
-		$Status.text = player.status()
-		$VideoFrame.ratio = player.aspect()
+		$Status.text = waiting_message if not waiting_message.is_empty() else player.status()
 		$Status.visible = video_material == null or not video_material.get_shader_parameter("has_frame")
 	if network_active or "--video-single-frame" in OS.get_cmdline_user_args():
 		log_elapsed += delta
 		if log_elapsed >= 1.0:
 			log_elapsed = 0.0
 			print("WELD_HOIST_STATUS ", player.status())
+
+
+func layout_video() -> void:
+	var bounds := Vector2(get_viewport().size) if spatial else size
+	player.layout_video(view, bounds, spatial)
 
 
 func _notification(what: int) -> void:

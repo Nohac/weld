@@ -4,6 +4,7 @@ use super::{
     frame::{Frame, FrameBudget, FrameCredit},
 };
 use crate::native::{self, Progress};
+use crate::presentation::supported_extent;
 use anyhow::{Context, Result, ensure};
 use std::{
     collections::{HashMap, VecDeque},
@@ -125,12 +126,6 @@ impl DecodeBackend for Backend {
     fn retire(&mut self, stream: MediaStreamId, generation: StreamGeneration) -> Result<()> {
         self.pool.retire(stream, generation)
     }
-}
-
-fn supported_extent(width: u32, height: u32) -> bool {
-    (1..=2048).contains(&width)
-        && (1..=2048).contains(&height)
-        && u64::from(width) * u64::from(height) <= 1920 * 1080
 }
 
 struct Job {

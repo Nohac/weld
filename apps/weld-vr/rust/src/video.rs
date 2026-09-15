@@ -3,12 +3,14 @@ mod input;
 mod xr;
 
 use crate::playback::{Controller, Source};
+use crate::presentation::{RasterSizing, XrPreferences, fit};
 use godot::{
     classes::{Control, Engine, INode, InputEvent, Node, Object, Os, notify::NodeNotification},
     prelude::*,
 };
 use input::DesktopInput;
 use std::path::PathBuf;
+use std::time::Instant;
 use weld_client::PresentationRate;
 
 #[derive(GodotClass)]
@@ -18,6 +20,8 @@ pub struct WeldVideoPlayer {
     desktop_input: Option<DesktopInput>,
     live_source: bool,
     message: String,
+    xr_preferences: Option<XrPreferences>,
+    raster_sizing: RasterSizing,
     base: Base<Node>,
 }
 #[godot_api]
@@ -29,6 +33,8 @@ impl INode for WeldVideoPlayer {
             desktop_input: None,
             live_source: false,
             message: "Native AV1 video fixture".into(),
+            xr_preferences: None,
+            raster_sizing: RasterSizing::default(),
         }
     }
     fn ready(&mut self) {
@@ -79,6 +85,77 @@ impl INode for WeldVideoPlayer {
 }
 #[godot_api]
 impl WeldVideoPlayer {
+    /// Resolve headset preferences before opening a stream. Only owned numeric
+    /// values reach the coordinator; poses and Godot objects stay here.
+    #[func]
+    fn configure_xr_presentation(
+        &mut self,
+        eye: Vector2,
+        projections: Array<Projection>,
+        envelope: Vector2,
+        distance: f64,
+        scale: f64,
+        sampling: f64,
+    ) -> bool {
+        if self.controller.is_some() || projections.len() > 2 {
+            return false;
+        }
+        self.xr_preferences = XrPreferences::new(
+            [f64::from(eye.x), f64::from(eye.y)],
+            &projections.iter_shared().collect::<Vec<_>>(),
+            [f64::from(envelope.x), f64::from(envelope.y)],
+            distance,
+            scale,
+            sampling,
+        );
+        self.xr_preferences.is_some()
+    }
+
+    /// Synchronous layout on plain Controls; no deferred Container sorting.
+    #[func]
+    fn layout_video(&self, mut view: Gd<Control>, bounds: Vector2, fill: bool) {
+        let size = if fill {
+            Some([f64::from(bounds.x), f64::from(bounds.y)])
+        } else {
+            fit(
+                [f64::from(bounds.x), f64::from(bounds.y)],
+                f64::from(self.aspect()),
+            )
+        };
+        if let Some(size) = size.filter(|size| size.iter().all(|v| v.is_finite() && *v > 0.0)) {
+            let size = Vector2::new(size[0] as f32, size[1] as f32);
+            view.set_position((bounds - size) * 0.5);
+            view.set_size(size);
+        }
+    }
+
+    #[func]
+    fn xr_panel_size(&self, envelope: Vector2) -> Vector2 {
+        fit(
+            [f64::from(envelope.x), f64::from(envelope.y)],
+            f64::from(self.aspect()),
+        )
+        .map_or(Vector2::ZERO, |size| {
+            Vector2::new(size[0] as f32, size[1] as f32)
+        })
+    }
+
+    #[func]
+    fn xr_viewport_size(&mut self) -> Vector2i {
+        if !self.controller.as_ref().is_some_and(Controller::has_frame) {
+            return Vector2i::ZERO;
+        }
+        let Some(pixels) = self
+            .xr_preferences
+            .and_then(|prefs| prefs.pixels(f64::from(self.aspect())))
+        else {
+            return Vector2i::ZERO;
+        };
+        let pixels = self.raster_sizing.update(pixels, Instant::now());
+        // Shared receive policy bounds both dimensions to 2048.
+        Vector2i::new(pixels[0] as i32, pixels[1] as i32)
+    }
+
     /// Connects this presenter to Rust-owned desktop input. Scenes provide only
     /// the image rectangle; XR and Android do not enable this input source.
     #[func]
@@ -135,6 +212,7 @@ impl WeldVideoPlayer {
             Source::Iroh {
                 directory: PathBuf::from(directory.to_string()),
                 rate,
+                sizing: self.xr_preferences,
             },
         )
     }

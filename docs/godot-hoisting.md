@@ -118,6 +118,10 @@ is pinned for that producer lifetime; edits require a new start.
   is an explicit low-delay error, not an empty completion or fabricated EOS.
 - Godot refresh is forwarded through existing `SetPresentation`; source pacing
   still clamps it to the encoder ceiling. There is no ACK roundtrip.
+- XR also sends bounded logical-size and preferred-scale requests for the
+  selected mapped root, based on stable headset presentation preferences.
+  [Sizing and native composition](godot-xr.md#image-quality) preserve the same
+  receive allocation ceiling and GPU frame-lifetime rules.
 - Stop/pause cancels production and performs GPU cleanup. Relaunch the viewer
   and source after pause. Source relay re-admission after viewer disconnect
   remains one-shot: restart the source for another connection. Detach/rejoin

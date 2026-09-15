@@ -3,6 +3,7 @@
 mod fixture;
 mod native;
 mod playback;
+mod presentation;
 mod video;
 
 use godot::{

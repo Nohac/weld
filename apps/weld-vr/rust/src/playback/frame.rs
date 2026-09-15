@@ -147,6 +147,19 @@ pub(super) fn display_geometry(
         x_end - view.source_x >= 1.0 && y_end - view.source_y >= 1.0,
         "content view is outside decoded image"
     );
+    let logical_size = [
+        f64::from(view.logical_width * (x_end - view.source_x) / view.source_width),
+        f64::from(view.logical_height * (y_end - view.source_y) / view.source_height),
+    ];
+    let aspect = (logical_size[0] / logical_size[1]) as f32;
+    ensure!(
+        logical_size
+            .iter()
+            .all(|value| value.is_finite() && *value > 0.0)
+            && aspect.is_finite()
+            && aspect > 0.0,
+        "invalid clipped logical extent"
+    );
     Ok(DisplayGeometry {
         crop: [
             (left as f32 + view.source_x + 0.5) / geometry.width as f32,
@@ -154,19 +167,42 @@ pub(super) fn display_geometry(
             (left as f32 + x_end - 0.5) / geometry.width as f32,
             (top as f32 + y_end - 0.5) / geometry.height as f32,
         ],
-        aspect: view.logical_width / view.logical_height,
+        aspect,
         // Sampling uses pixel centers; input covers the complete clipped pixel
         // edges. Both use the same intersection, even during resize mismatch.
-        logical_size: [
-            f64::from(view.logical_width * (x_end - view.source_x) / view.source_width),
-            f64::from(view.logical_height * (y_end - view.source_y) / view.source_height),
-        ],
+        logical_size,
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn clipped_logical_underflow_is_rejected() {
+        let result = display_geometry(
+            Geometry {
+                width: 1,
+                height: 1,
+                crop: [0, 0, 1, 1],
+            },
+            [1, 1],
+            Some(SurfaceContentView {
+                source_x: 0.0,
+                source_y: 0.0,
+                source_width: 1000.0,
+                source_height: 1.0,
+                logical_width: f32::from_bits(1),
+                logical_height: 1.0,
+            }),
+        );
+        assert!(
+            result
+                .err()
+                .expect("underflow must fail")
+                .to_string()
+                .contains("invalid clipped logical extent")
+        );
+    }
     #[test]
     fn clipped_video_and_input_use_the_same_source_intersection() {
         let display = display_geometry(
@@ -187,7 +223,7 @@ mod tests {
         )
         .expect("display");
         assert_eq!(display.logical_size, [160.0, 140.0]);
-        assert_eq!(display.aspect, 1.0);
+        assert!((display.aspect - 160.0 / 140.0).abs() < 1e-6);
         assert_eq!(
             display.crop,
             [20.5 / 100.0, 10.5 / 80.0, 99.5 / 100.0, 79.5 / 80.0]

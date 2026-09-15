@@ -54,6 +54,8 @@ size = Vector2i(1600, 1000)
 render_target_update_mode = 4
 
 [node name="VideoPanel" parent="PanelViewport" instance=ExtResource("2")]
+auto_connect = false
+spatial = true
 
 [node name="Screen" type="MeshInstance3D" parent="."]
 visible = false
