@@ -189,6 +189,7 @@ pub(super) fn run_session(
                         );
                     }
                     input::service(shared, &mut runtime);
+                    shared.session.observations.report(false);
                     // Transport wake_if_readable and codec/credit notifications
                     // retain an unpark token even when they race this wait.
                     let wait =
@@ -202,6 +203,7 @@ pub(super) fn run_session(
                     thread::park_timeout(wait);
                 }
                 lock(inventory).clear();
+                shared.session.observations.report(true);
                 lock(&shared.session.input).invalidate();
                 input::service(shared, &mut runtime);
                 shared.message("Disconnected; waiting for source restart");

@@ -5,13 +5,18 @@
 //! replay instead of risking buffer reuse.
 mod frame;
 mod input;
+mod mailbox;
+mod observations;
 mod receiver;
 mod receiver_decode;
 mod render;
 mod retirement;
 pub(crate) mod session;
+mod stress;
+mod window_frames;
 
 use frame::Frame;
+use mailbox::Mailbox;
 
 use crate::{
     fixture,
@@ -24,6 +29,7 @@ use godot::{
 };
 use retirement::Retired;
 use std::{
+    path::PathBuf,
     sync::{
         Arc, Mutex, MutexGuard,
         atomic::{AtomicBool, AtomicU64, Ordering},
@@ -39,7 +45,14 @@ static NEXT_SESSION: AtomicU64 = AtomicU64::new(1);
 const FIXTURE: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/panel-av1.ivf"));
 
 pub enum Source {
-    Fixture { single_frame: bool },
+    Fixture {
+        single_frame: bool,
+    },
+    Stress {
+        path: PathBuf,
+        seconds: u64,
+        smooth: bool,
+    },
 }
 
 enum PresentationUpdate {
@@ -54,6 +67,7 @@ enum PresentationUpdate {
 
 #[derive(Default)]
 struct SessionState {
+    observations: observations::Observations,
     input: Mutex<input::InputState>,
     presentation_rate: Mutex<Option<PresentationRate>>,
     cancelled: AtomicBool,
@@ -80,11 +94,12 @@ impl SessionState {
 
 #[derive(Default)]
 struct Shared {
+    diagnostic: Option<stress::Counters>,
     session: Arc<SessionState>,
     closed: AtomicBool,
     epoch: AtomicU64,
     queued: AtomicBool,
-    latest: Mutex<Option<PresentationUpdate>>,
+    latest: Mutex<Mailbox<PresentationUpdate>>,
     retired: Mutex<Vec<Retired>>,
     target: Mutex<Option<native::Target>>,
     pending: Mutex<Option<Frame>>,
@@ -96,6 +111,14 @@ struct Shared {
 }
 impl Shared {
     fn publish(&self, frame: Frame, view: Option<SurfaceContentView>) {
+        if self.session.cancelled.load(Ordering::Acquire) || self.closed.load(Ordering::Acquire) {
+            return;
+        }
+        self.decoded.fetch_add(1, Ordering::Relaxed);
+        self.session
+            .observations
+            .decoded
+            .fetch_add(1, Ordering::Relaxed);
         self.publish_input(frame, view, None);
     }
     fn publish_input(
@@ -105,19 +128,27 @@ impl Shared {
         input: Option<input::Target>,
     ) {
         if self.session.cancelled.load(Ordering::Acquire) || self.closed.load(Ordering::Acquire) {
+            self.session
+                .observations
+                .discard(observations::Discard::Lifecycle);
             return;
         }
-        self.decoded.fetch_add(1, Ordering::Relaxed);
         if matches!(
-            lock(&self.latest).replace(PresentationUpdate::Frame { frame, view, input }),
+            lock(&self.latest).push(
+                PresentationUpdate::Frame { frame, view, input },
+                Instant::now()
+            ),
             Some(PresentationUpdate::Frame { .. })
         ) {
             self.replaced.fetch_add(1, Ordering::Relaxed);
+            self.session
+                .observations
+                .discard(observations::Discard::Handoff);
         }
     }
     fn set_view(&self, view: SurfaceContentView, input: input::Target) {
         let mut latest = lock(&self.latest);
-        match latest.as_mut() {
+        match latest.newest_mut() {
             Some(PresentationUpdate::Frame {
                 view: current,
                 input: current_input,
@@ -127,12 +158,26 @@ impl Shared {
                 *current_input = Some(input);
             }
             Some(PresentationUpdate::Clear) => {}
-            _ => *latest = Some(PresentationUpdate::View(view, input)),
+            _ => latest.reset(PresentationUpdate::View(view, input)),
         }
     }
     fn clear(&self) {
         self.epoch.fetch_add(1, Ordering::AcqRel);
-        *lock(&self.latest) = Some(PresentationUpdate::Clear);
+        let mut latest = lock(&self.latest);
+        self.record_discarded_updates(&mut latest);
+        latest.reset(PresentationUpdate::Clear);
+    }
+    fn discard_pending_updates(&self) {
+        self.record_discarded_updates(&mut lock(&self.latest));
+    }
+    fn record_discarded_updates(&self, latest: &mut Mailbox<PresentationUpdate>) {
+        for update in latest.drain() {
+            if matches!(update, PresentationUpdate::Frame { .. }) {
+                self.session
+                    .observations
+                    .discard(observations::Discard::Lifecycle);
+            }
+        }
     }
     fn message(&self, message: impl AsRef<str>) {
         let mut current = lock(&self.session.message);
@@ -168,7 +213,16 @@ pub struct Controller {
 }
 impl Controller {
     pub fn start(texture: Gd<Object>, material: Gd<Object>, source: Source) -> Result<Self> {
-        let mut controller = Self::open(texture, material, Arc::new(Shared::default()))?;
+        let shared = Shared {
+            latest: Mutex::new(if matches!(&source, Source::Stress { smooth: true, .. }) {
+                Mailbox::smoothing(Duration::from_nanos(1_000_000_000 / 90))
+            } else {
+                Mailbox::default()
+            }),
+            diagnostic: matches!(&source, Source::Stress { .. }).then(stress::Counters::default),
+            ..Shared::default()
+        };
+        let mut controller = Self::open(texture, material, Arc::new(shared))?;
         let shared = Arc::clone(&controller.shared);
         controller.worker = Some(
             thread::Builder::new()
@@ -177,6 +231,9 @@ impl Controller {
                     *lock(&shared.session.wake) = Some(thread::current());
                     let result = match source {
                         Source::Fixture { single_frame } => play(&shared, single_frame),
+                        Source::Stress { path, seconds, .. } => {
+                            stress::run(&shared, &path, seconds)
+                        }
                     };
                     if let Err(error) = result
                         && !shared.session.cancelled.load(Ordering::Acquire)
@@ -247,12 +304,38 @@ impl Controller {
         if let Some(error) = lock(&self.shared.session.error).as_ref() {
             anyhow::bail!("{error}");
         }
-        if self.shared.queued.load(Ordering::Acquire) || lock(&self.shared.retired).len() >= 2 {
+        if let Some(stats) = &self.shared.diagnostic {
+            stats.ticks.fetch_add(1, Ordering::Relaxed);
+        }
+        if self.shared.queued.load(Ordering::Acquire) {
+            if let Some(stats) = &self.shared.diagnostic {
+                stats.queued.fetch_add(1, Ordering::Relaxed);
+            }
             return Ok(());
         }
-        let Some(update) = lock(&self.shared.latest).take() else {
+        if lock(&self.shared.retired).len() >= 2 {
+            if let Some(stats) = &self.shared.diagnostic {
+                stats.fences.fetch_add(1, Ordering::Relaxed);
+            }
+            return Ok(());
+        }
+        let (update, age, dropped) = lock(&self.shared.latest).take(Instant::now());
+        self.shared
+            .replaced
+            .fetch_add(dropped as u64, Ordering::Relaxed);
+        let Some(update) = update else {
+            if let Some(stats) = &self.shared.diagnostic {
+                stats.empty.fetch_add(1, Ordering::Relaxed);
+            }
             return Ok(());
         };
+        if let Some(stats) = &self.shared.diagnostic {
+            let micros = u64::try_from(age.as_micros()).unwrap_or(u64::MAX);
+            stats.selection_age_us.fetch_add(micros, Ordering::Relaxed);
+            stats
+                .selection_age_max_us
+                .fetch_max(micros, Ordering::Relaxed);
+        }
         self.presented_epoch = self.shared.epoch.load(Ordering::Acquire);
         let (frame, display, mut input) = match update {
             PresentationUpdate::Clear => {
@@ -320,8 +403,13 @@ impl Controller {
             render::quarantine();
             return;
         }
-        lock(&self.shared.latest).take();
-        lock(&self.shared.pending).take();
+        self.shared.discard_pending_updates();
+        if lock(&self.shared.pending).take().is_some() {
+            self.shared
+                .session
+                .observations
+                .discard(observations::Discard::Lifecycle);
+        }
         // Repeated stop retries quarantine only on the original EGL context.
         render::queue(
             self.generation,
@@ -350,7 +438,7 @@ impl Controller {
             {
                 self.shared.fail("decoder worker panicked");
             }
-            lock(&self.shared.latest).take();
+            self.shared.discard_pending_updates();
         }
         self.worker.is_none()
     }
@@ -388,6 +476,31 @@ impl Controller {
     }
     pub fn aspect(&self) -> f32 {
         self.aspect
+    }
+    pub fn diagnostic_stats(&self) -> Vec<(&'static str, u64)> {
+        let Some(stats) = &self.shared.diagnostic else {
+            return Vec::new();
+        };
+        [
+            ("selection_age_us", &stats.selection_age_us),
+            ("selection_age_max_us", &stats.selection_age_max_us),
+            ("submitted", &stats.submitted),
+            ("late_submissions", &stats.late),
+            ("decoded", &self.shared.decoded),
+            ("imported", &self.shared.presented),
+            ("superseded", &self.shared.replaced),
+            ("ticks", &stats.ticks),
+            ("queued_ticks", &stats.queued),
+            ("fence_ticks", &stats.fences),
+            ("empty_ticks", &stats.empty),
+            ("render_wait_us", &stats.render_wait_us),
+            ("render_wait_max_us", &stats.render_wait_max_us),
+            ("import_us", &stats.import_us),
+            ("import_max_us", &stats.import_max_us),
+        ]
+        .into_iter()
+        .map(|(name, value)| (name, value.load(Ordering::Relaxed)))
+        .collect()
     }
     pub fn has_frame(&self) -> bool {
         !self.stopped && self.current.is_some()
@@ -505,7 +618,23 @@ impl Controller {
             self.shared.fail(error);
             return false;
         }
-        !self.shared.queued.load(Ordering::Acquire) && lock(&self.shared.retired).len() < 2
+        if self.shared.queued.load(Ordering::Acquire) {
+            self.shared
+                .session
+                .observations
+                .render_busy
+                .fetch_add(1, Ordering::Relaxed);
+            return false;
+        }
+        if lock(&self.shared.retired).len() >= 2 {
+            self.shared
+                .session
+                .observations
+                .fence_busy
+                .fetch_add(1, Ordering::Relaxed);
+            return false;
+        }
+        true
     }
 }
 impl Drop for Controller {

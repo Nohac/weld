@@ -251,7 +251,7 @@ impl Workspace {
         }
         // All images of a committed tree are admitted together. Publication
         // and consumption share this short lock; no codec work runs under it.
-        let inventory = self
+        let mut inventory = self
             .session
             .inventory
             .lock()
@@ -278,6 +278,7 @@ impl Workspace {
             let can_tick = player.controller.as_ref().is_some_and(Controller::ready);
             *ready.entry(surface.pane.window).or_insert(true) &= can_tick;
         }
+        inventory.present_ready(&ready);
         for surface in self.panes.values() {
             let surface = surface.bind();
             if ready.get(&surface.pane.window) == Some(&true) {

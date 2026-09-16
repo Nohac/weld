@@ -1,6 +1,7 @@
 //! One connection owns protocol/input/decoder execution. Presentations only
 //! consume the resulting window hierarchy and independently fenced images.
 use super::frame::Frame;
+use super::window_frames::WindowFrames;
 use super::{Controller, Shared, input, lock, receiver};
 use crate::presentation::{ConfigureSizing, XrPreferences};
 use anyhow::{Context, Result, ensure};
@@ -11,6 +12,7 @@ use std::{
     path::PathBuf,
     sync::{Arc, Mutex, atomic::Ordering},
     thread::{self, JoinHandle},
+    time::Instant,
 };
 use weld_client::{
     ClientId, ClientSurfaceCommit, ClientSurfaceEvent, ClientSurfaceEventKind, ClientSurfaceId,
@@ -43,6 +45,7 @@ struct Surface {
     mapped: bool,
     root: Option<SurfaceLayerId>,
     layers: BTreeMap<SurfaceLayerId, Pane>,
+    frames: WindowFrames,
 }
 
 #[derive(Default)]
@@ -115,6 +118,7 @@ impl Inventory {
                             mapped: false,
                             root: None,
                             layers: BTreeMap::new(),
+                            frames: WindowFrames::default(),
                         },
                     );
                     requests.push(ClientSurfaceRequest {
@@ -277,8 +281,11 @@ impl Inventory {
             let Some(placement) = placement else {
                 // Retained inventory can become visible without new pixels.
                 // Keep its newest image, including replacements while hidden.
-                if let SurfaceBufferChange::Replaced { buffer, .. } = buffer.change {
-                    let slot = buffer
+                surface
+                    .frames
+                    .update(buffer.layer, &pane.shared, None, None, None);
+                if let SurfaceBufferChange::Replaced { buffer: lease, .. } = buffer.change {
+                    let slot = lease
                         .access::<RefCell<Option<Frame>>>()
                         .context("unexpected native frame payload")?;
                     if let Some(frame) = slot
@@ -286,7 +293,9 @@ impl Inventory {
                         .context("native frame already borrowed")?
                         .take()
                     {
-                        pane.shared.publish(frame, None);
+                        surface
+                            .frames
+                            .update(buffer.layer, &pane.shared, Some(frame), None, None);
                     }
                 }
                 continue;
@@ -341,8 +350,8 @@ impl Inventory {
                 },
             };
             match buffer.change {
-                SurfaceBufferChange::Replaced { buffer, .. } => {
-                    let slot = buffer
+                SurfaceBufferChange::Replaced { buffer: lease, .. } => {
+                    let slot = lease
                         .access::<RefCell<Option<Frame>>>()
                         .context("unexpected native frame payload")?;
                     if let Some(frame) = slot
@@ -351,16 +360,50 @@ impl Inventory {
                         .take()
                     {
                         frame.crop(Some(view))?;
-                        pane.shared.publish_input(frame, Some(view), Some(target));
+                        surface.frames.update(
+                            buffer.layer,
+                            &pane.shared,
+                            Some(frame),
+                            Some(view),
+                            Some(target),
+                        );
                     } else {
-                        pane.shared.set_view(view, target);
+                        surface.frames.update(
+                            buffer.layer,
+                            &pane.shared,
+                            None,
+                            Some(view),
+                            Some(target),
+                        );
                     }
                 }
-                SurfaceBufferChange::Retained { .. } => pane.shared.set_view(view, target),
+                SurfaceBufferChange::Retained { .. } => surface.frames.update(
+                    buffer.layer,
+                    &pane.shared,
+                    None,
+                    Some(view),
+                    Some(target),
+                ),
                 SurfaceBufferChange::Removed => {}
             }
         }
+        surface.frames.enqueue(
+            &surface.layers,
+            surface.mapped,
+            surface.root,
+            self.presentation_rate
+                .unwrap_or(PresentationRate::HZ_60)
+                .interval(),
+        );
         Ok(())
+    }
+    pub fn present_ready(&mut self, ready: &BTreeMap<u64, bool>) {
+        let now = Instant::now();
+        for surface in self.surfaces.values_mut() {
+            if ready.get(&surface.id) == Some(&true) {
+                surface.frames.present(now);
+            }
+        }
     }
     pub fn panes(&self) -> Vec<Pane> {
         let mut panes = Vec::new();

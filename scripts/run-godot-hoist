@@ -5,6 +5,7 @@ The phone must already have the current debug APK installed. Only public files
 are exchanged; private keys remain in per-device storage outside build outputs.
 """
 import argparse
+import json
 import os
 from pathlib import Path
 import re
@@ -18,6 +19,7 @@ import time
 ROOT = Path(__file__).resolve().parent.parent
 LAUNCHER = runpy.run_path(str(ROOT / "scripts/run-headless-iroh-hoist"))
 PACKAGE = "com.example.weldvr"
+LogCapture = runpy.run_path(str(ROOT / "scripts/godot-log-capture.py"))["LogCapture"]
 APP_DIRECTORY = "files/weld-device"
 
 
@@ -103,9 +105,34 @@ def parse_arguments(argv=None):
     parser.add_argument("--restart-after", type=LAUNCHER["positive_seconds"],
                         help="diagnostic: restart the source/apps once, leaving the viewer alive")
     parser.add_argument("--app", choices=("foot", "blender"), default="foot")
+    parser.add_argument("--blender-script", type=Path,
+                        help="diagnostic: run a Python exercise in a factory-startup Blender instance")
     parser.add_argument("--bitrate-mbps", type=int, choices=(8, 16, 24), default=16,
                         help="shared AV1 encoder target across windows (default: 16 Mbps)")
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
+    if args.blender_script is not None:
+        if args.app != "blender" or not args.blender_script.is_file():
+            parser.error("--blender-script requires --app blender and an existing Python file")
+        args.blender_script = args.blender_script.resolve()
+    return args
+
+
+def app_command(args):
+    if args.app == "foot":
+        return ["foot", "-e", "htop"]
+    if args.blender_script is not None:
+        return ["blender", "--factory-startup", "--python", str(args.blender_script)]
+    return ["blender"]
+
+
+def diagnostic_environment():
+    environment = os.environ.copy()
+    selected = environment.get("RUST_LOG", "info")
+    for target in ("weld_media_diag", "weld_vr_diag"):
+        if not any(part.strip().startswith(target + "=") for part in selected.split(",")):
+            selected += "," + target + "=debug"
+    environment["RUST_LOG"] = selected
+    return environment
 
 
 def main(argv=None):
@@ -147,6 +174,10 @@ def main(argv=None):
     hosts = []
     app_started = False
     phone_pid = None
+    capture = None
+    (run / "run.json").write_text(json.dumps({"started_at": time.time(), "desktop": args.desktop,
+        "bitrate_mbps": args.bitrate_mbps, "log_capture": "desktop" if args.desktop else "full-run-filtered",
+        "clock_note": "Cross-device wall clocks are approximate; timings are local, not one-way latency."}) + "\n")
 
     def stop(_signal, _frame):
         nonlocal stopping
@@ -159,6 +190,8 @@ def main(argv=None):
             raise InterruptedError("test cancelled")
         if any(host.exited() for host in hosts):
             raise RuntimeError(f"test process exited; see {run}")
+        if capture is not None:
+            capture.check()
 
     def wait(predicate, seconds=60):
         deadline = time.monotonic() + seconds
@@ -189,11 +222,11 @@ def main(argv=None):
 
     print(f"Logs: {run}", flush=True)
     try:
-        environment = os.environ.copy()
+        environment = diagnostic_environment()
         for key in ("DISPLAY", "WAYLAND_DISPLAY", "WAYLAND_SOCKET"):
             environment.pop(key, None)
         environment["XDG_RUNTIME_DIR"] = str(runtime)
-        app = ["foot", "-e", "htop"] if args.app == "foot" else ["blender"]
+        app = app_command(args)
         command = source_command(run, state, app, args.bitrate_mbps)
         hosts.append(LAUNCHER["OwnedHost"]("source", command, environment, ROOT, run))
         wait(lambda: (run / "source.profile").exists())
@@ -206,7 +239,7 @@ def main(argv=None):
             temporary = receiver_directory / f"profile-{os.getpid()}.pending"
             write_new(temporary, profile)
             temporary.replace(profile_path)
-            environment = {**os.environ, "WELD_VR_DEVICE_DIR": str(receiver_directory)}
+            environment = {**diagnostic_environment(), "WELD_VR_DEVICE_DIR": str(receiver_directory)}
             hosts.append(LAUNCHER["OwnedHost"]("viewer",
                 ["godot", "--path", str(ROOT / "apps/weld-vr"), "--display-driver", "wayland", "--rendering-driver", "opengl3_es"],
                 environment, ROOT, run))
@@ -217,6 +250,7 @@ def main(argv=None):
             check_existing(existing, profile)
             # A fresh app process reads one pinned profile. Stop only this test app.
             subprocess.run([*adb, "shell", "am", "force-stop", PACKAGE], check=True, timeout=5)
+            capture = LogCapture(adb, run / "viewer.log")
             if existing is not None:
                 phone_install(profile)
             activity = subprocess.check_output([*adb, "shell", "cmd", "package", "resolve-activity", "--brief", PACKAGE], text=True, timeout=5).splitlines()[-1].strip()
@@ -244,7 +278,7 @@ def main(argv=None):
                 restart.mkdir(mode=0o700)
                 (restart / "runtime").mkdir(mode=0o700)
                 write_new(restart / "viewer.identity", identity(public) + "\n")
-                source_environment = os.environ.copy()
+                source_environment = diagnostic_environment()
                 for key in ("DISPLAY", "WAYLAND_DISPLAY", "WAYLAND_SOCKET"):
                     source_environment.pop(key, None)
                 source_environment["XDG_RUNTIME_DIR"] = str(restart / "runtime")
@@ -255,13 +289,8 @@ def main(argv=None):
         print("Test cancelled.", flush=True)
     finally:
         try:
-            if phone_pid:
-                try:
-                    with (run / "viewer.log").open("w") as log:
-                        subprocess.run([*adb, "logcat", "-d", f"--pid={phone_pid}", "-t", "2000"],
-                                       stdout=log, stderr=subprocess.STDOUT, timeout=5, check=False)
-                except (OSError, subprocess.SubprocessError) as error:
-                    print(f"Could not collect viewer log: {error}", flush=True)
+            if capture is not None:
+                capture.close()
         finally:
             try:
                 stop_viewer = (lambda: subprocess.run(

@@ -269,6 +269,39 @@ impl WeldVideoPlayer {
             },
         )
     }
+    /// Finite local stress fixture; never opens a transport or input route.
+    #[func]
+    fn start_stress(
+        &mut self,
+        texture: Gd<Object>,
+        material: Gd<Object>,
+        path: GString,
+        seconds: i64,
+        smooth: bool,
+    ) -> bool {
+        if !(1..=60).contains(&seconds) {
+            return false;
+        }
+        self.start_source(
+            texture,
+            material,
+            Source::Stress {
+                path: PathBuf::from(path.to_string()),
+                seconds: seconds as u64,
+                smooth,
+            },
+        )
+    }
+    #[func]
+    fn diagnostic_stats(&self) -> VarDictionary {
+        let mut values = VarDictionary::new();
+        if let Some(controller) = &self.controller {
+            for (name, value) in controller.diagnostic_stats() {
+                values.set(name, i64::try_from(value).unwrap_or(i64::MAX));
+            }
+        }
+        values
+    }
     /// Diagnostic: one AU, no future input and no EOS-assisted flush.
     #[func]
     fn start_single_frame(&mut self, texture: Gd<Object>, material: Gd<Object>) -> bool {

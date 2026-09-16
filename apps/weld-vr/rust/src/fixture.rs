@@ -6,6 +6,8 @@ use weld_media::{DecoderConfig, VideoCodec};
 pub struct Clip<'a> {
     pub config: DecoderConfig,
     pub frames: Vec<Frame<'a>>,
+    pub rate: u64,
+    pub scale: u64,
 }
 pub struct Frame<'a> {
     pub timestamp: u64,
@@ -80,7 +82,12 @@ pub fn parse(bytes: &[u8]) -> Result<Clip<'_>> {
         offset = end;
     }
     ensure!(frames.len() == expected, "missing fixture frames");
-    Ok(Clip { config, frames })
+    Ok(Clip {
+        config,
+        frames,
+        rate,
+        scale,
+    })
 }
 
 fn read16(bytes: &[u8], offset: usize) -> Result<u16> {
@@ -135,6 +142,7 @@ mod tests {
         let bytes = sample();
         let clip = parse(&bytes).unwrap();
         assert_eq!(clip.config.extent(), (320, 180));
+        assert_eq!((clip.rate, clip.scale), (30, 1));
         assert_eq!(clip.frames[1].timestamp, 33_333);
         assert_eq!(clip.frames[0].bytes, &[42]);
     }

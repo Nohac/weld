@@ -21,6 +21,7 @@ use std::{
         Arc,
         atomic::{AtomicBool, Ordering},
     },
+    time::Instant,
 };
 
 unsafe extern "C" {
@@ -49,6 +50,7 @@ pub(super) enum Operation {
 
 pub(super) fn queue(generation: u64, shared: Arc<Shared>, operation: Operation) {
     let callable = Callable::from_custom(RenderCall {
+        queued_at: Some(Instant::now()),
         generation,
         shared,
         operation,
@@ -57,6 +59,7 @@ pub(super) fn queue(generation: u64, shared: Arc<Shared>, operation: Operation) 
 }
 
 struct RenderCall {
+    queued_at: Option<Instant>,
     generation: u64,
     shared: Arc<Shared>,
     operation: Operation,
@@ -108,6 +111,23 @@ impl RustCallable for RenderCall {
                     slot.insert(self.generation, presenter);
                 }
                 Operation::Present => {
+                    if let Some(start) = self.queued_at {
+                        self.shared
+                            .session
+                            .observations
+                            .render_wait_max_us
+                            .fetch_max(
+                                super::observations::micros(start.elapsed()),
+                                Ordering::Relaxed,
+                            );
+                    }
+                    if let (Some(stats), Some(start)) = (&self.shared.diagnostic, self.queued_at) {
+                        let micros = u64::try_from(start.elapsed().as_micros()).unwrap_or(u64::MAX);
+                        stats.render_wait_us.fetch_add(micros, Ordering::Relaxed);
+                        stats
+                            .render_wait_max_us
+                            .fetch_max(micros, Ordering::Relaxed);
+                    }
                     if self.shared.session.cancelled.load(Ordering::Acquire)
                         || self.shared.closed.load(Ordering::Acquire)
                     {
@@ -122,11 +142,25 @@ impl RustCallable for RenderCall {
                         "stale render session"
                     );
                     if let Some(image) = lock(&self.shared.pending).take() {
+                        let start = Some(Instant::now());
                         if let Err(error) = presenter.present(image, &self.shared) {
                             QUARANTINED.store(true, Ordering::Release);
                             return Err(error.context("native video restart required"));
                         }
                         self.shared.presented.fetch_add(1, Ordering::Relaxed);
+                        let stats = &self.shared.session.observations;
+                        stats.imported.fetch_add(1, Ordering::Relaxed);
+                        if let Some(start) = start {
+                            let micros = super::observations::micros(start.elapsed());
+                            stats.import_us.fetch_add(micros, Ordering::Relaxed);
+                            stats.import_max_us.fetch_max(micros, Ordering::Relaxed);
+                        }
+                        if let (Some(stats), Some(start)) = (&self.shared.diagnostic, start) {
+                            let micros =
+                                u64::try_from(start.elapsed().as_micros()).unwrap_or(u64::MAX);
+                            stats.import_us.fetch_add(micros, Ordering::Relaxed);
+                            stats.import_max_us.fetch_max(micros, Ordering::Relaxed);
+                        }
                     }
                 }
                 Operation::Close => {

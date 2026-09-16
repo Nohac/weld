@@ -3923,6 +3923,8 @@ dependencies = [
  "godot",
  "libc",
  "pkg-config",
+ "tracing",
+ "tracing-subscriber",
  "weld-client",
  "weld-hoist-encoded",
  "weld-hoist-iroh",

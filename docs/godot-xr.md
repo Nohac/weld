@@ -287,6 +287,84 @@ shows connection status until video arrives. Existing `--video-fixture` and
 
 ## Validation
 
+### Frame pacing checkpoint and diagnostics
+
+The normal desktop/XR receiver now retains at most two complete window
+snapshots to absorb short arrival bursts. Layers advance together; retained
+pixels survive snapshot replacement until consumed or genuinely discarded.
+The first or sole remaining frame does not wait for prefill. With a newer
+snapshot available, an older snapshot expires after two presenter intervals,
+capped at 34 ms. Resize/unmap/layout changes discard obsolete queued layouts.
+This is bounded smoothing, not adaptive playback timing or an ACK mechanism;
+input scheduling, native leases and GPU fences are unchanged.
+
+Generate and open a self-contained HTML/SVG report for the latest run:
+
+```sh
+scripts/plot-godot-hoist
+scripts/plot-godot-hoist target/validation/godot-hoist-RUN --no-open
+```
+
+The report separates source coalescing, decode/queue timing, presentation
+replacement, stale-snapshot expiry, layout/lifecycle discards, blocked render
+and fence checks, media-write cancellation, QUIC packets declared lost, and
+runtime-reported late XR frames. These are different units and must not be
+added into one dropped-frame total. Imports are not physical scanouts, and
+clock-local durations overlap; the charts do not establish one-way network
+latency. Legacy logs retain an unknown-reason superseded category and visibly
+unavailable stages rather than invented zeros.
+
+`run-godot-hoist` enables the existing media summaries unless explicitly
+overridden in `RUST_LOG`. Godot's application-owned tracing bridge forwards
+bounded summaries to the main-thread logger, splitting long Android messages
+into numbered chunks to avoid logger truncation. Full-run filtered logcat is
+captured in `viewer.log`, capped at 16 MiB, with explicit gap markers. Generated
+reports, logs, clips, APKs and native libraries remain untracked.
+
+The independent local-decoder stress scene uses the existing native provider
+and texture presentation, without Iroh or the live shared decode pool:
+
+```sh
+scripts/run-godot-video-stress --case mixed-latest --case mixed-smooth --seconds 25
+scripts/run-godot-video-stress --case mixed-heavy --seconds 25
+```
+
+Use `--adb`/`--serial` to select the shared device connection, `--desktop` for
+Linux EGL, or `--skip-build` only when the matching APK is already installed.
+The mixed case feeds one 1440p90 stream at an 8 Mbps encoder target, two
+1080p60 streams at 3 Mbps each, and five 360p30 streams at 0.5 Mbps each.
+The heavy case raises both secondary streams to 1440p90. Targets are not
+measured network usage. Short software-generated AV1 clips loop for a bounded
+duration; the test does not create an unbounded video recording.
+
+On 2026-09-16, a 60-second mixed smoothing run measured about 89.96, 60 and
+30 texture updates/s respectively, with 8.0 ms mean reported GPU time and no
+reported late XR frames. Three 1440p90 streams plus five small streams reached
+about 87 updates/s at 11.4 ms GPU time, despite decoding near 90 fps. In one
+controlled live Blender comparison, the measured active single-window tail
+improved from roughly 66 to 87 texture updates/s. Local A/B tests measured
+roughly 10 ms more decoded-frame selection age with smoothing. These are
+bounded observations, not hardware capacity guarantees or end-to-end latency.
+These measurements used the extension's standalone, unoptimized Cargo dev
+profile. It does not inherit the main Weld workspace's opt-level 1 / optimized
+dependency profile; optimized-extension comparisons are still pending.
+
+For a repeatable live motion and window-lifecycle exercise:
+
+```sh
+scripts/run-godot-hoist --app blender \
+  --blender-script apps/weld-vr/tests/blender_motion.py --seconds 75
+```
+
+This starts factory-settings Blender, orbits the viewport, opens/closes
+Preferences, and stops motion without saving user files. The Pico still emits
+Godot GLES texture-cleanup errors when the secondary native window closes;
+the same errors reproduced with latest-only presentation. They remain a
+separate unresolved lifecycle issue. Display-aligned pacing, an adaptive
+delay and below-refresh source cadence remain future experiments.
+
+### Earlier validation
+
 Run the isolated `apps/weld-vr/scripts/check-gdextension --android-export` check
 for scene wiring, injected tracker loss/recovery, offset/tilt invariants, export
 hooks and the Phone manifest negative control. It does not validate physical

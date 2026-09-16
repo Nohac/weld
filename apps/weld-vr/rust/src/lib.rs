@@ -1,5 +1,6 @@
 //! Godot shell bridge and shared GPU-native video fixture.
 
+mod diagnostics;
 mod fixture;
 mod native;
 mod playback;
@@ -17,7 +18,16 @@ struct WeldVrExtension;
 // Native video workers are owned by scene nodes and joined before node teardown
 // completes; opening the editor does not start native work.
 #[gdextension]
-unsafe impl ExtensionLibrary for WeldVrExtension {}
+unsafe impl ExtensionLibrary for WeldVrExtension {
+    fn on_stage_init(level: godot::init::InitStage) {
+        if level == godot::init::InitStage::Scene {
+            diagnostics::init();
+        }
+    }
+    fn on_main_loop_frame() {
+        diagnostics::drain();
+    }
+}
 
 /// A main-thread bridge proving that a Godot button can invoke Rust on-device.
 #[derive(GodotClass)]

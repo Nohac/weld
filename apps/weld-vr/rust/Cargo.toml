@@ -17,6 +17,8 @@ weld-client = { path = "../../../crates/weld-client" }
 weld-hoist-encoded = { path = "../../../crates/weld-hoist-encoded" }
 weld-hoist-iroh = { path = "../../../crates/weld-hoist-iroh" }
 libc = "0.2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "env-filter"] }
 
 [target.'cfg(target_os = "android")'.dependencies]
 weld-media-android = { path = "../../../crates/weld-media-android" }

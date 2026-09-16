@@ -1,0 +1,258 @@
+#!/usr/bin/env python3
+"""Plot the latest Godot hoist run as a self-contained HTML/SVG report.
+
+No Python packages, browser service, or network access required. Pass a run
+directory to select an older run. Missing measurements are never invented.
+"""
+import argparse
+from datetime import datetime, timezone
+import html
+import json
+from pathlib import Path
+import re
+import subprocess
+import sys
+
+ROOT = Path(__file__).resolve().parent.parent
+COLORS = ["#60cfa5", "#efae5b", "#ed6e78", "#a995eb", "#79b7ed", "#bbb"]
+FIELDS = re.compile(r"\b([A-Za-z_][A-Za-z_0-9]*)=([-+]?\d+(?:\.\d+)?)")
+
+
+def timestamp(line, year):
+    line = line.lstrip()
+    match = re.search(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d+)?Z", line)
+    if match:
+        return datetime.fromisoformat(match[0]).timestamp()
+    match = re.match(r"(\d{10}\.\d+)\s", line)
+    if match:
+        return float(match[1])
+    match = re.match(r"(\d\d-\d\d \d\d:\d\d:\d\d\.\d+)", line)
+    if match:
+        # Old logcat threadtime uses device local time. The report warns that
+        # cross-device clock alignment is approximate, never one-way latency.
+        return datetime.strptime(f"{year}-{match[1]}", "%Y-%m-%d %H:%M:%S.%f").timestamp()
+    return None
+
+
+def joined_lines(source):
+    pending = {}
+    for line in source:
+        match = re.search(r"WELD_TRACE id=(\d+) part=(\d+) total=(\d+) (.*)", line.rstrip("\n"))
+        if not match:
+            yield line
+            continue
+        identifier, part, total, payload = match.groups()
+        part, total = int(part), int(total)
+        if not 1 <= part <= total <= 8 or len(pending) >= 256:
+            yield "WELD_DIAGNOSTICS_GAP invalid_or_excessive_fragments\n"
+            pending.clear()
+            continue
+        pieces = pending.setdefault(identifier, {})
+        pieces[part] = payload
+        if len(pieces) == total and all(index in pieces for index in range(1, total + 1)):
+            yield ''.join(pieces[index] for index in range(1, total + 1)) + '\n'
+            del pending[identifier]
+    if pending:
+        yield f"WELD_DIAGNOSTICS_GAP incomplete_records={len(pending)}\n"
+
+
+def read_records(run):
+    records = []
+    notices = []
+    metadata_path = run / "run.json"
+    metadata = json.loads(metadata_path.read_text()) if metadata_path.exists() else {}
+    original_log = run / "source.log"
+    started = metadata.get("started_at", original_log.stat().st_mtime if original_log.exists() else run.stat().st_mtime)
+    year = datetime.fromtimestamp(started).year
+    markers = {
+        "presentation observations": "presentation",
+        "encoded destination observations": "decode",
+        "encoded source observations": "source",
+        "encoded transport observations": "transport",
+        "encoded selected-path observations": "network",
+        "opened VA-API encoder generation": "encoder",
+    }
+    paths = [run / "source.log", run / "viewer.log"]
+    paths += sorted(run.glob("restart*/source.log"))
+    for path in paths:
+        if not path.exists():
+            notices.append(f"Missing {path.name} (run may still be active).")
+            continue
+        if path.stat().st_size > 64 * 1024 * 1024:
+            raise ValueError(f"{path} exceeds the 64 MiB input bound")
+        with path.open(errors="replace") as source:
+            for line in joined_lines(source):
+                if "WELD_CAPTURE_GAP" in line or "WELD_DIAGNOSTICS_GAP" in line or "[truncated]" in line:
+                    notices.append("Log capture has missing/truncated data: " + line.strip()[:180])
+                kind = next((kind for marker, kind in markers.items() if marker in line), None)
+                fields = {key: float(value) for key, value in FIELDS.findall(line)}
+                if "PxrMetric:" in line and "Pkg=com.example.weldvr," in line:
+                    kind = "xr"
+                if "WELD_HOIST_STATUS" in line:
+                    match = re.search(r"(\d+) layers, decoded (\d+), presented (\d+), superseded (\d+)", line)
+                    if match:
+                        kind = "legacy"
+                        fields = dict(zip(["layers", "decoded", "imported", "unknown_discard"], map(float, match.groups())))
+                when = timestamp(line, year)
+                if kind and when is not None:
+                    records.append(dict(time=when, kind=kind, fields=fields, file=str(path)))
+                if len(records) > 20000:
+                    raise ValueError("too many samples; select a shorter run")
+    if not metadata:
+        notices.append("Legacy capture: receiver data may contain only the final logcat tail; startup is incomplete.")
+    return sorted(records, key=lambda row: row["time"]), list(dict.fromkeys(notices))
+
+
+def cumulative(rows, fields, epoch=None):
+    """Connection/path resets and disappearing legacy windows are boundaries."""
+    result = []
+    previous = None
+    for row in rows:
+        current = row["fields"]
+        if any(field not in current for field in fields):
+            previous = None
+            continue
+        if previous is not None:
+            old = previous["fields"]
+            duration = row["time"] - previous["time"]
+            reset = row["file"] != previous["file"] or (epoch is not None and current.get(epoch) != old.get(epoch))
+            reset |= any(current[field] < old[field] for field in fields)
+            if duration > 0 and not reset:
+                result.append((previous["time"], row["time"], [(current[field] - old[field]) / duration for field in fields]))
+        previous = row
+    return result
+
+
+def sampled(rows, fields, divisor=1):
+    return [(row["time"] - 0.8, row["time"], [row["fields"].get(field, 0) / divisor for field in fields])
+            for row in rows if all(field in row["fields"] for field in fields)]
+
+
+def interval(rows, fields):
+    result = []
+    for row in rows:
+        duration = row["fields"].get("interval_us", 0) / 1e6
+        if duration > 0 and all(field in row["fields"] for field in fields):
+            result.append((row["time"] - duration, row["time"], [row["fields"][field] / duration for field in fields]))
+    return result
+
+
+def chart(title, labels, points, start, end, unit, stacked=False):
+    heading = f"<h2>{html.escape(title)}</h2>"
+    if not points:
+        return f"<section>{heading}<p class='missing'>Unavailable — not recorded in these logs.</p></section>"
+    ceiling = max((sum(values) if stacked else max(values)) for _, _, values in points)
+    ceiling = max(ceiling * 1.1, 1)
+    width, height, left, top = 1050, 170, 60, 16
+    span = max(end - start, 1)
+    svg = [f"<svg viewBox='0 0 1140 230' role='img' aria-label='{html.escape(title, quote=True)}'>"]
+    for step in range(5):
+        y = top + height * step / 4
+        svg.append(f"<path d='M{left},{y}h{width}' stroke='#33404d'/><text x='52' y='{y+4}' text-anchor='end'>{ceiling*(4-step)/4:.1f}</text>")
+    for step in range(7):
+        x = left + width * step / 6
+        svg.append(f"<text x='{x}' y='211' text-anchor='middle'>{span*step/6:.1f}s</text>")
+    for beginning, finish, values in points:
+        x = left + max(beginning - start, 0) / span * width
+        bar_width = max((finish - max(beginning, start)) / span * width, 0.4)
+        svg.append(f"<rect x='{x:.2f}' y='{top+height+4}' width='{bar_width:.2f}' height='3' fill='#476379'><title>Measurement available</title></rect>")
+        accumulated = 0
+        for index, value in enumerate(values):
+            h = value / ceiling * height
+            y = top + height - h - accumulated
+            w = bar_width if stacked else bar_width / len(labels)
+            offset = 0 if stacked else index * w
+            tooltip = f"{beginning-start:.2f}–{finish-start:.2f}s: {labels[index]} {value:.3f} {unit}"
+            svg.append(f"<rect x='{x+offset:.2f}' y='{y:.2f}' width='{max(w-0.15,0.2):.2f}' height='{h:.2f}' fill='{COLORS[index % len(COLORS)]}'><title>{html.escape(tooltip)}</title></rect>")
+            if stacked:
+                accumulated += h
+    svg.append("</svg>")
+    legend = " ".join(f"<span style='color:{COLORS[i % len(COLORS)]}'>■ {html.escape(label)}</span>" for i, label in enumerate(labels))
+    return f"<section>{heading}<p>{legend} · {html.escape(unit)}</p>{''.join(svg)}</section>"
+
+
+def report(run):
+    records, notices = read_records(run)
+    if not records:
+        raise ValueError("no timestamped diagnostic samples found")
+    groups = {kind: [row for row in records if row["kind"] == kind] for kind in {row["kind"] for row in records}}
+    start, end = records[0]["time"], records[-1]["time"]
+    get = lambda kind: groups.get(kind, [])
+    charts = []
+    def add(title, labels, data, units, stacked=False):
+        charts.append(chart(title, labels, data, start, end, units, stacked))
+    if get("presentation"):
+        add("Receiver frame outcomes", ["Imported to GPU texture", "Queue replacement", "Stale snapshot", "Layout change", "Lifecycle", "Handoff replacement"],
+            cumulative(get("presentation"), ["imported_total", "superseded_total", "stale_total", "layout_discard_total", "lifecycle_discard_total", "handoff_discard_total"]), "frames/s", True)
+        add("Presentation delay — interval maxima", ["Snapshot wait", "Render-thread handoff", "Import CPU wall time"],
+            sampled(get("presentation"), ["snapshot_wait_max_us", "render_handoff_max_us", "import_cpu_max_us"], 1000), "ms")
+        add("Presentation blocked checks — not dropped frames", ["Render callback busy", "GPU fence busy"],
+            cumulative(get("presentation"), ["render_busy_checks_total", "fence_busy_checks_total"]), "checks/s")
+        add("Commit arrival gaps — includes legitimate idle periods", ["Largest gap"],
+            sampled(get("presentation"), ["commit_gap_max_us"], 1000), "ms")
+        add("Bursty commit arrivals — less than half a refresh interval apart", ["Closely spaced commits"],
+            cumulative(get("presentation"), ["commit_bursts_total"]), "events/s")
+    else:
+        notices.append("Legacy superseded counts do not distinguish staleness, layout changes or queue replacement. Window-count changes reset the baseline.")
+        add("Legacy receiver outcomes — discard reasons unavailable", ["Imported", "Superseded (unknown reason)"],
+            cumulative(get("legacy"), ["imported", "unknown_discard"], "layers"), "frames/s", True)
+    add("Source operations — commits and batches are different units", ["Commits received", "Commits coalesced", "Encoded batches"],
+        interval(get("source"), ["commits_received", "commits_coalesced", "batches_completed"]), "operations/s")
+    add("Receiver decode stages — overlapping interval maxima", ["Ingress → submit", "Worker queue", "Worker residence", "Completion handoff"],
+        sampled(get("decode"), ["media_wait_max_us", "worker_queue_max_us", "worker_residence_max_us", "completion_handoff_max_us"], 1000), "ms")
+    add("Receiver cancellation/failure — not congestion or packet-loss counts", ["Decode cancelled", "Commit cancelled", "Media after cancellation", "Codec failure"],
+        interval(get("decode"), ["decodes_cancelled", "commits_cancelled", "late_cancelled_media", "codec_failures"]), "events/s")
+    add("QUIC packets declared lost — may be retransmitted", ["Packets declared lost"],
+        cumulative(get("network"), ["lost_packets_total"], "path_epoch"), "packets/s")
+    add("Network RTT", ["Round-trip time"], sampled(get("network"), ["rtt_us"], 1000), "ms")
+    add("Media send backlog and write delay", ["Oldest pending", "Maximum write wall time (lifetime)"],
+        sampled(get("transport"), ["oldest_pending_age_us", "write_wall_max_us"], 1000), "ms")
+    add("Media records cancelled before full write — includes teardown", ["Cancelled records"],
+        cumulative(get("transport"), ["cancelled_records_total"]), "records/s")
+    add("XR rendering time", ["CPU", "GPU"], sampled(get("xr"), ["FrmCpu", "FrmGpu"]), "ms")
+    add("XR runtime-reported late frames", ["Late count"], sampled(get("xr"), ["FrmLate"]), "count/sample")
+    add("XR frame rate", ["App FPS"], sampled(get("xr"), ["FPS"]), "fps")
+    notices.append("Cross-device wall-clock alignment is approximate. No one-way network latency is inferred; overlapping stage durations must not be added.")
+    notices.append("Texture imports are not headset scanouts. Low activity can legitimately produce fewer than 90 video frames/s. Gaps do not establish packet loss.")
+    warnings = ''.join(f"<li>{html.escape(note)}</li>" for note in notices)
+    encoders = []
+    for row in get("encoder"):
+        fields = row["fields"]
+        required = ["stream", "generation", "frame_rate_millihertz", "visible_width", "visible_height", "bitrate_bits"]
+        if all(key in fields for key in required):
+            encoders.append(f"<tr><td>{row['time']-start:.2f}s</td><td>{fields['stream']:.0f}/{fields['generation']:.0f}</td>"
+                            f"<td>{fields['visible_width']:.0f}×{fields['visible_height']:.0f}</td>"
+                            f"<td>{fields['frame_rate_millihertz']/1000:.1f} fps</td><td>{fields['bitrate_bits']/1e6:.2f} Mbps</td></tr>")
+    return f"""<!doctype html><meta charset='utf-8'><title>Weld run diagnostics</title>
+<style>body{{background:#111820;color:#dbe5ee;font:15px system-ui;margin:30px auto;max-width:1180px;padding:0 16px}}section{{background:#19232e;padding:16px;margin:16px 0;border-radius:8px}}h2{{font-size:18px}}svg{{width:100%}}svg text{{fill:#aab8c7;font:12px system-ui}}p span{{margin-right:14px}}.missing{{color:#e8b56a}}li{{margin:8px 0}}table{{font:12px monospace}}td{{padding:5px}}</style>
+<h1>Weld run diagnostics</h1><p>{html.escape(run.name)} · {datetime.fromtimestamp(start, timezone.utc).isoformat()} · {end-start:.1f}s observed</p>
+<ul>{warnings}</ul><p>Hover bars for exact values. Marks below the bars indicate available samples. Counts with different units are never combined. Cumulative counters are differenced and rebaselined on resets.</p>
+{''.join(charts)}<section><h2>Encoder generation changes</h2><table><tr><th>Time</th><th>Stream/generation</th><th>Size</th><th>Cadence</th><th>Bitrate target</th></tr>{''.join(encoders) or '<tr><td>No changes recorded.</td></tr>'}</table></section>"""
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("run", nargs="?", type=Path)
+    parser.add_argument("--output", type=Path)
+    parser.add_argument("--no-open", action="store_true", help="generate the report without opening a browser")
+    args = parser.parse_args(argv)
+    if args.run is None:
+        runs = [path for path in (ROOT / "target/validation").glob("godot-hoist-*") if (path / "source.log").is_file()]
+        if not runs:
+            parser.error("no Godot hoist runs found")
+        args.run = max(runs, key=lambda path: (path / "source.log").stat().st_mtime)
+    output = args.output or args.run / "diagnostics.html"
+    output.write_text(report(args.run), encoding="utf-8")
+    print(f"Report: {output.resolve()}")
+    if not args.no_open:
+        try:
+            subprocess.run(["xdg-open", str(output.resolve())], check=True, timeout=10)
+        except (OSError, subprocess.SubprocessError) as error:
+            print(f"Report saved, but could not open it: {error}", file=sys.stderr)
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except (OSError, ValueError) as error:
+        raise SystemExit(f"Could not plot run: {error}") from error

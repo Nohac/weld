@@ -1,0 +1,268 @@
+#!/usr/bin/env python3
+"""Bounded local AV1 decoder/presentation experiments; no server or network needed.
+
+Default: build/install on the connected Pico, then compare presentation variants
+and mixed eight-stream loads (three high-resolution plus five small streams).
+Use --desktop for Linux EGL, --case NAME to select, --skip-build to reuse the APK.
+Generated clips/APKs and logs remain ignored; pairing/app settings are retained.
+"""
+import argparse
+import contextlib
+import json
+import os
+from pathlib import Path
+import re
+import resource
+import runpy
+import shutil
+import signal
+import subprocess
+import sys
+import tempfile
+import time
+
+ROOT = Path(__file__).resolve().parent.parent
+PROJECT = ROOT / "apps/weld-vr"
+WORKFLOW = runpy.run_path(str(ROOT / "scripts/run-godot-xr"))
+Step = WORKFLOW["Step"]
+PACKAGE = "com.example.weldvr"
+CASES = {
+    "1080p-one": (1920, 1080, 1, "predraw"),
+    "1080p-two": (1920, 1080, 2, "predraw"),
+    "1440p-two": (2560, 1440, 2, "predraw"),
+    "1440p-process": (2560, 1440, 2, "process"),
+    "1440p-postdraw": (2560, 1440, 2, "postdraw"),
+    "1080p-smooth": (1920, 1080, 2, "predraw"),
+    "1440p-smooth": (2560, 1440, 2, "predraw"),
+    "mixed-latest": (2560, 1440, 8, "predraw"),
+    "mixed-smooth": (2560, 1440, 8, "predraw"),
+    "mixed-heavy": (2560, 1440, 8, "predraw"),
+}
+
+
+def clip(width, height, directory, environment, fps=90, kbps=8000):
+    key = f"{width}x{height}-{fps}-{kbps}"
+    path = PROJECT / "build" / f"stress-v2-{key}.ivf"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if not path.exists():
+        # Software encode so the experiment does not contend with decoding or
+        # risk the VAAPI encoder driver. Two threads, 120 frames, bounded file.
+        step = Step(f"generate-{key}", ["ffmpeg", "-hide_banner", "-nostdin", "-v", "error",
+            "-f", "lavfi", "-i", f"testsrc2=size={width}x{height}:rate={fps}", "-frames:v", "120",
+            "-c:v", "libaom-av1", "-cpu-used", "8", "-row-mt", "1", "-threads", "2",
+            "-lag-in-frames", "0", "-g", "120", "-b:v", f"{kbps}k", "-fs", "16777216",
+            "-f", "ivf", "-y", str(path)], 120)
+        WORKFLOW["run_step"](step, directory, environment)
+    probe = json.loads(subprocess.check_output(["ffprobe", "-v", "error", "-count_packets",
+        "-show_entries", "stream=codec_name,width,height,nb_read_packets,r_frame_rate",
+        "-of", "json", str(path)], text=True, timeout=15))
+    stream = probe["streams"][0]
+    if not (32 < path.stat().st_size <= 16 * 1024 * 1024 and stream["codec_name"] == "av1"
+            and stream["width"] == width and stream["height"] == height
+            and stream["nb_read_packets"] == "120" and stream["r_frame_rate"] == f"{fps}/1"):
+        raise RuntimeError(f"invalid cached fixture: {path}; move it aside before retrying")
+    return path
+
+
+def summarize(path, config):
+    samples = {}
+    gpu = []
+    cpu = []
+    temperature = []
+    late = []
+    started = False
+    completed = False
+    elapsed = 0
+    for line in path.read_text(errors="replace").splitlines():
+        if "WELD_STRESS_START " in line:
+            started = True
+        if not started:
+            continue
+        if "PxrMetric:" in line and f"Pkg={PACKAGE}," not in line:
+            continue
+        if "WELD_STRESS_DONE success=true" in line:
+            completed = True
+        if "WELD_STRESS_SAMPLE " in line:
+            value = json.loads(line.split("WELD_STRESS_SAMPLE ", 1)[1])
+            elapsed = value["elapsed"]
+            # Exclude decoder startup and post-EOS tail from rate calculations.
+            if 3 <= value["elapsed"] <= config["seconds"] - 1:
+                samples.setdefault(value["panel"], []).append(value)
+        match = re.search(r"FrmGpu=([\d.]+)ms", line)
+        if match and 3 <= elapsed <= config["seconds"] - 1:
+            gpu.append(float(match[1]))
+        match = re.search(r"FrmCpu=([\d.]+)ms", line)
+        if match and 3 <= elapsed <= config["seconds"] - 1:
+            cpu.append(float(match[1]))
+        match = re.search(r"GPUTemp=([\d.]+)C", line)
+        if match and 3 <= elapsed <= config["seconds"] - 1:
+            temperature.append(float(match[1]))
+        match = re.search(r"FrmLate=(\d+)", line)
+        if match and 3 <= elapsed <= config["seconds"] - 1:
+            late.append(int(match[1]))
+    if not completed or len(samples) != config["panels"]:
+        raise RuntimeError(f"stress test did not finish all panels: {path}")
+    result = {"config": config, "panels": []}
+    for panel, rows in sorted(samples.items()):
+        if len(rows) < 2:
+            raise RuntimeError(f"too few samples: {path}")
+        first, last = rows[0], rows[-1]
+        elapsed = last["elapsed"] - first["elapsed"]
+        delta = {key: last[key] - first[key] for key in ["submitted", "decoded", "imported",
+            "superseded", "ticks", "queued_ticks", "fence_ticks", "empty_ticks",
+            "late_submissions", "render_wait_us", "import_us", "selection_age_us"]}
+        imports = max(delta["imported"], 1)
+        result["panels"].append({"panel": panel, "sample_seconds": round(elapsed, 3),
+            **{key + "_fps": round(delta[key] / elapsed, 2) for key in ["submitted", "decoded", "imported", "superseded"]},
+            **{key: delta[key] for key in ["ticks", "queued_ticks", "fence_ticks", "empty_ticks", "late_submissions"]},
+            "mean_render_wait_ms": round(delta["render_wait_us"] / imports / 1000, 3),
+            "mean_import_ms": round(delta["import_us"] / imports / 1000, 3)})
+        result["panels"][-1]["mean_selection_age_ms"] = round(delta["selection_age_us"] / imports / 1000, 3)
+        result["panels"][-1]["max_selection_age_ms"] = round(last["selection_age_max_us"] / 1000, 3)
+    if gpu:
+        result["pico_mean_gpu_ms"] = round(sum(gpu) / len(gpu), 3)
+        result["pico_max_gpu_ms"] = max(gpu)
+        result["pico_reported_late_sum"] = sum(late)
+    if cpu:
+        result["pico_mean_cpu_ms"] = round(sum(cpu) / len(cpu), 3)
+    if temperature:
+        result["pico_max_gpu_temperature_c"] = max(temperature)
+    return result
+
+
+def device_case(adb, paths, config, log, environment):
+    subprocess.run([*adb, "shell", "am", "force-stop", PACKAGE], check=True, timeout=10)
+    # Fixed diagnostic-only paths in this app's private directory. No pairing,
+    # preferences, camera data, or other apps are read or modified.
+    config = json.loads(json.dumps(config))
+    for index, path in enumerate(paths):
+        with path.open("rb") as content:
+            subprocess.run([*adb, "shell", "-T", "run-as", PACKAGE, "sh", "-c",
+                f"'cat > files/video-stress-{index}.ivf'"], stdin=content, check=True, timeout=30)
+        config["streams"][index]["clip"] = f"user://video-stress-{index}.ivf"
+    subprocess.run([*adb, "shell", "-T", "run-as", PACKAGE, "sh", "-c",
+        "'cat > files/video-stress.json'"], input=json.dumps(config).encode(), check=True, timeout=10)
+    activity = subprocess.check_output([*adb, "shell", "cmd", "package", "resolve-activity",
+        "--brief", PACKAGE], text=True, timeout=10).splitlines()[-1].strip()
+    if not activity.startswith(PACKAGE + "/"):
+        raise RuntimeError("unexpected Android activity")
+    with log.open("w") as output:
+        capture = subprocess.Popen([*adb, "logcat", "-T", "1", "-v", "threadtime", "-s",
+            "godot:I", "PxrMetric:I", "*:S"], stdout=output, stderr=subprocess.STDOUT, env=environment)
+        try:
+            subprocess.run([*adb, "shell", "am", "start", "-n", activity], check=True, timeout=10,
+                           stdout=subprocess.DEVNULL)
+            deadline = time.monotonic() + config["seconds"] + 30
+            sampled_memory = False
+            while time.monotonic() < deadline:
+                time.sleep(1)
+                text = log.read_text(errors="replace")
+                if not sampled_memory and "WELD_STRESS_SAMPLE" in text:
+                    memory = subprocess.run([*adb, "shell", "dumpsys", "meminfo", PACKAGE],
+                        text=True, capture_output=True, timeout=10)
+                    log.with_suffix(".memory.txt").write_text(memory.stdout)
+                    sampled_memory = True
+                if "SCRIPT ERROR:" in text or "E godot   : ERROR:" in text:
+                    raise RuntimeError(f"device scene error: {log}")
+                if "WELD_STRESS_DONE" in text:
+                    break
+                if capture.poll() is not None or log.stat().st_size > 4 * 1024 * 1024:
+                    raise RuntimeError("device log capture stopped or exceeded 4 MiB")
+            else:
+                raise RuntimeError(f"device test timed out: {log}")
+        finally:
+            subprocess.run([*adb, "shell", "am", "force-stop", PACKAGE], timeout=10, check=False)
+            capture.terminate()
+            try:
+                capture.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                capture.kill()
+                capture.wait(timeout=5)
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--desktop", action="store_true")
+    parser.add_argument("--adb", default=os.environ.get("ADB", "adb"))
+    parser.add_argument("--serial")
+    parser.add_argument("--case", action="append", choices=CASES)
+    parser.add_argument("--seconds", type=int, default=15)
+    parser.add_argument("--skip-build", action="store_true")
+    args = parser.parse_args()
+    if not 8 <= args.seconds <= 60:
+        parser.error("seconds must be 8..60")
+    resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
+    environment = dict(os.environ)
+    adb = []
+    if not args.desktop:
+        executable = shutil.which(args.adb)
+        if not executable:
+            raise RuntimeError("ADB missing")
+        environment["PATH"] = str(Path(executable).parent) + os.pathsep + environment.get("PATH", "")
+        devices = subprocess.check_output([executable, "devices"], text=True, timeout=10)
+        ready = [line.split()[0] for line in devices.splitlines() if line.endswith("\tdevice")]
+        if args.serial is None and len(ready) != 1:
+            raise RuntimeError("connect one headset or specify --serial")
+        args.serial = args.serial or ready[0]
+        if args.serial not in ready:
+            raise RuntimeError("headset is not ready")
+        adb = [executable, "-s", args.serial]
+    validation = ROOT / "target/validation"
+    validation.mkdir(parents=True, exist_ok=True)
+    run = Path(tempfile.mkdtemp(prefix="video-stress-", dir=validation))
+    print(f"Stress results: {run}", flush=True)
+    with contextlib.nullcontext() if args.desktop else WORKFLOW["device_lock"](args.serial):
+        if not args.skip_build:
+            if args.desktop:
+                WORKFLOW["run_step"](Step("build-desktop", [str(PROJECT / "scripts/build-gdextension"), "desktop"], 600), run, environment)
+            else:
+                for step in WORKFLOW["steps"]():
+                    if step.name == "shaders":
+                        # This offscreen pixel check needs no display cadence;
+                        # Wayland vsync can otherwise stall frame_post_draw.
+                        step = Step(step.name, [*step.command, "--disable-vsync"], step.timeout, step.marker, step.engine)
+                    WORKFLOW["run_step"](step, run, environment)
+                WORKFLOW["run_step"](Step("install", [*adb, "install", "-r", str(WORKFLOW["APK"])], 120, "Success"), run, environment)
+        results = []
+        try:
+            for name in args.case or CASES:
+                width, height, panels, tick = CASES[name]
+                config = dict(width=width, height=height, panels=panels, tick=tick, seconds=args.seconds)
+                config["playout"] = "smooth" if name.endswith("-smooth") or name == "mixed-heavy" else "latest"
+                if name.startswith("mixed"):
+                    secondary = (2560, 1440, 90, 3000) if name == "mixed-heavy" else (1920, 1080, 60, 3000)
+                    specifications = [(2560, 1440, 90, 8000), secondary, secondary] + [(640, 360, 30, 500)] * 5
+                else:
+                    specifications = [(width, height, 90, 8000)] * panels
+                paths = [clip(w, h, run, environment, fps, kbps) for w, h, fps, kbps in specifications]
+                config["streams"] = [dict(width=w, height=h, fps=fps, kbps=kbps, clip=str(path))
+                    for (w, h, fps, kbps), path in zip(specifications, paths)]
+                print(f"Running {name}: {specifications}; playout={config['playout']}", flush=True)
+                log = run / (name + ".log")
+                if args.desktop:
+                    command = ["godot", "--path", str(PROJECT), "--display-driver", "wayland", "--rendering-driver", "opengl3_es",
+                        "res://scenes/diagnostics/video_stress.tscn", "--", f"--stress-config={json.dumps(config)}"]
+                    WORKFLOW["run_step"](Step(name, command, args.seconds + 30, "WELD_STRESS_DONE success=true", True), run, environment)
+                else:
+                    device_case(adb, paths, config, log, environment)
+                result = summarize(log, config)
+                results.append(dict(name=name, **result))
+                print(json.dumps(results[-1], indent=2), flush=True)
+                (run / "summary.json").write_text(json.dumps(results, indent=2) + "\n")
+        finally:
+            if adb:
+                subprocess.run([*adb, "shell", "run-as", PACKAGE, "rm", "-f",
+                    "files/video-stress.json", "files/video-stress.ivf",
+                    *[f"files/video-stress-{index}.ivf" for index in range(8)]], timeout=10, check=False)
+
+
+if __name__ == "__main__":
+    def interrupted(_signal, _frame):
+        raise KeyboardInterrupt
+    for shutdown_signal in (signal.SIGTERM, signal.SIGHUP):
+        signal.signal(shutdown_signal, interrupted)
+    try:
+        main()
+    except (OSError, RuntimeError, subprocess.SubprocessError, KeyboardInterrupt) as error:
+        print(f"Stress test stopped: {error}", file=sys.stderr)
+        sys.exit(1)

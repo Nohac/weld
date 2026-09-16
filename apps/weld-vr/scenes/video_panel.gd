@@ -40,7 +40,7 @@ func connect_source() -> void:
 	_start(true)
 
 
-func _start(network: bool, single_frame: bool = false) -> void:
+func _start(network: bool, single_frame: bool = false, stress_path: String = "", stress_seconds: int = 15, stress_smooth: bool = false) -> void:
 	waiting_message = ""
 	stop()
 	if Engine.is_editor_hint() or DisplayServer.get_name() == "headless":
@@ -80,7 +80,9 @@ void fragment() {
 		if started:
 			_log_refresh(refresh, rate)
 	else:
-		if single_frame:
+		if not stress_path.is_empty():
+			started = player.start_stress(video_texture, video_material, stress_path, stress_seconds, stress_smooth)
+		elif single_frame:
 			started = player.start_single_frame(video_texture, video_material)
 		else:
 			started = player.start(video_texture, video_material)

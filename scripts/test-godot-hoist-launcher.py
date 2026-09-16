@@ -10,6 +10,15 @@ API = runpy.run_path(str(Path(__file__).with_name("run-godot-hoist")))
 
 
 class PairingTests(unittest.TestCase):
+    def test_blender_exercise_is_explicit_and_does_not_load_user_startup(self):
+        script = Path(__file__).resolve()
+        args = API["parse_arguments"](["--app", "blender", "--blender-script", str(script)])
+        self.assertEqual(API["app_command"](args),
+                         ["blender", "--factory-startup", "--python", str(script)])
+        self.assertEqual(API["app_command"](API["parse_arguments"](["--app", "blender"])), ["blender"])
+        with self.assertRaises(SystemExit):
+            API["parse_arguments"](["--blender-script", str(script)])
+
     def test_demo_bitrate_is_shared_explicit_and_defaults_to_sixteen(self):
         self.assertEqual(API["parse_arguments"]([]).bitrate_mbps, 16)
         self.assertEqual(API["parse_arguments"](["--bitrate-mbps", "24"]).bitrate_mbps, 24)

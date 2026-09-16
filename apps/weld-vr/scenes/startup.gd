@@ -6,6 +6,10 @@ const XR_SCENE = preload("res://scenes/xr.tscn")
 
 
 func _ready() -> void:
+	# One-shot local diagnostic, installed only by the explicit stress runner.
+	if FileAccess.file_exists("user://video-stress.json"):
+		add_child(load("res://scenes/diagnostics/video_stress.tscn").instantiate())
+		return
 	var interface := XRServer.find_interface("OpenXR")
 	if interface != null and interface.is_initialized():
 		print("WELD_XR OpenXR initialized; selecting spatial presentation")
