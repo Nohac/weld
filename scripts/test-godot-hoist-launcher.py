@@ -10,6 +10,22 @@ API = runpy.run_path(str(Path(__file__).with_name("run-godot-hoist")))
 
 
 class PairingTests(unittest.TestCase):
+    def test_half_rate_is_explicit_and_normal_launch_clears_pending_test(self):
+        self.assertFalse(API["parse_arguments"]([]).half_rate)
+        self.assertTrue(API["parse_arguments"](["--half-rate"]).half_rate)
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            marker = directory / API["HALF_RATE_MARKER"]
+            API["prepare_cadence_test"](True, directory=directory)
+            self.assertTrue(marker.exists())
+            API["prepare_cadence_test"](False, directory=directory)
+            self.assertFalse(marker.exists())
+        with patch.object(API["subprocess"], "run") as run:
+            API["prepare_cadence_test"](True, adb=["adb", "-s", "pico"])
+            self.assertEqual(run.call_args.args[0][-2:], ["touch", "files/weld-device/diagnostic-half-rate"])
+            API["prepare_cadence_test"](False, adb=["adb", "-s", "pico"])
+            self.assertEqual(run.call_args.args[0][-3:], ["rm", "-f", "files/weld-device/diagnostic-half-rate"])
+
     def test_blender_exercise_is_explicit_and_does_not_load_user_startup(self):
         script = Path(__file__).resolve()
         args = API["parse_arguments"](["--app", "blender", "--blender-script", str(script)])

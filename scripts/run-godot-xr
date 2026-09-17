@@ -175,6 +175,7 @@ def main(argv=None):
     parser.add_argument("--adb", default=os.environ.get("ADB", "adb"), help="shared ADB executable (default: ADB or PATH)")
     parser.add_argument("--app", choices=("blender", "foot"), default="blender")
     parser.add_argument("--seconds", type=seconds, default=180)
+    parser.add_argument("--half-rate", action="store_true", help="test half-rate streaming without changing XR refresh")
     parser.add_argument("--bitrate-mbps", type=int, choices=(8, 16, 24), default=16,
                         help="shared AV1 encoder target across windows (default: 16 Mbps)")
     args = parser.parse_args(argv)
@@ -214,6 +215,8 @@ def workflow(args, adb, serial, environment):
     command = ["systemd-run", "--user", "--scope", "--quiet", "-p", "MemoryMax=12G", "-p", "MemorySwapMax=0",
                str(ROOT / "scripts/run-godot-hoist"), "--serial", serial, "--app", args.app, "--seconds", str(args.seconds),
                "--bitrate-mbps", str(args.bitrate_mbps)]
+    if args.half_rate:
+        command.append("--half-rate")
     return launch_demo(command, environment)
 
 

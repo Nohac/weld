@@ -7,6 +7,7 @@ use crate::presentation::{ConfigureSizing, XrPreferences};
 use anyhow::{Context, Result, ensure};
 use godot::{classes::Object, prelude::*};
 use std::cell::RefCell;
+use std::io::ErrorKind;
 use std::{
     collections::{BTreeMap, HashMap},
     path::PathBuf,
@@ -53,8 +54,17 @@ pub(crate) struct Inventory {
     next_id: u64,
     surfaces: BTreeMap<ClientSurfaceId, Surface>,
     presentation_rate: Option<PresentationRate>,
+    /// Diagnostic source cadence only; local queue age still follows the display.
+    half_rate: bool,
 }
 impl Inventory {
+    fn requested_rate(&self, display: PresentationRate) -> PresentationRate {
+        if self.half_rate {
+            PresentationRate::try_from((display.millihertz() / 2).max(1_000)).unwrap_or(display)
+        } else {
+            display
+        }
+    }
     fn id(&mut self) -> Result<u64> {
         self.next_id = self
             .next_id
@@ -83,11 +93,17 @@ impl Inventory {
             return Vec::new();
         }
         self.presentation_rate = Some(rate);
+        let requested = self.requested_rate(rate);
+        tracing::debug!(target: "weld_vr_diag", display_millihertz = rate.millihertz(),
+            requested_millihertz = requested.millihertz(), half_rate = self.half_rate,
+            "stream cadence preference");
         self.surfaces
             .keys()
             .map(|surface| ClientSurfaceRequest {
                 surface: *surface,
-                kind: ClientSurfaceRequestKind::SetPresentation { rate: Some(rate) },
+                kind: ClientSurfaceRequestKind::SetPresentation {
+                    rate: Some(requested),
+                },
             })
             .collect()
     }
@@ -124,7 +140,9 @@ impl Inventory {
                     requests.push(ClientSurfaceRequest {
                         surface: surface_id,
                         kind: ClientSurfaceRequestKind::SetPresentation {
-                            rate: Some(self.presentation_rate.unwrap_or(PresentationRate::HZ_60)),
+                            rate: Some(self.requested_rate(
+                                self.presentation_rate.unwrap_or(PresentationRate::HZ_60),
+                            )),
                         },
                     });
                 }
@@ -469,10 +487,20 @@ impl Session {
         rate: PresentationRate,
         sizing: Option<XrPreferences>,
     ) -> Result<Self> {
+        // One-shot private development marker, written by run-godot-hoist.
+        // Consume it before connecting; an ordinary subsequent launch stays full-rate.
+        let half_rate = match std::fs::remove_file(directory.join("diagnostic-half-rate")) {
+            Ok(()) => true,
+            Err(error) if error.kind() == ErrorKind::NotFound => false,
+            Err(error) => return Err(error).context("consume half-rate diagnostic marker"),
+        };
         let shared = Arc::new(Shared::default());
         *lock(&shared.session.presentation_rate) = Some(rate);
         let bootstrap = Controller::open(texture, material, shared.clone())?;
-        let inventory = Arc::new(Mutex::new(Inventory::default()));
+        let inventory = Arc::new(Mutex::new(Inventory {
+            half_rate,
+            ..Inventory::default()
+        }));
         let state = inventory.clone();
         let worker = thread::Builder::new()
             .name("weld-receiver".into())
@@ -615,6 +643,47 @@ mod tests {
                 None,
             )
             .expect("surface update");
+    }
+    #[test]
+    fn half_rate_only_changes_source_requests_and_survives_reconnect() {
+        let shared = Shared::default();
+        let mut inventory = Inventory {
+            half_rate: true,
+            ..Inventory::default()
+        };
+        for display in [90_000, 120_000, 59_940] {
+            let rate = PresentationRate::try_from(display).expect("display rate");
+            inventory.set_presentation_rate(rate);
+            let requests = inventory
+                .apply(
+                    ClientSurfaceEvent {
+                        surface: id(1),
+                        kind: ClientSurfaceEventKind::Role(top(None)),
+                    },
+                    &shared,
+                    None,
+                )
+                .expect("new window");
+            assert_eq!(
+                requests[0].kind,
+                ClientSurfaceRequestKind::SetPresentation {
+                    rate: Some(PresentationRate::try_from(display / 2).expect("half rate")),
+                }
+            );
+            assert_eq!(
+                inventory.presentation_rate,
+                Some(rate),
+                "queue interval stays at display rate"
+            );
+            let changed = inventory.set_presentation_rate(PresentationRate::HZ_60);
+            assert_eq!(
+                changed[0].kind,
+                ClientSurfaceRequestKind::SetPresentation {
+                    rate: Some(PresentationRate::try_from(30_000).expect("half rate")),
+                }
+            );
+            inventory.clear();
+        }
     }
     #[test]
     fn live_refresh_changes_coalesce_and_only_target_surviving_surfaces() {

@@ -347,7 +347,33 @@ roughly 10 ms more decoded-frame selection age with smoothing. These are
 bounded observations, not hardware capacity guarantees or end-to-end latency.
 These measurements used the extension's standalone, unoptimized Cargo dev
 profile. It does not inherit the main Weld workspace's opt-level 1 / optimized
-dependency profile; optimized-extension comparisons are still pending.
+dependency profile. The extension and its Rust dependencies now use dev
+opt-level 3, retaining debug assertions and limited debug information for
+`weld-vr`, but no dependency debug information. Linux/Android builds and physical
+Pico playback passed; optimization did not eliminate frame replacements.
+
+For an opt-in half-rate live comparison, keeping the same bitrate:
+
+```sh
+scripts/run-godot-xr --half-rate --bitrate-mbps 16
+# Full-rate comparison:
+scripts/run-godot-xr --bitrate-mbps 16
+```
+
+The lower-level `run-godot-hoist` launcher also accepts `--half-rate` when the
+current APK is already installed. It writes a private, one-shot diagnostic
+marker consumed by the receiver at session startup. Only the outgoing source
+cadence preference is halved; XR refresh, input processing, queue capacity and
+the local frame-age limit remain unchanged. New windows, refresh changes and
+connection retries keep that session's policy. An ordinary launch defaults to
+full rate.
+
+On 2026-09-17, logs confirmed 45 fps AV1 encoder configuration with the Pico
+still presenting at 90 Hz. The user reported substantially fewer replacements
+than at full rate, but a late period of lag spikes coinciding with increased
+network RTT. This is an observed correlation, not a confirmed cause or a
+controlled latency comparison. Catch-up scheduling remains deferred; this
+experiment does not add buffering or change frame-discard policy.
 
 For a repeatable live motion and window-lifecycle exercise:
 
@@ -361,7 +387,7 @@ Preferences, and stops motion without saving user files. The Pico still emits
 Godot GLES texture-cleanup errors when the secondary native window closes;
 the same errors reproduced with latest-only presentation. They remain a
 separate unresolved lifecycle issue. Display-aligned pacing, an adaptive
-delay and below-refresh source cadence remain future experiments.
+delay and explicit catch-up scheduling remain future experiments.
 
 ### Earlier validation
 

@@ -39,8 +39,12 @@ pkg-config = "0.3"
 cros-libva = { path = "../../../vendor/cros-libva" }
 
 [profile.dev]
+opt-level = 3
 debug = 1
 incremental = false
+
+[profile.dev.package."*"]
+debug = 0
 
 [lints.rust]
 unsafe_op_in_unsafe_fn = "deny"

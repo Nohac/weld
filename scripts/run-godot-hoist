@@ -21,6 +21,23 @@ LAUNCHER = runpy.run_path(str(ROOT / "scripts/run-headless-iroh-hoist"))
 PACKAGE = "com.example.weldvr"
 LogCapture = runpy.run_path(str(ROOT / "scripts/godot-log-capture.py"))["LogCapture"]
 APP_DIRECTORY = "files/weld-device"
+HALF_RATE_MARKER = "diagnostic-half-rate"
+
+
+def prepare_cadence_test(half_rate, directory=None, adb=None):
+    # Consumed once by the receiver, not a persistent pairing/preference change.
+    if adb is not None:
+        subprocess.run([*adb, "shell", "run-as", PACKAGE, "mkdir", "-p", APP_DIRECTORY],
+                       check=True, timeout=5)
+        operation = ["touch"] if half_rate else ["rm", "-f"]
+        subprocess.run([*adb, "shell", "run-as", PACKAGE, *operation,
+                        f"{APP_DIRECTORY}/{HALF_RATE_MARKER}"], check=True, timeout=5)
+    else:
+        marker = directory / HALF_RATE_MARKER
+        if half_rate:
+            marker.touch(mode=0o600)
+        else:
+            marker.unlink(missing_ok=True)
 
 
 def identity(text):
@@ -100,6 +117,8 @@ def parse_arguments(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--serial", help="ADB serial; otherwise requires exactly one authorized device")
     parser.add_argument("--desktop", action="store_true", help="run the same Godot viewer on this laptop")
+    parser.add_argument("--half-rate", action="store_true",
+                        help="diagnostic: request half the display rate; keep XR and receiver buffering unchanged")
     parser.add_argument("--state-dir", type=Path, help="private persistent device state, not a build directory")
     parser.add_argument("--seconds", type=LAUNCHER["positive_seconds"], default=120)
     parser.add_argument("--restart-after", type=LAUNCHER["positive_seconds"],
@@ -157,6 +176,7 @@ def main(argv=None):
         subprocess.run([*adb, "shell", "run-as", PACKAGE, "pwd"], check=True, stdout=subprocess.DEVNULL, timeout=5)
     print("Live AV1 window hierarchy; receiver limits are eight surfaces/layers and 32 in-flight images.", flush=True)
     print(f"Shared AV1 bitrate target: {args.bitrate_mbps} Mbps (not a bandwidth cap).", flush=True)
+    print(f"Stream cadence: {'half' if args.half_rate else 'full'} display rate; local presentation unchanged.", flush=True)
     print("Iroh N0 contacts Internet discovery/relay services; existing desktop apps and host routes are unchanged.", flush=True)
     if not args.desktop:
         print("Android development viewer uses public DNS (Google plus Iroh public fallbacks), not system/Private DNS.", flush=True)
@@ -176,7 +196,8 @@ def main(argv=None):
     phone_pid = None
     capture = None
     (run / "run.json").write_text(json.dumps({"started_at": time.time(), "desktop": args.desktop,
-        "bitrate_mbps": args.bitrate_mbps, "log_capture": "desktop" if args.desktop else "full-run-filtered",
+        "bitrate_mbps": args.bitrate_mbps, "half_rate": args.half_rate,
+        "log_capture": "desktop" if args.desktop else "full-run-filtered",
         "clock_note": "Cross-device wall clocks are approximate; timings are local, not one-way latency."}) + "\n")
 
     def stop(_signal, _frame):
@@ -239,6 +260,7 @@ def main(argv=None):
             temporary = receiver_directory / f"profile-{os.getpid()}.pending"
             write_new(temporary, profile)
             temporary.replace(profile_path)
+            prepare_cadence_test(args.half_rate, directory=receiver_directory)
             environment = {**diagnostic_environment(), "WELD_VR_DEVICE_DIR": str(receiver_directory)}
             hosts.append(LAUNCHER["OwnedHost"]("viewer",
                 ["godot", "--path", str(ROOT / "apps/weld-vr"), "--display-driver", "wayland", "--rendering-driver", "opengl3_es"],
@@ -250,6 +272,7 @@ def main(argv=None):
             check_existing(existing, profile)
             # A fresh app process reads one pinned profile. Stop only this test app.
             subprocess.run([*adb, "shell", "am", "force-stop", PACKAGE], check=True, timeout=5)
+            prepare_cadence_test(args.half_rate, adb=adb)
             capture = LogCapture(adb, run / "viewer.log")
             if existing is not None:
                 phone_install(profile)
