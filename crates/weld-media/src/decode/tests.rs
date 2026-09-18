@@ -23,6 +23,8 @@ type FakeCompletion = DecodeCompletion<()>;
 
 #[derive(Default)]
 struct State {
+    cooperative: bool,
+    polls: usize,
     created: usize,
     started: Vec<(u64, MediaStreamId, ThreadId)>,
     released: HashSet<u64>,
@@ -73,7 +75,18 @@ impl DecodeProcessor for FakeProcessor {
             .push_back((request.token, state.fail_tokens.contains(&request.token)));
     }
 
-    fn complete(&mut self) -> Result<Vec<()>> {
+    fn poll(&mut self) -> Result<Poll<Vec<()>>> {
+        {
+            let mut state = self.control.state.lock().expect("state");
+            if state.cooperative {
+                state.polls += 1;
+                self.control.changed.notify_all();
+                let (token, _) = self.pending.front().expect("pending frame");
+                if !state.release_all && !state.released.contains(token) {
+                    return Ok(Poll::Pending);
+                }
+            }
+        }
         let (token, failed) = self.pending.pop_front().expect("pending fake frame");
         let mut state = self.control.state.lock().expect("state");
         state.steps.push(("finish", token));
@@ -91,7 +104,7 @@ impl DecodeProcessor for FakeProcessor {
         );
         drop(state);
         ensure!(!failed, "fake submit failed");
-        Ok(Vec::new())
+        Ok(Poll::Ready(Vec::new()))
     }
 
     fn retire(&mut self, stream: MediaStreamId, generation: StreamGeneration) {
@@ -121,6 +134,15 @@ struct Fixture {
 }
 
 impl Fixture {
+    fn polled(&self, count: usize) {
+        let state = self.control.state.lock().expect("state");
+        let (_state, timeout) = self
+            .control
+            .changed
+            .wait_timeout_while(state, Duration::from_secs(2), |state| state.polls < count)
+            .expect("poll gate");
+        assert!(!timeout.timed_out(), "pending job was not polled");
+    }
     fn new(limits: DecodePoolLimits) -> Self {
         let control = Arc::new(Control::default());
         let factory_control = control.clone();
@@ -223,6 +245,99 @@ impl Fixture {
             }
         }
     }
+}
+
+#[test]
+fn pending_head_allows_later_submission_and_keeps_first_poll_timing() {
+    let mut fixture = Fixture::new(DecodePoolLimits::try_new(1, 2, 1, 2).expect("limits"));
+    fixture.control.state.lock().expect("state").cooperative = true;
+    fixture.pool.try_decode(request(1, 1, 1)).expect("head");
+    fixture.polled(3);
+    let second_submitted = Instant::now();
+    fixture.pool.try_decode(request(2, 1, 1)).expect("next");
+    fixture.started(2);
+    assert!(
+        fixture
+            .control
+            .state
+            .lock()
+            .expect("state")
+            .steps
+            .iter()
+            .all(|(step, _)| *step == "submit")
+    );
+    fixture.release(&[1, 2]);
+    let completed = fixture.take(2);
+    assert_eq!(
+        completed.iter().map(|c| c.token).collect::<Vec<_>>(),
+        vec![1, 2]
+    );
+    assert!(
+        completed[0]
+            .timing
+            .expect("timing")
+            .pipeline
+            .expect("pipeline")
+            .finishing_at
+            < second_submitted
+    );
+    assert!(
+        completed[1]
+            .timing
+            .expect("timing")
+            .pipeline
+            .expect("pipeline")
+            .had_pending_frame
+    );
+}
+
+#[test]
+fn mid_poll_retirement_services_other_generation_but_not_pending_head() {
+    let mut fixture = Fixture::new(DecodePoolLimits::try_new(1, 2, 2, 2).expect("limits"));
+    fixture.control.state.lock().expect("state").cooperative = true;
+    fixture.release(&[1]);
+    fixture.pool.try_decode(request(1, 1, 1)).expect("old");
+    fixture.take(1);
+    fixture
+        .pool
+        .try_decode(request(2, 1, 2))
+        .expect("pending generation");
+    fixture.polled(3);
+    fixture
+        .pool
+        .retire(key(1, 1).0, key(1, 1).1)
+        .expect("old retirement");
+    fixture
+        .pool
+        .retire(key(1, 2).0, key(1, 2).1)
+        .expect("pending retirement");
+    fixture.retire_to(1);
+    assert_eq!(
+        fixture.control.state.lock().expect("state").retired,
+        vec![key(1, 1)]
+    );
+    fixture.release(&[2]);
+    fixture.take(1);
+    fixture.retire_to(0);
+}
+
+#[test]
+fn channel_shutdown_abandons_pending_head_without_a_future_frame() {
+    let mut fixture = Fixture::new(DecodePoolLimits::try_new(1, 2, 1, 2).expect("limits"));
+    fixture.control.state.lock().expect("state").cooperative = true;
+    fixture.pool.try_decode(request(1, 1, 1)).expect("head");
+    fixture.polled(3);
+    // Same channel closure as DecodePool::drop, without Fixture's release gate.
+    fixture.pool.workers[0].commands.take();
+    fixture.pool.workers[0]
+        .thread
+        .take()
+        .expect("worker")
+        .join()
+        .expect("join");
+    let state = fixture.control.state.lock().expect("state");
+    assert!(state.native.is_empty());
+    assert!(state.steps.iter().all(|(step, _)| *step != "finish"));
 }
 
 impl Drop for Fixture {

@@ -5,6 +5,7 @@ use ffmpeg_next::{Dictionary, Error, Packet, codec, ffi, format, frame};
 use ndk::native_window::NativeWindow;
 use weld_media::VideoCodec;
 
+use crate::image::Acquisition;
 use crate::{AndroidImage, AndroidImageTarget, DecoderConfig};
 
 unsafe extern "C" {
@@ -24,6 +25,7 @@ impl Drop for Device {
 /// Native context stays on its creating worker. Constructor consumes a fresh
 /// target, preventing two decoders from connecting to the same window.
 pub struct AndroidDecoder {
+    awaiting: Option<Acquisition>,
     decoder: Option<codec::decoder::Video>,
     device: Option<Device>,
     window: Option<NativeWindow>,
@@ -32,6 +34,7 @@ pub struct AndroidDecoder {
 
 impl Drop for AndroidDecoder {
     fn drop(&mut self) {
+        drop(self.awaiting.take());
         drop(self.decoder.take());
         drop(self.device.take());
         drop(self.window.take());
@@ -83,6 +86,7 @@ impl AndroidDecoder {
             codec::decoder::find_by_name(name).context("FFmpeg MediaCodec decoder missing")?;
         let window = target.window()?;
         let mut session = Self {
+            awaiting: None,
             decoder: None,
             device: None,
             window: Some(window),
@@ -176,10 +180,14 @@ impl AndroidDecoder {
         accepted(self.decoder()?.send_eof())
     }
 
-    /// Receive one ready output. Native calls and producer readiness may block;
-    /// call only on a codec worker. `cancelled` interrupts image polling, not a
-    /// driver call already executing. No later submission is required to poll.
+    /// Advance one output without waiting for ImageReader or its acquire fence.
+    /// Pending keeps the rendered output and original deadlines. FFmpeg/driver
+    /// calls can still block internally; call only on a codec worker.
     pub fn receive(&mut self, cancelled: impl Fn() -> bool) -> Result<DecodeProgress> {
+        ensure!(!cancelled(), "decode cancelled while acquiring image");
+        if self.awaiting.is_some() {
+            return self.acquire_pending();
+        }
         let mut frame = frame::Video::empty();
         match self.decoder()?.receive_frame(&mut frame) {
             Ok(()) => {
@@ -191,13 +199,23 @@ impl AndroidDecoder {
                 // SAFETY: live opaque frame, not previously rendered. FFmpeg
                 // marks its output index released, so frame drop will not repeat it.
                 check(unsafe { weld_mediacodec_render_frame(frame.as_mut_ptr()) })?;
-                Ok(DecodeProgress::Image(
-                    self.target.acquire(timestamp, cancelled)?,
-                ))
+                self.awaiting = Some(Acquisition::new(timestamp));
+                self.acquire_pending()
             }
             Err(Error::Other { errno }) if errno == libc::EAGAIN => Ok(DecodeProgress::Pending),
             Err(Error::Eof) => Ok(DecodeProgress::End),
             Err(error) => Err(error.into()),
+        }
+    }
+
+    fn acquire_pending(&mut self) -> Result<DecodeProgress> {
+        let waiting = self.awaiting.as_mut().context("rendered output missing")?;
+        match self.target.try_acquire(waiting)? {
+            Some(image) => {
+                self.awaiting = None;
+                Ok(DecodeProgress::Image(image))
+            }
+            None => Ok(DecodeProgress::Pending),
         }
     }
 }

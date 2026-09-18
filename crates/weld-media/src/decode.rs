@@ -9,10 +9,11 @@ use std::{
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
-        mpsc::{self, Receiver, Sender, SyncSender, TryRecvError, TrySendError},
+        mpsc::{self, Receiver, RecvTimeoutError, Sender, SyncSender, TryRecvError, TrySendError},
     },
+    task::Poll,
     thread::{self, JoinHandle},
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 use anyhow::{Context, Result, ensure};
@@ -151,17 +152,18 @@ pub trait DecodeProcessor: 'static {
     type Output: Send + 'static;
 
     /// Occupy one FIFO slot, including on submission failure. The pool calls
-    /// [`Self::complete`] exactly once for each slot unless shutdown or a panic
-    /// aborts it.
+    /// [`Self::poll`] until that slot returns Ready or Err, unless shutdown or a
+    /// panic aborts it. Partial native ownership must survive Pending.
     fn submit(&mut self, request: Self::Request);
-    /// Finish the oldest submitted job, returning zero or more outputs.
+    /// Advance the oldest submitted job, returning zero or more outputs once ready.
     ///
-    /// May block, but must finish in bounded time without needing a future submit.
-    /// The pool never polls an idle processor: retaining output past the final
-    /// job until another input arrives would strand an idle stream. This is a
-    /// low-delay execution contract, not support for arbitrary buffered codecs.
-    /// Hardware calls that hang cannot be cancelled by this pool.
-    fn complete(&mut self) -> Result<Vec<Self::Output>>;
+    /// Pending retains the slot, accepted-input state and original deadlines;
+    /// it permits the worker to submit more input before polling again. Exactly
+    /// one Ready or Err consumes each slot. No future input may be required to
+    /// finish the final job. Polling stops entirely when no work is pending.
+    /// Backends should yield rather than wait; synchronous native backends may
+    /// still block inside a driver call, which this pool cannot cancel.
+    fn poll(&mut self) -> Result<Poll<Vec<Self::Output>>>;
     /// Release this generation only after all its jobs have completed and been
     /// drained by the caller. Must not invalidate previously returned outputs.
     fn retire(&mut self, stream: MediaStreamId, generation: StreamGeneration);
@@ -532,10 +534,13 @@ fn worker_loop<P: DecodeProcessor>(
     let mut processor = factory().context("could not initialize decoder worker")?;
     let mut pending = VecDeque::new();
     let mut closed = false;
+    let mut received = None;
     loop {
         apply_retirements(index, &mut processor, retirements, events, notify)?;
         while pending.len() < depth && !closed {
-            let command = if pending.is_empty() {
+            let command = if let Some(command) = received.take() {
+                Some(command)
+            } else if pending.is_empty() {
                 commands.recv().ok()
             } else {
                 match commands.try_recv() {
@@ -567,6 +572,7 @@ fn worker_loop<P: DecodeProcessor>(
                             finishing_at: started_at,
                             had_pending_frame: !pending.is_empty(),
                         },
+                        false,
                     ));
                 }
             }
@@ -576,9 +582,39 @@ fn worker_loop<P: DecodeProcessor>(
         if closed {
             return Ok(());
         }
-        if let Some((token, queued_at, started_at, mut pipeline)) = pending.pop_front() {
-            pipeline.finishing_at = Instant::now();
-            let result = processor.complete();
+        if let Some((_, _, _, pipeline, polled)) = pending.front_mut() {
+            if !*polled {
+                pipeline.finishing_at = Instant::now();
+                *polled = true;
+            }
+            let result = match processor.poll() {
+                Ok(Poll::Ready(outputs)) => Ok(outputs),
+                Err(error) => Err(error),
+                Ok(Poll::Pending) => {
+                    // New work wakes this wait immediately. Only an active
+                    // native job needs the fallback poll; idle workers recv().
+                    match commands.recv_timeout(Duration::from_millis(1)) {
+                        Ok(Command::Wake) => {
+                            retirements.wake_queued.store(false, Ordering::SeqCst);
+                            apply_retirements(index, &mut processor, retirements, events, notify)?;
+                            notify();
+                        }
+                        Ok(command) => {
+                            ensure!(
+                                pending.len() < depth,
+                                "decode pipeline admission exceeded depth"
+                            );
+                            received = Some(command);
+                        }
+                        Err(RecvTimeoutError::Timeout) => {}
+                        Err(RecvTimeoutError::Disconnected) => return Ok(()),
+                    }
+                    continue;
+                }
+            };
+            let (token, queued_at, started_at, pipeline, _) = pending
+                .pop_front()
+                .context("polled decoder slot disappeared")?;
             let completed_at = Instant::now();
             if events
                 .send(Event::Decoded(

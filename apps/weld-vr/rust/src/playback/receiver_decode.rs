@@ -9,6 +9,7 @@ use anyhow::{Context, Result, ensure};
 use std::{
     collections::{HashMap, HashSet, VecDeque},
     sync::{Arc, atomic::Ordering},
+    task::Poll,
     thread,
     time::{Duration, Instant},
 };
@@ -156,6 +157,11 @@ struct Stream {
 struct Submitted {
     job: Job,
     accepted: bool,
+    deadline: Option<Instant>,
+}
+
+fn completion_deadline(deadline: &mut Option<Instant>, now: Instant) -> Instant {
+    *deadline.get_or_insert(now + Duration::from_secs(3))
 }
 struct Processor {
     target: native::Target,
@@ -164,7 +170,7 @@ struct Processor {
     pending: VecDeque<Result<Submitted>>,
 }
 impl Processor {
-    fn submit_native(&mut self, job: Job) -> Result<Submitted> {
+    fn prepare_stream(&mut self, job: &Job) -> Result<&mut Stream> {
         let request = &job.request;
         let frame = request.access_unit.frame;
         let key = (frame.stream, frame.generation);
@@ -186,10 +192,33 @@ impl Processor {
             stream.extent == extent && stream.codec == codec,
             "codec/extent changed within one generation"
         );
-        let accepted = stream
-            .decoder
-            .try_send(&request.access_unit.payload, frame.sequence)?;
-        Ok(Submitted { job, accepted })
+        Ok(stream)
+    }
+
+    fn submit_native(&mut self, job: Job) -> Result<Submitted> {
+        let frame = job.request.access_unit.frame;
+        let key = (frame.stream, frame.generation);
+        // Context creation can be slow. Do it only when this job reaches the
+        // head, never while an older job's completion deadline is running.
+        // Likewise, a later packet may not pass an unaccepted earlier packet.
+        let blocked = self.pending.iter().any(|pending| {
+            pending.as_ref().is_ok_and(|pending| {
+                let earlier = pending.job.request.access_unit.frame;
+                (earlier.stream, earlier.generation) == key && !pending.accepted
+            })
+        });
+        let accepted = if !blocked && self.decoders.contains_key(&key) {
+            self.prepare_stream(&job)?
+                .decoder
+                .try_send(&job.request.access_unit.payload, frame.sequence)?
+        } else {
+            false
+        };
+        Ok(Submitted {
+            job,
+            accepted,
+            deadline: None,
+        })
     }
 }
 impl DecodeProcessor for Processor {
@@ -199,50 +228,48 @@ impl DecodeProcessor for Processor {
         let result = self.submit_native(request);
         self.pending.push_back(result);
     }
-    fn complete(&mut self) -> Result<Vec<Self::Output>> {
-        let Submitted { job, mut accepted } = self
+    fn poll(&mut self) -> Result<Poll<Vec<Self::Output>>> {
+        let mut submitted = self
             .pending
             .pop_front()
             .context("missing submitted decode")??;
-        let Job { request, credit } = job;
+        let shared = self.shared.clone();
+        ensure!(
+            !shared.session.cancelled.load(Ordering::Acquire),
+            "decode cancelled"
+        );
+        let decoder = &mut self.prepare_stream(&submitted.job)?.decoder;
+        let deadline = completion_deadline(&mut submitted.deadline, Instant::now());
+        ensure!(
+            Instant::now() < deadline,
+            "decoder did not produce a low-delay frame within 3s"
+        );
+        let request = &submitted.job.request;
         let frame = request.access_unit.frame;
-        let decoder = &mut self
-            .decoders
-            .get_mut(&(frame.stream, frame.generation))
-            .context("missing decoder generation")?
-            .decoder;
-        let deadline = Instant::now() + Duration::from_secs(3);
-        loop {
-            ensure!(
-                !self.shared.session.cancelled.load(Ordering::Acquire),
-                "decode cancelled"
-            );
-            ensure!(
-                Instant::now() < deadline,
-                "decoder did not produce a low-delay frame within 3s; this device/stream is unsupported by this tracer"
-            );
-            if !accepted {
-                accepted = decoder.try_send(&request.access_unit.payload, frame.sequence)?;
+        if !submitted.accepted {
+            submitted.accepted = decoder.try_send(&request.access_unit.payload, frame.sequence)?;
+        }
+        match decoder.receive(|| shared.session.cancelled.load(Ordering::Acquire))? {
+            Progress::Pending => {
+                self.pending.push_front(Ok(submitted));
+                Ok(Poll::Pending)
             }
-            match decoder.receive(|| self.shared.session.cancelled.load(Ordering::Acquire))? {
-                Progress::Pending => thread::sleep(Duration::from_millis(1)),
-                Progress::End => anyhow::bail!("unexpected decoder end during live stream"),
-                Progress::Image(image) => {
-                    ensure!(
-                        accepted && image.timestamp_micros() == frame.sequence,
-                        "decoded output belongs to another frame"
-                    );
-                    let output = Frame {
-                        image,
-                        visible: [request.visible_width, request.visible_height],
-                        credit: Some(credit),
-                    };
-                    output.crop(None)?;
-                    return Ok(vec![DecodedFrame {
-                        frame,
-                        buffer: output,
-                    }]);
-                }
+            Progress::End => anyhow::bail!("unexpected decoder end during live stream"),
+            Progress::Image(image) => {
+                ensure!(
+                    submitted.accepted && image.timestamp_micros() == frame.sequence,
+                    "decoded output belongs to another frame"
+                );
+                let output = Frame {
+                    image,
+                    visible: [request.visible_width, request.visible_height],
+                    credit: Some(submitted.job.credit),
+                };
+                output.crop(None)?;
+                Ok(Poll::Ready(vec![DecodedFrame {
+                    frame,
+                    buffer: output,
+                }]))
             }
         }
     }
@@ -254,6 +281,19 @@ impl DecodeProcessor for Processor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn pending_polls_never_extend_the_original_completion_deadline() {
+        let start = Instant::now();
+        let mut deadline = None;
+        assert_eq!(
+            completion_deadline(&mut deadline, start),
+            start + Duration::from_secs(3)
+        );
+        assert_eq!(
+            completion_deadline(&mut deadline, start + Duration::from_secs(4)),
+            start + Duration::from_secs(3)
+        );
+    }
     #[test]
     fn tracer_rejects_unbounded_native_allocations() {
         assert!(supported_extent(1280, 833));

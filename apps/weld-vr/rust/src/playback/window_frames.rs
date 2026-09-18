@@ -4,7 +4,10 @@ use super::observations::{Discard, micros};
 use super::{Shared, frame::Frame, input, lock, mailbox::Mailbox, session::Pane};
 use std::{
     collections::BTreeMap,
-    sync::{Arc, Mutex, Weak, atomic::Ordering},
+    sync::{
+        Arc, Mutex, Weak,
+        atomic::{AtomicU64, Ordering},
+    },
     time::{Duration, Instant},
 };
 use weld_client::{InputPosition, SurfaceContentView, SurfaceLayerId};
@@ -71,10 +74,89 @@ struct Layout {
     layers: Vec<LayerLayout>,
 }
 
-type Snapshot = Vec<(Arc<Shared>, LayerContent)>;
+type Snapshot = Vec<(Arc<Shared>, LayerContent, u64)>;
+
+struct SelectedSnapshot {
+    epoch: u64,
+    entries: Snapshot,
+    age: Duration,
+}
+
+/// Bounded ownership handoff, not shared window inventory. Selection belongs to
+/// the display thread. No queue lock may span publication or native/Godot work.
+pub(crate) struct WindowChannel {
+    epoch: AtomicU64,
+    pending: Mutex<Mailbox<(u64, Snapshot)>>,
+}
+impl Default for WindowChannel {
+    fn default() -> Self {
+        Self {
+            epoch: AtomicU64::new(0),
+            pending: Mutex::new(Mailbox::smoothing(Duration::from_nanos(1_000_000_000 / 60))),
+        }
+    }
+}
+impl WindowChannel {
+    pub fn epoch(&self) -> u64 {
+        self.epoch.load(Ordering::Acquire)
+    }
+
+    fn invalidate(&self, reason: Discard) {
+        let discarded = {
+            let mut pending = lock(&self.pending);
+            self.epoch.fetch_add(1, Ordering::AcqRel);
+            pending.drain().collect::<Vec<_>>()
+        };
+        for (_, snapshot) in discarded {
+            discard(snapshot, reason);
+        }
+    }
+
+    pub fn present(&self, expected_epoch: u64, now: Instant) {
+        if let Some(selected) = self.select(expected_epoch, now) {
+            self.publish(selected);
+        }
+    }
+
+    fn select(&self, expected_epoch: u64, now: Instant) -> Option<SelectedSnapshot> {
+        let (snapshot, age, expired) = {
+            let mut pending = lock(&self.pending);
+            if self.epoch() != expected_epoch {
+                return None;
+            }
+            pending.pop(now)
+        };
+        if let Some((_, snapshot)) = expired {
+            discard(snapshot, Discard::Stale);
+        }
+        snapshot.map(|(epoch, entries)| SelectedSnapshot {
+            epoch,
+            entries,
+            age,
+        })
+    }
+
+    fn publish(&self, selected: SelectedSnapshot) {
+        if self.epoch() != selected.epoch {
+            discard(selected.entries, Discard::Lifecycle);
+            return;
+        }
+        if let Some((shared, _, _)) = selected.entries.first() {
+            shared.session.observations.selected(selected.age);
+        }
+        for (shared, content, layer_epoch) in selected.entries {
+            if let Some(frame) = content.image.and_then(|slot| slot.take()) {
+                shared.publish_input(frame, content.view, content.input, layer_epoch);
+            } else if let (Some(view), Some(input)) = (content.view, content.input) {
+                shared.set_view(view, input, layer_epoch);
+            }
+        }
+    }
+}
+
 pub(super) struct WindowFrames {
     content: BTreeMap<SurfaceLayerId, LayerContent>,
-    pending: Mailbox<Snapshot>,
+    pub channel: Arc<WindowChannel>,
     layout: Option<Layout>,
     last_arrival: Option<Instant>,
 }
@@ -82,7 +164,7 @@ impl Default for WindowFrames {
     fn default() -> Self {
         Self {
             content: BTreeMap::new(),
-            pending: Mailbox::smoothing(Duration::from_nanos(1_000_000_000 / 60)),
+            channel: Arc::new(WindowChannel::default()),
             layout: None,
             last_arrival: None,
         }
@@ -146,22 +228,23 @@ impl WindowFrames {
         // Geometry/lifecycle changes are immediate barriers. Smoothing applies
         // only to pixels in an unchanged window layout and cannot revive a layer.
         if self.layout.as_ref() != Some(&layout) {
-            for snapshot in self.pending.drain() {
-                discard(snapshot, Discard::Layout);
-            }
+            self.channel.invalidate(Discard::Layout);
             self.layout = Some(layout);
         }
-        self.pending.set_interval(interval);
         let snapshot: Snapshot = panes
             .iter()
             .filter_map(|(layer, pane)| {
-                self.content
-                    .get(layer)
-                    .map(|content| (pane.shared.clone(), content.clone()))
+                self.content.get(layer).map(|content| {
+                    (
+                        pane.shared.clone(),
+                        content.clone(),
+                        pane.shared.epoch.load(Ordering::Acquire),
+                    )
+                })
             })
             .collect();
         let now = Instant::now();
-        if let Some((shared, _)) = snapshot.first()
+        if let Some((shared, _, _)) = snapshot.first()
             && let Some(previous) = self.last_arrival
         {
             let gap = now.duration_since(previous);
@@ -179,35 +262,25 @@ impl WindowFrames {
             }
         }
         self.last_arrival = Some(now);
-        if let Some(snapshot) = self.pending.push(snapshot, now) {
+        let removed = {
+            let mut pending = lock(&self.channel.pending);
+            pending.set_interval(interval);
+            pending.push((self.channel.epoch(), snapshot), now)
+        };
+        if let Some((_, snapshot)) = removed {
             discard(snapshot, Discard::Superseded);
         }
     }
+    #[cfg(test)]
     pub fn present(&mut self, now: Instant) {
-        let (snapshot, age, expired) = self.pending.pop(now);
-        if let Some(snapshot) = expired {
-            discard(snapshot, Discard::Stale);
-        }
-        let Some(snapshot) = snapshot else {
-            return;
-        };
-        if let Some((shared, _)) = snapshot.first() {
-            shared.session.observations.selected(age);
-        }
-        for (shared, content) in snapshot {
-            if let Some(frame) = content.image.and_then(|slot| slot.take()) {
-                shared.publish_input(frame, content.view, content.input);
-            } else if let (Some(view), Some(input)) = (content.view, content.input) {
-                shared.set_view(view, input);
-            }
-        }
+        self.channel.present(self.channel.epoch(), now);
     }
 }
 
 fn discard(snapshot: Snapshot, reason: Discard) {
     // Retained pixels can survive an evicted snapshot. Count on final Drop only,
     // and count nothing if a surviving snapshot eventually consumes the slot.
-    for (_, content) in &snapshot {
+    for (_, content, _) in &snapshot {
         if let Some(image) = &content.image {
             *lock(&image.discard) = reason;
         }
@@ -216,9 +289,7 @@ fn discard(snapshot: Snapshot, reason: Discard) {
 
 impl Drop for WindowFrames {
     fn drop(&mut self) {
-        for snapshot in self.pending.drain() {
-            discard(snapshot, Discard::Lifecycle);
-        }
+        self.channel.invalidate(Discard::Lifecycle);
         for content in self.content.values() {
             if let Some(image) = &content.image {
                 *lock(&image.discard) = Discard::Lifecycle;
@@ -301,6 +372,55 @@ mod tests {
             )
             .collect()
     }
+    #[test]
+    fn selected_snapshot_cannot_overwrite_a_later_layer_clear() {
+        let panes = panes();
+        let mut producer = WindowFrames::default();
+        stage(&mut producer, &panes, 1, 800.0, true);
+        let receiver = producer.channel.clone();
+        let selected = receiver
+            .select(receiver.epoch(), Instant::now())
+            .expect("snapshot");
+        for pane in panes.values() {
+            pane.shared.clear();
+        }
+        receiver.publish(selected);
+        for pane in panes.values() {
+            assert!(matches!(
+                lock(&pane.shared.latest).take(Instant::now()).0,
+                Some(PresentationUpdate::Clear)
+            ));
+        }
+    }
+
+    #[test]
+    fn stale_topology_and_selected_layout_never_consume_new_geometry() {
+        let panes = panes();
+        let mut producer = WindowFrames::default();
+        stage(&mut producer, &panes, 1, 800.0, true);
+        let consumer = producer.channel.clone();
+        let old_epoch = consumer.epoch();
+        let selected = consumer
+            .select(old_epoch, Instant::now())
+            .expect("snapshot");
+        stage(&mut producer, &panes, 2, 400.0, true);
+        consumer.publish(selected);
+        assert!(consumer.select(old_epoch, Instant::now()).is_none());
+        assert!(
+            panes
+                .values()
+                .all(|pane| lock(&pane.shared.latest).newest_mut().is_none())
+        );
+        consumer.present(consumer.epoch(), Instant::now());
+        assert_eq!(epochs(&panes), vec![2, 2]);
+        stage(&mut producer, &panes, 3, 400.0, true);
+        drop(producer);
+        assert!(
+            consumer.select(consumer.epoch(), Instant::now()).is_none(),
+            "producer teardown drains even with a surviving consumer"
+        );
+    }
+
     #[test]
     fn window_layers_advance_together_and_layout_changes_bypass_queued_pixels() {
         let panes = panes();

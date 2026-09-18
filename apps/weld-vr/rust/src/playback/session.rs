@@ -1,7 +1,7 @@
 //! One connection owns protocol/input/decoder execution. Presentations only
 //! consume the resulting window hierarchy and independently fenced images.
 use super::frame::Frame;
-use super::window_frames::WindowFrames;
+use super::window_frames::{WindowChannel, WindowFrames};
 use super::{Controller, Shared, input, lock, receiver};
 use crate::presentation::{ConfigureSizing, XrPreferences};
 use anyhow::{Context, Result, ensure};
@@ -23,6 +23,48 @@ use weld_client::{
 
 const MAX_SURFACES: usize = 8;
 const MAX_LAYERS: usize = 8;
+
+/// Immutable topology for one presentation tick. Channels keep only bounded
+/// snapshots; neither Godot nor the renderer borrows the receiver's inventory.
+#[derive(Default)]
+pub(crate) struct Presentation {
+    pub panes: Vec<Pane>,
+    windows: Vec<(u64, Arc<WindowChannel>, u64)>,
+}
+impl Presentation {
+    pub fn present_ready(&self, ready: &BTreeMap<u64, bool>) {
+        let now = Instant::now();
+        for (window, channel, epoch) in &self.windows {
+            if ready.get(window) == Some(&true) {
+                channel.present(*epoch, now);
+            }
+        }
+    }
+}
+
+#[derive(Default)]
+struct Publication(Mutex<Arc<Presentation>>);
+impl Publication {
+    fn read(&self) -> Arc<Presentation> {
+        lock(&self.0).clone()
+    }
+    fn publish(&self, inventory: &Inventory) {
+        let next = Arc::new(Presentation {
+            panes: inventory.panes(),
+            windows: inventory
+                .surfaces
+                .values()
+                .map(|surface| {
+                    let channel = surface.frames.channel.clone();
+                    (surface.id, channel.clone(), channel.epoch())
+                })
+                .collect(),
+        });
+        let old = std::mem::replace(&mut *lock(&self.0), next);
+        // Never destroy a last channel/pixel lease under the topology lock.
+        drop(old);
+    }
+}
 
 #[derive(Clone)]
 pub(crate) struct Pane {
@@ -51,6 +93,7 @@ struct Surface {
 
 #[derive(Default)]
 pub(crate) struct Inventory {
+    publication: Arc<Publication>,
     next_id: u64,
     surfaces: BTreeMap<ClientSurfaceId, Surface>,
     presentation_rate: Option<PresentationRate>,
@@ -84,6 +127,7 @@ impl Inventory {
         }
         self.surfaces.clear();
         self.presentation_rate = None;
+        self.publication.publish(self);
     }
     pub(super) fn set_presentation_rate(
         &mut self,
@@ -167,6 +211,8 @@ impl Inventory {
         for id in self.surfaces.keys() {
             input.set_surface_visible(*id, self.visible(*id));
         }
+        drop(input);
+        self.publication.publish(self);
         Ok(requests)
     }
     fn size_request(
@@ -415,14 +461,6 @@ impl Inventory {
         );
         Ok(())
     }
-    pub fn present_ready(&mut self, ready: &BTreeMap<u64, bool>) {
-        let now = Instant::now();
-        for surface in self.surfaces.values_mut() {
-            if ready.get(&surface.id) == Some(&true) {
-                surface.frames.present(now);
-            }
-        }
-    }
     pub fn panes(&self) -> Vec<Pane> {
         let mut panes = Vec::new();
         for (id, surface) in &self.surfaces {
@@ -475,7 +513,7 @@ impl Inventory {
 }
 
 pub(crate) struct Session {
-    pub(crate) inventory: Arc<Mutex<Inventory>>,
+    publication: Arc<Publication>,
     bootstrap: Controller,
     worker: Option<JoinHandle<()>>,
 }
@@ -497,30 +535,35 @@ impl Session {
         let shared = Arc::new(Shared::default());
         *lock(&shared.session.presentation_rate) = Some(rate);
         let bootstrap = Controller::open(texture, material, shared.clone())?;
-        let inventory = Arc::new(Mutex::new(Inventory {
+        let publication = Arc::new(Publication::default());
+        let mut inventory = Inventory {
+            publication: publication.clone(),
             half_rate,
             ..Inventory::default()
-        }));
-        let state = inventory.clone();
+        };
         let worker = thread::Builder::new()
             .name("weld-receiver".into())
             .spawn(move || {
                 *lock(&shared.session.wake) = Some(thread::current());
-                if let Err(error) = receiver::run_session(&shared, directory, rate, sizing, &state)
+                if let Err(error) =
+                    receiver::run_session(&shared, directory, rate, sizing, &mut inventory)
                 {
                     shared.fail(format!("receiver: {error:#}"));
                 }
-                lock(&state).clear();
+                inventory.clear();
                 shared.done.store(true, Ordering::Release);
             })?;
         Ok(Self {
-            inventory,
+            publication,
             bootstrap,
             worker: Some(worker),
         })
     }
     pub fn panes(&self) -> Vec<Pane> {
-        lock(&self.inventory).panes()
+        self.publication.read().panes.clone()
+    }
+    pub fn presentation(&self) -> Arc<Presentation> {
+        self.publication.read()
     }
     pub fn set_presentation_rate(&self, rate: PresentationRate) -> bool {
         self.bootstrap.shared.session.set_presentation_rate(rate)
@@ -644,6 +687,39 @@ mod tests {
             )
             .expect("surface update");
     }
+    #[test]
+    fn published_topology_clears_on_disconnect_without_reusing_identities() {
+        let shared = Shared::default();
+        let mut inventory = Inventory::default();
+        apply(
+            &mut inventory,
+            &shared,
+            1,
+            ClientSurfaceEventKind::Role(top(None)),
+        );
+        apply(&mut inventory, &shared, 1, commit(true));
+        let held = inventory.publication.read();
+        assert_eq!(held.panes.len(), 1);
+        let old_id = held.panes[0].id;
+        let (_, channel, epoch) = &held.windows[0];
+        inventory.clear();
+        assert!(inventory.publication.read().panes.is_empty());
+        assert_ne!(channel.epoch(), *epoch);
+        held.present_ready(&[(held.panes[0].window, true)].into());
+        assert!(matches!(
+            lock(&held.panes[0].shared.latest).take(Instant::now()).0,
+            Some(super::super::PresentationUpdate::Clear)
+        ));
+        apply(
+            &mut inventory,
+            &shared,
+            1,
+            ClientSurfaceEventKind::Role(top(None)),
+        );
+        apply(&mut inventory, &shared, 1, commit(true));
+        assert!(inventory.publication.read().panes[0].id > old_id);
+    }
+
     #[test]
     fn half_rate_only_changes_source_requests_and_survives_reconnect() {
         let shared = Shared::default();

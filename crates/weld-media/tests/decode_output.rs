@@ -11,6 +11,7 @@ use std::{
         atomic::{AtomicUsize, Ordering},
         mpsc::{self, Sender},
     },
+    task::Poll,
     thread::{self, ThreadId},
     time::Duration,
 };
@@ -72,16 +73,18 @@ impl DecodeProcessor for LocalProcessor {
         self.pending.push_back(request);
     }
 
-    fn complete(&mut self) -> Result<Vec<OutputLease>> {
+    fn poll(&mut self) -> Result<Poll<Vec<OutputLease>>> {
         assert_eq!(*self.owner, thread::current().id());
         let request = self.pending.pop_front().context("missing test request")?;
         // One completion may contain multiple independently owned outputs.
-        Ok((0..2)
-            .map(|index| OutputLease {
-                value: Cell::new(request.token + index),
-                releases: self.releases.clone(),
-            })
-            .collect())
+        Ok(Poll::Ready(
+            (0..2)
+                .map(|index| OutputLease {
+                    value: Cell::new(request.token + index),
+                    releases: self.releases.clone(),
+                })
+                .collect(),
+        ))
     }
 
     fn retire(&mut self, stream: MediaStreamId, generation: StreamGeneration) {

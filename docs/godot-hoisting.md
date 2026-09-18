@@ -96,6 +96,11 @@ is pinned for that producer lifetime; edits require a new start.
   independently of Godot's frame cadence. It registers the adapter with
   `ClientRuntime`, including event validation, effects, route aliases, cursor
   feedback and retirement servicing. No new unbounded media queue exists.
+- The coordinator exclusively owns the window inventory. Godot clones an
+  immutable topology snapshot and consumes bounded per-window handoffs; native
+  imports and rendering never hold an inventory lock. Topology and layer epochs
+  reject obsolete publications after layout or lifecycle changes. Small
+  publication/mailbox locks remain; this is not a lock-free pipeline.
 - Android still uses `weld-media-android`: FFmpeg/`ffmpeg-next`, `ndk_codec=1`,
   MediaCodec to acquired native ImageReader buffers. Linux uses existing
   FFmpeg/VA-API. Context construction/calls/destruction stay on pool workers.
@@ -112,6 +117,12 @@ is pinned for that producer lifetime; edits require a new start.
   connection; excess inventory fails admission rather than allocating unbounded views.
 - Sixteen generations, four jobs, depth two, up to two workers in the existing
   shared decode pool. Affinity keeps a stream's generations on one worker.
+- Decoder completion is cooperatively polled, allowing another bounded input
+  submission while older output is pending. Android retains the same acquired
+  image, fence and fixed deadlines across polls, returning an unfinished image
+  with its fence on teardown. Workers use a 1 ms active-work retry when no
+  command arrives; idle workers block. Native FFmpeg calls and the VA-API
+  completion path can still block. Queue depths and frame-age limits are unchanged.
 - Seven frame credits per stream across generations, and 32 total per session,
   cover submitted jobs, completions, publication, mailboxes, GPU imports and
   retirement. Credits return after native release.

@@ -3,6 +3,7 @@
 use std::{
     collections::{HashMap, VecDeque},
     path::PathBuf,
+    task::Poll,
 };
 
 use anyhow::{Context, Result, ensure};
@@ -169,7 +170,7 @@ impl DecodeProcessor for NativeProcessor {
         });
     }
 
-    fn complete(&mut self) -> Result<Vec<VaapiDecodedFrame>> {
+    fn poll(&mut self) -> Result<Poll<Vec<VaapiDecodedFrame>>> {
         let pending = self
             .pending
             .pop_front()
@@ -197,7 +198,7 @@ impl DecodeProcessor for NativeProcessor {
             self.sessions.remove(&pending.key);
             self.poisoned.remove(&pending.key);
         }
-        result
+        result.map(Poll::Ready)
     }
 
     fn retire(&mut self, stream: MediaStreamId, generation: StreamGeneration) {

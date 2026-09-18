@@ -375,6 +375,20 @@ network RTT. This is an observed correlation, not a confirmed cause or a
 controlled latency comparison. Catch-up scheduling remains deferred; this
 experiment does not add buffering or change frame-discard policy.
 
+On 2026-09-18, cooperative decoder polling and receiver-owned inventory passed
+86 Rust tests, Linux/Android Clippy, desktop native playback, and a physical
+half-rate source-reconnection test. One decoder-only comparison reduced average
+worker residence from about 6.48 to 5.72 ms, but replacements did not consistently
+improve across automated runs, and network loss differed between runs. The user
+reported slightly smoother full-rate playback and possibly fewer replacements
+at both rates. These observations do not establish a controlled performance gain.
+
+A full-rate Preferences-close test also produced a native Godot GL-thread
+SIGSEGV. Earlier baseline runs reproduced texture-cleanup errors, but not that
+crash; whether the crash is a regression remains unresolved. The launcher still
+completed successfully because it did not monitor the Android process throughout
+the run. Check viewer logs and Android exit information when assessing success.
+
 For a repeatable live motion and window-lifecycle exercise:
 
 ```sh

@@ -13,7 +13,7 @@ use std::{
     cell::RefCell,
     path::PathBuf,
     rc::Rc,
-    sync::{Arc, Mutex, atomic::Ordering},
+    sync::{Arc, atomic::Ordering},
     thread,
     time::{Duration, Instant},
 };
@@ -74,7 +74,7 @@ pub(super) fn run_session(
     directory: PathBuf,
     rate: PresentationRate,
     sizing: Option<XrPreferences>,
-    inventory: &Arc<Mutex<Inventory>>,
+    inventory: &mut Inventory,
 ) -> Result<()> {
     let identity = IrohDeviceIdentity::load_or_create(&directory)?;
     let public = directory.join("public.identity");
@@ -111,7 +111,7 @@ pub(super) fn run_session(
         .context("native import target missing")?;
     let mut backoff = Duration::from_secs(1);
     while !shared.session.cancelled.load(Ordering::Acquire) {
-        lock(inventory).clear();
+        inventory.clear();
         lock(&shared.session.input).invalidate();
         shared.message("Connecting to saved Weld source");
         let mut pending = host.begin_connect_profile(
@@ -151,7 +151,7 @@ pub(super) fn run_session(
                 runtime.register(registration.into_parts().runtime)?;
                 let latest_rate = lock(&shared.session.presentation_rate).unwrap_or(rate);
                 // No surfaces yet; establish the preference before their Role events.
-                lock(inventory).set_presentation_rate(latest_rate);
+                inventory.set_presentation_rate(latest_rate);
                 let mut events = ClientEventQueue::default();
                 let mut invalid_events = Vec::new();
                 let mut invalid_effects = Vec::new();
@@ -169,7 +169,7 @@ pub(super) fn run_session(
                         "invalid client runtime events/effects: {invalid_events:?} {invalid_effects:?}"
                     );
                     while let Some(event) = events.pop_front() {
-                        let requests = lock(inventory).apply(event, shared, sizing)?;
+                        let requests = inventory.apply(event, shared, sizing)?;
                         for request in requests {
                             ensure!(
                                 runtime.apply_request(ClientRequest::Surface(request)),
@@ -181,7 +181,7 @@ pub(super) fn run_session(
                     // Drain destruction first so a changed preference only targets
                     // the surviving inventory. The mailbox contains no queued history.
                     let latest_rate = lock(&shared.session.presentation_rate).unwrap_or(rate);
-                    let requests = lock(inventory).set_presentation_rate(latest_rate);
+                    let requests = inventory.set_presentation_rate(latest_rate);
                     for request in requests {
                         ensure!(
                             runtime.apply_request(ClientRequest::Surface(request)),
@@ -202,7 +202,7 @@ pub(super) fn run_session(
                             });
                     thread::park_timeout(wait);
                 }
-                lock(inventory).clear();
+                inventory.clear();
                 shared.session.observations.report(true);
                 lock(&shared.session.input).invalidate();
                 input::service(shared, &mut runtime);

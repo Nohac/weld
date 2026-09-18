@@ -119,22 +119,30 @@ impl Shared {
             .observations
             .decoded
             .fetch_add(1, Ordering::Relaxed);
-        self.publish_input(frame, view, None);
+        self.publish_input(frame, view, None, self.epoch.load(Ordering::Acquire));
     }
     fn publish_input(
         &self,
         frame: Frame,
         view: Option<SurfaceContentView>,
         input: Option<input::Target>,
+        expected_epoch: u64,
     ) {
+        let mut latest = lock(&self.latest);
         if self.session.cancelled.load(Ordering::Acquire) || self.closed.load(Ordering::Acquire) {
             self.session
                 .observations
                 .discard(observations::Discard::Lifecycle);
             return;
         }
+        if self.epoch.load(Ordering::Acquire) != expected_epoch {
+            self.session
+                .observations
+                .discard(observations::Discard::Lifecycle);
+            return;
+        }
         if matches!(
-            lock(&self.latest).push(
+            latest.push(
                 PresentationUpdate::Frame { frame, view, input },
                 Instant::now()
             ),
@@ -146,8 +154,11 @@ impl Shared {
                 .discard(observations::Discard::Handoff);
         }
     }
-    fn set_view(&self, view: SurfaceContentView, input: input::Target) {
+    fn set_view(&self, view: SurfaceContentView, input: input::Target, expected_epoch: u64) {
         let mut latest = lock(&self.latest);
+        if self.epoch.load(Ordering::Acquire) != expected_epoch {
+            return;
+        }
         match latest.newest_mut() {
             Some(PresentationUpdate::Frame {
                 view: current,
@@ -162,8 +173,8 @@ impl Shared {
         }
     }
     fn clear(&self) {
-        self.epoch.fetch_add(1, Ordering::AcqRel);
         let mut latest = lock(&self.latest);
+        self.epoch.fetch_add(1, Ordering::AcqRel);
         self.record_discarded_updates(&mut latest);
         latest.reset(PresentationUpdate::Clear);
     }
@@ -319,7 +330,16 @@ impl Controller {
             }
             return Ok(());
         }
-        let (update, age, dropped) = lock(&self.shared.latest).take(Instant::now());
+        let (update, age, dropped, epoch) = {
+            let mut latest = lock(&self.shared.latest);
+            let (update, age, dropped) = latest.take(Instant::now());
+            (
+                update,
+                age,
+                dropped,
+                self.shared.epoch.load(Ordering::Acquire),
+            )
+        };
         self.shared
             .replaced
             .fetch_add(dropped as u64, Ordering::Relaxed);
@@ -336,7 +356,7 @@ impl Controller {
                 .selection_age_max_us
                 .fetch_max(micros, Ordering::Relaxed);
         }
-        self.presented_epoch = self.shared.epoch.load(Ordering::Acquire);
+        self.presented_epoch = epoch;
         let (frame, display, mut input) = match update {
             PresentationUpdate::Clear => {
                 self.current = None;

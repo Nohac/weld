@@ -198,9 +198,9 @@ impl Workspace {
             self.stop();
             return Ok(());
         }
-        let snapshot = self.session.panes();
+        let snapshot = self.session.presentation();
         self.panes.retain(|id, surface| {
-            if snapshot.iter().any(|pane| pane.id == *id) {
+            if snapshot.panes.iter().any(|pane| pane.id == *id) {
                 true
             } else {
                 let mut player = surface.bind().player.clone();
@@ -211,7 +211,7 @@ impl Workspace {
                 false
             }
         });
-        for pane in snapshot {
+        for pane in snapshot.panes.iter().cloned() {
             if let Some(surface) = self.panes.get_mut(&pane.id) {
                 surface.bind_mut().pane = pane;
                 continue;
@@ -249,24 +249,21 @@ impl Workspace {
             });
             self.panes.insert(id, surface);
         }
-        // All images of a committed tree are admitted together. Publication
-        // and consumption share this short lock; no codec work runs under it.
-        let mut inventory = self
-            .session
-            .inventory
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
-        let current = inventory.panes();
+        // Recheck topology after potentially slow Godot resource creation.
+        // Only immutable snapshots cross from the receiver. No shared inventory
+        // lock covers fence checks, texture imports or scene operations.
+        let current = self.session.presentation();
         // Topology may change while new Godot textures are being created.
         // Wait for the complete presentation inventory before consuming it.
-        if current.len() != self.panes.len()
+        if current.panes.len() != self.panes.len()
             || current
+                .panes
                 .iter()
                 .any(|pane| !self.panes.contains_key(&pane.id))
         {
             return Ok(());
         }
-        for pane in current {
+        for pane in current.panes.iter().cloned() {
             if let Some(surface) = self.panes.get_mut(&pane.id) {
                 surface.bind_mut().pane = pane;
             }
@@ -278,7 +275,7 @@ impl Workspace {
             let can_tick = player.controller.as_ref().is_some_and(Controller::ready);
             *ready.entry(surface.pane.window).or_insert(true) &= can_tick;
         }
-        inventory.present_ready(&ready);
+        current.present_ready(&ready);
         for surface in self.panes.values() {
             let surface = surface.bind();
             if ready.get(&surface.pane.window) == Some(&true) {

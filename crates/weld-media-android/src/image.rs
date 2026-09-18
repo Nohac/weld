@@ -2,11 +2,10 @@ use std::{
     ffi::c_void,
     os::fd::{AsRawFd, OwnedFd},
     sync::{Arc, Mutex},
-    thread,
     time::{Duration, Instant},
 };
 
-use anyhow::{Context, Result, bail, ensure};
+use anyhow::{Context, Result, ensure};
 use ndk::{
     hardware_buffer::HardwareBufferUsage,
     media::image_reader::{AcquireResult, Image, ImageFormat, ImageReader},
@@ -31,6 +30,39 @@ struct Owner {
 pub struct AndroidImageTarget {
     owner: Arc<Owner>,
     extent: (u32, u32),
+}
+
+/// One rendered output, retained across nonblocking acquisition attempts.
+pub(crate) struct Acquisition {
+    timestamp: u64,
+    deadline: Instant,
+    pending: Option<FencedImage>,
+}
+impl Acquisition {
+    pub(crate) fn new(timestamp: u64) -> Self {
+        Self {
+            timestamp,
+            deadline: Instant::now() + Duration::from_secs(2),
+            pending: None,
+        }
+    }
+}
+
+struct FencedImage {
+    image: Option<Image>,
+    fence: Option<OwnedFd>,
+    deadline: Instant,
+}
+impl Drop for FencedImage {
+    fn drop(&mut self) {
+        // A pending producer fence must follow the image back to Android even
+        // on cancellation, error or decoder teardown. Never release it early.
+        if let Some(image) = self.image.take()
+            && let Some(fence) = self.fence.take()
+        {
+            image.delete_async(fence);
+        }
+    }
 }
 
 impl AndroidImageTarget {
@@ -74,18 +106,12 @@ impl AndroidImageTarget {
             .map_err(Into::into)
     }
 
-    pub(crate) fn acquire(
-        &self,
-        timestamp: u64,
-        cancelled: impl Fn() -> bool,
-    ) -> Result<AndroidImage> {
-        let deadline = Instant::now() + Duration::from_secs(2);
-        loop {
-            ensure!(!cancelled(), "decode cancelled while acquiring image");
-            ensure!(
-                Instant::now() < deadline,
-                "native image acquisition timed out"
-            );
+    pub(crate) fn try_acquire(&self, waiting: &mut Acquisition) -> Result<Option<AndroidImage>> {
+        ensure!(
+            Instant::now() < waiting.deadline,
+            "native image acquisition timed out"
+        );
+        if waiting.pending.is_none() {
             let result = {
                 let reader = self
                     .owner
@@ -98,63 +124,83 @@ impl AndroidImageTarget {
             };
             match result {
                 AcquireResult::Image((image, fence)) => {
-                    if let Some(fence) = fence {
-                        let mut poll = libc::pollfd {
-                            fd: fence.as_raw_fd(),
-                            events: libc::POLLIN,
-                            revents: 0,
-                        };
-                        // SAFETY: live fd and one writable pollfd; bounded wait.
-                        let result = unsafe { libc::poll(&mut poll, 1, 1000) };
-                        if result != 1 || poll.revents & libc::POLLIN == 0 {
-                            image.delete_async(fence);
-                            bail!("image acquire fence failed or timed out");
-                        }
-                    }
-                    let actual = image.timestamp()?;
-                    let expected = i64::try_from(timestamp)?
-                        .checked_mul(1000)
-                        .context("timestamp overflow")?;
-                    ensure!(
-                        actual == expected,
-                        "image timestamp mismatch: expected {expected}, got {actual}"
-                    );
-                    let desc = image.hardware_buffer()?.describe();
-                    let crop = image.crop_rect()?;
-                    ensure!(
-                        desc.usage.contains(HardwareBufferUsage::GPU_SAMPLED_IMAGE),
-                        "image is not GPU sampleable"
-                    );
-                    let crop = [
-                        u32::try_from(crop.left)?,
-                        u32::try_from(crop.top)?,
-                        u32::try_from(crop.right)?,
-                        u32::try_from(crop.bottom)?,
-                    ];
-                    ensure!(
-                        crop[0] < crop[2]
-                            && crop[1] < crop[3]
-                            && crop[2] <= desc.width
-                            && crop[3] <= desc.height,
-                        "invalid native image crop"
-                    );
-                    return Ok(AndroidImage {
+                    waiting.pending = Some(FencedImage {
                         image: Some(image),
-                        _owner: self.owner.clone(),
-                        info: ImageInfo {
-                            timestamp_micros: timestamp,
-                            width: desc.width,
-                            height: desc.height,
-                            crop,
-                            format: desc.format.into(),
-                        },
+                        fence,
+                        deadline: Instant::now() + Duration::from_secs(1),
                     });
                 }
                 AcquireResult::NoBufferAvailable | AcquireResult::MaxImagesAcquired => {
-                    thread::sleep(Duration::from_millis(1))
+                    return Ok(None);
                 }
             }
         }
+        let pending = waiting.pending.as_ref().context("acquired image missing")?;
+        if let Some(fence) = &pending.fence {
+            ensure!(
+                Instant::now() < pending.deadline,
+                "image acquire fence timed out"
+            );
+            let mut poll = libc::pollfd {
+                fd: fence.as_raw_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            // SAFETY: live descriptor and writable pollfd; readiness only, no wait.
+            let result = unsafe { libc::poll(&mut poll, 1, 0) };
+            if result < 0
+                && std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted
+            {
+                return Ok(None);
+            }
+            ensure!(
+                result >= 0 && poll.revents & (libc::POLLERR | libc::POLLNVAL | libc::POLLHUP) == 0,
+                "image acquire fence failed"
+            );
+            if poll.revents & libc::POLLIN == 0 {
+                return Ok(None);
+            }
+        }
+        let mut pending = waiting.pending.take().context("acquired image missing")?;
+        let image = pending.image.take().context("acquired image missing")?;
+        let actual = image.timestamp()?;
+        let expected = i64::try_from(waiting.timestamp)?
+            .checked_mul(1000)
+            .context("timestamp overflow")?;
+        ensure!(
+            actual == expected,
+            "image timestamp mismatch: expected {expected}, got {actual}"
+        );
+        let desc = image.hardware_buffer()?.describe();
+        let crop = image.crop_rect()?;
+        ensure!(
+            desc.usage.contains(HardwareBufferUsage::GPU_SAMPLED_IMAGE),
+            "image is not GPU sampleable"
+        );
+        let crop = [
+            u32::try_from(crop.left)?,
+            u32::try_from(crop.top)?,
+            u32::try_from(crop.right)?,
+            u32::try_from(crop.bottom)?,
+        ];
+        ensure!(
+            crop[0] < crop[2]
+                && crop[1] < crop[3]
+                && crop[2] <= desc.width
+                && crop[3] <= desc.height,
+            "invalid native image crop"
+        );
+        Ok(Some(AndroidImage {
+            image: Some(image),
+            _owner: self.owner.clone(),
+            info: ImageInfo {
+                timestamp_micros: waiting.timestamp,
+                width: desc.width,
+                height: desc.height,
+                crop,
+                format: desc.format.into(),
+            },
+        }))
     }
 }
 
