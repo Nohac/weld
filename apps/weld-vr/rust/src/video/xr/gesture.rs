@@ -6,6 +6,7 @@ use godot::prelude::*;
 struct Hold {
     surface: Gd<WeldSurface>,
     token: (u64, u64),
+    workspace_anchor: (Vector3, Vector3),
     kind: Kind,
 }
 enum Kind {
@@ -16,18 +17,17 @@ enum Kind {
 #[derive(Clone, Copy)]
 struct DragAnchor {
     position: Vector3,
-    basis: Basis,
 }
 impl DragAnchor {
     fn new(aim: Transform3D, panel: Transform3D) -> Self {
         Self {
             position: aim.affine_inverse() * panel.origin,
-            basis: panel.basis,
         }
     }
     fn pose(self, aim: Transform3D) -> Transform3D {
-        // The ray moves the anchor point; wrist orientation never tilts the panel.
-        Transform3D::new(self.basis, aim * self.position)
+        // Translation includes manual pushing/pulling. The window placement
+        // policy owns orientation, so controller roll cannot tilt the window.
+        Transform3D::new(Basis::IDENTITY, aim * self.position)
     }
 }
 #[derive(Default)]
@@ -73,7 +73,10 @@ impl Gesture {
         let (new_a, new_grip) = self.buttons.step(a, sample.grip);
         let grip = self.buttons.grip_down;
         if let Some(mut hold) = self.hold.take() {
-            if hold.token != sample.token || sample.surface.as_ref() != Some(&hold.surface) {
+            if hold.token != sample.token
+                || sample.surface.as_ref() != Some(&hold.surface)
+                || hold.workspace_anchor != hold.surface.bind().workspace_anchor()
+            {
                 self.buttons = Buttons::default();
                 return true;
             }
@@ -131,6 +134,7 @@ impl Gesture {
             self.hold = Some(Hold {
                 surface: surface.clone(),
                 token: sample.token,
+                workspace_anchor: surface.bind().workspace_anchor(),
                 kind,
             });
             return true;
@@ -143,7 +147,7 @@ impl Gesture {
 mod tests {
     use super::*;
     #[test]
-    fn drag_preserves_panel_rotation_while_controller_rotates_and_translates() {
+    fn drag_keeps_anchor_and_allows_manual_push_while_layout_owns_rotation() {
         let start = Transform3D::new(Basis::IDENTITY, Vector3::new(0.2, 1.0, 0.0));
         let panel = Transform3D::new(
             Basis::from_axis_angle(Vector3::RIGHT, 0.15),
@@ -156,9 +160,13 @@ mod tests {
             start.origin + Vector3::RIGHT,
         );
         let pose = anchor.pose(moved);
-        assert_eq!(pose.basis, panel.basis);
+        assert_eq!(pose.basis, Basis::IDENTITY);
         assert!((pose.origin - panel.origin).length() > 0.1);
         assert_eq!(anchor.pose(moved), pose);
+        let pushed = Transform3D::new(start.basis, start.origin + Vector3::FORWARD * 0.5);
+        assert!(
+            (anchor.pose(pushed).origin - panel.origin - Vector3::FORWARD * 0.5).length() < 1e-5
+        );
     }
     #[test]
     fn shell_buttons_require_release_after_startup_and_emit_only_press_edges() {

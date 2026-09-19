@@ -1,9 +1,10 @@
 //! Godot projection of the existing receiver's surface hierarchy. A view owns
 //! presentation objects, never its own transport, decoder pool or input seat.
 use super::WeldVideoPlayer;
-use super::decoration::{Decoration, Shape};
+use super::decoration::{Clip, Decoration, Shape};
+use super::placement::Placement;
 use super::stereo::ViewLayout;
-use super::xr::controls::{Bar, Part, Placement};
+use super::xr::controls::{Bar, Part};
 use crate::{
     playback::{
         Controller,
@@ -175,8 +176,11 @@ impl WeldSurface {
         self.panel = Some(panel);
     }
     #[func]
-    fn style_panel(&mut self, physical_size: Vector2) {
+    fn style_panel(&mut self, physical_size: Vector2, owner: Option<Gd<WeldSurface>>) {
         if self.pane.kind == 3 {
+            if let Some(mut owner) = owner {
+                self.style_content(physical_size, &mut owner.bind_mut());
+            }
             return;
         }
         let Some(shape) = Shape::new(physical_size) else {
@@ -192,11 +196,8 @@ impl WeldSurface {
         let decoration = self
             .decoration
             .get_or_insert_with(|| Decoration::new(panel.clone()));
-        decoration.update(shape, &mut self.material);
-        if let Some(right) = &mut self.right_material {
-            right.set_shader_parameter("window_size", &shape.size.to_variant());
-            right.set_shader_parameter("corner_radius", &shape.radius.to_variant());
-        }
+        decoration.reset_front();
+        decoration.update(shape);
         decoration.set_focused(
             self.player
                 .bind()
@@ -204,22 +205,56 @@ impl WeldSurface {
                 .as_ref()
                 .is_some_and(Controller::is_focused),
         );
-        self.player.bind_mut().shape = Some(shape);
         if self.pane.kind <= 1 {
             self.bar
                 .get_or_insert_with(|| Bar::new(panel.clone()))
                 .place(physical_size.y);
         }
+        self.apply_clip(Clip::full(shape));
     }
     #[func]
-    fn placed_transform(&mut self, base: Transform3D) -> Transform3D {
-        self.placement.apply(base)
+    fn placed_transform(
+        &mut self,
+        base: Transform3D,
+        center: Vector3,
+        orientation_pivot: Vector3,
+    ) -> Transform3D {
+        self.placement.apply(base, center, orientation_pivot)
     }
 }
 
 impl WeldSurface {
+    fn apply_clip(&mut self, clip: Clip) {
+        clip.apply(&mut self.material);
+        if let Some(right) = &mut self.right_material {
+            clip.apply(right);
+        }
+        self.player.bind_mut().shape = Some(clip);
+    }
+    fn style_content(&mut self, size: Vector2, owner: &mut WeldSurface) {
+        let Some(shape) = owner.player.bind().shape.map(|clip| clip.shape) else {
+            return;
+        };
+        let (Some(panel), Some(parent)) = (&self.panel, &owner.panel) else {
+            return;
+        };
+        if !panel.is_instance_valid() || !parent.is_instance_valid() {
+            return;
+        }
+        let local = parent.get_global_transform().affine_inverse() * panel.get_global_position();
+        let Some(clip) = Clip::layer(shape, Vector2::new(local.x, -local.y), size) else {
+            return;
+        };
+        self.apply_clip(clip);
+        if let Some(decoration) = &mut owner.decoration {
+            decoration.include_layer(local.z);
+        }
+    }
     pub(super) fn move_to(&mut self, world: Transform3D) {
         self.placement.move_to(world);
+    }
+    pub(super) fn workspace_anchor(&self) -> (Vector3, Vector3) {
+        self.placement.anchor()
     }
     pub(super) fn controls(
         &mut self,
@@ -228,7 +263,7 @@ impl WeldSurface {
     ) -> Option<(Part, f32)> {
         let bar = self.bar.as_mut()?;
         if let Some(y) = content_y {
-            let height = self.player.bind().shape?.size.y;
+            let height = self.player.bind().shape?.shape.size.y;
             bar.approach(y, height);
         }
         let hit = bar.hit(aim);

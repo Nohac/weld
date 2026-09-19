@@ -2,7 +2,7 @@
 //! remains affine outside the quad so the shared pointer capture can drag there.
 use godot::prelude::*;
 
-pub(super) const RANGE: f32 = 3.0;
+pub(super) const RANGE: f32 = 6.0;
 
 pub(super) struct Intersection {
     pub pixels: Vector2,
@@ -142,7 +142,7 @@ mod tests {
         let viewport = Vector2::new(1600.0, 1000.0);
         for aim in [
             Transform3D::new(Basis::IDENTITY, Vector3::FORWARD),
-            Transform3D::new(Basis::IDENTITY, Vector3::BACK * 4.0),
+            Transform3D::new(Basis::IDENTITY, Vector3::BACK * (RANGE + 1.0)),
             Transform3D::new(
                 Basis::from_axis_angle(Vector3::UP, std::f32::consts::FRAC_PI_2),
                 Vector3::BACK,

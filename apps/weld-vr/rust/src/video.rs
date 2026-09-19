@@ -1,6 +1,7 @@
 //! Main-thread Godot API shared by all native providers.
 mod decoration;
 mod input;
+mod placement;
 mod stereo;
 mod workspace;
 mod xr;
@@ -53,7 +54,7 @@ pub struct WeldVideoPlayer {
     message: String,
     xr_preferences: Option<XrPreferences>,
     raster_sizing: RasterSizing,
-    shape: Option<decoration::Shape>,
+    shape: Option<decoration::Clip>,
     view_layout: ViewLayout,
     base: Base<Node>,
 }

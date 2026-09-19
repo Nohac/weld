@@ -7,9 +7,10 @@ composition layer when supported, with a Godot mesh fallback. There is no
 second media pipeline or CPU video readback.
 
 The panel fits the application's clipped logical aspect within a 1.6 m by 1 m
-envelope, initially 1.6 m ahead and slightly below the tracked head, tilted
-back. It stays pinned rather than following head movement. Recenter places it
-again. Host-keyboard capture remains separate work.
+envelope. Independent windows spawn at a 2.5 m radius around the initial head
+position, slightly below eye level. The workspace stays pinned rather than
+following head movement; recenter establishes a new anchor. Host-keyboard
+capture remains separate work.
 
 ## Window layout and decoration
 
@@ -19,6 +20,14 @@ with aspect preserved, and sit 8 cm forward. A second unparented toplevel from
 the same namespaced Wayland client also uses this placement; this is a shell
 grouping choice, not invented protocol parentage or modality. Menus, tooltips
 and subsurfaces retain the transported relative positions and stacking.
+
+Rust owns spherical spawn and drag placement for both mono and stereo windows.
+Position and facing use separate anchors: windows turn horizontally toward a
+virtual point 1.6 m behind the workspace's initial head pose, making the curve
+gentler without pushing the actual windows farther away. Vertical pitch follows
+half the elevation relative to that pivot, with a 6-degree backward bias at eye
+level and no roll. Both anchors change only on placement/recenter, not head lean.
+Azahar's explicit companion slot starts below its primary at the same radius.
 
 Each native panel has the same pose and bounds as its Rust ray-input target.
 The ray selects the nearest hit, while an admitted drag keeps its captured
@@ -36,17 +45,32 @@ input focus, including reset/unmap/disconnect, rather than inferring focus
 from scene order. Native video remains independently composed at full panel
 resolution.
 
+Client-owned content subsurfaces share the owning window's rounded clip rather
+than bypassing it or gaining independent rounded edges. The same clip applies
+to both stereo eyes and ray hit testing. The shared outline is lifted above
+content-layer hole-punch planes so those layers cannot hide the border.
+
 Only the pointed-at window reveals its slim close/drag strip, above or below
 the nearer horizontal edge. Opacity rises with proximity and reaches full at
 the edge; controls stay visible while hovered or dragged. The close button is
 on the left and activates on A release over it. A on the handle or the side
-grip over the window starts a captured shell drag. The window follows the ray
-anchor without changing its starting orientation. Parent-relative placement
-keeps attached windows/popups following their owner. Shell gestures do not
-forward clicks to the application underneath; tracking/focus loss cancels
+grip over the window starts a captured shell drag. Moving the controller changes
+the window position, including push/pull depth; facing follows the pinned
+orientation pivot rather than wrist rotation. There is no stick depth mapping.
+Placement radius is bounded to 0.6–5 m and elevation to ±85 degrees; window
+physical size stays unchanged. Parent-relative placement keeps attached
+windows/popups following their owner. Shell gestures do not
+forward clicks to the application underneath; recenter or tracking/focus loss cancels
 the gesture and requires held controls to be released before reuse.
 Closing sends the existing surface close request, not a process kill.
 Resizing and placement persistence are not implemented yet.
+
+The 2026-09-19 Pico Azahar comparison established the 2.5 m spawn distance,
+rear orientation pivot and softened pitch through user testing. The slice
+passed 86 Rust tests, strict Clippy, scene and GPU shader checks, and Android
+build/export. The shader checks cover both stereo eyes and owner-relative
+subsurface clipping. This is presentation validation, not a new codec or
+performance qualification.
 
 ## Controller presentation
 

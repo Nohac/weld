@@ -117,25 +117,6 @@ impl Bar {
     }
 }
 
-/// Offset in the layout parent's space, so attached menus still follow a moved window.
-#[derive(Default)]
-pub(crate) struct Placement {
-    base: Transform3D,
-    offset: Transform3D,
-}
-impl Placement {
-    pub fn apply(&mut self, base: Transform3D) -> Transform3D {
-        self.base = base;
-        base * self.offset
-    }
-    pub fn move_to(&mut self, world: Transform3D) {
-        if world.is_finite() && self.base.is_finite() && self.base.basis.determinant().abs() > 1e-6
-        {
-            self.offset = self.base.affine_inverse() * world;
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -179,18 +160,5 @@ mod tests {
         ] {
             assert!(!near_edge(uv, size));
         }
-    }
-    #[test]
-    fn placement_retains_user_offset_without_accumulating_and_follows_parent() {
-        let mut placement = Placement::default();
-        let base = Transform3D::new(Basis::IDENTITY, Vector3::new(0.0, 1.0, -1.6));
-        assert_eq!(placement.apply(base), base);
-        let moved = Transform3D::new(Basis::IDENTITY, base.origin + Vector3::RIGHT);
-        placement.move_to(moved);
-        for _ in 0..5 {
-            assert_eq!(placement.apply(base), moved);
-        }
-        let new_base = Transform3D::new(Basis::IDENTITY, base.origin + Vector3::UP);
-        assert_eq!(placement.apply(new_base).origin, moved.origin + Vector3::UP);
     }
 }

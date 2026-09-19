@@ -6,7 +6,7 @@ extends Node3D
 @export_range(1.0, 3.0, 0.05) var application_scale := 1.8
 @export_range(0.5, 3.0, 0.1) var panel_sampling := 2.0
 @export var panel_envelope := Vector2(1.6, 1.0)
-@export_range(0.2, 10.0, 0.1) var panel_distance := 1.6
+@export_range(0.2, 10.0, 0.1) var panel_distance := 2.5
 @export var use_native_panel := true
 @export_range(0.4, 0.9, 0.05) var secondary_window_fraction := 0.75
 @export_range(0.02, 0.2, 0.01) var secondary_window_distance := 0.08
@@ -20,6 +20,7 @@ var preferences_wait_started := Time.get_ticks_msec()
 var composition_panel: OpenXRCompositionLayerQuad
 var window_panels := {}
 var window_slots := {}
+var workspace_layout := WeldXrLayout.new()
 
 const ControllerRig = preload("res://scenes/controller_rig.gd")
 
@@ -151,13 +152,9 @@ func _process(_delta: float) -> void:
 	if pose == null or not pose.has_tracking_data:
 		return
 	# Place once from a valid pose; normal head movement never drags the panel.
-	var forward := -camera.global_basis.z
-	forward.y = 0.0
-	if forward.length_squared() < 0.001:
+	if not workspace_layout.recenter(camera.global_transform, panel_distance):
 		return
-	forward = forward.normalized()
-	screen.global_position = camera.global_position + forward * panel_distance + Vector3.DOWN * 0.15
-	screen.global_basis = Basis.looking_at(forward).rotated(forward.cross(Vector3.UP), -0.12)
+	screen.global_transform = workspace_layout.spawn_transform(0, false)
 	screen.show()
 	_sync_composition_panel()
 	placement_pending = false
@@ -270,18 +267,12 @@ func _update_windows() -> void:
 						free_slot += 1
 					window_slots[surface.window_id()] = free_slot
 				var slot: int = surface.panel_slot() if surface.panel_slot() >= 0 else window_slots[surface.window_id()]
-				var angle := deg_to_rad(65.0 * ceilf(slot / 2.0) * (1.0 if slot % 2 == 1 else -1.0))
-				transform = screen.global_transform
-				var pivot := transform.origin + transform.basis.z * panel_distance
-				transform.origin = pivot + (transform.origin - pivot).rotated(Vector3.UP, angle)
-				transform.basis = transform.basis.rotated(Vector3.UP, angle)
+				transform = workspace_layout.spawn_transform(slot, surface.panel_slot() == 1)
 				physical = surface.video_player().xr_panel_size(panel_envelope)
 				# Explicit companion slot stays below the main panel, not on top
 				# of it. Each panel retains its own ordinary drag offset.
 				if surface.panel_slot() == 1:
-					transform = screen.global_transform
 					physical *= 0.55
-					transform.origin += transform.basis * Vector3(0, -0.75, 0.15)
 				entry.depth = 0
 			else:
 				if parent == null or not placed.has(parent.surface_id()):
@@ -297,12 +288,12 @@ func _update_windows() -> void:
 				var forward := secondary_window_distance if centered else 0.025 + maxf(surface.stack_index(), 0) * 0.001
 				transform.origin += transform.basis * Vector3(offset.x, -offset.y, forward)
 				entry.depth = window_panels[parent.surface_id()].depth + 1
-			transform = surface.placed_transform(transform)
+			transform = surface.placed_transform(transform, workspace_layout.center(), workspace_layout.orientation_pivot())
 			if not entry.mesh.mesh.size.is_equal_approx(physical):
 				entry.mesh.mesh.size = physical
 			if not entry.mesh.global_transform.is_equal_approx(transform):
 				entry.mesh.global_transform = transform
-			surface.style_panel(physical)
+			surface.style_panel(physical, parent if surface.kind() == 3 else null)
 			var raster := surface.video_player().xr_viewport_size()
 			if raster.x > 0 and raster.y > 0 and entry.viewport.size != raster:
 				entry.viewport.size = raster

@@ -130,6 +130,22 @@ func _run() -> void:
 		_fail("XR video presentation must not enable desktop input")
 		return
 	var screen: MeshInstance3D = xr.get_node("Screen")
+	var layout := WeldXrLayout.new()
+	var head := Transform3D(Basis.from_euler(Vector3(0.2, 0.5, 0.1)), Vector3(1, 1.7, 2))
+	if not layout.recenter(head, 1.6):
+		_fail("Spherical workspace rejected a valid anchor")
+		return
+	for slot in range(8):
+		var pose := layout.spawn_transform(slot, slot == 1)
+		var toward_center: Vector3 = layout.center() - pose.origin
+		var toward_pivot: Vector3 = layout.orientation_pivot() - pose.origin
+		var horizontal_normal := Vector3(pose.basis.z.x, 0, pose.basis.z.z).normalized()
+		var horizontal_center := Vector3(toward_pivot.x, 0, toward_pivot.z).normalized()
+		if not is_equal_approx(toward_center.length(), 1.6) \
+			or horizontal_normal.dot(horizontal_center) < 0.9999 \
+			or absf(pose.basis.x.y) > 0.00001:
+			_fail("Spawned windows must face their pinned orientation pivot without roll")
+			return
 	var environment: Environment = xr.get_node("WorldEnvironment").environment
 	var light: DirectionalLight3D = xr.get_node("ControllerLight")
 	if environment.ambient_light_source != Environment.AMBIENT_SOURCE_COLOR \

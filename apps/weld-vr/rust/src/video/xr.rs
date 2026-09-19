@@ -27,6 +27,7 @@ struct Configuration {
     panel: Gd<MeshInstance3D>,
     view: Gd<Control>,
     laser: Gd<MeshInstance3D>,
+    laser_length: f32,
     marker: Gd<MeshInstance3D>,
 }
 impl Configuration {
@@ -223,7 +224,7 @@ impl WeldXrPointer {
             let length = distance / scale;
             config
                 .laser
-                .set_scale(Vector3::new(1.0, 1.0, length / geometry::RANGE));
+                .set_scale(Vector3::new(1.0, 1.0, length / config.laser_length));
             config
                 .laser
                 .set_position(Vector3::new(0.0, 0.0, -length * 0.5));
@@ -264,12 +265,21 @@ impl WeldXrPointer {
             godot_error!("XR pointer needs its Laser and Target presentation nodes");
             return;
         };
+        let Some(laser_length) = laser
+            .get_mesh()
+            .map(|mesh| mesh.get_aabb().size.z)
+            .filter(|length| length.is_finite() && *length > 0.0)
+        else {
+            godot_error!("XR pointer needs a positive-length laser mesh");
+            return;
+        };
         self.configuration = Some(Configuration {
             player,
             controller,
             panel,
             view,
             laser,
+            laser_length,
             marker,
         });
         self.base_mut().set_process(true);

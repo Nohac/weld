@@ -55,6 +55,24 @@ func _run() -> void:
 			push_error("Packed stereo eye selection or content crop is incorrect")
 			quit(1)
 			return
+		if viewport.get_texture().get_image().get_pixel(1, 1).a > 0.05:
+			push_error("Both stereo eyes must share the window corner clipping")
+			quit(1)
+			return
+	# An inset child has square local corners inside the window. A child at
+	# the owner's top-left clips only that outer corner, not its own right edge.
+	for region in [Vector4(0.25, 0.25, 0.5, 0.5), Vector4(0, 0, 0.5, 0.5)]:
+		material.set_shader_parameter("window_region", region)
+		for index in range(4):
+			await process_frame
+			RenderingServer.force_draw(false)
+		image = viewport.get_texture().get_image()
+		if image.get_pixel(254, 254).a < 0.95 \
+			or (region.x > 0.0 and image.get_pixel(1, 1).a < 0.95) \
+			or (region.x == 0.0 and image.get_pixel(1, 1).a > 0.05):
+			push_error("Subsurface clipping must use the shared window outline")
+			quit(1)
+			return
 	control.queue_free()
 	await process_frame
 	viewport.own_world_3d = true
