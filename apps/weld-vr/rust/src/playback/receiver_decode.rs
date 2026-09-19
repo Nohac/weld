@@ -155,11 +155,75 @@ struct Stream {
     decoder: native::Decoder,
     extent: [u32; 2],
     codec: VideoCodec,
+    accepted: VecDeque<(u64, usize)>,
+    returned: VecDeque<u64>,
 }
-struct Submitted {
+impl Stream {
+    fn try_send(&mut self, payload: &[u8], sequence: u64) -> Result<bool> {
+        let accepted = self.decoder.try_send(payload, sequence)?;
+        if accepted {
+            if self.accepted.len() == 16 {
+                self.accepted.pop_front();
+            }
+            self.accepted.push_back((sequence, payload.len()));
+        }
+        Ok(accepted)
+    }
+
+    fn receive(&mut self, cancelled: impl Fn() -> bool) -> Result<Progress> {
+        let progress = self.decoder.receive(cancelled)?;
+        if let Progress::Image(image) = &progress {
+            if self.returned.len() == 16 {
+                self.returned.pop_front();
+            }
+            self.returned.push_back(image.timestamp_micros());
+        }
+        Ok(progress)
+    }
+}
+struct Submitted<I = native::Image> {
+    // Return native storage before releasing this job's admission credit.
+    image: Option<I>,
     job: Job,
     accepted: bool,
     deadline: Option<Instant>,
+}
+
+/// Restore the worker's FIFO completion contract without adding image credits
+/// or a separate queue. Native output can only occupy an accepted job's slot.
+fn route_output<I>(
+    head: &Submitted<I>,
+    pending: &mut VecDeque<Result<Submitted<I>>>,
+    frame: MediaFrameId,
+    image: I,
+) -> Result<Option<I>> {
+    let expected = head.job.frame();
+    ensure!(
+        (frame.stream, frame.generation) == (expected.stream, expected.generation),
+        "decoded output belongs to another decoder generation"
+    );
+    if frame == expected {
+        ensure!(
+            head.accepted,
+            "decoded output belongs to an unaccepted head job"
+        );
+        return Ok(Some(image));
+    }
+    let next = pending
+        .iter_mut()
+        .filter_map(|entry| entry.as_mut().ok())
+        .find(|entry| entry.job.frame() == frame)
+        .context("decoded output does not match an outstanding job")?;
+    ensure!(next.accepted, "decoded output belongs to an unaccepted job");
+    ensure!(
+        next.image.is_none(),
+        "duplicate decoded output for a pending job"
+    );
+    next.image = Some(image);
+    tracing::debug!(target: "weld_vr_diag", stream = frame.stream.raw(),
+        generation = frame.generation.raw(), expected_sequence = expected.sequence,
+        received_sequence = frame.sequence, "buffered out-of-order decoder output");
+    Ok(None)
 }
 
 fn completion_deadline(deadline: &mut Option<Instant>, now: Instant) -> Instant {
@@ -190,6 +254,8 @@ impl Processor {
                 )?,
                 extent,
                 codec,
+                accepted: VecDeque::with_capacity(16),
+                returned: VecDeque::with_capacity(16),
             });
         }
         let stream = self
@@ -217,12 +283,12 @@ impl Processor {
         });
         let accepted = if !blocked && self.decoders.contains_key(&key) {
             self.prepare_stream(&job)?
-                .decoder
                 .try_send(&job.request.access_unit.payload, frame.sequence)?
         } else {
             false
         };
         Ok(Submitted {
+            image: None,
             job,
             accepted,
             deadline: None,
@@ -246,40 +312,72 @@ impl DecodeProcessor for Processor {
             !shared.session.cancelled.load(Ordering::Acquire),
             "decode cancelled"
         );
-        let decoder = &mut self.prepare_stream(&submitted.job)?.decoder;
+        // Preserve the existing deadline start after potentially slow native
+        // context creation. Subsequent polls and reordered outputs never reset it.
+        self.prepare_stream(&submitted.job)?;
         let deadline = completion_deadline(&mut submitted.deadline, Instant::now());
-        ensure!(
-            Instant::now() < deadline,
-            "decoder did not produce a low-delay frame within 3s"
-        );
-        let request = &submitted.job.request;
-        let frame = request.access_unit.frame;
-        if !submitted.accepted {
-            submitted.accepted = decoder.try_send(&request.access_unit.payload, frame.sequence)?;
-        }
-        match decoder.receive(|| shared.session.cancelled.load(Ordering::Acquire))? {
-            Progress::Pending => {
-                self.pending.push_front(Ok(submitted));
-                Ok(Poll::Pending)
+        let frame = submitted.job.frame();
+        let image = loop {
+            let successor_cached = self.pending.iter().any(|entry| {
+                entry.as_ref().is_ok_and(|entry| {
+                    let next = entry.job.frame();
+                    (next.stream, next.generation) == (frame.stream, frame.generation)
+                        && entry.image.is_some()
+                })
+            });
+            ensure!(
+                Instant::now() < deadline,
+                "decoder did not produce {frame:?} within 3s; successor_cached={successor_cached}"
+            );
+            ensure!(
+                !shared.session.cancelled.load(Ordering::Acquire),
+                "decode cancelled"
+            );
+            if let Some(image) = submitted.image.take() {
+                break image;
             }
-            Progress::End => anyhow::bail!("unexpected decoder end during live stream"),
-            Progress::Image(image) => {
-                ensure!(
-                    submitted.accepted && image.timestamp_micros() == frame.sequence,
-                    "decoded output belongs to another frame"
-                );
-                let output = Frame {
-                    image,
-                    visible: [request.visible_width, request.visible_height],
-                    credit: Some(submitted.job.credit),
-                };
-                output.crop(None)?;
-                Ok(Poll::Ready(vec![DecodedFrame {
-                    frame,
-                    buffer: output,
-                }]))
+            let decoder = self.prepare_stream(&submitted.job)?;
+            if !submitted.accepted {
+                submitted.accepted =
+                    decoder.try_send(&submitted.job.request.access_unit.payload, frame.sequence)?;
             }
-        }
+            match decoder.receive(|| shared.session.cancelled.load(Ordering::Acquire))? {
+                Progress::Pending => {
+                    self.pending.push_front(Ok(submitted));
+                    return Ok(Poll::Pending);
+                }
+                Progress::End => anyhow::bail!("unexpected decoder end during live stream"),
+                Progress::Image(image) => {
+                    let returned = MediaFrameId {
+                        sequence: image.timestamp_micros(),
+                        ..frame
+                    };
+                    if let Some(image) =
+                        route_output(&submitted, &mut self.pending, returned, image).with_context(
+                            || format!("matching {returned:?} while awaiting {frame:?}"),
+                        )?
+                    {
+                        break image;
+                    }
+                    // Drain immediately: the earlier image may already be ready.
+                    // Every cached result occupies a unique admitted job, so a
+                    // duplicate/unknown result errors instead of extending this loop.
+                }
+            }
+        };
+        let output = Frame {
+            image,
+            visible: [
+                submitted.job.request.visible_width,
+                submitted.job.request.visible_height,
+            ],
+            credit: Some(submitted.job.credit),
+        };
+        output.crop(None)?;
+        Ok(Poll::Ready(vec![DecodedFrame {
+            frame,
+            buffer: output,
+        }]))
     }
     fn retire(&mut self, stream: MediaStreamId, generation: StreamGeneration) {
         self.decoders.remove(&(stream, generation));
@@ -289,6 +387,171 @@ impl DecodeProcessor for Processor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::AtomicUsize;
+    use weld_media::{EncodedAccessUnit, EncodedFrameKind};
+
+    fn id(stream: u64, generation: u64, sequence: u64) -> MediaFrameId {
+        MediaFrameId::new(
+            MediaStreamId::new(stream),
+            StreamGeneration::new(generation),
+            sequence,
+        )
+    }
+
+    fn submitted<I>(
+        budget: &Arc<FrameBudget>,
+        frame: MediaFrameId,
+        accepted: bool,
+    ) -> Submitted<I> {
+        Submitted {
+            image: None,
+            job: Job {
+                request: DecodeRequest {
+                    token: frame.sequence,
+                    access_unit: EncodedAccessUnit {
+                        frame,
+                        codec: VideoCodec::Av1,
+                        kind: EncodedFrameKind::Delta,
+                        timestamp_micros: frame.sequence,
+                        payload: vec![1],
+                    },
+                    visible_width: 640,
+                    visible_height: 480,
+                },
+                credit: budget.reserve(frame.stream).expect("image credit"),
+            },
+            accepted,
+            deadline: None,
+        }
+    }
+
+    #[test]
+    fn swapped_outputs_keep_original_jobs_and_complete_in_fifo_order() {
+        let budget = FrameBudget::new(thread::current());
+        let head = submitted::<u64>(&budget, id(1, 1, 310), true);
+        let mut pending = VecDeque::from([Ok(submitted(&budget, id(1, 1, 311), true))]);
+        assert!(
+            route_output(&head, &mut pending, id(1, 1, 311), 311)
+                .unwrap()
+                .is_none()
+        );
+        assert!(head.image.is_none());
+        assert_eq!(pending.len(), 1, "reordering never admits another job");
+        let first = route_output(&head, &mut pending, id(1, 1, 310), 310).unwrap();
+        assert_eq!((head.job.token(), first), (310, Some(310)));
+        let mut second = pending.pop_front().unwrap().unwrap();
+        // The successor already owns its image: no third input or native
+        // receive is necessary to consume the final frame of the stream.
+        assert_eq!((second.job.token(), second.image.take()), (311, Some(311)));
+        assert!(second.image.take().is_none());
+    }
+
+    #[test]
+    fn ordinary_output_needs_no_successor_or_extra_storage() {
+        let budget = FrameBudget::new(thread::current());
+        let head = submitted::<u64>(&budget, id(1, 1, 1), true);
+        let mut pending = VecDeque::new();
+        assert_eq!(
+            route_output(&head, &mut pending, id(1, 1, 1), 1).unwrap(),
+            Some(1)
+        );
+        assert!(pending.is_empty());
+    }
+
+    #[test]
+    fn output_matching_rejects_unknown_unaccepted_or_cross_generation_images() {
+        for (candidate, output, accepted) in [
+            (id(2, 1, 311), id(2, 1, 311), true),
+            (id(1, 2, 311), id(1, 2, 311), true),
+            (id(1, 1, 311), id(1, 1, 312), true),
+            (id(1, 1, 311), id(1, 1, 311), false),
+        ] {
+            let budget = FrameBudget::new(thread::current());
+            let head = submitted::<u64>(&budget, id(1, 1, 310), true);
+            let mut pending = VecDeque::from([Ok(submitted(&budget, candidate, accepted))]);
+            assert!(route_output(&head, &mut pending, output, output.sequence).is_err());
+            assert!(pending.front().unwrap().as_ref().unwrap().image.is_none());
+        }
+        let budget = FrameBudget::new(thread::current());
+        let head = submitted::<u64>(&budget, id(1, 1, 310), false);
+        assert!(route_output(&head, &mut VecDeque::new(), id(1, 1, 310), 310).is_err());
+    }
+
+    #[test]
+    fn duplicate_output_never_overwrites_an_owned_image_and_errors_are_not_slots() {
+        let budget = FrameBudget::new(thread::current());
+        let head = submitted::<u64>(&budget, id(1, 1, 310), true);
+        let mut pending = VecDeque::from([
+            Err(anyhow::anyhow!("failed submission")),
+            Ok(submitted(&budget, id(1, 1, 311), true)),
+        ]);
+        assert!(
+            route_output(&head, &mut pending, id(1, 1, 311), 311)
+                .unwrap()
+                .is_none()
+        );
+        assert!(route_output(&head, &mut pending, id(1, 1, 311), 999).is_err());
+        assert!(pending.pop_front().unwrap().is_err());
+        assert_eq!(pending.pop_front().unwrap().unwrap().image, Some(311));
+    }
+
+    struct ImageLeaseProbe {
+        budget: Arc<FrameBudget>,
+        free_credits_at_drop: Arc<AtomicUsize>,
+        dropped: Arc<AtomicUsize>,
+    }
+    impl Drop for ImageLeaseProbe {
+        fn drop(&mut self) {
+            let mut available = Vec::new();
+            while let Some(credit) = self.budget.reserve(MediaStreamId::new(1)) {
+                available.push(credit);
+            }
+            self.free_credits_at_drop
+                .store(available.len(), Ordering::SeqCst);
+            self.dropped.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    #[test]
+    fn dropping_pending_work_releases_cached_image_before_its_credit() {
+        let budget = FrameBudget::new(thread::current());
+        let head = submitted::<ImageLeaseProbe>(&budget, id(1, 1, 310), true);
+        let mut pending = VecDeque::from([Ok(submitted(&budget, id(1, 1, 311), true))]);
+        let mut other_credits = Vec::new();
+        while let Some(credit) = budget.reserve(MediaStreamId::new(1)) {
+            other_credits.push(credit);
+        }
+        let free_credits_at_drop = Arc::new(AtomicUsize::new(usize::MAX));
+        let dropped = Arc::new(AtomicUsize::new(0));
+        let image = ImageLeaseProbe {
+            budget: budget.clone(),
+            free_credits_at_drop: free_credits_at_drop.clone(),
+            dropped: dropped.clone(),
+        };
+        assert!(
+            route_output(&head, &mut pending, id(1, 1, 311), image)
+                .unwrap()
+                .is_none()
+        );
+        assert!(budget.reserve(MediaStreamId::new(1)).is_none());
+        drop(head);
+        drop(pending); // Cached image must drop before its own job's credit.
+        assert_eq!(dropped.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            free_credits_at_drop.load(Ordering::SeqCst),
+            1,
+            "only the preceding job's credit is free when the cached image drops"
+        );
+        let first = budget
+            .reserve(MediaStreamId::new(1))
+            .expect("head credit released");
+        let second = budget
+            .reserve(MediaStreamId::new(1))
+            .expect("cached job credit released");
+        assert!(budget.reserve(MediaStreamId::new(1)).is_none());
+        drop((first, second, other_credits));
+    }
+
     #[test]
     fn pending_polls_never_extend_the_original_completion_deadline() {
         let start = Instant::now();
