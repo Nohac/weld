@@ -124,7 +124,7 @@ pub(super) fn run_session(
         shared.message("Connecting to saved Weld source");
         let mut pending = host.begin_connect_profile(
             &profile,
-            vec![VideoCodec::Av1],
+            vec![VideoCodec::Av1, VideoCodec::H264],
             notifier.clone(),
             Duration::from_secs(5),
         )?;
@@ -142,6 +142,7 @@ pub(super) fn run_session(
             Ok(peer) => {
                 backoff = Duration::from_secs(1);
                 let connection = Connection(peer);
+                tracing::info!(target: "weld_vr_diag", codec = ?connection.0.codec(), "negotiated Godot hoist codec");
                 let backend = Backend::new(
                     target.clone(),
                     shared.clone(),
@@ -185,7 +186,7 @@ pub(super) fn run_session(
                                 "presentation request rejected"
                             );
                         }
-                        shared.message("Receiving AV1 windows");
+                        shared.message("Receiving streamed windows");
                     }
                     // Drain destruction first so a changed preference only targets
                     // the surviving inventory. The mailbox contains no queued history.

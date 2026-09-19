@@ -19,6 +19,23 @@ def row(time, count, epoch=1, file="source.log"):
 
 
 class DiagnosticsTests(unittest.TestCase):
+    def test_report_codec_comes_from_actual_encoders_before_requested_metadata(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            run = Path(temporary)
+            (run / "run.json").write_text(json.dumps({"codec": "av1", "started_at": 1789815600}))
+            (run / "viewer.log").write_text("")
+            (run / "source.log").write_text(
+                "2026-09-19T12:00:00Z INFO opened VA-API encoder generation codec=H264 stream=1\n")
+            self.assertIn("Codec: H.264 (encoder logs)", PLOT["report"](run))
+            with (run / "source.log").open("a") as log:
+                log.write("2026-09-19T12:00:01Z INFO opened VA-API encoder generation codec=Av1 stream=2\n")
+            self.assertIn("Codec: AV1, H.264 (encoder logs)", PLOT["report"](run))
+            (run / "source.log").write_text(
+                "2026-09-19T12:00:00Z DEBUG presentation observations decoded_total=1\n")
+            self.assertIn("Codec: AV1 (requested; not confirmed in logs)", PLOT["report"](run))
+            (run / "run.json").write_text("{}")
+            self.assertIn("Codec: Unknown — not recorded", PLOT["report"](run))
+
     def test_report_opens_by_default_and_no_open_skips_launch(self):
         with tempfile.TemporaryDirectory(prefix="weld report ") as temporary:
             run = Path(temporary)

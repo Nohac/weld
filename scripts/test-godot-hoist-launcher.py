@@ -10,6 +10,15 @@ API = runpy.run_path(str(Path(__file__).with_name("run-godot-hoist")))
 
 
 class PairingTests(unittest.TestCase):
+    def test_codec_selection_preserves_av1_default_and_source_options(self):
+        self.assertEqual(API["parse_arguments"]([]).codec, "av1")
+        for codec in ("av1", "h264"):
+            args = API["parse_arguments"](["--codec", codec])
+            self.assertEqual(args.codec, codec)
+            command = API["source_command"](Path("/run/test"), Path("/state"), ["blender"], 16, codec)
+            self.assertEqual(command[command.index("--hoist-codec") + 1], codec)
+            self.assertEqual(command[command.index("--hoist-bitrate-target-mbps") + 1], "16")
+
     def test_low_latency_is_explicit_android_only_and_clears_pending_marker(self):
         self.assertFalse(API["parse_arguments"]([]).decoder_low_latency)
         self.assertTrue(API["parse_arguments"](["--decoder-low-latency"]).decoder_low_latency)

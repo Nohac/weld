@@ -186,6 +186,7 @@ impl Processor {
                     &config,
                     self.target.clone(),
                     self.low_latency,
+                    &request.access_unit.payload,
                 )?,
                 extent,
                 codec,

@@ -97,7 +97,12 @@ def read_records(run):
                         fields = dict(zip(["layers", "decoded", "imported", "unknown_discard"], map(float, match.groups())))
                 when = timestamp(line, year)
                 if kind and when is not None:
-                    records.append(dict(time=when, kind=kind, fields=fields, file=str(path)))
+                    record = dict(time=when, kind=kind, fields=fields, file=str(path))
+                    if kind == "encoder":
+                        codec = re.search(r"\bcodec=(Av1|H264|Vp9)\b", line)
+                        if codec:
+                            record["codec"] = codec[1].lower()
+                    records.append(record)
                 if len(records) > 20000:
                     raise ValueError("too many samples; select a shorter run")
     if not metadata:
@@ -185,6 +190,15 @@ def report(run):
     groups = {kind: [row for row in records if row["kind"] == kind] for kind in {row["kind"] for row in records}}
     start, end = records[0]["time"], records[-1]["time"]
     get = lambda kind: groups.get(kind, [])
+    codec_names = {"av1": "AV1", "h264": "H.264", "vp9": "VP9"}
+    observed_codecs = sorted({row["codec"] for row in get("encoder") if "codec" in row})
+    if observed_codecs:
+        codec_label = ", ".join(codec_names[codec] for codec in observed_codecs) + " (encoder logs)"
+    else:
+        metadata_path = run / "run.json"
+        metadata = json.loads(metadata_path.read_text()) if metadata_path.exists() else {}
+        requested_codec = codec_names.get(metadata.get("codec"))
+        codec_label = f"{requested_codec} (requested; not confirmed in logs)" if requested_codec else "Unknown — not recorded"
     charts = []
     def add(title, labels, data, units, average_kind="interval"):
         charts.append(chart(title, labels, data, start, end, units, average_kind))
@@ -241,6 +255,7 @@ def report(run):
 <style>body{{background:#111820;color:#dbe5ee;font:15px system-ui;margin:30px auto;max-width:1180px;padding:0 16px}}section{{background:#19232e;padding:16px;margin:16px 0;border-radius:8px}}h2{{font-size:18px}}.chart{{min-width:0}}.missing{{color:#e8b56a}}li{{margin:8px 0}}table{{font:12px monospace}}td{{padding:5px}}.u-legend{{white-space:normal;text-align:left}}.u-legend .u-series{{margin-right:12px}}.u-select{{background:#79b7ed30}}button{{background:#26394c;color:#dbe5ee;border:1px solid #6c859d;border-radius:5px;padding:8px 14px;cursor:pointer}}</style>
 <style>.u-legend{{min-height:70px;font-variant-numeric:tabular-nums}}.u-legend th,.u-legend td{{white-space:nowrap}}.u-legend .u-value{{width:19ch;min-width:19ch;text-align:right}}.chart{{overflow-x:auto}}.chart-options{{display:flex;align-items:center;gap:20px;flex-wrap:wrap}}</style>
 <h1>Weld run diagnostics</h1><p>{html.escape(run.name)} · {datetime.fromtimestamp(start, timezone.utc).isoformat()} · {end-start:.1f}s observed</p>
+<p><strong>Codec: {html.escape(codec_label)}</strong></p>
 <ul>{warnings}</ul><p>Hover for values and a shared time cursor. Drag horizontally to zoom all charts; double-click or reset to see the whole run. Click legend entries to hide/show individual series. Series are not stacked or added together. Cumulative counters are differenced and rebaselined on resets; missing coverage stays blank.</p>
 <p>Charts use CDN-loaded uPlot 1.6.32 and need Internet access (or cached assets). Log data is embedded here; no log upload is performed.</p>
 <p>Dashed lines show whole-run averages and stay fixed when zooming. Visible averages cover only the selected time range. Run totals sum measured counter changes, excluding unknown initial baselines and gaps; different outcomes must not be added to decoded/imported totals.</p>

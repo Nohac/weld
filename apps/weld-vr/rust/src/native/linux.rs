@@ -52,6 +52,7 @@ impl Decoder {
         config: &DecoderConfig,
         target: Target,
         low_latency: bool,
+        _initial_packet: &[u8],
     ) -> Result<Self> {
         ensure!(!low_latency, "low-latency experiment requires Android");
         Self::new(config, target)
@@ -119,7 +120,7 @@ mod tests {
     fn android_experiment_is_rejected_before_opening_native_devices() {
         let config = DecoderConfig::new(VideoCodec::Av1, 320, 180, Vec::new()).unwrap();
         let target = Target { modifiers: vec![0] };
-        let result = Decoder::new_with_low_latency(&config, target, true);
+        let result = Decoder::new_with_low_latency(&config, target, true, &[]);
         assert!(result.is_err_and(|error| error.to_string().contains("requires Android")));
     }
 }

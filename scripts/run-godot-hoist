@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Pair a development Godot viewer with headless AV1 windows over Iroh N0.
+"""Pair a development Godot viewer with headless encoded windows over Iroh N0.
 
 The phone must already have the current debug APK installed. Only public files
 are exchanged; private keys remain in per-device storage outside build outputs.
@@ -76,7 +76,7 @@ def write_new(path, text):
         output.write(text)
 
 
-def source_command(exchange, state, app, bitrate_mbps=16):
+def source_command(exchange, state, app, bitrate_mbps=16, codec="av1"):
     return ["cargo", "run", "--locked", "--quiet", "--", "--backend", "headless",
             "--wayland-socket", "source", "--hoist-all", "--headless-window-size", "960x640",
             "--keyboard-repeat-mode", "compositor", "--legacy-key-repeat", "emulated",
@@ -84,7 +84,7 @@ def source_command(exchange, state, app, bitrate_mbps=16):
             "--hoist-iroh-expect-peer", str(exchange / "viewer.identity"),
             "--hoist-iroh-device-dir", str(state / "source"),
             "--hoist-iroh-publish-profile", str(exchange / "source.profile"),
-            "--hoist-iroh-network", "n0", "--hoist-codec", "av1",
+            "--hoist-iroh-network", "n0", "--hoist-codec", codec,
             "--hoist-bitrate-target-mbps", str(bitrate_mbps), "--", *app]
 
 
@@ -135,10 +135,11 @@ def parse_arguments(argv=None):
     parser.add_argument("--restart-after", type=LAUNCHER["positive_seconds"],
                         help="diagnostic: restart the source/apps once, leaving the viewer alive")
     parser.add_argument("--app", choices=("foot", "blender"), default="foot")
+    parser.add_argument("--codec", choices=("av1", "h264"), default="av1")
     parser.add_argument("--blender-script", type=Path,
                         help="diagnostic: run a Python exercise in a factory-startup Blender instance")
     parser.add_argument("--bitrate-mbps", type=int, choices=(8, 16, 24), default=16,
-                        help="shared AV1 encoder target across windows (default: 16 Mbps)")
+                        help="shared encoder target across windows (default: 16 Mbps)")
     args = parser.parse_args(argv)
     if args.desktop and args.decoder_low_latency:
         parser.error("--decoder-low-latency requires an Android viewer")
@@ -187,8 +188,8 @@ def main(argv=None):
             serial = ready[0]
         adb = ["adb", "-s", serial]
         subprocess.run([*adb, "shell", "run-as", PACKAGE, "pwd"], check=True, stdout=subprocess.DEVNULL, timeout=5)
-    print("Live AV1 window hierarchy; receiver limits are eight surfaces/layers and 32 in-flight images.", flush=True)
-    print(f"Shared AV1 bitrate target: {args.bitrate_mbps} Mbps (not a bandwidth cap).", flush=True)
+    print(f"Live {args.codec.upper()} window hierarchy; receiver limits are eight surfaces/layers and 32 in-flight images.", flush=True)
+    print(f"Shared {args.codec.upper()} bitrate target: {args.bitrate_mbps} Mbps (not a bandwidth cap).", flush=True)
     print(f"Stream cadence: {'half' if args.half_rate else 'full'} display rate; local presentation unchanged.", flush=True)
     print(f"Android decoder low-latency request: {args.decoder_low_latency} (device support is not guaranteed).", flush=True)
     print("Iroh N0 contacts Internet discovery/relay services; existing desktop apps and host routes are unchanged.", flush=True)
@@ -210,7 +211,7 @@ def main(argv=None):
     phone_pid = None
     capture = None
     (run / "run.json").write_text(json.dumps({"started_at": time.time(), "desktop": args.desktop,
-        "bitrate_mbps": args.bitrate_mbps, "half_rate": args.half_rate,
+        "codec": args.codec, "bitrate_mbps": args.bitrate_mbps, "half_rate": args.half_rate,
         "decoder_low_latency": args.decoder_low_latency,
         "log_capture": "desktop" if args.desktop else "full-run-filtered",
         "clock_note": "Cross-device wall clocks are approximate; timings are local, not one-way latency."}) + "\n")
@@ -263,7 +264,7 @@ def main(argv=None):
             environment.pop(key, None)
         environment["XDG_RUNTIME_DIR"] = str(runtime)
         app = app_command(args)
-        command = source_command(run, state, app, args.bitrate_mbps)
+        command = source_command(run, state, app, args.bitrate_mbps, args.codec)
         hosts.append(LAUNCHER["OwnedHost"]("source", command, environment, ROOT, run))
         wait(lambda: (run / "source.profile").exists())
         profile = (run / "source.profile").read_text()
@@ -321,7 +322,7 @@ def main(argv=None):
                 for key in ("DISPLAY", "WAYLAND_DISPLAY", "WAYLAND_SOCKET"):
                     source_environment.pop(key, None)
                 source_environment["XDG_RUNTIME_DIR"] = str(restart / "runtime")
-                hosts.insert(0, LAUNCHER["OwnedHost"]("source", source_command(restart, state, app, args.bitrate_mbps), source_environment, ROOT, restart))
+                hosts.insert(0, LAUNCHER["OwnedHost"]("source", source_command(restart, state, app, args.bitrate_mbps, args.codec), source_environment, ROOT, restart))
                 restart_at = None
             time.sleep(0.1)
     except InterruptedError:

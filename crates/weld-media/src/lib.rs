@@ -17,7 +17,7 @@ pub use submit::WorkerSubmitError;
 mod config;
 mod frame;
 #[cfg(feature = "config")]
-pub use config::DecoderConfig;
+pub use config::{DecoderConfig, h264_annex_b_headers};
 mod id;
 mod timing;
 

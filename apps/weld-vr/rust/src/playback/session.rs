@@ -597,7 +597,7 @@ impl Session {
             return self.bootstrap.status();
         }
         format!(
-            "Receiving AV1 windows: {} layers, decoded {decoded}, presented {presented}, superseded {superseded}",
+            "Receiving streamed windows: {} layers, decoded {decoded}, presented {presented}, superseded {superseded}",
             panes.len()
         )
     }

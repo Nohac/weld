@@ -1,7 +1,7 @@
 use super::{Geometry, Progress};
 use anyhow::{Context, Result};
 use std::{ffi::c_void, os::fd::OwnedFd, ptr::NonNull};
-use weld_media::DecoderConfig;
+use weld_media::{DecoderConfig, VideoCodec, h264_annex_b_headers};
 use weld_media_android::{AndroidDecoder, AndroidImage, AndroidImageTarget, DecodeProgress};
 
 pub const TEXTURE_TARGET: u32 = 0x8d65; // GL_TEXTURE_EXTERNAL_OES
@@ -20,14 +20,30 @@ impl Target {
 pub struct Decoder(AndroidDecoder);
 impl Decoder {
     pub fn new(config: &DecoderConfig, target: Target) -> Result<Self> {
-        Self::new_with_low_latency(config, target, false)
+        Self::new_with_low_latency(config, target, false, &[])
     }
     pub fn new_with_low_latency(
         config: &DecoderConfig,
         _target: Target,
         low_latency: bool,
+        initial_packet: &[u8],
     ) -> Result<Self> {
         let (width, height) = config.extent();
+        // FFmpeg's H.264 MediaCodec open rejects empty extradata. Our wire
+        // format carries SPS/PPS in each generation's first keyframe; Linux
+        // accepts them in-band, but Android needs them before native creation.
+        let initialized;
+        let config = if config.codec() == VideoCodec::H264 && config.extra().is_empty() {
+            initialized = DecoderConfig::new(
+                VideoCodec::H264,
+                width,
+                height,
+                h264_annex_b_headers(initial_packet)?,
+            )?;
+            &initialized
+        } else {
+            config
+        };
         let decoder = AndroidDecoder::new_with_low_latency(
             config,
             AndroidImageTarget::new(width, height, MAX_ACQUIRED_IMAGES)?,

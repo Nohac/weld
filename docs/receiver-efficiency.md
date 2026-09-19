@@ -163,3 +163,36 @@ Linux/Android extension builds, Pico export and scene smoke passed. The packaged
 the extension during export; packaged/staged `.text` hashes matched, and both
 contained the experimental mode markers. Generated binaries and logs stay
 untracked; baseline FFmpeg cache was preserved.
+
+## H.264 comparison, 2026-09-19
+
+The live Godot receiver now accepts AV1 and H.264. Android's FFmpeg MediaCodec
+H.264 wrapper needs SPS/PPS extradata when opening the decoder: pinned FFmpeg's
+`ff_h264_decode_extradata` rejects an empty input. The Android provider extracts
+bounded Annex B parameter sets from the first access unit when configuration
+extradata is absent. Linux keeps its existing in-band header handling. Decoder
+generations, scheduling, frame queues and image leases are unchanged.
+
+Four 40-second full-rate Blender motion runs used an 8 Mbps shared target,
+with the low-latency request disabled. This avoids an unequal comparison caused
+by AV1's existing per-stream bitrate cap. The first AV1 run predates the H.264
+header fix; the second pair used the same APK, and the AV1 path was unchanged.
+
+| Codec | Single-window worker mean (seconds 8–20) | Run suffix |
+| --- | --- | --- |
+| AV1 | 5.510 ms | `n_bot80v` |
+| H.264 | 5.132 ms | `o681ogfd` |
+| AV1 | 5.597 ms | `1umi7kt7` |
+| H.264 | 5.717 ms | `_mup1u4a` |
+
+Worker residence includes waiting, not just hardware decoding. H.264 encoding
+was slightly faster in these samples, but receiver timings and replacements
+varied enough that there is no demonstrated overall latency win. Both codecs
+reported zero codec errors and QUIC packets declared lost. Tests ended before
+the known Preferences-close crash. The Pico used `c2.qti.avc.decoder`, which
+also reported `low_latency_feature=false`.
+
+Subsequent manual testing found no visible improvement with H.264 and possibly
+worse appearance. AV1 therefore remains the default; H.264 stays available for
+comparison and other devices. These observations are not a general codec
+quality ranking or an end-to-end latency measurement.
