@@ -3,6 +3,7 @@
 //! implement DecodeBackend until asynchronous output and presentation are proven.
 
 use std::{
+    collections::VecDeque,
     ffi::{CStr, c_char},
     panic::{AssertUnwindSafe, catch_unwind},
     path::Path,
@@ -38,10 +39,17 @@ extern "system" fn Java_WeldCodecProbe_run(
     _class: JClass<'_>,
     fixture: JString<'_>,
     expected: jint,
+    timestamp_step: jint,
+    depth: jint,
 ) -> jint {
     match catch_unwind(AssertUnwindSafe(|| -> Result<()> {
         let fixture: String = env.get_string(&fixture)?.into();
-        run(Path::new(&fixture), usize::try_from(expected)?)
+        run(
+            Path::new(&fixture),
+            usize::try_from(expected)?,
+            i64::from(timestamp_step),
+            usize::try_from(depth)?,
+        )
     })) {
         Ok(Ok(())) => 0,
         Ok(Err(error)) => {
@@ -131,7 +139,8 @@ impl Drop for LogCapture {
 
 struct Session {
     decoder: AndroidDecoder,
-    retained: Option<AndroidImage>,
+    retained: VecDeque<AndroidImage>,
+    hold_images: usize,
     images: usize,
     receive_calls: usize,
 }
@@ -170,10 +179,15 @@ impl Session {
             width <= 1920 && height <= 1088,
             "probe extent exceeds bound"
         );
-        let target = AndroidImageTarget::new(width, height, 4)?;
+        let hold_images = std::env::var("WELD_PROBE_HOLD_IMAGES")
+            .unwrap_or_else(|_| "1".into())
+            .parse::<usize>()?;
+        ensure!((1..=6).contains(&hold_images), "invalid held image count");
+        let target = AndroidImageTarget::new(width, height, 8)?;
         Ok(Self {
             decoder: AndroidDecoder::new(&config, target)?,
-            retained: None,
+            retained: VecDeque::with_capacity(hold_images),
+            hold_images,
             images: 0,
             receive_calls: 0,
         })
@@ -181,7 +195,7 @@ impl Session {
 
     fn receive(&mut self, ledger: &mut Ledger) -> Result<Receive> {
         self.receive_calls += 1;
-        ensure!(self.receive_calls <= 4096, "receive call bound exceeded");
+        ensure!(self.receive_calls <= 65_536, "receive call bound exceeded");
         match self.decoder.receive(|| false)? {
             DecodeProgress::Pending => Ok(Receive::Again),
             DecodeProgress::End => Ok(Receive::End),
@@ -198,7 +212,10 @@ impl Session {
                     info.format,
                     info.crop
                 );
-                self.retained = Some(image);
+                if self.retained.len() == self.hold_images {
+                    self.retained.pop_front();
+                }
+                self.retained.push_back(image);
                 Ok(Receive::Frame)
             }
         }
@@ -212,9 +229,14 @@ enum Receive {
     End,
 }
 
-fn run(path: &Path, expected: usize) -> Result<()> {
+fn run(path: &Path, expected: usize, timestamp_step: i64, depth: usize) -> Result<()> {
     let _watchdog = Watchdog::start()?;
-    let mut ledger = Ledger::new(expected)?;
+    ensure!((1..=4).contains(&depth), "pipeline depth must be 1..=4");
+    let mut ledger = Ledger::with_timestamp_step(expected, timestamp_step)?;
+    let poll_delay = std::env::var("WELD_PROBE_POLL_DELAY_MS")
+        .unwrap_or_else(|_| "0".into())
+        .parse::<u64>()?;
+    ensure!(poll_delay <= 100, "poll delay exceeds 100ms");
     let metadata = path.metadata()?;
     ensure!(
         metadata.is_file() && metadata.len() > 0 && metadata.len() <= MAX_FILE_BYTES,
@@ -256,7 +278,7 @@ fn run(path: &Path, expected: usize) -> Result<()> {
                 );
                 ensure!(
                     packets.len() < MAX_PACKETS,
-                    "fixture packet count exceeds 120"
+                    "fixture packet count exceeds {MAX_PACKETS}"
                 );
                 packets.push(packet);
             }
@@ -270,7 +292,7 @@ fn run(path: &Path, expected: usize) -> Result<()> {
         packets.len()
     );
     println!(
-        "codec={codec:?} wrapper={name} ndk_codec=1 packets={} min_api=28",
+        "codec={codec:?} wrapper={name} ndk_codec=1 packets={} min_api=28 timestamp_step_us={timestamp_step} depth={depth}",
         packets.len()
     );
     let mut session = Session::new(parameters, codec)?;
@@ -292,6 +314,7 @@ fn run(path: &Path, expected: usize) -> Result<()> {
             )? {
                 true => {
                     ledger.accepted(timestamp)?;
+                    println!("accepted={} pts_us={timestamp}", index + 1);
                     accepted = true;
                     break;
                 }
@@ -304,14 +327,21 @@ fn run(path: &Path, expected: usize) -> Result<()> {
             }
         }
         ensure!(accepted, "send retry bound exceeded");
-        let first_deadline = Instant::now() + Duration::from_secs(1);
+        if ledger.pending_count() >= depth && poll_delay > 0 {
+            thread::sleep(Duration::from_millis(poll_delay));
+        }
+        let first_deadline = Instant::now() + Duration::from_secs(3);
         loop {
             let result = session.receive(&mut ledger)?;
             ensure!(result != Receive::End, "decoder ended before EOS");
             if result == Receive::Frame {
                 continue;
             }
-            if index == 0 && session.images == 0 && Instant::now() < first_deadline {
+            if (index == 0 && session.images == 0) || ledger.pending_count() >= depth {
+                ensure!(
+                    Instant::now() < first_deadline,
+                    "pipeline made no progress for 3s"
+                );
                 thread::sleep(Duration::from_millis(1));
                 continue;
             }
@@ -357,7 +387,7 @@ fn run(path: &Path, expected: usize) -> Result<()> {
         "native image count mismatch: expected {expected}, got {}",
         session.images
     );
-    let retained = session.retained.take().context("no retained image")?;
+    let retained = session.retained.pop_back().context("no retained image")?;
     drop(session);
     // SAFETY: retained owns the acquired AImage and its reader after decoder
     // destruction. Borrow the AHB only to inspect metadata, never pixels.
@@ -372,7 +402,8 @@ fn run(path: &Path, expected: usize) -> Result<()> {
     );
     println!("retained image remains valid after decoder destruction");
     println!(
-        "PASS: {expected} decoded frames and native images, no pixel readback; NOT a presentation/FPS benchmark"
+        "PASS: {expected} decoded frames and native images, reordered_outputs={}, no pixel readback; NOT a presentation/FPS benchmark",
+        ledger.reordered_count()
     );
     Ok(())
 }

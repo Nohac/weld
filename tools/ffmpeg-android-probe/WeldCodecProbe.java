@@ -4,22 +4,24 @@ import android.os.Build;
 
 /** app_process supplies the Binder pool; all decode operations remain in Rust/NDK. */
 public final class WeldCodecProbe {
-    private static native int run(String fixture, int expectedFrames);
+    private static native int run(String fixture, int expectedFrames, int timestampStep, int depth);
 
     public static void main(String[] args) {
         if (args.length == 2 && args[0].equals("--codec-info")) {
             describeCodec(args[1]);
             return;
         }
-        if (args.length != 3) {
-            System.err.println("Usage: WeldCodecProbe LIBRARY_DIRECTORY FIXTURE EXPECTED_FRAMES");
+        if (args.length != 3 && args.length != 5) {
+            System.err.println("Usage: WeldCodecProbe LIBRARY_DIRECTORY FIXTURE EXPECTED_FRAMES [TIMESTAMP_STEP_US PIPELINE_DEPTH]");
             System.exit(2);
         }
         // Do not rely on linker namespace inheritance of LD_LIBRARY_PATH.
         for (String library : new String[]{"avutil", "avcodec", "avformat", "ffmpeg_android_probe"}) {
             System.load(args[0] + "/lib" + library + ".so");
         }
-        System.exit(run(args[1], Integer.parseInt(args[2])));
+        System.exit(run(args[1], Integer.parseInt(args[2]),
+            args.length == 5 ? Integer.parseInt(args[3]) : 16667,
+            args.length == 5 ? Integer.parseInt(args[4]) : 2));
     }
 
     private static void describeCodec(String name) {

@@ -53,7 +53,7 @@ behavior.
 - Fixtures are regenerated from `testsrc2`, 320x180, twelve low-delay access
   units each: AV1 Main, H.264 Constrained Baseline and VP9 Profile 0. The host
   FFmpeg version is recorded beside them. Software fixture encoding avoids
-  stressing the host GPU. The probe rejects files above 16 MiB, more than 120
+  stressing the host GPU. The probe rejects files above 16 MiB, more than 2048
   packets, unexpected streams and extents above 1920x1088.
 - FFmpeg log capture is capped at 256 KiB. Input retries and receive calls are
   bounded; image delivery has a two-second deadline, fence waits one second and
@@ -71,13 +71,28 @@ an implicit decoder from running before the native output target exists.
 The explicit decoder receives an `AVMediaCodecDeviceContext` pointing at an
 ImageReader-owned native window. `ndk_codec=1` is read back after open, and
 `get_format` accepts only `AV_PIX_FMT_MEDIACODEC`. The reader requests PRIVATE
-images with GPU-sampling usage and at most four acquired images; the probe holds
-only one at a time.
+images with GPU-sampling usage and at most eight acquired images. The probe
+holds one image by default; `--hold-images 1..6` exercises retained images.
 
 The probe preserves packets across send EAGAIN, tracks accepted microsecond
 timestamps separately from decoded frames, and drains delayed output through
 EOS. A first-packet idle observation checks whether an output arrives before
 another packet or EOS. It is not a latency or pipeline-depth benchmark.
+
+For bounded replay, use `--fixture PATH --frames N` (at most 2048), optionally
+`--timestamp-step-us 1` to match live sequence-number timestamps, `--depth 1..4`
+and `--poll-delay-ms 0..100`. Defaults are 16667 microseconds, depth two and no
+poll delay. The same file-size and watchdog bounds apply. PASS means all expected
+outputs arrived; `reordered_outputs` separately reports outputs that passed an
+older pending timestamp. PASS alone does not establish FIFO output order.
+
+Pico AV1 replay on 2026-09-19 returned adjacent pairs in reverse order (311 then
+310, and 470 then 469), while both probes completed all 997 images. The exact
+codec/driver cause is unproven. The Godot receiver now retains early images on
+their already-admitted jobs and restores FIFO completion without increasing
+image credits. A live three-minute test handled four swaps and continued
+playback; genuine missing output still fails at the original three-second
+receiver deadline.
 
 An opaque FFmpeg frame is rendered to the native window, then the probe acquires
 the next ImageReader image, waits its acquire fence and checks timestamp,

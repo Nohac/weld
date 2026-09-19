@@ -1,14 +1,39 @@
 #!/usr/bin/env bash
 set -euo pipefail
-if [[ $# != 4 || $1 != --serial || ( $3 != --codec && $3 != --codec-info ) ]]; then
+if [[ $# -lt 4 || $1 != --serial || ( $3 != --codec && $3 != --codec-info ) ]]; then
   echo 'Usage: run-android-codec-probe --serial DEVICE --codec av1|h264|vp9' >&2
   echo '       run-android-codec-probe --serial DEVICE --codec-info CODEC_NAME' >&2
+  echo 'Decode options: --fixture PATH --frames 1..2048 --timestamp-step-us 1..1000000 --depth 1..4 --hold-images 1..6 --poll-delay-ms 0..100' >&2
   echo 'Build first with scripts/build-android-codec-probe. Copies a small diagnostic to the selected device.' >&2
   exit 2
 fi
 serial=$2
 codec=$4
 mode=$3
+shift 4
+fixture=
+frames=12
+timestamp_step=16667
+depth=2
+hold_images=1
+poll_delay=0
+while [[ $# -gt 0 ]]; do
+  [[ $mode == --codec && $# -ge 2 ]] || { echo 'Invalid probe options.' >&2; exit 2; }
+  case "$1" in
+    --fixture) fixture=$2 ;;
+    --frames) frames=$2 ;;
+    --timestamp-step-us) timestamp_step=$2 ;;
+    --depth) depth=$2 ;;
+    --hold-images) hold_images=$2 ;;
+    --poll-delay-ms) poll_delay=$2 ;;
+    *) echo "Unknown probe option: $1" >&2; exit 2 ;;
+  esac
+  shift 2
+done
+[[ $frames =~ ^[1-9][0-9]{0,3}$ && $frames -le 2048 &&
+   $timestamp_step =~ ^[1-9][0-9]{0,6}$ && $timestamp_step -le 1000000 &&
+   $depth =~ ^[1-4]$ && $hold_images =~ ^[1-6]$ &&
+   $poll_delay =~ ^(0|[1-9][0-9]{0,2})$ && $poll_delay -le 100 ]] || { echo 'Probe limits exceeded.' >&2; exit 2; }
 [[ $serial =~ ^[a-zA-Z0-9._:-]+$ ]] || { echo 'Invalid device serial.' >&2; exit 2; }
 if [[ $mode == --codec-info ]]; then
   [[ $codec =~ ^[A-Za-z0-9._-]+$ ]] || { echo 'Invalid codec name.' >&2; exit 2; }
@@ -36,8 +61,11 @@ if [[ $mode == --codec-info ]]; then
     "CLASSPATH=$remote/classes.dex app_process /system/bin WeldCodecProbe --codec-info $codec"
   exit 0
 fi
+fixture=${fixture:-"$output/fixtures/$codec.$container"}
+[[ -f $fixture && $(wc -c < "$fixture") -le 16777216 ]] || { echo 'Fixture missing or exceeds 16 MiB.' >&2; exit 1; }
 for name in avutil avcodec avformat; do adb -s "$serial" push "$prefix/lib/lib$name.so" "$remote/"; done
-adb -s "$serial" push "$library" "$output/dex/classes.dex" "$output/fixtures/$codec.$container" "$remote/"
+adb -s "$serial" push "$library" "$output/dex/classes.dex" "$remote/"
+adb -s "$serial" push "$fixture" "$remote/input.$container"
 adb -s "$serial" shell chmod 444 "$remote/classes.dex"
 log=$(mktemp "$output/run-$codec.XXXXXX.log")
 echo "Device $serial API$api; remote diagnostic files retained in $remote"
@@ -45,5 +73,5 @@ echo "Log: $log"
 # The native watchdog exits after 30s even if adb disconnects. No network/device
 # configuration is changed and no Godot APK is installed. Keep paths shell-safe.
 timeout 45s adb -s "$serial" shell \
-  "CLASSPATH=$remote/classes.dex app_process /system/bin WeldCodecProbe $remote $remote/$codec.$container 12" \
+  "WELD_PROBE_HOLD_IMAGES=$hold_images WELD_PROBE_POLL_DELAY_MS=$poll_delay CLASSPATH=$remote/classes.dex app_process /system/bin WeldCodecProbe $remote $remote/input.$container $frames $timestamp_step $depth" \
   2>&1 | tee "$log"
