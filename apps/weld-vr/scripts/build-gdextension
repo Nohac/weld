@@ -17,6 +17,14 @@ case "$mode" in
   *) usage >&2; exit 2 ;;
 esac
 
+# Android export prepends its JDK to PATH. Keep Cargo's tracked build PATH
+# identical to the caller's checks when invoked by the XR preparation script.
+if [[ ${WELD_RUST_BUILD_PATH+x} ]]; then
+  [[ -n ${WELD_RUST_BUILD_PATH:-} ]] || { echo 'WELD_RUST_BUILD_PATH must not be empty.' >&2; exit 1; }
+  export PATH="$WELD_RUST_BUILD_PATH"
+  command -v cargo >/dev/null || { echo 'WELD_RUST_BUILD_PATH must contain cargo; reload the development shell.' >&2; exit 1; }
+fi
+
 project_directory=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 rust_directory="$project_directory/rust"
 repository_directory=$(cd -- "$project_directory/../.." && pwd)

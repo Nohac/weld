@@ -24,23 +24,29 @@ class WorkflowTests(unittest.TestCase):
              patch.object(MODULE, "ROOT", Path(temporary)), \
              patch.object(MODULE, "APK", Path(temporary) / "viewer.apk"), \
              patch.object(MODULE.shutil, "which", return_value="/tools/tool"), \
-             patch.object(MODULE, "steps", return_value=[]), \
+             patch.object(MODULE, "preparation") as prepare, \
              patch.object(MODULE, "run_step"), \
              patch.object(MODULE, "launch_demo") as launch:
             MODULE.APK.touch()
             for enabled in (False, True):
-                args = SimpleNamespace(app="blender", seconds=75, bitrate_mbps=16,
-                                       half_rate=False, decoder_low_latency=enabled)
-                MODULE.workflow(args, "/tools/adb", "pico", {"PATH": "/tools"})
+                args = SimpleNamespace(app="blender", seconds=75, bitrate_mbps=16, codec="h264",
+                                       half_rate=False, decoder_low_latency=enabled, recheck=False)
+                MODULE.workflow(args, "/external/adb", "pico", {"PATH": "/tools"})
+                self.assertEqual(prepare.call_args.args[2]["PATH"], "/tools")
+                self.assertEqual(launch.call_args.args[1]["PATH"], "/external:/tools")
                 command = launch.call_args.args[0]
                 self.assertEqual("--decoder-low-latency" in command, enabled)
                 self.assertNotIn("--half-rate", command)
                 self.assertEqual(command[command.index("--bitrate-mbps") + 1], "16")
+                self.assertEqual(command[command.index("--codec") + 1], "h264")
 
     def test_export_builds_before_engine_checks_without_duplicate_build_step(self):
         steps = MODULE.steps()
         self.assertEqual([step.name for step in steps], ["format", "rust-tests", "clippy", "pico-export", "scene", "shaders"])
         self.assertTrue(all("--release" not in step.command for step in steps))
+        for step in steps:
+            if step.name in ("rust-tests", "clippy"):
+                self.assertEqual(step.command[step.command.index("--target") + 1], "x86_64-unknown-linux-gnu")
 
     def test_engine_zero_exit_with_error_or_missing_marker_is_failure(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -61,12 +67,13 @@ class WorkflowTests(unittest.TestCase):
              patch.object(MODULE.shutil, "which", return_value="/tools/adb"), \
              patch.object(MODULE.subprocess, "check_output", return_value="List of devices attached\npico\tdevice\n"), \
              patch.object(MODULE, "device_lock"), \
-             patch.object(MODULE, "run_step", side_effect=RuntimeError("failed")) as run, \
+             patch.object(MODULE, "preparation_lock"), \
+             patch.object(MODULE, "preparation", side_effect=RuntimeError("failed")), \
+             patch.object(MODULE, "run_step") as run, \
              patch.object(MODULE, "launch_demo") as launch:
             with self.assertRaises(RuntimeError):
                 MODULE.main([])
-            self.assertEqual(run.call_count, 1)
-            self.assertEqual(run.call_args.args[0].name, "format")
+            run.assert_not_called()
             launch.assert_not_called()
 
     def test_same_device_is_locked_until_workflow_cleanup(self):

@@ -217,14 +217,25 @@ Container sorting. A resize can still have one frame of metadata/layout delay.
 
 ## Export and run on Pico
 
-From the shared development shell, `scripts/run-godot-xr` performs formatting,
-Rust tests, Clippy, Pico export (including the Rust build hook), scene and real
-GLES shader checks, then installs and launches Blender for three minutes. It
-stops on any failed step, including engine errors with a zero process exit code.
+From the shared development shell, `scripts/run-godot-xr` checks native build
+freshness, exports the Pico APK, then runs formatting/Rust tests/Clippy in
+parallel with the scene and real GLES shader checks. Cargo checks share the
+native build's explicit desktop target. The build PATH stays stable across
+Godot's Android export hook to avoid unnecessary rebuilds when Godot adds Java.
+Successful preparation is cached against input, toolchain, environment and APK
+contents; unchanged runs skip export and validation. `--recheck` forces them.
+The helper still installs the APK and launches Blender for three minutes on
+every run. Failures, including engine errors with a zero exit code, prevent
+installation. Concurrent checks are cancelled and joined before cleanup.
 Use `--app foot`, `--seconds`, `--serial`, or `--adb` as needed. Detailed check
-logs stay under `target/validation/godot-xr-*`.
+logs stay under `target/validation/godot-xr-*`. Preparation measured 16.45 seconds
+with forced checks and 1.48 seconds unchanged on the development laptop; APK
+installation is separate (about four seconds in the device smoke test).
 
-The shared AV1 target defaults to 16 Mbps; `--bitrate-mbps 8|16|24` selects the
+AV1 remains the default codec; `--codec h264` selects the comparison path in
+both `run-godot-xr` and `run-godot-hoist`. Diagnostic plots label the codec from
+encoder logs, falling back to explicitly unconfirmed requested run metadata.
+The shared target defaults to 16 Mbps; `--bitrate-mbps 8|16|24` selects the
 test's total encoder target, not a bandwidth cap or a per-window guarantee.
 Per-stream codec limits still apply. This does not change Weld's general default.
 Starting another helper on the same device requests a graceful stop of the
@@ -232,6 +243,8 @@ recorded prior owner and waits for its lock to release after cleanup (up to
 45 seconds). PID generation is validated and signaling uses a pidfd. Other
 devices and the shared ADB server are untouched. A pre-upgrade helper lacking
 owner metadata may need to be stopped manually once.
+The shared preparation lock also spans the demo, preventing a second helper's
+build/check workload from interfering with timing measurements on another device.
 
 Disable **Editor Settings > Export > Android > Shutdown ADB On Exit**
 (`export/android/shutdown_adb_on_exit = false`) when sharing ADB with other

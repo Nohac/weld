@@ -15,6 +15,7 @@ import os
 from pathlib import Path
 import re
 import resource
+import runpy
 import shutil
 import signal
 import subprocess
@@ -26,6 +27,7 @@ ROOT = Path(__file__).resolve().parent.parent
 PROJECT = ROOT / "apps/weld-vr"
 MANIFEST = PROJECT / "rust/Cargo.toml"
 APK = PROJECT / "build/weld-vr-pico-debug.apk"
+PREFLIGHT = runpy.run_path(str(ROOT / "scripts/godot-xr-preflight.py"))
 ERROR = re.compile(r"(?:SCRIPT ERROR:|SHADER ERROR:|\bERROR:|Rust build failed|This is NOT a successful Rust build)")
 
 
@@ -40,12 +42,13 @@ class Step:
 
 def steps():
     cargo = ["--manifest-path", str(MANIFEST)]
+    target = ["--target", "x86_64-unknown-linux-gnu"]
     godot = ["godot", "--path", str(PROJECT)]
     return [
         Step("format", ["cargo", "fmt", *cargo, "--check"], 60),
-        Step("rust-tests", ["cargo", "test", *cargo, "--locked", "-j2"], 600),
-        Step("clippy", ["cargo", "clippy", *cargo, "--all-targets", "--locked", "-j2", "--", "-D", "warnings"], 600),
-        # Export invokes the real build hook; do not build/stage a second time.
+        Step("rust-tests", ["cargo", "test", *cargo, *target, "--locked", "-j2"], 600),
+        Step("clippy", ["cargo", "clippy", *cargo, *target, "--all-targets", "--locked", "-j2", "--", "-D", "warnings"], 600),
+        # Export rechecks native freshness through its normal build hook.
         Step("pico-export", [*godot, "--headless", "--export-debug", "Android Pico", str(APK)], 600, engine=True),
         Step("scene", [*godot, "--headless", "--script", "res://tests/gdextension_smoke.gd"], 35,
              "WELD_VR_GDEXTENSION_SMOKE_OK", True),
@@ -66,15 +69,26 @@ def validate(step, code, path):
         raise RuntimeError(f"{step.name} failed (exit {code}, completion marker {marker_found}); see {path}")
 
 
-def run_step(step, directory, environment):
+def run_step(step, directory, environment, *, cancelled=None):
     path = directory / (step.name + ".log")
     print(f"Checking {step.name}...", flush=True)
+    started = time.monotonic()
     with path.open("w") as output:
         process = subprocess.Popen(step.command, cwd=ROOT, env=environment,
                                    stdin=subprocess.DEVNULL, stdout=output, stderr=subprocess.STDOUT,
                                    start_new_session=True)
         try:
-            code = process.wait(timeout=step.timeout)
+            while True:
+                if cancelled is not None and cancelled.is_set():
+                    raise InterruptedError(f"{step.name} cancelled after another check stopped")
+                remaining = step.timeout - (time.monotonic() - started)
+                if remaining <= 0:
+                    raise subprocess.TimeoutExpired(step.command, step.timeout)
+                try:
+                    code = process.wait(timeout=min(0.1, remaining))
+                    break
+                except subprocess.TimeoutExpired:
+                    pass
         finally:
             # A live, unreaped session leader pins this command's process group.
             # Never signal the caller, another test or the shared ADB server.
@@ -86,7 +100,68 @@ def run_step(step, directory, environment):
                     os.killpg(process.pid, signal.SIGKILL)
                     process.wait(timeout=5)
     validate(step, code, path)
-    print(f"  {step.name}: passed", flush=True)
+    print(f"  {step.name}: passed ({time.monotonic() - started:.2f}s)", flush=True)
+
+
+def build_environment(environment):
+    build_path = environment.get("WELD_RUST_BUILD_PATH", environment.get("PATH", ""))
+    if not build_path:
+        raise RuntimeError("WELD_RUST_BUILD_PATH/PATH must not be empty")
+    return dict(environment, PATH=build_path, WELD_RUST_BUILD_PATH=build_path)
+
+
+def preparation(args, run, environment):
+    environment = build_environment(environment)
+    started = time.monotonic()
+    cache = ROOT / "target/godot-xr-preflight.json"
+    run_step(Step("native-build", [str(PROJECT / "scripts/build-gdextension"), "android"], 600), run, environment)
+    key = PREFLIGHT["fingerprint"](ROOT, PROJECT, environment)
+    if not args.recheck and PREFLIGHT["cache_matches"](cache, key, APK):
+        print(f"Preparation cached: inputs and APK unchanged ({time.monotonic() - started:.2f}s). Use --recheck to rerun.", flush=True)
+        return
+    cache.unlink(missing_ok=True)
+    checks = steps()
+    # Export owns a Cargo build hook; finish it before starting Cargo checks.
+    for step in checks:
+        if step.name == "pico-export":
+            run_step(step, run, environment)
+    print("Checking Rust and Godot runtime probes in parallel...", flush=True)
+    PREFLIGHT["parallel_checks"]([
+        [step for step in checks if not step.engine],
+        [step for step in checks if step.engine and step.name != "pico-export"],
+    ], run_step, run, environment)
+    if not APK.is_file():
+        raise RuntimeError("export did not produce the Pico APK")
+    final_key = PREFLIGHT["fingerprint"](ROOT, PROJECT, environment)
+    if final_key["inputs"] != key["inputs"]:
+        raise RuntimeError("XR inputs changed during preparation; rerun before installing")
+    PREFLIGHT["save_cache"](cache, final_key, APK)
+    print(f"Preparation passed ({time.monotonic() - started:.2f}s); saved successful input/APK fingerprints.", flush=True)
+
+
+def preparation_lock():
+    # Acquisition order is device -> shared preparation. Hold through demo
+    # cleanup so another XR workflow cannot compile during timing measurements.
+    path = ROOT / "target/godot-xr-preflight.lock"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lock = path.open("a+")
+    deadline = time.monotonic() + 45
+    announced = False
+    try:
+        while True:
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                return lock
+            except BlockingIOError:
+                if not announced:
+                    print("Another XR workflow is preparing or streaming; waiting up to 45s to avoid build/test interference...", flush=True)
+                    announced = True
+                if time.monotonic() >= deadline:
+                    raise RuntimeError("another XR workflow is still preparing or streaming; stop it before retrying")
+                time.sleep(0.1)
+    except BaseException:
+        lock.close()
+        raise
 
 
 def seconds(value):
@@ -174,19 +249,20 @@ def main(argv=None):
     parser.add_argument("--serial", help="Pico ADB serial; otherwise requires exactly one ready device")
     parser.add_argument("--adb", default=os.environ.get("ADB", "adb"), help="shared ADB executable (default: ADB or PATH)")
     parser.add_argument("--app", choices=("blender", "foot"), default="blender")
+    parser.add_argument("--codec", choices=("av1", "h264"), default="av1")
+    parser.add_argument("--recheck", action="store_true", help="rerun export and all checks even if preparation is cached")
     parser.add_argument("--seconds", type=seconds, default=180)
     parser.add_argument("--half-rate", action="store_true", help="test half-rate streaming without changing XR refresh")
     parser.add_argument("--decoder-low-latency", action="store_true",
                         help="test Android's standard low-latency decoder request")
     parser.add_argument("--bitrate-mbps", type=int, choices=(8, 16, 24), default=16,
-                        help="shared AV1 encoder target across windows (default: 16 Mbps)")
+                        help="shared encoder target across windows (default: 16 Mbps)")
     args = parser.parse_args(argv)
     resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
     adb = shutil.which(args.adb)
     if adb is None:
         raise RuntimeError("ADB is missing; enter the development shell or supply --adb")
     environment = dict(os.environ)
-    environment["PATH"] = str(Path(adb).parent) + os.pathsep + environment.get("PATH", "")
     devices = subprocess.check_output([adb, "devices"], text=True, timeout=10, env=environment)
     ready = [line.split()[0] for line in devices.splitlines() if line.endswith("\tdevice")]
     if args.serial is None and len(ready) != 1:
@@ -195,33 +271,35 @@ def main(argv=None):
     if serial not in ready:
         raise RuntimeError(f"device {serial} is not ready; reconnect/authorize it before running")
     with device_lock(serial):
-        return workflow(args, adb, serial, environment)
+        with preparation_lock():
+            return workflow(args, adb, serial, environment)
 
 
 def workflow(args, adb, serial, environment):
+    build_path = build_environment(environment)["PATH"]
     for executable in ["cargo", "godot", "systemd-run"]:
-        if shutil.which(executable, path=environment["PATH"]) is None:
+        path = environment["PATH"] if executable == "systemd-run" else build_path
+        if shutil.which(executable, path=path) is None:
             raise RuntimeError(f"missing {executable}; enter the development shell")
     validation = ROOT / "target/validation"
     validation.mkdir(parents=True, exist_ok=True)
     run = Path(tempfile.mkdtemp(prefix="godot-xr-", dir=validation))
     APK.parent.mkdir(parents=True, exist_ok=True)
     print(f"XR checks: {run}\nADB: {adb}\nDevice: {serial}", flush=True)
-    for step in steps():
-        run_step(step, run, environment)
-    if not APK.is_file():
-        raise RuntimeError("export did not produce the Pico APK")
+    preparation(args, run, environment)
     run_step(Step("install", [adb, "-s", serial, "install", "-r", str(APK)], 120, "Success"), run, environment)
-    print("All checks passed. Starting the XR demo (12 GiB memory limit, no swap).", flush=True)
+    print("Preparation verified. Starting the XR demo (12 GiB memory limit, no swap).", flush=True)
     # The existing launcher owns demo cleanup, pairing and source supervision.
     command = ["systemd-run", "--user", "--scope", "--quiet", "-p", "MemoryMax=12G", "-p", "MemorySwapMax=0",
                str(ROOT / "scripts/run-godot-hoist"), "--serial", serial, "--app", args.app, "--seconds", str(args.seconds),
-               "--bitrate-mbps", str(args.bitrate_mbps)]
+               "--bitrate-mbps", str(args.bitrate_mbps), "--codec", args.codec]
     if args.half_rate:
         command.append("--half-rate")
     if args.decoder_low_latency:
         command.append("--decoder-low-latency")
-    return launch_demo(command, environment)
+    demo_environment = dict(environment)
+    demo_environment["PATH"] = str(Path(adb).parent) + os.pathsep + environment.get("PATH", "")
+    return launch_demo(command, demo_environment)
 
 
 if __name__ == "__main__":
