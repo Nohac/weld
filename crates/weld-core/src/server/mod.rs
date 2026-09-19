@@ -563,6 +563,7 @@ pub struct PendingSurfaceEvent {
 #[derive(Debug)]
 pub enum PendingSurfaceEventKind {
     Role(ClientSurfaceRole),
+    Metadata(weld_client::ClientSurfaceMetadata),
     TreeSnapshot(surface_tree::PendingSurfaceTreeSnapshot),
     WindowInteraction(WindowInteractionRequestKind),
     Destroyed,

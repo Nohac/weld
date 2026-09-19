@@ -45,7 +45,14 @@ impl WaylandClientBridge {
             .insert(update.surface, update.cursor);
     }
     pub(crate) fn push_back(&self, event: PendingSurfaceEvent) {
-        self.0.borrow_mut().events.push_back(event);
+        let mut state = self.0.borrow_mut();
+        if matches!(event.kind, PendingSurfaceEventKind::Metadata(_)) {
+            state.events.retain(|queued| {
+                queued.surface != event.surface
+                    || !matches!(queued.kind, PendingSurfaceEventKind::Metadata(_))
+            });
+        }
+        state.events.push_back(event);
     }
 
     fn pop_event(&self) -> Option<PendingSurfaceEvent> {
@@ -164,6 +171,7 @@ impl WaylandClientAdapter {
                 ClientSurfaceEventKind::Commit(self.translate_commit(surface, snapshot))
             }
             PendingSurfaceEventKind::Role(_)
+            | PendingSurfaceEventKind::Metadata(_)
             | PendingSurfaceEventKind::WindowInteraction(_)
             | PendingSurfaceEventKind::Destroyed => return None,
         };
@@ -299,6 +307,7 @@ impl WaylandClientAdapter {
 fn translate_non_commit_event(event: PendingSurfaceEvent) -> Option<ClientSurfaceEvent> {
     let PendingSurfaceEvent { surface, kind } = event;
     let kind = match kind {
+        PendingSurfaceEventKind::Metadata(metadata) => ClientSurfaceEventKind::Metadata(metadata),
         PendingSurfaceEventKind::Role(role) => ClientSurfaceEventKind::Role(role),
         PendingSurfaceEventKind::WindowInteraction(interaction) => {
             ClientSurfaceEventKind::Interaction(interaction)

@@ -7,6 +7,42 @@ fn active() -> ClientPresentationClaim {
     }
 }
 
+#[test]
+fn title_churn_between_commits_retains_only_latest_labels_and_pixels() {
+    let (mut state, _) = source();
+    let surface = surface(ClientSourceId::new(1), 1, 1);
+    let session = HoistSessionId::new(1);
+    for revision in 1..=1000 {
+        state
+            .queue_event(session, pixels(surface, revision, 1))
+            .expect("queued pixels");
+        state
+            .queue_event(
+                session,
+                ClientSurfaceEvent {
+                    surface,
+                    kind: ClientSurfaceEventKind::Metadata(
+                        weld_client::ClientSurfaceMetadata::new(
+                            "test.app".into(),
+                            revision.to_string(),
+                        )
+                        .unwrap(),
+                    ),
+                },
+            )
+            .expect("coalesced title");
+    }
+    let queue = &state.pending[&surface];
+    assert_eq!(queue.len(), 2);
+    assert!(
+        matches!(&queue[0].1.kind, ClientSurfaceEventKind::Commit(commit) if commit.revision.raw() == 1000)
+    );
+    assert!(
+        matches!(&queue[1].1.kind, ClientSurfaceEventKind::Metadata(metadata) if metadata.title() == "1000")
+    );
+    assert_eq!(state.pending_order.len(), 1);
+}
+
 fn pixels(surface: ClientSurfaceId, revision: u64, value: u8) -> ClientSurfaceEvent {
     one_buffer_commit(
         surface,

@@ -21,7 +21,7 @@ pub const MAX_ENCODED_ACCESS_UNIT_BYTES: usize = 32 * 1024 * 1024;
 pub struct ProtocolRevision(u32);
 
 impl ProtocolRevision {
-    pub const CURRENT: Self = Self(5);
+    pub const CURRENT: Self = Self(6);
 
     pub const fn new(raw: u32) -> Self {
         Self(raw)

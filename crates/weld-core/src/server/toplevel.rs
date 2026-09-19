@@ -26,13 +26,16 @@ use smithay::{
         output::OutputHandler,
         shell::xdg::{
             PopupSurface, PositionerState, SurfaceCachedState as XdgSurfaceCachedState,
-            ToplevelSurface, XdgShellHandler, XdgShellState, decoration::XdgDecorationHandler,
+            ToplevelSurface, XdgShellHandler, XdgShellState, XdgToplevelSurfaceData,
+            decoration::XdgDecorationHandler,
         },
         shm::{ShmHandler, ShmState},
     },
 };
 use tracing::{debug, info, warn};
-use weld_client::{ClientId, ClientSurfaceRole, ToplevelState as ClientToplevelState};
+use weld_client::{
+    ClientId, ClientSurfaceMetadata, ClientSurfaceRole, ToplevelState as ClientToplevelState,
+};
 
 use crate::{
     OutputId,
@@ -820,6 +823,13 @@ impl CompositorHandler for ServerState {
 }
 
 impl XdgShellHandler for ServerState {
+    fn title_changed(&mut self, surface: ToplevelSurface) {
+        self.publish_toplevel_metadata(&surface);
+    }
+
+    fn app_id_changed(&mut self, surface: ToplevelSurface) {
+        self.publish_toplevel_metadata(&surface);
+    }
     fn xdg_shell_state(&mut self) -> &mut XdgShellState {
         &mut self.xdg_shell_state
     }
@@ -940,6 +950,28 @@ impl XdgShellHandler for ServerState {
 
     fn popup_destroyed(&mut self, surface: PopupSurface) {
         self.destroy_popup(surface);
+    }
+}
+
+impl ServerState {
+    fn publish_toplevel_metadata(&mut self, surface: &ToplevelSurface) {
+        let Some(id) = self.toplevels.id_for_surface(surface.wl_surface()) else {
+            return;
+        };
+        let metadata = with_states(surface.wl_surface(), |states| {
+            let data = states.data_map.get::<XdgToplevelSurfaceData>()?;
+            let data = data.lock().ok()?;
+            Some(ClientSurfaceMetadata::truncated(
+                data.app_id.clone().unwrap_or_default(),
+                data.title.clone().unwrap_or_default(),
+            ))
+        });
+        if let Some(metadata) = metadata {
+            self.pending_surface_events.push_back(PendingSurfaceEvent {
+                surface: id,
+                kind: PendingSurfaceEventKind::Metadata(metadata),
+            });
+        }
     }
 }
 

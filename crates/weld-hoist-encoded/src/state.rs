@@ -362,7 +362,9 @@ impl EncodedSourceState {
                 self.cancel_surface(surface)?;
                 self.send_without_buffer(session, event)?;
             }
-            ClientSurfaceEventKind::Role(_) | ClientSurfaceEventKind::Interaction(_) => {
+            ClientSurfaceEventKind::Role(_)
+            | ClientSurfaceEventKind::Interaction(_)
+            | ClientSurfaceEventKind::Metadata(_) => {
                 if surface_busy {
                     self.queue_event(session, event)?;
                 } else {
@@ -546,7 +548,20 @@ impl EncodedSourceState {
         let first_for_surface = !self.pending.contains_key(&surface);
         let queue = self.pending.entry(surface).or_default();
         let mut replaced_previous_commit = false;
-        if let Some((_, previous)) = queue.back_mut()
+        if matches!(event.kind, ClientSurfaceEventKind::Metadata(_)) {
+            let before = queue.len();
+            queue.retain(|(previous_session, event)| {
+                *previous_session != session
+                    || !matches!(event.kind, ClientSurfaceEventKind::Metadata(_))
+            });
+            replaced_previous_commit = queue.len() < before;
+        }
+        // Labels are not double-buffered with pixels. They must not prevent
+        // adjacent-in-buffer-history commits from coalescing under load.
+        if let Some(index) = queue.iter().rposition(|(_, previous)| {
+            !matches!(previous.kind, ClientSurfaceEventKind::Metadata(_))
+        }) && let Some((previous_session, previous)) = queue.get_mut(index)
+            && *previous_session == session
             && let (
                 ClientSurfaceEventKind::Commit(current),
                 ClientSurfaceEventKind::Commit(previous),
@@ -554,7 +569,7 @@ impl EncodedSourceState {
             && current.mapped == previous.mapped
         {
             current.carry_unobserved_content_from(previous);
-            queue.pop_back();
+            queue.remove(index);
             self.observations.record(SourceObservation::CommitCoalesced);
             replaced_previous_commit = true;
             tracing::trace!(?surface, "coalesced an unobserved encoded source commit");
@@ -1378,16 +1393,24 @@ impl<P: DecodedFramePublisher> EncodedDestinationState<P> {
             "queued encoded destination control event"
         );
         let queued = self.queues.values().map(VecDeque::len).sum::<usize>();
-        ensure!(
-            queued < MAX_DESTINATION_EVENTS,
-            "encoded destination event bound exceeded"
-        );
         if matches!(event.kind, WireClientSurfaceEventKind::Commit(_)) {
             self.observations
                 .record(DestinationObservation::CommitReceived);
         }
         let queue = self.queues.entry(source_surface).or_default();
-        if queue.is_empty() {
+        let was_empty = queue.is_empty();
+        let before = queue.len();
+        if matches!(event.kind, WireClientSurfaceEventKind::Metadata(_)) {
+            queue.retain(|queued| {
+                queued.session != session
+                    || !matches!(queued.event.kind, WireClientSurfaceEventKind::Metadata(_))
+            });
+        }
+        ensure!(
+            queued - (before - queue.len()) < MAX_DESTINATION_EVENTS,
+            "encoded destination event bound exceeded"
+        );
+        if was_empty {
             self.ready_surfaces.push_back(source_surface);
         }
         queue.push_back(QueuedDestinationEvent {
@@ -2133,6 +2156,7 @@ fn commit_revision(event: &WireClientSurfaceEvent<EncodedBuffer>) -> Option<Clie
     match &event.kind {
         WireClientSurfaceEventKind::Commit(commit) => Some(commit.revision),
         WireClientSurfaceEventKind::Role(_)
+        | WireClientSurfaceEventKind::Metadata(_)
         | WireClientSurfaceEventKind::Interaction(_)
         | WireClientSurfaceEventKind::Destroyed => None,
     }

@@ -236,6 +236,7 @@ pub enum ClientSurfaceEventKind {
     Commit(ClientSurfaceCommit),
     Interaction(ToplevelInteractionRequestKind),
     Destroyed,
+    Metadata(crate::ClientSurfaceMetadata),
 }
 
 /// Adjacent event queue that preserves the newest unobserved buffer use.

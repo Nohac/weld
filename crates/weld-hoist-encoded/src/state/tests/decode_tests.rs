@@ -69,6 +69,38 @@ fn complete_decode(decoder: &Rc<RefCell<FakeDecoderState>>, index: usize) {
 }
 
 #[test]
+fn changing_titles_waiting_for_decode_remain_bounded_and_keep_one_ready_entry() {
+    let (mut port, transport, decoder) = destination_port();
+    decoder.borrow_mut().capacity = Some(0);
+    port.state.as_mut().unwrap().publisher.enabled = true;
+    let surface = surface(ClientSourceId::new(1), 1, 1);
+    queue(&transport, surface, 1, &[frame(1, 1, 0)]);
+    port.poll().unwrap();
+    for index in 0..1000 {
+        transport
+            .borrow_mut()
+            .incoming
+            .push_back(SourceTransportPacket::Control(SourceEnvelope {
+                session: HoistSessionId::new(1),
+                message: SourceMessage::Surface(WireClientSurfaceEvent {
+                    surface,
+                    kind: WireClientSurfaceEventKind::Metadata(
+                        weld_client::ClientSurfaceMetadata::new("app".into(), index.to_string())
+                            .unwrap(),
+                    ),
+                }),
+            }));
+        port.poll().unwrap();
+    }
+    let state = port.state.as_ref().unwrap();
+    assert_eq!(state.queues[&surface].len(), 2);
+    assert_eq!(state.ready_surfaces.len(), 1);
+    assert!(
+        matches!(&state.queues[&surface][1].event.kind, WireClientSurfaceEventKind::Metadata(metadata) if metadata.title() == "999")
+    );
+}
+
+#[test]
 fn one_four_layer_commit_fills_four_slots_and_applies_atomically() {
     let (mut port, transport, decoder) = destination_port();
     decoder.borrow_mut().capacity = Some(4);

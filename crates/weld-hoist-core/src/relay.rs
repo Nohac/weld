@@ -121,6 +121,8 @@ pub trait HoistDestinationPort {
 #[derive(Default)]
 struct CachedSurface {
     role: Option<weld_client::ClientSurfaceRole>,
+    metadata: Option<weld_client::ClientSurfaceMetadata>,
+    sent_metadata: Option<weld_client::ClientSurfaceMetadata>,
     commit: Option<ClientSurfaceCommit>,
     cursor: Option<weld_client::ClientCursor>,
     sent_cursor: Option<weld_client::ClientCursor>,
@@ -219,10 +221,10 @@ impl SourceRelayAdapter {
             self.fail(error);
             return;
         }
-        if let Some((role, commit)) = self
+        if let Some((role, metadata, commit)) = self
             .cache
             .get(&source)
-            .map(|cached| (cached.role, cached.commit.clone()))
+            .map(|cached| (cached.role, cached.metadata.clone(), cached.commit.clone()))
         {
             if let Some(role) = role {
                 self.send_surface(
@@ -230,6 +232,18 @@ impl SourceRelayAdapter {
                     ClientSurfaceEvent {
                         surface: source,
                         kind: ClientSurfaceEventKind::Role(role),
+                    },
+                );
+            }
+            if let Some(metadata) = metadata {
+                if let Some(cached) = self.cache.get_mut(&source) {
+                    cached.sent_metadata = Some(metadata.clone());
+                }
+                self.send_surface(
+                    session,
+                    ClientSurfaceEvent {
+                        surface: source,
+                        kind: ClientSurfaceEventKind::Metadata(metadata),
                     },
                 );
             }
@@ -305,6 +319,7 @@ impl SourceRelayAdapter {
         self.pending_cursors.retain(|surface| *surface != source);
         if let Some(cached) = self.cache.get_mut(&source) {
             cached.sent_cursor = None;
+            cached.sent_metadata = None;
         }
         self.effects.extend(
             self.remote_input
@@ -346,6 +361,16 @@ impl SourceRelayAdapter {
         }
         let source = event.surface;
         match &event.kind {
+            ClientSurfaceEventKind::Metadata(metadata) => {
+                let cached = self.cache.entry(source).or_default();
+                cached.metadata = Some(metadata.clone());
+                if let Some(session) = self.mappings.get(&source).copied()
+                    && cached.sent_metadata.as_ref() != Some(metadata)
+                {
+                    cached.sent_metadata = Some(metadata.clone());
+                    self.send_surface(session, event.clone());
+                }
+            }
             ClientSurfaceEventKind::Role(role) => {
                 self.cache.entry(source).or_default().role = Some(*role);
                 // Already admitted popups still publish position and stack changes.
@@ -1760,6 +1785,49 @@ mod tests {
         assert!(matches!(&state.submitted[2], SourcePortCommand::Surface {
             event: ClientSurfaceEvent { kind: ClientSurfaceEventKind::Commit(commit), .. }, ..
         } if commit.revision == weld_client::ClientCommitRevision::new(60)));
+    }
+
+    #[test]
+    fn metadata_replays_after_role_and_unchanged_labels_are_not_resent() {
+        let (mut relay, port) = auto_source();
+        let window = surface(ClientSourceId::new(1), 1);
+        let label = |title: &str| {
+            ClientSurfaceEventKind::Metadata(
+                weld_client::ClientSurfaceMetadata::new("test.app".into(), title.into()).unwrap(),
+            )
+        };
+        observe(&mut relay, window, top_role(None));
+        observe(&mut relay, window, label("old"));
+        observe(&mut relay, window, label("current"));
+        observe(&mut relay, window, commit(1, true));
+        assert!(port.borrow().submitted.is_empty());
+        port.borrow_mut().not_ready = false;
+        relay.poll();
+        let kinds: Vec<_> = port
+            .borrow()
+            .submitted
+            .iter()
+            .filter_map(|command| match command {
+                SourcePortCommand::Surface { event, .. } => Some(match &event.kind {
+                    ClientSurfaceEventKind::Role(_) => "role",
+                    ClientSurfaceEventKind::Metadata(metadata) => {
+                        assert_eq!(metadata.title(), "current");
+                        "metadata"
+                    }
+                    ClientSurfaceEventKind::Commit(_) => "commit",
+                    _ => "other",
+                }),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(kinds, ["role", "metadata", "commit"]);
+        let count = port.borrow().submitted.len();
+        for _ in 0..100 {
+            observe(&mut relay, window, label("current"));
+        }
+        assert_eq!(port.borrow().submitted.len(), count);
+        observe(&mut relay, window, label("changed"));
+        assert_eq!(port.borrow().submitted.len(), count + 1);
     }
 
     #[test]

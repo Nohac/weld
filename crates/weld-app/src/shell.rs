@@ -213,7 +213,9 @@ impl SurfaceCompositionDemand {
                 self.mapped_surfaces.remove(&surface);
                 CompositionDemand::Settle
             }
-            ClientSurfaceEventKind::Interaction(_) => CompositionDemand::Ordinary,
+            ClientSurfaceEventKind::Interaction(_) | ClientSurfaceEventKind::Metadata(_) => {
+                CompositionDemand::Ordinary
+            }
             ClientSurfaceEventKind::Role(_) => CompositionDemand::Settle,
         }
     }
@@ -627,6 +629,9 @@ impl AppShell {
         let demand = self.surface_demand.classify(&event);
         let ClientSurfaceEvent { surface, kind } = event;
         match kind {
+            // Current desktop decorations do not display client labels. The
+            // relay consumes them independently; they never create ECS windows.
+            ClientSurfaceEventKind::Metadata(_) => {}
             ClientSurfaceEventKind::Commit(commit) => {
                 let _ingress_span = tracing::trace_span!(
                     target: crate::PROFILE_TARGET,

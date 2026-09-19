@@ -174,6 +174,7 @@ pub enum WireClientSurfaceEventKind<B> {
     Commit(WireClientSurfaceCommit<B>),
     Interaction(ToplevelInteractionRequestKind),
     Destroyed,
+    Metadata(crate::ClientSurfaceMetadata),
 }
 
 impl<B> WireClientSurfaceEvent<B> {
@@ -189,6 +190,9 @@ impl<B> WireClientSurfaceEvent<B> {
         export: impl FnMut(SurfaceLayerId, ClientBufferLease) -> Result<B, E>,
     ) -> Result<Self, E> {
         let kind = match event.kind {
+            ClientSurfaceEventKind::Metadata(metadata) => {
+                WireClientSurfaceEventKind::Metadata(metadata)
+            }
             ClientSurfaceEventKind::Role(role) => WireClientSurfaceEventKind::Role(role),
             ClientSurfaceEventKind::Commit(commit) => WireClientSurfaceEventKind::Commit(
                 WireClientSurfaceCommit::try_from_client_with_layer(commit, export)?,
@@ -209,6 +213,9 @@ impl<B> WireClientSurfaceEvent<B> {
         import: impl FnMut(B, ClientBufferMetadata) -> Result<ClientBufferLease, E>,
     ) -> Result<ClientSurfaceEvent, E> {
         let kind = match self.kind {
+            WireClientSurfaceEventKind::Metadata(metadata) => {
+                ClientSurfaceEventKind::Metadata(metadata)
+            }
             WireClientSurfaceEventKind::Role(role) => ClientSurfaceEventKind::Role(role),
             WireClientSurfaceEventKind::Commit(commit) => {
                 ClientSurfaceEventKind::Commit(commit.try_into_client(import)?)

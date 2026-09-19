@@ -12,6 +12,7 @@ mod geometry;
 mod id;
 mod input;
 mod input_geometry;
+mod metadata;
 mod presentation;
 mod surface;
 #[cfg(feature = "serde")]
@@ -43,6 +44,7 @@ pub use input::{
     TouchpadHold, TouchpadPinch, TouchpadSwipe,
 };
 pub use input_geometry::SurfaceInputGeometry;
+pub use metadata::{ClientSurfaceMetadata, MAX_SURFACE_LABEL_BYTES, SurfaceMetadataError};
 pub use presentation::{ClientPresentationClaim, ClientPresentationUpdate, PresentationRate};
 pub use surface::{
     ClientCommitRevision, ClientEventQueue, ClientFocusRequest, ClientRequest, ClientSurfaceCommit,
