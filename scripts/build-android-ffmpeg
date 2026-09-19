@@ -18,8 +18,9 @@ toolchain="$ndk/toolchains/llvm/prebuilt/linux-x86_64"
 revision=38b88335f99e76ed89ff3c93f877fdefce736c13
 checksum=2ae7e42343cfffb811d15cfe98b6d005f082595fcdf034d30a4ff90cfed9f9c6
 cache="$root/target/android-ffmpeg"
+decoder_patch="$root/scripts/ffmpeg-patches/mediacodec-low-latency.patch"
 # The script includes all configure flags; SDK path/revision and API are also keyed.
-key=$( { sha256sum < "$root/scripts/build-android-ffmpeg"; sha256sum < "$ndk/source.properties"; printf '%s\n' "$ndk" "$checksum" 'arm64-v8a-api28'; } | sha256sum | cut -c1-24)
+key=$( { sha256sum < "$root/scripts/build-android-ffmpeg"; sha256sum < "$decoder_patch"; sha256sum < "$ndk/source.properties"; printf '%s\n' "$ndk" "$checksum" 'arm64-v8a-api28'; } | sha256sum | cut -c1-24)
 prefix="$cache/$key"
 if [[ ${1:-} == --print-prefix ]]; then printf '%s\n' "$prefix"; exit 0; fi
 mkdir -p "$cache"
@@ -41,6 +42,7 @@ stage=$(mktemp -d "$cache/stage.XXXXXX")
 echo "Building FFmpeg 8.1.2, ARM64/API28, two jobs. Logs: $stage"
 tar -xzf "$archive" -C "$stage"
 source_directory="$stage/FFmpeg-$revision"
+patch --batch --forward --fuzz=0 -p1 -d "$source_directory" < "$decoder_patch"
 mkdir "$stage/build"
 cd "$stage/build"
 export PATH="$toolchain/bin:$PATH"
@@ -72,6 +74,8 @@ for license in GPL NONFREE VERSION3; do
 done
 timeout 900s make -j2 > "$stage/build.log" 2>&1 || { tail -60 "$stage/build.log" >&2; exit 1; }
 make install > "$stage/install.log" 2>&1
+# The unique literal proves this is the patched binary, not an old cached library.
+"$toolchain/bin/llvm-strings" "$stage/install/lib/libavcodec.so" | grep -F 'Weld MediaCodec: requested low-latency=1' > /dev/null
 for library in avutil avcodec avformat; do
   file="$stage/install/lib/lib$library.so"
   "$toolchain/bin/llvm-readelf" -h -d "$file" > "$stage/$library.elf.txt"
@@ -86,6 +90,7 @@ for library in avutil avcodec avformat; do
 done
 cp config.h config_components.h "$stage/install/"
 cp "$source_directory/COPYING.LGPLv2.1" "$stage/install/"
+cp "$decoder_patch" "$stage/install/"
 printf 'FFmpeg=8.1.2\nrevision=%s\nsha256=%s\nABI=arm64-v8a\nAPI=28\nNDK=%s\n' \
   "$revision" "$checksum" "$ndk" > "$stage/install/complete"
 mv "$stage/install" "$prefix"

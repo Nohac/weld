@@ -6,6 +6,7 @@ from pathlib import Path
 import sys
 import subprocess
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
@@ -18,6 +19,24 @@ LOADER.exec_module(MODULE)
 
 
 class WorkflowTests(unittest.TestCase):
+    def test_low_latency_flag_is_forwarded_without_changing_other_preferences(self):
+        with tempfile.TemporaryDirectory() as temporary, \
+             patch.object(MODULE, "ROOT", Path(temporary)), \
+             patch.object(MODULE, "APK", Path(temporary) / "viewer.apk"), \
+             patch.object(MODULE.shutil, "which", return_value="/tools/tool"), \
+             patch.object(MODULE, "steps", return_value=[]), \
+             patch.object(MODULE, "run_step"), \
+             patch.object(MODULE, "launch_demo") as launch:
+            MODULE.APK.touch()
+            for enabled in (False, True):
+                args = SimpleNamespace(app="blender", seconds=75, bitrate_mbps=16,
+                                       half_rate=False, decoder_low_latency=enabled)
+                MODULE.workflow(args, "/tools/adb", "pico", {"PATH": "/tools"})
+                command = launch.call_args.args[0]
+                self.assertEqual("--decoder-low-latency" in command, enabled)
+                self.assertNotIn("--half-rate", command)
+                self.assertEqual(command[command.index("--bitrate-mbps") + 1], "16")
+
     def test_export_builds_before_engine_checks_without_duplicate_build_step(self):
         steps = MODULE.steps()
         self.assertEqual([step.name for step in steps], ["format", "rust-tests", "clippy", "pico-export", "scene", "shaders"])

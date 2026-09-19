@@ -11,6 +11,7 @@ use crate::presentation::XrPreferences;
 use anyhow::{Context, Result, ensure};
 use std::{
     cell::RefCell,
+    io::ErrorKind,
     path::PathBuf,
     rc::Rc,
     sync::{Arc, atomic::Ordering},
@@ -76,6 +77,13 @@ pub(super) fn run_session(
     sizing: Option<XrPreferences>,
     inventory: &mut Inventory,
 ) -> Result<()> {
+    // One-shot local experiment, retained for this session's reconnects and all
+    // decoder generations. It is never negotiated with or controlled by a peer.
+    let low_latency = match std::fs::remove_file(directory.join("diagnostic-low-latency")) {
+        Ok(()) => true,
+        Err(error) if error.kind() == ErrorKind::NotFound => false,
+        Err(error) => return Err(error).context("consume low-latency diagnostic marker"),
+    };
     let identity = IrohDeviceIdentity::load_or_create(&directory)?;
     let public = directory.join("public.identity");
     if !public.try_exists()? {
@@ -139,6 +147,7 @@ pub(super) fn run_session(
                     shared.clone(),
                     credits.clone(),
                     connection.0.codec(),
+                    low_latency,
                 )?;
                 let registration = destination_registration_with_backend(
                     connection.0.clone(),

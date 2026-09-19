@@ -36,6 +36,7 @@ impl Backend {
         shared: Arc<Shared>,
         credits: Arc<FrameBudget>,
         codec: VideoCodec,
+        low_latency: bool,
     ) -> Result<Self> {
         let owner = thread::current();
         let context = shared.clone();
@@ -48,6 +49,7 @@ impl Backend {
                         shared: context.clone(),
                         decoders: HashMap::new(),
                         pending: VecDeque::new(),
+                        low_latency,
                     })
                 },
                 move || owner.unpark(),
@@ -168,6 +170,7 @@ struct Processor {
     shared: Arc<Shared>,
     decoders: HashMap<Generation, Stream>,
     pending: VecDeque<Result<Submitted>>,
+    low_latency: bool,
 }
 impl Processor {
     fn prepare_stream(&mut self, job: &Job) -> Result<&mut Stream> {
@@ -179,7 +182,11 @@ impl Processor {
         if let std::collections::hash_map::Entry::Vacant(entry) = self.decoders.entry(key) {
             let config = DecoderConfig::new(codec, extent[0], extent[1], Vec::new())?;
             entry.insert(Stream {
-                decoder: native::Decoder::new(&config, self.target.clone())?,
+                decoder: native::Decoder::new_with_low_latency(
+                    &config,
+                    self.target.clone(),
+                    self.low_latency,
+                )?,
                 extent,
                 codec,
             });

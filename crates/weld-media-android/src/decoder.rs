@@ -72,6 +72,17 @@ unsafe extern "C" fn native_format(
 
 impl AndroidDecoder {
     pub fn new(config: &DecoderConfig, target: AndroidImageTarget) -> Result<Self> {
+        Self::new_with_low_latency(config, target, false)
+    }
+
+    /// Request Android's standard low-latency mode through Weld's patched FFmpeg.
+    /// A successful open does not prove the device implements the hint. No
+    /// vendor parameters, operating-rate override or queue policy is changed.
+    pub fn new_with_low_latency(
+        config: &DecoderConfig,
+        target: AndroidImageTarget,
+        low_latency: bool,
+    ) -> Result<Self> {
         ensure!(
             config.extent() == target.extent(),
             "decoder/target extent mismatch"
@@ -106,6 +117,9 @@ impl AndroidDecoder {
             check(ffi::av_hwdevice_ctx_init(raw))?;
         }
         let mut context = codec::Context::new_with_codec(codec);
+        if low_latency {
+            context.set_flags(codec::Flags::LOW_DELAY);
+        }
         let (width, height) = config.extent();
         // SAFETY: context uniquely owned and unopened. FFmpeg owns the padded
         // extradata allocation once assigned, including on setup/open failure.

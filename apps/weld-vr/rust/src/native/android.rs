@@ -19,12 +19,23 @@ impl Target {
 }
 pub struct Decoder(AndroidDecoder);
 impl Decoder {
-    pub fn new(config: &DecoderConfig, _target: Target) -> Result<Self> {
+    pub fn new(config: &DecoderConfig, target: Target) -> Result<Self> {
+        Self::new_with_low_latency(config, target, false)
+    }
+    pub fn new_with_low_latency(
+        config: &DecoderConfig,
+        _target: Target,
+        low_latency: bool,
+    ) -> Result<Self> {
         let (width, height) = config.extent();
-        Ok(Self(AndroidDecoder::new(
+        let decoder = AndroidDecoder::new_with_low_latency(
             config,
             AndroidImageTarget::new(width, height, MAX_ACQUIRED_IMAGES)?,
-        )?))
+            low_latency,
+        )?;
+        tracing::info!(target: "weld_vr_diag", requested_low_latency = low_latency,
+            width, height, "opened Android decoder; low-latency support not verified");
+        Ok(Self(decoder))
     }
     pub fn try_send(&mut self, bytes: &[u8], timestamp: u64) -> Result<bool> {
         self.0.try_send(bytes, timestamp)

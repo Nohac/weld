@@ -1,0 +1,15 @@
+--- a/libavcodec/mediacodecdec.c
++++ b/libavcodec/mediacodecdec.c
+@@ -438,6 +438,12 @@
+         ff_AMediaFormat_setInt32(format, "channel-count", avctx->ch_layout.nb_channels);
+         ff_AMediaFormat_setInt32(format, "sample-rate", avctx->sample_rate);
+     }
++    if (avctx->codec_type == AVMEDIA_TYPE_VIDEO &&
++        (avctx->flags & AV_CODEC_FLAG_LOW_DELAY)) {
++        ff_AMediaFormat_setInt32(format, "low-latency", 1);
++        av_log(avctx, AV_LOG_INFO,
++               "Weld MediaCodec: requested low-latency=1\n");
++    }
+     if (s->operating_rate > 0)
+         ff_AMediaFormat_setInt32(format, "operating-rate", s->operating_rate);
+ 

@@ -1,8 +1,11 @@
 """Counter semantics, clock parsing, honest missing data, and bounded capture."""
 import io
+import json
+import math
 from datetime import datetime, timezone
 from pathlib import Path
 import runpy
+import re
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -52,6 +55,52 @@ class DiagnosticsTests(unittest.TestCase):
         self.assertEqual(PLOT["sampled"](rows[1:2], ["count"]), [])
         self.assertIn("Unavailable", PLOT["chart"]("loss", ["packets"], [], 0, 10, "packets/s"))
 
+    def test_chart_intervals_keep_shared_origin_gaps_and_adjacent_rates(self):
+        data = PLOT["chart_data"]([(101, 102, [4]), (102, 103, [5]), (105, 106, [0])], 100, 1)
+        samples = dict(zip(*data))
+        self.assertEqual(samples[1], 4)
+        self.assertEqual(samples[math.nextafter(2, -math.inf)], 4)
+        self.assertEqual(samples[2], 5)
+        self.assertIsNone(samples[3])
+        self.assertEqual(samples[5], 0)
+        self.assertIsNone(samples[6])
+        self.assertEqual(data[0], sorted(set(data[0])))
+
+    def test_overlapping_display_spans_do_not_insert_false_gaps(self):
+        data = PLOT["chart_data"]([(0, 2, [1]), (1, 3, [2])], 0, 1)
+        self.assertEqual(data[1], [1, 1, 2, 2, None])
+
+    def test_embedded_chart_json_cannot_close_script(self):
+        output = PLOT["chart"]("<unsafe>", ["</script><script>alert(1)</script>"],
+                               [(0, 1, [3])], 0, 2, "ms")
+        self.assertNotIn("<unsafe>", output)
+        self.assertEqual(output.count("</script>"), 1)
+        payload = re.search(r"class='chart-data'>(.*?)</script>", output)[1]
+        self.assertEqual(json.loads(payload)["labels"], ["</script><script>alert(1)</script>"])
+
+    def test_rtt_immediately_follows_frame_outcomes_in_modern_report(self):
+        records = [dict(time=100, kind="presentation", fields={}, file="viewer.log"),
+                   dict(time=101, kind="network", fields={"rtt_us": 8000}, file="source.log")]
+        with patch.dict(PLOT["report"].__globals__, read_records=lambda _: (records, [])):
+            output = PLOT["report"](Path("test-run"))
+        self.assertEqual(re.findall(r"<h2>(.*?)</h2>", output)[:2],
+                         ["Receiver frame outcomes", "Network RTT"])
+        self.assertEqual(output.count("<h2>Network RTT</h2>"), 1)
+        self.assertIn("uplot@1.6.32/dist/uPlot.iife.min.js", output)
+        self.assertIn("could not load uPlot from the CDN", output)
+        self.assertIn('sync: {key: "weld-run", setSeries: false}', output)
+
+    def test_decoded_rate_is_separate_from_outcomes_when_recorded(self):
+        fields = dict.fromkeys(["imported_total", "superseded_total", "stale_total",
+                               "layout_discard_total", "lifecycle_discard_total", "handoff_discard_total"], 0)
+        records = [dict(time=100, kind="presentation", fields=dict(fields, decoded_total=10), file="viewer.log"),
+                   dict(time=102, kind="presentation", fields=dict(fields, decoded_total=30), file="viewer.log")]
+        with patch.dict(PLOT["report"].__globals__, read_records=lambda _: (records, [])):
+            output = PLOT["report"](Path("test-run"))
+        payload = json.loads(re.search(r"class='chart-data'>(.*?)</script>", output)[1])
+        self.assertEqual(payload["labels"][-1], "Decoded (not an additional outcome)")
+        self.assertEqual(payload["data"][-1], [10, 10, None])
+
     def test_inner_utc_wins_over_delayed_logcat_delivery(self):
         instant = datetime(2026, 9, 16, 20, 0, tzinfo=timezone.utc).timestamp()
         self.assertEqual(PLOT["timestamp"]("1790000000.123 I godot: 2026-09-16T20:00:00Z DEBUG", 2026), instant)
@@ -83,8 +132,10 @@ class DiagnosticsTests(unittest.TestCase):
             report = PLOT["report"](run)
             self.assertIn("unknown reason", report)
             self.assertIn("Unavailable", report)
-            self.assertIn("85.000 frames/s", report)
-            self.assertNotIn("<script", report)
+            payload = re.search(r"class='chart-data'>(.*?)</script>", report)[1]
+            self.assertIn(85, json.loads(payload)["data"][1])
+            self.assertEqual(re.findall(r"<h2>(.*?)</h2>", report)[:2],
+                             ["Legacy receiver outcomes — discard reasons unavailable", "Network RTT"])
 
 
 if __name__ == "__main__":

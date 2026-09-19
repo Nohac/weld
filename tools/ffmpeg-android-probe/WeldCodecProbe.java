@@ -32,6 +32,13 @@ public final class WeldCodecProbe {
                 System.out.println(name + " hardware=" + codec.isHardwareAccelerated()
                     + " software=" + codec.isSoftwareOnly() + " vendor=" + codec.isVendor()
                     + " alias=" + codec.isAlias() + " canonical=" + codec.getCanonicalName());
+                if (Build.VERSION.SDK_INT >= 30) {
+                    for (String type : codec.getSupportedTypes()) {
+                        boolean supported = codec.getCapabilitiesForType(type)
+                            .isFeatureSupported(MediaCodecInfo.CodecCapabilities.FEATURE_LowLatency);
+                        System.out.println("mime=" + type + " low_latency_feature=" + supported);
+                    }
+                }
                 return;
             }
         }

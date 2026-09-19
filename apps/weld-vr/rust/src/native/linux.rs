@@ -48,6 +48,14 @@ pub struct Decoder {
     ended: bool,
 }
 impl Decoder {
+    pub fn new_with_low_latency(
+        config: &DecoderConfig,
+        target: Target,
+        low_latency: bool,
+    ) -> Result<Self> {
+        ensure!(!low_latency, "low-latency experiment requires Android");
+        Self::new(config, target)
+    }
     pub fn new(config: &DecoderConfig, target: Target) -> Result<Self> {
         ensure!(
             config.extra().is_empty(),
@@ -99,6 +107,20 @@ impl Decoder {
         } else {
             Progress::Pending
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use weld_media::VideoCodec;
+
+    #[test]
+    fn android_experiment_is_rejected_before_opening_native_devices() {
+        let config = DecoderConfig::new(VideoCodec::Av1, 320, 180, Vec::new()).unwrap();
+        let target = Target { modifiers: vec![0] };
+        let result = Decoder::new_with_low_latency(&config, target, true);
+        assert!(result.is_err_and(|error| error.to_string().contains("requires Android")));
     }
 }
 /// VPP creates an independent allocation and completes its writes before this

@@ -10,6 +10,24 @@ API = runpy.run_path(str(Path(__file__).with_name("run-godot-hoist")))
 
 
 class PairingTests(unittest.TestCase):
+    def test_low_latency_is_explicit_android_only_and_clears_pending_marker(self):
+        self.assertFalse(API["parse_arguments"]([]).decoder_low_latency)
+        self.assertTrue(API["parse_arguments"](["--decoder-low-latency"]).decoder_low_latency)
+        with self.assertRaises(SystemExit):
+            API["parse_arguments"](["--desktop", "--decoder-low-latency"])
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            marker = directory / API["LOW_LATENCY_MARKER"]
+            API["prepare_decoder_test"](True, directory=directory)
+            self.assertTrue(marker.exists())
+            API["prepare_decoder_test"](False, directory=directory)
+            self.assertFalse(marker.exists())
+        with patch.object(API["subprocess"], "run") as run:
+            API["prepare_decoder_test"](True, adb=["adb", "-s", "pico"])
+            self.assertEqual(run.call_args.args[0][-2:], ["touch", "files/weld-device/diagnostic-low-latency"])
+            API["prepare_decoder_test"](False, adb=["adb", "-s", "pico"])
+            self.assertEqual(run.call_args.args[0][-3:], ["rm", "-f", "files/weld-device/diagnostic-low-latency"])
+
     def test_half_rate_is_explicit_and_normal_launch_clears_pending_test(self):
         self.assertFalse(API["parse_arguments"]([]).half_rate)
         self.assertTrue(API["parse_arguments"](["--half-rate"]).half_rate)

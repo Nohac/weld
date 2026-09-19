@@ -298,12 +298,21 @@ capped at 34 ms. Resize/unmap/layout changes discard obsolete queued layouts.
 This is bounded smoothing, not adaptive playback timing or an ACK mechanism;
 input scheduling, native leases and GPU fences are unchanged.
 
-Generate and open a self-contained HTML/SVG report for the latest run:
+Generate and open an interactive HTML/uPlot report for the latest run:
 
 ```sh
 scripts/plot-godot-hoist
 scripts/plot-godot-hoist target/validation/godot-hoist-RUN --no-open
 ```
+
+The report embeds measurements and loads pinned uPlot 1.6.32 assets from a CDN
+(Internet access or cached assets required). Frame outcomes and network RTT
+are adjacent, with synchronized cursors and zoom. Dashed whole-run averages,
+visible-range averages, measured counter totals, and an optional whole-run
+Y-axis lock provide context while zoomed. Rate averages are duration-weighted
+over measured intervals; sample/maxima averages are labeled separately. Gaps
+and unknown initial counter baselines are excluded. Fixed-width legend columns
+and a 70px minimum legend height keep hover updates stable.
 
 The report separates source coalescing, decode/queue timing, presentation
 replacement, stale-snapshot expiry, layout/lifecycle discards, blocked render
@@ -359,6 +368,12 @@ scripts/run-godot-xr --half-rate --bitrate-mbps 16
 # Full-rate comparison:
 scripts/run-godot-xr --bitrate-mbps 16
 ```
+
+The separate Android decoder experiment is selected with
+`scripts/run-godot-xr --decoder-low-latency --bitrate-mbps 16`. Omit the flag
+for baseline, or combine it with `--half-rate` for a matched half-rate comparison.
+See [receiver efficiency](receiver-efficiency.md) for the audit, FFmpeg patch,
+ownership constraints and limits of what the request establishes.
 
 The lower-level `run-godot-hoist` launcher also accepts `--half-rate` when the
 current APK is already installed. It writes a private, one-shot diagnostic

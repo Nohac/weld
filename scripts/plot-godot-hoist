@@ -1,20 +1,22 @@
 #!/usr/bin/env python3
-"""Plot the latest Godot hoist run as a self-contained HTML/SVG report.
+"""Plot the latest Godot hoist run as an interactive HTML/uPlot report.
 
-No Python packages, browser service, or network access required. Pass a run
-directory to select an older run. Missing measurements are never invented.
+No Python packages or browser service required. Charts load pinned uPlot assets
+from a CDN; measurements stay embedded in the report. Pass a run directory to
+select an older run. Missing measurements are never invented.
 """
 import argparse
 from datetime import datetime, timezone
 import html
 import json
+import math
 from pathlib import Path
 import re
 import subprocess
 import sys
 
 ROOT = Path(__file__).resolve().parent.parent
-COLORS = ["#60cfa5", "#efae5b", "#ed6e78", "#a995eb", "#79b7ed", "#bbb"]
+UPLOT_CDN = "https://cdn.jsdelivr.net/npm/uplot@1.6.32/dist"
 FIELDS = re.compile(r"\b([A-Za-z_][A-Za-z_0-9]*)=([-+]?\d+(?:\.\d+)?)")
 
 
@@ -137,38 +139,43 @@ def interval(rows, fields):
     return result
 
 
-def chart(title, labels, points, start, end, unit, stacked=False):
+def chart_data(points, start, series_count):
+    """Keep interval coverage and explicit gaps on uPlot's shared numeric axis."""
+    samples = {}
+    points = sorted(points, key=lambda point: point[0])
+    for index, (beginning, finish, values) in enumerate(points):
+        # A newer measurement supersedes overlapping display coverage.
+        if index + 1 < len(points):
+            finish = min(finish, points[index + 1][0])
+        beginning, finish = max(beginning - start, 0), max(finish - start, 0)
+        if finish <= beginning:
+            continue
+        samples[beginning] = values
+        # Preserve the measured span to its right edge, then break the path.
+        # An adjacent interval replaces this null with its own value.
+        samples[math.nextafter(finish, -math.inf)] = values
+        samples[finish] = [None] * series_count
+    times = sorted(samples)
+    return [times, *[[samples[time][index] for time in times] for index in range(series_count)]]
+
+
+def chart(title, labels, points, start, end, unit, average_kind="interval"):
     heading = f"<h2>{html.escape(title)}</h2>"
     if not points:
         return f"<section>{heading}<p class='missing'>Unavailable — not recorded in these logs.</p></section>"
-    ceiling = max((sum(values) if stacked else max(values)) for _, _, values in points)
-    ceiling = max(ceiling * 1.1, 1)
-    width, height, left, top = 1050, 170, 60, 16
-    span = max(end - start, 1)
-    svg = [f"<svg viewBox='0 0 1140 230' role='img' aria-label='{html.escape(title, quote=True)}'>"]
-    for step in range(5):
-        y = top + height * step / 4
-        svg.append(f"<path d='M{left},{y}h{width}' stroke='#33404d'/><text x='52' y='{y+4}' text-anchor='end'>{ceiling*(4-step)/4:.1f}</text>")
-    for step in range(7):
-        x = left + width * step / 6
-        svg.append(f"<text x='{x}' y='211' text-anchor='middle'>{span*step/6:.1f}s</text>")
-    for beginning, finish, values in points:
-        x = left + max(beginning - start, 0) / span * width
-        bar_width = max((finish - max(beginning, start)) / span * width, 0.4)
-        svg.append(f"<rect x='{x:.2f}' y='{top+height+4}' width='{bar_width:.2f}' height='3' fill='#476379'><title>Measurement available</title></rect>")
-        accumulated = 0
-        for index, value in enumerate(values):
-            h = value / ceiling * height
-            y = top + height - h - accumulated
-            w = bar_width if stacked else bar_width / len(labels)
-            offset = 0 if stacked else index * w
-            tooltip = f"{beginning-start:.2f}–{finish-start:.2f}s: {labels[index]} {value:.3f} {unit}"
-            svg.append(f"<rect x='{x+offset:.2f}' y='{y:.2f}' width='{max(w-0.15,0.2):.2f}' height='{h:.2f}' fill='{COLORS[index % len(COLORS)]}'><title>{html.escape(tooltip)}</title></rect>")
-            if stacked:
-                accumulated += h
-    svg.append("</svg>")
-    legend = " ".join(f"<span style='color:{COLORS[i % len(COLORS)]}'>■ {html.escape(label)}</span>" for i, label in enumerate(labels))
-    return f"<section>{heading}<p>{legend} · {html.escape(unit)}</p>{''.join(svg)}</section>"
+    descriptions = {
+        "interval": "Duration-weighted averages over measured intervals; gaps excluded.",
+        "sample": "Averages of recorded samples; missing samples excluded.",
+        "maxima": "Averages of recorded maxima, not average frame latency.",
+    }
+    payload = json.dumps(dict(labels=labels, data=chart_data(points, start, len(labels)),
+                              measurements=[(a - start, b - start, values) for a, b, values in points],
+                              average_kind=average_kind,
+                              end=max(end - start, 1), unit=unit), allow_nan=False,
+                         separators=(",", ":")).replace("<", "\\u003c")
+    return (f"<section>{heading}<p>{html.escape(unit)} · {descriptions[average_kind]}</p><div class='chart' "
+            f"role='img' aria-label='{html.escape(title, quote=True)}'></div>"
+            f"<script type='application/json' class='chart-data'>{payload}</script></section>")
 
 
 def report(run):
@@ -179,39 +186,44 @@ def report(run):
     start, end = records[0]["time"], records[-1]["time"]
     get = lambda kind: groups.get(kind, [])
     charts = []
-    def add(title, labels, data, units, stacked=False):
-        charts.append(chart(title, labels, data, start, end, units, stacked))
+    def add(title, labels, data, units, average_kind="interval"):
+        charts.append(chart(title, labels, data, start, end, units, average_kind))
     if get("presentation"):
-        add("Receiver frame outcomes", ["Imported to GPU texture", "Queue replacement", "Stale snapshot", "Layout change", "Lifecycle", "Handoff replacement"],
-            cumulative(get("presentation"), ["imported_total", "superseded_total", "stale_total", "layout_discard_total", "lifecycle_discard_total", "handoff_discard_total"]), "frames/s", True)
-        add("Presentation delay — interval maxima", ["Snapshot wait", "Render-thread handoff", "Import CPU wall time"],
-            sampled(get("presentation"), ["snapshot_wait_max_us", "render_handoff_max_us", "import_cpu_max_us"], 1000), "ms")
-        add("Presentation blocked checks — not dropped frames", ["Render callback busy", "GPU fence busy"],
-            cumulative(get("presentation"), ["render_busy_checks_total", "fence_busy_checks_total"]), "checks/s")
-        add("Commit arrival gaps — includes legitimate idle periods", ["Largest gap"],
-            sampled(get("presentation"), ["commit_gap_max_us"], 1000), "ms")
-        add("Bursty commit arrivals — less than half a refresh interval apart", ["Closely spaced commits"],
-            cumulative(get("presentation"), ["commit_bursts_total"]), "events/s")
+        labels = ["Imported to GPU texture", "Superseded (queue replacement)", "Stale snapshot", "Layout change", "Lifecycle", "Handoff replacement"]
+        fields = ["imported_total", "superseded_total", "stale_total", "layout_discard_total", "lifecycle_discard_total", "handoff_discard_total"]
+        if all("decoded_total" in row["fields"] for row in get("presentation")):
+            labels.append("Decoded (not an additional outcome)")
+            fields.append("decoded_total")
+        add("Receiver frame outcomes", labels, cumulative(get("presentation"), fields), "frames/s")
     else:
         notices.append("Legacy superseded counts do not distinguish staleness, layout changes or queue replacement. Window-count changes reset the baseline.")
         add("Legacy receiver outcomes — discard reasons unavailable", ["Imported", "Superseded (unknown reason)"],
-            cumulative(get("legacy"), ["imported", "unknown_discard"], "layers"), "frames/s", True)
+            cumulative(get("legacy"), ["imported", "unknown_discard"], "layers"), "frames/s")
+    add("Network RTT", ["Round-trip time"], sampled(get("network"), ["rtt_us"], 1000), "ms", "sample")
+    if get("presentation"):
+        add("Presentation delay — interval maxima", ["Snapshot wait", "Render-thread handoff", "Import CPU wall time"],
+            sampled(get("presentation"), ["snapshot_wait_max_us", "render_handoff_max_us", "import_cpu_max_us"], 1000), "ms", "maxima")
+        add("Presentation blocked checks — not dropped frames", ["Render callback busy", "GPU fence busy"],
+            cumulative(get("presentation"), ["render_busy_checks_total", "fence_busy_checks_total"]), "checks/s")
+        add("Commit arrival gaps — includes legitimate idle periods", ["Largest gap"],
+            sampled(get("presentation"), ["commit_gap_max_us"], 1000), "ms", "maxima")
+        add("Bursty commit arrivals — less than half a refresh interval apart", ["Closely spaced commits"],
+            cumulative(get("presentation"), ["commit_bursts_total"]), "events/s")
     add("Source operations — commits and batches are different units", ["Commits received", "Commits coalesced", "Encoded batches"],
         interval(get("source"), ["commits_received", "commits_coalesced", "batches_completed"]), "operations/s")
     add("Receiver decode stages — overlapping interval maxima", ["Ingress → submit", "Worker queue", "Worker residence", "Completion handoff"],
-        sampled(get("decode"), ["media_wait_max_us", "worker_queue_max_us", "worker_residence_max_us", "completion_handoff_max_us"], 1000), "ms")
+        sampled(get("decode"), ["media_wait_max_us", "worker_queue_max_us", "worker_residence_max_us", "completion_handoff_max_us"], 1000), "ms", "maxima")
     add("Receiver cancellation/failure — not congestion or packet-loss counts", ["Decode cancelled", "Commit cancelled", "Media after cancellation", "Codec failure"],
         interval(get("decode"), ["decodes_cancelled", "commits_cancelled", "late_cancelled_media", "codec_failures"]), "events/s")
     add("QUIC packets declared lost — may be retransmitted", ["Packets declared lost"],
         cumulative(get("network"), ["lost_packets_total"], "path_epoch"), "packets/s")
-    add("Network RTT", ["Round-trip time"], sampled(get("network"), ["rtt_us"], 1000), "ms")
     add("Media send backlog and write delay", ["Oldest pending", "Maximum write wall time (lifetime)"],
-        sampled(get("transport"), ["oldest_pending_age_us", "write_wall_max_us"], 1000), "ms")
+        sampled(get("transport"), ["oldest_pending_age_us", "write_wall_max_us"], 1000), "ms", "sample")
     add("Media records cancelled before full write — includes teardown", ["Cancelled records"],
         cumulative(get("transport"), ["cancelled_records_total"]), "records/s")
-    add("XR rendering time", ["CPU", "GPU"], sampled(get("xr"), ["FrmCpu", "FrmGpu"]), "ms")
-    add("XR runtime-reported late frames", ["Late count"], sampled(get("xr"), ["FrmLate"]), "count/sample")
-    add("XR frame rate", ["App FPS"], sampled(get("xr"), ["FPS"]), "fps")
+    add("XR rendering time", ["CPU", "GPU"], sampled(get("xr"), ["FrmCpu", "FrmGpu"]), "ms", "sample")
+    add("XR runtime-reported late frames", ["Late count"], sampled(get("xr"), ["FrmLate"]), "count/sample", "sample")
+    add("XR frame rate", ["App FPS"], sampled(get("xr"), ["FPS"]), "fps", "sample")
     notices.append("Cross-device wall-clock alignment is approximate. No one-way network latency is inferred; overlapping stage durations must not be added.")
     notices.append("Texture imports are not headset scanouts. Low activity can legitimately produce fewer than 90 video frames/s. Gaps do not establish packet loss.")
     warnings = ''.join(f"<li>{html.escape(note)}</li>" for note in notices)
@@ -223,11 +235,19 @@ def report(run):
             encoders.append(f"<tr><td>{row['time']-start:.2f}s</td><td>{fields['stream']:.0f}/{fields['generation']:.0f}</td>"
                             f"<td>{fields['visible_width']:.0f}×{fields['visible_height']:.0f}</td>"
                             f"<td>{fields['frame_rate_millihertz']/1000:.1f} fps</td><td>{fields['bitrate_bits']/1e6:.2f} Mbps</td></tr>")
-    return f"""<!doctype html><meta charset='utf-8'><title>Weld run diagnostics</title>
-<style>body{{background:#111820;color:#dbe5ee;font:15px system-ui;margin:30px auto;max-width:1180px;padding:0 16px}}section{{background:#19232e;padding:16px;margin:16px 0;border-radius:8px}}h2{{font-size:18px}}svg{{width:100%}}svg text{{fill:#aab8c7;font:12px system-ui}}p span{{margin-right:14px}}.missing{{color:#e8b56a}}li{{margin:8px 0}}table{{font:12px monospace}}td{{padding:5px}}</style>
+    javascript = Path(__file__).with_name("godot-hoist-charts.js").read_text()
+    return f"""<!doctype html><html lang='en'><meta charset='utf-8'><meta name='viewport' content='width=device-width, initial-scale=1'><title>Weld run diagnostics</title>
+<link rel='stylesheet' href='{UPLOT_CDN}/uPlot.min.css' crossorigin='anonymous' referrerpolicy='no-referrer'>
+<style>body{{background:#111820;color:#dbe5ee;font:15px system-ui;margin:30px auto;max-width:1180px;padding:0 16px}}section{{background:#19232e;padding:16px;margin:16px 0;border-radius:8px}}h2{{font-size:18px}}.chart{{min-width:0}}.missing{{color:#e8b56a}}li{{margin:8px 0}}table{{font:12px monospace}}td{{padding:5px}}.u-legend{{white-space:normal;text-align:left}}.u-legend .u-series{{margin-right:12px}}.u-select{{background:#79b7ed30}}button{{background:#26394c;color:#dbe5ee;border:1px solid #6c859d;border-radius:5px;padding:8px 14px;cursor:pointer}}</style>
+<style>.u-legend{{min-height:70px;font-variant-numeric:tabular-nums}}.u-legend th,.u-legend td{{white-space:nowrap}}.u-legend .u-value{{width:19ch;min-width:19ch;text-align:right}}.chart{{overflow-x:auto}}.chart-options{{display:flex;align-items:center;gap:20px;flex-wrap:wrap}}</style>
 <h1>Weld run diagnostics</h1><p>{html.escape(run.name)} · {datetime.fromtimestamp(start, timezone.utc).isoformat()} · {end-start:.1f}s observed</p>
-<ul>{warnings}</ul><p>Hover bars for exact values. Marks below the bars indicate available samples. Counts with different units are never combined. Cumulative counters are differenced and rebaselined on resets.</p>
-{''.join(charts)}<section><h2>Encoder generation changes</h2><table><tr><th>Time</th><th>Stream/generation</th><th>Size</th><th>Cadence</th><th>Bitrate target</th></tr>{''.join(encoders) or '<tr><td>No changes recorded.</td></tr>'}</table></section>"""
+<ul>{warnings}</ul><p>Hover for values and a shared time cursor. Drag horizontally to zoom all charts; double-click or reset to see the whole run. Click legend entries to hide/show individual series. Series are not stacked or added together. Cumulative counters are differenced and rebaselined on resets; missing coverage stays blank.</p>
+<p>Charts use CDN-loaded uPlot 1.6.32 and need Internet access (or cached assets). Log data is embedded here; no log upload is performed.</p>
+<p>Dashed lines show whole-run averages and stay fixed when zooming. Visible averages cover only the selected time range. Run totals sum measured counter changes, excluding unknown initial baselines and gaps; different outcomes must not be added to decoded/imported totals.</p>
+<div class='chart-options'><button id='reset-zoom' type='button'>Reset zoom</button><label><input id='lock-y-axis' type='checkbox'> Lock Y-axes to whole-run ranges</label></div><p id='chart-status' class='missing' role='status'>Loading charts… If this persists, check CDN access.</p><noscript>JavaScript is required to display the charts.</noscript>
+{''.join(charts)}<section><h2>Encoder generation changes</h2><table><tr><th>Time</th><th>Stream/generation</th><th>Size</th><th>Cadence</th><th>Bitrate target</th></tr>{''.join(encoders) or '<tr><td>No changes recorded.</td></tr>'}</table></section>
+<script src='{UPLOT_CDN}/uPlot.iife.min.js' crossorigin='anonymous' referrerpolicy='no-referrer'></script>
+<script>{javascript}</script></html>"""
 
 
 def main(argv=None):
