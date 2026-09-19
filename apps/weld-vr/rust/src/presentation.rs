@@ -191,6 +191,37 @@ pub enum ConfigureSizing {
 }
 
 impl ConfigureSizing {
+    /// Explicit pixel-oriented test preference at scale one. Unlike desktop
+    /// text preferences, packed video must keep its declared source aspect.
+    pub fn observe_fixed(
+        &mut self,
+        size: Extent,
+        revision: ClientCommitRevision,
+        logical: [f64; 2],
+        root: SurfaceContentView,
+    ) -> Option<ClientSurfaceRequestKind> {
+        match *self {
+            Self::Initial if configure_fits(root, logical, size, 1.0) => {
+                *self = Self::AwaitingSize(revision, size);
+                Some(ClientSurfaceRequestKind::Configure {
+                    logical_size: size,
+                    resizing: false,
+                })
+            }
+            Self::AwaitingSize(after, requested)
+                if revision > after
+                    && (logical[0] - f64::from(requested.width)).abs() < 1.0
+                    && (logical[1] - f64::from(requested.height)).abs() < 1.0
+                    && configure_fits(root, logical, requested, 1.0) =>
+            {
+                *self = Self::Complete;
+                Some(ClientSurfaceRequestKind::SetPreferredScale {
+                    scale_120: Some(120),
+                })
+            }
+            _ => None,
+        }
+    }
     /// Observe only the selected mapped root. A later safe commit gates scale:
     /// merely enqueueing Configure does not mean the application accepted it.
     pub fn observe(
@@ -290,6 +321,36 @@ mod tests {
             2.0,
         )
         .expect("XR preferences")
+    }
+
+    #[test]
+    fn fixed_packed_size_waits_for_observed_extent_before_setting_scale() {
+        let mut sizing = ConfigureSizing::default();
+        let size = Extent::new(1600, 480);
+        assert!(
+            matches!(sizing.observe_fixed(size, ClientCommitRevision::new(1), [800.0, 500.0], root([800.0, 500.0], 1.0)), Some(ClientSurfaceRequestKind::Configure { logical_size, .. }) if logical_size == size)
+        );
+        assert!(
+            sizing
+                .observe_fixed(
+                    size,
+                    ClientCommitRevision::new(2),
+                    [800.0, 500.0],
+                    root([800.0, 500.0], 1.0)
+                )
+                .is_none()
+        );
+        assert!(matches!(
+            sizing.observe_fixed(
+                size,
+                ClientCommitRevision::new(3),
+                [1600.0, 480.0],
+                root([1600.0, 480.0], 1.0)
+            ),
+            Some(ClientSurfaceRequestKind::SetPreferredScale {
+                scale_120: Some(120)
+            })
+        ));
     }
     #[test]
     fn portrait_and_landscape_fit_without_exceeding_receive_budget() {

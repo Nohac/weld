@@ -218,19 +218,17 @@ Container sorting. A resize can still have one frame of metadata/layout delay.
 ## Export and run on Pico
 
 From the shared development shell, `scripts/run-godot-xr` checks native build
-freshness, exports the Pico APK, then runs formatting/Rust tests/Clippy in
-parallel with the scene and real GLES shader checks. Cargo checks share the
-native build's explicit desktop target. The build PATH stays stable across
-Godot's Android export hook to avoid unnecessary rebuilds when Godot adds Java.
-Successful preparation is cached against input, toolchain, environment and APK
-contents; unchanged runs skip export and validation. `--recheck` forces them.
-The helper still installs the APK and launches Blender for three minutes on
-every run. Failures, including engine errors with a zero exit code, prevent
-installation. Concurrent checks are cancelled and joined before cleanup.
-Use `--app foot`, `--seconds`, `--serial`, or `--adb` as needed. Detailed check
-logs stay under `target/validation/godot-xr-*`. Preparation measured 16.45 seconds
-with forced checks and 1.48 seconds unchanged on the development laptop; APK
-installation is separate (about four seconds in the device smoke test).
+freshness, exports the Pico APK when needed, installs it and launches Blender
+for three minutes. Launching does not run tests, formatting, Clippy or scene
+probes. Run `scripts/check-godot-xr` separately for those checks; it builds the
+desktop extension and runs Rust and Godot checks in parallel without deployment.
+Cargo checks share the native build's explicit desktop target. The build PATH
+stays stable across Godot's Android export hook to avoid unnecessary rebuilds
+when Godot adds Java. Successful preparation is cached against input, toolchain,
+environment and APK contents; `--recheck` forces export, not validation.
+Build/export failures prevent installation. Use `--app foot`, `--seconds`,
+`--serial`, or `--adb` as needed. Preparation logs stay under
+`target/validation/godot-xr-*`; standalone checks use `godot-xr-check-*`.
 
 AV1 remains the default codec; `--codec h264` selects the comparison path in
 both `run-godot-xr` and `run-godot-hoist`. Diagnostic plots label the codec from

@@ -409,31 +409,48 @@ impl WeldXrPointer {
             && player
                 .shape
                 .is_none_or(|shape| shape.hit(rectangle, position));
-        let near_edge = intersection.as_ref().is_some_and(|intersection| {
-            controls::near_edge(intersection.pixels / rect.size, mesh.get_size())
-        });
-        let edge_opacity = intersection.as_ref().map_or(0.0, |intersection| {
-            controls::edge_opacity(intersection.pixels / rect.size, mesh.get_size())
-        });
-        let mut distance = intersection
-            .as_ref()
-            .filter(|hit| hit.inside || near_edge)
-            .map_or(geometry::RANGE, |hit| hit.distance);
+        // Hit routing remains on the content layer. Shell chrome and movement
+        // use its window's panel, not the potentially inset game subsurface.
         let surface = config
             .player
             .bind()
             .workspace
             .as_ref()
-            .and_then(|workspace| {
-                workspace
-                    .panes
-                    .values()
-                    .find(|surface| surface.bind().player == player_node)
-                    .cloned()
-            });
+            .and_then(|workspace| workspace.control_surface(&player_node));
+        let controls_panel = surface
+            .as_ref()
+            .and_then(|surface| surface.bind().panel.clone())
+            .filter(alive);
+        let controls_projection = controls_panel.as_ref().and_then(|panel| {
+            let mesh = panel.get_mesh()?.try_cast::<QuadMesh>().ok()?;
+            let size = mesh.get_size();
+            let hit = geometry::Panel::new(
+                panel.get_global_transform(),
+                mesh.get_center_offset(),
+                size,
+                Vector2::ONE,
+            )?
+            .project(aim)?;
+            Some((hit, size))
+        });
+        let near_edge = controls_projection
+            .as_ref()
+            .is_some_and(|(hit, size)| controls::near_edge(hit.pixels, *size));
+        let edge_opacity = controls_projection
+            .as_ref()
+            .map_or(0.0, |(hit, size)| controls::edge_opacity(hit.pixels, *size));
+        let mut distance = intersection
+            .as_ref()
+            .filter(|hit| hit.inside)
+            .map_or(geometry::RANGE, |hit| hit.distance);
+        if near_edge && let Some((hit, _)) = &controls_projection {
+            distance = distance.min(hit.distance);
+        }
         let chrome = surface.as_ref().and_then(|surface| {
-            let content_y =
-                (near_edge && !self.gesture.active()).then_some(position.y as f32 / rect.size.y);
+            let content_y = controls_projection
+                .as_ref()
+                .filter(|_| near_edge && !self.gesture.active())
+                .map(|(hit, _)| hit.pixels.y);
             surface.clone().bind_mut().controls(aim, content_y)
         });
         if let Some((_, chrome_distance)) = chrome {
@@ -455,7 +472,7 @@ impl WeldXrPointer {
         Some(Sample {
             player: player_node.clone(),
             surface,
-            panel,
+            panel: controls_panel.unwrap_or(panel),
             chrome: chrome.map(|(part, _)| part),
             near_edge,
             edge_opacity,

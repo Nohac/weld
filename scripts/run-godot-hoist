@@ -25,6 +25,29 @@ HALF_RATE_MARKER = "diagnostic-half-rate"
 LOW_LATENCY_MARKER = "diagnostic-low-latency"
 
 
+def prepare_presentation_rules(path, directory=None, adb=None):
+    text = None
+    if path is not None:
+        with path.open("rb") as source:
+            data = source.read(4097)
+        if len(data) > 4096:
+            raise RuntimeError("presentation rules exceed 4096 bytes")
+        text = data.decode("utf-8")
+    if adb is not None:
+        subprocess.run([*adb, "shell", "run-as", PACKAGE, "mkdir", "-p", APP_DIRECTORY], check=True, timeout=5)
+        if text is None:
+            subprocess.run([*adb, "shell", "run-as", PACKAGE, "rm", "-f", f"{APP_DIRECTORY}/presentation.rules"], check=True, timeout=5)
+        else:
+            subprocess.run([*adb, "shell", "run-as", PACKAGE, "sh", "-c",
+                "'umask 077; cat > files/weld-device/presentation.rules'"], input=text, text=True, check=True, timeout=5)
+    else:
+        target = directory / "presentation.rules"
+        if text is None:
+            target.unlink(missing_ok=True)
+        else:
+            target.write_text(text)
+
+
 def prepare_cadence_test(half_rate, directory=None, adb=None):
     prepare_diagnostic_marker(HALF_RATE_MARKER, half_rate, directory, adb)
 
@@ -134,13 +157,23 @@ def parse_arguments(argv=None):
     parser.add_argument("--seconds", type=LAUNCHER["positive_seconds"], default=120)
     parser.add_argument("--restart-after", type=LAUNCHER["positive_seconds"],
                         help="diagnostic: restart the source/apps once, leaving the viewer alive")
-    parser.add_argument("--app", choices=("foot", "blender"), default="foot")
+    parser.add_argument("--app", choices=("foot", "blender", "azahar"), default="foot")
+    parser.add_argument("--rom", type=Path, help="game image for --app azahar")
+    parser.add_argument("--presentation-rules", type=Path, help="local window selection, stereo and sizing rules")
     parser.add_argument("--codec", choices=("av1", "h264"), default="av1")
     parser.add_argument("--blender-script", type=Path,
                         help="diagnostic: run a Python exercise in a factory-startup Blender instance")
     parser.add_argument("--bitrate-mbps", type=int, choices=(8, 16, 24), default=16,
                         help="shared encoder target across windows (default: 16 Mbps)")
     args = parser.parse_args(argv)
+    if args.app == "azahar" and (args.rom is None or not args.rom.is_file()):
+        parser.error("--app azahar requires --rom pointing to an existing game image")
+    if args.rom is not None:
+        if args.app != "azahar":
+            parser.error("--rom requires --app azahar")
+        args.rom = args.rom.resolve()
+    if args.presentation_rules is not None and not args.presentation_rules.is_file():
+        parser.error("presentation rules file does not exist")
     if args.desktop and args.decoder_low_latency:
         parser.error("--decoder-low-latency requires an Android viewer")
     if args.blender_script is not None:
@@ -151,6 +184,8 @@ def parse_arguments(argv=None):
 
 
 def app_command(args):
+    if args.app == "azahar":
+        return ["azahar", "--windowed", str(args.rom)]
     if args.app == "foot":
         return ["foot", "-e", "htop"]
     if args.blender_script is not None:
@@ -165,6 +200,20 @@ def diagnostic_environment():
         if not any(part.strip().startswith(target + "=") for part in selected.split(",")):
             selected += "," + target + "=debug"
     environment["RUST_LOG"] = selected
+    return environment
+
+
+def source_environment(runtime):
+    environment = diagnostic_environment()
+    host_runtime = environment.get("XDG_RUNTIME_DIR")
+    if host_runtime:
+        # Isolate the Wayland socket, not host audio. Preserve explicit audio
+        # overrides and client.conf server selection rather than forcing a sink.
+        environment.setdefault("PIPEWIRE_RUNTIME_DIR", host_runtime)
+        environment.setdefault("PULSE_RUNTIME_PATH", str(Path(host_runtime) / "pulse"))
+    for key in ("DISPLAY", "WAYLAND_DISPLAY", "WAYLAND_SOCKET"):
+        environment.pop(key, None)
+    environment["XDG_RUNTIME_DIR"] = str(runtime)
     return environment
 
 
@@ -259,10 +308,7 @@ def main(argv=None):
 
     print(f"Logs: {run}", flush=True)
     try:
-        environment = diagnostic_environment()
-        for key in ("DISPLAY", "WAYLAND_DISPLAY", "WAYLAND_SOCKET"):
-            environment.pop(key, None)
-        environment["XDG_RUNTIME_DIR"] = str(runtime)
+        environment = source_environment(runtime)
         app = app_command(args)
         command = source_command(run, state, app, args.bitrate_mbps, args.codec)
         hosts.append(LAUNCHER["OwnedHost"]("source", command, environment, ROOT, run))
@@ -277,6 +323,7 @@ def main(argv=None):
             write_new(temporary, profile)
             temporary.replace(profile_path)
             prepare_cadence_test(args.half_rate, directory=receiver_directory)
+            prepare_presentation_rules(args.presentation_rules, directory=receiver_directory)
             environment = {**diagnostic_environment(), "WELD_VR_DEVICE_DIR": str(receiver_directory)}
             hosts.append(LAUNCHER["OwnedHost"]("viewer",
                 ["godot", "--path", str(ROOT / "apps/weld-vr"), "--display-driver", "wayland", "--rendering-driver", "opengl3_es"],
@@ -290,6 +337,7 @@ def main(argv=None):
             subprocess.run([*adb, "shell", "am", "force-stop", PACKAGE], check=True, timeout=5)
             prepare_cadence_test(args.half_rate, adb=adb)
             prepare_decoder_test(args.decoder_low_latency, adb=adb)
+            prepare_presentation_rules(args.presentation_rules, adb=adb)
             capture = LogCapture(adb, run / "viewer.log")
             if existing is not None:
                 phone_install(profile)
@@ -318,11 +366,8 @@ def main(argv=None):
                 restart.mkdir(mode=0o700)
                 (restart / "runtime").mkdir(mode=0o700)
                 write_new(restart / "viewer.identity", identity(public) + "\n")
-                source_environment = diagnostic_environment()
-                for key in ("DISPLAY", "WAYLAND_DISPLAY", "WAYLAND_SOCKET"):
-                    source_environment.pop(key, None)
-                source_environment["XDG_RUNTIME_DIR"] = str(restart / "runtime")
-                hosts.insert(0, LAUNCHER["OwnedHost"]("source", source_command(restart, state, app, args.bitrate_mbps, args.codec), source_environment, ROOT, restart))
+                restart_environment = source_environment(restart / "runtime")
+                hosts.insert(0, LAUNCHER["OwnedHost"]("source", source_command(restart, state, app, args.bitrate_mbps, args.codec), restart_environment, ROOT, restart))
                 restart_at = None
             time.sleep(0.1)
     except InterruptedError:
@@ -340,6 +385,7 @@ def main(argv=None):
                     finally:
                         # A failed startup may not have consumed the one-shot marker.
                         prepare_decoder_test(False, adb=adb)
+                        prepare_presentation_rules(None, adb=adb)
                 stop_owned(hosts, stop_viewer if adb is not None else None)
             finally:
                 for sig, handler in previous.items():

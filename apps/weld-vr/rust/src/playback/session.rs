@@ -4,6 +4,7 @@ use super::frame::Frame;
 use super::window_frames::{WindowChannel, WindowFrames};
 use super::{Controller, Shared, input, lock, receiver};
 use crate::presentation::{ConfigureSizing, XrPreferences};
+use crate::presentation_rules::{WindowRule, WindowRules};
 use anyhow::{Context, Result, ensure};
 use godot::{classes::Object, prelude::*};
 use std::cell::RefCell;
@@ -17,8 +18,8 @@ use std::{
 };
 use weld_client::{
     ClientId, ClientSurfaceCommit, ClientSurfaceEvent, ClientSurfaceEventKind, ClientSurfaceId,
-    ClientSurfaceRequest, ClientSurfaceRequestKind, ClientSurfaceRole, InputPosition,
-    PresentationRate, SurfaceBufferChange, SurfaceInputGeometry, SurfaceLayerId,
+    ClientSurfaceMetadata, ClientSurfaceRequest, ClientSurfaceRequestKind, ClientSurfaceRole,
+    InputPosition, PresentationRate, SurfaceBufferChange, SurfaceInputGeometry, SurfaceLayerId,
 };
 
 const MAX_SURFACES: usize = 8;
@@ -78,7 +79,30 @@ pub(crate) struct Pane {
     pub size: [f32; 2],
     pub stack: i32,
     pub visible: bool,
+    pub selected: bool,
+    pub metadata: Arc<ClientSurfaceMetadata>,
+    pub rule: Option<Arc<WindowRule>>,
     pub(super) shared: Arc<Shared>,
+}
+
+impl Pane {
+    pub fn controls_window(&self) -> Option<u64> {
+        // Subsurfaces carry application input, but shell operations belong to
+        // their containing window. Popups never acquire window controls.
+        (self.kind != 2).then_some(self.window)
+    }
+
+    pub fn panel_slot(&self) -> Option<u32> {
+        // Client-owned layers stay attached to their window, including when
+        // the window has an explicit presentation slot.
+        (self.kind <= 1)
+            .then(|| self.rule.as_ref().map(|rule| rule.slot))
+            .flatten()
+    }
+
+    pub fn is_stereo(&self) -> bool {
+        self.kind != 2 && self.rule.as_ref().is_some_and(|rule| rule.stereo)
+    }
 }
 
 struct Surface {
@@ -89,6 +113,7 @@ struct Surface {
     root: Option<SurfaceLayerId>,
     layers: BTreeMap<SurfaceLayerId, Pane>,
     frames: WindowFrames,
+    metadata: Arc<ClientSurfaceMetadata>,
 }
 
 #[derive(Default)]
@@ -99,6 +124,7 @@ pub(crate) struct Inventory {
     presentation_rate: Option<PresentationRate>,
     /// Diagnostic source cadence only; local queue age still follows the display.
     half_rate: bool,
+    rules: WindowRules,
 }
 impl Inventory {
     fn requested_rate(&self, display: PresentationRate) -> PresentationRate {
@@ -146,7 +172,7 @@ impl Inventory {
             .map(|surface| ClientSurfaceRequest {
                 surface: *surface,
                 kind: ClientSurfaceRequestKind::SetPresentation {
-                    rate: Some(requested),
+                    rate: (!self.rules.filtered() || self.visible(*surface)).then_some(requested),
                 },
             })
             .collect()
@@ -160,6 +186,33 @@ impl Inventory {
         let surface_id = event.surface;
         let mut requests = Vec::new();
         match event.kind {
+            ClientSurfaceEventKind::Metadata(metadata) => {
+                if let Some(surface) = self.surfaces.get_mut(&surface_id) {
+                    let previous = self
+                        .rules
+                        .select(surface.metadata.app_id(), surface.metadata.title());
+                    let next = self.rules.select(metadata.app_id(), metadata.title());
+                    let changed =
+                        previous != next || *surface.metadata == ClientSurfaceMetadata::default();
+                    if previous != next {
+                        surface.sizing = ConfigureSizing::default();
+                    }
+                    tracing::debug!(target: "weld_vr_diag", ?surface_id, app_id = metadata.app_id(), title = metadata.title(), "received window metadata");
+                    surface.metadata = Arc::new(metadata);
+                    if self.rules.filtered() && changed {
+                        requests.push(ClientSurfaceRequest {
+                            surface: surface_id,
+                            kind: ClientSurfaceRequestKind::SetPresentation {
+                                rate: next.map(|_| {
+                                    self.requested_rate(
+                                        self.presentation_rate.unwrap_or(PresentationRate::HZ_60),
+                                    )
+                                }),
+                            },
+                        });
+                    }
+                }
+            }
             ClientSurfaceEventKind::Role(role) => {
                 if let Some(surface) = self.surfaces.get_mut(&surface_id) {
                     surface.role = role;
@@ -179,6 +232,7 @@ impl Inventory {
                             root: None,
                             layers: BTreeMap::new(),
                             frames: WindowFrames::default(),
+                            metadata: Arc::new(ClientSurfaceMetadata::default()),
                         },
                     );
                     requests.push(ClientSurfaceRequest {
@@ -221,17 +275,35 @@ impl Inventory {
         commit: &ClientSurfaceCommit,
         preferences: Option<XrPreferences>,
     ) -> Option<ClientSurfaceRequest> {
-        let preferences = preferences?;
         let surface = self.surfaces.get_mut(&id)?;
         // Popups follow their owner's protocol geometry. Do not enlarge menus
         // or transient dialogs to the independent-window envelope.
-        if !matches!(surface.role, ClientSurfaceRole::Toplevel(state) if state.parent.is_none()) {
+        if !matches!(surface.role, ClientSurfaceRole::Toplevel(state) if state.parent.is_none() || self.rules.filtered())
+        {
             return None;
         }
         let root = commit.root.filter(|_| commit.mapped)?;
         let view = commit
             .window_geometry
             .map_or(root.view, |geometry| geometry.view);
+        if self.rules.filtered() {
+            let rule = self
+                .rules
+                .select(surface.metadata.app_id(), surface.metadata.title())?;
+            return surface
+                .sizing
+                .observe_fixed(
+                    rule.size,
+                    commit.revision,
+                    [
+                        f64::from(view.logical_width),
+                        f64::from(view.logical_height),
+                    ],
+                    root.view,
+                )
+                .map(|kind| ClientSurfaceRequest { surface: id, kind });
+        }
+        let preferences = preferences?;
         surface
             .sizing
             .observe(
@@ -323,6 +395,9 @@ impl Inventory {
                         size: [1.0; 2],
                         stack: 0,
                         visible: false,
+                        selected: false,
+                        metadata: Arc::new(ClientSurfaceMetadata::default()),
+                        rule: None,
                         shared: Arc::new(Shared {
                             session: session.session.clone(),
                             ..Shared::default()
@@ -474,6 +549,18 @@ impl Inventory {
             let visible = self.visible(*id);
             for pane in surface.layers.values() {
                 let mut pane = pane.clone();
+                pane.metadata = surface.metadata.clone();
+                pane.rule = self
+                    .rules
+                    .select(surface.metadata.app_id(), surface.metadata.title())
+                    .cloned();
+                pane.selected = !self.rules.filtered() || pane.rule.is_some();
+                if let Some(parent) = parent.and_then(|id| self.surfaces.get(&id)) {
+                    pane.selected |= self
+                        .rules
+                        .select(parent.metadata.app_id(), parent.metadata.title())
+                        .is_some();
+                }
                 pane.visible &= visible;
                 if pane.kind == 3 {
                     pane.parent = surface.id;
@@ -503,7 +590,13 @@ impl Inventory {
             match surface.role {
                 ClientSurfaceRole::Toplevel(state) => match state.parent {
                     Some(parent) => id = parent,
-                    None => return true,
+                    None => {
+                        return !self.rules.filtered()
+                            || self
+                                .rules
+                                .select(surface.metadata.app_id(), surface.metadata.title())
+                                .is_some();
+                    }
                 },
                 ClientSurfaceRole::Popup(state) => id = state.owner,
             }
@@ -539,6 +632,7 @@ impl Session {
         let mut inventory = Inventory {
             publication: publication.clone(),
             half_rate,
+            rules: WindowRules::consume(&directory)?,
             ..Inventory::default()
         };
         let worker = thread::Builder::new()
@@ -718,6 +812,75 @@ mod tests {
         );
         apply(&mut inventory, &shared, 1, commit(true));
         assert!(inventory.publication.read().panes[0].id > old_id);
+    }
+
+    #[test]
+    fn metadata_selects_only_explicit_windows_and_does_not_create_surfaces() {
+        let shared = Shared::default();
+        let mut inventory = Inventory {
+            rules: WindowRules::parse(
+                "weld-window-rules-v1\napp\tPrimary Window\tsbs\t1600\t480\t0\n",
+            )
+            .unwrap(),
+            ..Inventory::default()
+        };
+        let label = |title: &str| {
+            ClientSurfaceEventKind::Metadata(
+                ClientSurfaceMetadata::new("app".into(), title.into()).unwrap(),
+            )
+        };
+        apply(&mut inventory, &shared, 99, label("Primary Window"));
+        assert!(inventory.surfaces.is_empty());
+        for n in [1, 2] {
+            apply(
+                &mut inventory,
+                &shared,
+                n,
+                ClientSurfaceEventKind::Role(top(None)),
+            );
+        }
+        apply(&mut inventory, &shared, 1, label("Game | Primary Window"));
+        apply(&mut inventory, &shared, 2, label("Library"));
+        apply(&mut inventory, &shared, 1, commit(true));
+        apply(&mut inventory, &shared, 2, commit(true));
+        let panes = inventory.panes();
+        assert!(panes[0].selected && panes[0].visible && panes[0].rule.as_ref().unwrap().stereo);
+        assert!(!panes[1].selected && !panes[1].visible);
+        let mut layer = panes[0].clone();
+        assert_eq!(layer.panel_slot(), Some(0));
+        assert!(layer.is_stereo());
+        assert_eq!(layer.controls_window(), Some(layer.window));
+        layer.kind = 3;
+        assert_eq!(layer.panel_slot(), None);
+        assert_eq!(layer.controls_window(), Some(layer.window));
+        assert!(
+            layer.is_stereo(),
+            "game subsurfaces inherit stereo sampling"
+        );
+        layer.kind = 2;
+        assert_eq!(layer.panel_slot(), None);
+        assert_eq!(layer.controls_window(), None);
+        assert!(!layer.is_stereo(), "popups are not packed stereo images");
+        let requests = inventory.set_presentation_rate(PresentationRate::try_from(90_000).unwrap());
+        assert!(requests.iter().any(|request| request.surface == id(2)
+            && matches!(
+                request.kind,
+                ClientSurfaceRequestKind::SetPresentation { rate: None }
+            )));
+        let requests = inventory
+            .apply(
+                ClientSurfaceEvent {
+                    surface: id(1),
+                    kind: label("New game | Primary Window"),
+                },
+                &shared,
+                None,
+            )
+            .unwrap();
+        assert!(
+            requests.is_empty(),
+            "title churn within the same rule must not resend presentation requests"
+        );
     }
 
     #[test]

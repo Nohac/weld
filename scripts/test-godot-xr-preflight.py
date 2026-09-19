@@ -241,9 +241,9 @@ api['PREFLIGHT']['parallel_checks']([[steps[0]],[steps[1]]],api['run_step'],Path
             def rewrite_metadata(*args):
                 key["metadata"] = "uid2"
             with patch.object(LAUNCHER, "ROOT", root), patch.object(LAUNCHER, "APK", apk), \
-                 patch.object(LAUNCHER, "run_step") as run, \
+                 patch.object(LAUNCHER, "run_step", side_effect=rewrite_metadata) as run, \
                  patch.dict(LAUNCHER.PREFLIGHT, fingerprint=lambda *args: dict(key),
-                            parallel_checks=rewrite_metadata):
+                            parallel_checks=lambda *args: self.fail("launch must not run validation lanes")):
                 args = SimpleNamespace(recheck=False)
                 LAUNCHER.preparation(args, root, {"PATH": "/tools"})
                 self.assertEqual([call.args[0].name for call in run.call_args_list], ["native-build", "pico-export"])
@@ -254,11 +254,14 @@ api['PREFLIGHT']['parallel_checks']([[steps[0]],[steps[1]]],api['run_step'],Path
                 run.reset_mock()
                 LAUNCHER.preparation(args, root, {"PATH": "/tools"})
                 self.assertEqual([call.args[0].name for call in run.call_args_list], ["native-build", "pico-export"])
-                with patch.dict(LAUNCHER.PREFLIGHT, parallel_checks=lambda *args: key.update(inputs="edited")):
+                def edit_during_export(step, *unused):
+                    if step.name == "pico-export":
+                        key["inputs"] = "edited"
+                with patch.object(LAUNCHER, "run_step", side_effect=edit_during_export):
                     with self.assertRaisesRegex(RuntimeError, "inputs changed"):
                         LAUNCHER.preparation(args, root, {"PATH": "/tools"})
                 self.assertFalse((root / "target/godot-xr-preflight.json").exists())
-                with patch.dict(LAUNCHER.PREFLIGHT, parallel_checks=lambda *args: (_ for _ in ()).throw(RuntimeError("failed"))):
+                with patch.object(LAUNCHER, "run_step", side_effect=RuntimeError("failed")):
                     with self.assertRaisesRegex(RuntimeError, "failed"):
                         LAUNCHER.preparation(args, root, {"PATH": "/tools"})
                 self.assertFalse((root / "target/godot-xr-preflight.json").exists())

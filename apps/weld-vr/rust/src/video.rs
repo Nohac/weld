@@ -1,6 +1,7 @@
 //! Main-thread Godot API shared by all native providers.
 mod decoration;
 mod input;
+mod stereo;
 mod workspace;
 mod xr;
 
@@ -14,6 +15,7 @@ use godot::{
 use input::DesktopInput;
 use std::path::PathBuf;
 use std::time::Instant;
+use stereo::ViewLayout;
 use weld_client::PresentationRate;
 use workspace::{WeldSurface, Workspace};
 
@@ -52,6 +54,7 @@ pub struct WeldVideoPlayer {
     xr_preferences: Option<XrPreferences>,
     raster_sizing: RasterSizing,
     shape: Option<decoration::Shape>,
+    view_layout: ViewLayout,
     base: Base<Node>,
 }
 #[godot_api]
@@ -67,6 +70,7 @@ impl INode for WeldVideoPlayer {
             xr_preferences: None,
             raster_sizing: RasterSizing::default(),
             shape: None,
+            view_layout: ViewLayout::Mono,
         }
     }
     fn ready(&mut self) {
@@ -429,9 +433,11 @@ impl WeldVideoPlayer {
     }
     #[func]
     fn aspect(&self) -> f32 {
-        self.controller
-            .as_ref()
-            .map_or(16.0 / 9.0, Controller::aspect)
+        self.view_layout.aspect(
+            self.controller
+                .as_ref()
+                .map_or(16.0 / 9.0, Controller::aspect),
+        )
     }
     #[func]
     fn surfaces(&self) -> Array<Gd<WeldSurface>> {
@@ -453,6 +459,7 @@ impl WeldVideoPlayer {
             xr_preferences: preferences,
             raster_sizing: RasterSizing::default(),
             shape: None,
+            view_layout: ViewLayout::Mono,
         })
     }
     fn xr_targets(

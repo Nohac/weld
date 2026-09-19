@@ -321,6 +321,9 @@ mod tests {
                         size: [800.0, 500.0],
                         stack: id as i32,
                         visible: true,
+                        selected: true,
+                        metadata: Arc::new(weld_client::ClientSurfaceMetadata::default()),
+                        rule: None,
                         shared: Arc::new(Shared::default()),
                     },
                 )

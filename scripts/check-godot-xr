@@ -1,0 +1,60 @@
+#!/usr/bin/env python3
+"""Run Rust and Godot XR checks explicitly, without installing or launching a demo."""
+import os
+from pathlib import Path
+import runpy
+import signal
+import subprocess
+import sys
+import tempfile
+
+API = runpy.run_path(str(Path(__file__).with_name("run-godot-xr")))
+
+
+def steps():
+    step = API["Step"]
+    cargo = ["--manifest-path", str(API["MANIFEST"])]
+    target = ["--target", "x86_64-unknown-linux-gnu"]
+    godot = ["godot", "--path", str(API["PROJECT"])]
+    return [
+        step("format", ["cargo", "fmt", *cargo, "--check"], 60),
+        step("rust-tests", ["cargo", "test", *cargo, *target, "--locked", "-j2"], 600),
+        step("clippy", ["cargo", "clippy", *cargo, *target, "--all-targets", "--locked", "-j2", "--", "-D", "warnings"], 600),
+        step("scene", [*godot, "--headless", "--script", "res://tests/gdextension_smoke.gd"], 35,
+             "WELD_VR_GDEXTENSION_SMOKE_OK", True),
+        step("shaders", [*godot, "--display-driver", "wayland", "--rendering-driver", "opengl3_es",
+                         "--script", "res://tests/xr_decoration_smoke.gd"], 35,
+             "WELD_XR_DECORATION_SMOKE_OK", True),
+    ]
+
+
+def main():
+    environment = API["build_environment"](dict(os.environ))
+    with API["preparation_lock"]():
+        validation = API["ROOT"] / "target/validation"
+        validation.mkdir(parents=True, exist_ok=True)
+        run = Path(tempfile.mkdtemp(prefix="godot-xr-check-", dir=validation))
+        print(f"XR validation: {run}", flush=True)
+        API["run_step"](API["Step"]("native-build",
+            [str(API["PROJECT"] / "scripts/build-gdextension"), "desktop"], 600), run, environment)
+        checks = steps()
+        API["PREFLIGHT"]["parallel_checks"]([
+            [step for step in checks if not step.engine],
+            [step for step in checks if step.engine],
+        ], API["run_step"], run, environment)
+    return 0
+
+
+if __name__ == "__main__":
+    def interrupted(_signal, _frame):
+        raise KeyboardInterrupt
+
+    for shutdown_signal in (signal.SIGTERM, signal.SIGHUP):
+        signal.signal(shutdown_signal, interrupted)
+    try:
+        sys.exit(main())
+    except KeyboardInterrupt:
+        sys.exit(130)
+    except (OSError, RuntimeError, subprocess.SubprocessError) as error:
+        print(f"XR checks failed: {error}", file=sys.stderr)
+        sys.exit(1)

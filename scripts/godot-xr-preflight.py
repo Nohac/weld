@@ -30,8 +30,7 @@ def fingerprint(root, project, environment):
              "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_RUNTIME_DIR"}
     relevant = {key: value for key, value in environment.items() if key in names or key.startswith(prefixes)}
     inputs.update(json.dumps(relevant, sort_keys=True).encode())
-    for command in (["cargo", "--version"], ["rustc", "-Vv"], ["cargo", "clippy", "--version"],
-                    ["cargo", "fmt", "--version"], ["godot", "--version"]):
+    for command in (["cargo", "--version"], ["rustc", "-Vv"], ["godot", "--version"]):
         executable = shutil.which(command[0], path=environment.get("PATH"))
         if executable is None:
             raise RuntimeError(f"missing {command[0]} while checking preparation freshness")

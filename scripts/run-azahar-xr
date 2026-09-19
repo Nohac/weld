@@ -1,0 +1,50 @@
+#!/usr/bin/env python3
+"""Build/deploy Weld VR and launch Azahar's separate stereo/mono windows.
+
+Reuses the regular XR workflow, pairing, codec pipeline and cleanup. Configure
+Azahar with OpenGL, Separate Windows, Full-width Side-by-Side, nonzero 3D depth,
+2x resolution and Single Window Mode OFF. No ROM or save data is modified here.
+"""
+import argparse
+import os
+from pathlib import Path
+import subprocess
+import sys
+import tempfile
+
+ROOT = Path(__file__).resolve().parent.parent
+
+
+def rules(show_manager=False):
+    result = ("weld-window-rules-v1\n"
+        "org.azahar_emu.Azahar\t | Primary Window\tsbs\t1600\t480\t0\n"
+        "org.azahar_emu.Azahar\t | Secondary Window\tmono\t640\t480\t1\n")
+    if show_manager:
+        result += "org.azahar_emu.Azahar\t\tmono\t800\t600\t2\n"
+    return result
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--rom", type=Path, default=Path.home() / "Documents/Games/3ds/Super Mario 3D Land (USA) (En,Fr,Es) (Rev 1).3ds")
+    parser.add_argument("--show-manager", action="store_true", help="also show the emulator menu, including Load State > Slot 1")
+    args, forwarded = parser.parse_known_args()
+    if not args.rom.is_file():
+        parser.error("game image not found; supply --rom")
+    if subprocess.run(["pgrep", "-x", "azahar"], stdout=subprocess.DEVNULL).returncode == 0:
+        parser.error("close the existing Azahar instance first to avoid competing configuration/save writes")
+    print("Stereo upper screen + independent mono touchscreen. Existing emulator configuration and save data are reused.", flush=True)
+    print("To load save-state slot 1, add --show-manager and select Emulation > Load State > Slot 1. No state is overwritten.", flush=True)
+    validation = ROOT / "target/validation"
+    validation.mkdir(parents=True, exist_ok=True)
+    # Keep this tiny input beside test logs. Exec preserves the regular
+    # launcher's signal/cleanup ownership; no extra supervisor can orphan it.
+    path = Path(tempfile.mkdtemp(prefix="azahar-rules-", dir=validation)) / "presentation.rules"
+    path.write_text(rules(args.show_manager))
+    command = [str(ROOT / "scripts/run-godot-xr"), *forwarded, "--app", "azahar",
+               "--rom", str(args.rom.resolve()), "--presentation-rules", str(path.resolve())]
+    os.execv(command[0], command)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

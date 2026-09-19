@@ -216,6 +216,7 @@ pub struct Controller {
     shared: Arc<Shared>,
     worker: Option<JoinHandle<()>>,
     material: Gd<Object>,
+    stereo_material: Option<Gd<Object>>,
     _texture: Gd<Object>,
     current: Option<(native::Geometry, [u32; 2])>,
     aspect: f32,
@@ -291,6 +292,7 @@ impl Controller {
             generation,
             shared,
             material,
+            stereo_material: None,
             _texture: texture,
             current: None,
             aspect: 16.0 / 9.0,
@@ -386,6 +388,11 @@ impl Controller {
         self.uniform("has_frame", true.to_variant())?;
         if let Some(input) = input.as_mut() {
             input.geometry.logical_size = display.logical_size;
+            // Both displayed eyes address one logical interaction view: the
+            // left half of the packed client surface. Do not duplicate input.
+            if self.stereo_material.is_some() {
+                input.geometry.logical_size[0] *= 0.5;
+            }
         }
         self.input_target = input;
         let Some(frame) = frame else {
@@ -446,10 +453,38 @@ impl Controller {
         self.finished();
     }
     fn uniform(&mut self, name: &str, value: Variant) -> Result<()> {
-        self.material
-            .try_call("set_shader_parameter", &[name.to_variant(), value])
-            .map(|_| ())
-            .map_err(|error| anyhow::anyhow!("material parameter {name}: {error}"))
+        for material in std::iter::once(&mut self.material).chain(self.stereo_material.iter_mut()) {
+            material
+                .try_call("set_shader_parameter", &[name.to_variant(), value.clone()])
+                .map_err(|error| anyhow::anyhow!("material parameter {name}: {error}"))?;
+        }
+        Ok(())
+    }
+    /// A second eye samples the same imported texture and frame generation.
+    /// Retain its sampler until stop detaches both before native retirement.
+    pub fn attach_stereo_material(&mut self, mut material: Gd<Object>) -> Result<()> {
+        ensure!(
+            self.stereo_material.is_none(),
+            "stereo material already attached"
+        );
+        ensure!(
+            material.is_class("ShaderMaterial"),
+            "expected a ShaderMaterial"
+        );
+        for name in ["video", "crop", "has_frame"] {
+            let value = self
+                .material
+                .try_call("get_shader_parameter", &[name.to_variant()])
+                .map_err(|error| anyhow::anyhow!("read material parameter {name}: {error}"))?;
+            material
+                .try_call("set_shader_parameter", &[name.to_variant(), value])
+                .map_err(|error| anyhow::anyhow!("stereo material parameter {name}: {error}"))?;
+        }
+        self.stereo_material = Some(material);
+        if let Some(input) = &mut self.input_target {
+            input.geometry.logical_size[0] *= 0.5;
+        }
+        Ok(())
     }
     pub fn finished(&mut self) -> bool {
         if self.worker.as_ref().is_some_and(JoinHandle::is_finished) {

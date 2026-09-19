@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Check, build, install and launch the Pico XR demo in one command.
+"""Build, install and launch the Pico XR demo in one command.
 
 Uses the current development shell and shared ADB server. The Godot export hook
 builds/stages both Rust targets. No editor settings, app data or pairing are reset.
-Only after all checks pass is the APK installed and the bounded demo launched.
+Tests and linting are separate: scripts/check-godot-xr.
 An existing workflow for the same device is stopped and cleaned up first.
 """
 import argparse
@@ -41,20 +41,10 @@ class Step:
 
 
 def steps():
-    cargo = ["--manifest-path", str(MANIFEST)]
-    target = ["--target", "x86_64-unknown-linux-gnu"]
     godot = ["godot", "--path", str(PROJECT)]
     return [
-        Step("format", ["cargo", "fmt", *cargo, "--check"], 60),
-        Step("rust-tests", ["cargo", "test", *cargo, *target, "--locked", "-j2"], 600),
-        Step("clippy", ["cargo", "clippy", *cargo, *target, "--all-targets", "--locked", "-j2", "--", "-D", "warnings"], 600),
         # Export rechecks native freshness through its normal build hook.
         Step("pico-export", [*godot, "--headless", "--export-debug", "Android Pico", str(APK)], 600, engine=True),
-        Step("scene", [*godot, "--headless", "--script", "res://tests/gdextension_smoke.gd"], 35,
-             "WELD_VR_GDEXTENSION_SMOKE_OK", True),
-        Step("shaders", [*godot, "--display-driver", "wayland", "--rendering-driver", "opengl3_es",
-                         "--script", "res://tests/xr_decoration_smoke.gd"], 35,
-             "WELD_XR_DECORATION_SMOKE_OK", True),
     ]
 
 
@@ -120,16 +110,8 @@ def preparation(args, run, environment):
         print(f"Preparation cached: inputs and APK unchanged ({time.monotonic() - started:.2f}s). Use --recheck to rerun.", flush=True)
         return
     cache.unlink(missing_ok=True)
-    checks = steps()
-    # Export owns a Cargo build hook; finish it before starting Cargo checks.
-    for step in checks:
-        if step.name == "pico-export":
-            run_step(step, run, environment)
-    print("Checking Rust and Godot runtime probes in parallel...", flush=True)
-    PREFLIGHT["parallel_checks"]([
-        [step for step in checks if not step.engine],
-        [step for step in checks if step.engine and step.name != "pico-export"],
-    ], run_step, run, environment)
+    for step in steps():
+        run_step(step, run, environment)
     if not APK.is_file():
         raise RuntimeError("export did not produce the Pico APK")
     final_key = PREFLIGHT["fingerprint"](ROOT, PROJECT, environment)
@@ -248,9 +230,11 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--serial", help="Pico ADB serial; otherwise requires exactly one ready device")
     parser.add_argument("--adb", default=os.environ.get("ADB", "adb"), help="shared ADB executable (default: ADB or PATH)")
-    parser.add_argument("--app", choices=("blender", "foot"), default="blender")
+    parser.add_argument("--app", choices=("blender", "foot", "azahar"), default="blender")
+    parser.add_argument("--rom", type=Path, help="game image for --app azahar")
+    parser.add_argument("--presentation-rules", type=Path, help="local window selection, stereo and sizing rules")
     parser.add_argument("--codec", choices=("av1", "h264"), default="av1")
-    parser.add_argument("--recheck", action="store_true", help="rerun export and all checks even if preparation is cached")
+    parser.add_argument("--recheck", action="store_true", help="rerun export even if preparation is cached; does not run tests or linting")
     parser.add_argument("--seconds", type=seconds, default=180)
     parser.add_argument("--half-rate", action="store_true", help="test half-rate streaming without changing XR refresh")
     parser.add_argument("--decoder-low-latency", action="store_true",
@@ -258,6 +242,12 @@ def main(argv=None):
     parser.add_argument("--bitrate-mbps", type=int, choices=(8, 16, 24), default=16,
                         help="shared encoder target across windows (default: 16 Mbps)")
     args = parser.parse_args(argv)
+    if args.app == "azahar" and (args.rom is None or not args.rom.is_file()):
+        parser.error("--app azahar requires --rom pointing to an existing game image")
+    if args.rom is not None and args.app != "azahar":
+        parser.error("--rom requires --app azahar")
+    if args.presentation_rules is not None and not args.presentation_rules.is_file():
+        parser.error("presentation rules file does not exist")
     resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
     adb = shutil.which(args.adb)
     if adb is None:
@@ -285,7 +275,7 @@ def workflow(args, adb, serial, environment):
     validation.mkdir(parents=True, exist_ok=True)
     run = Path(tempfile.mkdtemp(prefix="godot-xr-", dir=validation))
     APK.parent.mkdir(parents=True, exist_ok=True)
-    print(f"XR checks: {run}\nADB: {adb}\nDevice: {serial}", flush=True)
+    print(f"XR preparation: {run}\nADB: {adb}\nDevice: {serial}", flush=True)
     preparation(args, run, environment)
     run_step(Step("install", [adb, "-s", serial, "install", "-r", str(APK)], 120, "Success"), run, environment)
     print("Preparation verified. Starting the XR demo (12 GiB memory limit, no swap).", flush=True)
@@ -297,6 +287,9 @@ def workflow(args, adb, serial, environment):
         command.append("--half-rate")
     if args.decoder_low_latency:
         command.append("--decoder-low-latency")
+    for option, value in [("--rom", getattr(args, "rom", None)), ("--presentation-rules", getattr(args, "presentation_rules", None))]:
+        if value is not None:
+            command.extend([option, str(value.resolve())])
     demo_environment = dict(environment)
     demo_environment["PATH"] = str(Path(adb).parent) + os.pathsep + environment.get("PATH", "")
     return launch_demo(command, demo_environment)

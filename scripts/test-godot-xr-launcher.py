@@ -5,6 +5,7 @@ import importlib.util
 from pathlib import Path
 import sys
 import subprocess
+import runpy
 import tempfile
 from types import SimpleNamespace
 import unittest
@@ -40,11 +41,13 @@ class WorkflowTests(unittest.TestCase):
                 self.assertEqual(command[command.index("--bitrate-mbps") + 1], "16")
                 self.assertEqual(command[command.index("--codec") + 1], "h264")
 
-    def test_export_builds_before_engine_checks_without_duplicate_build_step(self):
+    def test_launch_only_exports_and_validation_is_separate(self):
         steps = MODULE.steps()
-        self.assertEqual([step.name for step in steps], ["format", "rust-tests", "clippy", "pico-export", "scene", "shaders"])
+        self.assertEqual([step.name for step in steps], ["pico-export"])
         self.assertTrue(all("--release" not in step.command for step in steps))
-        for step in steps:
+        checks = runpy.run_path(str(PATH.with_name("check-godot-xr")))["steps"]()
+        self.assertEqual([step.name for step in checks], ["format", "rust-tests", "clippy", "scene", "shaders"])
+        for step in checks:
             if step.name in ("rust-tests", "clippy"):
                 self.assertEqual(step.command[step.command.index("--target") + 1], "x86_64-unknown-linux-gnu")
 

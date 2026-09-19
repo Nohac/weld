@@ -27,12 +27,34 @@ func _run() -> void:
 	viewport.add_child(control)
 	for index in range(4):
 		await process_frame
-		await RenderingServer.frame_post_draw
+		# Draw offscreen even when the desktop compositor occludes this probe.
+		RenderingServer.force_draw(false)
 	var image := viewport.get_texture().get_image()
 	if image.get_pixel(128, 128).a < 0.95 or image.get_pixel(1, 1).a > 0.05:
 		push_error("Video shader must preserve the center and clip rounded corners")
 		quit(1)
 		return
+	# Eye selection happens inside the existing content crop, excluding coded
+	# padding. Both materials sample the same texture without another decoder.
+	var stereo_image := Image.create(8, 2, false, Image.FORMAT_RGBA8)
+	stereo_image.fill(Color.BLUE)
+	for y in range(2):
+		for x in range(2, 4):
+			stereo_image.set_pixel(x, y, Color.RED)
+		for x in range(4, 6):
+			stereo_image.set_pixel(x, y, Color.GREEN)
+	material.set_shader_parameter("video", ImageTexture.create_from_image(stereo_image))
+	material.set_shader_parameter("crop", Vector4(0.25, 0.0, 0.75, 1.0))
+	for right in [false, true]:
+		material.set_shader_parameter("eye_view", Vector4(0.5, 0, 1, 1) if right else Vector4(0, 0, 0.5, 1))
+		for index in range(4):
+			await process_frame
+			RenderingServer.force_draw(false)
+		var eye_pixel := viewport.get_texture().get_image().get_pixel(128, 128)
+		if (right and (eye_pixel.g < 0.9 or eye_pixel.r > 0.1)) or (not right and (eye_pixel.r < 0.9 or eye_pixel.g > 0.1)):
+			push_error("Packed stereo eye selection or content crop is incorrect")
+			quit(1)
+			return
 	control.queue_free()
 	await process_frame
 	viewport.own_world_3d = true
@@ -54,7 +76,7 @@ func _run() -> void:
 	viewport.add_child(mesh)
 	for index in range(4):
 		await process_frame
-		await RenderingServer.frame_post_draw
+		RenderingServer.force_draw(false)
 	image = viewport.get_texture().get_image()
 	var border_alpha := 0.0
 	for x in range(217, 222):
@@ -69,7 +91,7 @@ func _run() -> void:
 	material.set_shader_parameter("focused", true)
 	for index in range(4):
 		await process_frame
-		await RenderingServer.frame_post_draw
+		RenderingServer.force_draw(false)
 	image = viewport.get_texture().get_image()
 	var active_border := image.get_pixel(219, 128)
 	if active_border.b <= inactive_border.b or active_border.r >= inactive_border.r \
@@ -80,7 +102,7 @@ func _run() -> void:
 	material.set_shader_parameter("focused", false)
 	for index in range(4):
 		await process_frame
-		await RenderingServer.frame_post_draw
+		RenderingServer.force_draw(false)
 	if not viewport.get_texture().get_image().get_pixel(219, 128).is_equal_approx(inactive_border):
 		push_error("Losing focus must restore the inactive border")
 		quit(1)
@@ -94,7 +116,7 @@ func _run() -> void:
 	mesh.material_override = material
 	for index in range(4):
 		await process_frame
-		await RenderingServer.frame_post_draw
+		RenderingServer.force_draw(false)
 	image = viewport.get_texture().get_image()
 	if image.get_pixel(128, 128).a < 0.95 or image.get_pixel(10, 10).a > 0.01 \
 		or image.get_pixel(156, 128).r <= image.get_pixel(128, 116).r \
@@ -105,7 +127,7 @@ func _run() -> void:
 	material.set_shader_parameter("opacity", 0.25)
 	for index in range(4):
 		await process_frame
-		await RenderingServer.frame_post_draw
+		RenderingServer.force_draw(false)
 	if absf(viewport.get_texture().get_image().get_pixel(128, 128).a - 0.25) > 0.01:
 		push_error("Window controls must fade their background and icons together")
 		quit(1)

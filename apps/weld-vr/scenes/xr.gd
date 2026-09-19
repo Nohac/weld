@@ -227,7 +227,7 @@ func _update_windows() -> void:
 		# or modality; actual popup/parent geometry still takes precedence.
 		# Keep the application anchor through temporary map/resize transitions;
 		# a secondary window must not briefly claim a separate carousel slot.
-		if surface.kind() == 0:
+		if surface.kind() == 0 and surface.panel_slot() < 0:
 			var application := surface.application_key()
 			if application_roots.has(application):
 				application_parents[surface.window_id()] = application_roots[application]
@@ -240,6 +240,8 @@ func _update_windows() -> void:
 			var entry: Dictionary = window_panels[key]
 			if entry.layer != null:
 				entry.layer.queue_free()
+			if entry.stereo != null:
+				entry.stereo.queue_free()
 			entry.mesh.queue_free()
 			entry.viewport.queue_free()
 			window_panels.erase(key)
@@ -259,19 +261,27 @@ func _update_windows() -> void:
 			var transform: Transform3D
 			var physical: Vector2
 			var parent = application_parents.get(surface.window_id()) if surface.kind() == 0 else roots.get(surface.parent_id())
-			if surface.kind() == 0 and parent == null:
+			if surface.panel_slot() >= 0:
+				parent = null
+			if (surface.kind() == 0 or surface.panel_slot() >= 0) and parent == null:
 				if not window_slots.has(surface.window_id()):
 					var free_slot := 0
 					while free_slot in window_slots.values():
 						free_slot += 1
 					window_slots[surface.window_id()] = free_slot
-				var slot: int = window_slots[surface.window_id()]
+				var slot: int = surface.panel_slot() if surface.panel_slot() >= 0 else window_slots[surface.window_id()]
 				var angle := deg_to_rad(65.0 * ceilf(slot / 2.0) * (1.0 if slot % 2 == 1 else -1.0))
 				transform = screen.global_transform
 				var pivot := transform.origin + transform.basis.z * panel_distance
 				transform.origin = pivot + (transform.origin - pivot).rotated(Vector3.UP, angle)
 				transform.basis = transform.basis.rotated(Vector3.UP, angle)
 				physical = surface.video_player().xr_panel_size(panel_envelope)
+				# Explicit companion slot stays below the main panel, not on top
+				# of it. Each panel retains its own ordinary drag offset.
+				if surface.panel_slot() == 1:
+					transform = screen.global_transform
+					physical *= 0.55
+					transform.origin += transform.basis * Vector3(0, -0.75, 0.15)
 				entry.depth = 0
 			else:
 				if parent == null or not placed.has(parent.surface_id()):
@@ -297,6 +307,8 @@ func _update_windows() -> void:
 			if raster.x > 0 and raster.y > 0 and entry.viewport.size != raster:
 				entry.viewport.size = raster
 			entry.video.size = entry.viewport.size
+			if entry.stereo != null:
+				entry.stereo.sync_panel(transform, physical, entry.viewport.size, -100 + entry.depth * 10)
 			if entry.layer != null:
 				var order: int = -100 + entry.depth * 10 + clampi(surface.stack_index(), 0, 7)
 				if entry.layer.sort_order != order:
@@ -325,6 +337,8 @@ func _set_entry_visible(entry: Dictionary, shown: bool) -> void:
 		entry.mesh.visible = shown
 	if entry.layer != null and entry.layer.visible != shown:
 		entry.layer.visible = shown
+	if entry.stereo != null:
+		entry.stereo.show_panel(shown)
 
 
 func _create_window_panel(surface: WeldSurface) -> Dictionary:
@@ -339,7 +353,14 @@ func _create_window_panel(surface: WeldSurface) -> Dictionary:
 	mesh.visible = false
 	add_child(mesh)
 	var layer: OpenXRCompositionLayerQuad
-	if use_native_panel:
+	var stereo: WeldStereoPanel
+	if surface.is_stereo():
+		stereo = WeldStereoPanel.new()
+		$XROrigin3D.add_child(stereo)
+		if not stereo.initialize(viewport, surface.right_eye_material()):
+			push_error("Cannot present stereo without native eye layers")
+		mesh.layers = 0
+	elif use_native_panel:
 		layer = OpenXRCompositionLayerQuad.new()
 		layer.visible = false
 		layer.alpha_blend = true
@@ -367,7 +388,7 @@ func _create_window_panel(surface: WeldSurface) -> Dictionary:
 	surface.bind_control(video)
 	surface.bind_panel(mesh)
 	print("WELD_XR_WINDOW id=", surface.surface_id(), " parent=", surface.parent_id(), " native=", layer != null)
-	return {"viewport": viewport, "mesh": mesh, "video": video, "layer": layer, "depth": 0}
+	return {"viewport": viewport, "mesh": mesh, "video": video, "layer": layer, "stereo": stereo, "depth": 0}
 
 
 func _setup_panel_presentation() -> void:

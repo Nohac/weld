@@ -61,9 +61,9 @@ impl Gesture {
         *self = Self::default();
     }
     pub fn owns(&self, sample: &Sample) -> bool {
-        self.hold
-            .as_ref()
-            .is_some_and(|hold| sample.surface.as_ref() == Some(&hold.surface))
+        self.hold.as_ref().is_some_and(|hold| {
+            sample.surface.as_ref() == Some(&hold.surface) && hold.token == sample.token
+        })
     }
     pub fn active(&self) -> bool {
         self.hold.is_some()
@@ -91,7 +91,7 @@ impl Gesture {
                 Kind::Close => {
                     if !a
                         && sample.chrome == Some(Part::Close)
-                        && let Some(controller) = sample.player.bind().xr_controller()
+                        && let Some(controller) = hold.surface.bind().player.bind().xr_controller()
                     {
                         controller.close_window();
                     }

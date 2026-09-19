@@ -51,6 +51,39 @@ keeping the viewer process alive and the source identity unchanged. It tests
 rediscovery and new connection generations, not preservation of running apps
 through a source-process restart.
 
+## Azahar stereo experiment
+
+`scripts/run-azahar-xr --show-manager --seconds 180` builds/deploys the Pico
+viewer and launches the configured game. Supply `--rom PATH` to override the
+local default. Configure Azahar for OpenGL, Separate Windows, full-width
+side-by-side stereo, nonzero 3D depth, 2x resolution and Single Window Mode off.
+The launcher refuses a competing Azahar process and does not modify ROMs or
+save states. With `--show-manager`, load slot 1 manually through the emulator's
+Emulation menu; save-state loading is not automated.
+
+Generic bounded app-ID/title metadata now crosses the hoist protocol (revision
+6; both peers must match). Identical labels are deduplicated and pending updates
+coalesced rather than retransmitted with every video frame. These labels are
+presentation hints, not authenticated application identity.
+
+The launcher supplies local selection rules for Azahar's Primary and Secondary
+windows: a 1600x480 packed stereo upper screen and a separate 640x480 mono
+touchscreen. Two eye-specific native OpenXR layers sample the same decoded
+upper-screen image; no second decoder or CPU pixel copy is introduced. This is
+explicit packed-stereo interpretation, not a new Wayland stereo extension.
+Attached content retains its owner's placement and close/drag controls. The
+shared bitrate target defaults to 16 Mbps across all windows.
+
+The isolated source keeps access to host PipeWire/PulseAudio runtime sockets
+while using a private Wayland runtime. Audio stays on the laptop; it is not
+streamed to the headset, and explicit audio environment overrides are preserved.
+
+On 2026-09-19 a three-minute Pico AV1 run (`godot-hoist-5jafw2uo`) decoded about
+20,000 frames across five layers without disconnecting. Four adjacent output
+swaps were handled by the bounded receiver reorder slots. Godot render-target
+cleanup warnings remain in the logs; this does not qualify all stereo lifecycle
+or performance behavior.
+
 ## Identity and permissions
 
 Laptop state defaults to `${XDG_DATA_HOME:-$HOME/.local/share}/weld/godot-hoist`

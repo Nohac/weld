@@ -5,6 +5,7 @@ mod fixture;
 mod native;
 mod playback;
 mod presentation;
+mod presentation_rules;
 mod video;
 
 use godot::{

@@ -10,6 +10,48 @@ API = runpy.run_path(str(Path(__file__).with_name("run-godot-hoist")))
 
 
 class PairingTests(unittest.TestCase):
+    def test_source_keeps_host_audio_while_isolating_wayland_including_restart(self):
+        original = {"XDG_RUNTIME_DIR": "/run/host", "DISPLAY": ":0",
+                    "WAYLAND_DISPLAY": "wayland-1", "WAYLAND_SOCKET": "7"}
+        with patch.dict(API["os"].environ, original, clear=True):
+            for runtime in (Path("/test/runtime"), Path("/test/restart/runtime")):
+                environment = API["source_environment"](runtime)
+                self.assertEqual(environment["XDG_RUNTIME_DIR"], str(runtime))
+                self.assertEqual(environment["PIPEWIRE_RUNTIME_DIR"], "/run/host")
+                self.assertEqual(environment["PULSE_RUNTIME_PATH"], "/run/host/pulse")
+                self.assertNotIn("PULSE_SERVER", environment)
+                for name in ("DISPLAY", "WAYLAND_DISPLAY", "WAYLAND_SOCKET"):
+                    self.assertNotIn(name, environment)
+            self.assertEqual(dict(API["os"].environ), original)
+
+    def test_source_preserves_explicit_audio_overrides(self):
+        audio = {"PIPEWIRE_RUNTIME_DIR": "/custom/pipewire", "PIPEWIRE_REMOTE": "other",
+                 "PULSE_RUNTIME_PATH": "/custom/pulse", "PULSE_SERVER": "unix:/custom/server",
+                 "PULSE_SINK": "headphones"}
+        with patch.dict(API["os"].environ, dict(audio, XDG_RUNTIME_DIR="/run/host"), clear=True):
+            environment = API["source_environment"](Path("/test/runtime"))
+            for name, value in audio.items():
+                self.assertEqual(environment[name], value)
+
+    def test_source_does_not_invent_host_audio_paths_without_runtime(self):
+        with patch.dict(API["os"].environ, {}, clear=True):
+            environment = API["source_environment"](Path("/test/runtime"))
+            self.assertNotIn("PIPEWIRE_RUNTIME_DIR", environment)
+            self.assertNotIn("PULSE_RUNTIME_PATH", environment)
+
+    def test_azahar_game_path_is_one_argument_and_rules_are_one_shot(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            rom = root / "Mario (USA).3ds"
+            rom.touch()
+            args = API["parse_arguments"](["--app", "azahar", "--rom", str(rom)])
+            self.assertEqual(API["app_command"](args), ["azahar", "--windowed", str(rom)])
+            rules = root / "test.rules"
+            rules.write_text("weld-window-rules-v1\napp\twindow\tsbs\t1600\t480\t0\n")
+            API["prepare_presentation_rules"](rules, directory=root)
+            self.assertEqual((root / "presentation.rules").read_text(), rules.read_text())
+            API["prepare_presentation_rules"](None, directory=root)
+            self.assertFalse((root / "presentation.rules").exists())
     def test_codec_selection_preserves_av1_default_and_source_options(self):
         self.assertEqual(API["parse_arguments"]([]).codec, "av1")
         for codec in ("av1", "h264"):

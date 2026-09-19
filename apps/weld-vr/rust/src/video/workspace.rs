@@ -2,6 +2,7 @@
 //! presentation objects, never its own transport, decoder pool or input seat.
 use super::WeldVideoPlayer;
 use super::decoration::{Decoration, Shape};
+use super::stereo::ViewLayout;
 use super::xr::controls::{Bar, Part, Placement};
 use crate::{
     playback::{
@@ -24,6 +25,7 @@ pub struct WeldSurface {
     pub(super) player: Gd<WeldVideoPlayer>,
     _texture: Gd<ExternalTexture>,
     material: Gd<ShaderMaterial>,
+    right_material: Option<Gd<ShaderMaterial>>,
     pub(super) control: Option<Gd<Control>>,
     pub(super) panel: Option<Gd<MeshInstance3D>>,
     decoration: Option<Decoration>,
@@ -36,6 +38,18 @@ impl IRefCounted for WeldSurface {}
 
 #[godot_api]
 impl WeldSurface {
+    #[func]
+    fn title(&self) -> GString {
+        self.pane.metadata.title().into()
+    }
+    #[func]
+    fn app_id(&self) -> GString {
+        self.pane.metadata.app_id().into()
+    }
+    #[func]
+    fn panel_slot(&self) -> i32 {
+        self.pane.panel_slot().map_or(-1, |slot| slot as i32)
+    }
     /// Adapter-scoped Wayland client identity, not an inferred parent or app title.
     #[func]
     fn application_key(&self) -> GString {
@@ -69,7 +83,12 @@ impl WeldSurface {
     }
     #[func]
     fn logical_position(&self) -> Vector2 {
-        Vector2::new(self.pane.position[0], self.pane.position[1])
+        let x = if self.is_stereo() {
+            self.pane.position[0] * 0.5
+        } else {
+            self.pane.position[0]
+        };
+        Vector2::new(x, self.pane.position[1])
     }
     #[func]
     fn logical_size(&self) -> Vector2 {
@@ -83,7 +102,12 @@ impl WeldSurface {
             let size = controller.logical_size();
             return Vector2::new(size[0] as f32, size[1] as f32);
         }
-        Vector2::new(self.pane.size[0], self.pane.size[1])
+        let x = if self.is_stereo() {
+            self.pane.size[0] * 0.5
+        } else {
+            self.pane.size[0]
+        };
+        Vector2::new(x, self.pane.size[1])
     }
     #[func]
     pub(super) fn is_mapped(&self) -> bool {
@@ -98,6 +122,45 @@ impl WeldSurface {
     #[func]
     fn video_material(&self) -> Gd<ShaderMaterial> {
         self.material.clone()
+    }
+    /// Select packed full-width stereo before mounting the panel. Layout
+    /// changes never create a second decoder or independently select a frame.
+    #[func]
+    fn enable_side_by_side(&mut self) -> bool {
+        if self.right_material.is_some() {
+            return true;
+        }
+        if self.panel.is_some() || self.pane.kind == 2 {
+            return false;
+        }
+        let Some(shader) = self.material.get_shader() else {
+            return false;
+        };
+        let mut right = ShaderMaterial::new_gd();
+        right.set_shader(&shader);
+        let mut player = self.player.bind_mut();
+        let Some(controller) = player.controller.as_mut() else {
+            return false;
+        };
+        if let Err(error) = controller.attach_stereo_material(right.clone().upcast()) {
+            godot_error!("Could not attach stereo view: {error:#}");
+            return false;
+        }
+        let layout = ViewLayout::SideBySide;
+        self.material
+            .set_shader_parameter("eye_view", &layout.eye_view(false).to_variant());
+        right.set_shader_parameter("eye_view", &layout.eye_view(true).to_variant());
+        player.view_layout = layout;
+        self.right_material = Some(right);
+        true
+    }
+    #[func]
+    fn right_eye_material(&self) -> Option<Gd<ShaderMaterial>> {
+        self.right_material.clone()
+    }
+    #[func]
+    fn is_stereo(&self) -> bool {
+        self.right_material.is_some()
     }
     #[func]
     fn video_player(&self) -> Gd<WeldVideoPlayer> {
@@ -130,6 +193,10 @@ impl WeldSurface {
             .decoration
             .get_or_insert_with(|| Decoration::new(panel.clone()));
         decoration.update(shape, &mut self.material);
+        if let Some(right) = &mut self.right_material {
+            right.set_shader_parameter("window_size", &shape.size.to_variant());
+            right.set_shader_parameter("corner_radius", &shape.radius.to_variant());
+        }
         decoration.set_focused(
             self.player
                 .bind()
@@ -241,6 +308,7 @@ impl Workspace {
                 player,
                 _texture: texture,
                 material,
+                right_material: None,
                 control: None,
                 panel: None,
                 decoration: None,
@@ -265,7 +333,12 @@ impl Workspace {
         }
         for pane in current.panes.iter().cloned() {
             if let Some(surface) = self.panes.get_mut(&pane.id) {
-                surface.bind_mut().pane = pane;
+                let stereo = pane.is_stereo();
+                let mut surface = surface.bind_mut();
+                surface.pane = pane;
+                if stereo && surface.panel.is_none() {
+                    surface.enable_side_by_side();
+                }
             }
         }
         let mut ready = BTreeMap::<u64, bool>::new();
@@ -285,12 +358,32 @@ impl Workspace {
         Ok(())
     }
     pub fn surfaces(&self) -> Array<Gd<WeldSurface>> {
-        self.panes.values().cloned().collect()
+        self.panes
+            .values()
+            .filter(|pane| pane.bind().pane.selected)
+            .cloned()
+            .collect()
     }
     pub fn selected_player(&self) -> Option<Gd<WeldVideoPlayer>> {
         self.panes
             .get(&self.selected?)
             .map(|s| s.bind().player.clone())
+    }
+    pub(super) fn control_surface(&self, player: &Gd<WeldVideoPlayer>) -> Option<Gd<WeldSurface>> {
+        let window = self
+            .panes
+            .values()
+            .find(|surface| &surface.bind().player == player)?
+            .bind()
+            .pane
+            .controls_window()?;
+        self.panes
+            .values()
+            .find(|surface| {
+                let surface = surface.bind();
+                surface.pane.window == window && surface.movable()
+            })
+            .cloned()
     }
     pub fn pick(&mut self, position: Vector2) -> Option<(Gd<WeldVideoPlayer>, Gd<Control>)> {
         let mut hit = None;

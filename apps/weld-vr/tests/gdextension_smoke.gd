@@ -184,7 +184,7 @@ func _run() -> void:
 	xr.add_child(probe_layer)
 	var visibility_changes := [0]
 	probe_layer.visibility_changed.connect(func(): visibility_changes[0] += 1)
-	var entry := {"mesh": probe_mesh, "layer": probe_layer}
+	var entry := {"mesh": probe_mesh, "layer": probe_layer, "stereo": null}
 	for _frame in range(5):
 		xr._set_entry_visible(entry, true)
 	if visibility_changes[0] != 1:
