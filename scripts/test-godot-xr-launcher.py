@@ -29,8 +29,8 @@ class WorkflowTests(unittest.TestCase):
              patch.object(MODULE, "run_step"), \
              patch.object(MODULE, "launch_demo") as launch:
             MODULE.APK.touch()
-            for enabled in (False, True):
-                args = SimpleNamespace(app="blender", seconds=75, bitrate_mbps=16, codec="h264",
+            for enabled, seconds in ((False, 75), (True, None)):
+                args = SimpleNamespace(app="blender", seconds=seconds, bitrate_mbps=16, codec="h264",
                                        half_rate=False, decoder_low_latency=enabled, recheck=False)
                 MODULE.workflow(args, "/external/adb", "pico", {"PATH": "/tools"})
                 self.assertEqual(prepare.call_args.args[2]["PATH"], "/tools")
@@ -40,6 +40,10 @@ class WorkflowTests(unittest.TestCase):
                 self.assertNotIn("--half-rate", command)
                 self.assertEqual(command[command.index("--bitrate-mbps") + 1], "16")
                 self.assertEqual(command[command.index("--codec") + 1], "h264")
+                self.assertEqual("--no-timeout" in command, seconds is None)
+                self.assertEqual("--seconds" in command, seconds is not None)
+                if seconds is not None:
+                    self.assertEqual(command[command.index("--seconds") + 1], "75")
 
     def test_launch_only_exports_and_validation_is_separate(self):
         steps = MODULE.steps()

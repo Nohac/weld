@@ -99,7 +99,7 @@ def write_new(path, text):
         output.write(text)
 
 
-def source_command(exchange, state, app, bitrate_mbps=16, codec="av1"):
+def source_command(exchange, state, app, bitrate_mbps=16, codec="av1", gamepad=False):
     return ["cargo", "run", "--locked", "--quiet", "--", "--backend", "headless",
             "--wayland-socket", "source", "--hoist-all", "--headless-window-size", "960x640",
             "--keyboard-repeat-mode", "compositor", "--legacy-key-repeat", "emulated",
@@ -108,7 +108,8 @@ def source_command(exchange, state, app, bitrate_mbps=16, codec="av1"):
             "--hoist-iroh-device-dir", str(state / "source"),
             "--hoist-iroh-publish-profile", str(exchange / "source.profile"),
             "--hoist-iroh-network", "n0", "--hoist-codec", codec,
-            "--hoist-bitrate-target-mbps", str(bitrate_mbps), "--", *app]
+            "--hoist-bitrate-target-mbps", str(bitrate_mbps),
+            *(["--hoist-gamepad"] if gamepad else []), "--", *app]
 
 
 def close_source_for_restart(hosts):
@@ -154,7 +155,10 @@ def parse_arguments(argv=None):
     parser.add_argument("--decoder-low-latency", action="store_true",
                         help="diagnostic: request Android decoder low-latency mode; requires the patched APK")
     parser.add_argument("--state-dir", type=Path, help="private persistent device state, not a build directory")
-    parser.add_argument("--seconds", type=LAUNCHER["positive_seconds"], default=120)
+    duration = parser.add_mutually_exclusive_group()
+    duration.add_argument("--seconds", type=LAUNCHER["positive_seconds"], default=120)
+    duration.add_argument("--no-timeout", dest="seconds", action="store_const", const=None,
+                          help="run until interrupted or a test process exits; do not force verbose media logging")
     parser.add_argument("--restart-after", type=LAUNCHER["positive_seconds"],
                         help="diagnostic: restart the source/apps once, leaving the viewer alive")
     parser.add_argument("--app", choices=("foot", "blender", "azahar"), default="foot")
@@ -193,8 +197,10 @@ def app_command(args):
     return ["blender"]
 
 
-def diagnostic_environment():
+def diagnostic_environment(verbose=True):
     environment = os.environ.copy()
+    if not verbose:
+        return environment
     selected = environment.get("RUST_LOG", "info")
     for target in ("weld_media_diag", "weld_vr_diag"):
         if not any(part.strip().startswith(target + "=") for part in selected.split(",")):
@@ -203,8 +209,8 @@ def diagnostic_environment():
     return environment
 
 
-def source_environment(runtime):
-    environment = diagnostic_environment()
+def source_environment(runtime, verbose=True):
+    environment = diagnostic_environment(verbose)
     host_runtime = environment.get("XDG_RUNTIME_DIR")
     if host_runtime:
         # Isolate the Wayland socket, not host audio. Preserve explicit audio
@@ -308,9 +314,11 @@ def main(argv=None):
 
     print(f"Logs: {run}", flush=True)
     try:
-        environment = source_environment(runtime)
+        environment = source_environment(runtime, verbose=args.seconds is not None)
         app = app_command(args)
-        command = source_command(run, state, app, args.bitrate_mbps, args.codec)
+        command = source_command(run, state, app, args.bitrate_mbps, args.codec, gamepad=args.app == "azahar")
+        if args.app == "azahar":
+            print("Gamepad enabled: window gamepad button captures both XR controllers; hold left grip to exit. The virtual controller is visible to host applications.", flush=True)
         hosts.append(LAUNCHER["OwnedHost"]("source", command, environment, ROOT, run))
         wait(lambda: (run / "source.profile").exists())
         profile = (run / "source.profile").read_text()
@@ -324,7 +332,7 @@ def main(argv=None):
             temporary.replace(profile_path)
             prepare_cadence_test(args.half_rate, directory=receiver_directory)
             prepare_presentation_rules(args.presentation_rules, directory=receiver_directory)
-            environment = {**diagnostic_environment(), "WELD_VR_DEVICE_DIR": str(receiver_directory)}
+            environment = {**diagnostic_environment(verbose=args.seconds is not None), "WELD_VR_DEVICE_DIR": str(receiver_directory)}
             hosts.append(LAUNCHER["OwnedHost"]("viewer",
                 ["godot", "--path", str(ROOT / "apps/weld-vr"), "--display-driver", "wayland", "--rendering-driver", "opengl3_es"],
                 environment, ROOT, run))
@@ -354,10 +362,11 @@ def main(argv=None):
             if existing is None:
                 phone_install(profile)
         write_new(run / "viewer.identity", identity(public) + "\n")
-        print(f"Viewer approved. Run for {args.seconds}s; Ctrl+C stops the demo. Desktop: click the image for mouse/keyboard input. XR: A left-click, B right-click, trigger middle-click, grip move, stick scroll; flat phone is view-only.", flush=True)
-        deadline = time.monotonic() + args.seconds
+        duration = "No runtime timeout" if args.seconds is None else f"Run for {args.seconds}s"
+        print(f"Viewer approved. {duration}; Ctrl+C stops the demo. Desktop: click the image for mouse/keyboard input. XR: A left-click, B right-click, trigger middle-click, grip move, stick scroll; flat phone is view-only.", flush=True)
+        deadline = None if args.seconds is None else time.monotonic() + args.seconds
         restart_at = time.monotonic() + args.restart_after if args.restart_after else None
-        while not stopping and time.monotonic() < deadline:
+        while not stopping and (deadline is None or time.monotonic() < deadline):
             check()
             if restart_at is not None and time.monotonic() >= restart_at:
                 print("Restarting source/apps with the same identity; viewer stays alive.", flush=True)
@@ -366,8 +375,8 @@ def main(argv=None):
                 restart.mkdir(mode=0o700)
                 (restart / "runtime").mkdir(mode=0o700)
                 write_new(restart / "viewer.identity", identity(public) + "\n")
-                restart_environment = source_environment(restart / "runtime")
-                hosts.insert(0, LAUNCHER["OwnedHost"]("source", source_command(restart, state, app, args.bitrate_mbps, args.codec), restart_environment, ROOT, restart))
+                restart_environment = source_environment(restart / "runtime", verbose=args.seconds is not None)
+                hosts.insert(0, LAUNCHER["OwnedHost"]("source", source_command(restart, state, app, args.bitrate_mbps, args.codec, gamepad=args.app == "azahar"), restart_environment, ROOT, restart))
                 restart_at = None
             time.sleep(0.1)
     except InterruptedError:

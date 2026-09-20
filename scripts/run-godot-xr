@@ -235,7 +235,10 @@ def main(argv=None):
     parser.add_argument("--presentation-rules", type=Path, help="local window selection, stereo and sizing rules")
     parser.add_argument("--codec", choices=("av1", "h264"), default="av1")
     parser.add_argument("--recheck", action="store_true", help="rerun export even if preparation is cached; does not run tests or linting")
-    parser.add_argument("--seconds", type=seconds, default=180)
+    duration = parser.add_mutually_exclusive_group()
+    duration.add_argument("--seconds", type=seconds, default=180)
+    duration.add_argument("--no-timeout", dest="seconds", action="store_const", const=None,
+                          help="run until interrupted or a demo process exits")
     parser.add_argument("--half-rate", action="store_true", help="test half-rate streaming without changing XR refresh")
     parser.add_argument("--decoder-low-latency", action="store_true",
                         help="test Android's standard low-latency decoder request")
@@ -281,8 +284,9 @@ def workflow(args, adb, serial, environment):
     print("Preparation verified. Starting the XR demo (12 GiB memory limit, no swap).", flush=True)
     # The existing launcher owns demo cleanup, pairing and source supervision.
     command = ["systemd-run", "--user", "--scope", "--quiet", "-p", "MemoryMax=12G", "-p", "MemorySwapMax=0",
-               str(ROOT / "scripts/run-godot-hoist"), "--serial", serial, "--app", args.app, "--seconds", str(args.seconds),
+               str(ROOT / "scripts/run-godot-hoist"), "--serial", serial, "--app", args.app,
                "--bitrate-mbps", str(args.bitrate_mbps), "--codec", args.codec]
+    command.extend(["--no-timeout"] if args.seconds is None else ["--seconds", str(args.seconds)])
     if args.half_rate:
         command.append("--half-rate")
     if args.decoder_low_latency:
