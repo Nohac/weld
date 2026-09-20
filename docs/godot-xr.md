@@ -31,15 +31,20 @@ tilt down toward the user. Pitch is bounded to ±85 degrees without roll. Both
 anchors change only on placement/recenter, not head lean.
 Azahar's explicit companion slot starts below its primary at the same radius.
 
-Each native panel has the same pose and bounds as its Rust ray-input target.
-The ray selects the nearest hit, while an admitted drag keeps its captured
-layer through release. Creation/removal and ancestor visibility update views
+Native panels include transparent margins for shell chrome; the Rust hit plane
+and content Control retain the original application bounds. Windows are ordered
+back-to-front by their root distance from the viewer, with a 3 cm hysteresis
+band. Popups and content layers stay grouped; related toplevels can move
+independently. Both stereo eyes and pointer picking use the same order, so
+intersecting windows behave as whole cards rather than cutting through one
+another. An admitted drag keeps its captured layer through release.
+Creation/removal and ancestor visibility update views
 without reconnecting. Native visibility changes only on actual transitions:
 hiding/showing every frame recreates Godot composition layers and caused
 visible flicker in the initial multi-window test.
 
 Rounded video corners use viewport alpha; transparent corners reject new ray
-hits. A small scene-rendered outline and soft shadow surround toplevels/popups
+hits. A small canvas-rendered outline and soft shadow surround toplevels/popups
 without enlarging the video or input rectangle. This shadow is a decorative
 fade, not a light-cast shadow onto another panel. The active input window gets
 a brighter blue border; inactive borders are muted gray. Rust reads existing
@@ -49,8 +54,11 @@ resolution.
 
 Client-owned content subsurfaces share the owning window's rounded clip rather
 than bypassing it or gaining independent rounded edges. The same clip applies
-to both stereo eyes and ray hit testing. The shared outline is lifted above
-content-layer hole-punch planes so those layers cannot hide the border.
+to both stereo eyes and ray hit testing. Borders, shadows and controls are drawn
+into the window's native canvas, not independently depth-tested scene geometry.
+Padded presentation canvases are bounded to 4096 pixels per dimension; decoded
+image limits and application input extents are unchanged. Mesh fallback uses
+the same painter order without inter-window depth testing.
 
 Only the pointed-at window reveals its slim close/drag strip, above or below
 the nearer horizontal edge. Opacity rises with proximity and reaches full at
@@ -78,6 +86,11 @@ On 2026-09-20, the user accepted the separate head-centered vertical curvature
 and closer 0.5 m horizontal pivot in Pico run `godot-hoist-h8fk_5xl`. The six
 focused placement tests passed, including pitch independence from the yaw
 pivot, fade endpoints, unchanged positions and the stronger horizontal turn.
+
+Whole-window stacking was accepted in Pico run `godot-hoist-pis6cf62` on
+2026-09-20. The slice passed 91 Rust tests, strict Clippy, scene and real GPU
+shader checks, and Android build/export. Coverage includes ordering changes,
+near-equal depth stability, family grouping, input order, and canvas padding.
 
 ## Controller presentation
 

@@ -1,8 +1,10 @@
 //! Godot projection of the existing receiver's surface hierarchy. A view owns
 //! presentation objects, never its own transport, decoder pool or input seat.
 use super::WeldVideoPlayer;
+use super::canvas::Layout;
 use super::decoration::{Clip, Decoration, Shape};
 use super::placement::Placement;
+use super::stacking::{Layer, Stack};
 use super::stereo::ViewLayout;
 use super::xr::controls::{Bar, Part};
 use crate::{
@@ -14,7 +16,10 @@ use crate::{
 };
 use anyhow::Result;
 use godot::{
-    classes::{Control, ExternalTexture, IRefCounted, MeshInstance3D, Os, Shader, ShaderMaterial},
+    classes::{
+        Control, ExternalTexture, IRefCounted, MeshInstance3D, Os, Shader, ShaderMaterial,
+        SubViewport,
+    },
     prelude::*,
 };
 use std::collections::BTreeMap;
@@ -28,10 +33,12 @@ pub struct WeldSurface {
     material: Gd<ShaderMaterial>,
     right_material: Option<Gd<ShaderMaterial>>,
     pub(super) control: Option<Gd<Control>>,
+    right_control: Option<Gd<Control>>,
     pub(super) panel: Option<Gd<MeshInstance3D>>,
     decoration: Option<Decoration>,
     bar: Option<Bar>,
     placement: Placement,
+    presentation_order: i32,
 }
 
 #[godot_api]
@@ -172,8 +179,9 @@ impl WeldSurface {
         self.control = Some(control);
     }
     #[func]
-    fn bind_panel(&mut self, panel: Gd<MeshInstance3D>) {
+    fn bind_panel(&mut self, panel: Gd<MeshInstance3D>, right_control: Option<Gd<Control>>) {
         self.panel = Some(panel);
+        self.right_control = right_control;
     }
     #[func]
     fn style_panel(&mut self, physical_size: Vector2, owner: Option<Gd<WeldSurface>>) {
@@ -186,31 +194,59 @@ impl WeldSurface {
         let Some(shape) = Shape::new(physical_size) else {
             return;
         };
-        let Some(panel) = self
-            .panel
-            .as_ref()
-            .filter(|panel| panel.is_instance_valid() && !panel.is_queued_for_deletion())
-        else {
-            return;
-        };
-        let decoration = self
-            .decoration
-            .get_or_insert_with(|| Decoration::new(panel.clone()));
-        decoration.reset_front();
-        decoration.update(shape);
-        decoration.set_focused(
-            self.player
-                .bind()
-                .controller
-                .as_ref()
-                .is_some_and(Controller::is_focused),
-        );
-        if self.pane.kind <= 1 {
-            self.bar
-                .get_or_insert_with(|| Bar::new(panel.clone()))
-                .place(physical_size.y);
-        }
         self.apply_clip(Clip::full(shape));
+    }
+    /// Lay out the complete native canvas while retaining a content-only hit plane.
+    #[func]
+    fn layout_canvas(&mut self, physical: Vector2, raster: Vector2i) -> Vector2 {
+        let Some(layout) = Layout::new(physical, raster, self.pane.kind != 3) else {
+            return physical;
+        };
+        let views: Vec<_> = [self.control.clone(), self.right_control.clone()]
+            .into_iter()
+            .flatten()
+            .collect();
+        for view in &views {
+            if let Some(mut viewport) = view
+                .get_viewport()
+                .and_then(|v| v.try_cast::<SubViewport>().ok())
+                && viewport.get_size() != layout.raster
+            {
+                viewport.set_size(layout.raster);
+            }
+            let mut view = view.clone();
+            view.set_position(layout.content.position);
+            view.set_size(layout.content.size);
+        }
+        if self.pane.kind != 3
+            && let Some(shape) = Shape::new(physical)
+        {
+            let decoration = self
+                .decoration
+                .get_or_insert_with(|| Decoration::new(&views));
+            decoration.update(shape, layout);
+            decoration.set_focused(
+                self.player
+                    .bind()
+                    .controller
+                    .as_ref()
+                    .is_some_and(Controller::is_focused),
+            );
+            if self.pane.kind <= 1
+                && let Some(panel) = &self.panel
+            {
+                let bar = self
+                    .bar
+                    .get_or_insert_with(|| Bar::new(panel.clone(), &views));
+                bar.layout(layout);
+                bar.place(physical.y);
+            }
+        }
+        layout.physical
+    }
+    #[func]
+    fn stacking_order(&self) -> i32 {
+        self.presentation_order
     }
     #[func]
     fn placed_transform(
@@ -246,9 +282,6 @@ impl WeldSurface {
             return;
         };
         self.apply_clip(clip);
-        if let Some(decoration) = &mut owner.decoration {
-            decoration.include_layer(local.z);
-        }
     }
     pub(super) fn move_to(&mut self, world: Transform3D) {
         self.placement.move_to(world);
@@ -285,6 +318,7 @@ pub(super) struct Workspace {
     pub panes: BTreeMap<u64, Gd<WeldSurface>>,
     pub selected: Option<u64>,
     preferences: Option<XrPreferences>,
+    stack: Stack,
 }
 impl Workspace {
     pub fn new(session: Session, preferences: Option<XrPreferences>) -> Self {
@@ -293,6 +327,7 @@ impl Workspace {
             panes: BTreeMap::new(),
             selected: None,
             preferences,
+            stack: Stack::default(),
         }
     }
     pub fn tick(&mut self) -> Result<()> {
@@ -345,10 +380,12 @@ impl Workspace {
                 material,
                 right_material: None,
                 control: None,
+                right_control: None,
                 panel: None,
                 decoration: None,
                 bar: None,
                 placement: Placement::default(),
+                presentation_order: -100,
             });
             self.panes.insert(id, surface);
         }
@@ -403,6 +440,48 @@ impl Workspace {
         self.panes
             .get(&self.selected?)
             .map(|s| s.bind().player.clone())
+    }
+    pub fn sort_xr_windows(&mut self, viewer: Vector3) {
+        if !viewer.is_finite() {
+            return;
+        }
+        let layers: Vec<_> = self
+            .panes
+            .values()
+            .filter_map(|surface| {
+                let surface = surface.bind();
+                let panel = surface.panel.as_ref()?;
+                if !surface.pane.selected
+                    || !surface.is_mapped()
+                    || !panel.is_instance_valid()
+                    || !panel.is_visible_in_tree()
+                {
+                    return None;
+                }
+                Some(Layer {
+                    id: surface.pane.id,
+                    window: surface.pane.window,
+                    root: surface.pane.kind != 3,
+                    popup_parent: (surface.pane.kind == 2).then_some(surface.pane.parent),
+                    stack: surface.pane.stack,
+                    distance: panel.get_global_position().distance_to(viewer),
+                })
+            })
+            .collect();
+        for (id, order) in self.stack.update(&layers) {
+            if let Some(surface) = self.panes.get_mut(&id) {
+                surface.bind_mut().presentation_order = -100 + order;
+            }
+        }
+    }
+    pub fn presentation_order(&self, player: &Gd<WeldVideoPlayer>) -> i32 {
+        self.panes
+            .values()
+            .find_map(|surface| {
+                let surface = surface.bind();
+                (&surface.player == player).then_some(surface.presentation_order)
+            })
+            .unwrap_or(-100)
     }
     pub(super) fn control_surface(&self, player: &Gd<WeldVideoPlayer>) -> Option<Gd<WeldSurface>> {
         let window = self

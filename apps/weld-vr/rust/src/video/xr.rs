@@ -6,6 +6,7 @@ mod gesture;
 mod policy;
 
 use super::WeldVideoPlayer;
+use super::stacking::pick_in_front;
 use super::workspace::WeldSurface;
 use controls::Part;
 use gesture::Gesture;
@@ -73,6 +74,7 @@ struct Sample {
     position: InputPosition,
     hit: bool,
     distance: f32,
+    order: i32,
     analog: [f32; 2],
     click: bool,
     axis: f64,
@@ -359,9 +361,9 @@ impl WeldXrPointer {
                     previous = Some(sample.clone());
                 }
                 if (sample.hit || sample.chrome.is_some() || sample.near_edge)
-                    && nearest
-                        .as_ref()
-                        .is_none_or(|old| sample.distance < old.distance)
+                    && nearest.as_ref().is_none_or(|old| {
+                        pick_in_front(sample.order, sample.distance, old.order, old.distance)
+                    })
                 {
                     nearest = Some(sample);
                 }
@@ -383,10 +385,9 @@ impl WeldXrPointer {
         if mesh.get_orientation() != Orientation::Z {
             return None;
         }
-        let viewport = view.get_viewport()?.get_visible_rect();
-        // XR fills its viewport explicitly. Do not depend on deferred Control
-        // layout when the viewport and world-space quad are resized together.
-        let rect = viewport;
+        // Native canvases include shell margins. The hit plane and this Control
+        // still describe content only; never map padding into application input.
+        let rect = view.get_rect();
         if !rect.position.is_finite()
             || !rect.size.is_finite()
             || rect.size.x <= 0.0
@@ -402,7 +403,7 @@ impl WeldXrPointer {
             panel.get_global_transform(),
             mesh.get_center_offset(),
             mesh.get_size(),
-            viewport.size,
+            rect.size,
         )?
         .project(aim);
         let rectangle = [
@@ -412,7 +413,10 @@ impl WeldXrPointer {
             f64::from(rect.size.y),
         ];
         let position = intersection.as_ref().map_or(self.last_position, |hit| {
-            InputPosition::new(f64::from(hit.pixels.x), f64::from(hit.pixels.y))
+            InputPosition::new(
+                f64::from(hit.pixels.x + rect.position.x),
+                f64::from(hit.pixels.y + rect.position.y),
+            )
         });
         let hit = intersection.as_ref().is_some_and(|hit| hit.inside)
             && controller.input_hit(rectangle, position)
@@ -480,6 +484,12 @@ impl WeldXrPointer {
             return None;
         }
         Some(Sample {
+            order: config
+                .player
+                .bind()
+                .workspace
+                .as_ref()
+                .map_or(-100, |workspace| workspace.presentation_order(&player_node)),
             player: player_node.clone(),
             surface,
             panel: controls_panel.unwrap_or(panel),

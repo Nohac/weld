@@ -1,7 +1,9 @@
 //! Main-thread Godot API shared by all native providers.
+mod canvas;
 mod decoration;
 mod input;
 mod placement;
+mod stacking;
 mod stereo;
 mod workspace;
 mod xr;
@@ -445,6 +447,12 @@ impl WeldVideoPlayer {
         self.workspace
             .as_ref()
             .map_or_else(Array::new, Workspace::surfaces)
+    }
+    #[func]
+    fn sort_xr_windows(&mut self, viewer: Vector3) {
+        if let Some(workspace) = &mut self.workspace {
+            workspace.sort_xr_windows(viewer);
+        }
     }
 }
 

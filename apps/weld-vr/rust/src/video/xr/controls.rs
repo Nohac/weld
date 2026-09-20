@@ -1,7 +1,8 @@
 //! Local window chrome; no video texture, decoder or remote input ownership.
 use super::geometry;
+use crate::video::canvas::{self, Layout};
 use godot::{
-    classes::{MeshInstance3D, QuadMesh, Shader, ShaderMaterial},
+    classes::{ColorRect, Control, MeshInstance3D, QuadMesh, Shader, ShaderMaterial},
     prelude::*,
 };
 
@@ -54,30 +55,56 @@ pub(crate) struct Bar {
     mesh: Gd<MeshInstance3D>,
     material: Gd<ShaderMaterial>,
     top: bool,
+    views: Vec<Gd<ColorRect>>,
+    layout: Option<Layout>,
 }
 impl Bar {
-    pub fn new(mut parent: Gd<MeshInstance3D>) -> Self {
+    pub fn new(mut parent: Gd<MeshInstance3D>, views: &[Gd<Control>]) -> Self {
         let mut shader = Shader::new_gd();
         shader.set_code(include_str!("controls.gdshader"));
         let mut material = ShaderMaterial::new_gd();
         material.set_shader(&shader);
+        material.set_shader_parameter("opacity", &0.0_f32.to_variant());
         let mut quad = QuadMesh::new_gd();
         quad.set_size(SIZE);
         let mut mesh = MeshInstance3D::new_alloc();
         mesh.set_name("WindowControls");
         mesh.set_mesh(&quad);
-        mesh.set_material_override(&material);
+        // World-space hit proxy only; both eyes draw the window-owned canvas.
+        mesh.set_layer_mask(0);
         mesh.hide();
         parent.add_child(&mesh);
         Self {
             mesh,
-            material,
             top: false,
+            views: views
+                .iter()
+                .filter_map(|view| canvas::add_overlay(view, &material, 20))
+                .collect(),
+            material,
+            layout: None,
         }
     }
     pub fn place(&mut self, height: f32) {
         let y = (height * 0.5 + SIZE.y * 0.5 + 0.025) * if self.top { 1.0 } else { -1.0 };
-        self.mesh.set_position(Vector3::new(0.0, y, 0.006));
+        self.mesh.set_position(Vector3::new(0.0, y, 0.0));
+        self.sync_canvas();
+    }
+    pub fn layout(&mut self, layout: Layout) {
+        self.layout = Some(layout);
+        self.sync_canvas();
+    }
+    fn sync_canvas(&mut self) {
+        let Some(layout) = self.layout else {
+            return;
+        };
+        let rect = layout.rectangle(Vector2::new(0.0, -self.mesh.get_position().y), SIZE);
+        for view in &mut self.views {
+            if view.is_instance_valid() {
+                view.set_position(rect.position);
+                view.set_size(rect.size);
+            }
+        }
     }
     pub fn show(&mut self, opacity: f32) {
         let shown = opacity > 0.0;

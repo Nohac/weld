@@ -75,23 +75,17 @@ func _run() -> void:
 			return
 	control.queue_free()
 	await process_frame
-	viewport.own_world_3d = true
-	var camera := Camera3D.new()
-	camera.projection = Camera3D.PROJECTION_ORTHOGONAL
-	camera.size = 1.4
-	camera.position.z = 1.0
-	viewport.add_child(camera)
-	var quad := QuadMesh.new()
-	quad.size = Vector2(1.12, 0.72)
-	var mesh := MeshInstance3D.new()
-	mesh.mesh = quad
+	# Decorations now share the native canvas with content, not scene depth.
+	var overlay := ColorRect.new()
+	overlay.size = Vector2(1.12, 0.72) * (256.0 / 1.4)
+	overlay.position = (Vector2(256, 256) - overlay.size) * 0.5
 	shader = Shader.new()
 	shader.code = FileAccess.get_file_as_string("res://rust/src/video/frame.gdshader")
 	material = ShaderMaterial.new()
 	material.shader = shader
 	material.set_shader_parameter("window_size", Vector2(1.0, 0.6))
-	mesh.material_override = material
-	viewport.add_child(mesh)
+	overlay.material = material
+	viewport.add_child(overlay)
 	for index in range(4):
 		await process_frame
 		RenderingServer.force_draw(false)
@@ -125,13 +119,13 @@ func _run() -> void:
 		push_error("Losing focus must restore the inactive border")
 		quit(1)
 		return
-	quad.size = Vector2(0.34, 0.05)
-	camera.size = 0.4
+	overlay.size = Vector2(0.34, 0.05) * (256.0 / 0.4)
+	overlay.position = (Vector2(256, 256) - overlay.size) * 0.5
 	shader = Shader.new()
 	shader.code = FileAccess.get_file_as_string("res://rust/src/video/xr/controls.gdshader")
 	material = ShaderMaterial.new()
 	material.shader = shader
-	mesh.material_override = material
+	overlay.material = material
 	for index in range(4):
 		await process_frame
 		RenderingServer.force_draw(false)

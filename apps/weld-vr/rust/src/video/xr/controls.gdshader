@@ -1,5 +1,4 @@
-shader_type spatial;
-render_mode unshaded, cull_disabled, depth_draw_never, fog_disabled;
+shader_type canvas_item;
 uniform int hovered = 0;
 uniform float opacity : hint_range(0.0, 1.0) = 1.0;
 
@@ -21,6 +20,5 @@ void fragment() {
 	vec2 rotated = vec2(cross_point.x + cross_point.y, cross_point.y - cross_point.x) * 0.707107;
 	float cross_d = min(pill(rotated, vec2(0.012, 0.0015), 0.001), pill(rotated, vec2(0.0015, 0.012), 0.001));
 	float icon = 1.0 - smoothstep(-aa, aa, min(handle, cross_d));
-	ALBEDO = mix(color, vec3(0.85, 0.9, 0.98), icon);
-	ALPHA = opacity * (1.0 - smoothstep(-aa, aa, d));
+	COLOR = vec4(mix(color, vec3(0.85, 0.9, 0.98), icon), opacity * (1.0 - smoothstep(-aa, aa, d)));
 }

@@ -295,24 +295,32 @@ func _update_windows() -> void:
 				entry.mesh.global_transform = transform
 			surface.style_panel(physical, parent if surface.kind() == 3 else null)
 			var raster := surface.video_player().xr_viewport_size()
-			if raster.x > 0 and raster.y > 0 and entry.viewport.size != raster:
-				entry.viewport.size = raster
-			entry.video.size = entry.viewport.size
-			if entry.stereo != null:
-				entry.stereo.sync_panel(transform, physical, entry.viewport.size, -100 + entry.depth * 10)
-			if entry.layer != null:
-				var order: int = -100 + entry.depth * 10 + clampi(surface.stack_index(), 0, 7)
-				if entry.layer.sort_order != order:
-					entry.layer.sort_order = order
-				if not entry.layer.global_transform.is_equal_approx(transform):
-					entry.layer.global_transform = transform
-				if not entry.layer.quad_size.is_equal_approx(physical):
-					entry.layer.quad_size = physical
+			entry.draw_size = surface.layout_canvas(physical, raster)
 			placed[key] = true
 	# Visibility is a compositor lifecycle transition. Hiding and showing a
 	# native layer each frame tears it down and registers it again in Godot.
 	for key in window_panels:
 		_set_entry_visible(window_panels[key], placed.has(key))
+	# One order owns the complete window family and the input pick policy.
+	panel.player.sort_xr_windows(camera.global_position)
+	for surface in surfaces:
+		if not placed.has(surface.surface_id()):
+			continue
+		var entry: Dictionary = window_panels[surface.surface_id()]
+		var transform: Transform3D = entry.mesh.global_transform
+		var order: int = surface.stacking_order()
+		if entry.stereo != null:
+			entry.stereo.sync_panel(transform, entry.draw_size, entry.viewport.size, order)
+		if entry.layer != null:
+			if entry.layer.sort_order != order:
+				entry.layer.sort_order = order
+			if not entry.layer.global_transform.is_equal_approx(transform):
+				entry.layer.global_transform = transform
+			if not entry.layer.quad_size.is_equal_approx(entry.draw_size):
+				entry.layer.quad_size = entry.draw_size
+		if entry.fallback != null:
+			entry.fallback.mesh.size = entry.draw_size
+			entry.fallback.material_override.render_priority = order
 
 
 func _secondary_size(logical: Vector2, parent_logical: Vector2, parent_size: Vector2) -> Vector2:
@@ -370,16 +378,23 @@ func _create_window_panel(surface: WeldSurface) -> Dictionary:
 	material.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
 	material.texture_filter = panel_texture_filter
 	material.albedo_texture = viewport.get_texture()
-	mesh.material_override = material
+	var fallback: MeshInstance3D
+	if layer == null and stereo == null:
+		fallback = MeshInstance3D.new()
+		fallback.mesh = QuadMesh.new()
+		material.no_depth_test = true
+		fallback.material_override = material
+		mesh.add_child(fallback)
+	mesh.layers = 0
 	var video := ColorRect.new()
 	video.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	video.material = surface.video_material()
 	video.size = viewport.size
 	viewport.add_child(video)
 	surface.bind_control(video)
-	surface.bind_panel(mesh)
+	surface.bind_panel(mesh, stereo.right_eye_control() if stereo != null else null)
 	print("WELD_XR_WINDOW id=", surface.surface_id(), " parent=", surface.parent_id(), " native=", layer != null)
-	return {"viewport": viewport, "mesh": mesh, "video": video, "layer": layer, "stereo": stereo, "depth": 0}
+	return {"viewport": viewport, "mesh": mesh, "video": video, "layer": layer, "stereo": stereo, "fallback": fallback, "draw_size": Vector2.ZERO, "depth": 0}
 
 
 func _setup_panel_presentation() -> void:

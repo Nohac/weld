@@ -97,8 +97,8 @@ impl WeldStereoPanel {
             || !physical.is_finite()
             || physical.x <= 0.0
             || physical.y <= 0.0
-            || !(1..=2048).contains(&raster.x)
-            || !(1..=2048).contains(&raster.y)
+            || !(1..=4096).contains(&raster.x)
+            || !(1..=4096).contains(&raster.y)
         {
             return;
         }
@@ -106,9 +106,6 @@ impl WeldStereoPanel {
             && viewport.get_size() != raster
         {
             viewport.set_size(raster);
-        }
-        if let Some(video) = &mut self.right_video {
-            video.set_size(raster.to_vector2());
         }
         for layer in &mut self.layers {
             if layer.get_global_transform() != world {
@@ -121,6 +118,11 @@ impl WeldStereoPanel {
                 layer.set_sort_order(order);
             }
         }
+    }
+
+    #[func]
+    fn right_eye_control(&self) -> Option<Gd<ColorRect>> {
+        self.right_video.clone()
     }
 
     #[func]

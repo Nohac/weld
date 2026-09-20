@@ -1,12 +1,11 @@
-//! Presentation-only rounded outline and soft shadow. Native video stays on
-//! its existing quad; decoration never expands its input or decoder extent.
+//! Window-owned canvas outline and shadow, composed with native video rather
+//! than independently depth-tested against other windows.
+use super::canvas::{self, Layout, SHADOW_MARGIN};
 use godot::{
-    classes::{MeshInstance3D, QuadMesh, Shader, ShaderMaterial},
+    classes::{ColorRect, Control, Shader, ShaderMaterial},
     prelude::*,
 };
 use weld_client::InputPosition;
-
-const MARGIN: f32 = 0.06;
 
 #[derive(Clone, Copy)]
 pub(super) struct Shape {
@@ -96,33 +95,24 @@ impl Clip {
 }
 
 pub(super) struct Decoration {
-    mesh: Gd<MeshInstance3D>,
+    views: Vec<Gd<ColorRect>>,
     material: Gd<ShaderMaterial>,
-    size: Vector2,
     focused: bool,
-    front: f32,
 }
 impl Decoration {
-    pub fn new(mut parent: Gd<MeshInstance3D>) -> Self {
+    pub fn new(views: &[Gd<Control>]) -> Self {
         let mut shader = Shader::new_gd();
         shader.set_code(include_str!("frame.gdshader"));
         let mut material = ShaderMaterial::new_gd();
         material.set_shader(&shader);
-        material.set_shader_parameter("margin", &MARGIN.to_variant());
-        let mut mesh = MeshInstance3D::new_alloc();
-        mesh.set_name("WindowOutline");
-        mesh.set_mesh(&QuadMesh::new_gd());
-        mesh.set_material_override(&material);
-        // Just in front of the content's hole-punch plane, so the outline also
-        // survives at rounded corners. Ordinary depth testing keeps hands ahead.
-        mesh.set_position(Vector3::new(0.0, 0.0, 0.001));
-        parent.add_child(&mesh);
+        material.set_shader_parameter("margin", &SHADOW_MARGIN.to_variant());
         Self {
-            mesh,
+            views: views
+                .iter()
+                .filter_map(|view| canvas::add_overlay(view, &material, 10))
+                .collect(),
             material,
-            size: Vector2::ZERO,
             focused: false,
-            front: 0.0,
         }
     }
     pub fn set_focused(&mut self, focused: bool) {
@@ -132,29 +122,16 @@ impl Decoration {
                 .set_shader_parameter("focused", &focused.to_variant());
         }
     }
-    pub fn reset_front(&mut self) {
-        self.front = 0.0;
-        self.mesh.set_position(Vector3::new(0.0, 0.0, 0.001));
-    }
-    /// Keep the shared border above child-layer hole-punch planes, not behind them.
-    pub fn include_layer(&mut self, depth: f32) {
-        if depth.is_finite() && depth > self.front {
-            self.front = depth;
-            self.mesh
-                .set_position(Vector3::new(0.0, 0.0, depth + 0.001));
-        }
-    }
-    pub fn update(&mut self, shape: Shape) {
-        if self.size == shape.size || !self.mesh.is_instance_valid() {
-            return;
-        }
-        self.size = shape.size;
-        if let Some(mut mesh) = self
-            .mesh
-            .get_mesh()
-            .and_then(|mesh| mesh.try_cast::<QuadMesh>().ok())
-        {
-            mesh.set_size(shape.size + Vector2::splat(2.0 * MARGIN));
+    pub fn update(&mut self, shape: Shape, layout: Layout) {
+        let rect = layout.rectangle(
+            Vector2::ZERO,
+            shape.size + Vector2::splat(2.0 * SHADOW_MARGIN),
+        );
+        for view in &mut self.views {
+            if view.is_instance_valid() {
+                view.set_position(rect.position);
+                view.set_size(rect.size);
+            }
         }
         self.material
             .set_shader_parameter("window_size", &shape.size.to_variant());

@@ -1,5 +1,4 @@
-shader_type spatial;
-render_mode unshaded, cull_disabled, depth_draw_never, fog_disabled;
+shader_type canvas_item;
 
 uniform vec2 window_size = vec2(1.0);
 uniform float corner_radius = 0.012;
@@ -25,6 +24,5 @@ void fragment() {
 	float shadow = 0.5 * exp(-0.5 * pow(shadow_distance / sigma, 2.0));
 	shadow *= smoothstep(-antialias, antialias, distance);
 	float alpha = border + shadow * (1.0 - border);
-	ALBEDO = color.rgb * border / max(alpha, 0.00001);
-	ALPHA = alpha;
+	COLOR = vec4(color.rgb * border / max(alpha, 0.00001), alpha);
 }
