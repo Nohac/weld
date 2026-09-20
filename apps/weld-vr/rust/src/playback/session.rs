@@ -172,7 +172,10 @@ impl Inventory {
             .map(|surface| ClientSurfaceRequest {
                 surface: *surface,
                 kind: ClientSurfaceRequestKind::SetPresentation {
-                    rate: (!self.rules.filtered() || self.visible(*surface)).then_some(requested),
+                    // Selection must not depend on receiving the first frame:
+                    // pausing an unmapped selection prevents it from ever mapping.
+                    rate: (!self.rules.filtered() || self.selection_matches(*surface, false))
+                        .then_some(requested),
                 },
             })
             .collect()
@@ -582,9 +585,16 @@ impl Inventory {
         }
         panes
     }
-    fn visible(&self, mut id: ClientSurfaceId) -> bool {
+    fn visible(&self, id: ClientSurfaceId) -> bool {
+        self.selection_matches(id, true)
+    }
+    fn selection_matches(&self, mut id: ClientSurfaceId, require_mapped: bool) -> bool {
         for _ in 0..=MAX_SURFACES {
-            let Some(surface) = self.surfaces.get(&id).filter(|s| s.mapped) else {
+            let Some(surface) = self
+                .surfaces
+                .get(&id)
+                .filter(|s| !require_mapped || s.mapped)
+            else {
                 return false;
             };
             match surface.role {
@@ -880,6 +890,77 @@ mod tests {
         assert!(
             requests.is_empty(),
             "title churn within the same rule must not resend presentation requests"
+        );
+    }
+
+    #[test]
+    fn filtered_refresh_changes_do_not_pause_windows_waiting_for_their_first_frame() {
+        let shared = Shared::default();
+        let mut inventory = Inventory {
+            rules: WindowRules::parse(
+                "weld-window-rules-v1\napp\tPrimary Window\tsbs\t1600\t480\t0\napp\tSecondary Window\tmono\t640\t480\t1\n",
+            ).unwrap(),
+            ..Inventory::default()
+        };
+        for (number, title) in [
+            (1, "Game | Primary Window"),
+            (2, "Game | Secondary Window"),
+            (3, "Library"),
+        ] {
+            apply(
+                &mut inventory,
+                &shared,
+                number,
+                ClientSurfaceEventKind::Role(top(None)),
+            );
+            apply(
+                &mut inventory,
+                &shared,
+                number,
+                ClientSurfaceEventKind::Metadata(
+                    ClientSurfaceMetadata::new("app".into(), title.into()).unwrap(),
+                ),
+            );
+        }
+        apply(
+            &mut inventory,
+            &shared,
+            4,
+            ClientSurfaceEventKind::Role(top(Some(id(1)))),
+        );
+        for hz in [75_000, 80_000, 85_000, 89_000, 90_000] {
+            let rate = PresentationRate::try_from(hz).unwrap();
+            let requests = inventory.set_presentation_rate(rate);
+            for number in [1, 2, 4] {
+                assert!(
+                    !inventory.visible(id(number)),
+                    "not mapped before the first frame"
+                );
+                let request = requests.iter().find(|r| r.surface == id(number)).unwrap();
+                assert_eq!(
+                    request.kind,
+                    ClientSurfaceRequestKind::SetPresentation { rate: Some(rate) },
+                    "a selected window must keep streaming while its first frame is pending"
+                );
+            }
+            let excluded = requests.iter().find(|r| r.surface == id(3)).unwrap();
+            assert_eq!(
+                excluded.kind,
+                ClientSurfaceRequestKind::SetPresentation { rate: None }
+            );
+        }
+        apply(&mut inventory, &shared, 1, commit(true));
+        assert!(inventory.visible(id(1)));
+        apply(&mut inventory, &shared, 1, commit(false));
+        let rate = PresentationRate::HZ_60;
+        let requests = inventory.set_presentation_rate(rate);
+        assert!(!inventory.visible(id(1)));
+        assert!(
+            requests
+                .iter()
+                .filter(|r| r.surface != id(3))
+                .all(|r| r.kind == ClientSurfaceRequestKind::SetPresentation { rate: Some(rate) }),
+            "temporary unmapping must not block remapping either"
         );
     }
 

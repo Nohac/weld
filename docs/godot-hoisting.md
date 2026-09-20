@@ -74,6 +74,17 @@ explicit packed-stereo interpretation, not a new Wayland stereo extension.
 Attached content retains its owner's placement and close/drag controls. The
 shared bitrate target defaults to 16 Mbps across all windows.
 
+Stream selection is independent of mapped/presentable state: a selected window
+must keep receiving frames before its first image and after temporary unmapping.
+Refresh-rate updates previously reused mapped visibility and could pause a
+window before the frame needed to make it visible. The regression test exercises
+75/80/85/89/90 Hz startup updates, excluded windows and selected descendants.
+Pico run `godot-hoist-6d3ud0qm` on 2026-09-20 kept all three selected Azahar
+windows active for the bounded 75-second test; the capture showed both game
+screens and decoding continued through the run. The full Rust suite passed
+95 tests with strict Clippy. Startup rate samples come from the OpenXR runtime,
+not Godot rendering FPS; they do not establish physical panel VRR.
+
 The isolated source keeps access to host PipeWire/PulseAudio runtime sockets
 while using a private Wayland runtime. Audio stays on the laptop; it is not
 streamed to the headset, and explicit audio environment overrides are preserved.
