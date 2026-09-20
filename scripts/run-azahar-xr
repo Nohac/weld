@@ -17,10 +17,10 @@ ROOT = Path(__file__).resolve().parent.parent
 
 def rules(show_manager=False):
     result = ("weld-window-rules-v1\n"
-        "org.azahar_emu.Azahar\t | Primary Window\tsbs\t1600\t480\t0\n"
-        "org.azahar_emu.Azahar\t | Secondary Window\tmono\t640\t480\t1\n")
+        "org.azahar_emu.Azahar\t | Primary Window\tsbs\t1600\t480\t0\t1\tprimary\n"
+        "org.azahar_emu.Azahar\t | Secondary Window\tmono\t640\t480\t1\t1\tcompanion\n")
     if show_manager:
-        result += "org.azahar_emu.Azahar\t\tmono\t800\t600\t2\n"
+        result += "org.azahar_emu.Azahar\t\tmono\t800\t600\t2\t1\tutility\n"
     return result
 
 

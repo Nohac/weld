@@ -4,6 +4,48 @@ use std::time::Duration;
 
 use crate::ClientSurfaceId;
 
+/// Presenter-selected label, scoped by the actual client and receiving peer.
+/// It is not an application identity, authorization grant or window parent.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(try_from = "u32", into = "u32"))]
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct PresentationGroupId(u32);
+
+impl TryFrom<u32> for PresentationGroupId {
+    type Error = &'static str;
+
+    fn try_from(value: u32) -> Result<Self, Self::Error> {
+        if (1..=65_535).contains(&value) {
+            Ok(Self(value))
+        } else {
+            Err("presentation group must be between 1 and 65535")
+        }
+    }
+}
+
+impl From<PresentationGroupId> for u32 {
+    fn from(value: PresentationGroupId) -> Self {
+        value.0
+    }
+}
+
+/// Relative visual importance within a shared bitrate group, not input focus.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PresentationRole {
+    Primary,
+    Companion,
+    Utility,
+}
+
+/// A quality preference subject to the source's budget and codec constraints.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SurfaceBitratePreference {
+    pub group: PresentationGroupId,
+    pub role: PresentationRole,
+}
+
 /// Bounded nominal refresh in millihertz. Claim state distinguishes a missing
 /// preference from suspension; zero is never a valid rate.
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]

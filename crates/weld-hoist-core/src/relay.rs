@@ -583,6 +583,9 @@ impl SourceRelayAdapter {
             DestinationMessage::Request(request) => {
                 match &request {
                     ClientRequest::Surface(surface) => match surface.kind {
+                        // The authorized port consumes encoded quality preferences.
+                        // Native/loopback ports may ignore them; never forward to Wayland.
+                        ClientSurfaceRequestKind::SetBitratePreference { .. } => return true,
                         ClientSurfaceRequestKind::SetPresentation { rate } => {
                             self.set_presentation(
                                 surface.surface,

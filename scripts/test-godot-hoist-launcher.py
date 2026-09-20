@@ -10,6 +10,18 @@ API = runpy.run_path(str(Path(__file__).with_name("run-godot-hoist")))
 
 
 class PairingTests(unittest.TestCase):
+    def test_azahar_rules_share_quality_group_with_catchall_last(self):
+        azahar = runpy.run_path(str(Path(__file__).with_name("run-azahar-xr")))
+        for manager in (False, True):
+            lines = azahar["rules"](manager).splitlines()
+            self.assertEqual(lines[0], "weld-window-rules-v1")
+            rows = [line.split("\t") for line in lines[1:]]
+            self.assertTrue(all(len(row) == 8 and row[6] == "1" for row in rows))
+            self.assertEqual([row[7] for row in rows], ["primary", "companion"] + (["utility"] if manager else []))
+            self.assertTrue(rows[0][1] and rows[1][1])
+            if manager:
+                self.assertEqual(rows[-1][1], "")
+
     def test_source_keeps_host_audio_while_isolating_wayland_including_restart(self):
         original = {"XDG_RUNTIME_DIR": "/run/host", "DISPLAY": ":0",
                     "WAYLAND_DISPLAY": "wayland-1", "WAYLAND_SOCKET": "7"}
@@ -47,7 +59,7 @@ class PairingTests(unittest.TestCase):
             args = API["parse_arguments"](["--app", "azahar", "--rom", str(rom)])
             self.assertEqual(API["app_command"](args), ["azahar", "--windowed", str(rom)])
             rules = root / "test.rules"
-            rules.write_text("weld-window-rules-v1\napp\twindow\tsbs\t1600\t480\t0\n")
+            rules.write_text("weld-window-rules-v1\napp\twindow\tsbs\t1600\t480\t0\t-\t-\n")
             API["prepare_presentation_rules"](rules, directory=root)
             self.assertEqual((root / "presentation.rules").read_text(), rules.read_text())
             API["prepare_presentation_rules"](None, directory=root)

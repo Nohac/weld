@@ -9,7 +9,7 @@ use weld_client::{
 use weld_media::{MediaStreamId, StreamGeneration};
 
 use super::{EncodedSourceState, SourceStream, take_counter};
-use crate::budget::StreamDemand;
+use crate::budget::{AllocationGroup, StreamDemand};
 
 #[derive(Default)]
 struct GroupRates {
@@ -106,6 +106,7 @@ impl EncodedSourceState {
         event: Option<&ClientSurfaceEvent>,
         now: Instant,
     ) -> Result<()> {
+        self.budget_preferences_dirty = false;
         let Some(budget) = &self.budget else {
             return Ok(());
         };
@@ -142,6 +143,7 @@ impl EncodedSourceState {
                         .group(*surface)
                         .context("budgeted stream has no owning hoist group")?,
                     pixels: u64::from(width) * u64::from(height),
+                    preference: self.activity.bitrate_preference(*surface),
                 })
             })
             .collect::<Result<Vec<_>>>()?;
@@ -192,7 +194,10 @@ impl EncodedSourceState {
                 usize::from(status.applied.map(|value| value.request) != Some(status.requested));
         }
         for (group, value) in groups {
+            let preference = self.activity.bitrate_preference(group.root);
             tracing::debug!(target: "weld_media_diag", session = ?group.session, root = ?group.root,
+                allocation_group = ?AllocationGroup::new(group, preference),
+                presentation_role = ?preference.map(|value| value.role),
                 allocation_priority = ?budget.priority(group), streams = value.streams,
                 input_pixels = value.pixels, requested_bitrate = value.requested,
                 applied_bitrate = value.applied, pending_streams = value.pending,

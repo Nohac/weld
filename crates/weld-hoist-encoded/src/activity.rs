@@ -8,7 +8,8 @@ use std::{
 use weld_client::{
     ButtonState, ClientInputTarget, ClientRequest, ClientSurfaceId, ClientSurfaceRequestKind,
     ClientSurfaceRole, InputEventKind, InputPosition, KeyboardKeyState, LinuxButtonCode,
-    PointerGesture, SurfaceLayerId, TouchpadHold, TouchpadPinch, TouchpadSwipe,
+    PointerGesture, SurfaceBitratePreference, SurfaceLayerId, TouchpadHold, TouchpadPinch,
+    TouchpadSwipe,
 };
 use weld_hoist_protocol::{DestinationMessage, HoistSessionId};
 
@@ -81,6 +82,7 @@ struct Surface {
     owner: Option<ClientSurfaceId>,
     mapped: bool,
     attention: Attention,
+    bitrate: Option<SurfaceBitratePreference>,
 }
 
 #[derive(Default)]
@@ -148,6 +150,7 @@ impl Activity {
                 owner: None,
                 mapped: false,
                 attention: Attention::default(),
+                bitrate: None,
             },
         );
     }
@@ -163,6 +166,35 @@ impl Activity {
                 entry.owner = owner;
             }
         }
+    }
+
+    pub(crate) fn set_bitrate_preference(
+        &mut self,
+        session: HoistSessionId,
+        surface: ClientSurfaceId,
+        preference: Option<SurfaceBitratePreference>,
+    ) -> bool {
+        let Some(entry) = self
+            .surfaces
+            .get_mut(&surface)
+            .filter(|s| s.session == session)
+        else {
+            return false;
+        };
+        if entry.bitrate == preference {
+            return false;
+        }
+        entry.bitrate = preference;
+        true
+    }
+
+    /// Reuse validated popup ownership, including malformed-owner fallback.
+    /// A popup's own hint cannot override its root's quality policy.
+    pub(crate) fn bitrate_preference(
+        &self,
+        surface: ClientSurfaceId,
+    ) -> Option<SurfaceBitratePreference> {
+        self.surfaces.get(&self.group(surface)?.root)?.bitrate
     }
 
     pub(crate) fn mapped(&mut self, surface: ClientSurfaceId, mapped: bool) {

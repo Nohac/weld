@@ -195,6 +195,8 @@ impl Inventory {
                         .rules
                         .select(surface.metadata.app_id(), surface.metadata.title());
                     let next = self.rules.select(metadata.app_id(), metadata.title());
+                    let previous_bitrate = previous.and_then(|rule| rule.bitrate);
+                    let next_bitrate = next.and_then(|rule| rule.bitrate);
                     let changed =
                         previous != next || *surface.metadata == ClientSurfaceMetadata::default();
                     if previous != next {
@@ -202,6 +204,14 @@ impl Inventory {
                     }
                     tracing::debug!(target: "weld_vr_diag", ?surface_id, app_id = metadata.app_id(), title = metadata.title(), "received window metadata");
                     surface.metadata = Arc::new(metadata);
+                    if previous_bitrate != next_bitrate {
+                        requests.push(ClientSurfaceRequest {
+                            surface: surface_id,
+                            kind: ClientSurfaceRequestKind::SetBitratePreference {
+                                preference: next_bitrate,
+                            },
+                        });
+                    }
                     if self.rules.filtered() && changed {
                         requests.push(ClientSurfaceRequest {
                             surface: surface_id,
@@ -829,7 +839,7 @@ mod tests {
         let shared = Shared::default();
         let mut inventory = Inventory {
             rules: WindowRules::parse(
-                "weld-window-rules-v1\napp\tPrimary Window\tsbs\t1600\t480\t0\n",
+                "weld-window-rules-v1\napp\tPrimary Window\tsbs\t1600\t480\t0\t-\t-\n",
             )
             .unwrap(),
             ..Inventory::default()
@@ -894,11 +904,75 @@ mod tests {
     }
 
     #[test]
+    fn metadata_sends_quality_before_cadence_deduplicates_titles_and_clears_selection() {
+        let shared = Shared::default();
+        let mut inventory = Inventory {
+            rules: WindowRules::parse(
+                "weld-window-rules-v1\napp\tPrimary\tsbs\t1600\t480\t0\t1\tprimary\n",
+            )
+            .expect("rules"),
+            ..Inventory::default()
+        };
+        apply(
+            &mut inventory,
+            &shared,
+            1,
+            ClientSurfaceEventKind::Role(top(None)),
+        );
+        let mut label = |title: &str| {
+            inventory
+                .apply(
+                    ClientSurfaceEvent {
+                        surface: id(1),
+                        kind: ClientSurfaceEventKind::Metadata(
+                            ClientSurfaceMetadata::new("app".into(), title.into())
+                                .expect("metadata"),
+                        ),
+                    },
+                    &shared,
+                    None,
+                )
+                .expect("apply")
+        };
+        let requests = label("Game Primary");
+        assert!(matches!(
+            requests[0].kind,
+            ClientSurfaceRequestKind::SetBitratePreference {
+                preference: Some(_)
+            }
+        ));
+        assert!(matches!(
+            requests[1].kind,
+            ClientSurfaceRequestKind::SetPresentation { rate: Some(_) }
+        ));
+        assert!(label("Renamed Primary").is_empty());
+        let cleared = label("Other");
+        assert_eq!(
+            cleared[0].kind,
+            ClientSurfaceRequestKind::SetBitratePreference { preference: None }
+        );
+        assert!(matches!(
+            cleared[1].kind,
+            ClientSurfaceRequestKind::SetPresentation { rate: None }
+        ));
+        assert!(matches!(
+            label("Game Primary")[0].kind,
+            ClientSurfaceRequestKind::SetBitratePreference {
+                preference: Some(_)
+            }
+        ));
+        assert!(
+            !inventory.visible(id(1)),
+            "no first frame required for quality selection"
+        );
+    }
+
+    #[test]
     fn filtered_refresh_changes_do_not_pause_windows_waiting_for_their_first_frame() {
         let shared = Shared::default();
         let mut inventory = Inventory {
             rules: WindowRules::parse(
-                "weld-window-rules-v1\napp\tPrimary Window\tsbs\t1600\t480\t0\napp\tSecondary Window\tmono\t640\t480\t1\n",
+                "weld-window-rules-v1\napp\tPrimary Window\tsbs\t1600\t480\t0\t-\t-\napp\tSecondary Window\tmono\t640\t480\t1\t-\t-\n",
             ).unwrap(),
             ..Inventory::default()
         };

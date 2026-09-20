@@ -13,6 +13,7 @@ use std::{
 };
 
 use anyhow::{Context, Result, ensure};
+use weld_client::{ClientId, PresentationGroupId, SurfaceBitratePreference};
 use weld_media::MediaStreamId;
 
 use crate::{
@@ -24,6 +25,25 @@ pub use attention::BitrateAllocationPolicy;
 use attention::QualityFocus;
 
 type StreamKey = (u64, MediaStreamId);
+
+/// Explicit quality groups never replace scheduling or input ownership groups.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub(crate) enum AllocationGroup {
+    Window(Group),
+    Presentation {
+        client: ClientId,
+        id: PresentationGroupId,
+    },
+}
+
+impl AllocationGroup {
+    pub(crate) fn new(group: Group, preference: Option<SurfaceBitratePreference>) -> Self {
+        preference.map_or(Self::Window(group), |preference| Self::Presentation {
+            client: group.root.client(),
+            id: preference.group,
+        })
+    }
+}
 
 /// The numeric minimum reservations cannot fit. No implicit overcommit is allowed.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -90,6 +110,7 @@ pub(crate) struct StreamDemand {
     pub group: Group,
     // Full input buffer pixels, not logical/cropped geometry or codec padding.
     pub pixels: u64,
+    pub preference: Option<SurfaceBitratePreference>,
 }
 
 pub(crate) struct BudgetMembership {
@@ -233,8 +254,11 @@ impl SharedBitrateBudget {
                     .flat_map(|(id, port)| {
                         port.demands.iter().map(|demand| AllocationInput {
                             key: (*id, demand.stream),
-                            group: (*id, demand.group),
+                            group: (*id, AllocationGroup::new(demand.group, demand.preference)),
                             pixels: demand.pixels,
+                            area_weight: demand
+                                .preference
+                                .map_or(1, |value| policy.role_weight(value.role)),
                             limits: port.limits,
                             current: original_targets.get(&(*id, demand.stream)).copied(),
                             weight: u64::from(

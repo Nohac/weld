@@ -297,6 +297,11 @@ pub enum ClientSurfaceRequestKind {
     SetPresentation {
         rate: Option<crate::PresentationRate>,
     },
+    /// Encoded quality grouping only; `None` restores ordinary window allocation.
+    /// No focus, parentage, scheduling priority or additional authority is granted.
+    SetBitratePreference {
+        preference: Option<crate::SurfaceBitratePreference>,
+    },
 }
 
 /// Source-addressed keyboard focus request; `None` clears that source's focus.

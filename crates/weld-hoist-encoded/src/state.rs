@@ -239,6 +239,7 @@ struct EncodedSourceState {
     // Release numeric reservations before closing the actuator/backend.
     budget: Option<BudgetMembership>,
     budget_activity: ActivitySnapshot,
+    budget_preferences_dirty: bool,
     admission_deferred: bool,
     activity: Activity,
     scheduler: Scheduler,
@@ -270,6 +271,7 @@ impl EncodedSourceState {
         Self {
             budget: None,
             budget_activity: ActivitySnapshot::default(),
+            budget_preferences_dirty: false,
             backend,
             activity: Activity::default(),
             admission_deferred: false,
@@ -1225,6 +1227,23 @@ impl<T: EncodedSourceTransport> HoistSourcePort for EncodedSourcePort<T> {
         }
         match &envelope.message {
             DestinationMessage::Request(ClientRequest::Surface(request))
+                if matches!(
+                    request.kind,
+                    ClientSurfaceRequestKind::SetBitratePreference { .. }
+                ) =>
+            {
+                if let Some(state) = &mut self.state
+                    && let ClientSurfaceRequestKind::SetBitratePreference { preference } =
+                        request.kind
+                {
+                    state.budget_preferences_dirty |= state.activity.set_bitrate_preference(
+                        envelope.session,
+                        request.surface,
+                        preference,
+                    );
+                }
+            }
+            DestinationMessage::Request(ClientRequest::Surface(request))
                 if matches!(request.kind, ClientSurfaceRequestKind::Configure { .. }) =>
             {
                 if let ClientSurfaceRequestKind::Configure { resizing, .. } = request.kind {
@@ -1254,9 +1273,15 @@ impl<T: EncodedSourceTransport> HoistSourcePort for EncodedSourcePort<T> {
         if let Some(state) = &mut self.state {
             // Observe the entire validated input batch before reallocating, just
             // as admission waits for it before selecting another encode batch.
-            state
-                .refresh_budget_attention(Instant::now())
-                .map_err(protocol_error)?;
+            if state.budget_preferences_dirty {
+                state
+                    .update_budget(None, Instant::now())
+                    .map_err(protocol_error)?;
+            } else {
+                state
+                    .refresh_budget_attention(Instant::now())
+                    .map_err(protocol_error)?;
+            }
             state.admission_deferred = false;
         }
         self.progress()?;

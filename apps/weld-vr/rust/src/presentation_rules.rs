@@ -7,7 +7,7 @@ use std::{
     path::Path,
     sync::Arc,
 };
-use weld_client::Extent;
+use weld_client::{Extent, PresentationGroupId, PresentationRole, SurfaceBitratePreference};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct WindowRule {
@@ -16,6 +16,7 @@ pub(crate) struct WindowRule {
     pub stereo: bool,
     pub size: Extent,
     pub slot: u32,
+    pub bitrate: Option<SurfaceBitratePreference>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -35,7 +36,7 @@ impl WindowRules {
         for line in lines {
             let fields: Vec<_> = line.split('\t').collect();
             ensure!(
-                fields.len() == 6 && entries.len() < 8,
+                fields.len() == 8 && entries.len() < 8,
                 "invalid presentation rule"
             );
             ensure!(
@@ -59,12 +60,28 @@ impl WindowRules {
             );
             let slot = fields[5].parse().context("invalid panel slot")?;
             ensure!(slot < 8, "panel slot exceeds window budget");
+            let bitrate = if fields[6] == "-" && fields[7] == "-" {
+                None
+            } else {
+                let group = PresentationGroupId::try_from(
+                    fields[6].parse::<u32>().context("invalid bitrate group")?,
+                )
+                .map_err(anyhow::Error::msg)?;
+                let role = match fields[7] {
+                    "primary" => PresentationRole::Primary,
+                    "companion" => PresentationRole::Companion,
+                    "utility" => PresentationRole::Utility,
+                    _ => anyhow::bail!("unknown bitrate role"),
+                };
+                Some(SurfaceBitratePreference { group, role })
+            };
             entries.push(Arc::new(WindowRule {
                 app_id: fields[0].into(),
                 title_suffix: fields[1].into(),
                 stereo,
                 size: Extent::new(width, height),
                 slot,
+                bitrate,
             }));
         }
         ensure!(
@@ -106,8 +123,53 @@ impl WindowRules {
 mod tests {
     use super::*;
     #[test]
+    fn quality_rules_are_explicit_bounded_and_optional() {
+        let rules = WindowRules::parse("weld-window-rules-v1\napp\tPrimary\tsbs\t1600\t480\t0\t1\tprimary\napp\tSecondary\tmono\t640\t480\t1\t1\tcompanion\napp\t\tmono\t800\t600\t2\t-\t-\n").expect("rules");
+        let primary = rules
+            .select("app", "Game Primary")
+            .expect("primary")
+            .bitrate
+            .expect("hint");
+        let companion = rules
+            .select("app", "Game Secondary")
+            .expect("secondary")
+            .bitrate
+            .expect("hint");
+        assert_eq!(primary.group, companion.group);
+        assert_eq!(primary.role, PresentationRole::Primary);
+        assert_eq!(companion.role, PresentationRole::Companion);
+        assert!(
+            rules
+                .select("app", "Manager")
+                .expect("manager")
+                .bitrate
+                .is_none()
+        );
+        for suffix in [
+            "0\tprimary",
+            "65536\tprimary",
+            "1\tunknown",
+            "-\tprimary",
+            "1\t-",
+            "1",
+            "1\tprimary\textra",
+        ] {
+            assert!(
+                WindowRules::parse(&format!(
+                    "weld-window-rules-v1\napp\t\tmono\t640\t480\t0\t{suffix}\n"
+                ))
+                .is_err()
+            );
+        }
+        assert!(WindowRules::parse("weld-window-rules-v1\napp\t\tmono\t640\t480\t0\n").is_err());
+        assert!(
+            WindowRules::parse("weld-window-rules-v2\napp\t\tmono\t640\t480\t0\t1\tprimary\n")
+                .is_err()
+        );
+    }
+    #[test]
     fn explicit_selectors_do_not_depend_on_window_order_or_game_title() {
-        let rules = WindowRules::parse("weld-window-rules-v1\norg.example.App\t | Primary Window\tsbs\t1600\t480\t0\norg.example.App\t | Secondary Window\tmono\t640\t480\t1\n").unwrap();
+        let rules = WindowRules::parse("weld-window-rules-v1\norg.example.App\t | Primary Window\tsbs\t1600\t480\t0\t-\t-\norg.example.App\t | Secondary Window\tmono\t640\t480\t1\t-\t-\n").unwrap();
         assert!(
             rules
                 .select("org.example.App", "Game A | Primary Window")
@@ -132,10 +194,10 @@ mod tests {
     #[test]
     fn malformed_and_oversized_rules_are_rejected() {
         for row in [
-            "app\tname\tsbs\t1601\t480\t0",
-            "app\tname\tmono\t4096\t480\t0",
-            "app\tname\tmono\t640\t480\t8",
-            "app\tname\tbad\t640\t480\t0",
+            "app\tname\tsbs\t1601\t480\t0\t-\t-",
+            "app\tname\tmono\t4096\t480\t0\t-\t-",
+            "app\tname\tmono\t640\t480\t8\t-\t-",
+            "app\tname\tbad\t640\t480\t0\t-\t-",
             "bad",
         ] {
             assert!(WindowRules::parse(&format!("weld-window-rules-v1\n{row}\n")).is_err());

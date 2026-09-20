@@ -35,6 +35,25 @@ are scoped by source-port membership and hoist session. Layers divide their grou
 by full input-buffer pixel area, not logical/cropped window geometry. Codec
 padding is not exposed here and is not included in that estimate.
 
+Presenters can explicitly pool independent windows with a
+`SetBitratePreference` group label and primary, companion or utility role. The
+label is scoped by source-port membership and the actual namespaced `ClientId`,
+not app-ID/title strings; it can span that client's hoist sessions. The group
+gets one entitlement using its strongest member attention, then divides by
+buffer area times the policy's role weights (default **4:2:1**). Switching input
+between members does not change that internal split. Popups inherit their
+validated window root's preference. Clearing the hint restores ordinary window
+allocation; withdrawal or session replacement retires it. No hint leaves the
+original allocation unchanged. Input focus, scheduling groups and window
+parentage do not change.
+
+Pooling intentionally removes the advantage of opening several background
+windows, so an unfocused application can receive less than when its windows
+competed separately. These are weights, not readability guarantees or new
+minimum bitrate reservations. Existing codec limits and target-switch behavior
+still apply. The per-window diagnostic includes the resolved allocation group
+and role alongside requested/applied targets.
+
 Both allocation levels reserve backend minima and redistribute capped shares.
 The allocator leaves 5% spare headroom where minima permit, rounds ideal rates
 down to 64,000 bit/s steps, then avoids small optional changes. With a single

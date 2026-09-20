@@ -21,7 +21,9 @@ pub const MAX_ENCODED_ACCESS_UNIT_BYTES: usize = 32 * 1024 * 1024;
 pub struct ProtocolRevision(u32);
 
 impl ProtocolRevision {
-    pub const CURRENT: Self = Self(6);
+    // Unreleased development baseline: rebuild peers together. This is not a
+    // promise of schema compatibility between arbitrary development builds.
+    pub const CURRENT: Self = Self(1);
 
     pub const fn new(raw: u32) -> Self {
         Self(raw)
@@ -170,6 +172,33 @@ mod tests {
     use super::*;
 
     #[test]
+    fn bitrate_preferences_roundtrip_and_reject_invalid_group_and_role() {
+        use weld_client::{
+            ClientSurfaceRequestKind, PresentationGroupId, PresentationRole,
+            SurfaceBitratePreference,
+        };
+        for raw in [0_u32, 65_536, u32::MAX] {
+            let bytes = postcard::to_allocvec(&raw).expect("raw id");
+            assert!(postcard::from_bytes::<PresentationGroupId>(&bytes).is_err());
+        }
+        assert!(postcard::from_bytes::<PresentationRole>(&[3]).is_err());
+        for preference in [
+            None,
+            Some(SurfaceBitratePreference {
+                group: PresentationGroupId::try_from(65_535).expect("group"),
+                role: PresentationRole::Primary,
+            }),
+        ] {
+            let request = ClientSurfaceRequestKind::SetBitratePreference { preference };
+            let bytes = postcard::to_allocvec(&request).expect("encode");
+            assert_eq!(
+                postcard::from_bytes::<ClientSurfaceRequestKind>(&bytes).expect("decode"),
+                request
+            );
+        }
+    }
+
+    #[test]
     fn presentation_rate_is_validated_on_the_wire() {
         for raw in [0_u32, 999, 1_000_001, u32::MAX] {
             let bytes = postcard::to_allocvec(&raw).expect("encode raw rate");
@@ -235,11 +264,6 @@ mod tests {
             );
             assert_eq!(input.time, index as u32);
         }
-        assert!(
-            ProtocolRevision::CURRENT
-                .ensure_compatible(ProtocolRevision::new(4))
-                .is_err()
-        );
     }
 
     #[test]
@@ -276,6 +300,7 @@ mod tests {
 
     #[test]
     fn protocol_revisions_require_an_exact_match() {
+        assert_eq!(ProtocolRevision::CURRENT.raw(), 1);
         assert!(
             ProtocolRevision::CURRENT
                 .ensure_compatible(ProtocolRevision::CURRENT)

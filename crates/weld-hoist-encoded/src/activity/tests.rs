@@ -4,6 +4,75 @@ use weld_client::{
     PopupState,
 };
 
+#[test]
+fn bitrate_preferences_follow_validated_roots_and_retire_with_registration() {
+    let mut activity = mapped();
+    let group = weld_client::PresentationGroupId::try_from(1).expect("group");
+    let preference = Some(SurfaceBitratePreference {
+        group,
+        role: weld_client::PresentationRole::Primary,
+    });
+    assert!(!activity.set_bitrate_preference(session(), surface(99), preference));
+    assert!(!activity.set_bitrate_preference(HoistSessionId::new(2), surface(1), preference));
+    assert!(activity.set_bitrate_preference(session(), surface(1), preference));
+    assert!(!activity.set_bitrate_preference(session(), surface(1), preference));
+    activity.role(
+        surface(2),
+        ClientSurfaceRole::Popup(PopupState {
+            owner: surface(1),
+            position: LogicalPoint::ZERO,
+            stack_index: 0,
+        }),
+    );
+    let own = Some(SurfaceBitratePreference {
+        role: weld_client::PresentationRole::Utility,
+        group,
+    });
+    activity.set_bitrate_preference(session(), surface(2), own);
+    assert_eq!(
+        activity.bitrate_preference(surface(2)),
+        preference,
+        "root wins"
+    );
+    activity.mapped(surface(1), false);
+    assert_eq!(
+        activity.bitrate_preference(surface(2)),
+        preference,
+        "temporary unmap preserves preference"
+    );
+    activity.register(HoistSessionId::new(2), surface(1));
+    assert_eq!(
+        activity.bitrate_preference(surface(1)),
+        None,
+        "new session resets hint"
+    );
+    assert_eq!(
+        activity.bitrate_preference(surface(2)),
+        own,
+        "cross-session owner falls back to self"
+    );
+    activity.register(session(), surface(1));
+    activity.set_bitrate_preference(session(), surface(1), preference);
+    activity.role(
+        surface(1),
+        ClientSurfaceRole::Popup(PopupState {
+            owner: surface(2),
+            position: LogicalPoint::ZERO,
+            stack_index: 0,
+        }),
+    );
+    assert_eq!(
+        activity.bitrate_preference(surface(2)),
+        own,
+        "cycles use the same fallback as attention"
+    );
+    activity.remove(surface(2));
+    activity.register(session(), surface(2));
+    assert_eq!(activity.bitrate_preference(surface(2)), None);
+    assert!(activity.set_bitrate_preference(session(), surface(1), None));
+    assert_eq!(activity.bitrate_preference(surface(1)), None);
+}
+
 pub(crate) fn surface(local: u64) -> ClientSurfaceId {
     ClientSurfaceId::new(ClientId::new(ClientSourceId::new(1), 1), local)
 }

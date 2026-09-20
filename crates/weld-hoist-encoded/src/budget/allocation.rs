@@ -5,14 +5,15 @@ use std::collections::BTreeMap;
 
 use anyhow::{Context, Result, ensure};
 
-use super::{EncoderBitrateLimits, Group, InsufficientBitrateBudget, StreamKey};
+use super::{AllocationGroup, EncoderBitrateLimits, InsufficientBitrateBudget, StreamKey};
 
 const RATE_STEP: u64 = 64_000;
 
 pub(super) struct AllocationInput {
     pub key: StreamKey,
-    pub group: (u64, Group),
+    pub group: (u64, AllocationGroup),
     pub pixels: u64,
+    pub area_weight: u16,
     pub limits: EncoderBitrateLimits,
     pub current: Option<u64>,
     pub weight: u64,
@@ -130,12 +131,17 @@ pub(super) fn allocate(target: u64, inputs: &[AllocationInput]) -> Result<Vec<u6
     for (members, group_rate) in groups.values().zip(group_rates) {
         let shares = members
             .iter()
-            .map(|index| Share {
-                minimum: inputs[*index].limits.minimum(),
-                maximum: inputs[*index].limits.maximum(),
-                weight: inputs[*index].pixels,
+            .map(|index| {
+                Ok(Share {
+                    minimum: inputs[*index].limits.minimum(),
+                    maximum: inputs[*index].limits.maximum(),
+                    weight: inputs[*index]
+                        .pixels
+                        .checked_mul(u64::from(inputs[*index].area_weight))
+                        .context("weighted bitrate area overflow")?,
+                })
             })
-            .collect::<Vec<_>>();
+            .collect::<Result<Vec<_>>>()?;
         for (index, rate) in members.iter().zip(waterfill(group_rate, &shares)?) {
             let rounded = if rate < RATE_STEP {
                 rate

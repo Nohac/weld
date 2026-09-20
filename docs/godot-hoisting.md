@@ -61,8 +61,9 @@ The launcher refuses a competing Azahar process and does not modify ROMs or
 save states. With `--show-manager`, load slot 1 manually through the emulator's
 Emulation menu; save-state loading is not automated.
 
-Generic bounded app-ID/title metadata now crosses the hoist protocol (revision
-6; both peers must match). Identical labels are deduplicated and pending updates
+Generic bounded app-ID/title metadata now crosses the hoist protocol. The
+unreleased development revision is reset to 1; peers must use matching builds,
+not merely matching revision numbers. Identical labels are deduplicated and pending updates
 coalesced rather than retransmitted with every video frame. These labels are
 presentation hints, not authenticated application identity.
 
@@ -73,6 +74,16 @@ upper-screen image; no second decoder or CPU pixel copy is introduced. This is
 explicit packed-stereo interpretation, not a new Wayland stereo extension.
 Attached content retains its owner's placement and close/drag controls. The
 shared bitrate target defaults to 16 Mbps across all windows.
+
+The launcher assigns the upper screen, touchscreen and optional manager to one
+explicit bitrate group with primary, companion and utility roles. Interaction
+boosts their shared entitlement; it does not transfer the upper screen's share
+to the touchscreen. The allocator knows no emulator names. See
+[shared encoder targets](shared-bitrate-targets.md#allocation-and-churn).
+The 2026-09-20 three-minute 8 Mbps Pico run `godot-hoist-_00kly0n` completed
+without disconnecting and confirmed the transported group/role hints. Tests
+cover stable targets across member focus changes, authorization, reset, codec
+bounds and frozen jobs; the run did not establish subjective focus-switch quality.
 
 Stream selection is independent of mapped/presentable state: a selected window
 must keep receiving frames before its first image and after temporary unmapping.

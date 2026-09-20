@@ -7,12 +7,15 @@ use std::{
     collections::HashMap,
     time::{Duration, Instant},
 };
+use weld_client::PresentationRole;
 
 /// Local bitrate preferences, independent from frame-admission scheduling.
 #[derive(Clone, Copy, Debug)]
 pub struct BitrateAllocationPolicy {
     /// Background, focused, initial-motion, interactive group weights.
     pub weights: [u16; 4],
+    /// Primary, companion and utility area multipliers inside explicit groups.
+    pub role_weights: [u16; 3],
     /// Retain quality through gaps in discrete input and sustained motion.
     pub interaction_hold: Duration,
     /// Transfer a focus-only bonus once the new group remains focused this long.
@@ -23,6 +26,7 @@ impl Default for BitrateAllocationPolicy {
     fn default() -> Self {
         Self {
             weights: [1, 2, 2, 12],
+            role_weights: [4, 2, 1],
             interaction_hold: Duration::from_secs(10),
             focus_settle: Duration::from_millis(500),
         }
@@ -30,9 +34,20 @@ impl Default for BitrateAllocationPolicy {
 }
 
 impl BitrateAllocationPolicy {
+    pub(super) fn role_weight(self, role: PresentationRole) -> u16 {
+        self.role_weights[match role {
+            PresentationRole::Primary => 0,
+            PresentationRole::Companion => 1,
+            PresentationRole::Utility => 2,
+        }]
+    }
+
     pub(super) fn validate(self) -> Result<()> {
         ensure!(
-            self.weights.iter().all(|weight| *weight > 0),
+            self.weights
+                .iter()
+                .chain(&self.role_weights)
+                .all(|weight| *weight > 0),
             "bitrate priority weights must be positive"
         );
         for hold in [self.interaction_hold, self.focus_settle] {

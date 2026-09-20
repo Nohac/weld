@@ -4,6 +4,131 @@ use super::*;
 use crate::{EncoderBitrateLimits, InsufficientBitrateBudget};
 use weld_client::{ClientFocusRequest, ClientSurfaceRole, LogicalPoint, PopupState};
 
+#[test]
+fn quality_hints_reallocate_after_the_batch_without_new_pixels_or_scheduler_grouping() {
+    let transport = Rc::new(RefCell::new(FakeSourceTransportState::default()));
+    let encoder = Rc::new(RefCell::new(FakeEncoderState {
+        bitrate_limits: Some(
+            EncoderBitrateLimits::try_new(128_000, 8_000_000, 8_000_000).expect("limits"),
+        ),
+        ..Default::default()
+    }));
+    let mut port = EncodedSourcePort::configured(
+        FakeSourceTransport(transport),
+        Box::new(FakeEncoder(encoder.clone())),
+        EncodedSourceOptions {
+            bitrate_budget: Some(SharedBitrateBudget::new(8_000_000).expect("budget")),
+            access_unit_dump: None,
+        },
+    )
+    .expect("port");
+    let control = port.encoder_rate_control().expect("control");
+    let source = ClientSourceId::new(1);
+    for local in 1..=2 {
+        port.submit(SourcePortCommand::Surface {
+            session: HoistSessionId::new(local),
+            event: one_buffer_commit(
+                id(local),
+                1,
+                1,
+                shm_lease(
+                    source,
+                    local,
+                    1,
+                    ClientBufferMetadata::new(Extent::new(100, 100), true),
+                ),
+            ),
+        })
+        .expect("commit");
+        let (token, frame, _) = encoder.borrow().submitted.last().expect("job").clone();
+        complete(&encoder, token, frame, 1);
+        port.poll().expect("completion");
+        port.progress_after_destination().expect("progress");
+    }
+    let before = control.streams().expect("streams");
+    for (local, role) in [
+        (1, weld_client::PresentationRole::Primary),
+        (2, weld_client::PresentationRole::Companion),
+    ] {
+        port.accept_destination(&DestinationEnvelope {
+            session: HoistSessionId::new(local),
+            message: DestinationMessage::Request(ClientRequest::Surface(
+                weld_client::ClientSurfaceRequest {
+                    surface: id(local),
+                    kind: ClientSurfaceRequestKind::SetBitratePreference {
+                        preference: Some(weld_client::SurfaceBitratePreference {
+                            group: weld_client::PresentationGroupId::try_from(1).expect("group"),
+                            role,
+                        }),
+                    },
+                },
+            )),
+        })
+        .expect("authorized hint");
+        assert_eq!(control.streams().expect("before batch"), before);
+    }
+    port.progress_after_destination()
+        .expect("apply whole group");
+    let after = control.streams().expect("grouped");
+    assert!(after[0].requested.bits_per_second > after[1].requested.bits_per_second);
+    assert!(
+        after
+            .iter()
+            .map(|s| s.requested.bits_per_second)
+            .sum::<u64>()
+            <= 8_000_000
+    );
+    assert_eq!(
+        encoder.borrow().submitted.len(),
+        2,
+        "no synthetic encode work"
+    );
+    let state = port.state.as_ref().expect("state");
+    assert_ne!(
+        state.activity.group(id(1)),
+        state.activity.group(id(2)),
+        "scheduling remains per window"
+    );
+
+    // Clear hints while a batch is active: its prepared encoder rate stays frozen.
+    port.submit(SourcePortCommand::Surface {
+        session: HoistSessionId::new(1),
+        event: one_buffer_commit(
+            id(1),
+            2,
+            1,
+            shm_lease(
+                source,
+                3,
+                1,
+                ClientBufferMetadata::new(Extent::new(100, 100), true),
+            ),
+        ),
+    })
+    .expect("next frame");
+    let frozen = encoder.borrow().submitted_bitrates.last().copied();
+    for local in 1..=2 {
+        port.accept_destination(&DestinationEnvelope {
+            session: HoistSessionId::new(local),
+            message: DestinationMessage::Request(ClientRequest::Surface(
+                weld_client::ClientSurfaceRequest {
+                    surface: id(local),
+                    kind: ClientSurfaceRequestKind::SetBitratePreference { preference: None },
+                },
+            )),
+        })
+        .expect("reset");
+    }
+    port.progress_after_destination()
+        .expect("restore default grouping");
+    let reset = control.streams().expect("reset streams");
+    assert_eq!(
+        reset[0].requested.bits_per_second,
+        reset[1].requested.bits_per_second
+    );
+    assert_eq!(encoder.borrow().submitted_bitrates.last().copied(), frozen);
+}
+
 fn budgeted(
     budget: &SharedBitrateBudget,
 ) -> (

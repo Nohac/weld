@@ -520,6 +520,8 @@ impl ServerState {
                 ClientSurfaceRequestKind::SetPresentation { .. } => {
                     warn!(surface = ?request.surface, "presentation request requires an authorized presenter claim");
                 }
+                // Local Wayland presentation has no encoded bitrate to allocate.
+                ClientSurfaceRequestKind::SetBitratePreference { .. } => {}
             },
             ClientRequest::Focus(request) => {
                 if request.source == crate::WAYLAND_CLIENT_SOURCE {

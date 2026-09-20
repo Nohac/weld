@@ -45,7 +45,10 @@ pub use input::{
 };
 pub use input_geometry::SurfaceInputGeometry;
 pub use metadata::{ClientSurfaceMetadata, MAX_SURFACE_LABEL_BYTES, SurfaceMetadataError};
-pub use presentation::{ClientPresentationClaim, ClientPresentationUpdate, PresentationRate};
+pub use presentation::{
+    ClientPresentationClaim, ClientPresentationUpdate, PresentationGroupId, PresentationRate,
+    PresentationRole, SurfaceBitratePreference,
+};
 pub use surface::{
     ClientCommitRevision, ClientEventQueue, ClientFocusRequest, ClientRequest, ClientSurfaceCommit,
     ClientSurfaceEvent, ClientSurfaceEventKind, ClientSurfaceRequest, ClientSurfaceRequestKind,

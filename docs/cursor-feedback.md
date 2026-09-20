@@ -6,7 +6,7 @@ hidden state, or a bounded lossless RGBA image and hotspot. The destination owns
 pointer position, hover/capture authority, theme, nominal size, and output scale.
 Cursor feedback never enters the video encoder or Bevy's surface/render queue.
 
-Both peers need protocol revision 3. Run `scripts/run-iroh-hoist --codec av1` and
+Both peers need matching builds. Run `scripts/run-iroh-hoist --codec av1` and
 hoist Firefox. Hover links, text fields, page text, and the address bar. Repeat
 inside menus and tab previews, then move onto destination SSD and resize a
 window. Release resize while remaining on the same edge, then move into client

@@ -776,9 +776,9 @@ declares `Discarded` before scheduling every commit, including retained-buffer
 updates; native and loopback relays preserve that declaration. The encoded
 destination rejects commits that do not declare the selected opaque mode.
 `ClientBufferMetadata::opaque` and `MappedSurface::opaque` instead describe
-pixel sampling and do not select a frame policy. The wire change uses exact
-protocol revision 5 (explicit keyboard repeats, no commit ACKs, retained cursor
-feedback), so both endpoints must run the matching build.
+pixel sampling and do not select a frame policy. The unreleased wire protocol
+uses development revision 1; both endpoints must run matching builds. That
+number alone is not a compatibility guarantee across development snapshots.
 
 Encoded commits have no application ACK or per-surface stop-and-wait gate.
 One encode batch runs at a time. Local media headroom admits the next batch;

@@ -2,6 +2,43 @@ use super::*;
 use weld_client::PresentationRate;
 
 #[test]
+fn bitrate_hints_are_authorized_then_consumed_without_native_effects() {
+    let source = ClientSourceId::new(1);
+    let root = surface(source, 1);
+    let session = HoistSessionId::new(1);
+    let state = Rc::new(RefCell::new(FakeSourceState::default()));
+    let mut relay = SourceRelayAdapter::new(source, FakeSourcePort(state.clone()));
+    relay.map(session, root);
+    let hint = |session| DestinationEnvelope {
+        session,
+        message: DestinationMessage::Request(ClientRequest::Surface(
+            weld_client::ClientSurfaceRequest {
+                surface: root,
+                kind: ClientSurfaceRequestKind::SetBitratePreference { preference: None },
+            },
+        )),
+    };
+    assert!(relay.accept_destination(hint(session)));
+    assert_eq!(state.borrow().accepted, 1);
+    assert!(relay.effects.is_empty());
+    assert!(!relay.accept_destination(hint(HoistSessionId::new(2))));
+    assert_eq!(
+        state.borrow().accepted,
+        1,
+        "cross-session hint never reaches the port"
+    );
+
+    let state = Rc::new(RefCell::new(FakeSourceState::default()));
+    let mut relay = SourceRelayAdapter::new(source, FakeSourcePort(state.clone()));
+    assert!(relay.accept_destination(hint(session)));
+    assert_eq!(
+        state.borrow().accepted,
+        0,
+        "stale surface cannot receive preferences"
+    );
+}
+
+#[test]
 fn map_cadence_popup_and_reclaim_share_one_claim_lifecycle() {
     let source = ClientSourceId::new(1);
     let root = surface(source, 1);

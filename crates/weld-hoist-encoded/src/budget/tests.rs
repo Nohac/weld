@@ -20,8 +20,9 @@ fn group(root: u64) -> Group {
 fn input(port: u64, stream: u64, root: u64, pixels: u64) -> AllocationInput {
     AllocationInput {
         key: (port, MediaStreamId::new(stream)),
-        group: (port, group(root)),
+        group: (port, AllocationGroup::Window(group(root))),
         pixels,
+        area_weight: 1,
         limits: EncoderBitrateLimits::try_new(128_000, 8_000_000, 8_000_000).expect("limits"),
         current: None,
         weight: 1,
@@ -37,6 +38,92 @@ fn windows_share_equally_and_popup_layers_split_their_owners_share() {
     assert!(rates.iter().sum::<u64>() <= 8_000_000);
     let one = allocate(8_000_000, &[input(1, 1, 1, 100)]).expect("single");
     assert_eq!(one, [7_552_000]);
+}
+
+#[test]
+fn explicit_group_uses_one_entitlement_and_focus_cannot_invert_its_role_split() {
+    let explicit = AllocationGroup::Presentation {
+        client: group(1).root.client(),
+        id: PresentationGroupId::try_from(1).expect("id"),
+    };
+    let mut inputs = [
+        input(1, 1, 1, 768_000),
+        input(1, 2, 2, 307_200),
+        input(1, 3, 3, 480_000),
+        input(1, 4, 4, 768_000),
+    ];
+    for (input, weight) in inputs[..3].iter_mut().zip([4, 2, 1]) {
+        input.group = (1, explicit);
+        input.area_weight = weight;
+    }
+    for attention_weight in [1, 2, 12] {
+        let mut previous = None;
+        for selected in 0..3 {
+            for (index, input) in inputs.iter_mut().enumerate() {
+                input.weight = if index == selected {
+                    attention_weight
+                } else {
+                    1
+                };
+            }
+            let rates = allocate(8_000_000, &inputs).expect("allocation");
+            assert!(rates[0] > rates[1] && rates[1] > rates[2]);
+            assert!(rates.iter().sum::<u64>() <= 8_000_000);
+            if attention_weight == 1 {
+                assert!(
+                    rates[..3].iter().sum::<u64>().abs_diff(rates[3]) < 300_000,
+                    "three windows receive one background entitlement plus their codec minima"
+                );
+            } else {
+                assert!(rates[..3].iter().sum::<u64>() > rates[3]);
+            }
+            if let Some(previous) = previous {
+                assert_eq!(
+                    rates, previous,
+                    "focus or interaction within group must not redistribute quality"
+                );
+            }
+            previous = Some(rates);
+        }
+    }
+    // A different active application may legitimately reduce this group's share.
+    for input in &mut inputs {
+        input.weight = 1;
+    }
+    inputs[3].weight = 12;
+    let background = allocate(8_000_000, &inputs).expect("background");
+    assert!(background[3] > background[..3].iter().sum());
+    assert!(background[0] > background[1]);
+}
+
+#[test]
+fn explicit_group_ids_are_scoped_by_client_and_port_and_caps_redistribute() {
+    let preference = Some(SurfaceBitratePreference {
+        group: PresentationGroupId::try_from(1).expect("group"),
+        role: weld_client::PresentationRole::Primary,
+    });
+    let first = AllocationGroup::new(group(1), preference);
+    let mut other = group(2);
+    other.root = ClientSurfaceId::new(ClientId::new(ClientSourceId::new(1), 2), 2);
+    assert_ne!(first, AllocationGroup::new(other, preference));
+    let mut inputs = [input(1, 1, 1, 100), input(2, 1, 1, 100)];
+    for input in &mut inputs {
+        input.group.1 = first;
+    }
+    assert_eq!(
+        allocate(8_000_000, &inputs).expect("ports"),
+        [3_776_000, 3_776_000]
+    );
+    inputs[1].group.0 = 1;
+    inputs[0].limits = EncoderBitrateLimits::try_new(128_000, 1_000_000, 1_000_000).expect("cap");
+    inputs[0].area_weight = 4;
+    let rates = allocate(8_000_000, &inputs).expect("capped group");
+    assert!(rates[0] <= 1_000_000 && rates[1] > 6_000_000);
+    inputs[0].pixels = u64::MAX;
+    assert!(
+        allocate(8_000_000, &inputs).is_err(),
+        "overflow is rejected"
+    );
 }
 
 #[test]
@@ -202,6 +289,7 @@ fn demands() -> Vec<StreamDemand> {
         stream: MediaStreamId::new(1),
         group: group(1),
         pixels: 100,
+        preference: None,
     }]
 }
 
@@ -319,6 +407,59 @@ struct PriorityFixture {
     submitted: BTreeMap<MediaStreamId, (u64, u64, u64)>,
 }
 
+#[test]
+fn shared_quality_group_keeps_targets_stable_when_input_moves_between_members() {
+    let now = Instant::now();
+    let mut fixture = PriorityFixture::new(now);
+    let preferences = [
+        weld_client::PresentationRole::Primary,
+        weld_client::PresentationRole::Companion,
+    ];
+    fixture
+        .member
+        .update_inventory(
+            (1..=3)
+                .map(|id| StreamDemand {
+                    stream: MediaStreamId::new(id),
+                    group: group(id),
+                    pixels: if id == 1 { 768_000 } else { 307_200 },
+                    preference: preferences.get((id - 1) as usize).map(|role| {
+                        SurfaceBitratePreference {
+                            group: PresentationGroupId::try_from(1).expect("group"),
+                            role: *role,
+                        }
+                    }),
+                })
+                .collect(),
+        )
+        .expect("group inventory");
+    fixture.focus(1);
+    fixture
+        .attention
+        .get_mut(&group(1))
+        .expect("primary")
+        .interaction = Some(now);
+    fixture.publish(now);
+    let primary_active = fixture.requests();
+    assert!(primary_active[0].bits_per_second > primary_active[1].bits_per_second);
+    assert!(primary_active[0].bits_per_second > primary_active[2].bits_per_second);
+    for (seconds, focused) in [(11, 2), (22, 1), (33, 2)] {
+        let at = now + Duration::from_secs(seconds);
+        fixture.focus(focused);
+        fixture
+            .attention
+            .get_mut(&group(focused))
+            .expect("member")
+            .interaction = Some(at);
+        fixture.publish(at);
+        assert_eq!(
+            fixture.requests(),
+            primary_active,
+            "moving activity within the group must not rotate encoders"
+        );
+    }
+}
+
 impl PriorityFixture {
     fn new(now: Instant) -> Self {
         let budget = SharedBitrateBudget::new(8_000_000).expect("budget");
@@ -339,6 +480,7 @@ impl PriorityFixture {
                         stream: MediaStreamId::new(id),
                         group: group(id),
                         pixels: 100,
+                        preference: None,
                     })
                     .collect(),
             )
@@ -571,6 +713,10 @@ fn another_ports_activity_drives_expiry_of_an_idle_peers_boost() {
 fn quality_policy_rejects_zero_weights_and_invalid_holds() {
     let defaults = BitrateAllocationPolicy::default();
     for policy in [
+        BitrateAllocationPolicy {
+            role_weights: [4, 0, 1],
+            ..defaults
+        },
         BitrateAllocationPolicy {
             weights: [1, 0, 2, 12],
             ..defaults
