@@ -97,6 +97,24 @@ class PreflightTests(unittest.TestCase):
                 library.write_bytes(b"library")
                 self.assertNotEqual(fingerprint(), before)
 
+    def test_fingerprint_tracks_selected_tools_not_unrelated_path_entries(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            project = root / "apps/weld-vr"
+            project.mkdir(parents=True)
+            environment = {"HOME": str(root), "PATH": "/tools", "WELD_RUST_BUILD_PATH": "/tools"}
+            with patch.object(API["subprocess"], "check_output", return_value=b"") as output, \
+                 patch.object(API["shutil"], "which", side_effect=lambda name, **kw: "/tools/" + name) as which:
+                fingerprint = lambda: API["fingerprint"](root, project, environment)
+                first = fingerprint()
+                environment.update(PATH="/unrelated:/tools", WELD_RUST_BUILD_PATH="/unrelated:/tools")
+                self.assertEqual(fingerprint(), first)
+                which.side_effect = lambda name, **kw: "/different-tools/" + name
+                self.assertNotEqual(fingerprint(), first)
+                which.side_effect = lambda name, **kw: "/tools/" + name
+                output.side_effect = lambda command, **kw: b"new version" if command[0] == "rustc" else b""
+                self.assertNotEqual(fingerprint(), first)
+
     def test_cache_requires_matching_inputs_and_apk_bytes(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

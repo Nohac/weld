@@ -25,11 +25,13 @@ def fingerprint(root, project, environment):
     prefixes = ("RUST", "CARGO", "ANDROID", "NDK", "JAVA", "GODOT", "PKG_CONFIG",
                 "BINDGEN", "CC", "CXX", "AR", "CFLAGS", "CPPFLAGS", "LDFLAGS",
                 "LIBGL", "MESA", "VK_", "HOST_", "TARGET_", "NIX_", "CLIPPY",
-                "LIBCLANG", "CRATE_CC", "WELD_RUST_BUILD_PATH")
-    names = {"PATH", "HOME", "LD_LIBRARY_PATH", "LIBRARY_PATH", "FFMPEG_DIR", "DISPLAY", "WAYLAND_DISPLAY",
+                "LIBCLANG", "CRATE_CC")
+    names = {"HOME", "LD_LIBRARY_PATH", "LIBRARY_PATH", "FFMPEG_DIR", "DISPLAY", "WAYLAND_DISPLAY",
              "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_RUNTIME_DIR"}
     relevant = {key: value for key, value in environment.items() if key in names or key.startswith(prefixes)}
     inputs.update(json.dumps(relevant, sort_keys=True).encode())
+    # Fingerprint selected tools, not unrelated shell/agent PATH entries. Cargo
+    # has already checked native inputs; the staged libraries are hashed below.
     for command in (["cargo", "--version"], ["rustc", "-Vv"], ["godot", "--version"]):
         executable = shutil.which(command[0], path=environment.get("PATH"))
         if executable is None:

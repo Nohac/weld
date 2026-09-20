@@ -286,10 +286,16 @@ freshness, exports the Pico APK when needed, installs it and launches Blender
 for three minutes. Launching does not run tests, formatting, Clippy or scene
 probes. Run `scripts/check-godot-xr` separately for those checks; it builds the
 desktop extension and runs Rust and Godot checks in parallel without deployment.
-Cargo checks share the native build's explicit desktop target. The build PATH
-stays stable across Godot's Android export hook to avoid unnecessary rebuilds
-when Godot adds Java. Successful preparation is cached against input, toolchain,
-environment and APK contents; `--recheck` forces export, not validation.
+Cargo checks share the native build's explicit desktop target. Build-tool
+selection stays stable across Godot's Android export hook when Godot adds Java.
+The extension build no longer watches the entire PATH: cc/pkg-config track
+compiler and library settings, and the APK cache fingerprints resolved tool
+paths/versions rather than unrelated shell PATH entries. Successful preparation
+is cached against source inputs, staged libraries, toolchain, relevant environment
+and APK contents; `--recheck` forces export, not validation.
+The 2026-09-20 reuse check `xr-build-reuse-ea7tlh0w` changed only an unrelated
+PATH prefix and reused both native targets and the APK in 1.4 seconds. Eleven
+script tests passed, including invalidation for changed tools, flags and content.
 Build/export failures prevent installation. Use `--app foot`, `--seconds`,
 `--serial`, or `--adb` as needed. Preparation logs stay under
 `target/validation/godot-xr-*`; standalone checks use `godot-xr-check-*`.

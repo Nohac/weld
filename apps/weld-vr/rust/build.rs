@@ -3,7 +3,8 @@ use std::{env, error::Error, fs, io, path::Path, process::Command};
 fn main() -> Result<(), Box<dyn Error>> {
     println!("cargo:rerun-if-changed=src/egl.c");
     println!("cargo:rerun-if-changed=build.rs");
-    println!("cargo:rerun-if-env-changed=PATH");
+    // cc/pkg-config track their compiler and library settings. Unrelated PATH
+    // entries from launchers must not regenerate the fixed fixture and relink.
     let mut build = cc::Build::new();
     match env::var("CARGO_CFG_TARGET_OS").as_deref() {
         Ok("android") => {
