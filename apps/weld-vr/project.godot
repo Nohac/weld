@@ -12,7 +12,7 @@ config_version=5
 
 config/name="WeldVR"
 run/main_scene="res://scenes/startup.tscn"
-config/features=PackedStringArray("4.7", "GL Compatibility")
+config/features=PackedStringArray("4.8", "GL Compatibility")
 config/icon="res://icon.svg"
 
 [display]
@@ -45,6 +45,6 @@ xr/pointer_tilt_degrees=5.0
 [xr]
 
 openxr/extensions/render_model=true
-openxr/extensions/hand_tracking.weld_pico=true
 shaders/enabled=true
+openxr/extensions/hand_tracking.weld_pico=true
 openxr/enabled.weld_xr=true

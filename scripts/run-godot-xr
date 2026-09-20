@@ -28,6 +28,7 @@ PROJECT = ROOT / "apps/weld-vr"
 MANIFEST = PROJECT / "rust/Cargo.toml"
 APK = PROJECT / "build/weld-vr-pico-debug.apk"
 PREFLIGHT = runpy.run_path(str(ROOT / "scripts/godot-xr-preflight.py"))
+ANDROID_ENV = runpy.run_path(str(ROOT / "scripts/godot-android-env.py"))
 ERROR = re.compile(r"(?:SCRIPT ERROR:|SHADER ERROR:|\bERROR:|Rust build failed|This is NOT a successful Rust build)")
 
 
@@ -41,7 +42,7 @@ class Step:
 
 
 def steps():
-    godot = ["godot", "--path", str(PROJECT)]
+    godot = [str(ROOT / "scripts/run-godot"), "--path", str(PROJECT)]
     return [
         # Export rechecks native freshness through its normal build hook.
         Step("pico-export", [*godot, "--headless", "--export-debug", "Android Pico", str(APK)], 600, engine=True),
@@ -50,13 +51,28 @@ def steps():
 
 def validate(step, code, path):
     marker_found = step.marker is None
+    preview = False
+    build_complete = False
+    shutdown_diagnostic = False
     with path.open(errors="replace") as log:
         for line in log:
+            preview |= "Godot Engine v4.8.dev6.official.8898c2b3d" in line
+            build_complete |= "export" in line and "Build complete." in line
             if step.engine and ERROR.search(line):
+                # 4.8-dev6's Android export polling thread reads EditorSettings
+                # after editor shutdown. APK generation has already completed.
+                # Keep the diagnostic in the log; never accept another error,
+                # another engine version, an incomplete export or nonzero exit.
+                if (step.name == "pico-export" and code == 0 and preview and build_complete
+                        and line.strip() == 'ERROR: EditorSettings not instantiated yet when getting setting "export/android/shutdown_adb_on_exit".'):
+                    shutdown_diagnostic = True
+                    continue
                 raise RuntimeError(f"{step.name} reported an error; see {path}")
             marker_found |= step.marker is not None and line.strip() == step.marker
     if code != 0 or not marker_found:
         raise RuntimeError(f"{step.name} failed (exit {code}, completion marker {marker_found}); see {path}")
+    if shutdown_diagnostic:
+        print("  Godot 4.8-dev6 logged its known post-export EditorSettings shutdown diagnostic.", flush=True)
 
 
 def run_step(step, directory, environment, *, cancelled=None):
@@ -105,16 +121,17 @@ def preparation(args, run, environment):
     started = time.monotonic()
     cache = ROOT / "target/godot-xr-preflight.json"
     run_step(Step("native-build", [str(PROJECT / "scripts/build-gdextension"), "android"], 600), run, environment)
-    key = PREFLIGHT["fingerprint"](ROOT, PROJECT, environment)
+    export_environment = ANDROID_ENV["export_environment"](ROOT, environment)
+    key = PREFLIGHT["fingerprint"](ROOT, PROJECT, export_environment)
     if not args.recheck and PREFLIGHT["cache_matches"](cache, key, APK):
         print(f"Preparation cached: inputs and APK unchanged ({time.monotonic() - started:.2f}s). Use --recheck to rerun.", flush=True)
         return
     cache.unlink(missing_ok=True)
     for step in steps():
-        run_step(step, run, environment)
+        run_step(step, run, export_environment)
     if not APK.is_file():
         raise RuntimeError("export did not produce the Pico APK")
-    final_key = PREFLIGHT["fingerprint"](ROOT, PROJECT, environment)
+    final_key = PREFLIGHT["fingerprint"](ROOT, PROJECT, export_environment)
     if final_key["inputs"] != key["inputs"]:
         raise RuntimeError("XR inputs changed during preparation; rerun before installing")
     PREFLIGHT["save_cache"](cache, final_key, APK)
@@ -270,7 +287,7 @@ def main(argv=None):
 
 def workflow(args, adb, serial, environment):
     build_path = build_environment(environment)["PATH"]
-    for executable in ["cargo", "godot", "systemd-run"]:
+    for executable in ["cargo", str(ROOT / "scripts/run-godot"), "systemd-run"]:
         path = environment["PATH"] if executable == "systemd-run" else build_path
         if shutil.which(executable, path=path) is None:
             raise RuntimeError(f"missing {executable}; enter the development shell")

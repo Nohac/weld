@@ -32,7 +32,7 @@ def fingerprint(root, project, environment):
     inputs.update(json.dumps(relevant, sort_keys=True).encode())
     # Fingerprint selected tools, not unrelated shell/agent PATH entries. Cargo
     # has already checked native inputs; the staged libraries are hashed below.
-    for command in (["cargo", "--version"], ["rustc", "-Vv"], ["godot", "--version"]):
+    for command in (["cargo", "--version"], ["rustc", "-Vv"], [str(root / "scripts/run-godot"), "--version"]):
         executable = shutil.which(command[0], path=environment.get("PATH"))
         if executable is None:
             raise RuntimeError(f"missing {command[0]} while checking preparation freshness")
@@ -41,7 +41,7 @@ def fingerprint(root, project, environment):
 
     sources = ["apps/weld-vr", "crates", "vendor", ".cargo", "Cargo.toml", "Cargo.lock",
                "rust-toolchain", "rust-toolchain.toml", "rustfmt.toml", ".rustfmt.toml",
-               "clippy.toml", ".clippy.toml", "scripts/run-godot-xr", "scripts/godot-xr-preflight.py",
+               "clippy.toml", ".clippy.toml", "scripts/run-godot-xr", "scripts/run-godot", "scripts/godot-xr-preflight.py", "scripts/godot-android-env.py",
                "scripts/build-android-ffmpeg", "scripts/ffmpeg-patches"]
     listed = subprocess.check_output(["git", "ls-files", "-co", "--exclude-standard", "-z", "--", *sources],
                                      cwd=root, env=environment, timeout=20)

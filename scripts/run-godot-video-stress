@@ -240,7 +240,7 @@ def main():
                 print(f"Running {name}: {specifications}; playout={config['playout']}", flush=True)
                 log = run / (name + ".log")
                 if args.desktop:
-                    command = ["godot", "--path", str(PROJECT), "--display-driver", "wayland", "--rendering-driver", "opengl3_es",
+                    command = [str(ROOT / "scripts/run-godot"), "--path", str(PROJECT), "--display-driver", "wayland", "--rendering-driver", "opengl3_es",
                         "res://scenes/diagnostics/video_stress.tscn", "--", f"--stress-config={json.dumps(config)}"]
                     WORKFLOW["run_step"](Step(name, command, args.seconds + 30, "WELD_STRESS_DONE success=true", True), run, environment)
                 else:

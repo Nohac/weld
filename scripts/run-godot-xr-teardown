@@ -1,0 +1,116 @@
+#!/usr/bin/env python3
+"""Bounded native XR window-retirement regression, without codecs or networking.
+
+Requires an awake Pico. Uses the ordinary debug export and shared ADB server.
+legacy uses current window deletion; detach clears layer viewports first;
+delayed also waits three process frames before deleting the detached nodes.
+"""
+import argparse
+import os
+from pathlib import Path
+import runpy
+import shutil
+import signal
+import subprocess
+import sys
+import tempfile
+import time
+
+ROOT = Path(__file__).resolve().parent.parent
+API = runpy.run_path(str(ROOT / "scripts/run-godot-xr"))
+PACKAGE = "com.example.weldvr"
+
+
+def probe(adb, mode, run):
+    subprocess.run([*adb, "shell", "am", "force-stop", PACKAGE], check=True, timeout=10)
+    path = run / "viewer.log"
+    with path.open("w") as output:
+        capture = subprocess.Popen([*adb, "logcat", "-T", "1", "-v", "threadtime", "-s",
+                                    "godot:I", "libc:F", "*:S"], stdout=output, stderr=subprocess.STDOUT)
+        try:
+            subprocess.run([*adb, "shell", "-T", "run-as", PACKAGE, "sh", "-c",
+                            "'cat > files/xr-teardown-probe'"], input=mode, text=True, check=True, timeout=10)
+            subprocess.run([*adb, "shell", "am", "start", "-n",
+                            PACKAGE + "/com.godot.game.GodotAppLauncher"], check=True, timeout=10)
+            deadline = time.monotonic() + 60
+            while time.monotonic() < deadline:
+                time.sleep(1)
+                if capture.poll() is not None or path.stat().st_size > 4 * 1024 * 1024:
+                    raise RuntimeError("probe capture exited or exceeded 4 MiB")
+                log = path.read_text(errors="replace")
+                # Ignore any preceding run's final buffered logcat record.
+                _, started, current = log.partition("WELD_TEARDOWN_PROBE_START")
+                if "SCRIPT ERROR:" in log or "WELD_TEARDOWN_PROBE invalid" in log:
+                    raise RuntimeError(f"probe startup failed; see {path}")
+                if not started:
+                    continue
+                if "Fatal signal" in current:
+                    raise RuntimeError(f"native teardown crash; see {path}")
+                if "WELD_TEARDOWN_PROBE_DONE" in current:
+                    errors = current.count("texture_free") + current.count("texture_proxy_update")
+                    if errors:
+                        raise RuntimeError(f"completed with {errors} texture-lifetime errors; see {path}")
+                    print("Passed: 40 native windows created and retired.", flush=True)
+                    return
+                state = subprocess.run([*adb, "shell", "pidof", PACKAGE], capture_output=True, timeout=10)
+                if state.returncode:
+                    raise RuntimeError(f"viewer exited without probe completion; see {path}")
+            raise RuntimeError(f"probe timed out (is the headset awake?); see {path}")
+        finally:
+            try:
+                subprocess.run([*adb, "shell", "am", "force-stop", PACKAGE], timeout=10, check=False)
+                subprocess.run([*adb, "shell", "run-as", PACKAGE, "rm", "-f",
+                                "files/xr-teardown-probe"], timeout=10, check=False)
+            finally:
+                capture.terminate()
+                try:
+                    capture.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    capture.kill()
+                    capture.wait(timeout=5)
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--mode", choices=("legacy", "detach", "delayed"), default="legacy")
+    parser.add_argument("--adb", default=os.environ.get("ADB", "adb"))
+    parser.add_argument("--serial")
+    parser.add_argument("--skip-build", action="store_true", help="reuse the installed debug APK")
+    args = parser.parse_args()
+    executable = shutil.which(args.adb)
+    if not executable:
+        raise RuntimeError("ADB missing")
+    devices = subprocess.check_output([executable, "devices"], text=True, timeout=10)
+    ready = [line.split()[0] for line in devices.splitlines() if line.endswith("\tdevice")]
+    if args.serial is None and len(ready) != 1:
+        raise RuntimeError("connect one headset or specify --serial")
+    serial = args.serial or ready[0]
+    if serial not in ready:
+        raise RuntimeError("headset is not ready")
+    adb = [executable, "-s", serial]
+    validation = ROOT / "target/validation"
+    validation.mkdir(parents=True, exist_ok=True)
+    run = Path(tempfile.mkdtemp(prefix="xr-teardown-", dir=validation))
+    print(f"Probe logs: {run}", flush=True)
+    with API["device_lock"](serial), API["preparation_lock"]():
+        environment = API["build_environment"](dict(os.environ))
+        if not args.skip_build:
+            API["preparation"](argparse.Namespace(recheck=False), run, environment)
+            API["run_step"](API["Step"]("install", [*adb, "install", "-r", str(API["APK"])],
+                                       120, "Success"), run, environment)
+        probe(adb, args.mode, run)
+    return 0
+
+
+if __name__ == "__main__":
+    def interrupted(_signal, _frame):
+        raise KeyboardInterrupt
+    for shutdown_signal in (signal.SIGTERM, signal.SIGHUP):
+        signal.signal(shutdown_signal, interrupted)
+    try:
+        sys.exit(main())
+    except KeyboardInterrupt:
+        sys.exit(130)
+    except (OSError, RuntimeError, subprocess.SubprocessError) as error:
+        print(f"XR teardown probe failed: {error}", file=sys.stderr)
+        sys.exit(1)

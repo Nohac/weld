@@ -1,68 +1,65 @@
-[gd_scene load_steps=7 format=3]
+[gd_scene format=3 uid="uid://b2qidtrorqj2m"]
 
-[ext_resource type="Script" path="res://scenes/xr.gd" id="1"]
+[ext_resource type="Script" uid="uid://dhghgbujxgcpt" path="res://scenes/xr.gd" id="1"]
 [ext_resource type="PackedScene" uid="uid://bjii61v6tg6cf" path="res://scenes/video_panel.tscn" id="2"]
-[ext_resource type="PackedScene" path="res://scenes/controller_pointer.tscn" id="3"]
-[ext_resource type="Script" path="res://scenes/controller_rig.gd" id="4"]
+[ext_resource type="PackedScene" uid="uid://cr8mhrkosvqj8" path="res://scenes/controller_pointer.tscn" id="3"]
+[ext_resource type="Script" uid="uid://bv5of7dc4d51h" path="res://scenes/controller_rig.gd" id="4"]
 
 [sub_resource type="Environment" id="Environment"]
-background_mode = 0
 ambient_light_source = 2
 ambient_light_color = Color(1, 1, 1, 1)
-ambient_light_energy = 0.6
 ambient_light_sky_contribution = 0.0
+ambient_light_energy = 0.6
 
 [sub_resource type="QuadMesh" id="PanelMesh"]
-size = Vector2(1.6, 1.0)
+size = Vector2(1.6, 1)
 
-[node name="XR" type="Node3D"]
+[node name="XR" type="Node3D" unique_id=1435003992]
 script = ExtResource("1")
 
-[node name="WorldEnvironment" type="WorldEnvironment" parent="."]
+[node name="WorldEnvironment" type="WorldEnvironment" parent="." unique_id=841672975]
 environment = SubResource("Environment")
 
-[node name="ControllerLight" type="DirectionalLight3D" parent="."]
-rotation = Vector3(-0.8, -0.5, 0)
+[node name="ControllerLight" type="DirectionalLight3D" parent="." unique_id=512540356]
+transform = Transform3D(0.87758255, 0.34391883, -0.334019, 0, 0.6967067, 0.7173561, 0.47942555, -0.6295392, 0.61141765, 0, 0, 0)
 light_energy = 1.2
-shadow_enabled = false
 
-[node name="XROrigin3D" type="XROrigin3D" parent="."]
+[node name="XROrigin3D" type="XROrigin3D" parent="." unique_id=1416037373]
 
-[node name="XRCamera3D" type="XRCamera3D" parent="XROrigin3D"]
+[node name="XRCamera3D" type="XRCamera3D" parent="XROrigin3D" unique_id=2040992388]
 current = true
-near = 0.05
 
-[node name="RightControllerRig" type="Node3D" parent="XROrigin3D"]
+[node name="RightControllerRig" type="Node3D" parent="XROrigin3D" unique_id=1355984505]
 visible = false
 script = ExtResource("4")
 
-[node name="LeftController" type="XRController3D" parent="XROrigin3D"]
-tracker = &"left_hand"
-pose = &"grip"
-
-[node name="Grip" type="XRController3D" parent="XROrigin3D/RightControllerRig"]
+[node name="Grip" type="XRController3D" parent="XROrigin3D/RightControllerRig" unique_id=195501642]
 tracker = &"right_hand"
 pose = &"grip"
 
-[node name="Aim" type="XRController3D" parent="XROrigin3D/RightControllerRig"]
+[node name="Aim" type="XRController3D" parent="XROrigin3D/RightControllerRig" unique_id=894517474]
 tracker = &"right_hand"
 pose = &"aim"
 
-[node name="PointerTilt" type="Node3D" parent="XROrigin3D/RightControllerRig/Aim"]
+[node name="PointerTilt" type="Node3D" parent="XROrigin3D/RightControllerRig/Aim" unique_id=703583709]
 
-[node name="Pointer" parent="XROrigin3D/RightControllerRig/Aim/PointerTilt" instance=ExtResource("3")]
+[node name="Pointer" parent="XROrigin3D/RightControllerRig/Aim/PointerTilt" unique_id=1994940094 instance=ExtResource("3")]
 
-[node name="PanelViewport" type="SubViewport" parent="."]
+[node name="LeftController" type="XRController3D" parent="XROrigin3D" unique_id=30794525]
+tracker = &"left_hand"
+pose = &"grip"
+
+[node name="PanelViewport" type="SubViewport" parent="." unique_id=1691335358]
 disable_3d = true
 size = Vector2i(1600, 1000)
 render_target_update_mode = 4
 
-[node name="VideoPanel" parent="PanelViewport" instance=ExtResource("2")]
+[node name="VideoPanel" parent="PanelViewport" unique_id=1454954752 instance=ExtResource("2")]
 auto_connect = false
 spatial = true
 
-[node name="Screen" type="MeshInstance3D" parent="."]
+[node name="Screen" type="MeshInstance3D" parent="." unique_id=1211908167]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.4, -1.6)
 visible = false
-position = Vector3(0, 1.4, -1.6)
 cast_shadow = 0
 mesh = SubResource("PanelMesh")

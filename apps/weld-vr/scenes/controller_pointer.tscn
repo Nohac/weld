@@ -1,8 +1,8 @@
-[gd_scene load_steps=4 format=3]
+[gd_scene format=3 uid="uid://cr8mhrkosvqj8"]
 
 [sub_resource type="StandardMaterial3D" id="PointerMaterial"]
-shading_mode = 0
 transparency = 1
+shading_mode = 0
 albedo_color = Color(1, 0.16, 0.16, 0.8)
 
 [sub_resource type="BoxMesh" id="LaserMesh"]
@@ -16,23 +16,25 @@ height = 0.01
 radial_segments = 16
 rings = 8
 
-[node name="Pointer" type="WeldXrPointer"]
+[node name="Pointer" type="WeldXrPointer" unique_id=1394775669]
 visible = false
 
-[node name="Laser" type="MeshInstance3D" parent="."]
-position = Vector3(0, 0, -1.5)
+[node name="Laser" type="MeshInstance3D" parent="." unique_id=2019007831]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, -1.5)
 cast_shadow = 0
 mesh = SubResource("LaserMesh")
 
-[node name="Target" type="MeshInstance3D" parent="."]
+[node name="Target" type="MeshInstance3D" parent="." unique_id=1743073819]
 visible = false
 cast_shadow = 0
 mesh = SubResource("TargetMesh")
 
-[node name="GamepadIndicator" type="Label3D" parent="."]
+[node name="GamepadIndicator" type="Label3D" parent="." unique_id=923313369]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.055, -0.16)
 visible = false
-position = Vector3(0, 0.055, -0.16)
 pixel_size = 0.00035
-font_size = 24
-text = "Gamepad\nRight grip: click / drag\nHold left grip to exit"
 no_depth_test = true
+text = "Gamepad
+Right grip: click / drag
+Hold left grip to exit"
+font_size = 24

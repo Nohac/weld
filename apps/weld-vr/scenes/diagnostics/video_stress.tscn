@@ -1,6 +1,6 @@
-[gd_scene format=3]
+[gd_scene format=3 uid="uid://ca5twb47nlu44"]
 
-[ext_resource type="Script" path="res://scenes/diagnostics/video_stress.gd" id="1"]
+[ext_resource type="Script" uid="uid://ce1tlxpky2374" path="res://scenes/diagnostics/video_stress.gd" id="1"]
 
-[node name="VideoStress" type="Node3D"]
+[node name="VideoStress" type="Node3D" unique_id=1990473645]
 script = ExtResource("1")

@@ -1,8 +1,8 @@
-[gd_scene load_steps=2 format=3 uid="uid://d1bgda50xmko3"]
+[gd_scene format=3 uid="uid://d1bgda50xmko3"]
 
 [ext_resource type="PackedScene" uid="uid://bjii61v6tg6cf" path="res://scenes/video_panel.tscn" id="1"]
 
-[node name="Flat" type="Control"]
+[node name="Flat" type="Control" unique_id=1076824759]
 layout_mode = 3
 anchors_preset = 15
 anchor_right = 1.0
@@ -11,5 +11,6 @@ grow_horizontal = 2
 grow_vertical = 2
 mouse_filter = 2
 
-[node name="VideoPanel" parent="." instance=ExtResource("1")]
+[node name="VideoPanel" parent="." unique_id=826310394 instance=ExtResource("1")]
+layout_mode = 1
 desktop_input = true

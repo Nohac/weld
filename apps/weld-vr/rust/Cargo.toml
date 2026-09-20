@@ -10,7 +10,9 @@ name = "weld_vr"
 crate-type = ["cdylib"]
 
 [dependencies]
-godot = { version = "=0.5.5", features = ["api-4-7"] }
+# Godot 4.8 removed unused editor LSP methods from the 4.7 API (godot#114533).
+# Resolve only the methods we actually call while testing the 4.8 preview.
+godot = { version = "=0.5.5", features = ["api-4-7", "lazy-function-tables"] }
 anyhow = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

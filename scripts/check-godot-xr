@@ -15,7 +15,7 @@ def steps():
     step = API["Step"]
     cargo = ["--manifest-path", str(API["MANIFEST"])]
     target = ["--target", "x86_64-unknown-linux-gnu"]
-    godot = ["godot", "--path", str(API["PROJECT"])]
+    godot = [str(API["ROOT"] / "scripts/run-godot"), "--path", str(API["PROJECT"])]
     return [
         step("format", ["cargo", "fmt", *cargo, "--check"], 60),
         step("rust-tests", ["cargo", "test", *cargo, *target, "--locked", "-j2"], 600),

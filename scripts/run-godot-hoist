@@ -334,7 +334,7 @@ def main(argv=None):
             prepare_presentation_rules(args.presentation_rules, directory=receiver_directory)
             environment = {**diagnostic_environment(verbose=args.seconds is not None), "WELD_VR_DEVICE_DIR": str(receiver_directory)}
             hosts.append(LAUNCHER["OwnedHost"]("viewer",
-                ["godot", "--path", str(ROOT / "apps/weld-vr"), "--display-driver", "wayland", "--rendering-driver", "opengl3_es"],
+                [str(ROOT / "scripts/run-godot"), "--path", str(ROOT / "apps/weld-vr"), "--display-driver", "wayland", "--rendering-driver", "opengl3_es"],
                 environment, ROOT, run))
             wait(lambda: (receiver_directory / "public.identity").exists())
             public = (receiver_directory / "public.identity").read_text()

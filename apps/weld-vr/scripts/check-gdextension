@@ -4,6 +4,7 @@ set -euo pipefail
 ulimit -c 0
 
 project_directory=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+godot_launcher="$project_directory/../../scripts/run-godot"
 desktop_cursor=false
 case "${1:-}" in
   '') build_target=desktop ;;
@@ -36,7 +37,7 @@ run_godot() {
   env XDG_CONFIG_HOME="$work_directory/config" XDG_DATA_HOME="$work_directory/data" \
     XDG_CACHE_HOME="$work_directory/cache" \
     ADB_SERVER_SOCKET="localfilesystem:$work_directory/adb.sock" \
-    timeout 90s godot --headless --path "$work_directory/project" "$@"
+    timeout 90s "$godot_launcher" --headless --path "$work_directory/project" "$@"
 }
 
 check_log() {
@@ -72,7 +73,7 @@ if [[ "$desktop_cursor" == true ]]; then
   if ! env XDG_CONFIG_HOME="$work_directory/config" XDG_DATA_HOME="$work_directory/data" \
     XDG_CACHE_HOME="$work_directory/cache" \
     ADB_SERVER_SOCKET="localfilesystem:$work_directory/adb.sock" \
-    timeout 30s godot --path "$work_directory/project" \
+    timeout 30s "$godot_launcher" --path "$work_directory/project" \
       --display-driver wayland --rendering-driver opengl3_es \
       --script res://tests/cursor_smoke.gd > "$work_directory/cursor.log" 2>&1; then
     cat "$work_directory/cursor.log" >&2
@@ -103,7 +104,7 @@ grep -qx 'WELD_BUILD_HOOK_SMOKE_OK' "$work_directory/hooks.log"
 check_log "$work_directory/hooks.log"
 
 if [[ "$build_target" == android ]]; then
-  template_version=$(godot --version | cut -d. -f1-4)
+  template_version=$("$godot_launcher" --version | cut -d. -f1-4)
   template_directory="${XDG_DATA_HOME:-$HOME/.local/share}/godot/export_templates/$template_version"
   if [[ ! -f "$template_directory/android_debug.apk" ]]; then
     printf 'Missing Godot Android export template: %s\n' "$template_directory" >&2

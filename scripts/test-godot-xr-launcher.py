@@ -83,6 +83,28 @@ class WorkflowTests(unittest.TestCase):
             run.assert_not_called()
             launch.assert_not_called()
 
+    def test_only_exact_preview_shutdown_diagnostic_after_successful_export_is_accepted(self):
+        banner = "Godot Engine v4.8.dev6.official.8898c2b3d\n"
+        complete = "[ 99% ] export | Build complete.\n"
+        diagnostic = 'ERROR: EditorSettings not instantiated yet when getting setting "export/android/shutdown_adb_on_exit".\n'
+        with tempfile.TemporaryDirectory() as temporary:
+            log = Path(temporary) / "export.log"
+            step = MODULE.Step("pico-export", [], 1, engine=True)
+            log.write_text(banner + complete + diagnostic)
+            MODULE.validate(step, 0, log)
+            for text, code in [(banner + complete + diagnostic, 1),
+                               (banner + diagnostic, 0),
+                               (complete + diagnostic, 0),
+                               (banner.replace("dev6", "dev7") + complete + diagnostic, 0),
+                               (banner + complete + diagnostic + "ERROR: another failure\n", 0),
+                               (banner + diagnostic + complete, 0)]:
+                log.write_text(text)
+                with self.assertRaises(RuntimeError):
+                    MODULE.validate(step, code, log)
+            log.write_text(banner + complete + diagnostic)
+            with self.assertRaises(RuntimeError):
+                MODULE.validate(MODULE.Step("scene", [], 1, engine=True), 0, log)
+
     def test_same_device_is_locked_until_workflow_cleanup(self):
         with tempfile.TemporaryDirectory() as temporary, patch.dict(MODULE.os.environ, {"XDG_RUNTIME_DIR": temporary}):
             with MODULE.device_lock("pico"):

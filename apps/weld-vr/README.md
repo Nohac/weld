@@ -4,6 +4,11 @@ Godot shell for Weld's VR client, initially developed on an Android phone.
 Keep the Godot project and Rust GDExtension together here; reuse existing
 Weld crates rather than duplicating protocol, transport or media logic.
 
+The current XR checkpoint uses **Godot 4.8-dev6** with matching Android export
+templates to avoid a reproduced 4.7.1 native-window teardown crash. See
+[engine issues and workarounds](../../docs/godot-engine-issues.md) for the exact
+version, remaining texture errors, Rust bindings and Nix launch/export setup.
+
 The project uses Compatibility/OpenGL ES for native decoded-buffer import.
 Linux selects `opengl3_es`; Android uses its native GLES driver. Godot 4.7.1
 cannot opt into the Vulkan device extensions needed by our external-memory
@@ -28,7 +33,7 @@ comes from Gradle, independently of scene helpers. See
 ## Rust bridge
 
 `rust/` is a small, independent Cargo workspace, pinned to `godot` 0.5.5 with
-Godot 4.7 API bindings. It remains separate from the Linux compositor workspace,
+Godot 4.7 API bindings and lazy function tables for the 4.8 preview. It remains separate from the Linux compositor workspace,
 with shared crates added as explicit path dependencies. Normal Godot bindings
 provide typed input and cursor APIs. `WeldVideoPlayer` owns desktop input in
 Rust; scenes supply only the displayed control and presentation-mode setting.
@@ -57,7 +62,7 @@ apps/weld-vr/scripts/build-gdextension
 # Linux editor library plus Android ARM64 library:
 apps/weld-vr/scripts/build-gdextension android
 
-godot --editor --display-driver wayland --rendering-driver opengl3_es --path apps/weld-vr
+scripts/run-godot --editor --display-driver wayland --rendering-driver opengl3_es --path apps/weld-vr
 ```
 
 Build before opening a fresh checkout, so Godot can register the native class.

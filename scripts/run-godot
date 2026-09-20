@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Keep the native Rust tool selection outside steam-run's FHS environment.
+# Godot's export hook restores this PATH before invoking Cargo.
+export WELD_RUST_BUILD_PATH="${WELD_RUST_BUILD_PATH-${PATH}}"
+
+# A local preview is opt-in by installing ~/.local/bin/godot (or setting an
+# explicit binary). Other development environments keep their packaged Godot.
+godot_binary=${WELD_GODOT_BIN:-"$HOME/.local/bin/godot"}
+if [[ -n ${WELD_GODOT_BIN:-} || -x "$godot_binary" ]]; then
+  if [[ ! -x "$godot_binary" ]]; then
+    printf 'Godot binary is not executable: %s\n' "$godot_binary" >&2
+    exit 1
+  fi
+  exec steam-run "$godot_binary" "$@"
+fi
+exec godot "$@"

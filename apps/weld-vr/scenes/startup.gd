@@ -6,6 +6,9 @@ const XR_SCENE = preload("res://scenes/xr.tscn")
 
 
 func _ready() -> void:
+	if FileAccess.file_exists("user://xr-teardown-probe"):
+		add_child(load("res://scenes/diagnostics/xr_teardown_probe.gd").new())
+		return
 	if FileAccess.file_exists("user://xr-overlap-probe"):
 		add_child(load("res://scenes/diagnostics/xr_overlap_probe.gd").new())
 		return

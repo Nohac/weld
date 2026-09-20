@@ -281,6 +281,10 @@ Container sorting. A resize can still have one frame of metadata/layout delay.
 
 ## Export and run on Pico
 
+The current checkpoint uses Godot 4.8-dev6 and matching Android templates.
+See [engine issues and workarounds](godot-engine-issues.md) for preview selection,
+the Nix SDK compatibility view, native teardown evidence and remaining errors.
+
 From the shared development shell, `scripts/run-godot-xr` checks native build
 freshness, exports the Pico APK when needed, installs it and launches Blender
 for three minutes. Launching does not run tests, formatting, Clippy or scene
@@ -332,7 +336,7 @@ setting also removes that declaration. No vendor SDK or camera-feed permission
 is needed for alpha-blend passthrough.
 
 ```sh
-godot --headless --path apps/weld-vr --install-android-build-template \
+scripts/run-godot --headless --path apps/weld-vr --install-android-build-template \
   --export-debug 'Android Pico' "$PWD/apps/weld-vr/build/weld-vr-pico-debug.apk"
 adb -s PICO_SERIAL install -r apps/weld-vr/build/weld-vr-pico-debug.apk
 scripts/run-godot-hoist --serial PICO_SERIAL --app blender
@@ -481,7 +485,9 @@ at both rates. These observations do not establish a controlled performance gain
 
 A full-rate Preferences-close test also produced a native Godot GL-thread
 SIGSEGV. Earlier baseline runs reproduced texture-cleanup errors, but not that
-crash; whether the crash is a regression remains unresolved. The launcher still
+crash. Later 4.7.1 crash diagnosis and bounded 4.8-dev6 validation are recorded in
+[engine issues](godot-engine-issues.md#native-composition-layer-teardown-crash).
+The launcher still
 completed successfully because it did not monitor the Android process throughout
 the run. Check viewer logs and Android exit information when assessing success.
 

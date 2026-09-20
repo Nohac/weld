@@ -13,8 +13,7 @@ mouse_filter = 2
 script = ExtResource("1")
 
 [node name="VideoFrame" type="Control" parent="." unique_id=474619565]
-layout_mode = 0
-anchors_preset = 15
+anchors_preset = 0
 anchor_right = 1.0
 anchor_bottom = 1.0
 grow_horizontal = 2
