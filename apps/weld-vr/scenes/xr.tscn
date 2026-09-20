@@ -36,6 +36,10 @@ near = 0.05
 visible = false
 script = ExtResource("4")
 
+[node name="LeftController" type="XRController3D" parent="XROrigin3D"]
+tracker = &"left_hand"
+pose = &"grip"
+
 [node name="Grip" type="XRController3D" parent="XROrigin3D/RightControllerRig"]
 tracker = &"right_hand"
 pose = &"grip"

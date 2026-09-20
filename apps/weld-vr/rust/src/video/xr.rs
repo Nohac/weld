@@ -1,6 +1,7 @@
 //! A single tracked XR pointer. Godot objects stay on the main thread; only
 //! ordinary owned pointer input enters the existing playback mailbox.
 pub(super) mod controls;
+mod gamepad;
 mod geometry;
 mod gesture;
 mod policy;
@@ -12,7 +13,7 @@ use controls::Part;
 use gesture::Gesture;
 use godot::{
     classes::{
-        Control, Engine, INode3D, MeshInstance3D, Node, Node3D, OpenXrInterface, QuadMesh,
+        Control, Engine, INode3D, Label3D, MeshInstance3D, Node, Node3D, OpenXrInterface, QuadMesh,
         XrController3D, XrServer, notify::Node3DNotification, open_xr_interface::SessionState,
         plane_mesh::Orientation,
     },
@@ -25,6 +26,8 @@ use weld_client::InputPosition;
 struct Configuration {
     player: Gd<WeldVideoPlayer>,
     controller: Gd<XrController3D>,
+    left_controller: Gd<XrController3D>,
+    gamepad_indicator: Gd<Label3D>,
     panel: Gd<MeshInstance3D>,
     view: Gd<Control>,
     laser: Gd<MeshInstance3D>,
@@ -35,6 +38,8 @@ impl Configuration {
     fn valid(&self) -> bool {
         alive(&self.player)
             && alive(&self.controller)
+            && alive(&self.left_controller)
+            && alive(&self.gamepad_indicator)
             && alive(&self.panel)
             && alive(&self.view)
             && alive(&self.laser)
@@ -86,6 +91,7 @@ struct WeldXrPointer {
     configuration: Option<Configuration>,
     policy: Policy,
     gesture: Gesture,
+    gamepad: gamepad::Mode,
     last_position: InputPosition,
     started: Instant,
     application_active: bool,
@@ -100,6 +106,7 @@ impl INode3D for WeldXrPointer {
             configuration: None,
             policy: Policy::default(),
             gesture: Gesture::default(),
+            gamepad: gamepad::Mode::default(),
             last_position: InputPosition::new(0.0, 0.0),
             started: Instant::now(),
             application_active: true,
@@ -114,12 +121,67 @@ impl INode3D for WeldXrPointer {
         self.base_mut().set_process(false);
     }
     fn process(&mut self, _delta: f64) {
+        // Gd<Node> does not keep a window alive. A closed dialog can invalidate
+        // last frame's target before hit testing compares Godot identities.
+        if self
+            .active_player
+            .as_ref()
+            .is_some_and(|player| !alive(player))
+        {
+            self.reset_pointer();
+            self.active_player = None;
+        }
+        self.gesture.discard_deleted_target();
+        let hands = self.sample_hands();
+        if self.gamepad.step(hands, Instant::now()) {
+            self.show_controls(None, 0.0);
+            self.gesture.reset();
+            if !self.gamepad.active() {
+                // Exit, denial or tracking loss releases a grip-driven mouse
+                // drag before held controls can regain their shell bindings.
+                self.reset_pointer();
+            }
+            if let Some(sample) = self.sample() {
+                if self.gamepad.active() {
+                    // The pointer can select a different surface; the gamepad
+                    // still belongs to the controller captured on entry.
+                    self.send_pointer(&sample);
+                }
+                self.draw_pointer(sample.distance, sample.hit || sample.chrome.is_some());
+            } else {
+                self.reset_pointer();
+                self.show_gamepad();
+            }
+            return;
+        }
         let Some(sample) = self.sample() else {
             self.deactivate();
             return;
         };
         let aim = self.base().get_global_transform();
         let shell_input = self.gesture.step(&sample, aim);
+        if self.gesture.take_gamepad_click() {
+            let controller = sample
+                .player
+                .bind()
+                .xr_controller()
+                .and_then(crate::playback::Controller::gamepad);
+            if let Some(controller) = controller
+                && self.gamepad.enter(controller)
+            {
+                if let Some(config) = &self.configuration {
+                    config.reset(self.active_player.as_ref(), self.last_position);
+                }
+                self.policy.deactivate();
+                self.gesture.reset();
+                self.show_controls(None, 0.0);
+                self.show_gamepad();
+                return;
+            }
+            godot_warn!(
+                "Gamepad unavailable: enable --hoist-gamepad on the source and wait for connection"
+            );
+        }
         let selected = (sample.near_edge || sample.chrome.is_some() || self.gesture.active())
             .then_some(sample.surface.as_ref())
             .flatten();
@@ -139,14 +201,51 @@ impl INode3D for WeldXrPointer {
             self.draw_pointer(sample.distance, sample.chrome.is_some() || sample.hit);
             return;
         }
-        let actions = self.policy.step(
-            sample.token,
-            sample.hit,
-            sample.analog,
-            sample.click,
-            sample.axis,
-            self.started.elapsed().as_secs_f64(),
-        );
+        self.send_pointer(&sample);
+        self.draw_pointer(sample.distance, sample.hit);
+    }
+    fn on_notification(&mut self, what: Node3DNotification) {
+        if matches!(
+            what,
+            Node3DNotification::APPLICATION_PAUSED | Node3DNotification::APPLICATION_FOCUS_OUT
+        ) {
+            self.application_active = false;
+            self.deactivate();
+        } else if matches!(
+            what,
+            Node3DNotification::APPLICATION_RESUMED | Node3DNotification::APPLICATION_FOCUS_IN
+        ) {
+            self.application_active = true;
+        }
+    }
+    fn exit_tree(&mut self) {
+        self.deactivate();
+    }
+}
+
+impl WeldXrPointer {
+    fn reset_pointer(&mut self) {
+        if self.policy.deactivate()
+            && let Some(config) = &self.configuration
+        {
+            config.reset(self.active_player.as_ref(), self.last_position);
+        }
+    }
+    fn send_pointer(&mut self, sample: &Sample) {
+        let now = self.started.elapsed().as_secs_f64();
+        let actions = if self.gamepad.active() {
+            self.policy
+                .step_gamepad(sample.token, sample.hit, sample.grip, now)
+        } else {
+            self.policy.step(
+                sample.token,
+                sample.hit,
+                sample.analog,
+                sample.click,
+                sample.axis,
+                now,
+            )
+        };
         self.last_position = sample.position;
         if let Some(config) = self.configuration.as_mut() {
             if actions.reset {
@@ -177,28 +276,50 @@ impl INode3D for WeldXrPointer {
                 }
             }
         }
-        self.draw_pointer(sample.distance, sample.hit);
     }
-    fn on_notification(&mut self, what: Node3DNotification) {
-        if matches!(
-            what,
-            Node3DNotification::APPLICATION_PAUSED | Node3DNotification::APPLICATION_FOCUS_OUT
-        ) {
-            self.application_active = false;
-            self.deactivate();
-        } else if matches!(
-            what,
-            Node3DNotification::APPLICATION_RESUMED | Node3DNotification::APPLICATION_FOCUS_IN
-        ) {
-            self.application_active = true;
+    fn sample_hands(&self) -> Option<gamepad::Hands> {
+        let config = self.configuration.as_ref()?;
+        if !self.application_active || !config.valid() {
+            return None;
         }
+        let xr = XrServer::singleton()
+            .find_interface("OpenXR")?
+            .try_cast::<OpenXrInterface>()
+            .ok()?;
+        if !xr.is_initialized()
+            || xr.get_session_state() != SessionState::FOCUSED
+            || !config.controller.get_has_tracking_data()
+            || !config.left_controller.get_has_tracking_data()
+        {
+            return None;
+        }
+        let hand = |controller: &Gd<XrController3D>| {
+            let stick = controller.get_vector2("primary");
+            gamepad::Hand {
+                stick: [stick.x, stick.y],
+                trigger: controller.get_float("trigger"),
+                grip: controller.get_float("grip"),
+                a: controller.is_button_pressed("ax_button"),
+                b: controller.is_button_pressed("by_button"),
+                click: controller.is_button_pressed("primary_click"),
+            }
+        };
+        Some(gamepad::Hands {
+            left: hand(&config.left_controller),
+            right: hand(&config.controller),
+        })
     }
-    fn exit_tree(&mut self) {
-        self.deactivate();
+    fn show_gamepad(&mut self) {
+        let active = self.gamepad.active() && self.application_active;
+        if let Some(config) = &mut self.configuration
+            && config.valid()
+        {
+            config.laser.hide();
+            config.marker.hide();
+            config.gamepad_indicator.set_visible(active);
+        }
+        self.base_mut().set_visible(active);
     }
-}
-
-impl WeldXrPointer {
     fn show_controls(&self, selected: Option<&Gd<WeldSurface>>, opacity: f32) {
         let Some(config) = &self.configuration else {
             return;
@@ -222,6 +343,8 @@ impl WeldXrPointer {
     fn draw_pointer(&mut self, distance: f32, hit: bool) {
         let scale = self.base().get_global_basis().col_c().length();
         if let Some(config) = &mut self.configuration {
+            config.laser.show();
+            config.gamepad_indicator.set_visible(self.gamepad.active());
             // The geometry helper's distance is world-space; meshes are local.
             let length = distance / scale;
             config
@@ -246,6 +369,7 @@ impl WeldXrPointer {
         &mut self,
         player: Gd<WeldVideoPlayer>,
         controller: Gd<XrController3D>,
+        left_controller: Gd<XrController3D>,
         panel: Gd<MeshInstance3D>,
         view: Gd<Control>,
     ) {
@@ -263,6 +387,14 @@ impl WeldXrPointer {
             .base()
             .get_node_or_null("Target")
             .and_then(|node| node.try_cast::<MeshInstance3D>().ok());
+        let indicator = self
+            .base()
+            .get_node_or_null("GamepadIndicator")
+            .and_then(|node| node.try_cast::<Label3D>().ok());
+        let Some(gamepad_indicator) = indicator else {
+            godot_error!("XR pointer needs GamepadIndicator");
+            return;
+        };
         let (Some(laser), Some(marker)) = (laser, marker) else {
             godot_error!("XR pointer needs its Laser and Target presentation nodes");
             return;
@@ -278,6 +410,8 @@ impl WeldXrPointer {
         self.configuration = Some(Configuration {
             player,
             controller,
+            left_controller,
+            gamepad_indicator,
             panel,
             view,
             laser,
@@ -290,13 +424,10 @@ impl WeldXrPointer {
 
 impl WeldXrPointer {
     fn deactivate(&mut self) {
+        self.gamepad.stop();
         self.show_controls(None, 0.0);
         self.gesture.reset();
-        if self.policy.deactivate()
-            && let Some(config) = &self.configuration
-        {
-            config.reset(self.active_player.as_ref(), self.last_position);
-        }
+        self.reset_pointer();
         self.active_player = None;
         self.base_mut().hide();
     }
@@ -447,9 +578,10 @@ impl WeldXrPointer {
             .project(aim)?;
             Some((hit, size))
         });
-        let near_edge = controls_projection
-            .as_ref()
-            .is_some_and(|(hit, size)| controls::near_edge(hit.pixels, *size));
+        let near_edge = !self.gamepad.active()
+            && controls_projection
+                .as_ref()
+                .is_some_and(|(hit, size)| controls::near_edge(hit.pixels, *size));
         let edge_opacity = controls_projection
             .as_ref()
             .map_or(0.0, |(hit, size)| controls::edge_opacity(hit.pixels, *size));
@@ -460,13 +592,16 @@ impl WeldXrPointer {
         if near_edge && let Some((hit, _)) = &controls_projection {
             distance = distance.min(hit.distance);
         }
-        let chrome = surface.as_ref().and_then(|surface| {
-            let content_y = controls_projection
-                .as_ref()
-                .filter(|_| near_edge && !self.gesture.active())
-                .map(|(hit, _)| hit.pixels.y);
-            surface.clone().bind_mut().controls(aim, content_y)
-        });
+        let chrome = surface
+            .as_ref()
+            .filter(|_| !self.gamepad.active())
+            .and_then(|surface| {
+                let content_y = controls_projection
+                    .as_ref()
+                    .filter(|_| near_edge && !self.gesture.active())
+                    .map(|(hit, _)| hit.pixels.y);
+                surface.clone().bind_mut().controls(aim, content_y)
+            });
         if let Some((_, chrome_distance)) = chrome {
             distance = chrome_distance;
         }

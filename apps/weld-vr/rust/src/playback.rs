@@ -67,6 +67,7 @@ enum PresentationUpdate {
 
 #[derive(Default)]
 struct SessionState {
+    gamepad: Mutex<Option<weld_hoist_core::gamepad::GamepadController>>,
     observations: observations::Observations,
     input: Mutex<input::InputState>,
     presentation_rate: Mutex<Option<PresentationRate>>,
@@ -626,6 +627,9 @@ impl Controller {
     pub fn reset_input(&self) {
         lock(&self.shared.session.input).reset();
         self.wake_input();
+    }
+    pub(crate) fn gamepad(&self) -> Option<weld_hoist_core::gamepad::GamepadController> {
+        lock(&self.shared.session.gamepad).clone()
     }
     pub fn scroll_input(&self, amount: f64) {
         if self.stopped || self.shared.session.cancelled.load(Ordering::Acquire) {

@@ -167,6 +167,13 @@ impl HoistSourcePort for LocalSourcePort {
     fn submit(&mut self, command: SourcePortCommand) -> HoistPortResult<()> {
         match command {
             SourcePortCommand::FocusCleared => Ok(()),
+            SourcePortCommand::Gamepad(status) => self.queue_source(
+                SourceEnvelope {
+                    session: weld_hoist_protocol::gamepad::GAMEPAD_SESSION,
+                    message: SourceMessage::Gamepad(status),
+                },
+                Vec::new(),
+            ),
             SourcePortCommand::MapSurface { session, surface } => self.queue_source(
                 SourceEnvelope {
                     session,
@@ -237,6 +244,7 @@ impl HoistSourcePort for LocalSourcePort {
                 }
             }
             DestinationMessage::Request(_)
+            | DestinationMessage::Gamepad(_)
             | DestinationMessage::Input(_)
             | DestinationMessage::Reclaim
             | DestinationMessage::CursorReceived { .. } => {}

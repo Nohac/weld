@@ -1150,6 +1150,15 @@ impl<T: EncodedSourceTransport> HoistSourcePort for EncodedSourcePort<T> {
                 }
                 Ok(())
             }
+            SourcePortCommand::Gamepad(status) => {
+                self.output
+                    .push(SourceTransportPacket::Control(SourceEnvelope {
+                        session: weld_hoist_protocol::gamepad::GAMEPAD_SESSION,
+                        message: SourceMessage::Gamepad(status),
+                    }))
+                    .map_err(protocol_error)?;
+                self.progress()
+            }
             SourcePortCommand::MapSurface { session, surface } => {
                 if let Some(state) = &mut self.state {
                     state.activity.register(session, surface);
@@ -1260,6 +1269,7 @@ impl<T: EncodedSourceTransport> HoistSourcePort for EncodedSourcePort<T> {
                 ));
             }
             DestinationMessage::Request(_)
+            | DestinationMessage::Gamepad(_)
             | DestinationMessage::Input(_)
             | DestinationMessage::Reclaim
             | DestinationMessage::CursorReceived { .. } => {}
@@ -2036,6 +2046,10 @@ impl<T: EncodedDestinationTransport, P: DecodedFramePublisher> EncodedDestinatio
                     .map_err(protocol_error)?;
             }
             SourceTransportPacket::Control(packet) => match packet.message {
+                SourceMessage::Gamepad(status) => records.push(DestinationPortRecord {
+                    session: packet.session,
+                    event: DestinationPortEvent::Gamepad(status),
+                }),
                 SourceMessage::Cursor { update, sequence } => records.push(DestinationPortRecord {
                     session: packet.session,
                     event: DestinationPortEvent::Cursor { update, sequence },

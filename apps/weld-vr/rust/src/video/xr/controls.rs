@@ -32,6 +32,7 @@ pub(super) fn edge_opacity(uv: Vector2, size: Vector2) -> f32 {
 pub(crate) enum Part {
     Drag,
     Close,
+    Gamepad,
 }
 
 fn part_at(point: Vector2) -> Option<Part> {
@@ -46,6 +47,8 @@ fn part_at(point: Vector2) -> Option<Part> {
     }
     Some(if point.x < -0.06 {
         Part::Close
+    } else if point.x > 0.075 {
+        Part::Gamepad
     } else {
         Part::Drag
     })
@@ -138,6 +141,7 @@ impl Bar {
                 None => 0,
                 Some(Part::Drag) => 1,
                 Some(Part::Close) => 2,
+                Some(Part::Gamepad) => 3,
             }
             .to_variant(),
         );
@@ -151,6 +155,7 @@ mod tests {
     fn slim_controls_hit_close_on_left_and_handle_on_right() {
         assert_eq!(part_at(Vector2::new(-0.115, 0.0)), Some(Part::Close));
         assert_eq!(part_at(Vector2::new(0.045, 0.0)), Some(Part::Drag));
+        assert_eq!(part_at(Vector2::new(0.12, 0.0)), Some(Part::Gamepad));
         assert_eq!(part_at(Vector2::new(0.045, 0.035)), None);
         assert_eq!(part_at(SIZE * 0.5), None);
     }

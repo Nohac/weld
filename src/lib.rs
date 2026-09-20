@@ -229,6 +229,9 @@ pub fn run(arguments: AppArguments) -> Result<()> {
                     codec,
                     dump_directory: arguments.hoist_encoded_dump_dir,
                     bitrate_budget,
+                    gamepad: arguments
+                        .hoist_gamepad
+                        .then(|| Box::new(weld_gamepad::UinputGamepadProvider) as _),
                 },
             )?;
             app.add_client_wake_source(network_wake)

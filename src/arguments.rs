@@ -245,6 +245,10 @@ pub struct AppArguments {
     #[arg(long, value_enum, value_name = "CODEC")]
     pub(crate) hoist_codec: Option<HoistCodec>,
 
+    /// Allow this authenticated Iroh peer to create a host-visible virtual gamepad.
+    #[arg(long, requires = "hoist_iroh_listen")]
+    pub(crate) hoist_gamepad: bool,
+
     /// Shared encoder target, not a bandwidth cap (AV1: 8 Mbps; H.264: 16 Mbps).
     #[arg(long, value_name = "MBPS", value_parser = clap::value_parser!(u64).range(1..=u64::MAX / 1_000_000))]
     pub(crate) hoist_bitrate_target_mbps: Option<u64>,

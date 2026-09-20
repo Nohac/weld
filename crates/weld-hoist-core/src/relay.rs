@@ -17,12 +17,17 @@ use weld_client::{
 };
 use weld_hoist_protocol::{DestinationEnvelope, DestinationMessage, HoistSessionId};
 
+use crate::gamepad::{
+    GamepadCaptureState, GamepadController, GamepadProvider, GamepadSource, GamepadStatus,
+};
 use crate::{HoistEndpointCommand, relocated_surface};
+use weld_hoist_protocol::gamepad::GAMEPAD_SESSION;
 
 pub type HoistPortError = Box<dyn Error + Send + Sync>;
 pub type HoistPortResult<T> = Result<T, HoistPortError>;
 
 pub enum SourcePortCommand {
+    Gamepad(GamepadStatus),
     /// Local observation: a trusted focus request no longer names a mapped target.
     FocusCleared,
     MapSurface {
@@ -83,6 +88,7 @@ pub struct DestinationPortRecord {
 }
 
 pub enum DestinationPortEvent {
+    Gamepad(GamepadStatus),
     MappedSurface(ClientSurfaceId),
     Surface(ClientSurfaceEvent),
     WithdrawSurface(ClientSurfaceId),
@@ -147,6 +153,7 @@ pub enum SourceAdmission {
 
 /// One source-side relay shared by loopback and external bindings.
 pub struct SourceRelayAdapter {
+    gamepad: GamepadSource,
     upstream_source: ClientSourceId,
     cache: HashMap<ClientSurfaceId, CachedSurface>,
     mappings: HashMap<ClientSurfaceId, HoistSessionId>,
@@ -175,6 +182,7 @@ impl SourceRelayAdapter {
         admission: SourceAdmission,
     ) -> Self {
         Self {
+            gamepad: GamepadSource::default(),
             upstream_source,
             cache: HashMap::new(),
             mappings: HashMap::new(),
@@ -190,6 +198,19 @@ impl SourceRelayAdapter {
             admission_started: false,
             presentations: HashMap::new(),
             presentation_updates: Vec::new(),
+        }
+    }
+
+    pub fn with_gamepad(mut self, provider: Option<Box<dyn GamepadProvider>>) -> Self {
+        self.gamepad = GamepadSource::new(provider);
+        self
+    }
+
+    fn gamepad_status(&mut self, status: Option<GamepadStatus>) {
+        if let Some(status) = status
+            && let Err(error) = self.port.submit(SourcePortCommand::Gamepad(status))
+        {
+            self.fail(error);
         }
     }
 
@@ -463,6 +484,11 @@ impl SourceRelayAdapter {
         if self.failed {
             return;
         }
+        let expired = self.gamepad.expire(Instant::now());
+        self.gamepad_status(expired);
+        if self.failed {
+            return;
+        }
         if let Some(active) = &mut self.cursor_in_flight
             && !active.warned
             && active.sent_at.elapsed() >= Duration::from_secs(2)
@@ -478,6 +504,13 @@ impl SourceRelayAdapter {
                 return;
             }
         };
+        if self.port.ready() {
+            let status = self.gamepad.advertise();
+            self.gamepad_status(status);
+            if self.failed {
+                return;
+            }
+        }
         if self.admission == SourceAdmission::AllToplevels
             && !self.admission_started
             && self.port.ready()
@@ -501,6 +534,21 @@ impl SourceRelayAdapter {
     }
 
     fn accept_destination(&mut self, envelope: DestinationEnvelope) -> bool {
+        if let DestinationMessage::Gamepad(request) = envelope.message {
+            if envelope.session != GAMEPAD_SESSION || !self.port.ready() {
+                self.fail("gamepad control outside an authorized connection");
+                return false;
+            }
+            let now = Instant::now();
+            let expired = self.gamepad.expire(now);
+            self.gamepad_status(expired);
+            if self.failed {
+                return false;
+            }
+            let status = self.gamepad.accept(request, now);
+            self.gamepad_status(status);
+            return !self.failed;
+        }
         if let DestinationMessage::CursorReceived { surface, sequence } = envelope.message {
             let Some(active) = &self.cursor_in_flight else {
                 if self
@@ -613,6 +661,7 @@ impl SourceRelayAdapter {
             }
             DestinationMessage::BufferReleased { .. } | DestinationMessage::Reclaim => {}
             DestinationMessage::CursorReceived { .. } => {}
+            DestinationMessage::Gamepad(_) => {}
         }
         true
     }
@@ -622,6 +671,7 @@ impl SourceRelayAdapter {
             return;
         }
         self.failed = true;
+        self.gamepad.stop(GamepadCaptureState::Stopped);
         for (surface, _) in self.presentations.drain() {
             self.presentation_updates.push(ClientPresentationUpdate {
                 surface,
@@ -752,7 +802,11 @@ impl ClientAdapter for SourceRelayAdapter {
         if self.failed {
             None
         } else {
-            self.port.next_deadline()
+            self.port
+                .next_deadline()
+                .into_iter()
+                .chain(self.gamepad.deadline())
+                .min()
         }
     }
     fn presentation_source(&self) -> Option<ClientSourceId> {
@@ -817,6 +871,7 @@ impl ClientAdapter for SourceRelayAdapter {
 
 /// One destination-side relay shared by loopback and external bindings.
 pub struct DestinationRelayAdapter {
+    gamepad: Option<GamepadController>,
     upstream_source: ClientSourceId,
     descriptor: ClientSourceDescriptor,
     sessions: HashMap<ClientSurfaceId, HoistSessionId>,
@@ -835,6 +890,7 @@ impl DestinationRelayAdapter {
         port: impl HoistDestinationPort + 'static,
     ) -> Self {
         Self {
+            gamepad: None,
             upstream_source,
             descriptor,
             sessions: HashMap::new(),
@@ -845,6 +901,11 @@ impl DestinationRelayAdapter {
             port: Box::new(port),
             cursor_updates: HashMap::new(),
         }
+    }
+
+    pub fn with_gamepad(mut self, gamepad: Option<GamepadController>) -> Self {
+        self.gamepad = gamepad;
+        self
     }
 
     fn poll(&mut self) {
@@ -863,10 +924,25 @@ impl DestinationRelayAdapter {
                 break;
             }
         }
+        while !self.failed {
+            let Some(request) = self.gamepad.as_ref().and_then(GamepadController::pop) else {
+                break;
+            };
+            self.send_destination(GAMEPAD_SESSION, DestinationMessage::Gamepad(request));
+        }
     }
 
     fn apply_record(&mut self, record: DestinationPortRecord) -> bool {
         match record.event {
+            DestinationPortEvent::Gamepad(status) => {
+                if record.session != GAMEPAD_SESSION {
+                    self.fail("gamepad status crossed into a surface session");
+                    return false;
+                }
+                if let Some(gamepad) = &self.gamepad {
+                    gamepad.observe(status);
+                }
+            }
             DestinationPortEvent::Cursor { update, sequence } => {
                 if update.surface.source() != self.upstream_source {
                     self.fail("cursor feedback targeted another source");
@@ -1066,6 +1142,9 @@ impl DestinationRelayAdapter {
         self.failed = true;
         tracing::warn!(source = ?self.upstream_source, destination = ?self.descriptor.id,
             error = %reason, "hoist destination relay failed");
+        if let Some(gamepad) = &self.gamepad {
+            gamepad.disconnect();
+        }
         self.port.disconnect();
         let surfaces = self.sessions.keys().copied().collect::<Vec<_>>();
         for surface in surfaces {
@@ -1196,8 +1275,17 @@ fn destination_message_surface(message: &DestinationMessage) -> Option<ClientSur
         DestinationMessage::Request(request) => request_surface(request),
         DestinationMessage::Input(input) => Some(input.target.surface()),
         DestinationMessage::BufferReleased { .. }
+        | DestinationMessage::Gamepad(_)
         | DestinationMessage::Reclaim
         | DestinationMessage::CursorReceived { .. } => None,
+    }
+}
+
+impl Drop for DestinationRelayAdapter {
+    fn drop(&mut self) {
+        if let Some(gamepad) = &self.gamepad {
+            gamepad.disconnect();
+        }
     }
 }
 
@@ -1578,6 +1666,57 @@ mod tests {
     }
 
     struct FakeSourcePort(Rc<RefCell<FakeSourceState>>);
+
+    #[test]
+    fn connection_gamepad_is_opt_in_authorized_and_independent_of_surfaces() {
+        use crate::gamepad::{
+            GamepadRequest, GamepadState,
+            tests::{DeviceLog, Provider},
+        };
+        let state = Rc::new(RefCell::new(FakeSourceState::default()));
+        let log = Rc::new(RefCell::new(DeviceLog::default()));
+        let mut source =
+            SourceRelayAdapter::new(ClientSourceId::new(1), FakeSourcePort(state.clone()))
+                .with_gamepad(Some(Box::new(Provider(log.clone()))));
+        let send = |request| DestinationEnvelope {
+            session: GAMEPAD_SESSION,
+            message: DestinationMessage::Gamepad(request),
+        };
+        assert!(source.next_deadline().is_none());
+        source.poll();
+        assert!(matches!(
+            state.borrow().submitted.first(),
+            Some(SourcePortCommand::Gamepad(GamepadStatus::Available))
+        ));
+        assert!(source.accept_destination(send(GamepadRequest::Begin { generation: 1 })));
+        assert_eq!(log.borrow().opened, 1);
+        assert!(source.next_deadline().is_some());
+        assert!(source.accept_destination(send(GamepadRequest::State {
+            generation: 1,
+            state: GamepadState {
+                left: [42, 0],
+                ..Default::default()
+            }
+        })));
+        assert!(source.effects.is_empty());
+        assert_eq!(
+            state.borrow().accepted,
+            0,
+            "gamepad never reaches media or focus policy"
+        );
+        source.fail("test disconnect");
+        assert_eq!(log.borrow().states.last(), Some(&GamepadState::default()));
+        assert_eq!(log.borrow().dropped, 1);
+
+        let mut source =
+            SourceRelayAdapter::new(ClientSourceId::new(1), FakeSourcePort(state.clone()))
+                .with_gamepad(Some(Box::new(Provider(log.clone()))));
+        assert!(!source.accept_destination(DestinationEnvelope {
+            session: HoistSessionId::new(1),
+            message: DestinationMessage::Gamepad(GamepadRequest::Begin { generation: 2 }),
+        }));
+        assert_eq!(log.borrow().opened, 1);
+    }
 
     #[derive(Default)]
     struct FakeDestinationState {

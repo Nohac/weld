@@ -1,5 +1,6 @@
 //! Runtime-independent hoist sessions and same-process loopback client adapter.
 
+pub mod gamepad;
 mod loopback;
 mod relay;
 

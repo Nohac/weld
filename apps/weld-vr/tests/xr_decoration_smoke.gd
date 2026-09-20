@@ -131,9 +131,18 @@ func _run() -> void:
 		RenderingServer.force_draw(false)
 	image = viewport.get_texture().get_image()
 	if image.get_pixel(128, 128).a < 0.95 or image.get_pixel(10, 10).a > 0.01 \
-		or image.get_pixel(156, 128).r <= image.get_pixel(128, 116).r \
+		or image.get_pixel(134, 128).r <= image.get_pixel(128, 116).r \
 		or image.get_pixel(54, 128).r <= image.get_pixel(202, 128).r:
 		push_error("Window controls must render a rounded strip with a visible drag handle")
+		quit(1)
+		return
+	material.set_shader_parameter("hovered", 3)
+	for index in range(4):
+		await process_frame
+		RenderingServer.force_draw(false)
+	var gamepad_region := viewport.get_texture().get_image().get_pixel(185, 128)
+	if gamepad_region.b <= gamepad_region.r:
+		push_error("Gamepad hover must highlight the right-hand controls region")
 		quit(1)
 		return
 	material.set_shader_parameter("opacity", 0.25)

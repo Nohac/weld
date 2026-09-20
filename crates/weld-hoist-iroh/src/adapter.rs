@@ -17,6 +17,15 @@ use weld_hoist_encoded::{
 use weld_media::VideoCodec;
 
 use crate::{IrohDestinationPeer, IrohSourcePeer};
+use weld_hoist_core::gamepad::{GamepadController, GamepadProvider};
+
+/// Trusted source assembly, independent of surface admission policy.
+#[derive(Default)]
+pub struct IrohSourceOptions {
+    pub dump_directory: Option<(PathBuf, VideoCodec)>,
+    pub bitrate_budget: Option<SharedBitrateBudget>,
+    pub gamepad: Option<Box<dyn GamepadProvider>>,
+}
 
 /// Source policy endpoint associated with one remote Iroh destination.
 #[derive(Clone)]
@@ -72,20 +81,19 @@ pub fn source_registration_with_backend(
     adapter_source: ClientSourceId,
     destination_source: ClientSourceId,
     backend: Box<dyn EncodeBackend>,
-    dump_directory: Option<(PathBuf, VideoCodec)>,
-    bitrate_budget: Option<SharedBitrateBudget>,
+    options: IrohSourceOptions,
 ) -> anyhow::Result<(ClientAdapterRegistration, IrohDestinationEndpoint)> {
     let descriptor = ClientSourceDescriptor::new(adapter_source, ClientProvenance::Relocated);
     let port = EncodedSourcePort::configured(
         peer.clone(),
         backend,
         EncodedSourceOptions {
-            bitrate_budget,
-            access_unit_dump: dump_directory,
+            bitrate_budget: options.bitrate_budget,
+            access_unit_dump: options.dump_directory,
         },
     )?;
     let rate_control = port.encoder_rate_control();
-    let adapter = SourceRelayAdapter::new(upstream_source, port);
+    let adapter = SourceRelayAdapter::new(upstream_source, port).with_gamepad(options.gamepad);
     Ok((
         ClientAdapterRegistration::new(descriptor, adapter, ControlOnlyClientImporter),
         IrohDestinationEndpoint {
@@ -103,6 +111,7 @@ pub fn destination_registration_with_backend<P: DecodedFramePublisher>(
     destination_source: ClientSourceId,
     publisher: P,
     backend: Box<dyn DecodeBackend<Output = P::Buffer>>,
+    gamepad: Option<GamepadController>,
 ) -> ClientAdapterRegistration {
     let descriptor = ClientSourceDescriptor::new(destination_source, ClientProvenance::Relocated);
     let importer = publisher.client_importer();
@@ -112,7 +121,8 @@ pub fn destination_registration_with_backend<P: DecodedFramePublisher>(
             upstream_source,
             descriptor,
             EncodedDestinationPort::new(peer, backend, descriptor, publisher),
-        ),
+        )
+        .with_gamepad(gamepad),
         importer,
     )
 }

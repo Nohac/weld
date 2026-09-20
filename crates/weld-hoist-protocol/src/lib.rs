@@ -6,6 +6,8 @@
 
 use std::fmt;
 
+pub mod gamepad;
+
 use serde::{Deserialize, Serialize};
 use weld_client::{
     ClientBufferId, ClientBufferUseId, ClientInputEvent, ClientRequest, ClientSurfaceId,
@@ -106,6 +108,7 @@ pub enum SourceMessage<B> {
         update: weld_client::ClientCursorUpdate,
         sequence: u64,
     },
+    Gamepad(gamepad::GamepadStatus),
 }
 
 /// Destination-to-source semantic envelope.
@@ -128,6 +131,7 @@ pub enum DestinationMessage {
         surface: ClientSurfaceId,
         sequence: u64,
     },
+    Gamepad(gamepad::GamepadRequest),
 }
 
 impl DestinationMessage {
@@ -137,6 +141,7 @@ impl DestinationMessage {
 
     pub const fn kind(&self) -> &'static str {
         match self {
+            Self::Gamepad(_) => "gamepad",
             Self::Request(_) => "request",
             Self::Input(_) => "input",
             Self::BufferReleased { .. } => "buffer-released",

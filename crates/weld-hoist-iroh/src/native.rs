@@ -8,6 +8,7 @@ use weld_core::{
     dmabuf::{DmabufContext, ExternalDmabufCapabilities},
     host::{ClientRuntimeWakeSource, client_runtime_notifier},
 };
+use weld_hoist_core::gamepad::GamepadProvider;
 use weld_hoist_encoded::{
     EncodeBackend, SharedBitrateBudget, decode_backend, encode_backend,
     native::DecodedDmabufPublisher,
@@ -15,9 +16,9 @@ use weld_hoist_encoded::{
 use weld_media::VideoCodec;
 
 use crate::{
-    IrohDestinationEndpoint, IrohDestinationPeer, IrohSourcePeer, PendingSourceAdmission,
-    destination_registration_with_backend, pending_source_registration_with_backend,
-    source_registration_with_backend,
+    IrohDestinationEndpoint, IrohDestinationPeer, IrohSourceOptions, IrohSourcePeer,
+    PendingSourceAdmission, destination_registration_with_backend,
+    pending_source_registration_with_backend, source_registration_with_backend,
 };
 
 /// Source media resources; remote namespace mapping belongs to the manual endpoint.
@@ -28,6 +29,7 @@ pub struct IrohSourceRegistrationOptions<'a> {
     pub codec: VideoCodec,
     pub dump_directory: Option<PathBuf>,
     pub bitrate_budget: Option<SharedBitrateBudget>,
+    pub gamepad: Option<Box<dyn GamepadProvider>>,
 }
 
 pub fn source_registration(
@@ -46,10 +48,13 @@ pub fn source_registration(
         options.adapter_source,
         destination_source,
         backend,
-        options
-            .dump_directory
-            .map(|directory| (directory, options.codec)),
-        options.bitrate_budget,
+        IrohSourceOptions {
+            dump_directory: options
+                .dump_directory
+                .map(|directory| (directory, options.codec)),
+            bitrate_budget: options.bitrate_budget,
+            gamepad: options.gamepad,
+        },
     )?;
     Ok((registration, endpoint, wake))
 }
@@ -92,6 +97,7 @@ pub fn destination_registration(
             destination_source,
             DecodedDmabufPublisher::new(dmabuf),
             backend,
+            None,
         ),
         wake,
     ))
@@ -109,8 +115,11 @@ pub fn pending_source_registration(
             options.upstream_source,
             options.adapter_source,
             backend,
-            options.dump_directory.map(|path| (path, options.codec)),
-            options.bitrate_budget,
+            IrohSourceOptions {
+                dump_directory: options.dump_directory.map(|path| (path, options.codec)),
+                bitrate_budget: options.bitrate_budget,
+                gamepad: options.gamepad,
+            },
         ),
         wake,
     ))

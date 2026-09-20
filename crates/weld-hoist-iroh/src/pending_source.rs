@@ -17,7 +17,7 @@ use weld_hoist_encoded::{
 use weld_hoist_protocol::DestinationEnvelope;
 use weld_media::VideoCodec;
 
-use crate::{IrohSourcePeer, PendingSourceAdmission};
+use crate::{IrohSourceOptions, IrohSourcePeer, PendingSourceAdmission};
 
 #[cfg(test)]
 #[path = "pending_source_tests.rs"]
@@ -30,8 +30,7 @@ pub fn pending_source_registration_with_backend(
     upstream: ClientSourceId,
     source: ClientSourceId,
     backend: Box<dyn EncodeBackend>,
-    dump: Option<(PathBuf, VideoCodec)>,
-    budget: Option<SharedBitrateBudget>,
+    options: IrohSourceOptions,
 ) -> ClientAdapterRegistration {
     ClientAdapterRegistration::new(
         ClientSourceDescriptor::new(source, ClientProvenance::Relocated),
@@ -42,11 +41,12 @@ pub fn pending_source_registration_with_backend(
                     pending,
                     backend: Some(backend),
                 },
-                dump,
-                budget,
+                dump: options.dump_directory,
+                budget: options.bitrate_budget,
             },
             SourceAdmission::AllToplevels,
-        ),
+        )
+        .with_gamepad(options.gamepad),
         ControlOnlyClientImporter,
     )
 }

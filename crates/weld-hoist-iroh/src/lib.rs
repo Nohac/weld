@@ -18,7 +18,7 @@ mod private_file;
 mod rendezvous;
 
 pub use adapter::{
-    IrohDestinationEndpoint, destination_registration_with_backend,
+    IrohDestinationEndpoint, IrohSourceOptions, destination_registration_with_backend,
     source_registration_with_backend,
 };
 pub use device::{IrohConnectionProfile, IrohDeviceIdentity, IrohTrustedPeers};

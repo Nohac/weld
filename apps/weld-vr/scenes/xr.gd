@@ -43,7 +43,7 @@ func _ready() -> void:
 	material.albedo_texture = $PanelViewport.get_texture()
 	screen.material_override = material
 	$XROrigin3D/RightControllerRig/Aim/PointerTilt/Pointer.configure(panel.player,
-		right_rig.aim, screen, panel.view)
+		right_rig.aim, $XROrigin3D/LeftController, screen, panel.view)
 	xr_interface = XRServer.find_interface("OpenXR") as OpenXRInterface
 	if xr_interface == null or not xr_interface.is_initialized():
 		# Scene inspection/tests can load the hierarchy without an XR runtime.

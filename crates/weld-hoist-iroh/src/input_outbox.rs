@@ -24,8 +24,9 @@ pub(super) struct InputOutbox {
 struct State {
     closed: bool,
     records: VecDeque<QueuedRecord>,
-    received: [u64; 5],
+    received: [u64; 6],
     coalesced: u64,
+    gamepad_coalesced: u64,
     observations: InputObservations,
     started: Instant,
     last_report: Instant,
@@ -55,8 +56,9 @@ impl Default for State {
         Self {
             closed: false,
             records: VecDeque::new(),
-            received: [0; 5],
+            received: [0; 6],
             coalesced: 0,
+            gamepad_coalesced: 0,
             observations: InputObservations::default(),
             started: now,
             last_report: now,
@@ -78,6 +80,7 @@ impl InputOutbox {
             DestinationMessage::CursorReceived { .. } => 2,
             DestinationMessage::BufferReleased { .. } => 3,
             DestinationMessage::Reclaim => 4,
+            DestinationMessage::Gamepad(_) => 5,
         };
         state.received[kind] = state.received[kind].saturating_add(1);
         if is_pointer_motion(&packet) {
@@ -85,20 +88,26 @@ impl InputOutbox {
                 state.observations.motions_received.saturating_add(1);
         }
         if let Some(previous) = state.records.back_mut()
-            && compatible_motion(&previous.packet, &packet)
+            && (compatible_motion(&previous.packet, &packet)
+                || compatible_gamepad(&previous.packet, &packet))
         {
+            let gamepad = matches!(packet.message, DestinationMessage::Gamepad(_));
             *previous = QueuedRecord {
                 packet,
                 enqueued_at,
             };
-            state.coalesced = state.coalesced.saturating_add(1);
+            if gamepad {
+                state.gamepad_coalesced = state.gamepad_coalesced.saturating_add(1);
+            } else {
+                state.coalesced = state.coalesced.saturating_add(1);
+            }
             return Ok(());
         }
         // A synchronous compositor caller cannot await. Keep a terminal bound
         // for sustained discrete/control overload rather than lose a release.
         ensure!(
             state.records.len() < QUEUE_CAPACITY,
-            "Iroh destination control backlog exhausted: {} queued; received [input, request, cursor-ack, buffer-release, reclaim]={:?}; coalesced_motions={}",
+            "Iroh destination control backlog exhausted: {} queued; received [input, request, cursor-ack, buffer-release, reclaim, gamepad]={:?}; coalesced_motions={}",
             state.records.len(),
             state.received,
             state.coalesced
@@ -169,12 +178,13 @@ impl InputOutbox {
             (
                 state.received,
                 state.coalesced,
+                state.gamepad_coalesced,
                 state.observations,
                 state.records.len(),
                 now.duration_since(state.started),
             )
         };
-        let (received, coalesced, observations, queued, uptime) = report;
+        let (received, coalesced, gamepad_coalesced, observations, queued, uptime) = report;
         // All counts and maxima are cumulative per outbox. Emission requires
         // successful traffic, so neither idle nor blocked writes start a timer.
         tracing::debug!(target: "weld_network_diag",
@@ -182,6 +192,7 @@ impl InputOutbox {
             received_by_kind_total = ?received,
             motions_received_total = observations.motions_received,
             motions_coalesced_total = coalesced,
+            gamepad_coalesced_total = gamepad_coalesced,
             dequeued_total = observations.dequeued,
             writes_completed_total = observations.writes_completed,
             motions_written_total = observations.motions_written,
@@ -219,6 +230,12 @@ fn compatible_motion(previous: &DestinationEnvelope, next: &DestinationEnvelope)
         && matches!(next_input.event, InputEventKind::PointerMotion { .. })
 }
 
+fn compatible_gamepad(previous: &DestinationEnvelope, next: &DestinationEnvelope) -> bool {
+    matches!((&previous.message, &next.message),
+        (DestinationMessage::Gamepad(old), DestinationMessage::Gamepad(new))
+        if previous.session == next.session && new.supersedes(*old))
+}
+
 #[cfg(test)]
 mod tests {
     use futures_lite::future::poll_once;
@@ -230,6 +247,53 @@ mod tests {
     use weld_hoist_protocol::HoistSessionId;
 
     use super::*;
+
+    #[tokio::test]
+    async fn gamepad_analog_coalesces_but_press_release_and_end_remain_ordered() {
+        use weld_hoist_protocol::gamepad::{GAMEPAD_SESSION, GamepadRequest, GamepadState};
+        let queue = InputOutbox::default();
+        let packet = |request| DestinationEnvelope {
+            session: GAMEPAD_SESSION,
+            message: DestinationMessage::Gamepad(request),
+        };
+        let mut state = GamepadState::default();
+        for axis in 1..100 {
+            state.left[0] = axis;
+            queue
+                .push(packet(GamepadRequest::State {
+                    generation: 1,
+                    state,
+                }))
+                .expect("analog");
+        }
+        state.buttons.south = true;
+        queue
+            .push(packet(GamepadRequest::State {
+                generation: 1,
+                state,
+            }))
+            .expect("press");
+        state.buttons.south = false;
+        queue
+            .push(packet(GamepadRequest::State {
+                generation: 1,
+                state,
+            }))
+            .expect("release");
+        queue
+            .push(packet(GamepadRequest::End { generation: 1 }))
+            .expect("end");
+        assert_eq!(queue.state.lock().expect("state").records.len(), 4);
+        for pressed in [false, true, false] {
+            assert!(matches!(queue.recv().await.expect("state").message,
+                DestinationMessage::Gamepad(GamepadRequest::State { state, .. })
+                if state.buttons.south == pressed && state.left[0] == 99));
+        }
+        assert!(matches!(
+            queue.recv().await.expect("end").message,
+            DestinationMessage::Gamepad(GamepadRequest::End { generation: 1 })
+        ));
+    }
 
     fn motion(time: u32) -> DestinationEnvelope {
         DestinationEnvelope {
@@ -274,7 +338,7 @@ mod tests {
         let packet = queue.recv().await.expect("motion");
         {
             let state = queue.state.lock().expect("state");
-            assert_eq!(state.received, [2, 0, 0, 0, 1]);
+            assert_eq!(state.received, [2, 0, 0, 0, 1, 0]);
             assert_eq!(state.coalesced, 1);
             assert_eq!(state.observations.motions_received, 2);
             assert_eq!(state.observations.dequeued, 1);

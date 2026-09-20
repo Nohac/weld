@@ -1,6 +1,6 @@
 //! Physical XR observations are separate from mailbox admission. A rejected
 //! press can retry while held/on-target, but never after withdrawal or release.
-pub(super) const BUTTONS: [i64; 3] = [1, 3, 2]; // A, index trigger, B
+pub(super) const BUTTONS: [i64; 3] = [1, 3, 2]; // Left, middle, right mouse buttons.
 const PRESS: f32 = 0.75;
 const RELEASE: f32 = 0.35;
 const DEADZONE: f64 = 0.2;
@@ -24,6 +24,11 @@ pub(super) struct Actions {
 }
 
 impl Policy {
+    /// Gameplay reserves A/B, trigger and stick for the gamepad. Right grip
+    /// alone drives the mouse, with the same admission, drag and regain rules.
+    pub fn step_gamepad(&mut self, token: (u64, u64), hit: bool, grip: f32, now: f64) -> Actions {
+        self.step(token, hit, [grip, 0.0], false, 0.0, now)
+    }
     pub fn deactivate(&mut self) -> bool {
         let active = self.token.take().is_some();
         self.physical = [false; 3];
@@ -109,6 +114,42 @@ mod tests {
     use super::*;
     fn neutral(policy: &mut Policy) {
         policy.step((1, 0), true, [0.0; 2], false, 0.0, 0.0);
+    }
+    #[test]
+    fn gamepad_grip_drags_and_releases_off_target_without_other_mouse_actions() {
+        let mut policy = Policy::default();
+        assert!(policy.step_gamepad((1, 0), true, 0.0, 0.0).reset);
+        let press = policy.step_gamepad((1, 0), true, 1.0, 0.1);
+        assert_eq!(press.edges, [Some(true), None, None]);
+        assert_eq!(press.wheel, None);
+        policy.admitted(0, true);
+        let drag = policy.step_gamepad((1, 0), false, 0.5, 0.2);
+        assert_eq!(drag.edges, [None; 3]);
+        assert_eq!(drag.wheel, None);
+        assert_eq!(
+            policy.step_gamepad((1, 0), false, 0.0, 0.3).edges,
+            [Some(false), None, None]
+        );
+    }
+    #[test]
+    fn gamepad_pointer_reset_and_surface_change_require_grip_release() {
+        let mut policy = Policy::default();
+        for token in [(1, 0), (2, 0)] {
+            assert!(policy.step_gamepad(token, true, 1.0, 0.0).reset);
+            assert_eq!(policy.step_gamepad(token, true, 1.0, 0.1).edges, [None; 3]);
+            policy.step_gamepad(token, true, 0.0, 0.2);
+            assert_eq!(
+                policy.step_gamepad(token, true, 1.0, 0.3).edges,
+                [Some(true), None, None]
+            );
+            policy.admitted(0, true);
+        }
+        assert!(
+            policy.deactivate(),
+            "exit/lost tracking must request remote reset"
+        );
+        assert!(policy.step_gamepad((2, 0), true, 1.0, 0.4).reset);
+        assert_eq!(policy.step_gamepad((2, 0), true, 1.0, 0.5).edges, [None; 3]);
     }
     #[test]
     fn failed_press_retries_until_admission_then_never_duplicates() {

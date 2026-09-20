@@ -1,5 +1,5 @@
 //! A shell gesture owns its press through release, independent of ray hover.
-use super::{Sample, controls::Part};
+use super::{Sample, alive, controls::Part};
 use crate::video::workspace::WeldSurface;
 use godot::prelude::*;
 
@@ -12,6 +12,7 @@ struct Hold {
 enum Kind {
     Drag { anchor: DragAnchor, grip: bool },
     Close,
+    Gamepad,
 }
 
 #[derive(Clone, Copy)]
@@ -34,6 +35,7 @@ impl DragAnchor {
 pub(super) struct Gesture {
     hold: Option<Hold>,
     buttons: Buttons,
+    gamepad_clicked: bool,
 }
 #[derive(Default)]
 struct Buttons {
@@ -57,6 +59,18 @@ impl Buttons {
     }
 }
 impl Gesture {
+    pub fn discard_deleted_target(&mut self) {
+        if self
+            .hold
+            .as_ref()
+            .is_some_and(|hold| !alive(&hold.surface.bind().player))
+        {
+            self.reset();
+        }
+    }
+    pub fn take_gamepad_click(&mut self) -> bool {
+        std::mem::take(&mut self.gamepad_clicked)
+    }
     pub fn reset(&mut self) {
         *self = Self::default();
     }
@@ -100,6 +114,10 @@ impl Gesture {
                     }
                     a
                 }
+                Kind::Gamepad => {
+                    self.gamepad_clicked = !a && sample.chrome == Some(Part::Gamepad);
+                    a
+                }
             };
             if held {
                 self.hold = Some(hold);
@@ -125,6 +143,7 @@ impl Gesture {
                     grip: false,
                 }),
                 Some(Part::Close) => Some(Kind::Close),
+                Some(Part::Gamepad) => Some(Kind::Gamepad),
                 None => None,
             }
         } else {

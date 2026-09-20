@@ -28,3 +28,11 @@ mesh = SubResource("LaserMesh")
 visible = false
 cast_shadow = 0
 mesh = SubResource("TargetMesh")
+
+[node name="GamepadIndicator" type="Label3D" parent="."]
+visible = false
+position = Vector3(0, 0.055, -0.16)
+pixel_size = 0.00035
+font_size = 24
+text = "Gamepad\nRight grip: click / drag\nHold left grip to exit"
+no_depth_test = true

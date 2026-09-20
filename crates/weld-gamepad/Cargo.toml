@@ -1,0 +1,10 @@
+[package]
+name = "weld-gamepad"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+evdev = { version = "=0.13.2", default-features = false }
+rustix = { workspace = true, features = ["fs"] }
+weld-hoist-core = { path = "../weld-hoist-core" }

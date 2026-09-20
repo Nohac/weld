@@ -3941,6 +3941,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "weld-client",
+ "weld-hoist-core",
  "weld-hoist-encoded",
  "weld-hoist-iroh",
  "weld-media",

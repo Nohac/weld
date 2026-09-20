@@ -70,6 +70,16 @@ impl LocalDestinationPort {
         records: &mut Vec<DestinationPortRecord>,
     ) -> HoistPortResult<()> {
         match packet.message {
+            SourceMessage::Gamepad(status) => {
+                if !file_descriptors.is_empty() {
+                    return Err(self
+                        .protocol_failure("gamepad feedback carried file descriptors".to_owned()));
+                }
+                records.push(DestinationPortRecord {
+                    session: packet.session,
+                    event: DestinationPortEvent::Gamepad(status),
+                });
+            }
             SourceMessage::Cursor { update, sequence } => {
                 if !file_descriptors.is_empty() {
                     return Err(self

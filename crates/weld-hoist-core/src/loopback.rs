@@ -29,6 +29,10 @@ struct LoopbackSourcePort {
 impl HoistSourcePort for LoopbackSourcePort {
     fn submit(&mut self, command: SourcePortCommand) -> HoistPortResult<()> {
         let record = match command {
+            SourcePortCommand::Gamepad(status) => DestinationPortRecord {
+                session: weld_hoist_protocol::gamepad::GAMEPAD_SESSION,
+                event: DestinationPortEvent::Gamepad(status),
+            },
             SourcePortCommand::FocusCleared => return Ok(()),
             SourcePortCommand::Cursor {
                 session,

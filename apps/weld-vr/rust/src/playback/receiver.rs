@@ -156,6 +156,14 @@ pub(super) fn run_session(
                     ClientSourceId::new(1),
                     Publisher,
                     Box::new(backend),
+                    Some({
+                        let owner = thread::current();
+                        let gamepad = weld_hoist_core::gamepad::GamepadController::new(move || {
+                            owner.unpark()
+                        });
+                        *lock(&shared.session.gamepad) = Some(gamepad.clone());
+                        gamepad
+                    }),
                 );
                 let mut runtime = ClientRuntime::default();
                 runtime.register(registration.into_parts().runtime)?;

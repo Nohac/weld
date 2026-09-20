@@ -90,7 +90,11 @@ fn run_registration(pending_mode: bool) -> Vec<Vec<u8>> {
     let (registration, endpoint, mut destination) = if pending_mode {
         (
             pending_source_registration_with_backend(
-                pending, upstream, adapter, backend, None, None,
+                pending,
+                upstream,
+                adapter,
+                backend,
+                Default::default(),
             ),
             None,
             None,
@@ -98,9 +102,15 @@ fn run_registration(pending_mode: bool) -> Vec<Vec<u8>> {
     } else {
         let destination = connect();
         let peer = wait_for(|| pending.poll().expect("poll"));
-        let (registration, endpoint) =
-            source_registration_with_backend(peer, upstream, adapter, adapter, backend, None, None)
-                .expect("ready registration");
+        let (registration, endpoint) = source_registration_with_backend(
+            peer,
+            upstream,
+            adapter,
+            adapter,
+            backend,
+            Default::default(),
+        )
+        .expect("ready registration");
         (registration, Some(endpoint), Some(destination))
     };
     let mut driver = registration.into_parts().runtime.driver;

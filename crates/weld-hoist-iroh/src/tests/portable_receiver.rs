@@ -73,6 +73,7 @@ pub(super) fn check_registration(source: &IrohSourcePeer, destination: IrohDesti
         target,
         Publisher,
         Box::new(Decoder::default()),
+        None,
     );
     let mut parts = registration.into_parts();
     assert!(parts.importer.importer.is::<TestClientImporter>());
