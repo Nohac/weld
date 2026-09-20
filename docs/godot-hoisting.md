@@ -75,6 +75,25 @@ explicit packed-stereo interpretation, not a new Wayland stereo extension.
 Attached content retains its owner's placement and close/drag controls. The
 shared bitrate target defaults to 16 Mbps across all windows.
 
+For the XR virtual gamepad, bind the circle pad with Azahar's **Set Analog
+Stick**, not separate cardinal/diagonal button bindings. The latter can produce
+`engine:analog_from_button` with multiple directions bound to the same axis
+threshold, causing conflicting angles and losing continuous stick magnitude.
+With Azahar closed, the equivalent entries in `[Controls]` of
+`~/.config/azahar-emu/qt-config.ini` for profile 1 are:
+
+```ini
+profiles\1\circle_pad="engine:sdl,guid:YOUR_SAVED_GAMEPAD_GUID,port:0,axis_x:0,axis_y:1,deadzone:0.0"
+profiles\1\circle_pad\default=false
+```
+
+Use the GUID/port from that gamepad's existing SDL bindings and the actual
+profile index; do not copy another controller's identity. Weld's virtual left
+stick uses SDL axes 0/1 and already applies a radial deadzone, so an additional
+Azahar deadzone is optional. This is a user configuration change, not something
+the launcher overwrites. With direct analog mapping, the user completed two
+Mario 3D Land levels on Pico without significant input trouble on 2026-09-21.
+
 The one-shot rules file is JSON with an ordered `rules` array. Each entry names
 `app_id`, `title_suffix`, `stereo`, `width`, `height`, `slot` and an optional
 `bitrate` object containing `group` and `role`. Rust deserializes through Serde
