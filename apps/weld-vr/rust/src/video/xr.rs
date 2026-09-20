@@ -489,7 +489,7 @@ impl WeldXrPointer {
                 .bind()
                 .workspace
                 .as_ref()
-                .map_or(-100, |workspace| workspace.presentation_order(&player_node)),
+                .map_or(-100, |workspace| workspace.input_order(&player_node)),
             player: player_node.clone(),
             surface,
             panel: controls_panel.unwrap_or(panel),

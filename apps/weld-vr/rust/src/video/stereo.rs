@@ -1,9 +1,10 @@
 //! Packed stereo interpretation. Both eyes sample one decoded image; this
 //! module introduces no second decoder, media queue, or frame-selection step.
+use super::native_canvas::NativeCanvas;
 use godot::{
     classes::{
-        ColorRect, INode3D, Node3D, OpenXrCompositionLayerQuad, ShaderMaterial, SubViewport,
-        open_xr_composition_layer::EyeVisibility, sub_viewport::UpdateMode,
+        ColorRect, Control, INode3D, Node3D, OpenXrCompositionLayerQuad, ShaderMaterial,
+        SubViewport, open_xr_composition_layer::EyeVisibility, sub_viewport::UpdateMode,
     },
     prelude::*,
 };
@@ -21,6 +22,7 @@ pub(super) enum ViewLayout {
 #[class(base=Node3D)]
 pub(super) struct WeldStereoPanel {
     layers: Vec<Gd<OpenXrCompositionLayerQuad>>,
+    canvases: Vec<NativeCanvas>,
     right_viewport: Option<Gd<SubViewport>>,
     right_video: Option<Gd<ColorRect>>,
     base: Base<Node3D>,
@@ -31,6 +33,7 @@ impl INode3D for WeldStereoPanel {
     fn init(base: Base<Node3D>) -> Self {
         Self {
             layers: Vec::new(),
+            canvases: Vec::new(),
             right_viewport: None,
             right_video: None,
             base,
@@ -40,6 +43,9 @@ impl INode3D for WeldStereoPanel {
     fn exit_tree(&mut self) {
         for layer in &mut self.layers {
             layer.set_layer_viewport(None::<&Gd<SubViewport>>);
+        }
+        for canvas in &mut self.canvases {
+            canvas.detach();
         }
     }
 }
@@ -64,17 +70,17 @@ impl WeldStereoPanel {
         viewport.add_child(&video);
         self.right_viewport = Some(viewport.clone());
         self.right_video = Some(video);
-        for (eye, target) in [
+        for (eye, source) in [
             (EyeVisibility::LEFT, left),
             (EyeVisibility::RIGHT, viewport),
         ] {
             let mut layer = OpenXrCompositionLayerQuad::new_alloc();
             layer.hide();
+            self.base_mut().add_child(&layer);
             layer.set_eye_visibility(eye);
             layer.set_alpha_blend(true);
             layer.set_sort_order(-100);
             layer.set_process_priority(150);
-            self.base_mut().add_child(&layer);
             layer.set_enable_hole_punch(true);
             if !layer.is_natively_supported() {
                 layer.queue_free();
@@ -84,7 +90,12 @@ impl WeldStereoPanel {
                 godot_error!("Stereo panel requires native OpenXR quad layers");
                 return false;
             }
-            layer.set_layer_viewport(&target);
+            let Some(canvas) = NativeCanvas::new(source, &mut self.base_mut()) else {
+                layer.queue_free();
+                return false;
+            };
+            layer.set_layer_viewport(&canvas.target);
+            self.canvases.push(canvas);
             self.layers.push(layer);
         }
         godot_print!("WELD_XR_STEREO native eye layers ready; one decoded image");
@@ -107,6 +118,9 @@ impl WeldStereoPanel {
         {
             viewport.set_size(raster);
         }
+        for canvas in &mut self.canvases {
+            canvas.resize(raster);
+        }
         for layer in &mut self.layers {
             if layer.get_global_transform() != world {
                 layer.set_global_transform(world);
@@ -123,6 +137,13 @@ impl WeldStereoPanel {
     #[func]
     fn right_eye_control(&self) -> Option<Gd<ColorRect>> {
         self.right_video.clone()
+    }
+
+    #[func]
+    fn output_control(&self, right: bool) -> Option<Gd<Control>> {
+        self.canvases
+            .get(usize::from(right))
+            .map(|canvas| canvas.view.clone())
     }
 
     #[func]

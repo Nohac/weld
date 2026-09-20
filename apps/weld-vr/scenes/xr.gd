@@ -235,8 +235,6 @@ func _update_windows() -> void:
 	for key in window_panels.keys():
 		if not live.has(key):
 			var entry: Dictionary = window_panels[key]
-			if entry.layer != null:
-				entry.layer.queue_free()
 			if entry.stereo != null:
 				entry.stereo.queue_free()
 			entry.mesh.queue_free()
@@ -302,7 +300,10 @@ func _update_windows() -> void:
 	for key in window_panels:
 		_set_entry_visible(window_panels[key], placed.has(key))
 	# One order owns the complete window family and the input pick policy.
-	panel.player.sort_xr_windows(camera.global_position)
+	var origin: Transform3D = $XROrigin3D.global_transform
+	var left_eye := xr_interface.get_transform_for_view(0, origin).origin
+	var right_eye := xr_interface.get_transform_for_view(1, origin).origin
+	panel.player.sort_xr_windows(camera.global_position, left_eye, right_eye)
 	for surface in surfaces:
 		if not placed.has(surface.surface_id()):
 			continue
@@ -311,13 +312,6 @@ func _update_windows() -> void:
 		var order: int = surface.stacking_order()
 		if entry.stereo != null:
 			entry.stereo.sync_panel(transform, entry.draw_size, entry.viewport.size, order)
-		if entry.layer != null:
-			if entry.layer.sort_order != order:
-				entry.layer.sort_order = order
-			if not entry.layer.global_transform.is_equal_approx(transform):
-				entry.layer.global_transform = transform
-			if not entry.layer.quad_size.is_equal_approx(entry.draw_size):
-				entry.layer.quad_size = entry.draw_size
 		if entry.fallback != null:
 			entry.fallback.mesh.size = entry.draw_size
 			entry.fallback.material_override.render_priority = order
@@ -334,8 +328,6 @@ func _secondary_size(logical: Vector2, parent_logical: Vector2, parent_size: Vec
 func _set_entry_visible(entry: Dictionary, shown: bool) -> void:
 	if entry.mesh.visible != shown:
 		entry.mesh.visible = shown
-	if entry.layer != null and entry.layer.visible != shown:
-		entry.layer.visible = shown
 	if entry.stereo != null:
 		entry.stereo.show_panel(shown)
 
@@ -351,35 +343,25 @@ func _create_window_panel(surface: WeldSurface) -> Dictionary:
 	mesh.mesh = QuadMesh.new()
 	mesh.visible = false
 	add_child(mesh)
-	var layer: OpenXRCompositionLayerQuad
 	var stereo: WeldStereoPanel
-	if surface.is_stereo():
+	if surface.is_stereo() or use_native_panel:
 		stereo = WeldStereoPanel.new()
 		$XROrigin3D.add_child(stereo)
-		if not stereo.initialize(viewport, surface.right_eye_material()):
+		# Mono content shares its material/decoded image, but overlap projection
+		# needs a separate canvas for each eye just like packed stereo content.
+		var right_material := surface.right_eye_material() if surface.is_stereo() else surface.video_material()
+		if not stereo.initialize(viewport, right_material):
 			push_error("Cannot present stereo without native eye layers")
+			stereo.queue_free()
+			stereo = null
 		mesh.layers = 0
-	elif use_native_panel:
-		layer = OpenXRCompositionLayerQuad.new()
-		layer.visible = false
-		layer.alpha_blend = true
-		layer.enable_hole_punch = true
-		layer.sort_order = -1
-		layer.process_priority = 150
-		$XROrigin3D.add_child(layer)
-		if layer.is_natively_supported():
-			layer.layer_viewport = viewport
-			mesh.layers = 0
-		else:
-			layer.queue_free()
-			layer = null
 	var material := StandardMaterial3D.new()
 	material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
 	material.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
 	material.texture_filter = panel_texture_filter
 	material.albedo_texture = viewport.get_texture()
 	var fallback: MeshInstance3D
-	if layer == null and stereo == null:
+	if stereo == null:
 		fallback = MeshInstance3D.new()
 		fallback.mesh = QuadMesh.new()
 		material.no_depth_test = true
@@ -393,8 +375,10 @@ func _create_window_panel(surface: WeldSurface) -> Dictionary:
 	viewport.add_child(video)
 	surface.bind_control(video)
 	surface.bind_panel(mesh, stereo.right_eye_control() if stereo != null else null)
-	print("WELD_XR_WINDOW id=", surface.surface_id(), " parent=", surface.parent_id(), " native=", layer != null)
-	return {"viewport": viewport, "mesh": mesh, "video": video, "layer": layer, "stereo": stereo, "fallback": fallback, "draw_size": Vector2.ZERO, "depth": 0}
+	if stereo != null:
+		surface.bind_outputs(stereo.output_control(false), stereo.output_control(true))
+	print("WELD_XR_WINDOW id=", surface.surface_id(), " parent=", surface.parent_id(), " native=", stereo != null)
+	return {"viewport": viewport, "mesh": mesh, "video": video, "stereo": stereo, "fallback": fallback, "draw_size": Vector2.ZERO, "depth": 0}
 
 
 func _setup_panel_presentation() -> void:

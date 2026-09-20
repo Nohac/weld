@@ -2,7 +2,15 @@
 //! Related toplevels move independently; popups and client layers stay grouped.
 use std::collections::BTreeMap;
 
-const DEPTH_HYSTERESIS: f32 = 0.03;
+const DEPTH_HYSTERESIS: f32 = 0.015;
+
+/// A blend between adjacent whole-family stackings, never between a window's
+/// own layers. Keep one crossing pair to avoid recursive texture dependencies.
+pub(super) struct Blend {
+    pub front: Vec<u64>,
+    pub back: Vec<u64>,
+    pub amount: f32,
+}
 
 pub(super) fn pick_in_front(
     order: i32,
@@ -25,6 +33,7 @@ pub(super) struct Layer {
 #[derive(Default)]
 pub(super) struct Stack {
     families: Vec<u64>,
+    pub blend: Option<Blend>,
 }
 impl Stack {
     /// Higher rank is in front. Near-equal distances keep the previous order,
@@ -83,6 +92,32 @@ impl Stack {
             })
             .collect();
         ordered.sort_by_key(|(key, _)| *key);
+        self.blend = None;
+        let candidates: Vec<_> = self
+            .families
+            .windows(2)
+            .enumerate()
+            .filter_map(|(rank, pair)| {
+                let difference = distances[&pair[1]] - distances[&pair[0]];
+                (difference > -DEPTH_HYSTERESIS).then_some((rank, difference))
+            })
+            .collect();
+        // Multiple simultaneous crossings keep ordinary stable stacking. This
+        // bounded experiment must not read another already-blended canvas.
+        if let [(rank, difference)] = candidates.as_slice() {
+            let family_layers = |family_rank| {
+                ordered
+                    .iter()
+                    .filter(|(key, _)| key.0 == family_rank)
+                    .map(|(_, id)| *id)
+                    .collect()
+            };
+            self.blend = Some(Blend {
+                back: family_layers(*rank),
+                front: family_layers(*rank + 1),
+                amount: (0.5 + difference / (2.0 * DEPTH_HYSTERESIS)).clamp(0.0, 1.0),
+            });
+        }
         ordered
             .into_iter()
             .enumerate()
@@ -138,5 +173,26 @@ mod tests {
         assert!(order[&1] < order[&4] && order[&4] < order[&3] && order[&3] < order[&2]);
         let order = stack.update(&[root(1, 1.0), root(2, 2.0)]);
         assert!(order[&1] > order[&2]);
+    }
+
+    #[test]
+    fn blend_tracks_depth_and_resets_after_crossing_or_removal() {
+        let mut stack = Stack::default();
+        stack.update(&[root(1, 2.0), root(2, 3.0)]);
+        assert!(stack.blend.is_none());
+        stack.update(&[root(1, 3.0), root(2, 3.0)]);
+        let blend = stack.blend.as_ref().unwrap();
+        assert_eq!(blend.front, [1]);
+        assert_eq!(blend.back, [2]);
+        assert_eq!(blend.amount, 0.5);
+        stack.update(&[root(1, 3.014), root(2, 3.0)]);
+        assert!(stack.blend.as_ref().unwrap().amount > 0.95);
+        let order = stack.update(&[root(1, 3.016), root(2, 3.0)]);
+        assert!(order[&2] > order[&1]);
+        assert!(stack.blend.is_none());
+        stack.update(&[root(1, 3.0)]);
+        assert!(stack.blend.is_none());
+        stack.update(&[root(1, 3.0), root(2, 3.0), root(3, 3.0)]);
+        assert!(stack.blend.is_none());
     }
 }

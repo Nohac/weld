@@ -33,11 +33,18 @@ Azahar's explicit companion slot starts below its primary at the same radius.
 
 Native panels include transparent margins for shell chrome; the Rust hit plane
 and content Control retain the original application bounds. Windows are ordered
-back-to-front by their root distance from the viewer, with a 3 cm hysteresis
-band. Popups and content layers stay grouped; related toplevels can move
+back-to-front by their root distance from the viewer, with a 1.5 cm hysteresis
+threshold. Popups and content layers stay grouped; related toplevels can move
 independently. Both stereo eyes and pointer picking use the same order, so
 intersecting windows behave as whole cards rather than cutting through one
 another. An admitted drag keeps its captured layer through release.
+One adjacent pair of window families can crossfade through a 3 cm depth band.
+Only their overlapping image area blends, using eye-specific projected window
+coordinates; video and decorations fade together without revealing the room
+through opaque content. Picking follows the visually dominant family while an
+existing drag stays captured. Multiple simultaneous crossings retain ordinary
+whole-window ordering. This is a center-distance transition, not a depth-buffer
+intersection or angle-dependent fade.
 Creation/removal and ancestor visibility update views
 without reconnecting. Native visibility changes only on actual transitions:
 hiding/showing every frame recreates Godot composition layers and caused
@@ -91,6 +98,19 @@ Whole-window stacking was accepted in Pico run `godot-hoist-pis6cf62` on
 2026-09-20. The slice passed 91 Rust tests, strict Clippy, scene and real GPU
 shader checks, and Android build/export. Coverage includes ordering changes,
 near-equal depth stability, family grouping, input order, and canvas padding.
+
+The accepted overlap fade uses ordinary sampleable source canvases and separate
+native OpenXR output canvases. All sources render before the outputs that sample
+them, including across windows. Native swapchain viewports are not shader inputs:
+on Pico, that path produced black or incorrect cross-window samples. Godot's
+[GLES proxy-remapping implementation at a13da4feb](https://github.com/godotengine/godot/blob/a13da4feb/drivers/gles3/storage/texture_storage.cpp#L1349)
+retains a thread-local proxy list initialized from the first texture; this is
+consistent with the observed cross-texture failure, not a confirmed upstream
+diagnosis. The isolated Pico color probe `xr-overlap-probe-c6yqxivc` verified the
+separate-canvas blend. The one-shot `user://xr-overlap-probe` marker runs that
+bounded diagnostic instead of connecting to a source. Rust policy tests, scene
+and GPU shader checks cover grouping, blend math, projection, input order and
+same-frame sampling. This adds GPU canvas work; it is not a performance claim.
 
 ## Controller presentation
 

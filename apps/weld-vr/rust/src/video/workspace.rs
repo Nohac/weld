@@ -3,6 +3,7 @@
 use super::WeldVideoPlayer;
 use super::canvas::Layout;
 use super::decoration::{Clip, Decoration, Shape};
+use super::overlap::{self, Canvas, Plane};
 use super::placement::Placement;
 use super::stacking::{Layer, Stack};
 use super::stereo::ViewLayout;
@@ -34,11 +35,15 @@ pub struct WeldSurface {
     right_material: Option<Gd<ShaderMaterial>>,
     pub(super) control: Option<Gd<Control>>,
     right_control: Option<Gd<Control>>,
+    outputs: Vec<Gd<Control>>,
     pub(super) panel: Option<Gd<MeshInstance3D>>,
     decoration: Option<Decoration>,
     bar: Option<Bar>,
     placement: Placement,
     presentation_order: i32,
+    input_order: i32,
+    canvas_layout: Option<Layout>,
+    overlap: Vec<overlap::Pass>,
 }
 
 #[godot_api]
@@ -184,6 +189,10 @@ impl WeldSurface {
         self.right_control = right_control;
     }
     #[func]
+    fn bind_outputs(&mut self, left: Gd<Control>, right: Gd<Control>) {
+        self.outputs = vec![left, right];
+    }
+    #[func]
     fn style_panel(&mut self, physical_size: Vector2, owner: Option<Gd<WeldSurface>>) {
         if self.pane.kind == 3 {
             if let Some(mut owner) = owner {
@@ -242,6 +251,7 @@ impl WeldSurface {
                 bar.place(physical.y);
             }
         }
+        self.canvas_layout = Some(layout);
         layout.physical
     }
     #[func]
@@ -260,6 +270,42 @@ impl WeldSurface {
 }
 
 impl WeldSurface {
+    fn canvas(&self) -> Option<Canvas> {
+        let panel = self.panel.as_ref()?;
+        let layout = self.canvas_layout?;
+        let left = self.control.as_ref()?.get_viewport()?;
+        let right = self.right_control.as_ref()?.get_viewport()?;
+        Some(Canvas {
+            plane: Plane {
+                world: panel.get_global_transform(),
+                size: layout.physical,
+            },
+            eyes: [left, right],
+        })
+    }
+
+    fn blend_overlap(&mut self, back: &[Canvas], eyes: [Vector3; 2], amount: f32) -> bool {
+        let Some(canvas) = self.canvas() else {
+            return false;
+        };
+        if self.overlap.is_empty() {
+            self.overlap = [self.control.as_ref(), self.right_control.as_ref()]
+                .into_iter()
+                .flatten()
+                .zip(&self.outputs)
+                .filter_map(|(source, output)| overlap::Pass::new(source, output))
+                .collect();
+        }
+        if self.overlap.len() != 2 {
+            return false;
+        }
+        let mut applied = true;
+        for (index, pass) in self.overlap.iter_mut().enumerate() {
+            applied &= pass.apply(canvas.plane, back, eyes[index], index, amount);
+        }
+        applied
+    }
+
     fn apply_clip(&mut self, clip: Clip) {
         clip.apply(&mut self.material);
         if let Some(right) = &mut self.right_material {
@@ -381,11 +427,15 @@ impl Workspace {
                 right_material: None,
                 control: None,
                 right_control: None,
+                outputs: Vec::new(),
                 panel: None,
                 decoration: None,
                 bar: None,
                 placement: Placement::default(),
                 presentation_order: -100,
+                input_order: -100,
+                canvas_layout: None,
+                overlap: Vec::new(),
             });
             self.panes.insert(id, surface);
         }
@@ -441,7 +491,12 @@ impl Workspace {
             .get(&self.selected?)
             .map(|s| s.bind().player.clone())
     }
-    pub fn sort_xr_windows(&mut self, viewer: Vector3) {
+    pub fn sort_xr_windows(&mut self, viewer: Vector3, eyes: [Vector3; 2]) {
+        for surface in self.panes.values_mut() {
+            for pass in &mut surface.bind_mut().overlap {
+                pass.clear();
+            }
+        }
         if !viewer.is_finite() {
             return;
         }
@@ -470,16 +525,57 @@ impl Workspace {
             .collect();
         for (id, order) in self.stack.update(&layers) {
             if let Some(surface) = self.panes.get_mut(&id) {
-                surface.bind_mut().presentation_order = -100 + order;
+                let mut surface = surface.bind_mut();
+                surface.presentation_order = -100 + order;
+                surface.input_order = surface.presentation_order;
+            }
+        }
+        if let Some(blend) = &self.stack.blend {
+            let back: Option<Vec<_>> = blend
+                .back
+                .iter()
+                .map(|id| self.panes.get(id)?.bind().canvas())
+                .collect();
+            if let Some(back) = back {
+                let mut applied = true;
+                for id in &blend.front {
+                    if let Some(surface) = self.panes.get_mut(id) {
+                        applied &= surface.bind_mut().blend_overlap(&back, eyes, blend.amount);
+                    } else {
+                        applied = false;
+                    }
+                }
+                if !applied {
+                    for id in &blend.front {
+                        if let Some(surface) = self.panes.get_mut(id) {
+                            for pass in &mut surface.bind_mut().overlap {
+                                pass.clear();
+                            }
+                        }
+                    }
+                    return;
+                }
+                // A held gesture still owns its route. Fresh hits choose the
+                // visually dominant family once the crossfade passes halfway.
+                if blend.amount > 0.5
+                    && let Some(first) = blend.back.first().and_then(|id| self.panes.get(id))
+                {
+                    let start = first.bind().presentation_order;
+                    for (rank, id) in blend.front.iter().chain(&blend.back).enumerate() {
+                        if let Some(surface) = self.panes.get_mut(id) {
+                            surface.bind_mut().input_order = start + rank as i32;
+                        }
+                    }
+                }
             }
         }
     }
-    pub fn presentation_order(&self, player: &Gd<WeldVideoPlayer>) -> i32 {
+    pub fn input_order(&self, player: &Gd<WeldVideoPlayer>) -> i32 {
         self.panes
             .values()
             .find_map(|surface| {
                 let surface = surface.bind();
-                (&surface.player == player).then_some(surface.presentation_order)
+                (&surface.player == player).then_some(surface.input_order)
             })
             .unwrap_or(-100)
     }

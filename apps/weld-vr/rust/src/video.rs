@@ -2,6 +2,8 @@
 mod canvas;
 mod decoration;
 mod input;
+mod native_canvas;
+mod overlap;
 mod placement;
 mod stacking;
 mod stereo;
@@ -449,9 +451,9 @@ impl WeldVideoPlayer {
             .map_or_else(Array::new, Workspace::surfaces)
     }
     #[func]
-    fn sort_xr_windows(&mut self, viewer: Vector3) {
+    fn sort_xr_windows(&mut self, viewer: Vector3, left_eye: Vector3, right_eye: Vector3) {
         if let Some(workspace) = &mut self.workspace {
-            workspace.sort_xr_windows(viewer);
+            workspace.sort_xr_windows(viewer, [left_eye, right_eye]);
         }
     }
 }

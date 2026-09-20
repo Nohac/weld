@@ -6,6 +6,9 @@ const XR_SCENE = preload("res://scenes/xr.tscn")
 
 
 func _ready() -> void:
+	if FileAccess.file_exists("user://xr-overlap-probe"):
+		add_child(load("res://scenes/diagnostics/xr_overlap_probe.gd").new())
+		return
 	# One-shot local diagnostic, installed only by the explicit stress runner.
 	if FileAccess.file_exists("user://video-stress.json"):
 		add_child(load("res://scenes/diagnostics/video_stress.tscn").instantiate())
