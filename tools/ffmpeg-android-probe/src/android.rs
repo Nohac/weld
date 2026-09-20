@@ -22,6 +22,7 @@ use jni::{
 use weld_media::VideoCodec;
 use weld_media_android::{
     AndroidDecoder, AndroidImage, AndroidImageTarget, DecodeProgress, DecoderConfig,
+    stream_configuration,
 };
 
 use crate::policy::{Ledger, MAX_FILE_BYTES, MAX_PACKETS, codec_class};
@@ -143,10 +144,11 @@ struct Session {
     hold_images: usize,
     images: usize,
     receive_calls: usize,
+    visible: [u32; 2],
 }
 
 impl Session {
-    fn new(parameters: codec::Parameters, codec: VideoCodec) -> Result<Self> {
+    fn new(parameters: codec::Parameters, codec: VideoCodec, first_packet: &[u8]) -> Result<Self> {
         // SAFETY: parameters owns immutable metadata; the validated extradata
         // allocation is copied before parameters drops.
         let config = unsafe {
@@ -174,7 +176,32 @@ impl Session {
                 extra,
             )?
         };
+        let visible = match std::env::var("WELD_PROBE_VISIBLE_SIZE") {
+            Ok(value) if !value.is_empty() => {
+                let (width, height) = value
+                    .split_once('x')
+                    .context("expected visible WIDTHxHEIGHT")?;
+                [width.parse()?, height.parse()?]
+            }
+            _ => {
+                let (width, height) = config.extent();
+                [width, height]
+            }
+        };
+        let config = if codec != VideoCodec::Vp9 {
+            stream_configuration(codec, visible, first_packet)?
+        } else {
+            ensure!(
+                visible == [config.extent().0, config.extent().1],
+                "VP9 visible override unsupported"
+            );
+            config
+        };
         let (width, height) = config.extent();
+        println!(
+            "initialization={width}x{height} visible={}x{}",
+            visible[0], visible[1]
+        );
         ensure!(
             width <= 1920 && height <= 1088,
             "probe extent exceeds bound"
@@ -190,6 +217,7 @@ impl Session {
             hold_images,
             images: 0,
             receive_calls: 0,
+            visible,
         })
     }
 
@@ -201,6 +229,14 @@ impl Session {
             DecodeProgress::End => Ok(Receive::End),
             DecodeProgress::Image(image) => {
                 let info = image.info();
+                let [left, top, right, bottom] = info.crop;
+                ensure!(
+                    right > left
+                        && bottom > top
+                        && right - left >= self.visible[0]
+                        && bottom - top >= self.visible[1],
+                    "acquired image does not cover the transported visible extent"
+                );
                 ledger.decoded(i64::try_from(info.timestamp_micros)?)?;
                 self.images += 1;
                 println!(
@@ -295,7 +331,11 @@ fn run(path: &Path, expected: usize, timestamp_step: i64, depth: usize) -> Resul
         "codec={codec:?} wrapper={name} ndk_codec=1 packets={} min_api=28 timestamp_step_us={timestamp_step} depth={depth}",
         packets.len()
     );
-    let mut session = Session::new(parameters, codec)?;
+    let first_packet = packets
+        .first()
+        .and_then(Packet::data)
+        .context("missing initial packet")?;
+    let mut session = Session::new(parameters, codec, first_packet)?;
     let name = logs.name()?;
     println!(
         "selected_codec={name:?} classification={} hardware_flag=unverified",

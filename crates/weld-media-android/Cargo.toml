@@ -16,6 +16,9 @@ ndk = { version = "=0.9.0", default-features = false, features = ["media", "nati
 [build-dependencies]
 cc = "1"
 
+[dev-dependencies]
+ffmpeg-next.workspace = true
+
 [lints.rust]
 unsafe_op_in_unsafe_fn = "deny"
 

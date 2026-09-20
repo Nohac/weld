@@ -157,7 +157,13 @@ impl AndroidDecoder {
         }
         let mut options = Dictionary::new();
         options.set("ndk_codec", "1");
-        session.decoder = Some(context.decoder().open_as_with(codec, options)?.video()?);
+        session.decoder = Some(
+            context
+                .decoder()
+                .open_as_with(codec, options)
+                .with_context(|| format!("could not open {name} at {width}x{height}"))?
+                .video()?,
+        );
         let mut native_mode = -1i64;
         // SAFETY: opened decoder owns this AVOptions private context and output is writable.
         unsafe {

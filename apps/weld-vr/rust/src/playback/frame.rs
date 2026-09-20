@@ -200,6 +200,25 @@ pub(super) fn display_geometry(
 mod tests {
     use super::*;
     #[test]
+    fn padded_tiny_window_keeps_visible_crop_and_input_size() {
+        let display = display_geometry(
+            Geometry {
+                width: 128,
+                height: 128,
+                crop: [0, 0, 128, 128],
+            },
+            [100, 30],
+            None,
+        )
+        .expect("padded window");
+        assert_eq!(
+            display.crop,
+            [0.5 / 128.0, 0.5 / 128.0, 99.5 / 128.0, 29.5 / 128.0]
+        );
+        assert_eq!(display.logical_size, [100.0, 30.0]);
+        assert!((display.aspect - 100.0 / 30.0).abs() < 0.00001);
+    }
+    #[test]
     fn clipped_logical_underflow_is_rejected() {
         let result = display_geometry(
             Geometry {

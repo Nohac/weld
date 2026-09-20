@@ -3,7 +3,7 @@ set -euo pipefail
 if [[ $# -lt 4 || $1 != --serial || ( $3 != --codec && $3 != --codec-info ) ]]; then
   echo 'Usage: run-android-codec-probe --serial DEVICE --codec av1|h264|vp9' >&2
   echo '       run-android-codec-probe --serial DEVICE --codec-info CODEC_NAME' >&2
-  echo 'Decode options: --fixture PATH --frames 1..2048 --timestamp-step-us 1..1000000 --depth 1..4 --hold-images 1..6 --poll-delay-ms 0..100' >&2
+  echo 'Decode options: --fixture PATH --frames 1..2048 --timestamp-step-us 1..1000000 --depth 1..4 --hold-images 1..6 --poll-delay-ms 0..100 --visible-size WIDTHxHEIGHT' >&2
   echo 'Build first with scripts/build-android-codec-probe. Copies a small diagnostic to the selected device.' >&2
   exit 2
 fi
@@ -17,6 +17,7 @@ timestamp_step=16667
 depth=2
 hold_images=1
 poll_delay=0
+visible_size=
 while [[ $# -gt 0 ]]; do
   [[ $mode == --codec && $# -ge 2 ]] || { echo 'Invalid probe options.' >&2; exit 2; }
   case "$1" in
@@ -26,10 +27,12 @@ while [[ $# -gt 0 ]]; do
     --depth) depth=$2 ;;
     --hold-images) hold_images=$2 ;;
     --poll-delay-ms) poll_delay=$2 ;;
+    --visible-size) visible_size=$2 ;;
     *) echo "Unknown probe option: $1" >&2; exit 2 ;;
   esac
   shift 2
 done
+[[ -z $visible_size || $visible_size =~ ^[1-9][0-9]{0,3}x[1-9][0-9]{0,3}$ ]] || { echo 'Expected --visible-size WIDTHxHEIGHT.' >&2; exit 2; }
 [[ $frames =~ ^[1-9][0-9]{0,3}$ && $frames -le 2048 &&
    $timestamp_step =~ ^[1-9][0-9]{0,6}$ && $timestamp_step -le 1000000 &&
    $depth =~ ^[1-4]$ && $hold_images =~ ^[1-6]$ &&
@@ -73,5 +76,5 @@ echo "Log: $log"
 # The native watchdog exits after 30s even if adb disconnects. No network/device
 # configuration is changed and no Godot APK is installed. Keep paths shell-safe.
 timeout 45s adb -s "$serial" shell \
-  "WELD_PROBE_HOLD_IMAGES=$hold_images WELD_PROBE_POLL_DELAY_MS=$poll_delay CLASSPATH=$remote/classes.dex app_process /system/bin WeldCodecProbe $remote $remote/input.$container $frames $timestamp_step $depth" \
+  "WELD_PROBE_VISIBLE_SIZE=$visible_size WELD_PROBE_HOLD_IMAGES=$hold_images WELD_PROBE_POLL_DELAY_MS=$poll_delay CLASSPATH=$remote/classes.dex app_process /system/bin WeldCodecProbe $remote $remote/input.$container $frames $timestamp_step $depth" \
   2>&1 | tee "$log"

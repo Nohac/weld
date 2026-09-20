@@ -1,8 +1,10 @@
 use super::{Geometry, Progress};
 use anyhow::{Context, Result};
 use std::{ffi::c_void, os::fd::OwnedFd, ptr::NonNull};
-use weld_media::{DecoderConfig, VideoCodec, h264_annex_b_headers};
-use weld_media_android::{AndroidDecoder, AndroidImage, AndroidImageTarget, DecodeProgress};
+use weld_media::{DecoderConfig, VideoCodec};
+use weld_media_android::{
+    AndroidDecoder, AndroidImage, AndroidImageTarget, DecodeProgress, stream_configuration,
+};
 
 pub const TEXTURE_TARGET: u32 = 0x8d65; // GL_TEXTURE_EXTERNAL_OES
 // Fixture holders: current/spare (2), retirements (2), pending (1), latest (1),
@@ -29,21 +31,19 @@ impl Decoder {
         initial_packet: &[u8],
     ) -> Result<Self> {
         let (width, height) = config.extent();
-        // FFmpeg's H.264 MediaCodec open rejects empty extradata. Our wire
-        // format carries SPS/PPS in each generation's first keyframe; Linux
-        // accepts them in-band, but Android needs them before native creation.
+        // Live transport carries visible window dimensions, which may be
+        // smaller than the encoded frame. MediaCodec configures before the
+        // first submission, so inspect in-band headers before native creation.
+        // Fixtures already supply container dimensions. VP9's FFmpeg parser
+        // exposes no dimensions; retain its existing explicit setup path.
         let initialized;
-        let config = if config.codec() == VideoCodec::H264 && config.extra().is_empty() {
-            initialized = DecoderConfig::new(
-                VideoCodec::H264,
-                width,
-                height,
-                h264_annex_b_headers(initial_packet)?,
-            )?;
+        let config = if !initial_packet.is_empty() && config.codec() != VideoCodec::Vp9 {
+            initialized = stream_configuration(config.codec(), [width, height], initial_packet)?;
             &initialized
         } else {
             config
         };
+        let (width, height) = config.extent();
         let decoder = AndroidDecoder::new_with_low_latency(
             config,
             AndroidImageTarget::new(width, height, MAX_ACQUIRED_IMAGES)?,

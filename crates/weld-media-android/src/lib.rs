@@ -4,6 +4,11 @@
 
 pub use weld_media::DecoderConfig;
 
+#[cfg(any(target_os = "android", test))]
+mod configuration;
+#[cfg(target_os = "android")]
+pub use configuration::stream_configuration;
+
 #[cfg(target_os = "android")]
 mod decoder;
 #[cfg(target_os = "android")]
