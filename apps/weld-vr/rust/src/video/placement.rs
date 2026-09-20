@@ -4,9 +4,9 @@ use godot::{classes::IRefCounted, prelude::*};
 
 const MIN_RADIUS: f32 = 0.6;
 const MAX_RADIUS: f32 = 5.0;
-const VERTICAL_FOLLOW: f32 = 0.5;
 const BACKWARD_SLANT_DEGREES: f32 = 6.0;
-const ORIENTATION_PIVOT_BEHIND: f32 = 1.6;
+const BACKWARD_SLANT_FADE_DEGREES: f32 = 15.0;
+const ORIENTATION_PIVOT_BEHIND: f32 = 0.5;
 
 /// User placement relative to the layout parent. Unmoved dialogs/popups retain
 /// application placement; moved windows face the pinned center. Child layers
@@ -50,8 +50,9 @@ impl Placement {
     }
 }
 
-/// Face a separate orientation pivot horizontally, with softened vertical tracking and
-/// a small laptop-like backward slant at eye level, never wrist roll.
+/// Face the rear pivot horizontally but use head-centered elevation vertically.
+/// The eye-level backslant fades above the horizon; it must not keep raised
+/// windows leaning away from the user. Never inherit wrist roll.
 /// Reach and placement bounds remain relative to the actual workspace center.
 pub(super) fn facing_center(
     center: Vector3,
@@ -89,8 +90,11 @@ pub(super) fn facing_center(
     } else {
         horizontal
     };
-    let facing_elevation = (facing.y / facing_radius).clamp(-1.0, 1.0).asin();
-    let pitch = facing_elevation * VERTICAL_FOLLOW - BACKWARD_SLANT_DEGREES.to_radians();
+    // Separate the axes: the rear pivot softens yaw, not vertical curvature.
+    let progress = (elevation / BACKWARD_SLANT_FADE_DEGREES.to_radians()).clamp(0.0, 1.0);
+    let fade = progress * progress * (3.0 - 2.0 * progress);
+    let pitch = (elevation - BACKWARD_SLANT_DEGREES.to_radians() * (1.0 - fade))
+        .clamp(-85.0_f32.to_radians(), 85.0_f32.to_radians());
     let z = -facing_horizontal * pitch.cos() - Vector3::UP * pitch.sin();
     let x = Vector3::UP.cross(z).normalized();
     let y = z.cross(x);
@@ -248,20 +252,32 @@ mod tests {
     }
 
     #[test]
-    fn vertical_tilt_is_softened_and_biased_without_changing_position() {
+    fn vertical_tilt_faces_head_above_eye_level_independently_of_yaw_pivot() {
         for (elevation, expected_pitch) in [
-            (-60.0_f32, -36.0_f32),
+            (-85.0_f32, -85.0_f32),
+            (-60.0, -66.0),
             (0.0, -6.0),
-            (30.0, 9.0),
-            (60.0, 24.0),
+            (7.5, 4.5),
+            (15.0, 15.0),
+            (30.0, 30.0),
+            (60.0, 60.0),
+            (85.0, 85.0),
         ] {
             let radians = elevation.to_radians();
-            let position = Vector3::new(0.0, radians.sin(), -radians.cos()) * 1.6;
-            let pose = facing_center(Vector3::ZERO, Vector3::ZERO, position).unwrap();
-            assert!((pose.origin - position).length() < 1e-5);
-            let pitch = -pose.basis.col_c().y.asin();
-            assert!((pitch - expected_pitch.to_radians()).abs() < 1e-5);
-            assert!(pose.basis.col_a().y.abs() < 1e-5);
+            let center = Vector3::new(1.0, 1.7, 2.0);
+            let position = center + Vector3::new(0.0, radians.sin(), -radians.cos()) * 2.5;
+            for pivot in [
+                center,
+                center + Vector3::BACK * 1.6,
+                center + Vector3::new(1.0, 0.0, 3.0),
+            ] {
+                let pose = facing_center(center, pivot, position).unwrap();
+                assert!((pose.origin - position).length() < 1e-5);
+                let pitch = -pose.basis.col_c().y.asin();
+                assert!((pitch - expected_pitch.to_radians()).abs() < 1e-5);
+                assert!(pose.basis.col_a().y.abs() < 1e-5);
+                assert!(pose.basis.col_b().y > 0.0);
+            }
         }
     }
 
@@ -310,13 +326,15 @@ mod tests {
     #[test]
     fn rear_pivot_reduces_horizontal_turn_without_moving_or_restricting_depth() {
         let center = Vector3::ZERO;
-        let pivot = Vector3::BACK * 1.6;
+        let pivot = Anchor::new(Transform3D::IDENTITY, 2.5)
+            .unwrap()
+            .orientation_pivot();
         let position = Vector3::new(1.0, 0.0, -1.6);
         let direct = facing_center(center, center, position).unwrap();
         let relaxed = facing_center(center, pivot, position).unwrap();
         let yaw = |pose: Transform3D| pose.basis.col_c().x.abs().atan2(pose.basis.col_c().z);
         assert!((yaw(direct).to_degrees() - 32.005).abs() < 0.01);
-        assert!((yaw(relaxed).to_degrees() - 17.354).abs() < 0.01);
+        assert!((yaw(relaxed).to_degrees() - 25.463).abs() < 0.01);
         assert!((relaxed.origin - position).length() < 1e-5);
         let near = facing_center(center, pivot, Vector3::FORWARD * 0.7).unwrap();
         assert!((near.origin.length() - 0.7).abs() < 1e-5);

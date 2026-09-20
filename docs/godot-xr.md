@@ -23,10 +23,12 @@ and subsurfaces retain the transported relative positions and stacking.
 
 Rust owns spherical spawn and drag placement for both mono and stereo windows.
 Position and facing use separate anchors: windows turn horizontally toward a
-virtual point 1.6 m behind the workspace's initial head pose, making the curve
-gentler without pushing the actual windows farther away. Vertical pitch follows
-half the elevation relative to that pivot, with a 6-degree backward bias at eye
-level and no roll. Both anchors change only on placement/recenter, not head lean.
+virtual point 0.5 m behind the workspace's initial head pose, making the curve
+gentler without pushing the actual windows farther away. Vertical pitch instead
+uses elevation from the pinned head position. A 6-degree backward bias at eye
+level fades smoothly to zero by 15 degrees above eye level, so raised windows
+tilt down toward the user. Pitch is bounded to ±85 degrees without roll. Both
+anchors change only on placement/recenter, not head lean.
 Azahar's explicit companion slot starts below its primary at the same radius.
 
 Each native panel has the same pose and bounds as its Rust ray-input target.
@@ -71,6 +73,11 @@ passed 86 Rust tests, strict Clippy, scene and GPU shader checks, and Android
 build/export. The shader checks cover both stereo eyes and owner-relative
 subsurface clipping. This is presentation validation, not a new codec or
 performance qualification.
+
+On 2026-09-20, the user accepted the separate head-centered vertical curvature
+and closer 0.5 m horizontal pivot in Pico run `godot-hoist-h8fk_5xl`. The six
+focused placement tests passed, including pitch independence from the yaw
+pivot, fade endpoints, unchanged positions and the stronger horizontal turn.
 
 ## Controller presentation
 
