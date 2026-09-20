@@ -6,6 +6,7 @@ Azahar with OpenGL, Separate Windows, Full-width Side-by-Side, nonzero 3D depth,
 2x resolution and Single Window Mode OFF. No ROM or save data is modified here.
 """
 import argparse
+import json
 import os
 from pathlib import Path
 import subprocess
@@ -16,12 +17,19 @@ ROOT = Path(__file__).resolve().parent.parent
 
 
 def rules(show_manager=False):
-    result = ("weld-window-rules-v1\n"
-        "org.azahar_emu.Azahar\t | Primary Window\tsbs\t1600\t480\t0\t1\tprimary\n"
-        "org.azahar_emu.Azahar\t | Secondary Window\tmono\t640\t480\t1\t1\tcompanion\n")
+    entries = [
+        {"app_id": "org.azahar_emu.Azahar", "title_suffix": " | Primary Window",
+         "stereo": True, "width": 1600, "height": 480, "slot": 0,
+         "bitrate": {"group": 1, "role": "primary"}},
+        {"app_id": "org.azahar_emu.Azahar", "title_suffix": " | Secondary Window",
+         "stereo": False, "width": 640, "height": 480, "slot": 1,
+         "bitrate": {"group": 1, "role": "companion"}},
+    ]
     if show_manager:
-        result += "org.azahar_emu.Azahar\t\tmono\t800\t600\t2\t1\tutility\n"
-    return result
+        entries.append({"app_id": "org.azahar_emu.Azahar", "title_suffix": "",
+            "stereo": False, "width": 800, "height": 600, "slot": 2,
+            "bitrate": {"group": 1, "role": "utility"}})
+    return json.dumps({"rules": entries}, separators=(",", ":"))
 
 
 def main():

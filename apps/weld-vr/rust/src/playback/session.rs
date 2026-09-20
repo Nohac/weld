@@ -839,7 +839,7 @@ mod tests {
         let shared = Shared::default();
         let mut inventory = Inventory {
             rules: WindowRules::parse(
-                "weld-window-rules-v1\napp\tPrimary Window\tsbs\t1600\t480\t0\t-\t-\n",
+                r#"{"rules":[{"app_id":"app","title_suffix":"Primary Window","stereo":true,"width":1600,"height":480,"slot":0}]}"#,
             )
             .unwrap(),
             ..Inventory::default()
@@ -908,7 +908,7 @@ mod tests {
         let shared = Shared::default();
         let mut inventory = Inventory {
             rules: WindowRules::parse(
-                "weld-window-rules-v1\napp\tPrimary\tsbs\t1600\t480\t0\t1\tprimary\n",
+                r#"{"rules":[{"app_id":"app","title_suffix":"Primary","stereo":true,"width":1600,"height":480,"slot":0,"bitrate":{"group":1,"role":"primary"}}]}"#,
             )
             .expect("rules"),
             ..Inventory::default()
@@ -972,7 +972,7 @@ mod tests {
         let shared = Shared::default();
         let mut inventory = Inventory {
             rules: WindowRules::parse(
-                "weld-window-rules-v1\napp\tPrimary Window\tsbs\t1600\t480\t0\t-\t-\napp\tSecondary Window\tmono\t640\t480\t1\t-\t-\n",
+                r#"{"rules":[{"app_id":"app","title_suffix":"Primary Window","stereo":true,"width":1600,"height":480,"slot":0},{"app_id":"app","title_suffix":"Secondary Window","stereo":false,"width":640,"height":480,"slot":1}]}"#,
             ).unwrap(),
             ..Inventory::default()
         };

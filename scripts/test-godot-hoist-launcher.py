@@ -1,4 +1,5 @@
 """Public pairing policy; process ownership is reused from the headless launcher."""
+import json
 from pathlib import Path
 import runpy
 import subprocess
@@ -13,14 +14,14 @@ class PairingTests(unittest.TestCase):
     def test_azahar_rules_share_quality_group_with_catchall_last(self):
         azahar = runpy.run_path(str(Path(__file__).with_name("run-azahar-xr")))
         for manager in (False, True):
-            lines = azahar["rules"](manager).splitlines()
-            self.assertEqual(lines[0], "weld-window-rules-v1")
-            rows = [line.split("\t") for line in lines[1:]]
-            self.assertTrue(all(len(row) == 8 and row[6] == "1" for row in rows))
-            self.assertEqual([row[7] for row in rows], ["primary", "companion"] + (["utility"] if manager else []))
-            self.assertTrue(rows[0][1] and rows[1][1])
+            document = json.loads(azahar["rules"](manager))
+            rows = document["rules"]
+            self.assertTrue(all(row["bitrate"]["group"] == 1 for row in rows))
+            self.assertEqual([row["bitrate"]["role"] for row in rows], ["primary", "companion"] + (["utility"] if manager else []))
+            self.assertTrue(rows[0]["title_suffix"] and rows[1]["title_suffix"])
+            self.assertEqual([row["stereo"] for row in rows[:2]], [True, False])
             if manager:
-                self.assertEqual(rows[-1][1], "")
+                self.assertEqual(rows[-1]["title_suffix"], "")
 
     def test_source_keeps_host_audio_while_isolating_wayland_including_restart(self):
         original = {"XDG_RUNTIME_DIR": "/run/host", "DISPLAY": ":0",
@@ -59,7 +60,8 @@ class PairingTests(unittest.TestCase):
             args = API["parse_arguments"](["--app", "azahar", "--rom", str(rom)])
             self.assertEqual(API["app_command"](args), ["azahar", "--windowed", str(rom)])
             rules = root / "test.rules"
-            rules.write_text("weld-window-rules-v1\napp\twindow\tsbs\t1600\t480\t0\t-\t-\n")
+            rules.write_text(json.dumps({"rules": [{"app_id": "app", "title_suffix": "window",
+                "stereo": True, "width": 1600, "height": 480, "slot": 0}]}))
             API["prepare_presentation_rules"](rules, directory=root)
             self.assertEqual((root / "presentation.rules").read_text(), rules.read_text())
             API["prepare_presentation_rules"](None, directory=root)

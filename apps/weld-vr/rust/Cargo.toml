@@ -12,8 +12,10 @@ crate-type = ["cdylib"]
 [dependencies]
 godot = { version = "=0.5.5", features = ["api-4-7"] }
 anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 weld-media = { path = "../../../crates/weld-media", features = ["config", "decode"] }
-weld-client = { path = "../../../crates/weld-client" }
+weld-client = { path = "../../../crates/weld-client", features = ["serde"] }
 weld-hoist-encoded = { path = "../../../crates/weld-hoist-encoded" }
 weld-hoist-iroh = { path = "../../../crates/weld-hoist-iroh" }
 libc = "0.2"

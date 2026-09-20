@@ -75,6 +75,15 @@ explicit packed-stereo interpretation, not a new Wayland stereo extension.
 Attached content retains its owner's placement and close/drag controls. The
 shared bitrate target defaults to 16 Mbps across all windows.
 
+The one-shot rules file is JSON with an ordered `rules` array. Each entry names
+`app_id`, `title_suffix`, `stereo`, `width`, `height`, `slot` and an optional
+`bitrate` object containing `group` and `role`. Rust deserializes through Serde
+into validated rules; the old positional text format and header are gone.
+First-match selection and the manager catch-all-last ordering are unchanged.
+The 4096-byte/eight-rule bounds and label, extent, stereo and slot checks remain.
+Tests exercise the actual Python producer against the Rust consumer, matching
+and Weld-owned limits rather than Serde round trips.
+
 The launcher assigns the upper screen, touchscreen and optional manager to one
 explicit bitrate group with primary, companion and utility roles. Interaction
 boosts their shared entitlement; it does not transfer the upper screen's share

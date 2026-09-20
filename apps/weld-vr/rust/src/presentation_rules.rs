@@ -1,6 +1,7 @@
 //! Explicit local presentation preferences, not peer identity or permissions.
 //! The test launcher supplies bounded rules; no emulator names live here.
 use anyhow::{Context, Result, ensure};
+use serde::Deserialize;
 use std::{
     fs::File,
     io::{ErrorKind, Read},
@@ -9,7 +10,8 @@ use std::{
 };
 use weld_client::{Extent, PresentationGroupId, PresentationRole, SurfaceBitratePreference};
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[serde(try_from = "RuleInput")]
 pub(crate) struct WindowRule {
     pub app_id: String,
     pub title_suffix: String,
@@ -24,71 +26,87 @@ pub(crate) struct WindowRules {
     pub entries: Vec<Arc<WindowRule>>,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RuleDocument {
+    rules: Vec<WindowRule>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RuleInput {
+    app_id: String,
+    title_suffix: String,
+    stereo: bool,
+    width: u32,
+    height: u32,
+    slot: u32,
+    #[serde(default)]
+    bitrate: Option<RuleBitrate>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RuleBitrate {
+    group: PresentationGroupId,
+    role: RuleRole,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum RuleRole {
+    Primary,
+    Companion,
+    Utility,
+}
+
+impl TryFrom<RuleInput> for WindowRule {
+    type Error = anyhow::Error;
+
+    fn try_from(rule: RuleInput) -> Result<Self> {
+        ensure!(
+            !rule.app_id.is_empty() && rule.app_id.len() <= 1024 && rule.title_suffix.len() <= 1024,
+            "invalid window selector"
+        );
+        ensure!(
+            crate::presentation::supported_extent(rule.width, rule.height),
+            "rule exceeds receive pixel budget"
+        );
+        ensure!(
+            !rule.stereo || rule.width.is_multiple_of(2),
+            "packed stereo width must be even"
+        );
+        ensure!(rule.slot < 8, "panel slot exceeds window budget");
+        Ok(Self {
+            app_id: rule.app_id,
+            title_suffix: rule.title_suffix,
+            stereo: rule.stereo,
+            size: Extent::new(rule.width, rule.height),
+            slot: rule.slot,
+            bitrate: rule.bitrate.map(|bitrate| SurfaceBitratePreference {
+                group: bitrate.group,
+                role: match bitrate.role {
+                    RuleRole::Primary => PresentationRole::Primary,
+                    RuleRole::Companion => PresentationRole::Companion,
+                    RuleRole::Utility => PresentationRole::Utility,
+                },
+            }),
+        })
+    }
+}
+
 impl WindowRules {
     pub fn parse(text: &str) -> Result<Self> {
         ensure!(text.len() <= 4096, "presentation rules exceed 4096 bytes");
-        let mut lines = text.lines();
+        let document: RuleDocument =
+            serde_json::from_str(text).context("parse presentation rules JSON")?;
         ensure!(
-            lines.next() == Some("weld-window-rules-v1"),
-            "invalid presentation rules header"
+            (1..=8).contains(&document.rules.len()),
+            "presentation rules must contain between one and eight entries"
         );
-        let mut entries = Vec::new();
-        for line in lines {
-            let fields: Vec<_> = line.split('\t').collect();
-            ensure!(
-                fields.len() == 8 && entries.len() < 8,
-                "invalid presentation rule"
-            );
-            ensure!(
-                !fields[0].is_empty() && fields[0].len() <= 1024 && fields[1].len() <= 1024,
-                "invalid window selector"
-            );
-            let stereo = match fields[2] {
-                "mono" => false,
-                "sbs" => true,
-                _ => anyhow::bail!("unknown window view layout"),
-            };
-            let width = fields[3].parse().context("invalid rule width")?;
-            let height = fields[4].parse().context("invalid rule height")?;
-            ensure!(
-                crate::presentation::supported_extent(width, height),
-                "rule exceeds receive pixel budget"
-            );
-            ensure!(
-                !stereo || width % 2 == 0,
-                "packed stereo width must be even"
-            );
-            let slot = fields[5].parse().context("invalid panel slot")?;
-            ensure!(slot < 8, "panel slot exceeds window budget");
-            let bitrate = if fields[6] == "-" && fields[7] == "-" {
-                None
-            } else {
-                let group = PresentationGroupId::try_from(
-                    fields[6].parse::<u32>().context("invalid bitrate group")?,
-                )
-                .map_err(anyhow::Error::msg)?;
-                let role = match fields[7] {
-                    "primary" => PresentationRole::Primary,
-                    "companion" => PresentationRole::Companion,
-                    "utility" => PresentationRole::Utility,
-                    _ => anyhow::bail!("unknown bitrate role"),
-                };
-                Some(SurfaceBitratePreference { group, role })
-            };
-            entries.push(Arc::new(WindowRule {
-                app_id: fields[0].into(),
-                title_suffix: fields[1].into(),
-                stereo,
-                size: Extent::new(width, height),
-                slot,
-                bitrate,
-            }));
-        }
-        ensure!(
-            !entries.is_empty(),
-            "presentation rules must select at least one window"
-        );
-        Ok(Self { entries })
+        Ok(Self {
+            entries: document.rules.into_iter().map(Arc::new).collect(),
+        })
     }
 
     /// A fresh launch without a file restores ordinary presentation behavior.
@@ -122,87 +140,105 @@ impl WindowRules {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::process::Command;
+
+    fn rule() -> RuleInput {
+        RuleInput {
+            app_id: "app".into(),
+            title_suffix: "Primary".into(),
+            stereo: true,
+            width: 1600,
+            height: 480,
+            slot: 0,
+            bitrate: None,
+        }
+    }
+
     #[test]
-    fn quality_rules_are_explicit_bounded_and_optional() {
-        let rules = WindowRules::parse("weld-window-rules-v1\napp\tPrimary\tsbs\t1600\t480\t0\t1\tprimary\napp\tSecondary\tmono\t640\t480\t1\t1\tcompanion\napp\t\tmono\t800\t600\t2\t-\t-\n").expect("rules");
-        let primary = rules
-            .select("app", "Game Primary")
-            .expect("primary")
-            .bitrate
-            .expect("hint");
-        let companion = rules
-            .select("app", "Game Secondary")
-            .expect("secondary")
-            .bitrate
-            .expect("hint");
-        assert_eq!(primary.group, companion.group);
-        assert_eq!(primary.role, PresentationRole::Primary);
-        assert_eq!(companion.role, PresentationRole::Companion);
-        assert!(
-            rules
-                .select("app", "Manager")
-                .expect("manager")
-                .bitrate
-                .is_none()
-        );
-        for suffix in [
-            "0\tprimary",
-            "65536\tprimary",
-            "1\tunknown",
-            "-\tprimary",
-            "1\t-",
-            "1",
-            "1\tprimary\textra",
-        ] {
-            assert!(
-                WindowRules::parse(&format!(
-                    "weld-window-rules-v1\napp\t\tmono\t640\t480\t0\t{suffix}\n"
-                ))
-                .is_err()
+    fn actual_launcher_json_parses_with_matching_roles_and_catchall_last() {
+        let launcher = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../scripts/run-azahar-xr");
+        for manager in [false, true] {
+            let output = Command::new("python3").args(["-I", "-c",
+                "import runpy,sys; print(runpy.run_path(sys.argv[1])['rules'](sys.argv[2] == 'true'))"])
+                .arg(&launcher).arg(manager.to_string()).output().expect("launcher rules");
+            assert!(output.status.success());
+            let text = String::from_utf8(output.stdout).expect("JSON");
+            let rules = WindowRules::parse(&text).expect("parse actual Python output");
+            assert_eq!(rules.entries.len(), if manager { 3 } else { 2 });
+            for (suffix, role, stereo, width) in [
+                (" | Primary Window", PresentationRole::Primary, true, 1600),
+                (
+                    " | Secondary Window",
+                    PresentationRole::Companion,
+                    false,
+                    640,
+                ),
+            ] {
+                let selected = rules
+                    .select("org.azahar_emu.Azahar", &format!("Any game{suffix}"))
+                    .expect("selected");
+                assert_eq!(selected.stereo, stereo);
+                assert_eq!(selected.size, Extent::new(width, 480));
+                assert_eq!(
+                    selected.bitrate,
+                    Some(SurfaceBitratePreference {
+                        group: PresentationGroupId::try_from(1).expect("group"),
+                        role,
+                    })
+                );
+            }
+            assert_eq!(
+                rules.select("org.azahar_emu.Azahar", "Manager").is_some(),
+                manager
             );
         }
-        assert!(WindowRules::parse("weld-window-rules-v1\napp\t\tmono\t640\t480\t0\n").is_err());
-        assert!(
-            WindowRules::parse("weld-window-rules-v2\napp\t\tmono\t640\t480\t0\t1\tprimary\n")
-                .is_err()
-        );
     }
+
     #[test]
-    fn explicit_selectors_do_not_depend_on_window_order_or_game_title() {
-        let rules = WindowRules::parse("weld-window-rules-v1\norg.example.App\t | Primary Window\tsbs\t1600\t480\t0\t-\t-\norg.example.App\t | Secondary Window\tmono\t640\t480\t1\t-\t-\n").unwrap();
-        assert!(
-            rules
-                .select("org.example.App", "Game A | Primary Window")
-                .unwrap()
-                .stereo
-        );
-        assert!(
-            rules
-                .select("org.example.App", "Game B | Primary Window")
-                .unwrap()
-                .stereo
-        );
-        assert!(
-            !rules
-                .select("org.example.App", "Game B | Secondary Window")
-                .unwrap()
-                .stereo
-        );
-        assert!(rules.select("other", "Game B | Primary Window").is_none());
-        assert!(rules.select("org.example.App", "Library").is_none());
+    fn selectors_match_app_and_suffix_independently_of_game_title() {
+        let rules = WindowRules {
+            entries: vec![Arc::new(WindowRule::try_from(rule()).expect("valid rule"))],
+        };
+        assert!(rules.select("app", "Game A Primary").is_some());
+        assert!(rules.select("app", "Game B Primary").is_some());
+        assert!(rules.select("other", "Game A Primary").is_none());
+        assert!(rules.select("app", "Library").is_none());
     }
+
     #[test]
-    fn malformed_and_oversized_rules_are_rejected() {
-        for row in [
-            "app\tname\tsbs\t1601\t480\t0\t-\t-",
-            "app\tname\tmono\t4096\t480\t0\t-\t-",
-            "app\tname\tmono\t640\t480\t8\t-\t-",
-            "app\tname\tbad\t640\t480\t0\t-\t-",
-            "bad",
-        ] {
-            assert!(WindowRules::parse(&format!("weld-window-rules-v1\n{row}\n")).is_err());
+    fn rule_validation_enforces_weld_label_pixel_and_slot_budgets() {
+        fn rejects(change: impl FnOnce(&mut RuleInput)) {
+            let mut input = rule();
+            change(&mut input);
+            assert!(WindowRule::try_from(input).is_err());
         }
-        assert!(WindowRules::parse("weld-window-rules-v1\n").is_err());
-        assert!(WindowRules::parse(&"x".repeat(4097)).is_err());
+        rejects(|input| input.app_id.clear());
+        rejects(|input| input.app_id = "x".repeat(1025));
+        rejects(|input| input.title_suffix = "ø".repeat(513));
+        rejects(|input| input.width = 1601);
+        rejects(|input| input.width = 4096);
+        rejects(|input| input.width = 0);
+        rejects(|input| input.slot = 8);
+        let mut mono = rule();
+        mono.stereo = false;
+        mono.width = 1601;
+        assert!(
+            WindowRule::try_from(mono).is_ok(),
+            "even width is a stereo constraint"
+        );
+    }
+
+    #[test]
+    fn document_limits_bound_rule_count_and_input_bytes() {
+        let entry = r#"{"app_id":"app","title_suffix":"Primary","stereo":true,"width":1600,"height":480,"slot":0}"#;
+        for (count, accepted) in [(0, false), (8, true), (9, false)] {
+            let text = format!(r#"{{"rules":[{}]}}"#, vec![entry; count].join(","));
+            assert_eq!(WindowRules::parse(&text).is_ok(), accepted);
+        }
+        let mut text = format!(r#"{{"rules":[{entry}]}}"#);
+        text.push_str(&" ".repeat(4096 - text.len()));
+        assert!(WindowRules::parse(&text).is_ok());
+        text.push(' ');
+        assert!(WindowRules::parse(&text).is_err());
     }
 }
