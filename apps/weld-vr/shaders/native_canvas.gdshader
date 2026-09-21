@@ -2,9 +2,10 @@
 shader_type canvas_item;
 render_mode unshaded, blend_disabled;
 uniform sampler2D canvas_image : filter_nearest;
+#include "res://shaders/pointer_overlay.gdshaderinc"
 
 void fragment() {
-	// The source is already premultiplied. Copy exactly, without blending its
-	// alpha a second time or reading back from the native OpenXR swapchain.
-	COLOR = texture(canvas_image, UV);
+	// Preserve the premultiplied source/coverage, adding only the foreground
+	// pointer. Never sample or read back the native OpenXR swapchain itself.
+	COLOR = with_pointer(texture(canvas_image, UV), UV);
 }

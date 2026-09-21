@@ -80,7 +80,32 @@ windows/popups following their owner. Shell gestures do not
 forward clicks to the application underneath; recenter or tracking/focus loss cancels
 the gesture and requires held controls to be released before reuse.
 Closing sends the existing surface close request, not a process kill.
-Resizing and placement persistence are not implemented yet.
+Rounded corner handles float 2 cm outside the window. A-drag previews a centered
+resize without changing its pose or reconfiguring the application on every
+motion; release sends one bounded logical-size request. Until matching content
+arrives, the old image is aspect-fitted rather than stretched. Packed stereo
+resizes preserve aspect. Tracking/focus loss cancels the drag.
+The strip's minus/plus controls change application UI scale in 20-percentage-point
+steps (100–300%), not physical window size. Resolution requests retain the
+existing pixel/dimension limits. Placement persistence is not implemented yet.
+
+### Optional local environments
+
+Place self-contained Godot scene wrappers (`.tscn` or `.scn`, `Node3D` roots) at
+the top level of `apps/weld-vr/environments/`, with their models/textures beneath
+that folder. The entire folder is Git-ignored; no downloaded scenery is required
+by a clean checkout. The current `all_resources` export presets include local
+scenery when present. ResourceLoader discovers scenes once at startup, including
+export-remapped resources, in filename order. No generated manifest is needed.
+Use numeric filename prefixes to choose the cycle order.
+
+Left grip in shell mode cycles these scenes and passthrough. With no scenes,
+cycling does nothing; gamepad mode retains its grip mapping. Hidden scenes stop
+processing. Scenery is pinned at recenter, not attached to ordinary head motion.
+Optional root metadata `background_color` (Color), `sky` (Sky), and `animation`
+(StringName naming an AnimationPlayer clip) select the background and looping
+animation. An absent folder is normal; invalid scenes warn and are skipped.
+Scenery consumes headset GPU budget independently of the streamed video.
 
 The 2026-09-19 Pico Azahar comparison established the 2.5 m spawn distance,
 rear orientation pivot and softened pitch through user testing. The slice
@@ -243,9 +268,14 @@ bind failure on the tested GLES runtime. Startup-only native presentation
 kept video live; the exact underlying GL failure remains unresolved. No error
 checks or native image lifetime protections were weakened.
 
-Live layers use hole punching and negative sort orders, ordered by hierarchy
-and stack, so scene controllers and the pointer can draw in front. The fixture
-uses sort order -1. Each pose and quad size follow the same panel-mesh
+Live layers use positive sort orders above the main projection without hole
+punching. Rectangular hole punches removed scenery beneath transparent window
+margins, turning soft shadows black. Hierarchy/stack order is unchanged; the
+fixture uses sort order 1. The laser and hit marker are also drawn in each eye's
+native window canvas where they lie in front of the window plane, preserving
+canvas alpha. The ordinary 3D laser remains in the scene. This adds no XR layers
+or render targets; controller meshes themselves remain in the main projection.
+Each pose and quad size follow the same panel-mesh
 geometry Rust uses for hit testing. That mesh stays logically visible but is
 excluded from rendering in native mode. Composition transforms update at
 priority 150, between scene layout at 100 and pointer sampling at 200.
@@ -408,8 +438,14 @@ clock-local durations overlap; the charts do not establish one-way network
 latency. Legacy logs retain an unknown-reason superseded category and visibly
 unavailable stages rather than invented zeros.
 
-`run-godot-hoist` enables the existing media summaries unless explicitly
-overridden in `RUST_LOG`. Godot's application-owned tracing bridge forwards
+`run-godot-hoist` enables media and network summaries for both timed and unlimited
+runs unless explicitly overridden in `RUST_LOG`. Duration no longer changes
+source logging. The report includes source commits/coalescing, encode batch
+timing, pending work, encoded frames/payload bitrate, receiver ingress/decode
+throughput and queues. Bursty presentation commits are measured after decoding,
+not at application production. Missing source/network samples produce explicit
+warnings; absent packet-loss data is not a zero-loss measurement.
+Godot's application-owned tracing bridge forwards
 bounded summaries to the main-thread logger, splitting long Android messages
 into numbered chunks to avoid logger truncation. Full-run filtered logcat is
 captured in `viewer.log`, capped at 16 MiB, with explicit gap markers. Generated

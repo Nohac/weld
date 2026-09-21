@@ -1,6 +1,7 @@
 //! Window-owned canvas outline and shadow, composed with native video rather
 //! than independently depth-tested against other windows.
 use super::canvas::{self, Layout, SHADOW_MARGIN};
+use super::sizing::RESIZE_HANDLE_GAP;
 use godot::{
     classes::{ColorRect, Control, Shader, ShaderMaterial},
     prelude::*,
@@ -100,12 +101,17 @@ pub(super) struct Decoration {
     focused: bool,
 }
 impl Decoration {
+    pub fn controls(&mut self, opacity: f32) {
+        self.material
+            .set_shader_parameter("resize_opacity", &opacity.to_variant());
+    }
     pub fn new(views: &[Gd<Control>]) -> Self {
         let mut shader = Shader::new_gd();
         shader.set_code(include_str!("frame.gdshader"));
         let mut material = ShaderMaterial::new_gd();
         material.set_shader(&shader);
         material.set_shader_parameter("margin", &SHADOW_MARGIN.to_variant());
+        material.set_shader_parameter("resize_gap", &RESIZE_HANDLE_GAP.to_variant());
         Self {
             views: views
                 .iter()

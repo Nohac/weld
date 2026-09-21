@@ -123,3 +123,20 @@ still caused an approximately 40-second native dependency rebuild in one cache
 check, despite APK reuse. This build-environment churn remains a performance
 follow-up, not a resolved cache claim. The 47 focused launcher/SDK/preflight
 tests passed again when recording this checkpoint.
+
+## Fresh editor import shutdown: 2026-09-21
+
+While validating optional scenery, `check-gdextension` stopped at the fresh
+temporary project's editor import without an explicit engine error. A separate
+verbose `--headless --import` of an asset-free copy completed resource loading
+but exited 134 during shutdown (`target/validation/asset-free-debug-import.log`).
+Running `gdextension_smoke.gd` in that same imported copy then passed, including
+the real XR scene with no environment folder. The exact shutdown cause has not
+been established; the full fresh-import harness is not a passing check on this
+tested 4.8-dev6 run. No nonzero exit was whitelisted.
+
+The regular scoped XR checks passed 113 Rust tests, strict Clippy, and the
+scene, decoration/pointer shader and optional-environment fixtures. Android
+export passed after initial local-asset import; loading the two environment
+scenes extracted from that APK passed discovery and material-binding checks.
+These are resource/lifecycle checks, not a new physical-headset qualification.

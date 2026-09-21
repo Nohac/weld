@@ -27,7 +27,7 @@ impl Layout {
         }
         let physical = if decorated {
             Vector2::new(
-                (content.x + 2.0 * SHADOW_MARGIN).max(0.4),
+                (content.x + 2.0 * SHADOW_MARGIN).max(0.5),
                 content.y + 2.0 * CHROME_MARGIN,
             )
         } else {
@@ -54,6 +54,16 @@ impl Layout {
             (self.physical * 0.5 + center - size * 0.5) * self.scale,
             size * self.scale,
         )
+    }
+    /// Geometry may change every input tick during a resize preview. Keep the
+    /// existing native canvas allocation until the final application frame.
+    pub fn keep_raster(mut self, raster: Vector2i) -> Self {
+        let ratio = raster.to_vector2() / self.raster.to_vector2();
+        self.content.position *= ratio;
+        self.content.size *= ratio;
+        self.scale *= ratio;
+        self.raster = raster;
+        self
     }
 }
 
@@ -92,5 +102,18 @@ mod tests {
         let layout = Layout::new(Vector2::splat(0.001), Vector2i::new(2048, 2048), true).unwrap();
         assert!(layout.raster.x <= 4096 && layout.raster.y <= 4096);
         assert!(Layout::new(Vector2::ZERO, Vector2i::ONE, true).is_none());
+    }
+    #[test]
+    fn resize_preview_keeps_canvas_allocation_and_centered_content() {
+        let old = Layout::new(Vector2::new(1.6, 1.0), Vector2i::new(1600, 1000), true).unwrap();
+        let next = Layout::new(Vector2::new(2.0, 0.8), Vector2i::new(1600, 1000), true)
+            .unwrap()
+            .keep_raster(old.raster);
+        assert_eq!(next.raster, old.raster);
+        assert!(
+            (next.content.position + next.content.size * 0.5 - old.raster.to_vector2() * 0.5)
+                .length()
+                < 1e-4
+        );
     }
 }

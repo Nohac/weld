@@ -28,6 +28,7 @@ pub(super) struct Target {
 #[derive(Clone, Debug)]
 enum Action {
     Close(ClientSurfaceId),
+    Configure(ClientSurfaceId, ClientSurfaceRequestKind),
     Pointer {
         route: Option<ClientPointerRoute>,
         position: InputPosition,
@@ -92,10 +93,10 @@ impl InputState {
         INPUT_CLOCK.get_or_init(Instant::now).elapsed().as_millis() as u32
     }
     pub fn reset(&mut self) {
-        // Closing a window is not a held input gesture. Focus reconciliation
-        // must not erase an already admitted close request.
+        // Completed shell actions are not held input gestures. Focus
+        // reconciliation must not erase an admitted close/resize/scale request.
         self.queue
-            .retain(|message| matches!(message.action, Action::Close(_)));
+            .retain(|message| matches!(message.action, Action::Close(_) | Action::Configure(..)));
         self.reset = Some(self.time());
         self.suppressed_keys.extend(self.keys.iter().copied());
         self.suppressed_buttons.extend(self.buttons.iter().copied());
@@ -124,7 +125,7 @@ impl InputState {
         }
         self.queue.retain(|message| !matches!(&message.action, Action::Pointer { route: Some(route), .. } if route.surface == surface));
         self.queue.retain(
-            |message| !matches!(&message.action, Action::Close(target) if *target == surface),
+            |message| !matches!(&message.action, Action::Close(target) | Action::Configure(target, _) if *target == surface),
         );
     }
     pub fn captures(&self, geometry: &SurfaceInputGeometry) -> bool {
@@ -155,7 +156,7 @@ impl InputState {
     }
     fn enqueue(&mut self, action: Action) -> bool {
         let pointer = match &action {
-            Action::Close(_) => self.cached_pointer,
+            Action::Close(_) | Action::Configure(..) => self.cached_pointer,
             Action::Pointer {
                 route, position, ..
             } => route.map(|route| (route, *position)),
@@ -357,6 +358,11 @@ impl InputState {
             && self.surface_visible(target.geometry.surface)
             && self.enqueue(Action::Close(target.geometry.surface))
     }
+    pub fn configure(&mut self, target: &Target, kind: ClientSurfaceRequestKind) -> bool {
+        target.epoch == self.epoch
+            && self.surface_visible(target.geometry.surface)
+            && self.enqueue(Action::Configure(target.geometry.surface, kind))
+    }
     pub fn scroll(&mut self, amount: f64) -> bool {
         let Some((route, position)) = self.cached_pointer else {
             return false;
@@ -419,6 +425,12 @@ pub(super) fn service(shared: &super::Shared, runtime: &mut ClientRuntime) {
             continue;
         }
         match message.action {
+            Action::Configure(surface, kind) => {
+                runtime.apply_request(ClientRequest::Surface(ClientSurfaceRequest {
+                    surface,
+                    kind,
+                }));
+            }
             Action::Close(surface) => {
                 runtime.apply_request(ClientRequest::Surface(ClientSurfaceRequest {
                     surface,
@@ -814,5 +826,52 @@ mod tests {
         service(&shared, &mut runtime);
         assert_eq!(observed.borrow().resets.len(), 1);
         assert!(runtime.pointer_cursor().is_none());
+    }
+
+    #[test]
+    fn shell_resize_is_delivered_once_survives_focus_reset_and_cannot_target_removed_windows() {
+        let shared = super::super::Shared::default();
+        let observed = Rc::new(RefCell::new(Observed::default()));
+        let mut runtime = ClientRuntime::default();
+        runtime
+            .register(ClientRuntimeAdapter::new(
+                ClientSourceDescriptor::new(ClientSourceId::new(1), ClientProvenance::Local),
+                Adapter(observed.clone()),
+            ))
+            .expect("register");
+        let target = target(0);
+        let kind = ClientSurfaceRequestKind::Configure {
+            logical_size: weld_client::Extent::new(900, 600),
+            resizing: false,
+        };
+        {
+            let mut input = super::super::lock(&shared.session.input);
+            assert!(input.configure(&target, kind.clone()));
+            input.reset();
+        }
+        service(&shared, &mut runtime);
+        service(&shared, &mut runtime);
+        assert_eq!(
+            observed.borrow().requests,
+            vec![ClientRequest::Surface(ClientSurfaceRequest {
+                surface: target.geometry.surface,
+                kind: kind.clone(),
+            })]
+        );
+        {
+            let mut input = super::super::lock(&shared.session.input);
+            assert!(input.configure(&target, kind));
+            input.remove_surface(target.geometry.surface);
+        }
+        service(&shared, &mut runtime);
+        assert_eq!(observed.borrow().requests.len(), 1);
+        let mut input = super::super::lock(&shared.session.input);
+        input.invalidate();
+        assert!(!input.configure(
+            &target,
+            ClientSurfaceRequestKind::SetPreferredScale {
+                scale_120: Some(240)
+            }
+        ));
     }
 }

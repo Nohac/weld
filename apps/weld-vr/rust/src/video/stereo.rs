@@ -79,9 +79,11 @@ impl WeldStereoPanel {
             self.base_mut().add_child(&layer);
             layer.set_eye_visibility(eye);
             layer.set_alpha_blend(true);
-            layer.set_sort_order(-100);
+            layer.set_sort_order(100);
             layer.set_process_priority(150);
-            layer.set_enable_hole_punch(true);
+            // Overlay the complete 3D projection. Underlays need rectangular
+            // holes, which erase scenery beneath translucent window shadows.
+            layer.set_enable_hole_punch(false);
             if !layer.is_natively_supported() {
                 layer.queue_free();
                 for layer in &mut self.layers {
@@ -128,8 +130,9 @@ impl WeldStereoPanel {
             if layer.get_quad_size() != physical {
                 layer.set_quad_size(physical);
             }
-            if layer.get_sort_order() != order {
-                layer.set_sort_order(order);
+            let native_order = order + 200;
+            if layer.get_sort_order() != native_order {
+                layer.set_sort_order(native_order);
             }
         }
     }

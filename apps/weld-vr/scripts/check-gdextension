@@ -25,10 +25,11 @@ fi
 work_directory=$(mktemp -d "${TMPDIR:-/tmp}/weld-vr-check.XXXXXX")
 trap 'rm -rf -- "$work_directory"' EXIT
 mkdir -p "$work_directory/project"
-# Do not copy editor state, Cargo outputs, export presets or signing credentials.
+# Do not copy local environments, editor state, Cargo outputs, export presets
+# or signing credentials. This also validates an asset-free checkout.
 cp -a -- "$project_directory/project.godot" "$project_directory/icon.svg" \
   "$project_directory/weld_vr.gdextension" "$project_directory/weld_vr.gdextension.uid" \
-  "$project_directory/scenes" \
+  "$project_directory/scenes" "$project_directory/shaders" \
   "$project_directory/tests" "$project_directory/addons" "$project_directory/bin" \
   "$project_directory/scripts" \
   "$work_directory/project/"

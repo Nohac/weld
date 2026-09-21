@@ -5,6 +5,7 @@ mod input;
 mod native_canvas;
 mod overlap;
 mod placement;
+mod sizing;
 mod stacking;
 mod stereo;
 mod workspace;

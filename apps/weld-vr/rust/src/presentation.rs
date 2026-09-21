@@ -20,7 +20,7 @@ fn bounded_pixels(pixels: [f64; 2]) -> bool {
         && supported_extent(pixels[0] as u32, pixels[1] as u32)
 }
 
-fn configure_fits(
+pub(crate) fn configure_fits(
     root: SurfaceContentView,
     content: [f64; 2],
     requested: Extent,
@@ -50,6 +50,35 @@ fn configure_fits(
     scale.is_finite() && scale > 0.0 && bounded_pixels(next_root.map(|v| (v * scale).ceil()))
 }
 
+/// Bound a user resize at both current and requested scale, including root
+/// decorations. Keep the requested aspect rather than clipping one dimension.
+pub(crate) fn bounded_resize(
+    root: SurfaceContentView,
+    content: [f64; 2],
+    desired: [f64; 2],
+    scale: f64,
+) -> Option<Extent> {
+    if desired.iter().any(|v| !v.is_finite() || *v < 1.0) || !scale.is_finite() || scale < 1.0 {
+        return None;
+    }
+    let reduction = (f64::from(MAX_DIMENSION) / desired[0].max(desired[1])).min(1.0);
+    let desired = desired.map(|v| (v * reduction).floor().max(1.0) as u32);
+    let (mut low, mut high, mut best) = (1, desired[0], None);
+    while low <= high {
+        let width = low + (high - low) / 2;
+        let height =
+            (u64::from(width) * u64::from(desired[1]) / u64::from(desired[0])).max(1) as u32;
+        let candidate = Extent::new(width, height);
+        if configure_fits(root, content, candidate, scale) {
+            best = Some(candidate);
+            low = width + 1;
+        } else {
+            high = width.saturating_sub(1);
+        }
+    }
+    best
+}
+
 pub fn fit(envelope: [f64; 2], aspect: f64) -> Option<[f64; 2]> {
     if !aspect.is_finite()
         || aspect <= 0.0
@@ -72,6 +101,9 @@ pub struct XrPreferences {
 }
 
 impl XrPreferences {
+    pub(crate) fn scale_120(&self) -> u32 {
+        self.scale_120
+    }
     pub fn new(
         eye: [f64; 2],
         projections: &[Projection],
@@ -299,6 +331,15 @@ impl RasterSizing {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn interactive_resize_preserves_aspect_and_reserves_hidpi_and_decoration_space() {
+        let view = root([820.0, 520.0], 2.0);
+        let size = bounded_resize(view, [800.0, 500.0], [2400.0, 1500.0], 3.0).unwrap();
+        assert!(configure_fits(view, [800.0, 500.0], size, 3.0));
+        assert!((f64::from(size.width) / f64::from(size.height) - 1.6).abs() < 0.01);
+        assert!(size.width < 800);
+        assert!(bounded_resize(view, [800.0, 500.0], [f64::NAN, 50.0], 2.0).is_none());
+    }
     fn root(logical: [f32; 2], scale: f32) -> SurfaceContentView {
         SurfaceContentView {
             source_x: 0.0,

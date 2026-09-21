@@ -2,6 +2,7 @@
 shader_type canvas_item;
 render_mode unshaded, blend_disabled;
 uniform sampler2D canvas_image : filter_nearest;
+#include "res://shaders/pointer_overlay.gdshaderinc"
 uniform float amount;
 uniform int count;
 // Bounded peer family, matching MAX_BACK_LAYERS. Explicit samplers keep the
@@ -47,5 +48,5 @@ void fragment() {
 	if (count > 5) { vec4 layer = sample_peer(peer_5, map_5, UV); back = layer + back * (1.0 - layer.a); }
 	if (count > 6) { vec4 layer = sample_peer(peer_6, map_6, UV); back = layer + back * (1.0 - layer.a); }
 	if (count > 7) { vec4 layer = sample_peer(peer_7, map_7, UV); back = layer + back * (1.0 - layer.a); }
-	COLOR = blend_orders(texture(canvas_image, UV), back, amount);
+	COLOR = with_pointer(blend_orders(texture(canvas_image, UV), back, amount), UV);
 }

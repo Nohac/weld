@@ -1,6 +1,9 @@
 //! A shell gesture owns its press through release, independent of ray hover.
+use super::geometry;
 use super::{Sample, alive, controls::Part};
+use crate::video::sizing::{Corner, centered_resize};
 use crate::video::workspace::WeldSurface;
+use godot::classes::QuadMesh;
 use godot::prelude::*;
 
 struct Hold {
@@ -13,6 +16,48 @@ enum Kind {
     Drag { anchor: DragAnchor, grip: bool },
     Close,
     Gamepad,
+    Resize(ResizeAnchor),
+    Scale(bool),
+}
+
+struct ResizeAnchor {
+    plane: geometry::Panel,
+    start: Vector2,
+    size: Vector2,
+    corner: Corner,
+    stereo: bool,
+}
+impl ResizeAnchor {
+    fn new(sample: &Sample, aim: Transform3D, corner: Corner, stereo: bool) -> Option<Self> {
+        let size = sample
+            .panel
+            .get_mesh()?
+            .try_cast::<QuadMesh>()
+            .ok()?
+            .get_size();
+        let plane = geometry::Panel::new(
+            sample.panel.get_global_transform(),
+            Vector3::ZERO,
+            size,
+            size,
+        )?;
+        let start = plane.project(aim)?.pixels;
+        Some(Self {
+            plane,
+            start,
+            size,
+            corner,
+            stereo,
+        })
+    }
+    fn size(&self, aim: Transform3D) -> Option<Vector2> {
+        Some(centered_resize(
+            self.size,
+            self.plane.project(aim)?.pixels - self.start,
+            self.corner,
+            self.stereo,
+        ))
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -72,6 +117,9 @@ impl Gesture {
         std::mem::take(&mut self.gamepad_clicked)
     }
     pub fn reset(&mut self) {
+        if let Some(hold) = &mut self.hold {
+            hold.surface.bind_mut().cancel_resize();
+        }
         *self = Self::default();
     }
     pub fn owns(&self, sample: &Sample) -> bool {
@@ -91,15 +139,16 @@ impl Gesture {
                 || sample.surface.as_ref() != Some(&hold.surface)
                 || hold.workspace_anchor != hold.surface.bind().workspace_anchor()
             {
+                hold.surface.bind_mut().cancel_resize();
                 self.buttons = Buttons::default();
                 return true;
             }
-            let held = match hold.kind {
+            let held = match &hold.kind {
                 Kind::Drag {
                     anchor,
                     grip: by_grip,
                 } => {
-                    let held = if by_grip { grip } else { a };
+                    let held = if *by_grip { grip } else { a };
                     if held && aim.is_finite() {
                         hold.surface.bind_mut().move_to(anchor.pose(aim));
                     }
@@ -116,6 +165,26 @@ impl Gesture {
                 }
                 Kind::Gamepad => {
                     self.gamepad_clicked = !a && sample.chrome == Some(Part::Gamepad);
+                    a
+                }
+                Kind::Resize(anchor) => {
+                    if let Some(size) = anchor.size(aim) {
+                        hold.surface.bind_mut().preview_resize(size);
+                    }
+                    if !a {
+                        hold.surface.bind_mut().finish_resize();
+                    }
+                    a
+                }
+                Kind::Scale(increase) => {
+                    let part = if *increase {
+                        Part::LargerUi
+                    } else {
+                        Part::SmallerUi
+                    };
+                    if !a && sample.chrome == Some(part) {
+                        hold.surface.bind_mut().change_application_scale(*increase);
+                    }
                     a
                 }
             };
@@ -144,6 +213,14 @@ impl Gesture {
                 }),
                 Some(Part::Close) => Some(Kind::Close),
                 Some(Part::Gamepad) => Some(Kind::Gamepad),
+                Some(Part::SmallerUi) => Some(Kind::Scale(false)),
+                Some(Part::LargerUi) => Some(Kind::Scale(true)),
+                Some(Part::Resize(corner)) => {
+                    let stereo = surface.bind().is_stereo();
+                    ResizeAnchor::new(sample, aim, corner, stereo)
+                        .filter(|_| surface.clone().bind_mut().begin_resize())
+                        .map(Kind::Resize)
+                }
                 None => None,
             }
         } else {

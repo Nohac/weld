@@ -12,3 +12,7 @@
 *.keystore
 *.jks
 export_credentials.cfg
+
+# Optional local scenery; neither third-party assets nor their scene wrappers
+# are required by a clean checkout. Godot can still import/export them locally.
+/environments/

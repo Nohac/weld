@@ -5,9 +5,12 @@ use super::canvas::Layout;
 use super::decoration::{Clip, Decoration, Shape};
 use super::overlap::{self, Canvas, Plane};
 use super::placement::Placement;
+use super::sizing::{self, Sizing};
 use super::stacking::{Layer, Stack};
 use super::stereo::ViewLayout;
 use super::xr::controls::{Bar, Part};
+use super::xr::ray_overlay::{self, Ray};
+use super::xr::{controls, geometry};
 use crate::{
     playback::{
         Controller,
@@ -24,6 +27,7 @@ use godot::{
     prelude::*,
 };
 use std::collections::BTreeMap;
+use std::time::Instant;
 
 #[derive(GodotClass)]
 #[class(base=RefCounted, no_init)]
@@ -40,6 +44,8 @@ pub struct WeldSurface {
     decoration: Option<Decoration>,
     bar: Option<Bar>,
     placement: Placement,
+    sizing: Sizing,
+    application_scale: Option<u32>,
     presentation_order: i32,
     input_order: i32,
     canvas_layout: Option<Layout>,
@@ -51,6 +57,32 @@ impl IRefCounted for WeldSurface {}
 
 #[godot_api]
 impl WeldSurface {
+    /// Scene layout supplies the natural envelope; Rust owns user sizing.
+    #[func]
+    fn panel_size(&mut self, natural: Vector2) -> Vector2 {
+        let logical = self.logical_size();
+        if let Some(scale) = self.sizing.observe(logical, Instant::now()) {
+            if self
+                .player
+                .bind()
+                .controller
+                .as_ref()
+                .is_some_and(|controller| controller.prefer_scale(scale))
+            {
+                self.application_scale = Some(scale);
+            } else {
+                godot_warn!("Application scale request was not admitted");
+            }
+        }
+        self.sizing.physical(natural, logical)
+    }
+    /// Child layers and ray mapping use the fitted image, not preview padding.
+    #[func]
+    pub(super) fn content_panel_size(&self) -> Vector2 {
+        self.player.bind().shape.map_or(Vector2::ZERO, |clip| {
+            sizing::fitted(clip.shape.size, self.logical_size())
+        })
+    }
     #[func]
     fn title(&self) -> GString {
         self.pane.metadata.title().into()
@@ -172,7 +204,7 @@ impl WeldSurface {
         self.right_material.clone()
     }
     #[func]
-    fn is_stereo(&self) -> bool {
+    pub(super) fn is_stereo(&self) -> bool {
         self.right_material.is_some()
     }
     #[func]
@@ -204,12 +236,24 @@ impl WeldSurface {
             return;
         };
         self.apply_clip(Clip::full(shape));
+        let fit = sizing::fitted(physical_size, self.logical_size()) / physical_size;
+        self.material
+            .set_shader_parameter("content_fit", &fit.to_variant());
+        if let Some(right) = &mut self.right_material {
+            right.set_shader_parameter("content_fit", &fit.to_variant());
+        }
     }
     /// Lay out the complete native canvas while retaining a content-only hit plane.
     #[func]
     fn layout_canvas(&mut self, physical: Vector2, raster: Vector2i) -> Vector2 {
         let Some(layout) = Layout::new(physical, raster, self.pane.kind != 3) else {
             return physical;
+        };
+        let layout = if self.sizing.busy() {
+            self.canvas_layout
+                .map_or(layout, |previous| layout.keep_raster(previous.raster))
+        } else {
+            layout
         };
         let views: Vec<_> = [self.control.clone(), self.right_control.clone()]
             .into_iter()
@@ -270,6 +314,74 @@ impl WeldSurface {
 }
 
 impl WeldSurface {
+    fn scale_120(&self) -> u32 {
+        self.application_scale.unwrap_or_else(|| {
+            if self.pane.rule.is_some() {
+                120
+            } else {
+                self.player
+                    .bind()
+                    .xr_preferences
+                    .map_or(120, |preferences| preferences.scale_120())
+            }
+        })
+    }
+    pub(super) fn begin_resize(&mut self) -> bool {
+        let Some(size) = self.player.bind().shape.map(|clip| clip.shape.size) else {
+            return false;
+        };
+        self.sizing.begin(size, self.logical_size())
+    }
+    pub(super) fn preview_resize(&mut self, size: Vector2) {
+        self.sizing.update(size);
+    }
+    pub(super) fn cancel_resize(&mut self) {
+        self.sizing.cancel();
+    }
+    pub(super) fn finish_resize(&mut self) {
+        let Some(desired) = self.sizing.desired() else {
+            return;
+        };
+        self.request_size(desired, None);
+    }
+    pub(super) fn change_application_scale(&mut self, increase: bool) {
+        let current = self.scale_120();
+        let next = if increase {
+            current.saturating_add(24).min(360)
+        } else {
+            current.saturating_sub(24).max(120)
+        };
+        if next == current || !self.begin_resize() {
+            return;
+        }
+        // Fixed physical panel and approximately fixed pixel count: increasing
+        // UI scale means fewer logical pixels, not a larger VR quad.
+        let desired = self.logical_size() * (current as f32 / next as f32);
+        self.request_size(desired, Some(next));
+    }
+    fn request_size(&mut self, desired: Vector2, scale: Option<u32>) {
+        let requested = self
+            .player
+            .bind()
+            .controller
+            .as_ref()
+            .and_then(|controller| {
+                controller.resize_window(
+                    [f64::from(desired.x), f64::from(desired.y)],
+                    scale.unwrap_or(self.scale_120()),
+                )
+            });
+        if let Some([width, height]) = requested {
+            self.sizing.wait(
+                Vector2::new(width as f32, height as f32),
+                scale,
+                Instant::now(),
+            );
+        } else {
+            self.sizing.cancel();
+            godot_warn!("Window resize request was not admitted");
+        }
+    }
     fn canvas(&self) -> Option<Canvas> {
         let panel = self.panel.as_ref()?;
         let layout = self.canvas_layout?;
@@ -340,12 +452,26 @@ impl WeldSurface {
         aim: Transform3D,
         content_y: Option<f32>,
     ) -> Option<(Part, f32)> {
+        let corner = self.panel.as_ref().and_then(|panel| {
+            let size = self.player.bind().shape?.shape.size;
+            let hit = geometry::Panel::new(
+                panel.get_global_transform(),
+                Vector3::ZERO,
+                size,
+                Vector2::ONE,
+            )?
+            .project(aim)?;
+            Some((
+                Part::Resize(controls::corner_at(hit.pixels, size)?),
+                hit.distance,
+            ))
+        });
         let bar = self.bar.as_mut()?;
         if let Some(y) = content_y {
             let height = self.player.bind().shape?.shape.size.y;
             bar.approach(y, height);
         }
-        let hit = bar.hit(aim);
+        let hit = corner.or_else(|| bar.hit(aim));
         bar.highlight(hit.map(|(part, _)| part));
         hit
     }
@@ -353,6 +479,9 @@ impl WeldSurface {
         self.pane.kind <= 1
     }
     pub(super) fn show_controls(&mut self, opacity: f32) {
+        if let Some(decoration) = &mut self.decoration {
+            decoration.controls(opacity);
+        }
         if let Some(bar) = &mut self.bar {
             bar.show(opacity);
         }
@@ -365,6 +494,7 @@ pub(super) struct Workspace {
     pub selected: Option<u64>,
     preferences: Option<XrPreferences>,
     stack: Stack,
+    eyes: Option<[Vector3; 2]>,
 }
 impl Workspace {
     pub fn new(session: Session, preferences: Option<XrPreferences>) -> Self {
@@ -374,6 +504,7 @@ impl Workspace {
             selected: None,
             preferences,
             stack: Stack::default(),
+            eyes: None,
         }
     }
     pub fn tick(&mut self) -> Result<()> {
@@ -432,6 +563,8 @@ impl Workspace {
                 decoration: None,
                 bar: None,
                 placement: Placement::default(),
+                sizing: Sizing::default(),
+                application_scale: None,
                 presentation_order: -100,
                 input_order: -100,
                 canvas_layout: None,
@@ -492,6 +625,7 @@ impl Workspace {
             .map(|s| s.bind().player.clone())
     }
     pub fn sort_xr_windows(&mut self, viewer: Vector3, eyes: [Vector3; 2]) {
+        self.eyes = Some(eyes);
         for surface in self.panes.values_mut() {
             for pass in &mut surface.bind_mut().overlap {
                 pass.clear();
@@ -578,6 +712,22 @@ impl Workspace {
                 (&surface.player == player).then_some(surface.input_order)
             })
             .unwrap_or(-100)
+    }
+    pub fn draw_pointer(&self, ray: Option<Ray>) {
+        for surface in self.panes.values() {
+            let surface = surface.bind();
+            if let (Some(panel), Some(layout)) = (&surface.panel, surface.canvas_layout)
+                && panel.is_instance_valid()
+            {
+                ray_overlay::apply(
+                    &surface.outputs,
+                    panel.get_global_transform(),
+                    layout.physical,
+                    self.eyes,
+                    ray,
+                );
+            }
+        }
     }
     pub(super) fn control_surface(&self, player: &Gd<WeldVideoPlayer>) -> Option<Gd<WeldSurface>> {
         let window = self

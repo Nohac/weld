@@ -4,13 +4,13 @@ use godot::prelude::*;
 
 pub(super) const RANGE: f32 = 6.0;
 
-pub(super) struct Intersection {
+pub(in crate::video) struct Intersection {
     pub pixels: Vector2,
     pub distance: f32,
     pub inside: bool,
 }
 
-pub(super) struct Panel {
+pub(in crate::video) struct Panel {
     inverse: Transform3D,
     center: Vector3,
     size: Vector2,

@@ -13,7 +13,6 @@ extends Node3D
 
 var xr_interface: OpenXRInterface
 var placement_pending := true
-var passthrough_active := false
 var controller_models: Array[OpenXRRenderModelManager] = []
 var preferences_resolved := false
 var preferences_wait_started := Time.get_ticks_msec()
@@ -44,6 +43,7 @@ func _ready() -> void:
 	screen.material_override = material
 	$XROrigin3D/RightControllerRig/Aim/PointerTilt/Pointer.configure(panel.player,
 		right_rig.aim, $XROrigin3D/LeftController, screen, panel.view)
+	$XROrigin3D/RightControllerRig/Aim/PointerTilt/Pointer.environment_cycle.connect($Environments.cycle_environment)
 	xr_interface = XRServer.find_interface("OpenXR") as OpenXRInterface
 	if xr_interface == null or not xr_interface.is_initialized():
 		# Scene inspection/tests can load the hierarchy without an XR runtime.
@@ -127,15 +127,7 @@ func _log_render_target() -> void:
 func _configure_passthrough() -> void:
 	# Alpha blend is the OpenXR compositor's camera background, not raw camera
 	# access. No vendor SDK or camera-feed permission is needed by this scene.
-	var modes := xr_interface.get_supported_environment_blend_modes()
-	passthrough_active = false
-	if XRInterface.XR_ENV_BLEND_MODE_ALPHA_BLEND in modes:
-		passthrough_active = xr_interface.set_environment_blend_mode(
-			XRInterface.XR_ENV_BLEND_MODE_ALPHA_BLEND)
-	if not passthrough_active:
-		xr_interface.set_environment_blend_mode(XRInterface.XR_ENV_BLEND_MODE_OPAQUE)
-	get_viewport().transparent_bg = passthrough_active
-	print("WELD_XR passthrough=", passthrough_active, " blend_modes=", modes)
+	$Environments.reapply_environment()
 
 
 func _process(_delta: float) -> void:
@@ -154,6 +146,7 @@ func _process(_delta: float) -> void:
 	# Place once from a valid pose; normal head movement never drags the panel.
 	if not workspace_layout.recenter(camera.global_transform, panel_distance):
 		return
+	$Environments.pin(camera.global_transform)
 	screen.global_transform = workspace_layout.spawn_transform(0, false)
 	screen.show()
 	_sync_composition_panel()
@@ -276,16 +269,19 @@ func _update_windows() -> void:
 				if parent == null or not placed.has(parent.surface_id()):
 					continue
 				var parent_mesh: MeshInstance3D = window_panels[parent.surface_id()].mesh
-				var factor: float = parent_mesh.mesh.size.x / parent.logical_size().x
+				var parent_content: Vector2 = parent.content_panel_size()
+				var factor: float = parent_content.x / parent.logical_size().x
 				physical = logical * factor
 				var centered := surface.kind() <= 1
 				if centered:
 					physical = _secondary_size(logical, parent.logical_size(), parent_mesh.mesh.size)
 				transform = parent_mesh.global_transform
-				var offset: Vector2 = Vector2.ZERO if centered else surface.logical_position() * factor + physical * 0.5 - parent_mesh.mesh.size * 0.5
+				var offset: Vector2 = Vector2.ZERO if centered else surface.logical_position() * factor + physical * 0.5 - parent_content * 0.5
 				var forward := secondary_window_distance if centered else 0.025 + maxf(surface.stack_index(), 0) * 0.001
 				transform.origin += transform.basis * Vector3(offset.x, -offset.y, forward)
 				entry.depth = window_panels[parent.surface_id()].depth + 1
+			if surface.kind() <= 1:
+				physical = surface.panel_size(physical)
 			transform = surface.placed_transform(transform, workspace_layout.center(), workspace_layout.orientation_pivot())
 			if not entry.mesh.mesh.size.is_equal_approx(physical):
 				entry.mesh.mesh.size = physical
@@ -392,8 +388,8 @@ func _setup_panel_presentation() -> void:
 	composition_panel.visible = false
 	composition_panel.process_priority = 150
 	composition_panel.alpha_blend = true
-	composition_panel.enable_hole_punch = true
-	composition_panel.sort_order = -1
+	composition_panel.enable_hole_punch = false
+	composition_panel.sort_order = 1
 	$XROrigin3D.add_child(composition_panel)
 	if not composition_panel.is_natively_supported():
 		composition_panel.queue_free()
@@ -440,7 +436,6 @@ func _exit_xr() -> void:
 
 func _exit_tree() -> void:
 	if xr_interface != null and xr_interface.is_initialized():
-		if passthrough_active:
-			xr_interface.stop_passthrough()
+		xr_interface.set_environment_blend_mode(XRInterface.XR_ENV_BLEND_MODE_OPAQUE)
 		get_viewport().transparent_bg = false
 		get_viewport().use_xr = false

@@ -25,6 +25,9 @@ def steps():
         step("shaders", [*godot, "--display-driver", "wayland", "--rendering-driver", "opengl3_es",
                          "--script", "res://tests/xr_decoration_smoke.gd"], 35,
              "WELD_XR_DECORATION_SMOKE_OK", True),
+        step("environments", [*godot, "--display-driver", "wayland", "--rendering-driver", "opengl3_es",
+                              "--script", "res://tests/xr_environment_smoke.gd"], 40,
+             "WELD_XR_ENVIRONMENT_SMOKE_OK", True),
     ]
 
 

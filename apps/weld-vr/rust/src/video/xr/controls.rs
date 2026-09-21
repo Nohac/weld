@@ -1,12 +1,13 @@
 //! Local window chrome; no video texture, decoder or remote input ownership.
 use super::geometry;
 use crate::video::canvas::{self, Layout};
+use crate::video::sizing::{Corner, RESIZE_HANDLE_GAP};
 use godot::{
     classes::{ColorRect, Control, MeshInstance3D, QuadMesh, Shader, ShaderMaterial},
     prelude::*,
 };
 
-pub(crate) const SIZE: Vector2 = Vector2::new(0.34, 0.05);
+pub(crate) const SIZE: Vector2 = Vector2::new(0.46, 0.05);
 
 pub(super) fn near_edge(uv: Vector2, size: Vector2) -> bool {
     uv.is_finite()
@@ -33,6 +34,32 @@ pub(crate) enum Part {
     Drag,
     Close,
     Gamepad,
+    SmallerUi,
+    LargerUi,
+    Resize(Corner),
+}
+
+pub(in crate::video) fn corner_at(uv: Vector2, size: Vector2) -> Option<Corner> {
+    if !uv.is_finite() || !size.is_finite() || size.x <= 0.0 || size.y <= 0.0 {
+        return None;
+    }
+    let point = (uv - Vector2::splat(0.5)) * size;
+    // Float outside the content; generous hit targets must not steal clicks
+    // from the application's own corner controls.
+    let outside = point.abs() - size * 0.5;
+    if outside.x <= 0.0 && outside.y <= 0.0 {
+        return None;
+    }
+    let distance = (outside - Vector2::splat(RESIZE_HANDLE_GAP)).abs();
+    if distance.x > 0.035 || distance.y > 0.035 {
+        return None;
+    }
+    Some(match (uv.x < 0.5, uv.y < 0.5) {
+        (true, true) => Corner::TopLeft,
+        (false, true) => Corner::TopRight,
+        (true, false) => Corner::BottomLeft,
+        (false, false) => Corner::BottomRight,
+    })
 }
 
 fn part_at(point: Vector2) -> Option<Part> {
@@ -45,12 +72,16 @@ fn part_at(point: Vector2) -> Option<Part> {
     if Vector2::new(q.x.max(0.0), q.y.max(0.0)).length() + q.x.max(q.y).min(0.0) > radius {
         return None;
     }
-    Some(if point.x < -0.06 {
+    Some(if point.x < -0.15 {
         Part::Close
-    } else if point.x > 0.075 {
-        Part::Gamepad
-    } else {
+    } else if point.x < -0.075 {
+        Part::SmallerUi
+    } else if point.x < 0.055 {
         Part::Drag
+    } else if point.x < 0.13 {
+        Part::LargerUi
+    } else {
+        Part::Gamepad
     })
 }
 
@@ -142,6 +173,9 @@ impl Bar {
                 Some(Part::Drag) => 1,
                 Some(Part::Close) => 2,
                 Some(Part::Gamepad) => 3,
+                Some(Part::SmallerUi) => 4,
+                Some(Part::LargerUi) => 5,
+                Some(Part::Resize(_)) => 0,
             }
             .to_variant(),
         );
@@ -152,10 +186,35 @@ impl Bar {
 mod tests {
     use super::*;
     #[test]
+    fn corner_hit_regions_are_larger_than_strokes_but_exclude_window_interior() {
+        let size = Vector2::new(1.6, 1.0);
+        let gap = Vector2::splat(RESIZE_HANDLE_GAP) / size;
+        assert_eq!(corner_at(-gap, size), Some(Corner::TopLeft));
+        assert_eq!(
+            corner_at(Vector2::new(1.0 + gap.x, -gap.y), size),
+            Some(Corner::TopRight)
+        );
+        assert_eq!(
+            corner_at(Vector2::ONE + gap, size),
+            Some(Corner::BottomRight)
+        );
+        assert_eq!(
+            corner_at(Vector2::new(-gap.x, 1.0 + gap.y), size),
+            Some(Corner::BottomLeft)
+        );
+        assert!(corner_at(Vector2::new(0.005, -0.02), size).is_some());
+        assert_eq!(corner_at(Vector2::ZERO, size), None);
+        assert_eq!(corner_at(Vector2::new(0.01, 0.01), size), None);
+        assert_eq!(corner_at(Vector2::new(0.5, 0.0), size), None);
+        assert_eq!(corner_at(Vector2::new(f32::NAN, 0.0), size), None);
+    }
+    #[test]
     fn slim_controls_hit_close_on_left_and_handle_on_right() {
-        assert_eq!(part_at(Vector2::new(-0.115, 0.0)), Some(Part::Close));
+        assert_eq!(part_at(Vector2::new(-0.19, 0.0)), Some(Part::Close));
         assert_eq!(part_at(Vector2::new(0.045, 0.0)), Some(Part::Drag));
-        assert_eq!(part_at(Vector2::new(0.12, 0.0)), Some(Part::Gamepad));
+        assert_eq!(part_at(Vector2::new(0.18, 0.0)), Some(Part::Gamepad));
+        assert_eq!(part_at(Vector2::new(-0.11, 0.0)), Some(Part::SmallerUi));
+        assert_eq!(part_at(Vector2::new(0.09, 0.0)), Some(Part::LargerUi));
         assert_eq!(part_at(Vector2::new(0.045, 0.035)), None);
         assert_eq!(part_at(SIZE * 0.5), None);
     }

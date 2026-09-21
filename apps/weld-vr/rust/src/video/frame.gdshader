@@ -6,6 +6,8 @@ uniform float margin = 0.06;
 uniform vec4 border_color : source_color = vec4(0.48, 0.52, 0.60, 0.72);
 uniform vec4 focused_border_color : source_color = vec4(0.2, 0.65, 1.0, 0.95);
 uniform bool focused = false;
+uniform float resize_opacity = 0.0;
+uniform float resize_gap = 0.02;
 
 float rounded_distance(vec2 point) {
 	vec2 q = abs(point) - (window_size * 0.5 - corner_radius);
@@ -19,6 +21,15 @@ void fragment() {
 	vec4 color = focused ? focused_border_color : border_color;
 	float thickness = focused ? 0.0018 : 0.001;
 	float border = (1.0 - smoothstep(thickness - antialias, thickness + antialias, abs(distance))) * color.a;
+	// Translate each corner outward, retaining its radius rather than growing
+	// the border stroke. The original outline and shadow remain untouched.
+	vec2 corner = window_size * 0.5 + vec2(resize_gap) - abs(point);
+	vec2 handle_q = -corner + vec2(corner_radius);
+	float handle_distance = length(max(handle_q, vec2(0.0))) + min(max(handle_q.x, handle_q.y), 0.0) - corner_radius;
+	float corner_mask = 1.0 - smoothstep(0.040, 0.045, max(corner.x, corner.y));
+	float handle = resize_opacity * corner_mask * (1.0 - smoothstep(0.0025 - antialias, 0.0025 + antialias, abs(handle_distance)));
+	border = max(border, handle);
+	color.rgb = mix(color.rgb, vec3(0.65, 0.85, 1.0), handle);
 	float sigma = min(0.014, min(window_size.x, window_size.y) * 0.1);
 	float shadow_distance = max(rounded_distance(point - vec2(0.0, sigma * 0.5)), 0.0);
 	float shadow = 0.5 * exp(-0.5 * pow(shadow_distance / sigma, 2.0));

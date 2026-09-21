@@ -59,6 +59,16 @@ func _run() -> void:
 			push_error("Both stereo eyes must share the window corner clipping")
 			quit(1)
 			return
+	material.set_shader_parameter("content_fit", Vector2(0.5, 1.0))
+	for index in range(4):
+		await process_frame
+		RenderingServer.force_draw(false)
+	image = viewport.get_texture().get_image()
+	if image.get_pixel(128, 128).g < 0.9 or image.get_pixel(32, 128).g > 0.1:
+		push_error("Resize preview must letterbox the image while preserving eye selection")
+		quit(1)
+		return
+	material.set_shader_parameter("content_fit", Vector2.ONE)
 	# An inset child has square local corners inside the window. A child at
 	# the owner's top-left clips only that outer corner, not its own right edge.
 	for region in [Vector4(0.25, 0.25, 0.5, 0.5), Vector4(0, 0, 0.5, 0.5)]:
@@ -119,7 +129,30 @@ func _run() -> void:
 		push_error("Losing focus must restore the inactive border")
 		quit(1)
 		return
-	overlay.size = Vector2(0.34, 0.05) * (256.0 / 0.4)
+	var before_handles := viewport.get_texture().get_image()
+	material.set_shader_parameter("resize_opacity", 1.0)
+	for index in range(4):
+		await process_frame
+		RenderingServer.force_draw(false)
+	image = viewport.get_texture().get_image()
+	var handle_gain := 0.0
+	for y in range(70, 85):
+		for x in range(33, 50):
+			handle_gain = maxf(handle_gain, image.get_pixel(x, y).a - before_handles.get_pixel(x, y).a)
+	if handle_gain < 0.15 or image.get_pixel(128, 128).a > 0.01:
+		push_error("Resize corners must be visible without covering the window center")
+		quit(1)
+		return
+	var outside_gain := 0.0
+	for y in range(66, 83):
+		for x in range(30, 50):
+			if x < 35 or y < 72:
+				outside_gain = maxf(outside_gain, image.get_pixel(x, y).a - before_handles.get_pixel(x, y).a)
+	if absf(image.get_pixel(37, 80).a - before_handles.get_pixel(37, 80).a) > 0.05 or outside_gain < 0.15:
+		push_error("Resize handles must float outside the unchanged window border")
+		quit(1)
+		return
+	overlay.size = Vector2(0.46, 0.05) * (256.0 / 0.5)
 	overlay.position = (Vector2(256, 256) - overlay.size) * 0.5
 	shader = Shader.new()
 	shader.code = FileAccess.get_file_as_string("res://rust/src/video/xr/controls.gdshader")
@@ -131,16 +164,17 @@ func _run() -> void:
 		RenderingServer.force_draw(false)
 	image = viewport.get_texture().get_image()
 	if image.get_pixel(128, 128).a < 0.95 or image.get_pixel(10, 10).a > 0.01 \
-		or image.get_pixel(134, 128).r <= image.get_pixel(128, 116).r \
-		or image.get_pixel(54, 128).r <= image.get_pixel(202, 128).r:
-		push_error("Window controls must render a rounded strip with a visible drag handle")
+		or image.get_pixel(123, 128).r <= image.get_pixel(128, 119).r \
+		or image.get_pixel(72, 128).r < image.get_pixel(128, 119).r + 0.2 \
+		or image.get_pixel(174, 128).r < image.get_pixel(128, 119).r + 0.2:
+		push_error("Window controls pixels: center=%s handle=%s background=%s minus=%s plus=%s" % [image.get_pixel(128, 128), image.get_pixel(123, 128), image.get_pixel(128, 119), image.get_pixel(72, 128), image.get_pixel(174, 128)])
 		quit(1)
 		return
 	material.set_shader_parameter("hovered", 3)
 	for index in range(4):
 		await process_frame
 		RenderingServer.force_draw(false)
-	var gamepad_region := viewport.get_texture().get_image().get_pixel(185, 128)
+	var gamepad_region := viewport.get_texture().get_image().get_pixel(204, 124)
 	if gamepad_region.b <= gamepad_region.r:
 		push_error("Gamepad hover must highlight the right-hand controls region")
 		quit(1)
@@ -158,10 +192,72 @@ func _run() -> void:
 	if not await _check_overlap(viewport):
 		quit(1)
 		return
+	if not await _check_pointer(viewport):
+		quit(1)
+		return
 	viewport.queue_free()
 	await process_frame
 	print("WELD_XR_DECORATION_SMOKE_OK")
 	quit(0)
+
+
+func _check_pointer(viewport: SubViewport) -> bool:
+	var shader := load("res://shaders/native_canvas.gdshader") as Shader
+	var material := ShaderMaterial.new()
+	material.shader = shader
+	var pixels := Image.create(1, 1, false, Image.FORMAT_RGBA8)
+	pixels.fill(Color(0, 0, 0.4, 0.4))
+	material.set_shader_parameter("canvas_image", ImageTexture.create_from_image(pixels))
+	material.set_shader_parameter("pointer_visible", true)
+	material.set_shader_parameter("pointer_hit", true)
+	material.set_shader_parameter("pointer_eye", Vector3(0, 0, 1))
+	material.set_shader_parameter("pointer_start", Vector3(-0.15, -0.15, 0.5))
+	material.set_shader_parameter("pointer_end", Vector3.ZERO)
+	var rect := ColorRect.new()
+	rect.size = Vector2(256, 256)
+	rect.material = material
+	viewport.add_child(rect)
+	for frame in range(4):
+		await process_frame
+		RenderingServer.force_draw(false)
+	var image := viewport.get_texture().get_image()
+	if image.get_pixel(128, 128).r < 0.1 or image.get_pixel(90, 166).r < 0.05 \
+		or absf(image.get_pixel(128, 128).a - 0.4) > 0.01:
+		push_error("Native pointer must retain beam, hit marker and window alpha")
+		return false
+	material.set_shader_parameter("pointer_start", Vector3(0, 0, -0.1))
+	material.set_shader_parameter("pointer_end", Vector3(0, 0, -0.5))
+	for frame in range(4):
+		await process_frame
+		RenderingServer.force_draw(false)
+	if viewport.get_texture().get_image().get_pixel(128, 128).r > 0.01:
+		push_error("Native pointer must not reveal a ray behind the window")
+		return false
+	material.set_shader_parameter("pointer_start", Vector3(0, 0, 0.75))
+	material.set_shader_parameter("pointer_end", Vector3(0, 0, 0.5))
+	var centers: Array[float] = []
+	for eye in [-0.03, 0.03]:
+		material.set_shader_parameter("pointer_eye", Vector3(eye, 0, 1))
+		for frame in range(4):
+			await process_frame
+			RenderingServer.force_draw(false)
+		image = viewport.get_texture().get_image()
+		var weight := 0.0
+		var total := 0.0
+		for x in range(256):
+			var red := image.get_pixel(x, 128).r
+			total += x * red
+			weight += red
+		if weight <= 0.0:
+			push_error("Eye-specific native pointer is missing")
+			return false
+		centers.append(total / weight)
+	if centers[0] - centers[1] < 8.0:
+		push_error("Native pointer must use each eye's own projection")
+		return false
+	rect.queue_free()
+	await process_frame
+	return true
 
 
 func _check_overlap(viewport: SubViewport) -> bool:

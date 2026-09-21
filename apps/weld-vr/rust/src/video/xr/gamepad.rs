@@ -119,8 +119,8 @@ impl Mode {
         let hands = hands.filter(|hands| hands.valid());
         let Some(capture) = self.capture.as_mut() else {
             let consumed = self.rearm;
-            // Left grip is the reserved exit chord and has no shell action.
-            // Keeping it held must not postpone returning to the right-hand ray.
+            // Keeping the exit grip held must not postpone the right-hand ray.
+            // The environment action separately requires left-grip release.
             if hands.is_some_and(|hands| hands.right.neutral()) {
                 self.rearm = false;
             }

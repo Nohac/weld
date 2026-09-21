@@ -20,6 +20,9 @@ script = ExtResource("1")
 [node name="WorldEnvironment" type="WorldEnvironment" parent="." unique_id=841672975]
 environment = SubResource("Environment")
 
+[node name="Environments" type="WeldXrEnvironment" parent="." node_paths=PackedStringArray("world")]
+world = NodePath("../WorldEnvironment")
+
 [node name="ControllerLight" type="DirectionalLight3D" parent="." unique_id=512540356]
 transform = Transform3D(0.87758255, 0.34391883, -0.334019, 0, 0.6967067, 0.7173561, 0.47942555, -0.6295392, 0.61141765, 0, 0, 0)
 light_energy = 1.2

@@ -38,7 +38,8 @@ use std::{
     time::{Duration, Instant},
 };
 use weld_client::{
-    ClientCursor, InputPosition, KeyboardKeyState, PresentationRate, SurfaceContentView,
+    ClientCursor, ClientSurfaceRequestKind, InputPosition, KeyboardKeyState, PresentationRate,
+    SurfaceContentView,
 };
 
 static NEXT_SESSION: AtomicU64 = AtomicU64::new(1);
@@ -212,6 +213,7 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 }
 
 pub struct Controller {
+    content_view: Option<SurfaceContentView>,
     input_target: Option<input::Target>,
     generation: u64,
     shared: Arc<Shared>,
@@ -289,6 +291,7 @@ impl Controller {
             anyhow::bail!("{error}");
         }
         let controller = Self {
+            content_view: None,
             input_target: None,
             generation,
             shared,
@@ -362,12 +365,14 @@ impl Controller {
         self.presented_epoch = epoch;
         let (frame, display, mut input) = match update {
             PresentationUpdate::Clear => {
+                self.content_view = None;
                 self.current = None;
                 self.input_target = None;
                 self.uniform("has_frame", false.to_variant())?;
                 return Ok(());
             }
             PresentationUpdate::View(view, input) => {
+                self.content_view = Some(view);
                 let Some((geometry, visible)) = self.current else {
                     return Ok(());
                 };
@@ -375,6 +380,7 @@ impl Controller {
                 (None, display, Some(input))
             }
             PresentationUpdate::Frame { frame, view, input } => {
+                self.content_view = view;
                 let display = frame::display_geometry(frame.image.geometry(), frame.visible, view)?;
                 self.current = Some((frame.image.geometry(), frame.visible));
                 (Some(frame), display, input)
@@ -644,6 +650,65 @@ impl Controller {
                 .input_target
                 .as_ref()
                 .is_some_and(|target| lock(&self.shared.session.input).close(target));
+        self.wake_input();
+        accepted
+    }
+    pub fn resize_window(&self, logical: [f64; 2], scale_120: u32) -> Option<[f64; 2]> {
+        let target = self
+            .input_target
+            .as_ref()
+            .filter(|_| self.input_token().is_some())?;
+        let root = self.content_view?;
+        let packing = if self.stereo_material.is_some() {
+            2.0
+        } else {
+            1.0
+        };
+        let content = [
+            target.geometry.logical_size[0] * packing,
+            target.geometry.logical_size[1],
+        ];
+        let size = crate::presentation::bounded_resize(
+            root,
+            content,
+            [logical[0] * packing, logical[1]],
+            f64::from(scale_120.div_ceil(120)),
+        )?;
+        let accepted = lock(&self.shared.session.input).configure(
+            target,
+            ClientSurfaceRequestKind::Configure {
+                logical_size: size,
+                resizing: false,
+            },
+        );
+        self.wake_input();
+        accepted.then_some([f64::from(size.width) / packing, f64::from(size.height)])
+    }
+    pub fn prefer_scale(&self, scale_120: u32) -> bool {
+        let Some(target) = self
+            .input_target
+            .as_ref()
+            .filter(|_| self.input_token().is_some())
+        else {
+            return false;
+        };
+        let Some(root) = self.content_view else {
+            return false;
+        };
+        if !(120..=360).contains(&scale_120)
+            || !crate::presentation::supported_extent(
+                (f64::from(root.logical_width) * f64::from(scale_120.div_ceil(120))).ceil() as u32,
+                (f64::from(root.logical_height) * f64::from(scale_120.div_ceil(120))).ceil() as u32,
+            )
+        {
+            return false;
+        }
+        let accepted = lock(&self.shared.session.input).configure(
+            target,
+            ClientSurfaceRequestKind::SetPreferredScale {
+                scale_120: Some(scale_120),
+            },
+        );
         self.wake_input();
         accepted
     }

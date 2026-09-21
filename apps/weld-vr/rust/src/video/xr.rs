@@ -1,10 +1,12 @@
 //! A single tracked XR pointer. Godot objects stay on the main thread; only
 //! ordinary owned pointer input enters the existing playback mailbox.
 pub(super) mod controls;
+mod environment;
 mod gamepad;
-mod geometry;
+pub(super) mod geometry;
 mod gesture;
 mod policy;
+pub(super) mod ray_overlay;
 
 use super::WeldVideoPlayer;
 use super::stacking::pick_in_front;
@@ -92,6 +94,7 @@ struct WeldXrPointer {
     policy: Policy,
     gesture: Gesture,
     gamepad: gamepad::Mode,
+    environment_grip: environment::CycleGrip,
     last_position: InputPosition,
     started: Instant,
     application_active: bool,
@@ -107,6 +110,7 @@ impl INode3D for WeldXrPointer {
             policy: Policy::default(),
             gesture: Gesture::default(),
             gamepad: gamepad::Mode::default(),
+            environment_grip: environment::CycleGrip::default(),
             last_position: InputPosition::new(0.0, 0.0),
             started: Instant::now(),
             application_active: true,
@@ -133,7 +137,14 @@ impl INode3D for WeldXrPointer {
         }
         self.gesture.discard_deleted_target();
         let hands = self.sample_hands();
-        if self.gamepad.step(hands, Instant::now()) {
+        let gamepad_input = self.gamepad.step(hands, Instant::now());
+        if self
+            .environment_grip
+            .step(hands.map(|hands| hands.left.grip), !gamepad_input)
+        {
+            self.signals().environment_cycle().emit();
+        }
+        if gamepad_input {
             self.show_controls(None, 0.0);
             self.gesture.reset();
             if !self.gamepad.active() {
@@ -310,6 +321,7 @@ impl WeldXrPointer {
         })
     }
     fn show_gamepad(&mut self) {
+        self.draw_native_pointer(None);
         let active = self.gamepad.active() && self.application_active;
         if let Some(config) = &mut self.configuration
             && config.valid()
@@ -341,6 +353,12 @@ impl WeldXrPointer {
         }
     }
     fn draw_pointer(&mut self, distance: f32, hit: bool) {
+        let aim = self.base().get_global_transform();
+        self.draw_native_pointer(Some(ray_overlay::Ray {
+            start: aim.origin,
+            end: aim.origin - aim.basis.col_c().normalized() * distance,
+            hit,
+        }));
         let scale = self.base().get_global_basis().col_c().length();
         if let Some(config) = &mut self.configuration {
             config.laser.show();
@@ -358,10 +376,21 @@ impl WeldXrPointer {
         }
         self.base_mut().show();
     }
+    fn draw_native_pointer(&self, ray: Option<ray_overlay::Ray>) {
+        if let Some(config) = &self.configuration
+            && alive(&config.player)
+            && let Some(workspace) = &config.player.bind().workspace
+        {
+            workspace.draw_pointer(ray);
+        }
+    }
 }
 
 #[godot_api]
 impl WeldXrPointer {
+    #[signal]
+    fn environment_cycle();
+
     /// Wires presentation nodes only. Action interpretation and hit testing
     /// belong to Rust, not signals or scalar events supplied by scripts.
     #[func]
@@ -424,6 +453,7 @@ impl WeldXrPointer {
 
 impl WeldXrPointer {
     fn deactivate(&mut self) {
+        self.draw_native_pointer(None);
         self.gamepad.stop();
         self.show_controls(None, 0.0);
         self.gesture.reset();
@@ -533,7 +563,13 @@ impl WeldXrPointer {
         let intersection = geometry::Panel::new(
             panel.get_global_transform(),
             mesh.get_center_offset(),
-            mesh.get_size(),
+            super::sizing::fitted(
+                mesh.get_size(),
+                Vector2::new(
+                    controller.logical_size()[0] as f32,
+                    controller.logical_size()[1] as f32,
+                ),
+            ),
             rect.size,
         )?
         .project(aim);
