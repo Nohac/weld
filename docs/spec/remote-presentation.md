@@ -345,6 +345,33 @@ camera frames and room observations local unless explicitly authorized otherwise
 This is screen perception layered on normal XR pose tracking, not a requirement
 to rebuild headset tracking, and is not a prerequisite for the first shell.
 
+### Workspace environments and monitor-to-room transition — Exploration
+
+A desktop workspace could pair its wallpaper with a spatial environment. The
+wallpaper may show a view into that environment rather than being an unrelated
+flat image. Activating XR from the aligned monitor would visually expand that
+view around the user while the workspace's existing application windows move
+out from the monitor plane into their spatial placements. Returning reverses
+the presentation transition; it does not restart applications, copy their
+state, or create a second running desktop session.
+
+Each workspace could remember its own environment and separate desktop/XR
+layouts. Switching workspaces, as in i3 or Sway, would switch the admitted
+window collection and its environment together. Stable workspace identity and
+window membership must be explicit source/session state, not inferred from a
+wallpaper image. Environment choice and transition animation belong to
+presentation policy; they do not alter application identity, consent, input
+ownership, or reclaim semantics. A missing environment must still permit a
+plain desktop or passthrough presentation.
+
+Prototype with a manually aligned monitor rectangle and a paired wallpaper /
+environment before adding automatic physical-screen tracking. Preserve a
+usable static transition or reduced-motion alternative, and keep the source
+recoverable if the headset disconnects mid-transition. Hidden workspaces should
+not require full-rate streaming or continuously animated environments merely
+to retain their layouts. This is an experience concept, not a requirement for
+the current environment switcher or a settled workspace protocol.
+
 ### Fixed and head-tracked spatial content
 
 Fixed stereo and head-tracked stereo have different lifecycle and sharing
