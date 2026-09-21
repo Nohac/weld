@@ -158,7 +158,7 @@ def parse_arguments(argv=None):
     duration = parser.add_mutually_exclusive_group()
     duration.add_argument("--seconds", type=LAUNCHER["positive_seconds"], default=120)
     duration.add_argument("--no-timeout", dest="seconds", action="store_const", const=None,
-                          help="run until interrupted or a test process exits; do not force verbose media logging")
+                          help="run until interrupted or a test process exits; keep summary diagnostics enabled")
     parser.add_argument("--restart-after", type=LAUNCHER["positive_seconds"],
                         help="diagnostic: restart the source/apps once, leaving the viewer alive")
     parser.add_argument("--app", choices=("foot", "blender", "azahar"), default="foot")
@@ -197,20 +197,18 @@ def app_command(args):
     return ["blender"]
 
 
-def diagnostic_environment(verbose=True):
+def diagnostic_environment():
     environment = os.environ.copy()
-    if not verbose:
-        return environment
     selected = environment.get("RUST_LOG", "info")
-    for target in ("weld_media_diag", "weld_vr_diag"):
+    for target in ("weld_media_diag", "weld_vr_diag", "weld_network_diag"):
         if not any(part.strip().startswith(target + "=") for part in selected.split(",")):
             selected += "," + target + "=debug"
     environment["RUST_LOG"] = selected
     return environment
 
 
-def source_environment(runtime, verbose=True):
-    environment = diagnostic_environment(verbose)
+def source_environment(runtime):
+    environment = diagnostic_environment()
     host_runtime = environment.get("XDG_RUNTIME_DIR")
     if host_runtime:
         # Isolate the Wayland socket, not host audio. Preserve explicit audio
@@ -314,7 +312,7 @@ def main(argv=None):
 
     print(f"Logs: {run}", flush=True)
     try:
-        environment = source_environment(runtime, verbose=args.seconds is not None)
+        environment = source_environment(runtime)
         app = app_command(args)
         command = source_command(run, state, app, args.bitrate_mbps, args.codec, gamepad=args.app == "azahar")
         if args.app == "azahar":
@@ -332,7 +330,7 @@ def main(argv=None):
             temporary.replace(profile_path)
             prepare_cadence_test(args.half_rate, directory=receiver_directory)
             prepare_presentation_rules(args.presentation_rules, directory=receiver_directory)
-            environment = {**diagnostic_environment(verbose=args.seconds is not None), "WELD_VR_DEVICE_DIR": str(receiver_directory)}
+            environment = {**diagnostic_environment(), "WELD_VR_DEVICE_DIR": str(receiver_directory)}
             hosts.append(LAUNCHER["OwnedHost"]("viewer",
                 [str(ROOT / "scripts/run-godot"), "--path", str(ROOT / "apps/weld-vr"), "--display-driver", "wayland", "--rendering-driver", "opengl3_es"],
                 environment, ROOT, run))
@@ -375,7 +373,7 @@ def main(argv=None):
                 restart.mkdir(mode=0o700)
                 (restart / "runtime").mkdir(mode=0o700)
                 write_new(restart / "viewer.identity", identity(public) + "\n")
-                restart_environment = source_environment(restart / "runtime", verbose=args.seconds is not None)
+                restart_environment = source_environment(restart / "runtime")
                 hosts.insert(0, LAUNCHER["OwnedHost"]("source", source_command(restart, state, app, args.bitrate_mbps, args.codec, gamepad=args.app == "azahar"), restart_environment, ROOT, restart))
                 restart_at = None
             time.sleep(0.1)

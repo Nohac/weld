@@ -11,16 +11,20 @@ API = runpy.run_path(str(Path(__file__).with_name("run-godot-hoist")))
 
 
 class PairingTests(unittest.TestCase):
-    def test_unlimited_runtime_is_explicit_and_does_not_force_verbose_logging(self):
+    def test_unlimited_runtime_keeps_source_and_network_summaries(self):
         self.assertEqual(API["parse_arguments"]([]).seconds, 120)
         self.assertIsNone(API["parse_arguments"](["--no-timeout"]).seconds)
         with self.assertRaises(SystemExit):
             API["parse_arguments"](["--no-timeout", "--seconds", "60"])
         with patch.dict(API["os"].environ, {"RUST_LOG": "warn"}, clear=True):
             for runtime in (Path("/test/runtime"), Path("/test/restart/runtime")):
-                environment = API["source_environment"](runtime, verbose=False)
-                self.assertEqual(environment["RUST_LOG"], "warn")
-            self.assertIn("weld_media_diag=debug", API["diagnostic_environment"]()["RUST_LOG"])
+                environment = API["source_environment"](runtime)
+                self.assertEqual(environment["RUST_LOG"],
+                                 "warn,weld_media_diag=debug,weld_vr_diag=debug,weld_network_diag=debug")
+        with patch.dict(API["os"].environ, {"RUST_LOG": "warn,weld_media_diag=trace"}, clear=True):
+            selected = API["diagnostic_environment"]()["RUST_LOG"]
+            self.assertIn("weld_media_diag=trace", selected)
+            self.assertNotIn("weld_media_diag=debug", selected)
 
     def test_gamepad_requires_explicit_source_opt_in_before_client_arguments(self):
         for enabled in (False, True):

@@ -190,6 +190,11 @@ def report(run):
     groups = {kind: [row for row in records if row["kind"] == kind] for kind in {row["kind"] for row in records}}
     start, end = records[0]["time"], records[-1]["time"]
     get = lambda kind: groups.get(kind, [])
+    for kind, description in (("source", "Weld backend/source timing"),
+                              ("transport", "Weld backend media-send queues"),
+                              ("network", "Network RTT and packet-loss measurements")):
+        if not get(kind):
+            notices.append(f"{description} unavailable: not recorded. Missing data does not mean zero activity or zero loss.")
     codec_names = {"av1": "AV1", "h264": "H.264", "vp9": "VP9"}
     observed_codecs = sorted({row["codec"] for row in get("encoder") if "codec" in row})
     if observed_codecs:
@@ -221,10 +226,23 @@ def report(run):
             cumulative(get("presentation"), ["render_busy_checks_total", "fence_busy_checks_total"]), "checks/s")
         add("Commit arrival gaps — includes legitimate idle periods", ["Largest gap"],
             sampled(get("presentation"), ["commit_gap_max_us"], 1000), "ms", "maxima")
-        add("Bursty commit arrivals — less than half a refresh interval apart", ["Closely spaced commits"],
+        add("Bursty presentation commits — after decoding, not source production", ["Commits less than half a refresh interval apart"],
             cumulative(get("presentation"), ["commit_bursts_total"]), "events/s")
-    add("Source operations — commits and batches are different units", ["Commits received", "Commits coalesced", "Encoded batches"],
+    add("Weld backend/source operations — commits and batches are different units", ["Application commits received", "Commits coalesced", "Encoded batches"],
         interval(get("source"), ["commits_received", "commits_coalesced", "batches_completed"]), "operations/s")
+    add("Weld backend encode timing", ["Completed batch wall time (interval maximum)", "Current batch age"],
+        sampled(get("source"), ["batch_wall_max_us", "active_batch_age_us"], 1000), "ms", "maxima")
+    add("Weld backend queues", ["Pending events", "Retained output records"],
+        sampled(get("source"), ["pending_events", "retained_output_records"]), "records", "sample")
+    add("Weld backend encoded output", ["Encoded layer frames"],
+        interval(get("source"), ["layer_frames_completed"]), "frames/s")
+    add("Weld backend encoded payload — excludes transport overhead", ["Encoded payload"],
+        [(a, b, [value * 8 / 1e6 for value in values])
+         for a, b, values in interval(get("source"), ["encoded_payload_bytes"])], "Mbps")
+    add("Receiver ingress and decode throughput — different units", ["Received commits", "Received media frames", "Completed decodes"],
+        interval(get("decode"), ["commits_received", "media_received", "decodes_completed"]), "operations/s")
+    add("Receiver queues", ["Pending events", "Pending media frames", "Decode jobs in flight"],
+        sampled(get("decode"), ["pending_events", "pending_media_frames", "decode_jobs_in_flight"]), "items", "sample")
     add("Receiver decode stages — overlapping interval maxima", ["Ingress → submit", "Worker queue", "Worker residence", "Completion handoff"],
         sampled(get("decode"), ["media_wait_max_us", "worker_queue_max_us", "worker_residence_max_us", "completion_handoff_max_us"], 1000), "ms", "maxima")
     add("Receiver cancellation/failure — not congestion or packet-loss counts", ["Decode cancelled", "Commit cancelled", "Media after cancellation", "Codec failure"],

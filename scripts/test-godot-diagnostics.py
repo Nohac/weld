@@ -19,6 +19,33 @@ def row(time, count, epoch=1, file="source.log"):
 
 
 class DiagnosticsTests(unittest.TestCase):
+    def test_backend_and_receiver_logs_supply_distinct_pipeline_charts(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            run = Path(temporary)
+            (run / "source.log").write_text(
+                "2026-09-21T12:00:01Z DEBUG encoded source observations interval_us=2000000 "
+                "commits_received=240 commits_coalesced=40 batches_completed=200 "
+                "layer_frames_completed=200 encoded_payload_bytes=2000000 "
+                "batch_wall_max_us=9000 active_batch_age_us=2000 pending_events=3 retained_output_records=2\n"
+                "2026-09-21T12:00:01Z DEBUG encoded selected-path observations rtt_us=7000 "
+                "path_epoch=1 lost_packets_total=0\n"
+                "2026-09-21T12:00:02Z DEBUG encoded selected-path observations rtt_us=8000 "
+                "path_epoch=1 lost_packets_total=0\n")
+            (run / "viewer.log").write_text(
+                "2026-09-21T12:00:01Z DEBUG encoded destination observations interval_us=1000000 "
+                "commits_received=100 media_received=100 decodes_completed=99 "
+                "pending_events=1 pending_media_frames=0 decode_jobs_in_flight=1\n")
+            output = PLOT["report"](run)
+            charts = [json.loads(payload) for payload in re.findall(r"class='chart-data'>(.*?)</script>", output)]
+            by_label = {item["labels"][0]: item for item in charts}
+            self.assertEqual(by_label["Application commits received"]["measurements"][0][2], [120, 20, 100])
+            self.assertEqual(by_label["Encoded payload"]["measurements"][0][2], [8])
+            self.assertEqual(by_label["Received commits"]["measurements"][0][2], [100, 100, 99])
+            self.assertEqual(by_label["Round-trip time"]["measurements"][0][2], [7])
+            self.assertEqual(by_label["Packets declared lost"]["measurements"][0][2], [0])
+            self.assertNotIn("Network RTT and packet-loss measurements unavailable", output)
+            self.assertIn("Weld backend media-send queues unavailable", output)
+
     def test_report_codec_comes_from_actual_encoders_before_requested_metadata(self):
         with tempfile.TemporaryDirectory() as temporary:
             run = Path(temporary)
@@ -149,6 +176,8 @@ class DiagnosticsTests(unittest.TestCase):
             report = PLOT["report"](run)
             self.assertIn("unknown reason", report)
             self.assertIn("Unavailable", report)
+            self.assertIn("Network RTT and packet-loss measurements unavailable", report)
+            self.assertIn("Weld backend/source timing unavailable", report)
             payload = re.search(r"class='chart-data'>(.*?)</script>", report)[1]
             self.assertIn(85, json.loads(payload)["data"][1])
             self.assertEqual(re.findall(r"<h2>(.*?)</h2>", report)[:2],
