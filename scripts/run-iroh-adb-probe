@@ -1,0 +1,230 @@
+#!/usr/bin/env python3
+"""Bounded synthetic raw TCP versus custom-only Iroh over ADB. No video/GPU work."""
+import argparse
+import json
+import os
+from pathlib import Path
+import resource
+import secrets
+import shlex
+import signal
+import subprocess
+import tempfile
+import time
+import uuid
+
+ROOT = Path(__file__).resolve().parents[1]
+TARGET = ROOT / "target/iroh-adb-probe/cargo"
+MANIFEST = ROOT / "tools/iroh-adb-probe/Cargo.toml"
+DEFAULT_ADB = "/nix/store/8fmn7pqcsdsb96i2pwccsyv7jzf4q2xh-rust-android-tools/bin/adb"
+
+
+def run(command, **kwargs):
+    return subprocess.run(command, check=True, timeout=20, text=True,
+                          stdout=subprocess.PIPE, stderr=subprocess.PIPE, **kwargs).stdout.strip()
+
+
+def limits():
+    resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
+    resource.setrlimit(resource.RLIMIT_FSIZE, (1024 * 1024, 1024 * 1024))
+
+
+def stop(process):
+    if process and process.poll() is None:
+        process.terminate()
+        try:
+            process.wait(timeout=3)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=3)
+
+
+def ready(path, process):
+    deadline = time.monotonic() + 12
+    while time.monotonic() < deadline:
+        for line in path.read_text().splitlines():
+            try:
+                value = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if value.get("event") == "ready":
+                port = value["port"]
+                if isinstance(port, int) and 0 < port < 65536:
+                    return port
+                raise RuntimeError("invalid listener port")
+        if process.poll() is not None:
+            raise RuntimeError(f"source exited: {path.read_text()}")
+        time.sleep(0.05)
+    raise TimeoutError("source did not become ready")
+
+
+def results(source_log, client_log, mode):
+    def events(path):
+        return [json.loads(line) for line in path.read_text().splitlines() if line.startswith("{")]
+    source_events, client_events = events(source_log), events(client_log)
+    if mode == "iroh":
+        for side in (source_events, client_events):
+            if not any(event.get("event") == "authenticated" and event.get("transport") == "custom-adb" for event in side):
+                raise RuntimeError("missing authenticated custom path verification")
+    sent = [event for event in source_events if event.get("event") == "source_phase"]
+    received = [event["measurements"] for event in client_events if event.get("event") == "receiver_phase"]
+    if len(sent) != 3 or len(received) != 3:
+        raise RuntimeError("missing phase results")
+    for source, client, rate in zip(sent, received, (0, 24, 96)):
+        if (source["target_mbps"] != rate or client["target_mbps"] != rate
+                or source["payload_bytes_written"] != client["received_bytes"]
+                or source["frames_written"] != client["received_frames"]
+                or (rate and not client["received_frames"])):
+            raise RuntimeError("source and receiver payload totals disagree")
+    return list(zip(sent, received))
+
+
+def reverse_mappings(adb):
+    return {parts[-2]: parts[-1] for line in run(adb + ["reverse", "--list"]).splitlines()
+            if len(parts := line.split()) >= 3}
+
+
+def create_reverse(adb, host_port):
+    existing = reverse_mappings(adb)
+    if "tcp:0" in existing:
+        print("Warning: pre-existing tcp:0 mapping left untouched.")
+    used = set(existing)
+    for _ in range(5):
+        # Avoid Pico's ephemeral range (32768-60999). --no-rebind remains the
+        # authority for collisions. Explicit ports avoid ADB 37's stale tcp:0
+        # reverse authorization bookkeeping after removing an allocated port.
+        port = 61000 + secrets.randbelow(4536)
+        remote, local = f"tcp:{port}", f"tcp:{host_port}"
+        if remote in used:
+            continue
+        used.add(remote)
+        try:
+            run(adb + ["reverse", "--no-rebind", remote, local])
+        except subprocess.CalledProcessError:
+            continue  # Creation failed: never remove a possibly unrelated mapping.
+        if reverse_mappings(adb).get(remote) != local:
+            raise RuntimeError(f"Could not confirm new reverse mapping {remote} to {local}; inspect it manually")
+        return remote, port
+    raise RuntimeError("could not allocate an explicit device reverse port")
+
+
+def remove_reverse(adb, remote, host_port):
+    current = reverse_mappings(adb).get(remote)
+    if current is None:
+        return
+    if current != f"tcp:{host_port}":
+        raise RuntimeError(f"mapping {remote} changed ownership; leaving it untouched")
+    run(adb + ["reverse", "--remove", remote])
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--desktop", action="store_true", help="two host processes, no ADB")
+    parser.add_argument("--serial", default="PA921CMGK7210024G")
+    parser.add_argument("--adb", default=DEFAULT_ADB)
+    parser.add_argument("--seconds", type=int, choices=range(1, 11), default=5,
+                        help="duration per idle/24/96 Mbps phase")
+    args = parser.parse_args()
+    env = dict(os.environ, CARGO_TARGET_DIR=str(TARGET))
+    subprocess.run(["cargo", "build", "--manifest-path", str(MANIFEST), "--locked", "-j2"],
+                   check=True, env=env)
+    binary = TARGET / "debug/iroh-adb-probe"
+    adb = [args.adb, "-s", args.serial]
+    if not args.desktop:
+        if run(adb + ["get-state"]) != "device":
+            raise RuntimeError("selected ADB device is unavailable")
+        subprocess.run(["cargo", "ndk", "-t", "arm64-v8a", "--platform", "28", "build",
+                        "--manifest-path", str(MANIFEST), "--locked", "-j2"], check=True, env=env)
+    validation = ROOT / "target/validation"
+    validation.mkdir(exist_ok=True, parents=True)
+    folder = Path(tempfile.mkdtemp(prefix="iroh-adb-probe-", dir=validation))
+    remote = "/data/local/tmp/weld-iroh-adb-" + uuid.uuid4().hex
+    source_key = folder / "source.key"
+    client_key = folder / "client.key"
+    device_created = False
+    print(f"Logs: {folder}", flush=True)
+    print(f"Host CPU clock ticks per second: {os.sysconf('SC_CLK_TCK')}")
+    try:
+        source_id = run([str(binary), "identity", str(source_key)])
+        if args.desktop:
+            client_id = run([str(binary), "identity", str(client_key)])
+        else:
+            run(adb + ["shell", "mkdir", "-m", "700", remote])
+            device_created = True
+            run(adb + ["push", str(TARGET / "aarch64-linux-android/debug/iroh-adb-probe"), remote + "/probe"])
+            run(adb + ["shell", "chmod", "700", remote + "/probe"])
+            client_id = run(adb + ["shell", remote + "/probe", "identity", remote + "/client.key"])
+            print("Device CPU clock ticks per second: " + run(adb + ["shell", "getconf", "CLK_TCK"]))
+            print("Device probe runs as shell UID, not the Godot application UID.")
+        for mode in ("raw", "iroh"):
+            source = client = None
+            reverse = None
+            source_log = folder / (mode + "-source.jsonl")
+            client_log = folder / (mode + "-receiver.jsonl")
+            try:
+                with source_log.open("w") as source_output, client_log.open("w") as client_output:
+                    source = subprocess.Popen([str(binary), "server", "--mode", mode,
+                        "--identity", str(source_key), "--peer", client_id, "--seconds", str(args.seconds)],
+                        stdout=source_output, stderr=subprocess.STDOUT, preexec_fn=limits)
+                    port = ready(source_log, source)
+                    if args.desktop:
+                        command = [str(binary), "client", "--mode", mode, "--identity", str(client_key),
+                                   "--peer", source_id, "--connect", f"127.0.0.1:{port}"]
+                    else:
+                        reverse, allocated = create_reverse(adb, port)
+                        argv = ["timeout", "50", remote + "/probe", "client", "--mode", mode,
+                                "--identity", remote + "/client.key", "--peer", source_id,
+                                "--connect", f"127.0.0.1:{allocated}"]
+                        script = f"ulimit -c 0; echo $$ > {remote}/pid; exec " + shlex.join(argv)
+                        command = adb + ["shell", "-T", "sh -c " + shlex.quote(script)]
+                    client = subprocess.Popen(command, stdout=client_output, stderr=subprocess.STDOUT,
+                                              preexec_fn=limits)
+                    client.wait(timeout=50)
+                    source.wait(timeout=12)
+                    if client.returncode or source.returncode:
+                        raise RuntimeError(f"{mode} failed: source={source.returncode}, receiver={client.returncode}; see {folder}")
+                print(f"\n{mode.upper()} receiver measurements:")
+                for sent, phase in results(source_log, client_log, mode):
+                    print(f"  target {phase['target_mbps']:2} Mbps: received {phase['received_mbps']:.2f} Mbps; "
+                          f"echo p50/p95/p99/max {phase['echo_p50_ms']:.2f}/{phase['echo_p95_ms']:.2f}/"
+                          f"{phase['echo_p99_ms']:.2f}/{phase['echo_max_ms']:.2f} ms; "
+                          f"source/receiver adapter drops {sent['adapter_dropped_packets']}/{phase['adapter_dropped_packets']}")
+            finally:
+                # Signal only the timeout process whose command references this unique run.
+                if device_created:
+                    script = (f"if test -f {remote}/pid; then p=$(cat {remote}/pid); "
+                              f"case $p in ''|*[!0-9]*) exit 1;; esac; "
+                              f"if tr '\\000' ' ' < /proc/$p/cmdline 2>/dev/null | grep -Fq '{remote}/probe'; "
+                              "then kill -TERM $p; fi; fi")
+                    try:
+                        run(adb + ["shell", "sh -c " + shlex.quote(script)])
+                    except (subprocess.SubprocessError, OSError) as error:
+                        print(f"Device cleanup warning: {error}; device timeout remains bounded at 50s")
+                stop(client)
+                stop(source)
+                if reverse:
+                    try:
+                        remove_reverse(adb, reverse, port)
+                    except (subprocess.SubprocessError, OSError, RuntimeError) as error:
+                        print(f"Mapping cleanup warning: {reverse}: {error}")
+    finally:
+        for key in (source_key, client_key):
+            key.unlink(missing_ok=True)
+        if device_created:
+            try:
+                run(adb + ["shell", "rm", "-f", remote + "/probe", remote + "/client.key", remote + "/pid"])
+                run(adb + ["shell", "rmdir", remote])
+            except (subprocess.SubprocessError, OSError) as error:
+                print(f"Device files cleanup warning: {remote}: {error}")
+
+
+def interrupted(*_):
+    raise KeyboardInterrupt()
+
+
+if __name__ == "__main__":
+    signal.signal(signal.SIGTERM, interrupted)
+    try:
+        main()
+    except (KeyboardInterrupt, subprocess.SubprocessError, RuntimeError, OSError) as error:
+        raise SystemExit(f"Probe stopped: {error}") from None
