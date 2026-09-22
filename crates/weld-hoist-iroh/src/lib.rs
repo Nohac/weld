@@ -1,6 +1,7 @@
 //! Encoded hoist transport over authenticated Iroh connections.
 
 mod adapter;
+mod adb;
 mod admission;
 mod device;
 mod diagnostics;
@@ -78,11 +79,30 @@ mod tests {
 
     #[test]
     fn direct_hosts_exchange_independent_control_and_media() {
+        exchange_control_and_media(
+            IrohHost::bind(IrohNetwork::Direct).expect("source"),
+            IrohHost::bind(IrohNetwork::Direct).expect("destination"),
+        );
+    }
+
+    #[test]
+    fn adb_hosts_reuse_control_media_and_portable_receiver() {
+        let directory = rendezvous::tests::ExchangeDirectory::new();
+        let identity =
+            IrohDeviceIdentity::load_or_create(directory.0.join("source")).expect("identity");
+        exchange_control_and_media(
+            IrohHost::bind_adb_source(&identity, "127.0.0.1:0".parse().expect("listen"))
+                .expect("source"),
+            IrohHost::bind(IrohNetwork::Adb).expect("destination"),
+        );
+    }
+
+    fn exchange_control_and_media(source_host: IrohHost, destination_host: IrohHost) {
         let directory = rendezvous::tests::ExchangeDirectory::new();
         let ticket = directory.0.join("source.ticket");
         let expected = directory.0.join("destination.identity");
-        let source_host = IrohHost::bind(IrohNetwork::Direct).expect("source host");
-        let destination_host = IrohHost::bind(IrohNetwork::Direct).expect("destination host");
+        let source_profile = source_host.connection_profile().expect("source profile");
+        let adb_profile = (source_profile.network() == IrohNetwork::Adb).then_some(source_profile);
         destination_host
             .publish_identity(&expected)
             .expect("approved destination identity");
@@ -100,15 +120,27 @@ mod tests {
                 )
                 .expect("accepted source peer")
         });
-        wait_for_ticket(&ticket);
-        let destination = destination_host
-            .connect_destination(
-                &ticket,
-                vec![VideoCodec::H264],
-                destination_notifier,
-                Duration::from_secs(10),
-            )
-            .expect("connected destination peer");
+        let destination = if let Some(profile) = adb_profile {
+            let mut pending = destination_host
+                .begin_connect_profile(
+                    &profile,
+                    vec![VideoCodec::H264],
+                    destination_notifier,
+                    Duration::from_secs(10),
+                )
+                .expect("dial");
+            wait_for(|| pending.poll().expect("connected destination"))
+        } else {
+            wait_for_ticket(&ticket);
+            destination_host
+                .connect_destination(
+                    &ticket,
+                    vec![VideoCodec::H264],
+                    destination_notifier,
+                    Duration::from_secs(10),
+                )
+                .expect("connected destination peer")
+        };
         let source = source.join().expect("source thread");
         assert_eq!(source.codec(), VideoCodec::H264);
         assert_eq!(destination.codec(), VideoCodec::H264);

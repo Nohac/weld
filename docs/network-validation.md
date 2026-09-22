@@ -37,6 +37,43 @@ is separated; the receiver keeps access to the same user's filesystem-backed
 Wayland socket and GPU. Neither Weld process runs as root. This exercises real
 WAN transport, but not different GPU hardware or a phone presenter.
 
+## USB/ADB production validation
+
+For the separate, opt-in **USB/ADB** path (not a WAN/tether test), see
+[Iroh transport setup](iroh-hoisting.md#opt-in-adb-byte-stream-transport).
+September 22 production validation used the normal source, receiver, AV1
+decoder and XR presentation with only the Iroh packet carrier replaced:
+
+- Desktop custom TCP loopback, Foot, 20 seconds:
+  `target/validation/godot-hoist-b0lm84nj`; live decode/presentation, clean exit.
+  This exercises the carrier but does not exercise USB.
+- Pico USB, Foot, 60 seconds:
+  `target/validation/godot-hoist-2t1iatro`; final status showed 50 decoded and
+  presented frames, zero superseded. Foot was mostly static, not a throughput
+  load. An earlier run that never gained OpenXR focus is not streaming evidence.
+- Pico USB, Azahar stereo upper screen plus mono touchscreen, 90 seconds,
+  24 Mbps shared encoder target:
+  `target/validation/godot-hoist-fa3c_jcw`; selected path `adb`, roughly 10,000
+  presented frames across the recorded layers, no reported QUIC lost packets
+  or adapter queue drops in the sampled intervals. Receiver replacements still
+  occurred, especially during startup; USB does not eliminate presentation or
+  scheduling bottlenecks. The owned reverse mapping was absent after cleanup.
+- N0 regression, the same Pico/Azahar setup for 30 seconds:
+  `target/validation/godot-hoist-utqpty33`; selected direct IPv4, last status
+  3,081 decoded and 3,002 presented frames, clean exit. This validates switching
+  the persisted profile back to N0 without changing either device identity.
+- Ctrl-C during connected Pico USB Foot playback:
+  `target/validation/godot-hoist-xuiwnzgq`; launcher returned 130 after reporting
+  completed cleanup, reverse mappings were empty and the shared ADB server PID
+  was unchanged. Physical unplug recovery has not been exercised in this batch.
+
+These are bounded functional runs, not long-session stability or input-to-photon
+latency measurements. The Azahar run still logged Godot's `t->is_render_target`
+diagnostic and unavailable GameMode service; both messages also occur in the
+saved pre-change run `godot-hoist-eit7io07`. They were not transport failures.
+The generated plots distinguish the ADB adapter's local queue drops from QUIC
+loss and retain the existing source, decoder and presentation measurements.
+
 ## Read-only inventory
 
 Run from an ordinary host terminal, without sudo:

@@ -18,6 +18,96 @@ fn notifier() -> IrohNotifier {
     IrohNotifier::new(|| Ok(()))
 }
 
+#[test]
+fn adb_rejects_wrong_peer_and_redials_without_replacing_another_live_peer() {
+    let directory = ExchangeDirectory::new();
+    let identity = IrohDeviceIdentity::load_or_create(directory.0.join("source")).expect("key");
+    let source = IrohHost::bind_adb_source(&identity, "127.0.0.1:0".parse().expect("listen"))
+        .expect("source");
+    let profile = source.connection_profile().expect("source profile");
+    assert_ne!(profile.addresses()[0].port(), 0);
+    let viewers = ["a", "b"].map(|name| {
+        IrohDeviceIdentity::load_or_create(directory.0.join(name)).expect("viewer key")
+    });
+    let destinations = viewers
+        .iter()
+        .map(|identity| IrohHost::bind_with_identity(IrohNetwork::Adb, identity).expect("viewer"))
+        .collect::<Vec<_>>();
+    assert!(destinations[0].connection_profile().is_err());
+    let trusted =
+        IrohTrustedPeers::new(viewers.iter().map(IrohDeviceIdentity::public_id).collect())
+            .expect("trust");
+    let mut accepting = source
+        .begin_accept_trusted_source(
+            trusted.clone(),
+            VideoCodec::Av1,
+            notifier(),
+            Duration::from_secs(10),
+        )
+        .expect("accept");
+    let rogue = IrohHost::bind(IrohNetwork::Adb).expect("rogue");
+    assert!(
+        rogue
+            .begin_connect_profile(
+                &profile,
+                vec![VideoCodec::Av1],
+                notifier(),
+                Duration::from_secs(2)
+            )
+            .expect("rogue dial")
+            .wait()
+            .is_err()
+    );
+    let mut live = Vec::new();
+    for destination in &destinations {
+        let receiving = destination
+            .begin_connect_profile(
+                &profile,
+                vec![VideoCodec::Av1],
+                notifier(),
+                Duration::from_secs(5),
+            )
+            .expect("dial")
+            .wait()
+            .expect("connected");
+        let mut sending = None;
+        wait_until(|| {
+            sending = accepting.poll().expect("admitted");
+            sending.is_some()
+        });
+        live.push((sending.expect("source"), receiving));
+        accepting = source
+            .begin_accept_trusted_source(
+                trusted.clone(),
+                VideoCodec::Av1,
+                notifier(),
+                Duration::from_secs(10),
+            )
+            .expect("rearm");
+    }
+    live[0].1.disconnect();
+    wait_until(|| !live[0].0.is_available());
+    assert!(live[1].0.is_available() && live[1].1.is_available());
+    let receiving = destinations[0]
+        .begin_connect_profile(
+            &profile,
+            vec![VideoCodec::Av1],
+            notifier(),
+            Duration::from_secs(5),
+        )
+        .expect("redial")
+        .wait()
+        .expect("reconnected");
+    let mut sending = None;
+    wait_until(|| {
+        sending = accepting.poll().expect("readmitted");
+        sending.is_some()
+    });
+    sending.expect("source").disconnect();
+    receiving.disconnect();
+    live[1].0.disconnect();
+}
+
 fn profile(host: &IrohHost) -> IrohConnectionProfile {
     let ticket = EndpointTicket::from_str(host.ticket()).expect("ticket");
     let address = ticket.endpoint_addr();

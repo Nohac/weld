@@ -73,6 +73,8 @@ def read_records(run):
         "encoded transport observations": "transport",
         "encoded selected-path observations": "network",
         "opened VA-API encoder generation": "encoder",
+        "Iroh selected path snapshot": "path",
+        "Iroh ADB link observations": "adb",
     }
     paths = [run / "source.log", run / "viewer.log"]
     paths += sorted(run.glob("restart*/source.log"))
@@ -102,6 +104,10 @@ def read_records(run):
                         codec = re.search(r"\bcodec=(Av1|H264|Vp9)\b", line)
                         if codec:
                             record["codec"] = codec[1].lower()
+                    if kind == "path":
+                        transport = re.search(r'\btransport="?([a-z0-9_-]+)', line)
+                        if transport:
+                            record["transport"] = transport[1]
                     records.append(record)
                 if len(records) > 20000:
                     raise ValueError("too many samples; select a shorter run")
@@ -205,6 +211,18 @@ def report(run):
         requested_codec = codec_names.get(metadata.get("codec"))
         codec_label = f"{requested_codec} (requested; not confirmed in logs)" if requested_codec else "Unknown — not recorded"
     charts = []
+    metadata_path = run / "run.json"
+    metadata = json.loads(metadata_path.read_text()) if metadata_path.exists() else {}
+    path_names = {"adb": "ADB byte stream", "ipv4": "Direct IPv4", "ipv6": "Direct IPv6", "relay": "Iroh relay"}
+    observed_paths = sorted({row["transport"] for row in get("path") if "transport" in row})
+    requested = metadata.get("transport", "not recorded")
+    if requested == "adb-loopback":
+        transport_label = "Custom TCP loopback (no USB)"
+    elif observed_paths:
+        transport_label = ", ".join(path_names.get(path, path) for path in observed_paths) + " (observed)"
+    else:
+        transport_label = "Not observed"
+    transport_label += f"; requested: {requested}"
     def add(title, labels, data, units, average_kind="interval"):
         charts.append(chart(title, labels, data, start, end, units, average_kind))
     if get("presentation"):
@@ -219,6 +237,10 @@ def report(run):
         add("Legacy receiver outcomes — discard reasons unavailable", ["Imported", "Superseded (unknown reason)"],
             cumulative(get("legacy"), ["imported", "unknown_discard"], "layers"), "frames/s")
     add("Network RTT", ["Round-trip time"], sampled(get("network"), ["rtt_us"], 1000), "ms", "sample")
+    for file, route in sorted({(row["file"], row["fields"].get("route")) for row in get("adb")}, key=str):
+        rows = [row for row in get("adb") if row["file"] == file and row["fields"].get("route") == route]
+        add(f"ADB adapter queue drops — {Path(file).name}, link {route:g}", ["Packets dropped before socket write; not USB loss"],
+            cumulative(rows, ["adapter_dropped_total"]), "packets/s")
     if get("presentation"):
         add("Presentation delay — interval maxima", ["Snapshot wait", "Render-thread handoff", "Import CPU wall time"],
             sampled(get("presentation"), ["snapshot_wait_max_us", "render_handoff_max_us", "import_cpu_max_us"], 1000), "ms", "maxima")
@@ -274,6 +296,7 @@ def report(run):
 <style>.u-legend{{min-height:70px;font-variant-numeric:tabular-nums}}.u-legend th,.u-legend td{{white-space:nowrap}}.u-legend .u-value{{width:19ch;min-width:19ch;text-align:right}}.chart{{overflow-x:auto}}.chart-options{{display:flex;align-items:center;gap:20px;flex-wrap:wrap}}</style>
 <h1>Weld run diagnostics</h1><p>{html.escape(run.name)} · {datetime.fromtimestamp(start, timezone.utc).isoformat()} · {end-start:.1f}s observed</p>
 <p><strong>Codec: {html.escape(codec_label)}</strong></p>
+<p><strong>Transport: {html.escape(transport_label)}</strong></p>
 <ul>{warnings}</ul><p>Hover for values and a shared time cursor. Drag horizontally to zoom all charts; double-click or reset to see the whole run. Click legend entries to hide/show individual series. Series are not stacked or added together. Cumulative counters are differenced and rebaselined on resets; missing coverage stays blank.</p>
 <p>Charts use CDN-loaded uPlot 1.6.32 and need Internet access (or cached assets). Log data is embedded here; no log upload is performed.</p>
 <p>Dashed lines show whole-run averages and stay fixed when zooming. Visible averages cover only the selected time range. Run totals sum measured counter changes, excluding unknown initial baselines and gaps; different outcomes must not be added to decoded/imported totals.</p>

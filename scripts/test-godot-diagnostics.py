@@ -19,6 +19,21 @@ def row(time, count, epoch=1, file="source.log"):
 
 
 class DiagnosticsTests(unittest.TestCase):
+    def test_adb_paths_and_queue_drops_are_distinct_from_quic_loss(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            run = Path(temporary)
+            (run / "run.json").write_text(json.dumps({"transport": "adb"}))
+            (run / "source.log").write_text(
+                '2026-09-21T12:00:01Z DEBUG Iroh selected path snapshot transport="adb" rtt_ms=2\n'
+                '2026-09-21T12:00:01Z DEBUG Iroh ADB link observations route=1 adapter_dropped_total=10\n'
+                '2026-09-21T12:00:06Z DEBUG Iroh ADB link observations route=1 adapter_dropped_total=15\n')
+            output = PLOT["report"](run)
+            self.assertIn("ADB byte stream (observed)", output)
+            self.assertIn("not USB loss", output)
+            self.assertIn("ADB adapter queue drops", output)
+            (run / "run.json").write_text(json.dumps({"transport": "adb-loopback"}))
+            self.assertIn("Custom TCP loopback (no USB)", PLOT["report"](run))
+
     def test_backend_and_receiver_logs_supply_distinct_pipeline_charts(self):
         with tempfile.TemporaryDirectory() as temporary:
             run = Path(temporary)

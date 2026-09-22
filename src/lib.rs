@@ -674,6 +674,30 @@ mod tests {
     }
 
     #[test]
+    fn adb_listener_requires_source_identity_and_conflicts_with_network_fallback() {
+        let flags = [
+            "weldwm",
+            "--hoist-iroh-listen",
+            "/tmp/ticket",
+            "--hoist-iroh-expect-peer",
+            "/tmp/peer",
+            "--hoist-iroh-device-dir",
+            "/tmp/key",
+            "--hoist-iroh-adb-listen",
+            "127.0.0.1:0",
+        ];
+        assert!(AppArguments::try_parse_from(flags).is_ok());
+        assert!(
+            AppArguments::try_parse_from(flags.into_iter().chain(["--hoist-iroh-network", "n0"]))
+                .is_err()
+        );
+        assert!(
+            AppArguments::try_parse_from(["weldwm", "--hoist-iroh-adb-listen", "127.0.0.1:0"])
+                .is_err()
+        );
+    }
+
+    #[test]
     fn persistent_identity_and_profile_require_explicit_iroh_roles() {
         for flag in ["--hoist-iroh-device-dir", "--hoist-iroh-publish-profile"] {
             assert!(AppArguments::try_parse_from(["weldwm", flag, "/tmp/example"]).is_err());

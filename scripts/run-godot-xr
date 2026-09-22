@@ -251,6 +251,7 @@ def main(argv=None):
     parser.add_argument("--rom", type=Path, help="game image for --app azahar")
     parser.add_argument("--presentation-rules", type=Path, help="local window selection, stereo and sizing rules")
     parser.add_argument("--codec", choices=("av1", "h264"), default="av1")
+    parser.add_argument("--transport", choices=("n0", "adb"), default="n0", help="use USB-only ADB or the normal Iroh network path")
     parser.add_argument("--recheck", action="store_true", help="rerun export even if preparation is cached; does not run tests or linting")
     duration = parser.add_mutually_exclusive_group()
     duration.add_argument("--seconds", type=seconds, default=180)
@@ -259,9 +260,11 @@ def main(argv=None):
     parser.add_argument("--half-rate", action="store_true", help="test half-rate streaming without changing XR refresh")
     parser.add_argument("--decoder-low-latency", action="store_true",
                         help="test Android's standard low-latency decoder request")
-    parser.add_argument("--bitrate-mbps", type=int, choices=(8, 16, 24), default=16,
-                        help="shared encoder target across windows (default: 16 Mbps)")
+    parser.add_argument("--bitrate-mbps", type=int, default=16,
+                        help="positive integer shared encoder target across windows (default: 16 Mbps)")
     args = parser.parse_args(argv)
+    if not 1 <= args.bitrate_mbps <= (2**64 - 1) // 1_000_000:
+        parser.error("--bitrate-mbps must be positive and fit Weld's 64-bit bits/second target")
     if args.app == "azahar" and (args.rom is None or not args.rom.is_file()):
         parser.error("--app azahar requires --rom pointing to an existing game image")
     if args.rom is not None and args.app != "azahar":
@@ -303,6 +306,7 @@ def workflow(args, adb, serial, environment):
     command = ["systemd-run", "--user", "--scope", "--quiet", "-p", "MemoryMax=12G", "-p", "MemorySwapMax=0",
                str(ROOT / "scripts/run-godot-hoist"), "--serial", serial, "--app", args.app,
                "--bitrate-mbps", str(args.bitrate_mbps), "--codec", args.codec]
+    command.extend(["--transport", args.transport])
     command.extend(["--no-timeout"] if args.seconds is None else ["--seconds", str(args.seconds)])
     if args.half_rate:
         command.append("--half-rate")

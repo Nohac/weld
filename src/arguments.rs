@@ -1,6 +1,6 @@
 //! Command-line configuration for the standard Weld distribution.
 
-use std::{ffi::OsString, path::PathBuf};
+use std::{ffi::OsString, net::SocketAddr, path::PathBuf};
 
 use clap::{ArgGroup, Parser, ValueEnum};
 use weld_app::{Backend, OutputScale};
@@ -236,6 +236,10 @@ pub struct AppArguments {
     /// Iroh connectivity preset. Direct has no DNS or relay dependency.
     #[arg(long, value_enum, value_name = "PRESET", requires = "hoist_iroh_peer")]
     pub(crate) hoist_iroh_network: Option<IrohNetworkKind>,
+
+    /// Serve Iroh solely through a launcher-managed ADB TCP tunnel (loopback only).
+    #[arg(long, value_name = "ADDRESS", requires_all = ["hoist_iroh_listen", "hoist_iroh_device_dir"], conflicts_with = "hoist_iroh_network")]
+    pub(crate) hoist_iroh_adb_listen: Option<SocketAddr>,
 
     /// Source-side surface carrier used for a local hoist peer.
     #[arg(long, value_enum, value_name = "MODE", requires = "hoist_listen")]

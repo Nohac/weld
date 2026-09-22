@@ -20,6 +20,25 @@ LOADER.exec_module(MODULE)
 
 
 class WorkflowTests(unittest.TestCase):
+    def test_bitrate_accepts_positive_targets_and_rejects_invalid_before_device_setup(self):
+        with patch.object(MODULE.resource, "setrlimit"), \
+             patch.object(MODULE.shutil, "which", return_value="/tools/adb") as which, \
+             patch.object(MODULE.subprocess, "check_output", return_value="pico\tdevice\n"), \
+             patch.object(MODULE, "device_lock"), \
+             patch.object(MODULE, "preparation_lock"), \
+             patch.object(MODULE, "workflow") as workflow:
+            for target in (None, 1, 12, 24, 32, 48, 64):
+                MODULE.main([] if target is None else ["--bitrate-mbps", str(target)])
+                self.assertEqual(workflow.call_args.args[0].bitrate_mbps, 16 if target is None else target)
+            which.reset_mock()
+            workflow.reset_mock()
+            for invalid in ("0", "-1", "1.5", str((2**64 - 1) // 1_000_000 + 1)):
+                with self.subTest(invalid=invalid), self.assertRaises(SystemExit) as failure:
+                    MODULE.main(["--bitrate-mbps", invalid])
+                self.assertEqual(failure.exception.code, 2)
+            which.assert_not_called()
+            workflow.assert_not_called()
+
     def test_low_latency_flag_is_forwarded_without_changing_other_preferences(self):
         with tempfile.TemporaryDirectory() as temporary, \
              patch.object(MODULE, "ROOT", Path(temporary)), \
@@ -30,16 +49,17 @@ class WorkflowTests(unittest.TestCase):
              patch.object(MODULE, "launch_demo") as launch:
             MODULE.APK.touch()
             for enabled, seconds in ((False, 75), (True, None)):
-                args = SimpleNamespace(app="blender", seconds=seconds, bitrate_mbps=16, codec="h264",
-                                       half_rate=False, decoder_low_latency=enabled, recheck=False)
+                args = SimpleNamespace(app="blender", seconds=seconds, bitrate_mbps=48 if enabled else 16, codec="h264",
+                                       half_rate=False, decoder_low_latency=enabled, recheck=False, transport="adb" if enabled else "n0")
                 MODULE.workflow(args, "/external/adb", "pico", {"PATH": "/tools"})
                 self.assertEqual(prepare.call_args.args[2]["PATH"], "/tools")
                 self.assertEqual(launch.call_args.args[1]["PATH"], "/external:/tools")
                 command = launch.call_args.args[0]
                 self.assertEqual("--decoder-low-latency" in command, enabled)
                 self.assertNotIn("--half-rate", command)
-                self.assertEqual(command[command.index("--bitrate-mbps") + 1], "16")
+                self.assertEqual(command[command.index("--bitrate-mbps") + 1], str(args.bitrate_mbps))
                 self.assertEqual(command[command.index("--codec") + 1], "h264")
+                self.assertEqual(command[command.index("--transport") + 1], args.transport)
                 self.assertEqual("--no-timeout" in command, seconds is None)
                 self.assertEqual("--seconds" in command, seconds is not None)
                 if seconds is not None:

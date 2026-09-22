@@ -7,7 +7,7 @@ use anyhow::{Context, Result, bail, ensure};
 use iroh::EndpointId;
 use iroh::{
     Endpoint, EndpointAddr,
-    endpoint::{Connection, RecvStream, SendStream},
+    endpoint::{Connection, IncomingAddr, RecvStream, SendStream},
 };
 #[cfg(test)]
 use iroh_tickets::endpoint::EndpointTicket;
@@ -57,6 +57,7 @@ impl Drop for PendingConnection {
 }
 
 pub(crate) struct SourceBootstrap {
+    pub adb_route: Option<iroh_base::CustomAddr>,
     pub pending: PendingConnection,
     pub send: SendStream,
     pub recv: RecvStream,
@@ -108,6 +109,10 @@ pub(crate) async fn accept_trusted_source(
                     break Err(anyhow::anyhow!("Iroh endpoint closed before peer admission"));
                 };
                 let expected = expected.clone();
+                let adb_route = match incoming.remote_addr() {
+                    IncomingAddr::Custom(address) => Some(address),
+                    _ => None,
+                };
                 candidates.spawn(async move {
                     timeout(attempt_timeout, async move {
                         let pending = PendingConnection::new(incoming.await.context("could not authenticate Iroh peer")?);
@@ -126,7 +131,7 @@ pub(crate) async fn accept_trusted_source(
                             bail!("Iroh destination rejected the session: {rejection}");
                         }
                         let media = pending.connection.open_uni().await?;
-                        Ok(SourceBootstrap { pending, send, recv, media })
+                        Ok(SourceBootstrap { pending, send, recv, media, adb_route })
                     }).await.context("Iroh handshake/bootstrap attempt timed out")?
                 });
             }

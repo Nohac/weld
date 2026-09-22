@@ -143,6 +143,8 @@ impl IrohTrustedPeers {
 /// Saved source identity and optional dialing hints. Addresses never authorize
 /// a peer: Iroh still authenticates the pinned identity. N0 can resolve fresh
 /// addresses; Direct needs at least one explicit address and has no discovery.
+/// ADB requires exactly one loopback TCP target in the reader's namespace, not
+/// a UDP hint. The launcher translates host-side and device-side tunnel ports.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct IrohConnectionProfile {
     peer: IrohPeerIdentity,
@@ -164,6 +166,12 @@ impl IrohConnectionProfile {
             network != IrohNetwork::Direct || !addresses.is_empty(),
             "a Direct Iroh profile requires an address hint"
         );
+        if network == IrohNetwork::Adb {
+            ensure!(
+                addresses.len() == 1 && addresses[0].ip().is_loopback() && addresses[0].port() != 0,
+                "an ADB profile requires exactly one nonzero loopback TCP address"
+            );
+        }
         Ok(Self {
             peer,
             network,
@@ -195,8 +203,10 @@ impl IrohConnectionProfile {
 
     pub(crate) fn endpoint_addr(&self) -> Result<EndpointAddr> {
         let mut addr = EndpointAddr::new(EndpointId::from_str(self.peer.as_str())?);
-        for address in &self.addresses {
-            addr = addr.with_ip_addr(*address);
+        if self.network != IrohNetwork::Adb {
+            for address in &self.addresses {
+                addr = addr.with_ip_addr(*address);
+            }
         }
         Ok(addr)
     }
@@ -226,6 +236,7 @@ impl FromStr for IrohConnectionProfile {
                     network = Some(match value.trim() {
                         "direct" => IrohNetwork::Direct,
                         "n0" => IrohNetwork::N0,
+                        "adb" => IrohNetwork::Adb,
                         _ => anyhow::bail!("invalid Iroh profile network"),
                     });
                 }
@@ -256,6 +267,7 @@ impl fmt::Display for IrohConnectionProfile {
             match self.network {
                 IrohNetwork::Direct => "direct",
                 IrohNetwork::N0 => "n0",
+                IrohNetwork::Adb => "adb",
             }
         )?;
         for address in &self.addresses {

@@ -15,9 +15,9 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 use iroh::{
-    Endpoint, EndpointAddr, RelayMode, SecretKey, Watcher,
+    Endpoint, EndpointAddr, RelayMode, SecretKey, TransportAddr, Watcher,
     dns::{DnsProtocol, DnsResolver},
-    endpoint::presets,
+    endpoint::{PortmapperConfig, presets},
 };
 use iroh_tickets::endpoint::EndpointTicket;
 use tokio::sync::{mpsc, oneshot};
@@ -26,7 +26,7 @@ use weld_media::VideoCodec;
 
 use crate::{
     IrohConnectionProfile, IrohDestinationPeer, IrohDeviceIdentity, IrohNotifier, IrohPeerIdentity,
-    IrohSourcePeer, IrohTrustedPeers,
+    IrohSourcePeer, IrohTrustedPeers, adb,
     admission::{self, WELD_ALPN},
     peer::{spawn_destination_peer, spawn_source_peer},
     rendezvous,
@@ -47,6 +47,8 @@ pub enum IrohNetwork {
     Direct,
     /// N0 discovery, NAT traversal, and relay fallback.
     N0,
+    /// Explicit launcher-managed loopback TCP tunnel, with no IP/relay fallback.
+    Adb,
 }
 
 /// DNS policy for N0 discovery/relay names. Direct mode sends no DNS queries.
@@ -99,11 +101,12 @@ pub struct IrohHost {
     lifetime: Arc<HostLifetime>,
     ticket: String,
     network: IrohNetwork,
+    adb_listen: Option<SocketAddr>,
 }
 
 impl IrohHost {
     pub fn bind(network: IrohNetwork) -> Result<Self> {
-        Self::bind_key(network, None, IrohDnsPolicy::System)
+        Self::bind_key(network, None, IrohDnsPolicy::System, None)
     }
 
     /// Binds with a persisted local key. N0 publishes a stable, linkable endpoint
@@ -119,13 +122,30 @@ impl IrohHost {
         identity: &IrohDeviceIdentity,
         dns: IrohDnsPolicy,
     ) -> Result<Self> {
-        Self::bind_key(network, Some(identity.secret()), dns)
+        Self::bind_key(network, Some(identity.secret()), dns, None)
+    }
+
+    /// Bind a custom-only source and resolve its loopback TCP listener before
+    /// publishing a profile. ADB itself remains owned by the caller's launcher.
+    /// Port zero selects a free host port; addresses never authorize viewers.
+    pub fn bind_adb_source(identity: &IrohDeviceIdentity, listen: SocketAddr) -> Result<Self> {
+        anyhow::ensure!(
+            listen.ip().is_loopback(),
+            "ADB listener must be loopback TCP"
+        );
+        Self::bind_key(
+            IrohNetwork::Adb,
+            Some(identity.secret()),
+            IrohDnsPolicy::System,
+            Some(listen),
+        )
     }
 
     fn bind_key(
         network: IrohNetwork,
         secret: Option<SecretKey>,
         dns: IrohDnsPolicy,
+        adb_listen: Option<SocketAddr>,
     ) -> Result<Self> {
         let (commands, receiver) = mpsc::unbounded_channel();
         let (started_tx, started_rx) = std_mpsc::sync_channel(1);
@@ -138,7 +158,9 @@ impl IrohHost {
                     .build()
                     .context("could not create Iroh Tokio runtime")
                     .and_then(|runtime| {
-                        runtime.block_on(run_host(network, secret, dns, receiver, started_tx))
+                        runtime.block_on(run_host(
+                            network, secret, dns, adb_listen, receiver, started_tx,
+                        ))
                     });
                 if let Err(error) = result {
                     tracing::error!(%error, "Iroh host stopped");
@@ -146,7 +168,7 @@ impl IrohHost {
                 let _ = done_tx.send(());
             })
             .context("could not spawn Iroh host thread")?;
-        let ticket = started_rx
+        let (ticket, adb_listen) = started_rx
             .recv()
             .context("Iroh host stopped during startup")?
             .map_err(anyhow::Error::msg)?;
@@ -159,10 +181,12 @@ impl IrohHost {
             }),
             ticket,
             network,
+            adb_listen,
         })
     }
 
-    /// Publishes the source ticket, then admits only the destination named by a trusted file.
+    /// Admits only the destination named by a trusted file. Direct/N0 also
+    /// publish a dialing ticket; ADB requires a separately published profile.
     /// Both files must be in private current-user directories; publications are one-shot.
     /// The timeout covers the file exchange and admission together, excluding endpoint bind.
     /// Only one acceptor may wait on this host at a time: incoming connections share
@@ -196,6 +220,10 @@ impl IrohHost {
         notifier: IrohNotifier,
         startup_timeout: Duration,
     ) -> Result<PendingSourceAdmission> {
+        anyhow::ensure!(
+            self.network != IrohNetwork::Adb || self.adb_listen.is_some(),
+            "ADB dial-only host cannot accept a source session"
+        );
         let deadline = Instant::now()
             .checked_add(startup_timeout)
             .context("Iroh startup timeout exceeds clock range")?;
@@ -205,7 +233,11 @@ impl IrohHost {
             .map_err(|_| anyhow::anyhow!("an Iroh source admission is already pending"))?;
         let guard = AcceptGuard(self.lifetime.accepting.clone());
         let expected = rendezvous::PublicationReader::new(expected_peer_path.as_ref())?;
-        rendezvous::publish(ticket_path.as_ref(), &self.ticket)?;
+        // ADB profiles carry namespace-local TCP addresses; there is no portable
+        // dialing ticket. Keep the identity-only ticket internal in this mode.
+        if self.network != IrohNetwork::Adb {
+            rendezvous::publish(ticket_path.as_ref(), &self.ticket)?;
+        }
         self.begin_admission(
             SourceApproval::Publication(expected),
             codec,
@@ -224,6 +256,10 @@ impl IrohHost {
         notifier: IrohNotifier,
         startup_timeout: Duration,
     ) -> Result<PendingSourceAdmission> {
+        anyhow::ensure!(
+            self.network != IrohNetwork::Adb || self.adb_listen.is_some(),
+            "ADB dial-only host cannot accept a source session"
+        );
         let deadline = Instant::now()
             .checked_add(startup_timeout)
             .context("Iroh startup timeout exceeds clock range")?;
@@ -287,6 +323,10 @@ impl IrohHost {
         notifier: IrohNotifier,
         startup_timeout: Duration,
     ) -> Result<IrohDestinationPeer> {
+        anyhow::ensure!(
+            self.network != IrohNetwork::Adb,
+            "ADB destinations require a connection profile, not a ticket"
+        );
         let deadline = Instant::now()
             .checked_add(startup_timeout)
             .context("Iroh startup timeout exceeds clock range")?;
@@ -294,7 +334,7 @@ impl IrohHost {
         let ticket =
             EndpointTicket::from_str(encoded.trim()).context("Iroh endpoint ticket is invalid")?;
         self.begin_connect_address(
-            ticket.endpoint_addr().clone(),
+            ConnectTarget::Address(ticket.endpoint_addr().clone()),
             supported_codecs,
             notifier,
             deadline,
@@ -319,7 +359,17 @@ impl IrohHost {
             .checked_add(startup_timeout)
             .context("Iroh startup timeout exceeds clock range")?;
         self.begin_connect_address(
-            profile.endpoint_addr()?,
+            if self.network == IrohNetwork::Adb {
+                ConnectTarget::Adb {
+                    peer: profile.endpoint_addr()?.id,
+                    address: *profile
+                        .addresses()
+                        .first()
+                        .context("ADB profile has no TCP address")?,
+                }
+            } else {
+                ConnectTarget::Address(profile.endpoint_addr()?)
+            },
             supported_codecs,
             notifier,
             deadline,
@@ -328,7 +378,7 @@ impl IrohHost {
 
     fn begin_connect_address(
         &self,
-        address: EndpointAddr,
+        address: ConnectTarget,
         supported_codecs: Vec<VideoCodec>,
         notifier: IrohNotifier,
         deadline: Instant,
@@ -354,6 +404,8 @@ impl IrohHost {
         })
     }
 
+    /// Endpoint ticket. In ADB mode this contains identity only, not a dialable
+    /// route; use [`Self::connection_profile`] for the namespace-local TCP target.
     pub fn ticket(&self) -> &str {
         &self.ticket
     }
@@ -366,7 +418,14 @@ impl IrohHost {
         IrohConnectionProfile::new(
             IrohPeerIdentity(address.id.to_string()),
             self.network,
-            address.ip_addrs().copied().collect(),
+            if self.network == IrohNetwork::Adb {
+                vec![
+                    self.adb_listen
+                        .context("dial-only ADB host has no source profile")?,
+                ]
+            } else {
+                address.ip_addrs().copied().collect()
+            },
         )
     }
 }
@@ -553,6 +612,14 @@ impl SourceApproval {
     }
 }
 
+enum ConnectTarget {
+    Address(EndpointAddr),
+    Adb {
+        peer: iroh::EndpointId,
+        address: SocketAddr,
+    },
+}
+
 enum HostCommand {
     AcceptSource {
         host: Weak<HostLifetime>,
@@ -566,7 +633,7 @@ enum HostCommand {
     },
     ConnectDestination {
         host: Weak<HostLifetime>,
-        address: EndpointAddr,
+        address: ConnectTarget,
         supported_codecs: Vec<VideoCodec>,
         deadline: Instant,
         notifier: IrohNotifier,
@@ -580,15 +647,37 @@ async fn run_host(
     network: IrohNetwork,
     secret: Option<SecretKey>,
     dns: IrohDnsPolicy,
+    adb_listen: Option<SocketAddr>,
     mut commands: mpsc::UnboundedReceiver<HostCommand>,
-    started: std_mpsc::SyncSender<Result<String, String>>,
+    started: std_mpsc::SyncSender<Result<(String, Option<SocketAddr>), String>>,
 ) -> Result<()> {
     let secret = secret.unwrap_or_else(SecretKey::generate);
+    let links = (network == IrohNetwork::Adb).then(|| adb::Manager::new(secret.public()));
+    let listener = match adb_listen {
+        Some(address) => Some(tokio::net::TcpListener::bind(address).await?),
+        None => None,
+    };
+    let listening = listener
+        .as_ref()
+        .map(|listener| listener.local_addr())
+        .transpose()?;
+    let _link_tasks = links.as_ref().map(|links| links.serve(listener));
     let mut endpoint = match network {
         IrohNetwork::Direct => Endpoint::builder(presets::Minimal).relay_mode(RelayMode::Disabled),
         IrohNetwork::N0 => Endpoint::builder(presets::N0),
+        IrohNetwork::Adb => Endpoint::builder(presets::Minimal)
+            .clear_ip_transports()
+            .clear_relay_transports()
+            .clear_address_lookup()
+            .portmapper_config(PortmapperConfig::Disabled)
+            .dns_resolver(DnsResolver::builder().build())
+            .add_custom_transport(Arc::new(adb::Transport(
+                links.as_ref().context("ADB manager missing")?.clone(),
+            ))),
     };
-    if let Some(resolver) = dns.resolver() {
+    if network == IrohNetwork::Adb {
+        tracing::info!(transport = "adb", requested_dns = ?dns, "Iroh ADB mode disables IP, relay, discovery and system DNS");
+    } else if let Some(resolver) = dns.resolver() {
         endpoint = endpoint.dns_resolver(resolver);
     }
     let endpoint = endpoint
@@ -602,13 +691,17 @@ async fn run_host(
             .await
             .context("Iroh N0 endpoint did not become online within 30 seconds")?;
     }
+    anyhow::ensure!(
+        network != IrohNetwork::Adb || endpoint.bound_sockets().is_empty(),
+        "ADB endpoint unexpectedly bound an IP transport"
+    );
     let address = endpoint.watch_addr().get();
     if network == IrohNetwork::Direct && address.ip_addrs().next().is_none() {
         bail!("Iroh endpoint published no direct listening address");
     }
     let ticket = EndpointTicket::new(address).to_string();
     started
-        .send(Ok(ticket))
+        .send(Ok((ticket, listening)))
         .map_err(|_| anyhow::anyhow!("Iroh host startup receiver disappeared"))?;
 
     while let Some(command) = commands.recv().await {
@@ -624,12 +717,21 @@ async fn run_host(
                 guard,
             } => {
                 let endpoint = endpoint.clone();
+                let links = links.clone();
                 tokio::spawn(async move {
                     let _guard = guard;
                     let admitted = async {
                         let expected = expected.resolve(deadline).await?;
-                        accept_source(host, endpoint, expected, codec, deadline, notifier.clone())
-                            .await
+                        accept_source(
+                            host,
+                            endpoint,
+                            expected,
+                            codec,
+                            deadline,
+                            notifier.clone(),
+                            links,
+                        )
+                        .await
                     };
                     let result = tokio::select! {
                         biased;
@@ -655,6 +757,7 @@ async fn run_host(
                 cancelled,
             } => {
                 let endpoint = endpoint.clone();
+                let links = links.clone();
                 tokio::spawn(async move {
                     let connecting = connect_destination(
                         host,
@@ -663,6 +766,7 @@ async fn run_host(
                         supported_codecs,
                         deadline,
                         notifier.clone(),
+                        links,
                     );
                     let result = tokio::select! {
                         biased;
@@ -682,6 +786,9 @@ async fn run_host(
         }
     }
     endpoint.close().await;
+    if let Some(links) = links {
+        links.close();
+    }
     Ok(())
 }
 
@@ -692,6 +799,7 @@ async fn accept_source(
     codec: VideoCodec,
     deadline: Instant,
     notifier: IrohNotifier,
+    links: Option<Arc<adb::Manager>>,
 ) -> Result<IrohSourcePeer> {
     let mut bootstrap = admission::accept_trusted_source(
         &endpoint,
@@ -701,6 +809,15 @@ async fn accept_source(
         admission::ATTEMPT_TIMEOUT,
     )
     .await?;
+    if let Some(links) = links {
+        links.admitted(
+            bootstrap
+                .adb_route
+                .as_ref()
+                .context("ADB admission did not use a custom route")?,
+            &bootstrap.pending.connection,
+        )?;
+    }
     let host = host
         .upgrade()
         .context("Iroh host was dropped during peer setup")?;
@@ -720,13 +837,31 @@ async fn accept_source(
 async fn connect_destination(
     host: Weak<HostLifetime>,
     endpoint: Endpoint,
-    address: EndpointAddr,
+    address: ConnectTarget,
     supported_codecs: Vec<VideoCodec>,
     deadline: Instant,
     notifier: IrohNotifier,
+    links: Option<Arc<adb::Manager>>,
 ) -> Result<IrohDestinationPeer> {
+    let (address, lease) = match address {
+        ConnectTarget::Address(address) => (address, None),
+        ConnectTarget::Adb { peer, address } => {
+            let lease = tokio::time::timeout_at(
+                deadline.into(),
+                links.context("ADB manager missing")?.connect(address),
+            )
+            .await??;
+            (
+                EndpointAddr::from_parts(peer, [TransportAddr::Custom(lease.address())]),
+                Some(lease),
+            )
+        }
+    };
     let mut bootstrap =
         admission::connect_address(&endpoint, address, &supported_codecs, deadline.into()).await?;
+    if let Some(lease) = lease {
+        lease.watch(&bootstrap.pending.connection)?;
+    }
     let host = host
         .upgrade()
         .context("Iroh host was dropped during peer setup")?;

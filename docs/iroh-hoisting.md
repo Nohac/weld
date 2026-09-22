@@ -71,6 +71,11 @@ address=[2001:db8::10]:4242
 Replace the example identity and addresses with the intended source's values.
 `network=direct` requires at least one address; `network=n0` permits an ID-only
 profile with discovery and relay fallback, and also honors optional address hints.
+`network=adb` instead requires exactly one nonzero loopback **TCP** address in
+the profile reader's namespace. The source publishes its host listener; the
+launcher installs the device-side reverse-port address in the viewer profile.
+It is not a UDP hint. ADB mode disables Iroh IP transports, discovery, relays,
+port mapping and system DNS, regardless of the caller's DNS preference.
 Current hosts bind ephemeral UDP ports: a Direct profile must be refreshed when
 the source rebinds or its address changes. A stable identity alone does not make
 those addresses stable; use N0 discovery for saved connections across restarts.
@@ -83,6 +88,62 @@ fields, more than 32 addresses and input exceeding 4096 bytes. `load` uses the
 same verified private-file rules as rendezvous; `save_new` is atomic and refuses
 to replace an existing profile. Deliberate profile updates/enrollment remain
 the application's responsibility.
+
+### Opt-in ADB byte-stream transport
+
+```sh
+scripts/run-godot-xr --transport adb --bitrate-mbps 16
+scripts/run-azahar-xr --transport adb --bitrate-mbps 24
+# Exercise the same custom transport locally, without USB:
+scripts/run-godot-hoist --desktop --transport adb --app foot
+```
+
+The default remains `--transport n0`. Each launcher invocation explicitly
+installs that run's transport/profile while preserving the pinned peer identity.
+No USB failure silently selects Wi-Fi. The retained ADB profile is stale after
+the launcher removes its tunnel; launch again through the script rather than
+expecting a standalone app launch to reconnect to that old port.
+
+`IrohHost::bind_adb_source` opens the loopback listener before publishing its
+actual address. The distribution exposes `--hoist-iroh-adb-listen 127.0.0.1:0`,
+requiring the source role and a persistent device directory; it conflicts with
+`--hoist-iroh-network`. ADB does not publish a dialing ticket and destinations
+must use a profile. A dial-only ADB host cannot accept source sessions.
+
+This is the existing authenticated Iroh connection and independent control/media
+streams over a custom packet carrier, not a second receiver or codec pipeline.
+Eight link slots include pending and closing drivers. Each socket gets a fresh
+local route ID, never a claimed identity or a reused old route. Only successful
+Weld admission promotes it; unpromoted sockets expire after ten seconds. Slot
+pressure evicts the oldest unpromoted socket, never an admitted peer. EOF closes
+the associated QUIC connection, while the persistent endpoint remains dialable.
+The receive queue stays alive when there are no sockets. Existing source relay
+admission is still one-shot: transport redial support does not automatically
+re-admit application windows after source peer loss.
+
+The loopback/ADB socket itself is **not** an authentication boundary: other
+local users or device apps may reach it. Iroh identity pinning and Weld approval
+remain mandatory, before application data. Bounded slots and framing limit
+resource use, but this is not protection against all local denial-of-service.
+
+The launcher owns one verified, explicit `adb reverse --no-rebind` mapping;
+it never resets the shared ADB server or removes unrelated mappings. Explicit
+ports avoid the observed ADB 37 `tcp:0` bookkeeping bug described in the
+[probe](../tools/iroh-adb-probe/README.md). `--restart-after` is rejected for
+ADB because source restart changes its ephemeral host port; repointing the
+existing device tunnel is not implemented. Normal teardown and Ctrl-C stop
+the viewer/source before removing the owned mapping.
+
+The byte stream still has head-of-line blocking. Iroh 1.1's experimental custom
+send API swallows `Pending`; full send queues therefore count packet drops
+for QUIC recovery, not application-commit drops. The writer sends each framed
+packet together, and receive polling drains batches. Queue bounds are 256
+packets per sender and 32 shared received packets, plus at most one reader
+packet per link, each limited to 65535 bytes. The existing current-thread
+Iroh runtime is unchanged. `weld_network_diag` reports selected transport and
+per-link adapter drops separately from QUIC loss; plots label both, including
+the device-free loopback case. The probe's throughput is not a guarantee of
+production latency or throughput on every device.
 
 `begin_accept_trusted_source` accepts an explicit `IrohTrustedPeers` allowlist
 (1–32 supplied identities), checking authenticated identity before sending any

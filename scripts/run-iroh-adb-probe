@@ -5,7 +5,7 @@ import json
 import os
 from pathlib import Path
 import resource
-import secrets
+import runpy
 import shlex
 import signal
 import subprocess
@@ -17,6 +17,7 @@ ROOT = Path(__file__).resolve().parents[1]
 TARGET = ROOT / "target/iroh-adb-probe/cargo"
 MANIFEST = ROOT / "tools/iroh-adb-probe/Cargo.toml"
 DEFAULT_ADB = "/nix/store/8fmn7pqcsdsb96i2pwccsyv7jzf4q2xh-rust-android-tools/bin/adb"
+REVERSE = runpy.run_path(str(ROOT / "scripts/adb-reverse.py"))
 
 
 def run(command, **kwargs):
@@ -79,44 +80,6 @@ def results(source_log, client_log, mode):
     return list(zip(sent, received))
 
 
-def reverse_mappings(adb):
-    return {parts[-2]: parts[-1] for line in run(adb + ["reverse", "--list"]).splitlines()
-            if len(parts := line.split()) >= 3}
-
-
-def create_reverse(adb, host_port):
-    existing = reverse_mappings(adb)
-    if "tcp:0" in existing:
-        print("Warning: pre-existing tcp:0 mapping left untouched.")
-    used = set(existing)
-    for _ in range(5):
-        # Avoid Pico's ephemeral range (32768-60999). --no-rebind remains the
-        # authority for collisions. Explicit ports avoid ADB 37's stale tcp:0
-        # reverse authorization bookkeeping after removing an allocated port.
-        port = 61000 + secrets.randbelow(4536)
-        remote, local = f"tcp:{port}", f"tcp:{host_port}"
-        if remote in used:
-            continue
-        used.add(remote)
-        try:
-            run(adb + ["reverse", "--no-rebind", remote, local])
-        except subprocess.CalledProcessError:
-            continue  # Creation failed: never remove a possibly unrelated mapping.
-        if reverse_mappings(adb).get(remote) != local:
-            raise RuntimeError(f"Could not confirm new reverse mapping {remote} to {local}; inspect it manually")
-        return remote, port
-    raise RuntimeError("could not allocate an explicit device reverse port")
-
-
-def remove_reverse(adb, remote, host_port):
-    current = reverse_mappings(adb).get(remote)
-    if current is None:
-        return
-    if current != f"tcp:{host_port}":
-        raise RuntimeError(f"mapping {remote} changed ownership; leaving it untouched")
-    run(adb + ["reverse", "--remove", remote])
-
-
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--desktop", action="store_true", help="two host processes, no ADB")
@@ -158,7 +121,7 @@ def main():
             print("Device probe runs as shell UID, not the Godot application UID.")
         for mode in ("raw", "iroh"):
             source = client = None
-            reverse = None
+            reverse = REVERSE["ReverseTunnel"](adb)
             source_log = folder / (mode + "-source.jsonl")
             client_log = folder / (mode + "-receiver.jsonl")
             try:
@@ -171,7 +134,7 @@ def main():
                         command = [str(binary), "client", "--mode", mode, "--identity", str(client_key),
                                    "--peer", source_id, "--connect", f"127.0.0.1:{port}"]
                     else:
-                        reverse, allocated = create_reverse(adb, port)
+                        allocated = reverse.open(port)
                         argv = ["timeout", "50", remote + "/probe", "client", "--mode", mode,
                                 "--identity", remote + "/client.key", "--peer", source_id,
                                 "--connect", f"127.0.0.1:{allocated}"]
@@ -202,11 +165,11 @@ def main():
                         print(f"Device cleanup warning: {error}; device timeout remains bounded at 50s")
                 stop(client)
                 stop(source)
-                if reverse:
+                if reverse.remote is not None:
                     try:
-                        remove_reverse(adb, reverse, port)
+                        reverse.close()
                     except (subprocess.SubprocessError, OSError, RuntimeError) as error:
-                        print(f"Mapping cleanup warning: {reverse}: {error}")
+                        print(f"Mapping cleanup warning: {reverse.remote}: {error}")
     finally:
         for key in (source_key, client_key):
             key.unlink(missing_ok=True)

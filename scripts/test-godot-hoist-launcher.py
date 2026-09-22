@@ -11,6 +11,34 @@ API = runpy.run_path(str(Path(__file__).with_name("run-godot-hoist")))
 
 
 class PairingTests(unittest.TestCase):
+    def test_adb_source_and_profile_retarget_preserve_peer_and_normal_defaults(self):
+        self.assertEqual(API["parse_arguments"]([]).transport, "n0")
+        self.assertEqual(API["parse_arguments"](["--desktop", "--transport", "adb"]).transport, "adb")
+        with self.assertRaises(SystemExit):
+            API["parse_arguments"](["--transport", "adb", "--restart-after", "30"])
+        command = API["source_command"](Path("/run"), Path("/state"), ["foot"], transport="adb")
+        self.assertNotIn("--hoist-iroh-network", command)
+        self.assertEqual(command[command.index("--hoist-iroh-adb-listen") + 1], "127.0.0.1:0")
+        profile = "peer=" + "a" * 64 + "\nnetwork=adb\naddress=127.0.0.1:1234\n"
+        installed = API["device_adb_profile"](profile, 61001)
+        self.assertEqual(API["profile_peer"](installed), API["profile_peer"](profile))
+        self.assertEqual(API["adb_profile_port"](installed), 61001)
+        for invalid in (profile.replace("127.0.0.1", "192.168.1.1"), profile.replace(":1234", ":0"), profile + "address=127.0.0.1:5678\n"):
+            with self.assertRaises(RuntimeError):
+                API["adb_profile_port"](invalid)
+
+    def test_adb_verification_failure_retains_mapping_for_finally_cleanup(self):
+        globals_ = API["ReverseTunnel"].open.__globals__
+        commands = Mock(side_effect=["", "", "", "UsbFfs tcp:61042 tcp:1234", ""])
+        with patch.dict(globals_, run=commands), patch.object(globals_["secrets"], "randbelow", return_value=42):
+            tunnel = API["ReverseTunnel"](["/same/adb", "-s", "device"])
+            with self.assertRaises(RuntimeError):
+                tunnel.open(1234)
+            self.assertEqual(tunnel.remote, "tcp:61042")
+            tunnel.close()
+            self.assertIsNone(tunnel.remote)
+            self.assertEqual(commands.call_args.args[0][-3:], ["reverse", "--remove", "tcp:61042"])
+
     def test_unlimited_runtime_keeps_source_and_network_summaries(self):
         self.assertEqual(API["parse_arguments"]([]).seconds, 120)
         self.assertIsNone(API["parse_arguments"](["--no-timeout"]).seconds)
@@ -142,10 +170,14 @@ class PairingTests(unittest.TestCase):
 
     def test_demo_bitrate_is_shared_explicit_and_defaults_to_sixteen(self):
         self.assertEqual(API["parse_arguments"]([]).bitrate_mbps, 16)
-        self.assertEqual(API["parse_arguments"](["--bitrate-mbps", "24"]).bitrate_mbps, 24)
-        for bitrate in (8, 16, 24):
+        for bitrate in (1, 8, 12, 16, 24, 32, 48, 64):
+            self.assertEqual(API["parse_arguments"](["--bitrate-mbps", str(bitrate)]).bitrate_mbps, bitrate)
             command = API["source_command"](Path("/run/test"), Path("/state"), ["blender"], bitrate)
             self.assertEqual(command[command.index("--hoist-bitrate-target-mbps") + 1], str(bitrate))
+        for invalid in ("0", "-1", "1.5", str((2**64 - 1) // 1_000_000 + 1)):
+            with self.subTest(invalid=invalid), self.assertRaises(SystemExit) as failure:
+                API["parse_arguments"](["--bitrate-mbps", invalid])
+            self.assertEqual(failure.exception.code, 2)
 
     def test_source_uses_explicit_repeat_with_legacy_emulation(self):
         command = API["source_command"](Path("/run/test"), Path("/state"), ["blender"])

@@ -93,6 +93,42 @@ fn peer() -> IrohPeerIdentity {
 }
 
 #[test]
+fn adb_profiles_are_namespace_local_tcp_targets_not_ip_hints() {
+    for addresses in [
+        vec![],
+        vec!["127.0.0.1:0"],
+        vec!["192.168.1.2:1234"],
+        vec!["127.0.0.1:1234", "127.0.0.1:5678"],
+    ] {
+        assert!(
+            IrohConnectionProfile::new(
+                peer(),
+                IrohNetwork::Adb,
+                addresses
+                    .iter()
+                    .map(|value| value.parse().expect("address"))
+                    .collect()
+            )
+            .is_err()
+        );
+    }
+    let profile = IrohConnectionProfile::new(
+        peer(),
+        IrohNetwork::Adb,
+        vec!["[::1]:1234".parse().expect("loopback")],
+    )
+    .expect("profile");
+    assert_eq!(
+        profile
+            .endpoint_addr()
+            .expect("peer identity")
+            .ip_addrs()
+            .count(),
+        0
+    );
+}
+
+#[test]
 fn public_identity_export_is_bounded_private_and_never_overwritten() {
     let directory = ExchangeDirectory::new();
     let device = IrohDeviceIdentity::load_or_create(directory.0.join("device")).expect("device");

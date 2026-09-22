@@ -13,27 +13,29 @@ loader = importlib.machinery.SourceFileLoader(
 spec = importlib.util.spec_from_loader(loader.name, loader)
 probe = importlib.util.module_from_spec(spec)
 loader.exec_module(probe)
+reverse = probe.REVERSE["create_reverse"].__globals__
 
 
 class LauncherTests(unittest.TestCase):
     def test_reverse_uses_explicit_port_and_verifies_mapping(self):
-        with (patch.object(probe.secrets, "randbelow", return_value=42),
-              patch.object(probe, "run", side_effect=["", "", "UsbFfs tcp:61042 tcp:1234"]) as run):
-            self.assertEqual(probe.create_reverse(["adb"], 1234), ("tcp:61042", 61042))
+        run = Mock(side_effect=["", "", "UsbFfs tcp:61042 tcp:1234"])
+        with (patch.object(reverse["secrets"], "randbelow", return_value=42), patch.dict(reverse, run=run)):
+            self.assertEqual(reverse["create_reverse"](["adb"], 1234), ("tcp:61042", 61042))
             self.assertIn(call(["adb", "reverse", "--no-rebind", "tcp:61042", "tcp:1234"]), run.call_args_list)
 
     def test_failed_reverse_creation_never_removes_a_mapping(self):
         failure = subprocess.CalledProcessError(1, "adb")
-        with (patch.object(probe.secrets, "randbelow", side_effect=range(5)),
-              patch.object(probe, "run", side_effect=[""] + [failure] * 5) as run):
+        run = Mock(side_effect=[""] + [failure] * 5)
+        with (patch.object(reverse["secrets"], "randbelow", side_effect=range(5)), patch.dict(reverse, run=run)):
             with self.assertRaises(RuntimeError):
-                probe.create_reverse(["adb"], 1234)
+                reverse["create_reverse"](["adb"], 1234)
             self.assertFalse(any("--remove" in item.args[0] for item in run.call_args_list))
 
     def test_reverse_cleanup_does_not_remove_replaced_mapping(self):
-        with patch.object(probe, "run", return_value="UsbFfs tcp:61042 tcp:5678") as run:
+        run = Mock(return_value="UsbFfs tcp:61042 tcp:5678")
+        with patch.dict(reverse, run=run):
             with self.assertRaisesRegex(RuntimeError, "changed ownership"):
-                probe.remove_reverse(["adb"], "tcp:61042", 1234)
+                reverse["remove_reverse"](["adb"], "tcp:61042", 1234)
             run.assert_called_once_with(["adb", "reverse", "--list"])
 
     def test_ready_ignores_partial_line_and_validates_port(self):

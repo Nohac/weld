@@ -58,6 +58,12 @@ Weld is a workspace of reusable layers and one standard distribution:
   independent QUIC control and encoded-media streams. Iroh and Tokio types do
   not cross its registration boundary. Its default graph is compositor-free;
   optional native/VA-API registration uses the same portable peer machinery.
+  Its opt-in ADB carrier routes bounded encrypted QUIC packets over loopback
+  TCP tunnels without changing those peer streams. A private link manager owns
+  socket lifetimes, unique route IDs, pending-link limits and failure isolation;
+  development launchers own ADB mappings. The Godot receiver selects this path
+  through the same saved-profile API. No USB-specific input, codec or relay
+  implementation is added. See [ADB hoisting](iroh-hoisting.md#opt-in-adb-byte-stream-transport).
 - `weld-hoist-ui` owns source placeholders, reclaim and closed-tombstone UI.
 - `weld-hoist` owns Bevy window-family admission and reclaim orchestration. It
   also owns the process-local endpoint registry used to select an endpoint for

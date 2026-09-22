@@ -175,6 +175,7 @@ fn path_kind(address: &TransportAddr) -> &'static str {
         TransportAddr::Ip(address) if address.is_ipv4() => "ipv4",
         TransportAddr::Ip(_) => "ipv6",
         TransportAddr::Relay(_) => "relay",
+        TransportAddr::Custom(address) if address.id() == crate::adb::TRANSPORT_ID => "adb",
         _ => "other",
     }
 }

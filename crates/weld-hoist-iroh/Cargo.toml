@@ -13,6 +13,9 @@ vaapi = ["native", "weld-hoist-encoded/vaapi"]
 anyhow.workspace = true
 futures-lite.workspace = true
 iroh.workspace = true
+iroh-base = "1.1"
+n0-watcher = "=1.0.0"
+noq-udp = "1.2"
 iroh-tickets.workspace = true
 postcard.workspace = true
 rustix = { workspace = true, features = ["fs"] }

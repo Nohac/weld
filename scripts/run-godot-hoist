@@ -6,6 +6,7 @@ are exchanged; private keys remain in per-device storage outside build outputs.
 """
 import argparse
 import json
+import ipaddress
 import os
 from pathlib import Path
 import re
@@ -23,6 +24,7 @@ LogCapture = runpy.run_path(str(ROOT / "scripts/godot-log-capture.py"))["LogCapt
 APP_DIRECTORY = "files/weld-device"
 HALF_RATE_MARKER = "diagnostic-half-rate"
 LOW_LATENCY_MARKER = "diagnostic-low-latency"
+ReverseTunnel = runpy.run_path(str(ROOT / "scripts/adb-reverse.py"))["ReverseTunnel"]
 
 
 def prepare_presentation_rules(path, directory=None, adb=None):
@@ -99,7 +101,7 @@ def write_new(path, text):
         output.write(text)
 
 
-def source_command(exchange, state, app, bitrate_mbps=16, codec="av1", gamepad=False):
+def source_command(exchange, state, app, bitrate_mbps=16, codec="av1", gamepad=False, transport="n0"):
     return ["cargo", "run", "--locked", "--quiet", "--", "--backend", "headless",
             "--wayland-socket", "source", "--hoist-all", "--headless-window-size", "960x640",
             "--keyboard-repeat-mode", "compositor", "--legacy-key-repeat", "emulated",
@@ -107,9 +109,28 @@ def source_command(exchange, state, app, bitrate_mbps=16, codec="av1", gamepad=F
             "--hoist-iroh-expect-peer", str(exchange / "viewer.identity"),
             "--hoist-iroh-device-dir", str(state / "source"),
             "--hoist-iroh-publish-profile", str(exchange / "source.profile"),
-            "--hoist-iroh-network", "n0", "--hoist-codec", codec,
+            *(["--hoist-iroh-adb-listen", "127.0.0.1:0"] if transport == "adb" else ["--hoist-iroh-network", "n0"]), "--hoist-codec", codec,
             "--hoist-bitrate-target-mbps", str(bitrate_mbps),
             *(["--hoist-gamepad"] if gamepad else []), "--", *app]
+
+
+def adb_profile_port(profile):
+    profile_peer(profile)
+    fields = [line.split("=", 1) for line in profile.splitlines() if line.strip()]
+    networks = [value for key, value in fields if key == "network"]
+    addresses = [value for key, value in fields if key == "address"]
+    if networks != ["adb"] or len(addresses) != 1:
+        raise RuntimeError("source did not publish a single ADB TCP address")
+    host, _, port = addresses[0].rpartition(":")
+    if not ipaddress.ip_address(host.strip("[]")).is_loopback or not port.isdecimal() or not 0 < int(port) < 65536:
+        raise RuntimeError("ADB profile target is not nonzero loopback TCP")
+    return int(port)
+
+
+def device_adb_profile(profile, port):
+    adb_profile_port(profile)
+    return "\n".join(f"address=127.0.0.1:{port}" if line.startswith("address=") else line
+                     for line in profile.splitlines()) + "\n"
 
 
 def close_source_for_restart(hosts):
@@ -150,6 +171,8 @@ def parse_arguments(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--serial", help="ADB serial; otherwise requires exactly one authorized device")
     parser.add_argument("--desktop", action="store_true", help="run the same Godot viewer on this laptop")
+    parser.add_argument("--transport", choices=("n0", "adb"), default="n0",
+                        help="adb: USB-only tunnel; with --desktop, custom-transport loopback without USB")
     parser.add_argument("--half-rate", action="store_true",
                         help="diagnostic: request half the display rate; keep XR and receiver buffering unchanged")
     parser.add_argument("--decoder-low-latency", action="store_true",
@@ -167,9 +190,13 @@ def parse_arguments(argv=None):
     parser.add_argument("--codec", choices=("av1", "h264"), default="av1")
     parser.add_argument("--blender-script", type=Path,
                         help="diagnostic: run a Python exercise in a factory-startup Blender instance")
-    parser.add_argument("--bitrate-mbps", type=int, choices=(8, 16, 24), default=16,
-                        help="shared encoder target across windows (default: 16 Mbps)")
+    parser.add_argument("--bitrate-mbps", type=int, default=16,
+                        help="positive integer shared encoder target across windows (default: 16 Mbps)")
     args = parser.parse_args(argv)
+    if not 1 <= args.bitrate_mbps <= (2**64 - 1) // 1_000_000:
+        parser.error("--bitrate-mbps must be positive and fit Weld's 64-bit bits/second target")
+    if args.transport == "adb" and args.restart_after is not None:
+        parser.error("--restart-after uses N0 rediscovery; ADB would require updating its ephemeral tunnel target")
     if args.app == "azahar" and (args.rom is None or not args.rom.is_file()):
         parser.error("--app azahar requires --rom pointing to an existing game image")
     if args.rom is not None:
@@ -245,8 +272,11 @@ def main(argv=None):
     print(f"Shared {args.codec.upper()} bitrate target: {args.bitrate_mbps} Mbps (not a bandwidth cap).", flush=True)
     print(f"Stream cadence: {'half' if args.half_rate else 'full'} display rate; local presentation unchanged.", flush=True)
     print(f"Android decoder low-latency request: {args.decoder_low_latency} (device support is not guaranteed).", flush=True)
-    print("Iroh N0 contacts Internet discovery/relay services; existing desktop apps and host routes are unchanged.", flush=True)
-    if not args.desktop:
+    if args.transport == "adb":
+        print("Iroh custom TCP loopback (no USB)." if args.desktop else "Iroh over ADB USB only; no IP/discovery/relay fallback.", flush=True)
+    else:
+        print("Iroh N0 contacts Internet discovery/relay services; existing desktop apps and host routes are unchanged.", flush=True)
+    if not args.desktop and args.transport == "n0":
         print("Android development viewer uses public DNS (Google plus Iroh public fallbacks), not system/Private DNS.", flush=True)
     print(f"Persistent device state: {state}", flush=True)
     subprocess.run(["cargo", "build", "--locked", "--bin", "weldwm", "-j2"], cwd=ROOT, check=True)
@@ -263,9 +293,11 @@ def main(argv=None):
     app_started = False
     phone_pid = None
     capture = None
+    tunnel = ReverseTunnel(adb) if adb is not None and args.transport == "adb" else None
     (run / "run.json").write_text(json.dumps({"started_at": time.time(), "desktop": args.desktop,
         "codec": args.codec, "bitrate_mbps": args.bitrate_mbps, "half_rate": args.half_rate,
         "decoder_low_latency": args.decoder_low_latency,
+        "transport": "adb-loopback" if args.desktop and args.transport == "adb" else args.transport,
         "log_capture": "desktop" if args.desktop else "full-run-filtered",
         "clock_note": "Cross-device wall clocks are approximate; timings are local, not one-way latency."}) + "\n")
 
@@ -314,13 +346,16 @@ def main(argv=None):
     try:
         environment = source_environment(runtime)
         app = app_command(args)
-        command = source_command(run, state, app, args.bitrate_mbps, args.codec, gamepad=args.app == "azahar")
+        command = source_command(run, state, app, args.bitrate_mbps, args.codec, gamepad=args.app == "azahar", transport=args.transport)
         if args.app == "azahar":
             print("Gamepad enabled: window gamepad button captures both XR controllers; hold left grip to exit. The virtual controller is visible to host applications.", flush=True)
         hosts.append(LAUNCHER["OwnedHost"]("source", command, environment, ROOT, run))
         wait(lambda: (run / "source.profile").exists())
         profile = (run / "source.profile").read_text()
         profile_peer(profile)
+        if tunnel is not None:
+            profile = device_adb_profile(profile, tunnel.open(adb_profile_port(profile)))
+            check()
         if args.desktop:
             receiver_directory.mkdir(mode=0o700, exist_ok=True)
             profile_path = receiver_directory / "source.profile"
@@ -393,7 +428,11 @@ def main(argv=None):
                         # A failed startup may not have consumed the one-shot marker.
                         prepare_decoder_test(False, adb=adb)
                         prepare_presentation_rules(None, adb=adb)
-                stop_owned(hosts, stop_viewer if adb is not None else None)
+                try:
+                    stop_owned(hosts, stop_viewer if adb is not None else None)
+                finally:
+                    if tunnel is not None:
+                        tunnel.close()
             finally:
                 for sig, handler in previous.items():
                     signal.signal(sig, handler)
