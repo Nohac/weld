@@ -195,6 +195,49 @@ The destination owns cursor
 placement in its spatial scene; the source still supplies client cursor shape
 and hotspot changes and validates input before delivery.
 
+### Physical mouse and spatial cursor routing — Exploration
+
+Start with an application-local mouse rather than flattening the entire 3D
+workspace into a source-side desktop. The XR shell owns window transforms,
+curvature, spatial overlap and cursor drawing; the source owns accepted client
+input state. Moving or rotating a panel changes the cursor's spatial projection,
+not its logical application coordinates. Retain a per-presentation cursor
+position when switching targets, reconciling it with current geometry on return.
+
+Cursor coordination is bidirectional: the shell requests an authorized target,
+pointer mode and logical interaction region; the source confirms the route and
+reports cursor position, shape, hotspot, visibility and capture state. See the
+[protocol exploration](remote-protocol.md#bidirectional-cursor-state--exploration).
+Laptop-attached motion reaches laptop-hosted applications directly; sending
+cursor state to the headset must not require a headset acknowledgement for each
+movement or wait for the next video frame.
+
+The application interaction region is not simply the main window's rectangle.
+Menus extending beyond it remain reachable through their popup geometry;
+independently placed dialogs are separately selectable targets. Preserve the
+original target during a drag until release or explicit cancellation. Controller
+hover must not steal an active mouse interaction. This ordinary window-local
+mouse mode is distinct from application-requested pointer locking, where motion
+may be unbounded and the cursor hidden.
+
+Do not allow new clicks through an unrelated panel visibly covering the target.
+A first policy candidate is to bring the selected application's presentation
+forward on explicit selection, keeping its interactive region unobscured. If
+layout changes invalidate that condition, suspend or renegotiate targeting;
+existing grabs still need their terminating releases or cancellation. Exact
+occlusion/region transitions, including popup creation during a drag, need
+validation before implementation. Do not replicate the 3D scene on the source
+merely to approximate destination hit testing.
+
+A separate workspace-navigation mode may use a held button to select another
+presentation, as in the ring-navigation experiment below. A later mouse-driven
+spatial pointer could steer a virtual ray without a tracked controller, with
+the XR shell resolving the visible hit. When the mouse is source-attached,
+destination-only hit testing adds a source-to-headset-to-source routing trip;
+that cost must be explicit rather than silently replacing the direct
+application-local path. Replicating layout to avoid that trip is a separate
+exploration with synchronization costs, not a prerequisite for the first proxy.
+
 ### Initial ring workspace
 
 The initial layout candidate is a circular arrangement around the user, starting

@@ -294,6 +294,31 @@ it observes connection metadata and traffic shape and can deny availability. A
 gateway that terminates encryption enters the content trust boundary and must
 be explicitly disclosed and authorized.
 
+### Bidirectional cursor state — Exploration
+
+For source-attached physical input with a remote presenter, extend the shared
+seat/focus contract rather than inventing an XR-only input channel. Candidate
+records distinguish destination target/mode/interaction-region requests from
+source acceptance and cursor-state observations. Source observations identify
+the accepted presentation, logical position, cursor shape or image and hotspot,
+visibility, and active capture/constraint state.
+
+Tie records to the authorized seat, session, interaction/focus generation and
+relevant geometry revision, with ordering sufficient to reject obsolete cursor
+positions and region updates after target changes or resize. A requested region
+does not grant access to another surface. Cursor observations may be coalesced
+within a valid generation; that does not permit dropping input transitions or
+unaccounted relative motion. Shape, position and visibility must not be applied
+to a different target just because its video frame arrived first.
+
+Source-local application input does not wait for per-movement cursor feedback
+acknowledgements. Target handoff is an explicitly accepted state transition,
+not an implicit change caused by cursor animation. Spatial transforms and
+occlusion remain presenter policy; the
+[XR mouse exploration](remote-presentation.md#physical-mouse-and-spatial-cursor-routing--exploration)
+describes the initial application-local mode and separate workspace navigation.
+Wire schema and reliability details are not settled by these notes.
+
 ## Buffer, frame, and queue lifetimes — Direction
 
 Raw-frame and encoded-payload lifetimes are separate. A source
@@ -526,6 +551,40 @@ independently against Weld's contracts rather than adopted as one stack.
 Any backend must accept Weld-owned native frames, report truthful stage and
 session capabilities, preserve per-stream lifetime, and never move a promised
 hardware path onto the compositor thread or an unreported CPU fallback.
+
+### Optional Pyrowave desktop streaming — Exploration
+
+Evaluate [Pyrowave](https://github.com/Themaister/pyrowave) for explicitly
+selected desktop applications on high-bandwidth local links. This is not an
+XR/Pico requirement or a replacement for AV1/H.264 defaults.
+
+Upstream describes an intra-only Vulkan shader codec aimed at Ethernet game
+streaming around 200+ Mbps, with 4:2:0 and 4:4:4 modes and a maximum encoded
+size per image. Its advertised GPU timings are not Weld measurements or
+end-to-end latency guarantees. Independent frames could simplify dropping
+obsolete compressed work; 4:4:4 could improve colored UI/text fidelity, but
+does not imply lossless compression. Shader execution trades dedicated video
+engine pressure for GPU compute/graphics, memory and link bandwidth.
+
+The [C API](https://github.com/Themaister/pyrowave/blob/master/pyrowave.h)
+exposes Vulkan images, external-memory/DMA-BUF import and synchronization, but
+its API/ABI is still unstable. Pin a validated revision behind a Weld-owned
+media adapter; preserve source buffer leases, GPU synchronization and native
+decoded-frame ownership without uncompressed CPU readback. Do not duplicate
+transport, input, window lifecycle or presentation scheduling for this codec.
+
+Application rules could prefer Pyrowave while other windows retain AV1/H.264.
+Selection must account for receiver capabilities, GPU contention, measured link
+headroom and the user's aggregate/per-application budgets. A local address or
+direct Iroh path is not proof of spare bandwidth. Mixed-codec application
+selection requires extending the current session-wide codec choice; fallback
+and generation transitions must be explicit. Codec tolerance of missing packets
+does not itself bypass retransmission or head-of-line blocking in the carrier.
+
+First validate a desktop DMA-BUF encode/transfer/GPU-decode/present probe against
+AV1 at representative extents and rates. Measure visual quality, complete-path
+latency, frame ages, payload bandwidth and interference with a GPU-busy game.
+Use those results before committing to application-rule syntax or broad support.
 
 ## GPU-resident network handoff — Exploration
 

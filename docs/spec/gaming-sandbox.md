@@ -27,6 +27,39 @@ documented Gamescope invocation. Candidate behaviors include:
 - correct fullscreen, relative-pointer, and cursor-confinement behavior; and
 - integration points expected by a future streaming plugin.
 
+## Steam and XWayland entry point
+
+Steam and games needing X11 motivate implementing the general
+[XWayland compatibility boundary](platform-completeness.md), not a
+Steam-specific rendering or streaming path. Weld does not currently enable or
+integrate Smithay's XWayland support; its vendored Anvil example provides
+`XWayland`, `X11Wm` and `XwmHandler` integration references.
+
+An initial rootless integration should make individual X11 windows ordinary
+Weld-managed presentations, including transient and override-redirect windows.
+X11 focus, geometry, close, fullscreen and grab semantics belong in the host
+adapter, with the existing buffer, input, pacing and hoisting paths reused.
+This general compatibility work need not wait for the gaming sandbox plugin.
+
+A sensible validation progression is a small X11 client, an accelerated X11
+application, then Steam and one game, both locally and hoisted. Steam startup
+alone does not validate launcher/game handoff, containers, relative input,
+controller access or GPU synchronization. Launcher-owned `DISPLAY` and process
+lifecycle must not redirect or disturb an already-running desktop Steam session.
+[X11 clients sharing an X server are not isolated from each
+other](https://wayland.freedesktop.org/docs/book/Xwayland.html); rootless window
+management must not be advertised as a security sandbox.
+
+XWayland is not a prerequisite for every Steam-launched game. As a separate
+early experiment, leave Steam on the existing desktop and route a compatible
+native-Wayland game to Weld. Proton driver support depends on the selected
+build: [GE-Proton documents a per-game Wayland
+option](https://github.com/GloriousEggroll/proton-ge-custom#runtime-config-options).
+That option does not make Steam's own UI native Wayland. Verify runtime/container
+socket access and the game's actual display path rather than assuming the flag
+worked. This experiment complements broad XWayland compatibility; it does not
+replace it.
+
 ## Fixed virtual display
 
 The sandbox should advertise a controlled `wl_output` mode, such as 1920×1080,

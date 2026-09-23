@@ -228,6 +228,16 @@ desktop, its native input adapter can supply the same route without that window.
 Capture/focus loss follows the existing
 [cleanup contract](#pointer-capture-and-relative-motion--direction).
 
+A fullscreen laptop control window is an initial presentation candidate, not
+an additional remote video presenter: it must not alter stream extent, scale
+or negotiated refresh. Show the controlled application and an obvious local
+escape. Fullscreen does not itself grant pointer capture or override the outer
+compositor's shortcuts; only forward through capture/focus actually granted.
+The XR shell's accepted target, not source-placeholder selection, determines
+the route. Bidirectional cursor visualization and the separation between
+application-local motion and workspace navigation are explored in
+[remote presentation](remote-presentation.md#physical-mouse-and-spatial-cursor-routing--exploration).
+
 Reuse [explicit keyboard repeats](../keyboard-repeat.md). Current repeat
 ownership is seat-wide and chosen at startup; automatic arbitration between
 heterogeneous controllers is not implemented. Supporting mixed producers needs
