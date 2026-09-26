@@ -10,6 +10,7 @@ if sys.argv[1] == "build":
 
 args = sys.argv[1:]
 mode = os.environ["WELD_LAUNCHER_TEST_MODE"]
+print("TEST_RUST_LOG=" + os.environ.get("RUST_LOG", ""), flush=True)
 source = "--hoist-iroh-listen" in args
 if source:
     ticket = Path(args[args.index("--hoist-iroh-listen") + 1])

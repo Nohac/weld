@@ -237,6 +237,12 @@ is needed: the existing exact revision, role, and codec checks remain in place.
 
 ## Connection diagnostics
 
+Use [the shared hoist plotter](hoist-diagnostics.md) for source/receiver media
+summaries, queue timing and network charts in Weld-to-Weld as well as Godot runs.
+`scripts/run-iroh-hoist` and `scripts/run-headless-iroh-hoist` enable the summary
+targets by default unless `RUST_LOG` is explicitly set. Plotting does not infer
+desktop presentation outcomes from decoder completions.
+
 ### Queue pressure
 
 Iroh control ingress admits at most 256 records per peer inbox. A full inbox parks
@@ -299,11 +305,11 @@ neither display cadence nor a proposed 4 ms interval has been imposed here.
 ### Selected paths
 
 ```sh
-RUST_LOG=info,weld_network_diag=debug scripts/run-iroh-hoist --codec av1
+RUST_LOG=info,weld_network_diag=debug,weld_media_diag=debug scripts/run-iroh-hoist --codec av1
 ```
 
 The optional observer uses Iroh path events for selected-path changes and reports
-`ipv4`, `ipv6`, `relay`, or `other`; it resnapshots if events were missed. A
+`ipv4`, `ipv6`, `relay`, `adb`, or `other`; it resnapshots if events were missed. A
 five-second timer reports selected-path RTT. It records public peer/path IDs,
 not raw IP addresses, tickets, private keys, input, or video. A relay report
 describes the relay transport, not the relay socket's IP family. The observer

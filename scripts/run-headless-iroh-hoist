@@ -177,11 +177,15 @@ def main(argv):
     validation = root / "target/validation"
     validation.mkdir(parents=True, exist_ok=True)
     run = Path(tempfile.mkdtemp(prefix="headless-iroh-", dir=validation))
+    (run / "run.json").write_text(json.dumps({"codec": args.codec, "transport": args.network,
+                                             "receiver": "weld", "started_at": time.time()}))
     runtime, profile = run / "runtime", run / "firefox-profile"
     runtime.mkdir(mode=0o700)
     profile.mkdir(mode=0o700)
     (run / "apps.json").write_text(json.dumps({"apps": names, "profile": str(profile)}))
-    source_env = os.environ.copy()
+    environment = os.environ.copy()
+    environment.setdefault("RUST_LOG", "info,weld_media_diag=debug,weld_network_diag=debug")
+    source_env = environment.copy()
     for key in ("DISPLAY", "WAYLAND_DISPLAY", "WAYLAND_SOCKET"):
         source_env.pop(key, None)
     source_env["XDG_RUNTIME_DIR"] = str(runtime)
@@ -217,7 +221,7 @@ def main(argv):
         if args.receiver_delay:
             delayed_until = time.monotonic() + args.receiver_delay
             wait_for(lambda: (check_stop() or time.monotonic() >= delayed_until), hosts, deadline)
-        start("destination", destination_command, os.environ.copy())
+        start("destination", destination_command, environment.copy())
         wait_for(lambda: ready(run / "destination"), hosts, deadline)
         print("Both Weld instances ready. Windows auto-hoist; no Super+H required.", flush=True)
         print(f"Runtime: {str(args.seconds) + ' seconds' if args.seconds else 'until receiver closes or Ctrl+C'}.", flush=True)

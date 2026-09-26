@@ -382,13 +382,14 @@ process-exit or transport-failure evidence. Do not treat that as a proven
 network fault. Close the receiver deliberately and verify source recovery and
 release of held inputs; automatic reconnect is not implemented.
 
-Avoid promising 60 fps. The current per-surface single outstanding commit
-couples cadence to round-trip time plus processing; the session also permits
-only one in-flight encode globally. AV1's configured bitrate is per layer
-encoder, not a total session budget. Use the validated settings and a small
-window first; do not raise bitrate or widen queues to hide latency. Measure
-the limitation before changing credit, dropping encoded dependencies, or
-implementing the broader [budgeting design](spec/remote-budgeting.md).
+Historical September 6 constraints: the then-current single outstanding commit
+coupled cadence to round-trip time plus processing, with one in-flight encode
+globally and a per-layer AV1 bitrate rather than a shared target. Those are not
+the current pipeline's limits. Later work removed commit-ACK pacing and added
+shared budgeting and decode pipelining; see [Iroh hoisting](iroh-hoisting.md) and
+[shared diagnostics](hoist-diagnostics.md) for current behavior and measurements.
+Do not promise a frame rate or widen queues to hide latency on the strength of
+this historical test; use measured current behavior.
 
 Success means verified distinct uplinks, intended-peer-only admission, usable
 input and presentation, bounded memory/logs, and reliable reclaim/cleanup. A

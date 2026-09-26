@@ -29,6 +29,9 @@ class LauncherTests(unittest.TestCase):
                     (binaries / name).symlink_to(fixture.resolve())
                 environment = {**os.environ, "PATH": str(binaries) + os.pathsep + os.environ["PATH"],
                                "WAYLAND_DISPLAY": "fake", "WELD_LAUNCHER_TEST_MODE": mode}
+                environment.pop("RUST_LOG", None)
+                if mode == "receiver-fails":
+                    environment["RUST_LOG"] = "error"
                 with (root / "launcher.log").open("w+") as log:
                     parent = subprocess.Popen([sys.executable, str(launcher), "--app", "foot",
                                                "--codec", "h264"], env=environment,
@@ -55,7 +58,13 @@ class LauncherTests(unittest.TestCase):
                             parent.kill()  # Supervisors observe EOF and clean their own groups.
                             parent.wait(timeout=5)
                     run = next((root / "target/validation").glob("headless-iroh-*"))
+                    metadata = json.loads((run / "run.json").read_text())
+                    self.assertEqual((metadata["codec"], metadata["transport"], metadata["receiver"]),
+                                     ("h264", "direct", "weld"))
                     for owned in json.loads((run / "processes.json").read_text()):
+                        expected_log = "error" if mode == "receiver-fails" else "info,weld_media_diag=debug,weld_network_diag=debug"
+                        self.assertIn("TEST_RUST_LOG=" + expected_log,
+                                      (run / (owned["role"] + ".log")).read_text())
                         with self.assertRaises(ProcessLookupError):
                             os.kill(owned["pid"], 0)
 

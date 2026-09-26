@@ -2,7 +2,9 @@
 
 Native presentation is shared by the bounded fixture and the
 [multi-window Iroh viewer](godot-hoisting.md) and its [XR scene](godot-xr.md).
-Godot 4.7.1 Compatibility runs OpenGL ES on Linux and Android. The Linux
+Godot Compatibility runs OpenGL ES on Linux and Android. Initial validation
+below used 4.7.1; the current engine and workarounds are recorded in
+[Godot engine issues](godot-engine-issues.md). The Linux
 `opengl3_es` override and runtime EGL/extension checks are deliberate: desktop
 core OpenGL/GLX is not the validated image-import route. Vulkan external-memory
 extension selection is tracked by [Godot PR #114940](https://github.com/godotengine/godot/pull/114940);

@@ -70,7 +70,7 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual([step.name for step in steps], ["pico-export"])
         self.assertTrue(all("--release" not in step.command for step in steps))
         checks = runpy.run_path(str(PATH.with_name("check-godot-xr")))["steps"]()
-        self.assertEqual([step.name for step in checks], ["format", "rust-tests", "clippy", "scene", "shaders"])
+        self.assertEqual([step.name for step in checks], ["format", "rust-tests", "clippy", "scene", "shaders", "environments"])
         for step in checks:
             if step.name in ("rust-tests", "clippy"):
                 self.assertEqual(step.command[step.command.index("--target") + 1], "x86_64-unknown-linux-gnu")

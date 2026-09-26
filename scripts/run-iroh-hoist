@@ -84,6 +84,9 @@ ticket_path="${run_directory}/source.ticket"
 identity_path="${run_directory}/destination.identity"
 source_log="${run_directory}/source.log"
 destination_log="${run_directory}/destination.log"
+printf '{"codec":"%s","transport":"%s","receiver":"weld","started_at":%s}\n' \
+    "${codec}" "${network}" "$(date +%s)" > "${run_directory}/run.json"
+export RUST_LOG="${RUST_LOG-info,weld_media_diag=debug,weld_network_diag=debug}"
 
 printf 'Starting encoded Iroh hoist with %s over %s. Focus the source window and press Super+H.\n' \
     "${codec}" "${network}"

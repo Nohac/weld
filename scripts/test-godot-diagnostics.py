@@ -10,7 +10,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-PLOT = runpy.run_path(str(Path(__file__).with_name("plot-godot-hoist")))
+PLOT = runpy.run_path(str(Path(__file__).with_name("plot-hoist")))
 CAPTURE = runpy.run_path(str(Path(__file__).with_name("godot-log-capture.py")))
 
 
@@ -140,7 +140,7 @@ class DiagnosticsTests(unittest.TestCase):
     def test_rtt_immediately_follows_frame_outcomes_in_modern_report(self):
         records = [dict(time=100, kind="presentation", fields={}, file="viewer.log"),
                    dict(time=101, kind="network", fields={"rtt_us": 8000}, file="source.log")]
-        with patch.dict(PLOT["report"].__globals__, read_records=lambda _: (records, [])):
+        with patch.dict(PLOT["report"].__globals__, read_records=lambda _: (records, [], {})):
             output = PLOT["report"](Path("test-run"))
         self.assertEqual(re.findall(r"<h2>(.*?)</h2>", output)[:2],
                          ["Receiver frame outcomes", "Network RTT"])
@@ -154,7 +154,7 @@ class DiagnosticsTests(unittest.TestCase):
                                "layout_discard_total", "lifecycle_discard_total", "handoff_discard_total"], 0)
         records = [dict(time=100, kind="presentation", fields=dict(fields, decoded_total=10), file="viewer.log"),
                    dict(time=102, kind="presentation", fields=dict(fields, decoded_total=30), file="viewer.log")]
-        with patch.dict(PLOT["report"].__globals__, read_records=lambda _: (records, [])):
+        with patch.dict(PLOT["report"].__globals__, read_records=lambda _: (records, [], {})):
             output = PLOT["report"](Path("test-run"))
         payload = json.loads(re.search(r"class='chart-data'>(.*?)</script>", output)[1])
         self.assertEqual(payload["labels"][-1], "Decoded (not an additional outcome)")

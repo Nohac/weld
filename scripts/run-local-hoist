@@ -66,6 +66,7 @@ source_log="${repository_root}/target/validation/weld-hoist-source-${log_label}.
 destination_log="${repository_root}/target/validation/weld-hoist-destination-${log_label}.log"
 encoded_dump_run="$(date -u +%Y%m%dT%H%M%SZ)"
 encoded_dump_directory="${repository_root}/target/validation/${codec}-${encoded_dump_run}"
+export RUST_LOG="${RUST_LOG-info,weld_media_diag=debug,weld_network_diag=debug}"
 
 if [[ "${trace_media}" == true ]]; then
     media_filter="weld_hoist_local::encoded=trace,weld_media_vaapi=trace"

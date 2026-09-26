@@ -144,6 +144,10 @@ impl Manager {
                     let stream = match listener.accept().await {
                         Ok((stream, _)) => stream,
                         Err(error) => {
+                            // Development-only carrier: even transient accept errors
+                            // currently retire this listener until the host restarts.
+                            // Retry/backoff and broader ADB recovery are deferred;
+                            // this is not evidence about normal Iroh/Wi-Fi failures.
                             tracing::warn!(%error, "ADB listener stopped");
                             break;
                         }
