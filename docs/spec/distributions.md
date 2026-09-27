@@ -9,6 +9,12 @@ same host boundaries. See [Architecture](../architecture.md).
 
 ## Distribution strategy — Direction
 
+Weld Master is the evolving flagship assembly, currently provided by `weldwm`.
+Its own defaults, configuration and startup composition are not backward-
+compatibility boundaries before a stable release. It should take advantage of
+Weld's reusable capabilities rather than preserve an older distribution layout.
+Sway compatibility informs the direction without defining Master's limits.
+
 Weld should make it practical to “weld together” a personal operating
 environment from libraries and plugins. Shared crates own mechanisms and
 stable extension surfaces; distributions choose defaults, configuration,

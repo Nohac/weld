@@ -31,6 +31,7 @@ members = [
   "crates/weld-media-vaapi",
   "crates/weld-ssd",
   "crates/weld-sway-config",
+  "crates/weld-tile",
   "crates/weld-window",
   "crates/weld-window-ui",
 ]
@@ -97,7 +98,8 @@ weld-core = { path = "crates/weld-core" }
 weld-window = { path = "crates/weld-window" }
 weld-window-ui = { path = "crates/weld-window-ui" }
 weld-ssd = { path = "crates/weld-ssd" }
-weld-float = { path = "crates/weld-float" }
+weld-tile = { path = "crates/weld-tile" }
+weld-sway-config = { path = "crates/weld-sway-config" }
 weld-gamepad = { path = "crates/weld-gamepad" }
 weld-hoist = { path = "crates/weld-hoist" }
 weld-hoist-iroh = { path = "crates/weld-hoist-iroh", features = ["vaapi"] }

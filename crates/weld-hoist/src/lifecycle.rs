@@ -14,7 +14,6 @@ use bevy::{
 };
 use weld_app::{
     client::ClientAdapterCommandQueue,
-    input::GlobalShortcutPressed,
     surface::{
         ClientId, ClientSource, ClientToplevel, MappedSurface, SurfaceAction, SurfaceActionQueue,
         SurfaceCommitRevisions,
@@ -26,32 +25,17 @@ use weld_hoist_ui::{
     ReclaimHoist,
 };
 use weld_window::{
-    ClientResizeState, FocusedWindow, ManagedWindow, OccupiesWindow, PresentationInsets,
-    PresentationOffset, PrimaryWindowPresentation, WindowAdmissionHold, WindowFamilyResolver,
-    WindowGeometry, WindowGeometryAnchor, WindowOccupant, WindowOutput, WindowPresentationOverride,
-    WindowVacancy, WindowVisibility, rounded_client_size,
+    ClientResizeState, ManagedWindow, OccupiesWindow, PresentationInsets, PresentationOffset,
+    PrimaryWindowPresentation, WindowAdmissionHold, WindowFamilyResolver, WindowGeometry,
+    WindowGeometryAnchor, WindowOccupant, WindowOutput, WindowPresentationOverride, WindowVacancy,
+    WindowVisibility, rounded_client_size,
 };
 
 use crate::{
     ActiveHoistFamily, HoistDetached, HoistEndpointRegistry, HoistFamilyAssignments,
-    HoistMembership, HoistSession, HoistShortcut, HoistWindow, HoistedWindow, LoopbackReceiver,
-    NextHoistFamilyId, NextHoistSessionId, PlannedHoist, RECLAIM_CONFIGURE_TIMEOUT, SessionState,
+    HoistMembership, HoistSession, HoistWindow, HoistedWindow, LoopbackReceiver, NextHoistFamilyId,
+    NextHoistSessionId, PlannedHoist, RECLAIM_CONFIGURE_TIMEOUT, SessionState,
 };
-
-pub(super) fn request_focused_hoist(
-    mut shortcuts: MessageReader<GlobalShortcutPressed>,
-    shortcut: Res<HoistShortcut>,
-    focus: Res<FocusedWindow>,
-    mut requests: MessageWriter<HoistWindow>,
-) {
-    if shortcuts
-        .read()
-        .any(|pressed| pressed.shortcut() == shortcut.0)
-        && let Some(window) = focus.entity()
-    {
-        requests.write(HoistWindow { window });
-    }
-}
 
 #[derive(SystemParam)]
 pub(super) struct BeginHoistParams<'w, 's> {

@@ -20,21 +20,21 @@ use winit::keyboard::Key;
 
 use super::{
     ApplicationInputBuffer, GlobalShortcut, GlobalShortcutAppExt, GlobalShortcutModifiers,
-    GlobalShortcutPlugin, GlobalShortcutPressed, InputBridgePlugin, InputOutputTarget,
-    PointerShortcut, PointerShortcutAppExt, PointerShortcutModifiers, TouchpadGesture,
-    VirtualTerminalShortcutPlugin, enqueue_application_input_batch, enqueue_raw_input,
-    filter_global_shortcut_event, filter_pointer_shortcut_event, filter_virtual_terminal_event,
+    GlobalShortcutPlugin, GlobalShortcutPressed, GlobalShortcutSet, InputBridgePlugin,
+    InputOutputTarget, PointerShortcut, PointerShortcutAppExt, PointerShortcutModifiers,
+    TouchpadGesture, VirtualTerminalShortcutPlugin, enqueue_application_input_batch,
+    enqueue_raw_input, filter_global_shortcut_event, filter_pointer_shortcut_event,
+    filter_virtual_terminal_event,
     raw::{
         ButtonState, InputDelta, InputPosition, LinuxButtonCode, LinuxKeycode, PointerGesture,
         RawSeatEvent, RawSeatEventKind, TouchpadPinch,
     },
-    shortcuts::take_shortcut_commands as take_host_commands,
+    shell_commands::take_commands as take_host_commands,
     take_input_effects, take_virtual_terminal_switch_request,
 };
 use crate::ActiveBackend;
 use weld_core::{
     OutputConfiguration, OutputId, OutputScale,
-    runtime::{HostCommand, OutputScaleAdjustment},
     surface::{Extent, LogicalPoint},
 };
 
@@ -135,6 +135,10 @@ fn upstream_repeats_preserve_bevy_held_state_without_new_presses() {
 #[test]
 fn shortcut_repeats_are_consumed_without_retriggering_or_buffering() {
     let mut app = shortcut_test_app(ActiveBackend::Nested);
+    app.register_global_shortcut(GlobalShortcut::new(
+        KeyCode::KeyF,
+        GlobalShortcutModifiers::super_key(),
+    ));
     let mut buffer = ApplicationInputBuffer::default();
     let event = |keycode, state| {
         RawSeatEvent::new(
@@ -154,12 +158,24 @@ fn shortcut_repeats_are_consumed_without_retriggering_or_buffering() {
         app.world_mut(),
         event(33, weld_client::KeyboardKeyState::Pressed)
     ));
-    assert_eq!(take_host_commands(app.world_mut()).len(), 1);
+    assert_eq!(
+        app.world()
+            .resource::<Messages<GlobalShortcutPressed>>()
+            .len(),
+        1
+    );
+    app.world_mut()
+        .resource_mut::<Messages<GlobalShortcutPressed>>()
+        .clear();
     assert!(!buffer.enqueue(
         app.world_mut(),
         event(33, weld_client::KeyboardKeyState::Repeated)
     ));
-    assert!(take_host_commands(app.world_mut()).is_empty());
+    assert!(
+        app.world()
+            .resource::<Messages<GlobalShortcutPressed>>()
+            .is_empty()
+    );
     assert_eq!(buffer.len(), 2);
     assert!(!buffer.enqueue(
         app.world_mut(),
@@ -331,6 +347,10 @@ fn application_buffer_retains_less_motion_without_changing_forward_decisions() {
 #[test]
 fn global_shortcut_is_consumed_before_the_frame_and_still_buffered() {
     let mut app = shortcut_test_app(ActiveBackend::Nested);
+    let shortcut = app.register_global_shortcut(GlobalShortcut::new(
+        KeyCode::KeyF,
+        GlobalShortcutModifiers::super_key(),
+    ));
     let super_press = RawSeatEvent::new(
         RawSeatEventKind::Keyboard {
             keycode: LinuxKeycode(125),
@@ -351,13 +371,15 @@ fn global_shortcut_is_consumed_before_the_frame_and_still_buffered() {
     assert!(enqueue_host_input(&mut app, super_press));
     assert!(!enqueue_host_input(&mut app, trigger_press.clone()));
     assert!(!enqueue_host_input(&mut app, trigger_press));
+    let mut cursor = MessageCursor::<GlobalShortcutPressed>::default();
     assert_eq!(
-        take_host_commands(app.world_mut()),
-        [HostCommand::Launch {
-            program: "firefox".into(),
-            arguments: Vec::new(),
-        }]
+        cursor
+            .read(app.world().resource::<Messages<GlobalShortcutPressed>>())
+            .map(|event| event.shortcut())
+            .collect::<Vec<_>>(),
+        [shortcut]
     );
+    assert!(take_host_commands(app.world_mut()).is_empty());
 
     app.update();
     assert!(take_input_effects(app.world_mut()).is_empty());
@@ -397,90 +419,27 @@ fn global_shortcut_is_consumed_before_the_frame_and_still_buffered() {
 }
 
 #[test]
-fn output_scale_shortcuts_are_enabled_only_for_drm() {
-    let events = || {
-        [
-            RawSeatEvent::new(
+fn shortcut_plugin_installs_no_launch_exit_or_scale_defaults() {
+    for backend in [ActiveBackend::Nested, ActiveBackend::Drm] {
+        let mut app = shortcut_test_app(backend);
+        for code in [125, 42, 28, 33, 48, 13, 12, 32, 1] {
+            let event = RawSeatEvent::new(
                 RawSeatEventKind::Keyboard {
-                    keycode: LinuxKeycode(125),
+                    keycode: LinuxKeycode(code),
                     logical_key: None,
                     state: weld_client::KeyboardKeyState::Pressed,
                 },
-                10,
-            ),
-            RawSeatEvent::new(
-                RawSeatEventKind::Keyboard {
-                    keycode: LinuxKeycode(13),
-                    logical_key: None,
-                    state: weld_client::KeyboardKeyState::Pressed,
-                },
-                11,
-            ),
-        ]
-    };
-
-    let mut drm = shortcut_test_app(ActiveBackend::Drm);
-    assert!(enqueue_host_input(&mut drm, events()[0].clone()));
-    assert!(!enqueue_host_input(&mut drm, events()[1].clone()));
-    assert_eq!(
-        take_host_commands(drm.world_mut()),
-        [HostCommand::AdjustOutputScale(
-            OutputScaleAdjustment::Increase
-        )]
-    );
-
-    let mut nested = shortcut_test_app(ActiveBackend::Nested);
-    for event in events() {
-        assert!(enqueue_host_input(&mut nested, event));
+                1,
+            );
+            assert!(enqueue_host_input(&mut app, event));
+        }
+        assert!(take_host_commands(app.world_mut()).is_empty());
+        assert!(
+            app.world()
+                .resource::<Messages<GlobalShortcutPressed>>()
+                .is_empty()
+        );
     }
-    assert!(take_host_commands(nested.world_mut()).is_empty());
-}
-
-#[test]
-fn physical_scale_match_shortcut_is_enabled_only_for_drm() {
-    let events = || {
-        [
-            RawSeatEvent::new(
-                RawSeatEventKind::Keyboard {
-                    keycode: LinuxKeycode(125),
-                    logical_key: None,
-                    state: weld_client::KeyboardKeyState::Pressed,
-                },
-                10,
-            ),
-            RawSeatEvent::new(
-                RawSeatEventKind::Keyboard {
-                    keycode: LinuxKeycode(42),
-                    logical_key: None,
-                    state: weld_client::KeyboardKeyState::Pressed,
-                },
-                11,
-            ),
-            RawSeatEvent::new(
-                RawSeatEventKind::Keyboard {
-                    keycode: LinuxKeycode(32),
-                    logical_key: None,
-                    state: weld_client::KeyboardKeyState::Pressed,
-                },
-                12,
-            ),
-        ]
-    };
-
-    let mut drm = shortcut_test_app(ActiveBackend::Drm);
-    for event in events() {
-        enqueue_host_input(&mut drm, event);
-    }
-    assert_eq!(
-        take_host_commands(drm.world_mut()),
-        [HostCommand::MatchOutputPhysicalScale]
-    );
-
-    let mut nested = shortcut_test_app(ActiveBackend::Nested);
-    for event in events() {
-        assert!(enqueue_host_input(&mut nested, event));
-    }
-    assert!(take_host_commands(nested.world_mut()).is_empty());
 }
 
 #[test]
@@ -515,6 +474,88 @@ fn application_global_shortcut_is_consumed_without_becoming_a_host_command() {
             .collect::<Vec<_>>(),
         [shortcut]
     );
+}
+
+#[test]
+fn live_shortcut_sets_replace_only_their_bindings_and_preserve_consumed_releases() {
+    let mut app = shortcut_test_app(ActiveBackend::Nested);
+    let independent = app.register_global_shortcut(GlobalShortcut::new(
+        KeyCode::F12,
+        GlobalShortcutModifiers::super_key(),
+    ));
+    let mut owned = GlobalShortcutSet::default();
+    let old = owned
+        .replace(
+            app.world_mut(),
+            [
+                GlobalShortcut::new(KeyCode::ArrowLeft, GlobalShortcutModifiers::super_key()),
+                GlobalShortcut::new(KeyCode::ArrowLeft, GlobalShortcutModifiers::super_shift()),
+            ],
+        )
+        .expect("shortcut support");
+    let key = |code, state| {
+        RawSeatEvent::new(
+            RawSeatEventKind::Keyboard {
+                keycode: LinuxKeycode(code),
+                logical_key: None,
+                state,
+            },
+            1,
+        )
+    };
+    for code in [125, 42, 105] {
+        filter_global_shortcut_event(
+            app.world_mut(),
+            &key(code, weld_client::KeyboardKeyState::Pressed),
+        );
+    }
+    let mut cursor = MessageCursor::<GlobalShortcutPressed>::default();
+    let events: Vec<_> = cursor
+        .read(app.world().resource::<Messages<GlobalShortcutPressed>>())
+        .map(|event| event.shortcut())
+        .collect();
+    assert_eq!(events, [old[1]]); // Shift must not accidentally select plain Left.
+    let new = owned
+        .replace(
+            app.world_mut(),
+            [GlobalShortcut::new(
+                KeyCode::ArrowRight,
+                GlobalShortcutModifiers::super_key(),
+            )],
+        )
+        .expect("replace");
+    assert!(!old.contains(&new[0]));
+    assert!(filter_global_shortcut_event(
+        app.world_mut(),
+        &key(105, weld_client::KeyboardKeyState::Released)
+    ));
+    filter_global_shortcut_event(
+        app.world_mut(),
+        &key(42, weld_client::KeyboardKeyState::Released),
+    );
+    assert!(!filter_global_shortcut_event(
+        app.world_mut(),
+        &key(105, weld_client::KeyboardKeyState::Pressed)
+    ));
+    filter_global_shortcut_event(
+        app.world_mut(),
+        &key(105, weld_client::KeyboardKeyState::Released),
+    );
+    for code in [106, 88] {
+        assert!(filter_global_shortcut_event(
+            app.world_mut(),
+            &key(code, weld_client::KeyboardKeyState::Pressed)
+        ));
+        assert!(filter_global_shortcut_event(
+            app.world_mut(),
+            &key(code, weld_client::KeyboardKeyState::Released)
+        ));
+    }
+    let events: Vec<_> = cursor
+        .read(app.world().resource::<Messages<GlobalShortcutPressed>>())
+        .map(|event| event.shortcut())
+        .collect();
+    assert_eq!(events, [new[0], independent]);
 }
 
 #[test]

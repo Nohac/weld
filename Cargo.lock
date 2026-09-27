@@ -8049,6 +8049,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "weld-tile"
+version = "0.1.0"
+dependencies = [
+ "bevy",
+ "weld-app",
+ "weld-window",
+]
+
+[[package]]
 name = "weld-window"
 version = "0.1.0"
 dependencies = [
@@ -8083,7 +8092,6 @@ dependencies = [
  "weld-app",
  "weld-client",
  "weld-core",
- "weld-float",
  "weld-gamepad",
  "weld-hoist",
  "weld-hoist-encoded",
@@ -8092,6 +8100,8 @@ dependencies = [
  "weld-media",
  "weld-media-vaapi",
  "weld-ssd",
+ "weld-sway-config",
+ "weld-tile",
  "weld-window",
  "weld-window-ui",
  "wgpu",

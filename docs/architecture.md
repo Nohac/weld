@@ -8,8 +8,8 @@ Weld is a workspace of reusable layers and one standard distribution:
 
 - `weld-sway-config` parses unexpanded Sway configuration spelling and reports
   source-aware structural errors. It depends only on Winnow, not the compositor;
-  configuration loading, command semantics and distribution integration are not
-  implemented yet.
+  the initial distribution-owned translation and reload live in `weldwm::master`,
+  not in this syntax crate.
 - `weld-client` defines the runtime-independent client adapter, surface,
   buffer-lease, request, and input contracts. It has no Smithay, Bevy, wgpu,
   codec, or transport dependency.
@@ -33,6 +33,11 @@ Weld is a workspace of reusable layers and one standard distribution:
   shell or window manager can replace.
 - `weld-float` supplies conventional freeform placement, focus, stacking,
   movement, and interactive-resize policy without owning UI entities.
+- `weld-tile` supplies native split-tree policy over durable managed windows.
+  Its queryable ECS containers, ordered commands, and live `TileSettings` do not
+  depend on configuration syntax or decoration/presentation crates. The first
+  slice has one workspace on the primary output; retained vacancies and hoist
+  placeholders keep their layout slots.
 - `weld-hoist-protocol` owns the serializable, transport-neutral hoist record
   subset shared by current bindings: exact revision and session identities,
   source and destination envelopes, surface modes, and
@@ -91,6 +96,23 @@ Weld is a workspace of reusable layers and one standard distribution:
   `WeldApp` returned by the builder with plugins and shortcuts, and supplies
   the executable. It is one possible assembly of the reusable crates, not the
   owner of their implementation.
+
+The graphical distribution is now the tiling-first Weld Master target. Its
+configuration plugin owns file selection, Sway-to-native translation, diagnostics
+and reload coordination. Subsystems own their typed settings and application
+semantics. A validated candidate replaces the configuration plugin's shortcut
+set and tiling settings in one exclusive application operation, without replacing
+the layout tree or client occupancy. Invalid candidates leave the working state
+alone. This is not a generic config framework or full Sway compatibility; see
+[Master tiling](master-tiling.md) for the current subset and limitations. The
+session-only headless host remains separate from this graphical policy assembly.
+Master's default bindings live in `examples/master.sway.config`, including
+launch, exit, hoist and output diagnostics. Shortcut support installs no key
+defaults; hoisting and the overlay accept typed requests instead. `ShellCommands`
+queues host effects without binding keys or executing configuration at load time.
+Weld-only commands use a `weld` prefix within ordinary Sway command spelling;
+no parser grammar fork is needed. Reserved DRM virtual-terminal switching stays
+separate from distribution bindings.
 
 Dependencies point inward: `weld-core` implements the local Smithay adapter
 through `weld-client`; `weld-app` depends on both; `weld-window` depends on

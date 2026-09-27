@@ -4,6 +4,7 @@ mod arguments;
 mod bitrate_budget;
 mod headless;
 mod iroh_host;
+mod master;
 mod overlay;
 mod telemetry;
 
@@ -16,7 +17,6 @@ use weld_app::{
     input::{GlobalShortcutPlugin, VirtualTerminalShortcutPlugin},
 };
 use weld_core::{runtime::RuntimeOptions, surface::Extent};
-use weld_float::FloatPlugin;
 use weld_hoist::{HoistEndpointRegistry, HoistPlugin, loopback_registration};
 use weld_hoist_iroh::{
     IrohHost, IrohSourceRegistrationOptions,
@@ -29,6 +29,7 @@ use weld_hoist_local::{
     encoded_source_registration, local_destination_registration, local_source_registration,
 };
 use weld_ssd::SsdPlugin;
+use weld_tile::TilePlugin;
 use weld_window::WindowPlugin;
 use weld_window_ui::WindowUiPlugin;
 
@@ -46,6 +47,7 @@ pub fn run(arguments: AppArguments) -> Result<()> {
         }
     };
     validate_hoist_arguments(&arguments)?;
+    let master_config = master::MasterConfigPlugin::load(arguments.config.as_deref())?;
     let hoist_codec = arguments.hoist_codec.unwrap_or_default();
     let bitrate_budget = bitrate_budget::for_source(&arguments)?;
     let iroh_timeout = Duration::from_secs(arguments.hoist_iroh_timeout.unwrap_or(120));
@@ -292,10 +294,11 @@ pub fn run(arguments: AppArguments) -> Result<()> {
         WindowPlugin,
         WindowUiPlugin,
         SsdPlugin,
-        FloatPlugin,
+        TilePlugin,
         GlobalShortcutPlugin,
         VirtualTerminalShortcutPlugin,
         DistributionOverlayPlugin,
+        master_config,
     ));
     if enable_hoist_policy {
         app.add_plugins(HoistPlugin);
@@ -317,6 +320,10 @@ fn validate_session_arguments(arguments: &AppArguments) -> Result<()> {
         );
         return Ok(());
     }
+    anyhow::ensure!(
+        arguments.config.is_none(),
+        "--config configures Weld Master; the session-only headless host has no window manager"
+    );
     anyhow::ensure!(
         arguments.screenshot.is_none() && arguments.remote_debug.is_none(),
         "headless sessions do not provide screenshots or Bevy remote debugging"
@@ -551,6 +558,7 @@ mod tests {
             vec!["--backend", "nested", "--headless-output", "1920x1080"],
             vec!["--backend", "headless", "--screenshot", "unused.png"],
             vec!["--backend", "headless", "--remote-debug"],
+            vec!["--backend", "headless", "--config", "unused.conf"],
             vec!["--backend", "headless", "--hoist-listen", "unused.sock"],
             vec![
                 "--backend",

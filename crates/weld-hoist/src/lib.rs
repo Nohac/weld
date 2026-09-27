@@ -17,13 +17,9 @@ use bevy::{
         component::Component, entity::Entity, message::Message, resource::Resource,
         schedule::IntoScheduleConfigs,
     },
-    input::keyboard::KeyCode,
     math::UVec2,
 };
-use weld_app::{
-    input::{GlobalShortcut, GlobalShortcutAppExt, GlobalShortcutId, GlobalShortcutModifiers},
-    surface::{ClientId, SurfaceId},
-};
+use weld_app::surface::{ClientId, SurfaceId};
 use weld_window::{WindowSystems, WindowVacancy};
 
 pub use endpoint::{HoistEndpointId, HoistEndpointRegistry};
@@ -208,9 +204,6 @@ struct HoistFamilyAssignments {
     planned: Vec<PlannedHoist>,
 }
 
-#[derive(Resource)]
-struct HoistShortcut(GlobalShortcutId);
-
 #[derive(Clone, Copy, Debug, Message)]
 pub struct HoistWindow {
     pub window: Entity,
@@ -220,12 +213,7 @@ pub struct HoistPlugin;
 
 impl Plugin for HoistPlugin {
     fn build(&self, app: &mut App) {
-        let shortcut = app.register_global_shortcut(GlobalShortcut::new(
-            KeyCode::KeyH,
-            GlobalShortcutModifiers::super_key(),
-        ));
         app.add_plugins(weld_hoist_ui::HoistUiPlugin)
-            .insert_resource(HoistShortcut(shortcut))
             .init_resource::<NextHoistSessionId>()
             .init_resource::<NextHoistFamilyId>()
             .init_resource::<HoistFamilyAssignments>()
@@ -233,7 +221,6 @@ impl Plugin for HoistPlugin {
             .add_systems(
                 PreUpdate,
                 (
-                    lifecycle::request_focused_hoist,
                     lifecycle::begin_requested_hoists,
                     lifecycle::bind_loopback_receivers,
                     lifecycle::maintain_sessions,

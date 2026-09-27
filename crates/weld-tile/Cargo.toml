@@ -1,0 +1,13 @@
+[package]
+name = "weld-tile"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+bevy.workspace = true
+weld-app = { path = "../weld-app" }
+weld-window = { path = "../weld-window" }
+
+[dev-dependencies]
+weld-app = { path = "../weld-app", features = ["test-support"] }

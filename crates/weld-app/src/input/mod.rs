@@ -11,6 +11,7 @@ mod keyboard;
 mod pointer_shortcuts;
 mod projection;
 mod routing;
+mod shell_commands;
 mod shortcuts;
 mod state;
 mod virtual_terminal;
@@ -48,10 +49,11 @@ pub(crate) use projection::enqueue_raw_input;
 pub(crate) use projection::enqueue_raw_input_batch;
 pub(crate) use projection::update_output_configurations;
 pub(crate) use routing::take_input_effects;
+pub use shell_commands::{ShellCommand, ShellCommands};
 pub(crate) use shortcuts::filter_global_shortcut_event;
 pub use shortcuts::{
     GlobalShortcut, GlobalShortcutAppExt, GlobalShortcutId, GlobalShortcutModifiers,
-    GlobalShortcutPlugin, GlobalShortcutPressed,
+    GlobalShortcutPlugin, GlobalShortcutPressed, GlobalShortcutSet,
 };
 pub(crate) use state::set_input_update_time;
 pub use virtual_terminal::VirtualTerminalShortcutPlugin;
@@ -62,9 +64,9 @@ pub use weld_client::{
     InputDelta, PointerGesture, PointerGestureKind, TouchpadHold, TouchpadPinch, TouchpadSwipe,
 };
 
-/// Collect input policy commands: queued shortcuts and changed keyboard settings.
+/// Collect configured shell effects and changed keyboard settings.
 pub(crate) fn take_host_commands(world: &mut World) -> Vec<HostCommand> {
-    let mut commands = shortcuts::take_shortcut_commands(world);
+    let mut commands = shell_commands::take_commands(world);
     commands.extend(keyboard::take_settings_command(world));
     commands
 }

@@ -28,15 +28,28 @@ need justifies it.
 
 ## Reloadable configuration — Direction
 
+The distribution's configuration plugin owns source/backend selection, loading,
+translation, diagnostics and coordinated reload. Other plugins own their typed
+settings, validation and live-application semantics, without depending on the
+configuration backend. Settings are distinct from live session state: a reload
+does not rebuild layouts, replace occupants or reset hoist sessions. Declare
+whether a setting affects existing state or only future operations. Device-side
+application failures need explicit reporting; do not promise rollback of
+irreversible external effects.
+
+Weld Master's first implemented slice uses Sway syntax for live tiling settings
+and a small shortcut subset; see [Master tiling](../master-tiling.md). Hyprland
+and native formats remain future backends, not placeholder implementations.
+
 Window, input, appearance, layout, binding, and remote policy should be stored
 as application resources. Replacing those resources lets systems observe new
 values while retaining clients and window state. Native changes cross typed
 host requests; immutable roots may require controlled reinitialization.
 
-The standard distribution should support a declarative configuration format
-such as TOML or KDL for common composition, rules, themes, and bindings. Rust
-plugins remain available when configuration needs new behavior rather than
-data. The exact schema and reload transaction are not yet selected.
+Sway configuration is the initial target. Existing configuration systems should
+shape the native contracts before deciding whether a Weld-native format is
+useful. Rust plugins remain available when configuration needs new behavior
+rather than data; no general-purpose configuration framework is required.
 
 The Weld-owned settings model should cover the meaningful input and compositor
 controls users rely on when adopting it without copying another compositor's

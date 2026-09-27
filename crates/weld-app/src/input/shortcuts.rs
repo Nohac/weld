@@ -1,6 +1,6 @@
-//! Shell-owned global shortcuts and host commands.
+//! Configuration-neutral global shortcut matching and press/release ownership.
 
-use std::collections::{HashSet, VecDeque};
+use std::collections::HashSet;
 
 use bevy::{
     app::{App, Plugin},
@@ -17,8 +17,6 @@ use super::{
     raw::{ButtonState, LinuxKeycode, RawSeatEvent, RawSeatEventKind},
     state::ConsumedShortcutKeys,
 };
-use crate::{ActiveBackend, WeldAppExt};
-use weld_core::runtime::{HostCommand, OutputScaleAdjustment};
 
 /// Modifier requirements for a shell-owned keyboard shortcut.
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
@@ -99,142 +97,73 @@ impl GlobalShortcutAppExt for App {
         register(self);
         self.world_mut()
             .resource_mut::<RawGlobalShortcutState>()
-            .register(shortcut)
+            .register(shortcut, false)
     }
 }
-
-#[derive(Clone, Copy)]
-enum GlobalShortcutCommand {
-    Launch(&'static str),
-    AdjustOutputScale(OutputScaleAdjustment),
-    MatchPhysicalScale,
-    Exit,
-}
-
-#[derive(Clone, Copy)]
-struct HostShortcutDefinition {
-    trigger: LinuxKeycode,
-    shift: bool,
-    drm_only: bool,
-    command: GlobalShortcutCommand,
-}
-
-impl HostShortcutDefinition {
-    fn host_command(self) -> HostCommand {
-        match self.command {
-            GlobalShortcutCommand::Launch(program) => HostCommand::Launch {
-                program: program.into(),
-                arguments: Vec::new(),
-            },
-            GlobalShortcutCommand::AdjustOutputScale(adjustment) => {
-                HostCommand::AdjustOutputScale(adjustment)
-            }
-            GlobalShortcutCommand::MatchPhysicalScale => HostCommand::MatchOutputPhysicalScale,
-            GlobalShortcutCommand::Exit => HostCommand::Exit,
-        }
-    }
-}
-
-const HOST_SHORTCUTS: [HostShortcutDefinition; 7] = [
-    HostShortcutDefinition {
-        trigger: LinuxKeycode(28),
-        shift: false,
-        drm_only: false,
-        command: GlobalShortcutCommand::Launch("foot"),
-    },
-    HostShortcutDefinition {
-        trigger: LinuxKeycode(33),
-        shift: false,
-        drm_only: false,
-        command: GlobalShortcutCommand::Launch("firefox"),
-    },
-    HostShortcutDefinition {
-        trigger: LinuxKeycode(48),
-        shift: false,
-        drm_only: false,
-        command: GlobalShortcutCommand::Launch("blender"),
-    },
-    HostShortcutDefinition {
-        trigger: LinuxKeycode(13),
-        shift: false,
-        drm_only: true,
-        command: GlobalShortcutCommand::AdjustOutputScale(OutputScaleAdjustment::Increase),
-    },
-    HostShortcutDefinition {
-        trigger: LinuxKeycode(12),
-        shift: false,
-        drm_only: true,
-        command: GlobalShortcutCommand::AdjustOutputScale(OutputScaleAdjustment::Decrease),
-    },
-    HostShortcutDefinition {
-        trigger: LinuxKeycode(32),
-        shift: true,
-        drm_only: true,
-        command: GlobalShortcutCommand::MatchPhysicalScale,
-    },
-    HostShortcutDefinition {
-        trigger: LinuxKeycode(1),
-        shift: true,
-        drm_only: false,
-        command: GlobalShortcutCommand::Exit,
-    },
-];
-
-#[derive(Resource, Default)]
-struct GlobalHostCommands(VecDeque<HostCommand>);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct RegisteredGlobalShortcut {
     id: GlobalShortcutId,
     chord: GlobalShortcut,
+    exact_modifiers: bool,
+}
+
+/// Owner-scoped live bindings. Replacement removes only this set, assigns fresh
+/// IDs, and preserves consumed key releases. Already queued old IDs are obsolete.
+#[derive(Default)]
+pub struct GlobalShortcutSet(Vec<GlobalShortcutId>);
+
+impl GlobalShortcutSet {
+    /// Replaces bindings atomically. Returns `None` unless shortcut support is
+    /// installed. Call with an empty iterator to unregister the owned set.
+    pub fn replace(
+        &mut self,
+        world: &mut World,
+        shortcuts: impl IntoIterator<Item = GlobalShortcut>,
+    ) -> Option<Vec<GlobalShortcutId>> {
+        let mut state = world.get_resource_mut::<RawGlobalShortcutState>()?;
+        state
+            .application_shortcuts
+            .retain(|entry| !self.0.contains(&entry.id));
+        self.0 = shortcuts
+            .into_iter()
+            .map(|chord| state.register(chord, true))
+            .collect();
+        Some(self.0.clone())
+    }
 }
 
 #[derive(Resource, Default)]
 struct RawGlobalShortcutState {
     next_id: u64,
-    host_shortcuts: Vec<HostShortcutDefinition>,
     application_shortcuts: Vec<RegisteredGlobalShortcut>,
     pressed: HashSet<LinuxKeycode>,
-    host_shortcuts_registered: bool,
 }
 
 impl RawGlobalShortcutState {
-    fn register(&mut self, chord: GlobalShortcut) -> GlobalShortcutId {
+    fn register(&mut self, chord: GlobalShortcut, exact_modifiers: bool) -> GlobalShortcutId {
         let id = GlobalShortcutId(self.next_id);
         self.next_id = self.next_id.saturating_add(1);
-        self.application_shortcuts
-            .push(RegisteredGlobalShortcut { id, chord });
+        self.application_shortcuts.push(RegisteredGlobalShortcut {
+            id,
+            chord,
+            exact_modifiers,
+        });
         id
-    }
-
-    fn register_host_shortcuts(&mut self, backend: Option<ActiveBackend>) {
-        if self.host_shortcuts_registered {
-            return;
-        }
-        self.host_shortcuts.extend(
-            HOST_SHORTCUTS
-                .into_iter()
-                .filter(|shortcut| !shortcut.drm_only || backend == Some(ActiveBackend::Drm)),
-        );
-        self.host_shortcuts_registered = true;
     }
 }
 
+/// Installs shortcut matching without any default chords or actions.
 pub struct GlobalShortcutPlugin;
 
 impl Plugin for GlobalShortcutPlugin {
     fn build(&self, app: &mut App) {
-        let backend = app.backend();
         register(app);
-        app.world_mut()
-            .resource_mut::<RawGlobalShortcutState>()
-            .register_host_shortcuts(backend);
     }
 }
 
 fn register(app: &mut App) {
-    app.init_resource::<GlobalHostCommands>()
-        .init_resource::<RawGlobalShortcutState>();
+    app.init_resource::<RawGlobalShortcutState>();
     if !app
         .world()
         .contains_resource::<Messages<GlobalShortcutPressed>>()
@@ -261,7 +190,7 @@ pub(crate) fn filter_global_shortcut_event(world: &mut World, event: &RawSeatEve
             .get_resource::<ConsumedShortcutKeys>()
             .is_some_and(|consumed| consumed.0.contains(keycode));
     };
-    let (host_command, application_shortcut) = {
+    let application_shortcut = {
         let Some(mut shortcuts) = world.get_resource_mut::<RawGlobalShortcutState>() else {
             return false;
         };
@@ -273,48 +202,36 @@ pub(crate) fn filter_global_shortcut_event(world: &mut World, event: &RawSeatEve
             }
         };
         if !newly_pressed {
-            (None, None)
+            None
         } else {
             let super_pressed = modifier_pressed(&shortcuts.pressed, &[125, 126]);
             let shift_pressed = modifier_pressed(&shortcuts.pressed, &[42, 54]);
-            let host = shortcuts
-                .host_shortcuts
+            let trigger = bevy_keycode(*keycode);
+            shortcuts
+                .application_shortcuts
                 .iter()
                 .find(|shortcut| {
-                    shortcut.trigger == *keycode
-                        && super_pressed
-                        && (!shortcut.shift || shift_pressed)
+                    shortcut.chord.trigger == trigger
+                        && shortcut.chord.modifiers.matches(&shortcuts.pressed)
+                        && (!shortcut.exact_modifiers
+                            || shortcut.chord.modifiers
+                                == GlobalShortcutModifiers {
+                                    control: modifier_pressed(&shortcuts.pressed, &[29, 97]),
+                                    alt: modifier_pressed(&shortcuts.pressed, &[56, 100]),
+                                    shift: shift_pressed,
+                                    super_key: super_pressed,
+                                })
                 })
-                .copied();
-            let application = host.is_none().then(|| {
-                let trigger = bevy_keycode(*keycode);
-                shortcuts
-                    .application_shortcuts
-                    .iter()
-                    .find(|shortcut| {
-                        shortcut.chord.trigger == trigger
-                            && shortcut.chord.modifiers.matches(&shortcuts.pressed)
-                    })
-                    .map(|shortcut| shortcut.id)
-            });
-            (
-                host.map(HostShortcutDefinition::host_command),
-                application.flatten(),
-            )
+                .map(|shortcut| shortcut.id)
         }
     };
 
     let consumed = world
         .get_resource::<ConsumedShortcutKeys>()
         .is_some_and(|consumed| consumed.0.contains(keycode));
-    if host_command.is_some() || application_shortcut.is_some() {
+    if application_shortcut.is_some() {
         if let Some(mut consumed) = world.get_resource_mut::<ConsumedShortcutKeys>() {
             consumed.0.insert(*keycode);
-        }
-        if let Some(command) = host_command
-            && let Some(mut commands) = world.get_resource_mut::<GlobalHostCommands>()
-        {
-            commands.0.push_back(command);
         }
         if let Some(shortcut) = application_shortcut
             && let Some(mut actions) = world.get_resource_mut::<Messages<GlobalShortcutPressed>>()
@@ -337,11 +254,4 @@ fn modifier_pressed(pressed: &HashSet<LinuxKeycode>, keycodes: &[u32]) -> bool {
     keycodes
         .iter()
         .any(|keycode| pressed.contains(&LinuxKeycode(*keycode)))
-}
-
-pub(super) fn take_shortcut_commands(world: &mut World) -> Vec<HostCommand> {
-    world
-        .get_resource_mut::<GlobalHostCommands>()
-        .map(|mut commands| commands.0.drain(..).collect())
-        .unwrap_or_default()
 }

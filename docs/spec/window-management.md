@@ -6,12 +6,15 @@ The first policy-neutral split is implemented. `weld-window` owns durable
 managed windows and optional client occupancy independently of UI;
 `weld-window-ui` supplies reusable unstyled Bevy UI presentation behavior;
 `weld-ssd` supplies the current opinionated decoration scene; and `weld-float`
-supplies default freeform management policy. A client surface can disappear
+supplies optional freeform management policy. A client surface can disappear
 without despawning a managed window whose vacancy policy is `Retain`.
 
 The exact implemented ownership and dependency direction are documented in
-[Architecture](../architecture.md). Persistent matching, workspaces, native
-tiling, and persistence below remain direction rather than completed features.
+[Architecture](../architecture.md). Persistent matching, multiple workspaces and
+persistence below remain direction rather than completed features. `weld-tile`
+now implements a native horizontal/vertical split tree with live gaps,
+directional focus, leaf swapping, proportional resize and retained slots in a
+single primary-output workspace. See [Master tiling](../master-tiling.md).
 
 ## Managed frame model — Direction
 
@@ -164,8 +167,8 @@ should permit new algorithms without replacing the window primitive.
 
 ## i3 and Sway compatibility — Exploration
 
-An i3/Sway-compatible layer could improve adoption, but compatibility is not
-an early requirement and should remain separate from native tiling. The tiling
+An i3/Sway-compatible layer is a target that informs adoption and design, not
+a requirement for exact parity, and remains separate from native tiling. The tiling
 foundation should not parse i3 configuration or expose i3 IPC types as its
 internal model.
 

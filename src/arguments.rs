@@ -144,6 +144,10 @@ impl BackendKind {
     ]).multiple(false))
 )]
 pub struct AppArguments {
+    /// Master Sway configuration file. Defaults to $XDG_CONFIG_HOME/weld/master.sway.config,
+    /// then built-in settings. Only the documented initial subset is supported.
+    #[arg(long, value_name = "PATH")]
+    pub(crate) config: Option<PathBuf>,
     /// Legacy repeat fallback: client timers, disabled, or emulated key edges. Defaults to client;
     /// WELD_LEGACY_KEY_REPEAT supplies a default when this option is absent.
     #[arg(long, value_enum)]

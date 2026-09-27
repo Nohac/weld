@@ -147,13 +147,21 @@ disables X11 fallback.
 The standard distribution provides these backend-neutral shortcuts:
 
 - `Super+Enter`: launch foot
-- `Super+F`: launch Firefox
+- `Super+Control+F`: launch Firefox
 - `Super+B`: launch Blender
 - `Super+H`: hoist or locally preview the focused occupied window
-- `Super+LMB`: move the floating window under the pointer
-- `Super+RMB`: resize the floating window under the pointer from its nearest corner
+- `Super+D/F/K/J` or `Super+Arrow`: focus left/right/up/down
+- Add `Shift` to the navigation bindings to swap a tile with its neighbor
+- `Super+Control+Arrow`: adjust tile proportions
+- `Super+F1/F2`: prepare a horizontal/vertical split
+- `Super+F3`: reload Master configuration
+- `Super+F4`: request close of the focused client
 - `Super+Shift+O`: toggle output-topology diagnostics
 - `Super+Shift+Escape`: exit Weld
+
+These defaults live in `examples/master.sway.config`, not the reusable plugins.
+Master now uses the native tiler. Its initial Sway configuration subset and
+reload semantics are documented in [Master tiling](docs/master-tiling.md).
 
 Weld options precede an explicit `--` when a client is also present. Capture a
 settled client-plus-shell composition and exit with:
@@ -271,6 +279,11 @@ Document non-obvious ownership, ordering, lifetime, protocol, and thread
 boundaries close to the implementation. Significant modules should explain
 their purpose and normal consumer, but ordinary accessors and direct control
 flow do not need narration.
+
+Write comments in positive, concrete terms: explain purpose, behavior, invariants
+and the reason for a decision. Avoid boilerplate about what something "isn't"
+or lists of systems it does not depend on. Keep architectural comparisons and
+scope discussions in the relevant design documentation.
 
 ## Commits
 
