@@ -6,6 +6,10 @@ project intent and future direction without presenting it as current behavior.
 
 Weld is a workspace of reusable layers and one standard distribution:
 
+- `weld-sway-config` parses unexpanded Sway configuration spelling and reports
+  source-aware structural errors. It depends only on Winnow, not the compositor;
+  configuration loading, command semantics and distribution integration are not
+  implemented yet.
 - `weld-client` defines the runtime-independent client adapter, surface,
   buffer-lease, request, and input contracts. It has no Smithay, Bevy, wgpu,
   codec, or transport dependency.

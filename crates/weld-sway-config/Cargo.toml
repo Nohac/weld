@@ -1,0 +1,11 @@
+[package]
+name = "weld-sway-config"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+winnow.workspace = true
+
+[dev-dependencies]
+insta.workspace = true
