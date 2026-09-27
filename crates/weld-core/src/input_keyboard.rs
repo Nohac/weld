@@ -4,28 +4,6 @@ use std::collections::HashMap;
 
 use weld_client::{ClientSurfaceId, KeyboardKeyState, LinuxKeycode};
 
-/// Repeat cadence owner for a native host's keyboard. Fixed at startup.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum KeyboardRepeatMode {
-    /// Applications generate repeats. Use when no upstream cadence is available.
-    Client,
-    /// Input supplies explicit repeats; keyboard-v10 applications must not generate them.
-    Compositor,
-}
-
-/// Fallback for pre-v10 keyboards and input-method grabs in compositor-repeat mode.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub enum LegacyKeyRepeat {
-    /// Retain client timers. Network-delayed releases can produce unwanted repeats.
-    #[default]
-    Client,
-    /// Disable legacy timers without emulating repeats as press/release pairs.
-    Disabled,
-    /// Disable legacy timers and emit wire release/press pairs for upstream repeats.
-    /// Client-visible key edges differ from a true hold; opt in for compatible apps.
-    Emulated,
-}
-
 struct HeldKey {
     surface: ClientSurfaceId,
     repeat_allowed: bool,

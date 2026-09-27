@@ -186,6 +186,13 @@ impl<Event: 'static> NativeRuntime<Event> {
         let mut policy_dirty = integration.application().is_some();
         let started_at = Instant::now();
         loop {
+            let settings = integration
+                .application()
+                .and_then(|app| app.take_keyboard_settings());
+            self.state
+                .data
+                .server
+                .synchronize_keyboard_settings(settings)?;
             let local_callback_demand = self.state.data.server.take_local_callback_demand();
             if local_callback_demand && let Some((driver, _)) = integration.native() {
                 driver.client_demand(CompositionDemand::Ordinary);
@@ -286,9 +293,6 @@ impl<Event: 'static> NativeRuntime<Event> {
                         {
                             HostCommandEffect::Continue => {}
                             HostCommandEffect::Exit => exit = true,
-                            HostCommandEffect::SetLegacyKeyRepeat(legacy) => {
-                                self.state.data.server.set_legacy_key_repeat(legacy)
-                            }
                             HostCommandEffect::AdjustOutputScale(_)
                             | HostCommandEffect::MatchOutputPhysicalScale => {
                                 bail!("output scale command requires a native output policy")

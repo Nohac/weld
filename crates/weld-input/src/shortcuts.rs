@@ -12,11 +12,13 @@ use bevy::{
     input::keyboard::KeyCode,
 };
 
-use super::{
-    projection::bevy_keycode,
-    raw::{ButtonState, LinuxKeycode, RawSeatEvent, RawSeatEventKind},
-    state::ConsumedShortcutKeys,
-};
+use crate::{ButtonState, LinuxKeycode, RawSeatEvent, RawSeatEventKind, SeatModifiers};
+use bevy_winit::converters::convert_physical_key_code;
+use winit::{keyboard::PhysicalKey, platform::scancode::PhysicalKeyExtScancode};
+
+/// Physical keys whose release belongs to a shell shortcut.
+#[derive(Resource, Default)]
+pub struct ConsumedShortcutKeys(pub HashSet<LinuxKeycode>);
 
 /// Modifier requirements for a shell-owned keyboard shortcut.
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
@@ -46,11 +48,11 @@ impl GlobalShortcutModifiers {
         }
     }
 
-    fn matches(self, pressed: &HashSet<LinuxKeycode>) -> bool {
-        (!self.control || modifier_pressed(pressed, &[29, 97]))
-            && (!self.alt || modifier_pressed(pressed, &[56, 100]))
-            && (!self.shift || modifier_pressed(pressed, &[42, 54]))
-            && (!self.super_key || modifier_pressed(pressed, &[125, 126]))
+    fn matches(self, pressed: SeatModifiers) -> bool {
+        (!self.control || pressed.control)
+            && (!self.alt || pressed.alt)
+            && (!self.shift || pressed.shift)
+            && (!self.super_key || pressed.super_key)
     }
 }
 
@@ -163,6 +165,7 @@ impl Plugin for GlobalShortcutPlugin {
 }
 
 fn register(app: &mut App) {
+    app.init_resource::<ConsumedShortcutKeys>();
     app.init_resource::<RawGlobalShortcutState>();
     if !app
         .world()
@@ -172,7 +175,7 @@ fn register(app: &mut App) {
     }
 }
 
-pub(crate) fn filter_global_shortcut_event(world: &mut World, event: &RawSeatEvent) -> bool {
+pub fn filter_global_shortcut_event(world: &mut World, event: &RawSeatEvent) -> bool {
     let RawSeatEventKind::Keyboard { keycode, state, .. } = &event.event else {
         if matches!(event.event, RawSeatEventKind::HostFocusLost)
             && let Some(mut shortcuts) = world.get_resource_mut::<RawGlobalShortcutState>()
@@ -204,22 +207,23 @@ pub(crate) fn filter_global_shortcut_event(world: &mut World, event: &RawSeatEve
         if !newly_pressed {
             None
         } else {
-            let super_pressed = modifier_pressed(&shortcuts.pressed, &[125, 126]);
-            let shift_pressed = modifier_pressed(&shortcuts.pressed, &[42, 54]);
-            let trigger = bevy_keycode(*keycode);
+            let modifiers = event
+                .modifiers
+                .unwrap_or_else(|| SeatModifiers::from_pressed_keys(&shortcuts.pressed));
+            let trigger = convert_physical_key_code(PhysicalKey::from_scancode(keycode.0));
             shortcuts
                 .application_shortcuts
                 .iter()
                 .find(|shortcut| {
                     shortcut.chord.trigger == trigger
-                        && shortcut.chord.modifiers.matches(&shortcuts.pressed)
+                        && shortcut.chord.modifiers.matches(modifiers)
                         && (!shortcut.exact_modifiers
                             || shortcut.chord.modifiers
                                 == GlobalShortcutModifiers {
-                                    control: modifier_pressed(&shortcuts.pressed, &[29, 97]),
-                                    alt: modifier_pressed(&shortcuts.pressed, &[56, 100]),
-                                    shift: shift_pressed,
-                                    super_key: super_pressed,
+                                    control: modifiers.control,
+                                    alt: modifiers.alt,
+                                    shift: modifiers.shift,
+                                    super_key: modifiers.super_key,
                                 })
                 })
                 .map(|shortcut| shortcut.id)
@@ -248,10 +252,4 @@ pub(crate) fn filter_global_shortcut_event(world: &mut World, event: &RawSeatEve
         }
         consumed
     }
-}
-
-fn modifier_pressed(pressed: &HashSet<LinuxKeycode>, keycodes: &[u32]) -> bool {
-    keycodes
-        .iter()
-        .any(|keycode| pressed.contains(&LinuxKeycode(*keycode)))
 }

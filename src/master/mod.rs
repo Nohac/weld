@@ -21,11 +21,9 @@ use bevy::{
         world::World,
     },
 };
-use weld_app::{
-    ActiveBackend,
-    input::{GlobalShortcutId, GlobalShortcutPressed, GlobalShortcutSet, ShellCommands},
-};
+use weld_app::{ActiveBackend, input::ShellCommands};
 use weld_hoist::HoistWindow;
+use weld_input::{GlobalShortcutId, GlobalShortcutPressed, GlobalShortcutSet};
 use weld_tile::TileCommands;
 use weld_window::{FocusedWindow, WindowSystems};
 
@@ -72,6 +70,7 @@ fn read_configuration(path: Option<&Path>) -> Result<Configuration> {
 impl Plugin for MasterConfigPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<ShellCommands>();
+        weld_input::register_keyboard_settings(app);
         let mut state = ConfigState {
             path: self.path.clone(),
             shortcuts: GlobalShortcutSet::default(),
@@ -113,6 +112,9 @@ impl ConfigState {
             .zip(bindings.into_iter().map(|binding| binding.1))
             .collect();
         world.insert_resource(config.tiling);
+        if let Some(mut settings) = world.get_resource_mut::<weld_input::KeyboardSettings>() {
+            settings.keymap = config.keymap;
+        }
         Ok(())
     }
 }

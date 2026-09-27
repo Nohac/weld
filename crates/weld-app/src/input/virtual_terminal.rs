@@ -68,15 +68,12 @@ pub(crate) fn filter_virtual_terminal_event(world: &mut World, event: &RawSeatEv
                 false
             }
         };
-        let control = [29, 97]
-            .into_iter()
-            .any(|code| keys.pressed.contains(&LinuxKeycode(code)));
-        let alt = [56, 100]
-            .into_iter()
-            .any(|code| keys.pressed.contains(&LinuxKeycode(code)));
+        let modifiers = event
+            .modifiers
+            .unwrap_or_else(|| weld_input::SeatModifiers::from_pressed_keys(&keys.pressed));
         newly_pressed
-            && control
-            && alt
+            && modifiers.control
+            && modifiers.alt
             && (FIRST_FUNCTION_KEY..=LAST_FUNCTION_KEY).contains(&keycode.0)
     };
 

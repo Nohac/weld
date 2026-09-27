@@ -258,6 +258,7 @@ impl NativeDriver<NestedEvent> for NestedDriver {
             .entered();
             let mut event_count = 0_usize;
             for event in self.host.input.drain() {
+                let event = state.data.server.resolve_input(event);
                 if shell.enqueue_input_event(event.clone()) {
                     state
                         .clients
@@ -566,10 +567,6 @@ fn apply_host_command(
 ) -> Result<bool> {
     match children.apply(server, command)? {
         HostCommandEffect::Continue => Ok(false),
-        HostCommandEffect::SetLegacyKeyRepeat(legacy) => {
-            server.set_legacy_key_repeat(legacy);
-            Ok(false)
-        }
         HostCommandEffect::Exit => Ok(true),
         HostCommandEffect::AdjustOutputScale(adjustment) => {
             warn!(

@@ -370,6 +370,7 @@ impl NativeDriver<HostEvent> for DrmDriver {
                 HostEvent::Session(SessionEvent::PauseSession) => {
                     self.target = SessionTarget::InactiveOwned;
                     for event in self.input.cancel_active_input().into_iter().flatten() {
+                        let event = state.data.server.resolve_input(event);
                         if application.enqueue_input_event(event.clone()) {
                             state
                                 .clients
@@ -381,6 +382,7 @@ impl NativeDriver<HostEvent> for DrmDriver {
                         RawSeatEventKind::HostFocusLost,
                         self.input.last_event_time_msec(),
                     );
+                    let focus_lost = state.data.server.resolve_input(focus_lost);
                     let _ = application.enqueue_input_event(focus_lost.clone());
                     state
                         .clients
@@ -460,6 +462,7 @@ impl NativeDriver<HostEvent> for DrmDriver {
                 } => return Err(error).context("Smithay DRM notifier failed"),
                 HostEvent::Input(event) => {
                     for event in self.input.convert(event).into_iter().flatten() {
+                        let event = state.data.server.resolve_input(event);
                         if matches!(event.event, RawSeatEventKind::PointerMotion { .. }) {
                             self.desktop
                                 .set_cursor_position(self.input.pointer_position());
@@ -534,9 +537,6 @@ impl NativeDriver<HostEvent> for DrmDriver {
         for command in application.take_host_commands() {
             match state.children.apply(&state.data.server, command)? {
                 HostCommandEffect::Continue => {}
-                HostCommandEffect::SetLegacyKeyRepeat(legacy) => {
-                    state.data.server.set_legacy_key_repeat(legacy)
-                }
                 HostCommandEffect::Exit => self.exit_requested = true,
                 HostCommandEffect::AdjustOutputScale(adjustment) => {
                     let output = self.input.output_at_pointer().or_else(|| {

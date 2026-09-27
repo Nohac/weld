@@ -2,14 +2,17 @@
 
 #[path = "input_keyboard.rs"]
 mod keyboard;
-#[path = "input_raw.rs"]
-mod raw;
 #[path = "input_source/mod.rs"]
 pub mod source;
 
 pub(crate) use keyboard::KeyboardRepeatTracker;
-pub use keyboard::{KeyboardRepeatMode, LegacyKeyRepeat};
-pub use raw::*;
+pub use weld_input::{
+    ButtonState, InputDelta, InputPosition, KeyboardKeyState, KeyboardKeymap, KeyboardMapper,
+    KeyboardRepeatMode, KeyboardSettings, KeymapConfig, LegacyKeyRepeat, LinuxButtonCode,
+    LinuxKeycode, PointerGesture, PointerGestureKind, RawScrollFrame, RawScrollPhase,
+    RawScrollSource, RawSeatEvent, RawSeatEventKind, SeatModifiers, TouchpadHold, TouchpadPinch,
+    TouchpadSwipe,
+};
 
 use crate::surface::{SurfaceId, SurfaceLayerId};
 

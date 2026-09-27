@@ -14,8 +14,9 @@ use bevy::{
     math::Vec2,
 };
 
-use super::raw::{
+use crate::{
     ButtonState, InputPosition, LinuxButtonCode, LinuxKeycode, RawSeatEvent, RawSeatEventKind,
+    SeatModifiers,
 };
 
 /// Modifier requirements for a shell-owned pointer shortcut.
@@ -98,7 +99,7 @@ pub trait PointerShortcutAppExt {
 
 impl PointerShortcutAppExt for App {
     fn register_pointer_shortcut(&mut self, shortcut: PointerShortcut) -> PointerShortcutId {
-        register(self);
+        register_pointer_shortcuts(self);
         let mut shortcuts = self.world_mut().resource_mut::<PointerShortcutRegistry>();
         shortcuts.register(shortcut)
     }
@@ -128,9 +129,9 @@ impl PointerShortcutRegistry {
 }
 
 #[derive(Resource, Default)]
-pub(super) struct PublishedPointerTarget(pub(super) Option<Entity>);
+pub struct PublishedPointerTarget(pub Option<Entity>);
 
-pub(super) fn register(app: &mut App) {
+pub fn register_pointer_shortcuts(app: &mut App) {
     app.init_resource::<PointerShortcutRegistry>()
         .init_resource::<PublishedPointerTarget>();
     if !app
@@ -141,7 +142,7 @@ pub(super) fn register(app: &mut App) {
     }
 }
 
-pub(crate) fn filter_pointer_shortcut_event(world: &mut World, event: &RawSeatEvent) -> bool {
+pub fn filter_pointer_shortcut_event(world: &mut World, event: &RawSeatEvent) -> bool {
     match event.event {
         RawSeatEventKind::Keyboard { keycode, state, .. } => {
             let Some(state) = state.transition() else {
@@ -163,7 +164,7 @@ pub(crate) fn filter_pointer_shortcut_event(world: &mut World, event: &RawSeatEv
             position,
             button,
             state,
-        } => filter_pointer_button(world, position, button, state),
+        } => filter_pointer_button(world, position, button, state, event.modifiers),
         RawSeatEventKind::HostFocusLost => {
             if let Some(mut registry) = world.get_resource_mut::<PointerShortcutRegistry>() {
                 registry.pressed_keys.clear();
@@ -185,6 +186,7 @@ fn filter_pointer_button(
     position: Option<InputPosition>,
     button: LinuxButtonCode,
     state: ButtonState,
+    modifiers: Option<SeatModifiers>,
 ) -> bool {
     if state == ButtonState::Released {
         return world
@@ -199,7 +201,15 @@ fn filter_pointer_button(
         registry
             .shortcuts
             .iter()
-            .filter(|&&shortcut| shortcut_matches(shortcut, button, &registry.pressed_keys))
+            .filter(|&&shortcut| {
+                shortcut_matches(
+                    shortcut,
+                    button,
+                    modifiers.unwrap_or_else(|| {
+                        SeatModifiers::from_pressed_keys(&registry.pressed_keys)
+                    }),
+                )
+            })
             .map(|shortcut| shortcut.id)
             .collect::<Vec<_>>()
     };
@@ -234,10 +244,10 @@ fn pointer_position(position: InputPosition) -> Option<Vec2> {
 fn shortcut_matches(
     shortcut: RegisteredPointerShortcut,
     button: LinuxButtonCode,
-    pressed_keys: &HashSet<LinuxKeycode>,
+    modifiers: SeatModifiers,
 ) -> bool {
     linux_button(shortcut.chord.button) == Some(button)
-        && modifiers_pressed(shortcut.chord.modifiers, pressed_keys)
+        && modifiers_pressed(shortcut.chord.modifiers, modifiers)
 }
 
 fn linux_button(button: MouseButton) -> Option<LinuxButtonCode> {
@@ -251,20 +261,11 @@ fn linux_button(button: MouseButton) -> Option<LinuxButtonCode> {
     }
 }
 
-fn modifiers_pressed(
-    required: PointerShortcutModifiers,
-    pressed_keys: &HashSet<LinuxKeycode>,
-) -> bool {
-    (!required.control || any_pressed(pressed_keys, &[29, 97]))
-        && (!required.alt || any_pressed(pressed_keys, &[56, 100]))
-        && (!required.shift || any_pressed(pressed_keys, &[42, 54]))
-        && (!required.super_key || any_pressed(pressed_keys, &[125, 126]))
-}
-
-fn any_pressed(pressed_keys: &HashSet<LinuxKeycode>, keycodes: &[u32]) -> bool {
-    keycodes
-        .iter()
-        .any(|keycode| pressed_keys.contains(&LinuxKeycode(*keycode)))
+fn modifiers_pressed(required: PointerShortcutModifiers, pressed: SeatModifiers) -> bool {
+    (!required.control || pressed.control)
+        && (!required.alt || pressed.alt)
+        && (!required.shift || pressed.shift)
+        && (!required.super_key || pressed.super_key)
 }
 
 #[cfg(test)]
@@ -272,7 +273,7 @@ mod tests {
     use bevy::ecs::message::MessageCursor;
 
     use super::*;
-    use crate::input::raw::InputPosition;
+    use crate::InputPosition;
 
     fn keyboard(keycode: u32, state: ButtonState) -> RawSeatEvent {
         RawSeatEvent::new(

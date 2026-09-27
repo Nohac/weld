@@ -19,6 +19,7 @@ members = [
   "crates/weld-core",
   "crates/weld-float",
   "crates/weld-gamepad",
+  "crates/weld-input",
   "crates/weld-hoist",
   "crates/weld-hoist-core",
   "crates/weld-hoist-encoded",
@@ -93,13 +94,14 @@ bevy.workspace = true
 bevy_dylib.workspace = true
 clap.workspace = true
 weld-app = { path = "crates/weld-app" }
+weld-input = { path = "crates/weld-input", features = ["bevy"] }
 weld-client = { path = "crates/weld-client" }
 weld-core = { path = "crates/weld-core" }
 weld-window = { path = "crates/weld-window" }
 weld-window-ui = { path = "crates/weld-window-ui" }
 weld-ssd = { path = "crates/weld-ssd" }
 weld-tile = { path = "crates/weld-tile" }
-weld-sway-config = { path = "crates/weld-sway-config" }
+weld-sway-config = { path = "crates/weld-sway-config", features = ["input"] }
 weld-gamepad = { path = "crates/weld-gamepad" }
 weld-hoist = { path = "crates/weld-hoist" }
 weld-hoist-iroh = { path = "crates/weld-hoist-iroh", features = ["vaapi"] }

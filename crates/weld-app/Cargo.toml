@@ -17,6 +17,7 @@ pollster = { workspace = true, optional = true }
 tracing.workspace = true
 weld-client = { path = "../weld-client" }
 weld-core = { path = "../weld-core" }
+weld-input = { path = "../weld-input", features = ["bevy"] }
 wgpu = { workspace = true, features = ["naga-ir", "vulkan", "wgsl"] }
 winit = { workspace = true, features = ["rwh_06"] }
 

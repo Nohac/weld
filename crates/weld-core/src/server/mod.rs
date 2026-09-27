@@ -3,6 +3,7 @@
 mod adapter;
 mod cursor;
 mod dmabuf;
+mod keyboard;
 mod output;
 mod popup;
 mod presentation;
@@ -102,6 +103,9 @@ pub struct ServerState {
     seat_state: SeatState<Self>,
     data_device_state: DataDeviceState,
     seat: Seat<Self>,
+    keyboard_mapper: crate::input::KeyboardMapper,
+    pending_keymap: Option<crate::input::KeyboardKeymap>,
+    default_keymap: crate::input::KeyboardKeymap,
     outputs: HashMap<OutputId, ServerOutput>,
     primary_output: OutputId,
     initial_toplevel_size: Option<crate::surface::Extent>,
@@ -334,6 +338,8 @@ impl ServerState {
             }) as Box<dyn Fn(DrmSyncPointSource, Client) -> bool>
         });
 
+        let default_keymap = crate::input::KeyboardKeymap::compile(&Default::default())?;
+        let keyboard_mapper = crate::input::KeyboardMapper::new(default_keymap.clone())?;
         let mut state = Self {
             display_handle,
             socket_name,
@@ -353,6 +359,9 @@ impl ServerState {
             seat_state,
             data_device_state,
             seat,
+            keyboard_mapper,
+            pending_keymap: None,
+            default_keymap,
             outputs: installed_outputs,
             primary_output,
             initial_toplevel_size,
@@ -390,6 +399,10 @@ impl ServerState {
             syncobj_blocker_installer,
         };
         state.configure_keyboard_repeat();
+        if let Some(keyboard) = state.seat.get_keyboard() {
+            let keymap = state.default_keymap.as_str().to_owned();
+            keyboard.set_keymap_from_string(&mut state, keymap)?;
+        }
         Ok(state)
     }
 

@@ -388,6 +388,10 @@ pub trait HostPolicy {
     fn take_pointer_route_updates(&mut self) -> Vec<ClientPointerRouteUpdate>;
     fn take_cursor_update(&mut self) -> crate::cursor::CursorHostUpdate;
     fn take_host_commands(&mut self) -> Vec<HostCommand>;
+    /// Publishes changed keyboard policy before the next native input batch.
+    fn take_keyboard_settings(&mut self) -> Option<crate::input::KeyboardSettings> {
+        None
+    }
     fn take_virtual_terminal_switch_request(&mut self) -> Option<i32>;
     fn take_client_requests(&mut self) -> Vec<ClientRequest>;
     fn take_adapter_commands(&mut self) -> Vec<weld_client::ClientAdapterCommandEnvelope>;

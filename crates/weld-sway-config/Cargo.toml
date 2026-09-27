@@ -4,8 +4,13 @@ version.workspace = true
 edition.workspace = true
 publish.workspace = true
 
+[features]
+input = ["dep:anyhow", "dep:weld-input"]
+
 [dependencies]
 winnow.workspace = true
+anyhow = { workspace = true, optional = true }
+weld-input = { path = "../weld-input", features = ["bevy"], optional = true }
 
 [dev-dependencies]
 insta.workspace = true

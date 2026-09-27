@@ -7,9 +7,14 @@ project intent and future direction without presenting it as current behavior.
 Weld is a workspace of reusable layers and one standard distribution:
 
 - `weld-sway-config` parses unexpanded Sway configuration spelling and reports
-  source-aware structural errors. It depends only on Winnow, not the compositor;
-  the initial distribution-owned translation and reload live in `weldwm::master`,
-  not in this syntax crate.
+  source-aware structural errors. Its default parser depends only on Winnow.
+  The optional `input` module translates keyboard directives and binding chords
+  into Weld input types; Master owns file selection, action assembly and reload.
+- `weld-input` owns raw seat records, compiled XKB configuration, keyboard
+  resolution, and repeat settings. Its optional Bevy integration owns keyboard
+  and pointer shortcut matching, binding replacement, press/release consumption
+  and live-settings publication. Native hosts own the live XKB interpreter;
+  application resources contain owned configuration and resolved input records.
 - `weld-client` defines the runtime-independent client adapter, surface,
   buffer-lease, request, and input contracts. It has no Smithay, Bevy, wgpu,
   codec, or transport dependency.
@@ -123,6 +128,13 @@ or policy crates must not depend directly on Smithay. A custom distribution can 
 `weld-window` while replacing `weld-window-ui`, `weld-ssd`, `weld-float`,
 `weld-hoist`, or any combination of them, or build a different application
 host while retaining the native backend and protocol machinery.
+
+Core uses `weld-input` without its Bevy feature. Both native input backends
+resolve physical events before shell filtering, and core publishes the same
+compiled map through Smithay. Keymap changes wait for held keys to release and
+apply between input batches. `weld-app` retains client routing, refresh-paced
+input buffering, Bevy/Leafwing projection and the DRM-specific VT policy. It
+re-exports the binding API for existing plugin consumers.
 
 The local, Iroh, and loopback bindings enter the same relay implementation.
 Loopback contributes only in-process queues, buffer-lease relay, and route

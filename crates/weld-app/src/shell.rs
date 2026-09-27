@@ -944,6 +944,10 @@ impl HostPolicy for AppShell {
         AppShell::take_host_commands(self)
     }
 
+    fn take_keyboard_settings(&mut self) -> Option<weld_input::KeyboardSettings> {
+        weld_input::take_keyboard_settings(self.app.world_mut())
+    }
+
     fn take_virtual_terminal_switch_request(&mut self) -> Option<i32> {
         AppShell::take_virtual_terminal_switch_request(self)
     }

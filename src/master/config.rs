@@ -1,11 +1,9 @@
 //! Narrow Sway-to-native translation. Unsupported syntax is an error, not an
 //! inert setting. This intentionally does not claim a complete Sway interpreter.
 
-use std::collections::HashSet;
-
 use anyhow::{Context, Result, bail, ensure};
-use bevy::input::keyboard::KeyCode;
-use weld_app::input::{GlobalShortcut, GlobalShortcutModifiers, ShellCommand};
+use weld_app::input::ShellCommand;
+use weld_input::{GlobalShortcut, KeyboardKeymap};
 use weld_sway_config::Statement;
 use weld_tile::{Direction, SplitAxis, TileOperation, TileSettings};
 
@@ -22,13 +20,23 @@ pub(super) enum Action {
 pub(super) struct Configuration {
     pub tiling: TileSettings,
     pub bindings: Vec<(GlobalShortcut, Action)>,
+    pub keymap: Option<KeyboardKeymap>,
 }
 
 pub(super) fn parse(name: &str, source: &str) -> Result<Configuration> {
     let syntax = weld_sway_config::parse(name, source)?;
-    let mut config = Configuration::default();
-    let mut chords = HashSet::new();
-    for statement in syntax.statements() {
+    let input = weld_sway_config::input::compile(name, source, &syntax)?;
+    let mut config = Configuration {
+        keymap: input.keymap,
+        ..Default::default()
+    };
+    for binding in input.bindings {
+        let words: Vec<_> = binding.command.iter().map(String::as_str).collect();
+        let action = action(&words)
+            .with_context(|| format!("{name}:{}: {}", binding.line, binding.command.join(" ")))?;
+        config.bindings.push((binding.shortcut, action));
+    }
+    for statement in input.remaining {
         let offset = statement
             .name()
             .segments()
@@ -39,17 +47,13 @@ pub(super) fn parse(name: &str, source: &str) -> Result<Configuration> {
             .filter(|byte| *byte == b'\n')
             .count()
             + 1;
-        apply(&mut config, &mut chords, statement)
+        apply(&mut config, statement)
             .with_context(|| format!("{name}:{line}: {}", statement.header().text()))?;
     }
     Ok(config)
 }
 
-fn apply(
-    config: &mut Configuration,
-    chords: &mut HashSet<GlobalShortcut>,
-    statement: &Statement,
-) -> Result<()> {
+fn apply(config: &mut Configuration, statement: &Statement) -> Result<()> {
     ensure!(
         statement.block().is_none(),
         "configuration blocks are not supported in this slice"
@@ -71,11 +75,6 @@ fn apply(
             }
         }
         ("default_orientation", [value]) => config.tiling.default_axis = axis(value)?,
-        ("bindsym", [chord, operation @ ..]) => {
-            let chord = binding(chord)?;
-            ensure!(chords.insert(chord), "duplicate key binding");
-            config.bindings.push((chord, action(operation)?));
-        }
         _ => bail!(
             "unsupported Master directive or arguments; see examples/master.sway.config for the current subset"
         ),
@@ -155,78 +154,10 @@ fn action(words: &[&str]) -> Result<Action> {
     })
 }
 
-fn binding(value: &str) -> Result<GlobalShortcut> {
-    let mut parts = value.split('+').collect::<Vec<_>>();
-    let key = parts.pop().context("missing binding key")?;
-    let mut modifiers = GlobalShortcutModifiers::default();
-    for part in parts {
-        let enabled = match part {
-            "Mod4" => &mut modifiers.super_key,
-            "Mod1" => &mut modifiers.alt,
-            "Control" | "Ctrl" => &mut modifiers.control,
-            "Shift" => &mut modifiers.shift,
-            _ => bail!("unsupported modifier {part}; variables are not implemented yet"),
-        };
-        ensure!(!*enabled, "duplicate binding modifier");
-        *enabled = true;
-    }
-    // This bootstrap maps key names to physical positions, just like the
-    // existing shortcut API. It is not yet XKB-aware bindsym compatibility.
-    let key = match key {
-        "a" => KeyCode::KeyA,
-        "b" => KeyCode::KeyB,
-        "c" => KeyCode::KeyC,
-        "d" => KeyCode::KeyD,
-        "e" => KeyCode::KeyE,
-        "f" => KeyCode::KeyF,
-        "g" => KeyCode::KeyG,
-        "h" => KeyCode::KeyH,
-        "i" => KeyCode::KeyI,
-        "j" => KeyCode::KeyJ,
-        "k" => KeyCode::KeyK,
-        "l" => KeyCode::KeyL,
-        "m" => KeyCode::KeyM,
-        "n" => KeyCode::KeyN,
-        "o" => KeyCode::KeyO,
-        "p" => KeyCode::KeyP,
-        "q" => KeyCode::KeyQ,
-        "r" => KeyCode::KeyR,
-        "s" => KeyCode::KeyS,
-        "t" => KeyCode::KeyT,
-        "u" => KeyCode::KeyU,
-        "v" => KeyCode::KeyV,
-        "w" => KeyCode::KeyW,
-        "x" => KeyCode::KeyX,
-        "y" => KeyCode::KeyY,
-        "z" => KeyCode::KeyZ,
-        "Return" => KeyCode::Enter,
-        "Escape" => KeyCode::Escape,
-        "equal" => KeyCode::Equal,
-        "minus" => KeyCode::Minus,
-        "Left" => KeyCode::ArrowLeft,
-        "Right" => KeyCode::ArrowRight,
-        "Up" => KeyCode::ArrowUp,
-        "Down" => KeyCode::ArrowDown,
-        "F1" => KeyCode::F1,
-        "F2" => KeyCode::F2,
-        "F3" => KeyCode::F3,
-        "F4" => KeyCode::F4,
-        "F5" => KeyCode::F5,
-        "F6" => KeyCode::F6,
-        "F7" => KeyCode::F7,
-        "F8" => KeyCode::F8,
-        "F9" => KeyCode::F9,
-        "F10" => KeyCode::F10,
-        "F11" => KeyCode::F11,
-        "F12" => KeyCode::F12,
-        _ => bail!("unsupported key name; see the documented physical-key subset"),
-    };
-    Ok(GlobalShortcut::new(key, modifiers))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use weld_input::{GlobalShortcutModifiers, KeyCode};
     #[test]
     fn default_navigation_uses_letters_without_a_launch_conflict() {
         let config =
@@ -239,11 +170,18 @@ mod tests {
         ] {
             for (modifiers, operation) in [
                 (
-                    GlobalShortcutModifiers::super_key(),
+                    GlobalShortcutModifiers {
+                        alt: true,
+                        ..Default::default()
+                    },
                     TileOperation::Focus(direction),
                 ),
                 (
-                    GlobalShortcutModifiers::super_shift(),
+                    GlobalShortcutModifiers {
+                        alt: true,
+                        shift: true,
+                        ..Default::default()
+                    },
                     TileOperation::Move(direction),
                 ),
             ] {
@@ -255,6 +193,46 @@ mod tests {
                 assert_eq!(binding.1, Action::Tile(operation));
             }
         }
+        let modifier = GlobalShortcutModifiers {
+            alt: true,
+            control: true,
+            ..Default::default()
+        };
+        for (key, axis) in [
+            (KeyCode::KeyF, SplitAxis::Horizontal),
+            (KeyCode::KeyJ, SplitAxis::Vertical),
+        ] {
+            assert!(config.bindings.contains(&(
+                GlobalShortcut::new(key, modifier),
+                Action::Tile(TileOperation::Split(axis))
+            )));
+        }
+        assert!(config.bindings.contains(&(
+            GlobalShortcut::new(
+                KeyCode::KeyQ,
+                GlobalShortcutModifiers {
+                    alt: true,
+                    shift: true,
+                    ..Default::default()
+                }
+            ),
+            Action::Tile(TileOperation::Close)
+        )));
+        assert!(!config.bindings.iter().any(|(chord, _)| matches!(
+            chord.trigger,
+            KeyCode::F1
+                | KeyCode::F2
+                | KeyCode::F3
+                | KeyCode::F4
+                | KeyCode::F5
+                | KeyCode::F6
+                | KeyCode::F7
+                | KeyCode::F8
+                | KeyCode::F9
+                | KeyCode::F10
+                | KeyCode::F11
+                | KeyCode::F12
+        )));
         assert_eq!(
             action(&["weld", "hoist"]).expect("extension"),
             Action::Hoist

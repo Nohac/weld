@@ -17,11 +17,22 @@ pub use weld_client::{
 pub struct RawSeatEvent {
     pub event: RawSeatEventKind,
     pub time: u32,
+    /// Effective Weld keymap modifiers after this transition.
+    pub modifiers: Option<SeatModifiers>,
 }
 
 impl RawSeatEvent {
     pub const fn new(event: RawSeatEventKind, time: u32) -> Self {
-        Self { event, time }
+        Self {
+            event,
+            time,
+            modifiers: None,
+        }
+    }
+
+    pub const fn with_modifiers(mut self, modifiers: SeatModifiers) -> Self {
+        self.modifiers = Some(modifiers);
+        self
     }
 
     pub fn into_runtime(self) -> weld_client::RuntimeInputEvent {
@@ -61,6 +72,33 @@ impl RawSeatEvent {
             weld_client::RuntimeInputEventKind::Input(event),
             self.time,
         )
+    }
+}
+
+/// Effective modifiers used when matching shell keyboard and pointer chords.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct SeatModifiers {
+    pub control: bool,
+    pub alt: bool,
+    pub shift: bool,
+    pub super_key: bool,
+}
+
+impl SeatModifiers {
+    /// Default physical modifier positions for synthetic sources that have not
+    /// passed through a configured native keyboard mapper.
+    pub fn from_pressed_keys(pressed: &std::collections::HashSet<LinuxKeycode>) -> Self {
+        let any = |codes: &[u32]| {
+            codes
+                .iter()
+                .any(|code| pressed.contains(&LinuxKeycode(*code)))
+        };
+        Self {
+            control: any(&[29, 97]),
+            alt: any(&[56, 100]),
+            shift: any(&[42, 54]),
+            super_key: any(&[125, 126]),
+        }
     }
 }
 

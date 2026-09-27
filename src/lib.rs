@@ -105,6 +105,7 @@ pub fn run(arguments: AppArguments) -> Result<()> {
             .legacy_key_repeat
             .map(Into::into)
             .unwrap_or_default(),
+        ..Default::default()
     });
     let mut enable_hoist_policy = true;
     match pending_transport {

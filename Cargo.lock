@@ -7834,6 +7834,7 @@ dependencies = [
  "weld-app",
  "weld-client",
  "weld-core",
+ "weld-input",
  "wgpu",
  "winit",
 ]
@@ -7867,6 +7868,7 @@ dependencies = [
  "wayland-protocols",
  "wayland-sys",
  "weld-client",
+ "weld-input",
  "wgpu",
  "winit",
  "x11-dl",
@@ -7994,6 +7996,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "weld-input"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bevy",
+ "bevy_winit",
+ "weld-client",
+ "winit",
+ "xkbcommon",
+]
+
+[[package]]
 name = "weld-media"
 version = "0.1.0"
 dependencies = [
@@ -8044,7 +8058,9 @@ dependencies = [
 name = "weld-sway-config"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "insta",
+ "weld-input",
  "winnow",
 ]
 
@@ -8097,6 +8113,7 @@ dependencies = [
  "weld-hoist-encoded",
  "weld-hoist-iroh",
  "weld-hoist-local",
+ "weld-input",
  "weld-media",
  "weld-media-vaapi",
  "weld-ssd",

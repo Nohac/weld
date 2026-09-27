@@ -7,12 +7,9 @@
 //! pace. Smithay resources never enter the application world.
 
 mod ingress;
-mod keyboard;
-mod pointer_shortcuts;
 mod projection;
 mod routing;
 mod shell_commands;
-mod shortcuts;
 mod state;
 mod virtual_terminal;
 
@@ -35,12 +32,6 @@ pub(crate) struct InputOutputTarget {
 }
 
 pub(crate) use ingress::ApplicationInputBuffer;
-pub use keyboard::{KeyboardRepeatMode, KeyboardSettings, LegacyKeyRepeat};
-pub(crate) use pointer_shortcuts::filter_pointer_shortcut_event;
-pub use pointer_shortcuts::{
-    PointerShortcut, PointerShortcutAppExt, PointerShortcutId, PointerShortcutModifiers,
-    PointerShortcutPressed,
-};
 pub use projection::TouchpadGesture;
 pub(crate) use projection::enqueue_application_input_batch;
 #[cfg(test)]
@@ -50,11 +41,6 @@ pub(crate) use projection::enqueue_raw_input_batch;
 pub(crate) use projection::update_output_configurations;
 pub(crate) use routing::take_input_effects;
 pub use shell_commands::{ShellCommand, ShellCommands};
-pub(crate) use shortcuts::filter_global_shortcut_event;
-pub use shortcuts::{
-    GlobalShortcut, GlobalShortcutAppExt, GlobalShortcutId, GlobalShortcutModifiers,
-    GlobalShortcutPlugin, GlobalShortcutPressed, GlobalShortcutSet,
-};
 pub(crate) use state::set_input_update_time;
 pub use virtual_terminal::VirtualTerminalShortcutPlugin;
 pub(crate) use virtual_terminal::{
@@ -63,12 +49,21 @@ pub(crate) use virtual_terminal::{
 pub use weld_client::{
     InputDelta, PointerGesture, PointerGestureKind, TouchpadHold, TouchpadPinch, TouchpadSwipe,
 };
+pub(crate) use weld_input::filter_global_shortcut_event;
+pub(crate) use weld_input::filter_pointer_shortcut_event;
+pub use weld_input::{
+    GlobalShortcut, GlobalShortcutAppExt, GlobalShortcutId, GlobalShortcutModifiers,
+    GlobalShortcutPlugin, GlobalShortcutPressed, GlobalShortcutSet,
+};
+pub use weld_input::{KeyboardRepeatMode, KeyboardSettings, LegacyKeyRepeat};
+pub use weld_input::{
+    PointerShortcut, PointerShortcutAppExt, PointerShortcutId, PointerShortcutModifiers,
+    PointerShortcutPressed,
+};
 
-/// Collect configured shell effects and changed keyboard settings.
+/// Collect configured shell effects.
 pub(crate) fn take_host_commands(world: &mut World) -> Vec<HostCommand> {
-    let mut commands = shell_commands::take_commands(world);
-    commands.extend(keyboard::take_settings_command(world));
-    commands
+    shell_commands::take_commands(world)
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq, SystemSet)]
@@ -94,7 +89,7 @@ impl InputBridgePlugin {
 impl Plugin for InputBridgePlugin {
     fn build(&self, app: &mut App) {
         state::register(app);
-        keyboard::register(app);
+        weld_input::register_keyboard_settings(app);
         projection::register(app, self.targets.clone());
         routing::register(app);
     }

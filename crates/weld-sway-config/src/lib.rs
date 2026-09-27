@@ -4,7 +4,8 @@
 //! quotes, escapes, criteria and command-chain punctuation rather than assigning
 //! them meaning. Unknown directives, `set`, and `include` are ordinary statements:
 //! parsing performs no expansion, file access, regex compilation or execution.
-//! There is no compositor consumer yet, and success claims no supported WM behavior.
+//! The optional `input` feature translates keyboard settings and binding chords
+//! into Weld input configuration for distribution assemblies.
 //!
 //! # Syntax boundary
 //!
@@ -39,6 +40,8 @@
 #![deny(missing_docs)]
 
 mod diagnostic;
+#[cfg(feature = "input")]
+pub mod input;
 mod parser;
 mod syntax;
 

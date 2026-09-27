@@ -20,13 +20,13 @@ use leafwing_input_manager::plugin::InputManagerSystem;
 
 use super::{
     InputSystems,
-    pointer_shortcuts::PublishedPointerTarget,
     raw::{ButtonState, LinuxButtonCode, RawSeatEvent, RawSeatEventKind},
     state::{InputUpdateTime, PendingSeatInput, PointerPositionState},
 };
 use crate::output::{OutputPosition, RendersOutput};
 use crate::surface::SurfaceInputNode;
 use weld_client::{ClientPointerRoute, ClientPointerRouteUpdate, InputTransform};
+use weld_input::PublishedPointerTarget;
 
 pub(super) fn register(app: &mut App) {
     app.init_resource::<InputEffects>()
