@@ -1,0 +1,326 @@
+#!/usr/bin/env python3
+"""Bounded full-output Weld/Blender or direct-Sway comparison on a fresh workspace.
+
+Automated motion uses a persistent virtual pointer into the Wayland input path. It
+stops if focus leaves this run's window. Only this run's process group is stopped;
+the prior workspace is restored if the test workspace still has focus.
+"""
+
+import argparse
+import json
+import math
+import os
+from pathlib import Path
+import resource
+import shutil
+import signal
+import socket
+import struct
+import subprocess
+import tempfile
+import time
+
+
+ROOT = Path(__file__).resolve().parents[2]
+PERF_FLAGS = '-C link-arg=-fuse-ld=lld -C force-frame-pointers=yes'
+
+
+class Sway:
+    def __init__(self):
+        self.connection = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.connection.settimeout(3)
+        self.connection.connect(os.environ['SWAYSOCK'])
+
+    def receive(self, length):
+        result = bytearray()
+        while len(result) < length:
+            chunk = self.connection.recv(length - len(result))
+            if not chunk:
+                raise RuntimeError('Sway IPC disconnected')
+            result.extend(chunk)
+        return result
+
+    def request(self, kind, text=''):
+        payload = text.encode()
+        self.connection.sendall(b'i3-ipc' + struct.pack('=II', len(payload), kind) + payload)
+        header = self.receive(14)
+        size, reply_kind = struct.unpack('=II', header[6:])
+        if header[:6] != b'i3-ipc' or reply_kind != kind or size > 16 * 1024 * 1024:
+            raise RuntimeError('Invalid Sway IPC response')
+        return json.loads(self.receive(size))
+
+    def command(self, text):
+        result = self.request(0, text)
+        if not all(item.get('success') for item in result):
+            raise RuntimeError(f'Sway rejected {text!r}: {result}')
+
+    def focused_workspace(self):
+        return next(workspace for workspace in self.request(1) if workspace['focused'])
+
+
+def walk(node):
+    yield node
+    for child in node.get('nodes', []) + node.get('floating_nodes', []):
+        yield from walk(child)
+
+
+def descendants(parent):
+    pending = [parent]
+    while pending:
+        pid = pending.pop()
+        yield pid
+        try:
+            pending.extend(map(int, Path(f'/proc/{pid}/task/{pid}/children').read_text().split()))
+        except FileNotFoundError:
+            pass
+
+
+def cpu(pid):
+    fields = Path(f'/proc/{pid}/stat').read_text().rsplit(') ', 1)[1].split()
+    ticks = os.sysconf('SC_CLK_TCK')
+    return [int(fields[11]) / ticks, int(fields[12]) / ticks]
+
+
+def hardware():
+    paths = list(Path('/sys/devices/system/cpu/cpufreq').glob('policy*/scaling_cur_freq'))
+    paths += list(Path('/sys/class/drm').glob('card*/device/gpu_busy_percent'))
+    result = {}
+    for path in paths:
+        try:
+            result[str(path)] = int(path.read_text())
+        except (OSError, ValueError):
+            pass
+    return result
+
+
+def stop(process):
+    if process is None:
+        return
+    try:
+        os.killpg(process.pid, signal.SIGTERM)
+        process.wait(timeout=5)
+    except ProcessLookupError:
+        pass
+    except subprocess.TimeoutExpired:
+        os.killpg(process.pid, signal.SIGKILL)
+        process.wait()
+
+
+def require_focus(sway, workspace, node_id):
+    focused = next((item for item in walk(sway.request(4)) if item.get('focused')), None)
+    if sway.focused_workspace()['name'] != workspace or not focused or focused['id'] != node_id:
+        raise RuntimeError('Focus left the owned test window; stopping capture')
+
+
+def close_pointer(pointer, middle_held):
+    if pointer is None or pointer.stdin is None:
+        return
+    try:
+        if middle_held:
+            pointer.stdin.write('b 0\n')
+            pointer.stdin.flush()
+    finally:
+        pointer.stdin.close()
+    pointer.wait(timeout=3)
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--mode', choices=['weld', 'sway'], default='weld')
+    parser.add_argument('--profile', choices=['dev', 'perf'], default='dev')
+    parser.add_argument('--config', type=Path, help='Required for Weld; explicitly selects WM policy')
+    parser.add_argument('--no-build', action='store_true')
+    parser.add_argument('--seconds', type=int, default=20)
+    parser.add_argument('--warmup', type=int, default=8)
+    parser.add_argument('--input', choices=['manual', 'idle', 'motion', 'orbit'], default='manual')
+    parser.add_argument('--hz', type=int, default=250, help='Requested synthetic pointer frequency')
+    parser.add_argument('--pointer-helper', type=Path, help='Compiled pointer-replay helper for automated input')
+    parser.add_argument('--validation', choices=['default', 'off'], default='default')
+    parser.add_argument('--client-wayland-log', action='store_true', help='Protocol-count probe; logging perturbs CPU timing')
+    parser.add_argument('--client-vsync', action='store_true', help='Diagnostic Mesa vblank_mode=3 for Blender only')
+    parser.add_argument('--perf', type=Path, help='Optional perf executable for CPU stacks')
+    parser.add_argument('--trace', action='store_true', help='Capture Tracy from the perf profile')
+    args = parser.parse_args()
+    if not 1 <= args.seconds <= 120 or not 1 <= args.hz <= 1000 or not 0 <= args.warmup <= 60:
+        parser.error('seconds must be 1..120, hz 1..1000, warmup 0..60')
+    if args.mode == 'weld' and (args.config is None or not args.config.is_file()):
+        parser.error('Weld requires --config pointing to a readable configuration')
+    if args.input in ('motion', 'orbit') and (args.pointer_helper is None or not args.pointer_helper.is_file()):
+        parser.error('Automated input requires --pointer-helper')
+    if args.trace and (args.profile != 'perf' or args.mode != 'weld' or not shutil.which('tracy-capture')):
+        parser.error('--trace requires Weld perf profile and tracy-capture')
+    if args.mode == 'weld' and args.profile == 'perf' and not args.trace:
+        parser.error('The Tracy-enabled perf profile requires --trace to drain its bounded capture')
+    resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
+    environment = {**os.environ, 'RUST_LOG': 'warn', 'TRACY_PORT': '18086'}
+    # External perf owns sampling. Tracy's own sampling/symbol worker materially
+    # perturbs the compositor and can retain gigabytes of symbol data.
+    for feature in ('SAMPLING', 'SAMPLE_RETIREMENT', 'SAMPLE_CACHE', 'SAMPLE_BRANCH', 'CONTEXT_SWITCH', 'VSYNC_CAPTURE'):
+        environment['TRACY_NO_' + feature] = '1'
+    if args.validation == 'off':
+        environment['VK_LOADER_LAYERS_DISABLE'] = 'VK_LAYER_KHRONOS_validation'
+    if args.profile == 'perf':
+        environment['RUSTFLAGS'] = PERF_FLAGS
+    if args.mode == 'weld' and not args.no_build:
+        build = ['cargo', 'build', '--locked', '-j2']
+        if args.profile == 'perf':
+            build += ['--profile', 'perf', '--features', 'profiling-tracy']
+        subprocess.run(build, cwd=ROOT, env=environment, check=True)
+    # Apply the capture bound after compilation: symbolized executables exceed it.
+    resource.setrlimit(resource.RLIMIT_FSIZE, (256 * 1024 * 1024, 256 * 1024 * 1024))
+    if args.profile == 'perf' and args.mode == 'weld':
+        # The optimized profile is standalone and must not rebuild during capture.
+        cargo = [str(ROOT / 'target/perf/weldwm')]
+    elif args.mode == 'weld':
+        cargo = [str(ROOT / 'target/debug/weldwm')]
+        rust_libraries = subprocess.check_output(['rustc', '--print', 'target-libdir'], text=True).strip()
+        environment['LD_LIBRARY_PATH'] = os.pathsep.join([str(ROOT / 'target/debug/deps'), rust_libraries, environment.get('LD_LIBRARY_PATH', '')])
+    run_parent = ROOT / 'target/validation'
+    run_parent.mkdir(parents=True, exist_ok=True)
+    run = Path(tempfile.mkdtemp(prefix='orbit-', dir=run_parent))
+    (run / 'settings.json').write_text(json.dumps(vars(args), default=str, indent=2))
+    print(f'Artifacts: {run}', flush=True)
+    sway = Sway()
+    previous = sway.focused_workspace()['name']
+    workspace = 'weld-perf-' + run.name.removeprefix('orbit-')
+    if any(item['name'] == workspace for item in sway.request(1)):
+        raise RuntimeError('Refusing to reuse an existing workspace')
+    host = collector = sampler = pointer = None
+    middle_held = False
+    try:
+        sway.command('workspace --no-auto-back-and-forth ' + json.dumps(workspace))
+        with (run / 'host.log').open('w') as log, (run / 'perf.log').open('w') as perf_log, (run / 'tracy.log').open('w') as tracy_log:
+            client = ['blender', '--factory-startup', '--python', str(Path(__file__).with_name('blender-workload.py'))]
+            if args.client_wayland_log:
+                client = ['env', 'WAYLAND_DEBUG=client', *client]
+            if args.client_vsync:
+                client = ['env', 'vblank_mode=3', *client]
+            launch = client if args.mode == 'sway' else [*cargo, '--backend', 'nested', '--config', str(args.config.resolve()), '--wayland-socket', 'weld-' + run.name, '--', *client]
+            if args.trace:
+                collector = subprocess.Popen(['tracy-capture', '-p', '18086', '-o', str(run / 'capture.tracy'), '-s', str(30 + args.warmup + args.seconds + 5), '-m', '512'], stdout=tracy_log, stderr=subprocess.STDOUT, start_new_session=True)
+            launched = time.monotonic()
+            host = subprocess.Popen(launch, cwd=ROOT, env=environment, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
+            deadline = time.monotonic() + 30
+            while True:
+                if host.poll() is not None:
+                    raise RuntimeError('Test application exited during startup')
+                pids = set(descendants(host.pid))
+                nodes = [node for node in walk(sway.request(4)) if node.get('pid') in pids and node.get('type') == 'con']
+                if nodes and 'WELD_PROBE' in (run / 'host.log').read_text():
+                    node = nodes[0]
+                    break
+                if time.monotonic() >= deadline:
+                    raise RuntimeError('Test window did not become ready')
+                time.sleep(0.1)
+            sway.command(f'[con_id={node["id"]}] move container to workspace {json.dumps(workspace)}; [con_id={node["id"]}] fullscreen enable; [con_id={node["id"]}] focus')
+            pid = node['pid']
+            # Sway's IPC peer credentials identify the compositor without name matching.
+            if args.mode == 'sway':
+                pid = struct.unpack('3i', sway.connection.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12))[0]
+            print(f'Full-output {args.mode}: warmup {args.warmup}s, capture {args.seconds}s. Input: {args.input}.', flush=True)
+            if args.input == 'manual':
+                print('Orbit Blender rapidly during the capture; switching workspaces aborts safely.', flush=True)
+            time.sleep(args.warmup)
+            node = next(item for item in walk(sway.request(4)) if item['id'] == node['id'])
+            (run / 'window.json').write_text(json.dumps(node, indent=2))
+            (run / 'outputs.json').write_text(json.dumps(sway.request(3), indent=2))
+            rect = node['rect']
+            center = (rect['x'] + rect['width'] * 0.4, rect['y'] + rect['height'] * 0.4)
+            root_rect = sway.request(4)['rect']
+            def pointer_move(x, y):
+                pointer.stdin.write(f'm {round(x - root_rect["x"])} {round(y - root_rect["y"])} {root_rect["width"]} {root_rect["height"]}\n')
+                pointer.stdin.flush()
+            if args.input in ('motion', 'orbit'):
+                require_focus(sway, workspace, node['id'])
+                pointer = subprocess.Popen([str(args.pointer_helper.resolve())], stdin=subprocess.PIPE, text=True, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
+                pointer_move(*center)
+                time.sleep(0.1)
+                if args.input == 'orbit':
+                    require_focus(sway, workspace, node['id'])
+                    pointer.stdin.write('b 1\n')
+                    pointer.stdin.flush()
+                    middle_held = True
+            if args.perf:
+                sampler = subprocess.Popen([str(args.perf), 'record', '--no-buildid-cache', '-m', '64', '-e', 'cpu-clock:u', '-F', '499', '--call-graph', 'fp' if args.profile == 'perf' else 'dwarf,16384', '-p', str(pid), '-o', str(run / 'cpu.data'), '--', 'sleep', str(args.seconds)], stdout=perf_log, stderr=subprocess.STDOUT, start_new_session=True)
+            before = cpu(pid)
+            started = time.monotonic()
+            last_check = 0.0
+            next_motion = started
+            last_position = center
+            sent = 0
+            hardware_samples = []
+            print('CAPTURE START', flush=True)
+            log.write('WELD_CAPTURE_START\n')
+            log.flush()
+            while time.monotonic() - started < args.seconds:
+                elapsed = time.monotonic() - started
+                if elapsed - last_check >= 0.25 or last_check == 0:
+                    require_focus(sway, workspace, node['id'])
+                    if host.poll() is not None:
+                        raise RuntimeError('Test application exited during capture')
+                    if not hardware_samples or elapsed - hardware_samples[-1]['seconds'] >= 1:
+                        hardware_samples.append({'seconds': elapsed, 'hardware': hardware()})
+                    last_check = elapsed
+                if args.input in ('motion', 'orbit'):
+                    angle = elapsed * math.tau * 1.5
+                    x = center[0] + math.sin(angle) * rect['width'] * 0.12
+                    y = center[1] + math.cos(angle) * rect['height'] * 0.12
+                    pointer.stdin.write(f'r {x - last_position[0]:.6f} {y - last_position[1]:.6f}\n')
+                    pointer.stdin.flush()
+                    last_position = (x, y)
+                    sent += 1
+                    next_motion = max(next_motion + 1 / args.hz, time.monotonic())
+                    time.sleep(max(0, next_motion - time.monotonic()))
+                else:
+                    time.sleep(0.05)
+            elapsed = time.monotonic() - started
+            after = cpu(pid)
+            log.write('WELD_CAPTURE_END\n')
+            log.flush()
+            trace_complete = collector is None or collector.poll() is None
+            result = {'pid': pid, 'seconds': elapsed, 'user_seconds': after[0] - before[0], 'system_seconds': after[1] - before[1], 'sent_motion': sent, 'input_hz': sent / elapsed,
+                      'capture_start_after_launch_seconds': started - launched,
+                      'capture_end_after_launch_seconds': started + elapsed - launched,
+                      'trace_alive_at_capture_end': trace_complete if collector else None}
+            (run / 'cpu.json').write_text(json.dumps(result, indent=2))
+            (run / 'hardware.json').write_text(json.dumps(hardware_samples, indent=2))
+            print('CAPTURE END', json.dumps(result), flush=True)
+            if middle_held:
+                pointer.stdin.write('b 0\n')
+                pointer.stdin.flush()
+                middle_held = False
+            if not trace_complete:
+                raise RuntimeError('Tracy ended before the CPU capture; trace is incomplete')
+            if sampler:
+                sampler.wait(timeout=10)
+                if sampler.returncode:
+                    raise RuntimeError('perf failed; see perf.log')
+            if collector:
+                collector.wait(timeout=args.warmup + 40)
+                if collector.returncode:
+                    raise RuntimeError('Tracy failed; see tracy.log')
+    finally:
+        try:
+            close_pointer(pointer, middle_held)
+        finally:
+            stop(pointer)
+            stop(sampler)
+            stop(collector)
+            stop(host)
+            try:
+                if sway.focused_workspace()['name'] == workspace:
+                    sway.command('workspace --no-auto-back-and-forth ' + json.dumps(previous))
+            finally:
+                sway.connection.close()
+        print(f'Finished. Artifacts: {run}', flush=True)
+
+
+if __name__ == '__main__':
+    def interrupted(signum, frame):
+        raise KeyboardInterrupt
+    signal.signal(signal.SIGTERM, interrupted)
+    signal.signal(signal.SIGHUP, interrupted)
+    try:
+        main()
+    except KeyboardInterrupt:
+        raise SystemExit(130)

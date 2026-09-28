@@ -67,6 +67,66 @@ path but is not representative of GPU performance.
 
 ## Whole-process CPU profiles
 
+### Full-output Blender orbit comparison
+
+The orbit runner opens a fresh Sway workspace, makes the owned test window
+fullscreen, records process CPU time, and restores the prior workspace when
+the test workspace still has focus. Blender uses factory settings without
+saving them. Pass the configuration explicitly:
+
+```sh
+scripts/profiling/orbit --config examples/master.sway.config
+scripts/profiling/orbit --mode sway
+```
+
+Hold the middle mouse button and orbit during the printed capture interval.
+Each run saves its settings, window/output geometry, CPU totals, frequency/GPU
+samples and log under `target/validation/orbit-*`. CPU totals measure the Weld
+or Sway process, excluding Blender. Changing focus stops the test. The default
+capture lasts 20 seconds; `--no-build` reuses the existing Weld executable.
+
+For automated replay, compile `pointer-replay.c` with `wayland-scanner`, a C
+compiler, `pkg-config`, Wayland client development files and the
+`wlr-virtual-pointer-unstable-v1.xml` protocol from wlr-protocols. For example,
+after assigning `pointer_protocol` to that XML file:
+
+```sh
+pointer_build=$(mktemp -d)
+wayland-scanner client-header "$pointer_protocol" "$pointer_build/virtual-pointer.h"
+wayland-scanner private-code "$pointer_protocol" "$pointer_build/virtual-pointer.c"
+cc -O2 -Wall -Wextra -Werror -I"$pointer_build" \
+  scripts/profiling/pointer-replay.c "$pointer_build/virtual-pointer.c" \
+  $(pkg-config --cflags --libs wayland-client) -o "$pointer_build/pointer-replay"
+scripts/profiling/orbit --config examples/master.sway.config --no-build \
+  --input orbit --hz 1000 --pointer-helper "$pointer_build/pointer-replay"
+```
+
+The persistent virtual pointer holds middle-click throughout `--input orbit`.
+`--input motion` deliberately omits the button for an input-only control;
+`--input idle` injects nothing. Replay checks focus before injection and every
+quarter second during capture. Avoid interacting with other windows during it.
+
+Useful separate controls are `--validation off` (disable the Khronos layer for
+this process tree), `--client-vsync` (Mesa `vblank_mode=3` for Blender only), and
+`--client-wayland-log` (count client protocol messages). Protocol logging
+perturbs timing; use it separately from baseline CPU measurements.
+
+`--perf /path/to/perf` records userspace stacks. `--profile perf --trace` builds
+an optimized, symbolized, frame-pointer-enabled Tracy binary and requires
+`tracy-capture`. This can require a substantial build. The runner disables
+Tracy's own sampling/symbol worker so external perf owns sampling, limits each
+capture file to 256 MiB and the collector memory to 512 MiB, and disables core
+dumps. Keep the executable for symbol resolution after capture. Trace timings
+and userspace sample percentages complement process CPU totals; they do not
+replace them.
+Long dev captures with DWARF stacks can exceed the file bound and fail; use a
+short capture or frame-pointer perf profile instead of raising limits blindly.
+
+See the [Blender orbit investigation](performance/blender-orbit-2026-09-28.md)
+for the measured buffer-release storm and proposed follow-up work.
+
+### Generic workload runner
+
 For workloads not explained by Tracy spans, use the generic perf runner:
 
 ```text
