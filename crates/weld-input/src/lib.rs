@@ -19,6 +19,6 @@ pub use pointer_shortcuts::*;
 pub use raw::*;
 pub use settings::{KeyboardRepeatMode, KeyboardSettings, LegacyKeyRepeat};
 #[cfg(feature = "bevy")]
-pub use settings::{register_keyboard_settings, take_keyboard_settings};
+pub use settings::{KeyboardSettingsReader, register_keyboard_settings};
 #[cfg(feature = "bevy")]
 pub use shortcuts::*;

@@ -195,6 +195,7 @@ mod tests {
         output::{OutputGeometry, OutputId, PrimaryOutput, WeldOutput},
         surface::SurfaceActionQueue,
     };
+    use weld_input::KeyboardSettingsReader;
     use weld_tile::{SplitAxis, TileContainer, TileParent, TilePlugin, TileSettings};
     use weld_window::{ManagedWindow, WindowId, WindowPlugin, WindowVacancy};
 
@@ -494,8 +495,8 @@ mod tests {
             path: example_path(),
             initial: read_configuration(&example_path()).expect("example config"),
         });
-        let settings =
-            weld_input::take_keyboard_settings(app.world_mut()).expect("initial publication");
+        let mut reader = KeyboardSettingsReader::new(app.world_mut());
+        let settings = reader.take(app.world()).expect("initial publication");
         assert!(settings.keymap.is_some());
         assert!(!app.world().resource::<ConfigState>().actions.is_empty());
         assert!(

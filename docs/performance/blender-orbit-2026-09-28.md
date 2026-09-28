@@ -1,7 +1,9 @@
 # Nested Blender orbit CPU investigation
 
-Investigation against `c2416036` on 2026-09-28. Production code is unchanged;
-the diagnostic launcher and fixture are under `scripts/profiling/`.
+Initial investigation against `c2416036` on 2026-09-28. Production code was
+unchanged for the baseline below. Findings and the diagnostic launcher under
+`scripts/profiling/` were checkpointed in `f57a2ef`; the implementation
+follow-up is recorded at the end.
 
 ## Reproduction and controls
 
@@ -70,7 +72,7 @@ roundtrips as a way to force servers to flush pending releases. This was
 verified against the Nix source for Mesa 26.2.3:
 `/nix/store/6pnvm1jkh0a144pmcsbkykq5crhn695a-source`, lines 1260-1295 of that file.
 
-Weld's [`DmabufImportManager::stage_inner`](../../crates/weld-core/src/dmabuf/manager.rs)
+Weld's [`DmabufManager::stage_inner`](../../crates/weld-core/src/dmabuf/manager.rs)
 moves a replaced `StagedImage` into `superseded`, retaining its client lease
 until `prepare_render` runs at the next composition. Keeping the import/source
 identity alive protects queued ECS snapshots, but also retaining the lease
@@ -145,3 +147,70 @@ cost, so the headline CPU table uses ordinary dev binaries without profilers.
 Blender's fixture motion counter may be bypassed by its active orbit modal
 handler; it is not a reliable lost-input counter. Draw and protocol counts
 confirmed continuous orbit rendering.
+
+## Implementation follow-up
+
+The DMA-BUF manager now drops never-acquired leases on supersession and layer
+removal, while retaining a deduplicated set of import IDs until queued
+snapshots have been consumed. `known_sources` owns the imported texture during
+that interval. Displayed, retiring and pending-GPU lifetimes are unchanged.
+
+`KeyboardSettingsReader` now lives in `AppShell`, outside the ECS world. It
+uses Bevy's `SystemState<Res<KeyboardSettings>>` change detection through
+shared World access, avoiding clones and keymap comparisons on unchanged
+polls. Value equality still suppresses identical replacements after a change.
+An initial implementation stored the reader in a resource and used
+`resource_scope` to access it. That was replaced before landing: in Bevy 0.19,
+resource scope removes and reinserts a resource entity on every poll.
+
+The subsequent DRM retest exposed missed repaints while typing in Blender and
+Chrome, while foot continued to update. The physical presenter could invoke
+Bevy rendering before queued surface ingress reached the main world, causing
+a fresh staged DMA-BUF to be discarded against stale scene references. DRM
+now defers presentation and its zero-time output wakeup until pending policy
+can run first. Vblank retirement opens that opportunity immediately, while a
+current scene still permits cursor-only presentation between application ticks.
+The user confirmed that typing repaints correctly again after restarting with
+the fix. The tests cover deferred ingress, clean cursor presentation and early
+vblank readiness; physical validation was the user's DRM retest.
+
+The following repeats use the same unprofiled 12-second, 1000 Hz held-middle
+orbit. No client-vsync override or input-rate limit was added:
+
+| Test | Before | Final implementation | Final artifact directory |
+| --- | ---: | ---: | --- |
+| Normal dev validation | 60.4% | 29.6% | `orbit-8w26i625` |
+| Validation disabled | 55.1% | 17.1% | `orbit-kvt3w297` |
+
+The lease-only control measured 16.3% with validation disabled
+(`orbit-7999_y7m`). The intermediate resource-scope reader measured 32.5%
+with validation and 21.4% without (`orbit-gzhha82p`, `orbit-o4ylql_q`). These
+are single-run measurements with normal clock/workload variation; they do not
+establish a precise isolated speedup for the reader change.
+
+A four-second, 250 Hz protocol probe after the lease fix recorded 644 root
+commits and 647 sync requests, with zero frame requests (`orbit-z0u9q8po`).
+That is approximately one roundtrip per commit, versus 13,958 for 692 commits
+before. Blender remained unpaced by frame callbacks. The original roundtrip
+storm is removed without requiring client cooperation with vsync.
+
+Validation:
+
+- Core unit suite: 132 passed, one explicitly ignored native-socket fixture.
+- Input binding integration suite: five passed, including multiple edits
+  between application updates and identical-value replacement suppression.
+- Distribution library suite: 23 passed, including initial configuration
+  availability before the first native publication.
+- Ordinary build, formatting and strict all-target Clippy for `weldwm`,
+  `weld-core` and `weld-input` passed. Core checks use `test-support`.
+- Fable reviewed the final lifecycle, reader and DRM scheduling implementation.
+- The existing `shell_main`/`shell_render` benchmarks' missing `weld-float`
+  dependency was verified against the checkpoint and restored as dev-only.
+  No dependency versions changed.
+
+The normal-validation capture still reports the same
+`VUID-vkAcquireNextImageKHR-fence-10066` seen in the baseline. Forced test
+teardown can still produce Blender's EGL/epoxy assertion after CAPTURE END,
+also present in baseline logs; core dumps remain disabled. Neither is claimed
+fixed by this slice. Remaining composition/validation overhead and a dedicated
+GPU-backed snapshot-retention regression test remain follow-ups.

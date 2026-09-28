@@ -218,7 +218,6 @@ impl FrameState {
             frame_interval,
         }
     }
-    #[cfg(test)]
     pub(crate) const fn update_dirty(&self) -> bool {
         self.update_dirty
     }

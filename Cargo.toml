@@ -115,6 +115,7 @@ tracing-tracy = { workspace = true, optional = true }
 
 [dev-dependencies]
 pollster.workspace = true
+weld-float = { path = "crates/weld-float" }
 wgpu = { workspace = true, features = ["vulkan"] }
 
 # Keep Weld's code quick to rebuild while giving Bevy, Smithay, wgpu, and other

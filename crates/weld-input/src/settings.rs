@@ -33,26 +33,44 @@ mod integration {
     use super::KeyboardSettings;
     use bevy::{
         app::App,
-        ecs::{resource::Resource, world::World},
+        ecs::{
+            change_detection::DetectChanges,
+            system::{Res, SystemState},
+            world::World,
+        },
     };
 
-    #[derive(Default, Resource)]
-    struct PublishedSettings(Option<KeyboardSettings>);
-
-    pub fn register_keyboard_settings(app: &mut App) {
-        app.init_resource::<KeyboardSettings>()
-            .init_resource::<PublishedSettings>();
+    /// Native publication history for the [`World`] supplied at construction.
+    /// Keep this reader in the host alongside its application.
+    pub struct KeyboardSettingsReader {
+        reader: SystemState<Res<'static, KeyboardSettings>>,
+        value: Option<KeyboardSettings>,
     }
 
-    /// Drain initial or changed settings once per native publication boundary.
-    pub fn take_keyboard_settings(world: &mut World) -> Option<KeyboardSettings> {
-        let settings = world.get_resource::<KeyboardSettings>()?.clone();
-        let mut published = world.get_resource_mut::<PublishedSettings>()?;
-        if published.0.as_ref() == Some(&settings) {
-            return None;
+    impl KeyboardSettingsReader {
+        pub fn new(world: &mut World) -> Self {
+            Self {
+                reader: SystemState::new(world),
+                value: None,
+            }
         }
-        published.0 = Some(settings.clone());
-        Some(settings)
+
+        /// Read initial or changed settings from this reader's original world.
+        pub fn take(&mut self, world: &World) -> Option<KeyboardSettings> {
+            // SystemState advances its change-detection boundary on each
+            // read, including host polls between application updates.
+            let settings = self.reader.get(world).ok()?;
+            if !settings.is_changed() || self.value.as_ref() == Some(&*settings) {
+                return None;
+            }
+            let settings = settings.clone();
+            self.value = Some(settings.clone());
+            Some(settings)
+        }
+    }
+
+    pub fn register_keyboard_settings(app: &mut App) {
+        app.init_resource::<KeyboardSettings>();
     }
 }
 

@@ -73,11 +73,13 @@ use weld_core::{
     ApplicationHost, CompositionDemand, CompositionHost, HostPolicy, OutputConfiguration,
     OutputHead, dmabuf::DirectClientBufferAccess,
 };
+use weld_input::KeyboardSettingsReader;
 
 #[cfg(test)]
 const PRIMARY_OUTPUT_ID: OutputId = OutputId::new(1);
 pub struct AppShell {
     app: App,
+    keyboard_settings: KeyboardSettingsReader,
     device: wgpu::Device,
     outputs: HashMap<OutputId, AppOutput>,
     redraw_requests: RedrawRequests,
@@ -435,9 +437,11 @@ impl AppShell {
             .context("Bevy WindowPlugin did not register redraw messages")?;
         let dmabuf_importer =
             DmabufImporter::new(&context.device, &context.queue, &context.dmabuf)?;
+        let keyboard_settings = KeyboardSettingsReader::new(app.world_mut());
 
         Ok(Self {
             app,
+            keyboard_settings,
             device: context.device,
             outputs,
             redraw_requests,
@@ -945,7 +949,7 @@ impl HostPolicy for AppShell {
     }
 
     fn take_keyboard_settings(&mut self) -> Option<weld_input::KeyboardSettings> {
-        weld_input::take_keyboard_settings(self.app.world_mut())
+        self.keyboard_settings.take(self.app.world())
     }
 
     fn take_virtual_terminal_switch_request(&mut self) -> Option<i32> {

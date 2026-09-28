@@ -15,6 +15,9 @@ Weld is a workspace of reusable layers and one standard distribution:
   and pointer shortcut matching, binding replacement, press/release consumption
   and live-settings publication. Native hosts own the live XKB interpreter;
   application resources contain owned configuration and resolved input records.
+  `AppShell` owns the cached Bevy change-detection reader for native settings;
+  unchanged polls skip keymap cloning and equality checks, while actual edits
+  retain semantic deduplication even between application updates.
 - `weld-client` defines the runtime-independent client adapter, surface,
   buffer-lease, request, and input contracts. It has no Smithay, Bevy, wgpu,
   codec, or transport dependency.
@@ -504,6 +507,14 @@ Smithay's desktop window model or restore the removed low-level presenter. See
 [Direct DRM presentation](drm-presentation.md) and the
 [DRM output adapter plan](drm-rendering-improvement-plan.md).
 
+DRM presentation waits for pending application ingress to reach its main-world
+tick before rendering. Smithay may request Bevy composition for swapchain
+repair or a software cursor, so even those redraws must see the current surface
+snapshots before consuming staged DMA-BUFs. The dispatch timeout uses the same
+gate to avoid spinning on an output deadline while waiting for policy. Vblank
+retirement opens that tick immediately; cursor-only presentation remains
+available between ticks when the scene is current.
+
 `weld-app` re-exports its exact supported Bevy version as `weld_app::bevy` so
 plugins can share Weld's ECS, application, and rendering types without an
 independent version choice. A plugin may depend directly on that same exact
@@ -643,6 +654,12 @@ cannot run. Vulkan ownership is tracked per imported image rather than per
 surface layer: reattaching one `wl_buffer` or displaying it in multiple layers
 shares one acquire, and the image is released only when its final displayed use
 retires. Each protocol use still completes independently.
+
+Superseding or removing a staged use drops that consumer's lease immediately.
+Its import ID remains pinned in `known_sources` until the next composition
+has drained queued application snapshots. Repeated supersession of one import
+retains one ID; those identity pins carry no client-buffer use. Sampled leases
+still follow the displayed, retiring and GPU-completion path above.
 
 An explicit release point follows that individual committed use. A superseded
 buffer that was never sampled signals immediately. A sampled use signals only

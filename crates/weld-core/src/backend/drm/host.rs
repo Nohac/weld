@@ -129,6 +129,13 @@ fn primary_output_index(
     outputs.into_iter().position(|output| output == primary)
 }
 
+fn physical_scene_ready(frame_state: &FrameState, now: Instant) -> bool {
+    // Smithay can request Bevy composition for swapchain repair or a software
+    // cursor, even without new composition damage. Pending surface snapshots
+    // must reach the main world before that render consumes staged DMA-BUFs.
+    !frame_state.update_dirty() || frame_state.update_due(now)
+}
+
 pub(super) fn run(
     bootstrap: DrmRuntimeBootstrap,
     options: RunOptions,
@@ -353,6 +360,7 @@ impl NativeDriver<HostEvent> for DrmDriver {
     fn timeout(&self, now: Instant) -> std::time::Duration {
         let mut timeout = self.frame_state.composition_timeout(now);
         if self.target == SessionTarget::ActivePhysical
+            && physical_scene_ready(&self.frame_state, now)
             && let Some(presentation_timeout) = self.presentation_schedule.timeout(now)
         {
             timeout = timeout.min(presentation_timeout);
@@ -731,6 +739,7 @@ impl NativeDriver<HostEvent> for DrmDriver {
         let due_outputs = self.presentation_schedule.due_outputs(now);
         let physical_due = self.target == SessionTarget::ActivePhysical
             && !capture_forced_owned
+            && physical_scene_ready(&self.frame_state, now)
             && !due_outputs.is_empty();
         if capture_forced_owned {
             self.frame_state.composition_rendered(now);
@@ -887,9 +896,59 @@ mod tests {
     use crate::runtime::{FrameState, IterationWork};
 
     use super::{
-        CompositionRoute, FrameCallbackReadiness, PhysicalRenderOutcome, SessionTarget,
-        apply_physical_outcome, composition_route, primary_output_index,
+        CompositionRoute, FrameCallbackReadiness, PhysicalRenderOutcome, PresentationSchedule,
+        SessionTarget, apply_physical_outcome, composition_route, physical_scene_ready,
+        primary_output_index,
     };
+
+    #[test]
+    fn physical_redraw_waits_for_queued_surface_ingress() {
+        let now = Instant::now();
+        let interval = Duration::from_millis(16);
+        let mut frame_state = FrameState::with_interval(interval);
+        frame_state.composition_rendered(now);
+        frame_state.presented();
+        let output = crate::OutputId::new(1);
+        let mut schedule = PresentationSchedule::new([(output, interval)]);
+
+        // A client commit stages a new buffer before the next application tick.
+        frame_state.request_composition();
+        schedule.request_composition_all();
+        let early = now + Duration::from_millis(1);
+        assert_eq!(schedule.due_outputs(early), [output]);
+        assert!(!frame_state.update_due(early));
+        assert!(!physical_scene_ready(&frame_state, early));
+        assert_eq!(
+            frame_state.composition_timeout(early),
+            Duration::from_millis(15)
+        );
+
+        // The same demand remains pending until policy can apply its snapshot.
+        let due = now + interval;
+        assert!(frame_state.update_due(due));
+        assert!(physical_scene_ready(&frame_state, due));
+        assert_eq!(schedule.due_outputs(due), [output]);
+
+        // An earlier vblank opens the policy tick immediately.
+        frame_state.physical_frame_retired();
+        assert!(frame_state.update_due(early));
+        assert!(physical_scene_ready(&frame_state, early));
+    }
+
+    #[test]
+    fn clean_scene_allows_cursor_presentation_between_application_ticks() {
+        let now = Instant::now();
+        let mut frame_state = FrameState::with_interval(Duration::from_millis(16));
+        frame_state.composition_rendered(now);
+        frame_state.presented();
+        frame_state.request_present();
+
+        assert!(!frame_state.update_due(now + Duration::from_millis(1)));
+        assert!(physical_scene_ready(
+            &frame_state,
+            now + Duration::from_millis(1)
+        ));
+    }
 
     #[test]
     fn composition_route_keeps_physical_presentation_except_for_owned_work() {

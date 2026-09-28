@@ -48,6 +48,19 @@ struct SurfaceLayerImages {
     displayed: Option<DisplayedImage>,
 }
 
+/// Pins entries in `known_sources` while queued snapshots still name them.
+#[derive(Default)]
+struct SupersededImports(HashSet<ImportId>);
+
+impl SupersededImports {
+    fn release(&mut self, id: ImportId, lease: ClientBufferLease) {
+        self.0.insert(id);
+        // This use was never acquired. Its client can reuse the allocation
+        // while the imported texture identity remains valid for ECS ingress.
+        drop(lease);
+    }
+}
+
 #[derive(Default)]
 struct AcquiredSources(HashMap<vk::Image, usize>);
 
@@ -339,7 +352,7 @@ pub struct DmabufManager {
     queue_family: u32,
     sources: DmabufSourceCache,
     layers: HashMap<SurfaceLayerKey, SurfaceLayerImages>,
-    superseded: Vec<StagedImage>,
+    superseded: SupersededImports,
     retiring: Vec<DisplayedImage>,
     known_sources: HashMap<ImportId, Rc<ImportedDmabufSource>>,
     acquired_sources: AcquiredSources,
@@ -390,7 +403,7 @@ impl DmabufManager {
             queue_family,
             sources,
             layers: HashMap::new(),
-            superseded: Vec::new(),
+            superseded: SupersededImports::default(),
             retiring: Vec::new(),
             known_sources: HashMap::new(),
             acquired_sources: AcquiredSources::default(),
@@ -441,10 +454,7 @@ impl DmabufManager {
             use_id: lease.use_id(),
             lease,
         }) {
-            // Its owned placeholder may still be referenced by a queued ECS
-            // snapshot. Keep it until the next main-world advance has drained
-            // those events, then release it without a GPU ownership transfer.
-            self.superseded.push(staged);
+            self.superseded.release(staged.id, staged.lease);
         }
         Ok(StagedImport {
             id,
@@ -466,8 +476,9 @@ impl DmabufManager {
         referenced_ids: &HashSet<ImportId>,
         registry: &mut impl ImportedImageRegistry,
     ) -> Result<Vec<ImportId>> {
-        let superseded = std::mem::take(&mut self.superseded);
-        Self::drop_unacquired_leases(superseded);
+        // Main-world ingress has consumed the snapshots that named these
+        // imports. Their leases were released when staging superseded them.
+        self.superseded.0.clear();
         self.prune_dead_sources(registry);
 
         let staged = self
@@ -723,7 +734,7 @@ impl DmabufManager {
                     .map(|image| image.id)
                     .chain(images.displayed.iter().map(|image| image.id))
             })
-            .chain(self.superseded.iter().map(|image| image.id))
+            .chain(self.superseded.0.iter().copied())
             .chain(self.retiring.iter().map(|image| image.id))
             .collect::<HashSet<_>>();
         let pruned = self
@@ -776,7 +787,7 @@ impl DmabufManager {
             return;
         };
         if let Some(staged) = images.staged {
-            self.superseded.push(staged);
+            self.superseded.release(staged.id, staged.lease);
         }
         if let Some(displayed) = images.displayed {
             self.retiring.push(displayed);
@@ -784,7 +795,8 @@ impl DmabufManager {
     }
 
     fn submit_shutdown_releases(&mut self) {
-        let mut staged = std::mem::take(&mut self.superseded);
+        self.superseded.0.clear();
+        let mut staged = Vec::new();
         let layers = std::mem::take(&mut self.layers);
         let mut displayed = std::mem::take(&mut self.retiring);
         for images in layers.into_values() {
@@ -879,7 +891,65 @@ mod tests {
         Extent,
     };
 
-    use super::{AcquiredSources, PendingGpuLeases};
+    use super::{AcquiredSources, ImportId, PendingGpuLeases, SupersededImports};
+
+    fn counted_lease(completed: Rc<Cell<usize>>, use_local: u64) -> ClientBufferLease {
+        let source = ClientSourceId::new(1);
+        ClientBufferLease::new(
+            ClientBufferId::new(source, 1),
+            ClientBufferUseId::new(source, use_local),
+            ClientBufferMetadata::new(Extent::new(1, 1), false),
+            Rc::new(()),
+            move |_| completed.set(completed.get() + 1),
+        )
+        .expect("matching source")
+    }
+
+    #[test]
+    fn superseded_use_releases_before_its_snapshot_identity_is_retired() {
+        let completed = Rc::new(Cell::new(0));
+        let mut superseded = SupersededImports::default();
+        let id = ImportId::new(1);
+
+        superseded.release(id, counted_lease(completed.clone(), 1));
+
+        assert_eq!(completed.get(), 1);
+        assert!(superseded.0.contains(&id));
+        superseded.0.clear();
+        assert_eq!(completed.get(), 1);
+    }
+
+    #[test]
+    fn superseding_repeated_imports_releases_each_use_and_retains_one_identity() {
+        let completed = Rc::new(Cell::new(0));
+        let mut superseded = SupersededImports::default();
+        for use_local in 1..=4 {
+            superseded.release(
+                ImportId::new(1),
+                counted_lease(completed.clone(), use_local),
+            );
+        }
+        assert_eq!(completed.get(), 4);
+        assert_eq!(superseded.0.len(), 1);
+    }
+
+    #[test]
+    fn superseding_preserves_other_consumers_and_gpu_pending_uses() {
+        let completed = Rc::new(Cell::new(0));
+        let lease = counted_lease(completed.clone(), 1);
+        let exporter = lease.clone();
+        let mut pending = PendingGpuLeases::default();
+        let sampled = counted_lease(completed.clone(), 2);
+        let sampled_id = sampled.use_id();
+        pending.retain(sampled_id, sampled);
+
+        SupersededImports::default().release(ImportId::new(1), lease);
+        assert_eq!(completed.get(), 0);
+        drop(exporter);
+        assert_eq!(completed.get(), 1);
+        pending.complete(sampled_id);
+        assert_eq!(completed.get(), 2);
+    }
 
     fn image(raw: u64) -> ash::vk::Image {
         ash::vk::Image::from_raw(raw)

@@ -149,21 +149,54 @@ fn windows_key_becomes_alt_for_pointer_shortcuts_and_focus_loss_clears_capture()
 fn keyboard_settings_publish_once_and_reset_to_default_explicitly() {
     let mut app = App::new();
     register_keyboard_settings(&mut app);
-    assert_eq!(
-        take_keyboard_settings(app.world_mut()),
-        Some(KeyboardSettings::default())
-    );
-    assert_eq!(take_keyboard_settings(app.world_mut()), None);
+    let mut reader = KeyboardSettingsReader::new(app.world_mut());
+    assert_eq!(reader.take(app.world()), Some(KeyboardSettings::default()));
+    assert_eq!(reader.take(app.world()), None);
     let settings = KeyboardSettings {
         keymap: Some(mapper().keymap().clone()),
         legacy_repeat: LegacyKeyRepeat::Emulated,
     };
     app.insert_resource(settings.clone());
-    assert_eq!(take_keyboard_settings(app.world_mut()), Some(settings));
-    assert_eq!(take_keyboard_settings(app.world_mut()), None);
+    assert_eq!(reader.take(app.world()), Some(settings));
+    assert_eq!(reader.take(app.world()), None);
     app.insert_resource(KeyboardSettings::default());
-    assert_eq!(
-        take_keyboard_settings(app.world_mut()),
-        Some(KeyboardSettings::default())
-    );
+    assert_eq!(reader.take(app.world()), Some(KeyboardSettings::default()));
+}
+
+#[test]
+fn keyboard_settings_track_multiple_edits_between_application_updates() {
+    let mut app = App::new();
+    register_keyboard_settings(&mut app);
+    let mut reader = KeyboardSettingsReader::new(app.world_mut());
+    assert!(reader.take(app.world()).is_some());
+
+    for legacy_repeat in [LegacyKeyRepeat::Disabled, LegacyKeyRepeat::Emulated] {
+        app.world_mut()
+            .resource_mut::<KeyboardSettings>()
+            .legacy_repeat = legacy_repeat;
+        assert_eq!(
+            reader
+                .take(app.world())
+                .map(|settings| settings.legacy_repeat),
+            Some(legacy_repeat)
+        );
+        assert_eq!(reader.take(app.world()), None);
+    }
+}
+
+#[test]
+fn equal_settings_replacement_does_not_republish_after_change_detection() {
+    let mut app = App::new();
+    register_keyboard_settings(&mut app);
+    let mut reader = KeyboardSettingsReader::new(app.world_mut());
+    let settings = KeyboardSettings {
+        keymap: Some(mapper().keymap().clone()),
+        legacy_repeat: LegacyKeyRepeat::Client,
+    };
+    app.insert_resource(settings.clone());
+    assert!(reader.take(app.world()).is_some());
+    app.insert_resource(settings);
+    assert_eq!(reader.take(app.world()), None);
+    app.update();
+    assert_eq!(reader.take(app.world()), None);
 }
