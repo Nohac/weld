@@ -93,6 +93,7 @@ printf 'Starting encoded Iroh hoist with %s over %s. Focus the source window and
 started_at=${SECONDS}
 cargo run -- \
     --backend nested \
+    --config "${repository_root}/examples/master.sway.config" \
     --wayland-socket weld-iroh-source \
     --hoist-iroh-listen "${ticket_path}" \
     --hoist-iroh-expect-peer "${identity_path}" \
@@ -124,6 +125,7 @@ done
 
 cargo run -- \
     --backend nested \
+    --config "${repository_root}/examples/master.sway.config" \
     --wayland-socket weld-iroh-destination \
     --hoist-iroh-connect "${ticket_path}" \
     --hoist-iroh-publish-identity "${identity_path}" \

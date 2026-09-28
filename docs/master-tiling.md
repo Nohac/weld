@@ -20,17 +20,16 @@ Alt+H invokes `weld hoist` through the existing hoist policy. Firefox is now
 Alt+Control+Shift+F, leaving Alt+F for focus-right. Ordinary clicks select tiles;
 decoration close buttons work. Pointer-driven floating movement is not installed.
 
-Configuration selection is an explicit `--config` path, then
-`$XDG_CONFIG_HOME/weld/master.sway.config` (or
-`$HOME/.config/weld/master.sway.config`), then the built-in copy of
-`examples/master.sway.config`. The user's daily Sway file is not automatically
-loaded while only a small subset works. Explicit paths may point to it, but
-unsupported directives fail clearly rather than becoming silent no-ops.
+Graphical Master requires an explicit `--config` path. The repository's
+`examples/master.sway.config` is a development example, selected explicitly by
+the graphical hoist and profiling launchers. A supplied file may be a Sway
+config, but unsupported directives fail clearly. Master has no implicit config
+discovery or bundled fallback. Headless session hosting needs no config.
 
 Alt+Shift+R reloads the selected file. The file replaces, rather than overlays,
 the configuration plugin's bindings; omitted settings return to their native
 defaults. Parse/translation failure leaves the old bindings and settings active.
-There is no file watcher yet. Reloading built-in defaults has no file to reread.
+There is no file watcher yet; reload rereads the supplied path.
 
 ## Supported configuration
 
@@ -108,17 +107,24 @@ binding chords into `weld-input` types. Winnow captures chord tokens and quoted
 values; the translation layer validates modifier names and aliases. Master
 selects the file, translates remaining distribution actions/tiling directives,
 and installs typed settings. It never mutates the layout tree. Applying a valid candidate
-replaces its owner-scoped keyboard bindings and settings in one exclusive
-operation. Old queued binding IDs cannot invoke new bindings, and consumed
+replaces its owner-scoped keyboard bindings and settings through a typed
+`SystemParam` borrowing just those resources. Old queued binding IDs cannot invoke new bindings, and consumed
 key releases remain consumed across replacement.
 
 Gaps relayout existing windows. Default orientation does not rewrite existing
 containers. Commands execute in order, resolving focused-target commands at
-execution time. Before issuing a non-tiling action such as hoist, Master flushes
-preceding native tiling operations so a focus change in the same input batch
-selects the correct target. Admission and output changes remain tiler-owned.
-Tree edits and derived geometry run exclusively before window
-presentation; no presentation system sees a half-reparented tree. The operation
+execution time. Master queues typed shortcut events; each observer's deferred
+effects finish before the next shortcut is resolved. A tiling action triggers
+`TileRequest`, so focus followed by hoist selects the updated target, while a
+reload invalidates remaining old binding IDs in the same batch.
+
+`TileSystems` orders workspace preparation, buffered commands, distribution
+actions and final layout within window management. Admission and output changes
+remain tiler-owned. Systems and observers declare their component/resource access
+with queries and typed parameters; deferred spawns and reparents are published
+before dependent layout or actions. Layout skips unchanged frames, traverses
+borrowed child lists and writes geometry only when it differs. Membership changes
+trigger pruning; retained client-buffer updates leave the tree untouched. The operation
 queue is bounded to 256 and split depth to 64. Animation is not part of layout.
 
 Retained vacancies occupy real slots without fake client surfaces. The hoist
@@ -149,12 +155,6 @@ as ordinary windows.
   horizontal/vertical commands through the compatibility adapter. Define native
   settings and operations around that directional capability; an internal axis
   may still serve the geometry calculation.
-- **Scheduled ECS policy.** Refactor admission, tree edits, layout and focus into
-  systems whose parameters declare component/resource access. Use change
-  detection and an explicit publication boundary for coherent tree updates.
-  Carry ordered cross-plugin actions, including focus followed by hoist, through
-  that schedule. Replace the current broad exclusive-world management and
-  configuration-driven flush paths as part of the same ownership change.
 
 These are follow-up changes to the current implementation. Existing comment
 wording will be improved when the relevant code is revisited, following the

@@ -106,18 +106,27 @@ The graphical distribution is now the tiling-first Weld Master target. Its
 configuration plugin owns file selection, Sway-to-native translation, diagnostics
 and reload coordination. Subsystems own their typed settings and application
 semantics. A validated candidate replaces the configuration plugin's shortcut
-set and tiling settings in one exclusive application operation, without replacing
+set and tiling settings through typed resource borrows in one system invocation, without replacing
 the layout tree or client occupancy. Invalid candidates leave the working state
 alone. This is not a generic config framework or full Sway compatibility; see
 [Master tiling](master-tiling.md) for the current subset and limitations. The
 session-only headless host remains separate from this graphical policy assembly.
-Master's default bindings live in `examples/master.sway.config`, including
+Graphical Master requires an explicit configuration path. Its development example
+bindings live in `examples/master.sway.config`, including
 launch, exit, hoist and output diagnostics. Shortcut support installs no key
 defaults; hoisting and the overlay accept typed requests instead. `ShellCommands`
 queues host effects without binding keys or executing configuration at load time.
 Weld-only commands use a `weld` prefix within ordinary Sway command spelling;
 no parser grammar fork is needed. Reserved DRM virtual-terminal switching stays
 separate from distribution bindings.
+
+Tiling management uses ordered preparation, buffered-command, distribution-action
+and layout sets. Queries and typed resources declare policy access; deferred
+structural edits finish at the dependent schedule boundaries. Master emits ordered
+shortcut events, and tiler observers publish each operation's topology, layout and
+focus effects before the next shortcut is resolved. Master never calls into an
+exclusive tiler flush. Unchanged frames skip layout; layout traverses borrowed
+child edges and updates geometry only when values differ.
 
 Dependencies point inward: `weld-core` implements the local Smithay adapter
 through `weld-client`; `weld-app` depends on both; `weld-window` depends on

@@ -33,18 +33,16 @@ fn remapped_control_matches_and_consumes_repeat_and_release_across_binding_reloa
     let mut app = App::new();
     app.add_plugins(GlobalShortcutPlugin);
     let mut bindings = GlobalShortcutSet::default();
-    bindings
-        .replace(
-            app.world_mut(),
-            [GlobalShortcut::new(
-                KeyCode::KeyF,
-                GlobalShortcutModifiers {
-                    control: true,
-                    ..Default::default()
-                },
-            )],
-        )
-        .expect("bindings");
+    bindings.replace(
+        &mut app.world_mut().resource_mut::<GlobalShortcutRegistry>(),
+        [GlobalShortcut::new(
+            KeyCode::KeyF,
+            GlobalShortcutModifiers {
+                control: true,
+                ..Default::default()
+            },
+        )],
+    );
     let caps = mapper.resolve(key(58, KeyboardKeyState::Pressed));
     assert!(caps.modifiers.expect("resolved").control);
     assert!(!filter_global_shortcut_event(app.world_mut(), &caps));
@@ -57,7 +55,10 @@ fn remapped_control_matches_and_consumes_repeat_and_release_across_binding_reloa
             state: KeyboardKeyState::Pressed
         })
     ));
-    bindings.replace(app.world_mut(), []).expect("reload");
+    bindings.replace(
+        &mut app.world_mut().resource_mut::<GlobalShortcutRegistry>(),
+        [],
+    );
     for state in [KeyboardKeyState::Repeated, KeyboardKeyState::Released] {
         assert!(filter_global_shortcut_event(
             app.world_mut(),
@@ -76,18 +77,16 @@ fn remapped_control_matches_and_consumes_repeat_and_release_across_binding_reloa
         1
     );
     // Physical Ctrl is now Caps Lock, so it must not accidentally match Ctrl+F.
-    bindings
-        .replace(
-            app.world_mut(),
-            [GlobalShortcut::new(
-                KeyCode::KeyF,
-                GlobalShortcutModifiers {
-                    control: true,
-                    ..Default::default()
-                },
-            )],
-        )
-        .expect("bindings");
+    bindings.replace(
+        &mut app.world_mut().resource_mut::<GlobalShortcutRegistry>(),
+        [GlobalShortcut::new(
+            KeyCode::KeyF,
+            GlobalShortcutModifiers {
+                control: true,
+                ..Default::default()
+            },
+        )],
+    );
     filter_global_shortcut_event(
         app.world_mut(),
         &mapper.resolve(key(29, KeyboardKeyState::Pressed)),

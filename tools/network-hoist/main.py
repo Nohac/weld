@@ -57,7 +57,8 @@ def execute_user(path, role):
     environment.setdefault("RUST_LOG", "warn,weldwm=info,weld_core=info,weld_network_diag=debug,weld_media_diag=debug")
     args = [config["runtime"]["binary"], "--backend", "nested", "--wayland-socket",
             f"weld-net-{config['id'][:12]}-{role}", "--hoist-iroh-network", "n0",
-            "--hoist-iroh-timeout", str(config["startup_seconds"])]
+            "--hoist-iroh-timeout", str(config["startup_seconds"]),
+            "--config", str(Path(config["repository"]) / "examples/master.sway.config")]
     if role == "source":
         args += ["--hoist-iroh-listen", str(directory / "source.ticket"),
                  "--hoist-iroh-expect-peer", str(directory / "destination.identity"),

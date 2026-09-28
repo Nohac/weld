@@ -4,8 +4,8 @@ Weld exposes a deliberately restricted Bevy Remote Protocol endpoint for
 development automation. It is opt-in and accepts loopback addresses only:
 
 ```text
-cargo run -- --remote-debug -- foot
-cargo run -- --remote-debug=127.0.0.1:16000 -- foot
+cargo run -- --config examples/master.sway.config --remote-debug -- foot
+cargo run -- --config examples/master.sway.config --remote-debug=127.0.0.1:16000 -- foot
 ```
 
 The default main-world endpoint is `http://127.0.0.1:15702/`. Bevy 0.19 also

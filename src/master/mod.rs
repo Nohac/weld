@@ -1,194 +1,193 @@
-//! Weld Master assembly policy. Configuration translates into plugin-owned
-//! settings and commands, never edits the tiler tree or client occupancy.
+//! Weld Master configuration and ordered distribution actions.
 
 mod config;
 
+use crate::overlay::ToggleOutputTopology;
+use anyhow::{Context, Result};
+use bevy::{
+    app::{App, Plugin, PreUpdate},
+    ecs::{
+        event::Event,
+        message::{MessageReader, Messages},
+        observer::On,
+        resource::Resource,
+        schedule::IntoScheduleConfigs,
+        system::{Commands, In, Res, ResMut, RunSystemOnce, SystemParam},
+    },
+    window::RequestRedraw,
+};
+use config::{Action, Configuration};
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
 };
-
-use crate::overlay::ToggleOutputTopology;
-use anyhow::{Context, Result};
-use bevy::window::RequestRedraw;
-use bevy::{
-    app::{App, Plugin, PreUpdate},
-    ecs::{
-        change_detection::Mut,
-        message::{MessageCursor, Messages},
-        resource::Resource,
-        schedule::IntoScheduleConfigs,
-        world::World,
-    },
-};
 use weld_app::{ActiveBackend, input::ShellCommands};
 use weld_hoist::HoistWindow;
-use weld_input::{GlobalShortcutId, GlobalShortcutPressed, GlobalShortcutSet};
-use weld_tile::TileCommands;
-use weld_window::{FocusedWindow, WindowSystems};
+use weld_input::{
+    GlobalShortcutId, GlobalShortcutPlugin, GlobalShortcutPressed, GlobalShortcutRegistry,
+    GlobalShortcutSet, KeyboardSettings,
+};
+use weld_tile::{TileRequest, TileSettings, TileSystems};
+use weld_window::FocusedWindow;
 
-use config::{Action, Configuration};
-
-/// Concrete distribution configuration, not a cross-backend framework.
+/// Selects and translates the distribution's configuration file.
 pub(crate) struct MasterConfigPlugin {
-    path: Option<PathBuf>,
+    path: PathBuf,
     initial: Configuration,
 }
 
 impl MasterConfigPlugin {
-    pub(crate) fn load(explicit: Option<&Path>) -> Result<Self> {
-        // Do not silently ingest the user's daily Sway config while only a
-        // subset is supported. An explicit path may point to any Sway file.
-        let path = explicit.map(Path::to_owned).or_else(|| {
-            let base = std::env::var_os("XDG_CONFIG_HOME")
-                .map(PathBuf::from)
-                .or_else(|| {
-                    std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config"))
-                })?;
-            let path = base.join("weld/master.sway.config");
-            path.is_file().then_some(path)
-        });
-        let initial = read_configuration(path.as_deref())?;
+    pub(crate) fn load(path: &Path) -> Result<Self> {
+        let initial = read_configuration(path)?;
+        let path = path.to_owned();
         Ok(Self { path, initial })
     }
 }
 
-fn read_configuration(path: Option<&Path>) -> Result<Configuration> {
-    match path {
-        Some(path) => {
-            let source = std::fs::read_to_string(path)
-                .with_context(|| format!("reading {}", path.display()))?;
-            config::parse(&path.display().to_string(), &source)
-        }
-        None => config::parse(
-            "built-in Master config",
-            include_str!("../../examples/master.sway.config"),
-        ),
-    }
+fn read_configuration(path: &Path) -> Result<Configuration> {
+    let source =
+        std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+    config::parse(&path.display().to_string(), &source)
 }
 
 impl Plugin for MasterConfigPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<ShellCommands>();
+        app.init_resource::<ShellCommands>()
+            .init_resource::<TileSettings>();
         weld_input::register_keyboard_settings(app);
-        let mut state = ConfigState {
+        if !app.is_plugin_added::<GlobalShortcutPlugin>() {
+            app.add_plugins(GlobalShortcutPlugin);
+        }
+        app.insert_resource(ConfigState {
             path: self.path.clone(),
             shortcuts: GlobalShortcutSet::default(),
             actions: HashMap::new(),
-            cursor: MessageCursor::default(),
-        };
-        if let Err(error) = state.apply(app.world_mut(), self.initial.clone()) {
+        })
+        .add_observer(dispatch_action)
+        .add_systems(PreUpdate, handle_actions.in_set(TileSystems::Actions));
+        // Native settings are published before the first Bevy update. Bootstrap
+        // through the same typed system access used for live configuration.
+        if let Err(error) = app
+            .world_mut()
+            .run_system_once_with(apply_configuration, self.initial.clone())
+        {
             tracing::error!(%error, "could not install Master configuration");
         }
-        app.insert_resource(state).add_systems(
-            PreUpdate,
-            handle_actions
-                .before(WindowSystems::Management)
-                .after(WindowSystems::Interaction),
-        );
     }
 }
 
 #[derive(Resource)]
 struct ConfigState {
-    path: Option<PathBuf>,
+    path: PathBuf,
     shortcuts: GlobalShortcutSet,
     actions: HashMap<GlobalShortcutId, Action>,
-    cursor: MessageCursor<GlobalShortcutPressed>,
 }
 
-impl ConfigState {
-    fn apply(&mut self, world: &mut World, config: Configuration) -> Result<()> {
-        let drm = world.get_resource::<ActiveBackend>() == Some(&ActiveBackend::Drm);
+/// These borrows make candidate publication atomic to other scheduled systems.
+#[derive(SystemParam)]
+struct ConfigTarget<'w> {
+    state: ResMut<'w, ConfigState>,
+    shortcuts: ResMut<'w, GlobalShortcutRegistry>,
+    tiling: ResMut<'w, TileSettings>,
+    keyboard: ResMut<'w, KeyboardSettings>,
+    backend: Option<Res<'w, ActiveBackend>>,
+}
+
+impl ConfigTarget<'_> {
+    fn apply(&mut self, config: Configuration) {
+        let drm = self.backend.as_deref() == Some(&ActiveBackend::Drm);
         let bindings: Vec<_> = config.bindings.into_iter().filter(|(_, action)| {
             !matches!(action, Action::Shell(command) if command.requires_drm() && !drm)
         }).collect();
-        let ids = self
-            .shortcuts
-            .replace(world, bindings.iter().map(|binding| binding.0))
-            .context("Master configuration requires global shortcut support")?;
-        self.actions = ids
+        let ids = self.state.shortcuts.replace(
+            &mut self.shortcuts,
+            bindings.iter().map(|binding| binding.0),
+        );
+        self.state.actions = ids
             .into_iter()
             .zip(bindings.into_iter().map(|binding| binding.1))
             .collect();
-        world.insert_resource(config.tiling);
-        if let Some(mut settings) = world.get_resource_mut::<weld_input::KeyboardSettings>() {
-            settings.keymap = config.keymap;
+        if *self.tiling != config.tiling {
+            *self.tiling = config.tiling;
         }
-        Ok(())
+        if self.keyboard.keymap != config.keymap {
+            self.keyboard.keymap = config.keymap;
+        }
     }
 }
 
-fn handle_actions(world: &mut World) {
-    world.resource_scope(dispatch_actions);
+fn apply_configuration(In(config): In<Configuration>, mut target: ConfigTarget) {
+    target.apply(config);
 }
 
-fn dispatch_actions(world: &mut World, mut state: Mut<ConfigState>) {
-    let pressed: Vec<_> = state
-        .cursor
-        .read(world.resource::<Messages<GlobalShortcutPressed>>())
-        .map(|event| event.shortcut())
-        .collect();
-    for id in pressed {
-        let Some(action) = state.actions.get(&id).cloned() else {
-            continue;
-        };
-        // Other actions observe the effects of preceding tiling commands, not
-        // last frame's focus. The tiler remains the only owner of tree edits.
-        if !matches!(action, Action::Tile(_)) {
-            TileCommands::flush(world);
+#[derive(Event)]
+struct DispatchShortcut(GlobalShortcutId);
+
+fn handle_actions(mut pressed: MessageReader<GlobalShortcutPressed>, mut commands: Commands) {
+    for event in pressed.read() {
+        // Each observer's commands finish before the next shortcut is resolved.
+        commands.trigger(DispatchShortcut(event.shortcut()));
+    }
+}
+
+#[derive(SystemParam)]
+struct ActionEffects<'w, 's> {
+    focus: Res<'w, FocusedWindow>,
+    shell: ResMut<'w, ShellCommands>,
+    hoist: Option<ResMut<'w, Messages<HoistWindow>>>,
+    topology: Option<ResMut<'w, Messages<ToggleOutputTopology>>>,
+    redraw: Option<ResMut<'w, Messages<RequestRedraw>>>,
+    commands: Commands<'w, 's>,
+}
+
+fn dispatch_action(
+    event: On<DispatchShortcut>,
+    mut target: ConfigTarget,
+    mut effects: ActionEffects,
+) {
+    let Some(action) = target.state.actions.get(&event.0).cloned() else {
+        return;
+    };
+    match action {
+        Action::Shell(command) => {
+            if effects.shell.push(command).is_err() {
+                tracing::warn!("shell command queue is full");
+            }
         }
-        match action {
-            Action::Shell(command) => {
-                if world.resource_mut::<ShellCommands>().push(command).is_err() {
-                    tracing::warn!("shell command queue is full");
-                }
-            }
-            Action::Hoist => {
-                if let Some(window) = world.resource::<FocusedWindow>().entity() {
-                    if let Some(mut requests) = world.get_resource_mut::<Messages<HoistWindow>>() {
-                        requests.write(HoistWindow { window });
-                    } else {
-                        tracing::warn!("hoisting is unavailable in this assembly");
-                    }
-                }
-            }
-            Action::OutputTopology => {
-                if let Some(mut requests) =
-                    world.get_resource_mut::<Messages<ToggleOutputTopology>>()
-                {
-                    requests.write(ToggleOutputTopology);
-                }
-            }
-            Action::Reload => {
-                match read_configuration(state.path.as_deref())
-                    .and_then(|config| state.apply(world, config))
-                {
-                    Ok(()) => tracing::info!("reloaded Master configuration"),
-                    Err(error) => {
-                        tracing::warn!(error = %format!("{error:#}"), "Master reload rejected; keeping current configuration")
-                    }
-                }
-            }
-            Action::Tile(operation) => {
-                if world
-                    .resource_mut::<TileCommands>()
-                    .push_focused(operation)
-                    .is_err()
-                {
-                    tracing::warn!("tiling command queue is full");
+        Action::Hoist => {
+            if let Some(window) = effects.focus.entity() {
+                if let Some(requests) = effects.hoist.as_mut() {
+                    requests.write(HoistWindow { window });
+                } else {
+                    tracing::warn!("hoisting is unavailable in this assembly");
                 }
             }
         }
-        if let Some(mut redraw) = world.get_resource_mut::<Messages<RequestRedraw>>() {
-            redraw.write(RequestRedraw);
+        Action::OutputTopology => {
+            if let Some(requests) = effects.topology.as_mut() {
+                requests.write(ToggleOutputTopology);
+            }
         }
+        Action::Reload => match read_configuration(&target.state.path) {
+            Ok(config) => {
+                target.apply(config);
+                tracing::info!("reloaded Master configuration");
+            }
+            Err(error) => {
+                tracing::warn!(error = %format!("{error:#}"), "Master reload rejected; keeping current configuration")
+            }
+        },
+        Action::Tile(operation) => effects.commands.trigger(TileRequest::Focused(operation)),
+    }
+    if let Some(redraw) = effects.redraw.as_mut() {
+        redraw.write(RequestRedraw);
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bevy::ecs::message::MessageCursor;
     use bevy::math::UVec2;
     use weld_app::input::GlobalShortcutPlugin;
     use weld_app::input::ShellCommand;
@@ -209,7 +208,7 @@ mod tests {
                     TilePlugin,
                     GlobalShortcutPlugin,
                     MasterConfigPlugin {
-                        path: None,
+                        path: example_path(),
                         initial: config::parse(
                             "test",
                             "bindsym Mod4+d focus left\nbindsym Mod4+h weld hoist",
@@ -286,8 +285,8 @@ mod tests {
                     TilePlugin,
                     GlobalShortcutPlugin,
                     MasterConfigPlugin {
-                        path: None,
-                        initial: read_configuration(None).expect("built-in config"),
+                        path: example_path(),
+                        initial: read_configuration(&example_path()).expect("example config"),
                     },
                 ))
                 .add_message::<HoistWindow>()
@@ -354,13 +353,8 @@ mod tests {
             );
             // The command is queued, not executed by configuration handling.
             assert!(app.world().contains_resource::<ShellCommands>());
-            app.world_mut()
-                .resource_scope(|world, mut state: Mut<ConfigState>| {
-                    state
-                        .apply(world, config::parse("empty", "").expect("empty config"))
-                        .expect("reload");
-                    assert!(state.actions.is_empty());
-                });
+            install(&mut app, config::parse("empty", "").expect("empty config"));
+            assert!(app.world().resource::<ConfigState>().actions.is_empty());
         }
     }
 
@@ -372,7 +366,7 @@ mod tests {
             TilePlugin,
             GlobalShortcutPlugin,
             MasterConfigPlugin {
-                path: None,
+                path: example_path(),
                 initial: config::parse(
                     "test",
                     "gaps inner 20\nbindsym Mod4+F3 reload\nbindsym Mod4+F4 splitv",
@@ -445,33 +439,68 @@ mod tests {
     #[test]
     fn rejected_candidate_leaves_live_settings_and_bindings_unchanged() {
         let mut app = App::new();
-        app.add_plugins(GlobalShortcutPlugin);
-        let mut state = ConfigState {
-            path: None,
+        app.add_plugins(GlobalShortcutPlugin)
+            .init_resource::<TileSettings>()
+            .init_resource::<KeyboardSettings>();
+        app.insert_resource(ConfigState {
+            path: example_path(),
             shortcuts: GlobalShortcutSet::default(),
             actions: HashMap::new(),
-            cursor: MessageCursor::default(),
-        };
-        state
-            .apply(
-                app.world_mut(),
-                read_configuration(None).expect("built-in config"),
-            )
-            .expect("apply");
+        });
+        install(
+            &mut app,
+            read_configuration(&example_path()).expect("example config"),
+        );
         let before = *app.world().resource::<TileSettings>();
-        let ids: Vec<_> = state.actions.keys().copied().collect();
+        let ids: Vec<_> = app
+            .world()
+            .resource::<ConfigState>()
+            .actions
+            .keys()
+            .copied()
+            .collect();
         let result = config::parse("test", "gaps inner 20\ndefault_orientation broken")
-            .and_then(|candidate| state.apply(app.world_mut(), candidate));
+            .map(|candidate| install(&mut app, candidate));
         assert!(result.is_err());
         assert_eq!(*app.world().resource::<TileSettings>(), before);
-        assert!(ids.iter().all(|id| state.actions.contains_key(id)));
-        state
-            .apply(
-                app.world_mut(),
-                config::parse("test", "gaps inner 20").expect("valid"),
-            )
-            .expect("apply");
+        assert!(ids.iter().all(|id| {
+            app.world()
+                .resource::<ConfigState>()
+                .actions
+                .contains_key(id)
+        }));
+        install(
+            &mut app,
+            config::parse("test", "gaps inner 20").expect("valid"),
+        );
         assert_eq!(app.world().resource::<TileSettings>().inner_gap, 20);
-        assert!(state.actions.is_empty()); // Removed bindings do not linger.
+        assert!(app.world().resource::<ConfigState>().actions.is_empty());
+    }
+
+    fn example_path() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/master.sway.config")
+    }
+
+    fn install(app: &mut App, config: Configuration) {
+        app.world_mut()
+            .run_system_once_with(apply_configuration, config)
+            .expect("configuration system");
+    }
+
+    #[test]
+    fn initial_settings_are_ready_before_the_first_host_publication() {
+        let mut app = App::new();
+        app.add_plugins(MasterConfigPlugin {
+            path: example_path(),
+            initial: read_configuration(&example_path()).expect("example config"),
+        });
+        let settings =
+            weld_input::take_keyboard_settings(app.world_mut()).expect("initial publication");
+        assert!(settings.keymap.is_some());
+        assert!(!app.world().resource::<ConfigState>().actions.is_empty());
+        assert!(
+            app.world()
+                .contains_resource::<Messages<GlobalShortcutPressed>>()
+        );
     }
 }

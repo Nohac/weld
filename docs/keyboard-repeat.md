@@ -31,7 +31,7 @@ The legacy default is `client` for compatibility. Network-delayed releases can
 let those timers generate unwanted characters. Enable the tested workaround:
 
 ```sh
-cargo run -- --legacy-key-repeat disabled
+cargo run -- --config examples/master.sway.config --legacy-key-repeat disabled
 WELD_LEGACY_KEY_REPEAT=disabled scripts/run-iroh-hoist
 WELD_LEGACY_KEY_REPEAT=disabled scripts/run-network-hoist --host wlp194s0 --client enp197s0f0u1i1
 ```
@@ -52,7 +52,7 @@ To retain hold-to-repeat without letting a legacy client's timer run across
 network-delayed releases, opt into the blanket fallback on the application host:
 
 ```sh
-cargo run -- --legacy-key-repeat emulated
+cargo run -- --config examples/master.sway.config --legacy-key-repeat emulated
 WELD_LEGACY_KEY_REPEAT=emulated scripts/run-iroh-hoist --codec av1
 WELD_LEGACY_KEY_REPEAT=emulated scripts/run-network-hoist --host wlp194s0 --client enp197s0f0u1i1
 ```

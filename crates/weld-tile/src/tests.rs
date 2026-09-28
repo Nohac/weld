@@ -1,5 +1,13 @@
 use bevy::{
-    app::App,
+    app::{App, PreUpdate},
+    ecs::{
+        message::Messages,
+        observer::On,
+        query::{Changed, With},
+        resource::Resource,
+        schedule::IntoScheduleConfigs,
+        system::{Query, ResMut},
+    },
     math::{UVec2, Vec2},
 };
 use weld_app::{
@@ -335,5 +343,159 @@ fn batched_navigation_resolves_focus_after_each_operation() {
     assert_eq!(
         app.world().resource::<FocusedWindow>().entity(),
         Some(first)
+    );
+}
+
+#[test]
+fn structural_edits_publish_before_the_next_batched_operation() {
+    let mut app = app();
+    let first = window(&mut app, 1);
+    let second = window(&mut app, 2);
+    {
+        let mut commands = app.world_mut().resource_mut::<TileCommands>();
+        for operation in [
+            TileOperation::Split(SplitAxis::Vertical),
+            TileOperation::Focus(Direction::Left),
+            TileOperation::Move(Direction::Right),
+            TileOperation::Focus(Direction::Left),
+        ] {
+            commands.push_focused(operation).expect("capacity");
+        }
+    }
+    app.update();
+    assert_eq!(geometry(&app, first).position.x, 400.0);
+    assert_eq!(geometry(&app, second).position.x, 0.0);
+    assert_eq!(
+        app.world().resource::<FocusedWindow>().entity(),
+        Some(second)
+    );
+    let parent = app
+        .world()
+        .get::<TileParent>(first)
+        .expect("new split")
+        .entity();
+    assert_eq!(
+        app.world()
+            .get::<TileContainer>(parent)
+            .expect("published container")
+            .axis(),
+        SplitAxis::Vertical
+    );
+}
+
+#[derive(Resource, Default)]
+struct Changes {
+    layouts: usize,
+    geometries: usize,
+    containers: usize,
+}
+
+#[test]
+fn unchanged_frames_do_not_relayout_or_republish_components() {
+    let mut app = app();
+    app.init_resource::<Changes>()
+        .add_observer(
+            |_: On<layout::LayoutRequested>, mut changes: ResMut<Changes>| changes.layouts += 1,
+        )
+        .add_systems(
+            PreUpdate,
+            (|windows: Query<(), (With<TileParent>, Changed<WindowGeometry>)>,
+              containers: Query<(), Changed<TileContainer>>,
+              mut changes: ResMut<Changes>| {
+                changes.geometries += windows.iter().count();
+                changes.containers += containers.iter().count();
+            })
+            .after(TileSystems::Layout),
+        );
+    window(&mut app, 1);
+    window(&mut app, 2);
+    *app.world_mut().resource_mut::<Changes>() = Changes::default();
+    for _ in 0..10 {
+        app.update();
+    }
+    let changes = app.world().resource::<Changes>();
+    assert_eq!(
+        (changes.layouts, changes.geometries, changes.containers),
+        (0, 0, 0)
+    );
+}
+
+#[test]
+fn commands_wait_for_the_first_output_and_admission() {
+    let mut app = App::new();
+    app.init_resource::<SurfaceActionQueue>()
+        .add_plugins((WindowPlugin, TilePlugin));
+    let first = window(&mut app, 1);
+    let second = window(&mut app, 2);
+    app.world_mut()
+        .trigger(TileRequest::Focused(TileOperation::Focus(Direction::Left)));
+    app.update();
+    assert!(app.world().get::<TileParent>(first).is_none());
+    assert_eq!(app.world().resource::<TileCommands>().0.len(), 1);
+    app.world_mut().spawn((
+        WeldOutput {
+            id: OutputId::new(1),
+        },
+        PrimaryOutput,
+        OutputGeometry::from_physical(UVec2::new(800, 600), 1.0),
+    ));
+    app.update();
+    assert!(app.world().get::<TileParent>(second).is_some());
+    assert_eq!(
+        app.world().resource::<FocusedWindow>().entity(),
+        Some(first)
+    );
+    assert!(app.world().resource::<TileCommands>().0.is_empty());
+}
+
+#[test]
+fn native_focus_commands_request_redraw() {
+    let mut app = app();
+    let first = window(&mut app, 1);
+    window(&mut app, 2);
+    app.world_mut()
+        .resource_mut::<Messages<bevy::window::RequestRedraw>>()
+        .clear();
+    command(&mut app, 2, TileOperation::Focus(Direction::Left));
+    assert_eq!(
+        app.world().resource::<FocusedWindow>().entity(),
+        Some(first)
+    );
+    assert!(
+        !app.world()
+            .resource::<Messages<bevy::window::RequestRedraw>>()
+            .is_empty()
+    );
+}
+
+#[test]
+fn ownership_transfer_compacts_multiple_levels_before_admission() {
+    let mut app = app();
+    let first = window(&mut app, 1);
+    let second = window(&mut app, 2);
+    command(&mut app, 2, TileOperation::Split(SplitAxis::Vertical));
+    let third = window(&mut app, 3);
+    command(&mut app, 3, TileOperation::Split(SplitAxis::Horizontal));
+    let fourth = window(&mut app, 4);
+    let other_manager = app.world_mut().spawn_empty().id();
+    for entity in [second, third] {
+        app.world_mut()
+            .entity_mut(entity)
+            .insert(ManagedBy(other_manager));
+    }
+    app.update();
+    assert_eq!(
+        app.world().get::<TileParent>(first),
+        app.world().get::<TileParent>(fourth)
+    );
+    assert!(app.world().get::<TileParent>(second).is_none());
+    assert!(app.world().get::<TileParent>(third).is_none());
+    assert_eq!(geometry(&app, fourth).size, Vec2::new(400.0, 600.0));
+    assert_eq!(
+        app.world_mut()
+            .query::<&TileContainer>()
+            .iter(app.world())
+            .count(),
+        1
     );
 }

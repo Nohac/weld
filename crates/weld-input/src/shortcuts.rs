@@ -98,7 +98,7 @@ impl GlobalShortcutAppExt for App {
     fn register_global_shortcut(&mut self, shortcut: GlobalShortcut) -> GlobalShortcutId {
         register(self);
         self.world_mut()
-            .resource_mut::<RawGlobalShortcutState>()
+            .resource_mut::<GlobalShortcutRegistry>()
             .register(shortcut, false)
     }
 }
@@ -116,14 +116,13 @@ struct RegisteredGlobalShortcut {
 pub struct GlobalShortcutSet(Vec<GlobalShortcutId>);
 
 impl GlobalShortcutSet {
-    /// Replaces bindings atomically. Returns `None` unless shortcut support is
-    /// installed. Call with an empty iterator to unregister the owned set.
+    /// Replaces bindings atomically through the shared registry. Call with an
+    /// empty iterator to unregister the owned set.
     pub fn replace(
         &mut self,
-        world: &mut World,
+        state: &mut GlobalShortcutRegistry,
         shortcuts: impl IntoIterator<Item = GlobalShortcut>,
-    ) -> Option<Vec<GlobalShortcutId>> {
-        let mut state = world.get_resource_mut::<RawGlobalShortcutState>()?;
+    ) -> Vec<GlobalShortcutId> {
         state
             .application_shortcuts
             .retain(|entry| !self.0.contains(&entry.id));
@@ -131,18 +130,20 @@ impl GlobalShortcutSet {
             .into_iter()
             .map(|chord| state.register(chord, true))
             .collect();
-        Some(self.0.clone())
+        self.0.clone()
     }
 }
 
+/// Shared shortcut registry. Configuration systems borrow it with `ResMut` to
+/// replace their owner-scoped bindings while preserving held-key consumption.
 #[derive(Resource, Default)]
-struct RawGlobalShortcutState {
+pub struct GlobalShortcutRegistry {
     next_id: u64,
     application_shortcuts: Vec<RegisteredGlobalShortcut>,
     pressed: HashSet<LinuxKeycode>,
 }
 
-impl RawGlobalShortcutState {
+impl GlobalShortcutRegistry {
     fn register(&mut self, chord: GlobalShortcut, exact_modifiers: bool) -> GlobalShortcutId {
         let id = GlobalShortcutId(self.next_id);
         self.next_id = self.next_id.saturating_add(1);
@@ -166,7 +167,7 @@ impl Plugin for GlobalShortcutPlugin {
 
 fn register(app: &mut App) {
     app.init_resource::<ConsumedShortcutKeys>();
-    app.init_resource::<RawGlobalShortcutState>();
+    app.init_resource::<GlobalShortcutRegistry>();
     if !app
         .world()
         .contains_resource::<Messages<GlobalShortcutPressed>>()
@@ -178,7 +179,7 @@ fn register(app: &mut App) {
 pub fn filter_global_shortcut_event(world: &mut World, event: &RawSeatEvent) -> bool {
     let RawSeatEventKind::Keyboard { keycode, state, .. } = &event.event else {
         if matches!(event.event, RawSeatEventKind::HostFocusLost)
-            && let Some(mut shortcuts) = world.get_resource_mut::<RawGlobalShortcutState>()
+            && let Some(mut shortcuts) = world.get_resource_mut::<GlobalShortcutRegistry>()
         {
             shortcuts.pressed.clear();
             if let Some(mut consumed) = world.get_resource_mut::<ConsumedShortcutKeys>() {
@@ -194,7 +195,7 @@ pub fn filter_global_shortcut_event(world: &mut World, event: &RawSeatEvent) -> 
             .is_some_and(|consumed| consumed.0.contains(keycode));
     };
     let application_shortcut = {
-        let Some(mut shortcuts) = world.get_resource_mut::<RawGlobalShortcutState>() else {
+        let Some(mut shortcuts) = world.get_resource_mut::<GlobalShortcutRegistry>() else {
             return false;
         };
         let newly_pressed = match state {

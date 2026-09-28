@@ -92,6 +92,7 @@ printf 'Starting %s local hoist with %s. Focus the source window and press Super
     "${surface_mode}" "${codec}"
 source_options=(
     --backend nested
+    --config "${repository_root}/examples/master.sway.config"
     --wayland-socket weld-hoist-source
     --hoist-listen "${socket_path}"
     --hoist-surface-mode "${surface_mode}"
@@ -123,7 +124,7 @@ while [[ ! -S "${socket_path}" ]]; do
     sleep 0.05
 done
 
-cargo run -- --backend nested --wayland-socket weld-hoist-destination --hoist-connect "${socket_path}" \
+cargo run -- --backend nested --config "${repository_root}/examples/master.sway.config" --wayland-socket weld-hoist-destination --hoist-connect "${socket_path}" \
     > >(tee "${destination_log}") 2>&1 &
 destination_pid=$!
 

@@ -144,8 +144,8 @@ impl BackendKind {
     ]).multiple(false))
 )]
 pub struct AppArguments {
-    /// Master Sway configuration file. Defaults to $XDG_CONFIG_HOME/weld/master.sway.config,
-    /// then built-in settings. Only the documented initial subset is supported.
+    /// Required configuration file for graphical Master. Only the documented
+    /// Sway subset is supported. Headless sessions do not use configuration.
     #[arg(long, value_name = "PATH")]
     pub(crate) config: Option<PathBuf>,
     /// Legacy repeat fallback: client timers, disabled, or emulated key edges. Defaults to client;

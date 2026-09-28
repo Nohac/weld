@@ -6,7 +6,7 @@ Weld. It has no runtime dependencies outside Python's standard library.
 Start Weld with its loopback-only endpoint and an optional nested client:
 
 ```text
-cargo run -- --remote-debug -- foot
+cargo run -- --config examples/master.sway.config --remote-debug -- foot
 ```
 
 Then inspect the endpoint or capture the complete client-plus-shell frame:

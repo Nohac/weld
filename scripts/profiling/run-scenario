@@ -339,7 +339,7 @@ trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
-weld_command=(env "TRACY_PORT=${tracy_port}" "${repository_root}/target/release/weldwm" --backend "${backend}")
+weld_command=(env "TRACY_PORT=${tracy_port}" "${repository_root}/target/release/weldwm" --backend "${backend}" --config "${repository_root}/examples/master.sway.config")
 if [[ -n "${screenshot_after}" ]]; then
     weld_command+=(--remote-debug)
 fi

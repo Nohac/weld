@@ -47,7 +47,12 @@ pub fn run(arguments: AppArguments) -> Result<()> {
         }
     };
     validate_hoist_arguments(&arguments)?;
-    let master_config = master::MasterConfigPlugin::load(arguments.config.as_deref())?;
+    let master_config = master::MasterConfigPlugin::load(
+        arguments
+            .config
+            .as_deref()
+            .context("graphical Weld requires --config PATH")?,
+    )?;
     let hoist_codec = arguments.hoist_codec.unwrap_or_default();
     let bitrate_budget = bitrate_budget::for_source(&arguments)?;
     let iroh_timeout = Duration::from_secs(arguments.hoist_iroh_timeout.unwrap_or(120));

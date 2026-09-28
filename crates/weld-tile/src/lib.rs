@@ -1,9 +1,9 @@
 //! Native split-tree policy over durable managed windows.
 //!
-//! The tree is owned ECS state, independent of configuration syntax and UI.
-//! [`TileCommands`] supplies typed edits; one exclusive management system applies
-//! them and publishes geometry before presentation. Client occupancy never
-//! determines tree membership: retained vacancies and hoisted windows keep slots.
+//! Typed systems admit windows, edit the tree and publish geometry before
+//! presentation. [`TileRequest`] observers preserve ordered shell actions;
+//! [`TileCommands`] buffers operations until a workspace is available.
+//! Retained vacancies and hoisted windows keep their layout slots.
 //! This first slice has one workspace on the primary output. Other outputs,
 //! floating overlays, tabbed/stacked layouts and fullscreen are separate policy.
 
@@ -13,13 +13,25 @@ mod plugin;
 
 use std::collections::VecDeque;
 
-use bevy::ecs::{component::Component, entity::Entity, resource::Resource, world::World};
+use bevy::ecs::{
+    component::Component, entity::Entity, event::Event, resource::Resource, schedule::SystemSet,
+};
 use weld_app::output::OutputId;
 use weld_window::WindowId;
 
 const COMMAND_CAPACITY: usize = 256;
 
 pub use plugin::TilePlugin;
+
+/// Management publication points. Deferred edits finish between each set.
+#[derive(SystemSet, Clone, Copy, Debug, Eq, PartialEq, Hash)]
+pub enum TileSystems {
+    Prepare,
+    Commands,
+    /// Distribution actions run after admission and before final layout.
+    Actions,
+    Layout,
+}
 
 /// Orientation of a split. Horizontal places children left to right.
 // Improvement: expose Left/Right/Up/Down split requests in the native API, with
@@ -142,27 +154,22 @@ pub enum TileOperation {
 
 /// Bounded, ordered native operations. Producers can retry on a full queue.
 #[derive(Resource, Default)]
-pub struct TileCommands(VecDeque<QueuedCommand>);
+pub struct TileCommands(VecDeque<TileRequest>);
 
-enum QueuedCommand {
+/// An ordered edit. Queue with [`bevy::ecs::system::Commands::trigger`] so its
+/// topology, geometry and focus effects finish before the next shell action.
+#[derive(Event, Clone, Copy, Debug)]
+pub enum TileRequest {
     Window(TileCommand),
     Focused(TileOperation),
 }
 
 impl TileCommands {
-    /// Applies pending operations before another subsystem action in an ordered
-    /// shell batch (for example focus-left followed by hoist). Uses the current
-    /// workspace bounds; ordinary management still owns admission/output updates.
-    /// Before the first layout is available, commands remain queued.
-    pub fn flush(world: &mut World) {
-        plugin::flush_commands(world);
-    }
-
     pub fn push(&mut self, command: TileCommand) -> Result<(), TileCommand> {
         if self.0.len() == COMMAND_CAPACITY {
             return Err(command);
         }
-        self.0.push_back(QueuedCommand::Window(command));
+        self.0.push_back(TileRequest::Window(command));
         Ok(())
     }
 
@@ -172,7 +179,7 @@ impl TileCommands {
         if self.0.len() == COMMAND_CAPACITY {
             return Err(operation);
         }
-        self.0.push_back(QueuedCommand::Focused(operation));
+        self.0.push_back(TileRequest::Focused(operation));
         Ok(())
     }
 }

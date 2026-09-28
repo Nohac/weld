@@ -20,11 +20,11 @@ use winit::keyboard::Key;
 
 use super::{
     ApplicationInputBuffer, GlobalShortcut, GlobalShortcutAppExt, GlobalShortcutModifiers,
-    GlobalShortcutPlugin, GlobalShortcutPressed, GlobalShortcutSet, InputBridgePlugin,
-    InputOutputTarget, PointerShortcut, PointerShortcutAppExt, PointerShortcutModifiers,
-    TouchpadGesture, VirtualTerminalShortcutPlugin, enqueue_application_input_batch,
-    enqueue_raw_input, filter_global_shortcut_event, filter_pointer_shortcut_event,
-    filter_virtual_terminal_event,
+    GlobalShortcutPlugin, GlobalShortcutPressed, GlobalShortcutRegistry, GlobalShortcutSet,
+    InputBridgePlugin, InputOutputTarget, PointerShortcut, PointerShortcutAppExt,
+    PointerShortcutModifiers, TouchpadGesture, VirtualTerminalShortcutPlugin,
+    enqueue_application_input_batch, enqueue_raw_input, filter_global_shortcut_event,
+    filter_pointer_shortcut_event, filter_virtual_terminal_event,
     raw::{
         ButtonState, InputDelta, InputPosition, LinuxButtonCode, LinuxKeycode, PointerGesture,
         RawSeatEvent, RawSeatEventKind, TouchpadPinch,
@@ -484,15 +484,13 @@ fn live_shortcut_sets_replace_only_their_bindings_and_preserve_consumed_releases
         GlobalShortcutModifiers::super_key(),
     ));
     let mut owned = GlobalShortcutSet::default();
-    let old = owned
-        .replace(
-            app.world_mut(),
-            [
-                GlobalShortcut::new(KeyCode::ArrowLeft, GlobalShortcutModifiers::super_key()),
-                GlobalShortcut::new(KeyCode::ArrowLeft, GlobalShortcutModifiers::super_shift()),
-            ],
-        )
-        .expect("shortcut support");
+    let old = owned.replace(
+        &mut app.world_mut().resource_mut::<GlobalShortcutRegistry>(),
+        [
+            GlobalShortcut::new(KeyCode::ArrowLeft, GlobalShortcutModifiers::super_key()),
+            GlobalShortcut::new(KeyCode::ArrowLeft, GlobalShortcutModifiers::super_shift()),
+        ],
+    );
     let key = |code, state| {
         RawSeatEvent::new(
             RawSeatEventKind::Keyboard {
@@ -515,15 +513,13 @@ fn live_shortcut_sets_replace_only_their_bindings_and_preserve_consumed_releases
         .map(|event| event.shortcut())
         .collect();
     assert_eq!(events, [old[1]]); // Shift must not accidentally select plain Left.
-    let new = owned
-        .replace(
-            app.world_mut(),
-            [GlobalShortcut::new(
-                KeyCode::ArrowRight,
-                GlobalShortcutModifiers::super_key(),
-            )],
-        )
-        .expect("replace");
+    let new = owned.replace(
+        &mut app.world_mut().resource_mut::<GlobalShortcutRegistry>(),
+        [GlobalShortcut::new(
+            KeyCode::ArrowRight,
+            GlobalShortcutModifiers::super_key(),
+        )],
+    );
     assert!(!old.contains(&new[0]));
     assert!(filter_global_shortcut_event(
         app.world_mut(),

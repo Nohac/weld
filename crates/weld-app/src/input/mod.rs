@@ -53,7 +53,7 @@ pub(crate) use weld_input::filter_global_shortcut_event;
 pub(crate) use weld_input::filter_pointer_shortcut_event;
 pub use weld_input::{
     GlobalShortcut, GlobalShortcutAppExt, GlobalShortcutId, GlobalShortcutModifiers,
-    GlobalShortcutPlugin, GlobalShortcutPressed, GlobalShortcutSet,
+    GlobalShortcutPlugin, GlobalShortcutPressed, GlobalShortcutRegistry, GlobalShortcutSet,
 };
 pub use weld_input::{KeyboardRepeatMode, KeyboardSettings, LegacyKeyRepeat};
 pub use weld_input::{

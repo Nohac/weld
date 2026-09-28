@@ -382,7 +382,7 @@ trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
-weld_command=("${weld_binary}" --backend "${backend}")
+weld_command=("${weld_binary}" --backend "${backend}" --config "${repository_root}/examples/master.sway.config")
 if (( ${#client[@]} > 0 )); then
     weld_command+=(-- "${client[@]}")
 fi

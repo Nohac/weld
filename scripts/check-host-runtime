@@ -119,6 +119,7 @@ def nested_capture(root, run, environment):
     print(f"Logs: {run}", flush=True)
     with (run / "host.log").open("w") as log:
         host = subprocess.Popen(["cargo", "run", "--quiet", "--", "--backend", "nested",
+                                 "--config", str(root / "examples/master.sway.config"),
                                  "--wayland-socket", str(socket), "--screenshot", str(screenshot),
                                  "--", "foot"], cwd=root, env=environment, stdout=log,
                                 stderr=subprocess.STDOUT, start_new_session=True)

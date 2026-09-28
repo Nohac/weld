@@ -140,6 +140,7 @@ def commands(args, run):
               "--legacy-key-repeat", "emulated", *common, "--",
               sys.executable, "-I", str(Path(__file__).resolve()), "_apps", str(run / "apps.json")]
     destination = ["cargo", "run", "--quiet", "--", "--backend", "nested",
+                   "--config", str(Path(__file__).resolve().parent.parent / "examples/master.sway.config"),
                    "--wayland-socket", str(run / "destination"),
                    "--hoist-iroh-connect", ticket,
                    "--hoist-iroh-publish-identity", identity, *common]

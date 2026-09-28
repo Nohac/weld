@@ -113,7 +113,7 @@ NixOS graphics drivers. The shared Rust shell is located at
 Launch Weld's nested development host without a client:
 
 ```text
-cargo run -- --backend nested
+cargo run -- --backend nested --config examples/master.sway.config
 ```
 
 Backend selection defaults to `auto`. Use an explicit backend when validating
@@ -130,7 +130,7 @@ Pass a program and arguments to launch it against Weld's private Wayland
 socket. The verified smoke test uses foot:
 
 ```text
-cargo run -- --backend nested -- foot
+cargo run -- --backend nested --config examples/master.sway.config -- foot
 ```
 
 To open another application in an already-running Weld instance, use the
@@ -144,7 +144,7 @@ scripts/run-app foot
 The launcher forces common toolkits onto their native Wayland backends and
 disables X11 fallback.
 
-The standard distribution provides these backend-neutral shortcuts:
+The development example config provides these backend-neutral shortcuts:
 
 - `Alt+Enter`: launch foot
 - `Alt+Control+Shift+F`: launch Firefox
@@ -159,7 +159,7 @@ The standard distribution provides these backend-neutral shortcuts:
 - `Alt+Shift+O`: toggle output-topology diagnostics
 - `Alt+Shift+Escape`: exit Weld
 
-These defaults live in `examples/master.sway.config`, not the reusable plugins.
+These example bindings live in `examples/master.sway.config`, not the reusable plugins.
 That file configures Ctrl/Caps and left Alt/Windows swaps: logical Alt is the
 physical Windows key with those settings. Master reads explicit Weld input
 configuration in both nested and DRM modes.
@@ -170,13 +170,13 @@ Weld options precede an explicit `--` when a client is also present. Capture a
 settled client-plus-shell composition and exit with:
 
 ```text
-cargo run -- --screenshot target/weld-startup.png -- foot
+cargo run -- --config examples/master.sway.config --screenshot target/weld-startup.png -- foot
 ```
 
 Enable the restricted, loopback-only development protocol with:
 
 ```text
-cargo run -- --remote-debug -- foot
+cargo run -- --config examples/master.sway.config --remote-debug -- foot
 uv run --project tools/remote-debug weld-debug status
 uv run --project tools/remote-debug weld-debug screenshot target/weld-remote.png
 ```
@@ -217,10 +217,10 @@ scripts/run-smithay-drm-compositor-probe
 Run the production startup-output backend from a real TTY with:
 
 ```text
-scripts/run-weld-drm
-scripts/run-weld-drm --seconds 30 foot
-WELD_DRM_VALIDATE=1 scripts/run-weld-drm foot
-WELD_DRM_PACING_TRACE=1 scripts/run-weld-drm foot
+scripts/run-weld-drm --config examples/master.sway.config
+scripts/run-weld-drm --seconds 30 --config examples/master.sway.config -- foot
+WELD_DRM_VALIDATE=1 scripts/run-weld-drm --config examples/master.sway.config -- foot
+WELD_DRM_PACING_TRACE=1 scripts/run-weld-drm --config examples/master.sway.config -- foot
 ```
 
 `--seconds` starts its watchdog after compilation and sends Weld `SIGTERM` when
