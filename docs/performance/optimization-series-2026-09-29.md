@@ -109,13 +109,63 @@ headset playback run for this slice; transport tests use fixture media. Buffer
 import retirement is covered by the offscreen Vulkan fixture, rather than a
 real client destroying its protocol buffer before display.
 
+## 1c. Reuse source-tree bookkeeping and effective input regions
+
+Checkpoint: `32a5ad80`. The source tree now reuses its committed-node Vec,
+live-node HashSet, content-update HashMap, and retained-node Vec capacities.
+Collected nodes move into retained state after applying their buffer assignments.
+Scratch contents are drained/cleared before returning; only storage survives the
+turn. Protocol dispatch, synchronized-tree application, explicit-sync release
+ordering, initial SHM copying, and per-commit snapshot publication stay immediate.
+
+Effective input rectangles are cached by the ordered region definition and
+effective bounds. Pixel-only commits reuse them, and unchanged protocol regions
+are not cloned. Region edits, crop/size changes, and unmap/remap invalidate the
+cache. Explicit root input regions still use the full surface bounds rather than
+the cropped window bounds.
+
+A fresh optimized userspace sample (`orbit-affgq85i`, zero lost samples) put
+`SurfaceTreeState::update` at approximately **1.33% inclusive / 0.37% self** of
+sample weight. This is a short statistical sample, not an exact per-call timing.
+The sampled total was 17.10% CPU with 351.3 Blender viewport draws/s. Bevy
+schedule execution, including rendering schedules, remains much more material.
+
+Uninstrumented captures, all 20 seconds, validation off, 1815×1179 viewport:
+
+| State | Run | CPU | Blender viewport draws/s |
+| --- | --- | ---: | ---: |
+| Checkpoint | `orbit-66ux4i5p` | 14.45% | 333.3 |
+| Source cache | `orbit-snrxba8g` | 15.50% | 331.3 |
+| Source cache | `orbit-_hvkjcfr` | 16.35% | 350.4 |
+| Checkpoint, rebuilt | `orbit-0jz13o1z` | 15.45% | 339.3 |
+| Source cache, retained binary | `orbit-gfzyo0qm` | 13.80% | 335.2 |
+| Checkpoint, retained binary | `orbit-4tk_yr1o` | 17.15% | 352.6 |
+
+The last three runs alternate retained binaries without intervening compilation.
+The initially higher candidate measurements also occur on the original code.
+These results establish **no repeatable whole-compositor CPU improvement** and
+do not establish a regression. The allocation and recomputation reductions are
+structural; their timing effect is below what these variable short captures can
+isolate. Further source snapshot deferral is not the next priority for this
+workload, given the small sampled share. All captures exclude concurrent builds
+and other GPU tests.
+
+Verification: 135 core tests passed, including new input cache invalidation and
+storage-reuse coverage; two hardware/socket tests remain ignored in this run.
+Core all-target clippy passes with warnings denied. `scripts/check-host-runtime
+--shm-only` passed with 61 frame callbacks and 61 buffer releases, unmap/remap,
+client exit, host shutdown, and socket cleanup (`host-runtime-z7eez8h2`).
+Fable approved the source change. No new multi-subsurface protocol fixture,
+manual DRM run, or network-media run was added for this internal source change.
+
 ## Remaining priorities
 
-1. Earlier source-side snapshot coalescing or incremental state publication,
-   with explicit per-consumer readiness and preserved protocol/input semantics.
-2. Avoid empty or unchanged Bevy schedule/render work.
-3. Make per-wake host maintenance demand-driven.
-4. Skip the empty screenshot/readback encoder submission.
+1. Avoid empty or unchanged Bevy schedule/render work.
+2. Make per-wake host maintenance demand-driven.
+3. Skip the empty screenshot/readback encoder submission.
+4. Revisit source snapshot deferral/incremental publication if multi-window or
+   complex surface-tree profiles show material cost, preserving per-consumer
+   readiness and protocol/input semantics.
 
 Record each subsequent coherent slice separately, using the same optimized
 workload and fresh comparison captures. Keep the timing effect separate from

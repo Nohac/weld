@@ -67,6 +67,15 @@ pub(super) struct SurfaceTreeState {
     nodes: Vec<TreeNode>,
     root_geometry: Option<Rectangle<i32, Logical>>,
     next_layer_id: Option<u64>,
+    scratch: TreeUpdateScratch,
+}
+
+/// Reused between commits; protocol handles and pending uses are drained each turn.
+#[derive(Default)]
+struct TreeUpdateScratch {
+    committed: Vec<CommittedNode>,
+    live_ids: HashSet<ObjectId>,
+    content_updates: HashMap<ObjectId, PendingSurfaceBufferContent>,
 }
 
 impl Default for SurfaceTreeState {
@@ -76,6 +85,7 @@ impl Default for SurfaceTreeState {
             nodes: Vec::new(),
             root_geometry: None,
             next_layer_id: Some(1),
+            scratch: TreeUpdateScratch::default(),
         }
     }
 }
@@ -86,11 +96,9 @@ struct CachedSurfaceBuffer {
     view: Option<SurfaceContentView>,
     opaque: bool,
     client_mapped: bool,
-    input_region: Option<RegionAttributes>,
-    input_rects: Vec<Rectangle<i32, Logical>>,
+    input: SurfaceInputRegion,
 }
 
-#[derive(Clone)]
 struct TreeNode {
     surface: WlSurface,
     object_id: ObjectId,
@@ -104,7 +112,66 @@ struct CommittedNode {
     release_point: Option<DrmSyncPoint>,
     buffer_scale: i32,
     buffer_transform: wl_output::Transform,
-    input_region: Option<RegionAttributes>,
+    input_region: InputRegionUpdate,
+}
+
+enum InputRegionUpdate {
+    Unchanged,
+    Changed(Option<RegionAttributes>),
+}
+
+/// Effective rectangles depend on region and bounds; region changes invalidate the cache.
+#[derive(Default)]
+struct SurfaceInputRegion {
+    region: Option<RegionAttributes>,
+    bounds: Option<Rectangle<i32, Logical>>,
+    dirty: bool,
+    rects: Vec<Rectangle<i32, Logical>>,
+}
+
+impl SurfaceInputRegion {
+    fn matches(&self, region: Option<&RegionAttributes>) -> bool {
+        match (self.region.as_ref(), region) {
+            (None, None) => true,
+            (Some(previous), Some(current)) => {
+                previous.rects.len() == current.rects.len()
+                    && previous.rects.iter().zip(&current.rects).all(
+                        |((old_kind, old_rect), (kind, rect))| {
+                            old_rect == rect
+                                && matches!(
+                                    (old_kind, kind),
+                                    (RectangleKind::Add, RectangleKind::Add)
+                                        | (RectangleKind::Subtract, RectangleKind::Subtract)
+                                )
+                        },
+                    )
+            }
+            _ => false,
+        }
+    }
+
+    fn update(&mut self, update: &mut InputRegionUpdate) {
+        if let InputRegionUpdate::Changed(region) = update {
+            self.region = region.take();
+            self.dirty = true;
+        }
+    }
+
+    fn refresh(&mut self, bounds: Option<Rectangle<i32, Logical>>) {
+        if !self.dirty && self.bounds == bounds {
+            return;
+        }
+        self.bounds = bounds;
+        self.dirty = false;
+        self.rects.clear();
+        if let Some(bounds) = bounds {
+            if let Some(region) = &self.region {
+                self.rects = effective_region(region, bounds);
+            } else {
+                self.rects.push(bounds);
+            }
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -139,7 +206,7 @@ impl SurfaceTreeState {
         )
         .entered();
 
-        let mut committed = Vec::new();
+        let mut scratch = std::mem::take(&mut self.scratch);
         let mut root_geometry = None;
         with_surface_tree_upward(
             root,
@@ -163,7 +230,16 @@ impl SurfaceTreeState {
                 let syncobj = syncobj.current();
                 syncobj.acquire_point = None;
                 let release_point = syncobj.release_point.take();
-                committed.push(CommittedNode {
+                let input_region = if self
+                    .buffers
+                    .get(&surface.id())
+                    .is_some_and(|cached| cached.input.matches(current.input_region.as_ref()))
+                {
+                    InputRegionUpdate::Unchanged
+                } else {
+                    InputRegionUpdate::Changed(current.input_region.clone())
+                };
+                scratch.committed.push(CommittedNode {
                     node: TreeNode {
                         surface: surface.clone(),
                         object_id: surface.id(),
@@ -174,30 +250,38 @@ impl SurfaceTreeState {
                     release_point,
                     buffer_scale: current.buffer_scale,
                     buffer_transform: current.buffer_transform,
-                    input_region: current.input_region.clone(),
+                    input_region,
                 });
             },
             |_, _, _| true,
         );
         self.root_geometry = root_geometry;
 
-        let live_ids = committed
-            .iter()
-            .map(|committed| committed.node.object_id.clone())
-            .collect::<HashSet<_>>();
+        scratch.live_ids.extend(
+            scratch
+                .committed
+                .iter()
+                .map(|committed| committed.node.object_id.clone()),
+        );
         self.buffers
-            .retain(|object_id, _| live_ids.contains(object_id));
-        self.nodes = committed
-            .iter()
-            .map(|committed| committed.node.clone())
-            .collect();
+            .retain(|object_id, _| scratch.live_ids.contains(object_id));
+        scratch.live_ids.clear();
+        self.nodes.clear();
 
-        let mut content_updates = HashMap::new();
-        for committed in committed {
-            self.apply_commit(surface_id, committed, releases, &mut content_updates);
+        for mut committed in scratch.committed.drain(..) {
+            self.apply_commit(
+                surface_id,
+                &mut committed,
+                releases,
+                &mut scratch.content_updates,
+            );
+            self.nodes.push(committed.node);
         }
         self.refresh_input_rects(&root.id());
-        self.snapshot(root.id(), content_updates)
+        let snapshot = self.snapshot(root.id(), &mut scratch.content_updates);
+        scratch.content_updates.clear();
+        self.scratch = scratch;
+        snapshot
     }
 
     pub(super) fn remove_surface(
@@ -228,7 +312,7 @@ impl SurfaceTreeState {
             .retain(|node| !removed_ids.contains(&node.object_id));
         self.buffers
             .retain(|object_id, _| !removed_ids.contains(object_id));
-        self.snapshot(root.id(), HashMap::new())
+        self.snapshot(root.id(), &mut HashMap::new())
     }
 
     pub(super) fn client_mapped(&self, root: &WlSurface) -> bool {
@@ -240,15 +324,15 @@ impl SurfaceTreeState {
     fn apply_commit(
         &mut self,
         surface_id: SurfaceId,
-        committed: CommittedNode,
+        committed: &mut CommittedNode,
         releases: &mut DmabufReleaseStore,
         content_updates: &mut HashMap<ObjectId, PendingSurfaceBufferContent>,
     ) {
-        let object_id = committed.node.object_id;
+        let object_id = committed.node.object_id.clone();
         if self.layer_for(&object_id).is_none() {
             release_without_sampling(
-                committed.assignment,
-                committed.release_point,
+                committed.assignment.take(),
+                committed.release_point.take(),
                 "surface layer identity exhaustion",
             );
             warn!(?surface_id, surface = ?object_id, "could not allocate a surface layer id");
@@ -258,9 +342,9 @@ impl SurfaceTreeState {
             .buffers
             .get_mut(&object_id)
             .expect("layer was just inserted");
-        cached.input_region = committed.input_region;
+        cached.input.update(&mut committed.input_region);
         let release_point = retain_release_for_import(
-            committed.release_point,
+            committed.release_point.take(),
             matches!(
                 committed.assignment.as_ref(),
                 Some(BufferAssignment::NewBuffer(_))
@@ -273,7 +357,7 @@ impl SurfaceTreeState {
             },
         );
 
-        match committed.assignment {
+        match committed.assignment.take() {
             Some(BufferAssignment::NewBuffer(buffer)) => {
                 let imported = import_buffer(
                     &committed.node.surface,
@@ -348,8 +432,7 @@ impl SurfaceTreeState {
                 view: None,
                 opaque: false,
                 client_mapped: false,
-                input_region: None,
-                input_rects: Vec::new(),
+                input: SurfaceInputRegion::default(),
             },
         );
         Some(layer)
@@ -358,7 +441,7 @@ impl SurfaceTreeState {
     fn snapshot(
         &self,
         root_id: ObjectId,
-        mut content_updates: HashMap<ObjectId, PendingSurfaceBufferContent>,
+        content_updates: &mut HashMap<ObjectId, PendingSurfaceBufferContent>,
     ) -> PendingSurfaceTreeSnapshot {
         let _snapshot_span = tracing::trace_span!(
             target: crate::PROFILE_TARGET,
@@ -432,7 +515,8 @@ impl SurfaceTreeState {
             layer: cached.layer,
             position: LogicalPoint::new(node.position.x as f32, node.position.y as f32),
             regions: cached
-                .input_rects
+                .input
+                .rects
                 .iter()
                 .map(|rectangle| SurfaceInputRect {
                     position: LogicalPoint::new(rectangle.loc.x as f32, rectangle.loc.y as f32),
@@ -447,18 +531,14 @@ impl SurfaceTreeState {
             let Some(cached) = self.buffers.get_mut(&node.object_id) else {
                 continue;
             };
-            let Some(view) = cached.view else {
-                cached.input_rects.clear();
-                continue;
-            };
-            let bounds = logical_view_bounds(view);
-            cached.input_rects = match &cached.input_region {
-                Some(region) => effective_region(region, bounds),
-                None if &node.object_id == root_id => {
-                    vec![displayed_root_bounds(view, self.root_geometry)]
+            let bounds = cached.view.map(|view| {
+                if cached.input.region.is_none() && &node.object_id == root_id {
+                    displayed_root_bounds(view, self.root_geometry)
+                } else {
+                    logical_view_bounds(view)
                 }
-                None => vec![bounds],
-            };
+            });
+            cached.input.refresh(bounds);
         }
     }
 
@@ -473,7 +553,8 @@ impl SurfaceTreeState {
                 cached.layer == layer
                     && cached.client_mapped
                     && cached
-                        .input_rects
+                        .input
+                        .rects
                         .iter()
                         .any(|rectangle| rectangle.contains(local))
             })
@@ -772,13 +853,101 @@ fn release_without_sampling(
 #[cfg(test)]
 mod tests {
     use super::{
-        crop_root_view, displayed_root_bounds, effective_region, retain_release_for_import,
+        InputRegionUpdate, SurfaceInputRegion, crop_root_view, displayed_root_bounds,
+        effective_region, retain_release_for_import,
     };
     use crate::surface::{LogicalPoint, SurfaceContentView};
     use smithay::{
         utils::Rectangle,
         wayland::compositor::{RectangleKind, RegionAttributes},
     };
+
+    #[test]
+    fn unchanged_input_region_reuses_effective_rectangles() {
+        let bounds = Rectangle::new((0, 0).into(), (100, 80).into());
+        let region = RegionAttributes {
+            rects: vec![
+                (RectangleKind::Add, bounds),
+                (
+                    RectangleKind::Subtract,
+                    Rectangle::new((20, 10).into(), (30, 40).into()),
+                ),
+            ],
+        };
+        let mut input = SurfaceInputRegion::default();
+        input.update(&mut InputRegionUpdate::Changed(Some(region.clone())));
+        input.refresh(Some(bounds));
+        assert_eq!(input.rects, effective_region(&region, bounds));
+        let storage = input.rects.as_ptr();
+        for _ in 0..100 {
+            assert!(input.matches(Some(&region)));
+            input.update(&mut InputRegionUpdate::Unchanged);
+            input.refresh(Some(bounds));
+            assert_eq!(input.rects.as_ptr(), storage);
+            assert!(!input.dirty);
+        }
+    }
+
+    #[test]
+    fn region_cache_distinguishes_order_operations_and_default_input() {
+        let bounds = Rectangle::new((0, 0).into(), (100, 80).into());
+        let mut region = RegionAttributes {
+            rects: vec![(RectangleKind::Add, bounds)],
+        };
+        let mut input = SurfaceInputRegion::default();
+        input.update(&mut InputRegionUpdate::Changed(Some(region.clone())));
+        input.refresh(Some(bounds));
+        assert_eq!(input.rects, [bounds]);
+        region.rects[0].0 = RectangleKind::Subtract;
+        assert!(!input.matches(Some(&region)));
+        input.update(&mut InputRegionUpdate::Changed(Some(region.clone())));
+        input.refresh(Some(bounds));
+        assert!(input.rects.is_empty());
+
+        region.rects.push((RectangleKind::Add, bounds));
+        input.update(&mut InputRegionUpdate::Changed(Some(region.clone())));
+        input.refresh(Some(bounds));
+        assert_eq!(input.rects, [bounds]);
+        region.rects.reverse();
+        assert!(!input.matches(Some(&region)));
+        input.update(&mut InputRegionUpdate::Changed(Some(region)));
+        input.refresh(Some(bounds));
+        assert!(input.rects.is_empty());
+
+        input.update(&mut InputRegionUpdate::Changed(Some(
+            RegionAttributes::default(),
+        )));
+        input.refresh(Some(bounds));
+        assert!(input.rects.is_empty());
+        assert!(!input.matches(None));
+        input.update(&mut InputRegionUpdate::Changed(None));
+        input.refresh(Some(bounds));
+        assert!(input.matches(None));
+        assert_eq!(input.rects, [bounds]);
+    }
+
+    #[test]
+    fn input_bounds_refresh_after_crop_resize_unmap_and_remap() {
+        let bounds = Rectangle::new((5, 10).into(), (100, 80).into());
+        let resized = Rectangle::new((15, 20).into(), (60, 40).into());
+        let mut input = SurfaceInputRegion::default();
+        input.refresh(Some(bounds));
+        assert_eq!(input.rects, [bounds]);
+        input.refresh(Some(resized));
+        assert_eq!(input.rects, [resized]);
+        input.refresh(None);
+        assert!(input.rects.is_empty());
+        let region = RegionAttributes {
+            rects: vec![(RectangleKind::Add, bounds)],
+        };
+        input.update(&mut InputRegionUpdate::Changed(Some(region)));
+        input.refresh(None);
+        assert!(input.rects.is_empty());
+        input.refresh(Some(resized));
+        assert_eq!(input.rects, [resized]);
+        input.refresh(Some(bounds));
+        assert_eq!(input.rects, [bounds]);
+    }
 
     #[test]
     fn explicit_release_points_are_retained_only_for_new_buffer_imports() {
