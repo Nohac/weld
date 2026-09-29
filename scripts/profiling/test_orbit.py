@@ -4,6 +4,7 @@ from importlib.machinery import SourceFileLoader
 from importlib.util import module_from_spec, spec_from_loader
 from pathlib import Path
 import struct
+import subprocess
 import unittest
 from unittest.mock import Mock, patch
 
@@ -15,6 +16,23 @@ loader.exec_module(orbit)
 
 
 class OrbitTests(unittest.TestCase):
+    def test_drm_launcher_rejects_non_tty_before_starting_tools(self):
+        result = subprocess.run(
+            [str(Path(__file__).with_name('drm-orbit'))],
+            stdin=subprocess.DEVNULL, capture_output=True, text=True,
+        )
+        self.assertEqual(result.returncode, 2)
+        self.assertIn('run from a text TTY', result.stderr)
+
+    def test_prepared_perf_binary_requires_no_build(self):
+        result = subprocess.run(
+            [str(Path(__file__).with_name('run-perf')), '--name', 'test',
+             '--instructions', 'test', '--binary', '/not-a-binary'],
+            stdin=subprocess.DEVNULL, capture_output=True, text=True,
+        )
+        self.assertEqual(result.returncode, 2)
+        self.assertIn('--binary requires --no-build', result.stderr)
+
     def test_abort_explicitly_releases_middle_before_closing_helper(self):
         pointer = Mock()
         orbit.close_pointer(pointer, True)
@@ -77,6 +95,18 @@ class OrbitTests(unittest.TestCase):
         with patch.object(Path, 'read_text', return_value='123 (name) with spaces) ' + ' '.join(fields)), \
                 patch.object(orbit.os, 'sysconf', return_value=100):
             self.assertEqual(orbit.cpu(123), [2.5, 0.75])
+
+    def test_thread_snapshot_preserves_names_and_skips_exited_threads(self):
+        fields = ['S'] + ['0'] * 10 + ['250', '75'] + ['0'] * 10
+        for vanished in (FileNotFoundError, ProcessLookupError):
+            with self.subTest(vanished=vanished):
+                with patch.object(Path, 'glob', return_value=[Path('/proc/123/task/123'), Path('/proc/123/task/124')]), \
+                        patch.object(Path, 'read_text', side_effect=[
+                            '123 (worker) name) ' + ' '.join(fields), 'worker) name\n', vanished(),
+                        ]), patch.object(orbit.os, 'sysconf', return_value=100):
+                    self.assertEqual(orbit.thread_cpu(123), {
+                        '123': {'name': 'worker) name', 'user_seconds': 2.5, 'system_seconds': 0.75},
+                    })
 
 
 if __name__ == '__main__':

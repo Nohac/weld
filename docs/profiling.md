@@ -111,19 +111,50 @@ this process tree), `--client-vsync` (Mesa `vblank_mode=3` for Blender only), an
 `--client-wayland-log` (count client protocol messages). Protocol logging
 perturbs timing; use it separately from baseline CPU measurements.
 
-`--perf /path/to/perf` records userspace stacks. `--profile perf --trace` builds
+`--perf /path/to/perf` records userspace stacks. `--profile optimized` builds
+an optimized, symbolized binary **without Tracy** for baseline CPU measurements.
+`--profile perf --trace` builds
 an optimized, symbolized, frame-pointer-enabled Tracy binary and requires
 `tracy-capture`. This can require a substantial build. The runner disables
 Tracy's own sampling/symbol worker so external perf owns sampling, limits each
 capture file to 256 MiB and the collector memory to 512 MiB, and disables core
 dumps. Keep the executable for symbol resolution after capture. Trace timings
 and userspace sample percentages complement process CPU totals; they do not
-replace them.
+replace them. Detailed tracing can materially increase CPU use; compare against
+the non-tracing binary before attributing CPU costs to the compositor.
+
+The optimized variants are retained as `target/perf/weldwm-orbit-optimized`
+and `target/perf/weldwm-orbit-perf` so switching features does not overwrite the
+executable needed to symbolize a previous capture. `--no-build` reuses that
+variant. Use `--jobs 6` to increase compilation parallelism; the default is two.
+`threads.json` records per-thread CPU counters at both capture boundaries;
+threads that exit during the interval can make their sum smaller than the
+process total. `--perf-frequency` changes the sampling frequency (default 499),
+and `--call-graph fp|dwarf` overrides unwinding (optimized defaults to frame
+pointers, dev to 16 KiB DWARF stacks).
 Long dev captures with DWARF stacks can exceed the file bound and fail; use a
 short capture or frame-pointer perf profile instead of raising limits blindly.
 
 See the [Blender orbit investigation](performance/blender-orbit-2026-09-28.md)
 for the measured buffer-release storm and proposed follow-up work.
+
+For the matching manual DRM capture, switch to a text TTY and run:
+
+```sh
+scripts/profiling/drm-orbit
+```
+
+Hold middle mouse and orbit continuously until Weld exits. The launcher uses
+the prepared non-Tracy optimized binary, factory Blender settings, disabled
+Vulkan validation, disabled core dumps, and a 256 MiB per-file capture bound.
+It delegates the six-second warmup, three-second sampling preflight, twenty-second
+capture, process cleanup, and flamegraph generation to `run-perf`. Artifacts go
+under `target/perf-traces`. Use `--build` to refresh the profiling binary with
+six Cargo jobs before launching. Run it from the same development environment
+as the nested tests; it does not take over an existing graphical session.
+
+The [post-fix cost analysis](performance/render-costs-2026-09-29.md) separates
+uninstrumented CPU totals, CPU sample attribution, and instrumented call counts.
 
 ### Generic workload runner
 

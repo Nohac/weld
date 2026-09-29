@@ -81,6 +81,23 @@ def cpu(pid):
     return [int(fields[11]) / ticks, int(fields[12]) / ticks]
 
 
+def thread_cpu(pid):
+    result = {}
+    ticks = os.sysconf('SC_CLK_TCK')
+    for task in Path(f'/proc/{pid}/task').glob('*'):
+        try:
+            fields = (task / 'stat').read_text().rsplit(') ', 1)[1].split()
+            result[task.name] = {
+                'name': (task / 'comm').read_text().strip(),
+                'user_seconds': int(fields[11]) / ticks,
+                'system_seconds': int(fields[12]) / ticks,
+            }
+        except (FileNotFoundError, ProcessLookupError):
+            # Threads may exit between enumeration and reading their counters.
+            continue
+    return result
+
+
 def hardware():
     paths = list(Path('/sys/devices/system/cpu/cpufreq').glob('policy*/scaling_cur_freq'))
     paths += list(Path('/sys/class/drm').glob('card*/device/gpu_busy_percent'))
@@ -127,7 +144,9 @@ def close_pointer(pointer, middle_held):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--mode', choices=['weld', 'sway'], default='weld')
-    parser.add_argument('--profile', choices=['dev', 'perf'], default='dev')
+    parser.add_argument('--profile', choices=['dev', 'perf', 'optimized'], default='dev',
+                        help='dev: development; perf: optimized with Tracy; optimized: no Tracy')
+    parser.add_argument('--jobs', type=int, default=2, help='Concurrent Cargo build jobs')
     parser.add_argument('--config', type=Path, help='Required for Weld; explicitly selects WM policy')
     parser.add_argument('--no-build', action='store_true')
     parser.add_argument('--seconds', type=int, default=20)
@@ -139,10 +158,14 @@ def main():
     parser.add_argument('--client-wayland-log', action='store_true', help='Protocol-count probe; logging perturbs CPU timing')
     parser.add_argument('--client-vsync', action='store_true', help='Diagnostic Mesa vblank_mode=3 for Blender only')
     parser.add_argument('--perf', type=Path, help='Optional perf executable for CPU stacks')
+    parser.add_argument('--perf-frequency', type=int, default=499)
+    parser.add_argument('--call-graph', choices=['fp', 'dwarf'], help='Override profile-default CPU unwinding')
     parser.add_argument('--trace', action='store_true', help='Capture Tracy from the perf profile')
     args = parser.parse_args()
     if not 1 <= args.seconds <= 120 or not 1 <= args.hz <= 1000 or not 0 <= args.warmup <= 60:
         parser.error('seconds must be 1..120, hz 1..1000, warmup 0..60')
+    if not 1 <= args.jobs <= 32 or not 1 <= args.perf_frequency <= 1000:
+        parser.error('jobs must be 1..32 and perf-frequency 1..1000')
     if args.mode == 'weld' and (args.config is None or not args.config.is_file()):
         parser.error('Weld requires --config pointing to a readable configuration')
     if args.input in ('motion', 'orbit') and (args.pointer_helper is None or not args.pointer_helper.is_file()):
@@ -159,18 +182,26 @@ def main():
         environment['TRACY_NO_' + feature] = '1'
     if args.validation == 'off':
         environment['VK_LOADER_LAYERS_DISABLE'] = 'VK_LAYER_KHRONOS_validation'
-    if args.profile == 'perf':
+    if args.profile in ('perf', 'optimized'):
         environment['RUSTFLAGS'] = PERF_FLAGS
     if args.mode == 'weld' and not args.no_build:
-        build = ['cargo', 'build', '--locked', '-j2']
-        if args.profile == 'perf':
-            build += ['--profile', 'perf', '--features', 'profiling-tracy']
+        build = ['cargo', 'build', '--locked', '-j', str(args.jobs)]
+        if args.profile in ('perf', 'optimized'):
+            build += ['--profile', 'perf']
+            if args.trace:
+                build += ['--features', 'profiling-tracy']
         subprocess.run(build, cwd=ROOT, env=environment, check=True)
+        if args.profile in ('perf', 'optimized'):
+            # Stable executable paths keep sampled symbols available when Cargo
+            # switches the profiling-tracy feature for the other measurement.
+            subprocess.run(['cp', '--reflink=auto', '--preserve=mode,timestamps',
+                            str(ROOT / 'target/perf/weldwm'),
+                            str(ROOT / f'target/perf/weldwm-orbit-{args.profile}')], check=True)
     # Apply the capture bound after compilation: symbolized executables exceed it.
     resource.setrlimit(resource.RLIMIT_FSIZE, (256 * 1024 * 1024, 256 * 1024 * 1024))
-    if args.profile == 'perf' and args.mode == 'weld':
+    if args.profile in ('perf', 'optimized') and args.mode == 'weld':
         # The optimized profile is standalone and must not rebuild during capture.
-        cargo = [str(ROOT / 'target/perf/weldwm')]
+        cargo = [str(ROOT / f'target/perf/weldwm-orbit-{args.profile}')]
     elif args.mode == 'weld':
         cargo = [str(ROOT / 'target/debug/weldwm')]
         rust_libraries = subprocess.check_output(['rustc', '--print', 'target-libdir'], text=True).strip()
@@ -241,7 +272,9 @@ def main():
                     pointer.stdin.flush()
                     middle_held = True
             if args.perf:
-                sampler = subprocess.Popen([str(args.perf), 'record', '--no-buildid-cache', '-m', '64', '-e', 'cpu-clock:u', '-F', '499', '--call-graph', 'fp' if args.profile == 'perf' else 'dwarf,16384', '-p', str(pid), '-o', str(run / 'cpu.data'), '--', 'sleep', str(args.seconds)], stdout=perf_log, stderr=subprocess.STDOUT, start_new_session=True)
+                call_graph = args.call_graph or ('dwarf' if args.profile == 'dev' else 'fp')
+                sampler = subprocess.Popen([str(args.perf), 'record', '--no-buildid-cache', '-m', '64', '-e', 'cpu-clock:u', '-F', str(args.perf_frequency), '--call-graph', 'dwarf,16384' if call_graph == 'dwarf' else 'fp', '-p', str(pid), '-o', str(run / 'cpu.data'), '--', 'sleep', str(args.seconds)], stdout=perf_log, stderr=subprocess.STDOUT, start_new_session=True)
+            threads_before = thread_cpu(pid)
             before = cpu(pid)
             started = time.monotonic()
             last_check = 0.0
@@ -275,6 +308,7 @@ def main():
                     time.sleep(0.05)
             elapsed = time.monotonic() - started
             after = cpu(pid)
+            threads_after = thread_cpu(pid)
             log.write('WELD_CAPTURE_END\n')
             log.flush()
             trace_complete = collector is None or collector.poll() is None
@@ -284,6 +318,7 @@ def main():
                       'trace_alive_at_capture_end': trace_complete if collector else None}
             (run / 'cpu.json').write_text(json.dumps(result, indent=2))
             (run / 'hardware.json').write_text(json.dumps(hardware_samples, indent=2))
+            (run / 'threads.json').write_text(json.dumps({'before': threads_before, 'after': threads_after}, indent=2))
             print('CAPTURE END', json.dumps(result), flush=True)
             if middle_held:
                 pointer.stdin.write('b 0\n')

@@ -20,6 +20,7 @@ Options:
   --stack-bytes BYTES  DWARF stack dump size (default: 16384)
   --output-base PATH   Artifact path without an extension
   --no-build           Reuse target/perf/weldwm after validating it
+  --binary PATH        Sample this prepared executable (requires --no-build)
   --no-print-instructions
                        Do not repeat instructions printed by a wrapper
   --force              Replace an explicitly selected artifact set
@@ -58,6 +59,7 @@ mmap_pages=64
 stack_bytes=16384
 output_base=""
 build_binary=true
+prepared_binary=""
 print_instructions=true
 force=false
 readonly PREFLIGHT_SECONDS=3
@@ -115,6 +117,11 @@ while (( $# > 0 )); do
             build_binary=false
             shift
             ;;
+        --binary)
+            require_value "$@"
+            prepared_binary="$2"
+            shift 2
+            ;;
         --no-print-instructions)
             print_instructions=false
             shift
@@ -145,6 +152,10 @@ fi
 [[ -n "${name}" ]] || fail "--name is required"
 [[ "${name}" =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]*$ ]] || fail "--name is not filename-safe"
 [[ -n "${instructions}" ]] || fail "--instructions is required"
+[[ -z "${prepared_binary}" || "${build_binary}" == false ]] || fail "--binary requires --no-build"
+if [[ -n "${prepared_binary}" ]]; then
+    prepared_binary="$(realpath -- "${prepared_binary}")"
+fi
 [[ "${backend}" == "drm" || "${backend}" == "nested" ]] || fail "--backend must be drm or nested"
 for value_name in warmup_seconds duration_seconds frequency mmap_pages stack_bytes; do
     value="${!value_name}"
@@ -235,8 +246,8 @@ if [[ "${build_binary}" == true ]]; then
     printf 'Building optimized symbolized Weld before taking over the TTY...\n' >&2
     cargo build --profile perf -p weldwm
 fi
-weld_binary="${repository_root}/target/perf/weldwm"
-[[ -x "${weld_binary}" ]] || fail "missing ${weld_binary}; omit --no-build"
+weld_binary="${prepared_binary:-${repository_root}/target/perf/weldwm}"
+[[ -x "${weld_binary}" ]] || fail "missing executable ${weld_binary}; build it before using --no-build"
 if ldd "${weld_binary}" | rg -q 'libbevy_dylib'; then
     fail "the perf binary unexpectedly links libbevy_dylib"
 fi

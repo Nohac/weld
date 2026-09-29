@@ -1,0 +1,53 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+usage() {
+    cat <<'EOF'
+Usage: scripts/profiling/drm-orbit [--build]
+
+Run from a text TTY. Hold middle mouse and orbit Blender until Weld exits.
+Captures 20 seconds after warmup and a short sampling-quality check, then
+restores the TTY and writes a flamegraph under target/perf-traces.
+
+Uses the prepared, optimized, non-Tracy orbit binary without recompiling.
+--build refreshes that binary first with six Cargo jobs.
+Vulkan validation and core dumps are disabled; capture files are bounded.
+Blender uses factory settings without saving them.
+EOF
+}
+
+build=false
+case "${1:-}" in
+    --build) build=true; shift ;;
+    -h|--help) usage; exit 0 ;;
+    "") ;;
+    *) usage >&2; exit 2 ;;
+esac
+(( $# == 0 )) || { usage >&2; exit 2; }
+[[ -t 0 && -t 1 && "$(tty)" =~ ^/dev/tty[0-9]+$ ]] || {
+    printf 'drm-orbit: run from a text TTY, not a desktop terminal.\n' >&2
+    exit 2
+}
+
+script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+repository_root="$(cd -- "${script_dir}/../.." && pwd)"
+cd -- "${repository_root}"
+binary="${repository_root}/target/perf/weldwm-orbit-optimized"
+ulimit -c 0
+if [[ "${build}" == true ]]; then
+    RUSTFLAGS='-C link-arg=-fuse-ld=lld -C force-frame-pointers=yes' \
+        cargo build --profile perf --locked -j6
+    cp --reflink=auto --preserve=mode,timestamps target/perf/weldwm "${binary}"
+fi
+[[ -x "${binary}" ]] || {
+    printf 'drm-orbit: missing profiling binary; run again with --build.\n' >&2
+    exit 2
+}
+# Apply the file bound after compilation; symbolized executables exceed it.
+ulimit -f 262144
+export VK_LOADER_LAYERS_DISABLE=VK_LAYER_KHRONOS_validation
+exec "${script_dir}/run-perf" --backend drm --no-build --binary "${binary}" \
+    --name blender-orbit-drm --warmup 6 --duration 20 \
+    --instructions 'Hold middle mouse and orbit continuously until Weld exits.' \
+    -- blender --factory-startup --python "${script_dir}/blender-workload.py"
