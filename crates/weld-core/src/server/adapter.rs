@@ -285,7 +285,7 @@ impl WaylandClientAdapter {
                 }
             })
             .collect();
-        ClientSurfaceCommit {
+        ClientSurfaceCommit::from(weld_client::ClientSurfaceState {
             revision: ClientCommitRevision::new(revision),
             alpha_mode: SurfaceAlphaMode::Preserved,
             mapped: client_mapped,
@@ -294,7 +294,7 @@ impl WaylandClientAdapter {
             overlays,
             inputs,
             buffers,
-        }
+        })
     }
 
     fn allocate_buffer_use(&mut self) -> Option<u64> {

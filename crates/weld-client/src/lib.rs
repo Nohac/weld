@@ -13,6 +13,7 @@ mod id;
 mod input;
 mod input_geometry;
 mod metadata;
+mod pending;
 mod presentation;
 mod surface;
 #[cfg(feature = "serde")]
@@ -45,6 +46,7 @@ pub use input::{
 };
 pub use input_geometry::SurfaceInputGeometry;
 pub use metadata::{ClientSurfaceMetadata, MAX_SURFACE_LABEL_BYTES, SurfaceMetadataError};
+pub use pending::{PendingClientEvents, PendingEventUpdate};
 pub use presentation::{
     ClientPresentationClaim, ClientPresentationUpdate, PresentationGroupId, PresentationRate,
     PresentationRole, SurfaceBitratePreference,
@@ -52,10 +54,10 @@ pub use presentation::{
 pub use surface::{
     ClientCommitRevision, ClientEventQueue, ClientFocusRequest, ClientRequest, ClientSurfaceCommit,
     ClientSurfaceEvent, ClientSurfaceEventKind, ClientSurfaceRequest, ClientSurfaceRequestKind,
-    ClientSurfaceRole, PopupState, SurfaceAlphaMode, SurfaceBufferChange, SurfaceBufferUpdate,
-    SurfaceContentView, SurfaceInputPlacement, SurfaceInputRect, SurfaceLayerPlacement,
-    SurfaceWindowGeometry, ToplevelInteractionRequestKind, ToplevelState, WindowDecoration,
-    WindowResizeEdge,
+    ClientSurfaceRole, ClientSurfaceState, PopupState, SurfaceAlphaMode, SurfaceBufferChange,
+    SurfaceBufferUpdate, SurfaceContentView, SurfaceInputPlacement, SurfaceInputRect,
+    SurfaceLayerPlacement, SurfaceWindowGeometry, ToplevelInteractionRequestKind, ToplevelState,
+    WindowDecoration, WindowResizeEdge,
 };
 #[cfg(feature = "serde")]
 pub use wire::{

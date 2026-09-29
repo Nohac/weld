@@ -1419,16 +1419,18 @@ mod tests {
     fn mapping_event(surface: ClientSurfaceId, mapped: bool) -> ClientSurfaceEvent {
         ClientSurfaceEvent {
             surface,
-            kind: ClientSurfaceEventKind::Commit(crate::ClientSurfaceCommit {
-                revision: crate::ClientCommitRevision::new(1),
-                alpha_mode: Default::default(),
-                mapped,
-                root: None,
-                window_geometry: None,
-                overlays: Vec::new(),
-                inputs: Vec::new(),
-                buffers: Vec::new(),
-            }),
+            kind: ClientSurfaceEventKind::Commit(crate::ClientSurfaceCommit::from(
+                crate::ClientSurfaceState {
+                    revision: crate::ClientCommitRevision::new(1),
+                    alpha_mode: Default::default(),
+                    mapped,
+                    root: None,
+                    window_geometry: None,
+                    overlays: Vec::new(),
+                    inputs: Vec::new(),
+                    buffers: Vec::new(),
+                },
+            )),
         }
     }
 

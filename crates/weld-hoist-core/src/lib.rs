@@ -219,16 +219,18 @@ mod tests {
         let surface = source(ClientSourceId::new(0), 7);
         upstream.borrow_mut().events.push(ClientSurfaceEvent {
             surface,
-            kind: ClientSurfaceEventKind::Commit(ClientSurfaceCommit {
-                revision: ClientCommitRevision::new(1),
-                alpha_mode: Default::default(),
-                mapped: true,
-                root: None,
-                window_geometry: None,
-                overlays: Vec::new(),
-                inputs: Vec::new(),
-                buffers: Vec::new(),
-            }),
+            kind: ClientSurfaceEventKind::Commit(ClientSurfaceCommit::from(
+                weld_client::ClientSurfaceState {
+                    revision: ClientCommitRevision::new(1),
+                    alpha_mode: Default::default(),
+                    mapped: true,
+                    root: None,
+                    window_geometry: None,
+                    overlays: Vec::new(),
+                    inputs: Vec::new(),
+                    buffers: Vec::new(),
+                },
+            )),
         });
         upstream.borrow_mut().events.push(ClientSurfaceEvent {
             surface,
@@ -459,19 +461,21 @@ mod tests {
         .expect("matching source");
         let commit = |revision, change| ClientSurfaceEvent {
             surface,
-            kind: ClientSurfaceEventKind::Commit(ClientSurfaceCommit {
-                revision: ClientCommitRevision::new(revision),
-                alpha_mode: Default::default(),
-                mapped: true,
-                root: None,
-                window_geometry: None,
-                overlays: Vec::new(),
-                inputs: Vec::new(),
-                buffers: vec![SurfaceBufferUpdate {
-                    layer: weld_client::SurfaceLayerId::new(1),
-                    change,
-                }],
-            }),
+            kind: ClientSurfaceEventKind::Commit(ClientSurfaceCommit::from(
+                weld_client::ClientSurfaceState {
+                    revision: ClientCommitRevision::new(revision),
+                    alpha_mode: Default::default(),
+                    mapped: true,
+                    root: None,
+                    window_geometry: None,
+                    overlays: Vec::new(),
+                    inputs: Vec::new(),
+                    buffers: vec![SurfaceBufferUpdate {
+                        layer: weld_client::SurfaceLayerId::new(1),
+                        change,
+                    }],
+                },
+            )),
         };
         upstream.borrow_mut().events.push(commit(
             1,

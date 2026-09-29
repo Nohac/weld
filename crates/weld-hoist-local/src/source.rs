@@ -319,22 +319,24 @@ mod tests {
             session,
             event: ClientSurfaceEvent {
                 surface,
-                kind: ClientSurfaceEventKind::Commit(ClientSurfaceCommit {
-                    revision: ClientCommitRevision::new(1),
-                    alpha_mode: Default::default(),
-                    mapped: true,
-                    root: None,
-                    window_geometry: None,
-                    overlays: Vec::new(),
-                    inputs: Vec::new(),
-                    buffers: vec![SurfaceBufferUpdate {
-                        layer: SurfaceLayerId::new(1),
-                        change: SurfaceBufferChange::Replaced {
-                            metadata,
-                            buffer: lease,
-                        },
-                    }],
-                }),
+                kind: ClientSurfaceEventKind::Commit(ClientSurfaceCommit::from(
+                    weld_client::ClientSurfaceState {
+                        revision: ClientCommitRevision::new(1),
+                        alpha_mode: Default::default(),
+                        mapped: true,
+                        root: None,
+                        window_geometry: None,
+                        overlays: Vec::new(),
+                        inputs: Vec::new(),
+                        buffers: vec![SurfaceBufferUpdate {
+                            layer: SurfaceLayerId::new(1),
+                            change: SurfaceBufferChange::Replaced {
+                                metadata,
+                                buffer: lease,
+                            },
+                        }],
+                    },
+                )),
             },
         })
         .expect("source surface");

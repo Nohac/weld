@@ -51,6 +51,64 @@ client destroying a DMA-BUF `wl_buffer` before display. There is no new manual
 DRM or network-hoist regression run for this slice. Clippy for the affected
 crates with test support and warnings denied passed.
 
+## 1b. Shared snapshots and consumer-owned admission
+
+Checkpoint: `a0b548a`. Pending-commit policy now lives in `weld-client` and is
+used by the runtime event queue, local presenter, and encoded source. Consumers
+share reference-counted commit state; cloning a commit retains its geometry and
+inventory vectors without copying them. Mutation is explicitly copy-on-write,
+and an admitted consumer takes uniquely owned vectors directly. Retained-buffer
+merging no longer builds a temporary hash map. Encoded alpha conversion happens
+at wire admission, so queued commits retain the shared snapshot unchanged.
+
+Bevy's second, prepared-event coalescer was removed. It could otherwise collapse
+the map/unmap transitions preserved by the earlier neutral queue. Prepared
+events now apply in admission order; the pre-role image cache remains local to
+presentation and carries prepared content without temporary lookup collections.
+
+All captures below used the same 1815×1179 Blender viewport, optimized profile,
+validation disabled, no profiler, and no concurrent compilation or GPU tests:
+
+| State | Run | CPU | Blender viewport draws/s |
+| --- | --- | ---: | ---: |
+| Checkpoint | `orbit-b0_nbtbe` | 14.25% | 326.9 |
+| Shared snapshots | `orbit-ma42bh3u` | 14.20% | 335.0 |
+| Shared snapshots | `orbit-0l_tiwrh` | 14.45% | 336.9 |
+
+This is **CPU-neutral within the observed short-run variation**, not a measured
+speedup. The snapshot-sharing and unique-consumption tests establish eliminated
+inventory copies; they do not establish how much total compositor CPU those
+copies cost. The single-window workload also does not measure multi-consumer
+hoist fan-out. Initial Smithay tree traversal, snapshot construction, and SHM
+copying still happen per processed commit. Those costs remain candidates for
+separate measurement and optimization.
+
+Verification: 51 neutral-client tests, 44 relay/core tests, 138 encoded-port
+tests, 59 application tests (including GPU presentation), and 132 compositor
+core tests passed. The explicit Vulkan import-retirement lifetime test also
+passed; the unrelated native keyboard socket test remains ignored. Regressions
+cover independently paced consumers, copy-on-write isolation, retained content,
+capacity replacement/rejection, session boundaries, ordered mapping changes,
+and prepared-event ordering. The separate Godot receiver workspace passes
+library/test compilation. Affected-crate clippy passes with warnings denied.
+The real-transport suites pass as well: 65 Iroh tests and 24 Unix transport tests.
+The `weld-ssd`, `weld-hoist`, `weld-window`, and `weld-window-ui` library suites
+also pass (49 tests combined).
+
+The broader `weld-float` suite passes 17 tests and fails
+`ending_an_already_settled_resize_removes_the_session_and_anchor`. The identical
+assertion at `crates/weld-float/src/lib.rs:2118` also fails in the untouched
+`target/debug/deps/weld_float-f2a6881541b3dc5c` binary built on September 12,
+before this slice. That fixture constructs Window/Float plugins directly,
+without the surface ingress plugin, and never advances a client commit revision
+to settle the resize request. This existing resize-test issue is left unchanged;
+the broader suite is not reported as entirely green.
+
+Fable approved the code review. There is no new manual DRM, network media, or
+headset playback run for this slice; transport tests use fixture media. Buffer
+import retirement is covered by the offscreen Vulkan fixture, rather than a
+real client destroying its protocol buffer before display.
+
 ## Remaining priorities
 
 1. Earlier source-side snapshot coalescing or incremental state publication,

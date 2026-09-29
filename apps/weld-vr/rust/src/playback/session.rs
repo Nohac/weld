@@ -336,6 +336,7 @@ impl Inventory {
         commit: ClientSurfaceCommit,
         session: &Shared,
     ) -> Result<()> {
+        let commit = commit.into_state();
         let root = commit.root.filter(|_| commit.mapped);
         let existing_layers: usize = self
             .surfaces
@@ -762,7 +763,7 @@ mod tests {
         })
     }
     fn commit(mapped: bool) -> ClientSurfaceEventKind {
-        ClientSurfaceEventKind::Commit(ClientSurfaceCommit {
+        ClientSurfaceEventKind::Commit(ClientSurfaceCommit::from(weld_client::ClientSurfaceState {
             revision: ClientCommitRevision::new(1),
             alpha_mode: Default::default(),
             mapped,
@@ -787,7 +788,7 @@ mod tests {
                     metadata: ClientBufferMetadata::new(Extent::new(800, 500), true),
                 },
             }],
-        })
+        }))
     }
     fn apply(inventory: &mut Inventory, shared: &Shared, n: u64, kind: ClientSurfaceEventKind) {
         inventory
@@ -1276,7 +1277,7 @@ mod tests {
         let ClientSurfaceEventKind::Commit(mut removed) = commit(true) else {
             panic!("commit");
         };
-        removed.buffers.clear();
+        removed.make_mut().buffers.clear();
         apply(
             &mut inventory,
             &shared,

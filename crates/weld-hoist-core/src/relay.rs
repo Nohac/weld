@@ -408,7 +408,6 @@ impl SourceRelayAdapter {
                 }
             }
             ClientSurfaceEventKind::Commit(commit) => {
-                let outgoing = commit.clone();
                 let cached = self.cache.entry(source).or_default();
                 if !commit.mapped {
                     cached.cursor = None;
@@ -425,7 +424,7 @@ impl SourceRelayAdapter {
                         session,
                         ClientSurfaceEvent {
                             surface: source,
-                            kind: ClientSurfaceEventKind::Commit(outgoing),
+                            kind: ClientSurfaceEventKind::Commit(commit.clone()),
                         },
                     );
                 } else {
@@ -1888,7 +1887,7 @@ mod tests {
     }
 
     fn commit(revision: u64, mapped: bool) -> ClientSurfaceEventKind {
-        ClientSurfaceEventKind::Commit(ClientSurfaceCommit {
+        ClientSurfaceEventKind::Commit(ClientSurfaceCommit::from(weld_client::ClientSurfaceState {
             revision: weld_client::ClientCommitRevision::new(revision),
             alpha_mode: weld_client::SurfaceAlphaMode::Preserved,
             mapped,
@@ -1897,7 +1896,7 @@ mod tests {
             overlays: Vec::new(),
             inputs: Vec::new(),
             buffers: Vec::new(),
-        })
+        }))
     }
 
     fn observe(
@@ -1993,13 +1992,16 @@ mod tests {
             let ClientSurfaceEventKind::Commit(mut changed) = commit(revision, true) else {
                 panic!("commit fixture");
             };
-            changed.buffers.push(weld_client::SurfaceBufferUpdate {
-                layer: weld_client::SurfaceLayerId::new(1),
-                change: weld_client::SurfaceBufferChange::Replaced {
-                    metadata,
-                    buffer: lease,
-                },
-            });
+            changed
+                .make_mut()
+                .buffers
+                .push(weld_client::SurfaceBufferUpdate {
+                    layer: weld_client::SurfaceLayerId::new(1),
+                    change: weld_client::SurfaceBufferChange::Replaced {
+                        metadata,
+                        buffer: lease,
+                    },
+                });
             observe(&mut relay, window, ClientSurfaceEventKind::Commit(changed));
         }
         assert_eq!(*released.borrow(), (1..60).collect::<Vec<_>>());
@@ -2008,10 +2010,13 @@ mod tests {
         let ClientSurfaceEventKind::Commit(mut retained) = commit(61, true) else {
             panic!("commit fixture");
         };
-        retained.buffers.push(weld_client::SurfaceBufferUpdate {
-            layer: weld_client::SurfaceLayerId::new(1),
-            change: weld_client::SurfaceBufferChange::Retained { metadata },
-        });
+        retained
+            .make_mut()
+            .buffers
+            .push(weld_client::SurfaceBufferUpdate {
+                layer: weld_client::SurfaceLayerId::new(1),
+                change: weld_client::SurfaceBufferChange::Retained { metadata },
+            });
         observe(&mut relay, window, ClientSurfaceEventKind::Commit(retained));
         assert_eq!(released.borrow().len(), 59);
         port.borrow_mut().not_ready = false;

@@ -101,7 +101,7 @@ impl LoopbackDestinationPort {
         let ClientSurfaceEventKind::Commit(commit) = &mut event.kind else {
             return event;
         };
-        for update in &mut commit.buffers {
+        for update in &mut commit.make_mut().buffers {
             let SurfaceBufferChange::Replaced { metadata, buffer } = &mut update.change else {
                 continue;
             };

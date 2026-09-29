@@ -1,7 +1,5 @@
 //! Bevy-owned compositor scene rendered into a Weld-owned wgpu texture.
 
-mod ingress;
-
 use std::{
     collections::{HashMap, HashSet},
     rc::Rc,
@@ -62,7 +60,7 @@ use crate::surface::{
 use weld_client::{
     ClientFocusRequest, ClientImporterRegistration, ClientOutputId, ClientRequest, ClientSourceId,
     ClientSurfaceEvent, ClientSurfaceEventKind, ClientSurfaceRequest, ClientSurfaceRequestKind,
-    SurfaceBufferChange,
+    PendingClientEvents, SurfaceBufferChange,
 };
 use weld_core::host::{
     CaptureRequest, CompositionDestination, CompositionFrame, CompositionOutputFrame,
@@ -77,8 +75,6 @@ use weld_core::{
 };
 use weld_input::KeyboardSettingsReader;
 
-use self::ingress::PresentationIngress;
-
 #[cfg(test)]
 const PRIMARY_OUTPUT_ID: OutputId = OutputId::new(1);
 pub struct AppShell {
@@ -89,7 +85,7 @@ pub struct AppShell {
     redraw_requests: RedrawRequests,
     dmabuf_importer: Option<DmabufImporter>,
     surface_demand: SurfaceCompositionDemand,
-    pending_surfaces: PresentationIngress,
+    pending_surfaces: PendingClientEvents,
     cursor: CursorHostTracker,
     pending_input: ApplicationInputBuffer,
     client_importers: HashSet<ClientSourceId>,
@@ -452,7 +448,7 @@ impl AppShell {
             redraw_requests,
             dmabuf_importer,
             surface_demand: SurfaceCompositionDemand::default(),
-            pending_surfaces: PresentationIngress::default(),
+            pending_surfaces: PendingClientEvents::default(),
             cursor: CursorHostTracker::default(),
             pending_input: ApplicationInputBuffer::default(),
             client_importers,
@@ -465,7 +461,7 @@ impl AppShell {
             tracing::trace_span!(target: crate::PROFILE_TARGET, "weld_app_advance_composition")
                 .entered();
         let mut pending = std::mem::take(&mut self.pending_surfaces);
-        for event in pending.drain() {
+        for (_, event) in pending.drain() {
             self.apply_client_event(event);
         }
         self.pending_surfaces = pending;
@@ -645,7 +641,7 @@ impl AppShell {
         // Relay observation has already happened in ClientRuntime. This inbox
         // belongs to the local presenter and follows its application cadence.
         if !matches!(event.kind, ClientSurfaceEventKind::Metadata(_)) {
-            self.pending_surfaces.push(event);
+            self.pending_surfaces.push((), event);
         }
         demand
     }
@@ -705,7 +701,7 @@ impl AppShell {
         surface: crate::surface::SurfaceId,
         commit: weld_client::ClientSurfaceCommit,
     ) -> SurfaceTreeSnapshot {
-        let weld_client::ClientSurfaceCommit {
+        let weld_client::ClientSurfaceState {
             revision: _,
             alpha_mode,
             mapped,
@@ -714,7 +710,7 @@ impl AppShell {
             overlays,
             inputs,
             buffers,
-        } = commit;
+        } = commit.into_state();
         let retained = buffers
             .iter()
             .filter(|buffer| !matches!(buffer.change, SurfaceBufferChange::Removed))
@@ -1337,16 +1333,18 @@ mod tests {
     fn snapshot_event(surface: SurfaceId, client_mapped: bool) -> ClientSurfaceEvent {
         ClientSurfaceEvent {
             surface,
-            kind: ClientSurfaceEventKind::Commit(ClientSurfaceCommit {
-                revision: ClientCommitRevision::new(1),
-                alpha_mode: Default::default(),
-                mapped: client_mapped,
-                root: None,
-                window_geometry: None,
-                overlays: Vec::new(),
-                inputs: Vec::new(),
-                buffers: Vec::new(),
-            }),
+            kind: ClientSurfaceEventKind::Commit(ClientSurfaceCommit::from(
+                weld_client::ClientSurfaceState {
+                    revision: ClientCommitRevision::new(1),
+                    alpha_mode: Default::default(),
+                    mapped: client_mapped,
+                    root: None,
+                    window_geometry: None,
+                    overlays: Vec::new(),
+                    inputs: Vec::new(),
+                    buffers: Vec::new(),
+                },
+            )),
         }
     }
 
@@ -1511,10 +1509,13 @@ mod tests {
             )
             .expect("matching source");
             if let ClientSurfaceEventKind::Commit(commit) = &mut event.kind {
-                commit.buffers.push(weld_client::SurfaceBufferUpdate {
-                    layer: SurfaceLayerId::new(1),
-                    change: weld_client::SurfaceBufferChange::Replaced { metadata, buffer },
-                });
+                commit
+                    .make_mut()
+                    .buffers
+                    .push(weld_client::SurfaceBufferUpdate {
+                        layer: SurfaceLayerId::new(1),
+                        change: weld_client::SurfaceBufferChange::Replaced { metadata, buffer },
+                    });
             }
             shell.enqueue_client_event(event);
         }
@@ -1678,29 +1679,31 @@ mod tests {
         .expect("matching diagnostic buffer source");
         shell.enqueue_client_event(ClientSurfaceEvent {
             surface,
-            kind: ClientSurfaceEventKind::Commit(ClientSurfaceCommit {
-                revision: ClientCommitRevision::new(1),
-                alpha_mode: Default::default(),
-                mapped: true,
-                root: Some(SurfaceLayerPlacement {
-                    layer,
-                    position: LogicalPoint::ZERO,
-                    view,
-                }),
-                window_geometry: Some(SurfaceWindowGeometry {
-                    origin: LogicalPoint::ZERO,
-                    view,
-                }),
-                overlays: Vec::new(),
-                inputs: Vec::new(),
-                buffers: vec![weld_client::SurfaceBufferUpdate {
-                    layer,
-                    change: weld_client::SurfaceBufferChange::Replaced {
-                        metadata,
-                        buffer: lease,
-                    },
-                }],
-            }),
+            kind: ClientSurfaceEventKind::Commit(ClientSurfaceCommit::from(
+                weld_client::ClientSurfaceState {
+                    revision: ClientCommitRevision::new(1),
+                    alpha_mode: Default::default(),
+                    mapped: true,
+                    root: Some(SurfaceLayerPlacement {
+                        layer,
+                        position: LogicalPoint::ZERO,
+                        view,
+                    }),
+                    window_geometry: Some(SurfaceWindowGeometry {
+                        origin: LogicalPoint::ZERO,
+                        view,
+                    }),
+                    overlays: Vec::new(),
+                    inputs: Vec::new(),
+                    buffers: vec![weld_client::SurfaceBufferUpdate {
+                        layer,
+                        change: weld_client::SurfaceBufferChange::Replaced {
+                            metadata,
+                            buffer: lease,
+                        },
+                    }],
+                },
+            )),
         });
     }
 

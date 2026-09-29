@@ -568,24 +568,42 @@ copied into Bevy images. A DMA-BUF is imported as an external Vulkan image and
 sampled directly by the private material behind `SurfaceNode`; the path has no
 CPU pixel copy, GPU normalization blit, or intermediate surface texture.
 
-The boundary has three distinct representations. Smithay emits a core-owned
-neutral `ClientSurfaceCommit` whose changed layer is retained, removed, or a
-replacement `ClientBufferLease`. A lease contains adapter-private access and
-completes only after its final consumer drops it. `AppShell` retains a
-presenter-owned inbox before image preparation. Within an ordered segment,
-interleaved surfaces retain their latest unobserved commit and carry forward
-retained-layer content. Superseded leases drop immediately; control records
-and mapping transitions close the segment. At the next main advance the shell
-resolves the surviving leases before ECS ingress and asks the core-owned DMA-BUF manager to resolve a
+Smithay publishes a neutral `ClientSurfaceCommit` through its adapter. The
+commit shares one immutable `ClientSurfaceState` and its geometry/inventory
+vectors using `Rc`; relays and consumers retain the snapshot without copying
+those vectors. A changed layer is retained, removed, or a replacement
+`ClientBufferLease`. A lease contains adapter-private access and completes only
+after its final consumer drops it. Snapshot mutation uses explicit copy-on-write;
+admitted consumers can take uniquely owned state without cloning its vectors.
+
+`weld-client::PendingClientEvents` owns pending-state coalescing for the client
+runtime, local presenter, and encoded source. Each consumer keeps its own queue
+and cadence; encoded queues also separate hoist sessions. Within an ordered
+segment, interleaved surfaces retain their latest unobserved commit and carry
+forward retained-layer content. Replacing a snapshot drops that consumer's old
+references immediately. Controls and mapping transitions preserve order;
+metadata coalesces independently within the segment. Retained-buffer merging
+allocates no temporary lookup table, and fully replaced inventories need no
+snapshot mutation. Bounded queues admit replacements at capacity and reject new
+records without modifying existing pending state.
+
+At the next main advance `AppShell` resolves the surviving leases before ECS
+ingress and asks the core-owned DMA-BUF manager to resolve a
 Wayland or transported external DMA-BUF image into a Bevy handle. Application
 plugins receive only retained content, pixels, or a Bevy `Handle<Image>` with
 project-owned sampling metadata; they
 never handle Smithay protocol objects, file descriptors, Vulkan images, or
-wgpu resources. Adjacent application snapshots coalesce while carrying the
-newest unobserved content.
+wgpu resources. Bevy applies prepared events in admission order. Its pre-role
+cache retains prepared images until their surface entity exists; frame
+supersession is decided in the neutral queue before image preparation. Encoders
+likewise resolve leases and convert opaque wire state only at admission, rather
+than mutating every incoming shared commit.
 
 The local inbox has no effect on protocol processing, device-paced input, or
 relay observation in `ClientRuntime`. Other consumers retain their own cadence.
+The Smithay adapter still constructs geometry/inventory snapshots per processed
+commit; this sharing boundary removes downstream copies, not the initial tree
+walk, protocol-state application, or SHM copy.
 Each leased DMA-BUF pins its validated GPU import through deferred preparation,
 including after destruction of the original protocol buffer. The renderer
 checks the import-cache identity before staging that pin; separately allocated

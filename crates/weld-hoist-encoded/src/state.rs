@@ -15,9 +15,9 @@ use weld_client::{
     ClientBufferId, ClientBufferLease, ClientBufferMetadata, ClientBufferUseId,
     ClientCommitRevision, ClientPresentationClaim, ClientRequest, ClientSourceDescriptor,
     ClientSurfaceEvent, ClientSurfaceEventKind, ClientSurfaceId, ClientSurfaceRequestKind,
-    PresentationRate, SurfaceAlphaMode, SurfaceBufferChange, SurfaceLayerId,
-    WireClientSurfaceCommit, WireClientSurfaceEvent, WireClientSurfaceEventKind,
-    WireSurfaceBufferChange,
+    PendingClientEvents, PendingEventUpdate, PresentationRate, SurfaceAlphaMode,
+    SurfaceBufferChange, SurfaceLayerId, WireClientSurfaceCommit, WireClientSurfaceEvent,
+    WireClientSurfaceEventKind, WireSurfaceBufferChange,
 };
 use weld_hoist_core::{
     DestinationPortCommand, DestinationPortEvent, DestinationPortRecord, HoistDestinationPort,
@@ -249,7 +249,7 @@ struct EncodedSourceState {
     output: VecDeque<SourceTransportPacket>,
     transport_blocked: bool,
     retained_output_records: usize,
-    pending: HashMap<ClientSurfaceId, VecDeque<(HoistSessionId, ClientSurfaceEvent)>>,
+    pending: HashMap<ClientSurfaceId, PendingClientEvents<HoistSessionId>>,
     pending_order: VecDeque<ClientSurfaceId>,
     resizing: HashSet<ClientSurfaceId>,
     streams: HashMap<(ClientSurfaceId, SurfaceLayerId), SourceStream>,
@@ -305,7 +305,7 @@ impl EncodedSourceState {
         Ok(self)
     }
 
-    fn enqueue(&mut self, session: HoistSessionId, mut event: ClientSurfaceEvent) -> Result<()> {
+    fn enqueue(&mut self, session: HoistSessionId, event: ClientSurfaceEvent) -> Result<()> {
         self.activity.register(session, event.surface);
         match &event.kind {
             ClientSurfaceEventKind::Role(role) => {
@@ -317,10 +317,8 @@ impl EncodedSourceState {
             }
             _ => {}
         }
-        if let ClientSurfaceEventKind::Commit(commit) = &mut event.kind {
+        if matches!(&event.kind, ClientSurfaceEventKind::Commit(_)) {
             self.observations.record(SourceObservation::CommitReceived);
-            // The selected encoded path has no alpha, including on retained commits.
-            commit.alpha_mode = SurfaceAlphaMode::Discarded;
         }
         let surface = event.surface;
         if matches!(&event.kind, ClientSurfaceEventKind::Commit(commit)
@@ -329,10 +327,10 @@ impl EncodedSourceState {
             // A full unmap supersedes unpublished pixels, even while paused.
             // Preserve intervening control order but never publish an old mapped
             // completion after this unmap. In-flight leases still await completion.
-            let pending = self.pending.remove(&surface).unwrap_or_default();
+            let mut pending = self.pending.remove(&surface).unwrap_or_default();
             self.cancel_encode(surface)?;
             self.pacing.reset(surface);
-            for (session, event) in pending {
+            for (session, event) in pending.drain() {
                 if !matches!(event.kind, ClientSurfaceEventKind::Commit(_)) {
                     self.send_without_buffer(session, event)?;
                 }
@@ -456,7 +454,7 @@ impl EncodedSourceState {
                 frames = batch.completed.len(),
                 payload_bytes,
                 encode_batch_micros = batch_wall_time.as_micros(),
-                pending_events = self.pending.values().map(VecDeque::len).sum::<usize>(),
+                pending_events = self.pending.values().map(PendingClientEvents::len).sum::<usize>(),
                 "completed encoded source batch"
             );
             if let Some(dump) = &mut self.dump {
@@ -491,7 +489,7 @@ impl EncodedSourceState {
             return;
         }
         let gauges = SourceGauges {
-            pending_events: self.pending.values().map(VecDeque::len).sum(),
+            pending_events: self.pending.values().map(PendingClientEvents::len).sum(),
             retained_output_records: self.retained_output_records,
             transport_blocked: self.transport_blocked,
             active_streams: self.streams.len(),
@@ -540,52 +538,26 @@ impl EncodedSourceState {
         self.retire_surface_streams(surface)
     }
 
-    fn queue_event(
-        &mut self,
-        session: HoistSessionId,
-        mut event: ClientSurfaceEvent,
-    ) -> Result<()> {
+    fn queue_event(&mut self, session: HoistSessionId, event: ClientSurfaceEvent) -> Result<()> {
         let surface = event.surface;
-        let pending_events = self.pending.values().map(VecDeque::len).sum::<usize>();
+        let pending_events = self
+            .pending
+            .values()
+            .map(PendingClientEvents::len)
+            .sum::<usize>();
         let first_for_surface = !self.pending.contains_key(&surface);
         let queue = self.pending.entry(surface).or_default();
-        let mut replaced_previous_commit = false;
-        if matches!(event.kind, ClientSurfaceEventKind::Metadata(_)) {
-            let before = queue.len();
-            queue.retain(|(previous_session, event)| {
-                *previous_session != session
-                    || !matches!(event.kind, ClientSurfaceEventKind::Metadata(_))
-            });
-            replaced_previous_commit = queue.len() < before;
-        }
-        // Labels are not double-buffered with pixels. They must not prevent
-        // adjacent-in-buffer-history commits from coalescing under load.
-        if let Some(index) = queue.iter().rposition(|(_, previous)| {
-            !matches!(previous.kind, ClientSurfaceEventKind::Metadata(_))
-        }) && let Some((previous_session, previous)) = queue.get_mut(index)
-            && *previous_session == session
-            && let (
-                ClientSurfaceEventKind::Commit(current),
-                ClientSurfaceEventKind::Commit(previous),
-            ) = (&mut event.kind, &mut previous.kind)
-            && current.mapped == previous.mapped
-        {
-            current.carry_unobserved_content_from(previous);
-            queue.remove(index);
+        let limit = queue.len() + MAX_PENDING_SOURCE_EVENTS.saturating_sub(pending_events);
+        let update = queue
+            .try_push(session, event, limit)
+            .map_err(|_| anyhow::anyhow!("encoded source pending-event bound exceeded"))?;
+        if update == PendingEventUpdate::CommitCoalesced {
             self.observations.record(SourceObservation::CommitCoalesced);
-            replaced_previous_commit = true;
             tracing::trace!(?surface, "coalesced an unobserved encoded source commit");
-        }
-        if !replaced_previous_commit {
-            ensure!(
-                pending_events < MAX_PENDING_SOURCE_EVENTS,
-                "encoded source pending-event bound exceeded"
-            );
         }
         if first_for_surface {
             self.pending_order.push_back(surface);
         }
-        queue.push_back((session, event));
         Ok(())
     }
 
@@ -734,7 +706,7 @@ impl EncodedSourceState {
         session: HoistSessionId,
         event: ClientSurfaceEvent,
     ) -> Result<()> {
-        let event = WireClientSurfaceEvent::try_from_client(event, |_| {
+        let event = encoded_surface_event(event, |_, _| {
             Err::<EncodedBuffer, _>(anyhow::anyhow!(
                 "buffer replacement entered the structural encoded path"
             ))
@@ -751,7 +723,7 @@ impl EncodedSourceState {
         let surface = event.surface;
         let frame_rate = self.pacing.rate(surface);
         let mut prepared = VecDeque::new();
-        let event = WireClientSurfaceEvent::try_from_client_with_layer(event, |layer, lease| {
+        let event = encoded_surface_event(event, |layer, lease| {
             let (frame, rate) =
                 self.allocate_frame(surface, layer, lease.metadata(), frame_rate)?;
             let PreparedEncodeInput {
@@ -782,7 +754,7 @@ impl EncodedSourceState {
             ?surface,
             revision = ?commit_revision(&event),
             replacements = prepared.len() + 1,
-            pending_events = self.pending.values().map(VecDeque::len).sum::<usize>(),
+            pending_events = self.pending.values().map(PendingClientEvents::len).sum::<usize>(),
             "submitted encoded source batch"
         );
         self.in_flight = Some(InFlightEncodeBatch {
@@ -2233,6 +2205,17 @@ fn encoded_metadata(
         })
 }
 
+fn encoded_surface_event(
+    event: ClientSurfaceEvent,
+    export: impl FnMut(SurfaceLayerId, ClientBufferLease) -> Result<EncodedBuffer>,
+) -> Result<WireClientSurfaceEvent<EncodedBuffer>> {
+    let mut event = WireClientSurfaceEvent::try_from_client_with_layer(event, export)?;
+    if let WireClientSurfaceEventKind::Commit(commit) = &mut event.kind {
+        commit.alpha_mode = SurfaceAlphaMode::Discarded;
+    }
+    Ok(event)
+}
+
 fn mark_encoded_buffers_opaque(event: &mut WireClientSurfaceEvent<EncodedBuffer>) {
     let WireClientSurfaceEventKind::Commit(commit) = &mut event.kind else {
         return;
@@ -2787,7 +2770,7 @@ mod tests {
 
         let mut unmap = commit(surface, 2, Vec::new());
         if let ClientSurfaceEventKind::Commit(commit) = &mut unmap.kind {
-            commit.mapped = false;
+            commit.make_mut().mapped = false;
         }
         for event in [unmap, commit(surface, 3, Vec::new())] {
             source
@@ -2898,16 +2881,18 @@ mod tests {
     ) -> ClientSurfaceEvent {
         ClientSurfaceEvent {
             surface,
-            kind: ClientSurfaceEventKind::Commit(ClientSurfaceCommit {
-                revision: ClientCommitRevision::new(revision),
-                alpha_mode: Default::default(),
-                mapped: true,
-                root: None,
-                window_geometry: None,
-                overlays: Vec::new(),
-                inputs: Vec::new(),
-                buffers,
-            }),
+            kind: ClientSurfaceEventKind::Commit(ClientSurfaceCommit::from(
+                weld_client::ClientSurfaceState {
+                    revision: ClientCommitRevision::new(revision),
+                    alpha_mode: Default::default(),
+                    mapped: true,
+                    root: None,
+                    window_geometry: None,
+                    overlays: Vec::new(),
+                    inputs: Vec::new(),
+                    buffers,
+                },
+            )),
         }
     }
 
@@ -3349,7 +3334,7 @@ mod tests {
         assert_eq!(destination.streams.len(), 2);
         let mut unmap = commit(surface, 162, Vec::new());
         if let ClientSurfaceEventKind::Commit(commit) = &mut unmap.kind {
-            commit.mapped = false;
+            commit.make_mut().mapped = false;
         }
         source
             .enqueue(session, unmap)
@@ -3882,7 +3867,7 @@ mod tests {
         for (revision, mapped) in [(1, true), (2, false), (3, true), (4, true)] {
             let mut event = commit(surface, revision, Vec::new());
             if let ClientSurfaceEventKind::Commit(commit) = &mut event.kind {
-                commit.mapped = mapped;
+                commit.make_mut().mapped = mapped;
             }
             source.queue_event(session, event).expect("bounded queue");
         }

@@ -1,6 +1,6 @@
 //! Retained client-surface roles, commits, and bidirectional policy requests.
 
-use std::collections::{HashMap, VecDeque};
+use std::{ops::Deref, rc::Rc};
 
 use crate::{
     ClientBufferLease, ClientBufferMetadata, ClientOutputId, ClientSourceId, ClientSurfaceId,
@@ -145,10 +145,15 @@ pub enum SurfaceAlphaMode {
 /// Complete current surface-tree geometry plus changed buffer uses.
 /// One atomic surface commit.
 ///
-/// Cloning a commit retains every embedded [`ClientBufferLease`] and therefore
-/// extends those committed buffer uses until all clones are dropped.
+/// Consumers share the immutable snapshot and its buffer leases. Mutation is
+/// explicit through [`Self::make_mut`]; rendering/encoding may take ownership
+/// through [`Self::into_state`] once that consumer is ready.
 #[derive(Clone, Debug)]
-pub struct ClientSurfaceCommit {
+pub struct ClientSurfaceCommit(Rc<ClientSurfaceState>);
+
+/// One complete surface inventory and the buffer updates applied atomically to it.
+#[derive(Clone, Debug)]
+pub struct ClientSurfaceState {
     pub revision: ClientCommitRevision,
     pub alpha_mode: SurfaceAlphaMode,
     pub mapped: bool,
@@ -164,23 +169,47 @@ pub struct ClientSurfaceCommit {
 }
 
 impl ClientSurfaceCommit {
-    pub fn carry_unobserved_content_from(&mut self, previous: &mut Self) {
-        let mut pending = previous
-            .buffers
-            .iter_mut()
-            .filter_map(|buffer| {
-                let change = std::mem::replace(&mut buffer.change, SurfaceBufferChange::Removed);
-                matches!(change, SurfaceBufferChange::Replaced { .. })
-                    .then_some((buffer.layer, change))
-            })
-            .collect::<HashMap<_, _>>();
-        for buffer in &mut self.buffers {
-            if matches!(buffer.change, SurfaceBufferChange::Retained { .. })
-                && let Some(change) = pending.remove(&buffer.layer)
-            {
-                buffer.change = change;
+    /// Copy on write keeps other consumers' snapshots unchanged.
+    pub fn make_mut(&mut self) -> &mut ClientSurfaceState {
+        Rc::make_mut(&mut self.0)
+    }
+
+    /// Reuse an exclusively owned snapshot, or copy it for this consumer.
+    pub fn into_state(self) -> ClientSurfaceState {
+        Rc::unwrap_or_clone(self.0)
+    }
+
+    /// Carry buffers not yet consumed by this reader through retained updates.
+    /// Fully replaced inventories need no allocation or snapshot mutation.
+    pub fn carry_unobserved_content_from(&mut self, previous: &Self) {
+        for index in 0..self.buffers.len() {
+            let buffer = &self.buffers[index];
+            if !matches!(buffer.change, SurfaceBufferChange::Retained { .. }) {
+                continue;
             }
+            let Some(change) = previous.buffers.iter().find_map(|previous| {
+                (previous.layer == buffer.layer
+                    && matches!(previous.change, SurfaceBufferChange::Replaced { .. }))
+                .then_some(&previous.change)
+            }) else {
+                continue;
+            };
+            self.make_mut().buffers[index].change = change.clone();
         }
+    }
+}
+
+impl From<ClientSurfaceState> for ClientSurfaceCommit {
+    fn from(state: ClientSurfaceState) -> Self {
+        Self(Rc::new(state))
+    }
+}
+
+impl Deref for ClientSurfaceCommit {
+    type Target = ClientSurfaceState;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
     }
 }
 
@@ -239,29 +268,17 @@ pub enum ClientSurfaceEventKind {
     Metadata(crate::ClientSurfaceMetadata),
 }
 
-/// Adjacent event queue that preserves the newest unobserved buffer use.
+/// Runtime event queue retaining the latest unobserved buffer uses across surfaces.
 #[derive(Default)]
-pub struct ClientEventQueue(VecDeque<ClientSurfaceEvent>);
+pub struct ClientEventQueue(crate::PendingClientEvents<()>);
 
 impl ClientEventQueue {
     pub fn push(&mut self, event: ClientSurfaceEvent) {
-        let ClientSurfaceEvent { surface, mut kind } = event;
-        if let ClientSurfaceEventKind::Commit(current) = &mut kind
-            && let Some(ClientSurfaceEvent {
-                surface: previous_surface,
-                kind: ClientSurfaceEventKind::Commit(previous),
-            }) = self.0.back_mut()
-            && *previous_surface == surface
-            && previous.mapped == current.mapped
-        {
-            current.carry_unobserved_content_from(previous);
-            self.0.pop_back();
-        }
-        self.0.push_back(ClientSurfaceEvent { surface, kind });
+        self.0.push((), event);
     }
 
     pub fn pop_front(&mut self) -> Option<ClientSurfaceEvent> {
-        self.0.pop_front()
+        self.0.pop_front().map(|(_, event)| event)
     }
 
     pub fn is_empty(&self) -> bool {
@@ -345,19 +362,21 @@ mod tests {
     fn commit(revision: u64, change: SurfaceBufferChange) -> ClientSurfaceEvent {
         ClientSurfaceEvent {
             surface: surface(),
-            kind: ClientSurfaceEventKind::Commit(ClientSurfaceCommit {
-                revision: ClientCommitRevision::new(revision),
-                alpha_mode: Default::default(),
-                mapped: true,
-                root: None,
-                window_geometry: None,
-                overlays: Vec::new(),
-                inputs: Vec::new(),
-                buffers: vec![SurfaceBufferUpdate {
-                    layer: SurfaceLayerId::new(1),
-                    change,
-                }],
-            }),
+            kind: ClientSurfaceEventKind::Commit(ClientSurfaceCommit::from(
+                crate::ClientSurfaceState {
+                    revision: ClientCommitRevision::new(revision),
+                    alpha_mode: Default::default(),
+                    mapped: true,
+                    root: None,
+                    window_geometry: None,
+                    overlays: Vec::new(),
+                    inputs: Vec::new(),
+                    buffers: vec![SurfaceBufferUpdate {
+                        layer: SurfaceLayerId::new(1),
+                        change,
+                    }],
+                },
+            )),
         }
     }
 
@@ -371,6 +390,23 @@ mod tests {
             move |_| completed.set(completed.get() + 1),
         )
         .expect("matching source identity")
+    }
+
+    #[test]
+    fn snapshots_share_inventory_until_mutation_and_move_unique_storage() {
+        let event = commit(1, SurfaceBufferChange::Removed);
+        let ClientSurfaceEventKind::Commit(original) = event.kind else {
+            panic!("commit fixture");
+        };
+        let mut changed = original.clone();
+        assert!(Rc::ptr_eq(&original.0, &changed.0));
+        assert_eq!(original.buffers.as_ptr(), changed.buffers.as_ptr());
+        changed.make_mut().revision = ClientCommitRevision::new(2);
+        assert_eq!(original.revision.raw(), 1);
+        assert!(!Rc::ptr_eq(&original.0, &changed.0));
+        let unique_storage = changed.buffers.as_ptr();
+        let owned = changed.into_state();
+        assert_eq!(unique_storage, owned.buffers.as_ptr());
     }
 
     #[test]
@@ -454,7 +490,7 @@ mod tests {
         let ClientSurfaceEventKind::Commit(unmap_commit) = &mut unmap.kind else {
             panic!("expected commit");
         };
-        unmap_commit.mapped = false;
+        unmap_commit.make_mut().mapped = false;
         queue.push(unmap);
         queue.push(ClientSurfaceEvent {
             surface,

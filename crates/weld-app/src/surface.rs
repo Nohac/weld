@@ -376,27 +376,15 @@ pub struct SurfaceTreeSnapshot {
 
 impl SurfaceTreeSnapshot {
     fn carry_pending_content_from(&mut self, previous: &mut Self) {
-        let retained = self
-            .buffers
-            .iter()
-            .map(|buffer| buffer.layer)
-            .collect::<HashSet<_>>();
-        let mut pending = previous
-            .buffers
-            .iter_mut()
-            .filter(|buffer| retained.contains(&buffer.layer))
-            .filter_map(|buffer| {
-                let content =
-                    std::mem::replace(&mut buffer.content, SurfaceBufferContent::Retained);
-                (!matches!(content, SurfaceBufferContent::Retained))
-                    .then_some((buffer.layer, content))
-            })
-            .collect::<HashMap<_, _>>();
         for buffer in &mut self.buffers {
             if matches!(buffer.content, SurfaceBufferContent::Retained)
-                && let Some(content) = pending.remove(&buffer.layer)
+                && let Some(previous) = previous
+                    .buffers
+                    .iter_mut()
+                    .find(|old| old.layer == buffer.layer)
             {
-                buffer.content = content;
+                buffer.content =
+                    std::mem::replace(&mut previous.content, SurfaceBufferContent::Retained);
             }
         }
     }
@@ -495,24 +483,7 @@ pub(crate) struct SurfaceEventQueue(VecDeque<HostSurfaceEvent>);
 
 impl SurfaceEventQueue {
     pub(crate) fn push(&mut self, event: HostSurfaceEvent) {
-        let HostSurfaceEvent { surface, kind } = event;
-        let kind = match kind {
-            HostSurfaceEventKind::Commit(mut snapshot) => {
-                if let Some(HostSurfaceEvent {
-                    surface: previous_surface,
-                    kind: HostSurfaceEventKind::Commit(previous),
-                }) = self.0.back_mut()
-                    && surface == *previous_surface
-                {
-                    snapshot.carry_pending_content_from(previous);
-                    *previous = snapshot;
-                    return;
-                }
-                HostSurfaceEventKind::Commit(snapshot)
-            }
-            kind => kind,
-        };
-        self.0.push_back(HostSurfaceEvent { surface, kind });
+        self.0.push_back(event);
     }
 }
 
@@ -1932,27 +1903,20 @@ mod tests {
     }
 
     #[test]
-    fn coalescing_preserves_unseen_pixels_and_drops_removed_layers() {
+    fn pre_role_state_preserves_unseen_pixels_and_drops_removed_layers() {
         let surface = SurfaceId::for_test(1);
-        let mut events = SurfaceEventQueue::default();
+        let mut registry = SurfaceRegistry::default();
         let mut first = root_snapshot(Some([1, 1, 1, 255]));
         first.buffers.push(buffer(2, Some([2, 2, 2, 255])));
         first.overlays.push(placement(2, Vec2::ZERO));
-        events.push(snapshot_event(surface, first));
+        queue_pending_snapshot(&mut registry, surface, first);
 
         let mut next = root_snapshot(None);
         next.buffers.push(buffer(3, Some([3, 3, 3, 255])));
         next.overlays.push(placement(3, Vec2::ZERO));
-        events.push(snapshot_event(surface, next));
+        queue_pending_snapshot(&mut registry, surface, next);
 
-        let Some(HostSurfaceEvent {
-            kind: HostSurfaceEventKind::Commit(snapshot),
-            ..
-        }) = events.0.front()
-        else {
-            panic!("adjacent snapshots should merge");
-        };
-        assert_eq!(events.0.len(), 1);
+        let snapshot = &registry.pending_snapshots[&surface];
         assert_eq!(snapshot.buffers.len(), 2);
         assert_eq!(
             match &snapshot.buffers[0].content {
@@ -1965,7 +1929,7 @@ mod tests {
     }
 
     #[test]
-    fn coalescing_preserves_an_unseen_imported_render_image() {
+    fn pre_role_state_preserves_an_unseen_imported_render_image() {
         let surface = SurfaceId::for_test(1);
         let image = SurfaceRenderImage {
             import: ImportId::for_test(7),
@@ -1976,21 +1940,37 @@ mod tests {
         };
         let mut first = root_snapshot(None);
         first.buffers[0].content = SurfaceBufferContent::RenderImage(image.clone());
-        let mut events = SurfaceEventQueue::default();
-        events.push(snapshot_event(surface, first));
-        events.push(snapshot_event(surface, root_snapshot(None)));
+        let mut registry = SurfaceRegistry::default();
+        queue_pending_snapshot(&mut registry, surface, first);
+        queue_pending_snapshot(&mut registry, surface, root_snapshot(None));
 
-        let Some(HostSurfaceEvent {
-            kind: HostSurfaceEventKind::Commit(snapshot),
-            ..
-        }) = events.0.front()
-        else {
-            panic!("adjacent snapshots should merge");
-        };
+        let snapshot = &registry.pending_snapshots[&surface];
         let SurfaceBufferContent::RenderImage(carried) = &snapshot.buffers[0].content else {
             panic!("the pending imported image should survive a retained update");
         };
         assert_eq!(carried, &image);
+    }
+
+    #[test]
+    fn prepared_commits_preserve_admitted_mapping_transitions() {
+        let surface = SurfaceId::for_test(1);
+        let mut events = SurfaceEventQueue::default();
+        for mapped in [true, false, true] {
+            let mut snapshot = root_snapshot(None);
+            snapshot.client_mapped = mapped;
+            events.push(snapshot_event(surface, snapshot));
+        }
+        let mapped: Vec<_> = events
+            .0
+            .into_iter()
+            .map(|event| {
+                let HostSurfaceEventKind::Commit(snapshot) = event.kind else {
+                    panic!("commit fixture");
+                };
+                snapshot.client_mapped
+            })
+            .collect();
+        assert_eq!(mapped, [true, false, true]);
     }
 
     #[test]

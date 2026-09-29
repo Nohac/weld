@@ -132,19 +132,21 @@ fn run_registration(pending_mode: bool) -> Vec<Vec<u8>> {
     .expect("lease");
     driver.observe_event(&ClientSurfaceEvent {
         surface,
-        kind: ClientSurfaceEventKind::Commit(ClientSurfaceCommit {
-            revision: ClientCommitRevision::new(1),
-            alpha_mode: Default::default(),
-            mapped: true,
-            root: None,
-            window_geometry: None,
-            overlays: Vec::new(),
-            inputs: Vec::new(),
-            buffers: vec![SurfaceBufferUpdate {
-                layer: SurfaceLayerId::new(1),
-                change: SurfaceBufferChange::Replaced { metadata, buffer },
-            }],
-        }),
+        kind: ClientSurfaceEventKind::Commit(ClientSurfaceCommit::from(
+            weld_client::ClientSurfaceState {
+                revision: ClientCommitRevision::new(1),
+                alpha_mode: Default::default(),
+                mapped: true,
+                root: None,
+                window_geometry: None,
+                overlays: Vec::new(),
+                inputs: Vec::new(),
+                buffers: vec![SurfaceBufferUpdate {
+                    layer: SurfaceLayerId::new(1),
+                    change: SurfaceBufferChange::Replaced { metadata, buffer },
+                }],
+            },
+        )),
     });
     assert_eq!(
         submissions.get(),

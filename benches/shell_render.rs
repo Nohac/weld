@@ -214,33 +214,35 @@ fn surface_snapshot(content: SyntheticContent) -> ClientSurfaceEvent {
     };
     ClientSurfaceEvent {
         surface: CLIENT_SURFACE,
-        kind: ClientSurfaceEventKind::Commit(ClientSurfaceCommit {
-            revision: ClientCommitRevision::new(1),
-            alpha_mode: Default::default(),
-            mapped: true,
-            root: Some(SurfaceLayerPlacement {
-                layer: CLIENT_LAYER,
-                position: LogicalPoint::ZERO,
-                view,
-            }),
-            window_geometry: Some(SurfaceWindowGeometry {
-                origin: LogicalPoint::ZERO,
-                view,
-            }),
-            overlays: Vec::new(),
-            inputs: vec![SurfaceInputPlacement {
-                layer: CLIENT_LAYER,
-                position: LogicalPoint::ZERO,
-                regions: vec![SurfaceInputRect {
+        kind: ClientSurfaceEventKind::Commit(ClientSurfaceCommit::from(
+            weld_client::ClientSurfaceState {
+                revision: ClientCommitRevision::new(1),
+                alpha_mode: Default::default(),
+                mapped: true,
+                root: Some(SurfaceLayerPlacement {
+                    layer: CLIENT_LAYER,
                     position: LogicalPoint::ZERO,
-                    size: LogicalSize::new(CLIENT_WIDTH as f32, CLIENT_HEIGHT as f32),
+                    view,
+                }),
+                window_geometry: Some(SurfaceWindowGeometry {
+                    origin: LogicalPoint::ZERO,
+                    view,
+                }),
+                overlays: Vec::new(),
+                inputs: vec![SurfaceInputPlacement {
+                    layer: CLIENT_LAYER,
+                    position: LogicalPoint::ZERO,
+                    regions: vec![SurfaceInputRect {
+                        position: LogicalPoint::ZERO,
+                        size: LogicalSize::new(CLIENT_WIDTH as f32, CLIENT_HEIGHT as f32),
+                    }],
                 }],
-            }],
-            buffers: vec![SurfaceBufferUpdate {
-                layer: CLIENT_LAYER,
-                change,
-            }],
-        }),
+                buffers: vec![SurfaceBufferUpdate {
+                    layer: CLIENT_LAYER,
+                    change,
+                }],
+            },
+        )),
     }
 }
 

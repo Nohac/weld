@@ -91,6 +91,7 @@ impl<B> WireClientSurfaceCommit<B> {
         commit: ClientSurfaceCommit,
         mut export: impl FnMut(SurfaceLayerId, ClientBufferLease) -> Result<B, E>,
     ) -> Result<Self, E> {
+        let commit = commit.into_state();
         let buffers = commit
             .buffers
             .into_iter()
@@ -149,7 +150,7 @@ impl<B> WireClientSurfaceCommit<B> {
                 })
             })
             .collect::<Result<Vec<_>, E>>()?;
-        Ok(ClientSurfaceCommit {
+        Ok(ClientSurfaceCommit::from(crate::ClientSurfaceState {
             revision: self.revision,
             alpha_mode: self.alpha_mode,
             mapped: self.mapped,
@@ -158,7 +159,7 @@ impl<B> WireClientSurfaceCommit<B> {
             overlays: self.overlays,
             inputs: self.inputs,
             buffers,
-        })
+        }))
     }
 }
 
@@ -280,7 +281,7 @@ mod tests {
             |_| {},
         )
         .expect("matching source");
-        let commit = ClientSurfaceCommit {
+        let commit = ClientSurfaceCommit::from(crate::ClientSurfaceState {
             revision: ClientCommitRevision::new(4),
             alpha_mode: SurfaceAlphaMode::Discarded,
             mapped: true,
@@ -306,7 +307,7 @@ mod tests {
                     buffer: lease,
                 },
             }],
-        };
+        });
 
         let wire = WireClientSurfaceCommit::try_from_client(commit, |buffer| {
             Ok::<_, ()>((buffer.buffer(), buffer.use_id()))

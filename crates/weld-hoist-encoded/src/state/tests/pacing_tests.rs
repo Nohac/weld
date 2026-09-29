@@ -35,10 +35,10 @@ fn title_churn_between_commits_retains_only_latest_labels_and_pixels() {
     let queue = &state.pending[&surface];
     assert_eq!(queue.len(), 2);
     assert!(
-        matches!(&queue[0].1.kind, ClientSurfaceEventKind::Commit(commit) if commit.revision.raw() == 1000)
+        matches!(&queue.front().expect("commit").1.kind, ClientSurfaceEventKind::Commit(commit) if commit.revision.raw() == 1000)
     );
     assert!(
-        matches!(&queue[1].1.kind, ClientSurfaceEventKind::Metadata(metadata) if metadata.title() == "1000")
+        matches!(&queue.iter().nth(1).expect("metadata").1.kind, ClientSurfaceEventKind::Metadata(metadata) if metadata.title() == "1000")
     );
     assert_eq!(state.pending_order.len(), 1);
 }
@@ -239,7 +239,7 @@ fn full_unmap_preserves_control_order_and_cancels_late_mapped_completion() {
     .expect("after barrier");
     let mut unmap = commit(surface, 4, Vec::new());
     if let ClientSurfaceEventKind::Commit(commit) = &mut unmap.kind {
-        commit.mapped = false;
+        commit.make_mut().mapped = false;
     }
     port.submit(SourcePortCommand::Surface {
         session,

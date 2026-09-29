@@ -181,7 +181,7 @@ fn negotiated_cadence_survives_paused_hidden_buffers_without_generation_churn() 
         );
         let mut event = one_buffer_commit(source_surface(), revision, 1, lease);
         if let ClientSurfaceEventKind::Commit(commit) = &mut event.kind {
-            commit.mapped = false;
+            commit.make_mut().mapped = false;
         }
         source
             .enqueue(HoistSessionId::new(1), event)
