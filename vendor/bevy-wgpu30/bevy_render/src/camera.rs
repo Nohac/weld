@@ -384,8 +384,21 @@ pub fn camera_system(
             .as_ref()
             .map(|viewport| viewport.physical_size);
 
-        if let Some(normalized_target) = render_target.normalize(primary_window)
-            && (normalized_target.is_changed(&changed_window_ids, &changed_image_handles)
+        let normalized_target = render_target.normalize(primary_window);
+        // Manual views can rotate backing textures without changing projection or UI metrics.
+        let target_changed = normalized_target.as_ref().is_some_and(|target| {
+            if let NormalizedRenderTarget::TextureView(handle) = target
+                && let Some(previous) = &camera.computed.target_info
+            {
+                manual_texture_views.get(handle).is_none_or(|view| {
+                    view.size != previous.physical_size || view.scale_factor != previous.scale_factor
+                })
+            } else {
+                target.is_changed(&changed_window_ids, &changed_image_handles)
+            }
+        });
+        if let Some(normalized_target) = normalized_target
+            && (target_changed
                 || camera.is_added()
                 || camera_projection.is_changed()
                 || camera.computed.old_viewport_size != viewport_size

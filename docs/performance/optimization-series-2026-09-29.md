@@ -158,6 +158,75 @@ client exit, host shutdown, and socket cleanup (`host-runtime-z7eez8h2`).
 Fable approved the source change. No new multi-subsurface protocol fixture,
 manual DRM run, or network-media run was added for this internal source change.
 
+## 2a. Preserve stable Bevy view state and cache the UI-root query
+
+Checkpoint: `02ca392f`. The fresh optimized sample `orbit-1kdyb5iz` attributes
+39.12% of userspace sample weight to `AppShell::render_outputs` and 25.94% to
+`advance_main`, with zero lost samples. Main/render scheduling remains a large
+part of the cost, spread over many systems. The earlier Tracy capture
+`orbit-wnecswtj` identifies the exclusive UI-root query setup among the recurring
+systems; its instrumented durations are not headline CPU measurements.
+
+This slice changes three specific behaviors:
+
+- The UI rounding policy uses a cached Bevy `Query` and deferred commands,
+  ordered before layout, instead of constructing `QueryState` every frame.
+- Stable output views retain their Bevy wrapper/identity and change ticks;
+  camera activity is written only on an actual change.
+- The vendored camera system compares manual-target size and scale with its
+  computed metrics. Texture rotation alone leaves projection/frustum state
+  unchanged. New metrics, viewport/sub-camera changes and explicit projection
+  changes still update it. The patch is recorded in the vendor refresh note.
+
+All following measurements use the optimized non-Tracy binary, validation off,
+25-second captures, and 1815×1179 Blender viewport. No build or other GPU test
+runs during capture. The original binary was retained for alternating controls.
+
+| State | Run | Client draws/s | CPU |
+| --- | --- | ---: | ---: |
+| Original, perf sample | `orbit-1kdyb5iz` | 337.5 | 14.52% |
+| Original | `orbit-pp2pm_f7` | 344.0 | 15.00% |
+| Stable views/query | `orbit-a41l_yno` | 347.9 | 17.00% |
+| Original repeat | `orbit-ohpu3r9r` | 345.1 | 14.16% |
+| Stable views/query plus experimental MSAA-off | `orbit-_ms34mvq` | 353.2 | 16.08% |
+| Original, client-vsync control | `orbit-hftyvbrw` | 60.0 | 10.88% |
+| Stable views/query plus MSAA-off, client-vsync control | `orbit-x0iikjmy` | 60.0 | 11.44% |
+| Original, client-vsync repeat | `orbit-51bxb1_8` | 60.0 | 10.96% |
+| Stable views/query, client-vsync control | `orbit-xt258010` | 60.0 | 10.56% |
+
+The final subset shows a 0.32–0.40 percentage-point reduction in **one** fixed-
+cadence control, not a demonstrated repeatable win. The unrestricted results do
+not show improvement. Structural elimination of redundant work is verified by
+change-tick tests; overall CPU benefit remains unproven. The client-vsync rows
+set Mesa's `vblank_mode=3` only in the test client, not Weld's production pacing.
+
+### MSAA experiment — default unchanged
+
+The compositor camera inherits 4× MSAA, but Bevy's UI pass draws to the unsampled
+attachment. The optional experiment set the compositor camera to `Msaa::Off`,
+avoiding the unused multisampled color attachment and reducing depth samples.
+A real GPU comparison of fractional-position rounded translucent UI and soft
+shadows produced identical pixels. Nevertheless the experiment did not establish
+a CPU benefit, so the production MSAA default is left unchanged. The independent
+pixel comparison remains as regression coverage for future rendering work.
+
+Verification: all 62 weld-app tests pass on Vulkan, including unchanged camera/
+projection/resource ticks, independent size and scale changes, explicit
+projection changes, UI-root reparenting and ordering, sequential two-output
+rendering, and actual pixels on two rotated external targets. All-target clippy
+with warnings denied and the workspace all-target check pass.
+
+The native startup screenshot with foot timed out on both candidates
+(`bevy-view-smoke-6WHsGB`, `bevy-view-smoke-rhkVqV`) and the preserved original
+binary (`bevy-view-baseline-YlXOZV`). This is a separately reproduced capture/
+readiness issue, not a passed smoke test or evidence of a new regression.
+No manual DRM or network-media run was performed.
+
+Fable approved the view/query changes and subsequently the GPU-test additions
+and MSAA experiment. Final confirmation after restoring the original MSAA
+default was quota-blocked; that final subset review is deferred, with no
+unresolved findings from the completed reviews.
+
 ## Remaining priorities
 
 1. Avoid empty or unchanged Bevy schedule/render work.

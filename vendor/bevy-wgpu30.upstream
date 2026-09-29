@@ -17,5 +17,6 @@ crates = [
   "bevy_text",
 ]
 source = "Published crates.io sources for version 0.19.1"
-refresh = "Replace each listed crate with its published source for the target Bevy release, then reapply the relevant changes from compatibility_revision and the documented manual-device Tracy timestamp guard."
+refresh = "Replace each listed crate with its published source for the target Bevy release, then reapply the relevant changes from compatibility_revision, the documented manual-device Tracy timestamp guard, and manual-target metric change detection."
+manual_target_metrics = "bevy_render/src/camera.rs compares manual-view size and scale with computed target info before updating camera projection. Backing texture rotation alone leaves metrics unchanged. Weld regression coverage lives in weld-app shell tests; recheck resize, scale, viewport and projection invalidation when refreshing."
 remove_when = "Weld adopts a suitable Bevy release that natively depends on wgpu 30 or newer."

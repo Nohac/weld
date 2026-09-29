@@ -18,6 +18,7 @@ use bevy::{
         message::{MessageCursor, Messages},
         resource::Resource,
         schedule::IntoScheduleConfigs,
+        system::{Commands, Query},
         world::World,
     },
     log::LogPlugin,
@@ -500,7 +501,12 @@ impl AppShell {
                     output.configuration.id()
                 );
             };
-            camera.is_active = false;
+            let active = requests
+                .iter()
+                .any(|request| request.output == output.configuration.id());
+            if camera.is_active != active {
+                camera.is_active = active;
+            }
         }
         for (index, request) in requests.iter().enumerate() {
             if requests[..index]
@@ -538,13 +544,6 @@ impl AppShell {
                 frame.target(),
                 output.configuration.scale().value(),
             );
-            let Some(mut camera) = self.app.world_mut().get_mut::<Camera>(output.camera) else {
-                bail!(
-                    "composition camera for output {:?} disappeared",
-                    request.output
-                );
-            };
-            camera.is_active = true;
             frames.push(CompositionOutputFrame {
                 output: request.output,
                 frame,
@@ -1155,25 +1154,35 @@ fn insert_manual_view(
     target: &CompositionTargetView,
     scale_factor: f64,
 ) {
-    app.world_mut().resource_mut::<ManualTextureViews>().insert(
+    let size = UVec2::new(target.extent().width, target.extent().height);
+    let scale_factor = scale_factor as f32;
+    let mut views = app.world_mut().resource_mut::<ManualTextureViews>();
+    // Render-world extraction is change-gated; keep this comparison read-only.
+    if views.get(&handle).is_some_and(|view| {
+        &*view.texture_view == target.view()
+            && view.size == size
+            && view.view_format == target.format()
+            && view.scale_factor == scale_factor
+    }) {
+        return;
+    }
+    views.insert(
         handle,
         ManualTextureView {
             texture_view: target.view().clone().into(),
-            size: UVec2::new(target.extent().width, target.extent().height),
+            size,
             view_format: target.format(),
-            scale_factor: scale_factor as f32,
+            scale_factor,
         },
     );
 }
 
-fn disable_ui_rounding_on_roots(world: &mut World) {
-    let roots = {
-        let mut query =
-            world.query_filtered::<Entity, (With<Node>, Without<ChildOf>, Without<LayoutConfig>)>();
-        query.iter(world).collect::<Vec<_>>()
-    };
-    for root in roots {
-        world.entity_mut(root).insert(LayoutConfig {
+type UnconfiguredUiRoots<'w, 's> =
+    Query<'w, 's, Entity, (With<Node>, Without<ChildOf>, Without<LayoutConfig>)>;
+
+fn disable_ui_rounding_on_roots(mut commands: Commands, roots: UnconfiguredUiRoots) {
+    for root in &roots {
+        commands.entity(root).insert(LayoutConfig {
             use_rounding: false,
         });
     }
@@ -1183,24 +1192,31 @@ fn disable_ui_rounding_on_roots(world: &mut World) {
 mod tests {
     use bevy::{
         app::{HierarchyPropagatePlugin, PostUpdate, PropagateSet, SubApp, Update},
+        camera::{Camera, Projection},
         ecs::{
+            change_detection::{DetectChanges, DetectChangesMut},
             message::MessageWriter,
             resource::Resource,
-            schedule::{Schedule, ScheduleLabel},
+            schedule::{IntoScheduleConfigs, Schedule, ScheduleLabel},
             system::ResMut,
         },
+        prelude::{ChildOf, Query, With},
         render::RenderApp,
         time::{Real, Time, TimePlugin, TimeReceiver, create_time_channels},
-        ui::{ComputedUiTargetCamera, Node, UiScale, update::propagate_ui_target_cameras},
+        ui::{
+            ComputedUiTargetCamera, LayoutConfig, Node, UiScale, UiSystems,
+            update::propagate_ui_target_cameras,
+        },
         window::{ExitCondition, RequestRedraw, WindowPlugin},
     };
 
     use super::{
         App, AppShell, ClientBufferAccessResolution, CompositionTargetContract,
-        ManualTextureViewHandle, Messages, OutputGeometry, PRIMARY_OUTPUT_ID, RedrawRequests,
-        SurfaceCompositionDemand, UVec2, WeldOutput, advance_main_app, disconnect_render_time,
-        render_composition_app, resolve_client_buffer_access, spawn_compositor_camera,
-        validate_external_target,
+        ManualTextureViewHandle, ManualTextureViews, Messages, OutputGeometry,
+        OwnedCompositionTarget, PRIMARY_OUTPUT_ID, RedrawRequests, SurfaceCompositionDemand, UVec2,
+        WeldOutput, advance_main_app, disable_ui_rounding_on_roots, disconnect_render_time,
+        insert_manual_view, render_composition_app, resolve_client_buffer_access,
+        spawn_compositor_camera, validate_external_target,
     };
     use weld_client::{
         ClientCommitRevision, ClientSurfaceCommit, ClientSurfaceEvent, ClientSurfaceEventKind,
@@ -1211,7 +1227,11 @@ mod tests {
     };
 
     #[cfg(feature = "test-support")]
-    use bevy::ui::UiTargetCamera;
+    use bevy::{
+        prelude::{BackgroundColor, BorderRadius, BoxShadow, Color, PositionType, px},
+        render::view::Msaa,
+        ui::UiTargetCamera,
+    };
     #[cfg(feature = "test-support")]
     use weld_core::{
         OutputConfiguration, OutputId, OutputScale,
@@ -1235,6 +1255,228 @@ mod tests {
 
     fn count_render(mut count: ResMut<RenderCount>) {
         count.0 += 1;
+    }
+
+    #[test]
+    fn root_rounding_policy_applies_before_layout_and_after_reparenting() {
+        let mut app = App::new();
+        app.add_systems(
+            PostUpdate,
+            disable_ui_rounding_on_roots.before(UiSystems::Layout),
+        );
+        app.add_systems(
+            PostUpdate,
+            (|roots: Query<&LayoutConfig, With<Node>>| {
+                assert!(roots.iter().any(|layout| !layout.use_rounding));
+            })
+            .in_set(UiSystems::Layout),
+        );
+        let root = app.world_mut().spawn(Node::default()).id();
+        let child = app.world_mut().spawn((Node::default(), ChildOf(root))).id();
+        let explicit = app
+            .world_mut()
+            .spawn((Node::default(), LayoutConfig { use_rounding: true }))
+            .id();
+        app.update();
+        assert!(
+            !app.world()
+                .get::<LayoutConfig>(root)
+                .expect("root policy")
+                .use_rounding
+        );
+        assert!(app.world().get::<LayoutConfig>(child).is_none());
+        assert!(
+            app.world()
+                .get::<LayoutConfig>(explicit)
+                .expect("explicit policy")
+                .use_rounding
+        );
+        app.world_mut().entity_mut(child).remove::<ChildOf>();
+        app.update();
+        assert!(
+            !app.world()
+                .get::<LayoutConfig>(child)
+                .expect("new root policy")
+                .use_rounding
+        );
+    }
+
+    #[cfg(feature = "test-support")]
+    #[test]
+    fn stable_manual_views_preserve_camera_ticks_but_metric_changes_update_projection() {
+        let (mut shell, _, device, _) = crate::benchmark::rendering_shell_with_outputs(
+            vec![diagnostic_output(
+                PRIMARY_OUTPUT_ID,
+                LogicalPoint::ZERO,
+                true,
+                0.0,
+            )],
+            |_| {},
+        )
+        .expect("diagnostic GPU shell");
+        let camera = shell.outputs[&PRIMARY_OUTPUT_ID].camera;
+        let handle = shell.outputs[&PRIMARY_OUTPUT_ID].view;
+        let mut frames = Vec::new();
+        for time in 1..=4 {
+            shell.advance_main(time);
+            shell
+                .render_outputs(&[owned_request(PRIMARY_OUTPUT_ID)], &mut frames)
+                .expect("render");
+        }
+        let projection_tick = shell
+            .app
+            .world()
+            .entity(camera)
+            .get_ref::<Projection>()
+            .expect("projection")
+            .last_changed();
+        let camera_tick = shell
+            .app
+            .world()
+            .entity(camera)
+            .get_ref::<Camera>()
+            .expect("camera")
+            .last_changed();
+        let view_tick = shell
+            .app
+            .world()
+            .get_resource_ref::<ManualTextureViews>()
+            .expect("views")
+            .last_changed();
+        let view_id = shell.app.world().resource::<ManualTextureViews>()[&handle]
+            .texture_view
+            .id();
+        for time in 5..=8 {
+            shell.advance_main(time);
+            shell
+                .render_outputs(&[owned_request(PRIMARY_OUTPUT_ID)], &mut frames)
+                .expect("render");
+            assert_eq!(
+                shell
+                    .app
+                    .world()
+                    .entity(camera)
+                    .get_ref::<Projection>()
+                    .expect("projection")
+                    .last_changed(),
+                projection_tick
+            );
+            assert_eq!(
+                shell
+                    .app
+                    .world()
+                    .entity(camera)
+                    .get_ref::<Camera>()
+                    .expect("camera")
+                    .last_changed(),
+                camera_tick
+            );
+            assert_eq!(
+                shell
+                    .app
+                    .world()
+                    .get_resource_ref::<ManualTextureViews>()
+                    .expect("views")
+                    .last_changed(),
+                view_tick
+            );
+            assert_eq!(
+                shell.app.world().resource::<ManualTextureViews>()[&handle]
+                    .texture_view
+                    .id(),
+                view_id
+            );
+        }
+        let format = shell.outputs[&PRIMARY_OUTPUT_ID]
+            .owned_target
+            .target
+            .format();
+        let rotated = OwnedCompositionTarget::new(&device, Extent::new(64, 64), format);
+        insert_manual_view(&mut shell.app, handle, &rotated.target, 1.0);
+        shell.advance_main(9);
+        assert_ne!(
+            shell.app.world().resource::<ManualTextureViews>()[&handle]
+                .texture_view
+                .id(),
+            view_id
+        );
+        assert_eq!(
+            shell
+                .app
+                .world()
+                .entity(camera)
+                .get_ref::<Projection>()
+                .expect("projection")
+                .last_changed(),
+            projection_tick
+        );
+
+        insert_manual_view(&mut shell.app, handle, &rotated.target, 2.0);
+        shell.advance_main(10);
+        assert_eq!(
+            shell
+                .app
+                .world()
+                .get::<Camera>(camera)
+                .expect("camera")
+                .logical_viewport_size(),
+            Some(bevy::math::Vec2::splat(32.0))
+        );
+        let scaled_tick = shell
+            .app
+            .world()
+            .entity(camera)
+            .get_ref::<Projection>()
+            .expect("projection")
+            .last_changed();
+        assert_ne!(scaled_tick, projection_tick);
+
+        let resized = OwnedCompositionTarget::new(&device, Extent::new(128, 96), format);
+        insert_manual_view(&mut shell.app, handle, &resized.target, 2.0);
+        shell.advance_main(11);
+        assert_eq!(
+            shell
+                .app
+                .world()
+                .get::<Camera>(camera)
+                .expect("camera")
+                .logical_viewport_size(),
+            Some(bevy::math::Vec2::new(64.0, 48.0))
+        );
+        assert_ne!(
+            shell
+                .app
+                .world()
+                .entity(camera)
+                .get_ref::<Projection>()
+                .expect("projection")
+                .last_changed(),
+            scaled_tick
+        );
+        shell
+            .app
+            .world_mut()
+            .get_mut::<Projection>(camera)
+            .expect("projection")
+            .set_changed();
+        let changed = shell
+            .app
+            .world()
+            .entity(camera)
+            .get_ref::<Projection>()
+            .expect("projection")
+            .last_changed();
+        shell.advance_main(12);
+        assert_ne!(
+            shell
+                .app
+                .world()
+                .entity(camera)
+                .get_ref::<Projection>()
+                .expect("projection")
+                .last_changed(),
+            changed
+        );
     }
 
     #[test]
@@ -1611,6 +1853,102 @@ mod tests {
         assert_surface_pixel(
             render_owned_output(&mut shell, &device, &queue, first),
             [255, 0, 255, 255],
+        );
+        let format = shell.outputs[&first].owned_target.target.format();
+        for (time, bgra, rgba) in [
+            (8, [0, 255, 0, 255], [0, 255, 0, 255]),
+            (9, [255, 0, 0, 255], [0, 0, 255, 255]),
+        ] {
+            let external = OwnedCompositionTarget::new(&device, Extent::new(64, 64), format);
+            update_diagnostic_surface(&mut shell, first_surface, bgra);
+            shell.advance_main(time);
+            shell
+                .render_outputs(
+                    &[CompositionOutputRequest {
+                        output: first,
+                        destination: CompositionDestination::External(external.target.clone()),
+                    }],
+                    &mut Vec::new(),
+                )
+                .expect("rotated external target");
+            assert_surface_pixel(
+                weld_core::renderer::read_owned_frame_rgba(&device, &queue, &external.frame())
+                    .expect("external target pixels"),
+                rgba,
+            );
+        }
+    }
+
+    #[cfg(feature = "test-support")]
+    #[test]
+    fn compositor_msaa_does_not_change_rounded_translucent_ui_or_shadows() {
+        let (mut shell, _, device, queue) = crate::benchmark::rendering_shell_with_outputs(
+            vec![diagnostic_output(
+                PRIMARY_OUTPUT_ID,
+                LogicalPoint::ZERO,
+                true,
+                0.0,
+            )],
+            |_| {},
+        )
+        .expect("diagnostic GPU shell");
+        let camera = shell.outputs[&PRIMARY_OUTPUT_ID].camera;
+        shell.app.world_mut().spawn((
+            Node {
+                position_type: PositionType::Absolute,
+                left: px(8.25),
+                top: px(5.75),
+                width: px(41.5),
+                height: px(37.5),
+                border_radius: BorderRadius::all(px(9.25)),
+                ..Default::default()
+            },
+            BackgroundColor(Color::srgba(0.2, 0.6, 0.9, 0.8)),
+            BoxShadow::new(
+                Color::srgba(0.0, 0.0, 0.0, 0.7),
+                px(2.5),
+                px(3.25),
+                px(1.0),
+                px(6.0),
+            ),
+            UiTargetCamera(camera),
+        ));
+        let mut images = Vec::new();
+        for samples in [Msaa::Sample4, Msaa::Off] {
+            *shell
+                .app
+                .world_mut()
+                .get_mut::<Msaa>(camera)
+                .expect("camera samples") = samples;
+            for time in 1..=5 {
+                shell.advance_main(time);
+                shell
+                    .render_outputs(&[owned_request(PRIMARY_OUTPUT_ID)], &mut Vec::new())
+                    .expect("settle UI");
+            }
+            images.push(render_owned_output(
+                &mut shell,
+                &device,
+                &queue,
+                PRIMARY_OUTPUT_ID,
+            ));
+        }
+        assert!(
+            images[0]
+                .chunks_exact(4)
+                .collect::<std::collections::HashSet<_>>()
+                .len()
+                > 12,
+            "the fixture must include antialiased/shadow pixels"
+        );
+        let differing_bytes = images[0]
+            .iter()
+            .zip(&images[1])
+            .filter(|(before, after)| before != after)
+            .count();
+        assert_eq!(
+            differing_bytes, 0,
+            "UI and shadow antialiasing must be unchanged"
         );
     }
 
