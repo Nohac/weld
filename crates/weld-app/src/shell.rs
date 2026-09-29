@@ -1,5 +1,7 @@
 //! Bevy-owned compositor scene rendered into a Weld-owned wgpu texture.
 
+mod ingress;
+
 use std::{
     collections::{HashMap, HashSet},
     rc::Rc,
@@ -75,6 +77,8 @@ use weld_core::{
 };
 use weld_input::KeyboardSettingsReader;
 
+use self::ingress::PresentationIngress;
+
 #[cfg(test)]
 const PRIMARY_OUTPUT_ID: OutputId = OutputId::new(1);
 pub struct AppShell {
@@ -85,6 +89,7 @@ pub struct AppShell {
     redraw_requests: RedrawRequests,
     dmabuf_importer: Option<DmabufImporter>,
     surface_demand: SurfaceCompositionDemand,
+    pending_surfaces: PresentationIngress,
     cursor: CursorHostTracker,
     pending_input: ApplicationInputBuffer,
     client_importers: HashSet<ClientSourceId>,
@@ -447,6 +452,7 @@ impl AppShell {
             redraw_requests,
             dmabuf_importer,
             surface_demand: SurfaceCompositionDemand::default(),
+            pending_surfaces: PresentationIngress::default(),
             cursor: CursorHostTracker::default(),
             pending_input: ApplicationInputBuffer::default(),
             client_importers,
@@ -458,6 +464,11 @@ impl AppShell {
         let _advance_span =
             tracing::trace_span!(target: crate::PROFILE_TARGET, "weld_app_advance_composition")
                 .entered();
+        let mut pending = std::mem::take(&mut self.pending_surfaces);
+        for event in pending.drain() {
+            self.apply_client_event(event);
+        }
+        self.pending_surfaces = pending;
         enqueue_application_input_batch(self.app.world_mut(), &mut self.pending_input);
         set_input_update_time(self.app.world_mut(), input_time);
         advance_main_app(&mut self.app, &mut self.redraw_requests)
@@ -631,6 +642,15 @@ impl AppShell {
 
     pub fn enqueue_client_event(&mut self, event: ClientSurfaceEvent) -> CompositionDemand {
         let demand = self.surface_demand.classify(&event);
+        // Relay observation has already happened in ClientRuntime. This inbox
+        // belongs to the local presenter and follows its application cadence.
+        if !matches!(event.kind, ClientSurfaceEventKind::Metadata(_)) {
+            self.pending_surfaces.push(event);
+        }
+        demand
+    }
+
+    fn apply_client_event(&mut self, event: ClientSurfaceEvent) {
         let ClientSurfaceEvent { surface, kind } = event;
         match kind {
             // Current desktop decorations do not display client labels. The
@@ -678,7 +698,6 @@ impl AppShell {
                 },
             ),
         }
-        demand
     }
 
     fn prepare_surface_commit(
@@ -1452,6 +1471,66 @@ mod tests {
                 .and_then(ComputedUiTargetCamera::get),
             Some(camera),
         );
+    }
+
+    #[cfg(feature = "test-support")]
+    #[test]
+    fn presentation_ingress_defers_buffer_preparation_until_main_advance() {
+        use std::cell::Cell;
+
+        use weld_client::{
+            ClientBufferId, ClientBufferLease, ClientBufferMetadata, ClientBufferUseId,
+        };
+
+        let (mut shell, _, _, _) = crate::benchmark::rendering_shell_with_outputs(
+            vec![diagnostic_output(
+                PRIMARY_OUTPUT_ID,
+                LogicalPoint::ZERO,
+                true,
+                0.0,
+            )],
+            |_| {},
+        )
+        .expect("diagnostic GPU shell");
+        let surface = SurfaceId::for_test(1);
+        let completed = std::rc::Rc::new(Cell::new(0));
+        let metadata = ClientBufferMetadata::new(Extent::new(1, 1), true);
+        for revision in 1..=3 {
+            let mut event = snapshot_event(surface, true);
+            let completed = completed.clone();
+            let buffer = ClientBufferLease::new(
+                ClientBufferId::new(surface.source(), revision),
+                ClientBufferUseId::new(surface.source(), revision),
+                metadata,
+                std::rc::Rc::new(weld_core::dmabuf::DirectClientBufferAccess::Shm(
+                    weld_core::dmabuf::WaylandShmBuffer {
+                        bgra_pixels: vec![0; 4],
+                    },
+                )),
+                move |_| completed.set(completed.get() + 1),
+            )
+            .expect("matching source");
+            if let ClientSurfaceEventKind::Commit(commit) = &mut event.kind {
+                commit.buffers.push(weld_client::SurfaceBufferUpdate {
+                    layer: SurfaceLayerId::new(1),
+                    change: weld_client::SurfaceBufferChange::Replaced { metadata, buffer },
+                });
+            }
+            shell.enqueue_client_event(event);
+        }
+        assert_eq!(
+            completed.get(),
+            2,
+            "latest use awaits presenter preparation"
+        );
+        shell.advance_main(1);
+        assert_eq!(
+            completed.get(),
+            3,
+            "SHM use completes after pixel extraction"
+        );
+        shell.advance_main(2);
+        assert_eq!(completed.get(), 3, "idle updates do not repeat preparation");
     }
 
     #[cfg(feature = "test-support")]

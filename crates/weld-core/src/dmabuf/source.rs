@@ -13,6 +13,7 @@ use smithay::backend::allocator::{Buffer, Fourcc, dmabuf::Dmabuf};
 use super::ImportId;
 
 pub(crate) struct ImportedDmabufSource {
+    owner: Rc<()>,
     pub(crate) id: ImportId,
     pub(crate) alive: Cell<bool>,
     pub(crate) texture: wgpu::Texture,
@@ -23,6 +24,7 @@ pub(crate) struct ImportedDmabufSource {
 
 #[derive(Clone)]
 pub(crate) struct DmabufSourceCache {
+    owner: Rc<()>,
     device: Option<wgpu::Device>,
     max_dimension: u32,
     imported: Rc<RefCell<HashMap<Dmabuf, Rc<ImportedDmabufSource>>>>,
@@ -32,6 +34,7 @@ pub(crate) struct DmabufSourceCache {
 impl DmabufSourceCache {
     pub(crate) fn new(device: &wgpu::Device) -> Self {
         Self {
+            owner: Rc::new(()),
             device: Some(device.clone()),
             max_dimension: device.limits().max_texture_dimension_2d,
             imported: Rc::new(RefCell::new(HashMap::new())),
@@ -42,6 +45,7 @@ impl DmabufSourceCache {
     /// No GPU import capability. Paired with an absent linux-dmabuf global.
     pub(crate) fn unavailable() -> Self {
         Self {
+            owner: Rc::new(()),
             device: None,
             max_dimension: 0,
             imported: Rc::new(RefCell::new(HashMap::new())),
@@ -136,8 +140,8 @@ impl DmabufSourceCache {
             )
         };
         // SAFETY: the HAL guard remains live while its opaque image handle is
-        // copied. Cache ownership keeps the texture alive until wl_buffer
-        // destruction, and tracked submissions retain in-flight uses.
+        // copied. The cache and committed lease pins retain the texture through
+        // protocol retirement; tracked submissions retain in-flight uses.
         let image = unsafe {
             texture
                 .as_hal::<wgpu::hal::api::Vulkan>()
@@ -152,6 +156,7 @@ impl DmabufSourceCache {
         );
         self.next_import_id.set(id.next());
         let imported = Rc::new(ImportedDmabufSource {
+            owner: self.owner.clone(),
             id,
             alive: Cell::new(true),
             texture,
@@ -167,6 +172,10 @@ impl DmabufSourceCache {
 
     pub(crate) fn get(&self, dmabuf: &Dmabuf) -> Option<Rc<ImportedDmabufSource>> {
         self.imported.borrow().get(dmabuf).cloned()
+    }
+
+    pub(crate) fn owns(&self, source: &ImportedDmabufSource) -> bool {
+        Rc::ptr_eq(&self.owner, &source.owner)
     }
 
     pub(crate) fn remove(&self, dmabuf: &Dmabuf) {
@@ -186,6 +195,114 @@ pub(crate) const fn texture_format(format: Fourcc) -> Option<wgpu::TextureFormat
 
 #[cfg(test)]
 mod tests {
+    use std::{cell::Cell, fs::File, os::fd::OwnedFd, rc::Rc};
+
+    use ash::vk;
+    use smithay::backend::allocator::{
+        Modifier,
+        dmabuf::{Dmabuf, DmabufFlags},
+    };
+    use weld_client::{
+        ClientBufferId, ClientBufferMetadata, ClientBufferUseId, ClientSourceId, Extent,
+    };
+
+    use super::{DmabufSourceCache, ImportedDmabufSource};
+    use crate::dmabuf::{DirectClientBufferAccess, DmabufAccess, DmabufContext, ImportId};
+
+    #[test]
+    #[ignore = "requires a Vulkan adapter for the retained texture fixture"]
+    fn committed_lease_pins_import_after_cache_retirement() {
+        let mut descriptor = wgpu::InstanceDescriptor::new_without_display_handle();
+        descriptor.backends = wgpu::Backends::VULKAN;
+        let instance = wgpu::Instance::new(descriptor);
+        let adapter = pollster::block_on(instance.request_adapter(&Default::default()))
+            .expect("Vulkan adapter");
+        let (device, _) =
+            pollster::block_on(adapter.request_device(&Default::default())).expect("Vulkan device");
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("lease lifetime fixture"),
+            size: wgpu::Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Bgra8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        // The descriptor is an identity fixture; it is never imported or sampled.
+        let mut builder = Dmabuf::builder(
+            (1, 1),
+            Fourcc::Argb8888,
+            Modifier::Linear,
+            DmabufFlags::empty(),
+        );
+        assert!(builder.add_plane(
+            OwnedFd::from(File::open("/dev/null").expect("fixture fd")),
+            0,
+            4
+        ));
+        let dmabuf = builder.build().expect("one plane");
+        let sources = DmabufSourceCache::new(&device);
+        let imported = Rc::new(ImportedDmabufSource {
+            owner: sources.owner.clone(),
+            id: ImportId::new(1),
+            alive: Cell::new(true),
+            view: texture.create_view(&Default::default()),
+            texture,
+            image: vk::Image::null(),
+            format: wgpu::TextureFormat::Bgra8Unorm,
+        });
+        let weak = Rc::downgrade(&imported);
+        assert!(sources.owns(&imported));
+        assert!(
+            !DmabufSourceCache::new(&device).owns(&imported),
+            "import IDs belong to their allocating cache"
+        );
+        sources
+            .imported
+            .borrow_mut()
+            .insert(dmabuf.clone(), imported);
+        let (sender, _receiver) = calloop::channel::channel();
+        let context = DmabufContext::new(sender, sources.clone(), None);
+        let source = ClientSourceId::new(1);
+        let completed = Rc::new(Cell::new(false));
+        let notify = completed.clone();
+        let lease = context
+            .lease_external(
+                ClientBufferId::new(source, 1),
+                ClientBufferUseId::new(source, 1),
+                ClientBufferMetadata::new(Extent::new(1, 1), true),
+                DmabufAccess::new(dmabuf.clone()),
+                move |_| notify.set(true),
+            )
+            .expect("validated cached import");
+        sources.remove(&dmabuf);
+        assert!(sources.get(&dmabuf).is_none());
+        assert!(!completed.get());
+        let access = lease
+            .access::<DirectClientBufferAccess>()
+            .expect("direct access");
+        let DirectClientBufferAccess::Dmabuf(access) = access else {
+            panic!("DMA-BUF access");
+        };
+        assert_eq!(
+            access.source.as_ref().expect("lease pin").id,
+            ImportId::new(1)
+        );
+        assert!(!access.source.as_ref().expect("lease pin").alive.get());
+        assert!(weak.upgrade().is_some());
+        drop(lease);
+        assert!(completed.get());
+        assert!(
+            weak.upgrade().is_none(),
+            "final consumer releases the retired texture"
+        );
+    }
+
     use super::*;
 
     #[test]

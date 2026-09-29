@@ -264,13 +264,17 @@ impl DmabufContext {
         metadata: ClientBufferMetadata,
         pending: PendingWaylandDmabufUse,
     ) -> anyhow::Result<ClientBufferLease> {
-        let PendingWaylandDmabufUse { access, release } = pending;
-        if self.sources.get(&access.dmabuf).is_none() {
+        let PendingWaylandDmabufUse {
+            mut access,
+            release,
+        } = pending;
+        let Some(imported) = self.sources.get(&access.dmabuf) else {
             let _ = self
                 .release_sender
                 .send(DmabufEvent::LeaseCompleted(release));
             anyhow::bail!("committed DMA-BUF was not imported during protocol creation");
-        }
+        };
+        access.source = Some(imported);
         let release_sender = self.release_sender.clone();
         ClientBufferLease::new(
             ClientBufferId::new(source, buffer_local),
@@ -311,12 +315,14 @@ impl DmabufContext {
         buffer: ClientBufferId,
         use_id: ClientBufferUseId,
         metadata: ClientBufferMetadata,
-        access: DmabufAccess,
+        mut access: DmabufAccess,
         notify: impl FnOnce(ClientBufferUseId) + 'static,
     ) -> Result<ClientBufferLease> {
-        self.sources
-            .get(&access.dmabuf)
-            .context("external DMA-BUF was not imported")?;
+        access.source = Some(
+            self.sources
+                .get(&access.dmabuf)
+                .context("external DMA-BUF was not imported")?,
+        );
         ClientBufferLease::new(
             buffer,
             use_id,
@@ -438,10 +444,14 @@ impl DmabufManager {
         frame: &DmabufAccess,
         lease: ClientBufferLease,
     ) -> Result<StagedImport> {
-        let source = self
-            .sources
-            .get(&frame.dmabuf)
-            .context("committed DMA-BUF was not imported during protocol creation")?;
+        let source = frame
+            .source
+            .clone()
+            .context("committed DMA-BUF lease has no validated import")?;
+        anyhow::ensure!(
+            self.sources.owns(&source),
+            "DMA-BUF lease belongs to another import context"
+        );
         let id = source.id;
         self.known_sources.insert(id, source.clone());
         let extent = source.texture.size();

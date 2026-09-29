@@ -15,9 +15,11 @@ pub(crate) use source::{DmabufSourceCache, ImportedDmabufSource};
 
 use smithay::{backend::allocator::dmabuf::Dmabuf, utils::SealedFile};
 use std::{
+    fmt,
     fs::File,
     io::{Read, Seek},
     os::fd::{AsFd, OwnedFd},
+    rc::Rc,
 };
 use weld_client::{ClientBufferLease, ClientBufferMetadata, ClientBufferUseId, Extent};
 
@@ -235,14 +237,29 @@ pub(crate) enum DmabufEvent {
 }
 
 /// A validated DMA-BUF crossing into the shell renderer.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct DmabufAccess {
     dmabuf: Dmabuf,
+    /// A committed consumer keeps its validated import after protocol retirement.
+    source: Option<Rc<ImportedDmabufSource>>,
+}
+
+impl fmt::Debug for DmabufAccess {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("DmabufAccess")
+            .field("dmabuf", &self.dmabuf)
+            .field("import", &self.source.as_ref().map(|source| source.id))
+            .finish()
+    }
 }
 
 impl DmabufAccess {
     pub(crate) fn new(dmabuf: Dmabuf) -> Self {
-        Self { dmabuf }
+        Self {
+            dmabuf,
+            source: None,
+        }
     }
 }
 

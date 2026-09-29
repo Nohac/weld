@@ -571,14 +571,25 @@ CPU pixel copy, GPU normalization blit, or intermediate surface texture.
 The boundary has three distinct representations. Smithay emits a core-owned
 neutral `ClientSurfaceCommit` whose changed layer is retained, removed, or a
 replacement `ClientBufferLease`. A lease contains adapter-private access and
-completes only after its final consumer drops it. `AppShell` resolves every
-lease before ECS ingress and asks the core-owned DMA-BUF manager to resolve a
+completes only after its final consumer drops it. `AppShell` retains a
+presenter-owned inbox before image preparation. Within an ordered segment,
+interleaved surfaces retain their latest unobserved commit and carry forward
+retained-layer content. Superseded leases drop immediately; control records
+and mapping transitions close the segment. At the next main advance the shell
+resolves the surviving leases before ECS ingress and asks the core-owned DMA-BUF manager to resolve a
 Wayland or transported external DMA-BUF image into a Bevy handle. Application
 plugins receive only retained content, pixels, or a Bevy `Handle<Image>` with
 project-owned sampling metadata; they
 never handle Smithay protocol objects, file descriptors, Vulkan images, or
 wgpu resources. Adjacent application snapshots coalesce while carrying the
 newest unobserved content.
+
+The local inbox has no effect on protocol processing, device-paced input, or
+relay observation in `ClientRuntime`. Other consumers retain their own cadence.
+Each leased DMA-BUF pins its validated GPU import through deferred preparation,
+including after destruction of the original protocol buffer. The renderer
+checks the import-cache identity before staging that pin; separately allocated
+import namespaces cannot alias each other's IDs or native images.
 
 Surface entities describe protocol lifecycle, mapping, geometry, and input
 structure. A buffer-only commit updates private surface and render resources;
