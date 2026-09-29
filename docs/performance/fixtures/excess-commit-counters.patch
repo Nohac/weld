@@ -1,0 +1,51 @@
+diff --git a/crates/weld-core/src/runtime/native.rs b/crates/weld-core/src/runtime/native.rs
+index e474a21a..037f24e1 100644
+--- a/crates/weld-core/src/runtime/native.rs
++++ b/crates/weld-core/src/runtime/native.rs
+@@ -185,7 +185,13 @@ impl<Event: 'static> NativeRuntime<Event> {
+         let mut policy_clock = PolicyClock::new(interval);
+         let mut policy_dirty = integration.application().is_some();
+         let started_at = Instant::now();
++        let mut probe_at = Instant::now();
++        let mut probe_loops = 0_u64;
++        let mut probe_main = 0_u64;
++        let mut probe_render = 0_u64;
++        let mut probe_events = 0_u64;
+         loop {
++            probe_loops += 1;
+             let settings = integration
+                 .application()
+                 .and_then(|app| app.take_keyboard_settings());
+@@ -249,6 +255,7 @@ impl<Event: 'static> NativeRuntime<Event> {
+                     },
+                 );
+                 while let Some(event) = events.pop_front() {
++                    probe_events += 1;
+                     // Adapters already observed the event during drain. No local
+                     // integration means no extra consumer retaining its buffer.
+                     if let Some(app) = integration.application() {
+@@ -267,6 +274,8 @@ impl<Event: 'static> NativeRuntime<Event> {
+             if let Some((driver, app)) = integration.native() {
+                 let mut frame = driver.policy_frame(&mut self.state, app);
+                 if frame.work.advance_main {
++                    probe_main += 1;
++                    probe_render += u64::from(frame.work.render_composition);
+                     frame.redraw = app.advance_main(frame.input_time);
+                     apply_policy_requests(&mut self.state, app);
+                     if !driver.apply_native_effects(&mut self.state, app, &mut frame)? {
+@@ -344,6 +353,15 @@ impl<Event: 'static> NativeRuntime<Event> {
+             if !keep_running {
+                 break;
+             }
++            let probe_elapsed = probe_at.elapsed().as_secs_f64();
++            if probe_elapsed >= 1.0 {
++                eprintln!("WELD_STAGE_PROBE elapsed={probe_elapsed:.6} loops={probe_loops} main={probe_main} render={probe_render} events={probe_events}");
++                probe_at = Instant::now();
++                probe_loops = 0;
++                probe_main = 0;
++                probe_render = 0;
++                probe_events = 0;
++            }
+         }
+         Ok(())
+     }

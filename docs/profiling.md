@@ -132,6 +132,15 @@ threads that exit during the interval can make their sum smaller than the
 process total. `--perf-frequency` changes the sampling frequency (default 499),
 and `--call-graph fp|dwarf` overrides unwinding (optimized defaults to frame
 pointers, dev to 16 KiB DWARF stacks).
+`--perf-stat` additionally writes `counters.csv` with process-attached task time
+and userspace cycles, instructions, and cache misses. It requires `--perf`.
+Check each counter's running percentage and unsupported/not-counted markers
+before comparing results; process CPU accounting remains in `cpu.json`.
+`--perf-event instructions:u` samples retired instructions instead of CPU time.
+Weight those stacks by their recorded sample **period**, not sample count, and
+do not label their percentages as CPU time. CPU samples now include the executing
+CPU number, which helps distinguish workload changes from core placement on
+heterogeneous machines. Both collectors are stopped with the owned test run.
 Long dev captures with DWARF stacks can exceed the file bound and fail; use a
 short capture or frame-pointer perf profile instead of raising limits blindly.
 
@@ -155,6 +164,8 @@ as the nested tests; it does not take over an existing graphical session.
 
 The [post-fix cost analysis](performance/render-costs-2026-09-29.md) separates
 uninstrumented CPU totals, CPU sample attribution, and instrumented call counts.
+The [excess-commit investigation](performance/excess-commits-2026-09-29.md)
+compares work counts, instruction counts, and CPU time across client cadences.
 
 ### Generic workload runner
 

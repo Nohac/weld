@@ -158,10 +158,14 @@ def main():
     parser.add_argument('--client-wayland-log', action='store_true', help='Protocol-count probe; logging perturbs CPU timing')
     parser.add_argument('--client-vsync', action='store_true', help='Diagnostic Mesa vblank_mode=3 for Blender only')
     parser.add_argument('--perf', type=Path, help='Optional perf executable for CPU stacks')
+    parser.add_argument('--perf-stat', action='store_true', help='Also count Weld-only cycles/instructions/cache misses; requires --perf')
     parser.add_argument('--perf-frequency', type=int, default=499)
+    parser.add_argument('--perf-event', choices=['cpu-clock:u', 'instructions:u'], default='cpu-clock:u', help='Sample CPU time or retired instructions')
     parser.add_argument('--call-graph', choices=['fp', 'dwarf'], help='Override profile-default CPU unwinding')
     parser.add_argument('--trace', action='store_true', help='Capture Tracy from the perf profile')
     args = parser.parse_args()
+    if args.perf_stat and not args.perf:
+        parser.error('--perf-stat requires --perf')
     if not 1 <= args.seconds <= 120 or not 1 <= args.hz <= 1000 or not 0 <= args.warmup <= 60:
         parser.error('seconds must be 1..120, hz 1..1000, warmup 0..60')
     if not 1 <= args.jobs <= 32 or not 1 <= args.perf_frequency <= 1000:
@@ -216,7 +220,7 @@ def main():
     workspace = 'weld-perf-' + run.name.removeprefix('orbit-')
     if any(item['name'] == workspace for item in sway.request(1)):
         raise RuntimeError('Refusing to reuse an existing workspace')
-    host = collector = sampler = pointer = None
+    host = collector = sampler = counter = pointer = None
     middle_held = False
     try:
         sway.command('workspace --no-auto-back-and-forth ' + json.dumps(workspace))
@@ -273,7 +277,9 @@ def main():
                     middle_held = True
             if args.perf:
                 call_graph = args.call_graph or ('dwarf' if args.profile == 'dev' else 'fp')
-                sampler = subprocess.Popen([str(args.perf), 'record', '--no-buildid-cache', '-m', '64', '-e', 'cpu-clock:u', '-F', str(args.perf_frequency), '--call-graph', 'dwarf,16384' if call_graph == 'dwarf' else 'fp', '-p', str(pid), '-o', str(run / 'cpu.data'), '--', 'sleep', str(args.seconds)], stdout=perf_log, stderr=subprocess.STDOUT, start_new_session=True)
+                sampler = subprocess.Popen([str(args.perf), 'record', '--no-buildid-cache', '--sample-cpu', '-m', '64', '-e', args.perf_event, '-F', str(args.perf_frequency), '--call-graph', 'dwarf,16384' if call_graph == 'dwarf' else 'fp', '-p', str(pid), '-o', str(run / 'cpu.data'), '--', 'sleep', str(args.seconds)], stdout=perf_log, stderr=subprocess.STDOUT, start_new_session=True)
+                if args.perf_stat:
+                    counter = subprocess.Popen([str(args.perf), 'stat', '--no-big-num', '-x', ';', '-o', str(run / 'counters.csv'), '-e', 'task-clock,cycles:u,instructions:u,cache-misses:u', '-p', str(pid), '--', 'sleep', str(args.seconds)], stdout=perf_log, stderr=subprocess.STDOUT, start_new_session=True)
             threads_before = thread_cpu(pid)
             before = cpu(pid)
             started = time.monotonic()
@@ -330,6 +336,10 @@ def main():
                 sampler.wait(timeout=10)
                 if sampler.returncode:
                     raise RuntimeError('perf failed; see perf.log')
+            if counter:
+                counter.wait(timeout=10)
+                if counter.returncode:
+                    raise RuntimeError('perf stat failed; see counters.csv and perf.log')
             if collector:
                 collector.wait(timeout=args.warmup + 40)
                 if collector.returncode:
@@ -340,6 +350,7 @@ def main():
         finally:
             stop(pointer)
             stop(sampler)
+            stop(counter)
             stop(collector)
             stop(host)
             try:
