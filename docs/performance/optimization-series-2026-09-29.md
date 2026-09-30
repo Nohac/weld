@@ -227,6 +227,74 @@ and MSAA experiment. Final confirmation after restoring the original MSAA
 default was quota-blocked; that final subset review is deferred, with no
 unresolved findings from the completed reviews.
 
+## 2b. Event driven output propagation and claimed callback servicing
+
+Implemented September 30, baseline `af8c4b94`. Output membership and preferred
+scale now propagate at toplevel registration, subtree attachment, assignment
+changes, popup-owner changes, and output/scale updates. Pixel-only commits and
+unchanged assignment requests skip propagation. Attaching an existing subtree
+updates every descendant immediately; membership and scale share one collected
+tree traversal. Popup geometry-only updates retain their output assignment.
+
+Independent callback servicing and deadline calculation resolve only roots
+with presentation claims. Ordinary local windows no longer require mapped-root
+enumeration on every host wakeup. Native callback staging, input servicing,
+protocol dispatch, buffer release, and composition pacing are unchanged.
+
+Optimized non-Tracy binaries, Vulkan validation off, 25-second captures after
+four seconds of warmup, 1815×1179 Blender viewport, approximately 997 pointer
+events/s with the middle button held. All captures use instruction sampling
+and process-attached hardware counters. No builds or other GPU tests run during
+capture. The first baseline precedes implementation builds; the remaining three
+alternate saved binaries without rebuilding between runs.
+
+| State | Artifact under `target/validation` | CPU, one core | Instructions, billions | Client draws/s |
+| --- | --- | ---: | ---: | ---: |
+| Baseline | `orbit-fwrpo4vx` | 16.48% | 3.559 | 343.8 |
+| Candidate | `orbit-ohaa4c2v` | 15.60% | 3.324 | 331.8 |
+| Baseline repeat | `orbit-ctghxe_0` | 16.72% | 3.602 | 344.2 |
+| Candidate repeat | `orbit-xzc13nrj` | 15.40% | 3.331 | 333.8 |
+
+The observed reduction is about **1.1 CPU percentage points** on average and
+**7% fewer retired instructions**. This is a modest signal from two captures per
+binary, not a confidence interval. Candidate client draw rates are about 3%
+lower, so these are not perfectly equal commit-rate workloads. GPU utilization
+is similar, around 81–83%, and the client remains unpaced in every run.
+
+Recorded-period-weighted instruction stacks show the intended paths shrinking:
+`service_independent_callbacks` drops from roughly 88–91 million sampled
+instructions per capture to 7–9 million. `independent_callback_timeout` accounts
+for 62–112 million in the baselines and has no matching candidate samples;
+per-commit `apply_surface_tree_outputs` similarly goes from 14–17 million to no
+matching samples. Zero samples means below sampling visibility, not zero cost.
+These are inclusive callees, not additional totals to add to whole-process
+instructions. Source-tree snapshot construction still runs for processed commits.
+
+Saved binaries are `target/perf/weldwm-orbit-host-before` and
+`target/perf/weldwm-orbit-host-after`. Same-basename symbol copies under
+`target/validation/host-before-symbols` and `host-after-symbols` allow
+`perf script --no-inline --symfs DIRECTORY,flat` to resolve each capture after
+the ordinary optimized binary changes. The candidate is restored as
+`target/perf/weldwm-orbit-optimized` for subsequent launches.
+
+Verification: 135 core tests pass, plus the new opt-in native socket regression
+run explicitly. That protocol test covers prebuilt subtree attachment to a
+different output, popup inheritance, scale overrides and output scale changes,
+an XDG configure/remap cycle, and active/paused/released callback ownership.
+The default suite leaves three native/GPU tests ignored; the new socket test
+is one of those and was run separately. Core all-target clippy with
+`test-support` and warnings denied, workspace all-target checks, formatting,
+and diff checks pass. The socket test requires execution outside the
+socket-restricted sandbox.
+
+Real SHM runtime checks pass with 61 callbacks/releases each, including the
+reclaim-only handoff fixture, client exit, SIGTERM shutdown and socket cleanup
+(`host-runtime-30burbxj`, `host-runtime-h5wnwdaf`). Fable approved the code review.
+No manual DRM or network-media run was performed. Delayed popup-owner discovery
+and role reuse on the same `wl_surface` were reviewed in source but do not have
+new protocol fixtures. Other per-wake maintenance and deferred snapshot
+publication remain separate follow-up work.
+
 ## Remaining priorities
 
 1. Avoid empty or unchanged Bevy schedule/render work.

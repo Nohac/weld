@@ -5,6 +5,8 @@ mod cursor;
 mod dmabuf;
 mod keyboard;
 mod output;
+#[cfg(test)]
+mod output_tests;
 mod popup;
 mod presentation;
 mod resize;

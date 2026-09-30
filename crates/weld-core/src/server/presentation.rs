@@ -242,10 +242,8 @@ impl ServerState {
     }
 
     pub(crate) fn independent_callback_timeout(&self, now: Instant) -> Option<Duration> {
-        self.mapped_frame_roots()
-            .filter(|(id, root)| {
-                self.presentation_claims.claimed(*id) && self.root_has_callbacks(*id, root)
-            })
+        self.independent_frame_roots()
+            .filter(|(id, root)| self.root_has_callbacks(*id, root))
             .filter_map(|(id, _)| {
                 self.presentation_claims
                     .timeout(id, self.fallback_presentation_rate(id), now)
@@ -255,10 +253,9 @@ impl ServerState {
 
     pub(crate) fn service_independent_callbacks(&mut self, now: Instant) {
         let due = self
-            .mapped_frame_roots()
+            .independent_frame_roots()
             .filter(|(id, root)| {
-                self.presentation_claims.claimed(*id)
-                    && self.root_has_callbacks(*id, root)
+                self.root_has_callbacks(*id, root)
                     && self
                         .presentation_claims
                         .timeout(*id, self.fallback_presentation_rate(*id), now)
@@ -275,6 +272,24 @@ impl ServerState {
             self.presentation_claims.completed(id, now);
         }
         // The native presentation_requested latch belongs to native staging.
+    }
+
+    fn independent_frame_roots(&self) -> impl Iterator<Item = (SurfaceId, WlSurface)> + '_ {
+        self.presentation_claims.roots.keys().filter_map(|&id| {
+            let (root, tree) = if let Some(toplevel) = self.toplevels.get(id) {
+                if !toplevel.surface.alive() {
+                    return None;
+                }
+                (toplevel.surface.wl_surface(), &toplevel.tree)
+            } else {
+                let popup = self.popups.get(id)?;
+                if !popup.surface.alive() {
+                    return None;
+                }
+                (popup.surface.wl_surface(), &popup.tree)
+            };
+            (root.is_alive() && tree.client_mapped(root)).then(|| (id, root.clone()))
+        })
     }
 
     pub(super) fn forget_presentation(&mut self, surface: SurfaceId) {

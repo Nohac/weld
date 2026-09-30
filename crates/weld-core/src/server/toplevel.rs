@@ -357,6 +357,9 @@ impl ServerState {
         let Some(toplevel) = self.toplevels.get_mut(surface_id) else {
             return;
         };
+        if toplevel.outputs == assignment {
+            return;
+        }
         toplevel.outputs = assignment.clone();
         let root = toplevel.surface.wl_surface().clone();
         let preferred_scale_120 = toplevel.preferred_scale_120;
@@ -385,6 +388,9 @@ impl ServerState {
         let Some(toplevel) = self.toplevels.get_mut(surface_id) else {
             return;
         };
+        if toplevel.preferred_scale_120 == preferred_scale_120 {
+            return;
+        }
         toplevel.preferred_scale_120 = preferred_scale_120;
         let root = toplevel.surface.wl_surface().clone();
         let assignment = toplevel.outputs.clone();
@@ -444,20 +450,12 @@ impl ServerState {
         assignment: &SurfaceOutputAssignment,
         preferred_scale_120: Option<u32>,
     ) {
-        let surfaces = collect_surfaces(root)
+        for surface in collect_surfaces(root)
             .into_iter()
             .filter(Resource::is_alive)
-            .collect::<Vec<_>>();
-        for surface in &surfaces {
-            for (output_id, output) in &self.outputs {
-                if assignment.memberships.contains(output_id) {
-                    output.native.enter(surface);
-                } else {
-                    output.native.leave(surface);
-                }
-            }
+        {
+            self.apply_surface_outputs(&surface, assignment, preferred_scale_120);
         }
-        self.send_surface_tree_scale(root, assignment, preferred_scale_120);
     }
 
     fn apply_surface_outputs(
@@ -614,13 +612,6 @@ impl ServerState {
             surface: surface_id,
             kind: PendingSurfaceEventKind::TreeSnapshot(snapshot),
         });
-        if let Some((assignment, scale)) = self
-            .toplevels
-            .get(surface_id)
-            .map(|state| (state.outputs.clone(), state.preferred_scale_120))
-        {
-            self.apply_surface_tree_outputs(root, &assignment, scale);
-        }
     }
 }
 
@@ -756,7 +747,9 @@ impl CompositorHandler for ServerState {
         let root = owning_root(parent);
         if let Some(assignment) = self.output_assignment_for_root(&root).cloned() {
             let scale = self.scale_override_for_root(&root);
-            self.apply_surface_outputs(surface, &assignment, scale);
+            // An attached surface can already have descendants. Move the whole
+            // subtree to its new root's output assignment before its first commit.
+            self.apply_surface_tree_outputs(surface, &assignment, scale);
         } else {
             self.enter_primary_output(surface);
         }
@@ -845,8 +838,7 @@ impl XdgShellHandler for ServerState {
             surface.send_close();
             return;
         };
-        self.enter_primary_output(surface.wl_surface());
-        let rejection_surface = surface.clone();
+        let surface_handle = surface.clone();
         let state = ToplevelState {
             surface,
             decoration: WindowDecoration::ClientSide,
@@ -859,9 +851,14 @@ impl XdgShellHandler for ServerState {
         };
         if !self.toplevels.insert(id, state) {
             warn!(?id, "refused a duplicate xdg-toplevel registration");
-            rejection_surface.send_close();
+            surface_handle.send_close();
             return;
         }
+        self.apply_surface_tree_outputs(
+            surface_handle.wl_surface(),
+            &SurfaceOutputAssignment::primary(self.primary_output),
+            None,
+        );
         self.pending_surface_events.push_back(PendingSurfaceEvent {
             surface: id,
             kind: PendingSurfaceEventKind::Role(ClientSurfaceRole::Toplevel(ClientToplevelState {

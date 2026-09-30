@@ -316,13 +316,15 @@ impl ServerState {
             let Some(state) = self.popups.get_mut(surface) else {
                 continue;
             };
+            let owner_changed = state.owner != Some(owner);
             state.owner = Some(owner);
             if state.published == Some(popup) {
-                self.apply_popup_output_assignment(surface);
                 continue;
             }
             state.published = Some(popup);
-            self.apply_popup_output_assignment(surface);
+            if owner_changed {
+                self.apply_popup_output_assignment(surface);
+            }
             self.pending_surface_events.push_back(PendingSurfaceEvent {
                 surface,
                 kind: PendingSurfaceEventKind::Role(ClientSurfaceRole::Popup(popup)),
