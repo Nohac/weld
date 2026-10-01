@@ -20,7 +20,8 @@ use weld_app::{
 };
 use weld_window::{
     FocusedWindow, ManagedBy, ManagedWindow, OccupiesWindow, PresentationInsets, PresentsWindow,
-    WindowGeometry, WindowId, WindowPlugin, WindowPresentationOverride, WindowVacancy,
+    WindowCommand, WindowCommandKind, WindowGeometry, WindowId, WindowPlugin,
+    WindowPresentationOverride, WindowVacancy,
 };
 
 use super::*;
@@ -506,5 +507,329 @@ fn ownership_transfer_compacts_multiple_levels_before_admission() {
             .iter(app.world())
             .count(),
         1
+    );
+}
+
+#[test]
+fn structural_place_lifts_a_child_to_its_grandparent_without_changing_selection() {
+    // Topology cases from i3 306-move-to-parent.t, exercised through the native
+    // edit primitive before marks and criteria become config features.
+    for nested in [false, true] {
+        let mut app = app();
+        let first = window(&mut app, 1);
+        if nested {
+            window(&mut app, 9);
+            command(&mut app, 1, TileOperation::Split(SplitAxis::Vertical));
+            app.world_mut().trigger(WindowCommand {
+                window: first,
+                kind: WindowCommandKind::Focus,
+            });
+            app.world_mut().flush();
+        }
+        let second = window(&mut app, 2);
+        let third = window(&mut app, 3);
+        command(&mut app, 2, TileOperation::Split(SplitAxis::Horizontal));
+        let wrapper = app
+            .world()
+            .get::<TileParent>(second)
+            .expect("parent")
+            .entity();
+        let destination = app
+            .world()
+            .get::<TileParent>(wrapper)
+            .expect("grandparent")
+            .entity();
+        app.world_mut().trigger(WindowCommand {
+            window: second,
+            kind: WindowCommandKind::Focus,
+        });
+        app.world_mut().trigger(TileTreeEdit::Place {
+            node: second,
+            anchor: wrapper,
+            side: TileSide::After,
+        });
+        app.world_mut().flush();
+        assert_eq!(
+            app.world()
+                .get::<TileContainer>(destination)
+                .expect("destination")
+                .children()
+                .map(|(node, _)| node)
+                .collect::<Vec<_>>(),
+            [first, second, third]
+        );
+        assert!(app.world().get_entity(wrapper).is_err());
+        assert_eq!(
+            app.world().resource::<FocusedWindow>().entity(),
+            Some(second)
+        );
+    }
+}
+
+#[test]
+fn structural_edits_reject_cycles_stale_nodes_and_foreign_ownership_atomically() {
+    let mut app = app();
+    let first = window(&mut app, 1);
+    let second = window(&mut app, 2);
+    command(&mut app, 2, TileOperation::Split(SplitAxis::Vertical));
+    let third = window(&mut app, 3);
+    let root = app.world().get::<ManagedBy>(first).expect("owner").0;
+    let branch = app
+        .world()
+        .get::<TileParent>(second)
+        .expect("parent")
+        .entity();
+    let stale = app.world_mut().spawn_empty().id();
+    app.world_mut().despawn(stale);
+    for edit in [
+        TileTreeEdit::Place {
+            node: branch,
+            anchor: second,
+            side: TileSide::After,
+        },
+        TileTreeEdit::Place {
+            node: second,
+            anchor: second,
+            side: TileSide::Before,
+        },
+        TileTreeEdit::Place {
+            node: root,
+            anchor: third,
+            side: TileSide::After,
+        },
+        TileTreeEdit::Place {
+            node: second,
+            anchor: stale,
+            side: TileSide::After,
+        },
+        TileTreeEdit::Place {
+            node: stale,
+            anchor: second,
+            side: TileSide::After,
+        },
+    ] {
+        app.world_mut().trigger(edit);
+        app.world_mut().flush();
+        assert_eq!(
+            app.world()
+                .get::<TileContainer>(root)
+                .expect("root")
+                .children()
+                .map(|(node, _)| node)
+                .collect::<Vec<_>>(),
+            [first, branch]
+        );
+        assert_eq!(
+            app.world()
+                .get::<TileContainer>(branch)
+                .expect("branch")
+                .children()
+                .map(|(node, _)| node)
+                .collect::<Vec<_>>(),
+            [second, third]
+        );
+    }
+    let foreign = app.world_mut().spawn_empty().id();
+    app.world_mut()
+        .entity_mut(second)
+        .insert(ManagedBy(foreign));
+    for edit in [
+        TileTreeEdit::Place {
+            node: second,
+            anchor: first,
+            side: TileSide::Before,
+        },
+        TileTreeEdit::Place {
+            node: first,
+            anchor: second,
+            side: TileSide::Before,
+        },
+        TileTreeEdit::WrapChildren {
+            container: root,
+            axis: SplitAxis::Vertical,
+        },
+    ] {
+        app.world_mut().trigger(edit);
+        app.world_mut().flush();
+    }
+    assert_eq!(
+        app.world().get::<TileContainer>(root).expect("root").axis(),
+        SplitAxis::Horizontal
+    );
+    assert_eq!(
+        app.world()
+            .get::<TileParent>(second)
+            .expect("parent")
+            .entity(),
+        branch
+    );
+    assert_eq!(
+        app.world()
+            .get::<TileParent>(first)
+            .expect("parent")
+            .entity(),
+        root
+    );
+}
+
+#[test]
+fn structural_edits_can_reparent_a_whole_subtree() {
+    let mut app = app();
+    let first = window(&mut app, 1);
+    let second = window(&mut app, 2);
+    command(&mut app, 2, TileOperation::Split(SplitAxis::Vertical));
+    let third = window(&mut app, 3);
+    let branch = app
+        .world()
+        .get::<TileParent>(second)
+        .expect("branch")
+        .entity();
+    app.world_mut().trigger(TileTreeEdit::Place {
+        node: branch,
+        anchor: first,
+        side: TileSide::Before,
+    });
+    app.world_mut().flush();
+    assert_eq!(
+        app.world()
+            .get::<TileParent>(third)
+            .expect("unchanged branch")
+            .entity(),
+        branch
+    );
+    assert_eq!(geometry(&app, first).position.x, 400.0);
+    assert_eq!(geometry(&app, second).position, Vec2::ZERO);
+}
+
+#[test]
+fn flattening_unary_groups_preserves_proportions_and_history() {
+    for same_axis in [false, true] {
+        let mut app = app();
+        let first = window(&mut app, 1);
+        let second = window(&mut app, 2);
+        let root = app.world().get::<ManagedBy>(first).expect("root").0;
+        app.world_mut().trigger(TileTreeEdit::WrapChildren {
+            container: root,
+            axis: SplitAxis::Vertical,
+        });
+        app.world_mut().flush();
+        app.world_mut().trigger(TileTreeEdit::WrapChildren {
+            container: root,
+            axis: SplitAxis::Horizontal,
+        });
+        app.world_mut().flush();
+        let inner = app
+            .world()
+            .get::<TileParent>(first)
+            .expect("inner")
+            .entity();
+        let outer = app
+            .world()
+            .get::<TileParent>(inner)
+            .expect("outer")
+            .entity();
+        if same_axis {
+            app.world_mut()
+                .get_mut::<TileContainer>(outer)
+                .expect("outer")
+                .axis = SplitAxis::Horizontal;
+        }
+        command(
+            &mut app,
+            1,
+            TileOperation::Resize {
+                axis: SplitAxis::Horizontal,
+                fraction: 0.2,
+            },
+        );
+        let before = (geometry(&app, first), geometry(&app, second));
+        app.world_mut()
+            .trigger(TileTreeEdit::Flatten { container: outer });
+        app.world_mut().flush();
+        assert_eq!((geometry(&app, first), geometry(&app, second)), before);
+        assert_eq!(
+            app.world()
+                .get::<TileParent>(first)
+                .expect("promoted")
+                .entity(),
+            root
+        );
+        assert!(app.world().get_entity(inner).is_err());
+        assert!(app.world().get_entity(outer).is_err());
+        assert_eq!(
+            app.world()
+                .resource::<TileFocusHistory>()
+                .recent()
+                .filter(|node| *node != root)
+                .collect::<Vec<_>>(),
+            [second, first]
+        );
+    }
+}
+
+#[test]
+fn reparent_rejects_a_subtree_whose_height_exceeds_the_destination_budget() {
+    let mut app = app();
+    let first = window(&mut app, 1);
+    let second = window(&mut app, 2);
+    command(&mut app, 1, TileOperation::Split(SplitAxis::Horizontal));
+    app.world_mut().trigger(WindowCommand {
+        window: first,
+        kind: WindowCommandKind::Focus,
+    });
+    app.world_mut().flush();
+    window(&mut app, 3);
+    let source = app
+        .world()
+        .get::<TileParent>(first)
+        .expect("source")
+        .entity();
+    let source_parent = app
+        .world()
+        .get::<TileParent>(source)
+        .expect("source parent")
+        .entity();
+    app.world_mut().trigger(WindowCommand {
+        window: second,
+        kind: WindowCommandKind::Focus,
+    });
+    app.world_mut().flush();
+    let mut last = second;
+    for id in 4..=66 {
+        command(
+            &mut app,
+            if id == 4 { 2 } else { id - 1 },
+            TileOperation::Split(SplitAxis::Vertical),
+        );
+        last = window(&mut app, id);
+    }
+    let destination = app
+        .world()
+        .get::<TileParent>(last)
+        .expect("destination")
+        .entity();
+    app.world_mut().trigger(TileTreeEdit::Place {
+        node: source,
+        anchor: last,
+        side: TileSide::Before,
+    });
+    app.world_mut().flush();
+    assert_eq!(
+        app.world()
+            .get::<TileParent>(source)
+            .expect("source parent")
+            .entity(),
+        source_parent
+    );
+    assert_eq!(
+        app.world()
+            .get::<TileParent>(last)
+            .expect("destination")
+            .entity(),
+        destination
+    );
+    assert_eq!(
+        app.world().get::<TileParent>(first).expect("leaf").entity(),
+        source
     );
 }

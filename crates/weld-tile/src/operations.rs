@@ -15,7 +15,7 @@ use weld_window::{FocusedWindow, ManagedWindow, WindowCommand, WindowCommandKind
 
 use crate::{
     ContainerId, Direction, SplitAxis, TileChild, TileCommands, TileContainer, TileFocusHistory,
-    TileOperation, TileParent, TileRequest, TileState,
+    TileOperation, TileParent, TileRequest, TileState, TileTreeChanged,
     layout::{LayoutDirty, LayoutRect, LayoutRequested},
 };
 
@@ -69,7 +69,7 @@ impl TreeEditor<'_, '_> {
             depth += 1;
             ancestor = parent.0;
         }
-        if depth >= 64 {
+        if depth >= crate::MAX_DEPTH {
             return;
         }
         let Some(nested) = self.create_container(
@@ -214,6 +214,9 @@ pub(crate) fn apply_request(
             }
         }
         TileOperation::Resize { axis, fraction } => editor.resize(window, axis, fraction),
+    }
+    if editor.dirty.0 {
+        editor.commands.trigger(TileTreeChanged);
     }
     editor.commands.trigger(LayoutRequested);
 }

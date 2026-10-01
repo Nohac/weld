@@ -11,7 +11,7 @@ Weld is a workspace of reusable layers and one standard distribution:
   The optional `input` module translates keyboard directives and binding chords
   into Weld input types.
 - `weld-i3-quirks` consumes that Sway output, interprets the supported settings
-  and actions, and supplies i3 tree-based focus and branch-local close recovery.
+  and actions, and supplies i3 tree-based focus, structural movement and branch-local close recovery.
   It uses the shared tree and node-focus history. Master owns file selection,
   atomic settings/binding publication, reload and distribution effects. Future
   config/behavior combinations will be shaped by a second concrete backend.
@@ -147,8 +147,19 @@ branch before tiler pruning collapses containers. Structural edits refresh this
 path during final management layout, before UI reconciliation can remove vacant
 windows. History includes retained vacant slots; client keyboard focus
 still requires a live mapped occupant. This first policy slice covers directional
-leaf focus and wrapping on one workspace. Container selection, tabs/stacks,
-floating switching and i3 structural movement remain subsequent slices.
+leaf focus, wrapping and directional movement on one workspace. Container selection,
+tabs/stacks, floating switching and cross-output movement remain subsequent slices.
+
+`weld-i3-quirks` chooses movement destinations and when to regroup or flatten
+splits. `weld-tile` validates and applies `TileTreeEdit` reparent, wrap and flatten
+operations, preserving bidirectional edges, node identity, weights and history.
+Validation rejects stale or foreign-owned targets, cycles and depth overflow before
+mutation. Empty source groups are retired; explicit unary groups survive movement.
+`TileTreeChanged` runs after deferred topology publication so history and close
+recovery see the new ancestry before the next queued action. The i3 continuation
+after workspace wrapping and its flatten pass complete inside that same ordered
+action batch. A rejected edit terminates its continuation. Layout and client
+resize publication remain shared with native tiling.
 
 Native tile requests and behavior events deferred until workspace admission use
 one bounded Bevy command queue, preserving their original order. The i3 config

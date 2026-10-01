@@ -65,7 +65,7 @@ mod tests {
                         shift: true,
                         ..Default::default()
                     },
-                    Action::Tile(TileOperation::Move(direction)),
+                    Action::Move(direction),
                 ),
             ] {
                 let binding = config

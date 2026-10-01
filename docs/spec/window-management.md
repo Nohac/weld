@@ -16,7 +16,7 @@ now implements a native horizontal/vertical split tree with live gaps,
 directional focus, leaf swapping, proportional resize and retained slots in a
 single primary-output workspace. See [Master tiling](../master-tiling.md).
 
-`weld-i3-quirks` adds tree-based directional focus, wrapping and branch-local
+`weld-i3-quirks` adds tree-based directional focus, wrapping, split-tree movement and branch-local
 close restoration using shared tree-node focus history. It consumes Sway configuration
 through `weld-sway-config`; Master selects and reloads the file. Native tree
 mutation and window identity remain owned by the shared layers.

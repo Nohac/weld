@@ -31,6 +31,7 @@ use crate::{
     TileWorkspace, history,
     layout::{self, LayoutDirty, LayoutRect},
     operations::{self, TreeEditor},
+    structural,
 };
 
 /// Installs split-tree admission, actions and layout before window presentation.
@@ -58,7 +59,9 @@ impl Plugin for TilePlugin {
             .add_observer(activate)
             .add_observer(close)
             .add_observer(operations::apply_request)
+            .add_observer(structural::apply_edit)
             .add_observer(history::remember_focus)
+            .add_observer(history::remember_tree_change)
             .add_observer(layout::apply_layout)
             .configure_sets(
                 PreUpdate,

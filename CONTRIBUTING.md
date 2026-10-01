@@ -151,7 +151,7 @@ The development example config provides these backend-neutral shortcuts:
 - `Alt+B`: launch Blender
 - `Alt+H`: hoist or locally preview the focused occupied window
 - `Alt+D/F/K/J` or `Alt+Arrow`: focus left/right/up/down
-- Add `Shift` to the navigation bindings to swap a tile with its neighbor
+- Add `Shift` to navigate a tile structurally through neighboring splits
 - `Alt+Control+Arrow`: adjust tile proportions
 - `Alt+Control+F/J`: prepare a horizontal/vertical split
 - `Alt+Shift+R`: reload Master configuration

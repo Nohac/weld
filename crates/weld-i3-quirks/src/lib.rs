@@ -6,6 +6,8 @@
 
 pub mod config;
 mod focus;
+mod movement;
+mod tree;
 
 use bevy::{
     app::{App, Plugin, PreUpdate},
@@ -16,6 +18,10 @@ use weld_tile::{Direction, TileSystems};
 /// Directional navigation through the current i3 layout and focus history.
 #[derive(Event, Clone, Copy, Debug)]
 pub struct I3FocusRequest(pub Direction);
+
+/// Move the selected leaf through i3's split-tree insertion rules.
+#[derive(Event, Clone, Copy, Debug)]
+pub struct I3MoveRequest(pub Direction);
 
 /// Where directional navigation may wrap after reaching a split edge.
 #[derive(Resource, Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -38,6 +44,10 @@ impl Plugin for I3QuirksPlugin {
             .init_resource::<focus::FocusPath>()
             .add_observer(focus::navigate)
             .add_observer(focus::remember_focus)
+            .add_observer(focus::tree_changed)
+            .add_observer(movement::move_focused)
+            .add_observer(movement::after_wrap)
+            .add_observer(movement::cleanup)
             .add_systems(PreUpdate, focus::recover.in_set(TileSystems::RecoverFocus))
             .add_systems(PreUpdate, focus::refresh_path.in_set(TileSystems::Layout));
     }

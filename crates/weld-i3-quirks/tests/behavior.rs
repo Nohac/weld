@@ -1,4 +1,4 @@
-//! Behavioral scenarios adapted from i3's focus tests at
+//! Behavioral scenarios adapted from i3's focus and movement tests at
 //! 903bcd518df32b0e055b17f5da3f988a0187fd3d. See ../UPSTREAM.md and ../LICENSE-i3.
 
 use bevy::{
@@ -22,6 +22,9 @@ use weld_window::{
     FocusedWindow, ManagedBy, ManagedWindow, WindowCommand, WindowCommandKind, WindowGeometry,
     WindowId, WindowPlugin, WindowVacancy,
 };
+
+#[path = "cases/movement.rs"]
+mod movement;
 
 fn app() -> App {
     let mut app = App::new();

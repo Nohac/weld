@@ -26,7 +26,7 @@ use weld_app::{
     input::{ShellCommand, ShellCommands},
 };
 use weld_hoist::HoistWindow;
-use weld_i3_quirks::{FocusWrapping, I3FocusRequest, I3QuirksPlugin};
+use weld_i3_quirks::{FocusWrapping, I3FocusRequest, I3MoveRequest, I3QuirksPlugin};
 use weld_input::{
     GlobalShortcutId, GlobalShortcutPlugin, GlobalShortcutPressed, GlobalShortcutRegistry,
     GlobalShortcutSet, KeyboardSettings,
@@ -161,6 +161,7 @@ fn dispatch_action(
     };
     match action {
         Action::Focus(direction) => effects.commands.trigger(I3FocusRequest(direction)),
+        Action::Move(direction) => effects.commands.trigger(I3MoveRequest(direction)),
         Action::Exec(command) => {
             effects.push_shell(ShellCommand::Launch {
                 program: "sh".to_owned(),

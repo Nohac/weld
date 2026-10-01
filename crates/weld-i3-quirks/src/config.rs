@@ -9,6 +9,7 @@ use weld_tile::{Direction, SplitAxis, TileOperation, TileSettings};
 #[derive(Clone, Debug, PartialEq)]
 pub enum Action<Extension = ()> {
     Focus(Direction),
+    Move(Direction),
     Tile(TileOperation),
     Reload,
     Exec(String),
@@ -147,7 +148,7 @@ fn action<Extension>(
             Action::Tile(TileOperation::Split(SplitAxis::Vertical))
         }
         ["focus", value] => Action::Focus(direction(value)?),
-        ["move", value] => Action::Tile(TileOperation::Move(direction(value)?)),
+        ["move", value] => Action::Move(direction(value)?),
         [
             "resize",
             kind @ ("grow" | "shrink"),

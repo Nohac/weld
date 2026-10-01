@@ -7,18 +7,16 @@ use bevy::{
         observer::On,
         query::Changed,
         resource::Resource,
-        system::{Commands, Query, Res, ResMut, SystemParam},
+        system::{Commands, Query, Res, ResMut},
     },
     window::RequestRedraw,
 };
-use weld_tile::{
-    Direction, SplitAxis, TileCommands, TileContainer, TileFocusHistory, TileParent, TileWorkspace,
-};
+use weld_tile::{Direction, SplitAxis, TileCommands, TileParent, TileTreeChanged};
 use weld_window::{
-    FocusedWindow, ManagedBy, ManagedWindow, WindowCommand, WindowCommandKind, WindowFocusChanged,
+    FocusedWindow, ManagedWindow, WindowCommand, WindowCommandKind, WindowFocusChanged,
 };
 
-use crate::{FocusWrapping, I3FocusRequest};
+use crate::{FocusWrapping, I3FocusRequest, tree::TreeView};
 
 /// Preserves ancestry across destruction so recovery can run before compaction.
 #[derive(Resource, Default)]
@@ -27,50 +25,7 @@ pub(crate) struct FocusPath {
     ancestors: Vec<Entity>,
 }
 
-#[derive(SystemParam)]
-pub(crate) struct FocusTree<'w, 's> {
-    containers: Query<'w, 's, &'static TileContainer>,
-    parents: Query<'w, 's, &'static TileParent>,
-    workspaces: Query<'w, 's, &'static TileWorkspace>,
-    windows: Query<'w, 's, (&'static ManagedWindow, &'static ManagedBy)>,
-    history: Res<'w, TileFocusHistory>,
-}
-
-impl FocusTree<'_, '_> {
-    fn belongs_to(&self, window: Entity, ancestor: Entity) -> bool {
-        let Ok((_, owner)) = self.windows.get(window) else {
-            return false;
-        };
-        let mut node = window;
-        let mut found = node == ancestor;
-        while let Ok(parent) = self.parents.get(node) {
-            node = parent.entity();
-            found |= node == ancestor;
-        }
-        found && owner.0 == node && self.workspaces.contains(node)
-    }
-
-    fn descend(&self, node: Entity) -> Option<Entity> {
-        if self.belongs_to(node, node) {
-            return Some(node);
-        }
-        self.history
-            .recent()
-            .filter(|child| {
-                self.parents
-                    .get(*child)
-                    .is_ok_and(|parent| parent.entity() == node)
-            })
-            .find_map(|child| self.descend(child))
-            .or_else(|| {
-                self.containers
-                    .get(node)
-                    .ok()?
-                    .children()
-                    .find_map(|(child, _)| self.descend(child))
-            })
-    }
-
+impl TreeView<'_, '_> {
     fn navigate(
         &self,
         window: Entity,
@@ -137,7 +92,7 @@ impl FocusTree<'_, '_> {
 
 pub(crate) fn navigate(
     request: On<I3FocusRequest>,
-    tree: FocusTree,
+    tree: TreeView,
     focus: Res<FocusedWindow>,
     wrapping: Res<FocusWrapping>,
     mut pending: ResMut<TileCommands>,
@@ -162,14 +117,14 @@ pub(crate) fn navigate(
 
 pub(crate) fn remember_focus(
     event: On<WindowFocusChanged>,
-    tree: FocusTree,
+    tree: TreeView,
     mut path: ResMut<FocusPath>,
 ) {
     tree.remember(event.window, &mut path);
 }
 
 pub(crate) fn refresh_path(
-    tree: FocusTree,
+    tree: TreeView,
     focus: Res<FocusedWindow>,
     changed: Query<(), Changed<TileParent>>,
     mut path: ResMut<FocusPath>,
@@ -179,8 +134,17 @@ pub(crate) fn refresh_path(
     }
 }
 
+pub(crate) fn tree_changed(
+    _: On<TileTreeChanged>,
+    tree: TreeView,
+    focus: Res<FocusedWindow>,
+    mut path: ResMut<FocusPath>,
+) {
+    tree.remember(focus.entity(), &mut path);
+}
+
 pub(crate) fn recover(
-    tree: FocusTree,
+    tree: TreeView,
     focus: Res<FocusedWindow>,
     path: Res<FocusPath>,
     windows: Query<&ManagedWindow>,

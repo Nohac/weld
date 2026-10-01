@@ -11,6 +11,7 @@ mod history;
 mod layout;
 mod operations;
 mod plugin;
+mod structural;
 
 use bevy::ecs::{
     component::Component,
@@ -25,6 +26,7 @@ use weld_app::output::OutputId;
 use weld_window::WindowId;
 
 const COMMAND_CAPACITY: usize = 256;
+const MAX_DEPTH: usize = 64;
 
 pub use history::TileFocusHistory;
 pub use plugin::TilePlugin;
@@ -60,6 +62,36 @@ pub enum Direction {
     Up,
     Down,
 }
+
+/// Insertion position relative to another child in the same container.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TileSide {
+    Before,
+    After,
+}
+
+/// Process-local structural edits requested by a window-management policy.
+/// The tiler validates membership, ownership, cycles and depth before mutation.
+#[derive(Event, Clone, Copy, Debug)]
+pub enum TileTreeEdit {
+    /// Detach a node and insert it beside an existing sibling or ancestor.
+    /// Empty source containers are removed; explicit unary splits are retained.
+    Place {
+        node: Entity,
+        anchor: Entity,
+        side: TileSide,
+    },
+    /// Group a container's current children under their existing axis, then
+    /// give the outer container a new axis. Child order and weights survive.
+    WrapChildren { container: Entity, axis: SplitAxis },
+    /// Flatten a unary group containing a split on its parent's axis. The
+    /// promoted children retain their combined share and relative proportions.
+    Flatten { container: Entity },
+}
+
+/// Published after deferred topology edits, before the next queued policy action.
+#[derive(Event, Clone, Copy, Debug)]
+pub struct TileTreeChanged;
 
 /// Live tiling preferences. Replacing this resource preserves the current tree.
 /// Gaps affect existing geometry; default axis affects only newly made splits.

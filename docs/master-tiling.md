@@ -14,7 +14,7 @@ cargo run -- --backend nested --config examples/master.sway.config -- foot
 Alt+Enter opens additional terminals. Alt+Ctrl+J prepares a vertical split
 around the focused tile; open another terminal to populate it. Alt+Ctrl+F does the
 same horizontally. Alt+D/F/K/J focuses left/right/up/down, with arrow-key
-alternatives. Shift adds leaf swapping,
+alternatives. Shift moves the selected window through the split tree,
 and Control adjusts width/height proportions. Alt+Shift+Q requests client close.
 Alt+H invokes `weld hoist` through the existing hoist policy. Firefox is now
 Alt+Control+Shift+F, leaving Alt+F for focus-right. Ordinary clicks select tiles;
@@ -111,7 +111,8 @@ binding chords into `weld-input` types. Winnow captures chord tokens and quoted
 values; the translation layer validates modifier names and aliases. Master
 selects the file and installs typed settings. `weld-i3-quirks` consumes the Sway
 parser/input output and translates supported settings and actions. It owns
-i3 directional navigation and close-focus restoration over the shared tree.
+i3 directional navigation, structural movement and close-focus restoration over
+the shared tree.
 Master supplies the interpreter's typed command extension for the `weld`
 vocabulary and executes shell/distribution effects.
 Applying a valid candidate
@@ -122,8 +123,8 @@ key releases remain consumed across replacement.
 Gaps relayout existing windows. Default orientation does not rewrite existing
 containers. Commands execute in order, resolving focused-target commands at
 execution time. Master queues typed shortcut events; each observer's deferred
-effects finish before the next shortcut is resolved. A focus action triggers
-`I3FocusRequest`; structural actions trigger `TileRequest`, so focus followed by
+effects finish before the next shortcut is resolved. Focus and move actions trigger
+`I3FocusRequest` and `I3MoveRequest`; other tiling actions trigger `TileRequest`, so focus followed by
 hoist selects the updated target, while a
 reload invalidates remaining old binding IDs in the same batch.
 
@@ -141,8 +142,16 @@ so startup buffering preserves their relative arrival order.
 Retained vacancies occupy real slots without fake client surfaces. The hoist
 adapter can detach/reclaim occupancy and override presentation without changing
 the leaf identity or slot. Ordinary window removal prunes the tree; explicit
-single-child splits remain available for the next admission. Directional moves
-currently swap leaf positions, not whole subtrees or Sway's full move semantics.
+single-child splits remain available for the next admission. Master directional
+moves reorder adjacent leaves, enter neighboring branches, or extract the selected
+window into an ancestor. Branch entry uses the near edge on a matching axis and
+the remembered child on a perpendicular axis, recursively. A perpendicular move
+at workspace level groups the remaining contents under their original axis and
+reorients the outer workspace. Moving out preserves explicit one-child splits;
+empty source groups are removed, and redundant alternating wrappers are flattened.
+Movement retains selection and does not wrap at a workspace edge.
+A singleton inside a direct workspace child also stays in its group at that
+edge when there is no adjacent output to move onto.
 Resizing transfers a share within the nearest matching-axis ancestor's adjacent
 sibling pair, bounded to 5..95 percent of that pair; this is native policy, not
 an exact Sway resize compatibility claim.
@@ -158,8 +167,13 @@ fallback policy unless they install and use the i3 actions.
 
 The first adapted i3 scenarios and deferred test families are recorded in
 [`weld-i3-quirks/UPSTREAM.md`](../crates/weld-i3-quirks/UPSTREAM.md).
-Parent/child group selection, tabs/stacks, `focus mode_toggle`, floating behavior
-and structural i3 movement remain follow-ups; their commands are still rejected.
+Parent/child group selection, moving a selected group through i3 commands,
+tabs/stacks, `focus mode_toggle`, floating and cross-output movement remain
+follow-ups. The native editor can reparent a whole subtree, but Master currently
+selects individual windows. Native `TileOperation::Move` remains the geometric
+leaf swap as a native primitive; Master's Sway `move` bindings use the i3
+policy instead. Resized shares follow same-parent reordering, cross-parent arrivals
+receive the mean existing share, and flattening preserves internal proportions.
 
 ## Deliberate boundaries
 

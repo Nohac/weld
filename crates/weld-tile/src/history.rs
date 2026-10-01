@@ -9,7 +9,7 @@ use bevy::ecs::{
 };
 use weld_window::{FocusedWindow, WindowFocusChanged};
 
-use crate::{TileParent, TileState};
+use crate::{TileParent, TileState, TileTreeChanged};
 
 /// Most recently selected leaves and their ancestor branches. Policies can
 /// filter this order to a container's direct children and descend recursively.
@@ -52,6 +52,28 @@ impl TileFocusHistory {
         }
     }
 
+    pub(crate) fn expand(&mut self, old: Entity, children: &[Entity]) {
+        let Some(index) = self.0.iter().position(|node| *node == old) else {
+            return;
+        };
+        let insertion = self.0[..index]
+            .iter()
+            .filter(|node| !children.contains(node))
+            .count();
+        let mut ordered: Vec<_> = self
+            .recent()
+            .filter(|node| children.contains(node))
+            .collect();
+        for child in children {
+            if !ordered.contains(child) {
+                ordered.push(*child);
+            }
+        }
+        self.0
+            .retain(|node| *node != old && !children.contains(node));
+        self.0.splice(insertion..insertion, ordered);
+    }
+
     fn remember(&mut self, window: Entity, parents: &Query<&TileParent>, root: Entity) {
         let mut ancestor = window;
         while let Ok(parent) = parents.get(ancestor) {
@@ -76,6 +98,18 @@ pub(crate) fn remember_focus(
     mut history: ResMut<TileFocusHistory>,
 ) {
     if let (Some(window), Some(root)) = (event.window, state.root) {
+        history.remember(window, &parents, root);
+    }
+}
+
+pub(crate) fn remember_tree_change(
+    _: On<TileTreeChanged>,
+    focus: Res<FocusedWindow>,
+    parents: Query<&TileParent>,
+    state: Res<TileState>,
+    mut history: ResMut<TileFocusHistory>,
+) {
+    if let (Some(window), Some(root)) = (focus.entity(), state.root) {
         history.remember(window, &parents, root);
     }
 }
@@ -138,5 +172,17 @@ mod tests {
         assert_eq!(history.0, [first, second]);
         history.replace(first, None);
         assert_eq!(history.0, [second]);
+    }
+
+    #[test]
+    fn expanding_a_group_preserves_its_rank_and_child_focus_order() {
+        let mut world = World::new();
+        let group = world.spawn_empty().id();
+        let first = world.spawn_empty().id();
+        let second = world.spawn_empty().id();
+        let external = world.spawn_empty().id();
+        let mut history = TileFocusHistory(vec![group, external, second, first]);
+        history.expand(group, &[first, second]);
+        assert_eq!(history.0, [second, first, external]);
     }
 }

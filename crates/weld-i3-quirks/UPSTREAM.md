@@ -4,6 +4,14 @@ The reference revision is i3 `903bcd518df32b0e055b17f5da3f988a0187fd3d`.
 Tests run against Weld's actual window and tiling plugins without a display server.
 Adapted scenarios carry the upstream BSD-3-Clause notice in `LICENSE-i3`.
 
+i3 is the behavioral reference where it and Sway differ. For example, i3 inserts
+after the remembered child when entering a perpendicular branch; moving right
+into a vertical branch therefore places the incoming window below that child.
+Sway's `container_move_to_container_from_direction` at revision
+`1652c54b73f67df17b7b4ab0b0f7048204aa8104` instead inserts before the destination
+leaf for right/down moves. The direction/axis matrix deliberately retains i3's
+rule. Sway syntax support does not imply Sway movement semantics.
+
 This first batch adapts directional no-ops and sibling wrapping from
 `testcases/t/121-next-prev.t`, and nested close restoration plus unfocused
 destruction from `129-focus-after-close.t`. Branch-memory and ancestor traversal
@@ -35,23 +43,48 @@ cases and explicit platform exclusions here.
 
 Source: https://github.com/i3/i3/tree/903bcd518df32b0e055b17f5da3f988a0187fd3d/testcases
 
-## Next: structural movement
+## Structural movement coverage
 
-Master still routes directional movement to the native leaf-swap operation.
-The movement slice must replace that interpretation rather than changing the
-meaning of the native swap for other consumers. The inspected upstream cases are:
+Master routes directional movement through `I3MoveRequest`. The native geometric
+swap remains available separately. `tests/behavior.rs` includes `cases/movement.rs`
+and exercises the following adaptations at the pinned revision:
 
 - `124-move.t`: solitary-window no-ops; adjacent-leaf reordering with no edge
   wrap; entering an adjacent split; reordering inside it; extracting back out;
-  and removing a source split after its last child moves away. Floating sections
-  also cover default 10-pixel steps, explicit pixels/percentages and positioning.
+  and removing a source split after its last child moves away. The floating
+  sections remain deferred (steps, explicit pixels/percentages and positioning).
 - `274-move-branch-position.t`: when movement matches the destination layout's
   axis, enter at the near edge (right/down prepend, left/up append). When it is
   perpendicular, insert after the destination's remembered child. Repeat from
-  both a workspace leaf and a nested source, for tabs and stacks.
+  both a workspace leaf and a nested source. Weld runs all 16 direction/axis/source
+  combinations with horizontal/vertical splits. The original tabbed/stacked
+  variants remain deferred until those layouts exist.
+
+  Both branch-entry sites in the pinned
+  [move.c](https://github.com/i3/i3/blob/903bcd518df32b0e055b17f5da3f988a0187fd3d/src/move.c)
+  use this position expression (whitespace condensed):
+
+  ```c
+  con_orientation(target->parent) != o || direction == D_UP || direction == D_LEFT
+      ? AFTER : BEFORE
+  ```
+
+  In particular, a perpendicular destination selects `AFTER` for every direction.
 - `306-move-to-parent.t`: preserve sibling position and selection when lifting
   a child into its grandparent, for both workspace and split destinations. The
-  upstream command sequence uses marks and criteria; the structural tests can
-  exercise the same tree transformation before those command features exist.
+  upstream command sequence uses marks and criteria; `weld-tile`'s structural
+  tests exercise the same two transformations directly. The command sequence
+  and selection of groups remain deferred.
 
-These are queued behavioral cases, not yet passing movement tests in Weld.
+Additional cases follow `src/move.c`, `con_descend_direction` and `tree_flatten`:
+workspace reorientation, nested destination descent, alternating-wrapper cleanup,
+batched moves, focus recovery immediately after reparent, and size-share handling.
+A singleton in a direct workspace child remains grouped at the workspace edge
+when no adjacent output exists, matching `tree_move`'s directed-output branch.
+Weld-specific coverage protects retained slots, startup ordering, invalid edits
+and depth-limit termination. Native flattening retains relative child proportions.
+
+`516-move.t` and `524-move.t` were inspected but require multi-output/workspace
+and fullscreen or stacked-layout support. Those suites remain deferred, along
+with group selection, floating movement, marks and criteria. This batch does not
+claim those command or layout surfaces.
