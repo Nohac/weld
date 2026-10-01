@@ -16,13 +16,17 @@ use bevy::{
     },
     window::RequestRedraw,
 };
-use config::{Action, Configuration};
+use config::{Action, Configuration, DistributionAction};
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
 };
-use weld_app::{ActiveBackend, input::ShellCommands};
+use weld_app::{
+    ActiveBackend,
+    input::{ShellCommand, ShellCommands},
+};
 use weld_hoist::HoistWindow;
+use weld_i3_quirks::{FocusWrapping, I3FocusRequest, I3QuirksPlugin};
 use weld_input::{
     GlobalShortcutId, GlobalShortcutPlugin, GlobalShortcutPressed, GlobalShortcutRegistry,
     GlobalShortcutSet, KeyboardSettings,
@@ -54,6 +58,9 @@ impl Plugin for MasterConfigPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<ShellCommands>()
             .init_resource::<TileSettings>();
+        if !app.is_plugin_added::<I3QuirksPlugin>() {
+            app.add_plugins(I3QuirksPlugin);
+        }
         weld_input::register_keyboard_settings(app);
         if !app.is_plugin_added::<GlobalShortcutPlugin>() {
             app.add_plugins(GlobalShortcutPlugin);
@@ -89,6 +96,7 @@ struct ConfigTarget<'w> {
     state: ResMut<'w, ConfigState>,
     shortcuts: ResMut<'w, GlobalShortcutRegistry>,
     tiling: ResMut<'w, TileSettings>,
+    focus_wrapping: ResMut<'w, FocusWrapping>,
     keyboard: ResMut<'w, KeyboardSettings>,
     backend: Option<Res<'w, ActiveBackend>>,
 }
@@ -97,7 +105,7 @@ impl ConfigTarget<'_> {
     fn apply(&mut self, config: Configuration) {
         let drm = self.backend.as_deref() == Some(&ActiveBackend::Drm);
         let bindings: Vec<_> = config.bindings.into_iter().filter(|(_, action)| {
-            !matches!(action, Action::Shell(command) if command.requires_drm() && !drm)
+            !matches!(action, Action::Extension(DistributionAction::Shell(command)) if command.requires_drm() && !drm)
         }).collect();
         let ids = self.state.shortcuts.replace(
             &mut self.shortcuts,
@@ -109,6 +117,9 @@ impl ConfigTarget<'_> {
             .collect();
         if *self.tiling != config.tiling {
             *self.tiling = config.tiling;
+        }
+        if *self.focus_wrapping != config.focus_wrapping {
+            *self.focus_wrapping = config.focus_wrapping;
         }
         if self.keyboard.keymap != config.keymap {
             self.keyboard.keymap = config.keymap;
@@ -149,12 +160,16 @@ fn dispatch_action(
         return;
     };
     match action {
-        Action::Shell(command) => {
-            if effects.shell.push(command).is_err() {
-                tracing::warn!("shell command queue is full");
-            }
+        Action::Focus(direction) => effects.commands.trigger(I3FocusRequest(direction)),
+        Action::Exec(command) => {
+            effects.push_shell(ShellCommand::Launch {
+                program: "sh".to_owned(),
+                arguments: vec!["-c".to_owned(), command],
+            });
         }
-        Action::Hoist => {
+        Action::Exit => effects.push_shell(ShellCommand::Exit),
+        Action::Extension(DistributionAction::Shell(command)) => effects.push_shell(command),
+        Action::Extension(DistributionAction::Hoist) => {
             if let Some(window) = effects.focus.entity() {
                 if let Some(requests) = effects.hoist.as_mut() {
                     requests.write(HoistWindow { window });
@@ -163,7 +178,7 @@ fn dispatch_action(
                 }
             }
         }
-        Action::OutputTopology => {
+        Action::Extension(DistributionAction::OutputTopology) => {
             if let Some(requests) = effects.topology.as_mut() {
                 requests.write(ToggleOutputTopology);
             }
@@ -181,6 +196,14 @@ fn dispatch_action(
     }
     if let Some(redraw) = effects.redraw.as_mut() {
         redraw.write(RequestRedraw);
+    }
+}
+
+impl ActionEffects<'_, '_> {
+    fn push_shell(&mut self, command: ShellCommand) {
+        if self.shell.push(command).is_err() {
+            tracing::warn!("shell command queue is full");
+        }
     }
 }
 
@@ -247,7 +270,7 @@ mod tests {
             let actions = &app.world().resource::<ConfigState>().actions;
             let hoist = *actions
                 .iter()
-                .find(|(_, action)| **action == Action::Hoist)
+                .find(|(_, action)| **action == Action::Extension(DistributionAction::Hoist))
                 .expect("hoist")
                 .0;
             let focus = *actions.keys().find(|id| **id != hoist).expect("focus");
@@ -313,23 +336,25 @@ mod tests {
             assert_eq!(
                 actions.values().any(|action| matches!(
                     action,
-                    Action::Shell(ShellCommand::IncreaseOutputScale)
+                    Action::Extension(DistributionAction::Shell(ShellCommand::IncreaseOutputScale))
                 )),
                 backend == ActiveBackend::Drm
             );
             let hoist = *actions
                 .iter()
-                .find(|(_, action)| **action == Action::Hoist)
+                .find(|(_, action)| **action == Action::Extension(DistributionAction::Hoist))
                 .expect("hoist binding")
                 .0;
             let launch = *actions
                 .iter()
-                .find(|(_, action)| matches!(action, Action::Shell(ShellCommand::Launch { .. })))
+                .find(|(_, action)| matches!(action, Action::Exec(_)))
                 .expect("launch binding")
                 .0;
             let topology = *actions
                 .iter()
-                .find(|(_, action)| **action == Action::OutputTopology)
+                .find(|(_, action)| {
+                    **action == Action::Extension(DistributionAction::OutputTopology)
+                })
                 .expect("overlay binding")
                 .0;
             for id in [hoist, launch, topology] {
@@ -442,6 +467,7 @@ mod tests {
         let mut app = App::new();
         app.add_plugins(GlobalShortcutPlugin)
             .init_resource::<TileSettings>()
+            .init_resource::<FocusWrapping>()
             .init_resource::<KeyboardSettings>();
         app.insert_resource(ConfigState {
             path: example_path(),
@@ -472,10 +498,24 @@ mod tests {
         }));
         install(
             &mut app,
-            config::parse("test", "gaps inner 20").expect("valid"),
+            config::parse("test", "gaps inner 20\nfocus_wrapping force").expect("valid"),
         );
         assert_eq!(app.world().resource::<TileSettings>().inner_gap, 20);
+        assert_eq!(
+            *app.world().resource::<FocusWrapping>(),
+            FocusWrapping::Force
+        );
         assert!(app.world().resource::<ConfigState>().actions.is_empty());
+        let invalid = config::parse("test", "gaps inner 50\nfocus_wrapping invalid")
+            .map(|candidate| install(&mut app, candidate));
+        assert!(invalid.is_err());
+        assert_eq!(app.world().resource::<TileSettings>().inner_gap, 20);
+        assert_eq!(
+            *app.world().resource::<FocusWrapping>(),
+            FocusWrapping::Force
+        );
+        install(&mut app, config::parse("empty", "").expect("empty"));
+        assert_eq!(*app.world().resource::<FocusWrapping>(), FocusWrapping::Yes);
     }
 
     fn example_path() -> PathBuf {

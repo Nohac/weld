@@ -9,7 +9,12 @@ Weld is a workspace of reusable layers and one standard distribution:
 - `weld-sway-config` parses unexpanded Sway configuration spelling and reports
   source-aware structural errors. Its default parser depends only on Winnow.
   The optional `input` module translates keyboard directives and binding chords
-  into Weld input types; Master owns file selection, action assembly and reload.
+  into Weld input types.
+- `weld-i3-quirks` consumes that Sway output, interprets the supported settings
+  and actions, and supplies i3 tree-based focus and branch-local close recovery.
+  It uses the shared tree and node-focus history. Master owns file selection,
+  atomic settings/binding publication, reload and distribution effects. Future
+  config/behavior combinations will be shaped by a second concrete backend.
 - `weld-input` owns raw seat records, compiled XKB configuration, keyboard
   resolution, and repeat settings. Its optional Bevy integration owns keyboard
   and pointer shortcut matching, binding replacement, press/release consumption
@@ -106,8 +111,9 @@ Weld is a workspace of reusable layers and one standard distribution:
   owner of their implementation.
 
 The graphical distribution is now the tiling-first Weld Master target. Its
-configuration plugin owns file selection, Sway-to-native translation, diagnostics
-and reload coordination. Subsystems own their typed settings and application
+configuration plugin owns file selection, diagnostics and reload coordination;
+`weld-i3-quirks` owns Sway interpretation and its focus decisions.
+Subsystems own their typed settings and application
 semantics. A validated candidate replaces the configuration plugin's shortcut
 set and tiling settings through typed resource borrows in one system invocation, without replacing
 the layout tree or client occupancy. Invalid candidates leave the working state
@@ -123,13 +129,32 @@ Weld-only commands use a `weld` prefix within ordinary Sway command spelling;
 no parser grammar fork is needed. Reserved DRM virtual-terminal switching stays
 separate from distribution bindings.
 
-Tiling management uses ordered preparation, buffered-command, distribution-action
+Tiling management uses ordered focus recovery, preparation, buffered-command, distribution-action
 and layout sets. Queries and typed resources declare policy access; deferred
 structural edits finish at the dependent schedule boundaries. Master emits ordered
 shortcut events, and tiler observers publish each operation's topology, layout and
 focus effects before the next shortcut is resolved. Master never calls into an
 exclusive tiler flush. Unchanged frames skip layout; layout traverses borrowed
 child edges and updates geometry only when values differ.
+
+`weld-window` publishes `WindowFocusChanged` after accepted selection changes.
+`weld-tile` records leaves and their ancestor branches in `TileFocusHistory`.
+Split and collapse operations preserve the affected branch's position in that
+history, including when an inactive branch loses its last-focused leaf.
+The i3 policy descends through each branch's most recently selected direct child.
+It retains the selected leaf's ancestor path so close recovery can search its nearest surviving
+branch before tiler pruning collapses containers. Structural edits refresh this
+path during final management layout, before UI reconciliation can remove vacant
+windows. History includes retained vacant slots; client keyboard focus
+still requires a live mapped occupant. This first policy slice covers directional
+leaf focus and wrapping on one workspace. Container selection, tabs/stacks,
+floating switching and i3 structural movement remain subsequent slices.
+
+Native tile requests and behavior events deferred until workspace admission use
+one bounded Bevy command queue, preserving their original order. The i3 config
+interpreter accepts a typed distribution-command fallback; Master owns `weld`
+commands and shell effects, while `exec`, `exit` and `reload` are interpreted as
+i3 actions. There is no shared cross-backend configuration IR.
 
 Dependencies point inward: `weld-core` implements the local Smithay adapter
 through `weld-client`; `weld-app` depends on both; `weld-window` depends on

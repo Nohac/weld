@@ -20,6 +20,7 @@ members = [
   "crates/weld-float",
   "crates/weld-gamepad",
   "crates/weld-input",
+  "crates/weld-i3-quirks",
   "crates/weld-hoist",
   "crates/weld-hoist-core",
   "crates/weld-hoist-encoded",
@@ -101,7 +102,7 @@ weld-window = { path = "crates/weld-window" }
 weld-window-ui = { path = "crates/weld-window-ui" }
 weld-ssd = { path = "crates/weld-ssd" }
 weld-tile = { path = "crates/weld-tile" }
-weld-sway-config = { path = "crates/weld-sway-config", features = ["input"] }
+weld-i3-quirks = { path = "crates/weld-i3-quirks" }
 weld-gamepad = { path = "crates/weld-gamepad" }
 weld-hoist = { path = "crates/weld-hoist" }
 weld-hoist-iroh = { path = "crates/weld-hoist-iroh", features = ["vaapi"] }

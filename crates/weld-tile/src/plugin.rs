@@ -27,7 +27,8 @@ use weld_window::{
 };
 
 use crate::{
-    TileChild, TileCommands, TileParent, TileSettings, TileState, TileSystems, TileWorkspace,
+    TileChild, TileCommands, TileFocusHistory, TileParent, TileSettings, TileState, TileSystems,
+    TileWorkspace, history,
     layout::{self, LayoutDirty, LayoutRect},
     operations::{self, TreeEditor},
 };
@@ -51,15 +52,18 @@ impl Plugin for TilePlugin {
         app.init_resource::<TileSettings>()
             .init_resource::<TileState>()
             .init_resource::<TileCommands>()
+            .init_resource::<TileFocusHistory>()
             .init_resource::<LayoutDirty>()
             .add_observer(intent)
             .add_observer(activate)
             .add_observer(close)
             .add_observer(operations::apply_request)
+            .add_observer(history::remember_focus)
             .add_observer(layout::apply_layout)
             .configure_sets(
                 PreUpdate,
                 (
+                    TileSystems::RecoverFocus,
                     TileSystems::Prepare,
                     TileSystems::Commands,
                     TileSystems::Actions,
@@ -84,7 +88,7 @@ impl Plugin for TilePlugin {
             .add_systems(PreUpdate, drain_commands.in_set(TileSystems::Commands))
             .add_systems(
                 PreUpdate,
-                (sync_output, layout::request_layout)
+                (sync_output, layout::request_layout, history::refresh_path)
                     .chain()
                     .in_set(TileSystems::Layout),
             );
@@ -137,6 +141,7 @@ fn prune(
             window.is_some() && manager.is_some_and(|manager| manager.0 == root)
         });
         if !live {
+            editor.history.replace(entity, None);
             editor
                 .commands
                 .entity(entity)
@@ -168,6 +173,9 @@ fn prune(
     }
     editor.dirty.0 = true;
     if entity != root && kept.len() <= 1 {
+        editor
+            .history
+            .replace(entity, kept.first().map(|child| child.entity));
         editor.commands.entity(entity).despawn();
         return (kept.first().map(|child| child.entity), true);
     }
@@ -313,12 +321,11 @@ fn drain_commands(
     mut pending: ResMut<TileCommands>,
     mut commands: Commands,
 ) {
-    if state.root.is_none() || pending.0.is_empty() {
+    if state.root.is_none() || pending.is_empty() {
         return;
     }
-    for request in pending.0.drain(..) {
-        commands.trigger(request);
-    }
+    commands.append(&mut pending.queue);
+    pending.count = 0;
 }
 
 fn intent(

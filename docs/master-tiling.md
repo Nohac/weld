@@ -36,6 +36,10 @@ There is no file watcher yet; reload rereads the supplied path.
 - `gaps inner N` and `gaps outer N`, in logical pixels, integer 0..65535.
   Geometry clamps gaps to available space.
 - `default_orientation horizontal|vertical`, for new workspace roots only.
+- `focus_wrapping no|yes|force|workspace` (default `yes`). Ordinary wrapping
+  first searches ancestor splits for a directional neighbor, then uses the
+  innermost wrap candidate. `force` wraps at the first eligible split edge.
+  With the current single workspace, `workspace` behaves like `yes`.
 - `bindsym CHORD COMMAND` with literal Mod4, Mod1, Control/Ctrl and Shift
   modifiers, lowercase ASCII letter names, arrow/F1-F12 keys, Return, Escape,
   equal and minus. Trigger names currently select physical key positions; modifiers follow
@@ -105,8 +109,12 @@ and container IDs are separate. Persistence storage is not implemented.
 The Sway backend's optional input module translates keyboard directives and
 binding chords into `weld-input` types. Winnow captures chord tokens and quoted
 values; the translation layer validates modifier names and aliases. Master
-selects the file, translates remaining distribution actions/tiling directives,
-and installs typed settings. It never mutates the layout tree. Applying a valid candidate
+selects the file and installs typed settings. `weld-i3-quirks` consumes the Sway
+parser/input output and translates supported settings and actions. It owns
+i3 directional navigation and close-focus restoration over the shared tree.
+Master supplies the interpreter's typed command extension for the `weld`
+vocabulary and executes shell/distribution effects.
+Applying a valid candidate
 replaces its owner-scoped keyboard bindings and settings through a typed
 `SystemParam` borrowing just those resources. Old queued binding IDs cannot invoke new bindings, and consumed
 key releases remain consumed across replacement.
@@ -114,11 +122,12 @@ key releases remain consumed across replacement.
 Gaps relayout existing windows. Default orientation does not rewrite existing
 containers. Commands execute in order, resolving focused-target commands at
 execution time. Master queues typed shortcut events; each observer's deferred
-effects finish before the next shortcut is resolved. A tiling action triggers
-`TileRequest`, so focus followed by hoist selects the updated target, while a
+effects finish before the next shortcut is resolved. A focus action triggers
+`I3FocusRequest`; structural actions trigger `TileRequest`, so focus followed by
+hoist selects the updated target, while a
 reload invalidates remaining old binding IDs in the same batch.
 
-`TileSystems` orders workspace preparation, buffered commands, distribution
+`TileSystems` orders focus recovery, workspace preparation, buffered commands, distribution
 actions and final layout within window management. Admission and output changes
 remain tiler-owned. Systems and observers declare their component/resource access
 with queries and typed parameters; deferred spawns and reparents are published
@@ -126,6 +135,8 @@ before dependent layout or actions. Layout skips unchanged frames, traverses
 borrowed child lists and writes geometry only when it differs. Membership changes
 trigger pruning; retained client-buffer updates leave the tree untouched. The operation
 queue is bounded to 256 and split depth to 64. Animation is not part of layout.
+Native and i3 focus requests waiting for the first workspace share that queue,
+so startup buffering preserves their relative arrival order.
 
 Retained vacancies occupy real slots without fake client surfaces. The hoist
 adapter can detach/reclaim occupancy and override presentation without changing
@@ -135,6 +146,20 @@ currently swap leaf positions, not whole subtrees or Sway's full move semantics.
 Resizing transfers a share within the nearest matching-axis ancestor's adjacent
 sibling pair, bounded to 5..95 percent of that pair; this is native policy, not
 an exact Sway resize compatibility claim.
+
+Directional focus in Master follows split ancestry rather than window-center
+distance. Entering a sibling branch restores its most recently focused window;
+closing the selected window first looks within its former branch, then climbs
+outward. All accepted window focus changes contribute to shared tree-node history, including
+clicks and new-window admission. Collapsed branches pass their focus-order position
+to their surviving child. Retained slots participate even without an
+occupant. Other users of `weld-tile` retain its default geometric navigation and
+fallback policy unless they install and use the i3 actions.
+
+The first adapted i3 scenarios and deferred test families are recorded in
+[`weld-i3-quirks/UPSTREAM.md`](../crates/weld-i3-quirks/UPSTREAM.md).
+Parent/child group selection, tabs/stacks, `focus mode_toggle`, floating behavior
+and structural i3 movement remain follow-ups; their commands are still rejected.
 
 ## Deliberate boundaries
 

@@ -7,25 +7,33 @@
 //! This first slice has one workspace on the primary output. Other outputs,
 //! floating overlays, tabbed/stacked layouts and fullscreen are separate policy.
 
+mod history;
 mod layout;
 mod operations;
 mod plugin;
 
-use std::collections::VecDeque;
-
 use bevy::ecs::{
-    component::Component, entity::Entity, event::Event, resource::Resource, schedule::SystemSet,
+    component::Component,
+    entity::Entity,
+    event::Event,
+    resource::Resource,
+    schedule::SystemSet,
+    system::{Command, command},
+    world::CommandQueue,
 };
 use weld_app::output::OutputId;
 use weld_window::WindowId;
 
 const COMMAND_CAPACITY: usize = 256;
 
+pub use history::TileFocusHistory;
 pub use plugin::TilePlugin;
 
 /// Management publication points. Deferred edits finish between each set.
 #[derive(SystemSet, Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub enum TileSystems {
+    /// Focus policies recover against the previous tree before removal compacts it.
+    RecoverFocus,
     Prepare,
     Commands,
     /// Distribution actions run after admission and before final layout.
@@ -154,7 +162,10 @@ pub enum TileOperation {
 
 /// Bounded, ordered native operations. Producers can retry on a full queue.
 #[derive(Resource, Default)]
-pub struct TileCommands(VecDeque<TileRequest>);
+pub struct TileCommands {
+    pub(crate) queue: CommandQueue,
+    pub(crate) count: usize,
+}
 
 /// An ordered edit. Queue with [`bevy::ecs::system::Commands::trigger`] so its
 /// topology, geometry and focus effects finish before the next shell action.
@@ -166,21 +177,41 @@ pub enum TileRequest {
 
 impl TileCommands {
     pub fn push(&mut self, command: TileCommand) -> Result<(), TileCommand> {
-        if self.0.len() == COMMAND_CAPACITY {
+        if self.count == COMMAND_CAPACITY {
             return Err(command);
         }
-        self.0.push_back(TileRequest::Window(command));
-        Ok(())
+        self.defer(TileRequest::Window(command))
+            .map_err(|_| command)
     }
 
     /// Resolves focus when this operation executes, preserving sequential
     /// keyboard navigation even when several inputs arrive in one frame.
     pub fn push_focused(&mut self, operation: TileOperation) -> Result<(), TileOperation> {
-        if self.0.len() == COMMAND_CAPACITY {
+        if self.count == COMMAND_CAPACITY {
             return Err(operation);
         }
-        self.0.push_back(TileRequest::Focused(operation));
+        self.defer(TileRequest::Focused(operation))
+            .map_err(|_| operation)
+    }
+
+    /// Queues a policy event alongside native edits, preserving arrival order
+    /// until workspace preparation has completed. The caller retains a rejected
+    /// event when the shared bound is reached.
+    pub fn defer<'a, E: Event<Trigger<'a>: Default>>(&mut self, event: E) -> Result<(), E> {
+        if self.count == COMMAND_CAPACITY {
+            return Err(event);
+        }
+        self.queue.push(command::trigger(event).handle_error());
+        self.count += 1;
         Ok(())
+    }
+
+    pub fn len(&self) -> usize {
+        self.count
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.count == 0
     }
 }
 

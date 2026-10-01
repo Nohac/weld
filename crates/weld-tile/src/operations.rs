@@ -14,8 +14,8 @@ use bevy::{
 use weld_window::{FocusedWindow, ManagedWindow, WindowCommand, WindowCommandKind, WindowGeometry};
 
 use crate::{
-    ContainerId, Direction, SplitAxis, TileChild, TileCommands, TileContainer, TileOperation,
-    TileParent, TileRequest, TileState,
+    ContainerId, Direction, SplitAxis, TileChild, TileCommands, TileContainer, TileFocusHistory,
+    TileOperation, TileParent, TileRequest, TileState,
     layout::{LayoutDirty, LayoutRect, LayoutRequested},
 };
 
@@ -26,6 +26,7 @@ pub(crate) struct TreeEditor<'w, 's> {
     pub state: ResMut<'w, TileState>,
     pub commands: Commands<'w, 's>,
     pub dirty: ResMut<'w, LayoutDirty>,
+    pub history: ResMut<'w, TileFocusHistory>,
 }
 
 impl TreeEditor<'_, '_> {
@@ -81,6 +82,7 @@ impl TreeEditor<'_, '_> {
             return;
         };
         // The new container is published before the following layout event.
+        self.history.wrap(window, nested);
         self.commands.entity(nested).insert(parent);
         if let Ok(mut container) = self.containers.get_mut(parent.0)
             && let Some(child) = container
@@ -174,9 +176,7 @@ pub(crate) fn apply_request(
     mut redraw: MessageWriter<RequestRedraw>,
 ) {
     if editor.state.root.is_none() {
-        if pending.0.len() < crate::COMMAND_CAPACITY {
-            pending.0.push_back(*event.event());
-        }
+        let _ = pending.defer(*event.event());
         return;
     }
     let (window, operation) = match *event.event() {

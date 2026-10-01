@@ -1,12 +1,13 @@
 use bevy::{
     app::{App, PreUpdate},
     ecs::{
+        change_detection::DetectChanges,
         message::Messages,
         observer::On,
         query::{Changed, With},
         resource::Resource,
         schedule::IntoScheduleConfigs,
-        system::{Query, ResMut},
+        system::{Query, Res, ResMut},
     },
     math::{UVec2, Vec2},
 };
@@ -388,6 +389,7 @@ struct Changes {
     layouts: usize,
     geometries: usize,
     containers: usize,
+    history: usize,
 }
 
 #[test]
@@ -401,9 +403,11 @@ fn unchanged_frames_do_not_relayout_or_republish_components() {
             PreUpdate,
             (|windows: Query<(), (With<TileParent>, Changed<WindowGeometry>)>,
               containers: Query<(), Changed<TileContainer>>,
+              history: Res<TileFocusHistory>,
               mut changes: ResMut<Changes>| {
                 changes.geometries += windows.iter().count();
                 changes.containers += containers.iter().count();
+                changes.history += usize::from(history.is_changed());
             })
             .after(TileSystems::Layout),
         );
@@ -415,8 +419,13 @@ fn unchanged_frames_do_not_relayout_or_republish_components() {
     }
     let changes = app.world().resource::<Changes>();
     assert_eq!(
-        (changes.layouts, changes.geometries, changes.containers),
-        (0, 0, 0)
+        (
+            changes.layouts,
+            changes.geometries,
+            changes.containers,
+            changes.history
+        ),
+        (0, 0, 0, 0)
     );
 }
 
@@ -431,7 +440,7 @@ fn commands_wait_for_the_first_output_and_admission() {
         .trigger(TileRequest::Focused(TileOperation::Focus(Direction::Left)));
     app.update();
     assert!(app.world().get::<TileParent>(first).is_none());
-    assert_eq!(app.world().resource::<TileCommands>().0.len(), 1);
+    assert_eq!(app.world().resource::<TileCommands>().len(), 1);
     app.world_mut().spawn((
         WeldOutput {
             id: OutputId::new(1),
@@ -445,7 +454,7 @@ fn commands_wait_for_the_first_output_and_admission() {
         app.world().resource::<FocusedWindow>().entity(),
         Some(first)
     );
-    assert!(app.world().resource::<TileCommands>().0.is_empty());
+    assert!(app.world().resource::<TileCommands>().is_empty());
 }
 
 #[test]

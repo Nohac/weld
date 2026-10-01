@@ -7996,6 +7996,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "weld-i3-quirks"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bevy",
+ "weld-app",
+ "weld-input",
+ "weld-sway-config",
+ "weld-tile",
+ "weld-window",
+]
+
+[[package]]
 name = "weld-input"
 version = "0.1.0"
 dependencies = [
@@ -8114,11 +8127,11 @@ dependencies = [
  "weld-hoist-encoded",
  "weld-hoist-iroh",
  "weld-hoist-local",
+ "weld-i3-quirks",
  "weld-input",
  "weld-media",
  "weld-media-vaapi",
  "weld-ssd",
- "weld-sway-config",
  "weld-tile",
  "weld-window",
  "weld-window-ui",

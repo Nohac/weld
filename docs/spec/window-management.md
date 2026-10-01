@@ -16,6 +16,11 @@ now implements a native horizontal/vertical split tree with live gaps,
 directional focus, leaf swapping, proportional resize and retained slots in a
 single primary-output workspace. See [Master tiling](../master-tiling.md).
 
+`weld-i3-quirks` adds tree-based directional focus, wrapping and branch-local
+close restoration using shared tree-node focus history. It consumes Sway configuration
+through `weld-sway-config`; Master selects and reloads the file. Native tree
+mutation and window identity remain owned by the shared layers.
+
 ## Managed frame model — Direction
 
 Window-management consumers should operate on stable **managed frames**, not
@@ -166,6 +171,13 @@ layout, but its identities, relationships, operations, and observation points
 should permit new algorithms without replacing the window primitive.
 
 ## i3 and Sway compatibility — Exploration
+
+Behavior adapters layer interaction decisions onto the shared tiling and window
+operations. The initial pairing is `weld-i3-quirks` consuming `weld-sway-config`;
+a future Hypr adapter may consume its own configuration backend. A shared
+configuration IR and cross-pairing should follow concrete implementations rather
+than being prerequisites. The i3 regression suite is the behavior reference;
+coverage is added alongside each implemented capability.
 
 An i3/Sway-compatible layer is a target that informs adoption and design, not
 a requirement for exact parity, and remains separate from native tiling. The tiling

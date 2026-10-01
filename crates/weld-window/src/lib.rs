@@ -13,7 +13,7 @@ use bevy::{
     ecs::{
         component::Component,
         entity::Entity,
-        event::EntityEvent,
+        event::{EntityEvent, Event},
         hierarchy::ChildOf,
         observer::On,
         query::{With, Without},
@@ -485,6 +485,12 @@ impl FocusedWindow {
     pub fn entity(&self) -> Option<Entity> {
         self.0
     }
+}
+
+/// Published after an accepted change to the selected managed window.
+#[derive(Event, Clone, Copy, Debug)]
+pub struct WindowFocusChanged {
+    pub window: Option<Entity>,
 }
 
 /// A reusable request from interaction sources to window-management policy.
@@ -1175,11 +1181,17 @@ fn apply_window_command(command: On<WindowCommand>, params: ApplyWindowCommandPa
             if focus.0 == Some(window) {
                 focus.0 = None;
                 applied_focus.reassert = true;
+                commands.trigger(WindowFocusChanged { window: None });
             }
         }
         WindowCommandKind::Focus => {
             if windows.contains(window) {
-                focus.0 = Some(window);
+                if focus.0 != Some(window) {
+                    focus.0 = Some(window);
+                    commands.trigger(WindowFocusChanged {
+                        window: Some(window),
+                    });
+                }
                 applied_focus.reassert = true;
             }
         }
