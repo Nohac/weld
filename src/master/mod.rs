@@ -26,6 +26,7 @@ use weld_app::{
     input::{ShellCommand, ShellCommands},
 };
 use weld_hoist::HoistWindow;
+use weld_i3_quirks::workspace::WorkspaceSettings;
 use weld_i3_quirks::{FocusWrapping, I3FocusRequest, I3MoveRequest, I3QuirksPlugin};
 use weld_input::{
     GlobalShortcutId, GlobalShortcutPlugin, GlobalShortcutPressed, GlobalShortcutRegistry,
@@ -97,6 +98,7 @@ struct ConfigTarget<'w> {
     shortcuts: ResMut<'w, GlobalShortcutRegistry>,
     tiling: ResMut<'w, TileSettings>,
     focus_wrapping: ResMut<'w, FocusWrapping>,
+    workspaces: ResMut<'w, WorkspaceSettings>,
     keyboard: ResMut<'w, KeyboardSettings>,
     backend: Option<Res<'w, ActiveBackend>>,
 }
@@ -120,6 +122,9 @@ impl ConfigTarget<'_> {
         }
         if *self.focus_wrapping != config.focus_wrapping {
             *self.focus_wrapping = config.focus_wrapping;
+        }
+        if *self.workspaces != config.workspaces {
+            *self.workspaces = config.workspaces;
         }
         if self.keyboard.keymap != config.keymap {
             self.keyboard.keymap = config.keymap;
@@ -162,6 +167,7 @@ fn dispatch_action(
     match action {
         Action::Focus(direction) => effects.commands.trigger(I3FocusRequest(direction)),
         Action::Move(direction) => effects.commands.trigger(I3MoveRequest(direction)),
+        Action::Workspace(request) => effects.commands.trigger(request),
         Action::Exec(command) => {
             effects.push_shell(ShellCommand::Launch {
                 program: "sh".to_owned(),
@@ -466,6 +472,7 @@ mod tests {
     #[test]
     fn rejected_candidate_leaves_live_settings_and_bindings_unchanged() {
         let mut app = App::new();
+        app.init_resource::<WorkspaceSettings>();
         app.add_plugins(GlobalShortcutPlugin)
             .init_resource::<TileSettings>()
             .init_resource::<FocusWrapping>()

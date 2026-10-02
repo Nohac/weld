@@ -35,7 +35,8 @@ Weld is a workspace of reusable layers and one standard distribution:
   Smithay protocol objects.
 - `weld-window` owns UI-independent managed-window identity, occupancy,
   geometry, visibility, stacking, focus, interaction, and presentation
-  contracts. Managed windows are distinct from the shorter-lived client
+  contracts, plus shared workspace identity, membership, output assignment and
+  selection. Managed windows are distinct from the shorter-lived client
   surfaces that occupy them.
 - `weld-window-ui` projects managed windows into unstyled Bevy UI roots. It
   supplies reusable client-surface mounts, client-decorated and popup
@@ -48,8 +49,8 @@ Weld is a workspace of reusable layers and one standard distribution:
   movement, and interactive-resize policy without owning UI entities.
 - `weld-tile` supplies native split-tree policy over durable managed windows.
   Its queryable ECS containers, ordered commands, and live `TileSettings` do not
-  depend on configuration syntax or decoration/presentation crates. The first
-  slice has one workspace on the primary output; retained vacancies and hoist
+  depend on configuration syntax or decoration/presentation crates. Each shared
+  workspace has its own tree on its assigned output; retained vacancies and hoist
   placeholders keep their layout slots.
 - `weld-hoist-protocol` owns the serializable, transport-neutral hoist record
   subset shared by current bindings: exact revision and session identities,
@@ -147,8 +148,25 @@ branch before tiler pruning collapses containers. Structural edits refresh this
 path during final management layout, before UI reconciliation can remove vacant
 windows. History includes retained vacant slots; client keyboard focus
 still requires a live mapped occupant. This first policy slice covers directional
-leaf focus, wrapping and directional movement on one workspace. Container selection,
+leaf focus, wrapping and directional movement within a workspace. Container selection,
 tabs/stacks, floating switching and cross-output movement remain subsequent slices.
+
+The window domain owns `Workspace` entities and the non-cascading Bevy
+`WorkspaceMember` and `WorkspaceOutput` relationships, whose inverse collections
+are maintained automatically. `FocusedWorkspace` remains meaningful with no
+selected window. The tiler adds a `TileWorkspace` tree on the same entity and
+validates layout/membership transfers together. Native neighbor selection stays
+within its tree. Local visibility changes preserve client occupancy and hoist
+presentation overrides; frame-demand/capture policy is a subsequent slice.
+
+The i3 plugin owns workspace naming, initial output assignment, one visible
+workspace per output, switching, empty-workspace retirement, and branch-aware
+selection. Sway `workspace NAME output ...` directives supply ordered connector
+preferences for creation, including primary/nonprimary and number fallback.
+Existing workspaces retain their outputs on switch or configuration reload.
+Output removal preserves populated workspaces and rehomes them through policy;
+logical-output ECS tests do not add physical connector hotplug support. See
+[Master workspaces](master-tiling.md#workspaces) for the supported commands and limits.
 
 `weld-i3-quirks` chooses movement destinations and when to regroup or flatten
 splits. `weld-tile` validates and applies `TileTreeEdit` reparent, wrap and flatten
@@ -468,6 +486,8 @@ the output in compositor-wide logical space, while the separate
 `OutputPlacement` carries its scale-independent physical footprint in
 millimeters and records whether those dimensions were measured or assumed.
 One entity is currently marked `PrimaryOutput`.
+Hosts publish `OutputGeometry` together with every `WeldOutput`; tiling roots
+wait for that geometry before initializing their layout bounds.
 The shell's composition camera relates to it through `RendersOutput` and
 `OutputCompositionCamera`, giving plugins a Bevy entity to use with
 `UiTargetCamera` without exposing a native texture or wgpu handle.

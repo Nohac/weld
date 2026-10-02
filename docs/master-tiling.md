@@ -1,4 +1,4 @@
-# Weld Master: first native tiling slice
+# Weld Master tiling and workspaces
 
 The graphical `weldwm` distribution now installs `weld-tile` instead of
 `weld-float`. Both remain reusable policies; Master does not keep a legacy
@@ -17,8 +17,12 @@ same horizontally. Alt+D/F/K/J focuses left/right/up/down, with arrow-key
 alternatives. Shift moves the selected window through the split tree,
 and Control adjusts width/height proportions. Alt+Shift+Q requests client close.
 Alt+H invokes `weld hoist` through the existing hoist policy. Firefox is now
-Alt+Control+Shift+F, leaving Alt+F for focus-right. Ordinary clicks select tiles;
+Alt+Shift+Enter, leaving Alt+F for focus-right. Ordinary clicks select tiles;
 decoration close buttons work. Pointer-driven floating movement is not installed.
+
+Alt+1..9 and Alt+0 select workspaces 1..10. Add Shift to move the selected
+window without following it. These are logical Alt bindings; the example's
+keymap makes physical Windows produce that modifier.
 
 Graphical Master requires an explicit `--config` path. The repository's
 `examples/master.sway.config` is a development example, selected explicitly by
@@ -39,9 +43,9 @@ There is no file watcher yet; reload rereads the supplied path.
 - `focus_wrapping no|yes|force|workspace` (default `yes`). Ordinary wrapping
   first searches ancestor splits for a directional neighbor, then uses the
   innermost wrap candidate. `force` wraps at the first eligible split edge.
-  With the current single workspace, `workspace` behaves like `yes`.
+  Directional output traversal is a follow-up, so `workspace` currently behaves like `yes`.
 - `bindsym CHORD COMMAND` with literal Mod4, Mod1, Control/Ctrl and Shift
-  modifiers, lowercase ASCII letter names, arrow/F1-F12 keys, Return, Escape,
+  modifiers, lowercase ASCII letter names, digits, arrow/F1-F12 keys, Return, Escape,
   equal and minus. Trigger names currently select physical key positions; modifiers follow
   Weld's configured XKB map. Full symbolic `bindsym` matching is a follow-up.
 - `input type:keyboard { ... }` or `input * { ... }`, and their single-line
@@ -49,6 +53,17 @@ There is no file watcher yet; reload rereads the supplied path.
   Values are literal XKB names, optionally quoted; empty quoted options clear
   configured swaps. Per-device selectors and variable expansion are follow-ups.
   Directives apply in source order to the single native seat.
+- `workspace NAME output CONNECTOR [FALLBACK...]`. The first available connector
+  wins; `primary` and `nonprimary` are supported selectors. An exact name rule
+  takes precedence over a digits-only number rule. The first directive for an
+  exact workspace name wins. Missing connectors fall back to the current output.
+- `workspace NAME`, `workspace number NAME`, `workspace next|prev`,
+  `workspace next_on_output|prev_on_output`, `workspace back_and_forth|current`.
+  The `number` form finds a leading number even in a name such as `3: work`.
+  Quoted reserved words remain literal names. Names can contain spaces; escapes,
+  variable expansion and command sequences are rejected in this subset.
+- `move [container|window] to workspace TARGET` and `move workspace TARGET` use
+  the same targets and move an individual selected window without following it.
 - Bound commands: `splith`, `splitv`, `split h|v|horizontal|vertical`,
   `focus left|right|up|down`, `move left|right|up|down`,
   `resize grow|shrink width|height N ppt`, `kill`, `reload`, `exit`, and `exec COMMAND`.
@@ -99,6 +114,56 @@ reloading an identical map leaves that state intact. Legacy repeat settings
 retain their existing ownership and are independent of XKB options.
 
 ## Ownership and live behavior
+
+### Workspaces
+
+`weld-window::workspace` owns session-stable workspace IDs, names, selection
+history and local visibility. `WorkspaceMember`/`WorkspaceWindows` and
+`WorkspaceOutput`/`OutputWorkspaces` are Bevy relationships with maintained
+inverse collections. Removing an output clears its association without
+destroying workspaces or managed windows. A `TileWorkspace` marker attaches a
+tiling tree to that shared workspace entity; the tree has no global root.
+
+The i3 plugin creates one visible workspace on each output. Initial names come
+from assignments to that output, then switch bindings in file order, then the
+first unused positive number. Existing workspaces stay on their assigned
+outputs. Selecting one on another monitor changes management focus there;
+the old monitor keeps its visible workspace. Creating an unassigned workspace
+uses the currently focused workspace's output.
+
+Switching preserves each tree, proportions and branch history. Moving a window
+updates its layout edges, workspace relationship, output and visibility before
+the next action. The source restores branch-local selection; the destination
+remembers the arriving window. Hidden empty workspaces are retired and explicit
+back-and-forth can recreate them by name. Retained vacancies and hoist slots
+count as members and prevent retirement.
+
+Visibility changes hide local window and popup presentations while retaining
+client occupancy and hoist overrides. Consumer-driven frame activity/capture
+integration is a later slice; this does not add a new suspension scheduler.
+Output loss reassigns surviving workspaces to an available output. With no
+outputs, windows remain hidden and retain their layout until one returns.
+Production DRM connector hotplug itself remains outside this slice.
+
+Reload publishes new creation/assignment preferences without moving existing
+workspaces or rewriting their layouts. Use a fresh workspace or restart the
+test to exercise a changed assignment. There is no workspace bar/IPC yet,
+pointer warping, blank-output pointer focus, `focus output`, `move workspace
+to output`, workspace rename, or automatic back-and-forth setting.
+
+Example:
+
+```sway
+workspace 1 output eDP-1
+workspace "2: recording" output DP-1 HDMI-A-1
+bindsym Mod1+2 workspace number 2
+bindsym Mod1+Shift+2 move container to workspace number 2
+```
+
+These output selection rules belong to `weld-i3-quirks`. The shared primitives
+allow presentation policies to choose different workspace/output arrangements.
+
+### Tiling and configuration
 
 `weld-window` still owns managed-window identity, occupancy, focus effects and
 client resize requests. `weld-tile` owns an ECS tree of ordered split containers
@@ -177,8 +242,7 @@ receive the mean existing share, and flattening preserves internal proportions.
 
 ## Deliberate boundaries
 
-This is one workspace on the primary output. Multiple workspaces, multi-output
-placement, floating dialogs/overlays, tabbed/stacked layouts, fullscreen,
+Floating dialogs/overlays, tabbed/stacked layouts, fullscreen,
 client-size constraint policy, complete tiled-state protocol hints, persistent
 matching and IPC remain follow-up slices. Popups keep the existing presentation
 path rather than becoming tiling leaves. Related toplevel dialogs currently tile
@@ -202,8 +266,9 @@ contributor guidance on concrete, positive descriptions.
 Automated checks cover split geometry, removal, vacant slots, occupancy
 detach/reclaim, shared decoration-aware resize effects, live settings,
 directional operations, batched navigation, config rejection, and shortcut
-replacement/release behavior. These do not constitute a multi-output or complete
-Sway compatibility test.
+replacement/release behavior. Workspace integration tests use synthetic outputs
+and adapted i3 scenarios; they do not establish physical multi-monitor validation
+or complete Sway compatibility.
 
 The initial nested smoke run completed with three real `foot` windows tiled
 across the output and a captured screenshot. It also emitted Vulkan acquisition

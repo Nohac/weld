@@ -30,6 +30,14 @@ pub struct Binding {
     pub line: usize,
 }
 
+/// Decodes a plain or fully quoted literal argument. Variables, escape sequences
+/// and unquoted command separators are rejected until their interpretation is supported.
+pub fn literal(value: &str) -> Result<&str> {
+    syntax::literal
+        .parse(value)
+        .map_err(|error| anyhow::anyhow!("invalid literal argument: {error}"))
+}
+
 /// Compile input directives and leave other directives for the assembly.
 ///
 /// Errors retain the source name and directive line. Compilation performs no
@@ -188,6 +196,16 @@ fn binding(value: &str) -> Result<GlobalShortcut> {
         "x" => KeyCode::KeyX,
         "y" => KeyCode::KeyY,
         "z" => KeyCode::KeyZ,
+        "0" => KeyCode::Digit0,
+        "1" => KeyCode::Digit1,
+        "2" => KeyCode::Digit2,
+        "3" => KeyCode::Digit3,
+        "4" => KeyCode::Digit4,
+        "5" => KeyCode::Digit5,
+        "6" => KeyCode::Digit6,
+        "7" => KeyCode::Digit7,
+        "8" => KeyCode::Digit8,
+        "9" => KeyCode::Digit9,
         "Return" => KeyCode::Enter,
         "Escape" => KeyCode::Escape,
         "equal" => KeyCode::Equal,

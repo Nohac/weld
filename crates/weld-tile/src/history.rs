@@ -7,9 +7,9 @@ use bevy::ecs::{
     resource::Resource,
     system::{Query, Res, ResMut},
 };
-use weld_window::{FocusedWindow, WindowFocusChanged};
+use weld_window::{FocusedWindow, ManagedBy, WindowFocusChanged};
 
-use crate::{TileParent, TileState, TileTreeChanged};
+use crate::{TileParent, TileTreeChanged};
 
 /// Most recently selected leaves and their ancestor branches. Policies can
 /// filter this order to a container's direct children and descend recursively.
@@ -94,11 +94,13 @@ impl TileFocusHistory {
 pub(crate) fn remember_focus(
     event: On<WindowFocusChanged>,
     parents: Query<&TileParent>,
-    state: Res<TileState>,
+    owners: Query<&ManagedBy>,
     mut history: ResMut<TileFocusHistory>,
 ) {
-    if let (Some(window), Some(root)) = (event.window, state.root) {
-        history.remember(window, &parents, root);
+    if let Some(window) = event.window
+        && let Ok(owner) = owners.get(window)
+    {
+        history.remember(window, &parents, owner.0);
     }
 }
 
@@ -106,11 +108,13 @@ pub(crate) fn remember_tree_change(
     _: On<TileTreeChanged>,
     focus: Res<FocusedWindow>,
     parents: Query<&TileParent>,
-    state: Res<TileState>,
+    owners: Query<&ManagedBy>,
     mut history: ResMut<TileFocusHistory>,
 ) {
-    if let (Some(window), Some(root)) = (focus.entity(), state.root) {
-        history.remember(window, &parents, root);
+    if let Some(window) = focus.entity()
+        && let Ok(owner) = owners.get(window)
+    {
+        history.remember(window, &parents, owner.0);
     }
 }
 
@@ -118,13 +122,14 @@ pub(crate) fn refresh_path(
     focus: Res<FocusedWindow>,
     parents: Query<&TileParent>,
     changed: Query<(), Changed<TileParent>>,
-    state: Res<TileState>,
+    owners: Query<&ManagedBy>,
     mut history: ResMut<TileFocusHistory>,
 ) {
     if !changed.is_empty()
-        && let (Some(window), Some(root)) = (focus.entity(), state.root)
+        && let Some(window) = focus.entity()
+        && let Ok(owner) = owners.get(window)
     {
-        history.remember(window, &parents, root);
+        history.remember(window, &parents, owner.0);
     }
 }
 

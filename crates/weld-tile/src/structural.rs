@@ -22,9 +22,8 @@ pub(crate) struct StructuralEditor<'w, 's> {
 impl StructuralEditor<'_, '_> {
     /// Validates both directions of every ancestor edge and returns its depth.
     fn depth(&self, mut node: Entity) -> Option<usize> {
-        let root = self.editor.state.root?;
         let mut depth = 0;
-        while node != root {
+        while !self.editor.roots.contains(node) {
             let parent = self.editor.parents.get(node).ok()?.entity();
             if !self
                 .editor
@@ -61,12 +60,21 @@ impl StructuralEditor<'_, '_> {
             }
             Some(height + 1)
         } else {
-            (self.windows.get(node).ok()?.0 == self.editor.state.root?).then_some(0)
+            let owner = self.windows.get(node).ok()?.0;
+            (self.editor.roots.contains(owner) && self.root(node)? == owner).then_some(0)
         }
     }
 
+    fn root(&self, mut node: Entity) -> Option<Entity> {
+        self.depth(node)?;
+        while let Ok(parent) = self.editor.parents.get(node) {
+            node = parent.entity();
+        }
+        Some(node)
+    }
+
     fn place(&mut self, node: Entity, anchor: Entity, side: TileSide) -> bool {
-        if node == anchor {
+        if node == anchor || self.root(node).is_none() || self.root(node) != self.root(anchor) {
             return false;
         }
         let (Ok(source), Ok(destination)) = (
@@ -148,7 +156,7 @@ impl StructuralEditor<'_, '_> {
     }
 
     fn remove_empty_ancestors(&mut self, mut node: Entity) {
-        while Some(node) != self.editor.state.root {
+        while !self.editor.roots.contains(node) {
             let Ok(container) = self.editor.containers.get(node) else {
                 break;
             };
@@ -278,7 +286,7 @@ pub(crate) fn apply_edit(
     mut tree: StructuralEditor,
     mut pending: ResMut<TileCommands>,
 ) {
-    if tree.editor.state.root.is_none() {
+    if tree.editor.roots.is_empty() {
         let _ = pending.defer(*event.event());
         return;
     }

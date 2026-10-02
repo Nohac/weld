@@ -16,7 +16,7 @@ use bevy::{
 };
 use weld_window::WindowGeometry;
 
-use crate::{SplitAxis, TileContainer, TileParent, TileSettings, TileState};
+use crate::{SplitAxis, TileContainer, TileParent, TileSettings, TileWorkspace};
 
 #[derive(Component, Clone, Copy, Debug, Default, PartialEq)]
 pub(crate) struct LayoutRect(pub WindowGeometry);
@@ -47,7 +47,7 @@ pub(crate) fn request_layout(
 
 #[derive(SystemParam)]
 pub(crate) struct Layout<'w, 's> {
-    state: Res<'w, TileState>,
+    roots: Query<'w, 's, Entity, With<TileWorkspace>>,
     settings: Res<'w, TileSettings>,
     dirty: ResMut<'w, LayoutDirty>,
     containers: Query<'w, 's, &'static TileContainer>,
@@ -60,22 +60,22 @@ pub(crate) fn apply_layout(_event: On<LayoutRequested>, mut layout: Layout) {
     if !layout.dirty.0 {
         return;
     }
-    let Some(root) = layout.state.root else {
-        return;
-    };
-    let Ok(rect) = layout.rectangles.get(root).map(|rect| rect.0) else {
-        return;
-    };
     let gap = f32::from(layout.settings.inner_gap);
     let Layout {
         containers,
         rectangles,
         windows,
         redraw,
+        roots,
         ..
     } = &mut layout;
-    if arrange(root, rect, gap, containers, rectangles, windows) {
-        redraw.write(RequestRedraw);
+    for root in roots.iter() {
+        let Ok(rect) = rectangles.get(root).map(|rect| rect.0) else {
+            continue;
+        };
+        if arrange(root, rect, gap, containers, rectangles, windows) {
+            redraw.write(RequestRedraw);
+        }
     }
     layout.dirty.0 = false;
 }

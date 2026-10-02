@@ -11,11 +11,13 @@ use bevy::{
     math::Vec2,
     window::RequestRedraw,
 };
-use weld_window::{FocusedWindow, ManagedWindow, WindowCommand, WindowCommandKind, WindowGeometry};
+use weld_window::{
+    FocusedWindow, ManagedBy, ManagedWindow, WindowCommand, WindowCommandKind, WindowGeometry,
+};
 
 use crate::{
     ContainerId, Direction, SplitAxis, TileChild, TileCommands, TileContainer, TileFocusHistory,
-    TileOperation, TileParent, TileRequest, TileState, TileTreeChanged,
+    TileOperation, TileParent, TileRequest, TileState, TileTreeChanged, TileWorkspace,
     layout::{LayoutDirty, LayoutRect, LayoutRequested},
 };
 
@@ -27,9 +29,31 @@ pub(crate) struct TreeEditor<'w, 's> {
     pub commands: Commands<'w, 's>,
     pub dirty: ResMut<'w, LayoutDirty>,
     pub history: ResMut<'w, TileFocusHistory>,
+    pub roots: Query<'w, 's, Entity, With<TileWorkspace>>,
 }
 
 impl TreeEditor<'_, '_> {
+    /// Resolves a root while validating bounded, bidirectional ancestry.
+    pub fn root_of(&self, mut node: Entity) -> Option<Entity> {
+        for _ in 0..=crate::MAX_DEPTH {
+            if self.roots.contains(node) {
+                return Some(node);
+            }
+            let parent = self.parents.get(node).ok()?.entity();
+            if !self
+                .containers
+                .get(parent)
+                .ok()?
+                .children()
+                .any(|(child, _)| child == node)
+            {
+                return None;
+            }
+            node = parent;
+        }
+        None
+    }
+
     pub fn create_container(
         &mut self,
         axis: SplitAxis,
@@ -172,10 +196,11 @@ pub(crate) fn apply_request(
     mut editor: TreeEditor,
     windows: Query<(Entity, &ManagedWindow, &WindowGeometry), With<TileParent>>,
     focus: Res<FocusedWindow>,
+    owners: Query<&ManagedBy>,
     mut pending: ResMut<TileCommands>,
     mut redraw: MessageWriter<RequestRedraw>,
 ) {
-    if editor.state.root.is_none() {
+    if editor.roots.is_empty() {
         let _ = pending.defer(*event.event());
         return;
     }
@@ -200,7 +225,7 @@ pub(crate) fn apply_request(
         }),
         TileOperation::Split(axis) => editor.split(window, axis),
         TileOperation::Focus(direction) => {
-            if let Some(next) = neighbor(&windows, window, direction) {
+            if let Some(next) = neighbor(&windows, &owners, window, direction) {
                 editor.commands.trigger(WindowCommand {
                     window: next,
                     kind: WindowCommandKind::Focus,
@@ -209,7 +234,7 @@ pub(crate) fn apply_request(
             }
         }
         TileOperation::Move(direction) => {
-            if let Some(next) = neighbor(&windows, window, direction) {
+            if let Some(next) = neighbor(&windows, &owners, window, direction) {
                 editor.swap(window, next);
             }
         }
@@ -223,10 +248,12 @@ pub(crate) fn apply_request(
 
 fn neighbor(
     windows: &Query<(Entity, &ManagedWindow, &WindowGeometry), With<TileParent>>,
+    owners: &Query<&ManagedBy>,
     window: Entity,
     direction: Direction,
 ) -> Option<Entity> {
     let (_, _, geometry) = windows.get(window).ok()?;
+    let owner = owners.get(window).ok()?.0;
     let center = geometry.position + geometry.size * 0.5;
     let unit = match direction {
         Direction::Left => Vec2::NEG_X,
@@ -237,6 +264,12 @@ fn neighbor(
     windows
         .iter()
         .filter_map(|(entity, managed, rect)| {
+            if !owners
+                .get(entity)
+                .is_ok_and(|candidate| candidate.0 == owner)
+            {
+                return None;
+            }
             let delta = rect.position + rect.size * 0.5 - center;
             (entity != window && delta.dot(unit) > 0.5).then_some((
                 entity,

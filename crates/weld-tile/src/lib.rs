@@ -4,14 +4,14 @@
 //! presentation. [`TileRequest`] observers preserve ordered shell actions;
 //! [`TileCommands`] buffers operations until a workspace is available.
 //! Retained vacancies and hoisted windows keep their layout slots.
-//! This first slice has one workspace on the primary output. Other outputs,
-//! floating overlays, tabbed/stacked layouts and fullscreen are separate policy.
+//! Each managed workspace owns a tree in its assigned output's coordinates.
 
 mod history;
 mod layout;
 mod operations;
 mod plugin;
 mod structural;
+mod workspace;
 
 use bevy::ecs::{
     component::Component,
@@ -22,7 +22,6 @@ use bevy::ecs::{
     system::{Command, command},
     world::CommandQueue,
 };
-use weld_app::output::OutputId;
 use weld_window::WindowId;
 
 const COMMAND_CAPACITY: usize = 256;
@@ -163,10 +162,17 @@ impl TileParent {
     }
 }
 
-/// The root workspace and its current output association.
+/// Marks a shared managed workspace whose layout is owned by this tiler.
 #[derive(Component, Clone, Copy, Debug, Eq, PartialEq)]
-pub struct TileWorkspace {
-    pub output: OutputId,
+pub struct TileWorkspace;
+
+/// Transfer a managed leaf into a workspace's layout. The destination anchor
+/// selects insertion after a leaf; absent an anchor, append to the root.
+#[derive(Event, Clone, Copy, Debug)]
+pub struct TileWorkspaceMove {
+    pub window: Entity,
+    pub workspace: Entity,
+    pub anchor: Option<Entity>,
 }
 
 /// Commands target stable window identities, not UI nodes or client surfaces.
@@ -249,7 +255,6 @@ impl TileCommands {
 
 #[derive(Resource, Default)]
 struct TileState {
-    root: Option<Entity>,
     next_id: u64,
 }
 

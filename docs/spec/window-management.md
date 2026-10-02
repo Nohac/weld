@@ -10,11 +10,11 @@ supplies optional freeform management policy. A client surface can disappear
 without despawning a managed window whose vacancy policy is `Retain`.
 
 The exact implemented ownership and dependency direction are documented in
-[Architecture](../architecture.md). Persistent matching, multiple workspaces and
-persistence below remain direction rather than completed features. `weld-tile`
+[Architecture](../architecture.md). Persistent matching and persistence below
+remain direction rather than completed features. `weld-tile`
 now implements a native horizontal/vertical split tree with live gaps,
-directional focus, leaf swapping, proportional resize and retained slots in a
-single primary-output workspace. See [Master tiling](../master-tiling.md).
+directional focus, leaf swapping, proportional resize and retained slots in
+per-workspace trees with output assignment. See [Master tiling](../master-tiling.md).
 
 `weld-i3-quirks` adds tree-based directional focus, wrapping, split-tree movement and branch-local
 close restoration using shared tree-node focus history. It consumes Sway configuration
@@ -70,6 +70,33 @@ Occupancy and local presentation are separate state axes:
 The last state preserves the source client while moving its interactive
 presentation elsewhere. It must not be modeled as vacancy merely because the
 source no longer draws the client texture locally.
+
+## Workspace presentation and activity — Direction
+
+Workspace membership, presentation destination and live-frame demand are
+separate state. Hiding a local workspace should withdraw its local demand while
+an authorized remote presenter or capture consumer can keep all or selected
+members updating. A single-window capture includes its surface tree; a workspace
+capture requests the required workspace composition. Releasing one consumer
+must preserve other consumers' demand. Activity does not grant input focus.
+The shared presentation-claim mechanism is the starting point for this work;
+the implemented workspace slice only changes local visibility and preserves
+occupancy/hoist ownership.
+
+A workspace may resolve a layout area within its output: fill, aspect-fit
+(for example 16:9 within a 21:9 monitor), or later a fixed recording extent.
+Layout, fullscreen bounds, input transforms and capture should consume that
+same resolved area. Geometry authority across differently sized simultaneous
+presenters needs an explicit policy.
+
+An authorized output on another Weld machine in the mesh could become a
+workspace presentation destination. Keep the owning application session and
+durable workspace identity separate from the destination peer/output identity.
+Disconnect must preserve windows and layout for reclaim or reconnection.
+Local Bevy relationships remain process-local; remote destinations use stable
+mesh identities through the hoist boundary. Authorization, destination
+availability, geometry negotiation and handoff are required follow-ups, not
+implemented by local output assignment.
 
 ## Persistent frames — Direction
 

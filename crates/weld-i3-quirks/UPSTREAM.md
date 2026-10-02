@@ -88,3 +88,30 @@ and depth-limit termination. Native flattening retains relative child proportion
 and fullscreen or stacked-layout support. Those suites remain deferred, along
 with group selection, floating movement, marks and criteria. This batch does not
 claim those command or layout surfaces.
+
+## Workspace foundation coverage
+
+`tests/cases/workspace.rs` adapts the following cases at the same pinned revision:
+
+- `297-assign-workspace-to-output.t`: initial assigned names, binding names and
+  unused numbers across four outputs; ordered connector fallbacks; exact-name
+  precedence over numeric assignments; primary/nonprimary selection. Rename
+  and directional output-move cases remain deferred.
+- `503-workspace.t`: global numbered cycling, equal numeric prefixes on distinct
+  outputs, and next/previous-on-output wrapping.
+- `176-workspace-baf.t`: explicit back-and-forth recreates retired empty
+  workspaces, and switching to the selected workspace is a no-op. Automatic
+  back-and-forth, rename, restart and scratchpad variants remain deferred.
+
+Policy also follows `src/workspace.c`: `workspace_get`, `get_assigned_output`,
+`create_workspace_on_output`, `workspace_show`, and next/previous selectors.
+First assignment directives win, and a missing assigned output falls back to
+the current output. Creation uses binding order before unused numeric names.
+Weld-specific coverage checks relationship inverses, per-tree geometry and
+focus, cross-workspace transfer, startup batches, hidden-slot occupancy,
+inactive close recovery, and output disappearance/reappearance.
+
+This slice preserves existing workspace assignment on config reload; applying
+new assignments to already-existing workspaces remains a separate policy change.
+Directional output traversal, pointer warping, group selection and floating
+workspace movement are not included.

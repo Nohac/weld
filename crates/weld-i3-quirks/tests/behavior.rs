@@ -25,6 +25,8 @@ use weld_window::{
 
 #[path = "cases/movement.rs"]
 mod movement;
+#[path = "cases/workspace.rs"]
+mod workspace;
 
 fn app() -> App {
     let mut app = App::new();

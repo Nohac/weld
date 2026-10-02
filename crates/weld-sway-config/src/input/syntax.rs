@@ -32,6 +32,29 @@ fn xkb_name_character(c: char) -> bool {
     c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | ',' | ':' | '+' | '/' | '.' | '(' | ')')
 }
 
+pub(super) fn literal<'a>(input: &mut &'a str) -> ParseResult<&'a str> {
+    alt((
+        delimited(
+            '"',
+            take_while(0.., |c: char| c != '"' && literal_character(c)),
+            '"',
+        ),
+        delimited(
+            '\'',
+            take_while(0.., |c: char| c != '\'' && literal_character(c)),
+            '\'',
+        ),
+        take_while(1.., |c: char| {
+            literal_character(c) && !c.is_whitespace() && !matches!(c, '"' | '\'' | ',' | ';')
+        }),
+    ))
+    .parse_next(input)
+}
+
+fn literal_character(c: char) -> bool {
+    !c.is_control() && !matches!(c, '\\' | '$')
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -12,18 +12,18 @@ use bevy::{
         schedule::IntoScheduleConfigs,
         system::{Commands, Local, Query, Res, ResMut},
     },
-    math::Vec2,
     picking::{
         events::{Click, Pointer, Press},
         pointer::PointerButton,
     },
     window::RequestRedraw,
 };
-use weld_app::output::{OutputGeometry, PrimaryOutput, WeldOutput};
+use weld_app::output::{OutputGeometry, WeldOutput};
+use weld_window::workspace::{FocusedWorkspace, Workspace, WorkspaceMember, WorkspaceOutput};
 use weld_window::{
     FocusedWindow, ManagedBy, ManagedWindow, WindowCloseHandle, WindowCommand, WindowCommandKind,
-    WindowGeometry, WindowIntent, WindowIntentKind, WindowOutput, WindowProjectionLookup,
-    WindowSystems, WindowVisibility, WindowZOrder,
+    WindowIntent, WindowIntentKind, WindowOutput, WindowProjectionLookup, WindowSystems,
+    WindowVisibility, WindowZOrder,
 };
 
 use crate::{
@@ -31,7 +31,7 @@ use crate::{
     TileWorkspace, history,
     layout::{self, LayoutDirty, LayoutRect},
     operations::{self, TreeEditor},
-    structural,
+    structural, workspace,
 };
 
 /// Installs split-tree admission, actions and layout before window presentation.
@@ -43,6 +43,7 @@ type Unmanaged = (Without<TileParent>, Without<ManagedBy>);
 #[derive(QueryData)]
 struct TiledWindow {
     entity: Entity,
+    member: &'static WorkspaceMember,
     output: Option<&'static WindowOutput>,
     visibility: &'static WindowVisibility,
     z_order: &'static WindowZOrder,
@@ -60,6 +61,9 @@ impl Plugin for TilePlugin {
             .add_observer(close)
             .add_observer(operations::apply_request)
             .add_observer(structural::apply_edit)
+            .add_observer(workspace::created)
+            .add_observer(workspace::move_window)
+            .add_observer(workspace::removed)
             .add_observer(history::remember_focus)
             .add_observer(history::remember_tree_change)
             .add_observer(layout::apply_layout)
@@ -78,7 +82,7 @@ impl Plugin for TilePlugin {
             .add_systems(
                 PreUpdate,
                 (
-                    ensure_workspace,
+                    workspace::ensure_roots,
                     prune_removed,
                     admit_windows,
                     sync_output,
@@ -98,24 +102,6 @@ impl Plugin for TilePlugin {
     }
 }
 
-fn ensure_workspace(
-    outputs: Query<&WeldOutput, With<PrimaryOutput>>,
-    settings: Res<TileSettings>,
-    mut editor: TreeEditor,
-) {
-    let Ok(output) = outputs.single() else { return };
-    if editor.state.root.is_some() {
-        return;
-    }
-    if let Some(root) = editor.create_container(settings.default_axis, Vec::new()) {
-        editor
-            .commands
-            .entity(root)
-            .insert(TileWorkspace { output: output.id });
-        editor.state.root = Some(root);
-    }
-}
-
 fn prune_removed(
     mut editor: TreeEditor,
     windows: Query<(Option<&ManagedWindow>, Option<&ManagedBy>)>,
@@ -127,10 +113,10 @@ fn prune_removed(
     if removed == 0 && changed.is_empty() {
         return;
     }
-    let Some(root) = editor.state.root else {
-        return;
-    };
-    prune(&mut editor, &windows, root, root);
+    let roots: Vec<_> = editor.roots.iter().collect();
+    for root in roots {
+        prune(&mut editor, &windows, root, root);
+    }
 }
 
 fn prune(
@@ -190,80 +176,104 @@ fn prune(
 
 fn admit_windows(
     mut editor: TreeEditor,
-    windows: Query<(Entity, &ManagedWindow), Unmanaged>,
-    outputs: Query<Entity, With<PrimaryOutput>>,
+    windows: Query<(Entity, &ManagedWindow, Option<&WorkspaceMember>), Unmanaged>,
+    workspaces: Query<(Entity, &Workspace, &WorkspaceOutput), With<TileWorkspace>>,
+    memberships: Query<&WorkspaceMember>,
+    selected: Res<FocusedWorkspace>,
     focus: Res<FocusedWindow>,
     mut ordered: Local<Vec<(weld_window::WindowId, Entity)>>,
 ) {
-    let Some(root) = editor.state.root else {
-        return;
-    };
-    let Ok(output) = outputs.single() else { return };
-    ordered.clear();
-    ordered.extend(windows.iter().map(|(entity, window)| (window.id, entity)));
-    if ordered.is_empty() {
-        return;
-    }
-    ordered.sort_unstable_by_key(|(id, _)| *id);
-    let focused = focus.entity();
-    let parent = focused
-        .and_then(|focused| editor.parents.get(focused).ok())
-        .map_or(root, |parent| parent.0);
-    let Ok(mut container) = editor.containers.get_mut(parent) else {
-        return;
-    };
-    let insertion = focused
-        .and_then(|focused| {
-            container
-                .children
+    let selected = selected.entity();
+    for (root, workspace, output) in &workspaces {
+        ordered.clear();
+        ordered.extend(
+            windows
                 .iter()
-                .position(|child| child.entity == focused)
-        })
-        .map_or(container.children.len(), |index| index + 1);
-    for (offset, (_, window)) in ordered.iter().copied().enumerate() {
-        container.children.insert(
-            insertion + offset,
-            TileChild {
-                entity: window,
-                weight: 1.0,
-            },
+                .filter(|(_, _, member)| {
+                    member.map_or(selected == Some(root), |member| member.0 == root)
+                })
+                .map(|(entity, window, _)| (window.id, entity)),
         );
-        editor.commands.entity(window).insert((
-            TileParent(parent),
-            LayoutRect::default(),
-            ManagedBy(root),
-            WindowOutput(output),
-            WindowVisibility::Visible,
-        ));
-        editor.commands.trigger(WindowCommand {
-            window,
-            kind: WindowCommandKind::Focus,
-        });
+        if ordered.is_empty() {
+            continue;
+        }
+        ordered.sort_unstable_by_key(|(id, _)| *id);
+        let focused = focus
+            .entity()
+            .filter(|window| {
+                memberships
+                    .get(*window)
+                    .is_ok_and(|member| member.0 == root)
+            })
+            .or_else(|| {
+                workspace.recent().find(|window| {
+                    memberships
+                        .get(*window)
+                        .is_ok_and(|member| member.0 == root)
+                })
+            });
+        let parent = focused
+            .and_then(|focused| editor.parents.get(focused).ok())
+            .map_or(root, |parent| parent.0);
+        let Ok(mut container) = editor.containers.get_mut(parent) else {
+            continue;
+        };
+        let insertion = focused
+            .and_then(|focused| {
+                container
+                    .children
+                    .iter()
+                    .position(|child| child.entity == focused)
+            })
+            .map_or(container.children.len(), |index| index + 1);
+        for (offset, (_, window)) in ordered.iter().copied().enumerate() {
+            container.children.insert(
+                insertion + offset,
+                TileChild {
+                    entity: window,
+                    weight: 1.0,
+                },
+            );
+            editor.commands.entity(window).insert((
+                TileParent(parent),
+                LayoutRect::default(),
+                ManagedBy(root),
+                WorkspaceMember(root),
+                WindowOutput(output.0),
+                if workspace.visible() {
+                    WindowVisibility::Visible
+                } else {
+                    WindowVisibility::Hidden
+                },
+            ));
+            if selected == Some(root) {
+                editor.commands.trigger(WindowCommand {
+                    window,
+                    kind: WindowCommandKind::Focus,
+                });
+            }
+        }
+        editor.dirty.0 = true;
     }
-    editor.dirty.0 = true;
 }
 
 fn sync_output(
-    outputs: Query<(Entity, &WeldOutput, &OutputGeometry), With<PrimaryOutput>>,
+    outputs: Query<&OutputGeometry, With<WeldOutput>>,
     settings: Res<TileSettings>,
-    mut workspace: Query<(&mut TileWorkspace, &mut LayoutRect)>,
+    mut workspaces: Query<
+        (&Workspace, Option<&WorkspaceOutput>, &mut LayoutRect),
+        With<TileWorkspace>,
+    >,
     windows: Query<TiledWindow, (With<ManagedWindow>, With<TileParent>)>,
     mut dirty: ResMut<LayoutDirty>,
     mut commands: Commands,
 ) {
-    let Ok((output, identity, geometry)) = outputs.single() else {
-        return;
-    };
-    let size = geometry.logical_size();
-    let margin = Vec2::splat(f32::from(settings.outer_gap)).min(size * 0.5);
-    let rect = WindowGeometry {
-        position: margin,
-        size: (size - 2.0 * margin).max(Vec2::ZERO),
-    };
-    for (mut workspace, mut bounds) in &mut workspace {
-        if workspace.output != identity.id {
-            workspace.output = identity.id;
-        }
+    for (_, output, mut bounds) in &mut workspaces {
+        let Some(output) = output else { continue };
+        let Ok(geometry) = outputs.get(output.0) else {
+            continue;
+        };
+        let rect = workspace::bounds(geometry, &settings);
         if bounds.0 != rect {
             bounds.0 = rect;
             dirty.0 = true;
@@ -273,13 +283,24 @@ fn sync_output(
         dirty.0 = true;
     }
     for window in &windows {
-        if window.output.is_none_or(|assigned| assigned.0 != output) {
-            commands.entity(window.entity).insert(WindowOutput(output));
-        }
-        if *window.visibility != WindowVisibility::Visible {
+        let Ok((workspace, output, _)) = workspaces.get(window.member.0) else {
+            continue;
+        };
+        let output = output.filter(|output| outputs.contains(output.0));
+        if let Some(output) = output
+            && window.output.is_none_or(|assigned| assigned.0 != output.0)
+        {
             commands
                 .entity(window.entity)
-                .insert(WindowVisibility::Visible);
+                .insert(WindowOutput(output.0));
+        }
+        let visibility = if output.is_some() && workspace.visible() {
+            WindowVisibility::Visible
+        } else {
+            WindowVisibility::Hidden
+        };
+        if *window.visibility != visibility {
+            commands.entity(window.entity).insert(visibility);
         }
         if *window.z_order != WindowZOrder(0) {
             commands.entity(window.entity).insert(WindowZOrder(0));
@@ -289,21 +310,25 @@ fn sync_output(
 
 fn repair_focus(
     focus: Res<FocusedWindow>,
-    windows: Query<(Entity, &ManagedWindow)>,
+    windows: Query<(Entity, &ManagedWindow, &WorkspaceMember)>,
+    selected: Res<FocusedWorkspace>,
     parents: Query<(), With<TileParent>>,
     mut commands: Commands,
     mut redraw: MessageWriter<RequestRedraw>,
 ) {
-    if focus
-        .entity()
-        .is_some_and(|entity| windows.contains(entity))
-    {
+    if focus.entity().is_some_and(|entity| {
+        windows
+            .get(entity)
+            .is_ok_and(|(_, _, member)| Some(member.0) == selected.entity())
+    }) {
         return;
     }
-    if let Some((window, _)) = windows
+    if let Some((window, _, _)) = windows
         .iter()
-        .filter(|(entity, _)| parents.contains(*entity))
-        .min_by_key(|(_, window)| window.id)
+        .filter(|(entity, _, member)| {
+            parents.contains(*entity) && Some(member.0) == selected.entity()
+        })
+        .min_by_key(|(_, window, _)| window.id)
     {
         commands.trigger(WindowCommand {
             window,
@@ -320,11 +345,11 @@ fn repair_focus(
 }
 
 fn drain_commands(
-    state: Res<TileState>,
+    roots: Query<(), With<TileWorkspace>>,
     mut pending: ResMut<TileCommands>,
     mut commands: Commands,
 ) {
-    if state.root.is_none() || pending.is_empty() {
+    if roots.is_empty() || pending.is_empty() {
         return;
     }
     commands.append(&mut pending.queue);

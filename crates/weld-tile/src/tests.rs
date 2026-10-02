@@ -7,7 +7,7 @@ use bevy::{
         query::{Changed, With},
         resource::Resource,
         schedule::IntoScheduleConfigs,
-        system::{Query, Res, ResMut},
+        system::{Commands, Query, Res, ResMut, RunSystemOnce},
     },
     math::{UVec2, Vec2},
 };
@@ -185,14 +185,34 @@ fn app() -> App {
         outer_gap: 0,
         ..Default::default()
     });
-    app.world_mut().spawn((
-        WeldOutput {
-            id: OutputId::new(1),
-        },
-        PrimaryOutput,
-        OutputGeometry::from_physical(UVec2::new(800, 600), 1.0),
-    ));
+    let output = app
+        .world_mut()
+        .spawn((
+            WeldOutput {
+                id: OutputId::new(1),
+            },
+            PrimaryOutput,
+            OutputGeometry::from_physical(UVec2::new(800, 600), 1.0),
+        ))
+        .id();
+    create_workspace(&mut app, output);
     app
+}
+
+fn create_workspace(app: &mut App, output: bevy::ecs::entity::Entity) {
+    app.world_mut()
+        .run_system_once(
+            move |mut creation: weld_window::workspace::WorkspaceCreation,
+                  mut commands: Commands| {
+                let workspace = creation.create("1".to_owned(), output).expect("workspace");
+                commands.trigger(weld_window::workspace::WorkspaceRequest::SetVisible {
+                    workspace,
+                    visible: true,
+                });
+                commands.trigger(weld_window::workspace::WorkspaceRequest::Focus(workspace));
+            },
+        )
+        .expect("workspace fixture");
 }
 
 fn window(app: &mut App, id: u64) -> Entity {
@@ -442,13 +462,17 @@ fn commands_wait_for_the_first_output_and_admission() {
     app.update();
     assert!(app.world().get::<TileParent>(first).is_none());
     assert_eq!(app.world().resource::<TileCommands>().len(), 1);
-    app.world_mut().spawn((
-        WeldOutput {
-            id: OutputId::new(1),
-        },
-        PrimaryOutput,
-        OutputGeometry::from_physical(UVec2::new(800, 600), 1.0),
-    ));
+    let output = app
+        .world_mut()
+        .spawn((
+            WeldOutput {
+                id: OutputId::new(1),
+            },
+            PrimaryOutput,
+            OutputGeometry::from_physical(UVec2::new(800, 600), 1.0),
+        ))
+        .id();
+    create_workspace(&mut app, output);
     app.update();
     assert!(app.world().get::<TileParent>(second).is_some());
     assert_eq!(

@@ -6,6 +6,8 @@
 
 const PROFILE_TARGET: &str = "weld_profile";
 
+pub mod workspace;
+
 use std::collections::HashMap;
 
 use bevy::{
@@ -806,6 +808,12 @@ pub struct WindowPlugin;
 impl Plugin for WindowPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<WindowRegistry>()
+            .init_resource::<workspace::WorkspaceIds>()
+            .init_resource::<workspace::FocusedWorkspace>()
+            .add_observer(workspace::request)
+            .add_observer(workspace::remember_focus)
+            .add_observer(workspace::removed)
+            .add_observer(workspace::member_moved)
             .init_resource::<FocusedWindow>()
             .init_resource::<AppliedClientFocus>()
             .init_resource::<SurfaceCommitRevisions>()

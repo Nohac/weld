@@ -7,10 +7,12 @@ publish.workspace = true
 [dependencies]
 anyhow.workspace = true
 bevy.workspace = true
+weld-app = { path = "../weld-app" }
 weld-input = { path = "../weld-input", features = ["bevy"] }
 weld-sway-config = { path = "../weld-sway-config", features = ["input"] }
 weld-tile = { path = "../weld-tile" }
 weld-window = { path = "../weld-window" }
 
 [dev-dependencies]
+indoc.workspace = true
 weld-app = { path = "../weld-app", features = ["test-support"] }

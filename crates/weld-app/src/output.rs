@@ -27,6 +27,14 @@ pub struct OutputInfo {
 }
 
 impl OutputInfo {
+    /// Synthetic connector facts for downstream policy integration tests.
+    #[cfg(feature = "test-support")]
+    pub fn for_test(name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            physical_size_millimeters: None,
+        }
+    }
     pub(crate) fn from_head(head: &OutputHead) -> Self {
         Self {
             name: head.name().to_owned(),

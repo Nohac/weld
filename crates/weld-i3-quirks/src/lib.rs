@@ -8,6 +8,7 @@ pub mod config;
 mod focus;
 mod movement;
 mod tree;
+pub mod workspace;
 
 use bevy::{
     app::{App, Plugin, PreUpdate},
@@ -30,8 +31,8 @@ pub enum FocusWrapping {
     #[default]
     Yes,
     Force,
-    /// Keeps navigation within the current workspace. With one workspace this
-    /// has the same result as [`Self::Yes`].
+    /// Keeps navigation within the current workspace. Directional output
+    /// traversal remains a follow-up, so currently this matches [`Self::Yes`].
     Workspace,
 }
 
@@ -41,6 +42,13 @@ pub struct I3QuirksPlugin;
 impl Plugin for I3QuirksPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<FocusWrapping>()
+            .init_resource::<workspace::WorkspaceSettings>()
+            .init_resource::<workspace::PreviousWorkspace>()
+            .add_observer(workspace::request)
+            .add_observer(workspace::apply_resolved)
+            .add_observer(workspace::remember)
+            .add_observer(workspace::bootstrap)
+            .add_observer(workspace::after_move)
             .init_resource::<focus::FocusPath>()
             .add_observer(focus::navigate)
             .add_observer(focus::remember_focus)
@@ -50,5 +58,17 @@ impl Plugin for I3QuirksPlugin {
             .add_observer(movement::cleanup)
             .add_systems(PreUpdate, focus::recover.in_set(TileSystems::RecoverFocus))
             .add_systems(PreUpdate, focus::refresh_path.in_set(TileSystems::Layout));
+        app.add_systems(
+            PreUpdate,
+            workspace::prepare
+                .before(TileSystems::RecoverFocus)
+                .in_set(weld_window::WindowSystems::Management),
+        );
+        app.add_systems(
+            PreUpdate,
+            workspace::reap
+                .after(TileSystems::Layout)
+                .in_set(weld_window::WindowSystems::Management),
+        );
     }
 }
