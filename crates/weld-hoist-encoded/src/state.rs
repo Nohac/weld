@@ -2990,6 +2990,15 @@ mod tests {
         let mut relay = SourceRelayAdapter::new(source_id, port);
         for local in 1..=160 {
             let surface = surface(source_id, 1, local);
+            relay.observe_event(&ClientSurfaceEvent {
+                surface,
+                kind: ClientSurfaceEventKind::Role(weld_client::ClientSurfaceRole::Toplevel(
+                    weld_client::ToplevelState {
+                        parent: None,
+                        decoration: weld_client::WindowDecoration::ServerSide,
+                    },
+                )),
+            });
             relay.apply_command(ClientAdapterCommandEnvelope::new(
                 source_id,
                 HoistEndpointCommand::Map {

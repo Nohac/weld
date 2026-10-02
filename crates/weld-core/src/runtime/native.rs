@@ -260,6 +260,12 @@ impl<Event: 'static> NativeRuntime<Event> {
                     }
                 }
             }
+            for (output, area) in self.state.data.server.take_output_work_areas() {
+                if let Some(app) = integration.application() {
+                    app.update_output_work_area(output, area);
+                    policy_dirty = true;
+                }
+            }
             self.state
                 .data
                 .server

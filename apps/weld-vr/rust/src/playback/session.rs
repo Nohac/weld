@@ -227,6 +227,10 @@ impl Inventory {
                 }
             }
             ClientSurfaceEventKind::Role(role) => {
+                ensure!(
+                    !matches!(role, ClientSurfaceRole::Layer(_)),
+                    "desktop layer surfaces cannot be hoisted"
+                );
                 if let Some(surface) = self.surfaces.get_mut(&surface_id) {
                     surface.role = role;
                 } else {
@@ -554,6 +558,7 @@ impl Inventory {
         let mut panes = Vec::new();
         for (id, surface) in &self.surfaces {
             let parent = match surface.role {
+                ClientSurfaceRole::Layer(_) => continue,
                 ClientSurfaceRole::Toplevel(state) => state.parent,
                 ClientSurfaceRole::Popup(state) => Some(state.owner),
             };
@@ -581,6 +586,7 @@ impl Inventory {
                 } else {
                     pane.parent = parent_key;
                     match surface.role {
+                        ClientSurfaceRole::Layer(_) => continue,
                         ClientSurfaceRole::Toplevel(state) => {
                             pane.kind = i32::from(state.parent.is_some())
                         }
@@ -609,6 +615,7 @@ impl Inventory {
                 return false;
             };
             match surface.role {
+                ClientSurfaceRole::Layer(_) => return false,
                 ClientSurfaceRole::Toplevel(state) => match state.parent {
                     Some(parent) => id = parent,
                     None => {

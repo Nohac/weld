@@ -4,6 +4,7 @@ mod adapter;
 mod cursor;
 mod dmabuf;
 mod keyboard;
+mod layer;
 mod output;
 #[cfg(test)]
 mod output_tests;
@@ -91,6 +92,9 @@ pub struct ServerState {
     pub socket_name: OsString,
     compositor_state: CompositorState,
     xdg_shell_state: XdgShellState,
+    layer_shell_state: smithay::wayland::shell::wlr_layer::WlrLayerShellState,
+    layers: layer::LayerStore,
+    pending_work_areas: HashMap<OutputId, crate::geometry::LogicalRect>,
     _xdg_decoration_state: XdgDecorationState,
     _cursor_shape_manager_state: CursorShapeManagerState,
     _pointer_gestures_state: PointerGesturesState,
@@ -186,6 +190,8 @@ impl ServerState {
         let display_handle = display.handle();
         let compositor_state = CompositorState::new::<Self>(&display_handle);
         let xdg_shell_state = XdgShellState::new::<Self>(&display_handle);
+        let layer_shell_state =
+            smithay::wayland::shell::wlr_layer::WlrLayerShellState::new::<Self>(&display_handle);
         let xdg_decoration_state = XdgDecorationState::new::<Self>(&display_handle);
         let cursor_shape_manager_state = CursorShapeManagerState::new::<Self>(&display_handle);
         let pointer_gestures_state = PointerGesturesState::new::<Self>(&display_handle);
@@ -347,6 +353,9 @@ impl ServerState {
             socket_name,
             compositor_state,
             xdg_shell_state,
+            layer_shell_state,
+            layers: layer::LayerStore::default(),
+            pending_work_areas: HashMap::new(),
             _xdg_decoration_state: xdg_decoration_state,
             _cursor_shape_manager_state: cursor_shape_manager_state,
             _pointer_gestures_state: pointer_gestures_state,
@@ -434,6 +443,7 @@ impl ServerState {
         }
         if metrics_changed {
             self.send_all_surface_scales();
+            self.arrange_layers(id);
         }
     }
 

@@ -12,6 +12,7 @@ pub mod debug;
 mod dmabuf;
 pub mod input;
 pub mod layer;
+pub mod layer_shell;
 pub mod output;
 mod shell;
 #[path = "surface.rs"]

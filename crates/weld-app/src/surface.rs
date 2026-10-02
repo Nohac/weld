@@ -445,6 +445,7 @@ impl Plugin for SurfacePlugin {
             Shader::from_wgsl
         );
         app.add_plugins(UiMaterialPlugin::<SurfaceUiMaterial>::default());
+        crate::layer_shell::register(app);
         app.init_resource::<ClientSources>()
             .init_resource::<SurfaceEventQueue>()
             .init_resource::<SurfaceActionQueue>()
@@ -565,10 +566,11 @@ pub fn enqueue_surface_event(world: &mut World, event: HostSurfaceEvent) {
 
 #[doc(hidden)]
 pub fn take_surface_actions(world: &mut World) -> Vec<SurfaceAction> {
-    world
+    let actions = world
         .get_resource_mut::<SurfaceActionQueue>()
         .map(|mut actions| actions.0.drain(..).collect())
-        .unwrap_or_default()
+        .unwrap_or_default();
+    crate::layer_shell::resolve_focus_actions(world, actions)
 }
 
 pub(crate) fn has_surface_frame(world: &World) -> bool {
@@ -688,6 +690,11 @@ fn apply_host_surface_events(world: &mut World) {
     for HostSurfaceEvent { surface, kind } in events {
         match kind {
             HostSurfaceEventKind::Role(role) => match role {
+                weld_client::ClientSurfaceRole::Layer(layer) => {
+                    if ensure_layer_entity(world, &mut registry, surface, layer).is_some() {
+                        apply_pending_snapshot(world, &mut registry, surface);
+                    }
+                }
                 weld_client::ClientSurfaceRole::Toplevel(toplevel) => {
                     if let Some(entity) =
                         ensure_window_entity(world, &mut registry, surface, toplevel.decoration)
@@ -765,10 +772,14 @@ fn ensure_window_entity(
     if let Some(entry) = registry.entries.get(&surface)
         && world.get_entity(entry.entity).is_ok()
     {
-        if world.get::<ClientPopup>(entry.entity).is_some() {
+        if world.get::<ClientPopup>(entry.entity).is_some()
+            || world
+                .get::<crate::layer_shell::ClientLayerSurface>(entry.entity)
+                .is_some()
+        {
             warn!(
                 ?surface,
-                "ignored an application-window role conflicting with a popup"
+                "ignored an application-window role conflicting with another surface role"
             );
             return None;
         }
@@ -819,10 +830,14 @@ fn ensure_popup_entity(
     if let Some(entry) = registry.entries.get(&surface)
         && world.get_entity(entry.entity).is_ok()
     {
-        if world.get::<ClientToplevel>(entry.entity).is_some() {
+        if world.get::<ClientToplevel>(entry.entity).is_some()
+            || world
+                .get::<crate::layer_shell::ClientLayerSurface>(entry.entity)
+                .is_some()
+        {
             warn!(
                 ?surface,
-                "ignored a popup role conflicting with an application window"
+                "ignored a popup role conflicting with another surface role"
             );
             return None;
         }
@@ -835,6 +850,39 @@ fn ensure_popup_entity(
     registry.entries.remove(&surface);
 
     let entity = world.spawn((source, ClientSurface { surface }, popup)).id();
+    registry.entries.insert(
+        surface,
+        SurfaceEntry {
+            entity,
+            buffers: HashMap::new(),
+            frame_ready: false,
+        },
+    );
+    Some(entity)
+}
+
+fn ensure_layer_entity(
+    world: &mut World,
+    registry: &mut SurfaceRegistry,
+    surface: SurfaceId,
+    layer: weld_client::LayerSurfaceState,
+) -> Option<Entity> {
+    let source = registered_client_source(world, surface)?;
+    if source.provenance != ClientProvenance::Local {
+        return None;
+    }
+    let role = crate::layer_shell::ClientLayerSurface(layer);
+    if let Some(entry) = registry.entries.get(&surface) {
+        let mut entity = world.get_entity_mut(entry.entity).ok()?;
+        if entity.contains::<ClientToplevel>() || entity.contains::<ClientPopup>() {
+            return None;
+        }
+        if entity.get::<crate::layer_shell::ClientLayerSurface>() != Some(&role) {
+            entity.insert(role);
+        }
+        return Some(entry.entity);
+    }
+    let entity = world.spawn((source, ClientSurface { surface }, role)).id();
     registry.entries.insert(
         surface,
         SurfaceEntry {
@@ -1807,6 +1855,62 @@ mod tests {
             .single(app.world())
             .expect("updated root should exist");
         assert_eq!(content.root.image, first_handle);
+    }
+
+    #[test]
+    fn desktop_roles_render_without_becoming_toplevels_and_cannot_change_role() {
+        let mut app = test_app();
+        let surface = SurfaceId::for_test(55);
+        enqueue_surface_event(
+            app.world_mut(),
+            HostSurfaceEvent {
+                surface,
+                kind: HostSurfaceEventKind::Role(weld_client::ClientSurfaceRole::Layer(
+                    weld_client::LayerSurfaceState {
+                        output: weld_client::ClientOutputId::new(1),
+                        position: weld_client::LogicalPoint::new(0.0, 0.0),
+                        layer: weld_client::DesktopLayer::Top,
+                        keyboard: weld_client::LayerKeyboardInteractivity::None,
+                        stack_index: 0,
+                    },
+                )),
+            },
+        );
+        enqueue_surface_event(
+            app.world_mut(),
+            snapshot_event(surface, root_snapshot(Some([1, 2, 3, 255]))),
+        );
+        app.update();
+        assert_eq!(
+            app.world_mut()
+                .query::<&MappedSurface>()
+                .iter(app.world())
+                .count(),
+            1
+        );
+        assert_eq!(
+            app.world_mut()
+                .query::<&ClientToplevel>()
+                .iter(app.world())
+                .count(),
+            0
+        );
+        register_window(&mut app, surface);
+        app.update();
+        assert_eq!(
+            app.world_mut()
+                .query::<&ClientToplevel>()
+                .iter(app.world())
+                .count(),
+            0
+        );
+        assert_eq!(
+            app.world_mut()
+                .query::<&crate::layer_shell::ClientLayerSurface>()
+                .iter(app.world())
+                .count(),
+            1
+        );
     }
 
     #[test]

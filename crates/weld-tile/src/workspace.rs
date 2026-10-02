@@ -8,7 +8,7 @@ use bevy::ecs::{
     system::{Query, Res},
 };
 use bevy::math::Vec2;
-use weld_app::output::OutputGeometry;
+use weld_app::output::{OutputGeometry, OutputWorkArea};
 use weld_window::workspace::{
     Workspace, WorkspaceCreated, WorkspaceMember, WorkspaceMemberMoved, WorkspaceOutput,
 };
@@ -21,11 +21,22 @@ use crate::{
     operations::TreeEditor,
 };
 
-pub(crate) fn bounds(geometry: &OutputGeometry, settings: &TileSettings) -> WindowGeometry {
-    let size = geometry.logical_size();
+pub(crate) fn bounds(
+    geometry: &OutputGeometry,
+    work_area: Option<&OutputWorkArea>,
+    settings: &TileSettings,
+) -> WindowGeometry {
+    let position = work_area.map_or(Vec2::ZERO, |area| {
+        area.position.clamp(Vec2::ZERO, geometry.logical_size())
+    });
+    let size = work_area.map_or(geometry.logical_size(), |area| {
+        area.size
+            .max(Vec2::ZERO)
+            .min(geometry.logical_size() - position)
+    });
     let margin = Vec2::splat(f32::from(settings.outer_gap)).min(size * 0.5);
     WindowGeometry {
-        position: margin,
+        position: position + margin,
         size: (size - 2.0 * margin).max(Vec2::ZERO),
     }
 }
@@ -35,6 +46,7 @@ fn initialize(
     workspace: Entity,
     settings: &TileSettings,
     geometry: &OutputGeometry,
+    work_area: Option<&OutputWorkArea>,
 ) {
     if editor.roots.contains(workspace) {
         return;
@@ -51,7 +63,7 @@ fn initialize(
             axis: settings.default_axis,
             children: Vec::new(),
         },
-        LayoutRect(bounds(geometry, settings)),
+        LayoutRect(bounds(geometry, work_area, settings)),
     ));
     editor.dirty.0 = true;
 }
@@ -61,12 +73,12 @@ pub(crate) fn created(
     mut editor: TreeEditor,
     settings: Res<TileSettings>,
     workspaces: Query<&WorkspaceOutput, With<Workspace>>,
-    outputs: Query<&OutputGeometry>,
+    outputs: Query<(&OutputGeometry, Option<&OutputWorkArea>)>,
 ) {
     if let Ok(output) = workspaces.get(event.0)
-        && let Ok(geometry) = outputs.get(output.0)
+        && let Ok((geometry, work_area)) = outputs.get(output.0)
     {
-        initialize(&mut editor, event.0, &settings, geometry);
+        initialize(&mut editor, event.0, &settings, geometry, work_area);
     }
 }
 
@@ -76,11 +88,11 @@ pub(crate) fn ensure_roots(
     mut editor: TreeEditor,
     settings: Res<TileSettings>,
     workspaces: Query<(Entity, &WorkspaceOutput), UninitializedWorkspace>,
-    outputs: Query<&OutputGeometry>,
+    outputs: Query<(&OutputGeometry, Option<&OutputWorkArea>)>,
 ) {
     for (workspace, output) in &workspaces {
-        if let Ok(geometry) = outputs.get(output.0) {
-            initialize(&mut editor, workspace, &settings, geometry);
+        if let Ok((geometry, work_area)) = outputs.get(output.0) {
+            initialize(&mut editor, workspace, &settings, geometry, work_area);
         }
     }
 }

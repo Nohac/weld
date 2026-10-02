@@ -384,6 +384,8 @@ pub trait HostPolicy {
     fn service_remote_debug(&mut self);
     /// Reconciles enabled output geometry before the next main advance.
     fn update_output_topology(&mut self, outputs: &[OutputConfiguration]);
+    /// Publishes output-local space remaining after desktop surface reservations.
+    fn update_output_work_area(&mut self, _output: OutputId, _area: crate::geometry::LogicalRect) {}
     fn should_exit(&self) -> bool;
     fn take_pointer_route_updates(&mut self) -> Vec<ClientPointerRouteUpdate>;
     fn take_cursor_update(&mut self) -> crate::cursor::CursorHostUpdate;

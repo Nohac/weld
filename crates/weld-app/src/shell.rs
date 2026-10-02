@@ -946,6 +946,27 @@ impl HostPolicy for AppShell {
         AppShell::update_output_topology(self, outputs);
     }
 
+    fn update_output_work_area(
+        &mut self,
+        output: weld_core::OutputId,
+        area: weld_core::geometry::LogicalRect,
+    ) {
+        let world = self.app.world_mut();
+        let entity = world
+            .query::<(Entity, &crate::output::WeldOutput)>()
+            .iter(world)
+            .find_map(|(entity, candidate)| (candidate.id == output).then_some(entity));
+        if let Some(entity) = entity {
+            let value = crate::output::OutputWorkArea {
+                position: Vec2::new(area.min_x() as f32, area.min_y() as f32),
+                size: Vec2::new(area.width() as f32, area.height() as f32),
+            };
+            if world.get::<crate::output::OutputWorkArea>(entity) != Some(&value) {
+                world.entity_mut(entity).insert(value);
+            }
+        }
+    }
+
     fn should_exit(&self) -> bool {
         AppShell::should_exit(self)
     }

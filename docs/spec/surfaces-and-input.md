@@ -83,9 +83,11 @@ Protocol roles and their surface-tree ownership remain part of this boundary.
 Stable frames, persistent vacancy, and floating or tiling policy are specified
 separately in [Window management](window-management.md).
 
-When layer shell becomes a concrete slice, Smithay's `LayerMap` should handle
-protocol anchors, margins, exclusive zones, and configure state before Weld
-projects the committed result into application policy.
+The implemented layer-shell boundary uses Smithay's `LayerMap` for anchors,
+margins, exclusive zones and configure state, then projects placement and work
+area into application policy. Output-bound desktop roles and their popups are
+excluded from independent window hoisting. A composed desktop capture may include
+them according to capture policy. See [Desktop layer surfaces](../layer-shell.md).
 
 ## Current input path — Implemented
 

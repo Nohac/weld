@@ -39,7 +39,7 @@ pub struct ToplevelState {
     pub decoration: WindowDecoration,
 }
 
-/// Current protocol-owned popup placement relative to its owning toplevel.
+/// Current protocol-owned popup placement relative to its owning root surface.
 #[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PopupState {
@@ -54,6 +54,38 @@ pub struct PopupState {
 pub enum ClientSurfaceRole {
     Toplevel(ToplevelState),
     Popup(PopupState),
+    /// Output-bound desktop content, excluded from independent window hoisting.
+    Layer(LayerSurfaceState),
+}
+
+/// Output-local desktop surface arranged by the host's layer-shell implementation.
+#[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct LayerSurfaceState {
+    pub output: ClientOutputId,
+    pub position: LogicalPoint,
+    pub layer: DesktopLayer,
+    pub keyboard: LayerKeyboardInteractivity,
+    pub stack_index: u32,
+}
+
+/// Desktop composition order, from wallpaper to interactive overlays.
+#[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub enum DesktopLayer {
+    Background,
+    Bottom,
+    Top,
+    Overlay,
+}
+
+/// Keyboard focus requested by a desktop surface.
+#[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LayerKeyboardInteractivity {
+    None,
+    Exclusive,
+    OnDemand,
 }
 
 /// The displayed part of a client buffer and its logical extent.

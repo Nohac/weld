@@ -97,7 +97,7 @@ pub(super) struct SurfaceOutputAssignment {
 }
 
 impl SurfaceOutputAssignment {
-    fn primary(output: OutputId) -> Self {
+    pub(super) fn primary(output: OutputId) -> Self {
         Self {
             memberships: vec![output],
             preferred: output,
@@ -321,6 +321,9 @@ impl ServerState {
     }
 
     pub(super) fn send_all_surface_scales(&self) {
+        for layer in self.layers.0.values() {
+            self.send_surface_tree_scale(layer.surface.wl_surface(), &layer.outputs, None);
+        }
         for toplevel in self
             .toplevels
             .values()
@@ -333,14 +336,13 @@ impl ServerState {
             );
         }
         for popup in self.popups.values().filter(|state| state.surface.alive()) {
-            let Some(owner) = popup.owner.and_then(|owner| self.toplevels.get(owner)) else {
-                continue;
-            };
-            self.send_surface_tree_scale(
-                popup.surface.wl_surface(),
-                &owner.outputs,
-                owner.preferred_scale_120,
-            );
+            if let Some(assignment) = self.output_assignment_for_root(popup.surface.wl_surface()) {
+                self.send_surface_tree_scale(
+                    popup.surface.wl_surface(),
+                    assignment,
+                    self.scale_override_for_root(popup.surface.wl_surface()),
+                );
+            }
         }
     }
 
@@ -411,13 +413,21 @@ impl ServerState {
         let Some(popup) = self.popups.get(surface_id) else {
             return;
         };
-        let Some(owner) = popup.owner.and_then(|owner| self.toplevels.get(owner)) else {
+        let Some(assignment) = popup.owner.and_then(|owner| {
+            self.toplevels
+                .get(owner)
+                .map(|owner| &owner.outputs)
+                .or_else(|| self.layers.0.get(owner).map(|owner| &owner.outputs))
+        }) else {
             return;
         };
         self.apply_surface_tree_outputs(
             popup.surface.wl_surface(),
-            &owner.outputs,
-            owner.preferred_scale_120,
+            assignment,
+            popup
+                .owner
+                .and_then(|owner| self.toplevels.get(owner))
+                .and_then(|owner| owner.preferred_scale_120),
         );
     }
 
@@ -444,7 +454,7 @@ impl ServerState {
         })
     }
 
-    fn apply_surface_tree_outputs(
+    pub(super) fn apply_surface_tree_outputs(
         &self,
         root: &WlSurface,
         assignment: &SurfaceOutputAssignment,
@@ -479,6 +489,9 @@ impl ServerState {
     }
 
     fn output_assignment_for_root(&self, root: &WlSurface) -> Option<&SurfaceOutputAssignment> {
+        if let Some(surface) = self.layers.id_for_surface(root) {
+            return self.layers.0.get(surface).map(|state| &state.outputs);
+        }
         if let Some(surface) = self.toplevels.id_for_surface(root) {
             return self.toplevels.get(surface).map(|state| &state.outputs);
         }
@@ -486,10 +499,12 @@ impl ServerState {
             .popups
             .id_for_surface(root)
             .and_then(|surface| self.popups.get(surface))?;
-        popup
-            .owner
-            .and_then(|owner| self.toplevels.get(owner))
-            .map(|state| &state.outputs)
+        popup.owner.and_then(|owner| {
+            self.toplevels
+                .get(owner)
+                .map(|state| &state.outputs)
+                .or_else(|| self.layers.0.get(owner).map(|state| &state.outputs))
+        })
     }
 
     fn scale_override_for_root(&self, root: &WlSurface) -> Option<u32> {
@@ -562,6 +577,16 @@ impl ServerState {
                             .map(|id| (id, root.clone()))
                     }),
             )
+            .chain(self.layers.0.values().filter_map(|layer| {
+                let root = layer.surface.wl_surface();
+                (layer.surface.layer_surface().alive() && layer.tree.client_mapped(root))
+                    .then(|| {
+                        self.layers
+                            .id_for_surface(root)
+                            .map(|id| (id, root.clone()))
+                    })
+                    .flatten()
+            }))
             .filter(|(_, root)| root.is_alive())
     }
 
@@ -765,7 +790,7 @@ impl CompositorHandler for ServerState {
         let root = owning_root(surface);
         tracing::trace!(target: "weld_surface_diag", surface = ?surface.id(), root = ?root.id(), "processed surface commit");
         let Some(surface_id) = self.toplevels.id_for_surface(&root) else {
-            if !self.commit_popup(&root) {
+            if !self.commit_layer(&root) && !self.commit_popup(&root) {
                 if get_role(&root).is_some() {
                     release_untracked_surface_tree(&root);
                 }
@@ -799,7 +824,9 @@ impl CompositorHandler for ServerState {
         self.leave_all_outputs(surface);
         let root = owning_root(surface);
         let Some(surface_id) = self.toplevels.id_for_surface(&root) else {
-            self.remove_popup_surface(&root, surface);
+            if !self.remove_layer_subsurface(&root, surface) {
+                self.remove_popup_surface(&root, surface);
+            }
             return;
         };
         self.clear_input_focus_for_surface(surface, self.event_time());

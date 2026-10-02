@@ -27,6 +27,34 @@ use weld_window::{
 use super::*;
 
 #[test]
+fn panel_work_area_reflows_tiles_without_changing_output_geometry() {
+    let mut app = app();
+    let window = window(&mut app, 1);
+    let output = app
+        .world_mut()
+        .query_filtered::<Entity, With<WeldOutput>>()
+        .single(app.world())
+        .expect("output");
+    let original = *app.world().get::<OutputGeometry>(output).expect("geometry");
+    app.world_mut()
+        .entity_mut(output)
+        .insert(weld_app::output::OutputWorkArea {
+            position: Vec2::new(0.0, 32.0),
+            size: Vec2::new(800.0, 568.0),
+        });
+    app.update();
+    assert_eq!(geometry(&app, window).position, Vec2::new(0.0, 32.0));
+    assert_eq!(geometry(&app, window).size, Vec2::new(800.0, 568.0));
+    assert_eq!(app.world().get::<OutputGeometry>(output), Some(&original));
+    app.world_mut()
+        .entity_mut(output)
+        .remove::<weld_app::output::OutputWorkArea>();
+    app.update();
+    assert_eq!(geometry(&app, window).position, Vec2::ZERO);
+    assert_eq!(geometry(&app, window).size, Vec2::new(800.0, 600.0));
+}
+
+#[test]
 fn manager_loss_readmits_once_and_transfer_relinquishes_the_leaf() {
     let mut app = app();
     let first = window(&mut app, 1);

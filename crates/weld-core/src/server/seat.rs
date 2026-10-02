@@ -317,6 +317,30 @@ impl ServerState {
     }
 
     fn apply_toplevel_focus(&mut self, requested: Option<SurfaceId>) {
+        if let Some(layer) = requested.and_then(|id| self.layers.0.get(id)) {
+            if !layer.surface.layer_surface().alive()
+                || !layer.tree.client_mapped(layer.surface.wl_surface())
+                || !layer.surface.can_receive_keyboard_focus()
+            {
+                warn!(
+                    ?requested,
+                    "ignored keyboard focus for an unavailable or noninteractive layer surface"
+                );
+                return;
+            }
+            let surface = layer.surface.wl_surface().clone();
+            if let Some(previous) = self
+                .focused_toplevel
+                .take()
+                .and_then(|id| self.toplevels.get(id))
+            {
+                set_activated(&previous.surface, false);
+            }
+            if let Some(keyboard) = self.seat.get_keyboard() {
+                keyboard.set_focus(self, Some(surface), SERIAL_COUNTER.next_serial());
+            }
+            return;
+        }
         let next = match requested {
             Some(id) => {
                 let Some(toplevel) = self.toplevels.get(id) else {
@@ -584,6 +608,13 @@ impl ServerState {
             .filter(|toplevel| toplevel.surface.alive())
         {
             &toplevel.tree
+        } else if let Some(layer) = self
+            .layers
+            .0
+            .get(target.surface)
+            .filter(|layer| layer.surface.layer_surface().alive())
+        {
+            &layer.tree
         } else {
             &self
                 .popups

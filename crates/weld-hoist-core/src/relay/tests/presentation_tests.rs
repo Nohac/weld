@@ -8,6 +8,7 @@ fn bitrate_hints_are_authorized_then_consumed_without_native_effects() {
     let session = HoistSessionId::new(1);
     let state = Rc::new(RefCell::new(FakeSourceState::default()));
     let mut relay = SourceRelayAdapter::new(source, FakeSourcePort(state.clone()));
+    observe(&mut relay, root, top_role(None));
     relay.map(session, root);
     let hint = |session| DestinationEnvelope {
         session,
@@ -46,6 +47,7 @@ fn map_cadence_popup_and_reclaim_share_one_claim_lifecycle() {
     let session = HoistSessionId::new(1);
     let state = Rc::new(RefCell::new(FakeSourceState::default()));
     let mut relay = SourceRelayAdapter::new(source, FakeSourcePort(state));
+    observe(&mut relay, root, top_role(None));
     relay.map(session, root);
     assert_eq!(
         relay.presentations[&root],
@@ -95,6 +97,7 @@ fn transport_failure_releases_claim_and_late_requests_cannot_reactivate_it() {
     let root = surface(source, 1);
     let state = Rc::new(RefCell::new(FakeSourceState::default()));
     let mut relay = SourceRelayAdapter::new(source, FakeSourcePort(state));
+    observe(&mut relay, root, top_role(None));
     relay.map(HoistSessionId::new(1), root);
     relay.presentation_updates.clear();
     relay.fail("disconnected");
@@ -122,6 +125,7 @@ fn accepted_callback_rate_keeps_requested_popup_preference_and_deadline_forwardi
         ..Default::default()
     }));
     let mut relay = SourceRelayAdapter::new(source, FakeSourcePort(state.clone()));
+    observe(&mut relay, root, top_role(None));
     relay.map(session, root);
     relay.presentation_updates.clear();
     let requested = ClientPresentationClaim::Active {

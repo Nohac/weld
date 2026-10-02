@@ -1,0 +1,123 @@
+#!/usr/bin/env python3
+"""Bounded nested Waybar/Rofi smoke test with isolated configuration and captures."""
+
+import argparse
+import json
+import os
+from pathlib import Path
+import signal
+import socket as sockets
+import subprocess
+import tempfile
+import time
+import urllib.request
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--no-build", action="store_true")
+    parser.add_argument("--interactive", action="store_true", help="leave the launcher open for up to 90 seconds for input testing")
+    args = parser.parse_args()
+    # Bevy's render-world endpoint has a fixed port as well as the main endpoint.
+    for port in (15702, 15703):
+        with sockets.socket() as probe:
+            probe.bind(("127.0.0.1", port))
+    root = Path(__file__).resolve().parent.parent
+    if not args.no_build:
+        subprocess.run(["cargo", "build", "--locked", "-j", "8"], cwd=root, check=True)
+    validation = root / "target/validation"
+    validation.mkdir(parents=True, exist_ok=True)
+    run = Path(tempfile.mkdtemp(prefix="layer-shell-", dir=validation))
+    print(f"Logs and captures: {run}", flush=True)
+    socket = run / "wayland"
+    config = run / "waybar.json"
+    config.write_text(json.dumps({"layer": "top", "height": 32, "modules-left": ["custom/probe"], "modules-right": ["clock"], "custom/probe": {"format": "Weld layer-shell probe"}, "clock": {"format": "{:%H:%M:%S}", "interval": 1}}))
+    style = run / "waybar.css"
+    style.write_text("* { font-size: 16px; } window#waybar { background: #245050; color: white; }\n")
+    processes = []
+    logs = []
+
+    def start(name, command, environment):
+        log = (run / f"{name}.log").open("w")
+        logs.append(log)
+        process = subprocess.Popen(command, cwd=root, env=environment, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
+        processes.append(process)
+        return process
+
+    def stop(process):
+        try:
+            os.killpg(process.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+        if process.poll() is None:
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                os.killpg(process.pid, signal.SIGKILL)
+                process.wait(timeout=5)
+
+    def rpc(method, params):
+        request = urllib.request.Request("http://127.0.0.1:15702/", json.dumps({"jsonrpc": "2.0", "id": 1, "method": method, "params": params}).encode(), {"Content-Type": "application/json"})
+        with urllib.request.urlopen(request, timeout=15) as response:
+            result = json.load(response)
+        if "error" in result:
+            raise RuntimeError(result["error"])
+        return result["result"]
+
+    def capture(index, name):
+        path = run / f"{name}.png"
+        rpc("world.write_message", {"message": "weldwm::debug::RemoteScreenshotRequest", "value": {"request_id": index, "path": str(path)}})
+        deadline = time.monotonic() + 12
+        while not path.exists():
+            if host.poll() is not None or time.monotonic() > deadline:
+                raise RuntimeError(f"capture failed: {name}; see host.log")
+            time.sleep(0.1)
+        if path.stat().st_size < 100:
+            raise RuntimeError("empty screenshot")
+
+    try:
+        environment = os.environ.copy()
+        host = start("host", ["cargo", "run", "--quiet", "--locked", "--", "--backend", "nested", "--config", "examples/master.sway.config", "--wayland-socket", str(socket), "--remote-debug", "--", "foot", "htop", "--delay=2"], environment)
+        deadline = time.monotonic() + 120
+        while not socket.exists():
+            if host.poll() is not None or time.monotonic() > deadline:
+                raise RuntimeError("host did not start; see host.log")
+            time.sleep(0.1)
+        environment.update(WAYLAND_DISPLAY=str(socket), GDK_BACKEND="wayland")
+        environment.pop("DISPLAY", None)
+        time.sleep(2)
+        capture(1, "ordinary")
+        bar = start("waybar", ["waybar", "--config", str(config), "--style", str(style)], environment)
+        time.sleep(2)
+        if bar.poll() is not None:
+            raise RuntimeError("Waybar exited; see waybar.log")
+        capture(2, "panel")
+        launcher = start("rofi", ["rofi", "-no-config", "-show", "run", "-theme-str", "window { width: 500px; }"], environment)
+        time.sleep(2)
+        if launcher.poll() is not None:
+            raise RuntimeError("Rofi exited; see rofi.log")
+        capture(3, "launcher")
+        if args.interactive:
+            print("Try typing in Rofi, Escape, then keyboard input in htop. This run closes in 90 seconds.", flush=True)
+            deadline = time.monotonic() + 90
+            while host.poll() is None and time.monotonic() < deadline:
+                time.sleep(0.5)
+            if host.poll() is not None:
+                if host.returncode != 0:
+                    raise RuntimeError(f"host exited with {host.returncode}; see host.log")
+                print("Interactive host closed cleanly; skipping the final capture.", flush=True)
+                return
+        stop(launcher)
+        stop(bar)
+        time.sleep(1)
+        capture(4, "restored")
+        print("PASS Waybar/Rofi map, captures, teardown, compositor survives. Inspect captures for placement; keyboard interaction needs a manual pass.", flush=True)
+    finally:
+        for process in reversed(processes):
+            stop(process)
+        for log in logs:
+            log.close()
+
+
+if __name__ == "__main__":
+    main()

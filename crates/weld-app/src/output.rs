@@ -153,6 +153,13 @@ impl OutputGeometry {
 #[derive(Component, Clone, Copy, Debug, Default, PartialEq)]
 pub struct OutputPosition(pub Vec2);
 
+/// Output-local rectangle available to ordinary window layout after panel reservations.
+#[derive(Component, Clone, Copy, Debug, PartialEq)]
+pub struct OutputWorkArea {
+    pub position: Vec2,
+    pub size: Vec2,
+}
+
 /// Associates a shell-owned composition camera with the output it renders.
 ///
 /// Weld owns the one-to-one binding. Replacing it from application policy

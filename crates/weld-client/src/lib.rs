@@ -54,10 +54,11 @@ pub use presentation::{
 pub use surface::{
     ClientCommitRevision, ClientEventQueue, ClientFocusRequest, ClientRequest, ClientSurfaceCommit,
     ClientSurfaceEvent, ClientSurfaceEventKind, ClientSurfaceRequest, ClientSurfaceRequestKind,
-    ClientSurfaceRole, ClientSurfaceState, PopupState, SurfaceAlphaMode, SurfaceBufferChange,
-    SurfaceBufferUpdate, SurfaceContentView, SurfaceInputPlacement, SurfaceInputRect,
-    SurfaceLayerPlacement, SurfaceWindowGeometry, ToplevelInteractionRequestKind, ToplevelState,
-    WindowDecoration, WindowResizeEdge,
+    ClientSurfaceRole, ClientSurfaceState, DesktopLayer, LayerKeyboardInteractivity,
+    LayerSurfaceState, PopupState, SurfaceAlphaMode, SurfaceBufferChange, SurfaceBufferUpdate,
+    SurfaceContentView, SurfaceInputPlacement, SurfaceInputRect, SurfaceLayerPlacement,
+    SurfaceWindowGeometry, ToplevelInteractionRequestKind, ToplevelState, WindowDecoration,
+    WindowResizeEdge,
 };
 #[cfg(feature = "serde")]
 pub use wire::{

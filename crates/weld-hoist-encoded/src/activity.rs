@@ -159,7 +159,7 @@ impl Activity {
         if let Some(entry) = self.surfaces.get_mut(&surface) {
             let owner = match role {
                 ClientSurfaceRole::Popup(popup) => Some(popup.owner),
-                ClientSurfaceRole::Toplevel(_) => None,
+                ClientSurfaceRole::Toplevel(_) | ClientSurfaceRole::Layer(_) => None,
             };
             if entry.owner != owner {
                 entry.attention = Attention::default();

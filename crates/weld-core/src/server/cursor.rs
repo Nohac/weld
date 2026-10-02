@@ -270,6 +270,7 @@ impl ServerState {
             .toplevels
             .id_for_surface(&root)
             .or_else(|| self.popups.id_for_surface(&root))
+            .or_else(|| self.layers.id_for_surface(&root))
         else {
             return;
         };

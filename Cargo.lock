@@ -7874,6 +7874,7 @@ dependencies = [
  "tracing-subscriber",
  "wayland-client",
  "wayland-protocols",
+ "wayland-protocols-wlr",
  "wayland-sys",
  "weld-client",
  "weld-input",

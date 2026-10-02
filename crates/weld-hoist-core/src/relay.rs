@@ -162,6 +162,7 @@ pub struct SourceRelayAdapter {
     remote_input: RemoteInputState,
     port: Box<dyn HoistSourcePort>,
     pending_cursors: VecDeque<ClientSurfaceId>,
+    pending_maps: HashMap<ClientSurfaceId, HoistSessionId>,
     cursor_in_flight: Option<CursorInFlight>,
     next_cursor_sequence: Option<u64>,
     admission: SourceAdmission,
@@ -191,6 +192,7 @@ impl SourceRelayAdapter {
             remote_input: RemoteInputState::default(),
             port: Box::new(port),
             pending_cursors: VecDeque::new(),
+            pending_maps: HashMap::new(),
             cursor_in_flight: None,
             next_cursor_sequence: Some(1),
             admission,
@@ -221,6 +223,18 @@ impl SourceRelayAdapter {
             || self.mappings.contains_key(&source)
         {
             return;
+        }
+        match self.cache.get(&source).and_then(|cached| cached.role) {
+            None => {
+                // Preserve the first session reservation, just like duplicate
+                // maps of a surface whose role is already known.
+                self.pending_maps.entry(source).or_insert(session);
+                return;
+            }
+            Some(weld_client::ClientSurfaceRole::Toplevel(_)) => {}
+            Some(weld_client::ClientSurfaceRole::Popup(popup))
+                if self.mappings.contains_key(&popup.owner) => {}
+            _ => return,
         }
         self.mappings.insert(source, session);
         let claim = self
@@ -327,12 +341,13 @@ impl SourceRelayAdapter {
                 };
                 *session
             }
-            None => return,
+            Some(weld_client::ClientSurfaceRole::Layer(_)) | None => return,
         };
         self.map(session, source);
     }
 
     fn unmap(&mut self, source: ClientSurfaceId) {
+        self.pending_maps.remove(&source);
         let Some(session) = self.mappings.remove(&source) else {
             return;
         };
@@ -376,6 +391,17 @@ impl SourceRelayAdapter {
         }
     }
 
+    fn desktop_surface(&self, source: ClientSurfaceId) -> bool {
+        match self.cache.get(&source).and_then(|cached| cached.role) {
+            Some(weld_client::ClientSurfaceRole::Layer(_)) => true,
+            Some(weld_client::ClientSurfaceRole::Popup(popup)) => matches!(
+                self.cache.get(&popup.owner).and_then(|cached| cached.role),
+                Some(weld_client::ClientSurfaceRole::Layer(_))
+            ),
+            _ => false,
+        }
+    }
+
     fn observe(&mut self, event: &ClientSurfaceEvent) {
         if event.surface.source() != self.upstream_source {
             return;
@@ -394,6 +420,21 @@ impl SourceRelayAdapter {
             }
             ClientSurfaceEventKind::Role(role) => {
                 self.cache.entry(source).or_default().role = Some(*role);
+                if self.desktop_surface(source) {
+                    self.unmap(source);
+                    for (id, cached) in &mut self.cache {
+                        if *id == source
+                            || matches!(cached.role, Some(weld_client::ClientSurfaceRole::Popup(popup)) if popup.owner == source)
+                        {
+                            cached.commit = None;
+                        }
+                    }
+                    return;
+                }
+                if let Some(session) = self.pending_maps.remove(&source) {
+                    self.map(session, source);
+                    return;
+                }
                 // Already admitted popups still publish position and stack changes.
                 // Only the initial map replays the cached role itself.
                 if let Some(session) = self.mappings.get(&source).copied() {
@@ -408,6 +449,9 @@ impl SourceRelayAdapter {
                 }
             }
             ClientSurfaceEventKind::Commit(commit) => {
+                if self.desktop_surface(source) {
+                    return;
+                }
                 let cached = self.cache.entry(source).or_default();
                 if !commit.mapped {
                     cached.cursor = None;
@@ -438,6 +482,7 @@ impl SourceRelayAdapter {
                 }
             }
             ClientSurfaceEventKind::Destroyed => {
+                self.pending_maps.remove(&source);
                 let children = self
                     .cache
                     .iter()
@@ -679,6 +724,7 @@ impl SourceRelayAdapter {
         }
         self.cursor_in_flight = None;
         self.pending_cursors.clear();
+        self.pending_maps.clear();
         tracing::warn!(source = ?self.upstream_source, error = %reason, "hoist source relay failed");
         self.port.disconnect();
         self.effects.extend(
@@ -993,6 +1039,10 @@ impl DestinationRelayAdapter {
                 // visibility; destruction/withdrawal still discard feedback.
                 match event.kind {
                     ClientSurfaceEventKind::Role(role) => {
+                        if matches!(role, weld_client::ClientSurfaceRole::Layer(_)) {
+                            self.fail("desktop layer surfaces cannot be hoisted");
+                            return false;
+                        }
                         self.roles.insert(source, role);
                         if let Some(role) = self.relocated_role(role) {
                             self.events.push(ClientSurfaceEvent {
@@ -1044,6 +1094,7 @@ impl DestinationRelayAdapter {
         role: weld_client::ClientSurfaceRole,
     ) -> Option<weld_client::ClientSurfaceRole> {
         match role {
+            weld_client::ClientSurfaceRole::Layer(_) => None,
             weld_client::ClientSurfaceRole::Toplevel(toplevel) => Some(
                 weld_client::ClientSurfaceRole::Toplevel(weld_client::ToplevelState {
                     parent: toplevel.parent.and_then(|parent| {
@@ -1929,6 +1980,51 @@ mod tests {
     }
 
     #[test]
+    fn desktop_layers_and_their_popups_reject_automatic_and_manual_hoisting() {
+        let (mut relay, port) = auto_source();
+        port.borrow_mut().not_ready = false;
+        let panel = surface(ClientSourceId::new(1), 51);
+        let popup = surface(ClientSourceId::new(1), 52);
+        relay.map(HoistSessionId::new(1), panel);
+        observe(&mut relay, panel, commit(1, true));
+        assert!(
+            port.borrow().submitted.is_empty(),
+            "pre-role map waits for admission"
+        );
+        observe(
+            &mut relay,
+            panel,
+            ClientSurfaceEventKind::Role(ClientSurfaceRole::Layer(
+                weld_client::LayerSurfaceState {
+                    output: weld_client::ClientOutputId::new(1),
+                    position: LogicalPoint::new(0.0, 0.0),
+                    layer: weld_client::DesktopLayer::Top,
+                    keyboard: weld_client::LayerKeyboardInteractivity::None,
+                    stack_index: 0,
+                },
+            )),
+        );
+        observe(&mut relay, panel, commit(1, true));
+        observe(
+            &mut relay,
+            popup,
+            ClientSurfaceEventKind::Role(ClientSurfaceRole::Popup(PopupState {
+                owner: panel,
+                position: LogicalPoint::new(0.0, 20.0),
+                stack_index: 1,
+            })),
+        );
+        observe(&mut relay, popup, commit(1, true));
+        relay.poll();
+        relay.map(HoistSessionId::new(1), panel);
+        relay.map(HoistSessionId::new(2), popup);
+        assert!(relay.mappings.is_empty());
+        assert!(port.borrow().submitted.is_empty());
+        assert!(relay.cache[&panel].commit.is_none());
+        assert!(relay.cache[&popup].commit.is_none());
+    }
+
+    #[test]
     fn metadata_replays_after_role_and_unchanged_labels_are_not_resent() {
         let (mut relay, port) = auto_source();
         let window = surface(ClientSourceId::new(1), 1);
@@ -2125,6 +2221,7 @@ mod tests {
         let session = HoistSessionId::new(9);
         let state = Rc::new(RefCell::new(FakeSourceState::default()));
         let mut adapter = SourceRelayAdapter::new(source, FakeSourcePort(state.clone()));
+        observe(&mut adapter, surface, top_role(None));
         adapter.apply_command(ClientAdapterCommandEnvelope::new(
             ClientSourceId::new(8),
             HoistEndpointCommand::Map {
@@ -2500,6 +2597,7 @@ mod tests {
     fn reclaim_releases_only_the_selected_surface_input() {
         let (mut relay, _, first, session) = mapped_source();
         let second = surface(first.source(), 8);
+        observe(&mut relay, second, top_role(None));
         relay.map(HoistSessionId::new(10), second);
         for (surface, session, key) in [(first, session, 42), (second, HoistSessionId::new(10), 29)]
         {

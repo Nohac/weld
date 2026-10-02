@@ -1,5 +1,8 @@
 //! Real protocol regression for event-driven output and scale propagation.
 
+#[path = "layer_tests.rs"]
+mod layer_tests;
+
 use std::{
     collections::{HashMap, HashSet},
     fs::File,
@@ -44,12 +47,17 @@ struct ObservedSurface {
 
 #[derive(Default)]
 struct Observer {
+    layers: Option<
+        wayland_protocols_wlr::layer_shell::v1::client::zwlr_layer_shell_v1::ZwlrLayerShellV1,
+    >,
+    layer_configures: Vec<(u32, u32)>,
     compositor: Option<wl_compositor::WlCompositor>,
     shm: Option<wl_shm::WlShm>,
     subsurfaces: Option<wl_subcompositor::WlSubcompositor>,
     shell: Option<xdg_wm_base::XdgWmBase>,
     fractional: Option<wp_fractional_scale_manager_v1::WpFractionalScaleManagerV1>,
     outputs: HashMap<u32, String>,
+    output_objects: Vec<wl_output::WlOutput>,
     surfaces: HashMap<u32, ObservedSurface>,
     frames: usize,
 }
@@ -70,6 +78,9 @@ impl Dispatch<wl_registry::WlRegistry, ()> for Observer {
         } = event
         {
             match interface.as_str() {
+                "zwlr_layer_shell_v1" => {
+                    state.layers = Some(registry.bind(name, version.min(4), qh, ()))
+                }
                 "wl_shm" => state.shm = Some(registry.bind(name, 1, qh, ())),
                 "wl_compositor" => {
                     state.compositor = Some(registry.bind(name, version.min(6), qh, ()))
@@ -80,7 +91,9 @@ impl Dispatch<wl_registry::WlRegistry, ()> for Observer {
                     state.fractional = Some(registry.bind(name, 1, qh, ()))
                 }
                 "wl_output" => {
-                    registry.bind::<wl_output::WlOutput, _, _>(name, 4, qh, ());
+                    state
+                        .output_objects
+                        .push(registry.bind::<wl_output::WlOutput, _, _>(name, 4, qh, ()));
                 }
                 _ => {}
             }

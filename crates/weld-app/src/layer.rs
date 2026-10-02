@@ -4,5 +4,9 @@
 //! of ad-hoc [`bevy::ui::GlobalZIndex`] values.
 
 pub const WINDOW_Z_INDEX_MIN: i32 = 0;
-pub const WINDOW_Z_INDEX_MAX: i32 = i32::MAX - 2;
+pub const WINDOW_Z_INDEX_MAX: i32 = 999_999;
+pub const BACKGROUND_Z_INDEX: i32 = -2_000_000;
+pub const BOTTOM_Z_INDEX: i32 = -1_000_000;
+pub const TOP_Z_INDEX: i32 = 1_000_000;
+pub const OVERLAY_Z_INDEX: i32 = 2_000_000;
 pub const SHELL_Z_INDEX: i32 = i32::MAX - 1;

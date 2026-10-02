@@ -18,7 +18,7 @@ use bevy::{
     },
     window::RequestRedraw,
 };
-use weld_app::output::{OutputGeometry, WeldOutput};
+use weld_app::output::{OutputGeometry, OutputWorkArea, WeldOutput};
 use weld_window::workspace::{FocusedWorkspace, Workspace, WorkspaceMember, WorkspaceOutput};
 use weld_window::{
     FocusedWindow, ManagedBy, ManagedWindow, WindowCloseHandle, WindowCommand, WindowCommandKind,
@@ -258,7 +258,7 @@ fn admit_windows(
 }
 
 fn sync_output(
-    outputs: Query<&OutputGeometry, With<WeldOutput>>,
+    outputs: Query<(&OutputGeometry, Option<&OutputWorkArea>), With<WeldOutput>>,
     settings: Res<TileSettings>,
     mut workspaces: Query<
         (&Workspace, Option<&WorkspaceOutput>, &mut LayoutRect),
@@ -270,10 +270,10 @@ fn sync_output(
 ) {
     for (_, output, mut bounds) in &mut workspaces {
         let Some(output) = output else { continue };
-        let Ok(geometry) = outputs.get(output.0) else {
+        let Ok((geometry, work_area)) = outputs.get(output.0) else {
             continue;
         };
-        let rect = workspace::bounds(geometry, &settings);
+        let rect = workspace::bounds(geometry, work_area, &settings);
         if bounds.0 != rect {
             bounds.0 = rect;
             dirty.0 = true;

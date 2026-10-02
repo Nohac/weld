@@ -86,16 +86,17 @@ impl ServerState {
             return;
         };
         let kind = PopupKind::Xdg(surface.clone());
-        let owner = find_popup_root_surface(&kind)
-            .ok()
-            .and_then(|root| self.toplevels.id_for_surface(&root));
+        let owner = find_popup_root_surface(&kind).ok().and_then(|root| {
+            self.toplevels
+                .id_for_surface(&root)
+                .or_else(|| self.layers.id_for_surface(&root))
+        });
         if let Err(error) = self.popup_manager.track_popup(kind) {
             warn!(%error, "refused an xdg-popup that could not be tracked");
             surface.send_popup_done();
             return;
         }
 
-        self.enter_primary_output(surface.wl_surface());
         let rejection_surface = surface.clone();
         if !self.popups.insert(
             id,
@@ -220,7 +221,9 @@ impl ServerState {
             debug!("ignored an xdg-popup grab without a live toplevel root");
             return;
         };
-        if self.toplevels.id_for_surface(&root).is_none() {
+        if self.toplevels.id_for_surface(&root).is_none()
+            && self.layers.id_for_surface(&root).is_none()
+        {
             debug!("ignored an xdg-popup grab whose root is not a Weld toplevel");
             return;
         }
@@ -282,14 +285,18 @@ impl ServerState {
         }
     }
 
-    fn publish_popup_layout(&mut self, popup_root: &WlSurface) {
+    pub(super) fn publish_popup_layout(&mut self, popup_root: &WlSurface) {
         let Some(kind) = self.popup_manager.find_popup(popup_root) else {
             return;
         };
         let Ok(root) = find_popup_root_surface(&kind) else {
             return;
         };
-        let Some(owner) = self.toplevels.id_for_surface(&root) else {
+        let Some(owner) = self
+            .toplevels
+            .id_for_surface(&root)
+            .or_else(|| self.layers.id_for_surface(&root))
+        else {
             return;
         };
         // Smithay returns topmost-first. Bevy's local ZIndex increases toward

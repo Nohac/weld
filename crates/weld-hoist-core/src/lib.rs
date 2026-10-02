@@ -159,6 +159,16 @@ mod tests {
 
     use super::*;
 
+    fn toplevel_event(surface: weld_client::ClientSurfaceId) -> ClientSurfaceEvent {
+        ClientSurfaceEvent {
+            surface,
+            kind: ClientSurfaceEventKind::Role(ClientSurfaceRole::Toplevel(ToplevelState {
+                parent: None,
+                decoration: WindowDecoration::ServerSide,
+            })),
+        }
+    }
+
     #[derive(Default)]
     struct UpstreamRecord {
         events: ClientEventQueue,
@@ -353,6 +363,7 @@ mod tests {
         let (mut runtime, upstream, endpoint) = runtime();
         let owner = source(ClientSourceId::new(0), 1);
         let popup = source(ClientSourceId::new(0), 2);
+        upstream.borrow_mut().events.push(toplevel_event(owner));
         assert!(runtime.apply_command(endpoint.map(HoistSessionId::new(1), owner)));
         let mut events = ClientEventQueue::default();
         let mut invalid = Vec::new();
@@ -391,6 +402,7 @@ mod tests {
     fn mapped_toplevel_relays_client_interactions_to_the_destination_identity() {
         let (mut runtime, upstream, endpoint) = runtime();
         let source = source(ClientSourceId::new(0), 3);
+        upstream.borrow_mut().events.push(toplevel_event(source));
         assert!(runtime.apply_command(endpoint.map(HoistSessionId::new(1), source)));
         upstream.borrow_mut().events.push(ClientSurfaceEvent {
             surface: source,
@@ -450,6 +462,7 @@ mod tests {
     fn cached_replacement_survives_retained_commits_for_later_map() {
         let (mut runtime, upstream, endpoint) = runtime();
         let surface = source(ClientSourceId::new(0), 9);
+        upstream.borrow_mut().events.push(toplevel_event(surface));
         let metadata = ClientBufferMetadata::new(weld_client::Extent::new(1, 1), false);
         let lease = ClientBufferLease::new(
             ClientBufferId::new(ClientSourceId::new(0), 1),
@@ -513,6 +526,7 @@ mod tests {
     fn focus_alias_rewrites_surface_and_source() {
         let (mut runtime, upstream, endpoint) = runtime();
         let surface = source(ClientSourceId::new(0), 5);
+        upstream.borrow_mut().events.push(toplevel_event(surface));
         assert!(runtime.apply_command(endpoint.map(HoistSessionId::new(1), surface)));
         let mut events = ClientEventQueue::default();
         let mut invalid = Vec::new();
@@ -546,6 +560,7 @@ mod tests {
     fn duplicate_map_and_unknown_unmap_do_not_retire_the_live_alias() {
         let (mut runtime, upstream, endpoint) = runtime();
         let surface = source(ClientSourceId::new(0), 11);
+        upstream.borrow_mut().events.push(toplevel_event(surface));
         let unknown = source(ClientSourceId::new(0), 12);
         let session = HoistSessionId::new(1);
         assert!(runtime.apply_command(endpoint.map(session, surface)));

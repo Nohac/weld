@@ -1135,10 +1135,14 @@ hoist-owned state.
 Enabling Smithay's `desktop` feature for focused protocol utilities does not
 make its `Window` or `Space` types authoritative for ordinary application
 windows; their placement, stacking, presentation, and picking remain ECS-owned.
-When `wlr-layer-shell` becomes a concrete implementation slice, prefer
-Smithay's `LayerMap` as the host-side layout engine for anchors, margins,
-exclusive zones, and configure state, then project its committed results into
-ECS instead of reimplementing that protocol policy.
+`wlr-layer-shell` uses Smithay's per-output `LayerMap` for anchors, margins,
+exclusive zones and configure state. Core publishes a distinct neutral layer
+role and an output-local work area. `weld-app::layer_shell` presents those roles
+through the shared `SurfaceNode`, including their owned XDG popups, and arbitrates
+temporary keyboard focus over the selected managed window. `weld-tile` consumes
+`OutputWorkArea` without changing output mode or logical geometry. Layer roots
+and their popups remain outside window/hoist admission; complete desktop capture
+includes their composition. See [Desktop layer surfaces](layer-shell.md).
 
 Validated pointer `xdg_toplevel.move` and `xdg_toplevel.resize` requests cross
 the Smithay boundary as protocol-neutral ECS messages. The active window
