@@ -37,7 +37,7 @@ Godot 4.7 API bindings and lazy function tables for the 4.8 preview. It remains 
 with shared crates added as explicit path dependencies. Normal Godot bindings
 provide typed input and cursor APIs. `WeldVideoPlayer` owns desktop input in
 Rust; scenes supply only the displayed control and presentation-mode setting.
-The diagnostic `WeldBridge` remains available. Playback, admission and EGL presentation
+Playback, admission and EGL presentation
 are shared; module-level platform selection chooses the existing Linux VA-API
 provider or Android MediaCodec provider via workspace path dependencies.
 Live Iroh reception and XR scene selection are wired. See

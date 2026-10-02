@@ -7872,7 +7872,6 @@ dependencies = [
  "smithay-drm-extras",
  "tracing",
  "tracing-subscriber",
- "tracing-tracy",
  "wayland-client",
  "wayland-protocols",
  "wayland-sys",

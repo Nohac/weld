@@ -422,7 +422,7 @@ scripts/plot-hoist target/validation/godot-hoist-RUN --no-open
 
 The [shared plotter](hoist-diagnostics.md) also supports Weld-to-Weld and
 headless/network run directories. With no path it selects the latest recognized
-run of any type. `plot-godot-hoist` remains a compatibility alias.
+run of any type.
 
 The report embeds measurements and loads pinned uPlot 1.6.32 assets from a CDN
 (Internet access or cached assets required). Frame outcomes and network RTT

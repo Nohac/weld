@@ -13,6 +13,10 @@ use weld_window::workspace::{
 };
 use weld_window::{OccupiesWindow, WindowOutput, WindowPresentationOverride, WindowVisibility};
 
+fn parse_config(name: &str, source: &str) -> anyhow::Result<config::Configuration> {
+    config::parse_with_extensions(name, source, |_| anyhow::bail!("unsupported i3 command"))
+}
+
 fn named_output(app: &mut App, id: u64, name: &str, primary: bool) -> Entity {
     let mut entity = app.world_mut().spawn((
         WeldOutput {
@@ -35,7 +39,7 @@ fn configured(source: &str, count: u64) -> (App, Vec<Entity>) {
         I3QuirksPlugin,
     ));
     app.insert_resource(
-        config::parse("test", source)
+        parse_config("test", source)
             .expect("configuration")
             .workspaces,
     );
@@ -427,7 +431,7 @@ fn numeric_selection_and_reload_do_not_recreate_existing_workspaces() {
     let original = workspace(&mut app, "3: work").expect("workspace");
     show(&mut app, "2");
     app.insert_resource(
-        config::parse("reload", "workspace 3 output fake-1")
+        parse_config("reload", "workspace 3 output fake-1")
             .expect("config")
             .workspaces,
     );

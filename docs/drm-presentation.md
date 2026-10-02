@@ -142,8 +142,6 @@ The focused Smithay probe remains useful for isolating the lower boundary:
 scripts/run-smithay-drm-compositor-probe
 ```
 
-The older Vulkan Display WSI probe remains only a driver diagnostic.
-
 ## Deferred
 
 - Dynamic output hotplug and mode changes.

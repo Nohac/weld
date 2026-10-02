@@ -51,18 +51,17 @@ class SharedPlotTests(unittest.TestCase):
                     self.assertEqual(chart["labels"], ["Completed decodes"])
                     self.assertEqual(chart["measurements"][0][2], [57])
 
-    def test_local_log_pair_and_both_cli_entrypoints_produce_same_report(self):
+    def test_local_log_pair_cli_produces_the_shared_report(self):
         with tempfile.TemporaryDirectory() as temporary:
             source = Path(temporary) / "weld-hoist-source-encoded-av1.log"
             receiver = source.with_name("weld-hoist-destination-encoded-av1.log")
             source.write_text(SOURCE)
             receiver.write_text(DESTINATION)
             self.assertEqual(PLOT["log_paths"](source), [source, receiver])
-            for entry in ("plot-hoist", "plot-godot-hoist"):
-                result = subprocess.run([sys.executable, str(SCRIPTS / entry), str(source), "--no-open"],
-                                        capture_output=True, text=True, timeout=10)
-                self.assertEqual(result.returncode, 0, result.stderr)
-                self.assertEqual(source.with_suffix(".html").read_text(), PLOT["report"](source))
+            result = subprocess.run([sys.executable, str(SCRIPTS / "plot-hoist"), str(source), "--no-open"],
+                                    capture_output=True, text=True, timeout=10)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(source.with_suffix(".html").read_text(), PLOT["report"](source))
 
     def test_latest_run_uses_receiver_activity_across_all_supported_layouts(self):
         with tempfile.TemporaryDirectory() as temporary:

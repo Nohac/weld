@@ -194,23 +194,10 @@ When auto selects the nested target, it runs until its host window is closed.
 
 ### DRM probes
 
-Use the direct-wgpu probe as a historical diagnostic for Vulkan Display
-discovery, presentation, and VT recovery:
-
-```text
-scripts/run-drm-wsi-probe --seconds 30
-scripts/run-drm-wsi-probe --seconds 30 --switch-vt 1
-```
-
-Run it from a bare TTY and switch back before the deadline. A requested VT
-cycle succeeds only after presenting a frame following activation. Also verify
-that the destination VT's graphical compositor remains usable and that the
-text console is restored after exit. Output defaults to
-`/tmp/weld-drm-wsi-probe.log`; set `WELD_DRM_WSI_PROBE_LOG` to override it.
-
 Use the Smithay output-compositor probe when changing the production DRM
 boundary:
 
+```text
 scripts/run-smithay-drm-compositor-probe
 ```
 

@@ -11,12 +11,12 @@ func _fail(message: String) -> void:
 
 
 func _run() -> void:
-	if not ClassDB.class_exists("WeldBridge"):
-		_fail("WeldBridge was not registered by the native library")
+	if not ClassDB.class_exists("WeldVideoPlayer"):
+		_fail("WeldVideoPlayer was not registered by the native library")
 		return
 	var packed: PackedScene = load(ProjectSettings.get_setting("application/run/main_scene"))
 	if packed == null:
-		_fail("Could not load the bridge scene")
+		_fail("Could not load the startup scene")
 		return
 	var startup := packed.instantiate()
 	root.add_child(startup)
@@ -77,24 +77,6 @@ func _run() -> void:
 		player.notification(notification)
 	if player.is_processing_input():
 		_fail("Focus notifications must not activate input without a live source")
-		return
-	var bridge := WeldBridge.new()
-	main.add_child(bridge)
-	for count in range(1, 3):
-		if bridge.ping() != "Hello from Rust!\nTap count: %d" % count:
-			_fail("Godot -> Rust response mismatch on call %d" % count)
-			return
-	startup.queue_free()
-	await process_frame
-	# A fresh instance must own fresh state after the previous scene is freed.
-	startup = packed.instantiate()
-	root.add_child(startup)
-	await process_frame
-	main = startup.get_child(0)
-	bridge = WeldBridge.new()
-	main.add_child(bridge)
-	if bridge.ping() != "Hello from Rust!\nTap count: 1":
-		_fail("Rust bridge state leaked between scene instances")
 		return
 	startup.queue_free()
 	await process_frame

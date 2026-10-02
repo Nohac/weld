@@ -42,10 +42,6 @@ impl<Extension> Default for Configuration<Extension> {
     }
 }
 
-pub fn parse(name: &str, source: &str) -> Result<Configuration> {
-    parse_with_extensions(name, source, |_| bail!("unsupported i3 command"))
-}
-
 /// Interprets i3 settings and commands, asking the distribution to validate
 /// additional command vocabulary. Errors retain the binding's source location.
 pub fn parse_with_extensions<Extension>(
@@ -269,6 +265,10 @@ fn workspace_name(words: &[&str]) -> Result<String> {
 mod tests {
     use super::*;
     use indoc::indoc;
+
+    fn parse(name: &str, source: &str) -> Result<Configuration> {
+        parse_with_extensions(name, source, |_| bail!("unsupported i3 command"))
+    }
     #[test]
     fn workspace_commands_preserve_names_and_validate_selectors() {
         let quoted = parse(

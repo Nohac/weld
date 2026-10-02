@@ -5,7 +5,7 @@ edition.workspace = true
 publish.workspace = true
 
 [features]
-profiling-tracy = ["dep:tracing-tracy"]
+profiling-tracy = []
 test-support = ["weld-client/test-support"]
 
 [dependencies]
@@ -27,7 +27,6 @@ smithay = { workspace = true, features = [
 ] }
 smithay-drm-extras.workspace = true
 tracing.workspace = true
-tracing-tracy = { workspace = true, optional = true }
 wayland-sys = { version = "0.31.11", features = ["client", "dlopen"] }
 weld-client = { path = "../weld-client" }
 weld-input = { path = "../weld-input" }

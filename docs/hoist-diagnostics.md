@@ -20,8 +20,6 @@ Replace `RUN` with the actual directory name printed by the launcher. Explicit
 directories need not use those names. Automatic discovery searches those run
 families and local source-log pairs under `target/validation`, choosing the
 newest source/receiver log modification time, not the newest generated report.
-The old `scripts/plot-godot-hoist` command is an alias with the same arguments
-and discovery behavior, including Weld-to-Weld runs.
 
 Directory runs use `source.log` and either `destination.log` or `viewer.log`.
 If both receiver names exist, plotting refuses rather than blending two
