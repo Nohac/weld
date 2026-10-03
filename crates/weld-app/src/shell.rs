@@ -478,11 +478,18 @@ impl AppShell {
         let _ = self.app.world_mut().try_run_schedule(RemoteLast);
     }
 
+    /// Advance and finish a main-only frame for the opt-in diagnostic host.
+    #[cfg(feature = "test-support")]
+    pub fn advance_main_only_for_benchmark(&mut self) {
+        self.advance_main(0);
+        self.app.world_mut().clear_trackers();
+    }
+
     /// Extract the preceding main-world advance and render Weld's composition.
     ///
     /// Construction pins Weld to Bevy's current non-pipelined [`RenderApp`].
-    /// Main-world trackers are cleared only after extraction has observed the
-    /// refresh-paced application frame. `frames` retains its allocation across
+    /// Normal frames clear main-world trackers after extraction; diagnostic
+    /// direct-draw probes clear them after drawing. `frames` retains its allocation across
     /// calls and contains a complete composition only when this returns `Ok`.
     pub fn render_outputs(
         &mut self,
@@ -570,7 +577,13 @@ impl AppShell {
             let _bevy_render_span =
                 tracing::trace_span!(target: crate::PROFILE_TARGET, "bevy_render_composition")
                     .entered();
-            render_composition_app(&mut self.app);
+            #[cfg(feature = "test-support")]
+            let replaced = crate::benchmark::render_probe(&mut self.app, frames)?;
+            #[cfg(not(feature = "test-support"))]
+            let replaced = false;
+            if !replaced {
+                render_composition_app(&mut self.app);
+            }
         }
         {
             let _finish_span =

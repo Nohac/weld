@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Run real GPU-backed clients against paced headless presenters; save bounded logs."""
 import argparse
+import csv
 import json
 import os
 from pathlib import Path
@@ -12,9 +13,47 @@ import subprocess
 import tempfile
 import time
 
+LAYERS = ("surface", "empty-app", "core-app", "framework-main", "default-main", "renderer-main", "state-direct", "ui-direct", "extract-direct", "prepare-direct", "render-direct", "minimal", "master")
+
+def collect_counters(process, log_path, directory, perf, seconds):
+    deadline = time.monotonic() + 40
+    while "MEASUREMENT_START" not in log_path.read_text():
+        if process.poll() is not None or time.monotonic() >= deadline:
+            raise RuntimeError("benchmark did not begin its measurement window")
+        time.sleep(0.02)
+    started = time.monotonic()
+    with (directory / "counters.csv").open("w") as counters:
+        subprocess.run([str(perf), "stat", "-x", ";", "-e", "instructions:u,cycles:u",
+                        "-p", str(process.pid), "--", "sleep", str(seconds - 2)],
+                       stderr=counters, check=True, timeout=seconds + 5,
+                       env={**os.environ, "LC_ALL": "C"})
+    duration = time.monotonic() - started
+    if process.poll() is not None:
+        raise RuntimeError("benchmark ended during counter collection")
+    values = {}
+    with (directory / "counters.csv").open() as counters:
+        for row in csv.reader(counters, delimiter=";"):
+            if len(row) >= 5 and row[2] in ("instructions:u", "cycles:u"):
+                try:
+                    count, coverage = int(row[0]), float(row[4])
+                except ValueError as error:
+                    raise RuntimeError(f"perf did not count {row[2]}") from error
+                if count <= 0 or coverage < 99:
+                    raise RuntimeError(f"insufficient perf coverage for {row[2]}")
+                values[row[2]] = count
+    if len(values) != 2:
+        raise RuntimeError("perf did not return both requested counters")
+    (directory / "counter-window.json").write_text(json.dumps({
+        "seconds": duration,
+        "counts": values,
+        "scope": "userspace, attached Weld process and threads; interior measurement window",
+    }, indent=2))
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--mode", choices=("master", "minimal", "surface", "all"), default="all")
+    parser.add_argument("--mode", choices=(*LAYERS, "all"), default="all")
+    parser.add_argument("--repeat", type=int, default=1, help="repeat cases, reversing order every other pass")
+    parser.add_argument("--perf", type=Path, help="optional perf binary for userspace instruction/cycle counters")
     parser.add_argument("--seconds", type=int, default=10)
     parser.add_argument("--warmup", type=int, default=3)
     parser.add_argument("--width", type=int, default=1920)
@@ -28,6 +67,15 @@ def main():
     parser.add_argument("--no-build", action="store_true")
     parser.add_argument("--scanner", type=Path)
     args = parser.parse_args()
+    if not 1 <= args.repeat <= 10:
+        parser.error("repeat must be 1..10")
+    if args.perf and args.seconds < 4:
+        parser.error("counter collection requires at least four measurement seconds")
+    if args.perf:
+        try:
+            args.perf = args.perf.resolve(strict=True)
+        except OSError as error:
+            parser.error(f"cannot use perf binary: {error}")
     if not (1 <= args.seconds <= 120 and 0 <= args.warmup <= 30 and 1 <= args.windows <= 8
             and 1 <= args.hz <= 240 and 1 <= args.producer_hz <= 1000 and 0 <= args.input_hz <= 2000
             and 64 <= args.width <= 8192 and 64 <= args.height <= 8192):
@@ -67,7 +115,7 @@ def main():
     resource.setrlimit(resource.RLIMIT_FSIZE, (128*1024*1024, 128*1024*1024))
     run = Path(tempfile.mkdtemp(prefix="paced-render-", dir=root / "target/validation"))
     print(f"Results: {run}", flush=True)
-    environment = {**os.environ, "VK_LOADER_LAYERS_DISABLE": "VK_LAYER_KHRONOS_validation", "WGPU_VALIDATION": "0"}
+    environment = {**os.environ, "VK_LOADER_LAYERS_DISABLE": "VK_LAYER_KHRONOS_validation", "RUST_LOG": "warn"}
     (run / "settings.json").write_text(json.dumps({
         "options": {key: str(value) if isinstance(value, Path) else value for key, value in vars(args).items()},
         "executable": executable,
@@ -76,9 +124,11 @@ def main():
         "started_unix": time.time(),
         "cpu_accounting": "Weld process user+system; excludes producer and post-run GPU capture",
     }, indent=2))
-    modes = ("surface", "minimal", "master") if args.mode == "all" else (args.mode,)
-    for mode in modes:
-        directory = run / mode
+    modes = LAYERS if args.mode == "all" else (args.mode,)
+    cases = [(iteration, mode) for iteration in range(args.repeat)
+             for mode in (modes if iteration % 2 == 0 else tuple(reversed(modes)))]
+    for iteration, mode in cases:
+        directory = run / (mode if args.repeat == 1 else f"{iteration + 1}-{mode}")
         directory.mkdir()
         command = [executable, "--mode", mode, "--producer", str(producer), "--run-dir", str(directory), "--decorations", args.decorations]
         for name in ("seconds", "warmup", "width", "height", "hz", "producer_hz", "input_hz", "windows"):
@@ -86,6 +136,8 @@ def main():
         with (directory / "run.log").open("w") as log:
             process = subprocess.Popen(command, env=environment, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
             try:
+                if args.perf:
+                    collect_counters(process, directory / "run.log", directory, args.perf, args.seconds)
                 code = process.wait(timeout=args.seconds + args.warmup + 30)
             finally:
                 try:

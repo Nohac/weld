@@ -124,6 +124,7 @@ impl NativeDriver<()> for Driver {
             let mut observations = self.observations.borrow_mut();
             observations.pending.clear();
             observations.measuring = true;
+            println!("MEASUREMENT_START");
         }
         if let Some((start, cpu)) = self.measuring_since
             && now.duration_since(start) >= self.options.duration

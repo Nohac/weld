@@ -3,6 +3,7 @@
 mod driver;
 mod surface;
 
+pub use crate::renderer::composite::CompositionBlitter as SurfaceBlitter;
 pub use surface::SurfaceOnly;
 
 use crate::{

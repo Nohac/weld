@@ -65,9 +65,16 @@ pub struct SurfaceOnly {
     last_route: Option<ClientPointerRoute>,
     requests: Vec<ClientRequest>,
     error: Option<String>,
+    frame_work: Option<Box<dyn FnMut()>>,
 }
 
 impl SurfaceOnly {
+    /// Add independently owned policy work while retaining the direct renderer.
+    pub fn with_frame_work(mut self, work: impl FnMut() + 'static) -> Self {
+        self.frame_work = Some(Box::new(work));
+        self
+    }
+
     pub fn new(context: RenderContext) -> Result<Self> {
         let extent = context.outputs.first().context("missing output")?.extent();
         let target = context.device.create_texture(&wgpu::TextureDescriptor {
@@ -117,6 +124,7 @@ impl SurfaceOnly {
             last_route: None,
             requests: Vec::new(),
             error: None,
+            frame_work: None,
         })
     }
     fn consume(&mut self, event: ClientSurfaceEvent) -> Result<()> {
@@ -180,6 +188,9 @@ impl HostPolicy for SurfaceOnly {
         true
     }
     fn advance_main(&mut self, _: u32) -> bool {
+        if let Some(work) = &mut self.frame_work {
+            work();
+        }
         while let Some(event) = self.pending.pop_front() {
             if let Err(error) = self.consume(event) {
                 self.error = Some(error.to_string());

@@ -1195,6 +1195,27 @@ fn destroy_surface(world: &mut World, registry: &mut SurfaceRegistry, surface: S
     }
 }
 
+/// Resolve promoted root images for the fixed-row diagnostic presenter.
+#[cfg(feature = "test-support")]
+pub(crate) fn benchmark_root_images(world: &World) -> Vec<bevy::asset::AssetId<Image>> {
+    let registry = world.resource::<SurfaceRegistry>();
+    let mut roots = registry
+        .entries
+        .iter()
+        .filter_map(|(id, entry)| {
+            let content = world.get::<SurfaceContent>(entry.entity)?;
+            let image = entry
+                .buffers
+                .get(&content.root.layer)?
+                .displayed_dmabuf
+                .as_ref()?;
+            Some((*id, image.image.id()))
+        })
+        .collect::<Vec<_>>();
+    roots.sort_by_key(|(id, _)| *id);
+    roots.into_iter().map(|(_, image)| image).collect()
+}
+
 type SurfaceNodeQuery<'world, 'state> = Query<
     'world,
     'state,
@@ -2173,6 +2194,68 @@ mod tests {
                 .revision(surface),
             revision + 1
         );
+    }
+
+    #[cfg(feature = "test-support")]
+    #[test]
+    fn diagnostic_roots_keep_displayed_images_until_promotion_and_drop_unmapped_roots() {
+        let mut app = test_app();
+        let surface = SurfaceId::for_test(32);
+        register_window(&mut app, surface);
+        let first = app
+            .world_mut()
+            .resource_mut::<Assets<Image>>()
+            .add(transparent_surface_image());
+        let second = app
+            .world_mut()
+            .resource_mut::<Assets<Image>>()
+            .add(transparent_surface_image());
+        for (index, image) in [first.clone(), second.clone()].into_iter().enumerate() {
+            let mut snapshot = root_snapshot(None);
+            snapshot.buffers[0].content = SurfaceBufferContent::RenderImage(SurfaceRenderImage {
+                import: ImportId::for_test(index as u64 + 1),
+                image,
+                encoding: SurfaceImageEncoding::EncodedOpaque,
+                y_inverted: false,
+                promoted: index == 0,
+            });
+            enqueue_surface_event(app.world_mut(), snapshot_event(surface, snapshot));
+            app.update();
+            assert_eq!(benchmark_root_images(app.world()), [first.id()]);
+        }
+        promote_dmabuf_sources(app.world_mut(), &[ImportId::for_test(2)]);
+        assert_eq!(benchmark_root_images(app.world()), [second.id()]);
+        let earlier = SurfaceId::for_test(1);
+        register_window(&mut app, earlier);
+        let mut earlier_snapshot = root_snapshot(None);
+        earlier_snapshot.buffers[0].content =
+            SurfaceBufferContent::RenderImage(SurfaceRenderImage {
+                import: ImportId::for_test(3),
+                image: first.clone(),
+                encoding: SurfaceImageEncoding::EncodedOpaque,
+                y_inverted: false,
+                promoted: true,
+            });
+        enqueue_surface_event(app.world_mut(), snapshot_event(earlier, earlier_snapshot));
+        app.update();
+        assert_eq!(
+            benchmark_root_images(app.world()),
+            [first.id(), second.id()]
+        );
+        let mut unmapped = root_snapshot(None);
+        unmapped.client_mapped = false;
+        enqueue_surface_event(app.world_mut(), snapshot_event(surface, unmapped));
+        app.update();
+        assert_eq!(benchmark_root_images(app.world()), [first.id()]);
+        enqueue_surface_event(
+            app.world_mut(),
+            HostSurfaceEvent {
+                surface: earlier,
+                kind: HostSurfaceEventKind::Destroyed,
+            },
+        );
+        app.update();
+        assert!(benchmark_root_images(app.world()).is_empty());
     }
 
     #[test]

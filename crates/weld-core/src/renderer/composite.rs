@@ -1,6 +1,6 @@
 //! Full-output composition blit used by nested presentation.
 
-pub(crate) struct CompositionBlitter {
+pub struct CompositionBlitter {
     bind_group_layout: wgpu::BindGroupLayout,
     pipeline: wgpu::RenderPipeline,
     sampler: wgpu::Sampler,
@@ -12,10 +12,7 @@ impl CompositionBlitter {
     }
 
     #[cfg(feature = "test-support")]
-    pub(crate) fn for_benchmark_client(
-        device: &wgpu::Device,
-        target_format: wgpu::TextureFormat,
-    ) -> Self {
+    pub fn for_benchmark_client(device: &wgpu::Device, target_format: wgpu::TextureFormat) -> Self {
         Self::with_shader(
             device,
             target_format,
@@ -96,7 +93,7 @@ impl CompositionBlitter {
         }
     }
 
-    pub(crate) fn create_bind_group(
+    pub fn create_bind_group(
         &self,
         device: &wgpu::Device,
         label: &'static str,
@@ -151,7 +148,7 @@ impl CompositionBlitter {
         pass.draw(0..3, 0..1);
     }
 
-    pub(crate) fn encode_overlay(
+    pub fn encode_overlay(
         &self,
         encoder: &mut wgpu::CommandEncoder,
         label: &'static str,

@@ -10,6 +10,11 @@ use weld_tile::TilePlugin;
 use weld_window::WindowPlugin;
 use weld_window_ui::WindowUiPlugin;
 
+/// Install the distribution's subscriber before the profiling renderer starts.
+pub fn initialize_tracing() -> Result<()> {
+    crate::telemetry::initialize()
+}
+
 /// Install Master with an explicit fixture config; startup commands are rejected
 /// by the benchmark driver so application CPU stays in the separate producer.
 pub fn configure(app: &mut App, config: &Path) -> Result<()> {

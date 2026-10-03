@@ -60,6 +60,12 @@ the standard window, presentation, SSD, float, and shortcut plugins.
 separates input ingress, surface ingress, main-world work, render submission,
 and GPU completion.
 
+The renderer-free assembly shared by `shell_main` and the `input_pipeline`
+production-main control now disables renderer-dependent plugin families and
+registers its shader loader. Measurements from before that initialization fix
+are not directly comparable. Use the paced `renderer-main` case to include
+the full renderer plugin assembly's main-world systems.
+
 The render benchmark forces one composition per measured iteration so its
 cases remain comparable; that is not a claim about normal demand policy. Check
 the printed adapter before interpreting results. A CPU adapter validates the
@@ -67,12 +73,13 @@ path but is not representative of GPU performance.
 
 ### Paced real-client comparison
 
-Compare three presenters on the same production Wayland host and DMA-BUF
+Compare diagnostic layers on the same production Wayland host and DMA-BUF
 lifecycle, with a separate animated EGL client:
 
 ```sh
 python3 scripts/profiling/paced-render --seconds 20 --width 2240 --height 1400
-python3 scripts/profiling/paced-render --no-build --windows 3 --producer-hz 240 --input-hz 1000
+python3 scripts/profiling/paced-render --no-build --repeat 2 --perf /path/to/perf
+python3 scripts/profiling/paced-render --no-build --mode minimal --windows 3 --producer-hz 240 --input-hz 1000
 ```
 
 The launcher builds an optimized release benchmark and the small C producer.
@@ -81,9 +88,52 @@ It requires Wayland/EGL/GLES development packages and `wayland-scanner` (or
 Results, settings, bounded logs and a post-measurement screenshot for each
 presenter are saved below `target/validation/paced-render-*`.
 
-- `surface`: direct wgpu composition with the shared core buffer manager.
-- `minimal`: Weld's Bevy integration and fixed-layout `SurfaceNode` presentation.
-- `master`: the Master window-management plugins and a launch-free config.
+`--mode all` runs the following cases. Repeats reverse their order on every
+other pass. They isolate boundaries; differences are not an automatically
+additive decomposition of production cost.
+
+| Mode | Work added to the direct-rendered client workload |
+| --- | --- |
+| `surface` | Direct wgpu draw and shared core buffer manager |
+| `empty-app` | Empty Bevy `App` main schedule |
+| `core-app` | Bevy `MinimalPlugins` |
+| `framework-main` | Framework main-world plugins, with renderer/core-pipeline/sprite-render/UI-render plugins disabled |
+| `default-main` | Also Weld's model and one camera, with no client entities |
+| `renderer-main` | Renderer installed, but only main-world work runs; no client entities |
+| `state-direct` | Real AppShell ingress, surface state and promoted images; direct draw |
+| `ui-direct` | Also normal SurfaceNode layout/picking; direct draw |
+| `extract-direct` | State-direct plus extraction, deferred commands and temporary-entity retirement |
+| `prepare-direct` | State-direct plus the normal render schedule, with camera-graph rendering gated off |
+| `render-direct` | State-direct plus the whole empty Bevy renderer, then a direct draw |
+| `minimal` | Normal AppShell and SurfaceNode rendering |
+| `master` | Master policy, window UI and launch-free fixture config |
+
+The first main-only cases keep input delivery in the raw presenter; their Bevy
+apps receive no client events or input. State/extract/prepare/render-direct
+have no mounted UI hit targets. Use `ui-direct`, `minimal` and `master` for
+Bevy input/picking comparisons. The diagnostic direct draws select promoted
+root images in surface-ID order and assume the fixture's opaque, upright,
+uncropped, one-root-per-window content. They do not implement a general UI
+renderer. Their first five frames run the normal renderer to settle startup;
+use the default warmup or longer for steady-state measurements.
+
+`prepare-direct` still runs the screenshot/readback tail; only
+`RenderGraphSystems::Render` is gated. `render-direct` clears/blits through
+Bevy and then clears/draws directly, so it intentionally does more GPU work than
+`minimal`. These controls separate renderer scheduling from client UI, not
+identical GPU command streams. Binding pruning on a live window unmap is not
+exercised by the producer; a unit regression covers root selection at unmap,
+promotion and out-of-order surface creation.
+`extract-direct` must keep its no-mounted-UI configuration: buffers populated
+by UI extraction are normally drained by preparation, which that case skips.
+
+Optional `--perf` saves userspace instruction/cycle counters from an interior
+window after `MEASUREMENT_START`. `counter-window.json` records its duration
+and counts; `counters.csv` retains perf's raw output. The producer is excluded.
+Unsupported/uncounted events or less than 99% counter coverage fail the run.
+These counters cover a shorter interval than the whole-run CPU totals, and
+exclude kernel instructions. Normal runs install a warning-level subscriber so
+promotion failures remain visible without enabling Tracy.
 
 The virtual output defaults to 60 Hz; clients default to 120 commits/second.
 GPU work is bounded to three submissions in flight. Synthetic pointer motion

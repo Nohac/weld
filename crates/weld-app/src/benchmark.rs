@@ -1,5 +1,10 @@
 //! Headless measurements for Weld's production application boundary.
 
+mod presentation;
+pub use presentation::PresentationProbe;
+use presentation::install_presentation_probe;
+pub(crate) use presentation::render_probe;
+
 use std::{collections::VecDeque, time::Duration, time::Instant};
 
 use anyhow::{Context, Result};
@@ -7,13 +12,16 @@ use bevy::{
     app::{App, First, Last, Plugin, PostUpdate, PreUpdate, TerminalCtrlCHandlerPlugin, Update},
     asset::AssetApp,
     camera::{Camera, Camera2d, ManualTextureViewHandle, NormalizedRenderTarget, RenderTarget},
+    core_pipeline::CorePipelinePlugin,
     ecs::entity::Entity,
     input::InputPlugin,
     log::LogPlugin,
     picking::pointer::PointerInput,
     prelude::{DefaultPlugins, IsDefaultUiCamera, MinimalPlugins, PluginGroup, With},
     render::RenderPlugin,
-    shader::Shader,
+    shader::{Shader, ShaderLoader},
+    sprite_render::SpriteRenderPlugin,
+    ui_render::UiRenderPlugin,
     window::{ExitCondition, WindowPlugin},
 };
 use weld_core::{
@@ -196,7 +204,11 @@ fn benchmark_app() -> App {
 
 /// Construct Weld's normal Bevy plugin stack without a render sub-app.
 pub fn production_app() -> App {
-    let configuration = output_configuration();
+    production_app_with_output(output_configuration())
+}
+
+/// Construct the main-world framework plugins before adding Weld's model.
+pub fn framework_app() -> App {
     let mut app = App::new();
     app.add_plugins(
         DefaultPlugins
@@ -207,10 +219,19 @@ pub fn production_app() -> App {
             })
             .add_before::<RenderPlugin>(HeadlessRenderPrerequisitesPlugin)
             .disable::<RenderPlugin>()
+            .disable::<CorePipelinePlugin>()
+            .disable::<SpriteRenderPlugin>()
+            .disable::<UiRenderPlugin>()
             .disable::<LogPlugin>()
             .disable::<TerminalCtrlCHandlerPlugin>(),
-    )
-    .add_plugins(
+    );
+    app
+}
+
+/// Use the fixture output geometry with the normal main-world Weld model.
+pub fn production_app_with_output(configuration: OutputConfiguration) -> App {
+    let mut app = framework_app();
+    app.add_plugins(
         WeldAppPlugin::new(
             vec![configuration],
             vec![OutputHead::new(configuration.id(), "benchmark", None)],
@@ -328,6 +349,16 @@ pub fn shell_for_host(
     importers: Vec<weld_client::ClientImporterRegistration>,
     configure: impl FnOnce(&mut App),
 ) -> Result<AppShell> {
+    shell_for_host_with_probe(context, importers, None, configure)
+}
+
+/// Construct the same bridge with an optional diagnostic presentation boundary.
+pub fn shell_for_host_with_probe(
+    context: RenderContext,
+    importers: Vec<weld_client::ClientImporterRegistration>,
+    probe: Option<PresentationProbe>,
+    configure: impl FnOnce(&mut App),
+) -> Result<AppShell> {
     let mut app = App::new();
     configure_rendering(&mut app, &context);
     app.add_plugins(WeldAppPlugin::new(
@@ -335,6 +366,9 @@ pub fn shell_for_host(
         context.output_heads.clone(),
     )?);
     configure(&mut app);
+    if let Some(probe) = probe {
+        install_presentation_probe(&mut app, &context, probe)?;
+    }
     AppShell::new(app, context, importers)
 }
 
@@ -342,7 +376,8 @@ struct HeadlessRenderPrerequisitesPlugin;
 
 impl Plugin for HeadlessRenderPrerequisitesPlugin {
     fn build(&self, app: &mut App) {
-        app.init_asset::<Shader>();
+        app.init_asset::<Shader>()
+            .init_asset_loader::<ShaderLoader>();
     }
 }
 

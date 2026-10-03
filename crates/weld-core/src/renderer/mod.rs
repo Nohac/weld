@@ -21,7 +21,7 @@ use crate::dmabuf::{DmabufCapabilities, DmabufSourceCache};
 use crate::host::CompositionFrame;
 use crate::runtime::gpu::NativeGpu;
 
-mod composite;
+pub(crate) mod composite;
 
 pub(crate) use composite::CompositionBlitter;
 

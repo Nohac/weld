@@ -13,7 +13,7 @@ use bevy::{
 use clap::{Parser, ValueEnum};
 use std::{path::PathBuf, time::Duration};
 use weld_app::{
-    benchmark::shell_for_host,
+    benchmark::{PresentationProbe, shell_for_host_with_probe},
     surface::{ClientSurface, MappedSurface, SurfaceNode, SurfaceView},
 };
 use weld_core::{
@@ -24,6 +24,16 @@ use weld_core::{
 #[derive(Clone, Copy, Debug, ValueEnum)]
 enum Mode {
     Surface,
+    EmptyApp,
+    CoreApp,
+    FrameworkMain,
+    DefaultMain,
+    RendererMain,
+    StateDirect,
+    UiDirect,
+    RenderDirect,
+    ExtractDirect,
+    PrepareDirect,
     Minimal,
     Master,
 }
@@ -72,6 +82,7 @@ fn main() -> Result<()> {
         return Ok(());
     };
     let run_dir = args.run_dir.context("--producer requires --run-dir")?;
+    weldwm::benchmark::initialize_tracing()?;
     ensure!((1..=8).contains(&args.windows), "window count must be 1..8");
     ensure!(
         (1..=1000).contains(&args.producer_hz),
@@ -128,14 +139,61 @@ fn main() -> Result<()> {
     );
     match args.mode {
         Mode::Surface => runtime.run(SurfaceOnly::new(context)?, adapters, Vec::new())?,
+        Mode::RendererMain => {
+            let mut shell = shell_for_host_with_probe(context.clone(), importers, None, |_| {})?;
+            let host = SurfaceOnly::new(context)?.with_frame_work(move || {
+                shell.advance_main_only_for_benchmark();
+            });
+            runtime.run(host, adapters, Vec::new())?;
+        }
+        Mode::EmptyApp | Mode::CoreApp | Mode::FrameworkMain | Mode::DefaultMain => {
+            let mut app = match args.mode {
+                Mode::EmptyApp => bevy::app::App::new(),
+                Mode::CoreApp => {
+                    let mut app = bevy::app::App::new();
+                    app.add_plugins(bevy::prelude::MinimalPlugins);
+                    app
+                }
+                Mode::FrameworkMain => weld_app::benchmark::framework_app(),
+                _ => weld_app::benchmark::production_app_with_output(
+                    *context
+                        .outputs
+                        .first()
+                        .context("missing benchmark output")?,
+                ),
+            };
+            app.finish();
+            app.cleanup();
+            let host = SurfaceOnly::new(context)?.with_frame_work(move || {
+                app.main_mut().run_default_schedule();
+                app.world_mut().clear_trackers();
+            });
+            runtime.run(host, adapters, Vec::new())?;
+        }
         mode => {
             let mut configured = Ok(());
-            let shell = shell_for_host(context, importers, |app| match mode {
+            let probe = match mode {
+                Mode::StateDirect | Mode::UiDirect => Some(PresentationProbe::Direct),
+                Mode::RenderDirect => Some(PresentationProbe::RenderThenDirect),
+                Mode::ExtractDirect => Some(PresentationProbe::ExtractThenDirect),
+                Mode::PrepareDirect => Some(PresentationProbe::PrepareThenDirect),
+                _ => None,
+            };
+            let shell = shell_for_host_with_probe(context, importers, probe, |app| match mode {
                 Mode::Master => configured = weldwm::benchmark::configure(app, &args.config),
-                Mode::Minimal => {
+                Mode::Minimal | Mode::UiDirect => {
                     app.add_systems(PreUpdate, mount_surfaces);
                 }
-                Mode::Surface => {}
+                Mode::Surface
+                | Mode::EmptyApp
+                | Mode::CoreApp
+                | Mode::FrameworkMain
+                | Mode::DefaultMain
+                | Mode::RendererMain
+                | Mode::StateDirect
+                | Mode::RenderDirect
+                | Mode::ExtractDirect
+                | Mode::PrepareDirect => {}
             })?;
             configured?;
             runtime.run(shell, adapters, Vec::new())?;
