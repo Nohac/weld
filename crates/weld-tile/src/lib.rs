@@ -102,6 +102,8 @@ pub struct TileSettings {
     pub inner_gap: u16,
     /// Logical pixels between the workspace and output edges.
     pub outer_gap: u16,
+    /// Remove workspace-edge gaps while exactly one tiled slot is present.
+    pub hide_solo_gaps: bool,
     /// Initial orientation for new workspace roots.
     pub default_axis: SplitAxis,
 }
@@ -111,6 +113,7 @@ impl Default for TileSettings {
         Self {
             inner_gap: 8,
             outer_gap: 8,
+            hide_solo_gaps: false,
             default_axis: SplitAxis::Horizontal,
         }
     }

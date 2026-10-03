@@ -90,6 +90,10 @@ pub struct WindowZOrder(pub i32);
 #[derive(Component, Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct FloatingWindow;
 
+/// Presentation fact published by a tiler for its workspace's only tiled slot.
+#[derive(Component, Clone, Copy, Debug, Default)]
+pub struct SoleTiledWindow;
+
 /// What to do when the client occupant disappears.
 #[derive(Component, Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum WindowVacancy {

@@ -39,6 +39,10 @@ scripts/run-weld-drm --xwayland --config examples/master.sway.config -- foot
 In the example keymap, **physical Windows is logical Alt** and is the modifier
 used below. The parent compositor can still consume nested shortcuts, so use
 DRM for the final input check. These commands use the development build.
+`Control` is physical Caps Lock with the example's explicit XKB swaps.
+Launch test apps from Weld's terminal so they inherit its Wayland/XWayland
+environment. Quit an existing Steam instance first, and use a separate browser
+profile if an existing instance would redirect the launch to the host desktop.
 
 ## Floating validation
 
@@ -79,11 +83,11 @@ DRM for the final input check. These commands use the development build.
 - These nested debug runs still reported Vulkan acquisition-fence validation
   messages also recorded before this phase. No warning-free renderer claim is made.
 
-Further milestone checks will be added as implementation and validation land.
+The sections below cover the remaining implemented milestones.
 
 ## Decoration validation
 
-1. Tiled terminals should start with a narrow pixel border and no titlebar.
+1. With two tiled terminals, each should have a narrow pixel border and no titlebar.
    Floating a window should select the normal floating frame with close/move controls.
 2. Mod+B cycles pixel, none and normal. Content must remain correctly aligned;
    a floating window should retain its client-content size as chrome changes.
@@ -98,6 +102,23 @@ Further milestone checks will be added as implementation and validation land.
    application-owned titlebars. Recheck opaque hoisted content, which needs Weld's frame.
 
 The example keeps Mod+B for border toggling; launch Blender with Mod+Shift+B.
+
+## Smart gaps and borders
+
+1. Leave one tiled terminal on a workspace. With the example's smart settings,
+   it should fill the bar-adjusted work area without a pixel border or outer gaps.
+2. Open a second terminal: spacing and pixel borders should return. Close it:
+   the first should expand again. Repeat with a nested split rather than only siblings.
+3. Float the second window or open a parent-declared dialog. The sole tile should
+   remain expanded; the floating window keeps its normal frame.
+4. In a private config copy, set either smart option to `off` and reload. Check
+   that gaps and borders can be controlled independently without changing the tree.
+5. Try `border normal` on the solo tile: its titlebar remains while the border
+   disappears. With a second tile, the requested border width returns.
+   Cycle Mod+B through all styles too; automatic hiding must not erase the saved
+   width. Border changes during fullscreen take effect when fullscreen exits.
+6. Hoist one of two retained slots. Its placeholder should still count, preserving
+   the workspace layout and the other tile's spacing.
 
 ## Tiled mouse resizing
 
@@ -153,3 +174,33 @@ The pre-map fullscreen-property variant also passed in
 `target/validation/fullscreen-smoke-jx3u1o9r`; pending policy transitions suppress
 the intermediate admission configure. Floating/tiled mode changes resume after
 leaving fullscreen.
+
+## Final automated pass and limits
+
+The smart-settings assembly passed the X11 family lifecycle capture in
+`target/validation/floating-smoke-1lsgvunz`. The parent has a bare solo-tile frame;
+the transient dialog remains centered and decorated. Waybar and Rofi also mapped,
+captured and tore down successfully in `target/validation/layer-shell-kyv30vv9`.
+Their captures show the panel work area and overlay launcher preserved.
+The header-only smart-border capture in `target/validation/floating-smoke-5i7fibg6`
+also preserves the normal header and rounded client bounds.
+
+Reproducible core checks:
+
+```sh
+cargo test -p weld-window -p weld-float -p weld-tile -p weld-ssd -p weld-i3-quirks -p weldwm --lib --locked -j 8
+cargo test -p weld-i3-quirks --test behavior --locked -j 8
+cargo clippy --workspace --all-targets --features weld-core/test-support --locked -j 8 -- -D warnings
+```
+
+Protocol/hoist tests also passed, including the real Wayland fullscreen configure
+fixture, authorized fullscreen forwarding, ordered encoded control events, and
+the existing hoist lifecycle suite. The Godot Rust desktop receiver compiled
+after the shared configure shape changed. No Android deployment or physical DRM
+input validation was performed during this phase.
+
+Use a private config copy for reload experiments, retaining a working exit
+binding (`Mod+Shift+Escape` in the example). Test on an unused TTY before replacing
+the main login session. Direct scanout, fixed-size/type-based dialog hints,
+per-app matching rules, and the rest of the Sway command language remain separate
+work. The existing Vulkan acquire-fence validation messages are not fixed here.

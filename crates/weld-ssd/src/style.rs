@@ -78,6 +78,8 @@ impl FrameColors {
 pub struct SsdSettings {
     pub tiled: BorderStyle,
     pub floating: BorderStyle,
+    /// Hide the border of a workspace's sole tiled slot, retaining normal headers.
+    pub hide_solo_border: bool,
     pub corner_radius: u16,
     pub focused: FrameColors,
     pub focused_inactive: FrameColors,
@@ -92,6 +94,7 @@ impl Default for SsdSettings {
         Self {
             tiled: BorderStyle::Normal(3),
             floating: BorderStyle::Normal(3),
+            hide_solo_border: false,
             corner_radius: 9,
             focused: FrameColors::from_border(super::FOCUSED_BORDER),
             focused_inactive: FrameColors::from_border(super::UNFOCUSED_BORDER),

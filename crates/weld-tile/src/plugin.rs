@@ -5,10 +5,10 @@ use bevy::{
     ecs::{
         change_detection::DetectChanges,
         entity::Entity,
-        lifecycle::RemovedComponents,
+        lifecycle::{Remove, RemovedComponents},
         message::MessageWriter,
         observer::On,
-        query::{Changed, Or, QueryData, With, Without},
+        query::{Changed, Has, Or, QueryData, With, Without},
         schedule::IntoScheduleConfigs,
         system::{Commands, Local, Query, Res, ResMut, SystemParam},
     },
@@ -16,13 +16,16 @@ use bevy::{
 };
 use weld_app::output::{OutputGeometry, OutputWorkArea, WeldOutput};
 use weld_app::surface::ClientToplevelParent;
-use weld_window::workspace::{FocusedWorkspace, Workspace, WorkspaceMember, WorkspaceOutput};
+use weld_window::workspace::{
+    FocusedWorkspace, Workspace, WorkspaceMember, WorkspaceOutput, WorkspaceWindows,
+};
 use weld_window::{
-    FloatingWindow, FocusedWindow, ManagedBy, ManagedWindow, WindowClientResolver, WindowCommand,
-    WindowCommandKind, WindowGeometry, WindowIntent, WindowIntentKind, WindowOutput, WindowSystems,
-    WindowVisibility, WindowZOrder,
+    FloatingWindow, FocusedWindow, ManagedBy, ManagedWindow, SoleTiledWindow, WindowClientResolver,
+    WindowCommand, WindowCommandKind, WindowGeometry, WindowIntent, WindowIntentKind, WindowOutput,
+    WindowSystems, WindowVisibility, WindowZOrder,
 };
 
+use std::collections::HashMap;
 use weld_window::pointer::{WindowPointerPlugin, WindowPointerSystems};
 
 use crate::{
@@ -48,6 +51,7 @@ struct TiledWindow {
     visibility: &'static WindowVisibility,
     z_order: &'static WindowZOrder,
     floating: Option<&'static FloatingWindow>,
+    sole_tile: Has<SoleTiledWindow>,
 }
 
 impl Plugin for TilePlugin {
@@ -67,6 +71,7 @@ impl Plugin for TilePlugin {
             .init_resource::<TileFocusHistory>()
             .init_resource::<LayoutDirty>()
             .add_observer(intent)
+            .add_observer(clear_sole_tile)
             .add_observer(crate::resize::begin)
             .add_observer(crate::resize::motion)
             .add_observer(crate::resize::tree_changed)
@@ -355,23 +360,51 @@ fn admit_windows(
     }
 }
 
+fn clear_sole_tile(event: On<Remove, TileParent>, mut commands: Commands) {
+    commands
+        .entity(event.entity)
+        .try_remove::<SoleTiledWindow>();
+}
+
+type WorkspaceLayouts<'w, 's> = Query<
+    'w,
+    's,
+    (
+        Entity,
+        &'static Workspace,
+        Option<&'static WorkspaceOutput>,
+        Option<&'static WorkspaceWindows>,
+        &'static mut LayoutRect,
+    ),
+    With<TileWorkspace>,
+>;
+
 fn sync_output(
     outputs: Query<(&OutputGeometry, Option<&OutputWorkArea>), With<WeldOutput>>,
     settings: Res<TileSettings>,
-    mut workspaces: Query<
-        (&Workspace, Option<&WorkspaceOutput>, &mut LayoutRect),
-        With<TileWorkspace>,
-    >,
+    mut workspaces: WorkspaceLayouts,
     windows: Query<TiledWindow, With<ManagedWindow>>,
     mut dirty: ResMut<LayoutDirty>,
     mut commands: Commands,
+    mut sole_tiles: Local<HashMap<Entity, Option<Entity>>>,
 ) {
-    for (_, output, mut bounds) in &mut workspaces {
+    sole_tiles.clear();
+    for (workspace, _, output, members, mut bounds) in &mut workspaces {
+        let mut tiles = members
+            .into_iter()
+            .flat_map(WorkspaceWindows::iter)
+            .filter(|window| {
+                windows
+                    .get(*window)
+                    .is_ok_and(|window| window.owner.0 == workspace && window.floating.is_none())
+            });
+        let sole = tiles.next().filter(|_| tiles.next().is_none());
+        sole_tiles.insert(workspace, sole);
         let Some(output) = output else { continue };
         let Ok((geometry, work_area)) = outputs.get(output.0) else {
             continue;
         };
-        let rect = workspace::bounds(geometry, work_area, &settings);
+        let rect = workspace::bounds(geometry, work_area, &settings, sole.is_some());
         if bounds.0 != rect {
             bounds.0 = rect;
             dirty.0 = true;
@@ -381,10 +414,19 @@ fn sync_output(
         dirty.0 = true;
     }
     for window in &windows {
+        let sole = window.owner.0 == window.member.0
+            && sole_tiles.get(&window.member.0) == Some(&Some(window.entity));
+        if sole != window.sole_tile {
+            if sole {
+                commands.entity(window.entity).insert(SoleTiledWindow);
+            } else {
+                commands.entity(window.entity).remove::<SoleTiledWindow>();
+            }
+        }
         if window.owner.0 != window.member.0 {
             continue;
         }
-        let Ok((workspace, output, _)) = workspaces.get(window.member.0) else {
+        let Ok((_, workspace, output, _, _)) = workspaces.get(window.member.0) else {
             continue;
         };
         let output = output.filter(|output| outputs.contains(output.0));

@@ -51,6 +51,170 @@ fn resize_motion(app: &mut App, window: Entity, delta: Vec2) {
 }
 
 #[test]
+fn removing_tile_membership_clears_the_presentation_hint_before_another_frame() {
+    let mut app = app();
+    let window = window(&mut app, 1);
+    assert!(
+        app.world()
+            .get::<weld_window::SoleTiledWindow>(window)
+            .is_some()
+    );
+    let parent = *app.world().get::<TileParent>(window).expect("parent");
+    app.world_mut().entity_mut(window).remove::<TileParent>();
+    app.world_mut().flush();
+    assert!(
+        app.world()
+            .get::<weld_window::SoleTiledWindow>(window)
+            .is_none()
+    );
+    app.world_mut().entity_mut(window).insert(parent);
+    app.update();
+    assert!(
+        app.world()
+            .get::<weld_window::SoleTiledWindow>(window)
+            .is_some()
+    );
+}
+
+#[test]
+fn solo_presentation_hint_tracks_workspace_transfer_and_retired_ownership() {
+    let mut app = app();
+    let first = window(&mut app, 1);
+    let second = window(&mut app, 2);
+    let output = app
+        .world()
+        .get::<weld_window::WindowOutput>(first)
+        .expect("output")
+        .0;
+    let destination = app
+        .world_mut()
+        .run_system_once(
+            move |mut creation: weld_window::workspace::WorkspaceCreation| {
+                creation.create("2".into(), output).expect("workspace")
+            },
+        )
+        .expect("create workspace");
+    app.update();
+    app.world_mut().trigger(TileWorkspaceMove {
+        window: second,
+        workspace: destination,
+        anchor: None,
+    });
+    app.update();
+    assert!(
+        app.world()
+            .get::<weld_window::SoleTiledWindow>(first)
+            .is_some()
+    );
+    assert!(
+        app.world()
+            .get::<weld_window::SoleTiledWindow>(second)
+            .is_some()
+    );
+    let other_manager = app.world_mut().spawn_empty().id();
+    app.world_mut()
+        .entity_mut(first)
+        .insert(ManagedBy(other_manager));
+    app.update();
+    assert!(
+        app.world()
+            .get::<weld_window::SoleTiledWindow>(first)
+            .is_none()
+    );
+    assert!(
+        app.world()
+            .get::<weld_window::SoleTiledWindow>(second)
+            .is_some()
+    );
+}
+
+#[test]
+fn smart_gaps_track_tiled_slots_while_floating_and_retained_windows_keep_identity() {
+    let mut app = app();
+    app.insert_resource(TileSettings {
+        inner_gap: 10,
+        outer_gap: 20,
+        hide_solo_gaps: true,
+        ..Default::default()
+    });
+    let first = window(&mut app, 1);
+    assert_eq!(
+        geometry(&app, first),
+        WindowGeometry {
+            position: Vec2::ZERO,
+            size: Vec2::new(800.0, 600.0)
+        }
+    );
+    assert!(
+        app.world()
+            .get::<weld_window::SoleTiledWindow>(first)
+            .is_some()
+    );
+    let second = window(&mut app, 2);
+    assert_eq!(geometry(&app, first).position, Vec2::splat(20.0));
+    assert!(
+        app.world()
+            .get::<weld_window::SoleTiledWindow>(first)
+            .is_none()
+    );
+    assert!(
+        app.world()
+            .get::<weld_window::SoleTiledWindow>(second)
+            .is_none()
+    );
+    app.world_mut().trigger(TileFloatingRequest {
+        window: Some(second),
+        enabled: Some(true),
+    });
+    app.update();
+    assert_eq!(geometry(&app, first).size, Vec2::new(800.0, 600.0));
+    assert!(
+        app.world()
+            .get::<weld_window::SoleTiledWindow>(first)
+            .is_some()
+    );
+    assert!(
+        app.world()
+            .get::<weld_window::SoleTiledWindow>(second)
+            .is_none()
+    );
+    app.world_mut()
+        .resource_mut::<TileSettings>()
+        .hide_solo_gaps = false;
+    app.update();
+    assert_eq!(
+        geometry(&app, first),
+        WindowGeometry {
+            position: Vec2::splat(20.0),
+            size: Vec2::new(760.0, 560.0)
+        }
+    );
+    // The retained slot still participates even with no mapped occupant.
+    assert!(
+        app.world()
+            .get::<weld_window::SoleTiledWindow>(first)
+            .is_some()
+    );
+    app.world_mut().trigger(TileFloatingRequest {
+        window: Some(second),
+        enabled: Some(false),
+    });
+    app.update();
+    assert!(
+        app.world()
+            .get::<weld_window::SoleTiledWindow>(first)
+            .is_none()
+    );
+    app.world_mut().entity_mut(second).despawn();
+    app.update();
+    assert!(
+        app.world()
+            .get::<weld_window::SoleTiledWindow>(first)
+            .is_some()
+    );
+}
+
+#[test]
 fn hiding_workspace_before_motion_preserves_split_weights() {
     let mut app = app();
     let first = window(&mut app, 1);
@@ -866,6 +1030,7 @@ fn nested_splits_relayout_live_without_replacing_identity_or_focus() {
         inner_gap: 10,
         outer_gap: 20,
         default_axis: SplitAxis::Horizontal,
+        hide_solo_gaps: false,
     };
     app.insert_resource(settings);
     app.update();

@@ -92,16 +92,24 @@ type StyledWindows<'w, 's> = Query<
         Has<FloatingWindow>,
         Option<&'static WindowBorderStyle>,
         Has<weld_window::fullscreen::WindowFullscreen>,
+        Has<weld_window::SoleTiledWindow>,
     ),
     With<ManagedWindow>,
 >;
 
 impl FrameStyles<'_, '_> {
+    fn requested_border(&self, window: Entity) -> BorderStyle {
+        let (floating, style, _, _) = self
+            .windows
+            .get(window)
+            .unwrap_or((false, None, false, false));
+        FrameGeometry::new(&self.settings, floating, style.copied()).border
+    }
     fn default_border(&self, window: Entity) -> BorderStyle {
         if self
             .windows
             .get(window)
-            .is_ok_and(|(floating, _, _)| floating)
+            .is_ok_and(|(floating, _, _, _)| floating)
         {
             self.settings.floating
         } else {
@@ -109,9 +117,11 @@ impl FrameStyles<'_, '_> {
         }
     }
     fn geometry(&self, window: Entity) -> FrameGeometry {
-        let (floating, style, fullscreen) =
-            self.windows.get(window).unwrap_or((false, None, false));
-        FrameGeometry::new(
+        let (floating, style, fullscreen, sole_tile) = self
+            .windows
+            .get(window)
+            .unwrap_or((false, None, false, false));
+        let mut geometry = FrameGeometry::new(
             &self.settings,
             floating,
             if fullscreen {
@@ -119,7 +129,17 @@ impl FrameStyles<'_, '_> {
             } else {
                 style.copied()
             },
-        )
+        );
+        if self.settings.hide_solo_border && sole_tile && !floating && !fullscreen {
+            geometry.border = match geometry.border {
+                BorderStyle::Normal(_) => BorderStyle::Normal(0),
+                BorderStyle::Pixel(_) | BorderStyle::None => BorderStyle::None,
+            };
+            if geometry.border == BorderStyle::None {
+                geometry.radius = 0.0;
+            }
+        }
+        geometry
     }
 }
 
@@ -136,8 +156,7 @@ fn border_request(
     {
         let style = event.0.unwrap_or_else(|| {
             styles
-                .geometry(window)
-                .border
+                .requested_border(window)
                 .toggle(styles.default_border(window))
         });
         commands.entity(window).insert(WindowBorderStyle(style));
@@ -1089,8 +1108,7 @@ mod tests {
         }
     }
 
-    #[test]
-    fn tile_outer_rectangle_survives_live_frame_metrics_changes() {
+    fn tiled_test_app() -> App {
         let mut app = base_test_app();
         app.add_plugins(weld_tile::TilePlugin);
         let output = app
@@ -1111,6 +1129,215 @@ mod tests {
                 },
             )
             .expect("workspace setup");
+        app
+    }
+
+    #[test]
+    fn solo_border_toggle_preserves_requested_width_with_gaps_and_retained_slots() {
+        let mut app = tiled_test_app();
+        {
+            let mut settings = app.world_mut().resource_mut::<SsdSettings>();
+            settings.tiled = BorderStyle::Pixel(7);
+            settings.hide_solo_border = true;
+        }
+        let first_surface = SurfaceId::for_test(303);
+        enqueue_surface_event(
+            app.world_mut(),
+            role(first_surface, WindowDecoration::ServerSide),
+        );
+        enqueue_surface_event(app.world_mut(), frame(first_surface, 320, 240));
+        app.update();
+        app.update();
+        let first = app
+            .world_mut()
+            .query::<&OccupiesWindow>()
+            .single(app.world())
+            .expect("window")
+            .0;
+        assert_eq!(
+            app.world()
+                .get::<WindowGeometry>(first)
+                .expect("gaps kept")
+                .position,
+            Vec2::splat(8.0)
+        );
+        for expected in [
+            BorderStyle::None,
+            BorderStyle::Normal(7),
+            BorderStyle::Pixel(7),
+        ] {
+            app.world_mut().trigger(BorderRequest(None));
+            app.update();
+            assert_eq!(
+                app.world().get::<WindowBorderStyle>(first),
+                Some(&WindowBorderStyle(expected))
+            );
+        }
+        let second_surface = SurfaceId::for_test(304);
+        enqueue_surface_event(
+            app.world_mut(),
+            role(second_surface, WindowDecoration::ServerSide),
+        );
+        enqueue_surface_event(app.world_mut(), frame(second_surface, 320, 240));
+        app.update();
+        app.update();
+        let root = app
+            .world()
+            .get::<PrimaryWindowPresentation>(first)
+            .expect("root")
+            .entity();
+        assert_eq!(
+            app.world().get::<PresentationInsets>(root),
+            Some(&BorderStyle::Pixel(7).insets())
+        );
+        app.world_mut()
+            .entity_mut(first)
+            .insert(weld_window::WindowVacancy::Retain);
+        enqueue_surface_event(
+            app.world_mut(),
+            HostSurfaceEvent {
+                surface: first_surface,
+                kind: HostSurfaceEventKind::Destroyed,
+            },
+        );
+        app.update();
+        app.update();
+        assert!(
+            app.world()
+                .get::<weld_window::WindowOccupant>(first)
+                .is_none()
+        );
+        assert!(
+            app.world()
+                .get::<weld_window::SoleTiledWindow>(first)
+                .is_none(),
+            "the vacant slot still shares its workspace with the second tile"
+        );
+        enqueue_surface_event(
+            app.world_mut(),
+            HostSurfaceEvent {
+                surface: second_surface,
+                kind: HostSurfaceEventKind::Destroyed,
+            },
+        );
+        for _ in 0..3 {
+            app.update();
+        }
+        assert!(
+            app.world()
+                .get::<weld_window::SoleTiledWindow>(first)
+                .is_some()
+        );
+        let root = app
+            .world()
+            .get::<PrimaryWindowPresentation>(first)
+            .expect("retained root")
+            .entity();
+        assert_eq!(
+            app.world().get::<PresentationInsets>(root),
+            Some(&PresentationInsets::default())
+        );
+        assert_eq!(
+            app.world().get::<WindowBorderStyle>(first),
+            Some(&WindowBorderStyle(BorderStyle::Pixel(7)))
+        );
+    }
+
+    #[test]
+    fn smart_borders_follow_tiled_cardinality_and_keep_explicit_style_and_headers() {
+        let mut app = tiled_test_app();
+        {
+            let mut settings = app.world_mut().resource_mut::<SsdSettings>();
+            settings.hide_solo_border = true;
+            settings.tiled = BorderStyle::Pixel(4);
+        }
+        app.world_mut()
+            .resource_mut::<weld_tile::TileSettings>()
+            .hide_solo_gaps = true;
+        let lookup = |app: &mut App, surface| {
+            app.world_mut()
+                .query::<(&ClientToplevel, &OccupiesWindow)>()
+                .iter(app.world())
+                .find(|(client, _)| client.surface == surface)
+                .expect("window")
+                .1
+                .0
+        };
+        let insets = |app: &App, window| {
+            let root = app
+                .world()
+                .get::<PrimaryWindowPresentation>(window)
+                .expect("root")
+                .entity();
+            *app.world().get::<PresentationInsets>(root).expect("insets")
+        };
+        let first_surface = SurfaceId::for_test(301);
+        enqueue_surface_event(
+            app.world_mut(),
+            role(first_surface, WindowDecoration::ServerSide),
+        );
+        enqueue_surface_event(app.world_mut(), frame(first_surface, 320, 240));
+        app.update();
+        app.update();
+        let first = lookup(&mut app, first_surface);
+        assert_eq!(insets(&app, first), PresentationInsets::default());
+        assert_eq!(
+            app.world()
+                .get::<WindowGeometry>(first)
+                .expect("sole tile")
+                .size,
+            Vec2::new(1000.0, 800.0)
+        );
+        let second_surface = SurfaceId::for_test(302);
+        enqueue_surface_event(
+            app.world_mut(),
+            role(second_surface, WindowDecoration::ServerSide),
+        );
+        enqueue_surface_event(app.world_mut(), frame(second_surface, 320, 240));
+        app.update();
+        app.update();
+        let second = lookup(&mut app, second_surface);
+        assert_eq!(
+            insets(&app, first),
+            PresentationInsets::new(4.0, 4.0, 4.0, 4.0)
+        );
+        assert_eq!(
+            insets(&app, second),
+            PresentationInsets::new(4.0, 4.0, 4.0, 4.0)
+        );
+        app.world_mut().trigger(weld_tile::TileFloatingRequest {
+            window: Some(second),
+            enabled: Some(true),
+        });
+        app.update();
+        app.update();
+        assert_eq!(insets(&app, first), PresentationInsets::default());
+        assert_eq!(insets(&app, second), BorderStyle::Normal(3).insets());
+        app.world_mut()
+            .entity_mut(first)
+            .insert(WindowBorderStyle(BorderStyle::Normal(5)));
+        app.update();
+        assert_eq!(
+            insets(&app, first),
+            PresentationInsets::new(0.0, HEADER_HEIGHT, 0.0, 0.0)
+        );
+        app.world_mut()
+            .resource_mut::<SsdSettings>()
+            .hide_solo_border = false;
+        app.update();
+        assert_eq!(insets(&app, first), BorderStyle::Normal(5).insets());
+        assert_eq!(
+            app.world()
+                .get::<WindowGeometry>(first)
+                .expect("layout retained")
+                .size,
+            Vec2::new(1000.0, 800.0)
+        );
+    }
+
+    #[test]
+    fn tile_outer_rectangle_survives_live_frame_metrics_changes() {
+        let mut app = tiled_test_app();
         let surface = SurfaceId::for_test(100);
         enqueue_surface_event(app.world_mut(), role(surface, WindowDecoration::ServerSide));
         enqueue_surface_event(app.world_mut(), frame(surface, 320, 240));

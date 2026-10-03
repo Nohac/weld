@@ -49,6 +49,10 @@ There is no file watcher yet; reload rereads the supplied path.
 - `gaps inner N` and `gaps outer N`, in logical pixels, integer 0..65535.
   Geometry clamps gaps to available space.
 - `default_orientation horizontal|vertical`, for new workspace roots only.
+- `smart_gaps on|off` removes outer gaps around a sole tiled slot.
+- `smart_borders on|off` hides that slot's border. Pixel frames become bare;
+  normal frames retain their header. Floating windows keep their configured frame.
+  `no_gaps`, `inverse_outer` and runtime smart-setting commands remain unsupported.
 - `focus_wrapping no|yes|force|workspace` (default `yes`). Ordinary wrapping
   first searches ancestor splits for a directional neighbor, then uses the
   innermost wrap candidate. `force` wraps at the first eligible split edge.
@@ -335,6 +339,16 @@ the durable window and intentionally survives vacancy and occupant replacement.
 
 The example uses pixel borders for tiles and normal frames for floating windows.
 Alt+B cycles the selected frame; Blender launch moved to Alt+Shift+B.
+It enables smart gaps/borders, so a sole tile has no pixel frame or outer spacing.
+The tiler publishes `SoleTiledWindow` from retained workspace slots; SSD consumes
+that presentation fact without traversing the split tree. Floating windows are
+excluded and retained hoist placeholders count as slots. Settings and the
+per-window requested border style survive cardinality changes.
+Border toggles operate on that requested style, including while fullscreen;
+automatic hiding changes presentation without replacing the preference.
+
+The basic on/off policy follows the [Sway command documentation](https://github.com/swaywm/sway/blob/master/sway/sway.5.scd).
+Normal titlebar retention follows [Sway's view geometry](https://github.com/swaywm/sway/blob/master/sway/tree/view.c).
 
 ## Fullscreen presentation
 

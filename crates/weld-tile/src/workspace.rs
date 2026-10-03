@@ -27,6 +27,7 @@ pub(crate) fn bounds(
     geometry: &OutputGeometry,
     work_area: Option<&OutputWorkArea>,
     settings: &TileSettings,
+    sole_tile: bool,
 ) -> WindowGeometry {
     let position = work_area.map_or(Vec2::ZERO, |area| {
         area.position.clamp(Vec2::ZERO, geometry.logical_size())
@@ -36,7 +37,12 @@ pub(crate) fn bounds(
             .max(Vec2::ZERO)
             .min(geometry.logical_size() - position)
     });
-    let margin = Vec2::splat(f32::from(settings.outer_gap)).min(size * 0.5);
+    let gap = if settings.hide_solo_gaps && sole_tile {
+        0
+    } else {
+        settings.outer_gap
+    };
+    let margin = Vec2::splat(f32::from(gap)).min(size * 0.5);
     WindowGeometry {
         position: position + margin,
         size: (size - 2.0 * margin).max(Vec2::ZERO),
@@ -65,7 +71,7 @@ fn initialize(
             axis: settings.default_axis,
             children: Vec::new(),
         },
-        LayoutRect(bounds(geometry, work_area, settings)),
+        LayoutRect(bounds(geometry, work_area, settings, false)),
     ));
     editor.dirty.0 = true;
 }

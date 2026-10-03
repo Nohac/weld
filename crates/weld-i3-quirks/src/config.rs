@@ -159,6 +159,10 @@ fn apply<Extension>(config: &mut Configuration<Extension>, statement: &Statement
             }
         }
         ("default_orientation", [value]) => config.tiling.default_axis = axis(value)?,
+        ("smart_gaps", [value @ ("on" | "off")]) => config.tiling.hide_solo_gaps = *value == "on",
+        ("smart_borders", [value @ ("on" | "off")]) => {
+            config.decorations.hide_solo_border = *value == "on"
+        }
         ("default_border" | "new_window", style) => config.decorations.tiled = border_style(style)?,
         ("default_floating_border" | "new_float", style) => {
             config.decorations.floating = border_style(style)?
@@ -610,6 +614,26 @@ mod tests {
         assert_eq!(config.bindings[0].1, Action::Floating(None));
         assert_eq!(config.bindings[1].1, Action::FocusModeToggle);
         assert!(parse("float", "floating_modifier Mod1+Mod1").is_err());
+    }
+
+    #[test]
+    fn smart_spacing_translates_to_independent_native_policies() {
+        let enabled = parse(
+            "smart",
+            indoc::indoc! {"
+            smart_gaps on
+            smart_borders on
+        "},
+        )
+        .expect("config");
+        assert!(enabled.tiling.hide_solo_gaps);
+        assert!(enabled.decorations.hide_solo_border);
+        let disabled = parse("smart", "smart_gaps off\nsmart_borders off").expect("config");
+        assert!(!disabled.tiling.hide_solo_gaps);
+        assert!(!disabled.decorations.hide_solo_border);
+        for unsupported in ["smart_gaps maybe", "smart_borders no_gaps"] {
+            assert!(parse("unsupported", unsupported).is_err());
+        }
     }
 
     #[test]
