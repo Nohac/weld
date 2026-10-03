@@ -8,6 +8,7 @@ use crate::surface::{Extent, SurfaceId};
 pub(super) struct PendingResize {
     pub(super) logical_size: Extent,
     pub(super) resizing: bool,
+    pub(super) fullscreen: bool,
 }
 
 #[derive(Default)]
@@ -63,6 +64,7 @@ mod tests {
         PendingResize {
             logical_size: Extent::new(width, height),
             resizing,
+            fullscreen: false,
         }
     }
 }

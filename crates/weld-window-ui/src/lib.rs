@@ -17,9 +17,9 @@ use bevy::{
         component::Component,
         entity::Entity,
         hierarchy::ChildOf,
-        query::{With, Without},
+        query::{Has, With, Without},
         schedule::IntoScheduleConfigs,
-        system::{Commands, Query},
+        system::{Commands, Query, SystemParam},
     },
     math::Vec2,
     prelude::{BoxShadow, Display, GlobalZIndex, Node, UiTargetCamera, ZIndex, px},
@@ -30,8 +30,8 @@ use weld_app::{
     cursor::{CursorRequest, CursorSystems},
     output::{OutputCompositionCamera, OutputPosition, PrimaryOutput, WeldOutput},
     surface::{
-        ClientDecorated, ClientPopup, ClientSurface, ClientToplevel, MappedSurface,
-        SurfaceAlphaMode, SurfaceView,
+        ClientDecorated, ClientPopup, ClientSurface, ClientToplevel, ClientToplevelParent,
+        MappedSurface, SurfaceAlphaMode, SurfaceView,
     },
 };
 use weld_window::{
@@ -39,6 +39,7 @@ use weld_window::{
     PrimaryWindowPresentation, WindowClientResolver, WindowGeometry, WindowGeometryAnchor,
     WindowOccupant, WindowOutput, WindowOutputIntersections, WindowPresentationOverride,
     WindowProjection, WindowSystems, WindowVacancy, WindowVisibility, WindowZOrder,
+    fullscreen::{FullscreenOccluded, FullscreenOutput, WindowFullscreen},
 };
 
 /// Attaches a UI root to the client-surface entity it presents.
@@ -332,6 +333,7 @@ fn sync_client_presentation_metrics(
     mut commands: Commands,
     clients: WindowClientResolver,
     mut roots: ClientMetricRoots,
+    fullscreen: Query<(), With<WindowFullscreen>>,
 ) {
     for (root, presentation, mut offset, mut anchor, shadow) in &mut roots {
         let Some(mapped) = clients
@@ -342,7 +344,10 @@ fn sync_client_presentation_metrics(
         };
         offset.0 = mapped.visual_offset;
         anchor.0 = -mapped.visual_offset;
-        match (mapped.has_visual_overflow(), shadow.is_some()) {
+        match (
+            mapped.has_visual_overflow() || fullscreen.contains(presentation.0),
+            shadow.is_some(),
+        ) {
             (true, true) => {
                 commands.entity(root).remove::<BoxShadow>();
             }
@@ -364,11 +369,20 @@ type WindowRootStateQuery<'w, 's> = Query<
         &'static WindowZOrder,
         &'static WindowVacancy,
         Option<&'static WindowOccupant>,
+        Has<FullscreenOccluded>,
     ),
 >;
 
+#[derive(SystemParam)]
+struct ProjectionVisibility<'w, 's> {
+    fullscreen: Query<'w, 's, &'static FullscreenOutput>,
+    parents: Query<'w, 's, &'static ClientToplevelParent>,
+    clients: WindowClientResolver<'w, 's>,
+}
+
 fn sync_window_roots(
     windows: WindowRootStateQuery,
+    visibility_policy: ProjectionVisibility,
     occupants: Query<Option<&MappedSurface>>,
     mut roots: Query<(
         &WindowProjection,
@@ -381,7 +395,7 @@ fn sync_window_roots(
 ) {
     let mut changed = false;
     for (projection, offset, mut z_index, mut node) in &mut roots {
-        let Ok((geometry, home, visibility, window_z, vacancy, occupant)) =
+        let Ok((geometry, home, visibility, window_z, vacancy, occupant, occluded)) =
             windows.get(projection.window())
         else {
             continue;
@@ -397,7 +411,18 @@ fn sync_window_roots(
                 .get(occupant.entity())
                 .is_ok_and(|mapped| mapped.is_some())
         });
-        let visible = *visibility == WindowVisibility::Visible && presentable;
+        let allowed = visibility_policy
+            .fullscreen
+            .get(projection.output())
+            .map_or(true, |claim| {
+                claim.allows_window(
+                    projection.window(),
+                    &visibility_policy.clients,
+                    &visibility_policy.parents,
+                )
+            });
+        let visible =
+            *visibility == WindowVisibility::Visible && presentable && !occluded && allowed;
         let display = if visible {
             Display::Flex
         } else {
@@ -436,11 +461,14 @@ fn present_popups(
         Without<PrimarySurfacePresentation>,
     >,
     clients: WindowClientResolver,
-    windows: Query<(
-        &PrimaryWindowPresentation,
-        &WindowVisibility,
-        Option<&WindowPresentationOverride>,
-    )>,
+    windows: Query<
+        (
+            &PrimaryWindowPresentation,
+            &WindowVisibility,
+            Option<&WindowPresentationOverride>,
+        ),
+        Without<FullscreenOccluded>,
+    >,
     anchors: Query<&WindowGeometryAnchor>,
     window_projections: Query<&WindowProjection>,
 ) {
@@ -499,11 +527,14 @@ fn sync_popup_presentations(
         &PrimarySurfacePresentation,
     )>,
     clients: WindowClientResolver,
-    windows: Query<(
-        &PrimaryWindowPresentation,
-        &WindowVisibility,
-        Option<&WindowPresentationOverride>,
-    )>,
+    windows: Query<
+        (
+            &PrimaryWindowPresentation,
+            &WindowVisibility,
+            Option<&WindowPresentationOverride>,
+        ),
+        Without<FullscreenOccluded>,
+    >,
     anchors: Query<&WindowGeometryAnchor>,
     mut roots: PopupRoots,
 ) {
@@ -559,7 +590,10 @@ fn reconcile_popup_projections(
     mut commands: Commands,
     popups: Query<(Entity, &ClientSurface, &ClientPopup, Option<&MappedSurface>)>,
     clients: WindowClientResolver,
-    windows: Query<(&WindowVisibility, Option<&WindowPresentationOverride>)>,
+    windows: Query<
+        (&WindowVisibility, Option<&WindowPresentationOverride>),
+        Without<FullscreenOccluded>,
+    >,
     window_roots: Query<(Entity, &WindowProjection, &WindowGeometryAnchor)>,
     mut roots: PopupProjectionRoots,
 ) {

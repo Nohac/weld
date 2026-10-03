@@ -820,6 +820,7 @@ fn reclaim_waits_for_the_placeholder_sized_client_commit() {
                     surface,
                     logical_size: UVec2 { x: 320, y: 240 },
                     resizing: false,
+                    fullscreen: false,
                 } if *surface == destination
             )
         }),
@@ -978,6 +979,7 @@ fn remote_admission_requests_its_size_without_a_preserved_source_window() {
             surface: destination,
             logical_size: UVec2::new(320, 240),
             resizing: false,
+            fullscreen: false,
         }]
     );
     let geometry = *app.world().get::<WindowGeometry>(window).expect("geometry");

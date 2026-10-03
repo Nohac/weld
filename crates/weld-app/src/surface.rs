@@ -107,6 +107,10 @@ pub struct ClientToplevelParent {
     pub surface: SurfaceId,
 }
 
+/// Latest unhandled client fullscreen intent, retained until window admission.
+#[derive(Component, Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PendingClientFullscreen(pub bool);
+
 /// Generic identity shared by every buffer-bearing client surface role.
 #[derive(Component, Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ClientSurface {
@@ -244,6 +248,7 @@ pub enum SurfaceAction {
         surface: SurfaceId,
         logical_size: bevy::math::UVec2,
         resizing: bool,
+        fullscreen: bool,
     },
     SetOutputs {
         surface: SurfaceId,
@@ -420,6 +425,7 @@ pub enum HostSurfaceEventKind {
     Role(weld_client::ClientSurfaceRole),
     Commit(SurfaceTreeSnapshot),
     Interaction(ToplevelInteractionRequestKind),
+    StateRequest(weld_client::ToplevelStateRequestKind),
     Destroyed,
 }
 
@@ -730,6 +736,15 @@ fn apply_host_surface_events(world: &mut World) {
             }
             HostSurfaceEventKind::Interaction(kind) => {
                 world.write_message(ToplevelInteractionRequest { surface, kind });
+            }
+            HostSurfaceEventKind::StateRequest(
+                weld_client::ToplevelStateRequestKind::Fullscreen(enabled),
+            ) => {
+                if let Some(entry) = registry.entries.get(&surface)
+                    && let Ok(mut entity) = world.get_entity_mut(entry.entity)
+                {
+                    entity.insert(PendingClientFullscreen(enabled));
+                }
             }
             HostSurfaceEventKind::Destroyed => {
                 destroy_surface(world, &mut registry, surface);

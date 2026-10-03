@@ -254,6 +254,13 @@ pub enum ToplevelInteractionRequestKind {
     End,
 }
 
+/// Client intent; the active window manager decides whether to grant it.
+#[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ToplevelStateRequestKind {
+    Fullscreen(bool),
+}
+
 #[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum WindowResizeEdge {
@@ -296,6 +303,7 @@ pub enum ClientSurfaceEventKind {
     Role(ClientSurfaceRole),
     Commit(ClientSurfaceCommit),
     Interaction(ToplevelInteractionRequestKind),
+    StateRequest(ToplevelStateRequestKind),
     Destroyed,
     Metadata(crate::ClientSurfaceMetadata),
 }
@@ -333,6 +341,7 @@ pub enum ClientSurfaceRequestKind {
     Configure {
         logical_size: Extent,
         resizing: bool,
+        fullscreen: bool,
     },
     SetOutputs {
         outputs: Vec<ClientOutputId>,

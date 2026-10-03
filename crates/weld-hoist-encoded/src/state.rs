@@ -364,6 +364,7 @@ impl EncodedSourceState {
             }
             ClientSurfaceEventKind::Role(_)
             | ClientSurfaceEventKind::Interaction(_)
+            | ClientSurfaceEventKind::StateRequest(_)
             | ClientSurfaceEventKind::Metadata(_) => {
                 if surface_busy {
                     self.queue_event(session, event)?;
@@ -2169,6 +2170,7 @@ fn commit_revision(event: &WireClientSurfaceEvent<EncodedBuffer>) -> Option<Clie
         WireClientSurfaceEventKind::Role(_)
         | WireClientSurfaceEventKind::Metadata(_)
         | WireClientSurfaceEventKind::Interaction(_)
+        | WireClientSurfaceEventKind::StateRequest(_)
         | WireClientSurfaceEventKind::Destroyed => None,
     }
 }
@@ -3478,6 +3480,16 @@ mod tests {
             })
             .expect("queue structural event");
         }
+        port.submit(SourcePortCommand::Surface {
+            session,
+            event: ClientSurfaceEvent {
+                surface,
+                kind: ClientSurfaceEventKind::StateRequest(
+                    weld_client::ToplevelStateRequestKind::Fullscreen(true),
+                ),
+            },
+        })
+        .expect("queue fullscreen intent");
 
         let (token, frame, _) = encoder.borrow().submitted[0].clone();
         complete(&encoder, token, frame, 1);
@@ -3486,7 +3498,7 @@ mod tests {
             .expect("empty input batch still progresses");
 
         let sent = &transport.borrow().sent;
-        assert_eq!(sent.len(), 4);
+        assert_eq!(sent.len(), 5);
         assert!(matches!(sent[0], SourceTransportPacket::Media(_)));
         assert!(matches!(
             &sent[1],
@@ -3516,6 +3528,18 @@ mod tests {
                 message: SourceMessage::Surface(WireClientSurfaceEvent {
                     kind: WireClientSurfaceEventKind::Interaction(
                         ToplevelInteractionRequestKind::End
+                    ),
+                    ..
+                }),
+                ..
+            })
+        ));
+        assert!(matches!(
+            &sent[4],
+            SourceTransportPacket::Control(SourceEnvelope {
+                message: SourceMessage::Surface(WireClientSurfaceEvent {
+                    kind: WireClientSurfaceEventKind::StateRequest(
+                        weld_client::ToplevelStateRequestKind::Fullscreen(true)
                     ),
                     ..
                 }),

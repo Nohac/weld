@@ -10,7 +10,7 @@ use bevy::{
         component::Component,
         entity::Entity,
         observer::On,
-        query::{QueryData, With},
+        query::{QueryData, With, Without},
         system::{Commands, Query, Res},
     },
     math::Vec2,
@@ -19,7 +19,7 @@ use weld_app::surface::ClientToplevelParent;
 use weld_window::{
     FloatingWindow, FocusedWindow, ManagedBy, ManagedWindow, WindowClientResolver, WindowCommand,
     WindowCommandKind, WindowGeometry, WindowIntent, WindowIntentKind, WindowZOrder,
-    workspace::WorkspaceMember,
+    fullscreen::WindowFullscreen, workspace::WorkspaceMember,
 };
 
 #[derive(Component, Clone, Copy)]
@@ -95,7 +95,7 @@ pub(crate) fn request(
     event: On<TileFloatingRequest>,
     mut editor: TreeEditor,
     focus: Res<FocusedWindow>,
-    mut windows: Query<FloatingTarget, With<ManagedWindow>>,
+    mut windows: Query<FloatingTarget, (With<ManagedWindow>, Without<WindowFullscreen>)>,
     rectangles: Query<&LayoutRect>,
 ) {
     let Some(window) = event.window.or(focus.entity()) else {

@@ -1253,8 +1253,9 @@ ECS policy to activate any concrete toplevel during that grab; clear-focus
 still waits. Popup and protocol move/resize grabs clear the exception and keep
 their normal grab authority. Ending a resize can fold its latched final size
 and the cleared `Resizing` state into one final configure. Destruction and close
-requests discard any latched size; future maximize or fullscreen policy must do
-the same before issuing its own configure. The window domain records the
+requests discard any latched size. Fullscreen size and state replace the same
+coalesced configure, clearing interactive-resize state together; future maximize
+policy must preserve this atomicity. The window domain records the
 surface commit revision at each client resize request. For left and top edges,
 `weld-float` retains the fixed edge in a private settlement anchor as the live
 interaction session ends. That anchor remains until the revision

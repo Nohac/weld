@@ -238,6 +238,7 @@ impl ConfigureSizing {
                 Some(ClientSurfaceRequestKind::Configure {
                     logical_size: size,
                     resizing: false,
+                    fullscreen: false,
                 })
             }
             Self::AwaitingSize(after, requested)
@@ -273,6 +274,7 @@ impl ConfigureSizing {
                 Some(ClientSurfaceRequestKind::Configure {
                     logical_size,
                     resizing: false,
+                    fullscreen: false,
                 })
             }
             Self::AwaitingSize(after, requested)

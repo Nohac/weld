@@ -82,25 +82,44 @@ struct FrameColorNodes(Vec<Entity>);
 #[derive(SystemParam)]
 struct FrameStyles<'w, 's> {
     settings: Res<'w, SsdSettings>,
-    windows: Query<
-        'w,
-        's,
-        (Has<FloatingWindow>, Option<&'static WindowBorderStyle>),
-        With<ManagedWindow>,
-    >,
+    windows: StyledWindows<'w, 's>,
 }
+
+type StyledWindows<'w, 's> = Query<
+    'w,
+    's,
+    (
+        Has<FloatingWindow>,
+        Option<&'static WindowBorderStyle>,
+        Has<weld_window::fullscreen::WindowFullscreen>,
+    ),
+    With<ManagedWindow>,
+>;
 
 impl FrameStyles<'_, '_> {
     fn default_border(&self, window: Entity) -> BorderStyle {
-        if self.windows.get(window).is_ok_and(|(floating, _)| floating) {
+        if self
+            .windows
+            .get(window)
+            .is_ok_and(|(floating, _, _)| floating)
+        {
             self.settings.floating
         } else {
             self.settings.tiled
         }
     }
     fn geometry(&self, window: Entity) -> FrameGeometry {
-        let (floating, style) = self.windows.get(window).unwrap_or((false, None));
-        FrameGeometry::new(&self.settings, floating, style.copied())
+        let (floating, style, fullscreen) =
+            self.windows.get(window).unwrap_or((false, None, false));
+        FrameGeometry::new(
+            &self.settings,
+            floating,
+            if fullscreen {
+                Some(WindowBorderStyle(BorderStyle::None))
+            } else {
+                style.copied()
+            },
+        )
     }
 }
 
@@ -821,9 +840,9 @@ mod tests {
     use weld_float::FloatPlugin;
     use weld_window::{
         FocusedWindow, OccupiesWindow, PresentationInsets, PresentationOffset,
-        PrimaryWindowPresentation, WindowGeometry, WindowGeometryAnchor, WindowInteractionKind,
-        WindowInteractionSession, WindowMoveHandle, WindowPlugin, WindowResizeHandle,
-        WindowVisibility, WindowZOrder,
+        PrimaryWindowPresentation, WindowCommand, WindowCommandKind, WindowGeometry,
+        WindowGeometryAnchor, WindowInteractionKind, WindowInteractionSession, WindowMoveHandle,
+        WindowPlugin, WindowResizeHandle, WindowVisibility, WindowZOrder,
     };
     use weld_window_ui::{PrimarySurfacePresentation, WindowUiPlugin};
 
@@ -856,6 +875,218 @@ mod tests {
             PrimaryOutput,
         ));
         app
+    }
+
+    #[test]
+    fn initial_client_fullscreen_waits_for_admission_and_preserves_dialog_access() {
+        use weld_app::surface::{ClientToplevelParent, PendingClientFullscreen};
+        use weld_window::fullscreen::{FullscreenOccluded, FullscreenPlugin, WindowFullscreen};
+        let mut app = test_app();
+        app.add_plugins(FullscreenPlugin);
+        let surface = SurfaceId::for_test(109);
+        enqueue_surface_event(app.world_mut(), role(surface, WindowDecoration::ServerSide));
+        enqueue_surface_event(
+            app.world_mut(),
+            HostSurfaceEvent {
+                surface,
+                kind: HostSurfaceEventKind::StateRequest(
+                    weld_client::ToplevelStateRequestKind::Fullscreen(true),
+                ),
+            },
+        );
+        app.update();
+        assert_eq!(
+            app.world_mut()
+                .query::<&PendingClientFullscreen>()
+                .iter(app.world())
+                .count(),
+            1
+        );
+        enqueue_surface_event(app.world_mut(), frame(surface, 320, 240));
+        app.update();
+        assert!(
+            take_surface_actions(app.world_mut())
+                .iter()
+                .all(|action| !matches!(
+                    action,
+                    SurfaceAction::Resize {
+                        fullscreen: false,
+                        ..
+                    }
+                )),
+            "admission must not revoke an initial fullscreen hint before policy applies"
+        );
+        app.update();
+        let owner = app
+            .world_mut()
+            .query::<&OccupiesWindow>()
+            .single(app.world())
+            .expect("occupancy")
+            .0;
+        assert!(app.world().get::<WindowFullscreen>(owner).is_some());
+        let dialog = SurfaceId::for_test(110);
+        let mut dialog_role = role(dialog, WindowDecoration::ServerSide);
+        if let HostSurfaceEventKind::Role(weld_client::ClientSurfaceRole::Toplevel(state)) =
+            &mut dialog_role.kind
+        {
+            state.parent = Some(surface);
+        }
+        enqueue_surface_event(app.world_mut(), dialog_role);
+        enqueue_surface_event(app.world_mut(), frame(dialog, 200, 100));
+        app.update();
+        let dialog_window = app
+            .world_mut()
+            .query_filtered::<&OccupiesWindow, With<ClientToplevelParent>>()
+            .single(app.world())
+            .expect("dialog")
+            .0;
+        assert!(
+            app.world()
+                .get::<FullscreenOccluded>(dialog_window)
+                .is_none()
+        );
+        app.world_mut().trigger(WindowCommand {
+            window: dialog_window,
+            kind: WindowCommandKind::Focus,
+        });
+        app.update();
+        assert_eq!(
+            app.world().resource::<FocusedWindow>().entity(),
+            Some(dialog_window)
+        );
+        app.world_mut().trigger(weld_window::WindowIntent {
+            window: owner,
+            kind: weld_window::WindowIntentKind::Activate,
+        });
+        assert_eq!(
+            app.world().get::<WindowZOrder>(owner),
+            Some(&WindowZOrder(0)),
+            "activation must not briefly raise the fullscreen owner over its dialog"
+        );
+        app.update();
+        assert_eq!(
+            app.world().resource::<FocusedWindow>().entity(),
+            Some(owner),
+            "clicking the fullscreen floating owner restores its focus"
+        );
+        enqueue_surface_event(
+            app.world_mut(),
+            role(SurfaceId::for_test(111), WindowDecoration::ServerSide),
+        );
+        enqueue_surface_event(app.world_mut(), frame(SurfaceId::for_test(111), 200, 100));
+        app.update();
+        assert_eq!(
+            app.world().resource::<FocusedWindow>().entity(),
+            Some(owner)
+        );
+        let hidden = app
+            .world_mut()
+            .query_filtered::<Entity, With<FullscreenOccluded>>()
+            .single(app.world())
+            .expect("unrelated hidden window");
+        let root = app
+            .world()
+            .get::<PrimaryWindowPresentation>(hidden)
+            .expect("hidden frame")
+            .entity();
+        assert_eq!(
+            app.world().get::<Node>(root).expect("frame node").display,
+            Display::None
+        );
+        enqueue_surface_event(
+            app.world_mut(),
+            HostSurfaceEvent {
+                surface: SurfaceId::for_test(111),
+                kind: HostSurfaceEventKind::StateRequest(
+                    weld_client::ToplevelStateRequestKind::Fullscreen(true),
+                ),
+            },
+        );
+        app.update();
+        app.update();
+        assert!(
+            app.world().get::<WindowFullscreen>(hidden).is_none(),
+            "background fullscreen request cannot steal output"
+        );
+        assert!(app.world().get::<WindowFullscreen>(owner).is_some());
+        enqueue_surface_event(app.world_mut(), unmapped(surface));
+        app.update();
+        assert!(
+            app.world().get::<FullscreenOccluded>(hidden).is_none(),
+            "unmapped fullscreen owner releases presentation"
+        );
+        enqueue_surface_event(app.world_mut(), frame(surface, 1000, 800));
+        app.update();
+        assert!(
+            app.world().get::<FullscreenOccluded>(hidden).is_some(),
+            "remapping restores the retained claim"
+        );
+    }
+
+    #[test]
+    fn fullscreen_configures_content_and_restores_floating_frame_without_size_drift() {
+        use weld_window::fullscreen::{
+            FullscreenAction, FullscreenMode, FullscreenPlugin, FullscreenRequest,
+        };
+        let mut app = test_app();
+        app.add_plugins(FullscreenPlugin);
+        let surface = SurfaceId::for_test(108);
+        enqueue_surface_event(app.world_mut(), role(surface, WindowDecoration::ServerSide));
+        enqueue_surface_event(app.world_mut(), frame(surface, 320, 240));
+        app.update();
+        let window = app
+            .world_mut()
+            .query::<&OccupiesWindow>()
+            .single(app.world())
+            .expect("occupancy")
+            .0;
+        let original = *app.world().get::<WindowGeometry>(window).expect("geometry");
+        for _ in 0..3 {
+            take_surface_actions(app.world_mut());
+            app.world_mut().trigger(FullscreenRequest {
+                window: Some(window),
+                action: FullscreenAction::Enable(FullscreenMode::Normal),
+            });
+            app.update();
+            let root = app
+                .world()
+                .get::<PrimaryWindowPresentation>(window)
+                .expect("frame")
+                .entity();
+            assert_eq!(
+                app.world().get::<PresentationInsets>(root),
+                Some(&PresentationInsets::default())
+            );
+            assert_eq!(
+                app.world()
+                    .get::<WindowGeometry>(window)
+                    .expect("fullscreen geometry")
+                    .size,
+                Vec2::new(1000.0, 800.0)
+            );
+            assert!(
+                take_surface_actions(app.world_mut()).contains(&SurfaceAction::Resize {
+                    surface,
+                    logical_size: UVec2::new(1000, 800),
+                    resizing: false,
+                    fullscreen: true,
+                })
+            );
+            app.world_mut().trigger(FullscreenRequest {
+                window: Some(window),
+                action: FullscreenAction::Disable,
+            });
+            app.update();
+            assert_eq!(app.world().get::<WindowGeometry>(window), Some(&original));
+            assert!(
+                take_surface_actions(app.world_mut()).contains(&SurfaceAction::Resize {
+                    surface,
+                    logical_size: UVec2::new(320, 240),
+                    resizing: false,
+                    fullscreen: false,
+                })
+            );
+        }
     }
 
     #[test]
@@ -902,7 +1133,8 @@ mod tests {
             take_surface_actions(app.world_mut()).contains(&SurfaceAction::Resize {
                 surface,
                 logical_size: (outer.size - Vec2::splat(16.0)).as_uvec2(),
-                resizing: false
+                resizing: false,
+                fullscreen: false,
             })
         );
         let dialog_surface = SurfaceId::for_test(103);
@@ -1558,6 +1790,7 @@ mod tests {
                 surface,
                 logical_size: UVec2::new(340, 240),
                 resizing: true,
+                fullscreen: false,
             })
         );
 
@@ -1568,6 +1801,7 @@ mod tests {
                 surface,
                 logical_size: UVec2::new(340, 240),
                 resizing: false,
+                fullscreen: false,
             })
         );
     }
@@ -1622,6 +1856,7 @@ mod tests {
                 surface,
                 logical_size: UVec2::new(320, 240),
                 resizing: true,
+                fullscreen: false,
             })
         );
 
@@ -1646,6 +1881,7 @@ mod tests {
                 surface,
                 logical_size: UVec2::new(300, 240),
                 resizing: true,
+                fullscreen: false,
             }]
         );
 
@@ -1982,6 +2218,7 @@ mod tests {
     #[test]
     fn rehoming_keeps_one_ssd_projection_per_output() {
         let mut app = test_app();
+        app.add_plugins(weld_window::fullscreen::FullscreenPlugin);
         let surface = SurfaceId::for_test(91);
         enqueue_surface_event(app.world_mut(), role(surface, WindowDecoration::ServerSide));
         enqueue_surface_event(app.world_mut(), frame(surface, 300, 60));
@@ -2052,6 +2289,42 @@ mod tests {
                 .get::<WindowProjection>(primary_root)
                 .map(|projection| projection.output()),
             Some(primary_output)
+        );
+        let fullscreen_surface = SurfaceId::for_test(92);
+        enqueue_surface_event(
+            app.world_mut(),
+            role(fullscreen_surface, WindowDecoration::ServerSide),
+        );
+        enqueue_surface_event(app.world_mut(), frame(fullscreen_surface, 320, 240));
+        app.update();
+        let owner = app
+            .world_mut()
+            .query::<(&ClientToplevel, &OccupiesWindow)>()
+            .iter(app.world())
+            .find(|(client, _)| client.surface == fullscreen_surface)
+            .expect("owner")
+            .1
+            .0;
+        app.world_mut()
+            .trigger(weld_window::fullscreen::FullscreenRequest {
+                window: Some(owner),
+                action: weld_window::fullscreen::FullscreenAction::Enable(
+                    weld_window::fullscreen::FullscreenMode::Normal,
+                ),
+            });
+        app.update();
+        assert_eq!(
+            app.world()
+                .get::<Node>(primary_root)
+                .expect("overlap projection")
+                .display,
+            Display::None
+        );
+        assert!(
+            app.world()
+                .get::<weld_window::fullscreen::FullscreenOccluded>(window)
+                .is_none(),
+            "foreign home output remains available"
         );
     }
 }

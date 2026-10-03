@@ -7,7 +7,7 @@ use crate::{
     ClientInputTarget, ClientSurfaceCommit, ClientSurfaceEvent, ClientSurfaceEventKind,
     ClientSurfaceId, ClientSurfaceRole, InputEventKind, SurfaceAlphaMode, SurfaceBufferChange,
     SurfaceBufferUpdate, SurfaceInputPlacement, SurfaceLayerId, SurfaceLayerPlacement,
-    SurfaceWindowGeometry, ToplevelInteractionRequestKind,
+    SurfaceWindowGeometry, ToplevelInteractionRequestKind, ToplevelStateRequestKind,
 };
 
 /// Addressed input suitable for transport to another compositor.
@@ -174,6 +174,7 @@ pub enum WireClientSurfaceEventKind<B> {
     Role(ClientSurfaceRole),
     Commit(WireClientSurfaceCommit<B>),
     Interaction(ToplevelInteractionRequestKind),
+    StateRequest(ToplevelStateRequestKind),
     Destroyed,
     Metadata(crate::ClientSurfaceMetadata),
 }
@@ -201,6 +202,9 @@ impl<B> WireClientSurfaceEvent<B> {
             ClientSurfaceEventKind::Interaction(interaction) => {
                 WireClientSurfaceEventKind::Interaction(interaction)
             }
+            ClientSurfaceEventKind::StateRequest(request) => {
+                WireClientSurfaceEventKind::StateRequest(request)
+            }
             ClientSurfaceEventKind::Destroyed => WireClientSurfaceEventKind::Destroyed,
         };
         Ok(Self {
@@ -223,6 +227,9 @@ impl<B> WireClientSurfaceEvent<B> {
             }
             WireClientSurfaceEventKind::Interaction(interaction) => {
                 ClientSurfaceEventKind::Interaction(interaction)
+            }
+            WireClientSurfaceEventKind::StateRequest(request) => {
+                ClientSurfaceEventKind::StateRequest(request)
             }
             WireClientSurfaceEventKind::Destroyed => ClientSurfaceEventKind::Destroyed,
         };

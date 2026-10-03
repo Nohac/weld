@@ -476,7 +476,7 @@ impl SourceRelayAdapter {
                     self.admit(source);
                 }
             }
-            ClientSurfaceEventKind::Interaction(_) => {
+            ClientSurfaceEventKind::Interaction(_) | ClientSurfaceEventKind::StateRequest(_) => {
                 if let Some(session) = self.mappings.get(&source).copied() {
                     self.send_surface(session, event.clone());
                 }
@@ -2711,6 +2711,35 @@ mod tests {
                 surface: None
             })),
         }));
+    }
+
+    #[test]
+    fn fullscreen_intent_and_atomic_configure_cross_the_active_session() {
+        let (mut relay, port, surface, session) = mapped_source();
+        relay.observe_event(&ClientSurfaceEvent {
+            surface,
+            kind: ClientSurfaceEventKind::StateRequest(
+                weld_client::ToplevelStateRequestKind::Fullscreen(true),
+            ),
+        });
+        assert!(
+            matches!(port.borrow().submitted.last(), Some(SourcePortCommand::Surface { event: ClientSurfaceEvent { surface: forwarded, kind: ClientSurfaceEventKind::StateRequest(weld_client::ToplevelStateRequestKind::Fullscreen(true)) }, .. }) if *forwarded == surface)
+        );
+        let request = ClientRequest::Surface(ClientSurfaceRequest {
+            surface,
+            kind: ClientSurfaceRequestKind::Configure {
+                logical_size: weld_client::Extent::new(1920, 1080),
+                resizing: false,
+                fullscreen: true,
+            },
+        });
+        assert!(relay.accept_destination(DestinationEnvelope {
+            session,
+            message: DestinationMessage::Request(request.clone())
+        }));
+        let mut effects = Vec::new();
+        relay.drain_effects(&mut effects);
+        assert!(effects.contains(&ClientAdapterEffect::Request(request)));
     }
 
     #[test]

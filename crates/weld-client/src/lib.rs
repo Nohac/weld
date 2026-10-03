@@ -57,8 +57,8 @@ pub use surface::{
     ClientSurfaceRole, ClientSurfaceState, DesktopLayer, LayerKeyboardInteractivity,
     LayerSurfaceState, PopupState, SurfaceAlphaMode, SurfaceBufferChange, SurfaceBufferUpdate,
     SurfaceContentView, SurfaceInputPlacement, SurfaceInputRect, SurfaceLayerPlacement,
-    SurfaceWindowGeometry, ToplevelInteractionRequestKind, ToplevelState, WindowDecoration,
-    WindowResizeEdge,
+    SurfaceWindowGeometry, ToplevelInteractionRequestKind, ToplevelState, ToplevelStateRequestKind,
+    WindowDecoration, WindowResizeEdge,
 };
 #[cfg(feature = "serde")]
 pub use wire::{

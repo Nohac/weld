@@ -422,6 +422,7 @@ mod tests {
                             kind: ClientSurfaceRequestKind::Configure {
                                 logical_size: Extent::new(800, 600),
                                 resizing: true,
+                                fullscreen: false,
                             },
                         },
                     )),
@@ -443,6 +444,7 @@ mod tests {
                     && request.kind == (ClientSurfaceRequestKind::Configure {
                         logical_size: Extent::new(800, 600),
                         resizing: true,
+                fullscreen: false,
                     })
         ));
     }

@@ -25,6 +25,129 @@ use weld_window::{
 };
 
 use super::*;
+use weld_app::layer_shell::DesktopLayerVisibility;
+use weld_window::fullscreen::{
+    FullscreenAction, FullscreenMode, FullscreenOccluded, FullscreenPlugin, FullscreenRequest,
+    WindowFullscreen,
+};
+
+#[test]
+fn fullscreen_retains_tree_and_restores_latest_tiled_layout() {
+    let mut app = app();
+    app.add_plugins(FullscreenPlugin);
+    let first = window(&mut app, 1);
+    let second = window(&mut app, 2);
+    let parent = app
+        .world()
+        .get::<TileParent>(second)
+        .expect("tile")
+        .entity();
+    let output = app
+        .world()
+        .get::<weld_window::WindowOutput>(second)
+        .expect("output")
+        .0;
+    app.world_mut().trigger(FullscreenRequest {
+        window: Some(second),
+        action: FullscreenAction::Enable(FullscreenMode::Normal),
+    });
+    app.update();
+    assert_eq!(
+        geometry(&app, second),
+        WindowGeometry {
+            position: Vec2::ZERO,
+            size: Vec2::new(800.0, 600.0)
+        }
+    );
+    assert_eq!(
+        app.world()
+            .get::<TileParent>(second)
+            .expect("retained tile")
+            .entity(),
+        parent
+    );
+    assert!(app.world().get::<FullscreenOccluded>(first).is_some());
+    assert_eq!(
+        app.world().get::<DesktopLayerVisibility>(output),
+        Some(&DesktopLayerVisibility::OverlayOnly)
+    );
+    app.world_mut().trigger(TileFloatingRequest {
+        window: Some(second),
+        enabled: Some(true),
+    });
+    app.update();
+    assert!(
+        app.world()
+            .get::<weld_window::FloatingWindow>(second)
+            .is_none(),
+        "exit fullscreen before switching layout mode"
+    );
+    app.world_mut()
+        .entity_mut(output)
+        .insert(OutputGeometry::from_physical(UVec2::new(1000, 700), 1.0));
+    app.update();
+    assert_eq!(geometry(&app, second).size, Vec2::new(1000.0, 700.0));
+    app.world_mut().trigger(FullscreenRequest {
+        window: Some(second),
+        action: FullscreenAction::Disable,
+    });
+    app.update();
+    assert_eq!(
+        geometry(&app, second),
+        WindowGeometry {
+            position: Vec2::new(500.0, 0.0),
+            size: Vec2::new(500.0, 700.0)
+        }
+    );
+    assert!(app.world().get::<FullscreenOccluded>(first).is_none());
+    assert!(app.world().get::<DesktopLayerVisibility>(output).is_none());
+}
+
+#[test]
+fn fullscreen_follows_workspace_visibility_and_releases_claim_on_destruction() {
+    let mut app = app();
+    app.add_plugins(FullscreenPlugin);
+    let first = window(&mut app, 1);
+    let second = window(&mut app, 2);
+    let workspace = app
+        .world()
+        .get::<weld_window::workspace::WorkspaceMember>(second)
+        .expect("workspace")
+        .0;
+    let output = app
+        .world()
+        .get::<weld_window::WindowOutput>(second)
+        .expect("output")
+        .0;
+    app.world_mut().trigger(FullscreenRequest {
+        window: Some(second),
+        action: FullscreenAction::Enable(FullscreenMode::Exclusive),
+    });
+    app.update();
+    assert_eq!(
+        app.world().get::<DesktopLayerVisibility>(output),
+        Some(&DesktopLayerVisibility::Hidden)
+    );
+    app.world_mut()
+        .trigger(weld_window::workspace::WorkspaceRequest::SetVisible {
+            workspace,
+            visible: false,
+        });
+    app.update();
+    assert!(app.world().get::<DesktopLayerVisibility>(output).is_none());
+    assert!(app.world().get::<WindowFullscreen>(second).is_some());
+    app.world_mut()
+        .trigger(weld_window::workspace::WorkspaceRequest::SetVisible {
+            workspace,
+            visible: true,
+        });
+    app.update();
+    assert!(app.world().get::<FullscreenOccluded>(first).is_some());
+    app.world_mut().entity_mut(second).despawn();
+    app.update();
+    assert!(app.world().get::<DesktopLayerVisibility>(output).is_none());
+    assert!(app.world().get::<FullscreenOccluded>(first).is_none());
+}
 
 #[test]
 fn floating_toggle_preserves_identity_membership_and_restores_tile_slot() {
@@ -304,6 +427,7 @@ fn occupant_detach_and_reclaim_preserve_layout_and_use_shared_resize_effects() {
             surface,
             logical_size: UVec2::new(796, 578),
             resizing: false,
+            fullscreen: false,
         })
     );
     let parent = *app.world().get::<TileParent>(first).expect("parent");
@@ -351,6 +475,7 @@ fn occupant_detach_and_reclaim_preserve_layout_and_use_shared_resize_effects() {
             surface,
             logical_size: UVec2::new(396, 578),
             resizing: false,
+            fullscreen: false,
         })
     );
 }

@@ -411,6 +411,7 @@ pub(super) struct MaintainParams<'w, 's> {
     sessions: Query<'w, 's, (Entity, &'static mut HoistSession)>,
     source_clients: Query<'w, 's, Option<&'static MappedSurface>, With<ClientToplevel>>,
     windows: Query<'w, 's, (&'static WindowGeometry, Option<&'static WindowOutput>)>,
+    fullscreen: Query<'w, 's, (), With<weld_window::fullscreen::WindowFullscreen>>,
     receivers: Query<
         'w,
         's,
@@ -550,15 +551,20 @@ pub(super) fn maintain_sessions(mut params: MaintainParams) {
         let Ok((source_geometry, source_output)) = params.windows.get(source) else {
             continue;
         };
-        let target_size = rounded_client_size(
-            (source_geometry.size - session.placeholder_metrics.insets.extent()).max(Vec2::ONE),
-        );
+        let fullscreen = params.fullscreen.contains(source);
+        let insets = if fullscreen {
+            Vec2::ZERO
+        } else {
+            session.placeholder_metrics.insets.extent()
+        };
+        let target_size = rounded_client_size((source_geometry.size - insets).max(Vec2::ONE));
         if !endpoint.has_local_receiver() {
             let after_revision = params.revisions.revision(session.surface);
             params.actions.push(SurfaceAction::Resize {
                 surface: session.surface,
                 logical_size: target_size,
                 resizing: false,
+                fullscreen,
             });
             session.state = SessionState::Reclaiming {
                 scope: ReclaimScope::Family,

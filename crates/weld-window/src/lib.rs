@@ -6,6 +6,7 @@
 
 const PROFILE_TARGET: &str = "weld_profile";
 
+pub mod fullscreen;
 pub mod workspace;
 pub mod workspace_protocol;
 
@@ -19,7 +20,7 @@ use bevy::{
         event::{EntityEvent, Event},
         hierarchy::ChildOf,
         observer::On,
-        query::{With, Without},
+        query::{Has, With, Without},
         resource::Resource,
         schedule::{ApplyDeferred, IntoScheduleConfigs, SystemSet},
         system::{Commands, Query, Res, ResMut, SystemParam},
@@ -921,6 +922,7 @@ pub struct ClientResizeState {
     surface: Option<SurfaceId>,
     requested_size: UVec2,
     requested_resizing: bool,
+    requested_fullscreen: bool,
     pending: Option<PendingClientResize>,
 }
 
@@ -934,6 +936,7 @@ struct PendingClientResize {
 struct TerminalClientResize {
     surface: SurfaceId,
     logical_size: UVec2,
+    fullscreen: bool,
 }
 
 impl Default for ClientResizeState {
@@ -942,6 +945,7 @@ impl Default for ClientResizeState {
             surface: None,
             requested_size: UVec2::ONE,
             requested_resizing: false,
+            requested_fullscreen: false,
             pending: None,
         }
     }
@@ -970,6 +974,7 @@ impl ClientResizeState {
             self.surface = Some(surface);
             self.requested_size = UVec2::ZERO;
             self.requested_resizing = false;
+            self.requested_fullscreen = false;
             self.pending = None;
             return terminal;
         }
@@ -987,10 +992,12 @@ impl ClientResizeState {
         let terminal = self.requested_resizing.then_some(TerminalClientResize {
             surface,
             logical_size: self.requested_size,
+            fullscreen: self.requested_fullscreen,
         });
         self.surface = None;
         self.requested_size = UVec2::ZERO;
         self.requested_resizing = false;
+        self.requested_fullscreen = false;
         self.pending = None;
         terminal
     }
@@ -1000,11 +1007,13 @@ impl ClientResizeState {
         surface: SurfaceId,
         requested_size: UVec2,
         resizing: bool,
+        fullscreen: bool,
         after_revision: u64,
     ) {
         self.surface = Some(surface);
         self.requested_size = requested_size;
         self.requested_resizing = resizing;
+        self.requested_fullscreen = fullscreen;
         self.pending = Some(PendingClientResize {
             surface,
             after_revision,
@@ -1061,16 +1070,21 @@ fn admit_mapped_toplevels(
     }
 }
 
-fn reconcile_presentation_insets(
-    mut windows: Query<(
-        &mut WindowGeometry,
-        &mut AppliedPresentationInsets,
-        Option<&PrimaryWindowPresentation>,
-        Option<&WindowPresentationOverride>,
-    )>,
-    roots: Query<&PresentationInsets>,
-) {
-    for (mut geometry, mut applied, presentation, presentation_override) in &mut windows {
+type InsetWindows<'w, 's> = Query<
+    'w,
+    's,
+    (
+        &'static mut WindowGeometry,
+        &'static mut AppliedPresentationInsets,
+        Option<&'static PrimaryWindowPresentation>,
+        Option<&'static WindowPresentationOverride>,
+        Has<fullscreen::WindowFullscreen>,
+    ),
+>;
+
+fn reconcile_presentation_insets(mut windows: InsetWindows, roots: Query<&PresentationInsets>) {
+    for (mut geometry, mut applied, presentation, presentation_override, fullscreen) in &mut windows
+    {
         if presentation_override.is_some() {
             continue;
         }
@@ -1081,7 +1095,9 @@ fn reconcile_presentation_insets(
         if applied.0 == current {
             continue;
         }
-        geometry.size = (geometry.size + current.extent() - applied.0.extent()).max(Vec2::ONE);
+        if !fullscreen {
+            geometry.size = (geometry.size + current.extent() - applied.0.extent()).max(Vec2::ONE);
+        }
         applied.0 = current;
     }
 }
@@ -1095,6 +1111,8 @@ type ResizeWindows<'w, 's> = Query<
         &'static mut ClientResizeState,
         Option<&'static PrimaryWindowPresentation>,
         Option<&'static WindowInteractionSession>,
+        Has<fullscreen::WindowFullscreen>,
+        Has<fullscreen::PendingFullscreenConfigure>,
     ),
 >;
 
@@ -1105,13 +1123,16 @@ fn reconcile_window_sizes(
     revisions: Res<SurfaceCommitRevisions>,
     mut actions: ResMut<SurfaceActionQueue>,
 ) {
-    for (window, geometry, mut resize, presentation, interaction) in &mut windows {
+    for (window, geometry, mut resize, presentation, interaction, fullscreen, pending_fullscreen) in
+        &mut windows
+    {
         let Some(client) = clients.mapped_client(window) else {
             if let Some(terminal) = resize.clear_client() {
                 actions.push(SurfaceAction::Resize {
                     surface: terminal.surface,
                     logical_size: terminal.logical_size,
                     resizing: false,
+                    fullscreen: terminal.fullscreen,
                 });
             }
             continue;
@@ -1123,27 +1144,44 @@ fn reconcile_window_sizes(
                 surface: terminal.surface,
                 logical_size: terminal.logical_size,
                 resizing: false,
+                fullscreen: terminal.fullscreen,
             });
+        }
+        if pending_fullscreen {
+            continue;
         }
         let insets = presentation
             .and_then(|presentation| roots.get(presentation.entity()).ok())
             .copied()
             .unwrap_or_default();
-        let requested = rounded_client_size((geometry.size - insets.extent()).max(Vec2::ONE));
-        let resizing = matches!(
-            interaction,
-            Some(WindowInteractionSession {
-                kind: WindowInteractionKind::Resize(_),
-            })
+        let requested = rounded_client_size(
+            (geometry.size
+                - if fullscreen {
+                    Vec2::ZERO
+                } else {
+                    insets.extent()
+                })
+            .max(Vec2::ONE),
         );
-        if requested == resize.requested_size && resizing == resize.requested_resizing {
+        let resizing = !fullscreen
+            && matches!(
+                interaction,
+                Some(WindowInteractionSession {
+                    kind: WindowInteractionKind::Resize(_),
+                })
+            );
+        if requested == resize.requested_size
+            && resizing == resize.requested_resizing
+            && fullscreen == resize.requested_fullscreen
+        {
             continue;
         }
-        resize.request(surface, requested, resizing, revision);
+        resize.request(surface, requested, resizing, fullscreen, revision);
         actions.push(SurfaceAction::Resize {
             surface,
             logical_size: requested,
             resizing,
+            fullscreen,
         });
     }
 }
@@ -1554,7 +1592,7 @@ mod tests {
     fn resize_settles_on_a_new_commit_even_when_the_client_uses_another_size() {
         let surface = SurfaceId::for_test(71);
         let mut resize = ClientResizeState::default();
-        resize.request(surface, UVec2::new(503, 409), true, 12);
+        resize.request(surface, UVec2::new(503, 409), true, false, 12);
 
         assert_eq!(resize.observe_commit(surface, 13), None);
 
@@ -1566,7 +1604,7 @@ mod tests {
     fn resize_remains_pending_until_the_surface_revision_advances() {
         let surface = SurfaceId::for_test(72);
         let mut resize = ClientResizeState::default();
-        resize.request(surface, UVec2::new(503, 409), true, 12);
+        resize.request(surface, UVec2::new(503, 409), true, false, 12);
 
         assert_eq!(resize.observe_commit(surface, 12), None);
 
@@ -1597,6 +1635,7 @@ mod tests {
                 surface,
                 logical_size: UVec2::new(320, 240),
                 resizing: true,
+                fullscreen: false,
             })
         );
 
@@ -1607,6 +1646,7 @@ mod tests {
                 surface,
                 logical_size: UVec2::new(320, 240),
                 resizing: false,
+                fullscreen: false,
             })
         );
     }
@@ -1662,6 +1702,7 @@ mod tests {
                     surface,
                     logical_size: UVec2::new(320, 240),
                     resizing: false,
+                    fullscreen: false,
                 }],
                 "admission must actually request its selected size for {provenance:?}"
             );
@@ -1839,6 +1880,7 @@ mod tests {
                 surface: SurfaceId::for_test(9),
                 logical_size: UVec2::new(330, 240),
                 resizing: false,
+                fullscreen: false,
             })
         );
     }

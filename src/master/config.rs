@@ -11,6 +11,7 @@ pub(super) type Configuration = i3::Configuration<DistributionAction>;
 pub(super) enum DistributionAction {
     Hoist,
     OutputTopology,
+    ExclusiveFullscreen,
     Shell(ShellCommand),
 }
 
@@ -21,6 +22,7 @@ pub(super) fn parse(name: &str, source: &str) -> Result<Configuration> {
 fn extension(words: &[&str]) -> Result<DistributionAction> {
     Ok(match words {
         ["weld", "hoist"] => DistributionAction::Hoist,
+        ["weld", "fullscreen", "exclusive"] => DistributionAction::ExclusiveFullscreen,
         ["weld", "output-debug"] => DistributionAction::OutputTopology,
         ["weld", "scale", "increase"] => {
             DistributionAction::Shell(ShellCommand::IncreaseOutputScale)

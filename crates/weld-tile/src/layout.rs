@@ -7,14 +7,14 @@ use bevy::{
         event::Event,
         message::MessageWriter,
         observer::On,
-        query::{Changed, With},
+        query::{Changed, With, Without},
         resource::Resource,
         system::{Commands, Query, Res, ResMut, SystemParam},
     },
     math::Vec2,
     window::RequestRedraw,
 };
-use weld_window::WindowGeometry;
+use weld_window::{WindowGeometry, fullscreen::WindowFullscreen};
 
 use crate::{SplitAxis, TileContainer, TileParent, TileSettings, TileWorkspace};
 
@@ -27,7 +27,11 @@ pub(crate) struct LayoutDirty(pub bool);
 #[derive(Event)]
 pub(crate) struct LayoutRequested;
 
-type ChangedTileGeometry = (With<TileParent>, Changed<WindowGeometry>);
+type ChangedTileGeometry = (
+    With<TileParent>,
+    Without<WindowFullscreen>,
+    Changed<WindowGeometry>,
+);
 
 pub(crate) fn request_layout(
     changed: Query<(&WindowGeometry, &LayoutRect), ChangedTileGeometry>,
@@ -52,7 +56,8 @@ pub(crate) struct Layout<'w, 's> {
     dirty: ResMut<'w, LayoutDirty>,
     containers: Query<'w, 's, &'static TileContainer>,
     rectangles: Query<'w, 's, &'static mut LayoutRect>,
-    windows: Query<'w, 's, &'static mut WindowGeometry, With<TileParent>>,
+    windows:
+        Query<'w, 's, &'static mut WindowGeometry, (With<TileParent>, Without<WindowFullscreen>)>,
     redraw: MessageWriter<'w, RequestRedraw>,
 }
 
@@ -86,7 +91,7 @@ fn arrange(
     gap: f32,
     containers: &Query<&TileContainer>,
     rectangles: &mut Query<&mut LayoutRect>,
-    windows: &mut Query<&mut WindowGeometry, With<TileParent>>,
+    windows: &mut Query<&mut WindowGeometry, (With<TileParent>, Without<WindowFullscreen>)>,
 ) -> bool {
     let mut changed = false;
     if let Ok(mut old) = rectangles.get_mut(entity)

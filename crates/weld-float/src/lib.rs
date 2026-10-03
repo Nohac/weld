@@ -46,7 +46,7 @@ use weld_window::{
     WindowCommandKind, WindowGeometry, WindowIntent, WindowIntentKind, WindowInteractionKind,
     WindowInteractionSession, WindowMoveHandle, WindowOccupant, WindowOutput,
     WindowProjectionLookup, WindowResizeHandle, WindowSystems, WindowVacancy, WindowVisibility,
-    WindowZOrder, rounded_client_size,
+    WindowZOrder, fullscreen::WindowFullscreen, rounded_client_size,
 };
 
 const FLOAT_Z_INDEX_MIN: i32 = WINDOW_Z_INDEX_MIN + 1;
@@ -400,6 +400,8 @@ fn adopt_orphaned_windows(
     }
 }
 
+type InteractiveFloating = (With<FloatingWindow>, Without<WindowFullscreen>);
+
 type FloatWindowQuery<'w, 's> = Query<
     'w,
     's,
@@ -417,6 +419,7 @@ struct HandleWindowIntentParams<'w, 's> {
     commands: Commands<'w, 's>,
     stack: ResMut<'w, WindowStack>,
     windows: FloatWindowQuery<'w, 's>,
+    fullscreen: Query<'w, 's, (), With<WindowFullscreen>>,
     insets: Query<'w, 's, &'static PresentationInsets>,
     presentations: Query<'w, 's, &'static PrimaryWindowPresentation>,
     clients: WindowClientResolver<'w, 's>,
@@ -430,6 +433,7 @@ fn handle_window_intent(intent: On<WindowIntent>, params: HandleWindowIntentPara
         mut commands,
         mut stack,
         mut windows,
+        fullscreen,
         insets,
         presentations,
         clients,
@@ -441,6 +445,16 @@ fn handle_window_intent(intent: On<WindowIntent>, params: HandleWindowIntentPara
     if matches!(intent.kind, WindowIntentKind::InteractionEnded(_)) {
         commands.entity(window).remove::<FloatInteractionControl>();
     }
+    if fullscreen.contains(window)
+        && matches!(
+            intent.kind,
+            WindowIntentKind::MoveBy(_)
+                | WindowIntentKind::ResizeBy(_)
+                | WindowIntentKind::InteractionEnded(_)
+        )
+    {
+        return;
+    }
     if intent.kind == WindowIntentKind::Activate {
         let Ok((_, _, owner, _)) = windows.get(window) else {
             return;
@@ -448,7 +462,7 @@ fn handle_window_intent(intent: On<WindowIntent>, params: HandleWindowIntentPara
         let manager = owner.0;
         let current = windows.get(window).ok().map(|(_, z, _, _)| z.0);
         let top = top_window_z(manager, &mut windows);
-        if current != top {
+        if current != top && !fullscreen.contains(window) {
             let z_index = next_window_z(&mut stack, manager, &mut windows);
             if let Ok((_, mut z_order, _, _)) = windows.get_mut(window) {
                 z_order.0 = z_index;
@@ -528,6 +542,7 @@ fn handle_window_intent(intent: On<WindowIntent>, params: HandleWindowIntentPara
 #[derive(SystemParam)]
 struct FloatPointerTargets<'w, 's> {
     projections: WindowProjectionLookup<'w, 's>,
+    fullscreen: Query<'w, 's, (), With<WindowFullscreen>>,
     windows: Query<
         'w,
         's,
@@ -545,7 +560,7 @@ impl FloatPointerTargets<'_, '_> {
         self.windows
             .get(window)
             .ok()
-            .filter(|(_, interaction)| interaction.is_none())
+            .filter(|(_, interaction)| interaction.is_none() && !self.fullscreen.contains(window))
             .map(|_| window)
     }
 
@@ -716,7 +731,7 @@ type ProtocolInteractionWindows<'w, 's> = Query<
         Option<&'static WindowInteractionSession>,
         Option<&'static FloatInteractionControl>,
     ),
-    With<FloatingWindow>,
+    InteractiveFloating,
 >;
 
 #[derive(SystemParam)]
@@ -735,7 +750,7 @@ struct PointerShortcutInteractionParams<'w, 's> {
             &'static WindowOutput,
             Option<&'static WindowInteractionSession>,
         ),
-        With<FloatingWindow>,
+        InteractiveFloating,
     >,
     output_positions: Query<'w, 's, &'static OutputPosition, With<WeldOutput>>,
     commands: Commands<'w, 's>,
@@ -990,7 +1005,7 @@ type AnchoredResizeQuery<'w, 's> = Query<
         &'static ResizeAnchor,
         Option<&'static PrimaryWindowPresentation>,
     ),
-    With<FloatingWindow>,
+    InteractiveFloating,
 >;
 
 fn reconcile_anchored_resize(

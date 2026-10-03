@@ -24,6 +24,25 @@ use weld_client::{DesktopLayer, LayerKeyboardInteractivity, LayerSurfaceState};
 #[derive(Component, Clone, Copy, Debug, PartialEq)]
 pub struct ClientLayerSurface(pub LayerSurfaceState);
 
+/// Output-local desktop presentation selected by the active shell policy.
+#[derive(Component, Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum DesktopLayerVisibility {
+    #[default]
+    All,
+    OverlayOnly,
+    Hidden,
+}
+
+impl DesktopLayerVisibility {
+    fn includes(self, layer: DesktopLayer) -> bool {
+        match self {
+            Self::All => true,
+            Self::OverlayOnly => layer == DesktopLayer::Overlay,
+            Self::Hidden => false,
+        }
+    }
+}
+
 #[derive(Component)]
 struct LayerPresentation(SurfaceId);
 
@@ -72,17 +91,25 @@ fn present_layers(
     mut commands: Commands,
     layers: Query<(&ClientSurface, &ClientLayerSurface, &MappedSurface)>,
     popups: Query<(&ClientSurface, &ClientPopup, &MappedSurface)>,
-    outputs: Query<(&WeldOutput, &OutputCompositionCamera)>,
+    outputs: Query<(
+        &WeldOutput,
+        &OutputCompositionCamera,
+        Option<&DesktopLayerVisibility>,
+    )>,
     mut presentations: ResMut<LayerPresentations>,
     mut focus: ResMut<LayerFocus>,
 ) {
     let mut active = HashSet::new();
     let mut exclusive = None;
     for (surface, layer, mapped) in &layers {
-        let Some(camera) = outputs.iter().find_map(|(output, camera)| {
-            (output.id.raw() == layer.0.output.raw())
-                .then(|| camera.entity())
-                .flatten()
+        let Some(camera) = outputs.iter().find_map(|(output, camera, visibility)| {
+            (output.id.raw() == layer.0.output.raw()
+                && visibility
+                    .copied()
+                    .unwrap_or_default()
+                    .includes(layer.0.layer))
+            .then(|| camera.entity())
+            .flatten()
         }) else {
             continue;
         };
@@ -129,9 +156,10 @@ fn present_layers(
     }
     focus.exclusive = exclusive.map(|(_, surface)| surface);
     if focus.on_demand.is_some_and(|selected| {
-        !layers.iter().any(|(surface, role, _)| {
-            surface.surface == selected && role.0.keyboard != LayerKeyboardInteractivity::None
-        })
+        !active.contains(&selected)
+            || !layers.iter().any(|(surface, role, _)| {
+                surface.surface == selected && role.0.keyboard != LayerKeyboardInteractivity::None
+            })
     }) {
         focus.on_demand = None;
     }
@@ -330,6 +358,37 @@ mod tests {
             app.world().resource::<LayerPresentations>().0[&popup].0,
             child
         );
+        app.world_mut()
+            .entity_mut(output)
+            .insert(DesktopLayerVisibility::OverlayOnly);
+        app.update();
+        assert!(app.world().resource::<LayerPresentations>().0.is_empty());
+        app.world_mut()
+            .get_mut::<ClientLayerSurface>(layer)
+            .expect("layer")
+            .0
+            .layer = DesktopLayer::Overlay;
+        app.world_mut()
+            .get_mut::<ClientLayerSurface>(layer)
+            .expect("layer")
+            .0
+            .keyboard = LayerKeyboardInteractivity::Exclusive;
+        app.update();
+        assert_eq!(app.world().resource::<LayerPresentations>().0.len(), 2);
+        assert_eq!(app.world().resource::<LayerFocus>().exclusive, Some(owner));
+        app.world_mut()
+            .entity_mut(output)
+            .insert(DesktopLayerVisibility::Hidden);
+        app.update();
+        assert!(app.world().resource::<LayerPresentations>().0.is_empty());
+        assert!(app.world().resource::<LayerFocus>().exclusive.is_none());
+        app.world_mut()
+            .entity_mut(output)
+            .remove::<DesktopLayerVisibility>();
+        app.update();
+        let roots = &app.world().resource::<LayerPresentations>().0;
+        let parent = roots[&owner].0;
+        let child = roots[&popup].0;
         app.world_mut().entity_mut(layer).remove::<MappedSurface>();
         app.update();
         assert!(app.world().get_entity(parent).is_err());

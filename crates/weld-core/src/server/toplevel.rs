@@ -60,6 +60,7 @@ pub(super) struct ToplevelState {
     pub(super) outputs: SurfaceOutputAssignment,
     pub(super) preferred_scale_120: Option<u32>,
     resize_sources: ToplevelResizeSources,
+    fullscreen: Option<bool>,
     // Consumed on first configure, not reapplied when this toplevel remaps.
     initial_size: Option<Extent>,
 }
@@ -78,6 +79,7 @@ impl ToplevelState {
             outputs: SurfaceOutputAssignment::primary(output),
             preferred_scale_120: None,
             resize_sources: ToplevelResizeSources::default(),
+            fullscreen: None,
             initial_size: None,
         }
     }
@@ -232,11 +234,34 @@ impl ServerState {
         surface: SurfaceId,
         requested: Extent,
         resizing: bool,
+        fullscreen: bool,
     ) {
+        let fullscreen_changed = self.set_toplevel_fullscreen(surface, fullscreen);
         let size_changed = self.stage_toplevel_size(surface, requested);
-        let state_changed =
-            self.set_toplevel_resize_source(surface, ResizeSource::PolicyRequest, resizing);
-        self.send_pending_toplevel_configure(surface, size_changed || state_changed);
+        let state_changed = self.set_toplevel_resize_source(
+            surface,
+            ResizeSource::PolicyRequest,
+            resizing && !fullscreen,
+        );
+        self.send_pending_toplevel_configure(
+            surface,
+            size_changed || state_changed || fullscreen_changed,
+        );
+    }
+
+    fn set_toplevel_fullscreen(&mut self, surface: SurfaceId, fullscreen: bool) -> bool {
+        if fullscreen {
+            self.set_toplevel_resize_source(surface, ResizeSource::ProtocolGrab, false);
+        }
+        let Some(toplevel) = self.toplevels.get_mut(surface) else {
+            return false;
+        };
+        if toplevel.fullscreen == Some(fullscreen) {
+            return false;
+        }
+        toplevel.fullscreen = Some(fullscreen);
+        toplevel.surface.set_fullscreen(fullscreen);
+        true
     }
 
     pub(super) fn begin_protocol_resize(&mut self, surface: SurfaceId) {
@@ -249,16 +274,22 @@ impl ServerState {
         surface: SurfaceId,
         pending: Option<PendingResize>,
     ) {
+        let fullscreen_changed = pending
+            .is_some_and(|request| self.set_toplevel_fullscreen(surface, request.fullscreen));
         let size_changed =
             pending.is_some_and(|request| self.stage_toplevel_size(surface, request.logical_size));
         let policy_changed = pending.is_some_and(|request| {
-            self.set_toplevel_resize_source(surface, ResizeSource::PolicyRequest, request.resizing)
+            self.set_toplevel_resize_source(
+                surface,
+                ResizeSource::PolicyRequest,
+                request.resizing && !request.fullscreen,
+            )
         });
         let protocol_changed =
             self.set_toplevel_resize_source(surface, ResizeSource::ProtocolGrab, false);
         self.send_pending_toplevel_configure(
             surface,
-            size_changed || policy_changed || protocol_changed,
+            size_changed || policy_changed || protocol_changed || fullscreen_changed,
         );
     }
 
@@ -293,7 +324,9 @@ impl ServerState {
             warn!(?surface, "ignored a resize request for an unknown surface");
             return false;
         };
-        toplevel.surface.stage_size(requested)
+        toplevel
+            .surface
+            .stage_size(requested, toplevel.fullscreen.unwrap_or(false))
     }
 
     fn record_server_side_decoration(&mut self, surface: &ToplevelSurface) {
@@ -874,6 +907,7 @@ impl XdgShellHandler for ServerState {
             outputs: SurfaceOutputAssignment::primary(self.primary_output),
             preferred_scale_120: None,
             resize_sources: ToplevelResizeSources::default(),
+            fullscreen: None,
             initial_size: self.initial_toplevel_size,
         };
         if !self.toplevels.insert(id, state) {
@@ -928,6 +962,20 @@ impl XdgShellHandler for ServerState {
         self.begin_pointer_move(surface, seat, serial);
     }
 
+    fn fullscreen_request(&mut self, surface: ToplevelSurface, _output: Option<WlOutput>) {
+        self.publish_fullscreen_request(surface.wl_surface(), true);
+        if surface.is_initial_configure_sent() {
+            surface.send_configure();
+        }
+    }
+
+    fn unfullscreen_request(&mut self, surface: ToplevelSurface) {
+        self.publish_fullscreen_request(surface.wl_surface(), false);
+        if surface.is_initial_configure_sent() {
+            surface.send_configure();
+        }
+    }
+
     fn resize_request(
         &mut self,
         surface: ToplevelSurface,
@@ -979,6 +1027,20 @@ impl ServerState {
             surface: id,
             kind: PendingSurfaceEventKind::Destroyed,
         });
+    }
+}
+
+impl ServerState {
+    pub(super) fn publish_fullscreen_request(&mut self, surface: &WlSurface, enabled: bool) {
+        if let Some(surface) = self.toplevels.id_for_surface(surface) {
+            self.pending_surface_events.push_back(PendingSurfaceEvent {
+                surface,
+                kind: PendingSurfaceEventKind::WindowStateRequest(
+                    weld_client::ToplevelStateRequestKind::Fullscreen(enabled),
+                ),
+            });
+            self.presentation_requested = true;
+        }
     }
 }
 

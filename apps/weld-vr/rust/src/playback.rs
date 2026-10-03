@@ -679,6 +679,7 @@ impl Controller {
             ClientSurfaceRequestKind::Configure {
                 logical_size: size,
                 resizing: false,
+                fullscreen: false,
             },
         );
         self.wake_input();

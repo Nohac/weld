@@ -276,7 +276,9 @@ impl Inventory {
                 }
                 self.commit(surface_id, commit, session)?;
             }
-            ClientSurfaceEventKind::Interaction(_) => {}
+            // XR retains its spatial window sizing; desktop fullscreen intents
+            // are handled by desktop WM policies.
+            ClientSurfaceEventKind::Interaction(_) | ClientSurfaceEventKind::StateRequest(_) => {}
         }
         let mut input = lock(&session.session.input);
         for id in self.surfaces.keys() {

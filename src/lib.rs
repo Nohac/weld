@@ -302,6 +302,7 @@ pub fn run(arguments: AppArguments) -> Result<()> {
     }
     app.add_plugins((
         WindowPlugin,
+        weld_window::fullscreen::FullscreenPlugin,
         WindowUiPlugin,
         SsdPlugin,
         TilePlugin,

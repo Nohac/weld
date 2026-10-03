@@ -417,6 +417,7 @@ impl XWaylandShellHandler for ServerState {
         let Some(id) = allocate_surface_id(&mut self.next_surface_id, client) else {
             return;
         };
+        let fullscreen = native.is_fullscreen();
         let state = ToplevelState::x11(native, surface.clone(), self.primary_output);
         if !self.toplevels.insert(id, state) {
             return;
@@ -428,6 +429,9 @@ impl XWaylandShellHandler for ServerState {
         let windows: Vec<_> = self.xwayland.windows.keys().copied().collect();
         for window in windows {
             self.publish_x11_role(window);
+        }
+        if fullscreen {
+            self.publish_fullscreen_request(&surface, true);
         }
         info!(
             window = key,
@@ -477,6 +481,16 @@ impl XwmHandler for ServerState {
     }
     fn mapped_override_redirect_window(&mut self, _: XwmId, window: X11Surface) {
         self.publish_x11_role(window.window_id());
+    }
+    fn fullscreen_request(&mut self, _: XwmId, window: X11Surface) {
+        if let Some(surface) = window.wl_surface() {
+            self.publish_fullscreen_request(&surface, true);
+        }
+    }
+    fn unfullscreen_request(&mut self, _: XwmId, window: X11Surface) {
+        if let Some(surface) = window.wl_surface() {
+            self.publish_fullscreen_request(&surface, false);
+        }
     }
     fn unmapped_window(&mut self, _: XwmId, window: X11Surface) {
         self.unmap_x11_window(window.window_id());

@@ -35,6 +35,7 @@ use weld_input::{
 };
 use weld_ssd::{BorderRequest, SsdSettings};
 use weld_tile::{TileRequest, TileSettings, TileSystems};
+use weld_window::fullscreen::{FullscreenAction, FullscreenMode, FullscreenRequest};
 use weld_window::{FocusedWindow, workspace_protocol::WorkspaceProtocolPlugin};
 
 /// Selects and translates the distribution's configuration file.
@@ -265,6 +266,16 @@ fn dispatch_action(
         }),
         Action::FocusModeToggle => effects.commands.trigger(weld_i3_quirks::I3FocusModeToggle),
         Action::Border(style) => effects.commands.trigger(BorderRequest(style)),
+        Action::Fullscreen(action) => effects.commands.trigger(FullscreenRequest {
+            window: None,
+            action,
+        }),
+        Action::Extension(DistributionAction::ExclusiveFullscreen) => {
+            effects.commands.trigger(FullscreenRequest {
+                window: None,
+                action: FullscreenAction::Toggle(FullscreenMode::Exclusive),
+            })
+        }
     }
     if let Some(redraw) = effects.redraw.as_mut() {
         redraw.write(RequestRedraw);

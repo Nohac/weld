@@ -278,7 +278,7 @@ receive the mean existing share, and flattening preserves internal proportions.
 
 ## Deliberate boundaries
 
-Tabbed/stacked layouts, fullscreen,
+Tabbed/stacked layouts,
 client-size constraint policy, complete tiled-state protocol hints, persistent
 matching and IPC remain follow-up slices. Popups keep the existing presentation
 path rather than becoming tiling leaves. Related toplevel dialogs currently tile
@@ -318,6 +318,32 @@ the durable window and intentionally survives vacancy and occupant replacement.
 
 The example uses pixel borders for tiles and normal frames for floating windows.
 Alt+B cycles the selected frame; Blender launch moved to Alt+Shift+B.
+
+## Fullscreen presentation
+
+`fullscreen enable|disable|toggle` translates to the native `FullscreenPlugin`.
+The example uses Mod+A; it also exits exclusive fullscreen. Mod+Shift+A invokes
+the Weld extension `weld fullscreen exclusive`, toggling the exclusive variant.
+
+Both variants retain workspace/tree membership, suppress unrelated windows,
+remove Weld chrome, and configure the client to the output logical size. Normal
+fullscreen keeps overlay launchers available. Exclusive fullscreen suppresses
+ordinary layer-shell presentation and keyboard routes, including overlays;
+compositor shortcuts remain active. Related declared dialogs and popups remain
+usable. The ordinary frame, freeform geometry and stacking return on exit; tiles
+use the current layout if output size or other windows changed in the meantime.
+Switching workspaces suspends the output claim until the workspace returns.
+Exit fullscreen before changing between floating and tiled layout.
+
+Wayland and X11 client requests share this policy. Requests survive admission;
+a visible background client cannot steal fullscreen focus. Configure size,
+resizing and fullscreen state travel together through the shared adapter and
+hoist transport. Rebuild both peers after this wire-shape change. The XR shell
+continues to own spatial window sizing and ignores desktop fullscreen intent.
+
+Exclusive fullscreen here is presentation/input policy. Direct scanout and
+suspending unrelated encoded streams are separate work. Physical multi-output
+and DRM validation remain on the daily-driver checklist.
 
 ## Next improvements
 

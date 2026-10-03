@@ -173,6 +173,7 @@ impl WaylandClientAdapter {
             PendingSurfaceEventKind::Role(_)
             | PendingSurfaceEventKind::Metadata(_)
             | PendingSurfaceEventKind::WindowInteraction(_)
+            | PendingSurfaceEventKind::WindowStateRequest(_)
             | PendingSurfaceEventKind::Destroyed => return None,
         };
         Some(ClientSurfaceEvent { surface, kind })
@@ -311,6 +312,9 @@ fn translate_non_commit_event(event: PendingSurfaceEvent) -> Option<ClientSurfac
         PendingSurfaceEventKind::Role(role) => ClientSurfaceEventKind::Role(role),
         PendingSurfaceEventKind::WindowInteraction(interaction) => {
             ClientSurfaceEventKind::Interaction(interaction)
+        }
+        PendingSurfaceEventKind::WindowStateRequest(request) => {
+            ClientSurfaceEventKind::StateRequest(request)
         }
         PendingSurfaceEventKind::Destroyed => ClientSurfaceEventKind::Destroyed,
         PendingSurfaceEventKind::TreeSnapshot(_) => return None,

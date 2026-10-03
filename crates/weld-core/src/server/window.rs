@@ -90,6 +90,26 @@ impl WindowSurface {
             }
         })
     }
+    pub(super) fn set_fullscreen(&self, fullscreen: bool) {
+        match self {
+            Self::Xdg(window) => {
+                window.with_pending_state(|state| {
+                    if fullscreen {
+                        state.states.set(xdg_toplevel::State::Fullscreen);
+                    } else {
+                        state.states.unset(xdg_toplevel::State::Fullscreen);
+                    }
+                });
+            }
+            Self::X11 { window, .. } => {
+                if !window.is_override_redirect()
+                    && let Err(error) = window.set_fullscreen(fullscreen)
+                {
+                    warn!(%error, "could not publish X11 fullscreen state");
+                }
+            }
+        }
+    }
     pub(super) fn flush_configure(&self) {
         if let Self::Xdg(window) = self
             && window.is_initial_configure_sent()
@@ -97,24 +117,28 @@ impl WindowSurface {
             window.send_pending_configure();
         }
     }
-    pub(super) fn stage_size(&self, requested: Extent) -> bool {
+    pub(super) fn stage_size(&self, requested: Extent, fullscreen: bool) -> bool {
         if !self.alive() {
             return false;
         }
-        let (minimum, maximum) = match self {
-            Self::Xdg(window) => with_states(window.wl_surface(), |states| {
-                let mut cached = states.cached_state.get::<SurfaceCachedState>();
-                let current = cached.current();
-                (current.min_size, current.max_size)
-            }),
-            Self::X11 { window, .. } => {
-                if window.is_override_redirect() {
-                    return false;
+        let (minimum, maximum) = if fullscreen {
+            (Size::from((0, 0)), Size::from((0, 0)))
+        } else {
+            match self {
+                Self::Xdg(window) => with_states(window.wl_surface(), |states| {
+                    let mut cached = states.cached_state.get::<SurfaceCachedState>();
+                    let current = cached.current();
+                    (current.min_size, current.max_size)
+                }),
+                Self::X11 { window, .. } => {
+                    if window.is_override_redirect() {
+                        return false;
+                    }
+                    (
+                        window.min_size().unwrap_or_default(),
+                        window.max_size().unwrap_or_default(),
+                    )
                 }
-                (
-                    window.min_size().unwrap_or_default(),
-                    window.max_size().unwrap_or_default(),
-                )
             }
         };
         let size = Size::<i32, Logical>::from((

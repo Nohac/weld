@@ -8,8 +8,8 @@ use smithay::reexports::x11rb::{
     protocol::{
         Event,
         xproto::{
-            AtomEnum, ChangeGCAux, ConnectionExt, CreateGCAux, CreateWindowAux, EventMask,
-            PropMode, Rectangle, WindowClass,
+            AtomEnum, ChangeGCAux, ClientMessageEvent, ConnectionExt, CreateGCAux, CreateWindowAux,
+            EventMask, PropMode, Rectangle, WindowClass,
         },
     },
     wrapper::ConnectionExt as _,
@@ -27,6 +27,12 @@ struct Options {
     title: String,
     #[arg(long)]
     lifecycle: bool,
+    /// Request and verify a fullscreen enter/exit cycle through the XWM.
+    #[arg(long)]
+    fullscreen: bool,
+    /// Set the X11 fullscreen property before first mapping, then verify/restore it.
+    #[arg(long)]
+    initial_fullscreen: bool,
 }
 
 fn main() -> Result<()> {
@@ -90,6 +96,23 @@ fn main() -> Result<()> {
     )?;
     let gc = connection.generate_id()?;
     connection.create_gc(gc, window, &CreateGCAux::new().foreground(0x40c0a0))?;
+    let state_atom = connection
+        .intern_atom(false, b"_NET_WM_STATE")?
+        .reply()?
+        .atom;
+    let fullscreen_atom = connection
+        .intern_atom(false, b"_NET_WM_STATE_FULLSCREEN")?
+        .reply()?
+        .atom;
+    if options.initial_fullscreen {
+        connection.change_property32(
+            PropMode::REPLACE,
+            window,
+            state_atom,
+            AtomEnum::ATOM,
+            &[fullscreen_atom],
+        )?;
+    }
     connection.map_window(window)?;
     connection.flush()?;
     let started = Instant::now();
@@ -98,11 +121,47 @@ fn main() -> Result<()> {
     let mut frame = 0u16;
     let mut presses = 0u32;
     let mut phase = 0u8;
+    let mut fullscreen_phase = u8::from(options.initial_fullscreen);
     let mut auxiliaries = Vec::new();
     println!(
         "X11_PROBE_READY window={window}; type or click to change the counter/color, close through Weld to test WM_DELETE_WINDOW"
     );
     while started.elapsed() < Duration::from_secs(options.seconds) {
+        if options.fullscreen || options.initial_fullscreen {
+            let elapsed = started.elapsed().as_secs();
+            if (fullscreen_phase == 0 && elapsed >= 2) || (fullscreen_phase == 2 && elapsed >= 7) {
+                let enabled = fullscreen_phase == 0;
+                connection.send_event(
+                    false,
+                    screen.root,
+                    EventMask::SUBSTRUCTURE_REDIRECT | EventMask::SUBSTRUCTURE_NOTIFY,
+                    ClientMessageEvent::new(
+                        32,
+                        window,
+                        state_atom,
+                        [u32::from(enabled), fullscreen_atom, 0, 1, 0],
+                    ),
+                )?;
+                fullscreen_phase += 1;
+                println!("FULLSCREEN_REQUEST {enabled}");
+            } else if (fullscreen_phase == 1 && elapsed >= 4)
+                || (fullscreen_phase == 3 && elapsed >= 9)
+            {
+                let enabled = fullscreen_phase == 1;
+                let reply = connection
+                    .get_property(false, window, state_atom, AtomEnum::ATOM, 0, 64)?
+                    .reply()?;
+                let actual = reply
+                    .value32()
+                    .is_some_and(|mut atoms| atoms.any(|atom| atom == fullscreen_atom));
+                anyhow::ensure!(
+                    actual == enabled,
+                    "fullscreen property mismatch: requested {enabled}, observed {actual}"
+                );
+                println!("FULLSCREEN_VERIFIED {enabled} {width}x{height}");
+                fullscreen_phase += 1;
+            }
+        }
         if options.lifecycle && phase == 0 && started.elapsed() >= Duration::from_secs(1) {
             for (title, popup, x, color) in [
                 ("X11 dialog", false, 60, 0x405020),

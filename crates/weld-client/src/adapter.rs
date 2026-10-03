@@ -1336,6 +1336,7 @@ fn track_cursor_surface(
             cursors.remove(&event.surface);
         }
         crate::ClientSurfaceEventKind::Interaction(_)
+        | crate::ClientSurfaceEventKind::StateRequest(_)
         | crate::ClientSurfaceEventKind::Metadata(_) => {}
     }
 }

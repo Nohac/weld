@@ -65,6 +65,7 @@ struct Observer {
     output_objects: Vec<wl_output::WlOutput>,
     surfaces: HashMap<u32, ObservedSurface>,
     frames: usize,
+    toplevel_configures: Vec<(i32, i32, Vec<u32>)>,
 }
 
 impl Dispatch<wl_registry::WlRegistry, ()> for Observer {
@@ -185,7 +186,29 @@ delegate_noop!(Observer: ignore wl_compositor::WlCompositor);
 delegate_noop!(Observer: ignore wl_subcompositor::WlSubcompositor);
 delegate_noop!(Observer: ignore wl_subsurface::WlSubsurface);
 delegate_noop!(Observer: ignore xdg_wm_base::XdgWmBase);
-delegate_noop!(Observer: ignore xdg_toplevel::XdgToplevel);
+impl Dispatch<xdg_toplevel::XdgToplevel, ()> for Observer {
+    fn event(
+        state: &mut Self,
+        _: &xdg_toplevel::XdgToplevel,
+        event: xdg_toplevel::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        if let xdg_toplevel::Event::Configure {
+            width,
+            height,
+            states,
+        } = event
+        {
+            let states = states
+                .chunks_exact(4)
+                .map(|bytes| u32::from_ne_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+                .collect();
+            state.toplevel_configures.push((width, height, states));
+        }
+    }
+}
 delegate_noop!(Observer: ignore xdg_positioner::XdgPositioner);
 delegate_noop!(Observer: ignore xdg_popup::XdgPopup);
 delegate_noop!(Observer: ignore wp_fractional_scale_manager_v1::WpFractionalScaleManagerV1);
@@ -367,6 +390,65 @@ impl Fixture {
             .collect::<Vec<_>>();
         assert_eq!(names, [output]);
     }
+}
+
+#[test]
+#[ignore = "native socket fixture requires XDG_RUNTIME_DIR"]
+fn fullscreen_size_and_state_arrive_in_one_configure_and_restore_constraints() {
+    use crate::surface::Extent;
+    let mut f = Fixture::new();
+    let surface = f.surface(40);
+    let xdg =
+        f.observer
+            .shell
+            .as_ref()
+            .expect("shell")
+            .get_xdg_surface(&surface, &f.queue.handle(), ());
+    let toplevel = xdg.get_toplevel(&f.queue.handle(), ());
+    toplevel.set_max_size(400, 300);
+    toplevel.set_fullscreen(None);
+    surface.commit();
+    f.sync();
+    let native = f.client.object_from_protocol_id::<smithay::reexports::wayland_server::protocol::wl_surface::WlSurface>(&f.server.display_handle, surface.id().protocol_id()).expect("native surface");
+    let id = f.server.toplevels.id_for_surface(&native).expect("id");
+    f.observer.toplevel_configures.clear();
+    for (logical_size, resizing, fullscreen) in [
+        (Extent::new(300, 200), true, false),
+        (Extent::new(800, 600), true, true),
+    ] {
+        f.server
+            .apply_client_request(weld_client::ClientRequest::Surface(
+                weld_client::ClientSurfaceRequest {
+                    surface: id,
+                    kind: weld_client::ClientSurfaceRequestKind::Configure {
+                        logical_size,
+                        resizing,
+                        fullscreen,
+                    },
+                },
+            ));
+    }
+    f.server.flush_pending_resizes();
+    f.sync();
+    assert_eq!(f.observer.toplevel_configures.len(), 1);
+    let (width, height, states) = &f.observer.toplevel_configures[0];
+    assert_eq!((*width, *height), (800, 600));
+    assert!(states.contains(&(xdg_toplevel::State::Fullscreen as u32)));
+    assert!(!states.contains(&(xdg_toplevel::State::Resizing as u32)));
+    f.observer.toplevel_configures.clear();
+    toplevel.unset_fullscreen();
+    f.sync();
+    f.observer.toplevel_configures.clear();
+    f.server
+        .configure_toplevel(id, Extent::new(500, 400), false, false);
+    f.sync();
+    let (width, height, states) = f
+        .observer
+        .toplevel_configures
+        .last()
+        .expect("restore configure");
+    assert_eq!((*width, *height), (400, 300));
+    assert!(!states.contains(&(xdg_toplevel::State::Fullscreen as u32)));
 }
 
 #[test]

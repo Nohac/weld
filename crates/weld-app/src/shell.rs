@@ -225,9 +225,9 @@ impl SurfaceCompositionDemand {
                 self.mapped_surfaces.remove(&surface);
                 CompositionDemand::Settle
             }
-            ClientSurfaceEventKind::Interaction(_) | ClientSurfaceEventKind::Metadata(_) => {
-                CompositionDemand::Ordinary
-            }
+            ClientSurfaceEventKind::Interaction(_)
+            | ClientSurfaceEventKind::Metadata(_)
+            | ClientSurfaceEventKind::StateRequest(_) => CompositionDemand::Ordinary,
             ClientSurfaceEventKind::Role(_) => CompositionDemand::Settle,
         }
     }
@@ -727,6 +727,13 @@ impl AppShell {
                     kind: HostSurfaceEventKind::Interaction(request),
                 },
             ),
+            ClientSurfaceEventKind::StateRequest(request) => enqueue_surface_event(
+                self.app.world_mut(),
+                HostSurfaceEvent {
+                    surface,
+                    kind: HostSurfaceEventKind::StateRequest(request),
+                },
+            ),
         }
     }
 
@@ -1150,11 +1157,13 @@ fn client_request(action: SurfaceAction) -> ClientRequest {
             surface,
             logical_size,
             resizing,
+            fullscreen,
         } => ClientRequest::Surface(ClientSurfaceRequest {
             surface,
             kind: ClientSurfaceRequestKind::Configure {
                 logical_size: Extent::new(logical_size.x, logical_size.y),
                 resizing,
+                fullscreen,
             },
         }),
         SurfaceAction::SetOutputs {

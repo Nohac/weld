@@ -11,6 +11,7 @@ use weld_input::{GlobalShortcut, KeyboardKeymap};
 use weld_ssd::{BorderStyle, FrameColors, SsdSettings};
 use weld_sway_config::Statement;
 use weld_tile::{Direction, SplitAxis, TileOperation, TileSettings};
+use weld_window::fullscreen::{FullscreenAction, FullscreenMode};
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Action<Extension = ()> {
@@ -21,6 +22,7 @@ pub enum Action<Extension = ()> {
     Floating(Option<bool>),
     FocusModeToggle,
     Border(Option<BorderStyle>),
+    Fullscreen(FullscreenAction),
     Reload,
     Exec(String),
     Exit,
@@ -305,6 +307,13 @@ fn action<Extension>(
             Action::Tile(TileOperation::Split(SplitAxis::Vertical))
         }
         ["border", "toggle"] => Action::Border(None),
+        ["fullscreen"] | ["fullscreen", "toggle"] => {
+            Action::Fullscreen(FullscreenAction::Toggle(FullscreenMode::Normal))
+        }
+        ["fullscreen", "enable"] => {
+            Action::Fullscreen(FullscreenAction::Enable(FullscreenMode::Normal))
+        }
+        ["fullscreen", "disable"] => Action::Fullscreen(FullscreenAction::Disable),
         ["border", style @ ..] => Action::Border(Some(border_style(style)?)),
         ["focus", "mode_toggle"] => Action::FocusModeToggle,
         ["floating", "enable"] => Action::Floating(Some(true)),
@@ -601,6 +610,33 @@ mod tests {
         assert_eq!(config.bindings[0].1, Action::Floating(None));
         assert_eq!(config.bindings[1].1, Action::FocusModeToggle);
         assert!(parse("float", "floating_modifier Mod1+Mod1").is_err());
+    }
+
+    #[test]
+    fn fullscreen_commands_translate_to_native_policy() {
+        let config = parse(
+            "fullscreen",
+            indoc::indoc! {"
+            bindsym Mod1+a fullscreen
+            bindsym Mod1+b fullscreen enable
+            bindsym Mod1+c fullscreen disable
+        "},
+        )
+        .expect("config");
+        let actions: Vec<_> = config
+            .bindings
+            .into_iter()
+            .map(|(_, action)| action)
+            .collect();
+        assert_eq!(
+            actions,
+            vec![
+                Action::Fullscreen(FullscreenAction::Toggle(FullscreenMode::Normal)),
+                Action::Fullscreen(FullscreenAction::Enable(FullscreenMode::Normal)),
+                Action::Fullscreen(FullscreenAction::Disable),
+            ]
+        );
+        assert!(parse("unsupported", "bindsym Mod1+a fullscreen global").is_err());
     }
 
     #[test]

@@ -98,3 +98,35 @@ Further milestone checks will be added as implementation and validation land.
    application-owned titlebars. Recheck opaque hoisted content, which needs Weld's frame.
 
 The example keeps Mod+B for border toggling; launch Blender with Mod+Shift+B.
+
+## Fullscreen validation
+
+1. With several tiles, use Mod+A. The selected app should fill the output,
+   including the bar area, with no Weld frame/watermark. Mod+A restores the tree.
+2. Repeat with a moved/resized floating window several times. Its original
+   position and content size should return without growing or shrinking.
+3. Open menus and a declared dialog while fullscreen. They should remain above
+   the owner and accept input. Unrelated newly launched windows must stay hidden.
+4. In normal fullscreen, Mod+Space should show Rofi; Escape returns input to the
+   application. In exclusive mode (Mod+Shift+A), ordinary overlays remain hidden.
+   Mod+A, workspace switching, and compositor exit shortcuts must still work.
+5. Switch away and back. The other workspace should have its normal bar/layout;
+   the original should still be fullscreen. Close the fullscreen owner and check
+   that bars, other windows and input recover.
+6. Test application-native fullscreen (F11 where supported, or a game's setting)
+   under both Wayland and XWayland. Native exit should restore the same layout.
+7. With multiple outputs, fullscreen one output. Other outputs must remain usable;
+   an unrelated window overlapping the claimed output should not cover its owner.
+8. Rebuild both hoist peers, then enter/exit fullscreen on a receiver and verify
+   client resizing and reclaim. The separate XR shell keeps spatial sizing.
+
+Automated coverage includes repeatable geometry restoration, output resize,
+workspace suspension/return, owner destruction, related-dialog focus,
+cross-output projection suppression, layer keyboard routing, and initial client
+requests before mapping. A real Wayland protocol fixture checks atomic size/state
+and constraint restoration. The bounded X11 probe verified fullscreen properties
+and visual entry/exit in `target/validation/fullscreen-smoke-caonz1j0`.
+The pre-map fullscreen-property variant also passed in
+`target/validation/fullscreen-smoke-jx3u1o9r`; pending policy transitions suppress
+the intermediate admission configure. Floating/tiled mode changes resume after
+leaving fullscreen.

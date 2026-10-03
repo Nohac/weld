@@ -520,12 +520,14 @@ impl ServerState {
                 ClientSurfaceRequestKind::Configure {
                     logical_size,
                     resizing,
+                    fullscreen,
                 } => {
                     self.pending_resizes.queue(
                         request.surface,
                         PendingResize {
                             logical_size,
                             resizing,
+                            fullscreen,
                         },
                     );
                 }
@@ -564,7 +566,12 @@ impl ServerState {
     pub(crate) fn flush_pending_resizes(&mut self) {
         let pending = self.pending_resizes.drain().collect::<Vec<_>>();
         for (surface, request) in pending {
-            self.configure_toplevel(surface, request.logical_size, request.resizing);
+            self.configure_toplevel(
+                surface,
+                request.logical_size,
+                request.resizing,
+                request.fullscreen,
+            );
         }
     }
 
@@ -596,6 +603,7 @@ pub enum PendingSurfaceEventKind {
     Metadata(weld_client::ClientSurfaceMetadata),
     TreeSnapshot(surface_tree::PendingSurfaceTreeSnapshot),
     WindowInteraction(WindowInteractionRequestKind),
+    WindowStateRequest(weld_client::ToplevelStateRequestKind),
     Destroyed,
 }
 

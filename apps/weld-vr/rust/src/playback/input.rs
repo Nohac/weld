@@ -843,6 +843,7 @@ mod tests {
         let kind = ClientSurfaceRequestKind::Configure {
             logical_size: weld_client::Extent::new(900, 600),
             resizing: false,
+            fullscreen: false,
         };
         {
             let mut input = super::super::lock(&shared.session.input);

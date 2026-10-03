@@ -14,13 +14,14 @@ use bevy::{
     math::{UVec2, Vec2},
     picking::Pickable,
     prelude::{
-        AlignItems, BackgroundColor, BorderColor, BorderRadius, ChildOf, Children, Color,
+        AlignItems, BackgroundColor, BorderColor, BorderRadius, ChildOf, Children, Color, Display,
         GlobalZIndex, Node, PositionType, UiRect, UiTargetCamera, px,
     },
     scene::{CommandsSceneExt, Scene, bsn},
     text::{FontSourceTemplate, TextColor, TextFont},
     ui::widget::{Text, TextShadow},
 };
+use weld_app::layer_shell::DesktopLayerVisibility;
 use weld_app::output::{
     OutputCompositionCamera, OutputFootprintProvenance, OutputGeometry, OutputInfo,
     OutputPlacement, OutputPosition, PrimaryOutput, WeldOutput,
@@ -33,7 +34,10 @@ impl Plugin for DistributionOverlayPlugin {
         app.init_resource::<OutputTopologyOverlayState>()
             .add_message::<ToggleOutputTopology>()
             .add_systems(Startup, spawn_distribution_overlay)
-            .add_systems(Update, update_output_topology_overlay);
+            .add_systems(
+                Update,
+                (update_output_topology_overlay, hide_fullscreen_watermark),
+            );
     }
 }
 
@@ -49,6 +53,24 @@ struct OutputTopologyOverlayState {
 
 #[derive(Component)]
 struct OutputTopologyOverlay;
+
+#[derive(Component, Clone, Default)]
+struct DistributionWatermark;
+
+fn hide_fullscreen_watermark(
+    outputs: Query<Option<&DesktopLayerVisibility>, With<PrimaryOutput>>,
+    mut watermark: Query<&mut Node, With<DistributionWatermark>>,
+) {
+    let hidden = outputs
+        .iter()
+        .any(|policy| policy.is_some_and(|policy| *policy != DesktopLayerVisibility::All));
+    let display = if hidden { Display::None } else { Display::Flex };
+    for mut node in &mut watermark {
+        if node.display != display {
+            node.display = display;
+        }
+    }
+}
 
 #[derive(Clone)]
 struct OutputTopologySnapshot {
@@ -77,6 +99,7 @@ type OutputTopologyQueryItem<'world> = (
 
 fn spawn_distribution_overlay(mut commands: Commands) {
     commands.spawn_scene(bsn! {
+        DistributionWatermark
         Pickable::IGNORE
         Node {
             position_type: PositionType::Absolute,
