@@ -5,8 +5,12 @@ use super::{
     toplevel::{ToplevelState, allocate_surface_id},
     window::WindowSurface,
 };
+use crate::cursor::{
+    CursorConfiguration, CursorIcon,
+    theme::{fallback_image, load_theme_images},
+};
 use crate::surface::{SurfaceId, WindowDecoration, WindowResizeEdge};
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, ensure};
 use calloop::{
     LoopHandle,
     timer::{TimeoutAction, Timer},
@@ -36,6 +40,7 @@ pub(super) struct XwaylandState {
     pub shell: XWaylandShellState,
     pub wm: Option<X11Wm>,
     pub display: Option<u32>,
+    cursor_configuration: CursorConfiguration,
     windows: HashMap<u32, X11Window>,
 }
 
@@ -63,6 +68,7 @@ impl XwaylandState {
             shell: XWaylandShellState::new::<ServerState>(display),
             wm: None,
             display: None,
+            cursor_configuration: CursorConfiguration::default(),
             windows: HashMap::new(),
         }
     }
@@ -79,6 +85,54 @@ pub(super) fn compositor_state(client: &Client) -> &CompositorClientState {
 }
 
 impl ServerState {
+    pub(crate) fn set_x11_cursor_configuration(&mut self, configuration: CursorConfiguration) {
+        if self.xwayland.cursor_configuration != configuration {
+            self.xwayland.cursor_configuration = configuration;
+            self.update_x11_default_cursor();
+        }
+    }
+
+    fn update_x11_default_cursor(&mut self) {
+        let Some(wm) = &mut self.xwayland.wm else {
+            return;
+        };
+        let configuration = &self.xwayland.cursor_configuration;
+        let images =
+            load_theme_images(configuration.theme(), CursorIcon::Default).unwrap_or_else(|error| {
+                warn!(%error, "using built-in X11 default cursor");
+                Arc::from([fallback_image()])
+            });
+        let Some(image) = images
+            .iter()
+            .min_by_key(|image| image.size.abs_diff(configuration.size()))
+        else {
+            return;
+        };
+        let result = (|| -> Result<()> {
+            ensure!(
+                image.width > 0 && image.height > 0 && image.width <= 512 && image.height <= 512,
+                "invalid X11 default cursor extent"
+            );
+            ensure!(
+                image.pixels_rgba.len() >= image.width as usize * image.height as usize * 4,
+                "short X11 default cursor raster"
+            );
+            wm.set_cursor(
+                &image.pixels_rgba,
+                (u16::try_from(image.width)?, u16::try_from(image.height)?).into(),
+                (
+                    u16::try_from(image.xhot.min(image.width - 1))?,
+                    u16::try_from(image.yhot.min(image.height - 1))?,
+                )
+                    .into(),
+            )?;
+            Ok(())
+        })();
+        if let Err(error) = result {
+            warn!(%error, "could not set themed X11 default cursor");
+        }
+    }
+
     /// XWayland adds surface-local input to its own root coordinates before
     /// hit-testing. Keep the presenter's selected window above X11 siblings.
     pub(super) fn raise_x11_surface(&mut self, surface: &WlSurface) {
@@ -119,6 +173,7 @@ impl ServerState {
                 match manager {
                     Ok(wm) => {
                         state.xwayland.wm = Some(wm);
+                        state.update_x11_default_cursor();
                         info!(display = %format_args!(":{display_number}"), "rootless XWayland ready");
                     }
                     Err(error) => {

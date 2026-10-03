@@ -61,6 +61,7 @@ use smithay::{
         fractional_scale::FractionalScaleManagerState,
         output::OutputManagerState,
         pointer_gestures::PointerGesturesState,
+        relative_pointer::RelativePointerManagerState,
         selection::data_device::DataDeviceState,
         shell::xdg::{XdgShellState, decoration::XdgDecorationState},
         shm::ShmState,
@@ -201,6 +202,7 @@ impl ServerState {
         let xdg_decoration_state = XdgDecorationState::new::<Self>(&display_handle);
         let cursor_shape_manager_state = CursorShapeManagerState::new::<Self>(&display_handle);
         let pointer_gestures_state = PointerGesturesState::new::<Self>(&display_handle);
+        RelativePointerManagerState::new::<Self>(&display_handle);
         let shm_state = ShmState::new::<Self>(&display_handle, []);
         let dmabuf_protocol = DmabufProtocol::new(&display_handle, dmabuf_capabilities)?;
         let viewporter_state = ViewporterState::new::<Self>(&display_handle);

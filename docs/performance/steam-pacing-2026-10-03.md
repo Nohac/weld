@@ -123,8 +123,8 @@ arriving at Smithay, all with distance ±15 and value120 ±120. SwayFX 0.6,
 wlroots 0.20.2 and Weld use the same libinput values; the user's Sway scroll
 factor was 1.0. Increasing Weld's output scale did not resolve the issue.
 
-The XInput2 probe found a separate input bug: Weld forwards absolute pointer
-positions but lacks relative-pointer protocol delivery. XWayland 24.1.13 sends
+The XInput2 probe found a separate input bug: Weld forwarded absolute pointer
+positions but lacked relative-pointer protocol delivery. XWayland 24.1.13 sends
 those movements through `xwayland-pointer`, while wheel events use
 `xwayland-relative-pointer`. Alternating movement and scrolling generates
 XInput2 `SlaveSwitch` events. Sway supplies relative motion alongside position,
@@ -143,6 +143,12 @@ logic ignored all 100 scroll samples. The corresponding Sway run,
 a baseline. Additional physical input occurred during the Sway run, so its
 144 samples are not a matched event-count comparison.
 
-The next correction is preserving real relative motion through the shared input
-path and delivering it with position in one Wayland pointer frame. This
-checkpoint records the diagnosis; it does not yet implement that correction.
+The correction now preserves relative motion through the shared input path and
+delivers it with position in one Wayland pointer frame. Iroh and application
+coalescing accumulate deltas. In the post-fix nested probe
+`x11-pacing-nested-ikizak7i`, only the initial baseline was ignored, with no
+repeated device switching during scrolling. Its 94 received samples are not
+claimed as a lossless 100-event run; the input interpretation failure is the
+measured correction. The user confirmed that physical DRM Steam scrolling now
+works correctly, including slow wheel notches, and that the themed X11 default
+cursor looks consistent with Weld chrome.

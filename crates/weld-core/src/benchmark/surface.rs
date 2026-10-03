@@ -181,7 +181,7 @@ impl HostPolicy for SurfaceOnly {
         CompositionDemand::Ordinary
     }
     fn enqueue_input_event(&mut self, event: RawSeatEvent) -> bool {
-        if let RawSeatEventKind::PointerMotion { position } = event.event {
+        if let RawSeatEventKind::PointerMotion { position, .. } = event.event {
             self.position = position;
         }
         self.time = event.time;

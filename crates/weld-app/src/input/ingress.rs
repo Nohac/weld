@@ -58,15 +58,20 @@ impl ApplicationInputBuffer {
         !consumed
     }
 
-    fn push(&mut self, event: RawSeatEvent) {
-        let adjacent_motion = matches!(event.event, RawSeatEventKind::PointerMotion { .. })
-            && self.events.back().is_some_and(|previous| {
-                matches!(previous.event, RawSeatEventKind::PointerMotion { .. })
-            });
-        if adjacent_motion {
-            if let Some(previous) = self.events.back_mut() {
-                *previous = event;
-            }
+    fn push(&mut self, mut event: RawSeatEvent) {
+        if let Some(previous) = self.events.back_mut()
+            && let (
+                RawSeatEventKind::PointerMotion {
+                    relative: older, ..
+                },
+                RawSeatEventKind::PointerMotion {
+                    relative: newer, ..
+                },
+            ) = (&previous.event, &mut event.event)
+            && let Some(merged) = weld_client::RelativeMotion::coalesce(*newer, *older)
+        {
+            *newer = merged;
+            *previous = event;
             return;
         }
         self.events.push_back(event);
@@ -90,6 +95,7 @@ mod tests {
     fn motion(x: f64, time: u32) -> RawSeatEvent {
         RawSeatEvent::new(
             RawSeatEventKind::PointerMotion {
+                relative: None,
                 position: InputPosition::new(x, 20.0),
             },
             time,
@@ -115,6 +121,34 @@ mod tests {
         input.push(motion(30.0, 3));
 
         assert_eq!(input.events, VecDeque::from([motion(30.0, 3)]));
+    }
+
+    #[test]
+    fn application_batch_retains_accumulated_relative_motion() {
+        use weld_client::{InputDelta, RelativeMotion};
+        let mut input = ApplicationInputBuffer::default();
+        for time in 1..=3 {
+            let mut event = motion(f64::from(time), time);
+            if let RawSeatEventKind::PointerMotion { relative, .. } = &mut event.event {
+                *relative = Some(RelativeMotion {
+                    delta: InputDelta::new(2.0, -1.0),
+                    unaccelerated: InputDelta::new(1.0, -0.5),
+                    time_micros: u64::from(time) * 1000,
+                });
+            }
+            input.push(event);
+        }
+        input.push(motion(4.0, 4));
+        assert_eq!(
+            input.len(),
+            2,
+            "absolute motion remains an ordering barrier"
+        );
+        assert!(
+            matches!(input.events[0].event, RawSeatEventKind::PointerMotion { position, relative: Some(relative) }
+            if position.x == 3.0 && relative.delta == InputDelta::new(6.0, -3.0)
+            && relative.unaccelerated == InputDelta::new(3.0, -1.5) && relative.time_micros == 3000)
+        );
     }
 
     #[test]

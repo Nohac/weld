@@ -107,8 +107,14 @@ fence validation messages also appear in these tests.
 
 ## Remaining compatibility work
 
-This adds the X11 host boundary, not complete Steam/game compatibility. The WM's
-fullscreen/minimize policy, relative pointer and confinement, X11/Wayland clipboard
+Relative motion and pointer position are delivered together, keeping XWayland's
+motion and wheel input on the same virtual device. This prevents Chromium from
+discarding wheel samples after repeated XInput2 device switches. Steam wheel
+scrolling and hover feedback have been confirmed in a physical DRM session.
+The X11 root cursor uses Weld's shared cursor theme and follows configuration
+updates; client-defined cursor artwork remains application-owned.
+
+The WM's fullscreen/minimize policy, pointer locking and confinement, X11/Wayland clipboard
 and drag-and-drop bridging, X11-specific scale policy, resize increments/aspect
 hints, and application activation requests need separate validation or support.
 Current resize constraints cover minimum/maximum dimensions. WM-requested close
@@ -116,4 +122,4 @@ still needs a dedicated interactive check. X11 root-coordinate bounds require
 windows to fit the advertised output space; larger remote presentations need
 additional virtual-output sizing policy. X11 restacking and Wayland input use
 different sockets, so strict first-event ordering needs further validation.
-DRM uses the same host integration but has not received a physical TTY X11 test.
+Broader game compatibility and mixed-output X11 scaling still need validation.

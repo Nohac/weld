@@ -409,7 +409,7 @@ impl Activity {
                             attention.buttons.remove(button);
                         }
                     },
-                    InputEventKind::PointerMotion { position } => {
+                    InputEventKind::PointerMotion { position, .. } => {
                         let changed = position.x.is_finite()
                             && position.y.is_finite()
                             && attention

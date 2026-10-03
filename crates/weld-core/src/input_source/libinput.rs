@@ -14,7 +14,8 @@ use tracing::{debug, trace, warn};
 use crate::input::{
     ButtonState as WeldButtonState, InputDelta, InputPosition, KeyboardKeyState, LinuxButtonCode,
     LinuxKeycode, PointerGesture, PointerGestureKind, RawScrollFrame, RawScrollPhase,
-    RawScrollSource, RawSeatEvent, RawSeatEventKind, TouchpadHold, TouchpadPinch, TouchpadSwipe,
+    RawScrollSource, RawSeatEvent, RawSeatEventKind, RelativeMotion, TouchpadHold, TouchpadPinch,
+    TouchpadSwipe,
 };
 use crate::output::OutputTopology;
 
@@ -47,6 +48,7 @@ impl LibinputAdapter {
     pub fn initial_event(&self) -> RawSeatEvent {
         RawSeatEvent::new(
             RawSeatEventKind::PointerMotion {
+                relative: None,
                 position: self.pointer,
             },
             0,
@@ -78,22 +80,17 @@ impl LibinputAdapter {
                     )
                 }))
             }
-            InputEvent::PointerMotion { event, .. } => {
-                // This transforms compositor pointer placement only. A future
-                // relative-pointer protocol must retain the original libinput
-                // accelerated and unaccelerated deltas and bypass this output
-                // topology projection.
-                self.pointer = self.topology.move_pointer(
-                    self.pointer,
-                    InputDelta::new(event.delta_x(), event.delta_y()),
-                );
-                single_event(Some(RawSeatEvent::new(
-                    RawSeatEventKind::PointerMotion {
-                        position: self.pointer,
-                    },
-                    event.time().millis(),
-                )))
-            }
+            InputEvent::PointerMotion { event, .. } => single_event(Some(self.relative_motion(
+                RelativeMotion {
+                    delta: InputDelta::new(event.delta_x(), event.delta_y()),
+                    unaccelerated: InputDelta::new(
+                        event.delta_x_unaccel(),
+                        event.delta_y_unaccel(),
+                    ),
+                    time_micros: event.time().micros(),
+                },
+                event.time().millis(),
+            ))),
             InputEvent::PointerMotionAbsolute { event, .. } => {
                 let Some(primary) = self.topology.primary_configuration() else {
                     return empty_batch();
@@ -106,6 +103,7 @@ impl LibinputAdapter {
                 ));
                 single_event(Some(RawSeatEvent::new(
                     RawSeatEventKind::PointerMotion {
+                        relative: None,
                         position: self.pointer,
                     },
                     event.time().millis(),
@@ -265,10 +263,23 @@ impl LibinputAdapter {
         self.pointer = self.topology.constrain(position);
         Some(RawSeatEvent::new(
             RawSeatEventKind::PointerMotion {
+                relative: None,
                 position: self.pointer,
             },
             self.last_event_time_msec,
         ))
+    }
+
+    fn relative_motion(&mut self, relative: RelativeMotion, time: u32) -> RawSeatEvent {
+        // Device deltas survive output traversal and clipping unchanged.
+        self.pointer = self.topology.move_pointer(self.pointer, relative.delta);
+        RawSeatEvent::new(
+            RawSeatEventKind::PointerMotion {
+                position: self.pointer,
+                relative: Some(relative),
+            },
+            time,
+        )
     }
 
     fn scroll_frame(
@@ -496,6 +507,7 @@ mod tests {
             adapter.initial_event(),
             RawSeatEvent::new(
                 RawSeatEventKind::PointerMotion {
+                    relative: None,
                     position: InputPosition::new(960.0, 540.0),
                 },
                 0,
@@ -510,6 +522,27 @@ mod tests {
     }
 
     #[test]
+    fn raw_motion_survives_output_clipping_and_runtime_conversion() {
+        let mut adapter = adapter(100, 100);
+        let relative = weld_client::RelativeMotion {
+            delta: InputDelta::new(200.0, -200.0),
+            unaccelerated: InputDelta::new(50.0, -60.0),
+            time_micros: 123_456,
+        };
+        let event = adapter.relative_motion(relative, 123).into_runtime();
+        assert_eq!(event.time, 123);
+        let weld_client::RuntimeInputEventKind::Input(weld_client::InputEventKind::PointerMotion {
+            position,
+            relative: delivered,
+        }) = event.event
+        else {
+            panic!("motion");
+        };
+        assert!(position.x < 100.0 && position.y == 0.0);
+        assert_eq!(delivered, Some(relative));
+    }
+
+    #[test]
     fn scale_only_bounds_change_preserves_physical_pointer_location_and_time() {
         let mut adapter = adapter(1920, 1080);
         adapter.pointer = InputPosition::new(1440.0, 810.0);
@@ -519,6 +552,7 @@ mod tests {
             adapter.update_output_topology(topology(1280, 720, 1.0)),
             Some(RawSeatEvent::new(
                 RawSeatEventKind::PointerMotion {
+                    relative: None,
                     position: InputPosition::new(960.0, 540.0),
                 },
                 42,

@@ -67,7 +67,7 @@ impl Default for State {
 }
 
 impl InputOutbox {
-    pub fn push(&self, packet: DestinationEnvelope) -> Result<()> {
+    pub fn push(&self, mut packet: DestinationEnvelope) -> Result<()> {
         let enqueued_at = Instant::now();
         let mut state = self
             .state
@@ -88,7 +88,7 @@ impl InputOutbox {
                 state.observations.motions_received.saturating_add(1);
         }
         if let Some(previous) = state.records.back_mut()
-            && (compatible_motion(&previous.packet, &packet)
+            && (coalesce_motion(&previous.packet, &mut packet)
                 || compatible_gamepad(&previous.packet, &packet))
         {
             let gamepad = matches!(packet.message, DestinationMessage::Gamepad(_));
@@ -217,17 +217,34 @@ fn is_pointer_motion(packet: &DestinationEnvelope) -> bool {
         if matches!(input.event, InputEventKind::PointerMotion { .. }))
 }
 
-fn compatible_motion(previous: &DestinationEnvelope, next: &DestinationEnvelope) -> bool {
+fn coalesce_motion(previous: &DestinationEnvelope, next: &mut DestinationEnvelope) -> bool {
     let (DestinationMessage::Input(previous_input), DestinationMessage::Input(next_input)) =
-        (&previous.message, &next.message)
+        (&previous.message, &mut next.message)
     else {
         return false;
     };
-    previous.session == next.session
-        && previous_input.target == next_input.target
-        && matches!(previous_input.target, ClientInputTarget::Pointer { .. })
-        && matches!(previous_input.event, InputEventKind::PointerMotion { .. })
-        && matches!(next_input.event, InputEventKind::PointerMotion { .. })
+    if previous.session != next.session
+        || previous_input.target != next_input.target
+        || !matches!(previous_input.target, ClientInputTarget::Pointer { .. })
+    {
+        return false;
+    }
+    let (
+        InputEventKind::PointerMotion {
+            relative: older, ..
+        },
+        InputEventKind::PointerMotion {
+            relative: newer, ..
+        },
+    ) = (&previous_input.event, &mut next_input.event)
+    else {
+        return false;
+    };
+    let Some(merged) = weld_client::RelativeMotion::coalesce(*newer, *older) else {
+        return false;
+    };
+    *newer = merged;
+    true
 }
 
 fn compatible_gamepad(previous: &DestinationEnvelope, next: &DestinationEnvelope) -> bool {
@@ -304,11 +321,48 @@ mod tests {
                     layer: SurfaceLayerId::new(0),
                 },
                 event: InputEventKind::PointerMotion {
+                    relative: None,
                     position: InputPosition::new(f64::from(time), 0.0),
                 },
                 time,
             }),
         }
+    }
+
+    #[tokio::test]
+    async fn coalesced_relative_motion_sums_deltas_and_preserves_absolute_barriers() {
+        use weld_client::{InputDelta, RelativeMotion};
+        let queue = InputOutbox::default();
+        for time in 1..=3 {
+            let mut packet = motion(time);
+            if let DestinationMessage::Input(input) = &mut packet.message
+                && let InputEventKind::PointerMotion { relative, .. } = &mut input.event
+            {
+                *relative = Some(RelativeMotion {
+                    delta: InputDelta::new(2.0, -1.0),
+                    unaccelerated: InputDelta::new(1.0, -0.5),
+                    time_micros: u64::from(time) * 1000,
+                });
+            }
+            queue.push(packet).expect("motion");
+        }
+        queue.push(motion(4)).expect("absolute barrier");
+        let DestinationMessage::Input(input) = queue.recv().await.expect("relative").message else {
+            panic!("input");
+        };
+        assert_eq!(input.time, 3);
+        assert!(
+            matches!(input.event, InputEventKind::PointerMotion { position, relative: Some(relative) }
+            if position.x == 3.0 && relative.delta == InputDelta::new(6.0, -3.0)
+            && relative.unaccelerated == InputDelta::new(3.0, -1.5) && relative.time_micros == 3000)
+        );
+        let DestinationMessage::Input(input) = queue.recv().await.expect("absolute").message else {
+            panic!("input");
+        };
+        assert_eq!(input.time, 4);
+        assert!(
+            matches!(input.event, InputEventKind::PointerMotion { relative: None, position } if position.x == 4.0)
+        );
     }
 
     #[tokio::test]
@@ -387,6 +441,7 @@ mod tests {
         assert_eq!(
             input.event,
             InputEventKind::PointerMotion {
+                relative: None,
                 position: InputPosition::new(4095.0, 0.0)
             }
         );

@@ -159,6 +159,7 @@ impl NativeDriver<()> for Driver {
                 let x = 100.0 + (self.input_sequence % 500) as f64;
                 let event = RawSeatEvent::new(
                     RawSeatEventKind::PointerMotion {
+                        relative: None,
                         position: InputPosition::new(x, 100.0),
                     },
                     self.started.elapsed().as_millis() as u32,

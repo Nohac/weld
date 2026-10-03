@@ -630,6 +630,10 @@ impl NativeDriver<HostEvent> for DrmDriver {
         }
         let cursor_update = application.take_cursor_update();
         if let Some(configuration) = cursor_update.configuration {
+            state
+                .data
+                .server
+                .set_x11_cursor_configuration(configuration.clone());
             self.desktop.set_cursor_configuration(configuration)?;
             self.presentation_schedule.request_present_all();
             self.frame_state.request_present();

@@ -159,6 +159,7 @@ fn quality_motion_survives_pauses_without_extending_queue_priority_or_encoder_ch
             &mut activity,
             1,
             InputEventKind::PointerMotion {
+                relative: None,
                 position: InputPosition::new(ms as f64, 0.0),
             },
             now + Duration::from_millis(ms),
@@ -174,6 +175,7 @@ fn quality_motion_survives_pauses_without_extending_queue_priority_or_encoder_ch
         &mut activity,
         1,
         InputEventKind::PointerMotion {
+            relative: None,
             position: InputPosition::new(200.0, 0.0),
         },
         resumed,
@@ -198,6 +200,7 @@ fn quality_motion_survives_pauses_without_extending_queue_priority_or_encoder_ch
         &mut activity,
         1,
         InputEventKind::PointerMotion {
+            relative: None,
             position: InputPosition::new(300.0, 0.0),
         },
         resumed + Duration::from_millis(90),

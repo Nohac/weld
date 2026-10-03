@@ -238,6 +238,7 @@ fn coalesced_pointer_motion_reports_the_aggregate_frame_delta() {
         app.world_mut(),
         RawSeatEvent::new(
             RawSeatEventKind::PointerMotion {
+                relative: None,
                 position: InputPosition::new(10.0, 20.0),
             },
             1,
@@ -256,6 +257,7 @@ fn coalesced_pointer_motion_reports_the_aggregate_frame_delta() {
         app.world_mut(),
         RawSeatEvent::new(
             RawSeatEventKind::PointerMotion {
+                relative: None,
                 position: InputPosition::new(20.0, 25.0),
             },
             2,
@@ -265,6 +267,7 @@ fn coalesced_pointer_motion_reports_the_aggregate_frame_delta() {
         app.world_mut(),
         RawSeatEvent::new(
             RawSeatEventKind::PointerMotion {
+                relative: None,
                 position: InputPosition::new(35.0, 50.0),
             },
             3,
@@ -291,6 +294,7 @@ fn application_buffer_retains_less_motion_without_changing_forward_decisions() {
                 app.world_mut(),
                 RawSeatEvent::new(
                     RawSeatEventKind::PointerMotion {
+                        relative: None,
                         position: InputPosition::new(f64::from(*time), 20.0),
                     },
                     *time,
@@ -318,12 +322,14 @@ fn application_buffer_retains_less_motion_without_changing_forward_decisions() {
         ),
         RawSeatEvent::new(
             RawSeatEventKind::PointerMotion {
+                relative: None,
                 position: InputPosition::new(20.0, 20.0),
             },
             11,
         ),
         RawSeatEvent::new(
             RawSeatEventKind::PointerMotion {
+                relative: None,
                 position: InputPosition::new(30.0, 20.0),
             },
             12,

@@ -1228,9 +1228,16 @@ interactive-resize sizes are latest-value coalesced at the Smithay server
 boundary and configured at most once per composition tick; pointer motion,
 buttons, axes, gestures, and keyboard input reach clients without that pacing.
 Physical output traversal changes only the compositor's absolute pointer
-position. A future relative-pointer implementation must preserve the original
-libinput accelerated and unaccelerated deltas and must not derive them from the
-physical topology projection.
+position. Relative-pointer delivery preserves the original libinput accelerated
+and unaccelerated deltas and microsecond timestamps through the shared input
+and hoist paths. Smithay sends position and relative motion within one pointer
+frame. Motion coalescing sums relative deltas while retaining the latest
+position and timestamp; absolute-only samples form a coalescing barrier.
+The nested Winit adapter pairs available raw device deltas with logical window
+displacement. When no paired raw event is available it uses that displacement
+for both delta fields; Winit timestamps have millisecond precision. Pointer
+locking and confinement remain separate work. Hoist peers must be rebuilt
+together after the input wire-shape change.
 Click activation is observed on the next application frame, after Smithay may
 already have established the ordinary implicit click grab. Core records the
 positive owner of that ordinary grab so the matching activation may apply

@@ -406,6 +406,7 @@ fn pointer_events(count: usize) -> Vec<RawSeatEvent> {
         .map(|index| {
             RawSeatEvent::new(
                 RawSeatEventKind::PointerMotion {
+                    relative: None,
                     position: InputPosition::new(
                         400.0 + index as f64 * 0.25,
                         300.0 + index as f64 * 0.125,

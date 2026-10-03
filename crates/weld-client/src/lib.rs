@@ -41,8 +41,8 @@ pub use input::{
     ButtonState, ClientInputEvent, ClientInputTarget, ClientKeyboardRoute, ClientPointerRoute,
     ClientPointerRouteUpdate, InputDelta, InputEventKind, InputPosition, InputTransform,
     KeyboardKeyState, LinuxButtonCode, LinuxKeycode, PointerGesture, PointerGestureKind,
-    RawScrollFrame, RawScrollPhase, RawScrollSource, RuntimeInputEvent, RuntimeInputEventKind,
-    TouchpadHold, TouchpadPinch, TouchpadSwipe,
+    RawScrollFrame, RawScrollPhase, RawScrollSource, RelativeMotion, RuntimeInputEvent,
+    RuntimeInputEventKind, TouchpadHold, TouchpadPinch, TouchpadSwipe,
 };
 pub use input_geometry::SurfaceInputGeometry;
 pub use metadata::{ClientSurfaceMetadata, MAX_SURFACE_LABEL_BYTES, SurfaceMetadataError};

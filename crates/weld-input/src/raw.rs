@@ -5,7 +5,7 @@ use winit::keyboard::Key;
 pub use weld_client::{
     ButtonState, InputDelta, InputPosition, KeyboardKeyState, LinuxButtonCode, LinuxKeycode,
     PointerGesture, PointerGestureKind, RawScrollFrame, RawScrollPhase, RawScrollSource,
-    TouchpadHold, TouchpadPinch, TouchpadSwipe,
+    RelativeMotion, TouchpadHold, TouchpadPinch, TouchpadSwipe,
 };
 
 /// One ordered input transition from a nested or standalone seat backend.
@@ -37,8 +37,8 @@ impl RawSeatEvent {
 
     pub fn into_runtime(self) -> weld_client::RuntimeInputEvent {
         let event = match self.event {
-            RawSeatEventKind::PointerMotion { position } => {
-                weld_client::InputEventKind::PointerMotion { position }
+            RawSeatEventKind::PointerMotion { position, relative } => {
+                weld_client::InputEventKind::PointerMotion { position, relative }
             }
             RawSeatEventKind::PointerLeft { position } => {
                 weld_client::InputEventKind::PointerLeft { position }
@@ -106,6 +106,7 @@ impl SeatModifiers {
 pub enum RawSeatEventKind {
     PointerMotion {
         position: InputPosition,
+        relative: Option<RelativeMotion>,
     },
     PointerLeft {
         position: InputPosition,

@@ -253,6 +253,7 @@ mod tests {
             },
             host_position: Some(crate::InputPosition::new(400.0, 500.0)),
             event: InputEventKind::PointerMotion {
+                relative: None,
                 position: crate::InputPosition::new(10.0, 20.0),
             },
             time: 6,
@@ -264,6 +265,7 @@ mod tests {
         assert_eq!(
             decoded.event,
             InputEventKind::PointerMotion {
+                relative: None,
                 position: crate::InputPosition::new(10.0, 20.0)
             }
         );

@@ -36,7 +36,9 @@ use smithay::{
     },
 };
 use tracing::{debug, trace, warn};
-use weld_client::{ClientInputEvent, ClientInputTarget, InputEventKind, KeyboardKeyState};
+use weld_client::{
+    ClientInputEvent, ClientInputTarget, InputEventKind, KeyboardKeyState, RelativeMotion,
+};
 
 use crate::{
     input::{
@@ -70,7 +72,7 @@ impl ServerState {
         match (target, event) {
             (
                 ClientInputTarget::Pointer { surface, layer },
-                InputEventKind::PointerMotion { position },
+                InputEventKind::PointerMotion { position, relative },
             ) => {
                 let host_position = host_position.unwrap_or(self.pointer_position);
                 self.apply_pointer_motion(
@@ -80,12 +82,14 @@ impl ServerState {
                         layer,
                         local_position: position,
                     }),
+                    relative,
                     time,
                 );
             }
             (ClientInputTarget::Pointer { .. }, InputEventKind::PointerLeft { .. }) => {
                 self.apply_pointer_motion(
                     host_position.unwrap_or(self.pointer_position),
+                    None,
                     None,
                     time,
                 );
@@ -436,6 +440,7 @@ impl ServerState {
         &mut self,
         position: InputPosition,
         target: Option<SurfaceHit>,
+        relative: Option<RelativeMotion>,
         time: u32,
     ) {
         let Some(pointer) = self.seat.get_pointer() else {
@@ -456,13 +461,24 @@ impl ServerState {
         );
         pointer.motion(
             self,
-            focus,
+            focus.clone(),
             &MotionEvent {
                 location: compositor_point(position),
                 serial: SERIAL_COUNTER.next_serial(),
                 time: InputTime::from_millis(time),
             },
         );
+        if let Some(relative) = relative.filter(|motion| motion.is_finite()) {
+            pointer.relative_motion(
+                self,
+                focus,
+                &RelativeMotionEvent {
+                    delta: (relative.delta.x, relative.delta.y).into(),
+                    delta_unaccel: (relative.unaccelerated.x, relative.unaccelerated.y).into(),
+                    time: InputTime::from_micros(relative.time_micros),
+                },
+            );
+        }
         pointer.frame(self);
         self.set_shell_cursor_ownership(shell_owns_cursor);
         self.retry_pending_focus(pointer.is_grabbed());

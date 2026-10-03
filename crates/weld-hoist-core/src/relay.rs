@@ -1487,7 +1487,7 @@ impl RemoteInputState {
                 }
                 KeyboardKeyState::Repeated => {}
             },
-            InputEventKind::PointerMotion { position } => {
+            InputEventKind::PointerMotion { position, .. } => {
                 for (target, last_position) in self.buttons.values_mut() {
                     if *target == input.target {
                         *last_position = Some(*position);
@@ -2552,6 +2552,7 @@ mod tests {
                 },
             },
             InputEventKind::PointerMotion {
+                relative: None,
                 position: InputPosition::new(30.0, 40.0),
             },
         ] {

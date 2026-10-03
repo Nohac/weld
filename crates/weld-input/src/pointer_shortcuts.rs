@@ -311,6 +311,7 @@ mod tests {
     fn motion() -> RawSeatEvent {
         RawSeatEvent::new(
             RawSeatEventKind::PointerMotion {
+                relative: None,
                 position: InputPosition::new(12.0, 22.0),
             },
             3,

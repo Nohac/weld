@@ -323,6 +323,12 @@ impl<Event: 'static> NativeRuntime<Event> {
                         }
                     }
                     let cursor = app.take_cursor_update();
+                    if let Some(configuration) = cursor.configuration {
+                        self.state
+                            .data
+                            .server
+                            .set_x11_cursor_configuration(configuration);
+                    }
                     if let Some(appearance) = cursor.appearance {
                         self.state.data.server.set_shell_cursor(appearance);
                     }

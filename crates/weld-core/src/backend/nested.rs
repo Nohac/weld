@@ -37,7 +37,7 @@ use tracing::{info, warn};
 use winit::{
     application::ApplicationHandler,
     dpi::{LogicalSize, PhysicalSize},
-    event::WindowEvent,
+    event::{DeviceEvent, DeviceId, WindowEvent},
     event_loop::{ActiveEventLoop, ControlFlow, EventLoop, OwnedDisplayHandle},
     platform::pump_events::{EventLoopExtPumpEvents, PumpStatus},
     raw_window_handle::{HasDisplayHandle, RawDisplayHandle},
@@ -401,6 +401,10 @@ impl NativeDriver<NestedEvent> for NestedDriver {
             state.data.server.set_shell_cursor_override(active);
         }
         if let Some(configuration) = cursor_update.configuration {
+            state
+                .data
+                .server
+                .set_x11_cursor_configuration(configuration.clone());
             self.host.cursor_configuration = configuration;
             self.host.cursor_dirty = true;
         }
@@ -758,6 +762,15 @@ impl NestedHost {
 }
 
 impl ApplicationHandler for NestedHost {
+    fn device_event(
+        &mut self,
+        _event_loop: &ActiveEventLoop,
+        _device_id: DeviceId,
+        event: DeviceEvent,
+    ) {
+        self.input.handle_device_event(event);
+    }
+
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.window.is_some() || self.creation_error.is_some() {
             return;

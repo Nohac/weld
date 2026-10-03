@@ -148,6 +148,7 @@ fn motion(activity: &mut Activity, local: u64, x: f64, now: Instant) {
         activity,
         local,
         InputEventKind::PointerMotion {
+            relative: None,
             position: InputPosition::new(x, 0.0),
         },
         now,
@@ -312,6 +313,7 @@ fn pointer_layer_handoff_and_cancel_are_not_activity() {
         },
         host_position: None,
         event: InputEventKind::PointerMotion {
+            relative: None,
             position: InputPosition::new(99.0, 0.0),
         },
         time: 0,

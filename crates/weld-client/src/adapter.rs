@@ -480,7 +480,10 @@ impl ClientRuntime {
                 }
                 self.set_pointer_route(Some(route));
                 self.dispatch_unconsumed_input(RuntimeInputEvent::new(
-                    RuntimeInputEventKind::Input(InputEventKind::PointerMotion { position }),
+                    RuntimeInputEventKind::Input(InputEventKind::PointerMotion {
+                        position,
+                        relative: None,
+                    }),
                     time,
                 ))
             }
@@ -812,10 +815,10 @@ impl ClientRuntime {
     ) -> ClientInputDispatchResult {
         let RuntimeInputEvent { event, time } = event;
         match event {
-            RuntimeInputEventKind::Input(InputEventKind::PointerMotion { position }) => {
+            RuntimeInputEventKind::Input(InputEventKind::PointerMotion { position, relative }) => {
                 self.pointer_position = Some(position);
                 self.dispatch_pointer(
-                    InputEventKind::PointerMotion { position },
+                    InputEventKind::PointerMotion { position, relative },
                     Some(position),
                     time,
                 )
@@ -1014,7 +1017,7 @@ impl ClientRuntime {
         };
         let local = position.map(|position| route.transform.transform(position));
         match &mut event {
-            InputEventKind::PointerMotion { position }
+            InputEventKind::PointerMotion { position, .. }
             | InputEventKind::PointerLeft { position } => {
                 if let Some(local) = local {
                     *position = local;
@@ -2030,6 +2033,51 @@ mod tests {
     }
 
     #[test]
+    fn pointer_routing_preserves_device_motion_while_transforming_position() {
+        let mut runtime = ClientRuntime::default();
+        let record = register(&mut runtime, 1);
+        let relative = crate::RelativeMotion {
+            delta: crate::InputDelta::new(5.0, -3.0),
+            unaccelerated: crate::InputDelta::new(2.0, -1.0),
+            time_micros: 123_456,
+        };
+        runtime.set_pointer_route(Some(ClientPointerRoute {
+            surface: surface(1, 1, 1),
+            layer: SurfaceLayerId::new(0),
+            transform: InputTransform {
+                xx: 2.0,
+                yy: 2.0,
+                x: -10.0,
+                y: -20.0,
+                ..InputTransform::IDENTITY
+            },
+        }));
+        assert_eq!(
+            runtime.dispatch_unconsumed_input(RuntimeInputEvent::new(
+                RuntimeInputEventKind::Input(InputEventKind::PointerMotion {
+                    position: InputPosition::new(20.0, 30.0),
+                    relative: Some(relative)
+                }),
+                123,
+            )),
+            ClientInputDispatchResult::Delivered
+        );
+        let record = record.borrow();
+        let delivered = record.inputs.last().expect("motion");
+        assert_eq!(
+            delivered.host_position,
+            Some(InputPosition::new(20.0, 30.0))
+        );
+        assert_eq!(
+            delivered.event,
+            InputEventKind::PointerMotion {
+                position: InputPosition::new(30.0, 40.0),
+                relative: Some(relative)
+            }
+        );
+    }
+
+    #[test]
     fn active_pointer_capture_defers_cross_source_handoff_without_sending_leave() {
         let mut runtime = ClientRuntime::default();
         let first = register(&mut runtime, 1);
@@ -2074,7 +2122,10 @@ mod tests {
         ));
         assert_eq!(
             runtime.dispatch_unconsumed_input(RuntimeInputEvent::new(
-                RuntimeInputEventKind::Input(InputEventKind::PointerMotion { position }),
+                RuntimeInputEventKind::Input(InputEventKind::PointerMotion {
+                    position,
+                    relative: None
+                }),
                 4,
             )),
             ClientInputDispatchResult::Delivered
@@ -2133,6 +2184,7 @@ mod tests {
         assert_eq!(
             runtime.dispatch_unconsumed_input(RuntimeInputEvent::new(
                 RuntimeInputEventKind::Input(InputEventKind::PointerMotion {
+                    relative: None,
                     position: InputPosition::new(1.0, 1.0),
                 }),
                 1,
@@ -2178,6 +2230,7 @@ mod tests {
         }));
         runtime.dispatch_unconsumed_input(RuntimeInputEvent::new(
             RuntimeInputEventKind::Input(InputEventKind::PointerMotion {
+                relative: None,
                 position: InputPosition::new(30.0, 40.0),
             }),
             2,
@@ -2192,6 +2245,7 @@ mod tests {
         ));
         runtime.dispatch_unconsumed_input(RuntimeInputEvent::new(
             RuntimeInputEventKind::Input(InputEventKind::PointerMotion {
+                relative: None,
                 position: InputPosition::new(50.0, 60.0),
             }),
             4,
@@ -2223,6 +2277,7 @@ mod tests {
         assert_eq!(
             runtime.dispatch_unconsumed_input(RuntimeInputEvent::new(
                 RuntimeInputEventKind::Input(InputEventKind::PointerMotion {
+                    relative: None,
                     position: InputPosition::new(2.0, 3.0),
                 }),
                 2,
@@ -2250,6 +2305,7 @@ mod tests {
             runtime
                 .dispatch_unconsumed_input(RuntimeInputEvent::new(
                     RuntimeInputEventKind::Input(InputEventKind::PointerMotion {
+                        relative: None,
                         position: InputPosition::new(4.0, 5.0),
                     }),
                     5,
@@ -2267,6 +2323,7 @@ mod tests {
         assert_eq!(
             runtime.dispatch_unconsumed_input(RuntimeInputEvent::new(
                 RuntimeInputEventKind::Input(InputEventKind::PointerMotion {
+                    relative: None,
                     position: InputPosition::new(5.0, 6.0),
                 }),
                 7,
@@ -2536,6 +2593,7 @@ mod tests {
         runtime.set_keyboard_route(Some(ClientKeyboardRoute { surface: relocated }));
         runtime.dispatch_unconsumed_input(RuntimeInputEvent::new(
             RuntimeInputEventKind::Input(InputEventKind::PointerMotion {
+                relative: None,
                 position: InputPosition::new(1.0, 2.0),
             }),
             1,
@@ -2572,6 +2630,7 @@ mod tests {
 
         runtime.dispatch_unconsumed_input(RuntimeInputEvent::new(
             RuntimeInputEventKind::Input(InputEventKind::PointerMotion {
+                relative: None,
                 position: InputPosition::new(4.0, 5.0),
             }),
             1,
@@ -2629,6 +2688,7 @@ mod tests {
         let motion = |time| {
             RuntimeInputEvent::new(
                 RuntimeInputEventKind::Input(InputEventKind::PointerMotion {
+                    relative: None,
                     position: InputPosition::new(1.0, 2.0),
                 }),
                 time,

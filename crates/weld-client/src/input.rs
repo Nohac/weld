@@ -67,6 +67,42 @@ impl InputDelta {
     }
 }
 
+/// One motion sample before output clipping, with its source clock in microseconds.
+#[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RelativeMotion {
+    pub delta: InputDelta,
+    pub unaccelerated: InputDelta,
+    pub time_micros: u64,
+}
+
+impl RelativeMotion {
+    pub fn is_finite(self) -> bool {
+        self.delta.x.is_finite()
+            && self.delta.y.is_finite()
+            && self.unaccelerated.x.is_finite()
+            && self.unaccelerated.y.is_finite()
+    }
+
+    /// Accumulate an older sample while retaining the newest source timestamp.
+    pub fn accumulate(mut self, older: Self) -> Option<Self> {
+        self.delta.x += older.delta.x;
+        self.delta.y += older.delta.y;
+        self.unaccelerated.x += older.unaccelerated.x;
+        self.unaccelerated.y += older.unaccelerated.y;
+        self.is_finite().then_some(self)
+    }
+
+    /// Merge adjacent motion payloads. Absolute and relative sources form a barrier.
+    pub fn coalesce(newer: Option<Self>, older: Option<Self>) -> Option<Option<Self>> {
+        match (newer, older) {
+            (None, None) => Some(None),
+            (Some(newer), Some(older)) => newer.accumulate(older).map(Some),
+            _ => None,
+        }
+    }
+}
+
 #[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct LinuxKeycode(pub u32);
@@ -298,6 +334,7 @@ pub struct ClientInputEvent {
 pub enum InputEventKind {
     PointerMotion {
         position: InputPosition,
+        relative: Option<RelativeMotion>,
     },
     PointerLeft {
         position: InputPosition,

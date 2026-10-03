@@ -5,13 +5,14 @@ use std::collections::{VecDeque, vec_deque::Drain};
 use tracing::trace;
 use winit::{
     dpi::PhysicalPosition,
-    event::{ElementState, MouseButton, MouseScrollDelta, TouchPhase, WindowEvent},
+    event::{DeviceEvent, ElementState, MouseButton, MouseScrollDelta, TouchPhase, WindowEvent},
     platform::scancode::PhysicalKeyExtScancode,
 };
 
 use crate::input::{
-    ButtonState, InputPosition, KeyboardKeyState, LinuxButtonCode, LinuxKeycode, RawScrollFrame,
-    RawScrollPhase, RawScrollSource, RawSeatEvent, RawSeatEventKind,
+    ButtonState, InputDelta, InputPosition, KeyboardKeyState, LinuxButtonCode, LinuxKeycode,
+    RawScrollFrame, RawScrollPhase, RawScrollSource, RawSeatEvent, RawSeatEventKind,
+    RelativeMotion,
 };
 
 #[derive(Default)]
@@ -19,6 +20,7 @@ pub struct NestedAdapter {
     events: VecDeque<RawSeatEvent>,
     pointer_position: Option<InputPosition>,
     active_scroll_axes: ActiveScrollAxes,
+    pending_unaccelerated: Option<InputDelta>,
 }
 
 impl NestedAdapter {
@@ -27,13 +29,31 @@ impl NestedAdapter {
     }
 
     pub fn drain(&mut self) -> Drain<'_, RawSeatEvent> {
+        // Discard unmatched raw samples when a window-event batch is drained.
+        // Raw-only pumps retain their sample for a following pointer frame.
+        self.pending_unaccelerated = None;
         self.events.drain(..)
+    }
+
+    pub fn handle_device_event(&mut self, event: DeviceEvent) {
+        if let DeviceEvent::MouseMotion { delta: (x, y) } = event
+            && self.pointer_position.is_some()
+            && x.is_finite()
+            && y.is_finite()
+        {
+            let pending = self
+                .pending_unaccelerated
+                .get_or_insert_with(InputDelta::default);
+            pending.x += x;
+            pending.y += y;
+        }
     }
 
     pub fn handle_window_event(&mut self, event: WindowEvent, scale_factor: f64, time: u32) {
         match event {
             WindowEvent::Focused(false) => {
                 self.pointer_position = None;
+                self.pending_unaccelerated = None;
                 self.cancel_active_scroll(time);
                 self.events
                     .push_back(RawSeatEvent::new(RawSeatEventKind::HostFocusLost, time));
@@ -43,13 +63,27 @@ impl NestedAdapter {
             WindowEvent::Focused(true) => {}
             WindowEvent::CursorMoved { position, .. } => {
                 let position = logical_input_position(position, scale_factor);
+                // Winit retains raw device deltas but only exposes accelerated
+                // motion as parent-transformed positions. Pair the raw sample
+                // preceding this window event; absolute-only hosts use the
+                // logical displacement for both fields.
+                let unaccelerated = self.pending_unaccelerated.take();
+                let relative = self.pointer_position.map(|previous| {
+                    let delta = InputDelta::new(position.x - previous.x, position.y - previous.y);
+                    RelativeMotion {
+                        delta,
+                        unaccelerated: unaccelerated.unwrap_or(delta),
+                        time_micros: u64::from(time) * 1000,
+                    }
+                });
                 self.pointer_position = Some(position);
                 self.events.push_back(RawSeatEvent::new(
-                    RawSeatEventKind::PointerMotion { position },
+                    RawSeatEventKind::PointerMotion { position, relative },
                     time,
                 ));
             }
             WindowEvent::CursorLeft { .. } => {
+                self.pending_unaccelerated = None;
                 let position = self.pointer_position.take().unwrap_or_default();
                 self.cancel_active_scroll(time);
                 self.events.push_back(RawSeatEvent::new(
@@ -264,6 +298,43 @@ mod tests {
         for (button, expected) in cases {
             assert_eq!(linux_button_code(button), expected);
         }
+    }
+
+    #[test]
+    fn nested_relative_motion_uses_logical_displacement_and_resets_on_leave() {
+        use super::NestedAdapter;
+        use crate::input::RawSeatEventKind;
+        use winit::event::{DeviceId, WindowEvent};
+        let mut adapter = NestedAdapter::default();
+        let motion = |x| WindowEvent::CursorMoved {
+            device_id: DeviceId::dummy(),
+            position: PhysicalPosition::new(x, 40.0),
+        };
+        adapter.handle_window_event(motion(20.0), 2.0, 1);
+        adapter.handle_device_event(winit::event::DeviceEvent::MouseMotion { delta: (9.0, -2.0) });
+        adapter.handle_window_event(motion(30.0), 2.0, 2);
+        let events = adapter.drain().collect::<Vec<_>>();
+        assert!(matches!(
+            events[0].event,
+            RawSeatEventKind::PointerMotion { relative: None, .. }
+        ));
+        assert!(
+            matches!(events[1].event, RawSeatEventKind::PointerMotion { relative: Some(relative), .. }
+            if relative.delta.x == 5.0 && relative.delta.y == 0.0 && relative.time_micros == 2000
+                && relative.unaccelerated == weld_client::InputDelta::new(9.0, -2.0))
+        );
+        adapter.handle_window_event(
+            WindowEvent::CursorLeft {
+                device_id: DeviceId::dummy(),
+            },
+            2.0,
+            3,
+        );
+        adapter.handle_window_event(motion(900.0), 2.0, 4);
+        assert!(matches!(
+            adapter.drain().next_back().expect("reentry").event,
+            RawSeatEventKind::PointerMotion { relative: None, .. }
+        ));
     }
 
     #[test]

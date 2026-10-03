@@ -140,7 +140,7 @@ fn replay_input_batch(
 ) {
     for raw_event in events {
         match raw_event.event {
-            RawSeatEventKind::PointerMotion { position } => routing.pointer.apply(position),
+            RawSeatEventKind::PointerMotion { position, .. } => routing.pointer.apply(position),
             RawSeatEventKind::PointerLeft { position } => {
                 routing.pointer.apply(position);
                 routing.pointer.clear_host();

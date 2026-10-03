@@ -218,7 +218,7 @@ fn project_raw_input(
 ) {
     while let Some(raw_event) = ingress.0.pop_front() {
         match &raw_event.event {
-            RawSeatEventKind::PointerMotion { position } => {
+            RawSeatEventKind::PointerMotion { position, .. } => {
                 let position = *position;
                 let previous = projected_pointer.0.host_position;
                 projected_pointer.0.apply(position);
