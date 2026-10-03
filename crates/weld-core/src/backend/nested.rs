@@ -121,6 +121,7 @@ pub(crate) fn prepare(options: RunOptions, signals: Signals) -> Result<PreparedH
         vec![client_registration],
         move |application, adapters, wake_sources| {
             let mut runtime = NativeRuntime::prepare(RuntimeSetup {
+                xwayland: options.xwayland,
                 server: ServerOptions {
                     initial_toplevel_size: None,
                     started_at,

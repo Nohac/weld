@@ -19,7 +19,6 @@ use smithay::{
         },
         dmabuf::get_dmabuf,
         drm_syncobj::{DrmSyncPoint, DrmSyncobjCachedState},
-        shell::xdg::SurfaceCachedState as XdgSurfaceCachedState,
     },
 };
 use tracing::warn;
@@ -199,6 +198,7 @@ impl SurfaceTreeState {
         surface_id: SurfaceId,
         root: &WlSurface,
         releases: &mut DmabufReleaseStore,
+        root_geometry: Option<Rectangle<i32, Logical>>,
     ) -> PendingSurfaceTreeSnapshot {
         let _update_span = tracing::trace_span!(
             target: crate::PROFILE_TARGET,
@@ -207,7 +207,6 @@ impl SurfaceTreeState {
         .entered();
 
         let mut scratch = std::mem::take(&mut self.scratch);
-        let mut root_geometry = None;
         with_surface_tree_upward(
             root,
             TraversalContext::default(),
@@ -220,10 +219,6 @@ impl SurfaceTreeState {
             },
             |surface, states, context| {
                 let position = context.position + surface_offset(states);
-                if context.parent.is_none() {
-                    let mut xdg_state = states.cached_state.get::<XdgSurfaceCachedState>();
-                    root_geometry = xdg_state.current().geometry;
-                }
                 let mut attributes = states.cached_state.get::<SurfaceAttributes>();
                 let current = attributes.current();
                 let mut syncobj = states.cached_state.get::<DrmSyncobjCachedState>();
@@ -746,6 +741,7 @@ fn import_buffer(
             let size = dmabuf.size();
             let width = u32::try_from(size.w).context("negative DMA-BUF width")?;
             let height = u32::try_from(size.h).context("negative DMA-BUF height")?;
+            tracing::trace!(target: "weld_surface_diag", surface = ?surface.id(), width, height, buffer_kind = "dma-buf", "importing client buffer");
             let metadata = SurfaceBufferMetadata {
                 width,
                 height,
@@ -785,6 +781,7 @@ fn import_buffer(
         }
     };
     buffer.release();
+    tracing::trace!(target: "weld_surface_diag", surface = ?surface.id(), width = copied.width, height = copied.height, buffer_kind = "shm", "importing client buffer");
     let metadata = SurfaceBufferMetadata {
         width: copied.width,
         height: copied.height,

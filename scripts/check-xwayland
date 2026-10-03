@@ -1,0 +1,131 @@
+#!/usr/bin/env python3
+"""Bounded rootless X11 probe, locally or over an isolated same-device Iroh link."""
+
+import argparse
+import json
+import os
+from pathlib import Path
+import resource
+import signal
+import socket
+import subprocess
+import tempfile
+import time
+import urllib.request
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--no-build", action="store_true")
+    parser.add_argument("--hoist", action="store_true")
+    parser.add_argument("--lifecycle", action="store_true", help="exercise transient/popup mapping and root unmap/remap")
+    parser.add_argument("--interactive", action="store_true", help="leave the test open for 90 seconds instead of capturing and exiting")
+    parser.add_argument("client", nargs=argparse.REMAINDER, help="optional X11 client command after --")
+    args = parser.parse_args()
+    for port in (15702, 15703):
+        with socket.socket() as probe_socket:
+            probe_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            probe_socket.bind(("127.0.0.1", port))
+    root = Path(__file__).resolve().parent.parent
+    resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
+    if not args.no_build:
+        subprocess.run(["cargo", "build", "-p", "weldwm", "-p", "weld-core", "--bin", "weldwm", "--example", "x11_window_probe", "--locked", "-j", "8"], cwd=root, check=True)
+    validation = root / "target/validation"
+    validation.mkdir(parents=True, exist_ok=True)
+    run = Path(tempfile.mkdtemp(prefix="xwayland-", dir=validation))
+    print(f"Logs and capture: {run}", flush=True)
+    config = run / "master.sway.config"
+    config.write_text("\n".join(line for line in (root / "examples/master.sway.config").read_text().splitlines() if not line.startswith(("exec ", "exec_always "))))
+    command = ["cargo", "run", "--quiet", "--locked", "--"]
+    capture = run / "capture.png"
+    graphical = ["--backend", "nested", "--config", str(config), "--remote-debug"]
+    probe = [str(root / "target/debug/examples/x11_window_probe"), "--seconds", "110"]
+    if args.client:
+        probe = args.client[1:] if args.client[0] == "--" else args.client
+        if args.lifecycle:
+            parser.error("--lifecycle uses the built-in probe")
+    if args.lifecycle:
+        probe.append("--lifecycle")
+    processes = []
+    logs = []
+
+    def start(name, arguments):
+        log = (run / f"{name}.log").open("w")
+        logs.append(log)
+        process = subprocess.Popen(command + arguments, cwd=root, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
+        processes.append(process)
+        return process
+
+    def wait_for_ticket(process, ticket):
+        deadline = time.monotonic() + 30
+        while not ticket.exists():
+            if process.poll() is not None or time.monotonic() > deadline:
+                raise RuntimeError("source failed to publish ticket; see source.log")
+            time.sleep(0.05)
+
+    try:
+        if args.hoist:
+            ticket = run / "source.ticket"
+            identity = run / "receiver.identity"
+            source = start("source", ["--backend", "headless", "--xwayland", "--wayland-socket", str(run / "source"), "--hoist-all",
+                "--hoist-iroh-listen", str(ticket), "--hoist-iroh-expect-peer", str(identity), "--hoist-codec", "h264", "--hoist-iroh-network", "direct", "--", *probe])
+            wait_for_ticket(source, ticket)
+            presenter = start("receiver", [*graphical, "--wayland-socket", str(run / "receiver"), "--hoist-iroh-connect", str(ticket), "--hoist-iroh-publish-identity", str(identity), "--hoist-iroh-network", "direct"])
+        else:
+            presenter = start("source", [*graphical, "--xwayland", "--wayland-socket", str(run / "source"), "--", *probe])
+        presenter_log = run / ("receiver.log" if args.hoist else "source.log")
+        deadline = time.monotonic() + 45
+        while "Weld nested compositor is ready" not in presenter_log.read_text() or "associated X11 window" not in (run / "source.log").read_text():
+            if presenter.poll() is not None or time.monotonic() > deadline:
+                raise RuntimeError("presenter did not become ready; inspect logs")
+            time.sleep(0.1)
+        time.sleep(3)
+        def snapshot(path, request_id):
+            request = urllib.request.Request("http://127.0.0.1:15702/", json.dumps({"jsonrpc": "2.0", "id": request_id, "method": "world.write_message", "params": {"message": "weldwm::debug::RemoteScreenshotRequest", "value": {"request_id": request_id, "path": str(path)}}}).encode(), {"Content-Type": "application/json"})
+            with urllib.request.urlopen(request, timeout=15) as response:
+                result = json.load(response)
+                if "error" in result:
+                    raise RuntimeError(result["error"])
+            deadline = time.monotonic() + 12
+            while not path.exists():
+                if presenter.poll() is not None or time.monotonic() > deadline:
+                    raise RuntimeError("capture did not complete; inspect logs")
+                time.sleep(0.1)
+        snapshot(capture, 1)
+        if "associated X11 window" not in (run / "source.log").read_text():
+            raise RuntimeError("client did not map an X11 window")
+        if args.lifecycle:
+            time.sleep(5)
+            snapshot(run / "remapped.png", 2)
+            source_log = (run / "source.log").read_text()
+            for marker in ("FAMILY_MAPPED", "FAMILY_UNMAPPED", "ROOT_REMAPPED"):
+                if marker not in source_log:
+                    raise RuntimeError(f"missing lifecycle step {marker}")
+        if args.interactive:
+            print("X11 probe runs for 90 seconds: type/click to change its input count; resize or close with the usual Weld controls.", flush=True)
+            deadline = time.monotonic() + 90
+            while presenter.poll() is None and time.monotonic() < deadline:
+                time.sleep(0.25)
+            if presenter.poll() is not None and presenter.returncode != 0:
+                raise RuntimeError("presenter exited unexpectedly; inspect logs")
+        else:
+            if not capture.exists() or not capture.read_bytes().startswith(b"\x89PNG"):
+                raise RuntimeError("missing capture")
+            print("PASS compositor completed the X11 capture; inspect capture.png for content", flush=True)
+    finally:
+        for process in reversed(processes):
+            try:
+                os.killpg(process.pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                os.killpg(process.pid, signal.SIGKILL)
+                process.wait(timeout=5)
+        for log in logs:
+            log.close()
+
+
+if __name__ == "__main__":
+    main()

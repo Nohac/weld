@@ -144,6 +144,10 @@ scripts/run-app foot
 The launcher forces common toolkits onto their native Wayland backends and
 disables X11 fallback.
 
+For X11 clients, enable `--xwayland` and launch through Weld (CLI, config `exec`,
+or a terminal inside Weld), which supplies the session's private `DISPLAY`.
+See [Rootless XWayland](docs/xwayland.md) for validation commands and limits.
+
 The development example config provides these backend-neutral shortcuts:
 
 - `Alt+Enter`: launch foot

@@ -9,10 +9,12 @@ pub use assembly::probe as presentation_probe;
 pub use assembly::{HostRuntime, RuntimeOptions};
 
 use std::{
+    cell::RefCell,
     collections::VecDeque,
     ffi::{OsStr, OsString},
     path::PathBuf,
     process::{Child, Command},
+    rc::Rc,
     time::{Duration, Instant},
 };
 
@@ -34,20 +36,34 @@ pub(crate) const BEVY_SETTLE_COMPOSITIONS: u8 = 5;
 /// backend events or process policy.
 pub(crate) struct LoopData<Event> {
     pub(crate) server: ServerState,
-    pub(crate) events: VecDeque<Event>,
+    pub(crate) events: BackendEvents<Event>,
 }
 
-impl<Event> LoopData<Event> {
-    pub(crate) fn new(server: ServerState) -> Self {
-        Self {
-            server,
-            events: VecDeque::new(),
-        }
+/// Backend notifications collected during protocol dispatch on the host thread.
+pub(crate) struct BackendEvents<Event>(Rc<RefCell<VecDeque<Event>>>);
+
+impl<Event> Default for BackendEvents<Event> {
+    fn default() -> Self {
+        Self(Rc::default())
     }
 }
 
-pub(crate) fn server_mut<Event>(data: &mut LoopData<Event>) -> &mut ServerState {
-    &mut data.server
+impl<Event> Clone for BackendEvents<Event> {
+    fn clone(&self) -> Self {
+        Self(Rc::clone(&self.0))
+    }
+}
+
+impl<Event> BackendEvents<Event> {
+    pub(crate) fn push_back(&self, event: Event) {
+        self.0.borrow_mut().push_back(event);
+    }
+    pub(crate) fn pop_front(&self) -> Option<Event> {
+        self.0.borrow_mut().pop_front()
+    }
+    pub(crate) fn is_empty(&self) -> bool {
+        self.0.borrow().is_empty()
+    }
 }
 
 /// Preserve completion-before-ingress and input-before-resize ordering across
@@ -158,7 +174,7 @@ impl ChildProcesses {
             tracing::trace_span!(target: crate::PROFILE_TARGET, "host_launch_client").entered();
         let mut command = Command::new(program);
         command.args(arguments);
-        configure_client_command(&mut command, &server.socket_name);
+        configure_client_command(&mut command, &server.socket_name, server.x11_display());
         let child = command
             .spawn()
             .with_context(|| format!("failed to spawn Wayland client {program:?}"))?;
@@ -173,8 +189,8 @@ impl ChildProcesses {
     }
 }
 
-/// Keep this environment exactly synchronized with `scripts/run-app`.
-pub(crate) fn configure_client_command(command: &mut Command, socket_name: &OsStr) {
+/// The native-only environment is also used by `scripts/run-app`.
+fn configure_client_command(command: &mut Command, socket_name: &OsStr, x11_display: Option<u32>) {
     command
         .env("WAYLAND_DISPLAY", socket_name)
         .env("GDK_BACKEND", "wayland")
@@ -186,6 +202,18 @@ pub(crate) fn configure_client_command(command: &mut Command, socket_name: &OsSt
         .env("XDG_SESSION_TYPE", "wayland")
         .env_remove("DISPLAY")
         .env_remove("WAYLAND_SOCKET");
+    if let Some(display) = x11_display {
+        command.env("DISPLAY", format!(":{display}"));
+        // Let toolkit backend discovery use this session's two display endpoints.
+        for key in [
+            "GDK_BACKEND",
+            "QT_QPA_PLATFORM",
+            "SDL_VIDEODRIVER",
+            "SDL_VIDEO_DRIVER",
+        ] {
+            command.env_remove(key);
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -355,6 +383,56 @@ impl PendingCapture {
 
     pub(crate) const fn is_startup(&self) -> bool {
         self.remote_request_id.is_none()
+    }
+}
+
+#[cfg(test)]
+mod launch_tests {
+    use super::{BackendEvents, configure_client_command};
+    use std::{ffi::OsStr, process::Command};
+
+    #[test]
+    fn launch_environment_owns_both_display_endpoints() {
+        for display in [None, Some(17)] {
+            let mut command = Command::new("test-client");
+            command
+                .env("DISPLAY", ":foreign")
+                .env("WAYLAND_SOCKET", "99");
+            configure_client_command(&mut command, OsStr::new("weld-private"), display);
+            let value = |name: &str| {
+                command
+                    .get_envs()
+                    .find(|(key, _)| *key == OsStr::new(name))
+                    .map(|(_, value)| value)
+            };
+            assert_eq!(
+                value("WAYLAND_DISPLAY"),
+                Some(Some(OsStr::new("weld-private")))
+            );
+            assert_eq!(value("WAYLAND_SOCKET"), Some(None));
+            assert_eq!(value("DISPLAY"), Some(display.map(|_| OsStr::new(":17"))));
+            assert_eq!(
+                value("GDK_BACKEND"),
+                Some(if display.is_some() {
+                    None
+                } else {
+                    Some(OsStr::new("wayland"))
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn backend_publishers_preserve_dispatch_order_and_drain_once() {
+        let queue = BackendEvents::default();
+        let producer = queue.clone();
+        producer.push_back(1);
+        queue.push_back(2);
+        assert_eq!(queue.pop_front(), Some(1));
+        producer.push_back(3);
+        assert_eq!(queue.pop_front(), Some(2));
+        assert_eq!(queue.pop_front(), Some(3));
+        assert!(queue.is_empty());
     }
 }
 

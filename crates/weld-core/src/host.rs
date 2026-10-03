@@ -32,6 +32,7 @@ pub(crate) struct RunOptions {
     pub(crate) output_scale: OutputScale,
     pub(crate) socket_name: Option<String>,
     pub(crate) keyboard_repeat_mode: Option<KeyboardRepeatMode>,
+    pub(crate) xwayland: bool,
 }
 
 /// Native host selected before an application is constructed.
@@ -51,6 +52,11 @@ pub struct HostBuilder {
 }
 
 impl HostBuilder {
+    /// Enables this host's rootless X11 compatibility server.
+    pub fn xwayland(mut self, enabled: bool) -> Self {
+        self.options.xwayland = enabled;
+        self
+    }
     /// Creates a builder that prepares the nested backend by default.
     pub fn new() -> Self {
         Self::default()

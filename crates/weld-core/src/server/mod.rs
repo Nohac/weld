@@ -4,6 +4,7 @@ mod adapter;
 mod cursor;
 mod dmabuf;
 mod keyboard;
+mod keyboard_focus;
 mod layer;
 mod output;
 #[cfg(test)]
@@ -15,7 +16,9 @@ mod seat;
 mod shm;
 mod surface_tree;
 mod toplevel;
+mod window;
 mod workspace;
+mod xwayland;
 
 pub use adapter::WaylandClientImporter;
 pub(crate) use adapter::{
@@ -93,6 +96,7 @@ pub struct ServerState {
     pub socket_name: OsString,
     compositor_state: CompositorState,
     xdg_shell_state: XdgShellState,
+    xwayland: xwayland::XwaylandState,
     layer_shell_state: smithay::wayland::shell::wlr_layer::WlrLayerShellState,
     layers: layer::LayerStore,
     pending_work_areas: HashMap<OutputId, crate::geometry::LogicalRect>,
@@ -171,12 +175,11 @@ struct ServerOutput {
 }
 
 impl ServerState {
-    pub(crate) fn new<LoopData: 'static>(
-        loop_handle: &LoopHandle<'static, LoopData>,
+    pub(crate) fn new(
+        loop_handle: &LoopHandle<'static, Self>,
         display: Display<Self>,
         dmabuf_release_source: Channel<DmabufEvent>,
         client_bridge: WaylandClientBridge,
-        server: fn(&mut LoopData) -> &mut Self,
         options: ServerOptions<'_>,
     ) -> Result<Self> {
         let ServerOptions {
@@ -192,6 +195,7 @@ impl ServerState {
         let display_handle = display.handle();
         let compositor_state = CompositorState::new::<Self>(&display_handle);
         let xdg_shell_state = XdgShellState::new::<Self>(&display_handle);
+        let xwayland = xwayland::XwaylandState::new(&display_handle);
         let layer_shell_state =
             smithay::wayland::shell::wlr_layer::WlrLayerShellState::new::<Self>(&display_handle);
         let xdg_decoration_state = XdgDecorationState::new::<Self>(&display_handle);
@@ -264,7 +268,6 @@ impl ServerState {
                     "host_accept_wayland_client"
                 )
                 .entered();
-                let state = server(state);
                 let Some(client_id) = state.allocate_client_id() else {
                     warn!("rejected a Wayland client because ClientId space is exhausted");
                     return;
@@ -286,7 +289,6 @@ impl ServerState {
             .insert_source(
                 Generic::new(display, Interest::READ, Mode::Level),
                 move |_, display, state| {
-                    let state = server(state);
                     // SAFETY: calloop owns this source for the complete event-loop lifetime, so
                     // the contained Display is not moved or accessed concurrently.
                     let result = unsafe { display.get_mut() }.dispatch_clients(state);
@@ -303,10 +305,10 @@ impl ServerState {
                 if let ChannelEvent::Msg(event) = event {
                     match event {
                         DmabufEvent::GpuUseCompleted(use_id) => {
-                            server(state).completed_dmabuf_uses.push(use_id);
+                            state.completed_dmabuf_uses.push(use_id);
                         }
                         DmabufEvent::LeaseCompleted(release) => {
-                            server(state).complete_dmabuf_release(release);
+                            state.complete_dmabuf_release(release);
                         }
                     }
                 }
@@ -317,14 +319,9 @@ impl ServerState {
             let blocker_handle = loop_handle.clone();
             Box::new(move |source: DmabufSource, client: Client| {
                 blocker_handle
-                    .insert_source(source, move |_, _, loop_data| {
-                        let state = server(loop_data);
+                    .insert_source(source, move |_, _, state| {
                         let display_handle = state.display_handle.clone();
-                        if let Some(client_state) = client.get_data::<ClientState>() {
-                            client_state
-                                .compositor_state
-                                .blocker_cleared(state, &display_handle);
-                        }
+                        xwayland::compositor_state(&client).blocker_cleared(state, &display_handle);
                         Ok(())
                     })
                     .is_ok()
@@ -334,14 +331,9 @@ impl ServerState {
             let blocker_handle = loop_handle.clone();
             Box::new(move |source: DrmSyncPointSource, client: Client| {
                 blocker_handle
-                    .insert_source(source, move |_, _, loop_data| {
-                        let state = server(loop_data);
+                    .insert_source(source, move |_, _, state| {
                         let display_handle = state.display_handle.clone();
-                        if let Some(client_state) = client.get_data::<ClientState>() {
-                            client_state
-                                .compositor_state
-                                .blocker_cleared(state, &display_handle);
-                        }
+                        xwayland::compositor_state(&client).blocker_cleared(state, &display_handle);
                         Ok(())
                     })
                     .is_ok()
@@ -355,6 +347,7 @@ impl ServerState {
             socket_name,
             compositor_state,
             xdg_shell_state,
+            xwayland,
             layer_shell_state,
             layers: layer::LayerStore::default(),
             pending_work_areas: HashMap::new(),

@@ -31,9 +31,10 @@ documented Gamescope invocation. Candidate behaviors include:
 
 Steam and games needing X11 motivate implementing the general
 [XWayland compatibility boundary](platform-completeness.md), not a
-Steam-specific rendering or streaming path. Weld does not currently enable or
-integrate Smithay's XWayland support; its vendored Anvil example provides
-`XWayland`, `X11Wm` and `XwmHandler` integration references.
+Steam-specific rendering or streaming path. Weld now has an opt-in
+[rootless XWayland host](../xwayland.md), reusing its existing rendering and
+hoist paths. The vendored Anvil example remains the reference for Smithay's
+`XWayland`, `X11Wm` and `XwmHandler` APIs.
 
 An initial rootless integration should make individual X11 windows ordinary
 Weld-managed presentations, including transient and override-redirect windows.

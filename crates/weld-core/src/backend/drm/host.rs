@@ -158,6 +158,7 @@ pub(super) fn run(
     } = bootstrap;
     let started_at = Instant::now();
     let mut runtime = NativeRuntime::prepare(RuntimeSetup {
+        xwayland: options.xwayland,
         server: ServerOptions {
             initial_toplevel_size: None,
             started_at,
@@ -187,18 +188,20 @@ pub(super) fn run(
         &runtime.state.data.server,
     )?;
 
+    let session_events = runtime.state.data.events.clone();
     runtime
         .event_loop
         .handle()
-        .insert_source(session_notifier, |event, _, data| {
-            data.events.push_back(HostEvent::Session(event));
+        .insert_source(session_notifier, move |event, _, _| {
+            session_events.push_back(HostEvent::Session(event));
         })
         .map_err(|_| anyhow!("failed to register libseat notifications"))?;
+    let drm_events = runtime.state.data.events.clone();
     runtime
         .event_loop
         .handle()
-        .insert_source(drm_notifier, |event, metadata, data| {
-            data.events.push_back(HostEvent::Drm {
+        .insert_source(drm_notifier, move |event, metadata, _| {
+            drm_events.push_back(HostEvent::Drm {
                 event,
                 metadata: *metadata,
             });
@@ -211,12 +214,13 @@ pub(super) fn run(
     libinput_context
         .udev_assign_seat(&seat_name)
         .map_err(|_| anyhow!("failed to assign libinput to seat {seat_name}"))?;
+    let input_events = runtime.state.data.events.clone();
     runtime
         .event_loop
         .handle()
         .insert_source(
             LibinputInputBackend::new(libinput_context.clone()),
-            |event, _, data| data.events.push_back(HostEvent::Input(event)),
+            move |event, _, _| input_events.push_back(HostEvent::Input(event)),
         )
         .map_err(|_| anyhow!("failed to register libinput"))?;
 

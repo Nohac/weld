@@ -196,6 +196,10 @@ pub struct AppArguments {
     #[arg(long, value_name = "NAME")]
     pub(crate) wayland_socket: Option<String>,
 
+    /// Enable a private rootless XWayland server for X11 applications.
+    #[arg(long)]
+    pub(crate) xwayland: bool,
+
     /// Accept one sibling Weld destination over a local Unix seqpacket socket.
     #[arg(long, value_name = "PATH", conflicts_with = "hoist_connect")]
     pub(crate) hoist_listen: Option<PathBuf>,

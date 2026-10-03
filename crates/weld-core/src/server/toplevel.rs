@@ -1,6 +1,6 @@
-//! XDG toplevel registration, lifecycle, commits, and surface indexing.
+//! Shared native window registration, XDG lifecycle, commits and surface indexing.
 
-use std::{collections::HashMap, hash::Hash};
+use std::{collections::HashMap, hash::Hash, sync::Arc};
 
 use smithay::{
     output::Output,
@@ -14,7 +14,7 @@ use smithay::{
             protocol::{wl_buffer, wl_output::WlOutput, wl_seat, wl_surface::WlSurface},
         },
     },
-    utils::{Logical, Serial, Size},
+    utils::Serial,
     wayland::{
         buffer::BufferHandler,
         compositor::{
@@ -26,9 +26,8 @@ use smithay::{
         fractional_scale::FractionalScaleHandler,
         output::OutputHandler,
         shell::xdg::{
-            PopupSurface, PositionerState, SurfaceCachedState as XdgSurfaceCachedState,
-            ToplevelSurface, XdgShellHandler, XdgShellState, XdgToplevelSurfaceData,
-            decoration::XdgDecorationHandler,
+            PopupSurface, PositionerState, ToplevelSurface, XdgShellHandler, XdgShellState,
+            XdgToplevelSurfaceData, decoration::XdgDecorationHandler,
         },
         shm::{ShmHandler, ShmState},
     },
@@ -50,10 +49,11 @@ use super::{
     surface_tree::{
         SurfaceTreeState, collect_surfaces, owning_root, release_untracked_surface_tree,
     },
+    window::WindowSurface,
 };
 
 pub(super) struct ToplevelState {
-    pub(super) surface: ToplevelSurface,
+    pub(super) surface: WindowSurface,
     pub(super) decoration: WindowDecoration,
     pub(super) parent: Option<SurfaceId>,
     pub(super) tree: SurfaceTreeState,
@@ -62,6 +62,25 @@ pub(super) struct ToplevelState {
     resize_sources: ToplevelResizeSources,
     // Consumed on first configure, not reapplied when this toplevel remaps.
     initial_size: Option<Extent>,
+}
+
+impl ToplevelState {
+    pub(super) fn x11(
+        window: Arc<smithay::xwayland::X11Surface>,
+        surface: WlSurface,
+        output: OutputId,
+    ) -> Self {
+        Self {
+            surface: WindowSurface::X11 { window, surface },
+            decoration: WindowDecoration::ServerSide,
+            parent: None,
+            tree: SurfaceTreeState::default(),
+            outputs: SurfaceOutputAssignment::primary(output),
+            preferred_scale_120: None,
+            resize_sources: ToplevelResizeSources::default(),
+            initial_size: None,
+        }
+    }
 }
 
 #[derive(Default)]
@@ -156,7 +175,7 @@ impl<K: Clone + Eq + Hash, V> IndexedStore<K, V> {
 pub(super) struct ToplevelStore(IndexedStore<ObjectId, ToplevelState>);
 
 impl ToplevelStore {
-    fn insert(&mut self, id: SurfaceId, state: ToplevelState) -> bool {
+    pub(super) fn insert(&mut self, id: SurfaceId, state: ToplevelState) -> bool {
         let object_id = state.surface.wl_surface().id();
         self.0.insert(id, object_id, state)
     }
@@ -165,7 +184,7 @@ impl ToplevelStore {
         self.0.get(id)
     }
 
-    fn get_mut(&mut self, id: SurfaceId) -> Option<&mut ToplevelState> {
+    pub(super) fn get_mut(&mut self, id: SurfaceId) -> Option<&mut ToplevelState> {
         self.0.get_mut(id)
     }
 
@@ -173,7 +192,10 @@ impl ToplevelStore {
         self.0.id_for_key(&surface.id())
     }
 
-    fn remove_surface(&mut self, surface: &WlSurface) -> Option<(SurfaceId, ToplevelState)> {
+    pub(super) fn remove_surface(
+        &mut self,
+        surface: &WlSurface,
+    ) -> Option<(SurfaceId, ToplevelState)> {
         self.0.remove_by_key(&surface.id())
     }
 
@@ -202,7 +224,7 @@ impl ServerState {
             warn!(?surface, "ignored a close request for an unknown surface");
             return;
         };
-        toplevel.surface.send_close();
+        toplevel.surface.close();
     }
 
     pub(super) fn configure_toplevel(
@@ -254,21 +276,15 @@ impl ServerState {
         if !effective_state_changed || !toplevel.surface.alive() {
             return false;
         }
-        toplevel.surface.with_pending_state(|state| {
-            if is_active {
-                state.states.set(xdg_toplevel::State::Resizing)
-            } else {
-                state.states.unset(xdg_toplevel::State::Resizing)
-            }
-        })
+        toplevel.surface.set_resizing(is_active)
     }
 
     fn send_pending_toplevel_configure(&self, surface: SurfaceId, changed: bool) {
         let Some(toplevel) = self.toplevels.get(surface) else {
             return;
         };
-        if changed && toplevel.surface.is_initial_configure_sent() {
-            toplevel.surface.send_pending_configure();
+        if changed {
+            toplevel.surface.flush_configure();
         }
     }
 
@@ -277,28 +293,7 @@ impl ServerState {
             warn!(?surface, "ignored a resize request for an unknown surface");
             return false;
         };
-        if !toplevel.surface.alive() {
-            return false;
-        }
-        let constraints = with_states(toplevel.surface.wl_surface(), |states| {
-            let mut cached = states.cached_state.get::<XdgSurfaceCachedState>();
-            let current = cached.current();
-            (current.min_size, current.max_size)
-        });
-        let requested_width = i32::try_from(requested.width.max(1)).unwrap_or(i32::MAX);
-        let requested_height = i32::try_from(requested.height.max(1)).unwrap_or(i32::MAX);
-        let size = Size::<i32, Logical>::from((
-            constrain_dimension(requested_width, constraints.0.w, constraints.1.w),
-            constrain_dimension(requested_height, constraints.0.h, constraints.1.h),
-        ));
-        toplevel.surface.with_pending_state(|state| {
-            if state.size == Some(size) {
-                false
-            } else {
-                state.size = Some(size);
-                true
-            }
-        })
+        toplevel.surface.stage_size(requested)
     }
 
     fn record_server_side_decoration(&mut self, surface: &ToplevelSurface) {
@@ -625,12 +620,13 @@ impl ServerState {
         }
     }
 
-    fn update_surface_tree(&mut self, surface_id: SurfaceId, root: &WlSurface) {
+    pub(super) fn update_surface_tree(&mut self, surface_id: SurfaceId, root: &WlSurface) {
         let (toplevels, releases) = (&mut self.toplevels, &mut self.dmabuf_releases);
         let Some(toplevel) = toplevels.get_mut(surface_id) else {
             return;
         };
-        let snapshot = toplevel.tree.update(surface_id, root, releases);
+        let geometry = toplevel.surface.geometry();
+        let snapshot = toplevel.tree.update(surface_id, root, releases, geometry);
         if snapshot.root.is_none() {
             self.clear_input_focus_for_surface(root, self.event_time());
         }
@@ -694,10 +690,7 @@ impl CompositorHandler for ServerState {
     }
 
     fn client_compositor_state<'a>(&self, client: &'a Client) -> &'a CompositorClientState {
-        &client
-            .get_data::<ClientState>()
-            .expect("Weld inserts ClientState for every accepted client")
-            .compositor_state
+        super::xwayland::compositor_state(client)
     }
 
     fn new_surface(&mut self, surface: &WlSurface) {
@@ -792,7 +785,10 @@ impl CompositorHandler for ServerState {
         tracing::trace!(target: "weld_surface_diag", surface = ?surface.id(), root = ?root.id(), "processed surface commit");
         let Some(surface_id) = self.toplevels.id_for_surface(&root) else {
             if !self.commit_layer(&root) && !self.commit_popup(&root) {
-                if get_role(&root).is_some() {
+                if get_role(&root).is_some_and(|role| {
+                    role != smithay::wayland::xwayland_shell::XWAYLAND_SHELL_ROLE
+                        || !super::xwayland::awaiting_x11_association(&root)
+                }) {
                     release_untracked_surface_tree(&root);
                 }
                 debug!(surface = ?surface.id(), "ignoring a surface outside a tracked xdg surface tree");
@@ -802,7 +798,8 @@ impl CompositorHandler for ServerState {
         let Some(toplevel) = self.toplevels.get(surface_id) else {
             return;
         };
-        if !toplevel.surface.is_initial_configure_sent() {
+        if matches!(&toplevel.surface, WindowSurface::Xdg(window) if !window.is_initial_configure_sent())
+        {
             let initial_size = self
                 .toplevels
                 .get_mut(surface_id)
@@ -813,7 +810,9 @@ impl CompositorHandler for ServerState {
             let Some(toplevel) = self.toplevels.get(surface_id) else {
                 return;
             };
-            toplevel.surface.send_configure();
+            if let WindowSurface::Xdg(window) = &toplevel.surface {
+                window.send_configure();
+            }
             return;
         }
         self.presentation_requested = true;
@@ -868,7 +867,7 @@ impl XdgShellHandler for ServerState {
         };
         let surface_handle = surface.clone();
         let state = ToplevelState {
-            surface,
+            surface: WindowSurface::Xdg(surface),
             decoration: WindowDecoration::ClientSide,
             parent: None,
             tree: SurfaceTreeState::default(),
@@ -956,7 +955,16 @@ impl XdgShellHandler for ServerState {
     }
 
     fn toplevel_destroyed(&mut self, surface: ToplevelSurface) {
-        let wl_surface = surface.wl_surface();
+        self.retire_window(surface.wl_surface());
+    }
+
+    fn popup_destroyed(&mut self, surface: PopupSurface) {
+        self.destroy_popup(surface);
+    }
+}
+
+impl ServerState {
+    pub(super) fn retire_window(&mut self, wl_surface: &WlSurface) {
         let Some((id, _state)) = self.toplevels.remove_surface(wl_surface) else {
             return;
         };
@@ -971,10 +979,6 @@ impl XdgShellHandler for ServerState {
             surface: id,
             kind: PendingSurfaceEventKind::Destroyed,
         });
-    }
-
-    fn popup_destroyed(&mut self, surface: PopupSurface) {
-        self.destroy_popup(surface);
     }
 }
 
@@ -1049,7 +1053,7 @@ fn window_resize_edge(edges: xdg_toplevel::ResizeEdge) -> Option<WindowResizeEdg
     }
 }
 
-fn constrain_dimension(requested: i32, minimum: i32, maximum: i32) -> i32 {
+pub(super) fn constrain_dimension(requested: i32, minimum: i32, maximum: i32) -> i32 {
     let minimum = minimum.max(1);
     let maximum = if maximum > 0 {
         maximum.max(minimum)

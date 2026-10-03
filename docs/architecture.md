@@ -26,7 +26,7 @@ Weld is a workspace of reusable layers and one standard distribution:
 - `weld-client` defines the runtime-independent client adapter, surface,
   buffer-lease, request, and input contracts. It has no Smithay, Bevy, wgpu,
   codec, or transport dependency.
-- `weld-core` owns Smithay, Wayland protocol state, native input sources,
+- `weld-core` owns Smithay, Wayland and XWayland protocol state, native input sources,
   backend event loops, DMA-BUF ownership, and native presentation adapters. It
   has no Bevy dependency.
 - `weld-app` owns the Bevy application and render bridge, the plugin-facing
@@ -1143,6 +1143,18 @@ temporary keyboard focus over the selected managed window. `weld-tile` consumes
 `OutputWorkArea` without changing output mode or logical geometry. Layer roots
 and their popups remain outside window/hoist admission; complete desktop capture
 includes their composition. See [Desktop layer surfaces](layer-shell.md).
+
+Optional rootless XWayland feeds this same native client adapter. Its XWM maps
+X11 windows onto associated Wayland surfaces; native `WindowSurface` controls
+translate close/resize/activation while shared surface trees own commits,
+buffer lifetimes and presentation callbacks. Sampling accepts the native
+window geometry as input, covering XDG geometry and X11 frame extents. X11
+keyboard targets retain Smithay's input-model handling. Client family IDs use
+XRes-reported process identity with conservative per-window fallback, rather
+than conflating all windows on the XWayland connection. The single host loop
+dispatches compositor state directly, with backend notifications retained in a
+same-thread queue for native drivers. See [Rootless XWayland](xwayland.md) for
+launching, validation and remaining compatibility work.
 
 Master also installs `WorkspaceProtocolPlugin` from `weld-window`. It projects
 workspace names, session IDs, visibility and output membership into a neutral

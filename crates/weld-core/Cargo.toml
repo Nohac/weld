@@ -24,6 +24,7 @@ smithay = { workspace = true, features = [
     "backend_udev",
     "desktop",
     "wayland_frontend",
+    "xwayland",
 ] }
 smithay-drm-extras.workspace = true
 tracing.workspace = true

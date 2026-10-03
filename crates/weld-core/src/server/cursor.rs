@@ -66,6 +66,21 @@ impl ServerState {
             return false;
         }
         self.refresh_cursor_surface(surface);
+        // The raster is now owned by the cursor cache. XWayland gates subsequent
+        // shape changes on this callback, including while focus moves elsewhere.
+        let callbacks = with_states(surface, |states| {
+            std::mem::take(
+                &mut states
+                    .cached_state
+                    .get::<SurfaceAttributes>()
+                    .current()
+                    .frame_callbacks,
+            )
+        });
+        let time = self.event_time();
+        for callback in callbacks {
+            callback.done(time);
+        }
         true
     }
 

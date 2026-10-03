@@ -134,7 +134,7 @@ impl ServerState {
         let Some(layer) = self.layers.0.get_mut(id) else {
             return true;
         };
-        let snapshot = layer.tree.update(id, root, &mut self.dmabuf_releases);
+        let snapshot = layer.tree.update(id, root, &mut self.dmabuf_releases, None);
         let mapped = snapshot.client_mapped;
         if let Some(output) = self.native_output(output_id) {
             let mut map = layer_map_for_output(&output);

@@ -2895,6 +2895,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "encoding_rs"
+version = "0.8.35"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "75030f3c4f45dafd7586dd6780965a8c7e8e285a5ecb86713e63a79c5b2766f3"
+dependencies = [
+ "cfg-if",
+]
+
+[[package]]
 name = "enum-assoc"
 version = "1.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6665,6 +6674,7 @@ dependencies = [
  "drm-ffi 0.9.1",
  "drm-fourcc",
  "drm-sys 0.8.1",
+ "encoding_rs",
  "errno",
  "gbm 0.18.0",
  "glam 0.33.3",
@@ -6678,6 +6688,7 @@ dependencies = [
  "rand",
  "reis",
  "rustix 1.1.4",
+ "scopeguard",
  "sha2 0.10.9",
  "smallvec",
  "tempfile",
@@ -6688,6 +6699,7 @@ dependencies = [
  "wayland-protocols-misc",
  "wayland-protocols-wlr",
  "wayland-server",
+ "x11rb",
  "xkbcommon",
 ]
 

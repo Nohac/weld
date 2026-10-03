@@ -74,9 +74,15 @@ pub struct WeldAppBuilder {
     scale: Option<OutputScale>,
     socket_name: Option<String>,
     keyboard_repeat_mode: Option<weld_core::input::KeyboardRepeatMode>,
+    xwayland: bool,
 }
 
 impl WeldAppBuilder {
+    /// Enables a rootless XWayland server for this session's X11 applications.
+    pub fn xwayland(mut self, enabled: bool) -> Self {
+        self.xwayland = enabled;
+        self
+    }
     /// Selects how Weld chooses its native host backend.
     pub fn backend(mut self, backend: Backend) -> Self {
         self.backend = backend;
@@ -143,6 +149,7 @@ impl WeldAppBuilder {
         let backend = requested_backend.resolve(BackendEnvironment::detect());
         info!(?requested_backend, ?backend, "selected Weld backend");
         let prepared = HostBuilder::new()
+            .xwayland(self.xwayland)
             .backend(backend.into())
             .launch(self.client)
             .screenshot(self.screenshot)

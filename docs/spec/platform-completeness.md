@@ -34,7 +34,8 @@ land together.
 XWayland should eventually map legacy clients into the same application policy
 as native Wayland windows while retaining X11-specific focus, size hints,
 override-redirect, clipboard, fullscreen, and grab semantics behind the host
-boundary. XWayland is not implemented.
+boundary. An opt-in rootless host is now implemented; see
+[XWayland](../xwayland.md) for its validated subset and remaining compatibility work.
 
 Multi-output work should preserve per-output scale, transform, refresh,
 composition target, and camera ownership. Multi-seat work should retain seat

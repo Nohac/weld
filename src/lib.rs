@@ -97,6 +97,7 @@ pub fn run(arguments: AppArguments) -> Result<()> {
     };
 
     let mut app = WeldApp::builder()
+        .xwayland(arguments.xwayland)
         .backend(backend)
         .launch(arguments.client)
         .screenshot(arguments.screenshot)
@@ -358,6 +359,7 @@ fn runtime_options(arguments: &AppArguments) -> Result<RuntimeOptions> {
             .unwrap_or(Extent::new(960, 640)),
     )?
     .socket_name(arguments.wayland_socket.clone())
+    .xwayland(arguments.xwayland)
     .launch(arguments.client.clone())
     .keyboard_repeat(
         headless_repeat_mode(arguments),

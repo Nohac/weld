@@ -45,9 +45,15 @@ pub struct RuntimeOptions {
     client: Vec<OsString>,
     keyboard_repeat: KeyboardRepeatMode,
     legacy_repeat: LegacyKeyRepeat,
+    xwayland: bool,
 }
 
 impl RuntimeOptions {
+    /// Enables rootless X11 applications in this session.
+    pub fn xwayland(mut self, enabled: bool) -> Self {
+        self.xwayland = enabled;
+        self
+    }
     /// Creates a virtual output with a bounded 1..240 Hz advertised refresh.
     /// This supplies the initial claimed-presentation fallback and optional
     /// policy cadence; without a presenter it does not generate frame callbacks.
@@ -82,6 +88,7 @@ impl RuntimeOptions {
             client: Vec::new(),
             keyboard_repeat: KeyboardRepeatMode::Client,
             legacy_repeat: LegacyKeyRepeat::default(),
+            xwayland: false,
         })
     }
 
@@ -141,6 +148,7 @@ impl HostRuntime {
             .into_parts()
             .runtime;
         let mut runtime = NativeRuntime::prepare(RuntimeSetup {
+            xwayland: config.xwayland,
             server: ServerOptions {
                 started_at,
                 seat_name: "weld-seat0",

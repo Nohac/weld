@@ -138,7 +138,12 @@ impl ServerState {
             let Some(popup) = popups.get_mut(surface_id) else {
                 return true;
             };
-            popup.tree.update(surface_id, root, releases)
+            popup.tree.update(
+                surface_id,
+                root,
+                releases,
+                super::window::xdg_geometry(root),
+            )
         };
         if snapshot.root.is_none() {
             self.clear_input_focus_for_surface(root, self.event_time());
@@ -231,7 +236,10 @@ impl ServerState {
         // PopupManager contains an internal root equality assertion. Supplying
         // the exact root returned by find_popup_root_surface keeps that
         // invariant protocol-derived instead of relying on Weld's index.
-        let Ok(mut grab) = self.popup_manager.grab_popup(root, kind, &seat, serial) else {
+        let Ok(mut grab) = self
+            .popup_manager
+            .grab_popup(root.into(), kind, &seat, serial)
+        else {
             return;
         };
         let previous_serial = grab.previous_serial();

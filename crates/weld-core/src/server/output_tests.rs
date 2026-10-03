@@ -1,5 +1,7 @@
 //! Real protocol regression for event-driven output and scale propagation.
 
+#[path = "cursor_tests.rs"]
+mod cursor_tests;
 #[path = "layer_tests.rs"]
 mod layer_tests;
 #[path = "workspace_tests.rs"]
@@ -222,7 +224,6 @@ impl Fixture {
             display,
             receiver,
             WaylandClientBridge::default(),
-            |state| state,
             ServerOptions {
                 started_at: Instant::now(),
                 seat_name: "output-test",

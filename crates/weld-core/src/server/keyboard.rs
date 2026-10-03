@@ -80,7 +80,6 @@ mod tests {
             Display::new().expect("display"),
             receiver,
             WaylandClientBridge::default(),
-            |state| state,
             ServerOptions {
                 started_at: Instant::now(),
                 seat_name: "keyboard-test",

@@ -1,5 +1,7 @@
 //! Smithay seat delivery and protocol focus application.
 
+use std::borrow::Cow;
+
 use smithay::{
     backend::input::{
         Axis, AxisSource, ButtonState as SmithayButtonState, InputTime, KeyEvent, Keycode,
@@ -12,16 +14,13 @@ use smithay::{
             AxisFrame, ButtonEvent, CursorImageStatus, Focus, GestureHoldBeginEvent,
             GestureHoldEndEvent, GesturePinchBeginEvent, GesturePinchEndEvent,
             GesturePinchUpdateEvent, GestureSwipeBeginEvent, GestureSwipeEndEvent,
-            GestureSwipeUpdateEvent, GrabStartData, MotionEvent, PointerGrab, PointerInnerHandle,
-            RelativeMotionEvent,
+            GestureSwipeUpdateEvent, GrabStartData, MotionEvent, PointerGrab, PointerHandle,
+            PointerInnerHandle, RelativeMotionEvent,
         },
     },
-    reexports::{
-        wayland_protocols::xdg::shell::server::xdg_toplevel,
-        wayland_server::{
-            Resource,
-            protocol::{wl_seat, wl_surface::WlSurface},
-        },
+    reexports::wayland_server::{
+        Resource,
+        protocol::{wl_seat, wl_surface::WlSurface},
     },
     utils::{Logical, SERIAL_COUNTER},
     wayland::{
@@ -48,6 +47,7 @@ use crate::{
     surface::{SurfaceId, WindowDecoration, WindowInteractionRequestKind, WindowResizeEdge},
 };
 
+use super::keyboard_focus::KeyboardFocus;
 use super::{PendingSurfaceEvent, PendingSurfaceEventKind, ServerState};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -159,7 +159,7 @@ impl ServerState {
         if self.keyboard_diagnostic_dirty
             && let Some(client) = keyboard
                 .current_focus()
-                .and_then(|surface| surface.client())
+                .and_then(|surface| surface.wl_surface().and_then(|surface| surface.client()))
         {
             let versions: Vec<_> = keyboard
                 .client_keyboards(&client)
@@ -290,6 +290,57 @@ impl ServerState {
             return;
         }
 
+        self.install_window_grab(surface_id, pointer, start_data, serial, interaction);
+    }
+
+    pub(super) fn begin_x11_interaction(
+        &mut self,
+        surface_id: SurfaceId,
+        button: u32,
+        edges: Option<WindowResizeEdge>,
+    ) {
+        let Some(pointer) = self.seat.get_pointer() else {
+            return;
+        };
+        let Some(start_data) = pointer.grab_start_data() else {
+            return;
+        };
+        let Some((focused, _)) = &start_data.focus else {
+            return;
+        };
+        let Some(window) = self.toplevels.get(surface_id) else {
+            return;
+        };
+        if super::surface_tree::owning_root(focused) != *window.surface.wl_surface() {
+            return;
+        }
+        let linux_button = match button {
+            1 => 0x110,
+            2 => 0x112,
+            3 => 0x111,
+            _ => return,
+        };
+        if !self.pressed_pointer_buttons.contains(&linux_button) {
+            return;
+        }
+        let interaction = edges.map_or(PointerInteraction::Move, PointerInteraction::Resize);
+        self.install_window_grab(
+            surface_id,
+            pointer,
+            start_data,
+            SERIAL_COUNTER.next_serial(),
+            interaction,
+        );
+    }
+
+    fn install_window_grab(
+        &mut self,
+        surface_id: SurfaceId,
+        pointer: PointerHandle<Self>,
+        start_data: GrabStartData<Self>,
+        serial: smithay::utils::Serial,
+        interaction: PointerInteraction,
+    ) {
         let request = match interaction {
             PointerInteraction::Move => WindowInteractionRequestKind::Move,
             PointerInteraction::Resize(edges) => WindowInteractionRequestKind::Resize { edges },
@@ -334,10 +385,10 @@ impl ServerState {
                 .take()
                 .and_then(|id| self.toplevels.get(id))
             {
-                set_activated(&previous.surface, false);
+                previous.surface.set_activated(false);
             }
             if let Some(keyboard) = self.seat.get_keyboard() {
-                keyboard.set_focus(self, Some(surface), SERIAL_COUNTER.next_serial());
+                keyboard.set_focus(self, Some(surface.into()), SERIAL_COUNTER.next_serial());
             }
             return;
         }
@@ -364,17 +415,18 @@ impl ServerState {
         let next_id = next.as_ref().map(|(id, _)| *id);
         if self.focused_toplevel != next_id {
             if let Some((_, surface)) = &previous {
-                set_activated(surface, false);
+                surface.set_activated(false);
             }
             if let Some((_, surface)) = &next {
-                set_activated(surface, true);
+                self.raise_x11_surface(surface.wl_surface());
+                surface.set_activated(true);
             }
             self.focused_toplevel = next_id;
         }
 
         let keyboard_focus = next
             .as_ref()
-            .map(|(_, surface)| surface.wl_surface().clone());
+            .map(|(_, surface)| KeyboardFocus::from(surface));
         if let Some(keyboard) = self.seat.get_keyboard() {
             keyboard.set_focus(self, keyboard_focus, SERIAL_COUNTER.next_serial());
         }
@@ -392,6 +444,11 @@ impl ServerState {
         };
         self.pointer_position = position;
         let focus = self.pointer_focus(position, target);
+        if !pointer.is_grabbed()
+            && let Some((surface, _)) = &focus
+        {
+            self.raise_x11_surface(surface);
+        }
         let shell_owns_cursor = shell_owns_cursor(
             focus.is_none(),
             pointer.is_grabbed(),
@@ -427,6 +484,9 @@ impl ServerState {
         let serial = SERIAL_COUNTER.next_serial();
         let focus = self.pointer_focus(position, target);
         let pointer_was_grabbed = pointer.is_grabbed();
+        if !pointer_was_grabbed && let Some((surface, _)) = &focus {
+            self.raise_x11_surface(surface);
+        }
         debug!(
             target: "weld_input_diag",
             time, button, ?state, ?target,
@@ -705,7 +765,11 @@ impl ServerState {
             pointer.frame(self);
         }
         if let Some(keyboard) = self.seat.get_keyboard()
-            && keyboard.current_focus().as_ref() == Some(surface)
+            && keyboard
+                .current_focus()
+                .and_then(|focus| focus.wl_surface().map(Cow::into_owned))
+                .as_ref()
+                == Some(surface)
         {
             keyboard.set_focus(self, None, serial);
         }
@@ -907,25 +971,11 @@ fn transition_pending_focus(
     }
 }
 
-fn set_activated(surface: &ToplevelSurface, activated: bool) {
-    if !surface.is_initial_configure_sent() {
-        return;
-    }
-    surface.with_pending_state(|state| {
-        if activated {
-            state.states.set(xdg_toplevel::State::Activated);
-        } else {
-            state.states.unset(xdg_toplevel::State::Activated);
-        }
-    });
-    surface.send_pending_configure();
-}
-
 // Required by Smithay's WlSurface pointer target; no constraints global is advertised yet.
 impl PointerConstraintsHandler for ServerState {}
 
 impl SeatHandler for ServerState {
-    type KeyboardFocus = WlSurface;
+    type KeyboardFocus = KeyboardFocus;
     type PointerFocus = WlSurface;
     type TouchFocus = WlSurface;
 
@@ -933,10 +983,12 @@ impl SeatHandler for ServerState {
         &mut self.seat_state
     }
 
-    fn focus_changed(&mut self, seat: &Seat<Self>, focused: Option<&WlSurface>) {
+    fn focus_changed(&mut self, seat: &Seat<Self>, focused: Option<&KeyboardFocus>) {
         self.keyboard_repeats.focus_changed();
         self.keyboard_diagnostic_dirty = true;
-        let client = focused.and_then(|surface| self.display_handle.get_client(surface.id()).ok());
+        let client = focused
+            .and_then(|focus| focus.wl_surface())
+            .and_then(|surface| self.display_handle.get_client(surface.id()).ok());
         set_data_device_focus(&self.display_handle, seat, client);
     }
 

@@ -166,7 +166,7 @@ fn panel_reservation_launcher_focus_and_remap_follow_protocol_lifecycle() {
             .get_keyboard()
             .expect("keyboard")
             .current_focus(),
-        Some(native.clone())
+        Some(native.clone().into())
     );
     let frame = f.server.stage_frame_callbacks();
     f.server.complete_frame_callbacks(frame);

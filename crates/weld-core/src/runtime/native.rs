@@ -18,9 +18,10 @@ use crate::{
 };
 
 use super::callbacks::CallbackLedger;
-use super::{ChildProcesses, HostCommandEffect, LoopData, server_mut, service_client_adapters};
+use super::{BackendEvents, ChildProcesses, HostCommandEffect, LoopData, service_client_adapters};
 
 pub(crate) struct RuntimeSetup<'a, Event> {
+    pub xwayland: bool,
     pub server: ServerOptions<'a>,
     pub releases: Channel<DmabufEvent>,
     pub bridge: WaylandClientBridge,
@@ -121,7 +122,7 @@ impl<Event> RuntimeIntegration<Event> {
 }
 
 pub(crate) struct NativeRuntime<Event: 'static> {
-    pub event_loop: EventLoop<'static, LoopData<Event>>,
+    pub event_loop: EventLoop<'static, ServerState>,
     pub state: HostState<Event>,
 }
 
@@ -134,26 +135,30 @@ impl<Event: 'static> NativeRuntime<Event> {
             clients.register(adapter)?;
         }
         let display = Display::<ServerState>::new().context("failed to create Wayland display")?;
-        let server = ServerState::new(
+        let mut server = ServerState::new(
             &event_loop.handle(),
             display,
             setup.releases,
             setup.bridge,
-            server_mut::<Event>,
             setup.server,
         )?;
+        if setup.xwayland {
+            server.start_xwayland(event_loop.handle())?;
+        }
         let shutdown_event = setup.shutdown_event;
+        let events = BackendEvents::default();
+        let shutdown_events = events.clone();
         event_loop
             .handle()
-            .insert_source(setup.signals, move |event, _, data| {
-                data.events.push_back(shutdown_event());
+            .insert_source(setup.signals, move |event, _, _| {
+                shutdown_events.push_back(shutdown_event());
                 tracing::debug!(signal = ?event.signal(), "received shutdown signal");
             })
             .context("failed to register process signals")?;
         Ok(Self {
             event_loop,
             state: HostState {
-                data: LoopData::new(server),
+                data: LoopData { server, events },
                 clients,
                 children: ChildProcesses::default(),
                 callbacks: CallbackLedger::default(),
@@ -221,7 +226,7 @@ impl<Event: 'static> NativeRuntime<Event> {
             {
                 let _span = tracing::trace_span!(target: crate::PROFILE_TARGET, "weld_calloop_wait_and_dispatch").entered();
                 self.event_loop
-                    .dispatch(Some(timeout), &mut self.state.data)
+                    .dispatch(Some(timeout), &mut self.state.data.server)
                     .context("native calloop dispatch failed")?;
             }
             if let Some((driver, app)) = integration.native() {
