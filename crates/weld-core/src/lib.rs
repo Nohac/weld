@@ -6,6 +6,9 @@ pub(crate) const PROFILE_TARGET: &str = "weld_profile";
 pub const WAYLAND_CLIENT_SOURCE: weld_client::ClientSourceId = weld_client::ClientSourceId::new(0);
 
 mod backend;
+#[cfg(feature = "test-support")]
+#[doc(hidden)]
+pub mod benchmark;
 pub mod cursor;
 pub mod dmabuf;
 pub mod geometry;

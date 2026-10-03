@@ -8,6 +8,9 @@ mod master;
 mod overlay;
 mod telemetry;
 
+#[cfg(feature = "test-support")]
+pub mod benchmark;
+
 use anyhow::{Context, Result};
 use clap::Parser;
 use overlay::DistributionOverlayPlugin;

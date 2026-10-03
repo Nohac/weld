@@ -168,3 +168,8 @@ required-features = ["test-support"]
 name = "shell_render"
 harness = false
 required-features = ["test-support"]
+
+[[bench]]
+name = "paced_render"
+harness = false
+required-features = ["test-support"]

@@ -322,6 +322,22 @@ fn headless_render_context(outputs: Vec<OutputConfiguration>) -> Result<RenderCo
     })
 }
 
+/// Install the production render bridge on a caller-owned offscreen native host.
+pub fn shell_for_host(
+    context: RenderContext,
+    importers: Vec<weld_client::ClientImporterRegistration>,
+    configure: impl FnOnce(&mut App),
+) -> Result<AppShell> {
+    let mut app = App::new();
+    configure_rendering(&mut app, &context);
+    app.add_plugins(WeldAppPlugin::new(
+        context.outputs.clone(),
+        context.output_heads.clone(),
+    )?);
+    configure(&mut app);
+    AppShell::new(app, context, importers)
+}
+
 struct HeadlessRenderPrerequisitesPlugin;
 
 impl Plugin for HeadlessRenderPrerequisitesPlugin {

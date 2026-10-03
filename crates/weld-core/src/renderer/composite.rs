@@ -8,6 +8,26 @@ pub(crate) struct CompositionBlitter {
 
 impl CompositionBlitter {
     pub(crate) fn new(device: &wgpu::Device, target_format: wgpu::TextureFormat) -> Self {
+        Self::with_shader(device, target_format, include_str!("composite.wgsl"))
+    }
+
+    #[cfg(feature = "test-support")]
+    pub(crate) fn for_benchmark_client(
+        device: &wgpu::Device,
+        target_format: wgpu::TextureFormat,
+    ) -> Self {
+        Self::with_shader(
+            device,
+            target_format,
+            include_str!("../benchmark/surface.wgsl"),
+        )
+    }
+
+    fn with_shader(
+        device: &wgpu::Device,
+        target_format: wgpu::TextureFormat,
+        source: &str,
+    ) -> Self {
         let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("weld composition bind group layout"),
             entries: &[
@@ -36,7 +56,7 @@ impl CompositionBlitter {
         });
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("weld composition shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("composite.wgsl").into()),
+            source: wgpu::ShaderSource::Wgsl(source.into()),
         });
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("weld composition pipeline"),

@@ -1,0 +1,108 @@
+#!/usr/bin/env python3
+"""Run real GPU-backed clients against paced headless presenters; save bounded logs."""
+import argparse
+import json
+import os
+from pathlib import Path
+import resource
+import shlex
+import shutil
+import signal
+import subprocess
+import tempfile
+import time
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--mode", choices=("master", "minimal", "surface", "all"), default="all")
+    parser.add_argument("--seconds", type=int, default=10)
+    parser.add_argument("--warmup", type=int, default=3)
+    parser.add_argument("--width", type=int, default=1920)
+    parser.add_argument("--height", type=int, default=1080)
+    parser.add_argument("--hz", type=int, default=60)
+    parser.add_argument("--producer-hz", type=int, default=120)
+    parser.add_argument("--input-hz", type=int, default=0)
+    parser.add_argument("--windows", type=int, default=1)
+    parser.add_argument("--decorations", choices=("client", "server"), default="client")
+    parser.add_argument("--jobs", type=int, default=8)
+    parser.add_argument("--no-build", action="store_true")
+    parser.add_argument("--scanner", type=Path)
+    args = parser.parse_args()
+    if not (1 <= args.seconds <= 120 and 0 <= args.warmup <= 30 and 1 <= args.windows <= 8
+            and 1 <= args.hz <= 240 and 1 <= args.producer_hz <= 1000 and 0 <= args.input_hz <= 2000
+            and 64 <= args.width <= 8192 and 64 <= args.height <= 8192):
+        parser.error("invalid workload bounds; use --help for the available controls")
+    root = Path(__file__).resolve().parents[2]
+    os.chdir(root)
+    resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
+    build = root / "target/validation/paced-render-build"
+    build.mkdir(parents=True, exist_ok=True)
+    producer = build / "egl-producer"
+    manifest = build / "executable.json"
+    if not args.no_build:
+        scanner = args.scanner or shutil.which("wayland-scanner")
+        if not scanner:
+            parser.error("wayland-scanner is required; pass --scanner /path/to/wayland-scanner")
+        protocol_dir = subprocess.check_output(["pkg-config", "--variable=pkgdatadir", "wayland-protocols"], text=True).strip()
+        protocol = Path(protocol_dir) / "stable/xdg-shell/xdg-shell.xml"
+        subprocess.run([str(scanner), "client-header", str(protocol), str(build / "xdg-shell-client-protocol.h")], check=True)
+        subprocess.run([str(scanner), "private-code", str(protocol), str(build / "xdg-shell-protocol.c")], check=True)
+        decoration_protocol = Path(protocol_dir) / "unstable/xdg-decoration/xdg-decoration-unstable-v1.xml"
+        subprocess.run([str(scanner), "client-header", str(decoration_protocol), str(build / "xdg-decoration-client-protocol.h")], check=True)
+        subprocess.run([str(scanner), "private-code", str(decoration_protocol), str(build / "xdg-decoration-protocol.c")], check=True)
+        flags = shlex.split(subprocess.check_output(["pkg-config", "--cflags", "--libs", "wayland-client", "wayland-egl", "egl", "glesv2"], text=True))
+        subprocess.run(["cc", "-O3", "-Wall", "-Wextra", "-Werror", "-I", str(build), "scripts/profiling/egl-producer.c", str(build / "xdg-shell-protocol.c"), str(build / "xdg-decoration-protocol.c"), "-o", str(producer), *flags], check=True)
+        executable = None
+        with subprocess.Popen(["cargo", "bench", "--no-run", "--profile", "release", "--bench", "paced_render", "--features", "test-support", "--locked", "-j", str(args.jobs), "--message-format=json"], stdout=subprocess.PIPE, text=True) as cargo:
+            for line in cargo.stdout:
+                event = json.loads(line)
+                if event.get("reason") == "compiler-artifact" and event.get("target", {}).get("name") == "paced_render":
+                    executable = event.get("executable") or executable
+                if event.get("reason") == "compiler-message":
+                    print(event["message"].get("rendered", ""), end="")
+            if cargo.wait() != 0 or not executable:
+                raise RuntimeError("benchmark build failed")
+        manifest.write_text(json.dumps({"executable": executable}))
+    executable = json.loads(manifest.read_text())["executable"]
+    resource.setrlimit(resource.RLIMIT_FSIZE, (128*1024*1024, 128*1024*1024))
+    run = Path(tempfile.mkdtemp(prefix="paced-render-", dir=root / "target/validation"))
+    print(f"Results: {run}", flush=True)
+    environment = {**os.environ, "VK_LOADER_LAYERS_DISABLE": "VK_LAYER_KHRONOS_validation", "WGPU_VALIDATION": "0"}
+    (run / "settings.json").write_text(json.dumps({
+        "options": {key: str(value) if isinstance(value, Path) else value for key, value in vars(args).items()},
+        "executable": executable,
+        "git_head": subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip(),
+        "kernel": os.uname().release,
+        "started_unix": time.time(),
+        "cpu_accounting": "Weld process user+system; excludes producer and post-run GPU capture",
+    }, indent=2))
+    modes = ("surface", "minimal", "master") if args.mode == "all" else (args.mode,)
+    for mode in modes:
+        directory = run / mode
+        directory.mkdir()
+        command = [executable, "--mode", mode, "--producer", str(producer), "--run-dir", str(directory), "--decorations", args.decorations]
+        for name in ("seconds", "warmup", "width", "height", "hz", "producer_hz", "input_hz", "windows"):
+            command += ["--" + name.replace("_", "-"), str(getattr(args, name))]
+        with (directory / "run.log").open("w") as log:
+            process = subprocess.Popen(command, env=environment, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
+            try:
+                code = process.wait(timeout=args.seconds + args.warmup + 30)
+            finally:
+                try:
+                    os.killpg(process.pid, signal.SIGTERM)
+                except ProcessLookupError:
+                    pass
+                try:
+                    process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    os.killpg(process.pid, signal.SIGKILL)
+                    process.wait()
+        lines = (directory / "run.log").read_text().splitlines()
+        for line in lines:
+            if line.startswith(("CASE", "ADAPTER", "RESULT")):
+                print(line, flush=True)
+        if code != 0 or not any(line.startswith("RESULT") for line in lines):
+            raise RuntimeError(f"{mode} failed: inspect {directory / 'run.log'}")
+
+if __name__ == "__main__":
+    main()

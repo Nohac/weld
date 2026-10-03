@@ -65,6 +65,41 @@ cases remain comparable; that is not a claim about normal demand policy. Check
 the printed adapter before interpreting results. A CPU adapter validates the
 path but is not representative of GPU performance.
 
+### Paced real-client comparison
+
+Compare three presenters on the same production Wayland host and DMA-BUF
+lifecycle, with a separate animated EGL client:
+
+```sh
+python3 scripts/profiling/paced-render --seconds 20 --width 2240 --height 1400
+python3 scripts/profiling/paced-render --no-build --windows 3 --producer-hz 240 --input-hz 1000
+```
+
+The launcher builds an optimized release benchmark and the small C producer.
+It requires Wayland/EGL/GLES development packages and `wayland-scanner` (or
+`--scanner /path/to/wayland-scanner`). `--no-build` reuses those artifacts.
+Results, settings, bounded logs and a post-measurement screenshot for each
+presenter are saved below `target/validation/paced-render-*`.
+
+- `surface`: direct wgpu composition with the shared core buffer manager.
+- `minimal`: Weld's Bevy integration and fixed-layout `SurfaceNode` presentation.
+- `master`: the Master window-management plugins and a launch-free config.
+
+The virtual output defaults to 60 Hz; clients default to 120 commits/second.
+GPU work is bounded to three submissions in flight. Synthetic pointer motion
+uses the normal input routing path. `--decorations server` adds an SSD workload;
+the default requests no server decorations.
+
+CPU percentages include all Weld process threads, expressed relative to one
+core, and exclude the producer, warmup and final screenshot. Policy/render
+phase timings are wall time. Commit ages start at bridge drain and end at CPU
+render submission; they do not measure display latency. This offscreen test
+uses scale 1 and native Wayland clients; physical presentation, Steam's XWayland
+behavior and fractional scaling need separate measurements.
+
+The [initial comparison](performance/paced-render-2026-10-03.md) records the
+baseline and its limits.
+
 ## Whole-process CPU profiles
 
 ### Full-output Blender orbit comparison
