@@ -65,8 +65,16 @@ def main():
     parser.add_argument("--decorations", choices=("client", "server"), default="client")
     parser.add_argument("--jobs", type=int, default=8)
     parser.add_argument("--no-build", action="store_true")
+    parser.add_argument("--executable", type=Path, help="use a saved benchmark binary (requires --no-build)")
     parser.add_argument("--scanner", type=Path)
     args = parser.parse_args()
+    if args.executable and not args.no_build:
+        parser.error("--executable requires --no-build")
+    if args.executable:
+        try:
+            args.executable = args.executable.resolve(strict=True)
+        except OSError as error:
+            parser.error(f"cannot use benchmark binary: {error}")
     if not 1 <= args.repeat <= 10:
         parser.error("repeat must be 1..10")
     if args.perf and args.seconds < 4:
@@ -111,7 +119,7 @@ def main():
             if cargo.wait() != 0 or not executable:
                 raise RuntimeError("benchmark build failed")
         manifest.write_text(json.dumps({"executable": executable}))
-    executable = json.loads(manifest.read_text())["executable"]
+    executable = str(args.executable) if args.executable else json.loads(manifest.read_text())["executable"]
     resource.setrlimit(resource.RLIMIT_FSIZE, (128*1024*1024, 128*1024*1024))
     run = Path(tempfile.mkdtemp(prefix="paced-render-", dir=root / "target/validation"))
     print(f"Results: {run}", flush=True)

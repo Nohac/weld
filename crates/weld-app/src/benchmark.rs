@@ -9,18 +9,16 @@ use std::{collections::VecDeque, time::Duration, time::Instant};
 
 use anyhow::{Context, Result};
 use bevy::{
-    app::{App, First, Last, Plugin, PostUpdate, PreUpdate, TerminalCtrlCHandlerPlugin, Update},
+    app::{App, First, Last, Plugin, PostUpdate, PreUpdate, Update},
     asset::AssetApp,
     camera::{Camera, Camera2d, ManualTextureViewHandle, NormalizedRenderTarget, RenderTarget},
     core_pipeline::CorePipelinePlugin,
     ecs::entity::Entity,
     input::InputPlugin,
-    log::LogPlugin,
     picking::pointer::PointerInput,
-    prelude::{DefaultPlugins, IsDefaultUiCamera, MinimalPlugins, PluginGroup, With},
+    prelude::{IsDefaultUiCamera, MinimalPlugins, With},
     render::RenderPlugin,
     shader::{Shader, ShaderLoader},
-    sprite_render::SpriteRenderPlugin,
     ui_render::UiRenderPlugin,
     window::{ExitCondition, WindowPlugin},
 };
@@ -34,7 +32,7 @@ use weld_core::{
 
 use crate::input::{InputBridgePlugin, InputOutputTarget, enqueue_raw_input_batch};
 use crate::output::{PrimaryOutput, RendersOutput};
-use crate::shell::{WeldAppPlugin, configure_rendering};
+use crate::shell::{WeldAppPlugin, compositor_plugins, configure_rendering};
 
 pub use crate::shell::AppShell;
 
@@ -211,7 +209,7 @@ pub fn production_app() -> App {
 pub fn framework_app() -> App {
     let mut app = App::new();
     app.add_plugins(
-        DefaultPlugins
+        compositor_plugins()
             .set(WindowPlugin {
                 primary_window: None,
                 exit_condition: ExitCondition::DontExit,
@@ -220,10 +218,7 @@ pub fn framework_app() -> App {
             .add_before::<RenderPlugin>(HeadlessRenderPrerequisitesPlugin)
             .disable::<RenderPlugin>()
             .disable::<CorePipelinePlugin>()
-            .disable::<SpriteRenderPlugin>()
-            .disable::<UiRenderPlugin>()
-            .disable::<LogPlugin>()
-            .disable::<TerminalCtrlCHandlerPlugin>(),
+            .disable::<UiRenderPlugin>(),
     );
     app
 }

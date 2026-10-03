@@ -8,7 +8,8 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 use bevy::{
-    app::{App, Plugin, PluginGroup, PostUpdate, TerminalCtrlCHandlerPlugin},
+    animation::AnimationPlugin,
+    app::{App, Plugin, PluginGroup, PluginGroupBuilder, PostUpdate, TerminalCtrlCHandlerPlugin},
     camera::{
         Camera, Camera2d, ClearColorConfig, CompositingSpace, ManualTextureViewHandle,
         NormalizedRenderTarget, RenderTarget,
@@ -21,12 +22,14 @@ use bevy::{
         system::{Commands, Query},
         world::World,
     },
+    gizmos::GizmoPlugin,
+    image::TextureAtlasPlugin,
     log::LogPlugin,
     math::{UVec2, Vec2},
     prelude::{ChildOf, Color, DefaultPlugins, Entity, LayoutConfig, Node, With, Without},
     remote::RemoteLast,
     render::{
-        RenderApp, RenderPlugin,
+        ExtractSchedule, RenderApp, RenderPlugin,
         renderer::{
             RenderAdapter, RenderAdapterInfo, RenderDevice, RenderInstance, RenderQueue,
             WgpuWrapper,
@@ -34,6 +37,8 @@ use bevy::{
         settings::RenderCreation,
         texture::{ManualTextureView, ManualTextureViews},
     },
+    sprite::SpritePlugin,
+    sprite_render::{SpriteAssetEvents, SpriteRenderPlugin, extract_sprite_events},
     time::TimeReceiver,
     ui::{IsDefaultUiCamera, UiScale, UiSystems},
     window::{ExitCondition, RequestRedraw, WindowPlugin},
@@ -317,6 +322,19 @@ impl Plugin for WeldAppPlugin {
     }
 }
 
+/// Shared compositor UI assembly for the live shell and main-only benchmarks.
+pub(crate) fn compositor_plugins() -> PluginGroupBuilder {
+    DefaultPlugins
+        .build()
+        .disable::<AnimationPlugin>()
+        .disable::<GizmoPlugin>()
+        .add_before::<SpritePlugin>(TextureAtlasPlugin)
+        .disable::<SpritePlugin>()
+        .disable::<SpriteRenderPlugin>()
+        .disable::<LogPlugin>()
+        .disable::<TerminalCtrlCHandlerPlugin>()
+}
+
 /// Install Bevy's renderer against the device opened by the native backend.
 pub fn configure_rendering(app: &mut App, context: &RenderContext) {
     let render_creation = RenderCreation::manual(
@@ -337,13 +355,14 @@ pub fn configure_rendering(app: &mut App, context: &RenderContext) {
         ..Default::default()
     };
 
-    app.add_plugins(
-        DefaultPlugins
-            .set(window_plugin)
-            .set(render_plugin)
-            .disable::<LogPlugin>()
-            .disable::<TerminalCtrlCHandlerPlugin>(),
-    );
+    app.add_plugins(compositor_plugins().set(window_plugin).set(render_plugin));
+    // UI's ordinary-image and sliced-image pipelines consume these events to
+    // invalidate texture bindings. Keep that shared part of SpriteRenderPlugin.
+    if let Some(render_app) = app.get_sub_app_mut(RenderApp) {
+        render_app
+            .init_resource::<SpriteAssetEvents>()
+            .add_systems(ExtractSchedule, extract_sprite_events);
+    }
 }
 
 impl AppShell {
@@ -1278,9 +1297,14 @@ mod tests {
 
     #[cfg(feature = "test-support")]
     use bevy::{
+        asset::{Assets, RenderAssetUsages},
+        image::Image,
         prelude::{BackgroundColor, BorderRadius, BoxShadow, Color, PositionType, px},
         render::view::Msaa,
-        ui::UiTargetCamera,
+        ui::{
+            UiTargetCamera,
+            widget::{ImageNode, NodeImageMode},
+        },
     };
     #[cfg(feature = "test-support")]
     use weld_core::{
@@ -2000,6 +2024,92 @@ mod tests {
             differing_bytes, 0,
             "UI and shadow antialiasing must be unchanged"
         );
+    }
+
+    #[cfg(feature = "test-support")]
+    #[test]
+    fn compositor_ui_invalidates_regular_and_tiled_image_bindings() {
+        let (mut shell, _, device, queue) = crate::benchmark::rendering_shell_with_outputs(
+            vec![diagnostic_output(
+                PRIMARY_OUTPUT_ID,
+                LogicalPoint::ZERO,
+                true,
+                0.0,
+            )],
+            |_| {},
+        )
+        .expect("diagnostic GPU shell");
+        let make_image = |size, color: [u8; 4]| {
+            Image::new_fill(
+                wgpu::Extent3d {
+                    width: size,
+                    height: size,
+                    depth_or_array_layers: 1,
+                },
+                wgpu::TextureDimension::D2,
+                &color,
+                wgpu::TextureFormat::Rgba8UnormSrgb,
+                RenderAssetUsages::default(),
+            )
+        };
+        let image = shell
+            .app
+            .world_mut()
+            .resource_mut::<Assets<Image>>()
+            .add(make_image(4, [255, 0, 0, 255]));
+        let camera = shell.outputs[&PRIMARY_OUTPUT_ID].camera;
+        for (left, image_mode) in [
+            (0.0, NodeImageMode::Stretch),
+            (
+                32.0,
+                NodeImageMode::Tiled {
+                    tile_x: true,
+                    tile_y: true,
+                    stretch_value: 4.0,
+                },
+            ),
+        ] {
+            shell.app.world_mut().spawn((
+                Node {
+                    position_type: PositionType::Absolute,
+                    left: px(left),
+                    width: px(32.0),
+                    height: px(32.0),
+                    ..Default::default()
+                },
+                ImageNode {
+                    image: image.clone(),
+                    image_mode,
+                    ..Default::default()
+                },
+                UiTargetCamera(camera),
+            ));
+        }
+        // Resize under the same asset ID to force a new GPU texture rather than
+        // an in-place upload. Both UI pipelines must invalidate their bindings.
+        for (size, color) in [
+            (4, [255, 0, 0, 255]),
+            (8, [0, 255, 0, 255]),
+            (16, [0, 0, 255, 255]),
+        ] {
+            *shell
+                .app
+                .world_mut()
+                .resource_mut::<Assets<Image>>()
+                .get_mut(&image)
+                .expect("fixture image") = make_image(size, color);
+            for time in 1..=5 {
+                shell.advance_main(time);
+                shell
+                    .render_outputs(&[owned_request(PRIMARY_OUTPUT_ID)], &mut Vec::new())
+                    .expect("settle image upload");
+            }
+            let pixels = render_owned_output(&mut shell, &device, &queue, PRIMARY_OUTPUT_ID);
+            for x in [16, 48] {
+                let offset = (16 * 64 + x) * 4;
+                assert_eq!(&pixels[offset..offset + 4], &color, "UI image at x={x}");
+            }
+        }
     }
 
     #[cfg(feature = "test-support")]

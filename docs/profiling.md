@@ -79,6 +79,7 @@ lifecycle, with a separate animated EGL client:
 ```sh
 python3 scripts/profiling/paced-render --seconds 20 --width 2240 --height 1400
 python3 scripts/profiling/paced-render --no-build --repeat 2 --perf /path/to/perf
+python3 scripts/profiling/paced-render --no-build --executable /path/to/saved/benchmark --mode minimal
 python3 scripts/profiling/paced-render --no-build --mode minimal --windows 3 --producer-hz 240 --input-hz 1000
 ```
 
@@ -126,6 +127,13 @@ exercised by the producer; a unit regression covers root selection at unmap,
 promotion and out-of-order surface creation.
 `extract-direct` must keep its no-mounted-UI configuration: buffers populated
 by UI extraction are normally drained by preparation, which that case skips.
+
+The live renderer and main-only controls share Weld's compositor plugin
+selection. This retains UI/text, texture atlases, picking and the core renderer,
+while omitting animation, gizmos and sprite/mesh-2D/tilemap presentation.
+UI image-change extraction remains installed for cached texture bindings.
+Use a saved pre-change executable to compare plugin selections without
+rebuilding between runs. The separate EGL producer must already be built.
 
 Optional `--perf` saves userspace instruction/cycle counters from an interior
 window after `MEASUREMENT_START`. `counter-window.json` records its duration

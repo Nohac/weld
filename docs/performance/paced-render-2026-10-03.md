@@ -229,3 +229,63 @@ opaque, uncropped roots. Live GPU binding retirement during window unmap is
 not yet exercised by the producer. The older `shell_main` and `input_pipeline`
 benchmarks were not rerun after correcting their shared renderer-free assembly;
 their historical timing results should not be compared directly to new runs.
+
+## First reduction: compositor UI plugin selection
+
+Checkpoint `d5b76a6` preserves the full-plugin baseline above. The first
+production change uses Bevy's public plugin controls to omit `AnimationPlugin`,
+`GizmoPlugin`, `SpritePlugin` and `SpriteRenderPlugin`. The latter also installed
+mesh-2D, color-material and tilemap rendering. None has a current Weld consumer.
+The live shell and renderer-free benchmark controls share the selection.
+
+`TextureAtlasPlugin` stays installed explicitly for `ImageNode` atlas layouts.
+The renderer also
+keeps upstream `SpriteAssetEvents` and `extract_sprite_events`, which UI's
+regular-image and texture-slice pipelines use to invalidate cached bindings.
+No upstream implementation was copied or patched. The core renderer, UI/text,
+picking, screenshot/readback path and GPU-buffer lifecycle remain intact.
+Cargo features and the dependency lockfile are unchanged.
+
+The saved pre-change executable is
+`target/validation/paced-render-build/paced-render-baseline-d5b76a6`.
+The launcher now accepts `--no-build --executable PATH` for such comparisons.
+All measurements below use release optimization level 3, validation disabled,
+2240×1400, one CSD client at 120 Hz and a 60 Hz output, no injected input,
+three seconds warmup, eight measured seconds and an interior six-second perf
+window. No compiler or other profiler ran concurrently.
+
+| Presenter | Baseline instructions, million/s | Slim instructions, million/s | Baseline CPU, % of one core | Slim CPU, % of one core |
+| --- | ---: | ---: | ---: | ---: |
+| Minimal, two runs each | 56.66–57.10 | 50.82–51.20 | 7.25–9.63 | 7.25–9.00 |
+| Master, two runs each | 65.61–65.71 | 59.49–59.85 | 10.49–10.99 | 8.38–8.87 |
+
+Artifacts:
+
+- Baseline minimal: `paced-render-2rwx90i7`.
+- Final slim minimal: `paced-render-wycq5_1j`.
+- Final slim Master: `paced-render-mraajjjo`.
+- Baseline Master: `paced-render-v1_adc2u`.
+
+The reduction in userspace instructions is approximately 10% for minimal and
+9% for Master. CPU time improved in this Master pair, but minimal's ranges
+overlap and clocks/placement remain uncontrolled. Do not equate the instruction
+reduction with a guaranteed CPU-time saving or extrapolate it to Steam yet.
+Every measured run sustained approximately 60 compositions/s and 120 commits/s,
+with at most one GPU submission in flight and no logged warnings/errors.
+
+The three-window SSD/input smoke run `paced-render-xid_1o3k` sustained 60
+compositions/s and 360 commits/s while injecting 1,000 pointer motions/s. The
+producer reported receiving input; the capture shows all three surfaces,
+borders, close controls and the text overlay. `paced-render-fw0su4ly` verifies
+the shared renderer-free assembly initializes and runs cleanly.
+
+The GPU image regression resizes and recolors the same asset ID, checking both
+ordinary and tiled UI nodes. Resizing is important: Bevy can reuse a texture for
+same-sized updates, which would not prove that stale bindings are invalidated.
+Existing regressions cover rounded/translucent UI, shadows, surface-material
+updates across sequential outputs, and rotating external composition targets.
+
+This is a bounded first reduction, not a replacement renderer. Further work
+should continue measuring preparation, view-resource setup and empty
+submissions. Removing these four plugins does not eliminate those remaining
+costs, and this slice adds no new Bevy fork or vendor patch.
