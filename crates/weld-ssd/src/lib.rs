@@ -2,6 +2,10 @@
 
 use std::collections::HashSet;
 
+mod style;
+use style::FrameGeometry;
+pub use style::{BorderRequest, BorderStyle, FrameColors, SsdSettings, WindowBorderStyle};
+
 const PROFILE_TARGET: &str = "weld_profile";
 
 use bevy::{
@@ -10,17 +14,18 @@ use bevy::{
     ecs::{
         component::Component,
         entity::Entity,
+        observer::On,
         query::{Has, With, Without},
         schedule::IntoScheduleConfigs,
-        system::{Commands, Query, Res},
-        template::template,
+        system::{Commands, Query, Res, SystemParam},
+        template::{FromTemplate, template},
     },
     math::Vec2,
     picking::Pickable,
     prelude::{
         AlignItems, BackgroundColor, BorderColor, BorderRadius, BoxShadow, Button, Children,
-        FlexDirection, GlobalZIndex, JustifyContent, Node, Overflow, PositionType, Rot2, Scene,
-        SceneList, UiRect, UiTargetCamera, UiTransform, ZIndex, percent, px,
+        Display, FlexDirection, GlobalZIndex, JustifyContent, Node, Overflow, PositionType, Rot2,
+        Scene, SceneList, UiRect, UiTargetCamera, UiTransform, ZIndex, percent, px,
     },
     scene::{CommandsSceneExt, bsn, bsn_list},
     window::RequestRedraw,
@@ -28,28 +33,24 @@ use bevy::{
 use weld_app::{
     output::{OutputCompositionCamera, PrimaryOutput, WeldOutput},
     surface::{
-        ClientProvenance, ClientToplevel, MappedSurface, ServerDecorated, SurfaceId, SurfaceView,
-        ToplevelResizeEdge,
+        ClientProvenance, ClientToplevel, ClientToplevelParent, MappedSurface, ServerDecorated,
+        SurfaceId, SurfaceView, ToplevelResizeEdge,
     },
 };
 use weld_window::{
-    FocusedWindow, PresentationInsets, PresentationOffset, PresentsWindow,
+    FloatingWindow, FocusedWindow, ManagedWindow, PresentationOffset, PresentsWindow,
     PrimaryWindowPresentation, WindowClientResolver, WindowCloseHandle, WindowGeometryAnchor,
-    WindowMoveHandle, WindowOutput, WindowOutputIntersections, WindowPresentationOverride,
-    WindowProjection, WindowResizeHandle, WindowSystems, WindowVacancy, WindowZOrder,
+    WindowInteractionSession, WindowMoveHandle, WindowOutput, WindowOutputIntersections,
+    WindowPresentationOverride, WindowProjection, WindowResizeHandle, WindowSystems, WindowVacancy,
+    WindowZOrder,
 };
 use weld_window_ui::{server_frame_required, surface_content_with_node};
 
-const BORDER_WIDTH: f32 = 3.0;
-const OUTER_BORDER_RADIUS: f32 = 9.0;
-const INNER_BORDER_RADIUS: f32 = OUTER_BORDER_RADIUS - BORDER_WIDTH;
+#[cfg(test)]
+const INNER_BORDER_RADIUS: f32 = 6.0;
 const HEADER_HEIGHT: f32 = 30.0;
 const CLOSE_BUTTON_SIZE: f32 = 22.0;
 const RESIZE_GRAB_EXTENT: f32 = 12.0;
-const RESIZE_HALO_EXTENT: f32 = RESIZE_GRAB_EXTENT - BORDER_WIDTH;
-// Absolute children are positioned from the root padding box. Including the
-// border in the negative inset makes each handle stop at the body edge.
-const RESIZE_HANDLE_INSET: f32 = -(RESIZE_HALO_EXTENT + BORDER_WIDTH);
 const FOCUSED_BORDER: Color = Color::srgb(0.35, 0.58, 0.88);
 const UNFOCUSED_BORDER: Color = Color::srgb(0.28, 0.34, 0.42);
 const RELOCATED_FOCUSED_BORDER: Color = Color::srgb(0.92, 0.18, 0.16);
@@ -64,31 +65,98 @@ struct VacantSsdPresentation;
 #[derive(Component, Clone, Copy, Debug, Default)]
 struct WindowBody;
 
+#[derive(Component, Clone, Copy, Default)]
+struct FrameHeader;
+
+#[derive(Component, Clone, Copy, Default)]
+struct FrameForeground;
+
+#[derive(Component, FromTemplate)]
+#[relationship(relationship_target = FrameColorNodes)]
+struct FrameColorOwner(Entity);
+
+#[derive(Component)]
+#[relationship_target(relationship = FrameColorOwner)]
+struct FrameColorNodes(Vec<Entity>);
+
+#[derive(SystemParam)]
+struct FrameStyles<'w, 's> {
+    settings: Res<'w, SsdSettings>,
+    windows: Query<
+        'w,
+        's,
+        (Has<FloatingWindow>, Option<&'static WindowBorderStyle>),
+        With<ManagedWindow>,
+    >,
+}
+
+impl FrameStyles<'_, '_> {
+    fn default_border(&self, window: Entity) -> BorderStyle {
+        if self.windows.get(window).is_ok_and(|(floating, _)| floating) {
+            self.settings.floating
+        } else {
+            self.settings.tiled
+        }
+    }
+    fn geometry(&self, window: Entity) -> FrameGeometry {
+        let (floating, style) = self.windows.get(window).unwrap_or((false, None));
+        FrameGeometry::new(&self.settings, floating, style.copied())
+    }
+}
+
+fn border_request(
+    event: On<BorderRequest>,
+    focus: Res<FocusedWindow>,
+    styles: FrameStyles,
+    mut commands: Commands,
+    mut redraw: bevy::ecs::message::MessageWriter<RequestRedraw>,
+) {
+    if let Some(window) = focus
+        .entity()
+        .filter(|window| styles.windows.contains(*window))
+    {
+        let style = event.0.unwrap_or_else(|| {
+            styles
+                .geometry(window)
+                .border
+                .toggle(styles.default_border(window))
+        });
+        commands.entity(window).insert(WindowBorderStyle(style));
+        redraw.write(RequestRedraw);
+    }
+}
+
 /// Installs Weld's validating default server-decoration scene.
 pub struct SsdPlugin;
 
 impl Plugin for SsdPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(
-            PreUpdate,
-            revoke_ssd_presentations.in_set(WindowSystems::PresentationRevoke),
-        )
-        .add_systems(
-            PreUpdate,
-            present_ssd_windows.in_set(WindowSystems::PresentationClaim),
-        )
-        .add_systems(
-            PreUpdate,
-            reconcile_ssd_projections.in_set(WindowSystems::UiReconcile),
-        )
-        .add_systems(
-            PreUpdate,
-            sync_focus_style.in_set(WindowSystems::UiReconcile),
-        )
-        .add_systems(
-            PreUpdate,
-            sync_focus_style.in_set(WindowSystems::FinalReconcile),
-        );
+        app.init_resource::<SsdSettings>()
+            .add_observer(border_request)
+            .add_systems(
+                PreUpdate,
+                revoke_ssd_presentations.in_set(WindowSystems::PresentationRevoke),
+            )
+            .add_systems(
+                PreUpdate,
+                present_ssd_windows.in_set(WindowSystems::PresentationClaim),
+            )
+            .add_systems(
+                PreUpdate,
+                reconcile_ssd_projections.in_set(WindowSystems::UiReconcile),
+            )
+            .add_systems(
+                PreUpdate,
+                sync_focus_style.in_set(WindowSystems::UiReconcile),
+            )
+            .add_systems(
+                PreUpdate,
+                sync_focus_style.in_set(WindowSystems::FinalReconcile),
+            )
+            .add_systems(
+                PreUpdate,
+                request_style_refresh.in_set(WindowSystems::FinalReconcile),
+            );
     }
 }
 
@@ -99,14 +167,16 @@ fn revoke_ssd_presentations(
             bevy::ecs::entity::Entity,
             &WindowProjection,
             Option<&VacantSsdPresentation>,
+            &FrameGeometry,
         ),
         With<SsdPresentation>,
     >,
     windows: Query<(&WindowVacancy, Option<&WindowPresentationOverride>)>,
     clients: WindowClientResolver,
     occupants: Query<(Option<&MappedSurface>, Has<ServerDecorated>), With<ClientToplevel>>,
+    styles: FrameStyles,
 ) {
-    for (root, projection, vacant_presentation) in &roots {
+    for (root, projection, vacant_presentation, geometry) in &roots {
         let still_server_decorated =
             windows
                 .get(projection.window())
@@ -123,7 +193,7 @@ fn revoke_ssd_presentations(
                             },
                         )
                 });
-        if !still_server_decorated {
+        if !still_server_decorated || *geometry != styles.geometry(projection.window()) {
             commands.entity(root).despawn();
         }
     }
@@ -153,6 +223,7 @@ fn reconcile_ssd_projections(
     )>,
     outputs: Query<&OutputCompositionCamera>,
     roots: Query<(bevy::ecs::entity::Entity, &WindowProjection), With<SsdPresentation>>,
+    styles: FrameStyles,
 ) {
     let mut retained = HashSet::new();
     for (window, primary, _, _, _, presentation_override) in &windows {
@@ -218,20 +289,16 @@ fn reconcile_ssd_projections(
             let Some(camera) = camera.entity() else {
                 continue;
             };
-            let root = spawn_ssd_scene(&mut commands, content);
+            let style = styles.geometry(window);
+            let root = spawn_ssd_scene(&mut commands, content, style);
             let mut root_commands = commands.entity(root);
             root_commands.insert((
                 WindowProjection::new(window, output),
                 UiTargetCamera(camera),
                 SsdPresentation,
                 PresentationOffset::default(),
-                PresentationInsets::new(
-                    BORDER_WIDTH,
-                    HEADER_HEIGHT + BORDER_WIDTH,
-                    BORDER_WIDTH,
-                    BORDER_WIDTH,
-                ),
-                WindowGeometryAnchor(Vec2::new(0.0, HEADER_HEIGHT)),
+                style.border.insets(),
+                WindowGeometryAnchor(Vec2::new(0.0, style.border.header())),
                 GlobalZIndex(z_order.0),
             ));
             if content == SsdContent::Vacant {
@@ -277,6 +344,7 @@ fn present_ssd_windows(
         Option<&ServerDecorated>,
     )>,
     outputs: OutputCameraQuery,
+    styles: FrameStyles,
 ) {
     let _presentation_span =
         tracing::trace_span!(target: PROFILE_TARGET, "weld_ssd_present_windows").entered();
@@ -307,19 +375,15 @@ fn present_ssd_windows(
             .ok()
             .and_then(|(_, camera, _)| camera)
             .and_then(OutputCompositionCamera::entity);
-        let root = spawn_ssd_scene(&mut commands, content);
+        let style = styles.geometry(window);
+        let root = spawn_ssd_scene(&mut commands, content, style);
         commands.entity(root).insert((
             PresentsWindow(window),
             WindowProjection::new(window, output),
             SsdPresentation,
             PresentationOffset::default(),
-            PresentationInsets::new(
-                BORDER_WIDTH,
-                HEADER_HEIGHT + BORDER_WIDTH,
-                BORDER_WIDTH,
-                BORDER_WIDTH,
-            ),
-            WindowGeometryAnchor(Vec2::new(0.0, HEADER_HEIGHT)),
+            style.border.insets(),
+            WindowGeometryAnchor(Vec2::new(0.0, style.border.header())),
             GlobalZIndex(z_order.0),
         ));
         if content == SsdContent::Vacant {
@@ -331,36 +395,116 @@ fn present_ssd_windows(
     }
 }
 
-fn sync_focus_style(
-    focus: Res<FocusedWindow>,
-    clients: WindowClientResolver,
-    mut roots: Query<(&WindowProjection, &mut BorderColor), With<SsdPresentation>>,
-    mut redraw: bevy::ecs::message::MessageWriter<RequestRedraw>,
-) {
-    let mut changed = false;
-    for (projection, mut border) in &mut roots {
-        let focused = focus.entity() == Some(projection.window());
-        let relocated = clients
-            .mapped_client(projection.window())
+#[derive(SystemParam)]
+struct FocusColors<'w, 's> {
+    focus: Res<'w, FocusedWindow>,
+    clients: WindowClientResolver<'w, 's>,
+    settings: Res<'w, SsdSettings>,
+    interactions: Query<'w, 's, (), With<WindowInteractionSession>>,
+    parents: Query<'w, 's, &'static ClientToplevelParent>,
+}
+
+impl FocusColors<'_, '_> {
+    fn palette(&self, window: Entity) -> FrameColors {
+        if self.clients.client_entity(window).is_none() {
+            return self.settings.placeholder;
+        }
+        let focused = self.focus.entity() == Some(window);
+        let relocated = self
+            .clients
+            .mapped_client(window)
             .is_some_and(|client| client.provenance() == ClientProvenance::Relocated);
-        let color = ssd_border_color(relocated, focused);
-        let expected = BorderColor::all(color);
-        if *border != expected {
-            *border = expected;
-            changed = true;
+        match (relocated, focused) {
+            (true, true) => self.settings.relocated_focused,
+            (true, false) => self.settings.relocated_unfocused,
+            (false, true) => self.settings.focused,
+            (false, false) => {
+                let parent = self
+                    .focus
+                    .entity()
+                    .and_then(|focused| self.clients.client_entity(focused))
+                    .and_then(|client| self.parents.get(client).ok());
+                if parent.is_some_and(|parent| {
+                    self.clients
+                        .mapped_client(window)
+                        .is_some_and(|client| client.surface() == parent.surface)
+                }) {
+                    self.settings.focused_inactive
+                } else {
+                    self.settings.unfocused
+                }
+            }
         }
     }
-    if changed {
+}
+
+type FrameStyleRoots<'w, 's> = Query<
+    'w,
+    's,
+    (
+        &'static WindowProjection,
+        &'static FrameGeometry,
+        &'static FrameColorNodes,
+        &'static mut BorderColor,
+    ),
+    With<SsdPresentation>,
+>;
+
+fn request_style_refresh(
+    styles: FrameStyles,
+    roots: Query<(&WindowProjection, &FrameGeometry), With<SsdPresentation>>,
+    mut redraw: bevy::ecs::message::MessageWriter<RequestRedraw>,
+) {
+    if roots
+        .iter()
+        .any(|(projection, geometry)| *geometry != styles.geometry(projection.window()))
+    {
         redraw.write(RequestRedraw);
     }
 }
 
-fn ssd_border_color(relocated: bool, focused: bool) -> Color {
-    match (relocated, focused) {
-        (true, true) => RELOCATED_FOCUSED_BORDER,
-        (true, false) => RELOCATED_UNFOCUSED_BORDER,
-        (false, true) => FOCUSED_BORDER,
-        (false, false) => UNFOCUSED_BORDER,
+fn sync_focus_style(
+    colors: FocusColors,
+    mut roots: FrameStyleRoots,
+    mut nodes: Query<(&mut BackgroundColor, Has<FrameHeader>)>,
+    mut redraw: bevy::ecs::message::MessageWriter<RequestRedraw>,
+) {
+    let mut changed = false;
+    for (projection, geometry, children, mut border) in &mut roots {
+        let palette = colors.palette(projection.window());
+        let expected = if colors.interactions.contains(projection.window()) {
+            BorderColor::all(palette.indicator)
+        } else if matches!(geometry.border, BorderStyle::Normal(_)) {
+            BorderColor {
+                top: palette.border,
+                left: palette.child_border,
+                right: palette.child_border,
+                bottom: palette.child_border,
+            }
+        } else {
+            BorderColor::all(palette.child_border)
+        };
+        if *border != expected {
+            *border = expected;
+            changed = true;
+        }
+        for child in &children.0 {
+            let Ok((mut background, header)) = nodes.get_mut(*child) else {
+                continue;
+            };
+            let expected = if header {
+                palette.background
+            } else {
+                palette.foreground
+            };
+            if background.0 != expected {
+                background.0 = expected;
+                changed = true;
+            }
+        }
+    }
+    if changed {
+        redraw.write(RequestRedraw);
     }
 }
 
@@ -370,47 +514,63 @@ enum SsdContent {
     Vacant,
 }
 
-fn spawn_ssd_scene(commands: &mut Commands, content: SsdContent) -> Entity {
-    match content {
-        SsdContent::Surface(surface) => commands.spawn_scene(scene(surface)).id(),
-        SsdContent::Vacant => commands.spawn_scene(vacant_scene()).id(),
-    }
+fn spawn_ssd_scene(commands: &mut Commands, content: SsdContent, style: FrameGeometry) -> Entity {
+    let root = match content {
+        SsdContent::Surface(surface) => commands.spawn_scene(scene(surface, style)).id(),
+        SsdContent::Vacant => commands.spawn_scene(vacant_scene(style)).id(),
+    };
+    commands.entity(root).insert(style);
+    root
 }
 
-fn scene(surface: SurfaceId) -> impl Scene {
+fn scene(surface: SurfaceId, style: FrameGeometry) -> impl Scene {
     let content = surface_content_with_node(
         surface,
         SurfaceView::WindowGeometry,
         Node {
             overflow: Overflow::clip(),
-            border_radius: BorderRadius::px(0.0, 0.0, INNER_BORDER_RADIUS, INNER_BORDER_RADIUS),
+            border_radius: BorderRadius::px(
+                if style.border.header() > 0.0 {
+                    0.0
+                } else {
+                    style.inner_radius()
+                },
+                if style.border.header() > 0.0 {
+                    0.0
+                } else {
+                    style.inner_radius()
+                },
+                style.inner_radius(),
+                style.inner_radius(),
+            ),
             ..Default::default()
         },
     );
-    window_scene(content)
+    window_scene(content, style)
 }
 
-fn vacant_scene() -> impl Scene {
+fn vacant_scene(style: FrameGeometry) -> impl Scene {
     let content = bsn_list! {
         (
             Node { width: percent(100), height: percent(100) }
             BackgroundColor(Color::srgb(0.10, 0.12, 0.16))
         )
     };
-    window_scene(content)
+    window_scene(content, style)
 }
 
-fn window_scene(content: impl SceneList) -> impl Scene {
-    let resize_handles = resize_handles();
+fn window_scene(content: impl SceneList, style: FrameGeometry) -> impl Scene {
+    let resize_handles = resize_handles(style.border);
     bsn! {
+        #FrameRoot
         Node {
             position_type: PositionType::Absolute,
             flex_direction: FlexDirection::Column,
-            border: UiRect::all(px(BORDER_WIDTH)),
-            border_radius: BorderRadius::all(px(OUTER_BORDER_RADIUS)),
+            border: UiRect::all(px(style.border.width())),
+            border_radius: BorderRadius::all(px(style.radius)),
         }
         BorderColor::all(UNFOCUSED_BORDER)
-        template(|_| Ok(window_shadow()))
+        template(move |_| Ok(if style.border == BorderStyle::None { BoxShadow::default() } else { window_shadow() }))
         Children [
             (
                 WindowBody
@@ -420,22 +580,25 @@ fn window_scene(content: impl SceneList) -> impl Scene {
                     min_width: px(0),
                     min_height: px(0),
                     flex_direction: FlexDirection::Column,
-                    border_radius: BorderRadius::all(px(INNER_BORDER_RADIUS)),
+                    border_radius: BorderRadius::all(px(style.inner_radius())),
                     overflow: Overflow::clip(),
                 }
                 BackgroundColor(Color::srgb(0.10, 0.12, 0.16))
                 Children [
                     (
                         WindowMoveHandle
+                        FrameHeader
+                        FrameColorOwner(#FrameRoot)
                         Node {
+                            display: {if style.border.header() > 0.0 { Display::Flex } else { Display::None }},
                             width: percent(100),
-                            height: px(HEADER_HEIGHT),
+                            height: px(style.border.header()),
                             flex_shrink: 0.0,
                             align_items: AlignItems::Center,
                             justify_content: JustifyContent::FlexEnd,
                             border_radius: BorderRadius::px(
-                                INNER_BORDER_RADIUS,
-                                INNER_BORDER_RADIUS,
+                                style.inner_radius(),
+                                style.inner_radius(),
                                 0.0,
                                 0.0,
                             ),
@@ -463,6 +626,8 @@ fn window_scene(content: impl SceneList) -> impl Scene {
                                 Children [
                                     (
                                         Pickable::IGNORE
+                                        FrameForeground
+                                        FrameColorOwner(#FrameRoot)
                                         Node {
                                             position_type: PositionType::Absolute,
                                             left: px(0),
@@ -475,6 +640,8 @@ fn window_scene(content: impl SceneList) -> impl Scene {
                                     ),
                                     (
                                         Pickable::IGNORE
+                                        FrameForeground
+                                        FrameColorOwner(#FrameRoot)
                                         Node {
                                             position_type: PositionType::Absolute,
                                             left: px(0),
@@ -497,93 +664,102 @@ fn window_scene(content: impl SceneList) -> impl Scene {
     }
 }
 
-fn resize_handles() -> impl SceneList {
+fn resize_handles(border: BorderStyle) -> impl SceneList {
+    // Reach from the padding-box edge through the entire visible border.
+    let extent = RESIZE_GRAB_EXTENT.max(border.width());
+    let inset = -extent;
+    let handle = |edge, mut node: Node| {
+        if border == BorderStyle::None {
+            node.display = Display::None;
+        }
+        resize_handle(edge, node)
+    };
     bsn_list![
-        resize_handle(
+        handle(
             ToplevelResizeEdge::Top,
             Node {
                 position_type: PositionType::Absolute,
                 left: px(0),
                 right: px(0),
-                top: px(RESIZE_HANDLE_INSET),
-                height: px(RESIZE_GRAB_EXTENT),
+                top: px(inset),
+                height: px(extent),
                 ..Default::default()
             }
         ),
-        resize_handle(
+        handle(
             ToplevelResizeEdge::Bottom,
             Node {
                 position_type: PositionType::Absolute,
                 left: px(0),
                 right: px(0),
-                bottom: px(RESIZE_HANDLE_INSET),
-                height: px(RESIZE_GRAB_EXTENT),
+                bottom: px(inset),
+                height: px(extent),
                 ..Default::default()
             }
         ),
-        resize_handle(
+        handle(
             ToplevelResizeEdge::Left,
             Node {
                 position_type: PositionType::Absolute,
-                left: px(RESIZE_HANDLE_INSET),
+                left: px(inset),
                 top: px(0),
                 bottom: px(0),
-                width: px(RESIZE_GRAB_EXTENT),
+                width: px(extent),
                 ..Default::default()
             }
         ),
-        resize_handle(
+        handle(
             ToplevelResizeEdge::Right,
             Node {
                 position_type: PositionType::Absolute,
-                right: px(RESIZE_HANDLE_INSET),
+                right: px(inset),
                 top: px(0),
                 bottom: px(0),
-                width: px(RESIZE_GRAB_EXTENT),
+                width: px(extent),
                 ..Default::default()
             }
         ),
-        resize_handle(
+        handle(
             ToplevelResizeEdge::TopLeft,
             Node {
                 position_type: PositionType::Absolute,
-                left: px(RESIZE_HANDLE_INSET),
-                top: px(RESIZE_HANDLE_INSET),
-                width: px(RESIZE_GRAB_EXTENT),
-                height: px(RESIZE_GRAB_EXTENT),
+                left: px(inset),
+                top: px(inset),
+                width: px(extent),
+                height: px(extent),
                 ..Default::default()
             }
         ),
-        resize_handle(
+        handle(
             ToplevelResizeEdge::TopRight,
             Node {
                 position_type: PositionType::Absolute,
-                right: px(RESIZE_HANDLE_INSET),
-                top: px(RESIZE_HANDLE_INSET),
-                width: px(RESIZE_GRAB_EXTENT),
-                height: px(RESIZE_GRAB_EXTENT),
+                right: px(inset),
+                top: px(inset),
+                width: px(extent),
+                height: px(extent),
                 ..Default::default()
             }
         ),
-        resize_handle(
+        handle(
             ToplevelResizeEdge::BottomLeft,
             Node {
                 position_type: PositionType::Absolute,
-                left: px(RESIZE_HANDLE_INSET),
-                bottom: px(RESIZE_HANDLE_INSET),
-                width: px(RESIZE_GRAB_EXTENT),
-                height: px(RESIZE_GRAB_EXTENT),
+                left: px(inset),
+                bottom: px(inset),
+                width: px(extent),
+                height: px(extent),
                 ..Default::default()
             }
         ),
-        resize_handle(
+        handle(
             ToplevelResizeEdge::BottomRight,
             Node {
                 position_type: PositionType::Absolute,
-                right: px(RESIZE_HANDLE_INSET),
-                bottom: px(RESIZE_HANDLE_INSET),
-                width: px(RESIZE_GRAB_EXTENT),
-                height: px(RESIZE_GRAB_EXTENT),
+                right: px(inset),
+                bottom: px(inset),
+                width: px(extent),
+                height: px(extent),
                 ..Default::default()
             }
         ),
@@ -614,6 +790,7 @@ mod tests {
         app::App,
         asset::{AssetApp, AssetPlugin, Assets},
         camera::{ManualTextureViewHandle, NormalizedRenderTarget},
+        ecs::system::RunSystemOnce,
         image::Image,
         input::{
             ButtonState,
@@ -653,6 +830,12 @@ mod tests {
     use super::*;
 
     fn test_app() -> App {
+        let mut app = base_test_app();
+        app.add_plugins(FloatPlugin);
+        app
+    }
+
+    fn base_test_app() -> App {
         let mut app = App::new();
         app.add_plugins((
             bevy::app::TaskPoolPlugin::default(),
@@ -663,13 +846,7 @@ mod tests {
             .insert_resource(Assets::<Image>::default())
             .insert_resource(UiScale(1.0))
             .add_message::<RequestRedraw>()
-            .add_plugins((
-                SurfacePlugin,
-                WindowPlugin,
-                WindowUiPlugin,
-                SsdPlugin,
-                FloatPlugin,
-            ));
+            .add_plugins((SurfacePlugin, WindowPlugin, WindowUiPlugin, SsdPlugin));
         app.world_mut().spawn((
             WeldOutput {
                 id: OutputId::new(1),
@@ -679,6 +856,311 @@ mod tests {
             PrimaryOutput,
         ));
         app
+    }
+
+    #[test]
+    fn tile_outer_rectangle_survives_live_frame_metrics_changes() {
+        let mut app = base_test_app();
+        app.add_plugins(weld_tile::TilePlugin);
+        let output = app
+            .world_mut()
+            .query_filtered::<Entity, With<WeldOutput>>()
+            .single(app.world())
+            .expect("output");
+        app.world_mut()
+            .run_system_once(
+                move |mut creation: weld_window::workspace::WorkspaceCreation,
+                      mut commands: Commands| {
+                    let workspace = creation.create("1".into(), output).expect("workspace");
+                    commands.trigger(weld_window::workspace::WorkspaceRequest::SetVisible {
+                        workspace,
+                        visible: true,
+                    });
+                    commands.trigger(weld_window::workspace::WorkspaceRequest::Focus(workspace));
+                },
+            )
+            .expect("workspace setup");
+        let surface = SurfaceId::for_test(100);
+        enqueue_surface_event(app.world_mut(), role(surface, WindowDecoration::ServerSide));
+        enqueue_surface_event(app.world_mut(), frame(surface, 320, 240));
+        app.update();
+        let window = app
+            .world_mut()
+            .query::<&OccupiesWindow>()
+            .single(app.world())
+            .expect("occupancy")
+            .0;
+        let outer = *app.world().get::<WindowGeometry>(window).expect("geometry");
+        take_surface_actions(app.world_mut());
+        app.world_mut().resource_mut::<SsdSettings>().tiled = BorderStyle::Pixel(8);
+        app.update();
+        assert_eq!(
+            *app.world().get::<WindowGeometry>(window).expect("geometry"),
+            outer
+        );
+        assert!(
+            take_surface_actions(app.world_mut()).contains(&SurfaceAction::Resize {
+                surface,
+                logical_size: (outer.size - Vec2::splat(16.0)).as_uvec2(),
+                resizing: false
+            })
+        );
+        let dialog_surface = SurfaceId::for_test(103);
+        let mut dialog_role = role(dialog_surface, WindowDecoration::ServerSide);
+        if let HostSurfaceEventKind::Role(weld_client::ClientSurfaceRole::Toplevel(state)) =
+            &mut dialog_role.kind
+        {
+            state.parent = Some(surface);
+        }
+        enqueue_surface_event(app.world_mut(), dialog_role);
+        enqueue_surface_event(app.world_mut(), frame(dialog_surface, 320, 240));
+        app.update();
+        let dialog = app
+            .world_mut()
+            .query::<(&ClientToplevel, &OccupiesWindow)>()
+            .iter(app.world())
+            .find(|(client, _)| client.surface == dialog_surface)
+            .expect("dialog")
+            .1
+            .0;
+        let placed = *app
+            .world()
+            .get::<WindowGeometry>(dialog)
+            .expect("dialog geometry");
+        assert_eq!(
+            placed.position,
+            outer.position + (outer.size - placed.size) * 0.5
+        );
+        app.update();
+        assert_eq!(
+            *app.world()
+                .get::<WindowGeometry>(dialog)
+                .expect("settled dialog"),
+            placed
+        );
+        enqueue_surface_event(
+            app.world_mut(),
+            HostSurfaceEvent {
+                surface: dialog_surface,
+                kind: HostSurfaceEventKind::Destroyed,
+            },
+        );
+        app.update();
+        let late_parent_surface = SurfaceId::for_test(104);
+        let child_surface = SurfaceId::for_test(105);
+        let mut child_role = role(child_surface, WindowDecoration::ServerSide);
+        if let HostSurfaceEventKind::Role(weld_client::ClientSurfaceRole::Toplevel(state)) =
+            &mut child_role.kind
+        {
+            state.parent = Some(late_parent_surface);
+        }
+        enqueue_surface_event(app.world_mut(), child_role);
+        enqueue_surface_event(app.world_mut(), frame(child_surface, 200, 100));
+        app.update();
+        enqueue_surface_event(
+            app.world_mut(),
+            role(late_parent_surface, WindowDecoration::ServerSide),
+        );
+        enqueue_surface_event(app.world_mut(), frame(late_parent_surface, 320, 240));
+        app.update();
+        let lookup = |app: &mut App, surface| {
+            app.world_mut()
+                .query::<(&ClientToplevel, &OccupiesWindow)>()
+                .iter(app.world())
+                .find(|(client, _)| client.surface == surface)
+                .expect("family window")
+                .1
+                .0
+        };
+        let child = lookup(&mut app, child_surface);
+        let parent = lookup(&mut app, late_parent_surface);
+        let parent = *app
+            .world()
+            .get::<WindowGeometry>(parent)
+            .expect("parent geometry");
+        let child = *app
+            .world()
+            .get::<WindowGeometry>(child)
+            .expect("child geometry");
+        assert_eq!(
+            child.position,
+            parent.position + (parent.size - child.size) * 0.5
+        );
+    }
+
+    #[test]
+    fn live_border_styles_preserve_client_size_and_remove_hidden_hit_areas() {
+        let mut app = test_app();
+        app.world_mut().resource_mut::<SsdSettings>().floating = BorderStyle::Pixel(5);
+        let surface = SurfaceId::for_test(101);
+        enqueue_surface_event(app.world_mut(), role(surface, WindowDecoration::ServerSide));
+        enqueue_surface_event(app.world_mut(), frame(surface, 320, 240));
+        app.update();
+        app.update();
+        let window = app
+            .world_mut()
+            .query::<&OccupiesWindow>()
+            .single(app.world())
+            .expect("occupancy")
+            .0;
+        let root = app
+            .world()
+            .get::<PrimaryWindowPresentation>(window)
+            .expect("presentation")
+            .entity();
+        assert_eq!(
+            app.world().get::<PresentationInsets>(root),
+            Some(&PresentationInsets::new(5.0, 5.0, 5.0, 5.0))
+        );
+        assert_eq!(
+            app.world()
+                .get::<WindowGeometry>(window)
+                .expect("geometry")
+                .size,
+            Vec2::new(330.0, 250.0)
+        );
+        assert!(
+            app.world_mut()
+                .query_filtered::<&Node, With<FrameHeader>>()
+                .iter(app.world())
+                .all(|node| node.display == Display::None)
+        );
+        app.world_mut()
+            .trigger(BorderRequest(Some(BorderStyle::None)));
+        app.update();
+        let bare = app
+            .world()
+            .get::<PrimaryWindowPresentation>(window)
+            .expect("bare presentation")
+            .entity();
+        assert!(app.world().get_entity(root).is_err());
+        assert_eq!(
+            app.world().get::<PresentationInsets>(bare),
+            Some(&PresentationInsets::default())
+        );
+        assert_eq!(
+            app.world()
+                .get::<WindowGeometry>(window)
+                .expect("geometry")
+                .size,
+            Vec2::new(320.0, 240.0)
+        );
+        assert!(
+            app.world_mut()
+                .query_filtered::<&Node, With<WindowResizeHandle>>()
+                .iter(app.world())
+                .all(|node| node.display == Display::None)
+        );
+        assert_eq!(
+            app.world().get::<BoxShadow>(bare),
+            Some(&BoxShadow::default())
+        );
+        app.world_mut()
+            .trigger(BorderRequest(Some(BorderStyle::Normal(2))));
+        app.update();
+        let normal = app
+            .world()
+            .get::<PrimaryWindowPresentation>(window)
+            .expect("normal presentation")
+            .entity();
+        assert_eq!(
+            app.world().get::<PresentationInsets>(normal),
+            Some(&PresentationInsets::new(2.0, 32.0, 2.0, 2.0))
+        );
+        assert_eq!(
+            app.world()
+                .get::<WindowGeometry>(window)
+                .expect("geometry")
+                .size,
+            Vec2::new(324.0, 274.0)
+        );
+        app.world_mut().resource_mut::<SsdSettings>().floating = BorderStyle::Pixel(24);
+        app.update();
+        assert_eq!(
+            app.world()
+                .get::<PrimaryWindowPresentation>(window)
+                .expect("override retained")
+                .entity(),
+            normal
+        );
+        app.world_mut()
+            .trigger(BorderRequest(Some(BorderStyle::None)));
+        app.update();
+        app.world_mut().trigger(BorderRequest(None));
+        app.update();
+        assert_eq!(
+            app.world().get::<WindowBorderStyle>(window),
+            Some(&WindowBorderStyle(BorderStyle::Normal(24)))
+        );
+        let right = app
+            .world_mut()
+            .query::<(&WindowResizeHandle, &Node)>()
+            .iter(app.world())
+            .find(|(handle, _)| handle.0 == ToplevelResizeEdge::Right)
+            .expect("right handle")
+            .1;
+        assert_eq!(right.right, px(-24.0));
+        assert_eq!(right.width, px(24.0));
+    }
+
+    #[test]
+    fn palette_reload_updates_existing_roots_and_interaction_indicator() {
+        let mut app = test_app();
+        let surface = SurfaceId::for_test(102);
+        enqueue_surface_event(app.world_mut(), role(surface, WindowDecoration::ServerSide));
+        enqueue_surface_event(app.world_mut(), frame(surface, 320, 240));
+        app.update();
+        let window = app
+            .world_mut()
+            .query::<&OccupiesWindow>()
+            .single(app.world())
+            .expect("occupancy")
+            .0;
+        let root = app
+            .world()
+            .get::<PrimaryWindowPresentation>(window)
+            .expect("presentation")
+            .entity();
+        let colors = FrameColors {
+            border: Color::srgb(1.0, 0.0, 0.0),
+            background: Color::srgb(0.0, 1.0, 0.0),
+            foreground: Color::BLACK,
+            indicator: Color::WHITE,
+            child_border: Color::srgb(0.0, 0.0, 1.0),
+        };
+        app.world_mut().resource_mut::<SsdSettings>().focused = colors;
+        app.update();
+        assert_eq!(
+            app.world()
+                .get::<PrimaryWindowPresentation>(window)
+                .expect("same root")
+                .entity(),
+            root
+        );
+        assert_eq!(
+            app.world().get::<BorderColor>(root),
+            Some(&BorderColor {
+                top: colors.border,
+                right: colors.child_border,
+                bottom: colors.child_border,
+                left: colors.child_border
+            })
+        );
+        assert!(
+            app.world_mut()
+                .query_filtered::<&BackgroundColor, With<FrameHeader>>()
+                .iter(app.world())
+                .all(|color| color.0 == colors.background)
+        );
+        app.world_mut().trigger(weld_window::WindowCommand {
+            window,
+            kind: weld_window::WindowCommandKind::BeginInteraction(WindowInteractionKind::Move),
+        });
+        app.update();
+        assert_eq!(
+            app.world().get::<BorderColor>(root),
+            Some(&BorderColor::all(colors.indicator))
+        );
     }
 
     #[test]

@@ -14,7 +14,7 @@ use bevy::{
         lifecycle::Remove,
         message::{MessageReader, MessageWriter},
         observer::On,
-        query::{Added, With, Without},
+        query::{Added, Changed, Or, With, Without},
         resource::Resource,
         schedule::{ApplyDeferred, IntoScheduleConfigs, SystemSet},
         system::{Commands, Local, Query, Res, ResMut, SystemParam},
@@ -60,6 +60,12 @@ impl Plugin for FloatPlugin {
         app.insert_resource(DefaultFloatManager(manager))
             .init_resource::<PlacementRandom>()
             .add_plugins(FloatBehaviorPlugin)
+            .add_systems(
+                PreUpdate,
+                classify_windows
+                    .after(WindowSystems::Admission)
+                    .before(WindowSystems::PresentationRevoke),
+            )
             .add_systems(
                 PreUpdate,
                 (initialize_windows, adopt_orphaned_windows)
@@ -152,6 +158,18 @@ impl Plugin for FloatBehaviorPlugin {
 
 #[derive(Component)]
 struct FloatManager;
+
+type UnclassifiedWindows = (
+    With<ManagedWindow>,
+    Without<ManagedBy>,
+    Without<FloatingWindow>,
+);
+
+fn classify_windows(mut commands: Commands, windows: Query<Entity, UnclassifiedWindows>) {
+    for window in &windows {
+        commands.entity(window).insert(FloatingWindow);
+    }
+}
 
 #[derive(Resource)]
 struct DefaultFloatManager(Entity);
@@ -1097,8 +1115,13 @@ fn top_window_z(manager: Entity, windows: &mut FloatWindowQuery) -> Option<i32> 
         .max()
 }
 
+type NewlyFloating = (
+    With<FloatingWindow>,
+    Or<(Added<FloatingWindow>, Changed<ManagedBy>)>,
+);
+
 fn initialize_stacking(
-    added: Query<(Entity, &ManagedWindow, &ManagedBy), Added<FloatingWindow>>,
+    added: Query<(Entity, &ManagedWindow, &ManagedBy), NewlyFloating>,
     mut stack: ResMut<WindowStack>,
     mut windows: FloatWindowQuery,
     mut ordered: Local<Vec<(weld_window::WindowId, Entity, Entity)>>,
@@ -1774,6 +1797,13 @@ mod tests {
         app.update();
 
         assert!(app.world().get::<ManagedBy>(window).is_some());
+        assert!(
+            app.world()
+                .get::<WindowZOrder>(window)
+                .expect("stacked after output arrives")
+                .0
+                > 0
+        );
         assert_eq!(
             app.world().get::<WindowOutput>(window),
             Some(&WindowOutput(output))

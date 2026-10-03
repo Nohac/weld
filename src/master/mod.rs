@@ -33,6 +33,7 @@ use weld_input::{
     GlobalShortcutId, GlobalShortcutPlugin, GlobalShortcutPressed, GlobalShortcutRegistry,
     GlobalShortcutSet, KeyboardSettings,
 };
+use weld_ssd::{BorderRequest, SsdSettings};
 use weld_tile::{TileRequest, TileSettings, TileSystems};
 use weld_window::{FocusedWindow, workspace_protocol::WorkspaceProtocolPlugin};
 
@@ -60,6 +61,7 @@ impl Plugin for MasterConfigPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<ShellCommands>()
             .init_resource::<FloatSettings>()
+            .init_resource::<SsdSettings>()
             .init_resource::<TileSettings>();
         if !app.is_plugin_added::<I3QuirksPlugin>() {
             app.add_plugins(I3QuirksPlugin);
@@ -121,6 +123,7 @@ struct ConfigTarget<'w> {
     workspaces: ResMut<'w, WorkspaceSettings>,
     keyboard: ResMut<'w, KeyboardSettings>,
     floating: ResMut<'w, FloatSettings>,
+    decorations: ResMut<'w, SsdSettings>,
     backend: Option<Res<'w, ActiveBackend>>,
 }
 
@@ -161,6 +164,9 @@ impl ConfigTarget<'_> {
         }
         if *self.floating != config.floating {
             *self.floating = config.floating;
+        }
+        if *self.decorations != config.decorations {
+            *self.decorations = config.decorations;
         }
     }
 }
@@ -258,6 +264,7 @@ fn dispatch_action(
             enabled,
         }),
         Action::FocusModeToggle => effects.commands.trigger(weld_i3_quirks::I3FocusModeToggle),
+        Action::Border(style) => effects.commands.trigger(BorderRequest(style)),
     }
     if let Some(redraw) = effects.redraw.as_mut() {
         redraw.write(RequestRedraw);
@@ -532,6 +539,7 @@ mod tests {
         let mut app = App::new();
         app.init_resource::<WorkspaceSettings>();
         app.init_resource::<FloatSettings>();
+        app.init_resource::<SsdSettings>();
         app.add_plugins(GlobalShortcutPlugin)
             .init_resource::<TileSettings>()
             .init_resource::<FocusWrapping>()

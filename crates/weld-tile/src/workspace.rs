@@ -118,7 +118,10 @@ pub(crate) fn move_window(
         editor
             .commands
             .entity(event.window)
-            .remove::<crate::floating::SavedTileSlot>()
+            .remove::<(
+                crate::floating::SavedTileSlot,
+                crate::floating::PendingDialogPlacement,
+            )>()
             .insert((
                 WorkspaceMember(event.workspace),
                 ManagedBy(event.workspace),

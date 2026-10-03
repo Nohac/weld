@@ -5,8 +5,10 @@ use crate::workspace::{
     I3WorkspaceRequest, WorkspaceAssignment, WorkspaceSettings, WorkspaceTarget, number,
 };
 use anyhow::{Context, Result, bail, ensure};
+use bevy::color::{Color, Srgba};
 use weld_float::FloatSettings;
 use weld_input::{GlobalShortcut, KeyboardKeymap};
+use weld_ssd::{BorderStyle, FrameColors, SsdSettings};
 use weld_sway_config::Statement;
 use weld_tile::{Direction, SplitAxis, TileOperation, TileSettings};
 
@@ -18,6 +20,7 @@ pub enum Action<Extension = ()> {
     Tile(TileOperation),
     Floating(Option<bool>),
     FocusModeToggle,
+    Border(Option<BorderStyle>),
     Reload,
     Exec(String),
     Exit,
@@ -33,6 +36,7 @@ pub struct Configuration<Extension = ()> {
     pub workspaces: WorkspaceSettings,
     pub startup: Vec<StartupCommand>,
     pub floating: FloatSettings,
+    pub decorations: SsdSettings,
 }
 
 /// A validated shell command and its configuration-load execution policy.
@@ -52,6 +56,7 @@ impl<Extension> Default for Configuration<Extension> {
             workspaces: WorkspaceSettings::default(),
             startup: Vec::new(),
             floating: FloatSettings::default(),
+            decorations: SsdSettings::default(),
         }
     }
 }
@@ -152,6 +157,34 @@ fn apply<Extension>(config: &mut Configuration<Extension>, statement: &Statement
             }
         }
         ("default_orientation", [value]) => config.tiling.default_axis = axis(value)?,
+        ("default_border" | "new_window", style) => config.decorations.tiled = border_style(style)?,
+        ("default_floating_border" | "new_float", style) => {
+            config.decorations.floating = border_style(style)?
+        }
+        ("corner_radius", [radius]) => {
+            config.decorations.corner_radius = radius
+                .parse::<u16>()
+                .context("corner radius must be an integer")?;
+            ensure!(
+                config.decorations.corner_radius <= 64,
+                "corner radius must be between 0 and 64"
+            );
+        }
+        (
+            kind @ ("client.focused"
+            | "client.unfocused"
+            | "client.focused_inactive"
+            | "client.placeholder"),
+            values,
+        ) => {
+            let colors = frame_colors(values)?;
+            match kind {
+                "client.focused" => config.decorations.focused = colors,
+                "client.focused_inactive" => config.decorations.focused_inactive = colors,
+                "client.placeholder" => config.decorations.placeholder = colors,
+                _ => config.decorations.unfocused = colors,
+            }
+        }
         ("floating_modifier", [value]) => {
             config.floating.modifier = Some(weld_sway_config::input::pointer_modifiers(value)?)
         }
@@ -175,6 +208,59 @@ fn axis(value: &str) -> Result<SplitAxis> {
         "vertical" => Ok(SplitAxis::Vertical),
         _ => bail!("orientation must be horizontal or vertical"),
     }
+}
+
+fn border_style(words: &[&str]) -> Result<BorderStyle> {
+    let (kind, width) = match words {
+        ["none"] => return Ok(BorderStyle::None),
+        [kind @ ("normal" | "pixel")] => (*kind, 3),
+        [kind @ ("normal" | "pixel"), width] => (
+            *kind,
+            width
+                .parse::<u16>()
+                .context("border width must be an integer")?,
+        ),
+        _ => bail!("border style must be normal, pixel or none, with an optional pixel width"),
+    };
+    ensure!(width <= 64, "border width must be between 0 and 64");
+    Ok(if kind == "normal" {
+        BorderStyle::Normal(width)
+    } else {
+        BorderStyle::Pixel(width)
+    })
+}
+
+fn frame_colors(words: &[&str]) -> Result<FrameColors> {
+    let (border, background, foreground, indicator, child_border) = match words {
+        [border, background, foreground] => {
+            (*border, *background, *foreground, *border, *background)
+        }
+        [border, background, foreground, indicator] => {
+            (*border, *background, *foreground, *indicator, *background)
+        }
+        [border, background, foreground, indicator, child_border] => {
+            (*border, *background, *foreground, *indicator, *child_border)
+        }
+        _ => bail!(
+            "client colors require border, background and text, with optional indicator and child-border colors"
+        ),
+    };
+    let color = |value: &str| -> Result<Color> {
+        ensure!(
+            value.starts_with('#') && matches!(value.len(), 7 | 9),
+            "colors must use #RRGGBB or #RRGGBBAA"
+        );
+        Ok(Srgba::hex(value)
+            .context("invalid hexadecimal color")?
+            .into())
+    };
+    Ok(FrameColors {
+        border: color(border)?,
+        background: color(background)?,
+        foreground: color(foreground)?,
+        indicator: color(indicator)?,
+        child_border: color(child_border)?,
+    })
 }
 
 fn direction(value: &str) -> Result<Direction> {
@@ -218,6 +304,8 @@ fn action<Extension>(
         ["splitv"] | ["split", "v"] | ["split", "vertical"] => {
             Action::Tile(TileOperation::Split(SplitAxis::Vertical))
         }
+        ["border", "toggle"] => Action::Border(None),
+        ["border", style @ ..] => Action::Border(Some(border_style(style)?)),
         ["focus", "mode_toggle"] => Action::FocusModeToggle,
         ["floating", "enable"] => Action::Floating(Some(true)),
         ["floating", "disable"] => Action::Floating(Some(false)),
@@ -513,5 +601,51 @@ mod tests {
         assert_eq!(config.bindings[0].1, Action::Floating(None));
         assert_eq!(config.bindings[1].1, Action::FocusModeToggle);
         assert!(parse("float", "floating_modifier Mod1+Mod1").is_err());
+    }
+
+    #[test]
+    fn frame_configuration_validates_dimensions_colors_and_runtime_commands() {
+        let config = parse(
+            "frames",
+            indoc! {"
+            default_border pixel 4
+            default_floating_border normal 2
+            corner_radius 8
+            client.focused #112233 #223344 #334455 #445566 #556677
+            bindsym Mod1+b border toggle
+            bindsym Mod1+n border none
+        "},
+        )
+        .expect("frames");
+        assert_eq!(config.decorations.tiled, BorderStyle::Pixel(4));
+        assert_eq!(config.decorations.floating, BorderStyle::Normal(2));
+        assert_eq!(
+            config.decorations.focused.child_border,
+            Color::srgb_u8(0x55, 0x66, 0x77)
+        );
+        assert_eq!(config.bindings[0].1, Action::Border(None));
+        assert_eq!(
+            config.bindings[1].1,
+            Action::Border(Some(BorderStyle::None))
+        );
+        let short =
+            parse("frames", "client.focused #112233 #223344 #334455").expect("three colors");
+        assert_eq!(
+            short.decorations.focused.indicator,
+            short.decorations.focused.border
+        );
+        assert_eq!(
+            short.decorations.focused.child_border,
+            short.decorations.focused.background
+        );
+        for bad in [
+            "default_border pixel -1",
+            "default_border normal 65",
+            "default_border none 3",
+            "corner_radius 65",
+            "client.focused #112233 #223344 #334455 #445566 invalid",
+        ] {
+            assert!(parse("bad", bad).is_err(), "{bad}");
+        }
     }
 }

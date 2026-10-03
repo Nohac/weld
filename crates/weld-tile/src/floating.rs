@@ -15,9 +15,11 @@ use bevy::{
     },
     math::Vec2,
 };
+use weld_app::surface::ClientToplevelParent;
 use weld_window::{
-    FloatingWindow, FocusedWindow, ManagedBy, ManagedWindow, WindowCommand, WindowCommandKind,
-    WindowGeometry, WindowZOrder, workspace::WorkspaceMember,
+    FloatingWindow, FocusedWindow, ManagedBy, ManagedWindow, WindowClientResolver, WindowCommand,
+    WindowCommandKind, WindowGeometry, WindowIntent, WindowIntentKind, WindowZOrder,
+    workspace::WorkspaceMember,
 };
 
 #[derive(Component, Clone, Copy)]
@@ -31,27 +33,50 @@ pub(crate) struct SavedTileSlot {
 pub(crate) struct SavedFloatingGeometry(pub WindowGeometry);
 
 #[derive(Component)]
-pub(crate) struct PendingDialogPlacement(pub Option<Entity>);
+pub(crate) struct PendingDialogPlacement;
+
+type CenteredDialogs = (With<PendingDialogPlacement>, With<FloatingWindow>);
 
 /// Center after initial parent layout, including simultaneously mapped families.
 pub(crate) fn center_dialogs(
-    pending: Query<(Entity, &PendingDialogPlacement, &WorkspaceMember)>,
+    pending: Query<(Entity, &WorkspaceMember), CenteredDialogs>,
     mut geometry: Query<&mut WindowGeometry>,
     rectangles: Query<&LayoutRect>,
+    clients: WindowClientResolver,
+    parents: Query<&ClientToplevelParent>,
     mut commands: Commands,
 ) {
-    for (window, placement, member) in &pending {
-        let bounds = placement
-            .0
+    for (window, member) in &pending {
+        let declared_parent = clients
+            .client_entity(window)
+            .and_then(|client| parents.get(client).ok());
+        let parent = declared_parent.and_then(|parent| clients.window_for_surface(parent.surface));
+        let bounds = parent
             .and_then(|parent| geometry.get(parent).ok())
             .copied()
             .or_else(|| rectangles.get(member.0).ok().map(|rect| rect.0));
         if let Some(bounds) = bounds
             && let Ok(mut geometry) = geometry.get_mut(window)
         {
-            geometry.position = bounds.position + (bounds.size - geometry.size) * 0.5;
+            let position = bounds.position + (bounds.size - geometry.size) * 0.5;
+            if geometry.position != position {
+                geometry.position = position;
+            }
         }
-        commands.entity(window).remove::<PendingDialogPlacement>();
+        if declared_parent.is_none() || parent.is_some() {
+            commands.entity(window).remove::<PendingDialogPlacement>();
+        }
+    }
+}
+
+pub(crate) fn cancel_centering(event: On<WindowIntent>, mut commands: Commands) {
+    if matches!(
+        event.kind,
+        WindowIntentKind::MoveBy(_) | WindowIntentKind::ResizeBy(_)
+    ) {
+        commands
+            .entity(event.window)
+            .try_remove::<PendingDialogPlacement>();
     }
 }
 
@@ -94,6 +119,10 @@ pub(crate) fn request(
     if enabled == floating.is_some() {
         return;
     }
+    editor
+        .commands
+        .entity(window)
+        .remove::<PendingDialogPlacement>();
     if enabled {
         let Ok(parent) = editor.parents.get(window).copied() else {
             return;

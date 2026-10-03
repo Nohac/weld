@@ -8027,6 +8027,7 @@ dependencies = [
  "weld-app",
  "weld-float",
  "weld-input",
+ "weld-ssd",
  "weld-sway-config",
  "weld-tile",
  "weld-window",
@@ -8087,6 +8088,7 @@ dependencies = [
  "weld-app",
  "weld-client",
  "weld-float",
+ "weld-tile",
  "weld-window",
  "weld-window-ui",
 ]

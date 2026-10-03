@@ -55,6 +55,23 @@ There is no file watcher yet; reload rereads the supplied path.
   Reload replaces these bindings while retaining already captured releases.
   Omission disables modifier pointer chords; titlebar and resize handles remain usable.
 - `floating enable|disable|toggle` and `focus mode_toggle` are bound commands.
+- `default_border normal|pixel [N]`, `default_floating_border normal|pixel [N]`
+  and `none`, with widths 0..64 logical pixels. `new_window` and `new_float`
+  are aliases. `normal` has a titlebar; `pixel` retains only the border; `none`
+  removes chrome, shadow and resize hit areas. Modifier-based floating controls
+  remain available. An omitted width uses 3 pixels.
+- `corner_radius N`, 0..64 logical pixels, applies to decorated frames.
+- `client.focused`, `client.unfocused`, `client.focused_inactive` and
+  `client.placeholder` accept three to five `#RRGGBB`/`#RRGGBBAA` colors: border,
+  background, text, indicator and child border. Omitted indicator/child-border
+  colors use the border and background colors respectively. Normal frames use the first
+  color on the upper border and child-border color elsewhere; pixel frames
+  use child-border color throughout. Titlebar fill and close glyph use background
+  and text. An active move/resize uses indicator color. The inactive palette
+  currently identifies the parent of the focused dialog. Relocated windows
+  retain their distinct configured red accent. Urgency hints remain a follow-up.
+- `border normal|pixel [N]|none|toggle` changes the selected window's frame.
+  Per-window overrides survive global reload; live defaults apply to other windows.
 - `bindsym CHORD COMMAND` with literal Mod4, Mod1, Control/Ctrl and Shift
   modifiers, lowercase ASCII letter names, digits, arrow/F1-F12 keys, Return, Escape, space,
   equal and minus. Trigger names currently select physical key positions; modifiers follow
@@ -285,6 +302,22 @@ another workspace without adding a tile. Declared-parent detection is the first
 dialog policy; fixed-size/type hints and rules are subsequent milestones.
 Cross-output workspace transfers preserve output-local freeform geometry;
 clamping a large floating window onto a smaller destination remains a follow-up.
+
+### Decorations
+
+Master publishes `SsdSettings` alongside the other typed settings. Geometry
+changes replace affected SSD projections before presentation metrics are
+reconciled, preserving floating client-content size and allowing tiled layout
+to keep its outer rectangle. Color changes update existing roots. Popup mounts
+follow the replacement root through the shared window presentation contract.
+Native client-side decorations remain owned by the application; these settings
+control Weld's frames, including the frames around opaque remote content.
+Mode classification happens before presentation claim so a newly admitted dialog
+gets its floating frame metrics before centering. Per-window style belongs to
+the durable window and intentionally survives vacancy and occupant replacement.
+
+The example uses pixel borders for tiles and normal frames for floating windows.
+Alt+B cycles the selected frame; Blender launch moved to Alt+Shift+B.
 
 ## Next improvements
 

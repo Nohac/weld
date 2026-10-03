@@ -40,7 +40,7 @@ use crate::{
 pub struct TilePlugin;
 
 type ChangedOwnership = Or<(Changed<ManagedWindow>, Changed<ManagedBy>)>;
-type Unmanaged = (Without<TileParent>, Without<ManagedBy>);
+type Unmanaged = (With<ManagedWindow>, Without<TileParent>, Without<ManagedBy>);
 
 #[derive(QueryData)]
 struct TiledWindow {
@@ -69,9 +69,16 @@ impl Plugin for TilePlugin {
             .add_observer(workspace::move_window)
             .add_observer(workspace::removed)
             .add_observer(crate::floating::request)
+            .add_observer(crate::floating::cancel_centering)
             .add_observer(history::remember_focus)
             .add_observer(history::remember_tree_change)
             .add_observer(layout::apply_layout)
+            .add_systems(
+                PreUpdate,
+                classify_dialogs
+                    .after(WindowSystems::Admission)
+                    .before(WindowSystems::PresentationRevoke),
+            )
             .configure_sets(
                 PreUpdate,
                 (
@@ -207,6 +214,20 @@ impl AdmissionFamilies<'_, '_> {
     }
 }
 
+fn classify_dialogs(
+    windows: Query<Entity, Unmanaged>,
+    families: AdmissionFamilies,
+    mut commands: Commands,
+) {
+    for window in &windows {
+        if families.is_dialog(window) && !families.floating.contains(window) {
+            commands
+                .entity(window)
+                .insert((FloatingWindow, crate::floating::PendingDialogPlacement));
+        }
+    }
+}
+
 fn admit_windows(
     mut editor: TreeEditor,
     windows: Query<(Entity, &ManagedWindow, Option<&WorkspaceMember>), Unmanaged>,
@@ -284,9 +305,7 @@ fn admit_windows(
                     editor
                         .commands
                         .entity(window)
-                        .insert(crate::floating::PendingDialogPlacement(
-                            families.parent(window),
-                        ));
+                        .insert(crate::floating::PendingDialogPlacement);
                 }
             } else {
                 container.children.insert(

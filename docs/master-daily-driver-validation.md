@@ -80,3 +80,21 @@ DRM for the final input check. These commands use the development build.
   messages also recorded before this phase. No warning-free renderer claim is made.
 
 Further milestone checks will be added as implementation and validation land.
+
+## Decoration validation
+
+1. Tiled terminals should start with a narrow pixel border and no titlebar.
+   Floating a window should select the normal floating frame with close/move controls.
+2. Mod+B cycles pixel, none and normal. Content must remain correctly aligned;
+   a floating window should retain its client-content size as chrome changes.
+3. With `border none`, there should be no shadow or invisible resize handles.
+   Modifier dragging/resizing should still work for a floating window.
+4. In a private config copy, change border widths, `corner_radius`, and the
+   focused/unfocused palettes, then reload. Existing non-overridden windows
+   should update; explicit per-window border selections should remain intact.
+5. Open a menu, then change the parent's border style. Popup position and input
+   should follow the new content anchor rather than the old titlebar offset.
+6. Check a client-decorated app too: these settings must not crop or duplicate
+   application-owned titlebars. Recheck opaque hoisted content, which needs Weld's frame.
+
+The example keeps Mod+B for border toggling; launch Blender with Mod+Shift+B.

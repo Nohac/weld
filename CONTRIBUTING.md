@@ -153,7 +153,8 @@ The development example config provides these backend-neutral shortcuts:
 - `Alt+Enter`: launch foot
 - `Alt+Space`: launch Rofi (`drun`)
 - `Alt+Control+Shift+F`: launch Firefox
-- `Alt+B`: launch Blender
+- `Alt+Shift+B`: launch Blender
+- `Alt+B`: cycle the selected window's titlebar/border style
 - `Alt+H`: hoist or locally preview the focused occupied window
 - `Alt+D/F/K/J` or `Alt+Arrow`: focus left/right/up/down
 - Add `Shift` to navigate a tile structurally through neighboring splits
