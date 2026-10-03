@@ -1144,6 +1144,16 @@ temporary keyboard focus over the selected managed window. `weld-tile` consumes
 and their popups remain outside window/hoist admission; complete desktop capture
 includes their composition. See [Desktop layer surfaces](layer-shell.md).
 
+Master also installs `WorkspaceProtocolPlugin` from `weld-window`. It projects
+workspace names, session IDs, visibility and output membership into a neutral
+`weld-app` inventory, consumed by the core `ext-workspace-v1` adapter. Protocol
+activation requests wait for manager commit and cross back as stable workspace
+IDs; the WM plugin resolves entities and i3 policy performs ordinary workspace
+switching. Inventory updates follow the complete policy frame and skip unchanged
+state. Desktop clients receive one group per output and activation capability.
+Master's config plugin queues startup `exec` and reload `exec_always` commands
+through the existing host client launcher after validated configuration install.
+
 Validated pointer `xdg_toplevel.move` and `xdg_toplevel.resize` requests cross
 the Smithay boundary as protocol-neutral ECS messages. The active window
 manager consumes those requests directly, resolves their occupant, verifies

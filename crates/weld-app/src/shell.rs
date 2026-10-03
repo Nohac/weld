@@ -58,6 +58,9 @@ use crate::surface::{
     SurfaceLayerPlacement, SurfaceTreeSnapshot, SurfaceWindowGeometry, enqueue_surface_event,
     has_surface_frame, publish_surface_bindings, take_surface_actions,
 };
+use crate::workspace::{
+    DesktopWorkspace, DesktopWorkspaceActivation, DesktopWorkspaceId, DesktopWorkspaces,
+};
 use weld_client::{
     ClientFocusRequest, ClientImporterRegistration, ClientOutputId, ClientRequest, ClientSourceId,
     ClientSurfaceEvent, ClientSurfaceEventKind, ClientSurfaceRequest, ClientSurfaceRequestKind,
@@ -944,6 +947,19 @@ impl HostPolicy for AppShell {
 
     fn update_output_topology(&mut self, outputs: &[OutputConfiguration]) {
         AppShell::update_output_topology(self, outputs);
+    }
+
+    fn take_desktop_workspaces(&mut self) -> Option<Vec<DesktopWorkspace>> {
+        self.app
+            .world_mut()
+            .get_resource_mut::<DesktopWorkspaces>()?
+            .take()
+    }
+
+    fn activate_desktop_workspaces(&mut self, workspaces: Vec<DesktopWorkspaceId>) {
+        self.app
+            .world_mut()
+            .write_message(DesktopWorkspaceActivation(workspaces));
     }
 
     fn update_output_work_area(

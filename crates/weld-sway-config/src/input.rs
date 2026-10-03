@@ -207,6 +207,7 @@ fn binding(value: &str) -> Result<GlobalShortcut> {
         "8" => KeyCode::Digit8,
         "9" => KeyCode::Digit9,
         "Return" => KeyCode::Enter,
+        "space" => KeyCode::Space,
         "Escape" => KeyCode::Escape,
         "equal" => KeyCode::Equal,
         "minus" => KeyCode::Minus,

@@ -18,7 +18,7 @@ use bevy::{
 };
 use config::{Action, Configuration, DistributionAction};
 use std::{
-    collections::HashMap,
+    collections::{HashMap, VecDeque},
     path::{Path, PathBuf},
 };
 use weld_app::{
@@ -33,7 +33,7 @@ use weld_input::{
     GlobalShortcutSet, KeyboardSettings,
 };
 use weld_tile::{TileRequest, TileSettings, TileSystems};
-use weld_window::FocusedWindow;
+use weld_window::{FocusedWindow, workspace_protocol::WorkspaceProtocolPlugin};
 
 /// Selects and translates the distribution's configuration file.
 pub(crate) struct MasterConfigPlugin {
@@ -62,6 +62,9 @@ impl Plugin for MasterConfigPlugin {
         if !app.is_plugin_added::<I3QuirksPlugin>() {
             app.add_plugins(I3QuirksPlugin);
         }
+        if !app.is_plugin_added::<WorkspaceProtocolPlugin>() {
+            app.add_plugins(WorkspaceProtocolPlugin);
+        }
         weld_input::register_keyboard_settings(app);
         if !app.is_plugin_added::<GlobalShortcutPlugin>() {
             app.add_plugins(GlobalShortcutPlugin);
@@ -70,9 +73,16 @@ impl Plugin for MasterConfigPlugin {
             path: self.path.clone(),
             shortcuts: GlobalShortcutSet::default(),
             actions: HashMap::new(),
+            initialized: false,
+            pending_launches: VecDeque::new(),
         })
         .add_observer(dispatch_action)
-        .add_systems(PreUpdate, handle_actions.in_set(TileSystems::Actions));
+        .add_systems(
+            PreUpdate,
+            (handle_actions, launch_startup)
+                .chain()
+                .in_set(TileSystems::Actions),
+        );
         // Native settings are published before the first Bevy update. Bootstrap
         // through the same typed system access used for live configuration.
         if let Err(error) = app
@@ -89,6 +99,8 @@ struct ConfigState {
     path: PathBuf,
     shortcuts: GlobalShortcutSet,
     actions: HashMap<GlobalShortcutId, Action>,
+    initialized: bool,
+    pending_launches: VecDeque<String>,
 }
 
 /// These borrows make candidate publication atomic to other scheduled systems.
@@ -105,6 +117,15 @@ struct ConfigTarget<'w> {
 
 impl ConfigTarget<'_> {
     fn apply(&mut self, config: Configuration) {
+        let startup = !self.state.initialized;
+        self.state.pending_launches.extend(
+            config
+                .startup
+                .into_iter()
+                .filter(|command| startup || command.on_reload)
+                .map(|command| command.command),
+        );
+        self.state.initialized = true;
         let drm = self.backend.as_deref() == Some(&ActiveBackend::Drm);
         let bindings: Vec<_> = config.bindings.into_iter().filter(|(_, action)| {
             !matches!(action, Action::Extension(DistributionAction::Shell(command)) if command.requires_drm() && !drm)
@@ -134,6 +155,29 @@ impl ConfigTarget<'_> {
 
 fn apply_configuration(In(config): In<Configuration>, mut target: ConfigTarget) {
     target.apply(config);
+}
+
+fn launch_startup(
+    mut state: ResMut<ConfigState>,
+    mut shell: ResMut<ShellCommands>,
+    mut redraw: Option<ResMut<Messages<RequestRedraw>>>,
+) {
+    while let Some(command) = state.pending_launches.front() {
+        if shell.push(shell_launch(command.clone())).is_err() {
+            if let Some(redraw) = redraw.as_mut() {
+                redraw.write(RequestRedraw);
+            }
+            break;
+        }
+        state.pending_launches.pop_front();
+    }
+}
+
+fn shell_launch(command: String) -> ShellCommand {
+    ShellCommand::Launch {
+        program: "sh".to_owned(),
+        arguments: vec!["-c".to_owned(), command],
+    }
 }
 
 #[derive(Event)]
@@ -169,10 +213,7 @@ fn dispatch_action(
         Action::Move(direction) => effects.commands.trigger(I3MoveRequest(direction)),
         Action::Workspace(request) => effects.commands.trigger(request),
         Action::Exec(command) => {
-            effects.push_shell(ShellCommand::Launch {
-                program: "sh".to_owned(),
-                arguments: vec!["-c".to_owned(), command],
-            });
+            effects.push_shell(shell_launch(command));
         }
         Action::Exit => effects.push_shell(ShellCommand::Exit),
         Action::Extension(DistributionAction::Shell(command)) => effects.push_shell(command),
@@ -481,6 +522,8 @@ mod tests {
             path: example_path(),
             shortcuts: GlobalShortcutSet::default(),
             actions: HashMap::new(),
+            initialized: false,
+            pending_launches: VecDeque::new(),
         });
         install(
             &mut app,
@@ -528,6 +571,53 @@ mod tests {
 
     fn example_path() -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/master.sway.config")
+    }
+
+    #[test]
+    fn startup_runs_once_and_only_exec_always_is_queued_on_reload() {
+        let mut app = App::new();
+        let source = "exec foot\nexec_always waybar\nexec rofi -show drun";
+        app.add_plugins(MasterConfigPlugin {
+            path: example_path(),
+            initial: config::parse("startup", source).expect("config"),
+        });
+        assert_eq!(
+            app.world().resource::<ConfigState>().pending_launches,
+            ["foot", "waybar", "rofi -show drun"]
+        );
+        app.world_mut()
+            .run_system_once(launch_startup)
+            .expect("startup");
+        assert!(
+            app.world()
+                .resource::<ConfigState>()
+                .pending_launches
+                .is_empty()
+        );
+        install(&mut app, config::parse("reload", source).expect("reload"));
+        assert_eq!(
+            app.world().resource::<ConfigState>().pending_launches,
+            ["waybar"]
+        );
+        let invalid = config::parse("reload", "exec_always unwanted\ndefault_orientation broken")
+            .map(|candidate| install(&mut app, candidate));
+        assert!(invalid.is_err());
+        assert_eq!(
+            app.world().resource::<ConfigState>().pending_launches,
+            ["waybar"]
+        );
+        app.world_mut()
+            .run_system_once(launch_startup)
+            .expect("reload startup");
+        app.world_mut()
+            .run_system_once(launch_startup)
+            .expect("next update");
+        assert!(
+            app.world()
+                .resource::<ConfigState>()
+                .pending_launches
+                .is_empty()
+        );
     }
 
     fn install(app: &mut App, config: Configuration) {

@@ -16,6 +16,7 @@ pub mod renderer;
 pub mod runtime;
 pub mod server;
 pub mod surface;
+pub mod workspace;
 
 pub use host::{
     ApplicationHost, CompositionDemand, CompositionHost, HostBackend, HostBuilder, HostPolicy,

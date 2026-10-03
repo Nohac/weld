@@ -17,6 +17,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--no-build", action="store_true")
     parser.add_argument("--interactive", action="store_true", help="leave the launcher open for up to 90 seconds for input testing")
+    parser.add_argument("--workspaces", action="store_true", help="use Master's startup Waybar with ext/workspaces and test the Rofi binding")
     args = parser.parse_args()
     # Bevy's render-world endpoint has a fixed port as well as the main endpoint.
     for port in (15702, 15703):
@@ -34,6 +35,11 @@ def main():
     config.write_text(json.dumps({"layer": "top", "height": 32, "modules-left": ["custom/probe"], "modules-right": ["clock"], "custom/probe": {"format": "Weld layer-shell probe"}, "clock": {"format": "{:%H:%M:%S}", "interval": 1}}))
     style = run / "waybar.css"
     style.write_text("* { font-size: 16px; } window#waybar { background: #245050; color: white; }\n")
+    master = root / "examples/master.sway.config"
+    if not args.workspaces:
+        isolated = run / "master.sway.config"
+        isolated.write_text("\n".join(line for line in master.read_text().splitlines() if not line.startswith(("exec ", "exec_always "))))
+        master = isolated
     processes = []
     logs = []
 
@@ -77,7 +83,7 @@ def main():
 
     try:
         environment = os.environ.copy()
-        host = start("host", ["cargo", "run", "--quiet", "--locked", "--", "--backend", "nested", "--config", "examples/master.sway.config", "--wayland-socket", str(socket), "--remote-debug", "--", "foot", "htop", "--delay=2"], environment)
+        host = start("host", ["cargo", "run", "--quiet", "--locked", "--", "--backend", "nested", "--config", str(master), "--wayland-socket", str(socket), "--remote-debug", "--", "foot", "htop", "--delay=2"], environment)
         deadline = time.monotonic() + 120
         while not socket.exists():
             if host.poll() is not None or time.monotonic() > deadline:
@@ -87,9 +93,9 @@ def main():
         environment.pop("DISPLAY", None)
         time.sleep(2)
         capture(1, "ordinary")
-        bar = start("waybar", ["waybar", "--config", str(config), "--style", str(style)], environment)
+        bar = None if args.workspaces else start("waybar", ["waybar", "--config", str(config), "--style", str(style)], environment)
         time.sleep(2)
-        if bar.poll() is not None:
+        if bar is not None and bar.poll() is not None:
             raise RuntimeError("Waybar exited; see waybar.log")
         capture(2, "panel")
         launcher = start("rofi", ["rofi", "-no-config", "-show", "run", "-theme-str", "window { width: 500px; }"], environment)
@@ -99,6 +105,8 @@ def main():
         capture(3, "launcher")
         if args.interactive:
             print("Try typing in Rofi, Escape, then keyboard input in htop. This run closes in 90 seconds.", flush=True)
+            if args.workspaces:
+                print("Also try logical Alt+Space for Rofi, Alt+2 then Alt+Enter for a second workspace, and click Waybar workspace 1/2. Alt+Shift+R reload should keep one bar. With example key swaps, logical Alt is the physical Windows key.", flush=True)
             deadline = time.monotonic() + 90
             while host.poll() is None and time.monotonic() < deadline:
                 time.sleep(0.5)
@@ -108,7 +116,8 @@ def main():
                 print("Interactive host closed cleanly; skipping the final capture.", flush=True)
                 return
         stop(launcher)
-        stop(bar)
+        if bar is not None:
+            stop(bar)
         time.sleep(1)
         capture(4, "restored")
         print("PASS Waybar/Rofi map, captures, teardown, compositor survives. Inspect captures for placement; keyboard interaction needs a manual pass.", flush=True)

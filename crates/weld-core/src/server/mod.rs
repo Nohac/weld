@@ -15,6 +15,7 @@ mod seat;
 mod shm;
 mod surface_tree;
 mod toplevel;
+mod workspace;
 
 pub use adapter::WaylandClientImporter;
 pub(crate) use adapter::{
@@ -95,6 +96,7 @@ pub struct ServerState {
     layer_shell_state: smithay::wayland::shell::wlr_layer::WlrLayerShellState,
     layers: layer::LayerStore,
     pending_work_areas: HashMap<OutputId, crate::geometry::LogicalRect>,
+    workspaces: workspace::WorkspaceProtocol,
     _xdg_decoration_state: XdgDecorationState,
     _cursor_shape_manager_state: CursorShapeManagerState,
     _pointer_gestures_state: PointerGesturesState,
@@ -356,6 +358,7 @@ impl ServerState {
             layer_shell_state,
             layers: layer::LayerStore::default(),
             pending_work_areas: HashMap::new(),
+            workspaces: workspace::WorkspaceProtocol::default(),
             _xdg_decoration_state: xdg_decoration_state,
             _cursor_shape_manager_state: cursor_shape_manager_state,
             _pointer_gestures_state: pointer_gestures_state,

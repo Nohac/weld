@@ -3,6 +3,7 @@
 use std::{collections::HashMap, hash::Hash};
 
 use smithay::{
+    output::Output,
     reexports::{
         wayland_protocols::xdg::{
             decoration::zv1::server::zxdg_toplevel_decoration_v1::Mode, shell::server::xdg_toplevel,
@@ -10,7 +11,7 @@ use smithay::{
         wayland_server::{
             Client, Resource,
             backend::ObjectId,
-            protocol::{wl_buffer, wl_seat, wl_surface::WlSurface},
+            protocol::{wl_buffer, wl_output::WlOutput, wl_seat, wl_surface::WlSurface},
         },
     },
     utils::{Logical, Serial, Size},
@@ -1058,7 +1059,11 @@ fn constrain_dimension(requested: i32, minimum: i32, maximum: i32) -> i32 {
     requested.clamp(minimum, maximum)
 }
 
-impl OutputHandler for ServerState {}
+impl OutputHandler for ServerState {
+    fn output_bound(&mut self, output: Output, resource: WlOutput) {
+        self.workspace_output_bound(output, resource);
+    }
+}
 
 #[cfg(test)]
 mod tests {

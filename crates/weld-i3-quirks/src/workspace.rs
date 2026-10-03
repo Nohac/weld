@@ -14,6 +14,7 @@ use weld_window::workspace::{
     FocusedWorkspace, Workspace, WorkspaceCreation, WorkspaceFocused, WorkspaceMember,
     WorkspaceOutput, WorkspaceRequest,
 };
+use weld_window::workspace_protocol::ActivateWorkspace;
 use weld_window::{FocusedWindow, ManagedWindow};
 
 /// Workspace selector in i3 command vocabulary.
@@ -225,6 +226,10 @@ impl WorkspaceView<'_, '_> {
             _ => None,
         }
     }
+}
+
+pub(crate) fn activate_existing(event: On<ActivateWorkspace>, mut commands: Commands) {
+    commands.trigger(Resolved::Switch(event.0));
 }
 
 pub(crate) fn request(

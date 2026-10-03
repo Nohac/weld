@@ -1,0 +1,5 @@
+* { font-family: sans-serif; font-size: 14px; }
+window#waybar { background: #242a35; color: #e6edf3; }
+#workspaces button { color: #c6ced8; padding: 0 12px; border-radius: 0; }
+#workspaces button.active { background: #466a91; color: white; }
+#clock { padding: 0 12px; }

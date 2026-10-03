@@ -2,6 +2,8 @@
 
 #[path = "layer_tests.rs"]
 mod layer_tests;
+#[path = "workspace_tests.rs"]
+mod workspace_tests;
 
 use std::{
     collections::{HashMap, HashSet},
@@ -47,6 +49,7 @@ struct ObservedSurface {
 
 #[derive(Default)]
 struct Observer {
+    workspaces: workspace_tests::Probe,
     layers: Option<
         wayland_protocols_wlr::layer_shell::v1::client::zwlr_layer_shell_v1::ZwlrLayerShellV1,
     >,
@@ -78,6 +81,9 @@ impl Dispatch<wl_registry::WlRegistry, ()> for Observer {
         } = event
         {
             match interface.as_str() {
+                "ext_workspace_manager_v1" => {
+                    state.workspaces.manager = Some(registry.bind(name, 1, qh, ()));
+                }
                 "zwlr_layer_shell_v1" => {
                     state.layers = Some(registry.bind(name, version.min(4), qh, ()))
                 }
@@ -91,6 +97,7 @@ impl Dispatch<wl_registry::WlRegistry, ()> for Observer {
                     state.fractional = Some(registry.bind(name, 1, qh, ()))
                 }
                 "wl_output" => {
+                    state.workspaces.output_registry = Some((registry.clone(), name));
                     state
                         .output_objects
                         .push(registry.bind::<wl_output::WlOutput, _, _>(name, 4, qh, ()));

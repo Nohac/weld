@@ -20,6 +20,12 @@ Alt+H invokes `weld hoist` through the existing hoist policy. Firefox is now
 Alt+Shift+Enter, leaving Alt+F for focus-right. Ordinary clicks select tiles;
 decoration close buttons work. Pointer-driven floating movement is not installed.
 
+The example starts Waybar with `examples/waybar.jsonc` and `examples/waybar.css`;
+launch from the repository root so those relative paths resolve. Waybar's
+`ext/workspaces` module displays existing workspaces and switches them on click.
+Alt+Space opens Rofi's application launcher (`drun`). Both programs must be
+installed, with native Wayland support in Rofi.
+
 Alt+1..9 and Alt+0 select workspaces 1..10. Add Shift to move the selected
 window without following it. These are logical Alt bindings; the example's
 keymap makes physical Windows produce that modifier.
@@ -45,7 +51,7 @@ There is no file watcher yet; reload rereads the supplied path.
   innermost wrap candidate. `force` wraps at the first eligible split edge.
   Directional output traversal is a follow-up, so `workspace` currently behaves like `yes`.
 - `bindsym CHORD COMMAND` with literal Mod4, Mod1, Control/Ctrl and Shift
-  modifiers, lowercase ASCII letter names, digits, arrow/F1-F12 keys, Return, Escape,
+  modifiers, lowercase ASCII letter names, digits, arrow/F1-F12 keys, Return, Escape, space,
   equal and minus. Trigger names currently select physical key positions; modifiers follow
   Weld's configured XKB map. Full symbolic `bindsym` matching is a follow-up.
 - `input type:keyboard { ... }` or `input * { ... }`, and their single-line
@@ -64,13 +70,19 @@ There is no file watcher yet; reload rereads the supplied path.
   variable expansion and command sequences are rejected in this subset.
 - `move [container|window] to workspace TARGET` and `move workspace TARGET` use
   the same targets and move an individual selected window without following it.
+- `exec [--no-startup-id] COMMAND` starts a command once after initial configuration.
+  `exec_always` also starts it after each successful reload. Commands keep their
+  source order and use the host-owned client launcher, with Weld's Wayland socket
+  and toolkit environment. Failed configuration reloads launch nothing.
+  `--no-startup-id` is accepted; activation tokens are not currently issued.
 - Bound commands: `splith`, `splitv`, `split h|v|horizontal|vertical`,
   `focus left|right|up|down`, `move left|right|up|down`,
   `resize grow|shrink width|height N ppt`, `kill`, `reload`, `exit`, and `exec COMMAND`.
-  Exec runs the preserved shell command through `sh -c` only when invoked, with
-  the ordinary host-owned client launch environment, never during parsing.
-  Sway-specific exec flags such as `--no-startup-id` are not interpreted yet;
-  provide the shell command directly. Bindings fire once per fresh press, not
+  Exec runs the preserved shell command through `sh -c` when invoked, never
+  during parsing. A whole-command pair of outer quotes is removed when it is
+  the sole argument; quotes within a multi-argument command are retained for
+  the shell. Bound `exec_always` behaves like bound `exec`.
+  Bindings fire once per fresh press, not
   repeatedly while held.
 - Weld-specific commands use the existing command grammar: `weld hoist`,
   `weld output-debug`, and `weld scale increase|decrease|physical`. Scale bindings
@@ -147,8 +159,10 @@ Production DRM connector hotplug itself remains outside this slice.
 
 Reload publishes new creation/assignment preferences without moving existing
 workspaces or rewriting their layouts. Use a fresh workspace or restart the
-test to exercise a changed assignment. There is no workspace bar/IPC yet,
-pointer warping, blank-output pointer focus, `focus output`, `move workspace
+test to exercise a changed assignment. Master publishes workspace names, active
+states and output membership through `ext-workspace-v1`, including click-to-switch
+activation. See [desktop layer surfaces](layer-shell.md#workspace-controls).
+Sway IPC, pointer warping, blank-output pointer focus, `focus output`, `move workspace
 to output`, workspace rename, or automatic back-and-forth setting.
 
 Example:

@@ -3,6 +3,7 @@ use super::*;
 use bevy::ecs::query::With;
 use indoc::indoc;
 use weld_app::output::OutputInfo;
+use weld_app::workspace::{DesktopWorkspaceActivation, DesktopWorkspaceId};
 use weld_i3_quirks::{
     config,
     workspace::{I3WorkspaceRequest, WorkspaceTarget},
@@ -11,6 +12,7 @@ use weld_window::workspace::{
     FocusedWorkspace, OutputWorkspaces, Workspace, WorkspaceMember, WorkspaceOutput,
     WorkspaceRequest, WorkspaceWindows,
 };
+use weld_window::workspace_protocol::WorkspaceProtocolPlugin;
 use weld_window::{OccupiesWindow, WindowOutput, WindowPresentationOverride, WindowVisibility};
 
 fn parse_config(name: &str, source: &str) -> anyhow::Result<config::Configuration> {
@@ -48,6 +50,50 @@ fn configured(source: &str, count: u64) -> (App, Vec<Entity>) {
         .collect();
     app.update();
     (app, outputs)
+}
+
+#[test]
+fn desktop_activation_restores_workspace_focus_and_ignores_stale_ids() {
+    let (mut app, _) = configured("workspace 3 output fake-1", 2);
+    app.add_plugins(WorkspaceProtocolPlugin);
+    let first = window(&mut app, 1);
+    let one = workspace(&mut app, "1").expect("first workspace");
+    let id = DesktopWorkspaceId::new(
+        app.world()
+            .get::<Workspace>(one)
+            .expect("workspace")
+            .id()
+            .raw(),
+    );
+    show(&mut app, "2");
+    let second = window(&mut app, 2);
+    let two = workspace(&mut app, "2").expect("second workspace");
+    app.world_mut()
+        .write_message(DesktopWorkspaceActivation(vec![id]));
+    app.update();
+    assert_eq!(current(&app), "1");
+    assert_eq!(selected(&app), first);
+    assert!(
+        !app.world()
+            .get::<Workspace>(two)
+            .expect("workspace")
+            .visible()
+    );
+    let three = workspace(&mut app, "3").expect("other output workspace");
+    assert!(
+        app.world()
+            .get::<Workspace>(three)
+            .expect("workspace")
+            .visible()
+    );
+    app.world_mut()
+        .write_message(DesktopWorkspaceActivation(vec![DesktopWorkspaceId::new(
+            u64::MAX,
+        )]));
+    app.update();
+    assert_eq!(selected(&app), first);
+    show(&mut app, "2");
+    assert_eq!(selected(&app), second);
 }
 
 fn workspace(app: &mut App, name: &str) -> Option<Entity> {

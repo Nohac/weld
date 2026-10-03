@@ -7,6 +7,7 @@
 const PROFILE_TARGET: &str = "weld_profile";
 
 pub mod workspace;
+pub mod workspace_protocol;
 
 use std::collections::HashMap;
 

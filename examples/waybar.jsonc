@@ -1,0 +1,13 @@
+{
+  "layer": "top",
+  "position": "top",
+  "height": 30,
+  "modules-left": ["ext/workspaces"],
+  "modules-right": ["clock"],
+  "ext/workspaces": {
+    "format": "{name}",
+    "on-click": "activate",
+    "sort-by-name": true
+  },
+  "clock": { "format": "{:%a %d %b  %H:%M}" }
+}

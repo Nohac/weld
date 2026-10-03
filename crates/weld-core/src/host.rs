@@ -19,6 +19,7 @@ use crate::{
     output::{OutputConfiguration, OutputHead, OutputId, OutputScale},
     runtime::HostCommand,
     surface::Extent,
+    workspace::{DesktopWorkspace, DesktopWorkspaceId},
 };
 use weld_client::{ClientPointerRouteUpdate, ClientRequest, ClientSurfaceEvent};
 
@@ -371,6 +372,12 @@ pub enum CompositionDemand {
 
 /// Application policy, independent of whether the host renders locally.
 pub trait HostPolicy {
+    /// Returns a changed inventory; the first publication enables workspace control.
+    fn take_desktop_workspaces(&mut self) -> Option<Vec<DesktopWorkspace>> {
+        None
+    }
+    /// Enqueues one committed protocol transaction for the next policy update.
+    fn activate_desktop_workspaces(&mut self, _workspaces: Vec<DesktopWorkspaceId>) {}
     fn enqueue_client_event(&mut self, event: ClientSurfaceEvent) -> CompositionDemand;
     /// Buffers an input event for the next application frame and returns
     /// whether core should also forward it to the focused client immediately.

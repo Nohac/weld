@@ -147,6 +147,7 @@ disables X11 fallback.
 The development example config provides these backend-neutral shortcuts:
 
 - `Alt+Enter`: launch foot
+- `Alt+Space`: launch Rofi (`drun`)
 - `Alt+Control+Shift+F`: launch Firefox
 - `Alt+B`: launch Blender
 - `Alt+H`: hoist or locally preview the focused occupied window
@@ -163,6 +164,9 @@ These example bindings live in `examples/master.sway.config`, not the reusable p
 That file configures Ctrl/Caps and left Alt/Windows swaps: logical Alt is the
 physical Windows key with those settings. Master reads explicit Weld input
 configuration in both nested and DRM modes.
+The example starts Waybar through `exec`, using the repository's example config
+and style paths. Launch from the repository root, or adjust those paths in your
+own configuration. Its workspace buttons use `ext-workspace-v1`.
 Master now uses the native tiler. Its initial Sway configuration subset and
 reload semantics are documented in [Master tiling](docs/master-tiling.md).
 

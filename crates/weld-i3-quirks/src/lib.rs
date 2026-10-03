@@ -45,6 +45,7 @@ impl Plugin for I3QuirksPlugin {
             .init_resource::<workspace::WorkspaceSettings>()
             .init_resource::<workspace::PreviousWorkspace>()
             .add_observer(workspace::request)
+            .add_observer(workspace::activate_existing)
             .add_observer(workspace::apply_resolved)
             .add_observer(workspace::remember)
             .add_observer(workspace::bootstrap)

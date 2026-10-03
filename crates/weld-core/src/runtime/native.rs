@@ -266,6 +266,15 @@ impl<Event: 'static> NativeRuntime<Event> {
                     policy_dirty = true;
                 }
             }
+            for batch in self.state.data.server.take_workspace_activations() {
+                if let Some(app) = integration.application() {
+                    app.activate_desktop_workspaces(batch);
+                    policy_dirty = true;
+                }
+                if let Some((driver, _)) = integration.native() {
+                    driver.client_demand(CompositionDemand::Settle);
+                }
+            }
             self.state
                 .data
                 .server
@@ -363,6 +372,9 @@ pub(crate) fn apply_policy_requests<Event>(
 ) {
     let _span =
         tracing::trace_span!(target: crate::PROFILE_TARGET, "weld_apply_policy_results").entered();
+    if let Some(workspaces) = policy.take_desktop_workspaces() {
+        state.data.server.publish_workspaces(workspaces);
+    }
     for request in policy.take_client_requests() {
         if !state.clients.apply_request(request) {
             tracing::warn!("ignored a request for an unregistered client source");

@@ -43,6 +43,7 @@ Wayland-enabled `rofi`:
 ```sh
 python3 scripts/check-layer-shell
 python3 scripts/check-layer-shell --no-build --interactive
+python3 scripts/check-layer-shell --no-build --workspaces --interactive
 ```
 
 The runner uses private Waybar settings, retains before/panel/launcher/after
@@ -50,6 +51,10 @@ captures under `target/validation/layer-shell-*`, and stops its own processes.
 The interactive variant leaves 90 seconds for typing in Rofi, Escape, and
 checking restored htop input. An updating terminal drives the existing
 frame-serviced remote-debug endpoint. Debug ports 15702 and 15703 must be free.
+The `--workspaces` variant uses the example's startup Waybar. After dismissing
+Rofi, use Alt+2 and Alt+Enter to populate another workspace, click between them
+on the bar, and try Alt+Space to reopen Rofi. Alt+Shift+R should retain one bar.
+Logical Alt is the physical Windows key with the example's configured swaps.
 
 Native protocol regression tests require a valid `XDG_RUNTIME_DIR` but no GPU:
 
@@ -68,9 +73,47 @@ focus loss; a pointer-observer regression test covers that path.
 
 ## Follow-ups
 
-Workspace reporting/activation for Waybar (`ext-workspace-v1`), Sway IPC, and
-foreign-toplevel enumeration for Rofi window switching are subsequent slices.
+Sway IPC and foreign-toplevel enumeration for Rofi window switching are subsequent slices.
 This slice targets Rofi application launching. Layer popup geometry follows the
 client's positioner; output-edge unconstraining remains shared follow-up work.
 Dynamic physical output hotplug and floating-window placement within reserved
 areas remain separate work. A layer surface is not a secure session lock.
+
+## Workspace controls
+
+Master enables `weld_window::workspace_protocol::WorkspaceProtocolPlugin`.
+It projects existing workspace identities, names, output membership and visibility
+through `weld-app` to the core host. Change detection skips unchanged WM frames;
+the native adapter diffs snapshots and emits complete `ext-workspace-v1` updates.
+The global appears after the first policy publication. Session-stable IDs remain
+internal rather than claiming the protocol's persistent cross-session identity.
+
+One group represents each output. Workspaces on every output are advertised;
+inactive workspaces remain eligible for display in switchers. The supported
+request capability is activation. Requests wait for the client's manager `commit`,
+then run through the same i3 switch policy as keyboard bindings, preserving
+per-output visibility and remembered window focus. Inventory publication follows
+the complete policy update. Stale requests are ignored. Pending requests and
+committed transactions are bounded. Group creation, workspace creation/removal,
+deactivation and reassignment are not advertised as client capabilities.
+
+Waybar should use `ext/workspaces`, as the included example does; `sway/workspaces`
+requires Sway IPC. Rofi `drun` launches applications; its window switcher needs a
+separate foreign-toplevel protocol implementation.
+
+Regression checks:
+
+```sh
+cargo test -p weld-i3-quirks --locked
+cargo test -p weldwm --lib master:: --locked
+cargo test -p weld-core --features test-support workspace_tests --locked -- --ignored --test-threads=1
+```
+
+The wire tests cover initial inventory, unchanged snapshots, rename/state/output
+changes, commit batching, stale requests, handle release, late output binding and
+leave-before-removal ordering. Policy tests cover activation/focus restoration;
+configuration tests cover initial execution, reload selection and invalid reloads.
+The nested test confirmed startup Waybar, Rofi's configured launcher shortcut,
+workspace creation from bindings and click-to-switch between populated workspaces.
+Reload/no-duplicate-bar behavior has automated coverage; it was not manually
+exercised in that run.

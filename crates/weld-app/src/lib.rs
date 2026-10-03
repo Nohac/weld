@@ -17,6 +17,7 @@ pub mod output;
 mod shell;
 #[path = "surface.rs"]
 mod surface_impl;
+pub mod workspace;
 
 /// Plugin-facing application surface model.
 pub mod surface {

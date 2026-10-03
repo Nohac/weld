@@ -28,6 +28,14 @@ pub struct Configuration<Extension = ()> {
     pub bindings: Vec<(GlobalShortcut, Action<Extension>)>,
     pub keymap: Option<KeyboardKeymap>,
     pub workspaces: WorkspaceSettings,
+    pub startup: Vec<StartupCommand>,
+}
+
+/// A validated shell command and its configuration-load execution policy.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StartupCommand {
+    pub command: String,
+    pub on_reload: bool,
 }
 
 impl<Extension> Default for Configuration<Extension> {
@@ -38,6 +46,7 @@ impl<Extension> Default for Configuration<Extension> {
             bindings: Vec::new(),
             keymap: None,
             workspaces: WorkspaceSettings::default(),
+            startup: Vec::new(),
         }
     }
 }
@@ -96,6 +105,12 @@ fn apply<Extension>(config: &mut Configuration<Extension>, statement: &Statement
         .map(|argument| argument.text())
         .collect();
     match (statement.name().text(), args.as_slice()) {
+        (directive @ ("exec" | "exec_always"), command) => {
+            config.startup.push(StartupCommand {
+                command: exec_command(command)?,
+                on_reload: directive == "exec_always",
+            });
+        }
         ("workspace", [name, "output", outputs @ ..]) if !outputs.is_empty() => {
             let name = weld_sway_config::input::literal(name)?;
             ensure!(!name.is_empty(), "workspace name must not be empty");
@@ -183,10 +198,10 @@ fn action<Extension>(
         | ["move", "workspace", target @ ..] => {
             Action::Workspace(I3WorkspaceRequest::MoveWindow(workspace_target(target)?))
         }
-        ["exec", command @ ..] if !command.is_empty() => {
+        ["exec" | "exec_always", command @ ..] => {
             // Shell syntax remains unexpanded here. It executes only when this
             // binding is invoked, through the host-owned client launcher.
-            Action::Exec(command.join(" "))
+            Action::Exec(exec_command(command)?)
         }
         ["exit"] => Action::Exit,
         ["splith"] | ["split", "h"] | ["split", "horizontal"] => {
@@ -225,6 +240,24 @@ fn action<Extension>(
         ["reload"] => Action::Reload,
         _ => Action::Extension(extension(words)?),
     })
+}
+
+fn exec_command(words: &[&str]) -> Result<String> {
+    let words = words.strip_prefix(&["--no-startup-id"]).unwrap_or(words);
+    ensure!(!words.is_empty(), "exec requires a shell command");
+    // Sway permits quoting the complete shell command as one config argument.
+    if let [word] = words {
+        for quote in ['\'', '"'] {
+            if let Some(command) = word
+                .strip_prefix(quote)
+                .and_then(|word| word.strip_suffix(quote))
+            {
+                ensure!(!command.trim().is_empty(), "exec requires a shell command");
+                return Ok(command.to_owned());
+            }
+        }
+    }
+    Ok(words.join(" "))
 }
 
 fn workspace_target(words: &[&str]) -> Result<WorkspaceTarget> {
@@ -357,6 +390,46 @@ mod tests {
             config.bindings[0].1,
             Action::Exec("foot --title \"a b\"".to_owned())
         );
+    }
+
+    #[test]
+    fn startup_commands_keep_order_reload_policy_and_shell_syntax() {
+        let config = parse(
+            "startup",
+            indoc! {r#"
+            exec --no-startup-id waybar --config "a b.json"
+            exec_always "printf '%s' "$HOME""
+            exec 'foot --title terminal'
+            bindsym Mod1+space exec --no-startup-id rofi -show drun
+        "#},
+        )
+        .expect("startup commands");
+        assert_eq!(
+            config.startup,
+            [
+                StartupCommand {
+                    command: "waybar --config \"a b.json\"".to_owned(),
+                    on_reload: false
+                },
+                StartupCommand {
+                    command: "printf '%s' \"$HOME\"".to_owned(),
+                    on_reload: true
+                },
+                StartupCommand {
+                    command: "foot --title terminal".to_owned(),
+                    on_reload: false
+                },
+            ]
+        );
+        assert_eq!(
+            config.bindings[0].1,
+            Action::Exec("rofi -show drun".to_owned())
+        );
+        for command in ["exec", "exec_always --no-startup-id", "exec \"\""] {
+            let error =
+                parse("startup", &format!("# comment\n{command}")).expect_err("missing command");
+            assert!(format!("{error:#}").contains("startup:2:"));
+        }
     }
     #[test]
     fn settings_and_commands_translate_without_exposing_sway_to_the_tiler() {
