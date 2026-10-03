@@ -10,7 +10,7 @@ use bevy::{
         observer::On,
         query::{Changed, Or, QueryData, With, Without},
         schedule::IntoScheduleConfigs,
-        system::{Commands, Local, Query, Res, ResMut},
+        system::{Commands, Local, Query, Res, ResMut, SystemParam},
     },
     picking::{
         events::{Click, Pointer, Press},
@@ -19,11 +19,13 @@ use bevy::{
     window::RequestRedraw,
 };
 use weld_app::output::{OutputGeometry, OutputWorkArea, WeldOutput};
+use weld_app::surface::ClientToplevelParent;
 use weld_window::workspace::{FocusedWorkspace, Workspace, WorkspaceMember, WorkspaceOutput};
 use weld_window::{
-    FocusedWindow, ManagedBy, ManagedWindow, WindowCloseHandle, WindowCommand, WindowCommandKind,
-    WindowIntent, WindowIntentKind, WindowOutput, WindowProjectionLookup, WindowSystems,
-    WindowVisibility, WindowZOrder,
+    FloatingWindow, FocusedWindow, ManagedBy, ManagedWindow, WindowClientResolver,
+    WindowCloseHandle, WindowCommand, WindowCommandKind, WindowGeometry, WindowIntent,
+    WindowIntentKind, WindowOutput, WindowProjectionLookup, WindowSystems, WindowVisibility,
+    WindowZOrder,
 };
 
 use crate::{
@@ -44,9 +46,11 @@ type Unmanaged = (Without<TileParent>, Without<ManagedBy>);
 struct TiledWindow {
     entity: Entity,
     member: &'static WorkspaceMember,
+    owner: &'static ManagedBy,
     output: Option<&'static WindowOutput>,
     visibility: &'static WindowVisibility,
     z_order: &'static WindowZOrder,
+    floating: Option<&'static FloatingWindow>,
 }
 
 impl Plugin for TilePlugin {
@@ -64,6 +68,7 @@ impl Plugin for TilePlugin {
             .add_observer(workspace::created)
             .add_observer(workspace::move_window)
             .add_observer(workspace::removed)
+            .add_observer(crate::floating::request)
             .add_observer(history::remember_focus)
             .add_observer(history::remember_tree_change)
             .add_observer(layout::apply_layout)
@@ -93,6 +98,12 @@ impl Plugin for TilePlugin {
                     .in_set(TileSystems::Prepare),
             )
             .add_systems(PreUpdate, drain_commands.in_set(TileSystems::Commands))
+            .add_systems(
+                PreUpdate,
+                crate::floating::center_dialogs
+                    .after(TileSystems::Layout)
+                    .in_set(WindowSystems::Management),
+            )
             .add_systems(
                 PreUpdate,
                 (sync_output, layout::request_layout, history::refresh_path)
@@ -174,13 +185,35 @@ fn prune(
     (Some(entity), true)
 }
 
+#[derive(SystemParam)]
+struct AdmissionFamilies<'w, 's> {
+    clients: WindowClientResolver<'w, 's>,
+    parents: Query<'w, 's, &'static ClientToplevelParent>,
+    geometry: Query<'w, 's, &'static WindowGeometry>,
+    memberships: Query<'w, 's, &'static WorkspaceMember>,
+    floating: Query<'w, 's, (), With<FloatingWindow>>,
+}
+
+impl AdmissionFamilies<'_, '_> {
+    fn parent(&self, window: Entity) -> Option<Entity> {
+        let client = self.clients.client_entity(window)?;
+        let parent = self.parents.get(client).ok()?;
+        self.clients.window_for_surface(parent.surface)
+    }
+    fn is_dialog(&self, window: Entity) -> bool {
+        self.clients
+            .client_entity(window)
+            .is_some_and(|client| self.parents.contains(client))
+    }
+}
+
 fn admit_windows(
     mut editor: TreeEditor,
     windows: Query<(Entity, &ManagedWindow, Option<&WorkspaceMember>), Unmanaged>,
     workspaces: Query<(Entity, &Workspace, &WorkspaceOutput), With<TileWorkspace>>,
-    memberships: Query<&WorkspaceMember>,
     selected: Res<FocusedWorkspace>,
     focus: Res<FocusedWindow>,
+    families: AdmissionFamilies,
     mut ordered: Local<Vec<(weld_window::WindowId, Entity)>>,
 ) {
     let selected = selected.entity();
@@ -189,8 +222,14 @@ fn admit_windows(
         ordered.extend(
             windows
                 .iter()
-                .filter(|(_, _, member)| {
-                    member.map_or(selected == Some(root), |member| member.0 == root)
+                .filter(|(window, _, member)| {
+                    member
+                        .or_else(|| {
+                            families
+                                .parent(*window)
+                                .and_then(|parent| families.memberships.get(parent).ok())
+                        })
+                        .map_or(selected == Some(root), |member| member.0 == root)
                 })
                 .map(|(entity, window, _)| (window.id, entity)),
         );
@@ -201,13 +240,15 @@ fn admit_windows(
         let focused = focus
             .entity()
             .filter(|window| {
-                memberships
+                families
+                    .memberships
                     .get(*window)
                     .is_ok_and(|member| member.0 == root)
             })
             .or_else(|| {
                 workspace.recent().find(|window| {
-                    memberships
+                    families
+                        .memberships
                         .get(*window)
                         .is_ok_and(|member| member.0 == root)
                 })
@@ -226,17 +267,42 @@ fn admit_windows(
                     .position(|child| child.entity == focused)
             })
             .map_or(container.children.len(), |index| index + 1);
-        for (offset, (_, window)) in ordered.iter().copied().enumerate() {
-            container.children.insert(
-                insertion + offset,
-                TileChild {
-                    entity: window,
-                    weight: 1.0,
-                },
-            );
+        let mut offset = 0;
+        for (_, window) in ordered.iter().copied() {
+            if families.is_dialog(window) || families.floating.contains(window) {
+                let initial = families.geometry.get(window).copied().unwrap_or_default();
+                let size = initial.size.max(bevy::math::Vec2::ONE);
+                editor.commands.entity(window).insert((
+                    FloatingWindow,
+                    WindowGeometry {
+                        position: initial.position,
+                        size,
+                    },
+                    WindowZOrder(1),
+                ));
+                if !families.floating.contains(window) {
+                    editor
+                        .commands
+                        .entity(window)
+                        .insert(crate::floating::PendingDialogPlacement(
+                            families.parent(window),
+                        ));
+                }
+            } else {
+                container.children.insert(
+                    insertion + offset,
+                    TileChild {
+                        entity: window,
+                        weight: 1.0,
+                    },
+                );
+                offset += 1;
+                editor
+                    .commands
+                    .entity(window)
+                    .insert((TileParent(parent), LayoutRect::default()));
+            }
             editor.commands.entity(window).insert((
-                TileParent(parent),
-                LayoutRect::default(),
                 ManagedBy(root),
                 WorkspaceMember(root),
                 WindowOutput(output.0),
@@ -264,7 +330,7 @@ fn sync_output(
         (&Workspace, Option<&WorkspaceOutput>, &mut LayoutRect),
         With<TileWorkspace>,
     >,
-    windows: Query<TiledWindow, (With<ManagedWindow>, With<TileParent>)>,
+    windows: Query<TiledWindow, With<ManagedWindow>>,
     mut dirty: ResMut<LayoutDirty>,
     mut commands: Commands,
 ) {
@@ -283,6 +349,9 @@ fn sync_output(
         dirty.0 = true;
     }
     for window in &windows {
+        if window.owner.0 != window.member.0 {
+            continue;
+        }
         let Ok((workspace, output, _)) = workspaces.get(window.member.0) else {
             continue;
         };
@@ -302,7 +371,7 @@ fn sync_output(
         if *window.visibility != visibility {
             commands.entity(window.entity).insert(visibility);
         }
-        if *window.z_order != WindowZOrder(0) {
+        if window.floating.is_none() && *window.z_order != WindowZOrder(0) {
             commands.entity(window.entity).insert(WindowZOrder(0));
         }
     }
@@ -313,6 +382,7 @@ fn repair_focus(
     windows: Query<(Entity, &ManagedWindow, &WorkspaceMember)>,
     selected: Res<FocusedWorkspace>,
     parents: Query<(), With<TileParent>>,
+    workspaces: Query<&Workspace>,
     mut commands: Commands,
     mut redraw: MessageWriter<RequestRedraw>,
 ) {
@@ -323,13 +393,24 @@ fn repair_focus(
     }) {
         return;
     }
-    if let Some((window, _, _)) = windows
+    let recent = selected
+        .entity()
+        .and_then(|workspace| workspaces.get(workspace).ok())
+        .and_then(|workspace| {
+            workspace.recent().find(|window| {
+                windows
+                    .get(*window)
+                    .is_ok_and(|(_, _, member)| Some(member.0) == selected.entity())
+            })
+        });
+    let fallback = windows
         .iter()
         .filter(|(entity, _, member)| {
             parents.contains(*entity) && Some(member.0) == selected.entity()
         })
         .min_by_key(|(_, window, _)| window.id)
-    {
+        .map(|(window, _, _)| window);
+    if let Some(window) = recent.or(fallback) {
         commands.trigger(WindowCommand {
             window,
             kind: WindowCommandKind::Focus,

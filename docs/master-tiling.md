@@ -1,8 +1,7 @@
 # Weld Master tiling and workspaces
 
-The graphical `weldwm` distribution now installs `weld-tile` instead of
-`weld-float`. Both remain reusable policies; Master does not keep a legacy
-floating-first assembly. Headless session hosting is unchanged and rejects
+The graphical `weldwm` distribution combines `weld-tile` workspace management
+with `weld-float` freeform interaction for selected windows. Headless session hosting rejects
 `--config`, since it does not install a graphical window manager.
 
 ## Try it
@@ -18,7 +17,9 @@ alternatives. Shift moves the selected window through the split tree,
 and Control adjusts width/height proportions. Alt+Shift+Q requests client close.
 Alt+H invokes `weld hoist` through the existing hoist policy. Firefox is now
 Alt+Shift+Enter, leaving Alt+F for focus-right. Ordinary clicks select tiles;
-decoration close buttons work. Pointer-driven floating movement is not installed.
+decoration close buttons work. Alt+Shift+Space toggles floating; Alt+Control+P
+selects the most recently focused window in the other layout plane. Alt+left
+drag moves floating windows, and Alt+right drag resizes from the pointer's quadrant.
 
 The example starts Waybar with `examples/waybar.jsonc` and `examples/waybar.css`;
 launch from the repository root so those relative paths resolve. Waybar's
@@ -50,6 +51,10 @@ There is no file watcher yet; reload rereads the supplied path.
   first searches ancestor splits for a directional neighbor, then uses the
   innermost wrap candidate. `force` wraps at the first eligible split edge.
   Directional output traversal is a follow-up, so `workspace` currently behaves like `yes`.
+- `floating_modifier MODIFIER[+MODIFIER...]` enables floating move/resize chords.
+  Reload replaces these bindings while retaining already captured releases.
+  Omission disables modifier pointer chords; titlebar and resize handles remain usable.
+- `floating enable|disable|toggle` and `focus mode_toggle` are bound commands.
 - `bindsym CHORD COMMAND` with literal Mod4, Mod1, Control/Ctrl and Shift
   modifiers, lowercase ASCII letter names, digits, arrow/F1-F12 keys, Return, Escape, space,
   equal and minus. Trigger names currently select physical key positions; modifiers follow
@@ -247,7 +252,7 @@ fallback policy unless they install and use the i3 actions.
 The first adapted i3 scenarios and deferred test families are recorded in
 [`weld-i3-quirks/UPSTREAM.md`](../crates/weld-i3-quirks/UPSTREAM.md).
 Parent/child group selection, moving a selected group through i3 commands,
-tabs/stacks, `focus mode_toggle`, floating and cross-output movement remain
+tabs/stacks and cross-output movement remain
 follow-ups. The native editor can reparent a whole subtree, but Master currently
 selects individual windows. Native `TileOperation::Move` remains the geometric
 leaf swap as a native primitive; Master's Sway `move` bindings use the i3
@@ -256,11 +261,30 @@ receive the mean existing share, and flattening preserves internal proportions.
 
 ## Deliberate boundaries
 
-Floating dialogs/overlays, tabbed/stacked layouts, fullscreen,
+Tabbed/stacked layouts, fullscreen,
 client-size constraint policy, complete tiled-state protocol hints, persistent
 matching and IPC remain follow-up slices. Popups keep the existing presentation
 path rather than becoming tiling leaves. Related toplevel dialogs currently tile
-as ordinary windows.
+as ordinary windows when no parent is declared. Declared transient toplevels
+float and center over their parent's final geometry. Popups retain their own
+protocol positioning and never become floating managed windows.
+
+### Mixed floating and tiled windows
+
+The workspace retains `ManagedBy`, membership, visibility and output ownership
+for both modes. `FloatingWindow` selects the freeform plane. Switching to floating
+removes the leaf from layout and retires empty split containers; switching back
+restores its former slot when that parent still exists, otherwise appends to the
+workspace root. The last freeform geometry survives a tiled interval. Occupancy,
+window identity and hoist state are preserved.
+
+`FloatBehaviorPlugin` supplies movement, resizing and stacking for those marked
+windows. `FloatPlugin` remains the separate floating-first admission assembly.
+Workspaces remember floating selection and support moving floating windows to
+another workspace without adding a tile. Declared-parent detection is the first
+dialog policy; fixed-size/type hints and rules are subsequent milestones.
+Cross-output workspace transfers preserve output-local freeform geometry;
+clamping a large floating window onto a smaller destination remains a follow-up.
 
 ## Next improvements
 

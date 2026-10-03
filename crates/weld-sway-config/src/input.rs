@@ -5,7 +5,10 @@ mod syntax;
 use crate::{ParsedConfig, Statement};
 use anyhow::{Context, Result, bail, ensure};
 use std::collections::HashSet;
-use weld_input::{GlobalShortcut, GlobalShortcutModifiers, KeyCode, KeyboardKeymap, KeymapConfig};
+use weld_input::{
+    GlobalShortcut, GlobalShortcutModifiers, KeyCode, KeyboardKeymap, KeymapConfig,
+    PointerShortcutModifiers,
+};
 use winnow::Parser;
 
 /// Input configuration plus directives left for other subsystem translators.
@@ -151,10 +154,21 @@ fn keyboard_field(config: &mut KeymapConfig, field: &str, value: &str) -> Result
     Ok(())
 }
 
-fn binding(value: &str) -> Result<GlobalShortcut> {
-    let (parts, key) = syntax::chord
+/// Translates the modifier-only chord used by `floating_modifier`.
+pub fn pointer_modifiers(value: &str) -> Result<PointerShortcutModifiers> {
+    let parts = syntax::modifiers
         .parse(value)
-        .map_err(|error| anyhow::anyhow!("invalid binding chord: {error}"))?;
+        .map_err(|error| anyhow::anyhow!("invalid modifier chord: {error}"))?;
+    let modifiers = resolve_modifiers(parts)?;
+    Ok(PointerShortcutModifiers {
+        control: modifiers.control,
+        alt: modifiers.alt,
+        shift: modifiers.shift,
+        super_key: modifiers.super_key,
+    })
+}
+
+fn resolve_modifiers(parts: Vec<syntax::Modifier<'_>>) -> Result<GlobalShortcutModifiers> {
     let mut modifiers = GlobalShortcutModifiers::default();
     for part in parts {
         let enabled = match part.0 {
@@ -167,6 +181,14 @@ fn binding(value: &str) -> Result<GlobalShortcut> {
         ensure!(!*enabled, "duplicate binding modifier");
         *enabled = true;
     }
+    Ok(modifiers)
+}
+
+fn binding(value: &str) -> Result<GlobalShortcut> {
+    let (parts, key) = syntax::chord
+        .parse(value)
+        .map_err(|error| anyhow::anyhow!("invalid binding chord: {error}"))?;
+    let modifiers = resolve_modifiers(parts)?;
     // Trigger names currently select physical positions; modifier matching uses
     // the configured XKB state supplied by the native host.
     let key = match key {

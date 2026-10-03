@@ -5,7 +5,7 @@ use bevy::{
         entity::Entity,
         message::MessageWriter,
         observer::On,
-        query::With,
+        query::{Has, With},
         system::{Commands, Query, Res, ResMut, SystemParam},
     },
     math::Vec2,
@@ -33,6 +33,26 @@ pub(crate) struct TreeEditor<'w, 's> {
 }
 
 impl TreeEditor<'_, '_> {
+    /// Retire emptied nested containers while preserving explicit unary splits.
+    pub(crate) fn retire_empty_ancestors(&mut self, mut node: Entity, root: Entity) {
+        while node != root {
+            let Ok(container) = self.containers.get(node) else {
+                break;
+            };
+            if !container.children.is_empty() {
+                break;
+            }
+            let Ok(parent) = self.parents.get(node).copied() else {
+                break;
+            };
+            if let Ok(mut container) = self.containers.get_mut(parent.entity()) {
+                container.children.retain(|child| child.entity != node);
+            }
+            self.history.replace(node, None);
+            self.commands.entity(node).despawn();
+            node = parent.entity();
+        }
+    }
     /// Resolves a root while validating bounded, bidirectional ancestry.
     pub fn root_of(&self, mut node: Entity) -> Option<Entity> {
         for _ in 0..=crate::MAX_DEPTH {
@@ -194,9 +214,9 @@ impl TreeEditor<'_, '_> {
 pub(crate) fn apply_request(
     event: On<TileRequest>,
     mut editor: TreeEditor,
-    windows: Query<(Entity, &ManagedWindow, &WindowGeometry), With<TileParent>>,
+    windows: Query<(Entity, &ManagedWindow, &WindowGeometry)>,
     focus: Res<FocusedWindow>,
-    owners: Query<&ManagedBy>,
+    owners: Query<(&ManagedBy, Has<TileParent>)>,
     mut pending: ResMut<TileCommands>,
     mut redraw: MessageWriter<RequestRedraw>,
 ) {
@@ -218,6 +238,12 @@ pub(crate) fn apply_request(
         ),
     };
     let Some(window) = window else { return };
+    let Ok((owner, tiled)) = owners.get(window) else {
+        return;
+    };
+    if !editor.roots.contains(owner.0) || (!tiled && operation != TileOperation::Close) {
+        return;
+    }
     match operation {
         TileOperation::Close => editor.commands.trigger(WindowCommand {
             window,
@@ -247,13 +273,13 @@ pub(crate) fn apply_request(
 }
 
 fn neighbor(
-    windows: &Query<(Entity, &ManagedWindow, &WindowGeometry), With<TileParent>>,
-    owners: &Query<&ManagedBy>,
+    windows: &Query<(Entity, &ManagedWindow, &WindowGeometry)>,
+    owners: &Query<(&ManagedBy, Has<TileParent>)>,
     window: Entity,
     direction: Direction,
 ) -> Option<Entity> {
     let (_, _, geometry) = windows.get(window).ok()?;
-    let owner = owners.get(window).ok()?.0;
+    let owner = owners.get(window).ok()?.0.0;
     let center = geometry.position + geometry.size * 0.5;
     let unit = match direction {
         Direction::Left => Vec2::NEG_X,
@@ -266,7 +292,7 @@ fn neighbor(
         .filter_map(|(entity, managed, rect)| {
             if !owners
                 .get(entity)
-                .is_ok_and(|candidate| candidate.0 == owner)
+                .is_ok_and(|(candidate, tiled)| tiled && candidate.0 == owner)
             {
                 return None;
             }

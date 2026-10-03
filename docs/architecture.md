@@ -47,6 +47,8 @@ Weld is a workspace of reusable layers and one standard distribution:
   shell or window manager can replace.
 - `weld-float` supplies conventional freeform placement, focus, stacking,
   movement, and interactive-resize policy without owning UI entities.
+  `FloatBehaviorPlugin` applies interaction to `FloatingWindow` members owned
+  by any workspace manager; `FloatPlugin` adds floating-first admission.
 - `weld-tile` supplies native split-tree policy over durable managed windows.
   Its queryable ECS containers, ordered commands, and live `TileSettings` do not
   depend on configuration syntax or decoration/presentation crates. Each shared
@@ -149,7 +151,10 @@ path during final management layout, before UI reconciliation can remove vacant
 windows. History includes retained vacant slots; client keyboard focus
 still requires a live mapped occupant. This first policy slice covers directional
 leaf focus, wrapping and directional movement within a workspace. Container selection,
-tabs/stacks, floating switching and cross-output movement remain subsequent slices.
+tabs/stacks and cross-output movement remain subsequent slices. Floating windows
+share workspace ownership and selection, while `FloatingWindow` selects the
+freeform geometry plane. Mode changes preserve identity, occupancy and hoist state;
+the tiler records the former slot and last floating geometry for return.
 
 The window domain owns `Workspace` entities and the non-cascading Bevy
 `WorkspaceMember` and `WorkspaceOutput` relationships, whose inverse collections
@@ -1200,7 +1205,9 @@ the owning manager through the same boundary. Output re-homing, projection
 replacement, and temporary occupant unmapping therefore cannot interrupt an
 active interaction.
 
-`weld-float` registers `Super+LMB` as move and `Super+RMB` as resize. Raw
+`weld-float` installs move and resize chords from live `FloatSettings`; Master's
+`floating_modifier` translation provides the modifier, with left-button move and
+right-button resize. No modifier chords are installed when the setting is absent. Raw
 ingress is the sole chord evaluator: it consumes a matching press and paired
 release before client delivery, then retains the frontmost picked Bevy entity
 and compositor-logical press position in `PointerShortcutPressed` for the next

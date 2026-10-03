@@ -2,9 +2,10 @@
 //! 903bcd518df32b0e055b17f5da3f988a0187fd3d. See ../UPSTREAM.md and ../LICENSE-i3.
 
 use bevy::{
-    app::App,
+    app::{App, PreUpdate},
     ecs::{
         entity::Entity,
+        schedule::IntoScheduleConfigs,
         system::{Commands, RunSystemOnce},
     },
     math::{UVec2, Vec2},
@@ -13,20 +14,173 @@ use weld_app::{
     output::{OutputGeometry, OutputId, PrimaryOutput, WeldOutput},
     surface::{SurfaceAction, SurfaceActionQueue, take_surface_actions},
 };
-use weld_i3_quirks::{FocusWrapping, I3FocusRequest, I3QuirksPlugin};
+use weld_float::{FloatBehaviorPlugin, FloatManagement};
+use weld_i3_quirks::{
+    FocusWrapping, I3FocusModeToggle, I3FocusRequest, I3QuirksPlugin,
+    workspace::{I3WorkspaceRequest, WorkspaceTarget},
+};
 use weld_tile::{
-    Direction, SplitAxis, TileCommand, TileContainer, TileFocusHistory, TileOperation, TileParent,
-    TilePlugin, TileRequest, TileSettings,
+    Direction, SplitAxis, TileCommand, TileContainer, TileFloatingRequest, TileFocusHistory,
+    TileOperation, TileParent, TilePlugin, TileRequest, TileSettings, TileSystems, TileWorkspace,
 };
 use weld_window::{
-    FocusedWindow, ManagedBy, ManagedWindow, WindowCommand, WindowCommandKind, WindowGeometry,
-    WindowId, WindowPlugin, WindowVacancy,
+    FloatingWindow, FocusedWindow, ManagedBy, ManagedWindow, WindowCommand, WindowCommandKind,
+    WindowGeometry, WindowId, WindowIntent, WindowIntentKind, WindowInteractionKind,
+    WindowInteractionSession, WindowPlugin, WindowVacancy, WindowZOrder,
 };
 
 #[path = "cases/movement.rs"]
 mod movement;
 #[path = "cases/workspace.rs"]
 mod workspace;
+
+#[test]
+fn floating_plane_focus_and_workspace_roundtrip_preserve_selection() {
+    let mut app = app();
+    let tiled = window(&mut app, 1);
+    let floating = window(&mut app, 2);
+    app.world_mut().trigger(TileFloatingRequest {
+        window: Some(floating),
+        enabled: Some(true),
+    });
+    app.update();
+    app.world_mut().trigger(I3FocusModeToggle);
+    app.update();
+    assert_eq!(selected(&app), tiled);
+    app.world_mut().trigger(I3FocusModeToggle);
+    app.update();
+    assert_eq!(selected(&app), floating);
+    app.world_mut()
+        .trigger(I3WorkspaceRequest::Switch(WorkspaceTarget::Name(
+            "2".into(),
+        )));
+    app.update();
+    app.world_mut()
+        .trigger(I3WorkspaceRequest::Switch(WorkspaceTarget::Name(
+            "1".into(),
+        )));
+    app.update();
+    assert_eq!(selected(&app), floating);
+    app.world_mut().entity_mut(floating).despawn();
+    app.update();
+    assert_eq!(selected(&app), tiled);
+}
+
+#[test]
+fn floating_window_transfer_updates_workspace_without_adding_a_tile() {
+    let mut app = app();
+    let tiled = window(&mut app, 1);
+    let floating = window(&mut app, 2);
+    app.world_mut().trigger(TileFloatingRequest {
+        window: Some(floating),
+        enabled: Some(true),
+    });
+    app.update();
+    app.world_mut()
+        .trigger(I3WorkspaceRequest::MoveWindow(WorkspaceTarget::Name(
+            "2".into(),
+        )));
+    app.update();
+    assert_eq!(selected(&app), tiled);
+    assert_eq!(
+        app.world().get::<weld_window::WindowVisibility>(floating),
+        Some(&weld_window::WindowVisibility::Hidden)
+    );
+    app.world_mut()
+        .trigger(I3WorkspaceRequest::Switch(WorkspaceTarget::Name(
+            "2".into(),
+        )));
+    app.update();
+    assert_eq!(selected(&app), floating);
+    assert!(app.world().get::<TileParent>(floating).is_none());
+    app.world_mut().trigger(TileFloatingRequest {
+        window: Some(floating),
+        enabled: Some(false),
+    });
+    app.update();
+    assert!(app.world().get::<TileParent>(floating).is_some());
+}
+
+#[test]
+fn mixed_assembly_raises_floating_windows_and_ends_drag_when_retiled() {
+    let mut app = app();
+    app.add_message::<weld_app::surface::ToplevelInteractionRequest>()
+        .add_plugins(FloatBehaviorPlugin)
+        .configure_sets(
+            PreUpdate,
+            FloatManagement
+                .after(TileSystems::Prepare)
+                .before(TileSystems::Actions),
+        );
+    let first = window(&mut app, 1);
+    let second = window(&mut app, 2);
+    for window in [first, second] {
+        app.world_mut().trigger(TileFloatingRequest {
+            window: Some(window),
+            enabled: Some(true),
+        });
+        app.update();
+    }
+    let order = |app: &App, window| app.world().get::<WindowZOrder>(window).expect("z").0;
+    assert!(order(&app, first) > 0);
+    assert!(order(&app, second) > order(&app, first));
+    app.world_mut().trigger(WindowIntent {
+        window: first,
+        kind: WindowIntentKind::Activate,
+    });
+    app.update();
+    assert!(order(&app, first) > order(&app, second));
+    app.world_mut().trigger(WindowCommand {
+        window: first,
+        kind: WindowCommandKind::BeginInteraction(WindowInteractionKind::Move),
+    });
+    app.world_mut().flush();
+    assert!(app.world().get::<WindowInteractionSession>(first).is_some());
+    app.world_mut().trigger(TileFloatingRequest {
+        window: Some(first),
+        enabled: Some(false),
+    });
+    app.update();
+    assert!(app.world().get::<WindowInteractionSession>(first).is_none());
+    assert!(app.world().get::<FloatingWindow>(first).is_none());
+    assert_eq!(order(&app, first), 0);
+}
+
+#[test]
+fn removing_tile_workspace_releases_both_layout_planes_and_readmits_floating_state() {
+    let mut app = app();
+    let tiled = window(&mut app, 1);
+    let floating = window(&mut app, 2);
+    app.world_mut().trigger(TileFloatingRequest {
+        window: Some(floating),
+        enabled: Some(true),
+    });
+    app.update();
+    let workspace = app.world().get::<ManagedBy>(tiled).expect("owner").0;
+    let previous = *app
+        .world()
+        .get::<WindowGeometry>(floating)
+        .expect("geometry");
+    app.world_mut()
+        .entity_mut(workspace)
+        .remove::<TileWorkspace>();
+    app.world_mut().flush();
+    assert!(app.world().get::<ManagedBy>(tiled).is_none());
+    assert!(app.world().get::<ManagedBy>(floating).is_none());
+    app.update();
+    assert_eq!(
+        app.world().get::<ManagedBy>(floating),
+        Some(&ManagedBy(workspace))
+    );
+    assert!(app.world().get::<FloatingWindow>(floating).is_some());
+    assert!(app.world().get::<TileParent>(floating).is_none());
+    assert_eq!(
+        *app.world()
+            .get::<WindowGeometry>(floating)
+            .expect("geometry"),
+        previous
+    );
+}
 
 fn app() -> App {
     let mut app = App::new();

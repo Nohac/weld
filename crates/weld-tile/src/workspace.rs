@@ -12,7 +12,9 @@ use weld_app::output::{OutputGeometry, OutputWorkArea};
 use weld_window::workspace::{
     Workspace, WorkspaceCreated, WorkspaceMember, WorkspaceMemberMoved, WorkspaceOutput,
 };
-use weld_window::{ManagedBy, ManagedWindow, WindowGeometry, WindowOutput, WindowVisibility};
+use weld_window::{
+    FloatingWindow, ManagedBy, ManagedWindow, WindowGeometry, WindowOutput, WindowVisibility,
+};
 
 use crate::{
     ContainerId, TileChild, TileContainer, TileParent, TileSettings, TileTreeChanged,
@@ -100,21 +102,42 @@ pub(crate) fn ensure_roots(
 pub(crate) fn move_window(
     event: On<TileWorkspaceMove>,
     mut editor: TreeEditor,
-    windows: Query<(&ManagedBy, &WorkspaceMember), With<ManagedWindow>>,
+    windows: Query<(&ManagedBy, &WorkspaceMember, Option<&FloatingWindow>), With<ManagedWindow>>,
     workspaces: Query<(&Workspace, &WorkspaceOutput), With<TileWorkspace>>,
 ) {
-    let Ok((owner, member)) = windows.get(event.window) else {
+    let Ok((owner, member, floating)) = windows.get(event.window) else {
         return;
     };
     if owner.0 != member.0 || !editor.roots.contains(owner.0) || member.0 == event.workspace {
         return;
     }
-    if editor.root_of(event.window) != Some(owner.0) {
-        return;
-    }
     let Ok((workspace, output)) = workspaces.get(event.workspace) else {
         return;
     };
+    if floating.is_some() {
+        editor
+            .commands
+            .entity(event.window)
+            .remove::<crate::floating::SavedTileSlot>()
+            .insert((
+                WorkspaceMember(event.workspace),
+                ManagedBy(event.workspace),
+                WindowOutput(output.0),
+                if workspace.visible() {
+                    WindowVisibility::Visible
+                } else {
+                    WindowVisibility::Hidden
+                },
+            ));
+        editor.commands.trigger(WorkspaceMemberMoved {
+            window: event.window,
+            previous: member.0,
+        });
+        return;
+    }
+    if editor.root_of(event.window) != Some(owner.0) {
+        return;
+    }
     let Ok(source) = editor.parents.get(event.window).copied() else {
         return;
     };
@@ -129,7 +152,7 @@ pub(crate) fn move_window(
         return;
     };
     let (destination, insertion) = if let Some(anchor) = event.anchor {
-        let Ok((owner, member)) = windows.get(anchor) else {
+        let Ok((owner, member, _)) = windows.get(anchor) else {
             return;
         };
         if owner.0 != event.workspace || member.0 != event.workspace {
@@ -198,24 +221,7 @@ pub(crate) fn move_window(
         },
     ));
     // Retain explicit unary splits, retiring only groups emptied by the move.
-    let mut empty = source.entity();
-    while empty != owner.0 {
-        let Ok(container) = editor.containers.get(empty) else {
-            break;
-        };
-        if !container.children.is_empty() {
-            break;
-        }
-        let Ok(parent) = editor.parents.get(empty).copied() else {
-            break;
-        };
-        if let Ok(mut container) = editor.containers.get_mut(parent.entity()) {
-            container.children.retain(|child| child.entity != empty);
-        }
-        editor.history.replace(empty, None);
-        editor.commands.entity(empty).despawn();
-        empty = parent.entity();
-    }
+    editor.retire_empty_ancestors(source.entity(), owner.0);
     editor.dirty.0 = true;
     editor.commands.trigger(WorkspaceMemberMoved {
         window: event.window,
@@ -228,8 +234,13 @@ pub(crate) fn move_window(
 pub(crate) fn removed(
     event: On<Remove, TileWorkspace>,
     mut editor: TreeEditor,
-    owners: Query<&ManagedBy>,
+    owners: Query<(Entity, &ManagedBy)>,
 ) {
+    for (window, owner) in &owners {
+        if owner.0 == event.entity {
+            editor.commands.entity(window).try_remove::<ManagedBy>();
+        }
+    }
     let mut pending = vec![event.entity];
     while let Some(node) = pending.pop() {
         if let Ok(container) = editor.containers.get(node) {
@@ -242,9 +253,6 @@ pub(crate) fn removed(
                 .commands
                 .entity(node)
                 .try_remove::<(TileParent, LayoutRect)>();
-            if owners.get(node).is_ok_and(|owner| owner.0 == event.entity) {
-                editor.commands.entity(node).try_remove::<ManagedBy>();
-            }
         }
         editor.history.replace(node, None);
     }

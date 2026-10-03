@@ -6,6 +6,7 @@
 //! Retained vacancies and hoisted windows keep their layout slots.
 //! Each managed workspace owns a tree in its assigned output's coordinates.
 
+mod floating;
 mod history;
 mod layout;
 mod operations;
@@ -173,6 +174,14 @@ pub struct TileWorkspaceMove {
     pub window: Entity,
     pub workspace: Entity,
     pub anchor: Option<Entity>,
+}
+
+/// Change the selected window's layout mode. `None` toggles the current mode.
+#[derive(Event, Clone, Copy, Debug)]
+pub struct TileFloatingRequest {
+    /// `None` resolves the focused window when the request executes.
+    pub window: Option<Entity>,
+    pub enabled: Option<bool>,
 }
 
 /// Commands target stable window identities, not UI nodes or client surfaces.

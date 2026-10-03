@@ -27,6 +27,157 @@ use weld_window::{
 use super::*;
 
 #[test]
+fn floating_toggle_preserves_identity_membership_and_restores_tile_slot() {
+    let mut app = app();
+    let first = window(&mut app, 1);
+    let second = window(&mut app, 2);
+    let third = window(&mut app, 3);
+    let owner = app
+        .world()
+        .get::<ManagedBy>(second)
+        .copied()
+        .expect("owner");
+    let tiled_geometry = geometry(&app, second);
+    app.world_mut().trigger(TileFloatingRequest {
+        window: Some(second),
+        enabled: None,
+    });
+    app.update();
+    assert!(
+        app.world()
+            .get::<weld_window::FloatingWindow>(second)
+            .is_some()
+    );
+    assert!(app.world().get::<TileParent>(second).is_none());
+    assert_eq!(app.world().get::<ManagedBy>(second), Some(&owner));
+    assert_eq!(geometry(&app, first).size.x, 400.0);
+    assert_eq!(geometry(&app, third).size.x, 400.0);
+    let moved = WindowGeometry {
+        position: Vec2::new(42.0, 31.0),
+        size: Vec2::new(250.0, 180.0),
+    };
+    app.world_mut().entity_mut(second).insert(moved);
+    app.world_mut().trigger(TileFloatingRequest {
+        window: Some(second),
+        enabled: None,
+    });
+    app.update();
+    assert!(
+        app.world()
+            .get::<weld_window::FloatingWindow>(second)
+            .is_none()
+    );
+    assert_eq!(geometry(&app, second), tiled_geometry);
+    app.world_mut().trigger(TileFloatingRequest {
+        window: Some(second),
+        enabled: None,
+    });
+    app.update();
+    assert_eq!(geometry(&app, second), moved);
+}
+
+#[test]
+fn floating_only_leaf_retires_its_empty_split_and_can_return_to_root() {
+    let mut app = app();
+    let first = window(&mut app, 1);
+    let second = window(&mut app, 2);
+    command(&mut app, 2, TileOperation::Split(SplitAxis::Vertical));
+    let split = app
+        .world()
+        .get::<TileParent>(second)
+        .expect("parent")
+        .entity();
+    app.world_mut().trigger(TileFloatingRequest {
+        window: Some(second),
+        enabled: Some(true),
+    });
+    app.update();
+    assert!(app.world().get_entity(split).is_err());
+    assert_eq!(geometry(&app, first).size, Vec2::new(800.0, 600.0));
+    app.world_mut().trigger(TileFloatingRequest {
+        window: Some(second),
+        enabled: Some(false),
+    });
+    app.update();
+    assert_eq!(geometry(&app, first).size.x, 400.0);
+    assert_eq!(geometry(&app, second).size.x, 400.0);
+}
+
+#[test]
+fn declared_dialog_is_centered_on_parent_without_retiling_it() {
+    for simultaneous in [false, true] {
+        let mut app = app();
+        let parent_surface = SurfaceId::for_test(500);
+        let spawn_client = |app: &mut App, surface, size| {
+            app.world_mut()
+                .spawn((
+                    ClientSource {
+                        id: parent_surface.source(),
+                        provenance: ClientProvenance::Local,
+                    },
+                    ClientToplevel { surface },
+                    MappedSurface {
+                        logical_size: size,
+                        alpha_mode: Default::default(),
+                        visual_offset: Vec2::ZERO,
+                        visual_size: size,
+                        opaque: true,
+                    },
+                ))
+                .id()
+        };
+        let parent_client = spawn_client(&mut app, parent_surface, Vec2::new(640.0, 480.0));
+        if !simultaneous {
+            app.update();
+        }
+        let dialog_client =
+            spawn_client(&mut app, SurfaceId::for_test(501), Vec2::new(320.0, 240.0));
+        app.world_mut()
+            .entity_mut(dialog_client)
+            .insert(weld_app::surface::ClientToplevelParent {
+                surface: parent_surface,
+            });
+        app.update();
+        let parent = app
+            .world()
+            .get::<OccupiesWindow>(parent_client)
+            .expect("parent window")
+            .0;
+        let dialog = app
+            .world()
+            .get::<OccupiesWindow>(dialog_client)
+            .expect("dialog window")
+            .0;
+        assert!(
+            app.world()
+                .get::<weld_window::FloatingWindow>(dialog)
+                .is_some()
+        );
+        assert!(app.world().get::<TileParent>(dialog).is_none());
+        assert_eq!(
+            geometry(&app, parent),
+            WindowGeometry {
+                position: Vec2::ZERO,
+                size: Vec2::new(800.0, 600.0)
+            }
+        );
+        assert_eq!(geometry(&app, dialog).position, Vec2::new(240.0, 180.0));
+        let id = app
+            .world()
+            .get::<ManagedWindow>(dialog)
+            .expect("window")
+            .id
+            .raw();
+        command(&mut app, id, TileOperation::Close);
+        assert!(
+            take_surface_actions(app.world_mut()).contains(&SurfaceAction::Close {
+                surface: SurfaceId::for_test(501)
+            })
+        );
+    }
+}
+
+#[test]
 fn panel_work_area_reflows_tiles_without_changing_output_geometry() {
     let mut app = app();
     let window = window(&mut app, 1);

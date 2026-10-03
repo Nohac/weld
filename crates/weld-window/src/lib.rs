@@ -84,6 +84,10 @@ pub enum WindowVisibility {
 #[derive(Component, Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct WindowZOrder(pub i32);
 
+/// Selects freeform geometry and interaction within the owning workspace.
+#[derive(Component, Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct FloatingWindow;
+
 /// What to do when the client occupant disappears.
 #[derive(Component, Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum WindowVacancy {

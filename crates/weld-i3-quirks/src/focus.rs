@@ -13,10 +13,44 @@ use bevy::{
 };
 use weld_tile::{Direction, SplitAxis, TileCommands, TileParent, TileTreeChanged};
 use weld_window::{
-    FocusedWindow, ManagedWindow, WindowCommand, WindowCommandKind, WindowFocusChanged,
+    FloatingWindow, FocusedWindow, ManagedWindow, WindowCommand, WindowCommandKind,
+    WindowFocusChanged,
+    workspace::{FocusedWorkspace, Workspace, WorkspaceMember},
 };
 
 use crate::{FocusWrapping, I3FocusRequest, tree::TreeView};
+
+pub(crate) fn mode_toggle(
+    _: On<crate::I3FocusModeToggle>,
+    focus: Res<FocusedWindow>,
+    selected: Res<FocusedWorkspace>,
+    workspaces: Query<&Workspace>,
+    windows: Query<(&WorkspaceMember, Option<&FloatingWindow>)>,
+    mut commands: Commands,
+    mut redraw: MessageWriter<RequestRedraw>,
+) {
+    let Some(workspace) = selected.entity() else {
+        return;
+    };
+    let Ok(state) = workspaces.get(workspace) else {
+        return;
+    };
+    let is_floating = focus
+        .entity()
+        .and_then(|window| windows.get(window).ok())
+        .is_some_and(|(_, floating)| floating.is_some());
+    if let Some(window) = state.recent().find(|window| {
+        windows.get(*window).is_ok_and(|(member, floating)| {
+            member.0 == workspace && floating.is_some() != is_floating
+        })
+    }) {
+        commands.trigger(WindowCommand {
+            window,
+            kind: WindowCommandKind::Focus,
+        });
+        redraw.write(RequestRedraw);
+    }
+}
 
 /// Preserves ancestry across destruction so recovery can run before compaction.
 #[derive(Resource, Default)]

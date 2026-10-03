@@ -2,12 +2,16 @@
 
 use winnow::{
     Parser, Result as ParseResult,
-    combinator::{alt, delimited, repeat, terminated},
+    combinator::{alt, delimited, repeat, separated, terminated},
     token::take_while,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct Modifier<'a>(pub &'a str);
+
+pub(super) fn modifiers<'a>(input: &mut &'a str) -> ParseResult<Vec<Modifier<'a>>> {
+    separated(1.., chord_word.map(Modifier), '+').parse_next(input)
+}
 
 pub(super) fn chord<'a>(input: &mut &'a str) -> ParseResult<(Vec<Modifier<'a>>, &'a str)> {
     let modifiers = repeat(0.., terminated(chord_word.map(Modifier), '+')).parse_next(input)?;

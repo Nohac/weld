@@ -7902,6 +7902,7 @@ version = "0.1.0"
 dependencies = [
  "bevy",
  "weld-app",
+ "weld-input",
  "weld-window",
 ]
 
@@ -8024,6 +8025,7 @@ dependencies = [
  "bevy",
  "indoc",
  "weld-app",
+ "weld-float",
  "weld-input",
  "weld-sway-config",
  "weld-tile",

@@ -518,6 +518,12 @@ impl SurfaceCommitRevisions {
     pub fn revision(&self, surface: SurfaceId) -> u64 {
         self.0.get(&surface).copied().unwrap_or_default()
     }
+
+    /// Records an admitted commit before resize-settlement policy observes it.
+    pub fn record_commit(&mut self, surface: SurfaceId) {
+        let revision = self.0.entry(surface).or_default();
+        *revision = revision.saturating_add(1);
+    }
 }
 
 struct SurfaceBufferAsset {
@@ -944,8 +950,7 @@ fn apply_surface_tree_snapshot(
         return;
     };
     if let Some(mut revisions) = world.get_resource_mut::<SurfaceCommitRevisions>() {
-        let revision = revisions.0.entry(surface).or_default();
-        *revision = revision.saturating_add(1);
+        revisions.record_commit(surface);
     }
 
     let retained = snapshot

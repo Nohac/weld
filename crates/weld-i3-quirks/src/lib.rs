@@ -24,6 +24,10 @@ pub struct I3FocusRequest(pub Direction);
 #[derive(Event, Clone, Copy, Debug)]
 pub struct I3MoveRequest(pub Direction);
 
+/// Select the most recently focused window in the other layout plane.
+#[derive(Event, Clone, Copy, Debug)]
+pub struct I3FocusModeToggle;
+
 /// Where directional navigation may wrap after reaching a split edge.
 #[derive(Resource, Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum FocusWrapping {
@@ -52,6 +56,7 @@ impl Plugin for I3QuirksPlugin {
             .add_observer(workspace::after_move)
             .init_resource::<focus::FocusPath>()
             .add_observer(focus::navigate)
+            .add_observer(focus::mode_toggle)
             .add_observer(focus::remember_focus)
             .add_observer(focus::tree_changed)
             .add_observer(movement::move_focused)

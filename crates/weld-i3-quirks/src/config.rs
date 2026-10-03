@@ -5,6 +5,7 @@ use crate::workspace::{
     I3WorkspaceRequest, WorkspaceAssignment, WorkspaceSettings, WorkspaceTarget, number,
 };
 use anyhow::{Context, Result, bail, ensure};
+use weld_float::FloatSettings;
 use weld_input::{GlobalShortcut, KeyboardKeymap};
 use weld_sway_config::Statement;
 use weld_tile::{Direction, SplitAxis, TileOperation, TileSettings};
@@ -15,6 +16,8 @@ pub enum Action<Extension = ()> {
     Move(Direction),
     Workspace(I3WorkspaceRequest),
     Tile(TileOperation),
+    Floating(Option<bool>),
+    FocusModeToggle,
     Reload,
     Exec(String),
     Exit,
@@ -29,6 +32,7 @@ pub struct Configuration<Extension = ()> {
     pub keymap: Option<KeyboardKeymap>,
     pub workspaces: WorkspaceSettings,
     pub startup: Vec<StartupCommand>,
+    pub floating: FloatSettings,
 }
 
 /// A validated shell command and its configuration-load execution policy.
@@ -47,6 +51,7 @@ impl<Extension> Default for Configuration<Extension> {
             keymap: None,
             workspaces: WorkspaceSettings::default(),
             startup: Vec::new(),
+            floating: FloatSettings::default(),
         }
     }
 }
@@ -147,6 +152,9 @@ fn apply<Extension>(config: &mut Configuration<Extension>, statement: &Statement
             }
         }
         ("default_orientation", [value]) => config.tiling.default_axis = axis(value)?,
+        ("floating_modifier", [value]) => {
+            config.floating.modifier = Some(weld_sway_config::input::pointer_modifiers(value)?)
+        }
         ("focus_wrapping", [value]) => {
             config.focus_wrapping = match *value {
                 "no" => FocusWrapping::No,
@@ -210,6 +218,10 @@ fn action<Extension>(
         ["splitv"] | ["split", "v"] | ["split", "vertical"] => {
             Action::Tile(TileOperation::Split(SplitAxis::Vertical))
         }
+        ["focus", "mode_toggle"] => Action::FocusModeToggle,
+        ["floating", "enable"] => Action::Floating(Some(true)),
+        ["floating", "disable"] => Action::Floating(Some(false)),
+        ["floating", "toggle"] => Action::Floating(None),
         ["focus", value] => Action::Focus(direction(value)?),
         ["move", value] => Action::Move(direction(value)?),
         [
@@ -478,5 +490,28 @@ mod tests {
         )
         .expect_err("bad number");
         assert!(format!("{error:#}").contains("example:2:"));
+    }
+    #[test]
+    fn floating_configuration_uses_live_modifiers_and_explicit_commands() {
+        let config = parse(
+            "float",
+            indoc! {"
+        floating_modifier Mod1+Control
+        bindsym Mod1+space floating toggle
+        bindsym Mod1+p focus mode_toggle
+    "},
+        )
+        .expect("config");
+        assert_eq!(
+            config.floating.modifier,
+            Some(weld_input::PointerShortcutModifiers {
+                alt: true,
+                control: true,
+                ..Default::default()
+            })
+        );
+        assert_eq!(config.bindings[0].1, Action::Floating(None));
+        assert_eq!(config.bindings[1].1, Action::FocusModeToggle);
+        assert!(parse("float", "floating_modifier Mod1+Mod1").is_err());
     }
 }

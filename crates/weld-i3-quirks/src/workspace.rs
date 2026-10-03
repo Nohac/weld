@@ -273,6 +273,7 @@ pub(crate) fn apply_resolved(
     view: WorkspaceView,
     tree: TreeView,
     members: Query<&WorkspaceMember>,
+    floating: Query<(), bevy::ecs::query::With<weld_window::FloatingWindow>>,
     mut commands: Commands,
 ) {
     match *event.event() {
@@ -297,7 +298,31 @@ pub(crate) fn apply_resolved(
             });
             commands.trigger(WorkspaceRequest::Select {
                 workspace,
-                window: tree.descend(workspace),
+                window: view
+                    .workspaces
+                    .get(workspace)
+                    .ok()
+                    .and_then(|(_, state, _)| state.recent().next())
+                    .filter(|window| {
+                        floating.contains(*window)
+                            && members
+                                .get(*window)
+                                .is_ok_and(|member| member.0 == workspace)
+                    })
+                    .or_else(|| tree.descend(workspace))
+                    .or_else(|| {
+                        view.workspaces
+                            .get(workspace)
+                            .ok()
+                            .and_then(|(_, state, _)| {
+                                state.recent().find(|window| {
+                                    floating.contains(*window)
+                                        && members
+                                            .get(*window)
+                                            .is_ok_and(|member| member.0 == workspace)
+                                })
+                            })
+                    }),
             });
         }
         Resolved::Move { window, workspace } => {
@@ -336,6 +361,7 @@ pub(crate) fn after_move(
     event: On<AfterMove>,
     tree: TreeView,
     members: Query<&WorkspaceMember>,
+    workspaces: Query<&Workspace>,
     mut commands: Commands,
 ) {
     if !members
@@ -347,7 +373,16 @@ pub(crate) fn after_move(
     let window = event
         .ancestors
         .iter()
-        .find_map(|ancestor| tree.descend(*ancestor));
+        .find_map(|ancestor| tree.descend(*ancestor))
+        .or_else(|| {
+            workspaces.get(event.source).ok().and_then(|state| {
+                state.recent().find(|window| {
+                    members
+                        .get(*window)
+                        .is_ok_and(|member| member.0 == event.source)
+                })
+            })
+        });
     commands.trigger(WorkspaceRequest::Select {
         workspace: event.source,
         window,

@@ -25,6 +25,7 @@ use weld_app::{
     ActiveBackend,
     input::{ShellCommand, ShellCommands},
 };
+use weld_float::{FloatManagement, FloatSettings};
 use weld_hoist::HoistWindow;
 use weld_i3_quirks::workspace::WorkspaceSettings;
 use weld_i3_quirks::{FocusWrapping, I3FocusRequest, I3MoveRequest, I3QuirksPlugin};
@@ -58,6 +59,7 @@ fn read_configuration(path: &Path) -> Result<Configuration> {
 impl Plugin for MasterConfigPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<ShellCommands>()
+            .init_resource::<FloatSettings>()
             .init_resource::<TileSettings>();
         if !app.is_plugin_added::<I3QuirksPlugin>() {
             app.add_plugins(I3QuirksPlugin);
@@ -76,6 +78,12 @@ impl Plugin for MasterConfigPlugin {
             initialized: false,
             pending_launches: VecDeque::new(),
         })
+        .configure_sets(
+            PreUpdate,
+            FloatManagement
+                .after(TileSystems::Prepare)
+                .before(TileSystems::Actions),
+        )
         .add_observer(dispatch_action)
         .add_systems(
             PreUpdate,
@@ -112,6 +120,7 @@ struct ConfigTarget<'w> {
     focus_wrapping: ResMut<'w, FocusWrapping>,
     workspaces: ResMut<'w, WorkspaceSettings>,
     keyboard: ResMut<'w, KeyboardSettings>,
+    floating: ResMut<'w, FloatSettings>,
     backend: Option<Res<'w, ActiveBackend>>,
 }
 
@@ -149,6 +158,9 @@ impl ConfigTarget<'_> {
         }
         if self.keyboard.keymap != config.keymap {
             self.keyboard.keymap = config.keymap;
+        }
+        if *self.floating != config.floating {
+            *self.floating = config.floating;
         }
     }
 }
@@ -241,6 +253,11 @@ fn dispatch_action(
             }
         },
         Action::Tile(operation) => effects.commands.trigger(TileRequest::Focused(operation)),
+        Action::Floating(enabled) => effects.commands.trigger(weld_tile::TileFloatingRequest {
+            window: None,
+            enabled,
+        }),
+        Action::FocusModeToggle => effects.commands.trigger(weld_i3_quirks::I3FocusModeToggle),
     }
     if let Some(redraw) = effects.redraw.as_mut() {
         redraw.write(RequestRedraw);
@@ -514,6 +531,7 @@ mod tests {
     fn rejected_candidate_leaves_live_settings_and_bindings_unchanged() {
         let mut app = App::new();
         app.init_resource::<WorkspaceSettings>();
+        app.init_resource::<FloatSettings>();
         app.add_plugins(GlobalShortcutPlugin)
             .init_resource::<TileSettings>()
             .init_resource::<FocusWrapping>()

@@ -112,11 +112,32 @@ struct RegisteredPointerShortcut {
 }
 
 #[derive(Resource, Default)]
-struct PointerShortcutRegistry {
+pub struct PointerShortcutRegistry {
     next_id: u64,
     shortcuts: Vec<RegisteredPointerShortcut>,
     pressed_keys: HashSet<LinuxKeycode>,
     captured_buttons: HashSet<LinuxButtonCode>,
+}
+
+/// Owner-scoped pointer bindings. Held captures survive replacement until release.
+#[derive(Default)]
+pub struct PointerShortcutSet(Vec<PointerShortcutId>);
+
+impl PointerShortcutSet {
+    pub fn replace(
+        &mut self,
+        registry: &mut PointerShortcutRegistry,
+        shortcuts: impl IntoIterator<Item = PointerShortcut>,
+    ) -> Vec<PointerShortcutId> {
+        registry
+            .shortcuts
+            .retain(|entry| !self.0.contains(&entry.id));
+        self.0 = shortcuts
+            .into_iter()
+            .map(|chord| registry.register(chord))
+            .collect();
+        self.0.clone()
+    }
 }
 
 impl PointerShortcutRegistry {
@@ -364,6 +385,41 @@ mod tests {
                 position: Some(Vec2::new(10.0, 20.0)),
             }]
         );
+    }
+
+    #[test]
+    fn replacement_preserves_held_capture_and_does_not_remove_other_owners() {
+        let (mut app, unrelated, _) = shortcut_app();
+        let mut owned = PointerShortcutSet::default();
+        let ids = owned.replace(
+            &mut app.world_mut().resource_mut::<PointerShortcutRegistry>(),
+            [PointerShortcut::new(
+                MouseButton::Right,
+                PointerShortcutModifiers::super_key(),
+            )],
+        );
+        filter_pointer_shortcut_event(app.world_mut(), &keyboard(125, ButtonState::Pressed));
+        assert!(filter_pointer_shortcut_event(
+            app.world_mut(),
+            &secondary(ButtonState::Pressed)
+        ));
+        owned.replace(
+            &mut app.world_mut().resource_mut::<PointerShortcutRegistry>(),
+            [],
+        );
+        let registry = app.world().resource::<PointerShortcutRegistry>();
+        assert!(registry.shortcuts.iter().any(|entry| entry.id == unrelated));
+        assert!(
+            !registry
+                .shortcuts
+                .iter()
+                .any(|entry| ids.contains(&entry.id))
+        );
+        assert!(filter_pointer_shortcut_event(
+            app.world_mut(),
+            &secondary(ButtonState::Released)
+        ));
+        assert!(!filter_pointer_shortcut_event(app.world_mut(), &motion()));
     }
 
     #[test]

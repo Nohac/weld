@@ -11,11 +11,12 @@ use bevy::{
         change_detection::{DetectChanges, Ref},
         component::Component,
         entity::Entity,
+        lifecycle::Remove,
         message::{MessageReader, MessageWriter},
         observer::On,
-        query::{With, Without},
+        query::{Added, With, Without},
         resource::Resource,
-        schedule::{ApplyDeferred, IntoScheduleConfigs},
+        schedule::{ApplyDeferred, IntoScheduleConfigs, SystemSet},
         system::{Commands, Local, Query, Res, ResMut, SystemParam},
     },
     input::{
@@ -30,10 +31,7 @@ use bevy::{
     window::RequestRedraw,
 };
 use weld_app::{
-    input::{
-        PointerShortcut, PointerShortcutAppExt, PointerShortcutId, PointerShortcutModifiers,
-        PointerShortcutPressed,
-    },
+    input::{PointerShortcut, PointerShortcutId, PointerShortcutModifiers, PointerShortcutPressed},
     layer::{WINDOW_Z_INDEX_MAX, WINDOW_Z_INDEX_MIN},
     output::{OutputGeometry, OutputPosition, PrimaryOutput, WeldOutput},
     surface::{
@@ -41,8 +39,9 @@ use weld_app::{
         ToplevelInteractionRequest, ToplevelInteractionRequestKind, ToplevelResizeEdge,
     },
 };
+use weld_input::{PointerShortcutRegistry, PointerShortcutSet, register_pointer_shortcuts};
 use weld_window::{
-    ClientResizeState, FocusedWindow, ManagedBy, ManagedWindow, PresentationInsets,
+    ClientResizeState, FloatingWindow, FocusedWindow, ManagedBy, ManagedWindow, PresentationInsets,
     PrimaryWindowPresentation, WindowClientResolver, WindowCloseHandle, WindowCommand,
     WindowCommandKind, WindowGeometry, WindowIntent, WindowIntentKind, WindowInteractionKind,
     WindowInteractionSession, WindowMoveHandle, WindowOccupant, WindowOutput,
@@ -50,27 +49,59 @@ use weld_window::{
     WindowZOrder, rounded_client_size,
 };
 
+const FLOAT_Z_INDEX_MIN: i32 = WINDOW_Z_INDEX_MIN + 1;
+
 /// The default freeform window manager.
 pub struct FloatPlugin;
 
 impl Plugin for FloatPlugin {
     fn build(&self, app: &mut App) {
         let manager = app.world_mut().spawn(FloatManager).id();
-        let move_shortcut = app.register_pointer_shortcut(PointerShortcut::new(
-            MouseButton::Left,
-            PointerShortcutModifiers::super_key(),
-        ));
-        let resize_shortcut = app.register_pointer_shortcut(PointerShortcut::new(
-            MouseButton::Right,
-            PointerShortcutModifiers::super_key(),
-        ));
         app.insert_resource(DefaultFloatManager(manager))
-            .insert_resource(FloatPointerShortcuts {
-                move_window: move_shortcut,
-                resize_window: resize_shortcut,
-            })
-            .init_resource::<FloatShortcutCapture>()
             .init_resource::<PlacementRandom>()
+            .add_plugins(FloatBehaviorPlugin)
+            .add_systems(
+                PreUpdate,
+                (initialize_windows, adopt_orphaned_windows)
+                    .chain()
+                    .before(FloatManagement)
+                    .in_set(WindowSystems::Management),
+            )
+            .add_systems(
+                PreUpdate,
+                reconcile_focus
+                    .after(reconcile_anchored_resize)
+                    .in_set(WindowSystems::Management),
+            )
+            .add_systems(
+                PreUpdate,
+                rehome_windows_by_center
+                    .after(reconcile_anchored_resize)
+                    .in_set(WindowSystems::Management),
+            );
+    }
+}
+
+/// Move, resize and raise behavior shared by floating-first and tiled shells.
+pub struct FloatBehaviorPlugin;
+
+/// Freeform geometry reconciliation, ordered after the shell's admission.
+#[derive(SystemSet, Clone, Copy, Debug, Eq, PartialEq, Hash)]
+pub struct FloatManagement;
+
+/// Live shell pointer chords. An absent modifier leaves all chords to clients.
+#[derive(Resource, Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct FloatSettings {
+    pub modifier: Option<PointerShortcutModifiers>,
+}
+
+impl Plugin for FloatBehaviorPlugin {
+    fn build(&self, app: &mut App) {
+        register_pointer_shortcuts(app);
+        app.init_resource::<FloatSettings>()
+            .configure_sets(PreUpdate, FloatManagement.in_set(WindowSystems::Management))
+            .init_resource::<FloatPointerShortcuts>()
+            .init_resource::<FloatShortcutCapture>()
             .init_resource::<WindowStack>()
             .add_message::<MouseButtonInput>()
             .add_message::<MouseMotion>()
@@ -79,39 +110,31 @@ impl Plugin for FloatPlugin {
             .add_observer(begin_move_handle)
             .add_observer(begin_resize_handle)
             .add_observer(close_window)
+            .add_observer(remove_floating)
+            .add_systems(PreUpdate, initialize_stacking.in_set(FloatManagement))
+            .add_systems(
+                PreUpdate,
+                synchronize_shortcuts
+                    .before(begin_pointer_shortcut_interactions)
+                    .in_set(FloatManagement),
+            )
             .add_systems(
                 PreUpdate,
                 handle_protocol_interactions.in_set(WindowSystems::Interaction),
             )
-            .add_systems(
-                PreUpdate,
-                (
-                    initialize_windows,
-                    adopt_orphaned_windows,
-                    reconcile_anchored_resize,
-                    reconcile_focus,
-                )
-                    .chain()
-                    .in_set(WindowSystems::Management),
-            )
+            .add_systems(PreUpdate, reconcile_anchored_resize.in_set(FloatManagement))
             .add_systems(
                 PreUpdate,
                 initialize_resize_anchors
-                    .after(initialize_windows)
                     .before(reconcile_anchored_resize)
-                    .in_set(WindowSystems::Management),
+                    .in_set(FloatManagement),
             )
             .add_systems(
                 PreUpdate,
                 begin_pointer_shortcut_interactions
-                    .before(initialize_windows)
-                    .in_set(WindowSystems::Management),
-            )
-            .add_systems(
-                PreUpdate,
-                rehome_windows_by_center
-                    .after(reconcile_anchored_resize)
-                    .in_set(WindowSystems::Management),
+                    .before(initialize_resize_anchors)
+                    .before(reconcile_anchored_resize)
+                    .in_set(FloatManagement),
             )
             .add_systems(
                 PreUpdate,
@@ -133,10 +156,40 @@ struct FloatManager;
 #[derive(Resource)]
 struct DefaultFloatManager(Entity);
 
-#[derive(Resource)]
+#[derive(Resource, Default)]
 struct FloatPointerShortcuts {
-    move_window: PointerShortcutId,
-    resize_window: PointerShortcutId,
+    move_window: Option<PointerShortcutId>,
+    resize_window: Option<PointerShortcutId>,
+    owned: PointerShortcutSet,
+}
+
+fn synchronize_shortcuts(
+    settings: Res<FloatSettings>,
+    mut shortcuts: ResMut<FloatPointerShortcuts>,
+    mut registry: ResMut<PointerShortcutRegistry>,
+) {
+    if !settings.is_changed() {
+        return;
+    }
+    let bindings = settings.modifier.into_iter().flat_map(|modifier| {
+        [
+            PointerShortcut::new(MouseButton::Left, modifier),
+            PointerShortcut::new(MouseButton::Right, modifier),
+        ]
+    });
+    let ids = shortcuts.owned.replace(&mut registry, bindings);
+    shortcuts.move_window = ids.first().copied();
+    shortcuts.resize_window = ids.get(1).copied();
+}
+
+fn remove_floating(event: On<Remove, FloatingWindow>, mut commands: Commands) {
+    commands
+        .entity(event.entity)
+        .try_remove::<(FloatInteractionControl, ResizeAnchor)>();
+    commands.trigger(WindowCommand {
+        window: event.entity,
+        kind: WindowCommandKind::EndInteraction,
+    });
 }
 
 #[derive(Resource, Default)]
@@ -174,7 +227,7 @@ struct WindowStack {
 impl Default for WindowStack {
     fn default() -> Self {
         Self {
-            next: Some(WINDOW_Z_INDEX_MIN),
+            next: Some(FLOAT_Z_INDEX_MIN),
         }
     }
 }
@@ -233,7 +286,6 @@ type UnmanagedWindowQuery<'w, 's> = Query<
         Option<&'static WindowOccupant>,
         Option<&'static WindowOutput>,
         &'static mut WindowGeometry,
-        &'static mut WindowZOrder,
     ),
     Without<ManagedBy>,
 >;
@@ -253,7 +305,6 @@ fn initialize_windows(
     mut commands: Commands,
     manager: Res<DefaultFloatManager>,
     random: Res<PlacementRandom>,
-    mut stack: ResMut<WindowStack>,
     mut windows: UnmanagedWindowQuery,
     occupants: Query<&weld_app::surface::ClientToplevel>,
     outputs: OutputQuery,
@@ -272,8 +323,8 @@ fn initialize_windows(
     };
 
     let mut unmanaged = windows.iter_mut().collect::<Vec<_>>();
-    unmanaged.sort_unstable_by_key(|(_, window, _, _, _, _)| window.id);
-    for (entity, window, occupant, assigned_output, mut geometry, mut z_order) in unmanaged {
+    unmanaged.sort_unstable_by_key(|(_, window, _, _, _)| window.id);
+    for (entity, window, occupant, assigned_output, mut geometry) in unmanaged {
         let output = assigned_output.map_or(primary_output, |output| output.0);
         let output_geometry = if output == primary_output {
             primary_geometry
@@ -290,11 +341,9 @@ fn initialize_windows(
             geometry.size,
             random.samples(placement_key),
         );
-        let allocated = stack.allocate().unwrap_or(WINDOW_Z_INDEX_MAX);
         geometry.position = position;
-        z_order.0 = allocated;
         let mut entity_commands = commands.entity(entity);
-        entity_commands.insert(ManagedBy(manager.0));
+        entity_commands.insert((ManagedBy(manager.0), FloatingWindow));
         if assigned_output.is_none() {
             entity_commands.insert(WindowOutput(output));
         }
@@ -342,12 +391,12 @@ type FloatWindowQuery<'w, 's> = Query<
         &'static ManagedBy,
         Option<&'static WindowInteractionSession>,
     ),
+    With<FloatingWindow>,
 >;
 
 #[derive(SystemParam)]
 struct HandleWindowIntentParams<'w, 's> {
     commands: Commands<'w, 's>,
-    manager: Res<'w, DefaultFloatManager>,
     stack: ResMut<'w, WindowStack>,
     windows: FloatWindowQuery<'w, 's>,
     insets: Query<'w, 's, &'static PresentationInsets>,
@@ -361,7 +410,6 @@ struct HandleWindowIntentParams<'w, 's> {
 fn handle_window_intent(intent: On<WindowIntent>, params: HandleWindowIntentParams) {
     let HandleWindowIntentParams {
         mut commands,
-        manager,
         mut stack,
         mut windows,
         insets,
@@ -376,17 +424,14 @@ fn handle_window_intent(intent: On<WindowIntent>, params: HandleWindowIntentPara
         commands.entity(window).remove::<FloatInteractionControl>();
     }
     if intent.kind == WindowIntentKind::Activate {
-        let float_managed = windows
-            .get(window)
-            .ok()
-            .is_some_and(|(_, _, managed_by, _)| managed_by.0 == manager.0);
-        if !float_managed {
+        let Ok((_, _, owner, _)) = windows.get(window) else {
             return;
-        }
+        };
+        let manager = owner.0;
         let current = windows.get(window).ok().map(|(_, z, _, _)| z.0);
-        let top = top_window_z(manager.0, &mut windows);
+        let top = top_window_z(manager, &mut windows);
         if current != top {
-            let z_index = next_window_z(&mut stack, manager.0, &mut windows);
+            let z_index = next_window_z(&mut stack, manager, &mut windows);
             if let Ok((_, mut z_order, _, _)) = windows.get_mut(window) {
                 z_order.0 = z_index;
             }
@@ -397,12 +442,9 @@ fn handle_window_intent(intent: On<WindowIntent>, params: HandleWindowIntentPara
         });
         return;
     }
-    let Ok((mut geometry, _, managed_by, interaction)) = windows.get_mut(window) else {
+    let Ok((mut geometry, _, _, interaction)) = windows.get_mut(window) else {
         return;
     };
-    if managed_by.0 != manager.0 {
-        return;
-    }
     match intent.kind {
         WindowIntentKind::Activate => {}
         WindowIntentKind::CloseRequested => {
@@ -467,7 +509,6 @@ fn handle_window_intent(intent: On<WindowIntent>, params: HandleWindowIntentPara
 
 #[derive(SystemParam)]
 struct FloatPointerTargets<'w, 's> {
-    manager: Res<'w, DefaultFloatManager>,
     projections: WindowProjectionLookup<'w, 's>,
     windows: Query<
         'w,
@@ -476,6 +517,7 @@ struct FloatPointerTargets<'w, 's> {
             &'static ManagedBy,
             Option<&'static WindowInteractionSession>,
         ),
+        With<FloatingWindow>,
     >,
 }
 
@@ -485,19 +527,13 @@ impl FloatPointerTargets<'_, '_> {
         self.windows
             .get(window)
             .ok()
-            .filter(|(managed_by, interaction)| {
-                managed_by.0 == self.manager.0 && interaction.is_none()
-            })
+            .filter(|(_, interaction)| interaction.is_none())
             .map(|_| window)
     }
 
     fn owned_window_for(&self, target: Entity) -> Option<Entity> {
         let window = self.projections.window_for(target)?;
-        self.windows
-            .get(window)
-            .ok()
-            .filter(|(managed_by, _)| managed_by.0 == self.manager.0)
-            .map(|_| window)
+        self.windows.get(window).ok().map(|_| window)
     }
 }
 
@@ -600,18 +636,13 @@ fn close_window(
 
 fn handle_protocol_interactions(
     mut requests: MessageReader<ToplevelInteractionRequest>,
-    manager: Res<DefaultFloatManager>,
     surfaces: Query<(
         &ClientToplevel,
         Option<&MappedSurface>,
         Option<&ClientDecorated>,
     )>,
     clients: WindowClientResolver,
-    windows: Query<(
-        &ManagedBy,
-        Option<&WindowInteractionSession>,
-        Option<&FloatInteractionControl>,
-    )>,
+    windows: ProtocolInteractionWindows,
     mut commands: Commands,
 ) {
     for request in requests.read().copied() {
@@ -624,12 +655,9 @@ fn handle_protocol_interactions(
         let Some(window) = clients.window_for_surface(request.surface) else {
             continue;
         };
-        let Ok((managed_by, interaction, control)) = windows.get(window) else {
+        let Ok((_, interaction, control)) = windows.get(window) else {
             continue;
         };
-        if managed_by.0 != manager.0 {
-            continue;
-        }
         match request.kind {
             ToplevelInteractionRequestKind::Move if interaction.is_none() => {
                 begin_float_interaction(
@@ -662,13 +690,23 @@ fn handle_protocol_interactions(
     }
 }
 
+type ProtocolInteractionWindows<'w, 's> = Query<
+    'w,
+    's,
+    (
+        &'static ManagedBy,
+        Option<&'static WindowInteractionSession>,
+        Option<&'static FloatInteractionControl>,
+    ),
+    With<FloatingWindow>,
+>;
+
 #[derive(SystemParam)]
 struct PointerShortcutInteractionParams<'w, 's> {
     presses: MessageReader<'w, 's, PointerShortcutPressed>,
     button_inputs: MessageReader<'w, 's, MouseButtonInput>,
     shortcuts: Res<'w, FloatPointerShortcuts>,
     capture: ResMut<'w, FloatShortcutCapture>,
-    manager: Res<'w, DefaultFloatManager>,
     projections: WindowProjectionLookup<'w, 's>,
     windows: Query<
         'w,
@@ -679,6 +717,7 @@ struct PointerShortcutInteractionParams<'w, 's> {
             &'static WindowOutput,
             Option<&'static WindowInteractionSession>,
         ),
+        With<FloatingWindow>,
     >,
     output_positions: Query<'w, 's, &'static OutputPosition, With<WeldOutput>>,
     commands: Commands<'w, 's>,
@@ -690,7 +729,6 @@ fn begin_pointer_shortcut_interactions(params: PointerShortcutInteractionParams)
         mut button_inputs,
         shortcuts,
         mut capture,
-        manager,
         projections,
         windows,
         output_positions,
@@ -701,9 +739,9 @@ fn begin_pointer_shortcut_interactions(params: PointerShortcutInteractionParams)
         .map(|input| (input.button, input.state))
         .collect::<HashMap<_, _>>();
     for press in presses.read().copied() {
-        let (button, shortcut_kind) = if press.shortcut() == shortcuts.move_window {
+        let (button, shortcut_kind) = if Some(press.shortcut()) == shortcuts.move_window {
             (MouseButton::Left, None)
-        } else if press.shortcut() == shortcuts.resize_window {
+        } else if Some(press.shortcut()) == shortcuts.resize_window {
             (MouseButton::Right, Some(press.position()))
         } else {
             continue;
@@ -720,10 +758,10 @@ fn begin_pointer_shortcut_interactions(params: PointerShortcutInteractionParams)
         else {
             continue;
         };
-        let Ok((managed_by, geometry, output, interaction)) = windows.get(window) else {
+        let Ok((_, geometry, output, interaction)) = windows.get(window) else {
             continue;
         };
-        if managed_by.0 != manager.0 || interaction.is_some() {
+        if interaction.is_some() {
             continue;
         }
         let kind = if let Some(position) = shortcut_kind {
@@ -895,24 +933,12 @@ fn end_pointer_interactions(
 /// The component insertion is deferred until the window pipeline flush before
 /// picking. This system runs before picking on every main-world advance, so
 /// the stored value reflects geometry before that advance's pointer deltas.
-fn initialize_resize_anchors(
-    mut commands: Commands,
-    manager: Res<DefaultFloatManager>,
-    windows: Query<
-        (
-            Entity,
-            &ManagedBy,
-            &WindowGeometry,
-            &WindowInteractionSession,
-        ),
-        Without<ResizeAnchor>,
-    >,
-) {
-    for (window, managed_by, geometry, interaction) in &windows {
+fn initialize_resize_anchors(mut commands: Commands, windows: UnanchoredResizeWindows) {
+    for (window, _, geometry, interaction) in &windows {
         let WindowInteractionKind::Resize(edges) = interaction.kind else {
             continue;
         };
-        if managed_by.0 == manager.0 && (edges.has_left() || edges.has_top()) {
+        if edges.has_left() || edges.has_top() {
             commands.entity(window).insert(ResizeAnchor {
                 fixed: geometry.position + geometry.size,
                 edges,
@@ -921,6 +947,18 @@ fn initialize_resize_anchors(
         }
     }
 }
+
+type UnanchoredResizeWindows<'w, 's> = Query<
+    'w,
+    's,
+    (
+        Entity,
+        &'static ManagedBy,
+        &'static WindowGeometry,
+        &'static WindowInteractionSession,
+    ),
+    (Without<ResizeAnchor>, With<FloatingWindow>),
+>;
 
 type AnchoredResizeQuery<'w, 's> = Query<
     'w,
@@ -934,20 +972,18 @@ type AnchoredResizeQuery<'w, 's> = Query<
         &'static ResizeAnchor,
         Option<&'static PrimaryWindowPresentation>,
     ),
+    With<FloatingWindow>,
 >;
 
 fn reconcile_anchored_resize(
     mut commands: Commands,
-    manager: Res<DefaultFloatManager>,
     revisions: Res<SurfaceCommitRevisions>,
     mut windows: AnchoredResizeQuery,
     clients: WindowClientResolver,
     insets: Query<&PresentationInsets>,
 ) {
-    for (window, mut geometry, managed_by, visibility, interaction, anchor, presentation) in
-        &mut windows
-    {
-        if managed_by.0 != manager.0 || *visibility == WindowVisibility::Hidden {
+    for (window, mut geometry, _, visibility, interaction, anchor, presentation) in &mut windows {
+        if *visibility == WindowVisibility::Hidden {
             commands.entity(window).remove::<ResizeAnchor>();
             continue;
         }
@@ -1061,7 +1097,35 @@ fn top_window_z(manager: Entity, windows: &mut FloatWindowQuery) -> Option<i32> 
         .max()
 }
 
+fn initialize_stacking(
+    added: Query<(Entity, &ManagedWindow, &ManagedBy), Added<FloatingWindow>>,
+    mut stack: ResMut<WindowStack>,
+    mut windows: FloatWindowQuery,
+    mut ordered: Local<Vec<(weld_window::WindowId, Entity, Entity)>>,
+) {
+    ordered.clear();
+    ordered.extend(
+        added
+            .iter()
+            .map(|(entity, window, owner)| (window.id, entity, owner.0)),
+    );
+    ordered.sort_unstable_by_key(|(id, _, _)| *id);
+    for (_, window, owner) in ordered.iter().copied() {
+        let z = next_window_z(&mut stack, owner, &mut windows);
+        if let Ok((_, mut order, _, _)) = windows.get_mut(window) {
+            order.0 = z;
+        }
+    }
+}
+
 fn next_window_z(stack: &mut WindowStack, manager: Entity, windows: &mut FloatWindowQuery) -> i32 {
+    if let Some(top) = top_window_z(manager, windows)
+        && stack.next.is_some_and(|next| next <= top)
+    {
+        stack.next = top
+            .checked_add(1)
+            .filter(|next| *next <= WINDOW_Z_INDEX_MAX);
+    }
     if let Some(z_index) = stack.allocate() {
         return z_index;
     }
@@ -1083,7 +1147,7 @@ fn rebase_window_order(stack: &mut WindowStack, order: &mut [i32]) {
     order.sort_unstable();
     for (offset, z_index) in order.iter_mut().enumerate() {
         let offset = i32::try_from(offset).unwrap_or(WINDOW_Z_INDEX_MAX);
-        *z_index = WINDOW_Z_INDEX_MIN
+        *z_index = FLOAT_Z_INDEX_MIN
             .saturating_add(offset)
             .min(WINDOW_Z_INDEX_MAX);
     }
@@ -1091,7 +1155,7 @@ fn rebase_window_order(stack: &mut WindowStack, order: &mut [i32]) {
         Some(z_index) => z_index
             .checked_add(1)
             .filter(|next| *next <= WINDOW_Z_INDEX_MAX),
-        None => Some(WINDOW_Z_INDEX_MIN),
+        None => Some(FLOAT_Z_INDEX_MIN),
     };
 }
 
@@ -1196,12 +1260,73 @@ mod tests {
 
     fn float_test_app() -> App {
         let mut app = App::new();
-        app.add_plugins((WindowPlugin, FloatPlugin))
-            .init_resource::<SurfaceActionQueue>()
-            .init_resource::<SurfaceCommitRevisions>()
-            .add_message::<ToplevelInteractionRequest>();
+        app.insert_resource(FloatSettings {
+            modifier: Some(PointerShortcutModifiers::super_key()),
+        })
+        .add_plugins((WindowPlugin, FloatPlugin))
+        .init_resource::<SurfaceActionQueue>()
+        .init_resource::<SurfaceCommitRevisions>()
+        .add_message::<ToplevelInteractionRequest>();
         spawn_output(&mut app, 1, UVec2::new(800, 600), 1.0, true);
         app
+    }
+
+    #[test]
+    fn shared_behavior_moves_only_selected_floating_windows_without_taking_ownership() {
+        let mut app = App::new();
+        app.init_resource::<SurfaceActionQueue>()
+            .add_message::<ToplevelInteractionRequest>()
+            .add_plugins((WindowPlugin, FloatBehaviorPlugin));
+        let manager = app.world_mut().spawn_empty().id();
+        let output = spawn_output(&mut app, 1, UVec2::new(800, 600), 1.0, true);
+        let tiled = app
+            .world_mut()
+            .spawn((
+                ManagedWindow {
+                    id: weld_window::WindowId::new(1),
+                },
+                ManagedBy(manager),
+                WindowOutput(output),
+                WindowVacancy::Retain,
+            ))
+            .id();
+        let floating = app
+            .world_mut()
+            .spawn((
+                ManagedWindow {
+                    id: weld_window::WindowId::new(2),
+                },
+                ManagedBy(manager),
+                WindowOutput(output),
+                WindowVacancy::Retain,
+                FloatingWindow,
+            ))
+            .id();
+        app.update();
+        let before = *app.world().get::<WindowGeometry>(tiled).expect("geometry");
+        for window in [tiled, floating] {
+            app.world_mut().trigger(WindowIntent {
+                window,
+                kind: WindowIntentKind::MoveBy(Vec2::new(20.0, 30.0)),
+            });
+        }
+        app.update();
+        assert_eq!(
+            *app.world().get::<WindowGeometry>(tiled).expect("tile"),
+            before
+        );
+        assert_eq!(
+            app.world()
+                .get::<WindowGeometry>(floating)
+                .expect("float")
+                .position,
+            before.position + Vec2::new(20.0, 30.0)
+        );
+        assert_eq!(
+            app.world().get::<ManagedBy>(floating),
+            Some(&ManagedBy(manager))
+        );
+        assert!(app.world().get::<WindowZOrder>(floating).expect("order").0 > 0);
     }
 
     fn admit_float_window(app: &mut App, id: u64) -> Entity {
@@ -1279,7 +1404,8 @@ mod tests {
         let foreign_manager = app.world_mut().spawn_empty().id();
         app.world_mut()
             .entity_mut(window)
-            .insert(ManagedBy(foreign_manager));
+            .insert(ManagedBy(foreign_manager))
+            .remove::<FloatingWindow>();
         app.world_mut().write_message(ToplevelInteractionRequest {
             surface: surface_id,
             kind: ToplevelInteractionRequestKind::Move,
@@ -1302,7 +1428,11 @@ mod tests {
             .spawn(WindowProjection::new(window, Entity::PLACEHOLDER))
             .id();
         let picked_child = app.world_mut().spawn(ChildOf(root)).id();
-        let shortcut = app.world().resource::<FloatPointerShortcuts>().move_window;
+        let shortcut = app
+            .world()
+            .resource::<FloatPointerShortcuts>()
+            .move_window
+            .expect("move binding");
 
         app.world_mut().write_message(PointerShortcutPressed::new(
             shortcut,
@@ -1336,7 +1466,11 @@ mod tests {
             .spawn(WindowProjection::new(window, Entity::PLACEHOLDER))
             .id();
         let picked_child = app.world_mut().spawn(ChildOf(root)).id();
-        let shortcut = app.world().resource::<FloatPointerShortcuts>().move_window;
+        let shortcut = app
+            .world()
+            .resource::<FloatPointerShortcuts>()
+            .move_window
+            .expect("move binding");
         assert!(app.world_mut().despawn(picked_child));
 
         app.world_mut().write_message(PointerShortcutPressed::new(
@@ -1410,7 +1544,8 @@ mod tests {
         let shortcut = app
             .world()
             .resource::<FloatPointerShortcuts>()
-            .resize_window;
+            .resize_window
+            .expect("resize binding");
         app.world_mut().write_message(MouseButtonInput {
             button: MouseButton::Right,
             state: ButtonState::Pressed,
@@ -1500,7 +1635,8 @@ mod tests {
         let shortcut = app
             .world()
             .resource::<FloatPointerShortcuts>()
-            .resize_window;
+            .resize_window
+            .expect("resize binding");
 
         app.world_mut().write_message(MouseButtonInput {
             button: MouseButton::Right,
@@ -1554,7 +1690,11 @@ mod tests {
             .world_mut()
             .spawn(WindowProjection::new(window, output))
             .id();
-        let shortcut = app.world().resource::<FloatPointerShortcuts>().move_window;
+        let shortcut = app
+            .world()
+            .resource::<FloatPointerShortcuts>()
+            .move_window
+            .expect("move binding");
         app.world_mut().write_message(MouseButtonInput {
             button: MouseButton::Left,
             state: ButtonState::Pressed,
@@ -1911,16 +2051,16 @@ mod tests {
         let mut stack = WindowStack { next: None };
         let mut empty = Vec::new();
         rebase_window_order(&mut stack, &mut empty);
-        assert_eq!(stack.allocate(), Some(WINDOW_Z_INDEX_MIN));
+        assert_eq!(stack.allocate(), Some(FLOAT_Z_INDEX_MIN));
 
         let mut order = vec![WINDOW_Z_INDEX_MAX, WINDOW_Z_INDEX_MIN, 7];
         rebase_window_order(&mut stack, &mut order);
         assert_eq!(
             order,
             vec![
-                WINDOW_Z_INDEX_MIN,
-                WINDOW_Z_INDEX_MIN + 1,
-                WINDOW_Z_INDEX_MIN + 2,
+                FLOAT_Z_INDEX_MIN,
+                FLOAT_Z_INDEX_MIN + 1,
+                FLOAT_Z_INDEX_MIN + 2,
             ]
         );
         assert!(stack.allocate().is_some_and(|z| z <= WINDOW_Z_INDEX_MAX));
@@ -2103,6 +2243,12 @@ mod tests {
                 .get::<WindowInteractionSession>(window)
                 .is_some()
         );
+
+        // A resizing-state configure also needs a subsequent client commit.
+        app.world_mut()
+            .resource_mut::<SurfaceCommitRevisions>()
+            .record_commit(SurfaceId::for_test(91));
+        app.update();
 
         app.world_mut().trigger(WindowCommand {
             window,

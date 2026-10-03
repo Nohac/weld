@@ -103,6 +103,7 @@ weld-window = { path = "crates/weld-window" }
 weld-window-ui = { path = "crates/weld-window-ui" }
 weld-ssd = { path = "crates/weld-ssd" }
 weld-tile = { path = "crates/weld-tile" }
+weld-float = { path = "crates/weld-float" }
 weld-i3-quirks = { path = "crates/weld-i3-quirks" }
 weld-gamepad = { path = "crates/weld-gamepad" }
 weld-hoist = { path = "crates/weld-hoist" }
@@ -117,7 +118,6 @@ tracing-tracy = { workspace = true, optional = true }
 
 [dev-dependencies]
 pollster.workspace = true
-weld-float = { path = "crates/weld-float" }
 wgpu = { workspace = true, features = ["vulkan"] }
 
 # Keep Weld's code quick to rebuild while giving Bevy, Smithay, wgpu, and other
