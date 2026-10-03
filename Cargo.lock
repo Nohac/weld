@@ -8120,6 +8120,7 @@ dependencies = [
  "tracing",
  "weld-app",
  "weld-core",
+ "weld-input",
 ]
 
 [[package]]

@@ -7,6 +7,7 @@
 const PROFILE_TARGET: &str = "weld_profile";
 
 pub mod fullscreen;
+pub mod pointer;
 pub mod workspace;
 pub mod workspace_protocol;
 
@@ -846,6 +847,7 @@ impl Plugin for WindowPlugin {
             .configure_sets(
                 PreUpdate,
                 WindowSystems::InteractionFinalize
+                    .after(WindowSystems::UiReconcile)
                     .after(PickingSystems::Hover)
                     .before(WindowSystems::FinalReconcile),
             )

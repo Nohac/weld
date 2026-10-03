@@ -12,21 +12,18 @@ use bevy::{
         schedule::IntoScheduleConfigs,
         system::{Commands, Local, Query, Res, ResMut, SystemParam},
     },
-    picking::{
-        events::{Click, Pointer, Press},
-        pointer::PointerButton,
-    },
     window::RequestRedraw,
 };
 use weld_app::output::{OutputGeometry, OutputWorkArea, WeldOutput};
 use weld_app::surface::ClientToplevelParent;
 use weld_window::workspace::{FocusedWorkspace, Workspace, WorkspaceMember, WorkspaceOutput};
 use weld_window::{
-    FloatingWindow, FocusedWindow, ManagedBy, ManagedWindow, WindowClientResolver,
-    WindowCloseHandle, WindowCommand, WindowCommandKind, WindowGeometry, WindowIntent,
-    WindowIntentKind, WindowOutput, WindowProjectionLookup, WindowSystems, WindowVisibility,
-    WindowZOrder,
+    FloatingWindow, FocusedWindow, ManagedBy, ManagedWindow, WindowClientResolver, WindowCommand,
+    WindowCommandKind, WindowGeometry, WindowIntent, WindowIntentKind, WindowOutput, WindowSystems,
+    WindowVisibility, WindowZOrder,
 };
+
+use weld_window::pointer::{WindowPointerPlugin, WindowPointerSystems};
 
 use crate::{
     TileChild, TileCommands, TileFocusHistory, TileParent, TileSettings, TileState, TileSystems,
@@ -55,14 +52,30 @@ struct TiledWindow {
 
 impl Plugin for TilePlugin {
     fn build(&self, app: &mut App) {
+        if !app.is_plugin_added::<WindowPointerPlugin>() {
+            app.add_plugins(WindowPointerPlugin);
+        }
+        app.configure_sets(
+            PreUpdate,
+            WindowPointerSystems::Start
+                .after(TileSystems::Prepare)
+                .before(TileSystems::Actions),
+        );
         app.init_resource::<TileSettings>()
             .init_resource::<TileState>()
             .init_resource::<TileCommands>()
             .init_resource::<TileFocusHistory>()
             .init_resource::<LayoutDirty>()
             .add_observer(intent)
-            .add_observer(activate)
-            .add_observer(close)
+            .add_observer(crate::resize::begin)
+            .add_observer(crate::resize::motion)
+            .add_observer(crate::resize::tree_changed)
+            .add_systems(
+                PreUpdate,
+                crate::resize::validate_sessions
+                    .after(TileSystems::Layout)
+                    .in_set(WindowSystems::Management),
+            )
             .add_observer(operations::apply_request)
             .add_observer(structural::apply_edit)
             .add_observer(workspace::created)
@@ -477,50 +490,4 @@ fn intent(
         kind,
     });
     redraw.write(RequestRedraw);
-}
-
-fn activate(
-    mut event: On<Pointer<Press>>,
-    projections: WindowProjectionLookup,
-    parents: Query<&TileParent>,
-    mut commands: Commands,
-) {
-    if event.button != PointerButton::Primary {
-        return;
-    }
-    if let Some(window) = projections
-        .window_for(event.entity)
-        .filter(|window| parents.contains(*window))
-    {
-        event.propagate(false);
-        commands.trigger(WindowIntent {
-            window,
-            kind: WindowIntentKind::Activate,
-        });
-    }
-}
-
-fn close(
-    mut event: On<Pointer<Click>>,
-    projections: WindowProjectionLookup,
-    handles: Query<(), With<WindowCloseHandle>>,
-    parents: Query<&TileParent>,
-    mut commands: Commands,
-) {
-    if event.button != PointerButton::Primary
-        || !handles.contains(event.entity)
-        || event.original_event_target() != event.entity
-    {
-        return;
-    }
-    if let Some(window) = projections
-        .window_for(event.entity)
-        .filter(|window| parents.contains(*window))
-    {
-        event.propagate(false);
-        commands.trigger(WindowIntent {
-            window,
-            kind: WindowIntentKind::CloseRequested,
-        });
-    }
 }

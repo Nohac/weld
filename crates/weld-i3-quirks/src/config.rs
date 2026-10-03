@@ -6,12 +6,12 @@ use crate::workspace::{
 };
 use anyhow::{Context, Result, bail, ensure};
 use bevy::color::{Color, Srgba};
-use weld_float::FloatSettings;
 use weld_input::{GlobalShortcut, KeyboardKeymap};
 use weld_ssd::{BorderStyle, FrameColors, SsdSettings};
 use weld_sway_config::Statement;
 use weld_tile::{Direction, SplitAxis, TileOperation, TileSettings};
 use weld_window::fullscreen::{FullscreenAction, FullscreenMode};
+use weld_window::pointer::WindowPointerSettings;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Action<Extension = ()> {
@@ -37,7 +37,7 @@ pub struct Configuration<Extension = ()> {
     pub keymap: Option<KeyboardKeymap>,
     pub workspaces: WorkspaceSettings,
     pub startup: Vec<StartupCommand>,
-    pub floating: FloatSettings,
+    pub pointer: WindowPointerSettings,
     pub decorations: SsdSettings,
 }
 
@@ -57,7 +57,7 @@ impl<Extension> Default for Configuration<Extension> {
             keymap: None,
             workspaces: WorkspaceSettings::default(),
             startup: Vec::new(),
-            floating: FloatSettings::default(),
+            pointer: WindowPointerSettings::default(),
             decorations: SsdSettings::default(),
         }
     }
@@ -188,7 +188,7 @@ fn apply<Extension>(config: &mut Configuration<Extension>, statement: &Statement
             }
         }
         ("floating_modifier", [value]) => {
-            config.floating.modifier = Some(weld_sway_config::input::pointer_modifiers(value)?)
+            config.pointer.modifier = Some(weld_sway_config::input::pointer_modifiers(value)?)
         }
         ("focus_wrapping", [value]) => {
             config.focus_wrapping = match *value {
@@ -600,7 +600,7 @@ mod tests {
         )
         .expect("config");
         assert_eq!(
-            config.floating.modifier,
+            config.pointer.modifier,
             Some(weld_input::PointerShortcutModifiers {
                 alt: true,
                 control: true,

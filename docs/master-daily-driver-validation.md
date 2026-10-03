@@ -99,6 +99,29 @@ Further milestone checks will be added as implementation and validation land.
 
 The example keeps Mod+B for border toggling; launch Blender with Mod+Shift+B.
 
+## Tiled mouse resizing
+
+1. Open two terminals side by side. Drag the shared border with the left button.
+   Both windows should resize smoothly; their tree/order should remain unchanged.
+2. Create a vertical split on one side. Drag the corner where the three windows
+   meet. Horizontal motion should move the outer split, vertical motion the inner.
+3. Mod+right-drag toward an interior shared edge should perform the same resize,
+   including on a client-decorated window. Outer edges without a neighboring tile
+   are no-ops. Mod+left-drag continues to move floating windows only.
+4. Release outside the window. Subsequent pointer motion must not continue resizing.
+   Releasing another mouse button while holding the initiating button must not end it.
+5. During a resize, close a neighboring window, switch workspace, toggle floating,
+   or enter fullscreen. The old drag must stop without moving an unrelated split.
+6. Repeat floating titlebar/modifier drags and CSD-native resizing. Reload pointer
+   bindings while holding a drag, then release; there must be no stuck capture.
+   Try a tiled CSD titlebar drag too: unsupported move requests must release
+   cleanly when the button is released.
+
+Automated coverage uses the shared border-press/motion/release adapter plus native
+tile-policy tests for ancestor corners, bounded shares, invalid deltas, tree-change
+cancellation, and competing requests in one batch. Existing floating settlement
+and captured-release regressions remain in the suite.
+
 ## Fullscreen validation
 
 1. With several tiles, use Mod+A. The selected app should fill the output,

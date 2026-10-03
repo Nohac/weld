@@ -11,6 +11,7 @@ mod history;
 mod layout;
 mod operations;
 mod plugin;
+mod resize;
 mod structural;
 mod workspace;
 

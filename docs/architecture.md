@@ -192,8 +192,10 @@ i3 actions. There is no shared cross-backend configuration IR.
 
 Dependencies point inward: `weld-core` implements the local Smithay adapter
 through `weld-client`; `weld-app` depends on both; `weld-window` depends on
-`weld-app`; the UI and floating-policy crates depend on the window domain
+`weld-app` and `weld-input`; the UI and floating-policy crates depend on the window domain
 rather than on each other; and the distribution composes the complete set.
+The i3 interpreter uses native window pointer settings, with `weld-float` needed
+only by its integration tests.
 Core, hoist protocol, and hoist core must not depend on Bevy, and application
 or policy crates must not depend directly on Smithay. A custom distribution can retain
 `weld-window` while replacing `weld-window-ui`, `weld-ssd`, `weld-float`,
@@ -1174,20 +1176,19 @@ Master's config plugin queues startup `exec` and reload `exec_always` commands
 through the existing host client launcher after validated configuration install.
 
 Validated pointer `xdg_toplevel.move` and `xdg_toplevel.resize` requests cross
-the Smithay boundary as protocol-neutral ECS messages. The active window
-manager consumes those requests directly, resolves their occupant, verifies
-manager ownership, and decides whether to create or end an interaction.
-`weld-float` records protocol-controlled lifetime separately from
+the Smithay boundary as protocol-neutral ECS messages. The shared pointer
+adapter resolves their occupant and offers the operation to the active manager,
+which validates ownership and geometry before accepting it. The shared adapter
+records protocol-controlled lifetime separately from
 pointer-controlled lifetime; Smithay's release-derived protocol end is the
 only input fact that terminates a protocol-controlled session.
 
 Presentation crates do not choose window actions. `weld-window` defines
 passive `WindowMoveHandle`, `WindowResizeHandle`, and `WindowCloseHandle`
 components. SSD and other presentations place those headless affordances on
-their Bevy entities, while the active manager installs the pointer observers
-that interpret them. `weld-float` currently binds primary press to activation,
-move handles, and resize handles, and primary click to close handles. A
-different manager can consume the same affordances with different policy.
+their Bevy entities. `WindowPointerPlugin` binds primary press to activation,
+move handles and resize handles, and primary click to close handles. The active
+manager validates ownership and supported geometry before accepting the request.
 This follows Bevy's headless-widget and styled-presentation split without
 depending on Feathers. `weld-window-ui` retains presentation feedback such as
 resize cursor icons, but it emits no move, resize, focus, or close policy.
@@ -1196,27 +1197,28 @@ After accepting an interaction, a manager uses the neutral
 `WindowCommand::BeginInteraction` and `WindowCommand::EndInteraction` commands
 to publish the single queryable `WindowInteractionSession`. Begin commands are
 manager-private by convention; the window primitive validates occupant state
-and maintains exclusivity but does not read buttons or motion. `weld-float`
+and maintains exclusivity. The shared `weld-window::pointer` adapter
 owns the selected input controller, translates frame-paced mouse motion into
 the public manager intents `MoveBy` and `ResizeBy`, and ends pointer-controlled
 sessions on the button it selected. Those intents are not mouse-specific:
 keyboard, touch, gamepad, remote, and scripted systems can provide deltas to
 the owning manager through the same boundary. Output re-homing, projection
 replacement, and temporary occupant unmapping therefore cannot interrupt an
-active interaction.
+active floating interaction. Tiled resize sessions retire when their split tree
+changes or their workspace becomes hidden.
 
-`weld-float` installs move and resize chords from live `FloatSettings`; Master's
+`WindowPointerPlugin` installs chords from live `WindowPointerSettings`; Master's
 `floating_modifier` translation provides the modifier, with left-button move and
 right-button resize. No modifier chords are installed when the setting is absent. Raw
 ingress is the sole chord evaluator: it consumes a matching press and paired
 release before client delivery, then retains the frontmost picked Bevy entity
 and compositor-logical press position in `PointerShortcutPressed` for the next
-application frame. Float policy resolves that entity through its
+application frame. The shared adapter resolves that entity through its
 `WindowProjection`, activates an owned window, and starts the selected action.
 Modifier resize follows Sway's quadrant rule, choosing one horizontal and one
 vertical edge relative to the window's global center. The initiating button is
-float policy, not part of the window primitive, so another manager may bind
-left, right, middle, or another supported button differently.
+the pointer adapter's input state. Float policy changes freeform geometry; tile
+policy changes adjacent split weights using the same capture and release path.
 
 Captured motion remains in the Bevy input batch but is withheld before Smithay
 sees it; this is a narrow shortcut filter, not yet a native shell pointer grab,
@@ -1257,13 +1259,13 @@ requests discard any latched size. Fullscreen size and state replace the same
 coalesced configure, clearing interactive-resize state together; future maximize
 policy must preserve this atomicity. The window domain records the
 surface commit revision at each client resize request. For left and top edges,
-`weld-float` retains the fixed edge in a private settlement anchor as the live
-interaction session ends. That anchor remains until the revision
+`weld-float` retains the fixed edge in a private settlement anchor when the shared
+adapter ends the live interaction. That anchor remains until the revision
 advances, regardless of whether a constrained client commits the exact
 requested size, and is discarded if its occupant unmaps. Client-issued
 protocol move and resize requests
 are accepted only for client-decorated windows; Weld's chrome owns movement
-for server-decorated windows, and SSD resize handles remain outside this slice.
+for server-decorated windows. SSD resize handles use the shared pointer adapter.
 Client-decorated applications also own the threshold for deciding that a press
 has become a titlebar drag. Before the client sends `xdg_toplevel.move`, Weld
 cannot distinguish that intent from clicking any other client-owned control.

@@ -25,7 +25,7 @@ use weld_app::{
     ActiveBackend,
     input::{ShellCommand, ShellCommands},
 };
-use weld_float::{FloatManagement, FloatSettings};
+use weld_float::FloatManagement;
 use weld_hoist::HoistWindow;
 use weld_i3_quirks::workspace::WorkspaceSettings;
 use weld_i3_quirks::{FocusWrapping, I3FocusRequest, I3MoveRequest, I3QuirksPlugin};
@@ -36,6 +36,7 @@ use weld_input::{
 use weld_ssd::{BorderRequest, SsdSettings};
 use weld_tile::{TileRequest, TileSettings, TileSystems};
 use weld_window::fullscreen::{FullscreenAction, FullscreenMode, FullscreenRequest};
+use weld_window::pointer::WindowPointerSettings;
 use weld_window::{FocusedWindow, workspace_protocol::WorkspaceProtocolPlugin};
 
 /// Selects and translates the distribution's configuration file.
@@ -61,7 +62,7 @@ fn read_configuration(path: &Path) -> Result<Configuration> {
 impl Plugin for MasterConfigPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<ShellCommands>()
-            .init_resource::<FloatSettings>()
+            .init_resource::<WindowPointerSettings>()
             .init_resource::<SsdSettings>()
             .init_resource::<TileSettings>();
         if !app.is_plugin_added::<I3QuirksPlugin>() {
@@ -123,7 +124,7 @@ struct ConfigTarget<'w> {
     focus_wrapping: ResMut<'w, FocusWrapping>,
     workspaces: ResMut<'w, WorkspaceSettings>,
     keyboard: ResMut<'w, KeyboardSettings>,
-    floating: ResMut<'w, FloatSettings>,
+    pointer: ResMut<'w, WindowPointerSettings>,
     decorations: ResMut<'w, SsdSettings>,
     backend: Option<Res<'w, ActiveBackend>>,
 }
@@ -163,8 +164,8 @@ impl ConfigTarget<'_> {
         if self.keyboard.keymap != config.keymap {
             self.keyboard.keymap = config.keymap;
         }
-        if *self.floating != config.floating {
-            *self.floating = config.floating;
+        if *self.pointer != config.pointer {
+            *self.pointer = config.pointer;
         }
         if *self.decorations != config.decorations {
             *self.decorations = config.decorations;
@@ -549,7 +550,7 @@ mod tests {
     fn rejected_candidate_leaves_live_settings_and_bindings_unchanged() {
         let mut app = App::new();
         app.init_resource::<WorkspaceSettings>();
-        app.init_resource::<FloatSettings>();
+        app.init_resource::<WindowPointerSettings>();
         app.init_resource::<SsdSettings>();
         app.add_plugins(GlobalShortcutPlugin)
             .init_resource::<TileSettings>()

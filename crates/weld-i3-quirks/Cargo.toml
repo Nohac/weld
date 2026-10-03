@@ -12,9 +12,9 @@ weld-input = { path = "../weld-input", features = ["bevy"] }
 weld-sway-config = { path = "../weld-sway-config", features = ["input"] }
 weld-tile = { path = "../weld-tile" }
 weld-window = { path = "../weld-window" }
-weld-float = { path = "../weld-float" }
 weld-ssd = { path = "../weld-ssd" }
 
 [dev-dependencies]
+weld-float = { path = "../weld-float" }
 indoc.workspace = true
 weld-app = { path = "../weld-app", features = ["test-support"] }

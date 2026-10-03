@@ -20,6 +20,8 @@ Alt+Shift+Enter, leaving Alt+F for focus-right. Ordinary clicks select tiles;
 decoration close buttons work. Alt+Shift+Space toggles floating; Alt+Control+P
 selects the most recently focused window in the other layout plane. Alt+left
 drag moves floating windows, and Alt+right drag resizes from the pointer's quadrant.
+Tiles resize at shared split boundaries, through a border drag or the same
+modifier-right drag toward an interior edge.
 
 The example starts Waybar with `examples/waybar.jsonc` and `examples/waybar.css`;
 launch from the repository root so those relative paths resolve. Waybar's
@@ -51,7 +53,8 @@ There is no file watcher yet; reload rereads the supplied path.
   first searches ancestor splits for a directional neighbor, then uses the
   innermost wrap candidate. `force` wraps at the first eligible split edge.
   Directional output traversal is a follow-up, so `workspace` currently behaves like `yes`.
-- `floating_modifier MODIFIER[+MODIFIER...]` enables floating move/resize chords.
+- `floating_modifier MODIFIER[+MODIFIER...]` configures shared window pointer chords:
+  move for floating windows and resize for floating or tiled windows.
   Reload replaces these bindings while retaining already captured releases.
   Omission disables modifier pointer chords; titlebar and resize handles remain usable.
 - `floating enable|disable|toggle` and `focus mode_toggle` are bound commands.
@@ -302,6 +305,20 @@ another workspace without adding a tile. Declared-parent detection is the first
 dialog policy; fixed-size/type hints and rules are subsequent milestones.
 Cross-output workspace transfers preserve output-local freeform geometry;
 clamping a large floating window onto a smaller destination remains a follow-up.
+
+### Mouse resizing
+
+`WindowPointerPlugin` owns picking, modifier chords, native-grab requests,
+frame-paced motion and matching-button release. Configuration publishes
+`WindowPointerSettings`; float and tile policies accept supported interactions.
+Acceptance installs the session, input owner and policy anchor atomically.
+
+The tiler resolves each requested edge to a neighboring pair of split branches,
+walking ancestors when necessary. Corner drags can adjust different ancestors
+on the two axes. Motion changes only the pair's weights, preserving their total
+share and a five-percent minimum per branch. Outer output edges without an
+adjacent branch are no-ops. Tree changes, hidden workspaces and fullscreen retire
+the active resize; a release of another mouse button leaves it active.
 
 ### Decorations
 

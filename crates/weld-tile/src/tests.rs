@@ -25,6 +25,306 @@ use weld_window::{
 };
 
 use super::*;
+use bevy::input::ButtonState;
+use bevy::input::mouse::{MouseButton, MouseButtonInput, MouseMotion};
+use weld_app::surface::ToplevelResizeEdge;
+use weld_window::pointer::{PointerInteractionControl, PointerInteractionRequest};
+use weld_window::{
+    WindowIntent, WindowIntentKind, WindowInteractionKind, WindowInteractionSession,
+};
+
+fn start_resize(app: &mut App, window: Entity, edges: ToplevelResizeEdge) {
+    app.world_mut().trigger(PointerInteractionRequest {
+        window,
+        kind: WindowInteractionKind::Resize(edges),
+        control: PointerInteractionControl::Pointer(MouseButton::Left),
+    });
+    app.world_mut().flush();
+}
+
+fn resize_motion(app: &mut App, window: Entity, delta: Vec2) {
+    app.world_mut().trigger(WindowIntent {
+        window,
+        kind: WindowIntentKind::ResizeBy(delta),
+    });
+    app.world_mut().flush();
+}
+
+#[test]
+fn hiding_workspace_before_motion_preserves_split_weights() {
+    let mut app = app();
+    let first = window(&mut app, 1);
+    let _second = window(&mut app, 2);
+    start_resize(&mut app, first, ToplevelResizeEdge::Right);
+    let before = geometry(&app, first);
+    app.world_mut()
+        .entity_mut(first)
+        .insert(weld_window::WindowVisibility::Hidden);
+    resize_motion(&mut app, first, Vec2::new(50.0, 0.0));
+    assert_eq!(geometry(&app, first), before);
+    assert!(app.world().get::<WindowInteractionSession>(first).is_none());
+}
+
+#[test]
+fn tiled_csd_resize_uses_the_shared_protocol_lifetime() {
+    use weld_app::surface::{
+        ClientDecorated, ToplevelInteractionRequest, ToplevelInteractionRequestKind,
+    };
+    let mut app = app();
+    let first = window(&mut app, 1);
+    let _second = window(&mut app, 2);
+    let surface = SurfaceId::for_test(777);
+    app.world_mut().spawn((
+        ClientToplevel { surface },
+        ClientDecorated,
+        ClientSource {
+            id: surface.source(),
+            provenance: ClientProvenance::Local,
+        },
+        MappedSurface {
+            logical_size: Vec2::new(400.0, 600.0),
+            visual_size: Vec2::new(400.0, 600.0),
+            visual_offset: Vec2::ZERO,
+            opaque: true,
+            alpha_mode: Default::default(),
+        },
+        OccupiesWindow(first),
+    ));
+    app.update();
+    take_surface_actions(app.world_mut());
+    app.world_mut().write_message(ToplevelInteractionRequest {
+        surface,
+        kind: ToplevelInteractionRequestKind::Resize {
+            edges: ToplevelResizeEdge::Right,
+        },
+    });
+    app.world_mut().write_message(MouseMotion {
+        delta: Vec2::new(40.0, 0.0),
+    });
+    app.update();
+    assert_eq!(
+        app.world().get::<PointerInteractionControl>(first),
+        Some(&PointerInteractionControl::Protocol)
+    );
+    assert_eq!(
+        geometry(&app, first).size.x,
+        440.0,
+        "session {:?}, anchor {:?}",
+        app.world().get::<WindowInteractionSession>(first),
+        app.world().get::<crate::resize::TileResizeSession>(first)
+    );
+    assert!(
+        take_surface_actions(app.world_mut()).contains(&SurfaceAction::Resize {
+            surface,
+            logical_size: UVec2::new(440, 600),
+            resizing: true,
+            fullscreen: false
+        })
+    );
+    app.world_mut().write_message(ToplevelInteractionRequest {
+        surface,
+        kind: ToplevelInteractionRequestKind::End,
+    });
+    app.update();
+    assert!(app.world().get::<WindowInteractionSession>(first).is_none());
+    assert!(
+        app.world()
+            .get::<PointerInteractionControl>(first)
+            .is_none()
+    );
+    assert!(
+        take_surface_actions(app.world_mut()).contains(&SurfaceAction::Resize {
+            surface,
+            logical_size: UVec2::new(440, 600),
+            resizing: false,
+            fullscreen: false
+        })
+    );
+}
+
+#[test]
+fn batched_resize_requests_cannot_replace_the_active_button_or_boundary() {
+    let mut app = app();
+    let _left = window(&mut app, 1);
+    let top = window(&mut app, 2);
+    command(&mut app, 2, TileOperation::Split(SplitAxis::Vertical));
+    let _bottom = window(&mut app, 3);
+    for (edges, button) in [
+        (ToplevelResizeEdge::Bottom, MouseButton::Left),
+        (ToplevelResizeEdge::Left, MouseButton::Right),
+    ] {
+        app.world_mut().trigger(PointerInteractionRequest {
+            window: top,
+            kind: WindowInteractionKind::Resize(edges),
+            control: PointerInteractionControl::Pointer(button),
+        });
+    }
+    app.world_mut().flush();
+    assert_eq!(
+        app.world().get::<PointerInteractionControl>(top),
+        Some(&PointerInteractionControl::Pointer(MouseButton::Left))
+    );
+    resize_motion(&mut app, top, Vec2::new(100.0, 50.0));
+    assert_eq!(geometry(&app, top).size, Vec2::new(400.0, 350.0));
+}
+
+#[test]
+fn pointer_resize_adjusts_only_adjacent_branches_and_keeps_the_tree() {
+    let mut app = app();
+    let first = window(&mut app, 1);
+    let second = window(&mut app, 2);
+    let original = app
+        .world()
+        .get::<TileParent>(first)
+        .expect("parent")
+        .entity();
+    start_resize(&mut app, first, ToplevelResizeEdge::Right);
+    resize_motion(&mut app, first, Vec2::new(80.0, 50.0));
+    assert_eq!(geometry(&app, first).size, Vec2::new(480.0, 600.0));
+    assert_eq!(
+        geometry(&app, second),
+        WindowGeometry {
+            position: Vec2::new(480.0, 0.0),
+            size: Vec2::new(320.0, 600.0)
+        }
+    );
+    assert_eq!(
+        app.world()
+            .get::<TileParent>(first)
+            .expect("parent")
+            .entity(),
+        original
+    );
+    resize_motion(&mut app, first, Vec2::new(100_000.0, 0.0));
+    assert_eq!(geometry(&app, second).size.x, 40.0);
+    resize_motion(&mut app, first, Vec2::new(f32::NAN, 0.0));
+    assert_eq!(geometry(&app, second).size.x, 40.0);
+}
+
+#[test]
+fn corner_resize_climbs_to_the_matching_ancestor_on_each_axis() {
+    let mut app = app();
+    let left = window(&mut app, 1);
+    let top = window(&mut app, 2);
+    command(&mut app, 2, TileOperation::Split(SplitAxis::Vertical));
+    let bottom = window(&mut app, 3);
+    start_resize(&mut app, top, ToplevelResizeEdge::BottomLeft);
+    resize_motion(&mut app, top, Vec2::new(-100.0, 60.0));
+    assert_eq!(geometry(&app, left).size, Vec2::new(300.0, 600.0));
+    assert_eq!(
+        geometry(&app, top),
+        WindowGeometry {
+            position: Vec2::new(300.0, 0.0),
+            size: Vec2::new(500.0, 360.0)
+        }
+    );
+    assert_eq!(
+        geometry(&app, bottom),
+        WindowGeometry {
+            position: Vec2::new(300.0, 360.0),
+            size: Vec2::new(500.0, 240.0)
+        }
+    );
+}
+
+#[test]
+fn outer_edges_are_noops_and_tree_changes_cancel_drag_capture() {
+    let mut app = app();
+    let first = window(&mut app, 1);
+    let second = window(&mut app, 2);
+    start_resize(&mut app, first, ToplevelResizeEdge::TopLeft);
+    assert!(app.world().get::<WindowInteractionSession>(first).is_none());
+    start_resize(&mut app, first, ToplevelResizeEdge::Right);
+    assert!(app.world().get::<WindowInteractionSession>(first).is_some());
+    command(&mut app, 2, TileOperation::Split(SplitAxis::Vertical));
+    assert!(app.world().get::<WindowInteractionSession>(first).is_none());
+    assert!(
+        app.world()
+            .get::<PointerInteractionControl>(first)
+            .is_none()
+    );
+    let original = geometry(&app, second);
+    resize_motion(&mut app, first, Vec2::splat(50.0));
+    assert_eq!(geometry(&app, second), original);
+}
+
+#[test]
+fn border_press_drives_shared_motion_and_only_its_release_ends_resize() {
+    use bevy::{
+        camera::NormalizedRenderTarget,
+        ecs::hierarchy::ChildOf,
+        picking::{
+            backend::HitData,
+            events::{Pointer, Press},
+            pointer::{Location, PointerButton, PointerId},
+        },
+    };
+    let mut app = app();
+    let first = window(&mut app, 1);
+    let _second = window(&mut app, 2);
+    let output = app
+        .world()
+        .get::<weld_window::WindowOutput>(first)
+        .expect("output")
+        .0;
+    let root = app
+        .world_mut()
+        .spawn(weld_window::WindowProjection::new(first, output))
+        .id();
+    let handle = app
+        .world_mut()
+        .spawn((
+            weld_window::WindowResizeHandle(ToplevelResizeEdge::Right),
+            ChildOf(root),
+        ))
+        .id();
+    app.world_mut().write_message(MouseButtonInput {
+        button: MouseButton::Left,
+        state: ButtonState::Pressed,
+        window: Entity::PLACEHOLDER,
+    });
+    app.world_mut().trigger(Pointer::new(
+        PointerId::Mouse,
+        Location {
+            target: NormalizedRenderTarget::None {
+                width: 800,
+                height: 600,
+            },
+            position: Vec2::new(400.0, 200.0),
+        },
+        Press {
+            button: PointerButton::Primary,
+            hit: HitData::new(Entity::PLACEHOLDER, 0.0, None, None),
+            count: 1,
+        },
+        handle,
+    ));
+    app.update();
+    app.world_mut().write_message(MouseMotion {
+        delta: Vec2::new(60.0, 0.0),
+    });
+    app.update();
+    assert_eq!(geometry(&app, first).size.x, 460.0);
+    app.world_mut().write_message(MouseButtonInput {
+        button: MouseButton::Right,
+        state: ButtonState::Released,
+        window: Entity::PLACEHOLDER,
+    });
+    app.update();
+    assert!(app.world().get::<WindowInteractionSession>(first).is_some());
+    app.world_mut().write_message(MouseButtonInput {
+        button: MouseButton::Left,
+        state: ButtonState::Released,
+        window: Entity::PLACEHOLDER,
+    });
+    app.update();
+    assert!(app.world().get::<WindowInteractionSession>(first).is_none());
+    app.world_mut().write_message(MouseMotion {
+        delta: Vec2::splat(80.0),
+    });
+    app.update();
+    assert_eq!(geometry(&app, first).size.x, 460.0);
+}
 use weld_app::layer_shell::DesktopLayerVisibility;
 use weld_window::fullscreen::{
     FullscreenAction, FullscreenMode, FullscreenOccluded, FullscreenPlugin, FullscreenRequest,
