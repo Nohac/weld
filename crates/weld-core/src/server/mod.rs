@@ -485,6 +485,11 @@ impl ServerState {
         if self.popup_grab.as_ref().is_some_and(PopupGrab::has_ended) {
             self.popup_grab = None;
         }
+        self.flush_protocol_events();
+    }
+
+    /// Publish pending protocol events, including input and configure requests.
+    pub(crate) fn flush_protocol_events(&mut self) {
         if let Err(error) = self.display_handle.flush_clients() {
             warn!(%error, "failed to flush Wayland clients");
         }

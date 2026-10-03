@@ -1067,7 +1067,9 @@ rate-less claim can be resolved against the root's preferred output before
 choosing the fastest active consumer. Claimed roots bypass the native callback
 ledger; a local display cannot delay their draw opportunities. Manual commands
 route claims before native staging, and automatic admission routes them after
-ordinary ingress. Local roots still use actual native presentation completion.
+ordinary ingress. Local roots receive their next draw opportunity after native
+submission succeeds. DRM scanout admission still waits for the matching CRTC
+vblank; GPU buffer-use leases follow their own completion.
 
 The mental model is moving a window between monitors: size, scale and cadence
 follow the presenter. Foreign output IDs do not become local native outputs.

@@ -407,8 +407,7 @@ impl NativeDriver<HostEvent> for DrmDriver {
                     self.libinput_context
                         .resume()
                         .map_err(|_| anyhow!("failed to resume libinput after VT activation"))?;
-                    self.desktop
-                        .activate(&mut state.data.server, &mut state.callbacks)?;
+                    self.desktop.activate()?;
                     self.presentation_schedule.activate_all();
                     self.target = SessionTarget::ActivePhysical;
                     self.frame_state.request_composition();
@@ -419,9 +418,7 @@ impl NativeDriver<HostEvent> for DrmDriver {
                 } => {
                     let vblank_at = Instant::now();
                     let sequence = metadata.map(|event| event.sequence);
-                    let retired =
-                        self.desktop
-                            .retire(crtc, &mut state.data.server, &mut state.callbacks)?;
+                    let retired = self.desktop.retire(crtc)?;
                     if let Some((output, retired)) = retired {
                         let sequence_delta = sequence
                             .zip(self.output_vblank_sequence.get(&output).copied())
@@ -700,16 +697,6 @@ impl NativeDriver<HostEvent> for DrmDriver {
                             &mut state.callbacks,
                             &mut state.data.server,
                             [],
-                        );
-                        // Preserve the former owned-composition completion of
-                        // older physical callbacks when a VT cannot produce
-                        // vblank. Native admissions and GPU uses stay live.
-                        let completed = state
-                            .callbacks
-                            .retire_outputs(self.selected_outputs.iter().map(|output| output.id));
-                        crate::runtime::callbacks::complete_callback_batches(
-                            &mut state.data.server,
-                            completed,
                         );
                     }
                     if capture {

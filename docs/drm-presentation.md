@@ -64,6 +64,12 @@ creates an in-flight record, and device-wide `DeviceInactive` redirects work to
 owned targets. Other render or queue failures quarantine only the affected
 output until restart.
 
+Client frame callbacks complete after successful queue submission, giving the
+client time to prepare its next buffer before the next composition. Physical
+admission remains held until page-flip completion, and GPU buffer-use leases
+follow GPU completion. Pending input and configure events are flushed before
+entering native presentation; callbacks generated there are flushed afterward.
+
 Each matching CRTC vblank is that output's pacing clock. Outputs are admitted
 independently and share a Bevy pass only when their actual deadlines align; for
 example, a 120 Hz output can receive an intermediate pass while a phase-aligned
@@ -97,9 +103,10 @@ manager when libseat reports suspension, and continues demand-driven Bevy work
 against the owned target. Inactive client frame callbacks complete after a
 successful owned submission.
 
-Activation calls `DrmOutputManager::activate(true)`, completes callbacks from a
+Activation calls `DrmOutputManager::activate(true)`, clears admission for a
 queued frame whose vblank can no longer arrive, and requests a fresh full
-physical frame. Repeated notifications are harmless.
+physical frame. Its callbacks already completed at submission. Repeated
+notifications are harmless.
 
 Capture always reads an owned `COPY_SRC` texture. An active capture performs a
 one-shot owned composition, writes the PNG through the shared readback helper,

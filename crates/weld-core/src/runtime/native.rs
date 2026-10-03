@@ -293,6 +293,9 @@ impl<Event: 'static> NativeRuntime<Event> {
                         break;
                     }
                 }
+                // Let clients act on input and configuration before the native
+                // presenter can block on GPU completion or swapchain acquisition.
+                self.state.data.server.flush_protocol_events();
                 if !driver.present(&mut self.state, app, frame)? {
                     break;
                 }

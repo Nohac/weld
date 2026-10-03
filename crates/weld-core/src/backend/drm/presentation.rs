@@ -50,11 +50,19 @@ impl FrameAdmission {
         matches!(self, Self::Idle)
     }
 
-    fn queue(&mut self, presentation_id: Option<u64>) {
+    fn queue(
+        &mut self,
+        presentation_id: Option<u64>,
+        output: OutputId,
+        callbacks: &mut CallbackLedger,
+    ) -> Vec<u64> {
         *self = Self::Queued {
             presentation_id,
             deferred_present: false,
         };
+        // Successful submission opens the client's next draw opportunity while
+        // this physical frame remains admitted until its page-flip completes.
+        presentation_id.map_or_else(Vec::new, |id| callbacks.retire(id, output))
     }
 
     fn defer_present(&mut self) {
@@ -297,7 +305,10 @@ impl PhysicalDesktop {
                 .queue_frame(SubmittedFrame { presentation_id })
             {
                 Ok(()) => {
-                    output.admission.queue(presentation_id);
+                    let completed = output
+                        .admission
+                        .queue(presentation_id, output.id, callbacks);
+                    complete_callback_batches(server, completed);
                     outcome.queued.push(output.id);
                     tracing::trace!(
                         target: "weld_drm_pacing",
@@ -388,8 +399,6 @@ impl PhysicalDesktop {
     pub(super) fn retire(
         &mut self,
         crtc: crtc::Handle,
-        server: &mut ServerState,
-        callbacks: &mut CallbackLedger,
     ) -> Result<Option<(OutputId, RetiredFrame)>> {
         let Some(output) = self.outputs.iter_mut().find(|output| output.crtc == crtc) else {
             return Ok(None);
@@ -413,10 +422,6 @@ impl PhysicalDesktop {
                 "physical frame callback identity diverged"
             );
         }
-        if let Some(id) = submitted.presentation_id.or(admission.presentation_id) {
-            let completed = callbacks.retire(id, output.id);
-            complete_callback_batches(server, completed);
-        }
         Ok(Some((output.id, admission)))
     }
 
@@ -424,22 +429,13 @@ impl PhysicalDesktop {
         self.manager.pause();
     }
 
-    pub(super) fn activate(
-        &mut self,
-        server: &mut ServerState,
-        callbacks: &mut CallbackLedger,
-    ) -> Result<()> {
+    pub(super) fn activate(&mut self) -> Result<()> {
         self.manager
             .lock()
             .activate(true)
             .context("failed to reactivate the Smithay DRM output manager")?;
         for output in &mut self.outputs {
-            if let Some(frame) = output.admission.retire()
-                && let Some(id) = frame.presentation_id
-            {
-                let completed = callbacks.retire(id, output.id);
-                complete_callback_batches(server, completed);
-            }
+            output.admission.retire();
             output.composition.mark_dirty();
         }
         Ok(())
@@ -469,4 +465,47 @@ struct PreparedOutput {
 enum PrepareBatch {
     Ready(Vec<PreparedOutput>),
     Inactive,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{CallbackLedger, FrameAdmission, OutputId, RetiredFrame};
+
+    #[test]
+    fn queued_frame_opens_client_callback_without_releasing_scanout_admission() {
+        let output = OutputId::new(1);
+        let mut callbacks = CallbackLedger::default();
+        assert!(callbacks.push(7, [output]).is_empty());
+        let mut admission = FrameAdmission::Idle;
+        assert_eq!(admission.queue(Some(7), output, &mut callbacks), vec![7]);
+        assert!(!admission.is_idle(), "scanout still owns the queued frame");
+        admission.defer_present();
+        assert_eq!(
+            admission.retire(),
+            Some(RetiredFrame {
+                presentation_id: Some(7),
+                deferred_present: true,
+            })
+        );
+        assert!(admission.is_idle());
+        assert!(
+            callbacks.retire(7, output).is_empty(),
+            "callback completes once"
+        );
+    }
+
+    #[test]
+    fn callback_batch_waits_for_each_output_submission_but_not_their_vblanks() {
+        let first = OutputId::new(1);
+        let second = OutputId::new(2);
+        let mut callbacks = CallbackLedger::default();
+        callbacks.push(7, [first, second]);
+        let mut a = FrameAdmission::Idle;
+        let mut b = FrameAdmission::Idle;
+        assert!(a.queue(Some(7), first, &mut callbacks).is_empty());
+        assert_eq!(b.queue(Some(7), second, &mut callbacks), vec![7]);
+        assert!(!a.is_idle() && !b.is_idle());
+        assert!(a.retire().is_some());
+        assert!(!b.is_idle(), "outputs retain independent scanout admission");
+    }
 }
