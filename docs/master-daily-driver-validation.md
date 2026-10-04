@@ -177,15 +177,18 @@ The example keeps Mod+B for border toggling; launch Blender with Mod+Shift+B.
    Only the top row's outer corners round; content meets the headers without
    corner holes. Switching to split/floating restores independent frames.
    Split inside a tab, then create another tab/stack group inside it: interior
-   gaps, borders, shadows and rounding stay suppressed. Nested headers remain
+   gaps, independent borders, shadows and rounding stay suppressed. Shared
+   dividers use the configured border width and styling. Nested headers remain
    selectable, and extracting the nested group restores its own frame.
 8. Fullscreen the active tab and exit. Headers disappear and return, without
    revealing inactive tab contents. Check mixed-scale outputs separately.
 
-The user confirmed initial tabs/stacks and interaction work, then confirmed the
-group-owned perimeter looked good. A further pass found independent chrome on
-nested splits; shared frame ownership now covers the complete subtree. That
-descendant behavior still needs visual confirmation after rebuilding.
+The user confirmed tabs/stacks and interaction work, and accepted the nested
+shared-frame styling with interior dividers after visual testing. Identifying
+the focused inner pane remains less clear with a group-wide outer border;
+improving that indication is deferred under
+[next improvements](master-tiling.md#next-improvements). Mixed-scale output
+validation remains outstanding.
 
 ## Tiled mouse resizing
 

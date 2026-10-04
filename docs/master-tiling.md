@@ -518,6 +518,12 @@ and DRM validation remain on the daily-driver checklist.
 
 ## Next improvements
 
+- **Focused pane within a shared frame.** The current nested tab/stack styling
+  is visually accepted, but the group-wide border can make the focused inner
+  window ambiguous. Explore highlighting the perimeter and divider segments
+  adjoining that window, while preserving the single outer frame and gapless
+  interior. Distinguish leaf focus from parent/group selection and inactive tabs.
+  This is deferred; the segment treatment remains a design option.
 - **Host keymap inheritance.** Explicit Weld keyboard configuration works in
   nested and DRM hosts. Automatically inheriting a parent compositor's keymap
   remains a separate option; Winit currently hides that protocol information.
