@@ -6,10 +6,11 @@
 //! and matching release; managers own geometry and their settlement state.
 
 use crate::{
-    ManagedBy, WindowClientResolver, WindowCloseHandle, WindowCommand, WindowCommandKind,
-    WindowGeometry, WindowIntent, WindowIntentKind, WindowInteractionKind,
+    FocusedWindow, ManagedBy, WindowClientResolver, WindowCloseHandle, WindowCommand,
+    WindowCommandKind, WindowGeometry, WindowIntent, WindowIntentKind, WindowInteractionKind,
     WindowInteractionSession, WindowMoveHandle, WindowOutput, WindowProjectionLookup,
-    WindowResizeHandle, WindowSystems, fullscreen::WindowFullscreen,
+    WindowResizeHandle, WindowSystems, WindowVisibility,
+    fullscreen::{FullscreenOccluded, WindowFullscreen},
 };
 use bevy::{
     app::{App, Plugin, PreUpdate},
@@ -27,11 +28,12 @@ use bevy::{
         system::{Commands, Local, Query, Res, ResMut, SystemParam},
     },
     input::{
-        ButtonState,
+        ButtonInput, ButtonState,
         mouse::{MouseButton, MouseButtonInput, MouseMotion},
     },
     math::Vec2,
     picking::{
+        PickingSystems,
         events::{Click, Pointer, Press},
         pointer::PointerButton,
     },
@@ -46,12 +48,16 @@ use weld_app::{
         ToplevelInteractionRequestKind, ToplevelResizeEdge,
     },
 };
-use weld_input::{PointerShortcutRegistry, PointerShortcutSet, register_pointer_shortcuts};
+use weld_input::{
+    PointerShortcutRegistry, PointerShortcutSet, PublishedPointerTarget, register_pointer_shortcuts,
+};
 
-/// Live compositor pointer chords, configured by the distribution.
+/// Live compositor pointer chords and focus policy, configured by the distribution.
 #[derive(Resource, Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct WindowPointerSettings {
     pub modifier: Option<PointerShortcutModifiers>,
+    /// Focus a window when mouse motion enters it, preserving its stacking order.
+    pub focus_follows_mouse: bool,
 }
 
 /// A picked handle/chord or host-validated native grab offered to the manager.
@@ -124,6 +130,13 @@ impl Plugin for WindowPointerPlugin {
             .add_observer(clear_control)
             .add_systems(
                 PreUpdate,
+                focus_under_pointer
+                    .after(PickingSystems::Last)
+                    .after(WindowSystems::InteractionFinalize)
+                    .before(WindowSystems::FinalReconcile),
+            )
+            .add_systems(
+                PreUpdate,
                 (synchronize_shortcuts, begin_pointer_shortcut_interactions)
                     .chain()
                     .in_set(WindowPointerSystems::Start),
@@ -143,6 +156,64 @@ impl Plugin for WindowPointerPlugin {
                     .chain()
                     .in_set(WindowSystems::InteractionFinalize),
             );
+    }
+}
+
+#[derive(SystemParam)]
+struct HoverFocus<'w, 's> {
+    motions: MessageReader<'w, 's, MouseMotion>,
+    buttons: Option<Res<'w, ButtonInput<MouseButton>>>,
+    settings: Res<'w, WindowPointerSettings>,
+    target: Res<'w, PublishedPointerTarget>,
+    projections: WindowProjectionLookup<'w, 's>,
+    windows:
+        Query<'w, 's, &'static WindowVisibility, (With<ManagedBy>, Without<FullscreenOccluded>)>,
+    sessions: Query<'w, 's, (), With<WindowInteractionSession>>,
+    focus: Res<'w, FocusedWindow>,
+}
+
+fn focus_under_pointer(
+    mut hover: HoverFocus,
+    mut previous: Local<Option<Entity>>,
+    mut commands: Commands,
+    mut redraw: MessageWriter<RequestRedraw>,
+) {
+    // Use the frontmost published hit, including decoration and popup ancestry.
+    // Refresh the remembered window even without motion: layout changes and
+    // keyboard navigation must not turn a stationary pointer into a focus request.
+    let target = hover
+        .target
+        .0
+        .and_then(|target| hover.projections.window_for(target))
+        .filter(|window| {
+            hover
+                .windows
+                .get(*window)
+                .is_ok_and(|visibility| *visibility == WindowVisibility::Visible)
+        });
+    let entered = *previous != target;
+    *previous = target;
+    let mut moved = false;
+    for motion in hover.motions.read() {
+        moved |= motion.delta.is_finite() && motion.delta != Vec2::ZERO;
+    }
+    let held = hover.buttons.as_ref().is_some_and(|buttons| {
+        buttons.get_pressed().next().is_some() || buttons.get_just_released().next().is_some()
+    });
+    if !hover.settings.focus_follows_mouse
+        || !entered
+        || !moved
+        || held
+        || !hover.sessions.is_empty()
+    {
+        return;
+    }
+    if let Some(window) = target.filter(|window| hover.focus.entity() != Some(*window)) {
+        commands.trigger(WindowCommand {
+            window,
+            kind: WindowCommandKind::Focus,
+        });
+        redraw.write(RequestRedraw);
     }
 }
 
@@ -605,6 +676,184 @@ fn end_pointer_interactions(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{
+        ManagedWindow, WindowId, WindowPlugin, WindowProjection, WindowVacancy, WindowZOrder,
+    };
+    use bevy::ecs::{hierarchy::ChildOf, message::Messages};
+    use weld_app::surface::SurfaceActionQueue;
+
+    fn hover_app() -> (App, Entity, Entity, Entity, Entity) {
+        let mut app = App::new();
+        app.init_resource::<SurfaceActionQueue>()
+            .init_resource::<ButtonInput<MouseButton>>()
+            .add_plugins((WindowPlugin, WindowPointerPlugin));
+        app.world_mut()
+            .resource_mut::<WindowPointerSettings>()
+            .focus_follows_mouse = true;
+        let owner = app.world_mut().spawn_empty().id();
+        let first = app
+            .world_mut()
+            .spawn((
+                ManagedWindow {
+                    id: WindowId::new(1),
+                },
+                ManagedBy(owner),
+                WindowVacancy::Retain,
+                WindowZOrder(2),
+            ))
+            .id();
+        let second = app
+            .world_mut()
+            .spawn((
+                ManagedWindow {
+                    id: WindowId::new(2),
+                },
+                ManagedBy(owner),
+                WindowVacancy::Retain,
+                WindowZOrder(1),
+            ))
+            .id();
+        let first_root = app
+            .world_mut()
+            .spawn(WindowProjection::new(first, owner))
+            .id();
+        let second_root = app
+            .world_mut()
+            .spawn(WindowProjection::new(second, owner))
+            .id();
+        app.world_mut().trigger(WindowCommand {
+            window: first,
+            kind: WindowCommandKind::Focus,
+        });
+        (app, first, second, first_root, second_root)
+    }
+
+    fn hover(app: &mut App, target: Option<Entity>, moved: bool) {
+        app.world_mut().resource_mut::<PublishedPointerTarget>().0 = target;
+        if moved {
+            app.world_mut()
+                .resource_mut::<Messages<MouseMotion>>()
+                .write(MouseMotion { delta: Vec2::X });
+        }
+        app.update();
+    }
+
+    #[test]
+    fn hover_focus_resolves_descendants_without_raising_or_undoing_keyboard_focus() {
+        let (mut app, first, second, first_root, second_root) = hover_app();
+        let child = app.world_mut().spawn(ChildOf(second_root)).id();
+        hover(&mut app, Some(first_root), true);
+        hover(&mut app, Some(child), true);
+        assert_eq!(
+            app.world().resource::<FocusedWindow>().entity(),
+            Some(second)
+        );
+        assert_eq!(app.world().get::<WindowZOrder>(second).expect("stack").0, 1);
+        app.world_mut().trigger(WindowCommand {
+            window: first,
+            kind: WindowCommandKind::Focus,
+        });
+        hover(&mut app, Some(second_root), true);
+        assert_eq!(
+            app.world().resource::<FocusedWindow>().entity(),
+            Some(first)
+        );
+        hover(&mut app, None, true);
+        assert_eq!(
+            app.world().resource::<FocusedWindow>().entity(),
+            Some(first)
+        );
+        hover(&mut app, Some(child), true);
+        assert_eq!(
+            app.world().resource::<FocusedWindow>().entity(),
+            Some(second)
+        );
+    }
+
+    #[test]
+    fn stationary_relayout_and_live_disable_do_not_steal_focus() {
+        let (mut app, first, second, first_root, second_root) = hover_app();
+        hover(&mut app, Some(first_root), true);
+        hover(&mut app, Some(second_root), false);
+        hover(&mut app, Some(second_root), true);
+        assert_eq!(
+            app.world().resource::<FocusedWindow>().entity(),
+            Some(first)
+        );
+        app.world_mut()
+            .resource_mut::<WindowPointerSettings>()
+            .focus_follows_mouse = false;
+        hover(&mut app, None, true);
+        hover(&mut app, Some(second_root), true);
+        assert_eq!(
+            app.world().resource::<FocusedWindow>().entity(),
+            Some(first)
+        );
+        app.world_mut()
+            .resource_mut::<WindowPointerSettings>()
+            .focus_follows_mouse = true;
+        hover(&mut app, Some(first_root), true);
+        hover(&mut app, Some(second_root), true);
+        assert_eq!(
+            app.world().resource::<FocusedWindow>().entity(),
+            Some(second)
+        );
+    }
+
+    #[test]
+    fn hover_focus_respects_buttons_sessions_visibility_and_fullscreen_occlusion() {
+        let (mut app, first, second, _, second_root) = hover_app();
+        app.world_mut()
+            .resource_mut::<ButtonInput<MouseButton>>()
+            .press(MouseButton::Left);
+        hover(&mut app, Some(second_root), true);
+        assert_eq!(
+            app.world().resource::<FocusedWindow>().entity(),
+            Some(first)
+        );
+        app.world_mut()
+            .resource_mut::<ButtonInput<MouseButton>>()
+            .reset_all();
+        app.world_mut()
+            .entity_mut(first)
+            .insert(WindowInteractionSession {
+                kind: WindowInteractionKind::Move,
+            });
+        hover(&mut app, None, true);
+        hover(&mut app, Some(second_root), true);
+        assert_eq!(
+            app.world().resource::<FocusedWindow>().entity(),
+            Some(first)
+        );
+        app.world_mut()
+            .entity_mut(first)
+            .remove::<WindowInteractionSession>();
+        app.world_mut()
+            .entity_mut(second)
+            .insert(WindowVisibility::Hidden);
+        hover(&mut app, Some(second_root), true);
+        assert_eq!(
+            app.world().resource::<FocusedWindow>().entity(),
+            Some(first)
+        );
+        app.world_mut()
+            .entity_mut(second)
+            .insert((WindowVisibility::Visible, FullscreenOccluded));
+        hover(&mut app, Some(second_root), true);
+        assert_eq!(
+            app.world().resource::<FocusedWindow>().entity(),
+            Some(first)
+        );
+        app.world_mut()
+            .entity_mut(second)
+            .remove::<FullscreenOccluded>();
+        hover(&mut app, Some(second_root), true);
+        assert_eq!(
+            app.world().resource::<FocusedWindow>().entity(),
+            Some(second)
+        );
+    }
+
     #[test]
     fn modifier_resize_selects_the_pointer_quadrant() {
         let geometry = WindowGeometry {

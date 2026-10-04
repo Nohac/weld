@@ -103,6 +103,24 @@ The sections below cover the remaining implemented milestones.
 
 The example keeps Mod+B for border toggling; launch Blender with Mod+Shift+B.
 
+## Hover focus and split hints
+
+1. Open two terminals and move between their contents and borders without clicking.
+   Keyboard input should follow the hovered window. Repeat with a floating window:
+   hovering an exposed part should focus it without raising it over other windows.
+2. Leave the mouse still and change selection with the keyboard. Move within the
+   same window: keyboard selection should remain. Cross into another window to
+   resume pointer-driven focus. Rofi and bars must not leak hover to windows below.
+3. Drag a client selection or resize a window across another window. Focus must
+   not jump during the held button or compositor interaction.
+4. With two bordered tiles, use Mod+Control+F (`splith`) and Mod+Control+J (`splitv`).
+   The selected tile's left edge should brighten for side-by-side placement; its
+   bottom edge should brighten for stacked placement. Opening a terminal should
+   follow that orientation. Floating windows have no split hint.
+5. In a private config, reload `focus_follows_mouse no` and verify click/keyboard
+   focus still works. Restore `yes`, and change the fourth `client.focused` color
+   to confirm the split highlight updates. Borderless/fullscreen windows stay bare.
+
 ## Smart gaps and borders
 
 1. Leave one tiled terminal on a workspace. With the example's smart settings,

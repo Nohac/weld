@@ -57,6 +57,11 @@ There is no file watcher yet; reload rereads the supplied path.
   first searches ancestor splits for a directional neighbor, then uses the
   innermost wrap candidate. `force` wraps at the first eligible split edge.
   Directional output traversal is a follow-up, so `workspace` currently behaves like `yes`.
+- `focus_follows_mouse yes|no` focuses a visible window when mouse motion enters
+  it, without raising floating windows. The example enables it; omission disables
+  it. Held buttons and active move/resize sessions suppress hover focus. Keyboard
+  selection and layout changes beneath a stationary pointer retain focus until
+  the pointer crosses into another window. `always` remains unsupported.
 - `floating_modifier MODIFIER[+MODIFIER...]` configures shared window pointer chords:
   move for floating windows and resize for floating or tiled windows.
   Reload replaces these bindings while retaining already captured releases.
@@ -74,7 +79,13 @@ There is no file watcher yet; reload rereads the supplied path.
   colors use the border and background colors respectively. Normal frames use the first
   color on the upper border and child-border color elsewhere; pixel frames
   use child-border color throughout. Titlebar fill and close glyph use background
-  and text. An active move/resize uses indicator color. The inactive palette
+  and text. The focused tile uses indicator color on its left edge for side-by-side
+  layout, or bottom edge for stacked layout. This is an orientation hint: the
+  requested left-edge convention differs from the insertion side, which remains
+  right/below the focused tile. The hint follows the current parent split and
+  adds no chrome when smart borders, fullscreen or an
+  explicit borderless style hides that edge. An active move/resize uses indicator
+  color on all edges. The inactive palette
   currently identifies the parent of the focused dialog. Relocated windows
   retain their distinct configured red accent. Urgency hints remain a follow-up.
 - `border normal|pixel [N]|none|toggle` changes the selected window's frame.

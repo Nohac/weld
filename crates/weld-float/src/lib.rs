@@ -845,6 +845,7 @@ mod tests {
         let mut app = App::new();
         app.insert_resource(WindowPointerSettings {
             modifier: Some(PointerShortcutModifiers::super_key()),
+            ..Default::default()
         })
         .add_plugins((WindowPlugin, FloatPlugin))
         .init_resource::<SurfaceActionQueue>()

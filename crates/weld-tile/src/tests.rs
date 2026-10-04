@@ -67,6 +67,11 @@ fn removing_tile_membership_clears_the_presentation_hint_before_another_frame() 
             .get::<weld_window::SoleTiledWindow>(window)
             .is_none()
     );
+    assert!(
+        app.world()
+            .get::<weld_window::WindowSplitEdge>(window)
+            .is_none()
+    );
     app.world_mut().entity_mut(window).insert(parent);
     app.update();
     assert!(
@@ -74,6 +79,39 @@ fn removing_tile_membership_clears_the_presentation_hint_before_another_frame() 
             .get::<weld_window::SoleTiledWindow>(window)
             .is_some()
     );
+}
+
+#[test]
+fn split_edge_tracks_orientation_and_floating_roundtrip() {
+    use weld_window::WindowSplitEdge;
+    let mut app = app();
+    let first = window(&mut app, 1);
+    let second = window(&mut app, 2);
+    assert_eq!(
+        app.world().get::<WindowSplitEdge>(second),
+        Some(&WindowSplitEdge::Left)
+    );
+    command(&mut app, 2, TileOperation::Split(SplitAxis::Vertical));
+    assert_eq!(
+        app.world().get::<WindowSplitEdge>(second),
+        Some(&WindowSplitEdge::Bottom)
+    );
+    assert_eq!(
+        app.world().get::<WindowSplitEdge>(first),
+        Some(&WindowSplitEdge::Left)
+    );
+    app.world_mut().trigger(TileFloatingRequest {
+        window: Some(second),
+        enabled: Some(true),
+    });
+    app.update();
+    assert!(app.world().get::<WindowSplitEdge>(second).is_none());
+    app.world_mut().trigger(TileFloatingRequest {
+        window: Some(second),
+        enabled: Some(false),
+    });
+    app.update();
+    assert!(app.world().get::<WindowSplitEdge>(second).is_some());
 }
 
 #[test]

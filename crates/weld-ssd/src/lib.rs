@@ -41,8 +41,8 @@ use weld_window::{
     FloatingWindow, FocusedWindow, ManagedWindow, PresentationOffset, PresentsWindow,
     PrimaryWindowPresentation, WindowClientResolver, WindowCloseHandle, WindowGeometryAnchor,
     WindowInteractionSession, WindowMoveHandle, WindowOutput, WindowOutputIntersections,
-    WindowPresentationOverride, WindowProjection, WindowResizeHandle, WindowSystems, WindowVacancy,
-    WindowZOrder,
+    WindowPresentationOverride, WindowProjection, WindowResizeHandle, WindowSplitEdge,
+    WindowSystems, WindowVacancy, WindowZOrder,
 };
 use weld_window_ui::{server_frame_required, surface_content_with_node};
 
@@ -439,6 +439,7 @@ struct FocusColors<'w, 's> {
     clients: WindowClientResolver<'w, 's>,
     settings: Res<'w, SsdSettings>,
     interactions: Query<'w, 's, (), With<WindowInteractionSession>>,
+    splits: Query<'w, 's, &'static WindowSplitEdge, Without<FloatingWindow>>,
     parents: Query<'w, 's, &'static ClientToplevelParent>,
 }
 
@@ -510,7 +511,7 @@ fn sync_focus_style(
     let mut changed = false;
     for (projection, geometry, children, mut border) in &mut roots {
         let palette = colors.palette(projection.window());
-        let expected = if colors.interactions.contains(projection.window()) {
+        let mut expected = if colors.interactions.contains(projection.window()) {
             BorderColor::all(palette.indicator)
         } else if matches!(geometry.border, BorderStyle::Normal(_)) {
             BorderColor {
@@ -522,6 +523,14 @@ fn sync_focus_style(
         } else {
             BorderColor::all(palette.child_border)
         };
+        if colors.focus.entity() == Some(projection.window())
+            && let Ok(edge) = colors.splits.get(projection.window())
+        {
+            match edge {
+                WindowSplitEdge::Left => expected.left = palette.indicator,
+                WindowSplitEdge::Bottom => expected.bottom = palette.indicator,
+            }
+        }
         if *border != expected {
             *border = expected;
             changed = true;
@@ -1130,6 +1139,98 @@ mod tests {
             )
             .expect("workspace setup");
         app
+    }
+
+    #[test]
+    fn focused_split_edge_updates_in_place_and_leaves_other_borders_alone() {
+        use weld_tile::{SplitAxis, TileOperation, TileRequest};
+        let mut app = tiled_test_app();
+        {
+            let mut settings = app.world_mut().resource_mut::<SsdSettings>();
+            settings.tiled = BorderStyle::Pixel(3);
+            settings.focused.indicator = Color::WHITE;
+        }
+        let surface = SurfaceId::for_test(310);
+        enqueue_surface_event(app.world_mut(), role(surface, WindowDecoration::ServerSide));
+        enqueue_surface_event(app.world_mut(), frame(surface, 320, 240));
+        app.update();
+        app.update();
+        let window = app
+            .world_mut()
+            .query::<&OccupiesWindow>()
+            .single(app.world())
+            .expect("window")
+            .0;
+        let root = app
+            .world()
+            .get::<PrimaryWindowPresentation>(window)
+            .expect("root")
+            .entity();
+        let base = app.world().resource::<SsdSettings>().focused.child_border;
+        let left = BorderColor {
+            left: Color::WHITE,
+            ..BorderColor::all(base)
+        };
+        assert_eq!(app.world().get::<BorderColor>(root), Some(&left));
+        app.world_mut()
+            .trigger(TileRequest::Focused(TileOperation::Split(
+                SplitAxis::Vertical,
+            )));
+        app.update();
+        let bottom = BorderColor {
+            bottom: Color::WHITE,
+            ..BorderColor::all(base)
+        };
+        assert_eq!(
+            app.world()
+                .get::<PrimaryWindowPresentation>(window)
+                .expect("same root")
+                .entity(),
+            root
+        );
+        assert_eq!(app.world().get::<BorderColor>(root), Some(&bottom));
+        app.world_mut()
+            .resource_mut::<SsdSettings>()
+            .focused
+            .indicator = Color::BLACK;
+        app.update();
+        assert_eq!(
+            app.world().get::<BorderColor>(root),
+            Some(&BorderColor {
+                bottom: Color::BLACK,
+                ..bottom
+            })
+        );
+        app.world_mut().trigger(WindowCommand {
+            window,
+            kind: WindowCommandKind::ClearFocus,
+        });
+        // Run only the style system: the tiler normally restores selection for a
+        // workspace containing one window before the next presentation.
+        app.world_mut()
+            .run_system_once(sync_focus_style)
+            .expect("unfocused style");
+        let unfocused = app.world().resource::<SsdSettings>().unfocused.child_border;
+        assert_eq!(
+            app.world().get::<BorderColor>(root),
+            Some(&BorderColor::all(unfocused))
+        );
+        app.world_mut().trigger(WindowCommand {
+            window,
+            kind: WindowCommandKind::Focus,
+        });
+        app.world_mut()
+            .trigger(BorderRequest(Some(BorderStyle::None)));
+        app.update();
+        let root = app
+            .world()
+            .get::<PrimaryWindowPresentation>(window)
+            .expect("borderless root")
+            .entity();
+        assert_eq!(
+            app.world().get::<PresentationInsets>(root),
+            Some(&PresentationInsets::default())
+        );
     }
 
     #[test]

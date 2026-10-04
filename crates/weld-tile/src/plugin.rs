@@ -22,7 +22,7 @@ use weld_window::workspace::{
 use weld_window::{
     FloatingWindow, FocusedWindow, ManagedBy, ManagedWindow, SoleTiledWindow, WindowClientResolver,
     WindowCommand, WindowCommandKind, WindowGeometry, WindowIntent, WindowIntentKind, WindowOutput,
-    WindowSystems, WindowVisibility, WindowZOrder,
+    WindowSplitEdge, WindowSystems, WindowVisibility, WindowZOrder,
 };
 
 use std::collections::HashMap;
@@ -71,7 +71,13 @@ impl Plugin for TilePlugin {
             .init_resource::<TileFocusHistory>()
             .init_resource::<LayoutDirty>()
             .add_observer(intent)
-            .add_observer(clear_sole_tile)
+            .add_observer(clear_tile_hints)
+            .add_systems(
+                PreUpdate,
+                sync_split_edges
+                    .after(TileSystems::Layout)
+                    .in_set(WindowSystems::Management),
+            )
             .add_observer(crate::resize::begin)
             .add_observer(crate::resize::motion)
             .add_observer(crate::resize::tree_changed)
@@ -135,6 +141,30 @@ impl Plugin for TilePlugin {
                     .chain()
                     .in_set(TileSystems::Layout),
             );
+    }
+}
+
+fn sync_split_edges(
+    windows: Query<(Entity, &TileParent, Option<&WindowSplitEdge>), With<ManagedWindow>>,
+    containers: Query<&crate::TileContainer>,
+    mut commands: Commands,
+) {
+    for (window, parent, current) in &windows {
+        let edge = containers
+            .get(parent.entity())
+            .ok()
+            .map(|container| match container.axis() {
+                crate::SplitAxis::Horizontal => WindowSplitEdge::Left,
+                crate::SplitAxis::Vertical => WindowSplitEdge::Bottom,
+            });
+        if current.copied() == edge {
+            continue;
+        }
+        if let Some(edge) = edge {
+            commands.entity(window).insert(edge);
+        } else {
+            commands.entity(window).remove::<WindowSplitEdge>();
+        }
     }
 }
 
@@ -360,10 +390,10 @@ fn admit_windows(
     }
 }
 
-fn clear_sole_tile(event: On<Remove, TileParent>, mut commands: Commands) {
+fn clear_tile_hints(event: On<Remove, TileParent>, mut commands: Commands) {
     commands
         .entity(event.entity)
-        .try_remove::<SoleTiledWindow>();
+        .try_remove::<(SoleTiledWindow, WindowSplitEdge)>();
 }
 
 type WorkspaceLayouts<'w, 's> = Query<

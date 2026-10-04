@@ -194,6 +194,9 @@ fn apply<Extension>(config: &mut Configuration<Extension>, statement: &Statement
         ("floating_modifier", [value]) => {
             config.pointer.modifier = Some(weld_sway_config::input::pointer_modifiers(value)?)
         }
+        ("focus_follows_mouse", [value @ ("yes" | "no")]) => {
+            config.pointer.focus_follows_mouse = *value == "yes";
+        }
         ("focus_wrapping", [value]) => {
             config.focus_wrapping = match *value {
                 "no" => FocusWrapping::No,
@@ -493,6 +496,23 @@ mod tests {
             assert_eq!(config.focus_wrapping, expected);
         }
         assert!(parse("test", "focus_wrapping perhaps").is_err());
+    }
+
+    #[test]
+    fn hover_focus_is_an_explicit_live_pointer_setting() {
+        assert!(
+            parse("test", "focus_follows_mouse yes")
+                .expect("enabled")
+                .pointer
+                .focus_follows_mouse
+        );
+        assert!(
+            !parse("test", "focus_follows_mouse no")
+                .expect("disabled")
+                .pointer
+                .focus_follows_mouse
+        );
+        assert!(parse("test", "focus_follows_mouse perhaps").is_err());
     }
 
     #[test]
