@@ -1601,3 +1601,144 @@ fn destroyed_preserved_source_becomes_a_dismissible_tombstone() {
     assert!(!app.world().entities().contains(session));
     assert!(!app.world().entities().contains(source_window));
 }
+
+fn disconnect_destroyed_source(process_destroy_first: bool) {
+    let (mut app, loopback) = test_app();
+    let mut endpoint = RecordingEndpoint::new(loopback);
+    endpoint.local_receiver = false;
+    app.insert_resource(HoistEndpointRegistry::with_default(endpoint.clone()));
+    let source = surface(LOCAL_SOURCE, 90);
+    let client = map_surface(&mut app, source, None, WindowDecoration::ServerSide);
+    let window = window_for_client(&mut app, client);
+    app.world_mut().write_message(HoistWindow {
+        window,
+        endpoint: None,
+    });
+    app.update();
+    let session = app
+        .world_mut()
+        .query::<(bevy::ecs::entity::Entity, &HoistSession)>()
+        .single(app.world())
+        .map(|(entity, _)| entity)
+        .expect("session");
+    endpoint.take_calls();
+    destroy_surface(&mut app, source);
+    if process_destroy_first {
+        app.update();
+        assert_eq!(endpoint.take_calls(), vec![EndpointCall::Unmap(source)]);
+    }
+    endpoint.set_available(false);
+    app.update();
+    app.update();
+    assert!(!app.world().entities().contains(client));
+    assert!(app.world().get::<WindowOccupant>(window).is_none());
+    assert_eq!(
+        app.world().get::<HoistPlaceholder>(window).map(|p| p.state),
+        Some(crate::HoistPlaceholderState::Closed)
+    );
+    assert_eq!(
+        app.world()
+            .get::<HoistSession>(session)
+            .map(HoistSession::phase),
+        Some(crate::HoistSessionPhase::Closed)
+    );
+    assert!(
+        endpoint.take_calls().is_empty(),
+        "closed endpoint gets no new unmap requests"
+    );
+    app.world_mut()
+        .write_message(DismissHoistTombstone { session });
+    app.update();
+    assert!(!app.world().entities().contains(window));
+    assert!(!app.world().entities().contains(session));
+}
+
+#[test]
+fn simultaneous_source_destruction_and_disconnect_preserve_a_closed_placeholder() {
+    disconnect_destroyed_source(false);
+}
+
+#[test]
+fn disconnect_after_source_destruction_keeps_the_tombstone_dismissible() {
+    disconnect_destroyed_source(true);
+}
+
+#[test]
+fn disconnect_restores_live_family_members_and_retires_destroyed_followers() {
+    let (mut app, loopback) = test_app();
+    let mut endpoint = RecordingEndpoint::new(loopback);
+    endpoint.local_receiver = false;
+    app.insert_resource(HoistEndpointRegistry::with_default(endpoint.clone()));
+    let root = surface_for_client(LOCAL_SOURCE, 20, 91);
+    let root_client = map_surface(&mut app, root, None, WindowDecoration::ServerSide);
+    let root_window = window_for_client(&mut app, root_client);
+    app.world_mut().write_message(HoistWindow {
+        window: root_window,
+        endpoint: None,
+    });
+    app.update();
+    let follower = surface_for_client(LOCAL_SOURCE, 20, 92);
+    let follower_client = map_surface(&mut app, follower, None, WindowDecoration::ServerSide);
+    app.update();
+    assert!(
+        app.world_mut()
+            .query::<&HoistSession>()
+            .iter(app.world())
+            .any(|session| session.surface() == follower && session.source().is_none())
+    );
+    destroy_surface(&mut app, follower);
+    endpoint.set_available(false);
+    app.update();
+    app.update();
+    assert!(!app.world().entities().contains(follower_client));
+    assert_eq!(
+        app.world()
+            .get::<OccupiesWindow>(root_client)
+            .map(|occupancy| occupancy.0),
+        Some(root_window)
+    );
+    assert!(
+        app.world()
+            .get::<WindowAdmissionHold>(root_client)
+            .is_none()
+    );
+    assert!(app.world().get::<HoistPlaceholder>(root_window).is_none());
+    assert_eq!(
+        app.world_mut()
+            .query::<&HoistSession>()
+            .iter(app.world())
+            .count(),
+        0
+    );
+}
+
+#[test]
+fn disconnect_after_placeholder_removal_readmits_the_surviving_client() {
+    let (mut app, loopback) = test_app();
+    let mut endpoint = RecordingEndpoint::new(loopback);
+    endpoint.local_receiver = false;
+    app.insert_resource(HoistEndpointRegistry::with_default(endpoint.clone()));
+    let source = surface(LOCAL_SOURCE, 93);
+    let client = map_surface(&mut app, source, None, WindowDecoration::ServerSide);
+    let window = window_for_client(&mut app, client);
+    app.world_mut().write_message(HoistWindow {
+        window,
+        endpoint: None,
+    });
+    app.update();
+    app.world_mut().despawn(window);
+    endpoint.set_available(false);
+    app.update();
+    app.update();
+    let replacement = window_for_client(&mut app, client);
+    assert_ne!(replacement, window);
+    assert!(app.world().entities().contains(replacement));
+    assert!(app.world().get::<WindowAdmissionHold>(client).is_none());
+    assert_eq!(
+        app.world_mut()
+            .query::<&HoistSession>()
+            .iter(app.world())
+            .count(),
+        0
+    );
+}

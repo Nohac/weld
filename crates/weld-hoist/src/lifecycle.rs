@@ -453,17 +453,18 @@ pub(super) fn maintain_sessions(mut params: MaintainParams) {
     }
 
     for (entity, mut session) in &mut params.sessions {
-        let Some(endpoint) = params.endpoints.endpoint(session.endpoint) else {
-            restore_source(&mut params.commands, entity, &session);
-            continue;
-        };
-        if !endpoint.is_available() {
-            restore_source(&mut params.commands, entity, &session);
-            continue;
-        }
+        // Surface ingress has already applied client destruction. Resolve that
+        // lifetime before transport loss can request restoration of its entity.
         if matches!(session.state, SessionState::Closed) {
-            if params.scratch.dismissed.contains(&entity) {
-                if let Some(source) = session.source_window {
+            if params.scratch.dismissed.contains(&entity)
+                || session
+                    .source_window
+                    .is_none_or(|source| !params.windows.contains(source))
+            {
+                if let Some(source) = session
+                    .source_window
+                    .filter(|source| params.windows.contains(*source))
+                {
                     params.commands.entity(source).despawn();
                 }
                 params.commands.entity(entity).despawn();
@@ -471,21 +472,31 @@ pub(super) fn maintain_sessions(mut params: MaintainParams) {
             }
             continue;
         }
+        let endpoint = params
+            .endpoints
+            .endpoint(session.endpoint)
+            .filter(|endpoint| endpoint.is_available());
         let source_mapping = params.source_clients.get(session.source_client);
         if source_mapping.is_err() {
-            params
-                .adapter_commands
-                .push(endpoint.unmap(session.surface));
-            if let Some(source) = session.source_window {
-                if let Ok(mut placeholder) = params.placeholders.get_mut(source) {
-                    placeholder.state = HoistPlaceholderState::Closed;
-                }
+            if let Some(endpoint) = endpoint {
+                params
+                    .adapter_commands
+                    .push(endpoint.unmap(session.surface));
+            }
+            if let Some(source) = session.source_window
+                && let Ok(mut placeholder) = params.placeholders.get_mut(source)
+            {
+                placeholder.state = HoistPlaceholderState::Closed;
                 session.state = SessionState::Closed;
             } else {
                 params.commands.entity(entity).despawn();
             }
             continue;
         }
+        let Some(endpoint) = endpoint else {
+            restore_source(&mut params.commands, entity, &session, &params.windows);
+            continue;
+        };
         if source_mapping.is_ok_and(|mapped| mapped.is_none())
             && !matches!(session.state, SessionState::Unmapping)
         {
@@ -519,7 +530,7 @@ pub(super) fn maintain_sessions(mut params: MaintainParams) {
                 .receiver
                 .is_some_and(|receiver| params.receivers.contains(receiver));
             if !destination_alive {
-                restore_source(&mut params.commands, entity, &session);
+                restore_source(&mut params.commands, entity, &session, &params.windows);
             }
             continue;
         }
@@ -694,7 +705,12 @@ pub(super) fn complete_reclaims(
     }
 }
 
-fn restore_source(commands: &mut Commands, session_entity: Entity, session: &HoistSession) {
+fn restore_source(
+    commands: &mut Commands,
+    session_entity: Entity,
+    session: &HoistSession,
+    windows: &Query<(&WindowGeometry, Option<&WindowOutput>)>,
+) {
     let mut client = commands.entity(session.source_client);
     client.remove::<WindowAdmissionHold>();
     if session.detach_on_restore {
@@ -702,14 +718,20 @@ fn restore_source(commands: &mut Commands, session_entity: Entity, session: &Hoi
             family: session.family,
         });
     }
-    if let Some(source) = session.source_window {
+    if let Some(source) = session
+        .source_window
+        .filter(|source| windows.contains(*source))
+    {
         client.insert(OccupiesWindow(source));
         commands
             .entity(source)
             .insert(session.original_vacancy)
             .remove::<(HoistedWindow, WindowPresentationOverride, HoistPlaceholder)>();
     }
-    if let Some(receiver) = session.receiver {
+    if let Some(receiver) = session
+        .receiver
+        .filter(|receiver| windows.contains(*receiver))
+    {
         commands.entity(receiver).despawn();
     }
     commands.entity(session_entity).despawn();
