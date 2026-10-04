@@ -94,7 +94,7 @@ pub struct FloatingWindow;
 #[derive(Component, Clone, Copy, Debug, Default)]
 pub struct SoleTiledWindow;
 
-/// Tiler-published border edge identifying the window's parent split orientation.
+/// Tiler-published border edge indicating an explicitly prepared split.
 #[derive(Component, Clone, Copy, Debug, Eq, PartialEq)]
 pub enum WindowSplitEdge {
     /// A vertical divider between left-to-right siblings.

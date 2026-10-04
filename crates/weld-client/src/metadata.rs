@@ -12,6 +12,7 @@ pub const MAX_SURFACE_LABEL_BYTES: usize = 1024;
 pub struct ClientSurfaceMetadata {
     app_id: String,
     title: String,
+    x11_instance: Option<String>,
 }
 
 impl ClientSurfaceMetadata {
@@ -19,7 +20,11 @@ impl ClientSurfaceMetadata {
         if app_id.len() > MAX_SURFACE_LABEL_BYTES || title.len() > MAX_SURFACE_LABEL_BYTES {
             return Err(SurfaceMetadataError);
         }
-        Ok(Self { app_id, title })
+        Ok(Self {
+            app_id,
+            title,
+            x11_instance: None,
+        })
     }
 
     /// Bound native labels without rejecting an otherwise valid local client.
@@ -32,7 +37,29 @@ impl ClientSurfaceMetadata {
             }
             text.truncate(end);
         }
-        Self { app_id, title }
+        Self {
+            app_id,
+            title,
+            x11_instance: None,
+        }
+    }
+    /// X11 class remains the cross-platform application label; instance also
+    /// identifies these labels as X11 properties for configuration criteria.
+    pub fn truncated_x11(class: String, mut instance: String, title: String) -> Self {
+        let mut metadata = Self::truncated(class, title);
+        let mut end = instance.len().min(MAX_SURFACE_LABEL_BYTES);
+        while !instance.is_char_boundary(end) {
+            end -= 1;
+        }
+        instance.truncate(end);
+        metadata.x11_instance = Some(instance);
+        metadata
+    }
+    pub fn x11_class(&self) -> Option<&str> {
+        self.x11_instance.as_ref().map(|_| self.app_id.as_str())
+    }
+    pub fn x11_instance(&self) -> Option<&str> {
+        self.x11_instance.as_deref()
     }
     pub fn app_id(&self) -> &str {
         &self.app_id
@@ -56,12 +83,22 @@ impl std::error::Error for SurfaceMetadataError {}
 struct WireMetadata {
     app_id: String,
     title: String,
+    x11_instance: Option<String>,
 }
 #[cfg(feature = "serde")]
 impl TryFrom<WireMetadata> for ClientSurfaceMetadata {
     type Error = SurfaceMetadataError;
     fn try_from(value: WireMetadata) -> Result<Self, Self::Error> {
-        Self::new(value.app_id, value.title)
+        let mut metadata = Self::new(value.app_id, value.title)?;
+        if value
+            .x11_instance
+            .as_ref()
+            .is_some_and(|value| value.len() > MAX_SURFACE_LABEL_BYTES)
+        {
+            return Err(SurfaceMetadataError);
+        }
+        metadata.x11_instance = value.x11_instance;
+        Ok(metadata)
     }
 }
 #[cfg(feature = "serde")]
@@ -70,6 +107,7 @@ impl From<ClientSurfaceMetadata> for WireMetadata {
         Self {
             app_id: value.app_id,
             title: value.title,
+            x11_instance: value.x11_instance,
         }
     }
 }
@@ -89,7 +127,27 @@ mod tests {
         assert!(
             ClientSurfaceMetadata::try_from(WireMetadata {
                 app_id: String::new(),
-                title: "x".repeat(1025)
+                title: "x".repeat(1025),
+                x11_instance: None,
+            })
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn x11_labels_preserve_class_identity_and_bound_instance() {
+        let native = ClientSurfaceMetadata::new("Demo".into(), String::new()).expect("native");
+        assert_eq!(native.x11_class(), None);
+        let x11 =
+            ClientSurfaceMetadata::truncated_x11("Demo".into(), "é".repeat(513), String::new());
+        assert_eq!(x11.x11_class(), Some("Demo"));
+        assert_eq!(x11.x11_instance(), Some("é".repeat(512).as_str()));
+        #[cfg(feature = "serde")]
+        assert!(
+            ClientSurfaceMetadata::try_from(WireMetadata {
+                app_id: String::new(),
+                title: String::new(),
+                x11_instance: Some("x".repeat(1025))
             })
             .is_err()
         );

@@ -117,6 +117,10 @@ pub struct ClientSurface {
     pub surface: SurfaceId,
 }
 
+/// Client-supplied labels used by window rules and shell presentation.
+#[derive(Component, Clone, Debug, PartialEq, Eq)]
+pub struct ClientWindowMetadata(pub weld_client::ClientSurfaceMetadata);
+
 /// Adapter identity and descriptive origin projected onto every client surface.
 #[derive(Component, Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ClientSource {
@@ -423,6 +427,7 @@ pub struct HostSurfaceEvent {
 #[doc(hidden)]
 pub enum HostSurfaceEventKind {
     Role(weld_client::ClientSurfaceRole),
+    Metadata(weld_client::ClientSurfaceMetadata),
     Commit(SurfaceTreeSnapshot),
     Interaction(ToplevelInteractionRequestKind),
     StateRequest(weld_client::ToplevelStateRequestKind),
@@ -496,6 +501,7 @@ impl SurfaceEventQueue {
 
 #[derive(Resource, Default)]
 struct SurfaceRegistry {
+    pending_metadata: HashMap<SurfaceId, weld_client::ClientSurfaceMetadata>,
     entries: HashMap<SurfaceId, SurfaceEntry>,
     pending_snapshots: HashMap<SurfaceId, SurfaceTreeSnapshot>,
 }
@@ -701,6 +707,12 @@ fn apply_host_surface_events(world: &mut World) {
 
     for HostSurfaceEvent { surface, kind } in events {
         match kind {
+            HostSurfaceEventKind::Metadata(metadata) => {
+                if registered_client_source(world, surface).is_some() {
+                    registry.pending_metadata.insert(surface, metadata);
+                    apply_pending_metadata(world, &mut registry, surface);
+                }
+            }
             HostSurfaceEventKind::Role(role) => match role {
                 weld_client::ClientSurfaceRole::Layer(layer) => {
                     if ensure_layer_entity(world, &mut registry, surface, layer).is_some() {
@@ -821,6 +833,7 @@ fn ensure_window_entity(
             source,
             ClientSurface { surface },
             ClientToplevel { surface },
+            ClientWindowMetadata(Default::default()),
         ))
         .id();
     set_decoration_marker(world, entity, decoration);
@@ -929,8 +942,23 @@ fn queue_pending_snapshot(
 }
 
 fn apply_pending_snapshot(world: &mut World, registry: &mut SurfaceRegistry, surface: SurfaceId) {
+    apply_pending_metadata(world, registry, surface);
     if let Some(snapshot) = registry.pending_snapshots.remove(&surface) {
         apply_surface_tree_snapshot(world, registry, surface, snapshot);
+    }
+}
+
+fn apply_pending_metadata(world: &mut World, registry: &mut SurfaceRegistry, surface: SurfaceId) {
+    let Some(entry) = registry.entries.get(&surface) else {
+        return;
+    };
+    if let Some(metadata) = registry.pending_metadata.remove(&surface)
+        && let Ok(mut entity) = world.get_entity_mut(entry.entity)
+    {
+        let metadata = ClientWindowMetadata(metadata);
+        if entity.get::<ClientWindowMetadata>() != Some(&metadata) {
+            entity.insert(metadata);
+        }
     }
 }
 
@@ -1198,6 +1226,7 @@ fn apply_surface_tree_snapshot(
 }
 
 fn destroy_surface(world: &mut World, registry: &mut SurfaceRegistry, surface: SurfaceId) {
+    registry.pending_metadata.remove(&surface);
     registry.pending_snapshots.remove(&surface);
     if let Some(mut revisions) = world.get_resource_mut::<SurfaceCommitRevisions>() {
         revisions.0.remove(&surface);
@@ -1751,6 +1780,167 @@ mod tests {
                 )),
             },
         );
+    }
+
+    #[test]
+    fn metadata_waits_for_a_role_and_updates_without_creating_a_window() {
+        let mut app = test_app();
+        let surface = SurfaceId::for_test(910);
+        let metadata = weld_client::ClientSurfaceMetadata::new("demo".into(), "Editor".into())
+            .expect("metadata");
+        enqueue_surface_event(
+            app.world_mut(),
+            HostSurfaceEvent {
+                surface,
+                kind: HostSurfaceEventKind::Metadata(metadata.clone()),
+            },
+        );
+        app.update();
+        assert!(app.world().resource::<SurfaceRegistry>().entries.is_empty());
+        register_window(&mut app, surface);
+        app.update();
+        let entity = app.world().resource::<SurfaceRegistry>().entries[&surface].entity;
+        assert_eq!(
+            app.world().get::<ClientWindowMetadata>(entity),
+            Some(&ClientWindowMetadata(metadata.clone()))
+        );
+        app.world_mut().clear_trackers();
+        enqueue_surface_event(
+            app.world_mut(),
+            HostSurfaceEvent {
+                surface,
+                kind: HostSurfaceEventKind::Metadata(metadata),
+            },
+        );
+        app.update();
+        assert!(
+            !app.world()
+                .entity(entity)
+                .get_ref::<ClientWindowMetadata>()
+                .expect("metadata")
+                .is_changed()
+        );
+        enqueue_surface_event(
+            app.world_mut(),
+            HostSurfaceEvent {
+                surface,
+                kind: HostSurfaceEventKind::Destroyed,
+            },
+        );
+        app.update();
+        assert!(app.world().get_entity(entity).is_err());
+        assert!(
+            app.world()
+                .resource::<SurfaceRegistry>()
+                .pending_metadata
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn rendered_panel_retains_popup_parent_across_content_updates() {
+        use crate::{
+            layer_shell,
+            output::{OutputId, RendersOutput, WeldOutput},
+        };
+        let mut app = test_app();
+        layer_shell::register(&mut app);
+        let output = app
+            .world_mut()
+            .spawn(WeldOutput {
+                id: OutputId::new(1),
+            })
+            .id();
+        app.world_mut().spawn(RendersOutput(output));
+        let panel = SurfaceId::for_test(920);
+        let popup = SurfaceId::for_test(921);
+        for (surface, role) in [
+            (
+                panel,
+                weld_client::ClientSurfaceRole::Layer(weld_client::LayerSurfaceState {
+                    output: weld_client::ClientOutputId::new(1),
+                    position: weld_client::LogicalPoint::new(0.0, 570.0),
+                    layer: weld_client::DesktopLayer::Top,
+                    keyboard: weld_client::LayerKeyboardInteractivity::None,
+                    stack_index: 0,
+                }),
+            ),
+            (
+                popup,
+                weld_client::ClientSurfaceRole::Popup(weld_client::PopupState {
+                    owner: panel,
+                    position: weld_client::LogicalPoint::new(25.0, -150.0),
+                    stack_index: 1,
+                }),
+            ),
+        ] {
+            enqueue_surface_event(
+                app.world_mut(),
+                HostSurfaceEvent {
+                    surface,
+                    kind: HostSurfaceEventKind::Role(role),
+                },
+            );
+            enqueue_surface_event(
+                app.world_mut(),
+                snapshot_event(surface, root_snapshot(Some([255; 4]))),
+            );
+        }
+        for _ in 0..3 {
+            app.update();
+        }
+        let roots = app
+            .world_mut()
+            .query::<(&SurfaceNode, &ChildOf)>()
+            .iter(app.world())
+            .map(|(node, parent)| (node.surface, parent.parent()))
+            .collect::<HashMap<_, _>>();
+        let panel_root = roots[&panel];
+        let popup_root = roots[&popup];
+        assert!(app.world().get::<SurfaceNode>(panel_root).is_none());
+        assert_eq!(
+            app.world()
+                .get::<ChildOf>(popup_root)
+                .expect("popup parent")
+                .parent(),
+            panel_root
+        );
+        assert_eq!(
+            app.world()
+                .get::<Node>(panel_root)
+                .expect("panel position")
+                .top,
+            px(570.0)
+        );
+        assert_eq!(
+            app.world()
+                .get::<Node>(popup_root)
+                .expect("popup position")
+                .top,
+            px(-150.0)
+        );
+        enqueue_surface_event(
+            app.world_mut(),
+            snapshot_event(panel, root_snapshot(Some([0; 4]))),
+        );
+        app.update();
+        app.update();
+        assert_eq!(
+            app.world()
+                .get::<ChildOf>(popup_root)
+                .expect("parent after redraw")
+                .parent(),
+            panel_root
+        );
+        enqueue_surface_event(
+            app.world_mut(),
+            HostSurfaceEvent {
+                surface: panel,
+                kind: HostSurfaceEventKind::Destroyed,
+            },
+        );
+        app.update();
+        assert!(app.world().get_entity(popup_root).is_err());
     }
 
     #[test]

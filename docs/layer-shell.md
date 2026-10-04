@@ -14,7 +14,9 @@ An explicit output selects that output; an omitted output selects the primary.
 
 `ClientSurfaceRole::Layer` carries committed output-local placement, composition
 layer, keyboard interactivity and stack order. `weld-app::layer_shell` projects
-mapped roots and their XDG popups through `SurfaceNode`. The rendering and
+mapped roots and their XDG popups through `SurfaceNode`. Each presentation has
+a layout root with a separate content child: `SurfaceNode` owns its drawing/input
+children, while popups retain the layer's layout root as their parent. The rendering and
 buffer-release path is shared with application surfaces. Desktop roots never
 receive `ClientToplevel` or enter ordinary managed-window admission.
 
@@ -74,8 +76,10 @@ focus loss; a pointer-observer regression test covers that path.
 ## Follow-ups
 
 Sway IPC and foreign-toplevel enumeration for Rofi window switching are subsequent slices.
-This slice targets Rofi application launching. Layer popup geometry follows the
-client's positioner; output-edge unconstraining remains shared follow-up work.
+This slice targets Rofi application launching. Layer popup geometry applies the
+client's flip/slide/resize constraints against its output on initial configure
+and reposition. Bounds are converted to parent coordinates, including panel
+placement, output scaling, and nested-menu offsets.
 Dynamic physical output hotplug and floating-window placement within reserved
 areas remain separate work. A layer surface is not a secure session lock.
 

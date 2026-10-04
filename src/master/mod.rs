@@ -27,6 +27,7 @@ use weld_app::{
 };
 use weld_float::FloatManagement;
 use weld_hoist::HoistWindow;
+use weld_i3_quirks::window_rules::WindowRules;
 use weld_i3_quirks::workspace::WorkspaceSettings;
 use weld_i3_quirks::{FocusWrapping, I3FocusRequest, I3MoveRequest, I3QuirksPlugin};
 use weld_input::{
@@ -144,12 +145,14 @@ struct ConfigTarget<'w> {
     keyboard: ResMut<'w, KeyboardSettings>,
     pointer: ResMut<'w, WindowPointerSettings>,
     decorations: ResMut<'w, SsdSettings>,
+    window_rules: ResMut<'w, WindowRules>,
     backend: Option<Res<'w, ActiveBackend>>,
 }
 
 impl ConfigTarget<'_> {
     fn apply(&mut self, config: Configuration) {
         report_warnings(&config);
+        *self.window_rules = config.window_rules;
         let startup = !self.state.initialized;
         self.state.pending_launches.extend(
             config
@@ -568,6 +571,7 @@ mod tests {
     #[test]
     fn rejected_candidate_leaves_live_settings_and_bindings_unchanged() {
         let mut app = App::new();
+        app.init_resource::<WindowRules>();
         app.init_resource::<WorkspaceSettings>();
         app.init_resource::<WindowPointerSettings>();
         app.init_resource::<SsdSettings>();

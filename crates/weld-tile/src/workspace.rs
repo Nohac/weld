@@ -67,6 +67,7 @@ fn initialize(
     editor.commands.entity(workspace).insert((
         TileWorkspace,
         TileContainer {
+            prepared_split: None,
             id,
             axis: settings.default_axis,
             children: Vec::new(),

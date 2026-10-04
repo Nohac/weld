@@ -340,8 +340,11 @@ impl ServerState {
                 },
             })
         };
-        let metadata =
-            ClientSurfaceMetadata::truncated(window.native.class(), window.native.title());
+        let metadata = ClientSurfaceMetadata::truncated_x11(
+            window.native.class(),
+            window.native.instance(),
+            window.native.title(),
+        );
         let Some(window) = self.xwayland.windows.get_mut(&window_id) else {
             return;
         };

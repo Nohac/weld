@@ -8,6 +8,104 @@ delegate_noop!(Observer: ignore zwlr_layer_shell_v1::ZwlrLayerShellV1);
 
 #[test]
 #[ignore = "native socket fixture requires XDG_RUNTIME_DIR"]
+fn bottom_panel_menus_flip_inside_scaled_output_and_reposition() {
+    let mut f = Fixture::new();
+    f.server.update_output_metrics(
+        OutputId::new(2),
+        OutputMetrics::new(800, 600, OutputScale::new(2.0).expect("scale")).expect("metrics"),
+        (800, 0),
+    );
+    let output = f
+        .observer
+        .output_objects
+        .iter()
+        .find(|output| {
+            f.observer
+                .outputs
+                .get(&output.id().protocol_id())
+                .is_some_and(|name| name == "test-2")
+        })
+        .expect("second output")
+        .clone();
+    let root = f.surface(111);
+    let layer = f
+        .observer
+        .layers
+        .as_ref()
+        .expect("layer shell")
+        .get_layer_surface(
+            &root,
+            Some(&output),
+            zwlr_layer_shell_v1::Layer::Top,
+            "bottom-panel".into(),
+            &f.queue.handle(),
+            (),
+        );
+    layer.set_anchor(
+        zwlr_layer_surface_v1::Anchor::Bottom
+            | zwlr_layer_surface_v1::Anchor::Left
+            | zwlr_layer_surface_v1::Anchor::Right,
+    );
+    layer.set_size(0, 30);
+    root.commit();
+    f.sync();
+    root.attach(Some(&f.buffer()), 0, 0);
+    root.commit();
+    f.sync();
+    let popup = f.surface(112);
+    let shell = f.observer.shell.clone().expect("xdg shell");
+    let positioner = shell.create_positioner(&f.queue.handle(), ());
+    positioner.set_size(120, 100);
+    positioner.set_anchor_rect(380, 10, 10, 10);
+    positioner.set_anchor(xdg_positioner::Anchor::BottomRight);
+    positioner.set_gravity(xdg_positioner::Gravity::BottomRight);
+    positioner.set_constraint_adjustment(
+        xdg_positioner::ConstraintAdjustment::FlipX | xdg_positioner::ConstraintAdjustment::FlipY,
+    );
+    let popup_xdg = shell.get_xdg_surface(&popup, &f.queue.handle(), ());
+    let role = popup_xdg.get_popup(None, &positioner, &f.queue.handle(), ());
+    layer.get_popup(&role);
+    popup.commit();
+    f.sync();
+    assert_eq!(
+        f.observer.popup_configures.last(),
+        Some(&(260, -90, 120, 100))
+    );
+    popup.attach(Some(&f.buffer()), 0, 0);
+    popup.commit();
+    f.sync();
+    let submenu = f.surface(113);
+    let submenu_xdg = shell.get_xdg_surface(&submenu, &f.queue.handle(), ());
+    let submenu_positioner = shell.create_positioner(&f.queue.handle(), ());
+    submenu_positioner.set_size(80, 50);
+    submenu_positioner.set_anchor_rect(110, 10, 10, 10);
+    submenu_positioner.set_anchor(xdg_positioner::Anchor::TopRight);
+    submenu_positioner.set_gravity(xdg_positioner::Gravity::BottomRight);
+    submenu_positioner.set_constraint_adjustment(xdg_positioner::ConstraintAdjustment::FlipX);
+    submenu_xdg.get_popup(Some(&popup_xdg), &submenu_positioner, &f.queue.handle(), ());
+    submenu.commit();
+    f.sync();
+    // Parent is at x=260; the submenu flips to x=290 in output coordinates,
+    // while its protocol configure remains parent-local.
+    assert_eq!(f.observer.popup_configures.last(), Some(&(30, 10, 80, 50)));
+    positioner.set_anchor_rect(10, 10, 10, 10);
+    role.reposition(&positioner, 1);
+    f.sync();
+    assert_eq!(
+        f.observer.popup_configures.last(),
+        Some(&(20, -90, 120, 100))
+    );
+    positioner.set_constraint_adjustment(xdg_positioner::ConstraintAdjustment::empty());
+    role.reposition(&positioner, 2);
+    f.sync();
+    assert_eq!(
+        f.observer.popup_configures.last(),
+        Some(&(20, 20, 120, 100))
+    );
+}
+
+#[test]
+#[ignore = "native socket fixture requires XDG_RUNTIME_DIR"]
 fn layer_popups_follow_the_selected_output_and_scale() {
     let mut f = Fixture::new();
     let output = f

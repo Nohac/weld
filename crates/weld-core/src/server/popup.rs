@@ -4,7 +4,7 @@ use smithay::{
     backend::input::InputTime,
     desktop::{
         PopupKeyboardGrab, PopupKind, PopupManager, PopupPointerGrab, PopupUngrabStrategy,
-        find_popup_root_surface,
+        find_popup_root_surface, get_popup_toplevel_coords, layer_map_for_output,
     },
     input::{Seat, pointer::Focus},
     reexports::wayland_server::{
@@ -12,7 +12,7 @@ use smithay::{
         backend::ObjectId,
         protocol::{wl_seat, wl_surface::WlSurface},
     },
-    utils::{SERIAL_COUNTER, Serial},
+    utils::{Rectangle, SERIAL_COUNTER, Serial},
     wayland::shell::xdg::{PopupSurface, PositionerState},
 };
 use tracing::{debug, info, warn};
@@ -126,9 +126,11 @@ impl ServerState {
             return true;
         };
         if !popup.surface.is_initial_configure_sent() {
-            if let Err(error) = popup.surface.send_configure() {
+            let surface = popup.surface.clone();
+            self.constrain_layer_popup(&surface);
+            if let Err(error) = surface.send_configure() {
                 warn!(%error, ?surface_id, "failed to send an initial xdg-popup configure");
-                popup.surface.send_popup_done();
+                surface.send_popup_done();
             }
             return true;
         }
@@ -203,7 +205,43 @@ impl ServerState {
             state.geometry = positioner.get_geometry();
             state.positioner = positioner;
         });
+        self.constrain_layer_popup(&surface);
         surface.send_repositioned(token);
+    }
+
+    /// Apply the client's flip/slide/resize policy in its parent's coordinates.
+    fn constrain_layer_popup(&self, popup: &PopupSurface) {
+        let kind = PopupKind::Xdg(popup.clone());
+        let Ok(root) = find_popup_root_surface(&kind) else {
+            return;
+        };
+        let Some(layer) = self
+            .layers
+            .id_for_surface(&root)
+            .and_then(|id| self.layers.0.get(id))
+        else {
+            return;
+        };
+        let Some(output) = self.outputs.get(&layer.outputs.preferred) else {
+            return;
+        };
+        let map = layer_map_for_output(&output.native);
+        let Some(geometry) = map.layer_geometry(&layer.surface) else {
+            return;
+        };
+        let size = output
+            .metrics
+            .mode()
+            .size
+            .to_f64()
+            .to_logical(output.metrics.scale_factor())
+            .to_i32_round();
+        let mut target =
+            Rectangle::from_size(output.native.current_transform().transform_size(size));
+        target.loc -= geometry.loc + get_popup_toplevel_coords(&kind);
+        popup.with_pending_state(|state| {
+            state.geometry = state.positioner.get_unconstrained_geometry(target);
+        });
     }
 
     pub(super) fn begin_popup_grab(

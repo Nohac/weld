@@ -674,18 +674,20 @@ impl AppShell {
         let demand = self.surface_demand.classify(&event);
         // Relay observation has already happened in ClientRuntime. This inbox
         // belongs to the local presenter and follows its application cadence.
-        if !matches!(event.kind, ClientSurfaceEventKind::Metadata(_)) {
-            self.pending_surfaces.push((), event);
-        }
+        self.pending_surfaces.push((), event);
         demand
     }
 
     fn apply_client_event(&mut self, event: ClientSurfaceEvent) {
         let ClientSurfaceEvent { surface, kind } = event;
         match kind {
-            // Current desktop decorations do not display client labels. The
-            // relay consumes them independently; they never create ECS windows.
-            ClientSurfaceEventKind::Metadata(_) => {}
+            ClientSurfaceEventKind::Metadata(metadata) => enqueue_surface_event(
+                self.app.world_mut(),
+                HostSurfaceEvent {
+                    surface,
+                    kind: HostSurfaceEventKind::Metadata(metadata),
+                },
+            ),
             ClientSurfaceEventKind::Commit(commit) => {
                 let _ingress_span = tracing::trace_span!(
                     target: crate::PROFILE_TARGET,

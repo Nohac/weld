@@ -146,13 +146,21 @@ impl Plugin for TilePlugin {
 
 fn sync_split_edges(
     windows: Query<(Entity, &TileParent, Option<&WindowSplitEdge>), With<ManagedWindow>>,
-    containers: Query<&crate::TileContainer>,
+    mut containers: Query<&mut crate::TileContainer>,
     mut commands: Commands,
 ) {
+    for mut container in &mut containers {
+        if let Some(window) = container.prepared_split
+            && (container.children.len() != 1 || container.children[0].entity != window)
+        {
+            container.prepared_split = None;
+        }
+    }
     for (window, parent, current) in &windows {
         let edge = containers
             .get(parent.entity())
             .ok()
+            .filter(|container| container.prepared_split == Some(window))
             .map(|container| match container.axis() {
                 crate::SplitAxis::Horizontal => WindowSplitEdge::Right,
                 crate::SplitAxis::Vertical => WindowSplitEdge::Bottom,

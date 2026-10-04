@@ -52,8 +52,9 @@ Closing an owner retires its published popup dependents.
 Client identities use XRes-reported local process IDs to group windows, with
 separate identities when that information is unavailable. Thus unrelated apps
 sharing XWayland's Wayland connection are not automatically one hoist family.
-Title and class metadata are published only when changed; X11 class supplies the
-current neutral application-label field. These hints provide grouping, not a
+Title, class and instance metadata are published only when changed; X11 class supplies the
+neutral application-label field, with instance preserving the X11 origin for
+configuration criteria. These hints provide grouping, not a
 security boundary: clients sharing an X server retain X11's mutual access.
 
 An unmap retires the associated surface. Remapping gets a new surface identity

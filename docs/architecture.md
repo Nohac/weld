@@ -11,7 +11,8 @@ Weld is a workspace of reusable layers and one standard distribution:
   The optional `input` module translates keyboard directives and binding chords
   into Weld input types.
 - `weld-i3-quirks` consumes that Sway output, interprets the supported settings
-  and actions, and supplies i3 tree-based focus, structural movement and branch-local close recovery.
+  and actions, applies criteria-based border rules, and supplies i3 tree-based focus,
+  structural movement and branch-local close recovery.
   It uses the shared tree and node-focus history. Master owns file selection,
   atomic settings/binding publication, reload and distribution effects. Future
   config/behavior combinations will be shaped by a second concrete backend.
@@ -33,6 +34,8 @@ Weld is a workspace of reusable layers and one standard distribution:
   application model, input projection, surface entities, and composition into
   a core-owned texture. Plugin APIs use Weld and Bevy types rather than
   Smithay protocol objects.
+  Client labels are retained as `ClientWindowMetadata` alongside surface roles;
+  labels arriving before a role wait for admission and are discarded on destruction.
 - `weld-window` owns UI-independent managed-window identity, occupancy,
   geometry, visibility, stacking, focus, interaction, and presentation
   contracts, plus shared workspace identity, membership, output assignment and

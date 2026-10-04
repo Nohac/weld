@@ -135,6 +135,8 @@ pub struct TileContainer {
     id: ContainerId,
     axis: SplitAxis,
     children: Vec<TileChild>,
+    /// Leaf for which an explicit split is waiting for its second child.
+    prepared_split: Option<Entity>,
 }
 
 impl TileContainer {

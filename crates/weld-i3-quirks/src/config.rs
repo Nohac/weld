@@ -41,6 +41,7 @@ pub struct Configuration<Extension = ()> {
     pub startup: Vec<StartupCommand>,
     pub pointer: WindowPointerSettings,
     pub decorations: SsdSettings,
+    pub window_rules: crate::window_rules::WindowRules,
     pub warnings: Vec<ConfigWarning>,
 }
 
@@ -65,6 +66,7 @@ impl<Extension> Default for Configuration<Extension> {
                 ..Default::default()
             },
             decorations: SsdSettings::default(),
+            window_rules: Default::default(),
             warnings: Vec::new(),
         }
     }
@@ -206,6 +208,16 @@ fn apply<Extension>(config: &mut Configuration<Extension>, statement: &Statement
         .map(|argument| argument.text())
         .collect();
     match (statement.name().text(), args.as_slice()) {
+        ("for_window", [criteria, "border", style @ ..]) => {
+            if style.iter().any(|word| word.contains([',', ';'])) {
+                return Err(unsupported(
+                    "window-rule command sequences are not supported",
+                ));
+            }
+            config
+                .window_rules
+                .add_border(criteria, border_style(style)?)?;
+        }
         (directive @ ("exec" | "exec_always"), command) => {
             config.startup.push(StartupCommand {
                 command: exec_command(command)?,

@@ -8,6 +8,7 @@ pub mod config;
 mod focus;
 mod movement;
 mod tree;
+pub mod window_rules;
 pub mod workspace;
 
 use bevy::{
@@ -46,6 +47,7 @@ pub struct I3QuirksPlugin;
 impl Plugin for I3QuirksPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<FocusWrapping>()
+            .init_resource::<window_rules::WindowRules>()
             .init_resource::<workspace::WorkspaceSettings>()
             .init_resource::<workspace::PreviousWorkspace>()
             .add_observer(workspace::request)
@@ -64,6 +66,12 @@ impl Plugin for I3QuirksPlugin {
             .add_observer(movement::cleanup)
             .add_systems(PreUpdate, focus::recover.in_set(TileSystems::RecoverFocus))
             .add_systems(PreUpdate, focus::refresh_path.in_set(TileSystems::Layout));
+        app.add_systems(
+            PreUpdate,
+            window_rules::apply
+                .after(TileSystems::Layout)
+                .in_set(weld_window::WindowSystems::Management),
+        );
         app.add_systems(
             PreUpdate,
             workspace::prepare

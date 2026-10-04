@@ -56,6 +56,7 @@ struct Observer {
         wayland_protocols_wlr::layer_shell::v1::client::zwlr_layer_shell_v1::ZwlrLayerShellV1,
     >,
     layer_configures: Vec<(u32, u32)>,
+    popup_configures: Vec<(i32, i32, i32, i32)>,
     compositor: Option<wl_compositor::WlCompositor>,
     shm: Option<wl_shm::WlShm>,
     subsurfaces: Option<wl_subcompositor::WlSubcompositor>,
@@ -95,7 +96,7 @@ impl Dispatch<wl_registry::WlRegistry, ()> for Observer {
                     state.compositor = Some(registry.bind(name, version.min(6), qh, ()))
                 }
                 "wl_subcompositor" => state.subsurfaces = Some(registry.bind(name, 1, qh, ())),
-                "xdg_wm_base" => state.shell = Some(registry.bind(name, 1, qh, ())),
+                "xdg_wm_base" => state.shell = Some(registry.bind(name, version.min(6), qh, ())),
                 "wp_fractional_scale_manager_v1" => {
                     state.fractional = Some(registry.bind(name, 1, qh, ()))
                 }
@@ -210,7 +211,26 @@ impl Dispatch<xdg_toplevel::XdgToplevel, ()> for Observer {
     }
 }
 delegate_noop!(Observer: ignore xdg_positioner::XdgPositioner);
-delegate_noop!(Observer: ignore xdg_popup::XdgPopup);
+impl Dispatch<xdg_popup::XdgPopup, ()> for Observer {
+    fn event(
+        state: &mut Self,
+        _: &xdg_popup::XdgPopup,
+        event: xdg_popup::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        if let xdg_popup::Event::Configure {
+            x,
+            y,
+            width,
+            height,
+        } = event
+        {
+            state.popup_configures.push((x, y, width, height));
+        }
+    }
+}
 delegate_noop!(Observer: ignore wp_fractional_scale_manager_v1::WpFractionalScaleManagerV1);
 
 impl Dispatch<wl_callback::WlCallback, bool> for Observer {

@@ -87,19 +87,13 @@ fn split_edge_tracks_orientation_and_floating_roundtrip() {
     let mut app = app();
     let first = window(&mut app, 1);
     let second = window(&mut app, 2);
-    assert_eq!(
-        app.world().get::<WindowSplitEdge>(second),
-        Some(&WindowSplitEdge::Right)
-    );
+    assert!(app.world().get::<WindowSplitEdge>(second).is_none());
     command(&mut app, 2, TileOperation::Split(SplitAxis::Vertical));
     assert_eq!(
         app.world().get::<WindowSplitEdge>(second),
         Some(&WindowSplitEdge::Bottom)
     );
-    assert_eq!(
-        app.world().get::<WindowSplitEdge>(first),
-        Some(&WindowSplitEdge::Right)
-    );
+    assert!(app.world().get::<WindowSplitEdge>(first).is_none());
     app.world_mut().trigger(TileFloatingRequest {
         window: Some(second),
         enabled: Some(true),
@@ -111,7 +105,35 @@ fn split_edge_tracks_orientation_and_floating_roundtrip() {
         enabled: Some(false),
     });
     app.update();
-    assert!(app.world().get::<WindowSplitEdge>(second).is_some());
+    assert!(app.world().get::<WindowSplitEdge>(second).is_none());
+}
+
+#[test]
+fn split_indicator_is_explicit_and_consumed_by_admission() {
+    use weld_window::WindowSplitEdge;
+    let mut app = app();
+    let first = window(&mut app, 1);
+    assert!(app.world().get::<WindowSplitEdge>(first).is_none());
+    // Preparing the existing axis still announces the next insertion.
+    command(&mut app, 1, TileOperation::Split(SplitAxis::Horizontal));
+    assert_eq!(
+        app.world().get::<WindowSplitEdge>(first),
+        Some(&WindowSplitEdge::Right)
+    );
+    let second = window(&mut app, 2);
+    assert!(app.world().get::<WindowSplitEdge>(first).is_none());
+    assert!(app.world().get::<WindowSplitEdge>(second).is_none());
+    command(&mut app, 2, TileOperation::Split(SplitAxis::Vertical));
+    assert_eq!(
+        app.world().get::<WindowSplitEdge>(second),
+        Some(&WindowSplitEdge::Bottom)
+    );
+    let third = window(&mut app, 3);
+    assert!(app.world().get::<WindowSplitEdge>(second).is_none());
+    assert!(app.world().get::<WindowSplitEdge>(third).is_none());
+    app.world_mut().despawn(third);
+    app.update();
+    assert!(app.world().get::<WindowSplitEdge>(second).is_none());
 }
 
 #[test]

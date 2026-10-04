@@ -1167,6 +1167,15 @@ mod tests {
             .expect("root")
             .entity();
         let base = app.world().resource::<SsdSettings>().focused.child_border;
+        assert_eq!(
+            app.world().get::<BorderColor>(root),
+            Some(&BorderColor::all(base))
+        );
+        app.world_mut()
+            .trigger(TileRequest::Focused(TileOperation::Split(
+                SplitAxis::Horizontal,
+            )));
+        app.update();
         let right = BorderColor {
             right: Color::WHITE,
             ..BorderColor::all(base)

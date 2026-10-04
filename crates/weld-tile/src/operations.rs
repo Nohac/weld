@@ -85,7 +85,15 @@ impl TreeEditor<'_, '_> {
         self.dirty.0 = true;
         Some(
             self.commands
-                .spawn((TileContainer { id, axis, children }, LayoutRect::default()))
+                .spawn((
+                    TileContainer {
+                        id,
+                        axis,
+                        children,
+                        prepared_split: None,
+                    },
+                    LayoutRect::default(),
+                ))
                 .id(),
         )
     }
@@ -98,10 +106,9 @@ impl TreeEditor<'_, '_> {
             return;
         };
         if container.children.len() == 1 {
-            if let Ok(mut container) = self.containers.get_mut(parent.0)
-                && container.axis != axis
-            {
+            if let Ok(mut container) = self.containers.get_mut(parent.0) {
                 container.axis = axis;
+                container.prepared_split = Some(window);
                 self.dirty.0 = true;
             }
             return;
@@ -128,6 +135,12 @@ impl TreeEditor<'_, '_> {
         // The new container is published before the following layout event.
         self.history.wrap(window, nested);
         self.commands.entity(nested).insert(parent);
+        self.commands
+            .entity(nested)
+            .entry::<TileContainer>()
+            .and_modify(move |mut container| {
+                container.prepared_split = Some(window);
+            });
         if let Ok(mut container) = self.containers.get_mut(parent.0)
             && let Some(child) = container
                 .children

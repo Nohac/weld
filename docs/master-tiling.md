@@ -74,6 +74,9 @@ not provide Sway IPC compatibility.
 - `gaps inner N` and `gaps outer N`, in logical pixels, integer 0..65535.
   Geometry clamps gaps to available space.
 - `default_orientation horizontal|vertical`, for new workspace roots only.
+  Split-edge highlighting appears only after an explicit split command, on the
+  right for horizontal insertion or bottom for vertical insertion. It clears
+  when the split gains another child; an ordinary layout direction is unmarked.
 - `smart_gaps on|off` removes outer gaps around a sole tiled slot.
 - `smart_borders on|off` hides that slot's border. Pixel frames become bare;
   normal frames retain their header. Floating windows keep their configured frame.
@@ -156,10 +159,23 @@ not provide Sway IPC compatibility.
   `weld output-debug`, and `weld scale increase|decrease|physical`. Scale bindings
   are registered only on DRM. Persistent-window matching is not yet exposed.
 
-Includes, criteria, command sequences, modes, and other blocks remain follow-ups.
+- `for_window [CRITERIA] border normal|pixel [N]|none` applies a per-window frame
+  choice. Criteria support `all` and regex matches for `app_id`, `class`,
+  `instance`, and `title`, combined with AND. Missing native/X11 properties match
+  as empty strings, following [Sway's criteria matching](https://github.com/swaywm/sway/blob/1.12/sway/criteria.c).
+  Thus `[class="^.*"]` also matches native Wayland windows. Rules run in source
+  order, once per matching occupant, including when a later title first matches.
+  Later title changes preserve manual border toggles. Successful reload retries
+  the new rules against existing windows; removing a rule leaves its previously
+  applied border choice intact. Matching uses Rust `regex`; PCRE-only constructs
+  such as look-around/backreferences and dynamic `__focused__` matching are not
+  supported. X11 class remains the neutral application label for hoisting, while
+  criteria distinguish class/instance from native Wayland `app_id`.
+
+Includes, general criteria commands, command sequences, modes, and other blocks remain follow-ups.
 Unsupported mode blocks are skipped whole, so their bindings never become global.
 `include` remains an error to avoid silently dropping a file's essential bindings.
-Unknown input devices, unsupported keys, SwayFX effects and window rules warn and
+Unknown input devices, unsupported keys, SwayFX effects and other window-rule actions warn and
 skip. Volume, mute, play/pause, next and previous media-key names are supported;
 brightness and the separate XF86AudioPause key remain unsupported.
 The pure parser preserves more syntax than

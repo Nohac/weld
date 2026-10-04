@@ -21,10 +21,18 @@ mod metadata_tests {
         assert!(
             matches!(decoded.kind, WireClientSurfaceEventKind::Metadata(metadata) if metadata.title() == "Stereo window" && metadata.app_id() == "test.app")
         );
-        // The metadata wire representation is a pair of strings. Verify the
-        // constructor's invariant is also enforced by actual deserialization.
-        let oversized = postcard::to_allocvec(&("test.app", "x".repeat(1025))).unwrap();
-        assert!(postcard::from_bytes::<ClientSurfaceMetadata>(&oversized).is_err());
+        // Supply the complete wire shape so rejection exercises the label
+        // bounds rather than failing on a missing field.
+        for (title, instance) in [
+            ("x".repeat(1025), None),
+            (String::new(), Some("x".repeat(1025))),
+        ] {
+            let oversized = postcard::to_allocvec(&("test.app", title, instance)).unwrap();
+            assert_eq!(
+                postcard::from_bytes::<ClientSurfaceMetadata>(&oversized),
+                Err(postcard::Error::SerdeDeCustom)
+            );
+        }
     }
 }
 use weld_hoist_protocol::{

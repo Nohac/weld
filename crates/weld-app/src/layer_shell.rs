@@ -187,15 +187,22 @@ fn mount(
         *entity
     } else {
         let entity = commands
-            .spawn((
-                LayerPresentation(surface),
-                SurfaceNode {
-                    surface,
-                    view: SurfaceView::FullSurface,
-                },
-                Pickable::IGNORE,
-            ))
+            .spawn((LayerPresentation(surface), Pickable::IGNORE))
             .id();
+        // SurfaceNode owns its rendering/input children. Keep protocol popups
+        // under the layout root so content synchronization retains their parent.
+        commands.spawn((
+            SurfaceNode {
+                surface,
+                view: SurfaceView::FullSurface,
+            },
+            Pickable::IGNORE,
+            Node {
+                position_type: PositionType::Absolute,
+                ..default()
+            },
+            ChildOf(entity),
+        ));
         presentations.0.insert(surface, (entity, placement));
         entity
     };
