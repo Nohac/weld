@@ -7038,6 +7038,7 @@ dependencies = [
  "bevy",
  "bevy_render",
  "cc",
+ "jni 0.22.4",
  "tracing",
  "weld-client",
  "weld-hoist-encoded",

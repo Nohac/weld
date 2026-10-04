@@ -1,8 +1,9 @@
 mod decode;
+mod insets;
 mod receiver;
 mod renderer;
 
-use crate::geometry::fit_rect;
+use crate::geometry::{Viewport, fit_rect};
 use bevy::{
     input::touch::TouchPhase,
     prelude::*,
@@ -13,7 +14,10 @@ use bevy::{
     window::{AppLifecycle, PrimaryWindow, WindowFocused},
 };
 use receiver::{Input, Session, Shared};
-use std::{sync::Arc, time::Instant};
+use std::{
+    sync::Arc,
+    time::{Duration, Instant},
+};
 use weld_client::{
     ButtonState, ClientPointerRoute, InputEventKind, InputPosition, LinuxButtonCode,
 };
@@ -31,13 +35,22 @@ struct VideoPanel;
 struct Pointer {
     held: Option<(u64, ClientPointerRoute)>,
     clock: Option<Instant>,
+    mapping: Option<(u64, [f64; 4], [f64; 2])>,
+}
+
+#[derive(Default, Resource)]
+struct Presentation {
+    viewport: Option<Viewport>,
+    changed: Option<Instant>,
 }
 
 pub fn install(app: &mut App) {
     app.add_plugins(ExtractResourcePlugin::<Stream>::default())
         .init_resource::<Pointer>()
+        .init_resource::<Presentation>()
+        .init_resource::<insets::Insets>()
         .add_systems(Startup, start)
-        .add_systems(Update, (lifecycle, layout, touch).chain());
+        .add_systems(Update, (lifecycle, viewport, layout, touch).chain());
     app.sub_app_mut(RenderApp)
         .init_resource::<renderer::VideoRenderer>()
         .add_systems(
@@ -94,9 +107,61 @@ fn lifecycle(
     }
 }
 
-fn layout(
+fn viewport(
     receiver: Option<Res<Receiver>>,
     windows: Query<&Window, With<PrimaryWindow>>,
+    mut presentation: ResMut<Presentation>,
+    mut status: Query<&mut Node, With<crate::StatusArea>>,
+    mut insets: ResMut<insets::Insets>,
+) {
+    let (Some(receiver), Ok(window), Some(android)) =
+        (receiver, windows.single(), bevy::android::ANDROID_APP.get())
+    else {
+        return;
+    };
+    let native = android.content_rect();
+    let size = [window.physical_width(), window.physical_height()];
+    let content = insets.content(size).map(|safe| {
+        [
+            native.left.max(safe[0]),
+            native.top.max(safe[1]),
+            native.right.min(safe[2]),
+            native.bottom.min(safe[3]),
+        ]
+    });
+    let next =
+        content.and_then(|content| Viewport::new(size, content, f64::from(window.scale_factor())));
+    if presentation.viewport != next {
+        presentation.viewport = next;
+        presentation.changed = Some(Instant::now());
+        if let Some(viewport) = next {
+            info!(?viewport, "phone presentation area changed");
+            for mut node in &mut status {
+                place(&mut node, viewport.status);
+            }
+        }
+    }
+    if presentation
+        .changed
+        .is_some_and(|since| since.elapsed() >= Duration::from_millis(150))
+    {
+        if let Some(viewport) = presentation.viewport {
+            receiver.0.set_preference(viewport.preference);
+        }
+        presentation.changed = None;
+    }
+}
+
+fn place(node: &mut Node, rect: [f64; 4]) {
+    node.left = px(rect[0] as f32);
+    node.top = px(rect[1] as f32);
+    node.width = px(rect[2] as f32);
+    node.height = px(rect[3] as f32);
+}
+
+fn layout(
+    receiver: Option<Res<Receiver>>,
+    presentation: Res<Presentation>,
     mut panels: Query<(&mut Node, &mut Visibility), With<VideoPanel>>,
     mut status: Query<&mut Text, With<crate::Status>>,
 ) {
@@ -110,9 +175,6 @@ fn layout(
             }
         }
     }
-    let Ok(window) = windows.single() else {
-        return;
-    };
     let displayed = receiver
         .0
         .shared
@@ -121,18 +183,14 @@ fn layout(
         .ok()
         .and_then(|value| value.clone());
     for (mut node, mut visible) in &mut panels {
-        if let Some((_, input)) = &displayed {
-            let rect = fit_rect(
-                [window.width() as f64, window.height() as f64],
-                input.logical_size,
-            );
-            node.left = px(rect[0] as f32);
-            node.top = px(rect[1] as f32);
-            node.width = px(rect[2] as f32);
-            node.height = px(rect[3] as f32);
-            *visible = Visibility::Visible;
+        if let (Some((_, input)), Some(viewport)) = (&displayed, presentation.viewport) {
+            let rect = fit_rect(viewport.video, input.logical_size);
+            let mut next = node.clone();
+            place(&mut next, rect);
+            node.set_if_neq(next);
+            visible.set_if_neq(Visibility::Visible);
         } else {
-            *visible = Visibility::Hidden;
+            visible.set_if_neq(Visibility::Hidden);
         }
     }
 }
@@ -142,6 +200,7 @@ fn touch(
     windows: Query<&Window, With<PrimaryWindow>>,
     mut events: MessageReader<TouchInput>,
     mut pointer: ResMut<Pointer>,
+    presentation: Res<Presentation>,
 ) {
     let Some(receiver) = receiver else {
         return;
@@ -167,14 +226,24 @@ fn touch(
         .lock()
         .ok()
         .and_then(|value| value.clone());
-    let Some((epoch, displayed)) = displayed else {
-        pointer.held = None;
+    let (Some((epoch, displayed)), Some(viewport)) = (displayed, presentation.viewport) else {
+        events.clear();
+        if pointer.held.take().is_some() {
+            receiver.0.reset_input();
+        }
+        pointer.mapping = None;
         return;
     };
-    let rect = fit_rect(
-        [window.width() as f64, window.height() as f64],
-        displayed.logical_size,
-    );
+    let rect = fit_rect(viewport.video, displayed.logical_size);
+    let mapping = Some((epoch, rect, displayed.logical_size));
+    if pointer.mapping != mapping {
+        pointer.mapping = mapping;
+        if pointer.held.take().is_some() {
+            receiver.0.reset_input();
+            events.clear();
+            return;
+        }
+    }
     for touch in events.read() {
         let position = InputPosition::new(f64::from(touch.position.x), f64::from(touch.position.y));
         let (route, focus, event) = match touch.phase {

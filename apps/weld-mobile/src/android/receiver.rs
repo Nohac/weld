@@ -29,6 +29,7 @@ use weld_media::VideoCodec;
 use weld_media_android::AndroidImage;
 
 use super::decode::Backend;
+use crate::geometry::WindowPreference;
 
 pub(super) struct Frame {
     pub epoch: u64,
@@ -45,6 +46,7 @@ pub(super) struct Shared {
     pub active: AtomicBool,
     pub epoch: AtomicU64,
     reset: AtomicBool,
+    preference: Mutex<Option<WindowPreference>>,
 }
 impl Shared {
     fn message(&self, message: impl Into<String>) {
@@ -109,6 +111,15 @@ impl Session {
         if self.shared.active.swap(active, Ordering::AcqRel) != active {
             self.reset_input();
         }
+    }
+    pub fn set_preference(&self, preference: WindowPreference) {
+        if let Ok(mut pending) = self.shared.preference.lock() {
+            if *pending == Some(preference) {
+                return;
+            }
+            *pending = Some(preference);
+        }
+        self.wake();
     }
     pub fn reset_input(&self) {
         self.shared.reset.store(true, Ordering::Release);
@@ -219,6 +230,7 @@ fn run(directory: PathBuf, shared: &Shared, input: Receiver<Input>) -> Result<()
     let mut runtime = ClientRuntime::default();
     runtime.register(registration.into_parts().runtime)?;
     let mut selected = None;
+    let mut configured = None;
     let mut events = ClientEventQueue::default();
     let mut invalid_events = Vec::new();
     let mut invalid_effects = Vec::new();
@@ -311,6 +323,39 @@ fn run(directory: PathBuf, shared: &Shared, input: Receiver<Input>) -> Result<()
             if let Some(id) = selected {
                 rate(&mut runtime, id, active)?;
             }
+        }
+        let preference = *shared
+            .preference
+            .lock()
+            .map_err(|_| anyhow::anyhow!("preference mailbox poisoned"))?;
+        if let (Some(surface), Some(preference)) = (selected, preference)
+            && configured != Some((surface, preference))
+        {
+            for kind in [
+                ClientSurfaceRequestKind::Configure {
+                    logical_size: preference.size,
+                    layout: Default::default(),
+                    resizing: false,
+                    fullscreen: false,
+                },
+                ClientSurfaceRequestKind::SetPreferredScale {
+                    scale_120: Some(preference.scale_120),
+                },
+            ] {
+                ensure!(
+                    runtime.apply_request(ClientRequest::Surface(ClientSurfaceRequest {
+                        surface,
+                        kind
+                    })),
+                    "phone sizing request rejected"
+                );
+            }
+            tracing::info!(
+                ?surface,
+                ?preference,
+                "requested phone window size and scale"
+            );
+            configured = Some((surface, preference));
         }
         if shared.reset.swap(false, Ordering::AcqRel) {
             for _ in input.try_iter() {}
@@ -431,6 +476,33 @@ mod tests {
         assert!(session.input(input()));
         assert!(!session.input(input()));
         assert!(shared.reset.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn sizing_mailbox_keeps_only_latest_viewport() {
+        let shared = Arc::new(Shared::default());
+        let (sender, _receiver) = mpsc::sync_channel(1);
+        let session = Session {
+            shared: shared.clone(),
+            input: sender,
+            worker: None,
+        };
+        let portrait = WindowPreference {
+            size: Extent::new(448, 880),
+            scale_120: 360,
+        };
+        let landscape = WindowPreference {
+            size: Extent::new(944, 384),
+            scale_120: 360,
+        };
+        session.set_preference(portrait);
+        session.set_preference(landscape);
+        session.set_preference(landscape);
+        assert_eq!(
+            *shared.preference.lock().expect("preference"),
+            Some(landscape)
+        );
+        assert!(!shared.reset.load(Ordering::Acquire));
     }
 
     #[test]

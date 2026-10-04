@@ -29,6 +29,7 @@ weld-media = { path = "../../crates/weld-media", features = ["decode", "config"]
 cc = "1"
 
 [target.'cfg(target_os = "android")'.dependencies]
+jni = "0.22.4"
 bevy = { version = "=0.19.1", default-features = false, features = ["android-native-activity"] }
 weld-media-android = { path = "../../crates/weld-media-android" }
 

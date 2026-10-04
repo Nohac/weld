@@ -46,12 +46,23 @@ The APK is debuggable and uses development signing only.
 
 ## Presentation and input
 
-The source starts at 960x640, subject to application size increments. The phone
-letterboxes that window and reserves a status strip. Rotation changes its local
-rectangle; it currently does not reconfigure the source size or scale.
+The source starts at 960x640, then the phone requests a logical window size and
+preferred scale from its available area and Android display density. Rotation
+updates those requests after a 150 ms settling interval. Preferences use a
+latest-value mailbox; application size increments do not cause configure loops.
+The received content keeps its aspect ratio while a resize is pending or an
+application chooses a different size.
+
+Android stable system-bar and camera-cutout insets, plus a 64 logical-pixel
+status strip, remain outside the video/touch area. The insets adapter samples
+the Android UI thread asynchronously at most twice a second, with an immediate
+refresh on window-size changes. Presentation waits for matching-size insets.
+Large viewport requests are reduced to leave room inside the decoder dimension
+ceiling; this is a shell bound, not hardware capability negotiation.
 One finger maps to primary-button press, captured motion and release. The
 shared surface-input geometry handles crop/scale coordinates and input regions.
-Focus loss, cancellation and queue overflow release held input. An epoch guards
+Focus loss, cancellation, rotation/mapping changes and queue overflow release
+held input. An epoch guards
 input and decoded-frame publication across window unmap/destruction.
 
 The receiver selects the first toplevel and requests 60 Hz while active. Other
@@ -83,15 +94,19 @@ processes, which this proof does not automatically recover from.
 - H.264 selected `c2.exynos.h264.decoder`. AV1 selected `c2.google.av1.decoder`.
   A direct Android `MediaCodecInfo` query confirmed the AV1 implementation reports
   `hardware=true software=false vendor=true`. The vendor capability file declares
-  a 3840x2160@60 performance point; this slice tested a much smaller live window.
+  a 3840x2160@60 performance point; the sizing test used a portrait window around
+  1344x2577 and a landscape window around 2841x996 (subject to terminal increments).
   The codec name's `google` prefix does not imply software decoding.
 - AV1 is the launch default. Android reports no low-latency feature for that
   codec; hardware acceleration and low-latency mode are separate capabilities.
 - User confirmed rotation and tap interaction. Screenshots confirmed the
   corrected aspect ratio after selecting `NodeImageMode::Stretch`.
+- Phone-sized AV1 passed portrait/landscape interaction. The final safe-area
+  build requested 448x859 and 947x332 logical pixels at 3x scale on this phone;
+  rotation returned to portrait without reconnecting or codec failure.
 - A background/foreground cycle produced source `Paused` then active 60000 mHz
   presentation demand and resumed updates on the existing connection.
-- Android Clippy with warnings denied passed. Three focused Rust tests were
+- Android and desktop Clippy with warnings denied passed. Seven focused Rust tests were
   compiled for ARM64 and executed on-device; no emulation was used.
 - Launcher tests cover log-capture timeout and cleanup after device failure.
 
@@ -103,9 +118,9 @@ GPUs remain unqualified.
 
 ## Next product slices
 
-Phone-sized configure/scale requests and usable keyboard input come before
-calling this a daily-use client. Device pairing UI should replace the launcher
-file exchange, followed by an authorized running-window browser and an explicit
-host-owned remote-launch catalog. Pairing, catalog visibility, launch and
+Device pairing UI should replace the launcher file exchange, followed by an
+authorized running-window browser and an explicit host-owned remote-launch
+catalog. Touch input is sufficient for the next slices; automatic keyboard/IME
+integration is deferred. Pairing, catalog visibility, launch and
 input/hoist authorization remain separate capabilities. The test launcher's
 whole-private-session consent is not that product authorization flow.

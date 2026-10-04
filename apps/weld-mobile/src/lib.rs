@@ -50,10 +50,15 @@ pub fn main() {
 #[derive(Component, Clone, Default)]
 struct Status;
 
+#[derive(Component, Clone, Default)]
+struct StatusArea;
+
 fn setup(mut commands: Commands) {
     commands.spawn(Camera2d);
     commands.spawn_scene(bsn! {
+        StatusArea
         Node {
+            position_type: PositionType::Absolute,
             width: percent(100), height: percent(100),
             padding: UiRect::all(px(16)),
             align_items: AlignItems::End,
