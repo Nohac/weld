@@ -1,6 +1,7 @@
 //! Distribution commands layered onto the i3 configuration interpreter.
 
 use anyhow::{Result, bail};
+use i3::{UnsupportedPolicy, unsupported};
 use weld_app::input::ShellCommand;
 use weld_i3_quirks::config as i3;
 
@@ -16,7 +17,7 @@ pub(super) enum DistributionAction {
 }
 
 pub(super) fn parse(name: &str, source: &str) -> Result<Configuration> {
-    i3::parse_with_extensions(name, source, extension)
+    i3::parse_with_policy(name, source, UnsupportedPolicy::Warn, extension)
 }
 
 fn extension(words: &[&str]) -> Result<DistributionAction> {
@@ -33,7 +34,8 @@ fn extension(words: &[&str]) -> Result<DistributionAction> {
         ["weld", "scale", "physical"] => {
             DistributionAction::Shell(ShellCommand::MatchOutputPhysicalScale)
         }
-        _ => bail!("unsupported Master command"),
+        ["weld", ..] => bail!("unsupported Master command"),
+        _ => return Err(unsupported("unsupported command")),
     })
 }
 

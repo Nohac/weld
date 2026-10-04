@@ -36,7 +36,8 @@ keymap makes physical Windows produce that modifier.
 Graphical Master requires an explicit `--config` path. The repository's
 `examples/master.sway.config` is a development example, selected explicitly by
 the graphical hoist and profiling launchers. A supplied file may be a Sway
-config, but unsupported directives fail clearly. Master has no implicit config
+config; unsupported features are skipped with source-located warnings. Malformed
+supported settings still reject the load. Master has no implicit config
 discovery or bundled fallback. Headless session hosting needs no config.
 
 Alt+Shift+R reloads the selected file. The file replaces, rather than overlays,
@@ -44,8 +45,32 @@ the configuration plugin's bindings; omitted settings return to their native
 defaults. Parse/translation failure leaves the old bindings and settings active.
 There is no file watcher yet; reload rereads the supplied path.
 
+Check a file without opening a compositor, connecting a transport or running its
+startup commands:
+
+```sh
+cargo run -- --validate-config --config ~/.config/sway/config
+```
+
+The check reports usable binding/startup-command counts and every skipped feature.
+An `exec` command is preserved, not checked for availability or compatibility:
+for example, `swaymsg exit` still addresses Sway, not Weld. Use a binding to Weld's
+supported `exit` command when running a Sway-derived config. Waybar's Sway IPC
+modules also need their Weld-supported equivalents; loading a bar command does
+not provide Sway IPC compatibility.
+
 ## Supported configuration
 
+- `set $name VALUE`, with ordered substitution in bindings, settings and commands.
+  Values can refer to earlier definitions; redefinition affects later lines.
+  Longer variable names match first. Expansion is single-pass, including inside
+  quotes, and reparses the expanded spelling. Unknown shell variables such as
+  `$HOME` remain for the shell; unresolved variables in required literal/chord
+  values are errors. `$$` protects a dollar sign and backslash-escaped dollars
+  remain escaped. Expanded text and the variable table are each limited to 8 MiB.
+  The pure syntax parser remains unexpanded; the optional `evaluate` feature owns
+  this pass. Prefix/redefinition behavior follows [Sway 1.12's variable replacement](https://github.com/swaywm/sway/blob/1.12/sway/config.c)
+  and [set handler](https://github.com/swaywm/sway/blob/1.12/sway/commands/set.c).
 - `gaps inner N` and `gaps outer N`, in logical pixels, integer 0..65535.
   Geometry clamps gaps to available space.
 - `default_orientation horizontal|vertical`, for new workspace roots only.
@@ -58,12 +83,13 @@ There is no file watcher yet; reload rereads the supplied path.
   innermost wrap candidate. `force` wraps at the first eligible split edge.
   Directional output traversal is a follow-up, so `workspace` currently behaves like `yes`.
 - `focus_follows_mouse yes|no` focuses a visible window when mouse motion enters
-  it, without raising floating windows. The example enables it; omission disables
-  it. Held buttons and active move/resize sessions suppress hover focus. Keyboard
+  it, without raising floating windows. The Sway interpreter enables it by default.
+  Held buttons and active move/resize sessions suppress hover focus. Keyboard
   selection and layout changes beneath a stationary pointer retain focus until
   the pointer crosses into another window. `always` remains unsupported.
 - `floating_modifier MODIFIER[+MODIFIER...]` configures shared window pointer chords:
   move for floating windows and resize for floating or tiled windows.
+  An optional trailing `normal` is accepted; `inverse` remains unsupported.
   Reload replaces these bindings while retaining already captured releases.
   Omission disables modifier pointer chords; titlebar and resize handles remain usable.
 - `floating enable|disable|toggle` and `focus mode_toggle` are bound commands.
@@ -90,13 +116,13 @@ There is no file watcher yet; reload rereads the supplied path.
 - `border normal|pixel [N]|none|toggle` changes the selected window's frame.
   Per-window overrides survive global reload; live defaults apply to other windows.
 - `bindsym CHORD COMMAND` with literal Mod4, Mod1, Control/Ctrl and Shift
-  modifiers, lowercase ASCII letter names, digits, arrow/F1-F12 keys, Return, Escape, space,
+  modifiers, lowercase ASCII letter names, digits, arrow/F1-F12 keys, Return, Escape, Tab, Pause, Print, space,
   equal and minus. Trigger names currently select physical key positions; modifiers follow
   Weld's configured XKB map. Full symbolic `bindsym` matching is a follow-up.
 - `input type:keyboard { ... }` or `input * { ... }`, and their single-line
   forms, with `xkb_rules`, `xkb_model`, `xkb_layout`, `xkb_variant`, `xkb_options`.
   Values are literal XKB names, optionally quoted; empty quoted options clear
-  configured swaps. Per-device selectors and variable expansion are follow-ups.
+  configured swaps. Per-device selectors remain a follow-up.
   Directives apply in source order to the single native seat.
 - `workspace NAME output CONNECTOR [FALLBACK...]`. The first available connector
   wins; `primary` and `nonprimary` are supported selectors. An exact name rule
@@ -106,7 +132,7 @@ There is no file watcher yet; reload rereads the supplied path.
   `workspace next_on_output|prev_on_output`, `workspace back_and_forth|current`.
   The `number` form finds a leading number even in a name such as `3: work`.
   Quoted reserved words remain literal names. Names can contain spaces; escapes,
-  variable expansion and command sequences are rejected in this subset.
+  unresolved variables and command sequences are rejected in this subset.
 - `move [container|window] to workspace TARGET` and `move workspace TARGET` use
   the same targets and move an individual selected window without following it.
 - `exec [--no-startup-id] COMMAND` starts a command once after initial configuration.
@@ -114,6 +140,9 @@ There is no file watcher yet; reload rereads the supplied path.
   source order and use the host-owned client launcher, with Weld's Wayland socket
   and toolkit environment. Failed configuration reloads launch nothing.
   `--no-startup-id` is accepted; activation tokens are not currently issued.
+- `bar { swaybar_command COMMAND }` starts an explicitly supplied bar command
+  once, using the same startup queue as `exec`. Other bar fields warn and skip;
+  the bar application owns its configuration. No default `swaybar` is started.
 - Bound commands: `splith`, `splitv`, `split h|v|horizontal|vertical`,
   `focus left|right|up|down`, `move left|right|up|down`,
   `resize grow|shrink width|height N ppt`, `kill`, `reload`, `exit`, and `exec COMMAND`.
@@ -127,8 +156,13 @@ There is no file watcher yet; reload rereads the supplied path.
   `weld output-debug`, and `weld scale increase|decrease|physical`. Scale bindings
   are registered only on DRM. Persistent-window matching is not yet exposed.
 
-Variables, includes, criteria, command sequences, modes, and blocks other than
-keyboard input configuration remain follow-ups. The pure parser preserves more syntax than
+Includes, criteria, command sequences, modes, and other blocks remain follow-ups.
+Unsupported mode blocks are skipped whole, so their bindings never become global.
+`include` remains an error to avoid silently dropping a file's essential bindings.
+Unknown input devices, unsupported keys, SwayFX effects and window rules warn and
+skip. Volume, mute, play/pause, next and previous media-key names are supported;
+brightness and the separate XF86AudioPause key remain unsupported.
+The pure parser preserves more syntax than
 the distribution currently interprets. Master configuration owns launcher, exit,
 output diagnostics and hoist bindings as well as tiling bindings. Reusable
 plugins expose typed actions without installing those default keys. A supplied

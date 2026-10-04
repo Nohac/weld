@@ -40,6 +40,14 @@ pub use arguments::{AppArguments, BackendKind};
 
 pub fn run(arguments: AppArguments) -> Result<()> {
     telemetry::initialize()?;
+    if arguments.validate_config {
+        return master::validate_configuration(
+            arguments
+                .config
+                .as_deref()
+                .context("--validate-config requires --config PATH")?,
+        );
+    }
     validate_session_arguments(&arguments)?;
     let backend = match arguments.backend.selection() {
         arguments::HostSelection::Bevy(backend) => backend,

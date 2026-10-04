@@ -59,6 +59,24 @@ fn read_configuration(path: &Path) -> Result<Configuration> {
     config::parse(&path.display().to_string(), &source)
 }
 
+pub(crate) fn validate_configuration(path: &Path) -> Result<()> {
+    let config = read_configuration(path)?;
+    report_warnings(&config);
+    tracing::info!(
+        bindings = config.bindings.len(),
+        startup_commands = config.startup.len(),
+        warnings = config.warnings.len(),
+        "configuration valid; no applications started"
+    );
+    Ok(())
+}
+
+fn report_warnings(config: &Configuration) {
+    for warning in &config.warnings {
+        tracing::warn!(source = %warning.source, line = warning.line, reason = %warning.message, "skipped unsupported configuration feature");
+    }
+}
+
 impl Plugin for MasterConfigPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<ShellCommands>()
@@ -131,6 +149,7 @@ struct ConfigTarget<'w> {
 
 impl ConfigTarget<'_> {
     fn apply(&mut self, config: Configuration) {
+        report_warnings(&config);
         let startup = !self.state.initialized;
         self.state.pending_launches.extend(
             config
@@ -679,5 +698,50 @@ mod tests {
             app.world()
                 .contains_resource::<Messages<GlobalShortcutPressed>>()
         );
+    }
+
+    #[test]
+    fn variable_reload_replaces_live_preferences_and_rejects_bad_assignments_atomically() {
+        let mut app = App::new();
+        app.add_plugins(MasterConfigPlugin {
+            path: example_path(),
+            initial: config::parse("initial", "set $mod Mod4\nfloating_modifier $mod\nfocus_follows_mouse yes\nbindsym $mod+Return exec foot").expect("initial"),
+        });
+        let old_ids = app
+            .world()
+            .resource::<ConfigState>()
+            .actions
+            .keys()
+            .copied()
+            .collect::<Vec<_>>();
+        let replacement = config::parse("replacement", "set $mod Mod1\nfloating_modifier $mod\nfocus_follows_mouse no\nblur enable\nbindsym $mod+Return exec foot").expect("warnings allow replacement");
+        assert_eq!(replacement.warnings.len(), 1);
+        install(&mut app, replacement);
+        let pointer = *app.world().resource::<WindowPointerSettings>();
+        assert!(pointer.modifier.expect("modifier").alt);
+        assert!(!pointer.focus_follows_mouse);
+        assert!(old_ids.iter().all(|id| {
+            !app.world()
+                .resource::<ConfigState>()
+                .actions
+                .contains_key(id)
+        }));
+        let new_ids = app
+            .world()
+            .resource::<ConfigState>()
+            .actions
+            .keys()
+            .copied()
+            .collect::<Vec<_>>();
+        let invalid = config::parse("invalid", "set $mod\nfloating_modifier Mod4")
+            .map(|config| install(&mut app, config));
+        assert!(invalid.is_err());
+        assert_eq!(*app.world().resource::<WindowPointerSettings>(), pointer);
+        assert!(new_ids.iter().all(|id| {
+            app.world()
+                .resource::<ConfigState>()
+                .actions
+                .contains_key(id)
+        }));
     }
 }

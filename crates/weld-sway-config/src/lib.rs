@@ -6,6 +6,8 @@
 //! parsing performs no expansion, file access, regex compilation or execution.
 //! The optional `input` feature translates keyboard settings and binding chords
 //! into Weld input configuration for distribution assemblies.
+//! The optional `evaluate` feature provides source-ordered variable expansion
+//! and unsupported-feature warnings; `input` enables it as well.
 //!
 //! # Syntax boundary
 //!
@@ -40,6 +42,8 @@
 #![deny(missing_docs)]
 
 mod diagnostic;
+#[cfg(feature = "evaluate")]
+pub mod evaluation;
 #[cfg(feature = "input")]
 pub mod input;
 mod parser;

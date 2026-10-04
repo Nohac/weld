@@ -144,10 +144,13 @@ impl BackendKind {
     ]).multiple(false))
 )]
 pub struct AppArguments {
-    /// Required configuration file for graphical Master. Only the documented
-    /// Sway subset is supported. Headless sessions do not use configuration.
+    /// Required configuration file for graphical Master. Unsupported Sway features
+    /// warn and skip. Headless sessions do not use configuration.
     #[arg(long, value_name = "PATH")]
     pub(crate) config: Option<PathBuf>,
+    /// Validate configuration and report skipped features without starting Weld or applications.
+    #[arg(long, requires = "config")]
+    pub(crate) validate_config: bool,
     /// Legacy repeat fallback: client timers, disabled, or emulated key edges. Defaults to client;
     /// WELD_LEGACY_KEY_REPEAT supplies a default when this option is absent.
     #[arg(long, value_enum)]

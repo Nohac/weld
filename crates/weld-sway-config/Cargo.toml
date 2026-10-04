@@ -5,7 +5,8 @@ edition.workspace = true
 publish.workspace = true
 
 [features]
-input = ["dep:anyhow", "dep:weld-input"]
+evaluate = ["dep:anyhow"]
+input = ["evaluate", "dep:weld-input"]
 
 [dependencies]
 winnow.workspace = true

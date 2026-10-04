@@ -9,6 +9,8 @@ use bevy::color::{Color, Srgba};
 use weld_input::{GlobalShortcut, KeyboardKeymap};
 use weld_ssd::{BorderStyle, FrameColors, SsdSettings};
 use weld_sway_config::Statement;
+pub use weld_sway_config::evaluation::{ConfigWarning, UnsupportedPolicy, unsupported};
+use weld_sway_config::evaluation::{expand_variables, line_of};
 use weld_tile::{Direction, SplitAxis, TileOperation, TileSettings};
 use weld_window::fullscreen::{FullscreenAction, FullscreenMode};
 use weld_window::pointer::WindowPointerSettings;
@@ -39,6 +41,7 @@ pub struct Configuration<Extension = ()> {
     pub startup: Vec<StartupCommand>,
     pub pointer: WindowPointerSettings,
     pub decorations: SsdSettings,
+    pub warnings: Vec<ConfigWarning>,
 }
 
 /// A validated shell command and its configuration-load execution policy.
@@ -57,8 +60,12 @@ impl<Extension> Default for Configuration<Extension> {
             keymap: None,
             workspaces: WorkspaceSettings::default(),
             startup: Vec::new(),
-            pointer: WindowPointerSettings::default(),
+            pointer: WindowPointerSettings {
+                focus_follows_mouse: true,
+                ..Default::default()
+            },
             decorations: SsdSettings::default(),
+            warnings: Vec::new(),
         }
     }
 }
@@ -70,16 +77,40 @@ pub fn parse_with_extensions<Extension>(
     source: &str,
     extension: impl Fn(&[&str]) -> Result<Extension>,
 ) -> Result<Configuration<Extension>> {
+    parse_with_policy(name, source, UnsupportedPolicy::Reject, extension)
+}
+
+/// Expand variables and compile supported behavior, retaining explicit warnings
+/// when the caller allows unsupported features to be skipped.
+pub fn parse_with_policy<Extension>(
+    name: &str,
+    source: &str,
+    policy: UnsupportedPolicy,
+    extension: impl Fn(&[&str]) -> Result<Extension>,
+) -> Result<Configuration<Extension>> {
+    let expanded = expand_variables(name, source)?;
+    let source = expanded.as_str();
     let syntax = weld_sway_config::parse(name, source)?;
-    let input = weld_sway_config::input::compile(name, source, &syntax)?;
+    let input = weld_sway_config::input::compile_with_policy(name, source, &syntax, policy)?;
     let mut config = Configuration {
         keymap: input.keymap,
+        warnings: input.warnings,
         ..Default::default()
     };
     for binding in input.bindings {
         let words: Vec<_> = binding.command.iter().map(String::as_str).collect();
-        let action = action(&words, &extension)
-            .with_context(|| format!("{name}:{}: {}", binding.line, binding.command.join(" ")))?;
+        let action = match action(&words, &extension) {
+            Ok(action) => action,
+            Err(error) => {
+                policy.handle(
+                    error.context(binding.command.join(" ")),
+                    name,
+                    binding.line,
+                    &mut config.warnings,
+                )?;
+                continue;
+            }
+        };
         if let Action::Workspace(I3WorkspaceRequest::Switch(
             WorkspaceTarget::Name(name) | WorkspaceTarget::Number(name),
         )) = &action
@@ -90,27 +121,85 @@ pub fn parse_with_extensions<Extension>(
         config.bindings.push((binding.shortcut, action));
     }
     for statement in input.remaining {
-        let offset = statement
-            .name()
-            .segments()
-            .first()
-            .map_or(0, |span| span.start);
-        let line = source[..offset]
-            .bytes()
-            .filter(|byte| *byte == b'\n')
-            .count()
-            + 1;
-        apply(&mut config, statement)
-            .with_context(|| format!("{name}:{line}: {}", statement.header().text()))?;
+        let line = line_of(source, statement)?;
+        let result = if statement.name().text() == "bar" && statement.block().is_some() {
+            apply_bar(&mut config, statement, name, source, policy)
+        } else {
+            apply(&mut config, statement)
+        };
+        if let Err(error) = result {
+            policy.handle(
+                error.context(statement.header().text().to_owned()),
+                name,
+                line,
+                &mut config.warnings,
+            )?;
+        }
     }
+    config.warnings.sort_by_key(|warning| warning.line);
     Ok(config)
 }
 
+fn apply_bar<Extension>(
+    config: &mut Configuration<Extension>,
+    statement: &Statement,
+    name: &str,
+    source: &str,
+    policy: UnsupportedPolicy,
+) -> Result<()> {
+    if !statement.arguments().is_empty() {
+        return Err(unsupported("named bars are not supported"));
+    }
+    let Some(block) = statement.block() else {
+        return Ok(());
+    };
+    let mut command = None;
+    for child in block.statements() {
+        let line = line_of(source, child)?;
+        if child.name().text() == "swaybar_command" && child.block().is_none() {
+            let words = child
+                .arguments()
+                .iter()
+                .map(|argument| argument.text())
+                .collect::<Vec<_>>();
+            command = Some(
+                exec_command(&words).with_context(|| format!("{name}:{line}: swaybar_command"))?,
+            );
+        } else {
+            policy.handle(
+                unsupported(format!(
+                    "unsupported bar setting: {}",
+                    child.header().text()
+                )),
+                name,
+                line,
+                &mut config.warnings,
+            )?;
+        }
+    }
+    if let Some(command) = command {
+        config.startup.push(StartupCommand {
+            command,
+            on_reload: false,
+        });
+    } else {
+        policy.handle(
+            unsupported("bar requires an explicit swaybar_command; no default bar was started"),
+            name,
+            line_of(source, statement)?,
+            &mut config.warnings,
+        )?;
+    }
+    Ok(())
+}
+
 fn apply<Extension>(config: &mut Configuration<Extension>, statement: &Statement) -> Result<()> {
-    ensure!(
-        statement.block().is_none(),
-        "configuration blocks are not supported in this slice"
-    );
+    if statement.block().is_some() {
+        return Err(unsupported(format!(
+            "unsupported configuration block {}",
+            statement.name().text()
+        )));
+    }
     let args: Vec<_> = statement
         .arguments()
         .iter()
@@ -158,6 +247,9 @@ fn apply<Extension>(config: &mut Configuration<Extension>, statement: &Statement
                 config.tiling.outer_gap = gap;
             }
         }
+        ("default_orientation", ["auto"]) => {
+            return Err(unsupported("automatic split orientation is not supported"));
+        }
         ("default_orientation", [value]) => config.tiling.default_axis = axis(value)?,
         ("smart_gaps", [value @ ("on" | "off")]) => config.tiling.hide_solo_gaps = *value == "on",
         ("smart_borders", [value @ ("on" | "off")]) => {
@@ -191,11 +283,22 @@ fn apply<Extension>(config: &mut Configuration<Extension>, statement: &Statement
                 _ => config.decorations.unfocused = colors,
             }
         }
-        ("floating_modifier", [value]) => {
+        ("floating_modifier", [value] | [value, "normal"]) => {
             config.pointer.modifier = Some(weld_sway_config::input::pointer_modifiers(value)?)
         }
         ("focus_follows_mouse", [value @ ("yes" | "no")]) => {
             config.pointer.focus_follows_mouse = *value == "yes";
+        }
+        ("focus_follows_mouse", ["always"])
+        | ("smart_borders", ["no_gaps"])
+        | ("smart_gaps", ["inverse_outer"]) => {
+            return Err(unsupported(format!(
+                "unsupported setting {}",
+                statement.header().text()
+            )));
+        }
+        ("focus_follows_mouse" | "smart_borders" | "smart_gaps", [_]) => {
+            bail!("invalid value for {}", statement.name().text())
         }
         ("focus_wrapping", [value]) => {
             config.focus_wrapping = match *value {
@@ -206,7 +309,13 @@ fn apply<Extension>(config: &mut Configuration<Extension>, statement: &Statement
                 _ => bail!("focus_wrapping must be no, yes, force or workspace"),
             };
         }
-        _ => bail!("unsupported i3 configuration directive or arguments"),
+        ("include", _) => bail!("include is not supported yet; load a combined configuration file"),
+        _ => {
+            return Err(unsupported(format!(
+                "unsupported directive {}",
+                statement.name().text()
+            )));
+        }
     }
     Ok(())
 }
@@ -287,6 +396,15 @@ fn action<Extension>(
     extension: &impl Fn(&[&str]) -> Result<Extension>,
 ) -> Result<Action<Extension>> {
     Ok(match words {
+        ["focus", "parent" | "child" | "tiling" | "floating"]
+        | ["layout" | "mode" | "sticky", ..]
+        | ["move", "scratchpad"]
+        | ["move", "workspace", "to", "output", ..] => {
+            return Err(unsupported(format!(
+                "unsupported command {}",
+                words.join(" ")
+            )));
+        }
         ["workspace", target @ ..] => {
             Action::Workspace(I3WorkspaceRequest::Switch(workspace_target(target)?))
         }
@@ -326,6 +444,7 @@ fn action<Extension>(
         ["floating", "enable"] => Action::Floating(Some(true)),
         ["floating", "disable"] => Action::Floating(Some(false)),
         ["floating", "toggle"] => Action::Floating(None),
+        ["floating", _] => bail!("floating mode must be enable, disable or toggle"),
         ["focus", value] => Action::Focus(direction(value)?),
         ["move", value] => Action::Move(direction(value)?),
         [
@@ -354,6 +473,16 @@ fn action<Extension>(
         }
         ["kill"] => Action::Tile(TileOperation::Close),
         ["reload"] => Action::Reload,
+        [
+            "focus" | "move" | "floating" | "fullscreen" | "split" | "splith" | "splitv" | "resize"
+            | "kill" | "reload" | "exit",
+            ..,
+        ] => {
+            return Err(unsupported(format!(
+                "unsupported command form {}",
+                words.join(" ")
+            )));
+        }
         _ => Action::Extension(extension(words)?),
     })
 }
@@ -417,6 +546,145 @@ mod tests {
 
     fn parse(name: &str, source: &str) -> Result<Configuration> {
         parse_with_extensions(name, source, |_| bail!("unsupported i3 command"))
+    }
+
+    #[test]
+    fn variables_configure_bindings_settings_and_exec_without_evaluating_shell() {
+        let config = parse(
+            "variables",
+            indoc! {r#"
+            set $mod Mod1
+            set $terminal foot --title "a terminal"
+            set $accent #123456
+            set $layout us
+            floating_modifier $mod
+            input type:keyboard {
+                xkb_layout $layout
+            }
+            client.focused $accent #111111 #ffffff
+            bindsym $mod+Return exec $terminal
+            bindsym $mod+Shift+q kill
+            exec echo "$HOME" $(hostname)
+        "#},
+        )
+        .expect("variable config");
+        assert_eq!(config.bindings.len(), 2);
+        assert!(config.bindings[0].0.modifiers.alt);
+        assert_eq!(
+            config.bindings[0].1,
+            Action::Exec("foot --title \"a terminal\"".into())
+        );
+        assert_eq!(
+            config.decorations.focused.border,
+            Color::srgb_u8(0x12, 0x34, 0x56)
+        );
+        assert_eq!(config.startup[0].command, "echo \"$HOME\" $(hostname)");
+        assert!(config.keymap.is_some());
+    }
+
+    #[test]
+    fn compatibility_skips_whole_unsupported_features_but_keeps_usable_commands() {
+        let config: Configuration = parse_with_policy(
+            "portable",
+            indoc! {r#"
+            set $mod Mod4
+            blur enable
+            bindsym $mod+Return exec foot
+            bindsym $mod+s layout stacking
+            mode "resize" {
+                bindsym Return exec must-not-be-a-global-binding
+            }
+            input type:touchpad {
+                tap enabled
+            }
+            bar {
+                swaybar_command waybar
+                mode hide
+            }
+            bindsym $mod+Tab workspace back_and_forth
+            bindsym $mod+Shift+q kill
+        "#},
+            UnsupportedPolicy::Warn,
+            |_| Err(unsupported("unknown command")),
+        )
+        .expect("portable config");
+        assert_eq!(config.bindings.len(), 3);
+        assert_eq!(
+            config.startup,
+            [StartupCommand {
+                command: "waybar".into(),
+                on_reload: false
+            }]
+        );
+        assert_eq!(
+            config
+                .warnings
+                .iter()
+                .map(|warning| warning.line)
+                .collect::<Vec<_>>(),
+            [2, 4, 5, 8, 13]
+        );
+        assert!(config.pointer.focus_follows_mouse);
+        assert!(config.keymap.is_none());
+    }
+
+    #[test]
+    fn compatibility_keeps_malformed_supported_values_and_missing_variables_fatal() {
+        for source in [
+            "set $mod",
+            "floating_modifier $missing",
+            "bindsym $missing+q kill",
+            "gaps inner typo",
+            "bindsym Mod1+q floating typo",
+            "default_orientation diagonal",
+            "include missing.conf",
+            "input type:keyboard xkb_layout nonexistent_weld_layout",
+        ] {
+            let config: Result<Configuration> =
+                parse_with_policy("invalid", source, UnsupportedPolicy::Warn, |_| {
+                    Err(unsupported("unknown command"))
+                });
+            assert!(config.is_err(), "{source}");
+        }
+    }
+
+    #[test]
+    fn valid_unimplemented_sway_forms_warn_without_discarding_supported_bindings() {
+        for setting in [
+            "default_orientation auto",
+            "focus_follows_mouse always",
+            "gaps horizontal 5",
+            "smart_gaps inverse_outer",
+            "smart_borders no_gaps",
+            "workspace 1",
+            "bar bar-0 {\n swaybar_command should-not-start\n}",
+            "bindsym Mod4+x move scratchpad",
+            "bindsym Mod4+x focus output right",
+            "bindsym Mod4+x focus tiling",
+            "bindsym Mod4+x fullscreen toggle global",
+            "bindsym Mod4+x resize shrink width 10px",
+            "bindsym --to-code Mod4+x exec foot",
+        ] {
+            let source = format!(
+                "{setting}\nbindsym Mod4+Return exec foot\nfloating_modifier Mod4 normal\n"
+            );
+            let config: Configuration =
+                parse_with_policy("portable", &source, UnsupportedPolicy::Warn, |_| {
+                    Err(unsupported("unknown"))
+                })
+                .expect(setting);
+            assert_eq!(config.bindings.len(), 1, "{setting}");
+            assert_eq!(config.warnings.len(), 1, "{setting}");
+            assert!(config.startup.is_empty(), "{setting}");
+            assert!(config.pointer.modifier.expect("normal modifier").super_key);
+            if setting.contains("--to-code") {
+                assert!(
+                    config.warnings[0]
+                        .message
+                        .contains("unsupported bindsym flag --to-code")
+                );
+            }
+        }
     }
     #[test]
     fn workspace_commands_preserve_names_and_validate_selectors() {

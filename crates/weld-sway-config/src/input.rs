@@ -2,6 +2,7 @@
 
 mod syntax;
 
+use crate::evaluation::{ConfigWarning, UnsupportedPolicy, line_of, unsupported};
 use crate::{ParsedConfig, Statement};
 use anyhow::{Context, Result, bail, ensure};
 use std::collections::HashSet;
@@ -20,6 +21,8 @@ pub struct InputConfiguration<'a> {
     pub bindings: Vec<Binding>,
     /// Statements owned by other configuration consumers, in source order.
     pub remaining: Vec<&'a Statement>,
+    /// Unsupported input features skipped under the selected policy.
+    pub warnings: Vec<ConfigWarning>,
 }
 
 /// A native chord and its preserved Sway command spelling.
@@ -50,38 +53,49 @@ pub fn compile<'a>(
     source: &str,
     syntax: &'a ParsedConfig,
 ) -> Result<InputConfiguration<'a>> {
+    compile_with_policy(name, source, syntax, UnsupportedPolicy::Reject)
+}
+
+/// Compile input directives with explicit unsupported-feature handling.
+/// Malformed supported settings remain fatal under either policy.
+pub fn compile_with_policy<'a>(
+    name: &str,
+    source: &str,
+    syntax: &'a ParsedConfig,
+    policy: UnsupportedPolicy,
+) -> Result<InputConfiguration<'a>> {
     let mut config = InputConfiguration::default();
     let mut keyboard = KeymapConfig::default();
     let mut keyboard_configured = false;
     let mut chords = HashSet::new();
     for statement in syntax.statements() {
-        let offset = statement
-            .name()
-            .segments()
-            .first()
-            .map_or(0, |span| span.start);
-        let line = source
-            .get(..offset)
-            .context("syntax offset is outside its source")?
-            .bytes()
-            .filter(|byte| *byte == b'\n')
-            .count()
-            + 1;
+        let line = line_of(source, statement)?;
         let result = match statement.name().text() {
-            "input" => {
-                keyboard_configured = true;
-                apply_keyboard(&mut keyboard, statement)
-            }
+            "input" => apply_keyboard(
+                &mut keyboard,
+                statement,
+                name,
+                source,
+                policy,
+                &mut config.warnings,
+            )
+            .map(|()| keyboard_configured = true),
             "bindsym" => (|| {
                 ensure!(
                     statement.block().is_none(),
                     "bindsym requires a command, not a block"
                 );
                 let mut words = statement.arguments().iter().map(|word| word.text());
-                let shortcut = binding(words.next().context("missing binding chord")?)?;
-                ensure!(chords.insert(shortcut), "duplicate key binding");
+                let chord = words.next().context("missing binding chord")?;
+                if chord.starts_with("--") {
+                    return Err(unsupported(format!(
+                        "unsupported bindsym flag {chord}; binding skipped"
+                    )));
+                }
+                let shortcut = binding(chord)?;
                 let command: Vec<_> = words.map(str::to_owned).collect();
                 ensure!(!command.is_empty(), "missing binding command");
+                ensure!(chords.insert(shortcut), "duplicate key binding");
                 config.bindings.push(Binding {
                     shortcut,
                     command,
@@ -94,7 +108,14 @@ pub fn compile<'a>(
                 Ok(())
             }
         };
-        result.with_context(|| format!("{name}:{line}: {}", statement.header().text()))?;
+        if let Err(error) = result {
+            policy.handle(
+                error.context(statement.header().text().to_owned()),
+                name,
+                line,
+                &mut config.warnings,
+            )?;
+        }
     }
     if keyboard_configured {
         config.keymap = Some(
@@ -105,12 +126,21 @@ pub fn compile<'a>(
     Ok(config)
 }
 
-fn apply_keyboard(config: &mut KeymapConfig, statement: &Statement) -> Result<()> {
+fn apply_keyboard(
+    config: &mut KeymapConfig,
+    statement: &Statement,
+    name: &str,
+    source: &str,
+    policy: UnsupportedPolicy,
+    warnings: &mut Vec<ConfigWarning>,
+) -> Result<()> {
     let mut args = statement.arguments().iter().map(|arg| arg.text());
-    ensure!(
-        matches!(args.next(), Some("type:keyboard" | "*")),
-        "keyboard input selector must be type:keyboard or *; per-device settings are not supported yet"
-    );
+    let selector = literal(args.next().context("missing input selector")?)?;
+    if !matches!(selector, "type:keyboard" | "*") {
+        return Err(unsupported(
+            "only type:keyboard and * keyboard input settings are supported",
+        ));
+    }
     if let Some(block) = statement.block() {
         ensure!(args.next().is_none(), "unexpected input block arguments");
         for child in block.statements() {
@@ -125,8 +155,14 @@ fn apply_keyboard(config: &mut KeymapConfig, statement: &Statement) -> Result<()
                     child.header().text()
                 );
             };
-            keyboard_field(config, child.name().text(), value)
-                .with_context(|| child.header().text().to_owned())?;
+            if let Err(error) = keyboard_field(config, child.name().text(), value) {
+                policy.handle(
+                    error.context(child.header().text().to_owned()),
+                    name,
+                    line_of(source, child)?,
+                    warnings,
+                )?;
+            }
         }
     } else {
         let words: Vec<_> = args.collect();
@@ -145,7 +181,11 @@ fn keyboard_field(config: &mut KeymapConfig, field: &str, value: &str) -> Result
         "xkb_layout" => &mut config.layout,
         "xkb_variant" => &mut config.variant,
         "xkb_options" => &mut config.options,
-        _ => bail!("unsupported keyboard directive {field}"),
+        _ => {
+            return Err(unsupported(format!(
+                "unsupported keyboard directive {field}"
+            )));
+        }
     };
     let value = syntax::xkb_value
         .parse(value)
@@ -176,7 +216,8 @@ fn resolve_modifiers(parts: Vec<syntax::Modifier<'_>>) -> Result<GlobalShortcutM
             "Mod1" => &mut modifiers.alt,
             "Control" | "Ctrl" => &mut modifiers.control,
             "Shift" => &mut modifiers.shift,
-            name => bail!("unsupported modifier {name}"),
+            name if name.contains('$') => bail!("unresolved variable in modifier {name}"),
+            name => return Err(unsupported(format!("unsupported modifier {name}"))),
         };
         ensure!(!*enabled, "duplicate binding modifier");
         *enabled = true;
@@ -231,6 +272,15 @@ fn binding(value: &str) -> Result<GlobalShortcut> {
         "Return" => KeyCode::Enter,
         "space" => KeyCode::Space,
         "Escape" => KeyCode::Escape,
+        "Tab" => KeyCode::Tab,
+        "Pause" => KeyCode::Pause,
+        "Print" => KeyCode::PrintScreen,
+        "XF86AudioRaiseVolume" => KeyCode::AudioVolumeUp,
+        "XF86AudioLowerVolume" => KeyCode::AudioVolumeDown,
+        "XF86AudioMute" => KeyCode::AudioVolumeMute,
+        "XF86AudioPlay" => KeyCode::MediaPlayPause,
+        "XF86AudioNext" => KeyCode::MediaTrackNext,
+        "XF86AudioPrev" => KeyCode::MediaTrackPrevious,
         "equal" => KeyCode::Equal,
         "minus" => KeyCode::Minus,
         "Left" => KeyCode::ArrowLeft,
@@ -249,7 +299,8 @@ fn binding(value: &str) -> Result<GlobalShortcut> {
         "F10" => KeyCode::F10,
         "F11" => KeyCode::F11,
         "F12" => KeyCode::F12,
-        _ => bail!("unsupported key name; see the documented physical-key subset"),
+        key if key.contains('$') => bail!("unresolved variable in key {key}"),
+        _ => return Err(unsupported(format!("unsupported key name {key}"))),
     };
     Ok(GlobalShortcut::new(key, modifiers))
 }
@@ -275,6 +326,7 @@ mod tests {
             keymap: config.keymap,
             bindings: config.bindings,
             remaining: Vec::new(),
+            warnings: config.warnings,
         })
     }
     #[test]
