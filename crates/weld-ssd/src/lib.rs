@@ -527,7 +527,7 @@ fn sync_focus_style(
             && let Ok(edge) = colors.splits.get(projection.window())
         {
             match edge {
-                WindowSplitEdge::Left => expected.left = palette.indicator,
+                WindowSplitEdge::Right => expected.right = palette.indicator,
                 WindowSplitEdge::Bottom => expected.bottom = palette.indicator,
             }
         }
@@ -1167,11 +1167,11 @@ mod tests {
             .expect("root")
             .entity();
         let base = app.world().resource::<SsdSettings>().focused.child_border;
-        let left = BorderColor {
-            left: Color::WHITE,
+        let right = BorderColor {
+            right: Color::WHITE,
             ..BorderColor::all(base)
         };
-        assert_eq!(app.world().get::<BorderColor>(root), Some(&left));
+        assert_eq!(app.world().get::<BorderColor>(root), Some(&right));
         app.world_mut()
             .trigger(TileRequest::Focused(TileOperation::Split(
                 SplitAxis::Vertical,

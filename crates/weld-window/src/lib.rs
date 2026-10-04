@@ -98,7 +98,7 @@ pub struct SoleTiledWindow;
 #[derive(Component, Clone, Copy, Debug, Eq, PartialEq)]
 pub enum WindowSplitEdge {
     /// A vertical divider between left-to-right siblings.
-    Left,
+    Right,
     /// A horizontal divider between top-to-bottom siblings.
     Bottom,
 }

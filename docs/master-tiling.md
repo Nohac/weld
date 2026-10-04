@@ -79,10 +79,9 @@ There is no file watcher yet; reload rereads the supplied path.
   colors use the border and background colors respectively. Normal frames use the first
   color on the upper border and child-border color elsewhere; pixel frames
   use child-border color throughout. Titlebar fill and close glyph use background
-  and text. The focused tile uses indicator color on its left edge for side-by-side
-  layout, or bottom edge for stacked layout. This is an orientation hint: the
-  requested left-edge convention differs from the insertion side, which remains
-  right/below the focused tile. The hint follows the current parent split and
+  and text. The focused tile uses indicator color on its right edge for side-by-side
+  layout, or bottom edge for stacked layout, marking where the next window opens.
+  The hint follows the current parent split and
   adds no chrome when smart borders, fullscreen or an
   explicit borderless style hides that edge. An active move/resize uses indicator
   color on all edges. The inactive palette

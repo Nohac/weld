@@ -114,7 +114,7 @@ The example keeps Mod+B for border toggling; launch Blender with Mod+Shift+B.
 3. Drag a client selection or resize a window across another window. Focus must
    not jump during the held button or compositor interaction.
 4. With two bordered tiles, use Mod+Control+F (`splith`) and Mod+Control+J (`splitv`).
-   The selected tile's left edge should brighten for side-by-side placement; its
+   The selected tile's right edge should brighten for side-by-side placement; its
    bottom edge should brighten for stacked placement. Opening a terminal should
    follow that orientation. Floating windows have no split hint.
 5. In a private config, reload `focus_follows_mouse no` and verify click/keyboard

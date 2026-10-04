@@ -89,7 +89,7 @@ fn split_edge_tracks_orientation_and_floating_roundtrip() {
     let second = window(&mut app, 2);
     assert_eq!(
         app.world().get::<WindowSplitEdge>(second),
-        Some(&WindowSplitEdge::Left)
+        Some(&WindowSplitEdge::Right)
     );
     command(&mut app, 2, TileOperation::Split(SplitAxis::Vertical));
     assert_eq!(
@@ -98,7 +98,7 @@ fn split_edge_tracks_orientation_and_floating_roundtrip() {
     );
     assert_eq!(
         app.world().get::<WindowSplitEdge>(first),
-        Some(&WindowSplitEdge::Left)
+        Some(&WindowSplitEdge::Right)
     );
     app.world_mut().trigger(TileFloatingRequest {
         window: Some(second),

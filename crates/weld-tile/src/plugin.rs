@@ -154,7 +154,7 @@ fn sync_split_edges(
             .get(parent.entity())
             .ok()
             .map(|container| match container.axis() {
-                crate::SplitAxis::Horizontal => WindowSplitEdge::Left,
+                crate::SplitAxis::Horizontal => WindowSplitEdge::Right,
                 crate::SplitAxis::Vertical => WindowSplitEdge::Bottom,
             });
         if current.copied() == edge {
