@@ -90,6 +90,10 @@ pub struct WindowZOrder(pub i32);
 #[derive(Component, Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct FloatingWindow;
 
+/// Shell policy requesting a compositor-owned frame around the client content.
+#[derive(Component, Clone, Copy, Debug, Default)]
+pub struct ServerFrameRequested;
+
 /// Presentation fact published by a tiler for its workspace's only tiled slot.
 #[derive(Component, Clone, Copy, Debug, Default)]
 pub struct SoleTiledWindow;

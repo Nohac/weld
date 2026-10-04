@@ -44,7 +44,7 @@ use weld_window::{
     WindowPresentationOverride, WindowProjection, WindowResizeHandle, WindowSplitEdge,
     WindowSystems, WindowVacancy, WindowZOrder,
 };
-use weld_window_ui::{server_frame_required, surface_content_with_node};
+use weld_window_ui::{WindowFramePolicy, surface_content_with_node};
 
 #[cfg(test)]
 const INNER_BORDER_RADIUS: f32 = 6.0;
@@ -81,6 +81,7 @@ struct FrameColorNodes(Vec<Entity>);
 
 #[derive(SystemParam)]
 struct FrameStyles<'w, 's> {
+    frames: WindowFramePolicy<'w, 's>,
     settings: Res<'w, SsdSettings>,
     windows: StyledWindows<'w, 's>,
 }
@@ -226,7 +227,12 @@ fn revoke_ssd_presentations(
                                 vacant_presentation.is_none()
                                     && occupants.get(client).is_ok_and(|(mapped, requested)| {
                                         // Unmapping hides the frame; remapping resolves policy.
-                                        mapped.is_none() || server_frame_required(requested, mapped)
+                                        mapped.is_none()
+                                            || styles.frames.server_frame_required(
+                                                projection.window(),
+                                                requested,
+                                                mapped,
+                                            )
                                     })
                             },
                         )
@@ -309,7 +315,10 @@ fn reconcile_ssd_projections(
                 let Ok((toplevel, Some(mapped), requested)) = occupants.get(client) else {
                     continue;
                 };
-                if !server_frame_required(requested.is_some(), Some(mapped)) {
+                if !styles
+                    .frames
+                    .server_frame_required(window, requested.is_some(), Some(mapped))
+                {
                     continue;
                 }
                 SsdContent::Surface(toplevel.surface)
@@ -392,7 +401,10 @@ fn present_ssd_windows(
                 let Ok((toplevel, Some(mapped), requested)) = occupants.get(client) else {
                     continue;
                 };
-                if !server_frame_required(requested.is_some(), Some(mapped)) {
+                if !styles
+                    .frames
+                    .server_frame_required(window, requested.is_some(), Some(mapped))
+                {
                     continue;
                 }
                 SsdContent::Surface(toplevel.surface)
@@ -1094,6 +1106,7 @@ mod tests {
             );
             assert!(
                 take_surface_actions(app.world_mut()).contains(&SurfaceAction::Resize {
+                    layout: Default::default(),
                     surface,
                     logical_size: UVec2::new(1000, 800),
                     resizing: false,
@@ -1108,6 +1121,7 @@ mod tests {
             assert_eq!(app.world().get::<WindowGeometry>(window), Some(&original));
             assert!(
                 take_surface_actions(app.world_mut()).contains(&SurfaceAction::Resize {
+                    layout: Default::default(),
                     surface,
                     logical_size: UVec2::new(320, 240),
                     resizing: false,
@@ -1240,6 +1254,61 @@ mod tests {
             app.world().get::<PresentationInsets>(root),
             Some(&PresentationInsets::default())
         );
+    }
+
+    #[test]
+    fn explicit_pixel_frame_overrides_client_preference_and_survives_floating() {
+        let mut app = tiled_test_app();
+        app.world_mut()
+            .resource_mut::<SsdSettings>()
+            .hide_solo_border = false;
+        let surface = SurfaceId::for_test(315);
+        enqueue_surface_event(app.world_mut(), role(surface, WindowDecoration::ClientSide));
+        enqueue_surface_event(app.world_mut(), frame(surface, 320, 240));
+        app.update();
+        app.update();
+        let window = app
+            .world_mut()
+            .query::<&OccupiesWindow>()
+            .single(app.world())
+            .expect("window")
+            .0;
+        let initial = app
+            .world()
+            .get::<PrimaryWindowPresentation>(window)
+            .expect("initial frame")
+            .entity();
+        assert!(app.world().get::<SsdPresentation>(initial).is_none());
+        app.world_mut()
+            .entity_mut(window)
+            .insert(WindowBorderStyle(BorderStyle::Pixel(3)));
+        app.update();
+        app.update();
+        for floating in [false, true, false] {
+            app.world_mut().trigger(weld_tile::TileFloatingRequest {
+                window: Some(window),
+                enabled: Some(floating),
+            });
+            app.update();
+            app.update();
+            let root = app
+                .world()
+                .get::<PrimaryWindowPresentation>(window)
+                .expect("frame")
+                .entity();
+            assert!(app.world().get::<SsdPresentation>(root).is_some());
+            assert_eq!(
+                app.world().get::<PresentationInsets>(root),
+                Some(&PresentationInsets::new(3.0, 3.0, 3.0, 3.0))
+            );
+            assert_eq!(
+                app.world()
+                    .get::<FrameGeometry>(root)
+                    .expect("style")
+                    .border,
+                BorderStyle::Pixel(3)
+            );
+        }
     }
 
     #[test]
@@ -1468,6 +1537,7 @@ mod tests {
         );
         assert!(
             take_surface_actions(app.world_mut()).contains(&SurfaceAction::Resize {
+                layout: Default::default(),
                 surface,
                 logical_size: (outer.size - Vec2::splat(16.0)).as_uvec2(),
                 resizing: false,
@@ -2124,6 +2194,7 @@ mod tests {
         assert_eq!(content_node.flex_shrink, 0.0);
         assert!(
             take_surface_actions(app.world_mut()).contains(&SurfaceAction::Resize {
+                layout: Default::default(),
                 surface,
                 logical_size: UVec2::new(340, 240),
                 resizing: true,
@@ -2135,6 +2206,7 @@ mod tests {
         app.update();
         assert!(
             take_surface_actions(app.world_mut()).contains(&SurfaceAction::Resize {
+                layout: Default::default(),
                 surface,
                 logical_size: UVec2::new(340, 240),
                 resizing: false,
@@ -2190,6 +2262,7 @@ mod tests {
         ));
         assert!(
             take_surface_actions(app.world_mut()).contains(&SurfaceAction::Resize {
+                layout: Default::default(),
                 surface,
                 logical_size: UVec2::new(320, 240),
                 resizing: true,
@@ -2215,6 +2288,7 @@ mod tests {
         assert_eq!(
             resize_actions,
             vec![SurfaceAction::Resize {
+                layout: Default::default(),
                 surface,
                 logical_size: UVec2::new(300, 240),
                 resizing: true,

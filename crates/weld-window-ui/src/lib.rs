@@ -36,9 +36,10 @@ use weld_app::{
 };
 use weld_window::{
     ManagedWindow, PresentationInsets, PresentationOffset, PresentsWindow,
-    PrimaryWindowPresentation, WindowClientResolver, WindowGeometry, WindowGeometryAnchor,
-    WindowOccupant, WindowOutput, WindowOutputIntersections, WindowPresentationOverride,
-    WindowProjection, WindowSystems, WindowVacancy, WindowVisibility, WindowZOrder,
+    PrimaryWindowPresentation, ServerFrameRequested, WindowClientResolver, WindowGeometry,
+    WindowGeometryAnchor, WindowOccupant, WindowOutput, WindowOutputIntersections,
+    WindowPresentationOverride, WindowProjection, WindowSystems, WindowVacancy, WindowVisibility,
+    WindowZOrder,
     fullscreen::{FullscreenOccluded, FullscreenOutput, WindowFullscreen},
 };
 
@@ -73,9 +74,22 @@ pub struct WindowUiPlugin;
 /// Cropping opaque media removes client shadow/resize margins, so the shell
 /// supplies resize and close affordances. The client's decoration declaration
 /// remains unchanged, and controls inside its window geometry remain visible.
-pub fn server_frame_required(server_requested: bool, mapped: Option<&MappedSurface>) -> bool {
-    server_requested
-        || mapped.is_some_and(|mapped| mapped.alpha_mode == SurfaceAlphaMode::Discarded)
+#[derive(SystemParam)]
+pub struct WindowFramePolicy<'w, 's> {
+    requested: Query<'w, 's, (), With<ServerFrameRequested>>,
+}
+
+impl WindowFramePolicy<'_, '_> {
+    pub fn server_frame_required(
+        &self,
+        window: Entity,
+        server_requested: bool,
+        mapped: Option<&MappedSurface>,
+    ) -> bool {
+        self.requested.contains(window)
+            || server_requested
+            || mapped.is_some_and(|mapped| mapped.alpha_mode == SurfaceAlphaMode::Discarded)
+    }
 }
 
 impl Plugin for WindowUiPlugin {
@@ -127,6 +141,7 @@ impl Plugin for WindowUiPlugin {
 }
 
 fn revoke_client_presentations(
+    frames: WindowFramePolicy,
     mut commands: Commands,
     roots: Query<(Entity, &WindowProjection), With<client::ClientWindowPresentation>>,
     windows: Query<Option<&WindowPresentationOverride>, With<ManagedWindow>>,
@@ -140,9 +155,9 @@ fn revoke_client_presentations(
             && clients
                 .client_entity(projection.window())
                 .is_some_and(|client| {
-                    occupants
-                        .get(client)
-                        .is_ok_and(|mapped| !server_frame_required(false, mapped))
+                    occupants.get(client).is_ok_and(|mapped| {
+                        !frames.server_frame_required(projection.window(), false, mapped)
+                    })
                 });
         if !still_client_decorated {
             commands.entity(root).despawn();
@@ -163,6 +178,7 @@ type ProjectedClientWindows<'w, 's> = Query<
 >;
 
 fn reconcile_client_window_projections(
+    frames: WindowFramePolicy,
     mut commands: Commands,
     windows: ProjectedClientWindows,
     clients: WindowClientResolver,
@@ -216,7 +232,7 @@ fn reconcile_client_window_projections(
         let Ok((toplevel, mapped, Some(_))) = occupants.get(client) else {
             continue;
         };
-        if server_frame_required(false, Some(mapped)) {
+        if frames.server_frame_required(window, false, Some(mapped)) {
             continue;
         }
         for output in intersections.iter() {
@@ -266,6 +282,7 @@ type UnpresentedClientWindows<'w, 's> = Query<
 >;
 
 fn present_client_windows(
+    frames: WindowFramePolicy,
     mut commands: Commands,
     windows: UnpresentedClientWindows,
     clients: WindowClientResolver,
@@ -282,7 +299,7 @@ fn present_client_windows(
         let Ok((toplevel, mapped, Some(_))) = occupants.get(client) else {
             continue;
         };
-        if server_frame_required(false, Some(mapped)) {
+        if frames.server_frame_required(window, false, Some(mapped)) {
             continue;
         }
         let output = output.map(|output| output.0).or_else(|| {

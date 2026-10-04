@@ -4,7 +4,7 @@ use bevy::{
     color::Color,
     ecs::{component::Component, event::Event, resource::Resource},
 };
-use weld_window::PresentationInsets;
+use weld_window::{PresentationInsets, ServerFrameRequested};
 
 /// The shell-owned frame surrounding client content.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -44,8 +44,11 @@ impl BorderStyle {
     }
 }
 
-/// Explicit per-window selection; absent this, the live layout default applies.
+/// Explicit per-window selection, requesting compositor-owned presentation.
+/// Clearing the override and returning to client preference requires removing
+/// both this component and [`ServerFrameRequested`].
 #[derive(Component, Clone, Copy, Debug, Eq, PartialEq)]
+#[require(ServerFrameRequested)]
 pub struct WindowBorderStyle(pub BorderStyle);
 
 /// Change the focused window's style; `None` cycles normal, pixel and none.
