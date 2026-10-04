@@ -31,6 +31,7 @@ use weld_media_android::AndroidImage;
 
 use super::decode::Backend;
 use crate::geometry::WindowPreference;
+use crate::startup::InitialPresentation;
 
 pub(super) struct Frame {
     pub epoch: u64,
@@ -129,6 +130,18 @@ impl Session {
         self.shared.browser.store(true, Ordering::Release);
         self.shared.release.store(true, Ordering::Release);
         self.reset_input();
+    }
+    /// Return true when Android should leave the app instead of returning a hoist.
+    pub fn back(&self) -> bool {
+        if self.shared.paired.load(Ordering::Acquire)
+            && !self.shared.browser.load(Ordering::Acquire)
+        {
+            self.release();
+            false
+        } else {
+            self.reset_input();
+            true
+        }
     }
     pub fn reconnect(&self) {
         self.shared.retry.store(true, Ordering::Release);
@@ -411,6 +424,7 @@ fn stream(
     let mut selected = None;
     let mut requested = None;
     let mut configured = None;
+    let mut initial = InitialPresentation::default();
     let mut events = ClientEventQueue::default();
     let mut invalid_events = Vec::new();
     let mut invalid_effects = Vec::new();
@@ -430,6 +444,8 @@ fn stream(
                 }
                 requested = None;
                 selected = None;
+                configured = None;
+                initial = InitialPresentation::default();
                 reset(&mut runtime);
             }
             if let Ok(mut catalogue) = shared.catalogue.lock() {
@@ -439,6 +455,7 @@ fn stream(
                 device.release()?;
                 selected = None;
                 configured = None;
+                initial = InitialPresentation::default();
                 requested = None;
                 reset(&mut runtime);
             }
@@ -453,6 +470,19 @@ fn stream(
                 device.hoist(application.window)?;
                 requested = Some(application.window);
             }
+        }
+        let preference = *shared
+            .preference
+            .lock()
+            .map_err(|_| anyhow::anyhow!("preference mailbox poisoned"))?;
+        if let (Some(surface), Some(preference)) = (selected, preference) {
+            configure(
+                &mut runtime,
+                surface,
+                preference,
+                &mut configured,
+                &mut initial,
+            )?;
         }
         runtime.drain_events(&mut events, &mut invalid_events);
         runtime.apply_pending_effects(&mut invalid_effects);
@@ -478,7 +508,11 @@ fn stream(
                     {
                         selected = Some(id);
                         configured = None;
-                        shared.message("Streaming first window; touch to click or drag");
+                        initial = InitialPresentation::default();
+                        if let Some(preference) = preference {
+                            configure(&mut runtime, id, preference, &mut configured, &mut initial)?;
+                        }
+                        shared.message("Preparing application for the phone display");
                     }
                     rate(&mut runtime, id, selected == Some(id) && active)?;
                 }
@@ -486,6 +520,8 @@ fn stream(
                     let commit = commit.into_state();
                     let Some(root) = commit.root.filter(|_| commit.mapped) else {
                         shared.clear();
+                        configured = None;
+                        initial = InitialPresentation::default();
                         reset(&mut runtime);
                         continue;
                     };
@@ -524,16 +560,30 @@ fn stream(
                                         .cloned()
                                         .collect(),
                                 };
-                                *shared
-                                    .latest
-                                    .lock()
-                                    .map_err(|_| anyhow::anyhow!("frame mailbox poisoned"))? =
-                                    Some(Frame {
-                                        epoch: shared.epoch.load(Ordering::Acquire),
-                                        image,
-                                        view,
-                                        input,
-                                    });
+                                let frame = Frame {
+                                    epoch: shared.epoch.load(Ordering::Acquire),
+                                    image,
+                                    view,
+                                    input,
+                                };
+                                let first = initial.is_waiting();
+                                if let Some(frame) = initial.offer(
+                                    frame,
+                                    [view.logical_width, view.logical_height],
+                                    Instant::now(),
+                                ) {
+                                    if first {
+                                        tracing::info!(
+                                            width = view.logical_width,
+                                            height = view.logical_height,
+                                            "presenting initial phone frame"
+                                        );
+                                        shared.message(
+                                            "Streaming; Back returns to the application list",
+                                        );
+                                    }
+                                    publish(shared, frame)?;
+                                }
                             }
                         }
                     }
@@ -541,6 +591,7 @@ fn stream(
                 ClientSurfaceEventKind::Destroyed if selected == Some(id) => {
                     selected = None;
                     configured = None;
+                    initial = InitialPresentation::default();
                     shared.clear();
                     reset(&mut runtime);
                     if paired {
@@ -562,38 +613,10 @@ fn stream(
                 rate(&mut runtime, id, active)?;
             }
         }
-        let preference = *shared
-            .preference
-            .lock()
-            .map_err(|_| anyhow::anyhow!("preference mailbox poisoned"))?;
-        if let (Some(surface), Some(preference)) = (selected, preference)
-            && configured != Some((surface, preference))
-        {
-            for kind in [
-                ClientSurfaceRequestKind::Configure {
-                    logical_size: preference.size,
-                    layout: Default::default(),
-                    resizing: false,
-                    fullscreen: false,
-                },
-                ClientSurfaceRequestKind::SetPreferredScale {
-                    scale_120: Some(preference.scale_120),
-                },
-            ] {
-                ensure!(
-                    runtime.apply_request(ClientRequest::Surface(ClientSurfaceRequest {
-                        surface,
-                        kind
-                    })),
-                    "phone sizing request rejected"
-                );
-            }
-            tracing::info!(
-                ?surface,
-                ?preference,
-                "requested phone window size and scale"
-            );
-            configured = Some((surface, preference));
+        if let Some(frame) = initial.poll(Instant::now()) {
+            tracing::info!("presenting application's chosen size after initial sizing deadline");
+            shared.message("Streaming; application chose its own size");
+            publish(shared, frame)?;
         }
         if shared.reset.swap(false, Ordering::AcqRel) {
             for _ in input.try_iter() {}
@@ -645,6 +668,9 @@ fn stream(
         }
         let wait = runtime
             .next_deadline()
+            .into_iter()
+            .chain(initial.deadline())
+            .min()
             .map_or(Duration::from_millis(100), |deadline| {
                 deadline
                     .saturating_duration_since(Instant::now())
@@ -657,6 +683,43 @@ fn stream(
     drop(runtime);
     shared.clear();
     shared.message("Disconnected; reopen to connect again");
+    Ok(())
+}
+
+fn configure(
+    runtime: &mut ClientRuntime,
+    surface: ClientSurfaceId,
+    preference: WindowPreference,
+    configured: &mut Option<(ClientSurfaceId, WindowPreference)>,
+    initial: &mut InitialPresentation<Frame>,
+) -> Result<()> {
+    if *configured == Some((surface, preference)) {
+        return Ok(());
+    }
+    for kind in preference.requests() {
+        ensure!(
+            runtime.apply_request(ClientRequest::Surface(ClientSurfaceRequest {
+                surface,
+                kind
+            })),
+            "phone sizing request rejected"
+        );
+    }
+    initial.configure(preference, Instant::now());
+    *configured = Some((surface, preference));
+    tracing::info!(
+        ?surface,
+        ?preference,
+        "requested tiled phone size and scale"
+    );
+    Ok(())
+}
+
+fn publish(shared: &Shared, frame: Frame) -> Result<()> {
+    *shared
+        .latest
+        .lock()
+        .map_err(|_| anyhow::anyhow!("frame mailbox poisoned"))? = Some(frame);
     Ok(())
 }
 fn reset(runtime: &mut ClientRuntime) {
@@ -714,6 +777,27 @@ mod tests {
         assert!(session.input(input()));
         assert!(!session.input(input()));
         assert!(shared.reset.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn back_returns_the_active_hoist_before_leaving_the_browser() {
+        let shared = Arc::new(Shared::default());
+        shared.paired.store(true, Ordering::Release);
+        let (sender, _receiver) = mpsc::sync_channel(1);
+        let session = Session {
+            shared: shared.clone(),
+            input: sender,
+            worker: None,
+        };
+        let epoch = shared.epoch.load(Ordering::Acquire);
+        assert!(!session.back());
+        assert!(shared.browser.load(Ordering::Acquire));
+        assert!(shared.release.load(Ordering::Acquire));
+        assert!(shared.reset.load(Ordering::Acquire));
+        assert!(shared.epoch.load(Ordering::Acquire) > epoch);
+        shared.release.store(false, Ordering::Release);
+        assert!(session.back());
+        assert!(!shared.release.load(Ordering::Acquire));
     }
 
     #[test]

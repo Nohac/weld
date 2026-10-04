@@ -55,7 +55,7 @@ laptop; USB is needed only for installing this development APK.
 
 6. Tap **foot** in the phone's application list. Verify that htop streams, taps
    select the expected row, and rotation resizes the application. The desktop
-   should retain a hoist placeholder. Tap **Return to desktop** and verify the
+   should retain a hoist placeholder. Use Android's **Back gesture/button** and verify the
    original window returns; select it again to test a second hoist.
 
 7. Open a second independent terminal in nested Weld. Both windows should appear
@@ -77,6 +77,12 @@ laptop; USB is needed only for installing this development APK.
 
 The ordinary desktop and pairing commands have no test timeout. The separate
 `run-mobile-hoist` development fixture remains bounded.
+
+Streams use the full display, including the camera-cutout area; system bars can
+be revealed with Android's usual gestures. Back from the application list leaves
+Weld Mobile. The phone requests tiled sizing, so host-side floating size hints
+do not clamp its requested dimensions. Applications can still choose their own
+content layout; a desktop application is not automatically a mobile-responsive UI.
 
 ## Trust and networking
 

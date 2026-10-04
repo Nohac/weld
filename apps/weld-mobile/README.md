@@ -52,12 +52,24 @@ The APK is debuggable and uses development signing only.
 
 ## Presentation and input
 
-The source starts at 960x640, then the phone requests a logical window size and
-preferred scale from its available area and Android display density. Rotation
-updates those requests after a 150 ms settling interval. Preferences use a
-latest-value mailbox; application size increments do not cause configure loops.
-The received content keeps its aspect ratio while a resize is pending or an
-application chooses a different size.
+The phone requests tiled sizing and preferred scale from its full display and
+Android density, including the camera-cutout area. Pairing/browser controls use
+safe insets. Android Back returns a paired application to the desktop; Back from
+the application list backgrounds Weld Mobile. There is no reserved control strip.
+
+Sizing is sent as soon as the selected surface is announced. Initial presentation
+holds at most one latest native image until matching logical geometry arrives;
+after one second it presents the latest available image for applications that
+choose another size. That fallback also fires when the app stops committing.
+Rotation updates requests after a 150 ms settling interval. Later resizes remain
+live and aspect-preserving, and size increments do not cause configure loops.
+
+The Pixel full-display check requested 448x997 logical pixels at 3x scale and
+first presented matching geometry 312 ms later, without first publishing the
+cached desktop-size frame. Steam fit was confirmed manually. Fifteen Android
+tests cover geometry, startup fallback, Back/return and input/mailbox behavior;
+they passed on the Pixel. Android Back dispatch/backgrounding was exercised on
+the development fixture; paired return policy is also covered by a focused test.
 
 Android stable system-bar and camera-cutout insets, plus a 64 logical-pixel
 status strip, remain outside the video/touch area. The insets adapter samples

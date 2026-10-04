@@ -1,5 +1,9 @@
 //! Phone application browser and session controls, backed by receiver-owned state.
 use super::{Presentation, Receiver, enrollment::Enrollment};
+use bevy::input::{
+    ButtonState,
+    keyboard::{Key, KeyboardInput, NativeKeyCode},
+};
 use bevy::prelude::*;
 use std::sync::atomic::Ordering;
 use weld_hoist_iroh::pairing::ApplicationInfo;
@@ -7,10 +11,9 @@ use weld_hoist_iroh::pairing::ApplicationInfo;
 #[derive(Component, Clone, Default)]
 enum Action {
     Hoist(ApplicationInfo),
-    #[default]
-    Apps,
     Paste,
     Scan,
+    #[default]
     Reconnect,
     Previous,
     Next,
@@ -27,7 +30,7 @@ struct BrowserSignature {
     catalogue: Vec<ApplicationInfo>,
     message: String,
     browser: bool,
-    paired: bool,
+    displaying: bool,
     page: usize,
     viewport: Option<crate::geometry::Viewport>,
 }
@@ -74,7 +77,6 @@ fn actions(
         }
         match action {
             Action::Hoist(application) => receiver.0.hoist(application.clone()),
-            Action::Apps => receiver.0.release(),
             Action::Paste => enrollment.paste = true,
             Action::Scan => enrollment.scan = true,
             Action::Reconnect => receiver.0.reconnect(),
@@ -83,14 +85,58 @@ fn actions(
         }
     }
 }
-fn enroll(receiver: Option<Res<Receiver>>, mut enrollment: ResMut<Enrollment>) {
-    if let Some(receiver) = receiver
-        && let Some(update) = enrollment.poll()
-    {
+fn enroll(
+    receiver: Option<Res<Receiver>>,
+    mut enrollment: ResMut<Enrollment>,
+    mut keys: MessageReader<KeyboardInput>,
+) {
+    let key_back = keys
+        .read()
+        .fold(false, |back, event| back | is_back_release(event));
+    let Some(receiver) = receiver else {
+        return;
+    };
+    let mut back = key_back;
+    if let Some(update) = enrollment.poll() {
         receiver.0.set_development(update.development);
+        back |= update.back;
         if let Some(link) = update.link {
             receiver.0.pair(&link, update.name);
         }
+    }
+    if back && receiver.0.back() {
+        enrollment.background = true;
+    }
+}
+
+// Winit handles Android key events in the native stage, before Java Back dispatch.
+fn is_back_release(event: &KeyboardInput) -> bool {
+    event.state == ButtonState::Released
+        && !event.repeat
+        && (event.logical_key == Key::BrowserBack
+            || event.key_code == KeyCode::Unidentified(NativeKeyCode::Android(4)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn android_back_keys_trigger_on_release_and_ignore_other_keys() {
+        let mut event = KeyboardInput {
+            key_code: KeyCode::Unidentified(NativeKeyCode::Android(4)),
+            logical_key: Key::BrowserBack,
+            state: ButtonState::Pressed,
+            text: None,
+            repeat: false,
+            window: Entity::PLACEHOLDER,
+        };
+        assert!(!is_back_release(&event));
+        event.state = ButtonState::Released;
+        assert!(is_back_release(&event));
+        event.key_code = KeyCode::Escape;
+        event.logical_key = Key::Escape;
+        assert!(!is_back_release(&event));
     }
 }
 fn draw(
@@ -116,9 +162,9 @@ fn draw(
         .map(|message| message.clone())
         .unwrap_or_default();
     let browser = shared.browser.load(Ordering::Acquire);
-    let paired = shared.paired.load(Ordering::Acquire);
+    let displaying = shared.displayed.lock().is_ok_and(|frame| frame.is_some());
     let page_size = presentation.viewport.map_or(1, |viewport| {
-        ((viewport.video[3] - 220.0) / 96.0).floor().clamp(1.0, 4.0) as usize
+        ((viewport.safe[3] - 280.0) / 96.0).floor().clamp(1.0, 4.0) as usize
     });
     state.page = state
         .page
@@ -127,7 +173,7 @@ fn draw(
         catalogue: catalogue.clone(),
         message: message.clone(),
         browser,
-        paired,
+        displaying,
         page: state.page,
         viewport: presentation.viewport,
     };
@@ -139,7 +185,7 @@ fn draw(
         commands.entity(entity).despawn();
     }
     for mut visible in &mut status {
-        visible.set_if_neq(if browser || paired {
+        visible.set_if_neq(if browser || displaying {
             Visibility::Hidden
         } else {
             Visibility::Visible
@@ -184,20 +230,12 @@ fn draw(
         commands.spawn_scene(bsn! {
             BrowserRoot
             GlobalZIndex(10)
-            Node { position_type: PositionType::Absolute, left: px(viewport.video[0] as f32), top: px(viewport.video[1] as f32), width: px(viewport.video[2] as f32), height: px(viewport.video[3] as f32), flex_direction: FlexDirection::Column, padding: UiRect::all(px(12)) }
+            Node { position_type: PositionType::Absolute, left: px(viewport.safe[0] as f32), top: px(viewport.safe[1] as f32), width: px(viewport.safe[2] as f32), height: px(viewport.safe[3] as f32), flex_direction: FlexDirection::Column, padding: UiRect::all(px(12)) }
             BackgroundColor(Color::srgb(0.035, 0.045, 0.065))
             Children [
                 (Text::new(message) TextFont { font_size: FontSize::Px(18.0) } TextColor(Color::WHITE)),
                 {rows},
             ]
-        });
-    }
-    if paired && !browser {
-        commands.spawn_scene(bsn! {
-            BrowserRoot
-            GlobalZIndex(11)
-            Node { position_type: PositionType::Absolute, left: px(viewport.status[0] as f32), top: px(viewport.status[1] as f32), width: px(viewport.status[2] as f32), height: px(viewport.status[3] as f32), flex_direction: FlexDirection::Row }
-            Children [{button("Return to desktop".into(), Action::Apps)}]
         });
     }
 }

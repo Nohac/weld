@@ -140,7 +140,7 @@ fn viewport(
         if let Some(viewport) = next {
             info!(?viewport, "phone presentation area changed");
             for mut node in &mut status {
-                place(&mut node, viewport.status);
+                place(&mut node, viewport.safe);
             }
         }
     }

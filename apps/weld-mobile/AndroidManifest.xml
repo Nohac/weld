@@ -3,7 +3,7 @@
     <uses-feature android:glEsVersion="0x00030000" android:required="true" />
     <uses-permission android:name="android.permission.INTERNET" />
     <application android:label="Weld Mobile" android:hasCode="true"
-        android:debuggable="true" android:allowBackup="false"
+        android:debuggable="true" android:allowBackup="false" android:enableOnBackInvokedCallback="true"
         android:theme="@android:style/Theme.Material.NoActionBar.Fullscreen">
         <meta-data android:name="com.google.mlkit.vision.DEPENDENCIES" android:value="barcode_ui" />
         <activity android:name="org.weld.mobile.WeldActivity" android:exported="true" android:launchMode="singleTask"
