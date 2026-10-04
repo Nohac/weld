@@ -311,6 +311,166 @@ fn moving_a_selected_group_to_another_workspace_preserves_internal_structure() {
 }
 
 #[test]
+fn moving_the_workspace_selection_transfers_its_tiles_as_a_group() {
+    let (mut app, first, second, third, branch) = nested();
+    let source = app
+        .world()
+        .get::<WorkspaceMember>(first)
+        .expect("workspace")
+        .0;
+    hierarchy(&mut app, I3FocusHierarchy::Parent);
+    hierarchy(&mut app, I3FocusHierarchy::Parent);
+    assert_eq!(group(&app), Some(source));
+    app.world_mut()
+        .trigger(I3WorkspaceRequest::MoveWindow(WorkspaceTarget::Name(
+            "2".into(),
+        )));
+    app.update();
+    let destination = app.world().get::<WorkspaceMember>(first).expect("moved").0;
+    assert_ne!(source, destination);
+    let transferred = app
+        .world()
+        .get::<TileParent>(first)
+        .expect("group")
+        .entity();
+    assert_ne!(transferred, source);
+    assert_eq!(
+        app.world()
+            .get::<TileParent>(transferred)
+            .expect("destination root")
+            .entity(),
+        destination
+    );
+    assert_eq!(
+        app.world()
+            .get::<TileContainer>(transferred)
+            .expect("preserved outer layout")
+            .children()
+            .map(|(node, _)| node)
+            .collect::<Vec<_>>(),
+        [first, branch]
+    );
+    assert_eq!(
+        app.world()
+            .get::<TileContainer>(source)
+            .expect("retained source workspace")
+            .children()
+            .count(),
+        0
+    );
+    for window in [first, second, third] {
+        assert_eq!(
+            app.world()
+                .get::<WorkspaceMember>(window)
+                .expect("member")
+                .0,
+            destination
+        );
+        assert_eq!(
+            app.world().get::<WindowVisibility>(window),
+            Some(&WindowVisibility::Hidden)
+        );
+    }
+    assert_eq!(
+        app.world().resource::<FocusedWorkspace>().entity(),
+        Some(source)
+    );
+    assert_eq!(app.world().resource::<FocusedWindow>().entity(), None);
+    show(&mut app, "2");
+    assert_eq!(selected(&app), third);
+}
+
+#[test]
+fn selecting_both_windows_of_a_single_split_can_move_them_together() {
+    let mut app = app();
+    let first = window(&mut app, 1);
+    let second = window(&mut app, 2);
+    let source = app.world().get::<WorkspaceMember>(first).expect("source").0;
+    hierarchy(&mut app, I3FocusHierarchy::Parent);
+    assert_eq!(group(&app), Some(source));
+    app.world_mut()
+        .trigger(I3WorkspaceRequest::MoveWindow(WorkspaceTarget::Name(
+            "2".into(),
+        )));
+    app.update();
+    let destination = app
+        .world()
+        .get::<WorkspaceMember>(first)
+        .expect("destination")
+        .0;
+    assert_ne!(destination, source);
+    assert_eq!(
+        app.world()
+            .get::<WorkspaceMember>(second)
+            .expect("member")
+            .0,
+        destination
+    );
+    assert_eq!(
+        app.world().get::<TileParent>(first),
+        app.world().get::<TileParent>(second)
+    );
+    show(&mut app, "2");
+    assert_eq!(selected(&app), second);
+}
+
+#[test]
+fn moving_workspace_tiles_into_a_populated_workspace_leaves_floating_windows_behind() {
+    let (mut app, first, _, third, _) = nested();
+    let source = app.world().get::<WorkspaceMember>(first).expect("source").0;
+    let floating = window(&mut app, 4);
+    app.world_mut().trigger(TileFloatingRequest {
+        window: Some(floating),
+        enabled: Some(true),
+    });
+    app.update();
+    show(&mut app, "2");
+    let existing = window(&mut app, 5);
+    let destination = app
+        .world()
+        .get::<WorkspaceMember>(existing)
+        .expect("destination")
+        .0;
+    show(&mut app, "1");
+    focus(&mut app, third);
+    hierarchy(&mut app, I3FocusHierarchy::Parent);
+    hierarchy(&mut app, I3FocusHierarchy::Parent);
+    assert_eq!(group(&app), Some(source));
+    app.world_mut()
+        .trigger(I3WorkspaceRequest::MoveWindow(WorkspaceTarget::Name(
+            "2".into(),
+        )));
+    app.update();
+    assert_eq!(
+        app.world().get::<WorkspaceMember>(first).expect("moved").0,
+        destination
+    );
+    assert_eq!(
+        app.world()
+            .get::<WorkspaceMember>(floating)
+            .expect("retained floater")
+            .0,
+        source
+    );
+    assert_eq!(selected(&app), floating);
+    let group = app
+        .world()
+        .get::<TileParent>(first)
+        .expect("moved group")
+        .entity();
+    assert_eq!(
+        app.world()
+            .get::<TileContainer>(destination)
+            .expect("destination tree")
+            .children()
+            .map(|(node, _)| node)
+            .collect::<Vec<_>>(),
+        [existing, group]
+    );
+    assert!(app.world().get::<TileParent>(floating).is_none());
+}
+
+#[test]
 fn an_unfocused_sticky_window_does_not_steal_destination_focus() {
     let mut app = app();
     let source = window(&mut app, 1);

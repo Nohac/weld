@@ -350,7 +350,9 @@ pub(crate) fn apply_resolved(
                 anchor,
             });
             commands.trigger(AfterMove {
-                window,
+                // Moving a workspace selection leaves the workspace entity in
+                // place; verify the transfer through one of its selected leaves.
+                window: tree.descend(window).unwrap_or(window),
                 source,
                 destination: workspace,
                 ancestors,

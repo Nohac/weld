@@ -31,6 +31,9 @@ close and move-to-workspace commands target the selected group. Clicking a
 window or switching window/workspace focus returns to leaf selection.
 Splitting a selected group prepares a new enclosing split without changing the
 group's internal layout; the next tiled window is admitted beside the group.
+Moving the workspace-root selection transfers all its tiled contents as one
+group. The source workspace keeps its identity/output, and floating windows stay
+there. Both empty and populated destination workspaces accept the group.
 Alt+Shift+P toggles stickiness: a floating window stays on its output when that
 output changes workspace. A tiled window can retain the preference, but it
 takes effect only while floating. Disabling stickiness leaves it in the current

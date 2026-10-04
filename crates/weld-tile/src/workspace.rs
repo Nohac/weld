@@ -122,9 +122,6 @@ pub(crate) fn move_window(
             let Some(root) = editor.root_of(event.window) else {
                 return;
             };
-            if root == event.window {
-                return;
-            }
             (root, false)
         };
     if !editor.roots.contains(source_workspace) || source_workspace == event.workspace {
@@ -160,18 +157,25 @@ pub(crate) fn move_window(
     if editor.root_of(event.window) != Some(source_workspace) {
         return;
     }
-    let Ok(source) = editor.parents.get(event.window).copied() else {
-        return;
-    };
-    let Ok(source_container) = editor.containers.get(source.entity()) else {
-        return;
-    };
-    let Some(source_index) = source_container
-        .children
-        .iter()
-        .position(|child| child.entity == event.window)
-    else {
-        return;
+    let whole_workspace = event.window == source_workspace;
+    let (source, source_index) = if whole_workspace {
+        (source_workspace, None)
+    } else {
+        let Ok(parent) = editor.parents.get(event.window) else {
+            return;
+        };
+        let source = parent.entity();
+        let Ok(container) = editor.containers.get(source) else {
+            return;
+        };
+        let Some(index) = container
+            .children
+            .iter()
+            .position(|child| child.entity == event.window)
+        else {
+            return;
+        };
+        (source, Some(index))
     };
     let (destination, insertion) = if let Some(anchor) = event.anchor {
         let Ok((owner, member, _)) = windows.get(anchor) else {
@@ -248,24 +252,64 @@ pub(crate) fn move_window(
             .sum::<f32>()
             / target.children.len() as f32
     };
-    if !weight.is_finite() || weight <= 0.0 {
+    if leaves.is_empty() || !weight.is_finite() || weight <= 0.0 {
         return;
     }
-    if let Ok(mut source) = editor.containers.get_mut(source.entity()) {
-        source.children.remove(source_index);
-    }
+    // A workspace keeps its identity and output. Its selected tiling contents
+    // become one ordinary split at the destination, retaining all inner edges.
+    let moved = if whole_workspace {
+        let Ok(container) = editor.containers.get(source) else {
+            return;
+        };
+        let children = container.children.clone();
+        let prepared_split = container.prepared_split;
+        let axis = container.axis;
+        let Some(group) = editor.create_container(axis, children.clone()) else {
+            return;
+        };
+        let recent = editor
+            .history
+            .recent()
+            .find(|node| children.iter().any(|child| child.entity == *node));
+        if let Some(recent) = recent {
+            editor.history.wrap(recent, group);
+        }
+        editor
+            .commands
+            .entity(group)
+            .entry::<TileContainer>()
+            .and_modify(move |mut container| container.prepared_split = prepared_split);
+        for child in children {
+            editor
+                .commands
+                .entity(child.entity)
+                .insert(TileParent(group));
+        }
+        if let Ok(mut container) = editor.containers.get_mut(source) {
+            container.children.clear();
+            container.prepared_split = None;
+        }
+        group
+    } else {
+        if let Some(index) = source_index
+            && let Ok(mut container) = editor.containers.get_mut(source)
+        {
+            container.children.remove(index);
+        }
+        event.window
+    };
     if let Ok(mut target) = editor.containers.get_mut(destination) {
         target.children.insert(
             insertion,
             TileChild {
-                entity: event.window,
+                entity: moved,
                 weight,
             },
         );
     }
     editor
         .commands
-        .entity(event.window)
+        .entity(moved)
         .insert(TileParent(destination));
     for leaf in leaves {
         editor.commands.entity(leaf).insert((
@@ -284,7 +328,7 @@ pub(crate) fn move_window(
         });
     }
     // Retain explicit unary splits, retiring only groups emptied by the move.
-    editor.retire_empty_ancestors(source.entity(), source_workspace);
+    editor.retire_empty_ancestors(source, source_workspace);
     editor.dirty.0 = true;
     editor.commands.trigger(TileTreeChanged);
     editor.commands.trigger(LayoutRequested);

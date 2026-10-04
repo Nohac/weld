@@ -177,9 +177,11 @@ pub struct TileWorkspace;
 
 /// Transfer a managed window or split into a workspace's layout. The destination anchor
 /// selects insertion after a leaf; absent an anchor, append to the root.
+/// A workspace target transfers its tiled contents as one new split, retaining
+/// the source workspace and any floating windows there.
 #[derive(Event, Clone, Copy, Debug)]
 pub struct TileWorkspaceMove {
-    /// A managed window or a nested [`TileContainer`].
+    /// A managed window, nested [`TileContainer`], or [`TileWorkspace`].
     pub window: Entity,
     pub workspace: Entity,
     pub anchor: Option<Entity>,
