@@ -67,6 +67,12 @@ pub(crate) struct AfterMove {
     ancestors: Vec<Entity>,
 }
 
+#[derive(Event)]
+pub(crate) struct FinishSwitch {
+    workspace: Entity,
+    retained_focus: Option<Entity>,
+}
+
 #[derive(SystemParam)]
 pub(crate) struct WorkspaceView<'w, 's> {
     workspaces: Query<'w, 's, (Entity, &'static Workspace, Option<&'static WorkspaceOutput>)>,
@@ -236,6 +242,7 @@ pub(crate) fn request(
     event: On<I3WorkspaceRequest>,
     view: WorkspaceView,
     focus: Res<FocusedWindow>,
+    selection: Res<weld_tile::TileSelection>,
     mut creation: WorkspaceCreation,
     mut pending: ResMut<TileCommands>,
     mut commands: Commands,
@@ -261,7 +268,7 @@ pub(crate) fn request(
     match event.event() {
         I3WorkspaceRequest::Switch(_) => commands.trigger(Resolved::Switch(workspace)),
         I3WorkspaceRequest::MoveWindow(_) => {
-            if let Some(window) = focus.entity() {
+            if let Some(window) = selection.target(&focus) {
                 commands.trigger(Resolved::Move { window, workspace });
             }
         }
@@ -273,6 +280,7 @@ pub(crate) fn apply_resolved(
     view: WorkspaceView,
     tree: TreeView,
     members: Query<&WorkspaceMember>,
+    sticky: crate::sticky::StickyWindows,
     floating: Query<(), bevy::ecs::query::With<weld_window::FloatingWindow>>,
     mut commands: Commands,
 ) {
@@ -281,11 +289,24 @@ pub(crate) fn apply_resolved(
             let Ok((_, _, Some(output))) = view.workspaces.get(workspace) else {
                 return;
             };
+            let mut retained_focus = focus_target(workspace, &view, &tree, &members, &floating);
             for (other, state, assigned) in &view.workspaces {
                 if other != workspace
                     && state.visible()
                     && assigned.is_some_and(|assigned| assigned.0 == output.0)
                 {
+                    for (window, member) in &sticky.windows {
+                        if member.0 == other {
+                            commands.trigger(TileWorkspaceMove {
+                                window,
+                                workspace,
+                                anchor: None,
+                            });
+                            if sticky.focus.entity() == Some(window) {
+                                retained_focus = Some(window);
+                            }
+                        }
+                    }
                     commands.trigger(WorkspaceRequest::SetVisible {
                         workspace: other,
                         visible: false,
@@ -296,43 +317,24 @@ pub(crate) fn apply_resolved(
                 workspace,
                 visible: true,
             });
-            commands.trigger(WorkspaceRequest::Select {
+            commands.trigger(FinishSwitch {
                 workspace,
-                window: view
-                    .workspaces
-                    .get(workspace)
-                    .ok()
-                    .and_then(|(_, state, _)| state.recent().next())
-                    .filter(|window| {
-                        floating.contains(*window)
-                            && members
-                                .get(*window)
-                                .is_ok_and(|member| member.0 == workspace)
-                    })
-                    .or_else(|| tree.descend(workspace))
-                    .or_else(|| {
-                        view.workspaces
-                            .get(workspace)
-                            .ok()
-                            .and_then(|(_, state, _)| {
-                                state.recent().find(|window| {
-                                    floating.contains(*window)
-                                        && members
-                                            .get(*window)
-                                            .is_ok_and(|member| member.0 == workspace)
-                                })
-                            })
-                    }),
+                retained_focus,
             });
         }
         Resolved::Move { window, workspace } => {
             if !view.workspaces.contains(workspace) {
                 return;
             }
-            let Ok(source) = members.get(window) else {
+            let Some(source) = members
+                .get(window)
+                .ok()
+                .map(|member| member.0)
+                .or_else(|| tree.root(window))
+            else {
                 return;
             };
-            if source.0 == workspace {
+            if source == workspace {
                 return;
             }
             let anchor = tree.descend(workspace);
@@ -349,12 +351,57 @@ pub(crate) fn apply_resolved(
             });
             commands.trigger(AfterMove {
                 window,
-                source: source.0,
+                source,
                 destination: workspace,
                 ancestors,
             });
         }
     }
+}
+
+pub(crate) fn finish_switch(
+    event: On<FinishSwitch>,
+    view: WorkspaceView,
+    tree: TreeView,
+    members: Query<&WorkspaceMember>,
+    floating: Query<(), bevy::ecs::query::With<weld_window::FloatingWindow>>,
+    mut commands: Commands,
+) {
+    let workspace = event.workspace;
+    let window = event
+        .retained_focus
+        .filter(|window| {
+            members
+                .get(*window)
+                .is_ok_and(|member| member.0 == workspace)
+        })
+        .or_else(|| focus_target(workspace, &view, &tree, &members, &floating));
+    commands.trigger(WorkspaceRequest::Select { workspace, window });
+}
+
+fn focus_target(
+    workspace: Entity,
+    view: &WorkspaceView,
+    tree: &TreeView,
+    members: &Query<&WorkspaceMember>,
+    floating: &Query<(), bevy::ecs::query::With<weld_window::FloatingWindow>>,
+) -> Option<Entity> {
+    let float_here = |window: &Entity| {
+        floating.contains(*window)
+            && members
+                .get(*window)
+                .is_ok_and(|member| member.0 == workspace)
+    };
+    let state = view
+        .workspaces
+        .get(workspace)
+        .ok()
+        .map(|(_, state, _)| state);
+    state
+        .and_then(|state| state.recent().next())
+        .filter(float_here)
+        .or_else(|| tree.descend(workspace))
+        .or_else(|| state.and_then(|state| state.recent().find(float_here)))
 }
 
 pub(crate) fn after_move(
@@ -364,9 +411,10 @@ pub(crate) fn after_move(
     workspaces: Query<&Workspace>,
     mut commands: Commands,
 ) {
-    if !members
-        .get(event.window)
-        .is_ok_and(|member| member.0 == event.destination)
+    if tree.root(event.window) != Some(event.destination)
+        && !members
+            .get(event.window)
+            .is_ok_and(|member| member.0 == event.destination)
     {
         return;
     }

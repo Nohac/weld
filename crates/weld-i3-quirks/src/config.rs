@@ -23,6 +23,8 @@ pub enum Action<Extension = ()> {
     Tile(TileOperation),
     Floating(Option<bool>),
     FocusModeToggle,
+    FocusHierarchy(crate::I3FocusHierarchy),
+    Sticky(Option<bool>),
     Border(Option<BorderStyle>),
     Fullscreen(FullscreenAction),
     Reload,
@@ -408,8 +410,8 @@ fn action<Extension>(
     extension: &impl Fn(&[&str]) -> Result<Extension>,
 ) -> Result<Action<Extension>> {
     Ok(match words {
-        ["focus", "parent" | "child" | "tiling" | "floating"]
-        | ["layout" | "mode" | "sticky", ..]
+        ["focus", "tiling" | "floating"]
+        | ["layout" | "mode", ..]
         | ["move", "scratchpad"]
         | ["move", "workspace", "to", "output", ..] => {
             return Err(unsupported(format!(
@@ -453,6 +455,12 @@ fn action<Extension>(
         ["fullscreen", "disable"] => Action::Fullscreen(FullscreenAction::Disable),
         ["border", style @ ..] => Action::Border(Some(border_style(style)?)),
         ["focus", "mode_toggle"] => Action::FocusModeToggle,
+        ["sticky", "enable"] => Action::Sticky(Some(true)),
+        ["sticky", "disable"] => Action::Sticky(Some(false)),
+        ["sticky", "toggle"] => Action::Sticky(None),
+        ["sticky", ..] => bail!("sticky mode must be enable, disable or toggle"),
+        ["focus", "parent"] => Action::FocusHierarchy(crate::I3FocusHierarchy::Parent),
+        ["focus", "child"] => Action::FocusHierarchy(crate::I3FocusHierarchy::Child),
         ["floating", "enable"] => Action::Floating(Some(true)),
         ["floating", "disable"] => Action::Floating(Some(false)),
         ["floating", "toggle"] => Action::Floating(None),
@@ -914,6 +922,36 @@ mod tests {
         assert_eq!(config.bindings[0].1, Action::Floating(None));
         assert_eq!(config.bindings[1].1, Action::FocusModeToggle);
         assert!(parse("float", "floating_modifier Mod1+Mod1").is_err());
+    }
+
+    #[test]
+    fn hierarchy_and_sticky_bindings_compile_with_variables() {
+        let config = parse(
+            "selection",
+            indoc! {"
+            set $mod Mod4
+            bindsym $mod+Control+p focus mode_toggle
+            bindsym $mod+Shift+p sticky toggle
+            bindsym $mod+p focus parent
+            bindsym $mod+Control+Shift+p focus child
+        "},
+        )
+        .expect("config");
+        let actions: Vec<_> = config
+            .bindings
+            .into_iter()
+            .map(|(_, action)| action)
+            .collect();
+        assert_eq!(
+            actions,
+            [
+                Action::FocusModeToggle,
+                Action::Sticky(None),
+                Action::FocusHierarchy(crate::I3FocusHierarchy::Parent),
+                Action::FocusHierarchy(crate::I3FocusHierarchy::Child)
+            ]
+        );
+        assert!(parse("bad", "bindsym Mod4+p sticky maybe").is_err());
     }
 
     #[test]

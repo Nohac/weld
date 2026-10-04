@@ -99,6 +99,13 @@ impl TreeEditor<'_, '_> {
     }
 
     fn split(&mut self, window: Entity, axis: SplitAxis) {
+        if self.roots.contains(window) {
+            if let Ok(mut container) = self.containers.get_mut(window) {
+                container.axis = axis;
+                self.dirty.0 = true;
+            }
+            return;
+        }
         let Ok(parent) = self.parents.get(window).copied() else {
             return;
         };
@@ -120,8 +127,14 @@ impl TreeEditor<'_, '_> {
             depth += 1;
             ancestor = parent.0;
         }
-        if depth >= crate::MAX_DEPTH {
-            return;
+        let mut descendants = vec![(window, depth)];
+        while let Some((node, depth)) = descendants.pop() {
+            if depth >= crate::MAX_DEPTH {
+                return;
+            }
+            if let Ok(container) = self.containers.get(node) {
+                descendants.extend(container.children().map(|(child, _)| (child, depth + 1)));
+            }
         }
         let Some(nested) = self.create_container(
             axis,
@@ -228,7 +241,7 @@ pub(crate) fn apply_request(
     event: On<TileRequest>,
     mut editor: TreeEditor,
     windows: Query<(Entity, &ManagedWindow, &WindowGeometry)>,
-    focus: Res<FocusedWindow>,
+    selection: CommandSelection,
     owners: Query<(&ManagedBy, Has<TileParent>)>,
     mut pending: ResMut<TileCommands>,
     mut redraw: MessageWriter<RequestRedraw>,
@@ -245,23 +258,36 @@ pub(crate) fn apply_request(
                 .map(|(entity, _, _)| entity),
             command.operation,
         ),
-        TileRequest::Focused(operation) => (
-            focus.entity().filter(|entity| windows.contains(*entity)),
-            operation,
-        ),
+        TileRequest::Focused(operation) => {
+            (selection.selection.target(&selection.focus), operation)
+        }
     };
     let Some(window) = window else { return };
-    let Ok((owner, tiled)) = owners.get(window) else {
-        return;
+    let container = editor.containers.contains(window);
+    let valid = if container {
+        editor.root_of(window).is_some()
+    } else {
+        owners.get(window).is_ok_and(|(owner, tiled)| {
+            editor.roots.contains(owner.0) && (tiled || operation == TileOperation::Close)
+        })
     };
-    if !editor.roots.contains(owner.0) || (!tiled && operation != TileOperation::Close) {
+    if !valid {
         return;
     }
     match operation {
-        TileOperation::Close => editor.commands.trigger(WindowCommand {
-            window,
-            kind: WindowCommandKind::CloseOccupant,
-        }),
+        TileOperation::Close => {
+            let mut pending = vec![window];
+            while let Some(node) = pending.pop() {
+                if let Ok(container) = editor.containers.get(node) {
+                    pending.extend(container.children().map(|(child, _)| child));
+                } else {
+                    editor.commands.trigger(WindowCommand {
+                        window: node,
+                        kind: WindowCommandKind::CloseOccupant,
+                    });
+                }
+            }
+        }
         TileOperation::Split(axis) => editor.split(window, axis),
         TileOperation::Focus(direction) => {
             if let Some(next) = neighbor(&windows, &owners, window, direction) {
@@ -283,6 +309,12 @@ pub(crate) fn apply_request(
         editor.commands.trigger(TileTreeChanged);
     }
     editor.commands.trigger(LayoutRequested);
+}
+
+#[derive(SystemParam)]
+pub(crate) struct CommandSelection<'w> {
+    focus: Res<'w, FocusedWindow>,
+    selection: Res<'w, crate::TileSelection>,
 }
 
 fn neighbor(

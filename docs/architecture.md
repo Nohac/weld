@@ -152,9 +152,15 @@ It retains the selected leaf's ancestor path so close recovery can search its ne
 branch before tiler pruning collapses containers. Structural edits refresh this
 path during final management layout, before UI reconciliation can remove vacant
 windows. History includes retained vacant slots; client keyboard focus
-still requires a live mapped occupant. This first policy slice covers directional
-leaf focus, wrapping and directional movement within a workspace. Container selection,
-tabs/stacks and cross-output movement remain subsequent slices. Floating windows
+still requires a live mapped occupant. `TileSelection` holds an explicit structural
+container target separately from `FocusedWindow`, which retains the client leaf.
+`TileSelect` validates a tree selection and descends branch history to its client.
+The tiler projects membership through `WindowGroupSelected`; SSD uses that marker
+for focused border colors. i3 chooses parent/child and directional targets, while
+native operations apply group resize, orientation, close and workspace transfer.
+Window activation and workspace changes reset structural selection; reconciliation
+clears retired groups. Tabs/stacks and directional cross-output movement remain
+subsequent slices. Floating windows
 share workspace ownership and selection, while `FloatingWindow` selects the
 freeform geometry plane. Mode changes preserve identity, occupancy and hoist state;
 the tiler records the former slot and last floating geometry for return.
@@ -171,6 +177,11 @@ The i3 plugin owns workspace naming, initial output assignment, one visible
 workspace per output, switching, empty-workspace retirement, and branch-aware
 selection. Sway `workspace NAME output ...` directives supply ordered connector
 preferences for creation, including primary/nonprimary and number fallback.
+`StickyWindow` is a durable window preference. i3 transfers sticky floating members
+to the newly visible workspace on the same output before hiding the previous
+workspace, through the tiler's ordinary membership transfer. A deferred focus
+step preserves focused sticky windows without letting unfocused arrivals steal
+the destination's remembered selection. Vacancy and hoist ownership are unchanged.
 Existing workspaces retain their outputs on switch or configuration reload.
 Output removal preserves populated workspaces and rehomes them through policy;
 logical-output ECS tests do not add physical connector hotplug support. See

@@ -66,6 +66,18 @@ impl Plugin for TilePlugin {
                 .before(TileSystems::Actions),
         );
         app.init_resource::<TileSettings>()
+            .init_resource::<crate::TileSelection>()
+            .add_observer(crate::selection::select)
+            .add_observer(crate::selection::commit)
+            .add_observer(crate::selection::focused)
+            .add_observer(crate::selection::workspace_focused)
+            .add_observer(crate::selection::activated)
+            .add_systems(
+                PreUpdate,
+                crate::selection::reconcile
+                    .after(TileSystems::Layout)
+                    .in_set(WindowSystems::Management),
+            )
             .init_resource::<TileState>()
             .init_resource::<TileCommands>()
             .init_resource::<TileFocusHistory>()
@@ -289,16 +301,22 @@ fn classify_dialogs(
     }
 }
 
+#[derive(SystemParam)]
+struct AdmissionContext<'w> {
+    workspace: Res<'w, FocusedWorkspace>,
+    focus: Res<'w, FocusedWindow>,
+    selection: Res<'w, crate::TileSelection>,
+}
+
 fn admit_windows(
     mut editor: TreeEditor,
     windows: Query<(Entity, &ManagedWindow, Option<&WorkspaceMember>), Unmanaged>,
     workspaces: Query<(Entity, &Workspace, &WorkspaceOutput), With<TileWorkspace>>,
-    selected: Res<FocusedWorkspace>,
-    focus: Res<FocusedWindow>,
+    context: AdmissionContext,
     families: AdmissionFamilies,
     mut ordered: Local<Vec<(weld_window::WindowId, Entity)>>,
 ) {
-    let selected = selected.entity();
+    let selected = context.workspace.entity();
     for (root, workspace, output) in &workspaces {
         ordered.clear();
         ordered.extend(
@@ -319,13 +337,17 @@ fn admit_windows(
             continue;
         }
         ordered.sort_unstable_by_key(|(id, _)| *id);
-        let focused = focus
-            .entity()
-            .filter(|window| {
-                families
-                    .memberships
-                    .get(*window)
-                    .is_ok_and(|member| member.0 == root)
+        let focused = context
+            .selection
+            .container()
+            .filter(|node| editor.root_of(*node) == Some(root))
+            .or_else(|| {
+                context.focus.entity().filter(|window| {
+                    families
+                        .memberships
+                        .get(*window)
+                        .is_ok_and(|member| member.0 == root)
+                })
             })
             .or_else(|| {
                 workspace.recent().find(|window| {

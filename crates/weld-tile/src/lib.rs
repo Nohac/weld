@@ -12,6 +12,7 @@ mod layout;
 mod operations;
 mod plugin;
 mod resize;
+mod selection;
 mod structural;
 mod workspace;
 
@@ -31,6 +32,7 @@ const MAX_DEPTH: usize = 64;
 
 pub use history::TileFocusHistory;
 pub use plugin::TilePlugin;
+pub use selection::{TileSelect, TileSelection};
 
 /// Management publication points. Deferred edits finish between each set.
 #[derive(SystemSet, Clone, Copy, Debug, Eq, PartialEq, Hash)]
@@ -135,7 +137,7 @@ pub struct TileContainer {
     id: ContainerId,
     axis: SplitAxis,
     children: Vec<TileChild>,
-    /// Leaf for which an explicit split is waiting for its second child.
+    /// Child node for which an explicit split is waiting for its second child.
     prepared_split: Option<Entity>,
 }
 
@@ -173,10 +175,11 @@ impl TileParent {
 #[derive(Component, Clone, Copy, Debug, Eq, PartialEq)]
 pub struct TileWorkspace;
 
-/// Transfer a managed leaf into a workspace's layout. The destination anchor
+/// Transfer a managed window or split into a workspace's layout. The destination anchor
 /// selects insertion after a leaf; absent an anchor, append to the root.
 #[derive(Event, Clone, Copy, Debug)]
 pub struct TileWorkspaceMove {
+    /// A managed window or a nested [`TileContainer`].
     pub window: Entity,
     pub workspace: Entity,
     pub anchor: Option<Entity>,
@@ -201,7 +204,8 @@ pub struct TileCommand {
 pub enum TileOperation {
     /// Requests client close without removing a retained window slot.
     Close,
-    /// Wrap this window in a split for the next admission, or orient its sole-child parent.
+    /// Wrap the selected node for the next admission, or orient its sole-child
+    /// parent. Selecting the workspace root changes its orientation directly.
     Split(SplitAxis),
     Focus(Direction),
     /// Swap leaf positions with the directional neighbor, including across splits.

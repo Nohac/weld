@@ -448,6 +448,7 @@ fn present_ssd_windows(
 #[derive(SystemParam)]
 struct FocusColors<'w, 's> {
     focus: Res<'w, FocusedWindow>,
+    selected_group: Query<'w, 's, (), With<weld_window::WindowGroupSelected>>,
     clients: WindowClientResolver<'w, 's>,
     settings: Res<'w, SsdSettings>,
     interactions: Query<'w, 's, (), With<WindowInteractionSession>>,
@@ -457,10 +458,11 @@ struct FocusColors<'w, 's> {
 
 impl FocusColors<'_, '_> {
     fn palette(&self, window: Entity) -> FrameColors {
-        if self.clients.client_entity(window).is_none() {
+        let group_selected = self.selected_group.contains(window);
+        if self.clients.client_entity(window).is_none() && !group_selected {
             return self.settings.placeholder;
         }
-        let focused = self.focus.entity() == Some(window);
+        let focused = self.focus.entity() == Some(window) || group_selected;
         let relocated = self
             .clients
             .mapped_client(window)
@@ -1254,6 +1256,50 @@ mod tests {
             app.world().get::<PresentationInsets>(root),
             Some(&PresentationInsets::default())
         );
+    }
+
+    #[test]
+    fn group_selection_uses_focused_borders_without_changing_keyboard_focus() {
+        let mut app = tiled_test_app();
+        app.world_mut().resource_mut::<SsdSettings>().tiled = BorderStyle::Pixel(3);
+        let first = SurfaceId::for_test(315);
+        let second = SurfaceId::for_test(316);
+        for surface in [first, second] {
+            enqueue_surface_event(app.world_mut(), role(surface, WindowDecoration::ServerSide));
+            enqueue_surface_event(app.world_mut(), frame(surface, 320, 240));
+            app.update();
+        }
+        app.update();
+        let focused = app
+            .world()
+            .resource::<FocusedWindow>()
+            .entity()
+            .expect("focus");
+        let root = app
+            .world_mut()
+            .query_filtered::<Entity, With<weld_tile::TileWorkspace>>()
+            .single(app.world())
+            .expect("workspace");
+        app.world_mut().trigger(weld_tile::TileSelect(root));
+        app.update();
+        assert_eq!(
+            app.world().resource::<FocusedWindow>().entity(),
+            Some(focused)
+        );
+        let color = app.world().resource::<SsdSettings>().focused.child_border;
+        let frames: Vec<_> = app
+            .world_mut()
+            .query::<&PrimaryWindowPresentation>()
+            .iter(app.world())
+            .map(|p| p.entity())
+            .collect();
+        assert_eq!(frames.len(), 2);
+        for frame in frames {
+            assert_eq!(
+                app.world().get::<BorderColor>(frame),
+                Some(&BorderColor::all(color))
+            );
+        }
     }
 
     #[test]

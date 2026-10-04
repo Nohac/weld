@@ -7,6 +7,8 @@
 pub mod config;
 mod focus;
 mod movement;
+mod sticky;
+pub use sticky::I3StickyRequest;
 mod tree;
 pub mod window_rules;
 pub mod workspace;
@@ -28,6 +30,13 @@ pub struct I3MoveRequest(pub Direction);
 /// Select the most recently focused window in the other layout plane.
 #[derive(Event, Clone, Copy, Debug)]
 pub struct I3FocusModeToggle;
+
+/// Select an ancestor split or its last-selected direct child.
+#[derive(Event, Clone, Copy, Debug, PartialEq)]
+pub enum I3FocusHierarchy {
+    Parent,
+    Child,
+}
 
 /// Where directional navigation may wrap after reaching a split edge.
 #[derive(Resource, Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -53,12 +62,15 @@ impl Plugin for I3QuirksPlugin {
             .add_observer(workspace::request)
             .add_observer(workspace::activate_existing)
             .add_observer(workspace::apply_resolved)
+            .add_observer(workspace::finish_switch)
+            .add_observer(sticky::request)
             .add_observer(workspace::remember)
             .add_observer(workspace::bootstrap)
             .add_observer(workspace::after_move)
             .init_resource::<focus::FocusPath>()
             .add_observer(focus::navigate)
             .add_observer(focus::mode_toggle)
+            .add_observer(focus::hierarchy)
             .add_observer(focus::remember_focus)
             .add_observer(focus::tree_changed)
             .add_observer(movement::move_focused)

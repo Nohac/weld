@@ -288,6 +288,10 @@ fn dispatch_action(
             enabled,
         }),
         Action::FocusModeToggle => effects.commands.trigger(weld_i3_quirks::I3FocusModeToggle),
+        Action::FocusHierarchy(request) => effects.commands.trigger(request),
+        Action::Sticky(enabled) => effects
+            .commands
+            .trigger(weld_i3_quirks::I3StickyRequest(enabled)),
         Action::Border(style) => effects.commands.trigger(BorderRequest(style)),
         Action::Fullscreen(action) => effects.commands.trigger(FullscreenRequest {
             window: None,

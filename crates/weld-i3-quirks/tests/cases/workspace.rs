@@ -19,6 +19,47 @@ fn parse_config(name: &str, source: &str) -> anyhow::Result<config::Configuratio
     config::parse_with_extensions(name, source, |_| anyhow::bail!("unsupported i3 command"))
 }
 
+#[test]
+fn sticky_window_stays_on_its_output_when_focus_moves_to_another_monitor() {
+    let (mut app, outputs) = configured("workspace 3 output fake-1", 2);
+    let sticky = window(&mut app, 1);
+    app.world_mut().trigger(TileFloatingRequest {
+        window: Some(sticky),
+        enabled: Some(true),
+    });
+    app.world_mut()
+        .trigger(weld_i3_quirks::I3StickyRequest(Some(true)));
+    app.update();
+    let home = app.world().get::<WorkspaceMember>(sticky).expect("home").0;
+    assert_eq!(selected(&app), sticky);
+    show(&mut app, "3");
+    assert_eq!(
+        app.world()
+            .get::<WorkspaceMember>(sticky)
+            .expect("member")
+            .0,
+        home
+    );
+    assert_eq!(
+        app.world().get::<WindowOutput>(sticky),
+        Some(&WindowOutput(outputs[0]))
+    );
+    assert_eq!(
+        app.world().get::<WindowVisibility>(sticky),
+        Some(&WindowVisibility::Visible)
+    );
+    show(&mut app, "1");
+    show(&mut app, "2");
+    let second = workspace(&mut app, "2").expect("second workspace");
+    assert_eq!(
+        app.world()
+            .get::<WorkspaceMember>(sticky)
+            .expect("member")
+            .0,
+        second
+    );
+}
+
 fn named_output(app: &mut App, id: u64, name: &str, primary: bool) -> Entity {
     let mut entity = app.world_mut().spawn((
         WeldOutput {

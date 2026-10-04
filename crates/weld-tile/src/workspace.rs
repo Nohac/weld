@@ -112,16 +112,28 @@ pub(crate) fn move_window(
     windows: Query<(&ManagedBy, &WorkspaceMember, Option<&FloatingWindow>), With<ManagedWindow>>,
     workspaces: Query<(&Workspace, &WorkspaceOutput), With<TileWorkspace>>,
 ) {
-    let Ok((owner, member, floating)) = windows.get(event.window) else {
-        return;
-    };
-    if owner.0 != member.0 || !editor.roots.contains(owner.0) || member.0 == event.workspace {
+    let (source_workspace, floating) =
+        if let Ok((owner, member, floating)) = windows.get(event.window) {
+            if owner.0 != member.0 {
+                return;
+            }
+            (member.0, floating.is_some())
+        } else {
+            let Some(root) = editor.root_of(event.window) else {
+                return;
+            };
+            if root == event.window {
+                return;
+            }
+            (root, false)
+        };
+    if !editor.roots.contains(source_workspace) || source_workspace == event.workspace {
         return;
     }
     let Ok((workspace, output)) = workspaces.get(event.workspace) else {
         return;
     };
-    if floating.is_some() {
+    if floating {
         editor
             .commands
             .entity(event.window)
@@ -141,11 +153,11 @@ pub(crate) fn move_window(
             ));
         editor.commands.trigger(WorkspaceMemberMoved {
             window: event.window,
-            previous: member.0,
+            previous: source_workspace,
         });
         return;
     }
-    if editor.root_of(event.window) != Some(owner.0) {
+    if editor.root_of(event.window) != Some(source_workspace) {
         return;
     }
     let Ok(source) = editor.parents.get(event.window).copied() else {
@@ -194,6 +206,38 @@ pub(crate) fn move_window(
     let Ok(target) = editor.containers.get(destination) else {
         return;
     };
+    let mut destination_depth = 1;
+    let mut ancestor = destination;
+    while let Ok(parent) = editor.parents.get(ancestor) {
+        destination_depth += 1;
+        ancestor = parent.entity();
+    }
+    let mut leaves = Vec::new();
+    let mut pending = vec![(event.window, destination_depth)];
+    while let Some((node, depth)) = pending.pop() {
+        if depth > crate::MAX_DEPTH {
+            return;
+        }
+        if let Ok(container) = editor.containers.get(node) {
+            for (child, _) in container.children() {
+                if !editor
+                    .parents
+                    .get(child)
+                    .is_ok_and(|parent| parent.entity() == node)
+                {
+                    return;
+                }
+                pending.push((child, depth + 1));
+            }
+        } else {
+            if !windows.get(node).is_ok_and(|(owner, member, floating)| {
+                owner.0 == source_workspace && member.0 == source_workspace && floating.is_none()
+            }) {
+                return;
+            }
+            leaves.push(node);
+        }
+    }
     let weight = if target.children.is_empty() {
         1.0
     } else {
@@ -219,24 +263,29 @@ pub(crate) fn move_window(
             },
         );
     }
-    editor.commands.entity(event.window).insert((
-        TileParent(destination),
-        WorkspaceMember(event.workspace),
-        ManagedBy(event.workspace),
-        WindowOutput(output.0),
-        if workspace.visible() {
-            WindowVisibility::Visible
-        } else {
-            WindowVisibility::Hidden
-        },
-    ));
+    editor
+        .commands
+        .entity(event.window)
+        .insert(TileParent(destination));
+    for leaf in leaves {
+        editor.commands.entity(leaf).insert((
+            WorkspaceMember(event.workspace),
+            ManagedBy(event.workspace),
+            WindowOutput(output.0),
+            if workspace.visible() {
+                WindowVisibility::Visible
+            } else {
+                WindowVisibility::Hidden
+            },
+        ));
+        editor.commands.trigger(WorkspaceMemberMoved {
+            window: leaf,
+            previous: source_workspace,
+        });
+    }
     // Retain explicit unary splits, retiring only groups emptied by the move.
-    editor.retire_empty_ancestors(source.entity(), owner.0);
+    editor.retire_empty_ancestors(source.entity(), source_workspace);
     editor.dirty.0 = true;
-    editor.commands.trigger(WorkspaceMemberMoved {
-        window: event.window,
-        previous: member.0,
-    });
     editor.commands.trigger(TileTreeChanged);
     editor.commands.trigger(LayoutRequested);
 }

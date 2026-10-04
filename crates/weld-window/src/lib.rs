@@ -94,6 +94,14 @@ pub struct FloatingWindow;
 #[derive(Component, Clone, Copy, Debug, Default)]
 pub struct TiledWindow;
 
+/// A window included in the manager's currently selected group.
+#[derive(Component, Clone, Copy, Debug, Default)]
+pub struct WindowGroupSelected;
+
+/// Retained preference to keep a floating window on its output across workspace switches.
+#[derive(Component, Clone, Copy, Debug, Default)]
+pub struct StickyWindow;
+
 /// Shell policy requesting a compositor-owned frame around the client content.
 #[derive(Component, Clone, Copy, Debug, Default)]
 pub struct ServerFrameRequested;

@@ -11,7 +11,8 @@ use bevy::ecs::{
     system::{Commands, Query, Res, ResMut},
 };
 use weld_tile::{
-    Direction, SplitAxis, TileCommands, TileContainer, TileParent, TileSide, TileTreeEdit,
+    Direction, SplitAxis, TileCommands, TileContainer, TileParent, TileSelection, TileSide,
+    TileTreeEdit,
 };
 use weld_window::FocusedWindow;
 
@@ -103,10 +104,7 @@ impl TreeView<'_, '_> {
     }
 
     fn move_plan(&self, node: Entity, direction: Direction, allow_wrap: bool) -> Option<MovePlan> {
-        if !self.belongs_to(node, node) {
-            return None;
-        }
-        let root = self.windows.get(node).ok()?.1.0;
+        let root = self.root(node)?;
         let parent = self.parents.get(node).ok()?.entity();
         if parent == root && self.containers.get(root).ok()?.children().count() == 1 {
             return None;
@@ -202,6 +200,7 @@ pub(crate) fn move_focused(
     event: On<I3MoveRequest>,
     tree: TreeView,
     focus: Res<FocusedWindow>,
+    selection: Res<TileSelection>,
     mut pending: ResMut<TileCommands>,
     mut commands: Commands,
 ) {
@@ -209,7 +208,7 @@ pub(crate) fn move_focused(
         let _ = pending.defer(*event.event());
         return;
     }
-    if let Some(node) = focus.entity()
+    if let Some(node) = selection.target(&focus)
         && let Some(plan) = tree.move_plan(node, event.0, true)
     {
         submit(plan, node, event.0, &tree, &mut commands);

@@ -23,6 +23,19 @@ drag moves floating windows, and Alt+right drag resizes from the pointer's quadr
 Tiles resize at shared split boundaries, through a border drag or the same
 modifier-right drag toward an interior edge.
 
+Alt+P selects the parent split; repeated presses climb to the workspace root.
+Alt+Control+Shift+P selects its remembered direct child. The selected group's
+Weld borders use the focused palette while keyboard input stays with its
+remembered client. Directional move, percentage resize, split preparation,
+close and move-to-workspace commands target the selected group. Clicking a
+window or switching window/workspace focus returns to leaf selection.
+Splitting a selected group prepares a new enclosing split without changing the
+group's internal layout; the next tiled window is admitted beside the group.
+Alt+Shift+P toggles stickiness: a floating window stays on its output when that
+output changes workspace. A tiled window can retain the preference, but it
+takes effect only while floating. Disabling stickiness leaves it in the current
+workspace. Retained vacant/hoisted slots obey the same policy.
+
 The example starts Waybar with `examples/waybar.jsonc` and `examples/waybar.css`;
 launch from the repository root so those relative paths resolve. Waybar's
 `ext/workspaces` module displays existing workspaces and switches them on click.
@@ -335,10 +348,10 @@ fallback policy unless they install and use the i3 actions.
 
 The first adapted i3 scenarios and deferred test families are recorded in
 [`weld-i3-quirks/UPSTREAM.md`](../crates/weld-i3-quirks/UPSTREAM.md).
-Parent/child group selection, moving a selected group through i3 commands,
-tabs/stacks and cross-output movement remain
-follow-ups. The native editor can reparent a whole subtree, but Master currently
-selects individual windows. Native `TileOperation::Move` remains the geometric
+Tabs/stacks, floating an entire selected group and group fullscreen remain
+follow-ups; floating/fullscreen commands currently target the keyboard-focused
+window. Directional cross-output movement remains a follow-up. Native
+`TileOperation::Move` remains the geometric
 leaf swap as a native primitive; Master's Sway `move` bindings use the i3
 policy instead. Resized shares follow same-parent reordering, cross-parent arrivals
 receive the mean existing share, and flattening preserves internal proportions.

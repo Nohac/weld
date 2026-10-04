@@ -31,6 +31,8 @@ use weld_window::{
 
 #[path = "cases/movement.rs"]
 mod movement;
+#[path = "cases/selection.rs"]
+mod selection;
 #[path = "cases/workspace.rs"]
 mod workspace;
 

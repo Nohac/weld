@@ -23,6 +23,15 @@ closes and the tiler promotes its surviving child.
 
 The wider test corpus remains the target for subsequent behavior slices:
 
+`tests/cases/selection.rs` now covers parent/child traversal, group navigation,
+subtree move/resize/close and workspace transfer, close recovery, mode toggling,
+and sticky-window workspace transitions. These are local integration scenarios
+for the command semantics; they do not claim a complete port of `101-focus.t`
+or `307-focus-next-prev.t`. Group selection retains a concrete keyboard-focused
+client and projects selected membership onto Weld frames. Sticky regressions
+cover vacant slots, delayed activation when toggling floating, focus retention
+and output locality. Whole-group floating/fullscreen and tabs/stacks remain open.
+
 - Parent/child and sibling selection: `101-focus.t`, `307-focus-next-prev.t`.
 - Wrapping interactions: `170-force_focus_wrapping.t`, `308-focus_wrapping.t`,
   `539-disable_focus_wrapping.t`.

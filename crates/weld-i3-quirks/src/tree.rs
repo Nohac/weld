@@ -17,8 +17,28 @@ pub(crate) struct TreeView<'w, 's> {
 }
 
 impl TreeView<'_, '_> {
+    pub(crate) fn root(&self, mut node: Entity) -> Option<Entity> {
+        for _ in 0..=64 {
+            if self.workspaces.contains(node) {
+                return Some(node);
+            }
+            let parent = self.parents.get(node).ok()?.entity();
+            if !self
+                .containers
+                .get(parent)
+                .ok()?
+                .children()
+                .any(|(child, _)| child == node)
+            {
+                return None;
+            }
+            node = parent;
+        }
+        None
+    }
+
     pub(crate) fn belongs_to(&self, window: Entity, ancestor: Entity) -> bool {
-        let Ok((_, owner)) = self.windows.get(window) else {
+        let Some(root) = self.root(window) else {
             return false;
         };
         let mut node = window;
@@ -27,7 +47,12 @@ impl TreeView<'_, '_> {
             node = parent.entity();
             found |= node == ancestor;
         }
-        found && owner.0 == node && self.workspaces.contains(node)
+        found
+            && root == node
+            && self
+                .windows
+                .get(window)
+                .is_ok_and(|(_, owner)| owner.0 == root)
     }
 
     pub(crate) fn descend(&self, node: Entity) -> Option<Entity> {
@@ -49,5 +74,20 @@ impl TreeView<'_, '_> {
                     .children()
                     .find_map(|(child, _)| self.descend(child))
             })
+    }
+
+    pub(crate) fn child(&self, node: Entity) -> Option<Entity> {
+        let container = self.containers.get(node).ok()?;
+        self.history
+            .recent()
+            .find(|child| {
+                self.parents
+                    .get(*child)
+                    .is_ok_and(|parent| parent.entity() == node)
+                    && container
+                        .children()
+                        .any(|(candidate, _)| candidate == *child)
+            })
+            .or_else(|| container.children().next().map(|(child, _)| child))
     }
 }

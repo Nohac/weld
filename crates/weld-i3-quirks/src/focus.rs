@@ -11,7 +11,9 @@ use bevy::{
     },
     window::RequestRedraw,
 };
-use weld_tile::{Direction, SplitAxis, TileCommands, TileParent, TileTreeChanged};
+use weld_tile::{
+    Direction, SplitAxis, TileCommands, TileParent, TileSelect, TileSelection, TileTreeChanged,
+};
 use weld_window::{
     FloatingWindow, FocusedWindow, ManagedWindow, WindowCommand, WindowCommandKind,
     WindowFocusChanged,
@@ -19,6 +21,34 @@ use weld_window::{
 };
 
 use crate::{FocusWrapping, I3FocusRequest, tree::TreeView};
+
+pub(crate) fn hierarchy(
+    event: On<crate::I3FocusHierarchy>,
+    tree: TreeView,
+    focus: Res<FocusedWindow>,
+    selection: Res<TileSelection>,
+    fullscreen: Query<(), bevy::ecs::query::With<weld_window::fullscreen::WindowFullscreen>>,
+    mut commands: Commands,
+) {
+    if focus
+        .entity()
+        .is_some_and(|window| fullscreen.contains(window))
+    {
+        return;
+    }
+    let Some(node) = selection.target(&focus) else {
+        return;
+    };
+    let target = match *event.event() {
+        crate::I3FocusHierarchy::Parent => {
+            tree.parents.get(node).ok().map(|parent| parent.entity())
+        }
+        crate::I3FocusHierarchy::Child => tree.child(node),
+    };
+    if let Some(target) = target {
+        commands.trigger(TileSelect(target));
+    }
+}
 
 pub(crate) fn mode_toggle(
     _: On<crate::I3FocusModeToggle>,
@@ -66,9 +96,7 @@ impl TreeView<'_, '_> {
         direction: Direction,
         wrapping: FocusWrapping,
     ) -> Option<Entity> {
-        if !self.belongs_to(window, window) {
-            return None;
-        }
+        self.root(window)?;
         let axis = match direction {
             Direction::Left | Direction::Right => SplitAxis::Horizontal,
             Direction::Up | Direction::Down => SplitAxis::Vertical,
@@ -90,7 +118,11 @@ impl TreeView<'_, '_> {
                 };
                 if let Some((neighbor, _)) = next.and_then(|index| container.children().nth(index))
                 {
-                    return self.descend(neighbor);
+                    return if self.containers.contains(window) {
+                        Some(neighbor)
+                    } else {
+                        self.descend(neighbor)
+                    };
                 }
                 if wrapping != FocusWrapping::No
                     && wrap.is_none()
@@ -103,13 +135,25 @@ impl TreeView<'_, '_> {
                     }
                     .map(|(child, _)| child);
                     if wrapping == FocusWrapping::Force {
-                        return wrap.and_then(|node| self.descend(node));
+                        return wrap.and_then(|node| {
+                            if self.containers.contains(window) {
+                                Some(node)
+                            } else {
+                                self.descend(node)
+                            }
+                        });
                     }
                 }
             }
             branch = parent;
         }
-        wrap.and_then(|node| self.descend(node))
+        wrap.and_then(|node| {
+            if self.containers.contains(window) {
+                Some(node)
+            } else {
+                self.descend(node)
+            }
+        })
     }
 
     fn remember(&self, window: Option<Entity>, path: &mut FocusPath) {
@@ -128,24 +172,20 @@ pub(crate) fn navigate(
     request: On<I3FocusRequest>,
     tree: TreeView,
     focus: Res<FocusedWindow>,
+    selection: Res<TileSelection>,
     wrapping: Res<FocusWrapping>,
     mut pending: ResMut<TileCommands>,
     mut commands: Commands,
-    mut redraw: MessageWriter<RequestRedraw>,
 ) {
     if tree.workspaces.is_empty() {
         let _ = pending.defer(*request.event());
         return;
     }
-    if let Some(window) = focus
-        .entity()
+    if let Some(window) = selection
+        .target(&focus)
         .and_then(|window| tree.navigate(window, request.0, *wrapping))
     {
-        commands.trigger(WindowCommand {
-            window,
-            kind: WindowCommandKind::Focus,
-        });
-        redraw.write(RequestRedraw);
+        commands.trigger(TileSelect(window));
     }
 }
 
