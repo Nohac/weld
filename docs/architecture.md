@@ -1047,11 +1047,20 @@ destination `ClientSurfaceId` namespaces.
 Registry entries remain present while sessions can reference them. A lost
 connection is represented by `HoistEndpoint::is_available`, making the entry a
 stable tombstone rather than allowing its ID to be reused for another peer.
-The standard distribution currently registers one startup endpoint when it is
-a hoist source or loopback host; destination-only startup installs neither the
-registry nor `weld-hoist`. Dynamic endpoint registration, removal after the
-last referencing session, and live multi-peer admission remain future runtime
-work.
+The standard distribution registers a startup endpoint for source/loopback use
+and dynamically registers approved phone connections. Explicit `HoistWindow`
+targets preserve the desktop default endpoint. Disconnected non-default entries
+retire after the last referencing session; endpoint IDs are never reused.
+Destination-only startup installs neither the registry nor `weld-hoist`.
+
+`weld-control` owns same-user CLI approval, private persistent trust and the local
+control socket. `weld-hoist-iroh::pairing` owns authenticated enrollment and an
+independent application catalog/control stream. Master translates approved
+requests into ordinary hoist/reclaim messages. The runtime-owned desktop relay
+forks cached source snapshots per connection, sharing upstream buffer leases and
+the existing encoded source pipeline. A separate coalesced policy wake services
+catalog/selection changes without putting media or pointer traffic through Bevy.
+See [Phone pairing](device-pairing.md) for approval semantics and current limits.
 
 `Super+H` asks `weld-hoist` to detach and admission-hold every mapped toplevel
 from the focused surface's stable `ClientId`. That identity represents one

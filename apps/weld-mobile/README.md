@@ -7,6 +7,10 @@ live here; the Linux compositor stays on the source machine.
 
 ## Run
 
+For pairing with your running desktop, application selection and revocation,
+follow [Phone pairing](../../docs/device-pairing.md). The commands below launch
+the separate development fixture.
+
 With the Rust/Android development shell and one authorized ADB device:
 
 ```sh
@@ -37,8 +41,10 @@ scripts/build-mobile --install --serial DEVICE
 scripts/build-mobile --clippy
 ```
 
-Packaging uses the SDK's `aapt2`, `zipalign` and `apksigner`, plus `cargo-ndk`;
-Android Studio and Gradle are unnecessary for this NativeActivity bootstrap.
+Rust builds use `cargo-ndk`. A pinned Gradle wrapper packages the small Android
+activity and Google Code Scanner dependencies; the SDK supplies Nix-compatible
+`aapt2`, `zipalign` and `apksigner`. Android Studio is unnecessary. The first build
+downloads Gradle and Android dependencies; later builds reuse their caches.
 Build outputs use `target/mobile`; the ignored `apps/weld-mobile/.local`
 directory keeps the development signing key across target cleanup. Preserve
 that key to update an installed APK without uninstalling its private identity.
@@ -118,9 +124,7 @@ GPUs remain unqualified.
 
 ## Next product slices
 
-Device pairing UI should replace the launcher file exchange, followed by an
-authorized running-window browser and an explicit host-owned remote-launch
-catalog. Touch input is sufficient for the next slices; automatic keyboard/IME
-integration is deferred. Pairing, catalog visibility, launch and
-input/hoist authorization remain separate capabilities. The test launcher's
-whole-private-session consent is not that product authorization flow.
+Device pairing and an authorized running-window browser are implemented.
+An explicit host-owned remote-launch catalog and automatic keyboard/IME remain
+future work. Touch input is sufficient for the current flow. The test launcher's
+whole-private-session consent remains separate from ordinary desktop approval.

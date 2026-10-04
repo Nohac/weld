@@ -1,13 +1,15 @@
 //! Per-session peer approval and bounded bootstrap, before any Weld application data.
 
+use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::{Mutex, mpsc};
 
 use anyhow::{Context, Result, bail, ensure};
 #[cfg(test)]
 use iroh::EndpointId;
 use iroh::{
     Endpoint, EndpointAddr,
-    endpoint::{Connection, IncomingAddr, RecvStream, SendStream},
+    endpoint::{Connection, RecvStream, SendStream},
 };
 #[cfg(test)]
 use iroh_tickets::endpoint::EndpointTicket;
@@ -28,6 +30,48 @@ pub(crate) const WELD_ALPN: &[u8] = b"weld/hoist/1";
 const MAX_CANDIDATES: usize = 8;
 pub(crate) const ATTEMPT_TIMEOUT: Duration = Duration::from_secs(5);
 
+pub(crate) struct Accepted {
+    pub pending: PendingConnection,
+    pub adb_route: Option<iroh_base::CustomAddr>,
+}
+pub(crate) type IncomingQueue = Arc<Mutex<mpsc::Receiver<Accepted>>>;
+pub(crate) enum SourceListener {
+    Routed(IncomingQueue),
+    #[cfg(test)]
+    Endpoint(Endpoint),
+}
+impl From<IncomingQueue> for SourceListener {
+    fn from(queue: IncomingQueue) -> Self {
+        Self::Routed(queue)
+    }
+}
+#[cfg(test)]
+impl From<&Endpoint> for SourceListener {
+    fn from(endpoint: &Endpoint) -> Self {
+        Self::Endpoint(endpoint.clone())
+    }
+}
+impl SourceListener {
+    async fn accept(&self) -> Option<Accepted> {
+        match self {
+            Self::Routed(queue) => queue.lock().await.recv().await,
+            #[cfg(test)]
+            Self::Endpoint(endpoint) => {
+                let incoming = endpoint.accept().await?;
+                let adb_route = match incoming.remote_addr() {
+                    iroh::endpoint::IncomingAddr::Custom(address) => Some(address),
+                    _ => None,
+                };
+                let connection = incoming.await.ok()?;
+                Some(Accepted {
+                    pending: PendingConnection::new(connection),
+                    adb_route,
+                })
+            }
+        }
+    }
+}
+
 /// An established attempt remains close-on-drop until transferred into a live peer.
 pub(crate) struct PendingConnection {
     pub connection: Connection,
@@ -35,7 +79,7 @@ pub(crate) struct PendingConnection {
 }
 
 impl PendingConnection {
-    fn new(connection: Connection) -> Self {
+    pub(crate) fn new(connection: Connection) -> Self {
         Self {
             connection,
             armed: true,
@@ -91,12 +135,13 @@ pub(crate) async fn accept_source(
 }
 
 pub(crate) async fn accept_trusted_source(
-    endpoint: &Endpoint,
+    listener: impl Into<SourceListener>,
     expected: IrohTrustedPeers,
     codec: VideoCodec,
     deadline: Instant,
     attempt_timeout: Duration,
 ) -> Result<SourceBootstrap> {
+    let listener = listener.into();
     let mut candidates = JoinSet::new();
     let mut rejected = 0_u64;
     let result = loop {
@@ -104,18 +149,15 @@ pub(crate) async fn accept_trusted_source(
             _ = tokio::time::sleep_until(deadline) => {
                 break Err(anyhow::anyhow!("timed out waiting for the approved Iroh peer ({rejected} attempts rejected)"));
             }
-            incoming = endpoint.accept(), if candidates.len() < MAX_CANDIDATES => {
+            incoming = listener.accept(), if candidates.len() < MAX_CANDIDATES => {
                 let Some(incoming) = incoming else {
                     break Err(anyhow::anyhow!("Iroh endpoint closed before peer admission"));
                 };
                 let expected = expected.clone();
-                let adb_route = match incoming.remote_addr() {
-                    IncomingAddr::Custom(address) => Some(address),
-                    _ => None,
-                };
+                let adb_route = incoming.adb_route;
                 candidates.spawn(async move {
                     timeout(attempt_timeout, async move {
-                        let pending = PendingConnection::new(incoming.await.context("could not authenticate Iroh peer")?);
+                        let pending = incoming.pending;
                         ensure!(expected.contains(&pending.connection.remote_id()), "Iroh peer is not an approved destination");
                         // No Weld offer or metadata may precede this identity check.
                         let (mut send, mut recv) = pending.connection.open_bi().await?;

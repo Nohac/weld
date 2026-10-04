@@ -970,6 +970,12 @@ fn spawn_compositor_camera(
 }
 
 impl HostPolicy for AppShell {
+    fn take_policy_wake(&mut self) -> bool {
+        self.app
+            .world()
+            .get_resource::<crate::wake::PolicyWake>()
+            .is_some_and(crate::wake::PolicyWake::take)
+    }
     fn enqueue_client_event(&mut self, event: ClientSurfaceEvent) -> CompositionDemand {
         AppShell::enqueue_client_event(self, event)
     }

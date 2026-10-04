@@ -97,11 +97,13 @@ impl IrohDnsPolicy {
 }
 
 /// Long-lived Iroh endpoint host. Individual peers borrow its lifetime.
+#[derive(Clone)]
 pub struct IrohHost {
     lifetime: Arc<HostLifetime>,
     ticket: String,
     network: IrohNetwork,
     adb_listen: Option<SocketAddr>,
+    pairing: crate::pairing::PairingHost,
 }
 
 impl IrohHost {
@@ -150,6 +152,10 @@ impl IrohHost {
         let (commands, receiver) = mpsc::unbounded_channel();
         let (started_tx, started_rx) = std_mpsc::sync_channel(1);
         let (done_tx, done_rx) = std_mpsc::sync_channel(1);
+        let pairing = crate::pairing::PairingHost::default();
+        let pair_worker = pairing.clone();
+        let owner = Arc::new(Mutex::new(Weak::new()));
+        let worker_owner = owner.clone();
         let worker = thread::Builder::new()
             .name("weld-iroh".to_owned())
             .spawn(move || {
@@ -159,7 +165,16 @@ impl IrohHost {
                     .context("could not create Iroh Tokio runtime")
                     .and_then(|runtime| {
                         runtime.block_on(run_host(
-                            network, secret, dns, adb_listen, receiver, started_tx,
+                            EndpointStartup {
+                                network,
+                                secret,
+                                dns,
+                                adb_listen,
+                            },
+                            receiver,
+                            started_tx,
+                            pair_worker,
+                            worker_owner,
                         ))
                     });
                 if let Err(error) = result {
@@ -172,16 +187,82 @@ impl IrohHost {
             .recv()
             .context("Iroh host stopped during startup")?
             .map_err(anyhow::Error::msg)?;
+        let lifetime = Arc::new(HostLifetime {
+            commands,
+            worker: Mutex::new(Some(worker)),
+            done: Mutex::new(done_rx),
+            accepting: Arc::new(AtomicBool::new(false)),
+        });
+        *owner
+            .lock()
+            .map_err(|_| anyhow::anyhow!("endpoint owner poisoned"))? = Arc::downgrade(&lifetime);
         Ok(Self {
-            lifetime: Arc::new(HostLifetime {
-                commands,
-                worker: Mutex::new(Some(worker)),
-                done: Mutex::new(done_rx),
-                accepting: Arc::new(AtomicBool::new(false)),
-            }),
+            lifetime,
             ticket,
             network,
             adb_listen,
+            pairing,
+        })
+    }
+
+    pub fn pairing(&self) -> crate::pairing::PairingHost {
+        self.pairing.clone()
+    }
+
+    pub fn begin_device_session(
+        &self,
+        profile: IrohConnectionProfile,
+        codecs: Vec<VideoCodec>,
+        notifier: IrohNotifier,
+    ) -> Result<crate::pairing::PendingDeviceSession> {
+        anyhow::ensure!(
+            profile.network() == self.network,
+            "device network differs from endpoint"
+        );
+        let (reply, result) = oneshot::channel();
+        let (cancel, cancelled) = oneshot::channel();
+        self.lifetime
+            .commands
+            .send(HostCommand::DeviceSession {
+                host: Arc::downgrade(&self.lifetime),
+                profile,
+                codecs,
+                notifier,
+                reply,
+                cancelled,
+            })
+            .map_err(|_| anyhow::anyhow!("Iroh host unavailable"))?;
+        Ok(crate::pairing::PendingDeviceSession {
+            result,
+            cancel: Some(cancel),
+        })
+    }
+
+    pub fn begin_pairing(
+        &self,
+        invitation: crate::pairing::PairingInvitation,
+        name: String,
+        notifier: IrohNotifier,
+    ) -> Result<crate::pairing::PendingPairing> {
+        anyhow::ensure!(
+            invitation.profile()?.network() == self.network,
+            "pairing network differs from endpoint"
+        );
+        let progress = Arc::new(Mutex::new(crate::pairing::PairingProgress::Connecting));
+        let (cancel, cancelled) = oneshot::channel();
+        self.lifetime
+            .commands
+            .send(HostCommand::Pair {
+                invitation,
+                name,
+                notifier,
+                progress: progress.clone(),
+                cancelled,
+            })
+            .map_err(|_| anyhow::anyhow!("Iroh host unavailable"))?;
+        Ok(crate::pairing::PendingPairing {
+            progress,
+            cancel: Some(cancel),
         })
     }
 
@@ -621,6 +702,21 @@ enum ConnectTarget {
 }
 
 enum HostCommand {
+    DeviceSession {
+        host: Weak<HostLifetime>,
+        profile: IrohConnectionProfile,
+        codecs: Vec<VideoCodec>,
+        notifier: IrohNotifier,
+        reply: oneshot::Sender<Result<crate::pairing::DeviceSession, String>>,
+        cancelled: oneshot::Receiver<()>,
+    },
+    Pair {
+        invitation: crate::pairing::PairingInvitation,
+        name: String,
+        notifier: IrohNotifier,
+        progress: Arc<Mutex<crate::pairing::PairingProgress>>,
+        cancelled: oneshot::Receiver<()>,
+    },
     AcceptSource {
         host: Weak<HostLifetime>,
         codec: VideoCodec,
@@ -643,14 +739,26 @@ enum HostCommand {
     Shutdown,
 }
 
-async fn run_host(
+struct EndpointStartup {
     network: IrohNetwork,
     secret: Option<SecretKey>,
     dns: IrohDnsPolicy,
     adb_listen: Option<SocketAddr>,
+}
+
+async fn run_host(
+    options: EndpointStartup,
     mut commands: mpsc::UnboundedReceiver<HostCommand>,
     started: std_mpsc::SyncSender<Result<(String, Option<SocketAddr>), String>>,
+    pairing: crate::pairing::PairingHost,
+    owner: Arc<Mutex<Weak<HostLifetime>>>,
 ) -> Result<()> {
+    let EndpointStartup {
+        network,
+        secret,
+        dns,
+        adb_listen,
+    } = options;
     let secret = secret.unwrap_or_else(SecretKey::generate);
     let links = (network == IrohNetwork::Adb).then(|| adb::Manager::new(secret.public()));
     let listener = match adb_listen {
@@ -682,7 +790,11 @@ async fn run_host(
     }
     let endpoint = endpoint
         .secret_key(secret)
-        .alpns(vec![WELD_ALPN.to_vec()])
+        .alpns(vec![
+            WELD_ALPN.to_vec(),
+            crate::pairing::PAIR_ALPN.to_vec(),
+            crate::pairing::SESSION_ALPN.to_vec(),
+        ])
         .bind()
         .await
         .map_err(anyhow::Error::from)?;
@@ -700,12 +812,54 @@ async fn run_host(
         bail!("Iroh endpoint published no direct listening address");
     }
     let ticket = EndpointTicket::new(address).to_string();
+    let incoming = crate::incoming::IncomingHub::start(endpoint.clone(), pairing, owner);
     started
         .send(Ok((ticket, listening)))
         .map_err(|_| anyhow::anyhow!("Iroh host startup receiver disappeared"))?;
 
     while let Some(command) = commands.recv().await {
         match command {
+            HostCommand::DeviceSession {
+                host,
+                profile,
+                codecs,
+                notifier,
+                reply,
+                cancelled,
+            } => {
+                let endpoint = endpoint.clone();
+                tokio::spawn(async move {
+                    tokio::select! {
+                        _ = async { if cancelled.await.is_err() { std::future::pending::<()>().await; } } => {},
+                        result = crate::pairing::connect_session(host, endpoint, profile, codecs, notifier.clone(), reply) => {
+                            if let Err(error) = result { tracing::warn!(%error, "device session ended"); }
+                        }
+                    }
+                    let _ = notifier.notify();
+                });
+            }
+            HostCommand::Pair {
+                invitation,
+                name,
+                notifier,
+                progress,
+                cancelled,
+            } => {
+                let endpoint = endpoint.clone();
+                tokio::spawn(async move {
+                    let result = tokio::select! {
+                        _ = cancelled => Err(anyhow::anyhow!("pairing cancelled")),
+                        result = tokio::time::timeout(Duration::from_secs(125), crate::pairing::connect(endpoint, invitation, name, progress.clone(), notifier.clone())) => result.context("pairing timed out").and_then(|result| result),
+                    };
+                    if let Err(error) = result {
+                        if let Ok(mut progress) = progress.lock() {
+                            *progress =
+                                crate::pairing::PairingProgress::Failed(format!("{error:#}"));
+                        }
+                        let _ = notifier.notify();
+                    }
+                });
+            }
             HostCommand::AcceptSource {
                 host,
                 codec,
@@ -716,7 +870,7 @@ async fn run_host(
                 cancelled,
                 guard,
             } => {
-                let endpoint = endpoint.clone();
+                let listener = incoming.hoist.clone();
                 let links = links.clone();
                 tokio::spawn(async move {
                     let _guard = guard;
@@ -724,7 +878,7 @@ async fn run_host(
                         let expected = expected.resolve(deadline).await?;
                         accept_source(
                             host,
-                            endpoint,
+                            listener,
                             expected,
                             codec,
                             deadline,
@@ -794,7 +948,7 @@ async fn run_host(
 
 async fn accept_source(
     host: Weak<HostLifetime>,
-    endpoint: Endpoint,
+    listener: admission::IncomingQueue,
     expected: IrohTrustedPeers,
     codec: VideoCodec,
     deadline: Instant,
@@ -802,7 +956,7 @@ async fn accept_source(
     links: Option<Arc<adb::Manager>>,
 ) -> Result<IrohSourcePeer> {
     let mut bootstrap = admission::accept_trusted_source(
-        &endpoint,
+        listener,
         expected,
         codec,
         deadline.into(),

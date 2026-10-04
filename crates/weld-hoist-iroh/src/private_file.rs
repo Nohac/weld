@@ -1,5 +1,5 @@
 //! Same-user private storage, not attestation or protection from that OS user.
-//! Directory fds pin checked parents; writes publish complete files without overwrite.
+//! Directory fds pin checked parents; atomic publication supports create and explicit replacement.
 
 use anyhow::{Context, Result, ensure};
 use rustix::{
@@ -21,6 +21,24 @@ static NEXT_TEMPORARY: AtomicU64 = AtomicU64::new(0);
 pub(crate) struct PrivateDirectory(File);
 
 impl PrivateDirectory {
+    pub fn lock_exclusive(&self, name: &OsStr) -> Result<File> {
+        let file = File::from(openat(
+            &self.0,
+            name,
+            OFlags::RDWR | OFlags::CREATE | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::RUSR | Mode::WUSR,
+        )?);
+        let metadata = file.metadata()?;
+        ensure!(
+            metadata.is_file()
+                && metadata.uid() == geteuid().as_raw()
+                && metadata.mode() & 0o777 == 0o600,
+            "invalid private lock file"
+        );
+        rustix::fs::flock(&file, rustix::fs::FlockOperation::NonBlockingLockExclusive)
+            .context("device storage already owned by another Weld instance")?;
+        Ok(file)
+    }
     pub fn open(path: &Path) -> Result<Self> {
         let file = File::from(
             open(
@@ -102,6 +120,16 @@ impl PrivateDirectory {
 
     /// False means the destination already exists; nothing is overwritten.
     pub fn create_new(&self, name: &OsStr, contents: &[u8]) -> Result<bool> {
+        self.publish(name, contents, false)
+    }
+
+    pub fn replace(&self, name: &OsStr, contents: &[u8]) -> Result<()> {
+        self.open_file(name)?;
+        self.publish(name, contents, true)?;
+        Ok(())
+    }
+
+    fn publish(&self, name: &OsStr, contents: &[u8], replace: bool) -> Result<bool> {
         let temporary = format!(
             ".weld-iroh-{}-{}",
             std::process::id(),
@@ -126,7 +154,12 @@ impl PrivateDirectory {
             file.sync_all()?;
             // Android app SELinux policy permits rename in private storage but
             // denies hard links. NOREPLACE preserves atomic first-writer wins.
-            match renameat_with(&self.0, &temporary, &self.0, name, RenameFlags::NOREPLACE) {
+            let flags = if replace {
+                RenameFlags::empty()
+            } else {
+                RenameFlags::NOREPLACE
+            };
+            match renameat_with(&self.0, &temporary, &self.0, name, flags) {
                 Ok(()) => Ok(true),
                 Err(Errno::EXIST) => Ok(false),
                 Err(error @ (Errno::INVAL | Errno::NOSYS)) => {

@@ -2,6 +2,7 @@
 
 mod arguments;
 mod bitrate_budget;
+mod devices;
 mod headless;
 mod iroh_host;
 mod master;
@@ -105,6 +106,15 @@ pub fn run(arguments: AppArguments) -> Result<()> {
         })
     } else {
         None
+    };
+
+    let device_options = devices::DeviceOptions::from_arguments(&arguments);
+    let device_host = match &pending_transport {
+        Some(
+            PendingHoistTransport::IrohSource { host, .. }
+            | PendingHoistTransport::IrohDestination { host, .. },
+        ) => Some(host.clone()),
+        _ => None,
     };
 
     let mut app = WeldApp::builder()
@@ -324,6 +334,17 @@ pub fn run(arguments: AppArguments) -> Result<()> {
     if enable_hoist_policy {
         app.add_plugins(HoistPlugin);
     }
+    let _device_controls = if enable_hoist_policy {
+        match device_options.and_then(|options| devices::install(&mut app, options, device_host)) {
+            Ok(controls) => Some(controls),
+            Err(error) => {
+                tracing::warn!(%error, "device pairing unavailable; continuing desktop session");
+                None
+            }
+        }
+    } else {
+        None
+    };
     app.run()
 }
 

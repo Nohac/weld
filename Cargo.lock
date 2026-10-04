@@ -5951,6 +5951,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d55d956fa96f5ec02be2e13af0e20391a5aa83d6a074e3ad368959d0fab299ea"
 
 [[package]]
+name = "qrcode"
+version = "0.14.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d68782463e408eb1e668cf6152704bd856c78c5b6417adaee3203d8f4c1fc9ec"
+
+[[package]]
 name = "quick-xml"
 version = "0.41.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7869,6 +7875,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "weld-control"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "qrcode",
+ "rustix 1.1.4",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "weld-hoist-iroh",
+ "weld-media",
+ "xdg",
+]
+
+[[package]]
 name = "weld-core"
 version = "0.1.0"
 dependencies = [
@@ -7959,7 +7981,9 @@ name = "weld-hoist-iroh"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "base64",
  "futures-lite",
+ "getrandom 0.3.4",
  "iroh",
  "iroh-base",
  "iroh-tickets",
@@ -7968,6 +7992,7 @@ dependencies = [
  "postcard",
  "rustix 1.1.4",
  "serde",
+ "serde_json",
  "tokio",
  "tracing",
  "weld-client",
@@ -8159,11 +8184,13 @@ dependencies = [
  "bevy_dylib",
  "clap",
  "pollster",
+ "tokio",
  "tracing",
  "tracing-subscriber",
  "tracing-tracy",
  "weld-app",
  "weld-client",
+ "weld-control",
  "weld-core",
  "weld-float",
  "weld-gamepad",
@@ -8867,6 +8894,12 @@ name = "xcursor"
 version = "0.3.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "163b33ed8786455e2fa5d72f554057ce3f3182425434f756cd39c99839d88e23"
+
+[[package]]
+name = "xdg"
+version = "3.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2fb433233f2df9344722454bc7e96465c9d03bff9d77c248f9e7523fe79585b5"
 
 [[package]]
 name = "xkbcommon"

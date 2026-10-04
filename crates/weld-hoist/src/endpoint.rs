@@ -76,6 +76,14 @@ impl HoistEndpointRegistry {
         self.default
     }
 
+    /// Retire a non-default endpoint after its final session has been removed.
+    pub fn retire(&mut self, id: HoistEndpointId) -> bool {
+        if self.default == Some(id) {
+            return false;
+        }
+        self.endpoints.remove(&id).is_some()
+    }
+
     pub fn endpoint(&self, id: HoistEndpointId) -> Option<&dyn HoistEndpoint> {
         self.endpoints.get(&id).map(Arc::as_ref)
     }

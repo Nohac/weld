@@ -3,16 +3,19 @@
 mod adapter;
 mod adb;
 mod admission;
+mod desktop;
 mod device;
 mod diagnostics;
 mod framing;
 mod host;
 mod inbox;
+mod incoming;
 mod input_outbox;
 mod media_queue;
 #[cfg(feature = "vaapi")]
 mod native;
 mod notifier;
+pub mod pairing;
 mod peer;
 mod pending_source;
 mod private_file;
@@ -22,6 +25,7 @@ pub use adapter::{
     IrohDestinationEndpoint, IrohSourceOptions, destination_registration_with_backend,
     source_registration_with_backend,
 };
+pub use desktop::{DesktopEndpoint, DesktopEndpoints, desktop_source_registration};
 pub use device::{IrohConnectionProfile, IrohDeviceIdentity, IrohTrustedPeers};
 pub use host::{
     IrohDnsPolicy, IrohHost, IrohNetwork, PendingDestinationConnection, PendingSourceAdmission,

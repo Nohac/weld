@@ -190,6 +190,16 @@ pub struct WeldApp {
 }
 
 impl WeldApp {
+    /// Obtain the shared wake handle for externally queued policy work.
+    pub fn policy_wake(&mut self) -> std::io::Result<crate::wake::PolicyWake> {
+        if let Some(wake) = self.app.world().get_resource::<crate::wake::PolicyWake>() {
+            return Ok(wake.clone());
+        }
+        let (wake, source) = crate::wake::PolicyWake::new()?;
+        self.app.insert_resource(wake.clone());
+        self.client_wake_sources.push(source);
+        Ok(wake)
+    }
     /// Begins configuring a Weld-hosted Bevy application.
     pub fn builder() -> WeldAppBuilder {
         WeldAppBuilder::default()

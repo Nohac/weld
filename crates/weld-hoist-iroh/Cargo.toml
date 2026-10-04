@@ -11,6 +11,9 @@ vaapi = ["native", "weld-hoist-encoded/vaapi"]
 
 [dependencies]
 anyhow.workspace = true
+base64 = "0.22.1"
+getrandom = "0.3.4"
+serde_json = "1"
 futures-lite.workspace = true
 iroh.workspace = true
 iroh-base = "1.1"

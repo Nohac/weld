@@ -1,4 +1,6 @@
+mod browser;
 mod decode;
+mod enrollment;
 mod insets;
 mod receiver;
 mod renderer;
@@ -45,6 +47,7 @@ struct Presentation {
 }
 
 pub fn install(app: &mut App) {
+    browser::install(app);
     app.add_plugins(ExtractResourcePlugin::<Stream>::default())
         .init_resource::<Pointer>()
         .init_resource::<Presentation>()
@@ -183,7 +186,13 @@ fn layout(
         .ok()
         .and_then(|value| value.clone());
     for (mut node, mut visible) in &mut panels {
-        if let (Some((_, input)), Some(viewport)) = (&displayed, presentation.viewport) {
+        if !receiver
+            .0
+            .shared
+            .browser
+            .load(std::sync::atomic::Ordering::Acquire)
+            && let (Some((_, input)), Some(viewport)) = (&displayed, presentation.viewport)
+        {
             let rect = fit_rect(viewport.video, input.logical_size);
             let mut next = node.clone();
             place(&mut next, rect);
@@ -209,6 +218,11 @@ fn touch(
         return;
     };
     if !window.focused
+        || receiver
+            .0
+            .shared
+            .browser
+            .load(std::sync::atomic::Ordering::Acquire)
         || !receiver
             .0
             .shared

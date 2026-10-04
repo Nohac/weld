@@ -106,6 +106,12 @@ directory under `/run/opengl-driver/lib/dri`; it deliberately does not force a
 vendor driver name. A missing FFmpeg or libva environment must be reported
 separately from a loaded driver that lacks a requested capability.
 
+`scripts/build-mobile` builds Rust through cargo-ndk and packages the Android
+activity and Google Code Scanner with a pinned Gradle wrapper. Its first build
+downloads Gradle and Maven dependencies; later builds reuse their caches.
+Android Studio is unnecessary. The Android SDK/NDK and Java paths come from the
+development shell. Pairing validation is described in [Phone pairing](docs/device-pairing.md).
+
 Run Weld inside a development shell whose glibc is compatible with the running
 NixOS graphics drivers. The shared Rust shell is located at
 `/home/jonas/Dotfiles/nixos/envs/rust`; reload it after its lock file changes.

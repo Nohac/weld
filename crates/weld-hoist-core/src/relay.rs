@@ -173,6 +173,28 @@ pub struct SourceRelayAdapter {
 }
 
 impl SourceRelayAdapter {
+    /// Starts an independent peer from the latest observed local surface inventory.
+    /// Buffer snapshots retain their ordinary shared leases until that peer releases them.
+    pub fn fork(&self, port: impl HoistSourcePort + 'static) -> Self {
+        let mut peer = Self::new(self.upstream_source, port);
+        peer.cache = self
+            .cache
+            .iter()
+            .map(|(surface, cached)| {
+                (
+                    *surface,
+                    CachedSurface {
+                        role: cached.role,
+                        metadata: cached.metadata.clone(),
+                        commit: cached.commit.clone(),
+                        cursor: cached.cursor.clone(),
+                        ..Default::default()
+                    },
+                )
+            })
+            .collect();
+        peer
+    }
     pub fn new(upstream_source: ClientSourceId, port: impl HoistSourcePort + 'static) -> Self {
         Self::with_admission(upstream_source, port, SourceAdmission::Manual)
     }
@@ -2271,6 +2293,38 @@ mod tests {
             },
         ));
         (adapter, state, surface, session)
+    }
+
+    #[test]
+    fn new_peer_replays_latest_inventory_without_inheriting_active_sessions() {
+        let (mut original, _, surface, _) = mapped_source();
+        observe(&mut original, surface, commit(10, true));
+        observe(&mut original, surface, commit(11, true));
+        let port = Rc::new(RefCell::new(FakeSourceState::default()));
+        let mut peer = original.fork(FakeSourcePort(port.clone()));
+        assert!(peer.mappings.is_empty());
+        assert!(peer.presentations.is_empty());
+        assert!(port.borrow().submitted.is_empty());
+        peer.map(HoistSessionId::new(100), surface);
+        let revisions = port
+            .borrow()
+            .submitted
+            .iter()
+            .filter_map(|command| match command {
+                SourcePortCommand::Surface {
+                    event:
+                        ClientSurfaceEvent {
+                            kind: ClientSurfaceEventKind::Commit(commit),
+                            ..
+                        },
+                    ..
+                } => Some(commit.revision.raw()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(revisions, vec![11]);
+        assert_eq!(peer.mappings[&surface], HoistSessionId::new(100));
+        assert_ne!(original.mappings[&surface], peer.mappings[&surface]);
     }
 
     #[test]

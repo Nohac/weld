@@ -262,7 +262,10 @@ fn dispatch_action(
         Action::Extension(DistributionAction::Hoist) => {
             if let Some(window) = effects.focus.entity() {
                 if let Some(requests) = effects.hoist.as_mut() {
-                    requests.write(HoistWindow { window });
+                    requests.write(HoistWindow {
+                        window,
+                        endpoint: None,
+                    });
                 } else {
                     tracing::warn!("hoisting is unavailable in this assembly");
                 }

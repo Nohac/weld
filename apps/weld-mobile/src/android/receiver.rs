@@ -7,7 +7,7 @@ use std::{
     rc::Rc,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering},
         mpsc::{self, Receiver, SyncSender},
     },
     thread::{self, JoinHandle},
@@ -21,6 +21,7 @@ use weld_client::{
     RuntimeInputEventKind, SurfaceBufferChange, SurfaceContentView, SurfaceInputGeometry,
 };
 use weld_hoist_encoded::{DecodedFramePublisher, EncodedDestinationTransport};
+use weld_hoist_iroh::pairing::{ApplicationInfo, PairingInvitation, PairingProgress};
 use weld_hoist_iroh::{
     IrohConnectionProfile, IrohDestinationPeer, IrohDeviceIdentity, IrohDnsPolicy, IrohHost,
     IrohNotifier, IrohPeerIdentity, destination_registration_with_backend,
@@ -47,9 +48,17 @@ pub(super) struct Shared {
     pub epoch: AtomicU64,
     reset: AtomicBool,
     preference: Mutex<Option<WindowPreference>>,
+    pub catalogue: Mutex<Vec<ApplicationInfo>>,
+    pub browser: AtomicBool,
+    pub paired: AtomicBool,
+    pub selection: Mutex<Option<ApplicationInfo>>,
+    invitation: Mutex<Option<(PairingInvitation, String)>>,
+    release: AtomicBool,
+    retry: AtomicBool,
+    mode: AtomicU8,
 }
 impl Shared {
-    fn message(&self, message: impl Into<String>) {
+    pub fn message(&self, message: impl Into<String>) {
         let message = message.into();
         tracing::info!("{message}");
         if let Ok(mut status) = self.status.lock() {
@@ -80,6 +89,51 @@ pub(super) struct Session {
     worker: Option<JoinHandle<()>>,
 }
 impl Session {
+    pub fn set_development(&self, development: bool) {
+        let mode = if development { 2 } else { 1 };
+        let previous = self.shared.mode.swap(mode, Ordering::AcqRel);
+        if previous != 0 && previous != mode {
+            self.reconnect();
+        }
+        if previous == 0 {
+            self.wake();
+        }
+    }
+    pub fn pair(&self, link: &str, name: String) {
+        match link.parse() {
+            Ok(invitation) => {
+                self.shared.browser.store(true, Ordering::Release);
+                self.shared.clear();
+                if let Ok(mut pending) = self.shared.invitation.lock() {
+                    *pending = Some((invitation, name));
+                }
+                self.reset_input();
+            }
+            Err(_) => self.shared.message("Not a valid Weld pairing link"),
+        }
+    }
+    pub fn hoist(&self, application: ApplicationInfo) {
+        self.shared.clear();
+        if let Ok(mut selection) = self.shared.selection.lock() {
+            *selection = Some(application);
+        }
+        self.shared.browser.store(false, Ordering::Release);
+        self.reset_input();
+    }
+    pub fn release(&self) {
+        self.shared.message("Running applications");
+        self.shared.clear();
+        if let Ok(mut selection) = self.shared.selection.lock() {
+            *selection = None;
+        }
+        self.shared.browser.store(true, Ordering::Release);
+        self.shared.release.store(true, Ordering::Release);
+        self.reset_input();
+    }
+    pub fn reconnect(&self) {
+        self.shared.retry.store(true, Ordering::Release);
+        self.wake();
+    }
     pub fn start(directory: PathBuf) -> Result<Self> {
         let shared = Arc::new(Shared::default());
         shared.active.store(true, Ordering::Release);
@@ -181,41 +235,166 @@ fn run(directory: PathBuf, shared: &Shared, input: Receiver<Input>) -> Result<()
         IrohPeerIdentity::load(&public)? == identity.public_id(),
         "public identity differs from private key"
     );
-    shared.message("Waiting for development pairing profile");
-    let profile_path = directory.join("source.profile");
-    while !profile_path.try_exists()? {
-        if shared.stopped.load(Ordering::Acquire) {
-            return Ok(());
+    let paired_profile = directory.join("paired.profile");
+    let development_profile = directory.join("source.profile");
+    shared.browser.store(true, Ordering::Release);
+    shared.message("Open a Weld pairing link or use Paste pairing link");
+    let mut connect = true;
+    while !shared.stopped.load(Ordering::Acquire) {
+        let mode = shared.mode.load(Ordering::Acquire);
+        if mode == 0 {
+            thread::park_timeout(Duration::from_millis(100));
+            continue;
         }
-        thread::park_timeout(Duration::from_millis(250));
+        let invitation = shared
+            .invitation
+            .lock()
+            .map_err(|_| anyhow::anyhow!("pairing inbox poisoned"))?
+            .take();
+        if let Some((invitation, name)) = invitation {
+            let result = enroll(&identity, invitation, name, shared, &paired_profile);
+            match result {
+                Ok(()) => connect = true,
+                Err(error) => shared.message(format!("Pairing failed: {error:#}")),
+            }
+        }
+        connect |= shared.retry.swap(false, Ordering::AcqRel);
+        let paired = mode == 1 && paired_profile.try_exists()?;
+        let path = if paired {
+            &paired_profile
+        } else {
+            &development_profile
+        };
+        if connect && (paired || mode == 2) && path.try_exists()? {
+            connect = false;
+            shared.paired.store(paired, Ordering::Release);
+            shared.browser.store(paired, Ordering::Release);
+            let result = IrohConnectionProfile::load(path).and_then(|profile| {
+                let host = IrohHost::bind_with_identity_and_dns(
+                    profile.network(),
+                    &identity,
+                    IrohDnsPolicy::Public,
+                )?;
+                stream(&host, &profile, shared, &input, paired)
+            });
+            shared.clear();
+            if let Ok(mut catalogue) = shared.catalogue.lock() {
+                catalogue.clear();
+            }
+            if let Ok(mut selected) = shared.selection.lock() {
+                *selected = None;
+            }
+            shared.browser.store(true, Ordering::Release);
+            if let Err(error) = result {
+                shared.message(format!("Disconnected: {error:#}. Tap Reconnect to retry."));
+            }
+        }
+        thread::park_timeout(Duration::from_millis(100));
     }
-    let profile = IrohConnectionProfile::load(&profile_path)?;
+    Ok(())
+}
+
+fn has_invitation(shared: &Shared) -> bool {
+    shared
+        .invitation
+        .lock()
+        .is_ok_and(|pending| pending.is_some())
+}
+
+fn enroll(
+    identity: &IrohDeviceIdentity,
+    invitation: PairingInvitation,
+    name: String,
+    shared: &Shared,
+    destination: &std::path::Path,
+) -> Result<()> {
+    let profile = invitation.profile()?;
     let host =
-        IrohHost::bind_with_identity_and_dns(profile.network(), &identity, IrohDnsPolicy::Public)?;
+        IrohHost::bind_with_identity_and_dns(profile.network(), identity, IrohDnsPolicy::Public)?;
+    let owner = thread::current();
+    let notifier = IrohNotifier::new(move || {
+        owner.unpark();
+        Ok(())
+    });
+    let pending = host.begin_pairing(invitation, name, notifier)?;
+    shared.message("Connecting for pairing");
+    let mut shown = None;
+    loop {
+        ensure!(
+            !shared.stopped.load(Ordering::Acquire) && !has_invitation(shared),
+            "pairing cancelled"
+        );
+        match pending.progress() {
+            PairingProgress::Connecting => {}
+            PairingProgress::Verify { host, code } => {
+                if shown.as_ref() != Some(&code) {
+                    shared.message(format!("Pair with {host}: {code}\nConfirm this code on the desktop to allow browsing and hoisting."));
+                    shown = Some(code);
+                }
+            }
+            PairingProgress::Approved { .. } => {
+                profile.save(destination)?;
+                shared.message("Paired. Loading running applications");
+                return Ok(());
+            }
+            PairingProgress::Failed(error) => anyhow::bail!("{error}"),
+        }
+        thread::park_timeout(Duration::from_millis(100));
+    }
+}
+
+fn stream(
+    host: &IrohHost,
+    profile: &IrohConnectionProfile,
+    shared: &Shared,
+    input: &Receiver<Input>,
+    paired: bool,
+) -> Result<()> {
     let owner = thread::current();
     let notifier = IrohNotifier::new(move || {
         owner.unpark();
         Ok(())
     });
     shared.message("Connecting to approved Weld host");
-    let mut pending = host.begin_connect_profile(
-        &profile,
-        vec![VideoCodec::Av1, VideoCodec::H264],
-        notifier,
-        Duration::from_secs(10),
-    )?;
-    let peer = loop {
-        if shared.stopped.load(Ordering::Acquire) {
-            return Ok(());
+    let mut device = None;
+    let peer = if paired {
+        let mut pending = host.begin_device_session(
+            profile.clone(),
+            vec![VideoCodec::Av1, VideoCodec::H264],
+            notifier.clone(),
+        )?;
+        loop {
+            ensure!(
+                !shared.stopped.load(Ordering::Acquire) && !has_invitation(shared),
+                "connection cancelled"
+            );
+            if let Some(session) = pending.poll()? {
+                let peer = session.peer.clone();
+                device = Some(session);
+                break peer;
+            }
+            thread::park_timeout(Duration::from_millis(100));
         }
-        if let Some(peer) = pending.poll()? {
-            break peer;
+    } else {
+        let mut pending = host.begin_connect_profile(
+            profile,
+            vec![VideoCodec::Av1, VideoCodec::H264],
+            notifier,
+            Duration::from_secs(10),
+        )?;
+        loop {
+            if shared.stopped.load(Ordering::Acquire) || has_invitation(shared) {
+                return Ok(());
+            }
+            if let Some(peer) = pending.poll()? {
+                break peer;
+            }
+            thread::park_timeout(Duration::from_millis(100));
         }
-        thread::park_timeout(Duration::from_millis(100));
     };
     let connection = Connection(peer);
     shared.message(format!(
-        "Connected ({:?}); waiting for a window",
+        "Connected ({:?}); choose an application",
         connection.0.codec()
     ));
     let backend = Backend::new(connection.0.codec())?;
@@ -230,12 +409,51 @@ fn run(directory: PathBuf, shared: &Shared, input: Receiver<Input>) -> Result<()
     let mut runtime = ClientRuntime::default();
     runtime.register(registration.into_parts().runtime)?;
     let mut selected = None;
+    let mut requested = None;
     let mut configured = None;
     let mut events = ClientEventQueue::default();
     let mut invalid_events = Vec::new();
     let mut invalid_effects = Vec::new();
     let mut active = shared.active.load(Ordering::Acquire);
-    while !shared.stopped.load(Ordering::Acquire) && connection.0.is_available() {
+    while !shared.stopped.load(Ordering::Acquire)
+        && connection.0.is_available()
+        && !has_invitation(shared)
+        && !shared.retry.load(Ordering::Acquire)
+    {
+        if let Some(device) = &device {
+            if let Some(error) = device.take_error() {
+                shared.message(error);
+                shared.clear();
+                shared.browser.store(true, Ordering::Release);
+                if let Ok(mut selection) = shared.selection.lock() {
+                    *selection = None;
+                }
+                requested = None;
+                selected = None;
+                reset(&mut runtime);
+            }
+            if let Ok(mut catalogue) = shared.catalogue.lock() {
+                *catalogue = device.applications();
+            }
+            if shared.release.swap(false, Ordering::AcqRel) {
+                device.release()?;
+                selected = None;
+                configured = None;
+                requested = None;
+                reset(&mut runtime);
+            }
+            let next = shared
+                .selection
+                .lock()
+                .map_err(|_| anyhow::anyhow!("selection poisoned"))?
+                .clone();
+            if let Some(application) = next
+                && requested != Some(application.window)
+            {
+                device.hoist(application.window)?;
+                requested = Some(application.window);
+            }
+        }
         runtime.drain_events(&mut events, &mut invalid_events);
         runtime.apply_pending_effects(&mut invalid_effects);
         runtime.apply_pending_presentations(&mut invalid_effects);
@@ -247,8 +465,19 @@ fn run(directory: PathBuf, shared: &Shared, input: Receiver<Input>) -> Result<()
             let id = event.surface;
             match event.kind {
                 ClientSurfaceEventKind::Role(role) => {
-                    if selected.is_none() && matches!(role, ClientSurfaceRole::Toplevel(_)) {
+                    let wanted = !paired
+                        || shared.selection.lock().is_ok_and(|selection| {
+                            selection.as_ref().is_some_and(|application| {
+                                application.surface.client().local() == id.client().local()
+                                    && application.surface.local() == id.local()
+                            })
+                        });
+                    if selected.is_none()
+                        && wanted
+                        && matches!(role, ClientSurfaceRole::Toplevel(_))
+                    {
                         selected = Some(id);
+                        configured = None;
                         shared.message("Streaming first window; touch to click or drag");
                     }
                     rate(&mut runtime, id, selected == Some(id) && active)?;
@@ -311,8 +540,17 @@ fn run(directory: PathBuf, shared: &Shared, input: Receiver<Input>) -> Result<()
                 }
                 ClientSurfaceEventKind::Destroyed if selected == Some(id) => {
                     selected = None;
+                    configured = None;
                     shared.clear();
                     reset(&mut runtime);
+                    if paired {
+                        shared.message("Running applications");
+                        shared.browser.store(true, Ordering::Release);
+                        if let Ok(mut selection) = shared.selection.lock() {
+                            *selection = None;
+                        }
+                        requested = None;
+                    }
                 }
                 _ => {}
             }

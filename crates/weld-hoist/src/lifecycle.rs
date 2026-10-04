@@ -77,11 +77,7 @@ type HoistableWindows<'w, 's> = Query<
 >;
 
 pub(super) fn begin_requested_hoists(mut params: BeginHoistParams) {
-    let requested = params
-        .requests
-        .read()
-        .map(|request| request.window)
-        .collect::<Vec<_>>();
+    let requested = params.requests.read().copied().collect::<Vec<_>>();
     params.assignments.active.clear();
     params.assignments.blocked.clear();
     params.assignments.clients.clear();
@@ -111,7 +107,8 @@ pub(super) fn begin_requested_hoists(mut params: BeginHoistParams) {
         .active
         .retain(|client, _| !blocked.contains(client));
 
-    for window in requested {
+    for request in requested {
+        let window = request.window;
         let Ok((_, _, occupant, _, _, _, _)) = params.windows.get(window) else {
             continue;
         };
@@ -127,16 +124,20 @@ pub(super) fn begin_requested_hoists(mut params: BeginHoistParams) {
         }
         let (family, source_mode) = match params.assignments.active.get(&client).copied() {
             Some(family)
-                if params
-                    .endpoints
-                    .endpoint(family.endpoint)
-                    .is_some_and(|endpoint| endpoint.is_available()) =>
+                if request
+                    .endpoint
+                    .is_none_or(|endpoint| endpoint == family.endpoint)
+                    && params
+                        .endpoints
+                        .endpoint(family.endpoint)
+                        .is_some_and(|endpoint| endpoint.is_available()) =>
             {
                 (family, HoistSourceMode::Followed)
             }
             Some(_) => continue,
             None => {
-                let Some(endpoint) = params.endpoints.default_id() else {
+                let Some(endpoint) = request.endpoint.or_else(|| params.endpoints.default_id())
+                else {
                     continue;
                 };
                 if !params

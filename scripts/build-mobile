@@ -5,7 +5,6 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
-import zipfile
 
 ROOT = Path(__file__).resolve().parent.parent
 OUTPUT = ROOT / "target/mobile"
@@ -49,14 +48,21 @@ def main():
         "-j", args.jobs, *(["--", "-D", "warnings"] if args.clippy else []), env=env, cwd=ROOT)
     if args.clippy:
         return
-    unsigned = OUTPUT / "unsigned.apk"
-    run(tools / "aapt2", "link", "-I", platform, "--manifest",
-        PROJECT / "AndroidManifest.xml", "-o", unsigned)
     library = OUTPUT / "cargo/aarch64-linux-android/debug/libweld_mobile.so"
-    with zipfile.ZipFile(unsigned, "a", compression=zipfile.ZIP_DEFLATED) as archive:
-        archive.write(library, "lib/arm64-v8a/libweld_mobile.so")
-        for name in ("avcodec", "avformat", "avutil"):
-            archive.write(prefix / f"lib/lib{name}.so", f"lib/arm64-v8a/lib{name}.so")
+    native = OUTPUT / "native/arm64-v8a"
+    native.mkdir(parents=True, exist_ok=True)
+    for source in [library, *(prefix / f"lib/lib{name}.so" for name in ("avcodec", "avformat", "avutil"))]:
+        destination = native / source.name
+        if destination.is_symlink() and destination.resolve() == source.resolve():
+            continue
+        if destination.is_symlink():
+            destination.unlink()
+        destination.symlink_to(source)
+    run("java", "-classpath", PROJECT / "android/gradle/wrapper/gradle-wrapper.jar",
+        "org.gradle.wrapper.GradleWrapperMain", "--no-daemon", "--console=plain",
+        "-p", PROJECT / "android", f"-Pandroid.aapt2FromMavenOverride={tools / 'aapt2'}",
+        "assembleDebug", cwd=ROOT)
+    unsigned = OUTPUT / "android/outputs/apk/debug/weld-mobile-debug-unsigned.apk"
     run(tools / "zipalign", "-f", "-P", "16", "4", unsigned, OUTPUT / "aligned.apk")
     # An isolated debug key leaves the user's existing Android signing setup alone.
     local = PROJECT / ".local"
@@ -77,7 +83,7 @@ def main():
     if args.install:
         adb = ["adb"] + (["-s", args.serial] if args.serial else [])
         run(*adb, "install", "-r", apk)
-        run(*adb, "shell", "am", "start", "-n", "org.weld.mobile/android.app.NativeActivity")
+        run(*adb, "shell", "am", "start", "-n", "org.weld.mobile/org.weld.mobile.WeldActivity")
 
 
 if __name__ == "__main__":

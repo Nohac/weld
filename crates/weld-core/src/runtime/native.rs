@@ -265,6 +265,15 @@ impl<Event: 'static> NativeRuntime<Event> {
                     }
                 }
             }
+            if integration
+                .application()
+                .is_some_and(|app| app.take_policy_wake())
+            {
+                policy_dirty = true;
+                if let Some((driver, _)) = integration.native() {
+                    driver.client_demand(CompositionDemand::Settle);
+                }
+            }
             for (output, area) in self.state.data.server.take_output_work_areas() {
                 if let Some(app) = integration.application() {
                     app.update_output_work_area(output, area);

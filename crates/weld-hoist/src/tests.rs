@@ -49,6 +49,40 @@ use crate::{
 const LOCAL_SOURCE: ClientSourceId = ClientSourceId::new(0);
 const LOOPBACK_SOURCE: ClientSourceId = ClientSourceId::new(1);
 
+#[test]
+fn explicit_phone_destination_preserves_the_desktop_default() {
+    let (mut app, default) = test_app();
+    let (_, phone_endpoint) = loopback_registration(LOCAL_SOURCE, ClientSourceId::new(2));
+    let mut phone = RecordingEndpoint::new(phone_endpoint);
+    phone.local_receiver = false;
+    let default_id = app.world().resource::<HoistEndpointRegistry>().default_id();
+    let phone_id = app
+        .world_mut()
+        .resource_mut::<HoistEndpointRegistry>()
+        .register(phone.clone())
+        .expect("phone endpoint");
+    let surface = surface(LOCAL_SOURCE, 99);
+    let client = map_surface(&mut app, surface, None, WindowDecoration::ServerSide);
+    let window = window_for_client(&mut app, client);
+    app.world_mut().write_message(HoistWindow {
+        window,
+        endpoint: Some(phone_id),
+    });
+    app.update();
+    assert_eq!(phone.take_calls(), vec![EndpointCall::Map(surface)]);
+    assert_eq!(
+        app.world().resource::<HoistEndpointRegistry>().default_id(),
+        default_id
+    );
+    let session = app
+        .world_mut()
+        .query::<&HoistSession>()
+        .single(app.world())
+        .expect("session");
+    assert_eq!(session.endpoint(), phone_id);
+    assert_ne!(session.destination(), default.destination(surface));
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum EndpointCall {
     Map(SurfaceId),
@@ -276,6 +310,7 @@ fn begin_hoist(
     decoration: WindowDecoration,
 ) -> (bevy::ecs::entity::Entity, bevy::ecs::entity::Entity) {
     app.world_mut().write_message(HoistWindow {
+        endpoint: None,
         window: source_window,
     });
     app.update();
@@ -313,6 +348,7 @@ fn hoist_uses_an_independent_relocated_client_and_restores_after_ordered_unmap()
     let source_client = map_surface(&mut app, source_surface, None, WindowDecoration::ServerSide);
     let source_window = window_for_client(&mut app, source_client);
     app.world_mut().write_message(HoistWindow {
+        endpoint: None,
         window: source_window,
     });
     app.update();
@@ -425,6 +461,7 @@ fn initial_family_members_preserve_slots_and_later_members_follow_without_placeh
     let root_window = window_for_client(&mut app, root_client);
     let child_window = window_for_client(&mut app, child_client);
     app.world_mut().write_message(HoistWindow {
+        endpoint: None,
         window: root_window,
     });
     app.update();
@@ -493,6 +530,7 @@ fn independent_same_client_toplevels_follow_without_absorbing_other_clients() {
     let outsider_window = window_for_client(&mut app, outsider_client);
 
     app.world_mut().write_message(HoistWindow {
+        endpoint: None,
         window: root_window,
     });
     app.update();
@@ -543,6 +581,7 @@ fn closed_tombstone_does_not_block_following_a_replacement_peer() {
     let root_window = window_for_client(&mut app, root_client);
     let closed_window = window_for_client(&mut app, closed_client);
     app.world_mut().write_message(HoistWindow {
+        endpoint: None,
         window: root_window,
     });
     app.update();
@@ -602,6 +641,7 @@ fn reclaim_is_atomic_for_independent_same_client_peers_and_allows_a_new_family()
     let root_window = window_for_client(&mut app, root_client);
     let peer_window = window_for_client(&mut app, peer_client);
     app.world_mut().write_message(HoistWindow {
+        endpoint: None,
         window: root_window,
     });
     app.update();
@@ -694,6 +734,7 @@ fn reclaim_is_atomic_for_independent_same_client_peers_and_allows_a_new_family()
     );
 
     app.world_mut().write_message(HoistWindow {
+        endpoint: None,
         window: root_window,
     });
     app.update();
@@ -713,6 +754,7 @@ fn protocol_unmap_ends_the_relocation_without_marking_the_source_closed() {
     let source_client = map_surface(&mut app, source_surface, None, WindowDecoration::ServerSide);
     let source_window = window_for_client(&mut app, source_client);
     app.world_mut().write_message(HoistWindow {
+        endpoint: None,
         window: source_window,
     });
     app.update();
@@ -786,7 +828,10 @@ fn remote_reclaim_restores_the_source_layout() {
         if tiled {
             app.world_mut().entity_mut(window).insert(TiledWindow);
         }
-        app.world_mut().write_message(HoistWindow { window });
+        app.world_mut().write_message(HoistWindow {
+            window,
+            endpoint: None,
+        });
         app.update();
         let session = app
             .world_mut()
@@ -1200,6 +1245,7 @@ fn reparented_member_restores_without_ending_the_original_family() {
     let root_window = window_for_client(&mut app, root_client);
     let child_window = window_for_client(&mut app, child_client);
     app.world_mut().write_message(HoistWindow {
+        endpoint: None,
         window: root_window,
     });
     app.update();
@@ -1282,6 +1328,7 @@ fn reparented_member_restores_without_ending_the_original_family() {
     );
 
     app.world_mut().write_message(HoistWindow {
+        endpoint: None,
         window: child_window,
     });
     app.update();
@@ -1312,6 +1359,7 @@ fn root_unmap_keeps_the_surviving_family_placeholder() {
     let root_window = window_for_client(&mut app, root_client);
     let child_window = window_for_client(&mut app, child_client);
     app.world_mut().write_message(HoistWindow {
+        endpoint: None,
         window: root_window,
     });
     app.update();
@@ -1383,6 +1431,7 @@ fn active_family_keeps_its_endpoint_after_the_default_changes() {
     let root_client = map_surface(&mut app, root_surface, None, WindowDecoration::ServerSide);
     let root_window = window_for_client(&mut app, root_client);
     app.world_mut().write_message(HoistWindow {
+        endpoint: None,
         window: root_window,
     });
     app.update();
@@ -1448,6 +1497,7 @@ fn unavailable_default_refuses_admission_without_mutating_the_source() {
         });
 
     app.world_mut().write_message(HoistWindow {
+        endpoint: None,
         window: source_window,
     });
     app.update();
@@ -1484,6 +1534,7 @@ fn unavailable_session_endpoint_restores_its_source() {
     let source_client = map_surface(&mut app, source_surface, None, WindowDecoration::ServerSide);
     let source_window = window_for_client(&mut app, source_client);
     app.world_mut().write_message(HoistWindow {
+        endpoint: None,
         window: source_window,
     });
     app.update();

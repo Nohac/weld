@@ -120,7 +120,7 @@ def main():
     print("Iroh N0 uses Internet discovery/relays; the development receiver uses public DNS.", flush=True)
     try:
         device("shell", "am", "force-stop", PACKAGE)
-        device("shell", "am", "start", "-n", f"{PACKAGE}/android.app.NativeActivity")
+        device("shell", "am", "start", "-n", f"{PACKAGE}/org.weld.mobile.WeldActivity", "--ez", "weld.development", "true")
         public = COMMON["identity"](wait(lambda: phone_read("public.identity")))
         COMMON["write_new"](directory / "viewer.identity", public + "\n")
         host = COMMON["LAUNCHER"]["OwnedHost"]("source",
@@ -135,7 +135,7 @@ def main():
         device("shell", "-T", "run-as", PACKAGE, "sh", "-c",
             "'umask 077; cat > files/weld-device/source.profile.pending && mv files/weld-device/source.profile.pending files/weld-device/source.profile'",
             input=profile, text=True)
-        device("shell", "am", "start", "-n", f"{PACKAGE}/android.app.NativeActivity")
+        device("shell", "am", "start", "-n", f"{PACKAGE}/org.weld.mobile.WeldActivity", "--ez", "weld.development", "true")
         pid = wait(lambda: subprocess.run([*adb, "shell", "pidof", PACKAGE],
             text=True, capture_output=True, timeout=5).stdout.strip())
         with (directory / "receiver.log").open("w") as log:

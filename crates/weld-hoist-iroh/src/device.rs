@@ -153,6 +153,11 @@ pub struct IrohConnectionProfile {
 }
 
 impl IrohConnectionProfile {
+    /// Replace an explicitly selected saved profile after user-approved enrollment.
+    pub fn save(&self, path: &Path) -> Result<()> {
+        let (directory, name) = PrivateDirectory::for_file(path)?;
+        directory.replace(&name, self.to_string().as_bytes())
+    }
     pub fn new(
         peer: IrohPeerIdentity,
         network: IrohNetwork,

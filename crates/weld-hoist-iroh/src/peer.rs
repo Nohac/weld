@@ -45,11 +45,14 @@ impl<T> PeerState<T> {
     }
 
     fn drain(&self) -> HoistPortResult<Vec<T>> {
+        if self.connection.close_reason().is_some() {
+            self.incoming.fail();
+        }
         self.incoming.drain().map_err(peer_error)
     }
 
     fn is_available(&self) -> bool {
-        self.incoming.is_available()
+        self.connection.close_reason().is_none() && self.incoming.is_available()
     }
 
     fn fail(&self) {

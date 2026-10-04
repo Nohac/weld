@@ -378,6 +378,10 @@ pub enum CompositionDemand {
 
 /// Application policy, independent of whether the host renders locally.
 pub trait HostPolicy {
+    /// Consume coalesced externally queued policy work after host wake dispatch.
+    fn take_policy_wake(&mut self) -> bool {
+        false
+    }
     /// Returns a changed inventory; the first publication enables workspace control.
     fn take_desktop_workspaces(&mut self) -> Option<Vec<DesktopWorkspace>> {
         None

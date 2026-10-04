@@ -1,0 +1,23 @@
+[package]
+name = "weld-control"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+qrcode = { version = "0.14.1", default-features = false }
+rustix = { workspace = true, features = ["fs"] }
+serde.workspace = true
+serde_json = "1"
+xdg = "3.0.0"
+weld-hoist-iroh = { path = "../weld-hoist-iroh" }
+
+[[bin]]
+name = "weldctl"
+path = "src/main.rs"
+
+[dev-dependencies]
+tempfile = "3"
+weld-media = { path = "../weld-media" }

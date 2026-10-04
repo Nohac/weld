@@ -17,6 +17,7 @@ members = [
   "crates/weld-app",
   "crates/weld-client",
   "crates/weld-core",
+  "crates/weld-control",
   "crates/weld-float",
   "crates/weld-gamepad",
   "crates/weld-input",
@@ -101,6 +102,7 @@ weld-app = { path = "crates/weld-app" }
 weld-input = { path = "crates/weld-input", features = ["bevy"] }
 weld-client = { path = "crates/weld-client" }
 weld-core = { path = "crates/weld-core" }
+weld-control = { path = "crates/weld-control" }
 weld-window = { path = "crates/weld-window" }
 weld-window-ui = { path = "crates/weld-window-ui" }
 weld-ssd = { path = "crates/weld-ssd" }
@@ -120,6 +122,8 @@ tracing-subscriber.workspace = true
 tracing-tracy = { workspace = true, optional = true }
 
 [dev-dependencies]
+tokio.workspace = true
+weld-app = { path = "crates/weld-app", features = ["test-support"] }
 pollster.workspace = true
 wgpu = { workspace = true, features = ["vulkan"] }
 

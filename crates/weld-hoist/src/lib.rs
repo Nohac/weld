@@ -207,6 +207,7 @@ struct HoistFamilyAssignments {
 #[derive(Clone, Copy, Debug, Message)]
 pub struct HoistWindow {
     pub window: Entity,
+    pub endpoint: Option<HoistEndpointId>,
 }
 
 pub struct HoistPlugin;
