@@ -466,3 +466,116 @@ fn management_reload_preserves_presenter_insets_and_border_changes_apply_in_the_
     assert_eq!(after.position.x, before.position.x + 4.0);
     assert_eq!(after.size.x, before.size.x - 8.0);
 }
+
+#[test]
+fn inner_dividers_share_border_style_reserve_content_space_and_follow_visibility() {
+    use weld_tile::{SplitAxis, TileOperation, TileRequest, TileSelect};
+    use weld_window::{WindowCommand, WindowCommandKind};
+    for axis in [SplitAxis::Horizontal, SplitAxis::Vertical] {
+        let (mut app, first, second) = setup();
+        app.world_mut()
+            .trigger(TileRequest::Focused(TileOperation::Split(axis)));
+        app.update();
+        let third = app
+            .world_mut()
+            .spawn((
+                ManagedWindow {
+                    id: WindowId::new(3),
+                },
+                WindowVacancy::Retain,
+            ))
+            .id();
+        app.update();
+        app.update();
+        let inner = app
+            .world()
+            .get::<TileParent>(third)
+            .expect("split")
+            .entity();
+        let left = *app
+            .world()
+            .get::<WindowGeometry>(second)
+            .expect("first pane");
+        let right = *app
+            .world()
+            .get::<WindowGeometry>(third)
+            .expect("second pane");
+        let (entity, node, color) = app
+            .world_mut()
+            .query_filtered::<(Entity, &Node, &BackgroundColor), With<divider::PaneDivider>>()
+            .single(app.world())
+            .map(|(entity, node, color)| (entity, node.clone(), *color))
+            .expect("one divider");
+        assert_eq!(node.border_radius, BorderRadius::ZERO);
+        assert_eq!(
+            color.0,
+            app.world()
+                .resource::<SsdSettings>()
+                .placeholder
+                .child_border
+        );
+        match axis {
+            SplitAxis::Horizontal => {
+                assert_eq!(node.left, px(left.position.x + left.size.x));
+                assert_eq!(node.width, px(3));
+                assert_eq!(right.position.x, left.position.x + left.size.x + 3.0);
+            }
+            SplitAxis::Vertical => {
+                assert_eq!(node.top, px(left.position.y + left.size.y));
+                assert_eq!(node.height, px(3));
+                assert_eq!(right.position.y, left.position.y + left.size.y + 3.0);
+            }
+        }
+        app.update();
+        assert!(app.world().get::<divider::PaneDivider>(entity).is_some());
+        app.world_mut().resource_mut::<SsdSettings>().tiled = weld_ssd::BorderStyle::Pixel(5);
+        app.world_mut().trigger(TileSelect(inner));
+        app.update();
+        let node = app.world().get::<Node>(entity).expect("retained divider");
+        assert_eq!(
+            if axis == SplitAxis::Horizontal {
+                node.width
+            } else {
+                node.height
+            },
+            px(5)
+        );
+        assert_eq!(
+            app.world().get::<BackgroundColor>(entity).expect("color").0,
+            app.world().resource::<SsdSettings>().focused.child_border
+        );
+        app.world_mut().trigger(WindowCommand {
+            window: first,
+            kind: WindowCommandKind::Focus,
+        });
+        app.update();
+        assert_eq!(
+            app.world_mut()
+                .query::<&divider::PaneDivider>()
+                .iter(app.world())
+                .count(),
+            0
+        );
+        app.world_mut().trigger(WindowCommand {
+            window: third,
+            kind: WindowCommandKind::Focus,
+        });
+        app.update();
+        assert_eq!(
+            app.world_mut()
+                .query::<&divider::PaneDivider>()
+                .iter(app.world())
+                .count(),
+            1
+        );
+        app.world_mut().resource_mut::<SsdSettings>().tiled = weld_ssd::BorderStyle::None;
+        app.update();
+        assert_eq!(
+            app.world_mut()
+                .query::<&divider::PaneDivider>()
+                .iter(app.world())
+                .count(),
+            0
+        );
+    }
+}

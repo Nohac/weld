@@ -113,14 +113,6 @@ pub(super) fn reconcile(
         let Some(camera) = tree.camera(container) else {
             continue;
         };
-        let mut depth = 0;
-        let mut node = container;
-        while depth < weld_tile::MAX_DEPTH as i32
-            && let Ok(parent) = tree.parents.get(node)
-        {
-            depth += 1;
-            node = parent.entity();
-        }
         desired.insert(
             container,
             GroupFrame {
@@ -138,7 +130,7 @@ pub(super) fn reconcile(
                     .width()
                     .min(geometry.0.size.min_element() * 0.5),
                 radius: f32::from(tree.style.corner_radius.min(64)),
-                z: weld_app::layer::TILE_FRAME_Z_INDEX_BASE + depth,
+                z: tree.frame_z(container),
             },
         );
     }

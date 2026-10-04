@@ -144,7 +144,7 @@ fn native_geometric_navigation_and_move_choose_the_visible_tab() {
 }
 
 #[test]
-fn descendants_of_a_group_are_gapless_and_only_touching_outer_corners_are_rounded() {
+fn group_descendants_reserve_only_dividers_and_round_only_outer_corners() {
     let mut app = app();
     app.world_mut().resource_mut::<TileSettings>().inner_gap = 20;
     app.world_mut()
@@ -167,7 +167,7 @@ fn descendants_of_a_group_are_gapless_and_only_touching_outer_corners_are_rounde
     app.update();
     let left = geometry(&app, second);
     let right = geometry(&app, third);
-    assert_eq!(left.position.x + left.size.x, right.position.x);
+    assert_eq!(left.position.x + left.size.x + 3.0, right.position.x);
     assert_eq!(
         app.world().get::<weld_window::WindowGroupHeader>(second),
         Some(&weld_window::WindowGroupHeader {
@@ -187,7 +187,7 @@ fn descendants_of_a_group_are_gapless_and_only_touching_outer_corners_are_rounde
     app.update();
     let top = geometry(&app, third);
     let bottom = geometry(&app, fourth);
-    assert_eq!(top.position.y + top.size.y, bottom.position.y);
+    assert_eq!(top.position.y + top.size.y + 3.0, bottom.position.y);
     assert_eq!(
         app.world().get::<weld_window::WindowGroupHeader>(third),
         Some(&weld_window::WindowGroupHeader {

@@ -464,7 +464,8 @@ fn present_ssd_windows(
 }
 
 #[derive(SystemParam)]
-struct FocusColors<'w, 's> {
+/// Shared palette policy for window frames and their group dividers.
+pub struct WindowFrameColors<'w, 's> {
     focus: Res<'w, FocusedWindow>,
     selected_group: Query<'w, 's, (), With<weld_window::WindowGroupSelected>>,
     clients: WindowClientResolver<'w, 's>,
@@ -474,7 +475,16 @@ struct FocusColors<'w, 's> {
     parents: Query<'w, 's, &'static ClientToplevelParent>,
 }
 
-impl FocusColors<'_, '_> {
+impl WindowFrameColors<'_, '_> {
+    /// Color of a content border, including selection, provenance and resize feedback.
+    pub fn content_border(&self, window: Entity) -> Color {
+        let palette = self.palette(window);
+        if self.interactions.contains(window) {
+            palette.indicator
+        } else {
+            palette.child_border
+        }
+    }
     fn palette(&self, window: Entity) -> FrameColors {
         let group_selected = self.selected_group.contains(window);
         if self.clients.client_entity(window).is_none() && !group_selected {
@@ -535,7 +545,7 @@ fn request_style_refresh(
 }
 
 fn sync_focus_style(
-    colors: FocusColors,
+    colors: WindowFrameColors,
     mut roots: FrameStyleRoots,
     mut nodes: Query<(&mut BackgroundColor, Has<FrameHeader>)>,
     mut redraw: bevy::ecs::message::MessageWriter<RequestRedraw>,
@@ -553,7 +563,7 @@ fn sync_focus_style(
                 bottom: palette.child_border,
             }
         } else {
-            BorderColor::all(palette.child_border)
+            BorderColor::all(colors.content_border(projection.window()))
         };
         if colors.focus.entity() == Some(projection.window())
             && let Ok(edge) = colors.splits.get(projection.window())

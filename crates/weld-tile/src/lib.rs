@@ -179,7 +179,7 @@ impl Default for TileSettings {
 pub struct TilePresentationMetrics {
     /// Logical height reserved for each tab/stack header row.
     pub header_height: u16,
-    /// Space reserved around the outermost group's shared frame.
+    /// Width of the outermost group's frame and its internal split dividers.
     pub group_border: u16,
 }
 

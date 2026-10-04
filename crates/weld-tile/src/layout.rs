@@ -167,7 +167,7 @@ impl GeometryWriter<'_, '_> {
                     axis,
                     container.children.iter().map(|child| child.weight),
                     if grouped {
-                        0.0
+                        f32::from(settings.group_border)
                     } else {
                         f32::from(settings.inner_gap)
                     },

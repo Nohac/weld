@@ -1,6 +1,7 @@
 //! Tab and stack headers projected from the tiler's owned layout facts.
 
 use std::collections::HashMap;
+mod divider;
 mod frame;
 
 use bevy::{
@@ -36,8 +37,8 @@ use weld_tile::{
     TileContainer, TileFocusHistory, TileGeometry, TileHeaders, TileLayout, TileParent,
 };
 use weld_window::{
-    FocusedWindow, WindowClientResolver, WindowGeometry, WindowIntent, WindowIntentKind,
-    WindowOccupant, WindowSystems,
+    FocusedWindow, WindowClientResolver, WindowGeometry, WindowGroupSelected, WindowIntent,
+    WindowIntentKind, WindowInteractionSession, WindowOccupant, WindowSystems,
     fullscreen::FullscreenOutput,
     workspace::{Workspace, WorkspaceOutput},
 };
@@ -65,6 +66,16 @@ impl Plugin for TileUiPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<SsdSettings>()
             .init_resource::<weld_tile::TilePresentationMetrics>()
+            .add_systems(
+                PreUpdate,
+                divider::reconcile.in_set(WindowSystems::UiReconcile),
+            )
+            .add_systems(
+                PreUpdate,
+                divider::reconcile
+                    .after(weld_tile::TileSystems::LateLayout)
+                    .before(WindowSystems::FinalReconcile),
+            )
             .add_systems(
                 PreUpdate,
                 frame::publish_metrics
@@ -180,6 +191,16 @@ struct HeaderTree<'w, 's> {
 }
 
 impl HeaderTree<'_, '_> {
+    fn frame_z(&self, mut node: Entity) -> i32 {
+        let mut depth = 0;
+        while depth < weld_tile::MAX_DEPTH as i32
+            && let Ok(parent) = self.parents.get(node)
+        {
+            depth += 1;
+            node = parent.entity();
+        }
+        weld_app::layer::TILE_FRAME_Z_INDEX_BASE + depth
+    }
     fn in_group(&self, mut node: Entity) -> bool {
         for _ in 0..weld_tile::MAX_DEPTH {
             let Ok(parent) = self.parents.get(node) else {
@@ -293,6 +314,8 @@ type HeaderChanges = Or<(
     Changed<ClientWindowMetadata>,
     Changed<WindowOccupant>,
     Changed<FullscreenOutput>,
+    Changed<WindowGroupSelected>,
+    Changed<WindowInteractionSession>,
 )>;
 
 #[derive(SystemParam)]
@@ -303,6 +326,8 @@ struct Invalidations<'w, 's> {
     cameras: RemovedComponents<'w, 's, OutputCompositionCamera>,
     occupants: RemovedComponents<'w, 's, WindowOccupant>,
     fullscreen: RemovedComponents<'w, 's, FullscreenOutput>,
+    selected: RemovedComponents<'w, 's, WindowGroupSelected>,
+    interactions: RemovedComponents<'w, 's, WindowInteractionSession>,
 }
 
 impl Invalidations<'_, '_> {
@@ -311,7 +336,9 @@ impl Invalidations<'_, '_> {
             + self.outputs.read().count()
             + self.cameras.read().count()
             + self.occupants.read().count()
-            + self.fullscreen.read().count();
+            + self.fullscreen.read().count()
+            + self.selected.read().count()
+            + self.interactions.read().count();
         removed != 0 || !self.changed.is_empty()
     }
 }

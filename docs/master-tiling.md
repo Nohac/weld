@@ -66,6 +66,9 @@ matching split ancestor.
 The group owns one rounded outer border and shadow around its headers and
 content. All descendants join that frame: internal splits have no gaps, independent
 borders or shadows, and only leaves touching its outer bottom corners round.
+Shared split edges use a single divider with the configured tiled border width
+and the ordinary content-border color policy. The divider occupies reserved
+space rather than covering client pixels; no wallpaper gap is introduced.
 Nested tab/stack groups keep their own headers and selection while sharing the
 outermost frame. Moving a window or group out restores its standalone styling.
 Group chrome follows the configured default tiled border and SSD palette;
