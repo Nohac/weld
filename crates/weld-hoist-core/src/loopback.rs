@@ -188,6 +188,17 @@ struct LoopbackClientAdapter {
 }
 
 impl ClientAdapter for LoopbackClientAdapter {
+    fn presentation_source(&self) -> Option<ClientSourceId> {
+        self.source.presentation_source()
+    }
+
+    fn drain_presentation_claims(
+        &mut self,
+        updates: &mut Vec<weld_client::ClientPresentationUpdate>,
+    ) {
+        self.source.drain_presentation_claims(updates);
+    }
+
     fn next_deadline(&self) -> Option<std::time::Instant> {
         self.source.next_deadline()
     }
@@ -212,6 +223,9 @@ impl ClientAdapter for LoopbackClientAdapter {
 
     fn apply_request(&mut self, request: ClientRequest) {
         self.destination.apply_request(request);
+        // Deliver demand before native staging, including when both viewers
+        // were paused and no client commit will wake the next ingress pass.
+        self.source.drain_events(&mut self.events);
     }
 
     fn apply_input(&mut self, event: ClientInputEvent) {
@@ -325,6 +339,67 @@ mod tests {
             vec![ClientCursorUpdate {
                 surface: endpoint(destination).destination(surface),
                 cursor: ClientCursor::Named(CursorIcon::Text)
+            }]
+        );
+    }
+
+    #[test]
+    fn loopback_publishes_active_paused_and_released_claims_for_its_source() {
+        use weld_client::{
+            ClientPresentationClaim, ClientPresentationUpdate, ClientSurfaceRequest,
+            ClientSurfaceRequestKind,
+        };
+        let source = ClientSourceId::new(0);
+        let destination = ClientSourceId::new(1);
+        let surface = ClientSurfaceId::new(ClientId::new(source, 1), 9);
+        let mut adapter = registration(
+            source,
+            ClientSourceDescriptor::new(destination, ClientProvenance::Relocated),
+        )
+        .into_parts()
+        .runtime
+        .driver;
+        adapter.observe_event(&ClientSurfaceEvent {
+            surface,
+            kind: ClientSurfaceEventKind::Role(ClientSurfaceRole::Toplevel(ToplevelState {
+                parent: None,
+                decoration: WindowDecoration::ClientSide,
+                hints: Default::default(),
+            })),
+        });
+        let endpoint = endpoint(destination);
+        adapter.apply_command(endpoint.map(crate::HoistSessionId::new(1), surface));
+        assert_eq!(adapter.presentation_source(), Some(source));
+        let mut claims = Vec::new();
+        adapter.drain_presentation_claims(&mut claims);
+        assert_eq!(
+            claims,
+            [ClientPresentationUpdate {
+                surface,
+                claim: ClientPresentationClaim::Active { rate: None }
+            }]
+        );
+        claims.clear();
+        adapter.apply_request(ClientRequest::Surface(ClientSurfaceRequest {
+            surface: endpoint.destination(surface),
+            kind: ClientSurfaceRequestKind::SetPresentation { rate: None },
+        }));
+        adapter.drain_presentation_claims(&mut claims);
+        assert_eq!(
+            claims,
+            [ClientPresentationUpdate {
+                surface,
+                claim: ClientPresentationClaim::Paused
+            }]
+        );
+        claims.clear();
+        adapter.apply_command(endpoint.unmap(surface));
+        adapter.drain_presentation_claims(&mut claims);
+        assert_eq!(
+            claims,
+            [ClientPresentationUpdate {
+                surface,
+                claim: ClientPresentationClaim::Release
             }]
         );
     }

@@ -83,9 +83,9 @@ impl From<PresentationRate> for u32 {
     }
 }
 
-/// An adapter's claim overrides local presentation until that adapter releases
-/// it. Multiple claims are independent; the source chooses the fastest active
-/// demand. Active without a rate uses the source's advertised output rate.
+/// An adapter's claim takes over implicit local presentation until released.
+/// Explicit local demand and adapter claims are independent; the source chooses
+/// the fastest active demand. Active without a rate uses the source's output rate.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ClientPresentationClaim {
     Release,

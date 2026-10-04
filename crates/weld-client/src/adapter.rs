@@ -1207,7 +1207,16 @@ impl ClientRuntime {
     fn resolve_request(&self, request: ClientRequest) -> Option<ClientRequest> {
         match request {
             ClientRequest::Surface(mut request) => {
-                request.surface = self.resolve_alias(request.surface).ok()?;
+                // Presentation demand belongs to the addressed viewer. A local
+                // loopback's input alias must not overwrite the source viewer.
+                if !matches!(
+                    request.kind,
+                    crate::ClientSurfaceRequestKind::SetPresentation { .. }
+                ) {
+                    request.surface = self.resolve_alias(request.surface).ok()?;
+                } else if self.retired_aliases.contains(&request.surface) {
+                    return None;
+                }
                 Some(ClientRequest::Surface(request))
             }
             ClientRequest::Focus(mut request) => {
@@ -1418,6 +1427,35 @@ mod tests {
             ))
             .expect("unique test source");
         record
+    }
+
+    #[test]
+    fn presentation_demand_stays_with_the_viewer_while_input_aliases_relocate_requests() {
+        let mut runtime = ClientRuntime::default();
+        let native = register(&mut runtime, 0);
+        let viewer = register(&mut runtime, 1);
+        let origin = surface(0, 1, 1);
+        let relocated = surface(1, 1, 1);
+        runtime.set_route_alias(relocated, origin);
+        let request =
+            |surface, kind| ClientRequest::Surface(crate::ClientSurfaceRequest { surface, kind });
+        let paused = request(
+            relocated,
+            crate::ClientSurfaceRequestKind::SetPresentation { rate: None },
+        );
+        assert!(runtime.apply_request(paused.clone()));
+        assert_eq!(viewer.borrow().requests, [paused]);
+        assert!(native.borrow().requests.is_empty());
+        assert!(runtime.apply_request(request(relocated, crate::ClientSurfaceRequestKind::Close)));
+        assert_eq!(
+            native.borrow().requests,
+            [request(origin, crate::ClientSurfaceRequestKind::Close)]
+        );
+        runtime.remove_route_alias(relocated);
+        assert!(!runtime.apply_request(request(
+            relocated,
+            crate::ClientSurfaceRequestKind::SetPresentation { rate: None }
+        )));
     }
 
     fn mapping_event(surface: ClientSurfaceId, mapped: bool) -> ClientSurfaceEvent {

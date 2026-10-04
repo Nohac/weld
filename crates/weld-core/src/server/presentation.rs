@@ -27,14 +27,18 @@ struct Demand {
 #[derive(Default)]
 pub(super) struct PresentationClaims {
     roots: HashMap<SurfaceId, Demand>,
+    local: HashMap<SurfaceId, Option<PresentationRate>>,
     local_handoffs: HashSet<SurfaceId>,
 }
 
 impl PresentationClaims {
     fn take_local_demand(&mut self) -> bool {
-        self.local_handoffs
-            .drain()
-            .any(|surface| !self.roots.contains_key(&surface))
+        let pending = self
+            .local_handoffs
+            .iter()
+            .any(|surface| self.native(*surface));
+        self.local_handoffs.clear();
+        pending
     }
     fn update(&mut self, owner: ClientSourceId, update: ClientPresentationUpdate) {
         match update.claim {
@@ -60,12 +64,32 @@ impl PresentationClaims {
         self.roots.contains_key(&surface)
     }
 
+    /// Explicit local demand participates alongside adapter consumers. Before
+    /// policy publishes it, adapter claims take over the implicit native owner.
+    pub(super) fn native(&self, surface: SurfaceId) -> bool {
+        let active_adapter = self.roots.get(&surface).is_some_and(|demand| {
+            demand
+                .owners
+                .values()
+                .any(|claim| matches!(claim, ClientPresentationClaim::Active { .. }))
+        });
+        if active_adapter {
+            return false;
+        }
+        self.local
+            .get(&surface)
+            .map_or(!self.claimed(surface), Option::is_some)
+    }
+
     fn timeout(
         &self,
         surface: SurfaceId,
         fallback: PresentationRate,
         now: Instant,
     ) -> Option<Duration> {
+        if self.native(surface) {
+            return None;
+        }
         let demand = self.roots.get(&surface)?;
         // Each rate-less owner uses this root's output rate before aggregation.
         let rate = demand
@@ -75,6 +99,7 @@ impl PresentationClaims {
                 ClientPresentationClaim::Active { rate } => Some(rate.unwrap_or(fallback)),
                 ClientPresentationClaim::Release | ClientPresentationClaim::Paused => None,
             })
+            .chain(self.local.get(&surface).copied().flatten())
             .max()?;
         Some(demand.last.map_or(Duration::ZERO, |last| {
             (last + rate.interval()).saturating_duration_since(now)
@@ -159,18 +184,35 @@ impl ServerState {
         {
             return;
         }
-        let was_claimed = self.presentation_claims.claimed(update.surface);
+        let was_native = self.presentation_claims.native(update.surface);
         self.presentation_claims.update(owner, update);
-        let claimed = self.presentation_claims.claimed(update.surface);
-        if !was_claimed && claimed {
+        self.transition_callback_owner(update.surface, was_native);
+    }
+
+    pub(super) fn set_local_presentation(
+        &mut self,
+        surface: SurfaceId,
+        rate: Option<PresentationRate>,
+    ) {
+        if self.toplevels.get(surface).is_none() && self.popups.get(surface).is_none() {
+            return;
+        }
+        let was_native = self.presentation_claims.native(surface);
+        self.presentation_claims.local.insert(surface, rate);
+        self.transition_callback_owner(surface, was_native);
+    }
+
+    fn transition_callback_owner(&mut self, surface: SurfaceId, was_native: bool) {
+        let native = self.presentation_claims.native(surface);
+        if was_native && !native {
             // Extract before a native completion can signal these callbacks.
             // Do not wait behind another output's pending ledger prefix.
             for (_, groups) in &mut self.staged_frame_callbacks {
                 let mut remaining = Vec::new();
                 for group in groups.drain(..) {
-                    if group.root == update.surface {
+                    if group.root == surface {
                         self.independent_callbacks
-                            .entry(update.surface)
+                            .entry(surface)
                             .or_default()
                             .push(group);
                     } else {
@@ -179,8 +221,8 @@ impl ServerState {
                 }
                 *groups = remaining;
             }
-        } else if was_claimed && !claimed {
-            if let Some(groups) = self.independent_callbacks.remove(&update.surface) {
+        } else if !was_native && native {
+            if let Some(groups) = self.independent_callbacks.remove(&surface) {
                 // Prepend oldest callbacks per actual wl_surface, not just root.
                 for group in groups.into_iter().rev() {
                     group.restore();
@@ -190,12 +232,10 @@ impl ServerState {
             // Current (not yet staged) callbacks need native composition too.
             let pending = self
                 .mapped_frame_roots()
-                .find(|(id, _)| *id == update.surface)
+                .find(|(id, _)| *id == surface)
                 .is_some_and(|(id, root)| self.root_has_callbacks(id, &root));
             if pending {
-                self.presentation_claims
-                    .local_handoffs
-                    .insert(update.surface);
+                self.presentation_claims.local_handoffs.insert(surface);
             }
         }
     }
@@ -293,6 +333,7 @@ impl ServerState {
     }
 
     pub(super) fn forget_presentation(&mut self, surface: SurfaceId) {
+        self.presentation_claims.local.remove(&surface);
         self.presentation_claims.roots.remove(&surface);
         self.presentation_claims.local_handoffs.remove(&surface);
         self.independent_callbacks.remove(&surface);
@@ -305,6 +346,54 @@ impl ServerState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn explicit_local_demand_and_independent_consumers_aggregate_without_implicit_reactivation() {
+        let mut claims = PresentationClaims::default();
+        let surface = SurfaceId::for_test(8);
+        let owner = ClientSourceId::new(8);
+        let now = Instant::now();
+        let local_rate = PresentationRate::try_from(120_000).expect("120Hz");
+        claims.local.insert(surface, None);
+        assert!(!claims.native(surface));
+        claims.update(
+            owner,
+            ClientPresentationUpdate {
+                surface,
+                claim: ClientPresentationClaim::Active {
+                    rate: Some(PresentationRate::HZ_60),
+                },
+            },
+        );
+        claims.completed(surface, now);
+        assert_eq!(
+            claims.timeout(surface, local_rate, now),
+            Some(PresentationRate::HZ_60.interval())
+        );
+        claims.local.insert(surface, Some(local_rate));
+        assert_eq!(
+            claims.timeout(surface, local_rate, now),
+            Some(local_rate.interval())
+        );
+        claims.update(
+            owner,
+            ClientPresentationUpdate {
+                surface,
+                claim: ClientPresentationClaim::Paused,
+            },
+        );
+        assert!(claims.native(surface));
+        assert_eq!(claims.timeout(surface, local_rate, now), None);
+        claims.local.insert(surface, None);
+        claims.update(
+            owner,
+            ClientPresentationUpdate {
+                surface,
+                claim: ClientPresentationClaim::Release,
+            },
+        );
+        assert!(!claims.native(surface));
+    }
 
     #[test]
     fn claims_are_isolated_and_only_active_consumers_supply_cadence() {

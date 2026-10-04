@@ -414,6 +414,116 @@ impl Fixture {
 
 #[test]
 #[ignore = "native socket fixture requires XDG_RUNTIME_DIR"]
+fn hidden_local_presentation_pauses_callbacks_but_active_remote_demand_keeps_them_alive() {
+    let mut f = Fixture::new();
+    let surface = f.surface(50);
+    let (id, _) = f.toplevel(&surface);
+    let buffer = f.buffer();
+    surface.attach(Some(&buffer), 0, 0);
+    surface.frame(&f.queue.handle(), true);
+    surface.commit();
+    f.sync();
+    let staged = f.server.stage_frame_callbacks();
+    let presentation = |rate| {
+        weld_client::ClientRequest::Surface(weld_client::ClientSurfaceRequest {
+            surface: id,
+            kind: weld_client::ClientSurfaceRequestKind::SetPresentation { rate },
+        })
+    };
+    f.server.apply_client_request(presentation(None));
+    f.server.complete_frame_callbacks(staged);
+    f.sync();
+    assert_eq!(
+        f.observer.frames, 0,
+        "hiding also withdraws already-staged callbacks"
+    );
+    let now = Instant::now();
+    assert_eq!(f.server.independent_callback_timeout(now), None);
+    let frame = f.server.stage_frame_callbacks();
+    f.server.complete_frame_callbacks(frame);
+    f.sync();
+    assert_eq!(f.observer.frames, 0);
+
+    // Becoming visible wakes native presentation without needing another commit.
+    f.server
+        .apply_client_request(presentation(Some(PresentationRate::HZ_60)));
+    assert!(f.server.take_local_callback_demand());
+    let frame = f.server.stage_frame_callbacks();
+    f.server.complete_frame_callbacks(frame);
+    f.sync();
+    assert_eq!(f.observer.frames, 1);
+
+    surface.frame(&f.queue.handle(), true);
+    surface.commit();
+    f.sync();
+    f.server.apply_client_request(presentation(None));
+    let owner = ClientSourceId::new(99);
+    f.server.apply_presentation_claim(
+        owner,
+        ClientPresentationUpdate {
+            surface: id,
+            claim: ClientPresentationClaim::Active {
+                rate: Some(PresentationRate::HZ_60),
+            },
+        },
+    );
+    assert_eq!(
+        f.server.independent_callback_timeout(now),
+        Some(Duration::ZERO)
+    );
+    f.server.service_independent_callbacks(now);
+    f.sync();
+    assert_eq!(
+        f.observer.frames, 2,
+        "hidden source still feeds its remote presenter"
+    );
+
+    surface.frame(&f.queue.handle(), true);
+    surface.commit();
+    f.sync();
+    f.server.apply_presentation_claim(
+        owner,
+        ClientPresentationUpdate {
+            surface: id,
+            claim: ClientPresentationClaim::Paused,
+        },
+    );
+    f.server
+        .service_independent_callbacks(now + Duration::from_secs(1));
+    let frame = f.server.stage_frame_callbacks();
+    f.server.complete_frame_callbacks(frame);
+    f.sync();
+    assert_eq!(
+        f.observer.frames, 2,
+        "no active consumer means no frame opportunities"
+    );
+    f.server
+        .apply_client_request(presentation(Some(PresentationRate::HZ_60)));
+    assert!(f.server.take_local_callback_demand());
+    let frame = f.server.stage_frame_callbacks();
+    f.server.complete_frame_callbacks(frame);
+    f.sync();
+    assert_eq!(
+        f.observer.frames, 3,
+        "paused remote consumer cannot block a visible local presenter"
+    );
+
+    f.server.apply_client_request(presentation(None));
+    f.server.apply_presentation_claim(
+        owner,
+        ClientPresentationUpdate {
+            surface: id,
+            claim: ClientPresentationClaim::Release,
+        },
+    );
+    assert!(
+        !f.server.take_local_callback_demand(),
+        "release must not reactivate a hidden source"
+    );
+}
+
+#[test]
+#[ignore = "native socket fixture requires XDG_RUNTIME_DIR"]
 fn fullscreen_size_and_state_arrive_in_one_configure_and_restore_constraints() {
     use crate::surface::Extent;
     let mut f = Fixture::new();

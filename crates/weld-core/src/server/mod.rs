@@ -549,8 +549,8 @@ impl ServerState {
                 ClientSurfaceRequestKind::SetPreferredScale { scale_120 } => {
                     self.set_toplevel_preferred_scale(request.surface, scale_120);
                 }
-                ClientSurfaceRequestKind::SetPresentation { .. } => {
-                    warn!(surface = ?request.surface, "presentation request requires an authorized presenter claim");
+                ClientSurfaceRequestKind::SetPresentation { rate } => {
+                    self.set_local_presentation(request.surface, rate);
                 }
                 // Local Wayland presentation has no encoded bitrate to allocate.
                 ClientSurfaceRequestKind::SetBitratePreference { .. } => {}

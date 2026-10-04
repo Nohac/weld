@@ -253,8 +253,19 @@ back-and-forth can recreate them by name. Retained vacancies and hoist slots
 count as members and prevent retirement.
 
 Visibility changes hide local window and popup presentations while retaining
-client occupancy and hoist overrides. Consumer-driven frame activity/capture
-integration is a later slice; this does not add a new suspension scheduler.
+client occupancy and hoist overrides. The window domain publishes frame demand
+after final management reconciliation: hidden windows, fullscreen-occluded
+windows, windows without an output, and detached hoist sources pause their local
+frame opportunities. Managed popups inherit their root's demand; desktop-layer
+popups keep their separate presentation policy. Only changed demand is sent.
+Showing a window restores pending callbacks and explicitly wakes native
+presentation, so resuming requires no new client commit. An active remote
+consumer keeps its source running even on a hidden source workspace. Hiding a
+remote receiver pauses that receiver's claim instead; other active consumers
+continue. Mapping, occupancy, output membership and GPU lease lifetime remain
+intact. Capture integration can use independent active claims, but an OBS/capture
+consumer is not added by this slice. Callback throttling is cooperative: apps
+which draw without waiting for callbacks can still consume resources.
 Output loss reassigns surviving workspaces to an available output. With no
 outputs, windows remain hidden and retain their layout until one returns.
 Production DRM connector hotplug itself remains outside this slice.

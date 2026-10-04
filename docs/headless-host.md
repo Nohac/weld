@@ -51,8 +51,11 @@ policy update cadence, not a free-running drawing timer.
 The receiver's `SetPresentation` request updates that demand; `None` explicitly
 pauses it. Popups inherit their owner's demand. Independent presenter claims
 are combined at the source, using the fastest active rate, and releasing one
-claim does not erase another. The last release returns callback ownership to
-local presentation, or leaves the surface dormant if no local presenter exists.
+claim does not erase another. Explicit local demand participates independently:
+a hidden source workspace does not pause an active hoist, and a paused remote
+viewer does not block an active local presenter. The last release returns callback
+ownership to active local presentation, or leaves a locally hidden surface paused.
+A host with no local presenter keeps it dormant.
 No catch-up bursts, per-frame network ACKs or GPU buffer-release semantics are
 introduced. Without eligible callbacks, calloop waits on its sources with a
 one-second child-reaping maintenance timeout. Unmapped roots remain ineligible.

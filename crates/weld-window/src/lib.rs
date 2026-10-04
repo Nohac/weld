@@ -6,6 +6,8 @@
 
 const PROFILE_TARGET: &str = "weld_profile";
 
+mod activity;
+
 pub mod fullscreen;
 pub mod pointer;
 pub mod workspace;
@@ -734,7 +736,6 @@ struct PublishedOutputMembership {
     outputs: Vec<OutputId>,
     preferred: Option<OutputId>,
     preferred_scale_120: Option<u32>,
-    presentation_rate: Option<weld_app::output::PresentationRate>,
 }
 
 #[derive(Resource, Default)]
@@ -781,30 +782,12 @@ fn publish_window_output_memberships(
         if memberships.is_empty() {
             continue;
         }
-        let presentation_rate = (client.provenance() == ClientProvenance::Relocated)
-            .then(|| {
-                preferred
-                    .and_then(|preferred| {
-                        outputs.iter().find_map(|(output, geometry)| {
-                            (output.id == preferred).then(|| geometry.presentation_rate())
-                        })
-                    })
-                    .or_else(|| {
-                        outputs
-                            .iter()
-                            .filter(|(output, _)| memberships.contains(&output.id))
-                            .map(|(_, geometry)| geometry.presentation_rate())
-                            .max()
-                    })
-            })
-            .flatten();
         published.scratch.insert(
             client.surface(),
             PublishedOutputMembership {
                 outputs: memberships,
                 preferred,
                 preferred_scale_120,
-                presentation_rate,
             },
         );
     }
@@ -848,12 +831,6 @@ fn publish_window_output_memberships(
             preferred: membership.preferred,
             preferred_scale_120: membership.preferred_scale_120,
         });
-        if let Some(rate) = membership.presentation_rate {
-            actions.push(SurfaceAction::SetPresentation {
-                surface,
-                rate: Some(rate),
-            });
-        }
     }
 
     // Empty assignments cannot yet express leave-all: weld-core rejects them.
@@ -872,6 +849,7 @@ pub struct WindowPlugin;
 impl Plugin for WindowPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<WindowRegistry>()
+            .init_resource::<activity::PublishedActivity>()
             .init_resource::<workspace::WorkspaceIds>()
             .init_resource::<workspace::FocusedWorkspace>()
             .add_observer(workspace::request)
@@ -967,6 +945,7 @@ impl Plugin for WindowPlugin {
                     (
                         (synchronize_registry, reconcile_window_sizes).chain(),
                         reconcile_client_focus,
+                        activity::publish,
                     )
                         .chain()
                         .in_set(WindowSystems::FinalReconcile),
@@ -1566,6 +1545,130 @@ mod tests {
                 .iter()
                 .any(|action| matches!(action, SurfaceAction::SetPresentation { .. }))
         );
+    }
+
+    #[test]
+    fn hidden_windows_pause_frame_demand_without_unmapping_and_resume_with_their_popups() {
+        for provenance in [ClientProvenance::Local, ClientProvenance::Relocated] {
+            let mut app = test_app();
+            let surface = SurfaceId::for_test(99);
+            let popup_surface = SurfaceId::for_test(100);
+            let client = mapped_toplevel(&mut app, surface);
+            let initial = *app
+                .world()
+                .get::<MappedSurface>(client)
+                .expect("initial frame");
+            app.world_mut().entity_mut(client).remove::<MappedSurface>();
+            app.world_mut()
+                .get_mut::<ClientSource>(client)
+                .expect("source")
+                .provenance = provenance;
+            let output = app
+                .world_mut()
+                .spawn((
+                    WeldOutput {
+                        id: OutputId::new(1),
+                    },
+                    PrimaryOutput,
+                    OutputGeometry::from_physical(UVec2::new(800, 600), 1.0),
+                    OutputPosition::default(),
+                ))
+                .id();
+            app.update();
+            assert!(
+                !take_surface_actions(app.world_mut())
+                    .iter()
+                    .any(|action| matches!(action, SurfaceAction::SetPresentation { .. })),
+                "bootstrap must receive its first frame before demand can pause it"
+            );
+            app.world_mut().entity_mut(client).insert(initial);
+            app.update();
+            let window = app.world().get::<OccupiesWindow>(client).expect("window").0;
+            app.world_mut()
+                .entity_mut(window)
+                .insert(WindowOutput(output));
+            let mapped = *app.world().get::<MappedSurface>(client).expect("mapped");
+            app.world_mut().spawn((
+                weld_app::surface::ClientSurface {
+                    surface: popup_surface,
+                },
+                weld_app::surface::ClientPopup {
+                    owner: surface,
+                    position: Vec2::ZERO,
+                    stack_index: 1,
+                },
+                mapped,
+            ));
+            let layer_popup = SurfaceId::for_test(101);
+            app.world_mut().spawn((
+                weld_app::surface::ClientSurface {
+                    surface: layer_popup,
+                },
+                weld_app::surface::ClientPopup {
+                    owner: SurfaceId::for_test(102),
+                    position: Vec2::ZERO,
+                    stack_index: 1,
+                },
+                mapped,
+            ));
+            app.update();
+            assert!(
+                !take_surface_actions(app.world_mut())
+                    .iter()
+                    .any(|action| matches!(action,
+                SurfaceAction::SetPresentation { surface, .. } if *surface == layer_popup))
+            );
+            app.world_mut()
+                .entity_mut(window)
+                .insert(WindowVisibility::Hidden);
+            app.update();
+            let actions = take_surface_actions(app.world_mut());
+            for surface in [surface, popup_surface] {
+                assert!(actions.contains(&SurfaceAction::SetPresentation {
+                    surface,
+                    rate: None
+                }));
+            }
+            assert_eq!(app.world().get::<MappedSurface>(client), Some(&mapped));
+            assert_eq!(
+                app.world()
+                    .get::<OccupiesWindow>(client)
+                    .expect("occupant retained")
+                    .0,
+                window
+            );
+            app.update();
+            assert!(
+                !take_surface_actions(app.world_mut())
+                    .iter()
+                    .any(|action| matches!(action, SurfaceAction::SetPresentation { .. }))
+            );
+            app.world_mut()
+                .entity_mut(window)
+                .insert(WindowVisibility::Visible);
+            app.update();
+            let actions = take_surface_actions(app.world_mut());
+            for surface in [surface, popup_surface] {
+                assert!(actions.contains(&SurfaceAction::SetPresentation {
+                    surface,
+                    rate: Some(weld_app::output::PresentationRate::HZ_60)
+                }));
+            }
+            // A hoist detaches local occupancy while retaining the mapped client.
+            app.world_mut()
+                .entity_mut(client)
+                .remove::<OccupiesWindow>();
+            app.world_mut()
+                .entity_mut(client)
+                .insert(WindowAdmissionHold);
+            app.update();
+            assert!(take_surface_actions(app.world_mut()).contains(
+                &SurfaceAction::SetPresentation {
+                    surface,
+                    rate: None
+                }
+            ));
+        }
     }
 
     fn mapped_toplevel(app: &mut App, surface: SurfaceId) -> Entity {

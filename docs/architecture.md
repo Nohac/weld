@@ -171,7 +171,8 @@ are maintained automatically. `FocusedWorkspace` remains meaningful with no
 selected window. The tiler adds a `TileWorkspace` tree on the same entity and
 validates layout/membership transfers together. Native neighbor selection stays
 within its tree. Local visibility changes preserve client occupancy and hoist
-presentation overrides; frame-demand/capture policy is a subsequent slice.
+presentation overrides. Window visibility now publishes local frame demand;
+capture integrations must publish their own active consumer claims.
 
 The i3 plugin owns workspace naming, initial output assignment, one visible
 workspace per output, switching, empty-workspace retirement, and branch-aware
@@ -1085,8 +1086,17 @@ and receiver output preferences supply its cadence. `ClientRuntime` validates
 the claimant's declared upstream and routes its identity to the owning local
 adapter. The Wayland bridge applies the claim in `ServerState`, where each
 rate-less claim can be resolved against the root's preferred output before
-choosing the fastest active consumer. Claimed roots bypass the native callback
-ledger; a local display cannot delay their draw opportunities. Manual commands
+choosing the fastest active consumer. `weld-window::activity` separately publishes
+changed local demand through `SetPresentation`, including paused demand for hidden
+or locally unpresented clients and inherited demand for their popups. Presentation
+requests stay with the addressed viewer instead of following input aliases;
+loopback forwards its claim updates before native staging. Active adapter demand
+bypasses the native callback ledger and aggregates explicit local demand, so a
+local display cannot delay its draw opportunities. With only local demand active,
+callbacks return to native presentation. With no active demand, callbacks remain
+pending. Transitions withdraw already-staged callbacks or restore and wake native
+presentation without needing a new commit. Implicit native behavior remains the
+fallback for hosts without window policy. Manual commands
 route claims before native staging, and automatic admission routes them after
 ordinary ingress. Local roots receive their next draw opportunity after native
 submission succeeds. DRM scanout admission still waits for the matching CRTC

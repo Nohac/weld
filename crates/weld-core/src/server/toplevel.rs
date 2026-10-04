@@ -656,7 +656,7 @@ impl ServerState {
         self.next_presentation_id = self.next_presentation_id.saturating_add(1);
         let mut callbacks = Vec::new();
         for (id, root) in self.mapped_frame_roots() {
-            if !self.presentation_claims.claimed(id) {
+            if self.presentation_claims.native(id) {
                 callbacks.extend(super::presentation::take_callbacks(id, &root));
             }
         }
