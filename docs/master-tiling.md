@@ -39,6 +39,47 @@ output changes workspace. A tiled window can retain the preference, but it
 takes effect only while floating. Disabling stickiness leaves it in the current
 workspace. Retained vacant/hoisted slots obey the same policy.
 
+Alt+W selects tabbed layout, Alt+S selects stacking, and Alt+E restores the last
+split layout (then alternates horizontal/vertical). These bindings also work
+with the corresponding `$mod` commands in an explicitly supplied Sway config.
+
+### Tabbed and stacked groups
+
+`layout tabbed`, `layout stacking` (or `stacked`), `layout splith`, `layout splitv`
+and `layout default` change the selected node's parent layout. Selecting the
+workspace root targets its contents. This differs from `splith`/`splitv`, which
+prepare a new split around the selected node for the next admission.
+`layout toggle` cycles split → stacked → tabbed → remembered split;
+`layout toggle all` includes both split orientations. Explicit lists such as
+`layout toggle tabbed stacked splitv` are supported; unknown choices reject the
+configuration candidate rather than being silently ignored.
+
+Each overlapping group shows its last-selected child branch. Directional focus
+uses left/right for tabs and up/down for stacks, with the existing wrapping and
+ancestor traversal policy. Movement reorders children, enters groups, or extracts
+at an edge using those same layout axes. Nested splits, group selection, close
+recovery and workspace transfers retain their ordinary tree identities. Closing
+to a single tab retains the layout for the next admission. Split proportions
+survive layout changes; resize operations skip overlapping groups and resize a
+matching split ancestor.
+
+The group owns one rounded outer border and shadow around its headers and
+content. All descendants join that frame: internal splits have no gaps, independent
+borders or shadows, and only leaves touching its outer bottom corners round.
+Nested tab/stack groups keep their own headers and selection while sharing the
+outermost frame. Moving a window or group out restores its standalone styling.
+Group chrome follows the configured default tiled border and SSD palette;
+client-drawn controls inside window geometry remain application content.
+Headers show the current child title (or its remembered descendant's title),
+and clicking one activates that branch's remembered window. Fullscreen and
+hidden workspaces suppress the group UI. Header-wheel cycling is deferred.
+
+Inactive tab/stack branches remain mapped and retain buffers and hoist slots.
+Only local presentation demand pauses; independent active remote/capture claims
+continue through the existing consumer policy. Layout geometry and header nodes
+are retained across unchanged frames. Physical mixed-scale output validation
+remains part of the manual checklist.
+
 The example starts Waybar with `examples/waybar.jsonc` and `examples/waybar.css`;
 launch from the repository root so those relative paths resolve. Waybar's
 `ext/workspaces` module displays existing workspaces and switches them on click.
@@ -362,7 +403,7 @@ fallback policy unless they install and use the i3 actions.
 
 The first adapted i3 scenarios and deferred test families are recorded in
 [`weld-i3-quirks/UPSTREAM.md`](../crates/weld-i3-quirks/UPSTREAM.md).
-Tabs/stacks, floating an entire selected group and group fullscreen remain
+Floating an entire selected group and group fullscreen remain
 follow-ups; floating/fullscreen commands currently target the keyboard-focused
 window. Directional cross-output movement remains a follow-up. Native
 `TileOperation::Move` remains the geometric
@@ -372,7 +413,7 @@ receive the mean existing share, and flattening preserves internal proportions.
 
 ## Deliberate boundaries
 
-Tabbed/stacked layouts, resize-increment/aspect hints, persistent matching and
+Resize-increment/aspect hints, persistent matching and
 IPC remain follow-up slices. Popups keep the existing presentation path rather
 than becoming tiling leaves. Declared transient toplevels float and center over
 their parent's geometry. Unparented dialog, splash, utility and toolbar windows,

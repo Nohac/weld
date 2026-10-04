@@ -48,7 +48,6 @@ struct TiledWindow {
     member: &'static WorkspaceMember,
     owner: &'static ManagedBy,
     output: Option<&'static WindowOutput>,
-    visibility: &'static WindowVisibility,
     z_order: &'static WindowZOrder,
     floating: Option<&'static FloatingWindow>,
     sole_tile: Has<SoleTiledWindow>,
@@ -61,11 +60,24 @@ impl Plugin for TilePlugin {
         }
         app.configure_sets(
             PreUpdate,
+            TileSystems::LateLayout
+                .after(WindowSystems::InteractionFinalize)
+                .before(WindowSystems::FinalReconcile),
+        );
+        app.add_systems(
+            PreUpdate,
+            (sync_visibility, layout::request_layout)
+                .chain()
+                .in_set(TileSystems::LateLayout),
+        );
+        app.configure_sets(
+            PreUpdate,
             WindowPointerSystems::Start
                 .after(TileSystems::Prepare)
                 .before(TileSystems::Actions),
         );
         app.init_resource::<TileSettings>()
+            .init_resource::<crate::TilePresentationMetrics>()
             .init_resource::<crate::TileSelection>()
             .add_observer(crate::selection::select)
             .add_observer(crate::selection::commit)
@@ -102,6 +114,7 @@ impl Plugin for TilePlugin {
             )
             .add_observer(operations::apply_request)
             .add_observer(structural::apply_edit)
+            .add_observer(structural::set_layout)
             .add_observer(workspace::created)
             .add_observer(workspace::move_window)
             .add_observer(workspace::removed)
@@ -109,6 +122,12 @@ impl Plugin for TilePlugin {
             .add_observer(crate::floating::cancel_centering)
             .add_observer(history::remember_focus)
             .add_observer(history::remember_tree_change)
+            .add_systems(
+                PreUpdate,
+                sync_group_headers
+                    .after(TileSystems::Layout)
+                    .in_set(WindowSystems::Management),
+            )
             .add_observer(layout::apply_layout)
             .add_systems(
                 PreUpdate,
@@ -135,6 +154,7 @@ impl Plugin for TilePlugin {
                     prune_removed,
                     admit_windows,
                     sync_output,
+                    sync_visibility,
                     repair_focus,
                     layout::request_layout,
                 )
@@ -150,7 +170,12 @@ impl Plugin for TilePlugin {
             )
             .add_systems(
                 PreUpdate,
-                (sync_output, layout::request_layout, history::refresh_path)
+                (
+                    sync_output,
+                    history::refresh_path,
+                    sync_visibility,
+                    layout::request_layout,
+                )
                     .chain()
                     .in_set(TileSystems::Layout),
             );
@@ -226,6 +251,7 @@ fn prune(
         return (live.then_some(entity), !live);
     };
     let children = container.children.clone();
+    let preserve_unary = !container.layout().is_split();
     let mut kept = Vec::with_capacity(children.len());
     let mut removed = false;
     for child in children {
@@ -248,7 +274,7 @@ fn prune(
         return (Some(entity), false);
     }
     editor.dirty.0 = true;
-    if entity != root && kept.len() <= 1 {
+    if entity != root && (kept.is_empty() || (kept.len() == 1 && !preserve_unary)) {
         editor
             .history
             .replace(entity, kept.first().map(|child| child.entity));
@@ -426,9 +452,12 @@ fn admit_windows(
 }
 
 fn clear_tile_hints(event: On<Remove, TileParent>, mut commands: Commands) {
-    commands
-        .entity(event.entity)
-        .try_remove::<(SoleTiledWindow, WindowSplitEdge, weld_window::TiledWindow)>();
+    commands.entity(event.entity).try_remove::<(
+        SoleTiledWindow,
+        WindowSplitEdge,
+        weld_window::TiledWindow,
+        weld_window::WindowGroupHeader,
+    )>();
 }
 
 fn mark_tiled_window(
@@ -503,7 +532,7 @@ fn sync_output(
         if window.owner.0 != window.member.0 {
             continue;
         }
-        let Ok((_, workspace, output, _, _)) = workspaces.get(window.member.0) else {
+        let Ok((_, _, output, _, _)) = workspaces.get(window.member.0) else {
             continue;
         };
         let output = output.filter(|output| outputs.contains(output.0));
@@ -514,16 +543,118 @@ fn sync_output(
                 .entity(window.entity)
                 .insert(WindowOutput(output.0));
         }
-        let visibility = if output.is_some() && workspace.visible() {
+        if window.floating.is_none() && *window.z_order != WindowZOrder(0) {
+            commands.entity(window.entity).insert(WindowZOrder(0));
+        }
+    }
+}
+
+#[derive(SystemParam)]
+struct BranchVisibility<'w, 's> {
+    parents: Query<'w, 's, &'static TileParent>,
+    containers: Query<'w, 's, &'static crate::TileContainer>,
+    history: Res<'w, TileFocusHistory>,
+}
+
+type VisibilityWindows<'w, 's> = Query<
+    'w,
+    's,
+    (
+        Entity,
+        &'static WorkspaceMember,
+        &'static ManagedBy,
+        &'static WindowVisibility,
+        Has<FloatingWindow>,
+    ),
+>;
+
+fn sync_visibility(
+    windows: VisibilityWindows,
+    workspaces: Query<(&Workspace, Option<&WorkspaceOutput>), With<TileWorkspace>>,
+    outputs: Query<(), (With<WeldOutput>, With<OutputGeometry>)>,
+    branches: BranchVisibility,
+    mut commands: Commands,
+    mut redraw: MessageWriter<RequestRedraw>,
+) {
+    // Workspace commands and admission publish initial member visibility.
+    // Refine it after management and late picking, before UI/focus/activity
+    // publication. New late workspace mutations must precede LateLayout too.
+    for (window, member, owner, current, floating) in &windows {
+        if owner.0 != member.0 {
+            continue;
+        }
+        let Ok((workspace, output)) = workspaces.get(member.0) else {
+            continue;
+        };
+        let visible = workspace.visible()
+            && output.is_some_and(|output| outputs.contains(output.0))
+            && (floating
+                || crate::visibility::branch_visible(
+                    window,
+                    &branches.parents,
+                    &branches.containers,
+                    &branches.history,
+                ));
+        let visibility = if visible {
             WindowVisibility::Visible
         } else {
             WindowVisibility::Hidden
         };
-        if *window.visibility != visibility {
-            commands.entity(window.entity).insert(visibility);
+        if *current != visibility {
+            commands.entity(window).insert(visibility);
+            redraw.write(RequestRedraw);
         }
-        if window.floating.is_none() && *window.z_order != WindowZOrder(0) {
-            commands.entity(window.entity).insert(WindowZOrder(0));
+    }
+}
+
+fn sync_group_headers(
+    windows: Query<
+        (Entity, &LayoutRect, Option<&weld_window::WindowGroupHeader>),
+        With<ManagedWindow>,
+    >,
+    parents: Query<&TileParent>,
+    containers: Query<(&crate::TileContainer, &LayoutRect)>,
+    settings: Res<crate::TilePresentationMetrics>,
+    mut commands: Commands,
+) {
+    for (window, rect, current) in &windows {
+        let mut node = window;
+        let mut outer = None;
+        for _ in 0..crate::MAX_DEPTH {
+            let Ok(parent) = parents.get(node) else { break };
+            node = parent.entity();
+            let Ok((container, bounds)) = containers.get(node) else {
+                break;
+            };
+            if !container.layout().is_split() {
+                outer = Some(bounds.0);
+            }
+        }
+        let grouped = outer.map(|bounds| {
+            let border = f32::from(settings.group_border).min(bounds.size.min_element() * 0.5);
+            let bottom = (rect.0.position.y + rect.0.size.y
+                - (bounds.position.y + bounds.size.y - border))
+                .abs()
+                < 0.01;
+            weld_window::WindowGroupHeader {
+                bottom_left: bottom
+                    && (rect.0.position.x - bounds.position.x - border).abs() < 0.01,
+                bottom_right: bottom
+                    && (rect.0.position.x + rect.0.size.x
+                        - (bounds.position.x + bounds.size.x - border))
+                        .abs()
+                        < 0.01,
+            }
+        });
+        if current.copied() == grouped {
+            continue;
+        }
+        if let Some(grouped) = grouped {
+            commands.entity(window).insert(grouped);
+        } else {
+            commands
+                .entity(window)
+                .remove::<weld_window::WindowGroupHeader>();
         }
     }
 }

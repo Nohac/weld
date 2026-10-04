@@ -188,15 +188,21 @@ impl StructuralEditor<'_, '_> {
         let Ok(container) = self.editor.containers.get(node) else {
             return false;
         };
-        if container.axis == axis || container.children.is_empty() {
+        if container.layout == crate::TileLayout::Split(axis) || container.children.is_empty() {
             return false;
         }
         let old_axis = container.axis;
+        let old_layout = container.layout;
         let children = container.children.clone();
         let Some(group) = self.editor.create_container(old_axis, children.clone()) else {
             return false;
         };
         self.editor.commands.entity(group).insert(TileParent(node));
+        self.editor
+            .commands
+            .entity(group)
+            .entry::<crate::TileContainer>()
+            .and_modify(move |mut container| container.layout = old_layout);
         // Anchor the new group's history at its most-recent child.
         let recent = self
             .editor
@@ -212,7 +218,7 @@ impl StructuralEditor<'_, '_> {
             }
         }
         if let Ok(mut container) = self.editor.containers.get_mut(node) {
-            container.axis = axis;
+            container.set_layout(crate::TileLayout::Split(axis));
             container.children = vec![TileChild {
                 entity: group,
                 weight: 1.0,
@@ -242,7 +248,11 @@ impl StructuralEditor<'_, '_> {
         let Ok(destination) = self.editor.containers.get(parent.entity()) else {
             return false;
         };
-        if children.is_empty() || inner_container.axis != destination.axis {
+        if children.is_empty()
+            || !container.layout.is_split()
+            || !inner_container.layout.is_split()
+            || inner_container.layout != destination.layout
+        {
             return false;
         }
         let Some(index) = destination
@@ -279,6 +289,102 @@ impl StructuralEditor<'_, '_> {
         self.editor.dirty.0 = true;
         true
     }
+
+    fn group_children(&mut self, node: Entity, layout: crate::TileLayout) -> bool {
+        let Some(depth) = self.depth(node) else {
+            return false;
+        };
+        if self
+            .height(node, MAX_DEPTH + 1)
+            .is_none_or(|height| depth + height >= MAX_DEPTH)
+        {
+            return false;
+        }
+        let Ok(container) = self.editor.containers.get(node) else {
+            return false;
+        };
+        if container.children.is_empty() {
+            return false;
+        }
+        let children = container.children.clone();
+        let axis = container.axis;
+        let Some(group) = self.editor.create_container(axis, children.clone()) else {
+            return false;
+        };
+        self.editor.commands.entity(group).insert(TileParent(node));
+        self.editor
+            .commands
+            .entity(group)
+            .entry::<crate::TileContainer>()
+            .and_modify(move |mut container| container.set_layout(layout));
+        let recent = self
+            .editor
+            .history
+            .recent()
+            .find(|recent| children.iter().any(|child| child.entity == *recent));
+        if let Some(recent) = recent {
+            self.editor.history.wrap(recent, group);
+        }
+        for child in children {
+            if let Ok(mut parent) = self.editor.parents.get_mut(child.entity) {
+                parent.0 = group;
+            }
+        }
+        if let Ok(mut container) = self.editor.containers.get_mut(node) {
+            container.set_layout(crate::TileLayout::Split(axis));
+            container.children = vec![TileChild {
+                entity: group,
+                weight: 1.0,
+            }];
+        }
+        true
+    }
+
+    fn collapse(&mut self, node: Entity) -> bool {
+        if self.depth(node).is_none() || self.height(node, MAX_DEPTH).is_none() {
+            return false;
+        }
+        let Ok(parent) = self.editor.parents.get(node).copied() else {
+            return false;
+        };
+        let Ok(container) = self.editor.containers.get(node) else {
+            return false;
+        };
+        let [child] = container.children.as_slice() else {
+            return false;
+        };
+        let child = child.entity;
+        let Ok(mut outer) = self.editor.containers.get_mut(parent.entity()) else {
+            return false;
+        };
+        let Some(edge) = outer.children.iter_mut().find(|edge| edge.entity == node) else {
+            return false;
+        };
+        edge.entity = child;
+        if let Ok(mut edge) = self.editor.parents.get_mut(child) {
+            *edge = parent;
+        }
+        self.editor.history.replace(node, Some(child));
+        self.editor.commands.entity(node).despawn();
+        self.editor.dirty.0 = true;
+        true
+    }
+}
+
+pub(crate) fn set_layout(event: On<crate::TileSetLayout>, mut editor: TreeEditor) {
+    if editor.root_of(event.container).is_none() {
+        return;
+    }
+    let Ok(mut container) = editor.containers.get_mut(event.container) else {
+        return;
+    };
+    if container.layout == event.layout {
+        return;
+    }
+    container.set_layout(event.layout);
+    editor.dirty.0 = true;
+    editor.commands.trigger(TileTreeChanged);
+    editor.commands.trigger(LayoutRequested);
 }
 
 pub(crate) fn apply_edit(
@@ -293,6 +399,8 @@ pub(crate) fn apply_edit(
     let changed = match *event.event() {
         TileTreeEdit::Place { node, anchor, side } => tree.place(node, anchor, side),
         TileTreeEdit::WrapChildren { container, axis } => tree.wrap_children(container, axis),
+        TileTreeEdit::GroupChildren { container, layout } => tree.group_children(container, layout),
+        TileTreeEdit::Collapse { container } => tree.collapse(container),
         TileTreeEdit::Flatten { container } => tree.flatten(container),
     };
     if changed {

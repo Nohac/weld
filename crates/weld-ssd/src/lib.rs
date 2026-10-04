@@ -94,23 +94,24 @@ type StyledWindows<'w, 's> = Query<
         Option<&'static WindowBorderStyle>,
         Has<weld_window::fullscreen::WindowFullscreen>,
         Has<weld_window::SoleTiledWindow>,
+        Option<&'static weld_window::WindowGroupHeader>,
     ),
     With<ManagedWindow>,
 >;
 
 impl FrameStyles<'_, '_> {
     fn requested_border(&self, window: Entity) -> BorderStyle {
-        let (floating, style, _, _) = self
+        let (floating, style, _, _, _) = self
             .windows
             .get(window)
-            .unwrap_or((false, None, false, false));
+            .unwrap_or((false, None, false, false, None));
         FrameGeometry::new(&self.settings, floating, style.copied()).border
     }
     fn default_border(&self, window: Entity) -> BorderStyle {
         if self
             .windows
             .get(window)
-            .is_ok_and(|(floating, _, _, _)| floating)
+            .is_ok_and(|(floating, _, _, _, _)| floating)
         {
             self.settings.floating
         } else {
@@ -118,10 +119,10 @@ impl FrameStyles<'_, '_> {
         }
     }
     fn geometry(&self, window: Entity) -> FrameGeometry {
-        let (floating, style, fullscreen, sole_tile) = self
+        let (floating, style, fullscreen, sole_tile, group_header) = self
             .windows
             .get(window)
-            .unwrap_or((false, None, false, false));
+            .unwrap_or((false, None, false, false, None));
         let mut geometry = FrameGeometry::new(
             &self.settings,
             floating,
@@ -131,7 +132,24 @@ impl FrameStyles<'_, '_> {
                 style.copied()
             },
         );
-        if self.settings.hide_solo_border && sole_tile && !floating && !fullscreen {
+        if let Some(group_header) = group_header
+            && !floating
+            && !fullscreen
+        {
+            geometry.border = BorderStyle::None;
+            geometry.radius = (f32::from(self.settings.corner_radius.min(64))
+                - self.settings.tiled.width())
+            .max(0.0);
+            geometry.joined_top = true;
+            geometry.round_bottom_left = group_header.bottom_left;
+            geometry.round_bottom_right = group_header.bottom_right;
+        }
+        if self.settings.hide_solo_border
+            && sole_tile
+            && !floating
+            && !fullscreen
+            && group_header.is_none()
+        {
             geometry.border = match geometry.border {
                 BorderStyle::Normal(_) => BorderStyle::Normal(0),
                 BorderStyle::Pixel(_) | BorderStyle::None => BorderStyle::None,
@@ -591,18 +609,26 @@ fn scene(surface: SurfaceId, style: FrameGeometry) -> impl Scene {
         Node {
             overflow: Overflow::clip(),
             border_radius: BorderRadius::px(
-                if style.border.header() > 0.0 {
+                if style.border.header() > 0.0 || style.joined_top {
                     0.0
                 } else {
                     style.inner_radius()
                 },
-                if style.border.header() > 0.0 {
+                if style.border.header() > 0.0 || style.joined_top {
                     0.0
                 } else {
                     style.inner_radius()
                 },
-                style.inner_radius(),
-                style.inner_radius(),
+                if style.round_bottom_right {
+                    style.inner_radius()
+                } else {
+                    0.0
+                },
+                if style.round_bottom_left {
+                    style.inner_radius()
+                } else {
+                    0.0
+                },
             ),
             ..Default::default()
         },
@@ -621,14 +647,23 @@ fn vacant_scene(style: FrameGeometry) -> impl Scene {
 }
 
 fn window_scene(content: impl SceneList, style: FrameGeometry) -> impl Scene {
-    let resize_handles = resize_handles(style.border);
+    let resize_handles = resize_handles(if style.joined_top {
+        BorderStyle::Pixel(0)
+    } else {
+        style.border
+    });
     bsn! {
         #FrameRoot
         Node {
             position_type: PositionType::Absolute,
             flex_direction: FlexDirection::Column,
             border: UiRect::all(px(style.border.width())),
-            border_radius: BorderRadius::all(px(style.radius)),
+            border_radius: BorderRadius::px(
+                if style.joined_top { 0.0 } else { style.radius },
+                if style.joined_top { 0.0 } else { style.radius },
+                if style.round_bottom_right { style.radius } else { 0.0 },
+                if style.round_bottom_left { style.radius } else { 0.0 },
+            ),
         }
         BorderColor::all(UNFOCUSED_BORDER)
         template(move |_| Ok(if style.border == BorderStyle::None { BoxShadow::default() } else { window_shadow() }))
@@ -641,7 +676,12 @@ fn window_scene(content: impl SceneList, style: FrameGeometry) -> impl Scene {
                     min_width: px(0),
                     min_height: px(0),
                     flex_direction: FlexDirection::Column,
-                    border_radius: BorderRadius::all(px(style.inner_radius())),
+                    border_radius: BorderRadius::px(
+                        if style.joined_top { 0.0 } else { style.inner_radius() },
+                        if style.joined_top { 0.0 } else { style.inner_radius() },
+                        if style.round_bottom_right { style.inner_radius() } else { 0.0 },
+                        if style.round_bottom_left { style.inner_radius() } else { 0.0 },
+                    ),
                     overflow: Overflow::clip(),
                 }
                 BackgroundColor(Color::srgb(0.10, 0.12, 0.16))
@@ -835,7 +875,8 @@ fn resize_handle(edge: ToplevelResizeEdge, node: Node) -> impl Scene {
     }
 }
 
-fn window_shadow() -> BoxShadow {
+/// Shared outer shadow for a window or a complete tab/stack group.
+pub fn window_shadow() -> BoxShadow {
     BoxShadow::new(
         Color::srgba(0.0, 0.0, 0.0, 0.55),
         px(0),
@@ -1155,6 +1196,124 @@ mod tests {
             )
             .expect("workspace setup");
         app
+    }
+
+    #[test]
+    fn group_content_joins_flush_and_restores_its_independent_frame() {
+        let mut app = tiled_test_app();
+        let surface = SurfaceId::for_test(719);
+        enqueue_surface_event(app.world_mut(), role(surface, WindowDecoration::ServerSide));
+        enqueue_surface_event(app.world_mut(), frame(surface, 320, 240));
+        app.update();
+        app.update();
+        let window = app
+            .world()
+            .resource::<FocusedWindow>()
+            .entity()
+            .expect("window");
+        let container = app
+            .world()
+            .get::<weld_tile::TileParent>(window)
+            .expect("parent")
+            .entity();
+        app.world_mut().trigger(weld_tile::TileSetLayout {
+            container,
+            layout: weld_tile::TileLayout::Tabbed,
+        });
+        app.update();
+        app.update();
+        let root = app
+            .world()
+            .get::<PrimaryWindowPresentation>(window)
+            .expect("presentation")
+            .entity();
+        let style = *app.world().get::<FrameGeometry>(root).expect("style");
+        assert_eq!(style.border, BorderStyle::None);
+        assert!(style.joined_top);
+        let node = app.world().get::<Node>(root).expect("node");
+        assert_eq!(node.border_radius.top_left, px(0));
+        assert_eq!(node.border_radius.top_right, px(0));
+        assert_eq!(node.border_radius.bottom_left, px(style.radius));
+        assert_eq!(node.border, UiRect::all(px(0)));
+        assert_eq!(
+            app.world().get::<BoxShadow>(root),
+            Some(&BoxShadow::default())
+        );
+        assert!(
+            app.world_mut()
+                .query::<(&WindowResizeHandle, &Node)>()
+                .iter(app.world())
+                .any(|(_, node)| node.display != Display::None)
+        );
+        app.world_mut().trigger(weld_tile::TileSetLayout {
+            container,
+            layout: weld_tile::TileLayout::Split(weld_tile::SplitAxis::Horizontal),
+        });
+        app.update();
+        app.update();
+        let root = app
+            .world()
+            .get::<PrimaryWindowPresentation>(window)
+            .expect("presentation")
+            .entity();
+        let style = *app.world().get::<FrameGeometry>(root).expect("style");
+        assert!(!style.joined_top);
+        assert!(matches!(style.border, BorderStyle::Normal(_)));
+    }
+
+    #[test]
+    fn client_decorated_content_joins_and_leaves_a_group_through_frame_arbitration() {
+        let mut app = tiled_test_app();
+        let surface = SurfaceId::for_test(720);
+        enqueue_surface_event(app.world_mut(), role(surface, WindowDecoration::ClientSide));
+        enqueue_surface_event(app.world_mut(), frame(surface, 320, 240));
+        app.update();
+        app.update();
+        let window = app
+            .world()
+            .resource::<FocusedWindow>()
+            .entity()
+            .expect("window");
+        let root = app
+            .world()
+            .get::<PrimaryWindowPresentation>(window)
+            .expect("presentation")
+            .entity();
+        assert!(app.world().get::<FrameGeometry>(root).is_none());
+        let container = app
+            .world()
+            .get::<weld_tile::TileParent>(window)
+            .expect("parent")
+            .entity();
+        app.world_mut().trigger(weld_tile::TileSetLayout {
+            container,
+            layout: weld_tile::TileLayout::Tabbed,
+        });
+        app.update();
+        app.update();
+        let root = app
+            .world()
+            .get::<PrimaryWindowPresentation>(window)
+            .expect("presentation")
+            .entity();
+        assert!(
+            app.world()
+                .get::<FrameGeometry>(root)
+                .expect("joined frame")
+                .joined_top
+        );
+        app.world_mut().trigger(weld_tile::TileSetLayout {
+            container,
+            layout: weld_tile::TileLayout::Split(weld_tile::SplitAxis::Horizontal),
+        });
+        app.update();
+        app.update();
+        let root = app
+            .world()
+            .get::<PrimaryWindowPresentation>(window)
+            .expect("presentation")
+            .entity();
+        assert!(app.world().get::<FrameGeometry>(root).is_none());
     }
 
     #[test]

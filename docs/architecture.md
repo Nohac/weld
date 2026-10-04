@@ -57,6 +57,15 @@ Weld is a workspace of reusable layers and one standard distribution:
   depend on configuration syntax or decoration/presentation crates. Each shared
   workspace has its own tree on its assigned output; retained vacancies and hoist
   placeholders keep their layout slots.
+- `weld-tile-ui` projects tab/stack group frames and clickable headers from the
+  tiler's geometry and active-branch facts. It uses SSD's palette, border width,
+  corner radius and shadow; it publishes the frame's reserved inset to the tiler.
+  Presenter measurements live in `TilePresentationMetrics`, separately from
+  reloadable management settings. Nested groups share the outermost frame;
+  all contained splits are gapless and leaf corner flags identify only its
+  outer content corners. SSD uses those facts to suppress individual chrome.
+  Header clicks use ordinary window activation. The tiler owns visibility,
+  topology and focus history, and remains usable with another presentation layer.
 - `weld-hoist-protocol` owns the serializable, transport-neutral hoist record
   subset shared by current bindings: exact revision and session identities,
   source and destination envelopes, surface modes, and
@@ -159,8 +168,12 @@ The tiler projects membership through `WindowGroupSelected`; SSD uses that marke
 for focused border colors. i3 chooses parent/child and directional targets, while
 native operations apply group resize, orientation, close and workspace transfer.
 Window activation and workspace changes reset structural selection; reconciliation
-clears retired groups. Tabs/stacks and directional cross-output movement remain
-subsequent slices. Floating windows
+clears retired groups. Tabbed and stacked containers retain ordered children,
+split proportions and their last split orientation. Their selected branch comes
+from that same history. Hidden branches retain mapping and occupancy while local
+frame demand pauses. Management and post-picking reconciliation finish before
+client focus and activity publication. Directional cross-output movement remains
+a subsequent slice. Floating windows
 share workspace ownership and selection, while `FloatingWindow` selects the
 freeform geometry plane. Mode changes preserve identity, occupancy and hoist state;
 the tiler records the former slot and last floating geometry for return.

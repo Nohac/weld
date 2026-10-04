@@ -8117,6 +8117,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "weld-tile-ui"
+version = "0.1.0"
+dependencies = [
+ "bevy",
+ "weld-app",
+ "weld-i3-quirks",
+ "weld-ssd",
+ "weld-tile",
+ "weld-window",
+]
+
+[[package]]
 name = "weld-window"
 version = "0.1.0"
 dependencies = [
@@ -8165,6 +8177,7 @@ dependencies = [
  "weld-media-vaapi",
  "weld-ssd",
  "weld-tile",
+ "weld-tile-ui",
  "weld-window",
  "weld-window-ui",
  "wgpu",

@@ -17,7 +17,7 @@ use bevy::{
         component::Component,
         entity::Entity,
         hierarchy::ChildOf,
-        query::{Has, With, Without},
+        query::{Has, Or, With, Without},
         schedule::IntoScheduleConfigs,
         system::{Commands, Query, SystemParam},
     },
@@ -76,8 +76,13 @@ pub struct WindowUiPlugin;
 /// remains unchanged, and controls inside its window geometry remain visible.
 #[derive(SystemParam)]
 pub struct WindowFramePolicy<'w, 's> {
-    requested: Query<'w, 's, (), With<ServerFrameRequested>>,
+    requested: Query<'w, 's, (), FrameRequested>,
 }
+
+type FrameRequested = Or<(
+    With<ServerFrameRequested>,
+    With<weld_window::WindowGroupHeader>,
+)>;
 
 impl WindowFramePolicy<'_, '_> {
     pub fn server_frame_required(

@@ -15,7 +15,7 @@ pub enum BorderStyle {
 }
 
 impl BorderStyle {
-    pub(crate) fn width(self) -> f32 {
+    pub fn width(self) -> f32 {
         match self {
             Self::Normal(width) | Self::Pixel(width) => f32::from(width.min(64)),
             Self::None => 0.0,
@@ -113,6 +113,9 @@ impl Default for SsdSettings {
 pub(crate) struct FrameGeometry {
     pub border: BorderStyle,
     pub radius: f32,
+    pub joined_top: bool,
+    pub round_bottom_left: bool,
+    pub round_bottom_right: bool,
 }
 
 impl FrameGeometry {
@@ -131,6 +134,9 @@ impl FrameGeometry {
         );
         Self {
             border,
+            joined_top: false,
+            round_bottom_left: true,
+            round_bottom_right: true,
             radius: if border == BorderStyle::None {
                 0.0
             } else {

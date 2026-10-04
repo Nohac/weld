@@ -100,6 +100,15 @@ pub struct TiledWindow;
 #[derive(Component, Clone, Copy, Debug, Default)]
 pub struct WindowGroupSelected;
 
+/// A group frame supplies this window's chrome; its content joins beneath the header.
+#[derive(Component, Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct WindowGroupHeader {
+    /// This leaf reaches the shared frame's bottom-left content corner.
+    pub bottom_left: bool,
+    /// This leaf reaches the shared frame's bottom-right content corner.
+    pub bottom_right: bool,
+}
+
 /// Retained preference to keep a floating window on its output across workspace switches.
 #[derive(Component, Clone, Copy, Debug, Default)]
 pub struct StickyWindow;

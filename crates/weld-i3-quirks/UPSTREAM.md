@@ -30,7 +30,7 @@ for the command semantics; they do not claim a complete port of `101-focus.t`
 or `307-focus-next-prev.t`. Group selection retains a concrete keyboard-focused
 client and projects selected membership onto Weld frames. Sticky regressions
 cover vacant slots, delayed activation when toggling floating, focus retention
-and output locality. Whole-group floating/fullscreen and tabs/stacks remain open.
+and output locality. Whole-group floating/fullscreen remain open.
 
 - Parent/child and sibling selection: `101-focus.t`, `307-focus-next-prev.t`.
 - Wrapping interactions: `170-force_focus_wrapping.t`, `308-focus_wrapping.t`,
@@ -49,6 +49,34 @@ and output locality. Whole-group floating/fullscreen and tabs/stacks remain open
 This is partial scenario coverage, not a claim that these whole files or the
 complete suite have been ported. Each later slice should record its adapted
 cases and explicit platform exclusions here.
+
+## Tabbed and stacked layout coverage
+
+`tests/cases/layout.rs` adds supported transition sequences from `192-layout.t`
+and the stacking-axis independence scenario from `131-stacking-order.t`.
+The invalid-toggle case in `292-regress-layout-toggle.t` is covered at Weld's
+configuration boundary: malformed layout names reject the candidate. Unlike i3's
+permissive toggle list, Weld does not skip unknown names within a list.
+
+Command targeting follows `con_set_layout` in pinned `src/con.c`: ordinary
+selection acts on its parent; a populated workspace groups its contents for an
+explicit layout, while `default` restores its split without wrapping. The unary
+collapse guard prevents repeated split/tab transitions from growing a chain.
+Directional axes follow `con_orientation`; close recovery and active branches
+reuse the existing focus history. Tab/stack groups survive with one child.
+
+Local regressions cover nested visibility, remembered-child restoration,
+reordering/extraction, group workspace transfer and retained split shares. Tiler
+tests additionally check local frame-demand pause/resume and native geometric
+navigation excluding hidden tabs. GPU-free header tests check click activation,
+late-frame visibility, fullscreen teardown/restoration, unchanged node retention
+and the shared rounded perimeter. Header-wheel cycling (`297-scroll-tabbed.t`),
+the full nested movement matrix and complete upstream suite remain follow-ups.
+
+Weld's shared-frame presentation is local policy: contained splits are gapless,
+nested tab/stack groups share one outer border, and only outer content corners
+round. Tests cover all four outer/inner tab/stack combinations, extraction,
+client-decoration transitions and presenter measurements surviving config reload.
 
 Source: https://github.com/i3/i3/tree/903bcd518df32b0e055b17f5da3f988a0187fd3d/testcases
 
@@ -93,10 +121,10 @@ when no adjacent output exists, matching `tree_move`'s directed-output branch.
 Weld-specific coverage protects retained slots, startup ordering, invalid edits
 and depth-limit termination. Native flattening retains relative child proportions.
 
-`516-move.t` and `524-move.t` were inspected but require multi-output/workspace
-and fullscreen or stacked-layout support. Those suites remain deferred, along
-with group selection, floating movement, marks and criteria. This batch does not
-claim those command or layout surfaces.
+`516-move.t` and `524-move.t` were inspected during this initial movement batch
+but have not been ported in full. Group selection and basic tab/stack movement
+now have the separate coverage listed above. Cross-output movement, explicit
+floating movement, marks and broader criteria remain follow-ups.
 
 ## Workspace foundation coverage
 

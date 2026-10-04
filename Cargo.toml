@@ -34,6 +34,7 @@ members = [
   "crates/weld-ssd",
   "crates/weld-sway-config",
   "crates/weld-tile",
+  "crates/weld-tile-ui",
   "crates/weld-window",
   "crates/weld-window-ui",
 ]
@@ -104,6 +105,7 @@ weld-window = { path = "crates/weld-window" }
 weld-window-ui = { path = "crates/weld-window-ui" }
 weld-ssd = { path = "crates/weld-ssd" }
 weld-tile = { path = "crates/weld-tile" }
+weld-tile-ui = { path = "crates/weld-tile-ui" }
 weld-float = { path = "crates/weld-float" }
 weld-i3-quirks = { path = "crates/weld-i3-quirks" }
 weld-gamepad = { path = "crates/weld-gamepad" }

@@ -14,6 +14,7 @@ mod plugin;
 mod resize;
 mod selection;
 mod structural;
+mod visibility;
 mod workspace;
 
 use bevy::ecs::{
@@ -28,9 +29,11 @@ use bevy::ecs::{
 use weld_window::WindowId;
 
 const COMMAND_CAPACITY: usize = 256;
-const MAX_DEPTH: usize = 64;
+/// Maximum container depth accepted by structural edits and tree traversals.
+pub const MAX_DEPTH: usize = 64;
 
 pub use history::TileFocusHistory;
+pub use layout::LayoutRect as TileGeometry;
 pub use plugin::TilePlugin;
 pub use selection::{TileSelect, TileSelection};
 
@@ -44,6 +47,8 @@ pub enum TileSystems {
     /// Distribution actions run after admission and before final layout.
     Actions,
     Layout,
+    /// Reconcile header clicks and other post-picking selection before client focus.
+    LateLayout,
 }
 
 /// Orientation of a split. Horizontal places children left to right.
@@ -56,6 +61,47 @@ pub enum SplitAxis {
     Horizontal,
     Vertical,
 }
+
+/// Placement of a container's children. Overlapping layouts show one branch.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TileLayout {
+    Split(SplitAxis),
+    Tabbed,
+    Stacked,
+}
+
+impl TileLayout {
+    /// Axis used for directional navigation between children.
+    pub const fn axis(self) -> SplitAxis {
+        match self {
+            Self::Split(axis) => axis,
+            Self::Tabbed => SplitAxis::Horizontal,
+            Self::Stacked => SplitAxis::Vertical,
+        }
+    }
+    pub const fn is_split(self) -> bool {
+        matches!(self, Self::Split(_))
+    }
+}
+
+/// Change an existing container's layout while retaining edges and proportions.
+#[derive(Event, Clone, Copy, Debug)]
+pub struct TileSetLayout {
+    pub container: Entity,
+    pub layout: TileLayout,
+}
+
+/// Policy-owned geometry for a container header, in workspace-output coordinates.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TileHeader {
+    pub child: Entity,
+    pub geometry: weld_window::WindowGeometry,
+    pub selected: bool,
+}
+
+/// Header presentation facts published by layout and consumed by shell UI.
+#[derive(Component, Debug, Default, PartialEq)]
+pub struct TileHeaders(pub Vec<TileHeader>);
 
 /// Direction in output-local logical coordinates.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -87,6 +133,13 @@ pub enum TileTreeEdit {
     /// Group a container's current children under their existing axis, then
     /// give the outer container a new axis. Child order and weights survive.
     WrapChildren { container: Entity, axis: SplitAxis },
+    /// Put all children in a new group with the requested layout.
+    GroupChildren {
+        container: Entity,
+        layout: TileLayout,
+    },
+    /// Promote a unary container's child into its slot, retaining its share.
+    Collapse { container: Entity },
     /// Flatten a unary group containing a split on its parent's axis. The
     /// promoted children retain their combined share and relative proportions.
     Flatten { container: Entity },
@@ -121,6 +174,24 @@ impl Default for TileSettings {
     }
 }
 
+/// Presenter-owned measurements, preserved when management configuration reloads.
+#[derive(Resource, Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TilePresentationMetrics {
+    /// Logical height reserved for each tab/stack header row.
+    pub header_height: u16,
+    /// Space reserved around the outermost group's shared frame.
+    pub group_border: u16,
+}
+
+impl Default for TilePresentationMetrics {
+    fn default() -> Self {
+        Self {
+            header_height: 28,
+            group_border: 0,
+        }
+    }
+}
+
 /// Session-stable container identity; never expose Bevy entities to persistence.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct ContainerId(u64);
@@ -133,9 +204,11 @@ impl ContainerId {
 
 /// Ordered tree edges and orientation, queryable but edited through commands.
 #[derive(Component, Debug)]
+#[require(TileHeaders)]
 pub struct TileContainer {
     id: ContainerId,
     axis: SplitAxis,
+    layout: TileLayout,
     children: Vec<TileChild>,
     /// Child node for which an explicit split is waiting for its second child.
     prepared_split: Option<Entity>,
@@ -146,7 +219,20 @@ impl TileContainer {
         self.id
     }
     pub const fn axis(&self) -> SplitAxis {
+        self.layout.axis()
+    }
+    pub const fn layout(&self) -> TileLayout {
+        self.layout
+    }
+    pub const fn last_split_axis(&self) -> SplitAxis {
         self.axis
+    }
+    fn set_layout(&mut self, layout: TileLayout) {
+        if let TileLayout::Split(axis) = layout {
+            self.axis = axis;
+        }
+        self.layout = layout;
+        self.prepared_split = None;
     }
     pub fn children(&self) -> impl Iterator<Item = (Entity, f32)> + '_ {
         self.children

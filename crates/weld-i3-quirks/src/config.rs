@@ -21,6 +21,7 @@ pub enum Action<Extension = ()> {
     Move(Direction),
     Workspace(I3WorkspaceRequest),
     Tile(TileOperation),
+    Layout(crate::I3LayoutRequest),
     Floating(Option<bool>),
     FocusModeToggle,
     FocusHierarchy(crate::I3FocusHierarchy),
@@ -405,13 +406,101 @@ fn direction(value: &str) -> Result<Direction> {
     }
 }
 
+fn layout_choice(word: &str) -> Result<crate::LayoutChoice> {
+    use crate::LayoutChoice;
+    use weld_tile::TileLayout;
+    Ok(match word {
+        "splith" => LayoutChoice::Layout(TileLayout::Split(SplitAxis::Horizontal)),
+        "splitv" => LayoutChoice::Layout(TileLayout::Split(SplitAxis::Vertical)),
+        "tabbed" => LayoutChoice::Layout(TileLayout::Tabbed),
+        "stacking" | "stacked" => LayoutChoice::Layout(TileLayout::Stacked),
+        "split" => LayoutChoice::Split,
+        _ => bail!("unknown layout {word}"),
+    })
+}
+
+fn layout_action(words: &[&str]) -> Result<crate::I3LayoutRequest> {
+    use crate::{I3LayoutRequest, LayoutChoice};
+    Ok(match words {
+        ["toggle"] => I3LayoutRequest::Toggle,
+        ["toggle", "all"] => I3LayoutRequest::ToggleAll,
+        ["toggle", choices @ ..] if !choices.is_empty() => I3LayoutRequest::Cycle(
+            choices
+                .iter()
+                .map(|word| layout_choice(word))
+                .collect::<Result<_>>()?,
+        ),
+        ["default"] => I3LayoutRequest::Default,
+        [word] => match layout_choice(word)? {
+            LayoutChoice::Layout(layout) => I3LayoutRequest::Set(layout),
+            LayoutChoice::Split => bail!("use layout toggle split or layout default"),
+        },
+        _ => bail!("layout requires a layout name or toggle sequence"),
+    })
+}
+
+#[cfg(test)]
+mod layout_tests {
+    use super::*;
+    use crate::{I3LayoutRequest, LayoutChoice};
+    use weld_tile::TileLayout;
+
+    #[test]
+    fn layout_bindings_compile_to_distinct_preparation_and_layout_actions() {
+        let config: Configuration = parse_with_extensions(
+            "layouts",
+            indoc::indoc! {"
+            set $mod Mod1
+            bindsym $mod+s layout stacking
+            bindsym $mod+w layout tabbed
+            bindsym $mod+e layout toggle split
+            bindsym $mod+v splitv
+            bindsym $mod+h layout splith
+            bindsym $mod+t layout toggle tabbed stacked splitv
+        "},
+            |_| bail!("unexpected extension"),
+        )
+        .expect("config");
+        assert_eq!(
+            config
+                .bindings
+                .iter()
+                .map(|(_, action)| action.clone())
+                .collect::<Vec<_>>(),
+            [
+                Action::Layout(I3LayoutRequest::Set(TileLayout::Stacked)),
+                Action::Layout(I3LayoutRequest::Set(TileLayout::Tabbed)),
+                Action::Layout(I3LayoutRequest::Cycle(vec![LayoutChoice::Split])),
+                Action::Tile(TileOperation::Split(SplitAxis::Vertical)),
+                Action::Layout(I3LayoutRequest::Set(TileLayout::Split(
+                    SplitAxis::Horizontal
+                ))),
+                Action::Layout(I3LayoutRequest::Cycle(vec![
+                    LayoutChoice::Layout(TileLayout::Tabbed),
+                    LayoutChoice::Layout(TileLayout::Stacked),
+                    LayoutChoice::Layout(TileLayout::Split(SplitAxis::Vertical))
+                ])),
+            ]
+        );
+    }
+
+    #[test]
+    fn invalid_layout_cycle_rejects_the_candidate_instead_of_mutating_live_state() {
+        let result: Result<Configuration> =
+            parse_with_extensions("layouts", "bindsym Mod1+x layout toggle 1337 1337", |_| {
+                bail!("extension")
+            });
+        assert!(result.is_err());
+    }
+}
+
 fn action<Extension>(
     words: &[&str],
     extension: &impl Fn(&[&str]) -> Result<Extension>,
 ) -> Result<Action<Extension>> {
     Ok(match words {
         ["focus", "tiling" | "floating"]
-        | ["layout" | "mode", ..]
+        | ["mode", ..]
         | ["move", "scratchpad"]
         | ["move", "workspace", "to", "output", ..] => {
             return Err(unsupported(format!(
@@ -439,6 +528,7 @@ fn action<Extension>(
             Action::Exec(exec_command(command)?)
         }
         ["exit"] => Action::Exit,
+        ["layout", args @ ..] => Action::Layout(layout_action(args)?),
         ["splith"] | ["split", "h"] | ["split", "horizontal"] => {
             Action::Tile(TileOperation::Split(SplitAxis::Horizontal))
         }
@@ -628,7 +718,7 @@ mod tests {
             |_| Err(unsupported("unknown command")),
         )
         .expect("portable config");
-        assert_eq!(config.bindings.len(), 3);
+        assert_eq!(config.bindings.len(), 4);
         assert_eq!(
             config.startup,
             [StartupCommand {
@@ -642,7 +732,7 @@ mod tests {
                 .iter()
                 .map(|warning| warning.line)
                 .collect::<Vec<_>>(),
-            [2, 4, 5, 8, 13]
+            [2, 5, 8, 13]
         );
         assert!(config.pointer.focus_follows_mouse);
         assert!(config.keymap.is_none());

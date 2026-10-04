@@ -29,6 +29,8 @@ use weld_window::{
     WindowInteractionSession, WindowPlugin, WindowVacancy, WindowZOrder,
 };
 
+#[path = "cases/layout.rs"]
+mod layout;
 #[path = "cases/movement.rs"]
 mod movement;
 #[path = "cases/selection.rs"]

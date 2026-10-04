@@ -46,7 +46,7 @@ impl Boundaries<'_, '_> {
                 .children
                 .iter()
                 .position(|child| child.entity == branch)?;
-            if container.axis == axis {
+            if container.layout == crate::TileLayout::Split(axis) {
                 let first = if leading {
                     index.checked_sub(1)
                 } else {
@@ -193,7 +193,7 @@ fn resize_boundary(
     rectangles: &Query<&LayoutRect>,
 ) -> Option<bool> {
     let mut container = containers.get_mut(boundary.parent).ok()?;
-    if container.axis != axis {
+    if container.layout != crate::TileLayout::Split(axis) {
         return None;
     }
     let index = container

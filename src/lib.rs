@@ -314,6 +314,7 @@ pub fn run(arguments: AppArguments) -> Result<()> {
         WindowUiPlugin,
         SsdPlugin,
         TilePlugin,
+        weld_tile_ui::TileUiPlugin,
         weld_float::FloatBehaviorPlugin,
         GlobalShortcutPlugin,
         VirtualTerminalShortcutPlugin,

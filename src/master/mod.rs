@@ -283,6 +283,7 @@ fn dispatch_action(
             }
         },
         Action::Tile(operation) => effects.commands.trigger(TileRequest::Focused(operation)),
+        Action::Layout(request) => effects.commands.trigger(request),
         Action::Floating(enabled) => effects.commands.trigger(weld_tile::TileFloatingRequest {
             window: None,
             enabled,

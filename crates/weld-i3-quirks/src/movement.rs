@@ -257,8 +257,12 @@ pub(crate) fn cleanup(
             let (_, child_layout) = containers.get(child).ok()?;
             let parent = parents.get(node).ok()?.entity();
             let (_, parent_layout) = containers.get(parent).ok()?;
-            (container.axis() != child_layout.axis() && child_layout.axis() == parent_layout.axis())
-                .then_some((container.id().raw(), node))
+            (container.layout().is_split()
+                && child_layout.layout().is_split()
+                && parent_layout.layout().is_split()
+                && container.axis() != child_layout.axis()
+                && child_layout.axis() == parent_layout.axis())
+            .then_some((container.id().raw(), node))
         })
         .min_by_key(|(id, _)| *id);
     if let Some((_, node)) = redundant {

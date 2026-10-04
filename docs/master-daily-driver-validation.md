@@ -158,6 +158,35 @@ The example keeps Mod+B for border toggling; launch Blender with Mod+Shift+B.
 6. Hoist one of two retained slots. Its placeholder should still count, preserving
    the workspace layout and the other tile's spacing.
 
+## Tabbed and stacked layout validation
+
+1. Open three terminals. Mod+W creates tabs; Mod+S creates stacked headers.
+   Only the active branch should show content, and its title should be highlighted.
+2. Click each header and type. Left/right navigate tabs; up/down navigate stacks.
+   Moving the pointer over inactive header text must not send clicks to hidden content.
+3. Mod+E restores the previous split, then alternates its axis. Existing split
+   proportions should return. `splith`/`splitv` still prepare a nested split.
+4. Create a split inside a tab. Switching away hides both descendants; switching
+   back restores that branch's remembered selection. Move children with the usual
+   Mod+Shift+arrows, including extraction at the group edge.
+5. Close the active tab, then close down to one. Focus should recover locally,
+   and the next terminal should join the remaining tab group.
+6. Select the group with Mod+P and move it to another workspace. Return and check
+   order, layout, focus, and retained hoist placeholders.
+7. Check the outer frame: tabs/stacks and content share one border and shadow.
+   Only the top row's outer corners round; content meets the headers without
+   corner holes. Switching to split/floating restores independent frames.
+   Split inside a tab, then create another tab/stack group inside it: interior
+   gaps, borders, shadows and rounding stay suppressed. Nested headers remain
+   selectable, and extracting the nested group restores its own frame.
+8. Fullscreen the active tab and exit. Headers disappear and return, without
+   revealing inactive tab contents. Check mixed-scale outputs separately.
+
+The user confirmed initial tabs/stacks and interaction work, then confirmed the
+group-owned perimeter looked good. A further pass found independent chrome on
+nested splits; shared frame ownership now covers the complete subtree. That
+descendant behavior still needs visual confirmation after rebuilding.
+
 ## Tiled mouse resizing
 
 1. Open two terminals side by side. Drag the shared border with the left button.

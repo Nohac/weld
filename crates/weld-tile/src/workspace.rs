@@ -70,6 +70,7 @@ fn initialize(
             prepared_split: None,
             id,
             axis: settings.default_axis,
+            layout: crate::TileLayout::Split(settings.default_axis),
             children: Vec::new(),
         },
         LayoutRect(bounds(geometry, work_area, settings, false)),
@@ -264,6 +265,7 @@ pub(crate) fn move_window(
         let children = container.children.clone();
         let prepared_split = container.prepared_split;
         let axis = container.axis;
+        let layout = container.layout;
         let Some(group) = editor.create_container(axis, children.clone()) else {
             return;
         };
@@ -278,7 +280,10 @@ pub(crate) fn move_window(
             .commands
             .entity(group)
             .entry::<TileContainer>()
-            .and_modify(move |mut container| container.prepared_split = prepared_split);
+            .and_modify(move |mut container| {
+                container.layout = layout;
+                container.prepared_split = prepared_split;
+            });
         for child in children {
             editor
                 .commands

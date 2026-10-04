@@ -6,7 +6,9 @@
 
 pub mod config;
 mod focus;
+mod layout;
 mod movement;
+pub use layout::{I3LayoutRequest, LayoutChoice};
 mod sticky;
 pub use sticky::I3StickyRequest;
 mod tree;
@@ -69,6 +71,7 @@ impl Plugin for I3QuirksPlugin {
             .add_observer(workspace::after_move)
             .init_resource::<focus::FocusPath>()
             .add_observer(focus::navigate)
+            .add_observer(layout::request)
             .add_observer(focus::mode_toggle)
             .add_observer(focus::hierarchy)
             .add_observer(focus::remember_focus)

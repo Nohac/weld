@@ -89,6 +89,7 @@ impl TreeEditor<'_, '_> {
                     TileContainer {
                         id,
                         axis,
+                        layout: crate::TileLayout::Split(axis),
                         children,
                         prepared_split: None,
                     },
@@ -101,7 +102,9 @@ impl TreeEditor<'_, '_> {
     fn split(&mut self, window: Entity, axis: SplitAxis) {
         if self.roots.contains(window) {
             if let Ok(mut container) = self.containers.get_mut(window) {
-                container.axis = axis;
+                let prepared = container.prepared_split;
+                container.set_layout(crate::TileLayout::Split(axis));
+                container.prepared_split = prepared;
                 self.dirty.0 = true;
             }
             return;
@@ -112,9 +115,9 @@ impl TreeEditor<'_, '_> {
         let Ok(container) = self.containers.get(parent.0) else {
             return;
         };
-        if container.children.len() == 1 {
+        if container.children.len() == 1 && container.layout.is_split() {
             if let Ok(mut container) = self.containers.get_mut(parent.0) {
-                container.axis = axis;
+                container.set_layout(crate::TileLayout::Split(axis));
                 container.prepared_split = Some(window);
                 self.dirty.0 = true;
             }
@@ -210,7 +213,7 @@ impl TreeEditor<'_, '_> {
             let Ok(container) = self.containers.get(parent.0) else {
                 return;
             };
-            if container.axis == axis && container.children.len() > 1 {
+            if container.layout == crate::TileLayout::Split(axis) && container.children.len() > 1 {
                 let Some(index) = container
                     .children
                     .iter()
@@ -290,7 +293,7 @@ pub(crate) fn apply_request(
         }
         TileOperation::Split(axis) => editor.split(window, axis),
         TileOperation::Focus(direction) => {
-            if let Some(next) = neighbor(&windows, &owners, window, direction) {
+            if let Some(next) = neighbor(&windows, &owners, &editor, window, direction) {
                 editor.commands.trigger(WindowCommand {
                     window: next,
                     kind: WindowCommandKind::Focus,
@@ -299,7 +302,7 @@ pub(crate) fn apply_request(
             }
         }
         TileOperation::Move(direction) => {
-            if let Some(next) = neighbor(&windows, &owners, window, direction) {
+            if let Some(next) = neighbor(&windows, &owners, &editor, window, direction) {
                 editor.swap(window, next);
             }
         }
@@ -320,6 +323,7 @@ pub(crate) struct CommandSelection<'w> {
 fn neighbor(
     windows: &Query<(Entity, &ManagedWindow, &WindowGeometry)>,
     owners: &Query<(&ManagedBy, Has<TileParent>)>,
+    editor: &TreeEditor,
     window: Entity,
     direction: Direction,
 ) -> Option<Entity> {
@@ -335,7 +339,12 @@ fn neighbor(
     windows
         .iter()
         .filter_map(|(entity, managed, rect)| {
-            if !owners
+            if !crate::visibility::branch_visible(
+                entity,
+                &editor.parents.as_readonly(),
+                &editor.containers.as_readonly(),
+                &editor.history,
+            ) || !owners
                 .get(entity)
                 .is_ok_and(|(candidate, tiled)| tiled && candidate.0 == owner)
             {

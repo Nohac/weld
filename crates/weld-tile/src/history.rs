@@ -17,6 +17,12 @@ use crate::{TileParent, TileTreeChanged};
 pub struct TileFocusHistory(Vec<Entity>);
 
 impl TileFocusHistory {
+    /// Last-selected direct child, falling back to insertion order.
+    pub fn active_child(&self, container: &crate::TileContainer) -> Option<Entity> {
+        self.recent()
+            .find(|node| container.children().any(|(child, _)| child == *node))
+            .or_else(|| container.children().next().map(|(child, _)| child))
+    }
     pub fn recent(&self) -> impl Iterator<Item = Entity> + '_ {
         self.0.iter().copied()
     }

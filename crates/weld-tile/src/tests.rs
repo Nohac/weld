@@ -24,6 +24,203 @@ use weld_window::{
     WindowPresentationOverride, WindowVacancy,
 };
 
+#[test]
+fn inactive_tabs_pause_local_demand_and_switching_reactivates_the_retained_surface() {
+    let mut app = app();
+    let first = window(&mut app, 1);
+    let second = window(&mut app, 2);
+    let first_surface = SurfaceId::for_test(701);
+    let second_surface = SurfaceId::for_test(702);
+    for (window, surface) in [(first, first_surface), (second, second_surface)] {
+        app.world_mut().spawn((
+            ClientToplevel { surface },
+            ClientSource {
+                id: surface.source(),
+                provenance: ClientProvenance::Local,
+            },
+            MappedSurface {
+                logical_size: Vec2::new(400.0, 600.0),
+                visual_size: Vec2::new(400.0, 600.0),
+                visual_offset: Vec2::ZERO,
+                opaque: true,
+                alpha_mode: Default::default(),
+            },
+            OccupiesWindow(window),
+        ));
+    }
+    app.update();
+    take_surface_actions(app.world_mut());
+    let container = app
+        .world()
+        .get::<TileParent>(second)
+        .expect("root")
+        .entity();
+    app.world_mut().trigger(TileSetLayout {
+        container,
+        layout: TileLayout::Tabbed,
+    });
+    app.update();
+    let actions = take_surface_actions(app.world_mut());
+    assert!(actions.iter().any(|action| matches!(action, SurfaceAction::SetPresentation { surface, rate: None } if *surface == first_surface)));
+    app.world_mut().trigger(WindowCommand {
+        window: first,
+        kind: WindowCommandKind::Focus,
+    });
+    app.update();
+    let actions = take_surface_actions(app.world_mut());
+    assert!(actions.iter().any(|action| matches!(action, SurfaceAction::SetPresentation { surface, rate: Some(_) } if *surface == first_surface)));
+    assert!(actions.iter().any(|action| matches!(action, SurfaceAction::SetPresentation { surface, rate: None } if *surface == second_surface)));
+    assert_eq!(
+        app.world_mut()
+            .query::<&MappedSurface>()
+            .iter(app.world())
+            .count(),
+        2
+    );
+    app.update();
+    assert!(
+        !take_surface_actions(app.world_mut())
+            .iter()
+            .any(|action| matches!(action, SurfaceAction::SetPresentation { .. }))
+    );
+}
+
+#[test]
+fn native_geometric_navigation_and_move_choose_the_visible_tab() {
+    for operation in [
+        TileOperation::Focus(Direction::Right),
+        TileOperation::Move(Direction::Right),
+    ] {
+        let mut app = app();
+        let first = window(&mut app, 1);
+        let hidden = window(&mut app, 2);
+        command(&mut app, 2, TileOperation::Split(SplitAxis::Vertical));
+        let active = window(&mut app, 3);
+        let group = app
+            .world()
+            .get::<TileParent>(active)
+            .expect("group")
+            .entity();
+        app.world_mut().trigger(TileSetLayout {
+            container: group,
+            layout: TileLayout::Tabbed,
+        });
+        app.update();
+        app.world_mut().trigger(WindowCommand {
+            window: first,
+            kind: WindowCommandKind::Focus,
+        });
+        app.update();
+        command(&mut app, 1, operation);
+        assert_eq!(
+            app.world()
+                .get::<TileParent>(hidden)
+                .expect("hidden parent")
+                .entity(),
+            group
+        );
+        if matches!(operation, TileOperation::Focus(_)) {
+            assert_eq!(
+                app.world().resource::<FocusedWindow>().entity(),
+                Some(active)
+            );
+        } else {
+            assert_eq!(
+                app.world()
+                    .get::<TileParent>(first)
+                    .expect("moved")
+                    .entity(),
+                group
+            );
+            assert_ne!(
+                app.world()
+                    .get::<TileParent>(active)
+                    .expect("swapped")
+                    .entity(),
+                group
+            );
+        }
+    }
+}
+
+#[test]
+fn descendants_of_a_group_are_gapless_and_only_touching_outer_corners_are_rounded() {
+    let mut app = app();
+    app.world_mut().resource_mut::<TileSettings>().inner_gap = 20;
+    app.world_mut()
+        .resource_mut::<TilePresentationMetrics>()
+        .group_border = 3;
+    let first = window(&mut app, 1);
+    let second = window(&mut app, 2);
+    let outer = app
+        .world()
+        .get::<TileParent>(second)
+        .expect("outer")
+        .entity();
+    app.world_mut().trigger(TileSetLayout {
+        container: outer,
+        layout: TileLayout::Tabbed,
+    });
+    app.update();
+    command(&mut app, 2, TileOperation::Split(SplitAxis::Horizontal));
+    let third = window(&mut app, 3);
+    app.update();
+    let left = geometry(&app, second);
+    let right = geometry(&app, third);
+    assert_eq!(left.position.x + left.size.x, right.position.x);
+    assert_eq!(
+        app.world().get::<weld_window::WindowGroupHeader>(second),
+        Some(&weld_window::WindowGroupHeader {
+            bottom_left: true,
+            bottom_right: false
+        })
+    );
+    assert_eq!(
+        app.world().get::<weld_window::WindowGroupHeader>(third),
+        Some(&weld_window::WindowGroupHeader {
+            bottom_left: false,
+            bottom_right: true
+        })
+    );
+    command(&mut app, 3, TileOperation::Split(SplitAxis::Vertical));
+    let fourth = window(&mut app, 4);
+    app.update();
+    let top = geometry(&app, third);
+    let bottom = geometry(&app, fourth);
+    assert_eq!(top.position.y + top.size.y, bottom.position.y);
+    assert_eq!(
+        app.world().get::<weld_window::WindowGroupHeader>(third),
+        Some(&weld_window::WindowGroupHeader {
+            bottom_left: false,
+            bottom_right: false
+        })
+    );
+    assert_eq!(
+        app.world().get::<weld_window::WindowGroupHeader>(fourth),
+        Some(&weld_window::WindowGroupHeader {
+            bottom_left: false,
+            bottom_right: true
+        })
+    );
+    assert_eq!(
+        app.world().get::<weld_window::WindowVisibility>(first),
+        Some(&weld_window::WindowVisibility::Hidden)
+    );
+    app.world_mut().trigger(TileSetLayout {
+        container: outer,
+        layout: TileLayout::Split(SplitAxis::Horizontal),
+    });
+    app.update();
+    let left = geometry(&app, second);
+    let right = geometry(&app, third);
+    assert_eq!(right.position.x - left.position.x - left.size.x, 20.0);
+    assert!(
+        app.world()
+            .get::<weld_window::WindowGroupHeader>(fourth)
+            .is_none()
+    );
+}
+
 use super::*;
 use bevy::input::ButtonState;
 use bevy::input::mouse::{MouseButton, MouseButtonInput, MouseMotion};
@@ -1712,7 +1909,7 @@ fn flattening_unary_groups_preserves_proportions_and_history() {
             app.world_mut()
                 .get_mut::<TileContainer>(outer)
                 .expect("outer")
-                .axis = SplitAxis::Horizontal;
+                .set_layout(TileLayout::Split(SplitAxis::Horizontal));
         }
         command(
             &mut app,

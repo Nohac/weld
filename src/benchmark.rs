@@ -24,6 +24,7 @@ pub fn configure(app: &mut App, config: &Path) -> Result<()> {
         WindowUiPlugin,
         SsdPlugin,
         TilePlugin,
+        weld_tile_ui::TileUiPlugin,
         GlobalShortcutPlugin,
         VirtualTerminalShortcutPlugin,
         crate::overlay::DistributionOverlayPlugin,
