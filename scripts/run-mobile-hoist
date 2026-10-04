@@ -1,0 +1,163 @@
+#!/usr/bin/env python3
+"""Build/deploy the Bevy phone proof and stream one private test application.
+
+Uses Iroh N0 over the phone's network; USB supplies deployment and explicit
+development enrollment only. The host's existing desktop is left alone.
+"""
+import argparse
+import fcntl
+import hashlib
+import os
+from pathlib import Path
+import resource
+import runpy
+import signal
+import subprocess
+import tempfile
+import time
+
+ROOT = Path(__file__).resolve().parent.parent
+COMMON = runpy.run_path(str(ROOT / "scripts/run-godot-hoist"))
+PACKAGE = "org.weld.mobile"
+DIRECTORY = "files/weld-device"
+
+
+def stop_run(logcat, stop_viewer, host):
+    """Attempt every owned teardown even if an earlier cleanup step fails."""
+    try:
+        if logcat is not None:
+            logcat.terminate()
+            try:
+                logcat.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                logcat.kill()
+                logcat.wait(timeout=5)
+    finally:
+        try:
+            stop_viewer()
+        finally:
+            if host is not None:
+                host.close()
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--serial")
+    parser.add_argument("--seconds", type=int, default=120)
+    parser.add_argument("--codec", choices=("av1", "h264"), default="av1")
+    parser.add_argument("--no-build", action="store_true", help="use the installed APK and existing host build")
+    parser.add_argument("command", nargs=argparse.REMAINDER)
+    args = parser.parse_args()
+    if not 1 <= args.seconds <= 1800:
+        parser.error("--seconds must be 1..1800")
+    app = args.command
+    if app[:1] == ["--"]:
+        app = app[1:]
+    app = app or ["foot", "-e", "htop"]
+    os.umask(0o077)
+    resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
+    serial = args.serial
+    if serial is None:
+        devices = subprocess.check_output(["adb", "devices"], text=True, timeout=5)
+        ready = [line.split()[0] for line in devices.splitlines() if line.endswith("\tdevice")]
+        if len(ready) != 1:
+            parser.error("connect one authorized Android device or pass --serial")
+        serial = ready[0]
+    adb = ["adb", "-s", serial]
+    lock_directory = ROOT / "target/mobile"
+    lock_directory.mkdir(parents=True, exist_ok=True)
+    lock = (lock_directory / (hashlib.sha256(serial.encode()).hexdigest() + ".lock")).open("a")
+    try:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        parser.error("a mobile test is already using this device; stop it with Ctrl-C first")
+
+    def device(*arguments, timeout=15, **kwargs):
+        return subprocess.run([*adb, *arguments], check=True, timeout=timeout, **kwargs)
+
+    if not args.no_build:
+        subprocess.run([str(ROOT / "scripts/build-mobile")], check=True)
+        subprocess.run(["cargo", "build", "--locked", "--bin", "weldwm", "-j8"], cwd=ROOT, check=True)
+        device("install", "-r", str(ROOT / "target/mobile/weld-mobile.apk"), timeout=180)
+    state = Path(os.environ.get("XDG_DATA_HOME", str(Path.home() / ".local/share"))) / "weld/mobile-hoist"
+    state.mkdir(parents=True, mode=0o700, exist_ok=True)
+    validation = ROOT / "target/validation"
+    validation.mkdir(parents=True, exist_ok=True)
+    directory = Path(tempfile.mkdtemp(prefix="mobile-hoist-", dir=validation))
+    runtime = directory / "runtime"
+    runtime.mkdir(mode=0o700)
+    stopped = False
+    host = None
+    logcat = None
+
+    def stop(_signal, _frame):
+        nonlocal stopped
+        stopped = True
+
+    for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+        signal.signal(sig, stop)
+
+    def wait(predicate, seconds=30):
+        until = time.monotonic() + seconds
+        while time.monotonic() < until:
+            if stopped:
+                raise InterruptedError("cancelled")
+            if host is not None and host.exited():
+                raise RuntimeError(f"source exited; inspect {directory}")
+            result = predicate()
+            if result:
+                return result
+            time.sleep(0.1)
+        raise RuntimeError(f"startup timed out; inspect {directory}")
+
+    def phone_read(name):
+        result = subprocess.run([*adb, "shell", "-T", "run-as", PACKAGE,
+            "head", "-c", "4097", f"{DIRECTORY}/{name}"], text=True,
+            capture_output=True, timeout=5)
+        return result.stdout if result.returncode == 0 else None
+
+    print(f"Logs: {directory}", flush=True)
+    print("Iroh N0 uses Internet discovery/relays; the development receiver uses public DNS.", flush=True)
+    try:
+        device("shell", "am", "force-stop", PACKAGE)
+        device("shell", "am", "start", "-n", f"{PACKAGE}/android.app.NativeActivity")
+        public = COMMON["identity"](wait(lambda: phone_read("public.identity")))
+        COMMON["write_new"](directory / "viewer.identity", public + "\n")
+        host = COMMON["LAUNCHER"]["OwnedHost"]("source",
+            COMMON["source_command"](directory, state, app, bitrate_mbps=8, codec=args.codec),
+            COMMON["source_environment"](runtime), ROOT, directory)
+        wait(lambda: (directory / "source.profile").exists())
+        profile = (directory / "source.profile").read_text()
+        COMMON["profile_peer"](profile)
+        COMMON["check_existing"](phone_read("source.profile"), profile)
+        device("shell", "am", "force-stop", PACKAGE)
+        # Public profile only; secrets stay in the phone/host private directories.
+        device("shell", "-T", "run-as", PACKAGE, "sh", "-c",
+            "'umask 077; cat > files/weld-device/source.profile.pending && mv files/weld-device/source.profile.pending files/weld-device/source.profile'",
+            input=profile, text=True)
+        device("shell", "am", "start", "-n", f"{PACKAGE}/android.app.NativeActivity")
+        pid = wait(lambda: subprocess.run([*adb, "shell", "pidof", PACKAGE],
+            text=True, capture_output=True, timeout=5).stdout.strip())
+        with (directory / "receiver.log").open("w") as log:
+            logcat = subprocess.Popen([*adb, "logcat", "-v", "threadtime", "--pid", pid],
+                stdout=log, stderr=subprocess.STDOUT)
+            print(f"Phone receiver running for {args.seconds}s. Touch clicks/drags; Ctrl-C stops this test.", flush=True)
+            until = time.monotonic() + args.seconds
+            next_check = 0.0
+            while not stopped and time.monotonic() < until:
+                if host.exited() or logcat.poll() is not None:
+                    raise RuntimeError(f"test process exited; inspect {directory}")
+                if time.monotonic() >= next_check:
+                    running = subprocess.run([*adb, "shell", "pidof", PACKAGE],
+                        text=True, capture_output=True, timeout=5).stdout.strip()
+                    if running != pid:
+                        raise RuntimeError(f"phone receiver exited or was replaced; inspect {directory}")
+                    next_check = time.monotonic() + 1
+                time.sleep(0.2)
+    finally:
+        stop_run(logcat, lambda: device("shell", "am", "force-stop", PACKAGE), host)
+    print(f"Test stopped. Logs: {directory}")
+
+
+if __name__ == "__main__":
+    main()

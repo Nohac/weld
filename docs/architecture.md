@@ -120,6 +120,12 @@ Weld is a workspace of reusable layers and one standard distribution:
   of Godot, transport and the decoder context lifetime. Both the diagnostic probe
   and Godot's Android provider use it. Portable codec configuration lives in
   `weld-media`'s light `config` feature.
+- `apps/weld-mobile` assembles a Bevy Android receiver proof around the portable
+  Iroh/client runtime and Android decoder. Its GLES adapter converts acquired
+  images into a reusable GPU texture on Bevy's device and returns native-image
+  leases behind release fences. The first shell presents one root window with
+  touch-as-pointer input. Development enrollment, supported paths and remaining
+  phone integration are recorded in its [README](../apps/weld-mobile/README.md).
 - `weldwm` is the standard distribution. It requests a backend, configures the
   `WeldApp` returned by the builder with plugins and shortcuts, and supplies
   the executable. It is one possible assembly of the reusable crates, not the

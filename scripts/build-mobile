@@ -1,0 +1,84 @@
+#!/usr/bin/env python3
+"""Build/sign the Android ARM64 debug receiver with the SDK from the dev shell."""
+import argparse
+import os
+from pathlib import Path
+import shutil
+import subprocess
+import zipfile
+
+ROOT = Path(__file__).resolve().parent.parent
+OUTPUT = ROOT / "target/mobile"
+PROJECT = ROOT / "apps/weld-mobile"
+
+
+def run(*args, **kwargs):
+    subprocess.run([str(arg) for arg in args], check=True, **kwargs)
+
+
+def main():
+    os.umask(0o077)
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--install", action="store_true")
+    parser.add_argument("--serial", help="ADB device serial (required when multiple devices are attached)")
+    parser.add_argument("--jobs", type=int, default=8)
+    parser.add_argument("--clippy", action="store_true", help="check Android code without building/deploying an APK")
+    args = parser.parse_args()
+    sdk = Path(os.environ.get("ANDROID_HOME") or os.environ["ANDROID_SDK_ROOT"])
+    ndk = Path(os.environ.get("ANDROID_NDK_HOME") or os.environ["ANDROID_NDK_ROOT"])
+    tools = sdk / "build-tools/36.1.0"
+    platform = sdk / "platforms/android-36/android.jar"
+    if not platform.is_file() or not (tools / "aapt2").is_file():
+        parser.error("Android platform 36 and build-tools 36.1.0 are required")
+    OUTPUT.mkdir(parents=True, exist_ok=True)
+    run(ROOT / "scripts/build-android-ffmpeg")
+    prefix = Path(subprocess.check_output(
+        [str(ROOT / "scripts/build-android-ffmpeg"), "--print-prefix"], text=True).strip())
+    toolchain = ndk / "toolchains/llvm/prebuilt/linux-x86_64"
+    env = dict(os.environ, CARGO_TARGET_DIR=str(OUTPUT / "cargo"),
+               ANDROID_NDK_HOME=str(ndk), FFMPEG_DIR=str(prefix),
+               PKG_CONFIG_LIBDIR="", PKG_CONFIG_PATH="",
+               BINDGEN_EXTRA_CLANG_ARGS_aarch64_linux_android=
+               f"--sysroot={toolchain}/sysroot --target=aarch64-linux-android28")
+    if args.jobs < 1:
+        parser.error("--jobs must be positive")
+    if args.clippy and args.install:
+        parser.error("--clippy cannot be combined with --install")
+    run("cargo", "ndk", "-t", "arm64-v8a", "--platform", "28", "clippy" if args.clippy else "build",
+        "--manifest-path", PROJECT / "Cargo.toml", "--lib", "--locked",
+        "-j", args.jobs, *(["--", "-D", "warnings"] if args.clippy else []), env=env, cwd=ROOT)
+    if args.clippy:
+        return
+    unsigned = OUTPUT / "unsigned.apk"
+    run(tools / "aapt2", "link", "-I", platform, "--manifest",
+        PROJECT / "AndroidManifest.xml", "-o", unsigned)
+    library = OUTPUT / "cargo/aarch64-linux-android/debug/libweld_mobile.so"
+    with zipfile.ZipFile(unsigned, "a", compression=zipfile.ZIP_DEFLATED) as archive:
+        archive.write(library, "lib/arm64-v8a/libweld_mobile.so")
+        for name in ("avcodec", "avformat", "avutil"):
+            archive.write(prefix / f"lib/lib{name}.so", f"lib/arm64-v8a/lib{name}.so")
+    run(tools / "zipalign", "-f", "-P", "16", "4", unsigned, OUTPUT / "aligned.apk")
+    # An isolated debug key leaves the user's existing Android signing setup alone.
+    local = PROJECT / ".local"
+    local.mkdir(mode=0o700, exist_ok=True)
+    key = local / "debug.keystore"
+    previous_key = OUTPUT / "debug.keystore"
+    if not key.exists() and previous_key.exists():
+        shutil.copy2(previous_key, key)
+    if not key.exists():
+        run("keytool", "-genkeypair", "-keystore", key, "-storepass", "android",
+            "-keypass", "android", "-alias", "androiddebugkey", "-keyalg", "RSA",
+            "-keysize", "2048", "-validity", "10000", "-dname", "CN=Weld Debug")
+    apk = OUTPUT / "weld-mobile.apk"
+    run(tools / "apksigner", "sign", "--ks", key, "--ks-pass", "pass:android",
+        "--out", apk, OUTPUT / "aligned.apk")
+    run(tools / "apksigner", "verify", apk)
+    print(f"Debug APK: {apk}", flush=True)
+    if args.install:
+        adb = ["adb"] + (["-s", args.serial] if args.serial else [])
+        run(*adb, "install", "-r", apk)
+        run(*adb, "shell", "am", "start", "-n", "org.weld.mobile/android.app.NativeActivity")
+
+
+if __name__ == "__main__":
+    main()

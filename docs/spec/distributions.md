@@ -48,7 +48,9 @@ A phone and tablet assembly could combine the
 [identity
 wallet](identity-and-meshes.md#device-wallet-and-pairing--exploration),
 remote application discovery, and one or more destination presentations. The
-current first experiment is the Godot/Rust phone-first client below. The earlier
+current phone receiver proof uses [Bevy on Android](../../apps/weld-mobile/README.md),
+reusing the transport and Android decoder exercised by the Godot/Rust client below.
+The earlier
 native-shell candidate remains
 [the Dioxus project](https://github.com/DioxusLabs/dioxus) with its Native
 renderer and [Blitz](https://github.com/DioxusLabs/blitz). Dioxus Native remains

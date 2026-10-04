@@ -1,0 +1,65 @@
+[package]
+name = "weld-mobile"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+# Android's activity, graphics and native media dependencies build independently
+# of Master's Linux host and development dylib.
+[workspace]
+
+[dependencies]
+anyhow = "1"
+bevy = { version = "=0.19.1", default-features = false, features = [
+    "std", "async_executor", "multi_threaded", "bevy_log", "bevy_winit",
+    "scene", "ui_bevy_render", "default_font",
+] }
+bevy_render = { version = "=0.19.1", features = ["gles"] }
+wgpu = { version = "=30.0.0", default-features = false, features = ["gles"] }
+tracing = "0.1"
+weld-client = { path = "../../crates/weld-client" }
+weld-hoist-encoded = { path = "../../crates/weld-hoist-encoded" }
+weld-hoist-iroh = { path = "../../crates/weld-hoist-iroh" }
+weld-media = { path = "../../crates/weld-media", features = ["decode", "config"] }
+
+[build-dependencies]
+cc = "1"
+
+[target.'cfg(target_os = "android")'.dependencies]
+bevy = { version = "=0.19.1", default-features = false, features = ["android-native-activity"] }
+weld-media-android = { path = "../../crates/weld-media-android" }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+bevy = { version = "=0.19.1", default-features = false, features = ["wayland"] }
+
+[profile.dev]
+opt-level = 1
+debug = 1
+incremental = false
+
+[profile.dev.package."*"]
+opt-level = 3
+debug = 0
+
+# Same version/type boundary as Master; see vendor/bevy-wgpu30.upstream.
+[patch.crates-io]
+bevy_camera = { path = "../../vendor/bevy-wgpu30/bevy_camera" }
+bevy_color = { path = "../../vendor/bevy-wgpu30/bevy_color" }
+bevy_image = { path = "../../vendor/bevy-wgpu30/bevy_image" }
+bevy_light = { path = "../../vendor/bevy-wgpu30/bevy_light" }
+bevy_material = { path = "../../vendor/bevy-wgpu30/bevy_material" }
+bevy_mesh = { path = "../../vendor/bevy-wgpu30/bevy_mesh" }
+bevy_reflect = { path = "../../vendor/bevy-wgpu30/bevy_reflect" }
+bevy_render = { path = "../../vendor/bevy-wgpu30/bevy_render" }
+bevy_shader = { path = "../../vendor/bevy-wgpu30/bevy_shader" }
+bevy_sprite = { path = "../../vendor/bevy-wgpu30/bevy_sprite" }
+bevy_text = { path = "../../vendor/bevy-wgpu30/bevy_text" }
+
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+
+[lints.clippy]
+undocumented_unsafe_blocks = "deny"
