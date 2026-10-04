@@ -37,6 +37,89 @@ pub enum WindowDecoration {
 pub struct ToplevelState {
     pub parent: Option<ClientSurfaceId>,
     pub decoration: WindowDecoration,
+    pub hints: ToplevelHints,
+}
+
+/// Client-provided facts used for initial placement and floating size limits.
+#[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct ToplevelHints {
+    pub kind: ToplevelKind,
+    /// Zero means no client minimum on that axis.
+    pub min_size: Extent,
+    /// Zero means no client maximum on that axis.
+    pub max_size: Extent,
+}
+
+impl ToplevelHints {
+    pub fn prefers_floating(self) -> bool {
+        self.kind != ToplevelKind::Normal
+            || (self.min_size.width > 0
+                && self.min_size.height > 0
+                && (self.min_size.width == self.max_size.width
+                    || self.min_size.height == self.max_size.height))
+    }
+
+    pub fn constrain(self, size: Extent) -> Extent {
+        fn dimension(value: u32, minimum: u32, maximum: u32) -> u32 {
+            let minimum = minimum.max(1);
+            let maximum = if maximum == 0 {
+                u32::MAX
+            } else {
+                maximum.max(minimum)
+            };
+            value.clamp(minimum, maximum)
+        }
+        Extent::new(
+            dimension(size.width, self.min_size.width, self.max_size.width),
+            dimension(size.height, self.min_size.height, self.max_size.height),
+        )
+    }
+}
+
+#[cfg(test)]
+mod hint_tests {
+    use super::*;
+    #[test]
+    fn size_limits_handle_zero_and_inconsistent_maxima() {
+        let limits = ToplevelHints {
+            min_size: Extent::new(400, 300),
+            max_size: Extent::new(200, 0),
+            ..Default::default()
+        };
+        assert_eq!(
+            limits.constrain(Extent::new(100, 200)),
+            Extent::new(400, 300)
+        );
+        assert_eq!(
+            limits.constrain(Extent::new(1000, 900)),
+            Extent::new(400, 900)
+        );
+        assert_eq!(
+            ToplevelHints::default().constrain(Extent::new(0, 0)),
+            Extent::new(1, 1)
+        );
+    }
+}
+
+#[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum ToplevelKind {
+    #[default]
+    Normal,
+    Dialog,
+    Utility,
+    Toolbar,
+    Splash,
+}
+
+/// Presenter-selected placement mode, applied atomically with size/state.
+#[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum ToplevelLayout {
+    #[default]
+    Floating,
+    Tiled,
 }
 
 /// Current protocol-owned popup placement relative to its owning root surface.
@@ -340,6 +423,7 @@ pub enum ClientSurfaceRequestKind {
     Close,
     Configure {
         logical_size: Extent,
+        layout: ToplevelLayout,
         resizing: bool,
         fullscreen: bool,
     },
@@ -519,6 +603,7 @@ mod tests {
             kind: ClientSurfaceEventKind::Role(ClientSurfaceRole::Toplevel(ToplevelState {
                 parent: None,
                 decoration: WindowDecoration::ServerSide,
+                hints: Default::default(),
             })),
         });
         queue.push(commit(

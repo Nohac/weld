@@ -310,6 +310,7 @@ mod tests {
             kind: ClientSurfaceEventKind::Role(ClientSurfaceRole::Toplevel(ToplevelState {
                 parent: None,
                 decoration: WindowDecoration::ClientSide,
+                hints: Default::default(),
             })),
         });
         adapter.apply_command(endpoint(destination).map(crate::HoistSessionId::new(1), surface));

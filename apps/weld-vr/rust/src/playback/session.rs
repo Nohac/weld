@@ -769,6 +769,7 @@ mod tests {
         ClientSurfaceRole::Toplevel(ToplevelState {
             parent,
             decoration: WindowDecoration::ServerSide,
+            hints: Default::default(),
         })
     }
     fn commit(mapped: bool) -> ClientSurfaceEventKind {

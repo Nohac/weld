@@ -1103,6 +1103,7 @@ impl DestinationRelayAdapter {
                             .then(|| relocated_surface(self.descriptor.id, parent))
                     }),
                     decoration: toplevel.decoration,
+                    hints: toplevel.hints,
                 }),
             ),
             weld_client::ClientSurfaceRole::Popup(popup) => {
@@ -1837,6 +1838,45 @@ mod tests {
         assert!(relay.events.is_empty());
     }
 
+    #[test]
+    fn destination_preserves_window_hints_when_parent_identity_is_relocated() {
+        let source = ClientSourceId::new(1);
+        let destination = ClientSourceId::new(2);
+        let parent = surface(source, 1);
+        let child = surface(source, 2);
+        let session = HoistSessionId::new(1);
+        let hints = weld_client::ToplevelHints {
+            kind: weld_client::ToplevelKind::Dialog,
+            min_size: weld_client::Extent::new(320, 240),
+            max_size: weld_client::Extent::new(640, 480),
+        };
+        let mut relay = DestinationRelayAdapter::new(
+            source,
+            ClientSourceDescriptor::new(destination, ClientProvenance::Relocated),
+            FakeDestinationPort::default(),
+        );
+        relay.map_surface(session, parent);
+        relay.map_surface(session, child);
+        assert!(relay.apply_record(DestinationPortRecord {
+            session,
+            event: DestinationPortEvent::Surface(ClientSurfaceEvent {
+                surface: child,
+                kind: ClientSurfaceEventKind::Role(ClientSurfaceRole::Toplevel(
+                    weld_client::ToplevelState {
+                        parent: Some(parent),
+                        decoration: weld_client::WindowDecoration::ServerSide,
+                        hints
+                    }
+                )),
+            }),
+        }));
+        let event = relay.events.pop_front().expect("relocated role");
+        assert_eq!(event.surface, relocated_surface(destination, child));
+        assert!(
+            matches!(event.kind, ClientSurfaceEventKind::Role(ClientSurfaceRole::Toplevel(state)) if state.hints == hints && state.parent == Some(relocated_surface(destination, parent)))
+        );
+    }
+
     #[derive(Debug)]
     struct FakePortFailure;
 
@@ -1934,6 +1974,7 @@ mod tests {
         ClientSurfaceEventKind::Role(ClientSurfaceRole::Toplevel(weld_client::ToplevelState {
             parent,
             decoration: weld_client::WindowDecoration::ServerSide,
+            hints: Default::default(),
         }))
     }
 
@@ -2728,6 +2769,7 @@ mod tests {
         let request = ClientRequest::Surface(ClientSurfaceRequest {
             surface,
             kind: ClientSurfaceRequestKind::Configure {
+                layout: weld_client::ToplevelLayout::Tiled,
                 logical_size: weld_client::Extent::new(1920, 1080),
                 resizing: false,
                 fullscreen: true,

@@ -1160,9 +1160,11 @@ fn client_request(action: SurfaceAction) -> ClientRequest {
             logical_size,
             resizing,
             fullscreen,
+            layout,
         } => ClientRequest::Surface(ClientSurfaceRequest {
             surface,
             kind: ClientSurfaceRequestKind::Configure {
+                layout,
                 logical_size: Extent::new(logical_size.x, logical_size.y),
                 resizing,
                 fullscreen,
@@ -2150,6 +2152,7 @@ mod tests {
                 weld_client::ToplevelState {
                     parent: None,
                     decoration: WindowDecoration::ClientSide,
+                    hints: Default::default(),
                 },
             )),
         });

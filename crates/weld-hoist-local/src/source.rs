@@ -420,6 +420,7 @@ mod tests {
                         ClientSurfaceRequest {
                             surface,
                             kind: ClientSurfaceRequestKind::Configure {
+                                layout: Default::default(),
                                 logical_size: Extent::new(800, 600),
                                 resizing: true,
                                 fullscreen: false,
@@ -442,6 +443,7 @@ mod tests {
             [ClientAdapterEffect::Request(ClientRequest::Surface(request))]
                 if request.surface == surface
                     && request.kind == (ClientSurfaceRequestKind::Configure {
+                        layout: Default::default(),
                         logical_size: Extent::new(800, 600),
                         resizing: true,
                 fullscreen: false,

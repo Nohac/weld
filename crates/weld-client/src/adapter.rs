@@ -1457,6 +1457,7 @@ mod tests {
                     crate::ToplevelState {
                         parent: None,
                         decoration: crate::WindowDecoration::ClientSide,
+                        hints: Default::default(),
                     },
                 )),
             });
@@ -1589,6 +1590,7 @@ mod tests {
             kind: ClientSurfaceEventKind::Role(ClientSurfaceRole::Toplevel(ToplevelState {
                 parent: None,
                 decoration: WindowDecoration::ClientSide,
+                hints: Default::default(),
             })),
         });
         runtime.drain_events(&mut ClientEventQueue::default(), &mut Vec::new());
@@ -2750,6 +2752,7 @@ mod tests {
                 kind: ClientSurfaceEventKind::Role(ClientSurfaceRole::Toplevel(ToplevelState {
                     parent: None,
                     decoration: WindowDecoration::ClientSide,
+                    hints: Default::default(),
                 })),
             });
         }

@@ -434,7 +434,11 @@ fn handle_window_intent(intent: On<WindowIntent>, params: HandleWindowIntentPara
                 .copied()
                 .unwrap_or_default();
             let minimum = presentation_insets.extent() + Vec2::ONE;
-            geometry.size = resized_size(geometry.size, delta, *edges).max(minimum);
+            let desired = resized_size(geometry.size, delta, *edges).max(minimum);
+            geometry.size = clients.mapped_client(window).map_or(desired, |client| {
+                client.constrain_content_size(desired - presentation_insets.extent())
+                    + presentation_insets.extent()
+            });
         }
         WindowIntentKind::InteractionEnded(kind) => {
             let WindowInteractionKind::Resize(edges) = kind else {

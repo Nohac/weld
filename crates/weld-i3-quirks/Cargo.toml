@@ -16,6 +16,7 @@ weld-window = { path = "../weld-window" }
 weld-ssd = { path = "../weld-ssd" }
 
 [dev-dependencies]
+weld-window-ui = { path = "../weld-window-ui" }
 weld-client = { path = "../weld-client" }
 weld-float = { path = "../weld-float" }
 indoc.workspace = true

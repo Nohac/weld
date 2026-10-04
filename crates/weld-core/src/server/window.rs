@@ -1,6 +1,7 @@
 //! Native window controls over the shared Wayland surface/buffer transport.
 
 use crate::surface::Extent;
+use smithay::xwayland::xwm::WmWindowType;
 use smithay::{
     reexports::{
         wayland_protocols::xdg::shell::server::xdg_toplevel,
@@ -15,6 +16,7 @@ use smithay::{
 };
 use std::sync::Arc;
 use tracing::warn;
+use weld_client::{ToplevelHints, ToplevelKind, ToplevelLayout};
 
 #[derive(Clone)]
 pub(super) enum WindowSurface {
@@ -26,6 +28,61 @@ pub(super) enum WindowSurface {
 }
 
 impl WindowSurface {
+    pub(super) fn hints(&self) -> ToplevelHints {
+        let (kind, minimum, maximum) = match self {
+            Self::Xdg(window) => with_states(window.wl_surface(), |states| {
+                let mut cached = states.cached_state.get::<SurfaceCachedState>();
+                let current = cached.current();
+                (ToplevelKind::Normal, current.min_size, current.max_size)
+            }),
+            Self::X11 { window, .. } => {
+                let kind = match window.window_type() {
+                    Some(WmWindowType::Dialog) => ToplevelKind::Dialog,
+                    Some(WmWindowType::Utility) => ToplevelKind::Utility,
+                    Some(WmWindowType::Toolbar) => ToplevelKind::Toolbar,
+                    Some(WmWindowType::Splash) => ToplevelKind::Splash,
+                    _ if window.is_modal() => ToplevelKind::Dialog,
+                    _ => ToplevelKind::Normal,
+                };
+                (
+                    kind,
+                    window.min_size().unwrap_or_default(),
+                    window.max_size().unwrap_or_default(),
+                )
+            }
+        };
+        ToplevelHints {
+            kind,
+            min_size: Extent::new(minimum.w.max(0) as u32, minimum.h.max(0) as u32),
+            max_size: Extent::new(maximum.w.max(0) as u32, maximum.h.max(0) as u32),
+        }
+    }
+
+    pub(super) fn set_layout(&self, layout: ToplevelLayout) {
+        let tiled = layout == ToplevelLayout::Tiled;
+        match self {
+            Self::Xdg(window) => window.with_pending_state(|state| {
+                for edge in [
+                    xdg_toplevel::State::TiledLeft,
+                    xdg_toplevel::State::TiledRight,
+                    xdg_toplevel::State::TiledTop,
+                    xdg_toplevel::State::TiledBottom,
+                ] {
+                    if tiled {
+                        state.states.set(edge);
+                    } else {
+                        state.states.unset(edge);
+                    }
+                }
+            }),
+            Self::X11 { window, .. } if !window.is_override_redirect() => {
+                if let Err(error) = window.set_maximized(tiled) {
+                    warn!(%error, "could not publish X11 tiled state");
+                }
+            }
+            Self::X11 { .. } => {}
+        }
+    }
     pub(super) fn geometry(&self) -> Option<Rectangle<i32, Logical>> {
         match self {
             Self::Xdg(window) => xdg_geometry(window.wl_surface()),
@@ -117,41 +174,25 @@ impl WindowSurface {
             window.send_pending_configure();
         }
     }
-    pub(super) fn stage_size(&self, requested: Extent, fullscreen: bool) -> bool {
-        if !self.alive() {
+    pub(super) fn stage_size(
+        &self,
+        requested: Extent,
+        fullscreen: bool,
+        layout: ToplevelLayout,
+    ) -> bool {
+        if !self.alive()
+            || matches!(self, Self::X11 { window, .. } if window.is_override_redirect())
+        {
             return false;
         }
-        let (minimum, maximum) = if fullscreen {
-            (Size::from((0, 0)), Size::from((0, 0)))
+        let requested = if fullscreen || layout == ToplevelLayout::Tiled {
+            requested
         } else {
-            match self {
-                Self::Xdg(window) => with_states(window.wl_surface(), |states| {
-                    let mut cached = states.cached_state.get::<SurfaceCachedState>();
-                    let current = cached.current();
-                    (current.min_size, current.max_size)
-                }),
-                Self::X11 { window, .. } => {
-                    if window.is_override_redirect() {
-                        return false;
-                    }
-                    (
-                        window.min_size().unwrap_or_default(),
-                        window.max_size().unwrap_or_default(),
-                    )
-                }
-            }
+            self.hints().constrain(requested)
         };
         let size = Size::<i32, Logical>::from((
-            super::toplevel::constrain_dimension(
-                i32::try_from(requested.width.max(1)).unwrap_or(i32::MAX),
-                minimum.w,
-                maximum.w,
-            ),
-            super::toplevel::constrain_dimension(
-                i32::try_from(requested.height.max(1)).unwrap_or(i32::MAX),
-                minimum.h,
-                maximum.h,
-            ),
+            i32::try_from(requested.width.max(1)).unwrap_or(i32::MAX),
+            i32::try_from(requested.height.max(1)).unwrap_or(i32::MAX),
         ));
         match self {
             Self::Xdg(window) => window.with_pending_state(|state| {

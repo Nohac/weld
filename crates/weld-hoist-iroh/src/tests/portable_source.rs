@@ -119,6 +119,7 @@ fn run_registration(pending_mode: bool) -> Vec<Vec<u8>> {
         kind: ClientSurfaceEventKind::Role(ClientSurfaceRole::Toplevel(ToplevelState {
             parent: None,
             decoration: WindowDecoration::ServerSide,
+            hints: Default::default(),
         })),
     });
     let metadata = ClientBufferMetadata::new(Extent::new(1, 1), true);

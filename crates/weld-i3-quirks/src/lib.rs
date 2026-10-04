@@ -69,8 +69,8 @@ impl Plugin for I3QuirksPlugin {
         app.add_systems(
             PreUpdate,
             window_rules::apply
-                .after(TileSystems::Layout)
-                .in_set(weld_window::WindowSystems::Management),
+                .after(weld_window::WindowSystems::Admission)
+                .before(weld_window::WindowSystems::PresentationRevoke),
         );
         app.add_systems(
             PreUpdate,

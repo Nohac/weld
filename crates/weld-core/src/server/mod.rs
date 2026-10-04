@@ -521,10 +521,12 @@ impl ServerState {
                     logical_size,
                     resizing,
                     fullscreen,
+                    layout,
                 } => {
                     self.pending_resizes.queue(
                         request.surface,
                         PendingResize {
+                            layout,
                             logical_size,
                             resizing,
                             fullscreen,
@@ -571,6 +573,7 @@ impl ServerState {
                 request.logical_size,
                 request.resizing,
                 request.fullscreen,
+                request.layout,
             );
         }
     }

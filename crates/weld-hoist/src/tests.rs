@@ -29,12 +29,12 @@ use weld_app::{
 };
 use weld_client::{
     ClientAdapterCommandEnvelope, ClientId, ClientSourceDescriptor, ClientSourceId,
-    ClientSurfaceRole, ToplevelState,
+    ClientSurfaceRole, ToplevelLayout, ToplevelState,
 };
 use weld_float::FloatPlugin;
 use weld_ssd::SsdPlugin;
 use weld_window::{
-    ClientResizeState, OccupiesWindow, PrimaryWindowPresentation, WindowAdmissionHold,
+    ClientResizeState, OccupiesWindow, PrimaryWindowPresentation, TiledWindow, WindowAdmissionHold,
     WindowGeometry, WindowInteractionKind, WindowInteractionSession, WindowOccupant, WindowOutput,
     WindowPlugin,
 };
@@ -58,6 +58,7 @@ enum EndpointCall {
 #[derive(Clone)]
 struct RecordingEndpoint {
     inner: weld_hoist_core::LoopbackEndpoint,
+    local_receiver: bool,
     available: Arc<AtomicBool>,
     calls: Arc<Mutex<Vec<EndpointCall>>>,
 }
@@ -66,6 +67,7 @@ impl RecordingEndpoint {
     fn new(inner: weld_hoist_core::LoopbackEndpoint) -> Self {
         Self {
             inner,
+            local_receiver: true,
             available: Arc::new(AtomicBool::new(true)),
             calls: Arc::new(Mutex::new(Vec::new())),
         }
@@ -86,7 +88,7 @@ impl HoistEndpoint for RecordingEndpoint {
     }
 
     fn has_local_receiver(&self) -> bool {
-        self.inner.has_local_receiver()
+        self.local_receiver
     }
 
     fn destination(&self, source: SurfaceId) -> SurfaceId {
@@ -168,6 +170,7 @@ fn map_surface(
             kind: HostSurfaceEventKind::Role(ClientSurfaceRole::Toplevel(ToplevelState {
                 parent,
                 decoration,
+                hints: Default::default(),
             })),
         },
     );
@@ -231,6 +234,7 @@ fn set_parent(app: &mut App, surface: SurfaceId, parent: Option<SurfaceId>) {
             kind: HostSurfaceEventKind::Role(ClientSurfaceRole::Toplevel(ToplevelState {
                 parent,
                 decoration: WindowDecoration::ServerSide,
+                hints: Default::default(),
             })),
         },
     );
@@ -767,6 +771,47 @@ fn protocol_unmap_ends_the_relocation_without_marking_the_source_closed() {
 }
 
 #[test]
+fn remote_reclaim_restores_the_source_layout() {
+    for (tiled, expected_layout) in [
+        (false, ToplevelLayout::Floating),
+        (true, ToplevelLayout::Tiled),
+    ] {
+        let (mut app, loopback) = test_app();
+        let mut endpoint = RecordingEndpoint::new(loopback);
+        endpoint.local_receiver = false;
+        app.insert_resource(HoistEndpointRegistry::with_default(endpoint));
+        let source = surface(LOCAL_SOURCE, 29);
+        let client = map_surface(&mut app, source, None, WindowDecoration::ServerSide);
+        let window = window_for_client(&mut app, client);
+        if tiled {
+            app.world_mut().entity_mut(window).insert(TiledWindow);
+        }
+        app.world_mut().write_message(HoistWindow { window });
+        app.update();
+        let session = app
+            .world_mut()
+            .query::<(bevy::ecs::entity::Entity, &HoistSession)>()
+            .single(app.world())
+            .map(|(entity, _)| entity)
+            .expect("remote hoist session");
+        take_surface_actions(app.world_mut());
+        app.world_mut().write_message(ReclaimHoist { session });
+        app.update();
+        let actions = take_surface_actions(app.world_mut());
+        assert!(
+            actions.iter().any(|action| matches!(
+                action,
+                SurfaceAction::Resize { surface, layout, logical_size, .. }
+                    if *surface == source
+                        && *layout == expected_layout
+                        && *logical_size == UVec2::new(320, 240)
+            )),
+            "unexpected reclaim actions: {actions:?}"
+        );
+    }
+}
+
+#[test]
 fn reclaim_waits_for_the_placeholder_sized_client_commit() {
     let (mut app, endpoint) = test_app();
     let source_surface = surface(LOCAL_SOURCE, 30);
@@ -817,6 +862,7 @@ fn reclaim_waits_for_the_placeholder_sized_client_commit() {
             matches!(
                 action,
                 SurfaceAction::Resize {
+                    layout: _,
                     surface,
                     logical_size: UVec2 { x: 320, y: 240 },
                     resizing: false,
@@ -976,6 +1022,7 @@ fn remote_admission_requests_its_size_without_a_preserved_source_window() {
             .filter(|action| matches!(action, SurfaceAction::Resize { .. }))
             .collect::<Vec<_>>(),
         vec![SurfaceAction::Resize {
+            layout: Default::default(),
             surface: destination,
             logical_size: UVec2::new(320, 240),
             resizing: false,

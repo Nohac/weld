@@ -441,6 +441,7 @@ fn fullscreen_size_and_state_arrive_in_one_configure_and_restore_constraints() {
                 weld_client::ClientSurfaceRequest {
                     surface: id,
                     kind: weld_client::ClientSurfaceRequestKind::Configure {
+                        layout: Default::default(),
                         logical_size,
                         resizing,
                         fullscreen,
@@ -460,7 +461,7 @@ fn fullscreen_size_and_state_arrive_in_one_configure_and_restore_constraints() {
     f.sync();
     f.observer.toplevel_configures.clear();
     f.server
-        .configure_toplevel(id, Extent::new(500, 400), false, false);
+        .configure_toplevel(id, Extent::new(500, 400), false, false, Default::default());
     f.sync();
     let (width, height, states) = f
         .observer
@@ -469,6 +470,51 @@ fn fullscreen_size_and_state_arrive_in_one_configure_and_restore_constraints() {
         .expect("restore configure");
     assert_eq!((*width, *height), (400, 300));
     assert!(!states.contains(&(xdg_toplevel::State::Fullscreen as u32)));
+}
+
+#[test]
+#[ignore = "native socket fixture requires XDG_RUNTIME_DIR"]
+fn tiled_configures_override_client_limits_and_restore_them_when_floating() {
+    use weld_client::{Extent, ToplevelLayout};
+    let mut f = Fixture::new();
+    let surface = f.surface(41);
+    let xdg =
+        f.observer
+            .shell
+            .as_ref()
+            .expect("shell")
+            .get_xdg_surface(&surface, &f.queue.handle(), ());
+    let toplevel = xdg.get_toplevel(&f.queue.handle(), ());
+    toplevel.set_min_size(400, 300);
+    toplevel.set_max_size(600, 500);
+    surface.commit();
+    f.sync();
+    let native = f.client.object_from_protocol_id::<smithay::reexports::wayland_server::protocol::wl_surface::WlSurface>(&f.server.display_handle, surface.id().protocol_id()).expect("native");
+    let id = f.server.toplevels.id_for_surface(&native).expect("id");
+    for (layout, requested, expected) in [
+        (ToplevelLayout::Tiled, Extent::new(200, 150), (200, 150)),
+        (ToplevelLayout::Floating, Extent::new(200, 150), (400, 300)),
+        (ToplevelLayout::Tiled, Extent::new(800, 700), (800, 700)),
+        (ToplevelLayout::Floating, Extent::new(800, 700), (600, 500)),
+    ] {
+        f.observer.toplevel_configures.clear();
+        f.server
+            .configure_toplevel(id, requested, false, false, layout);
+        f.sync();
+        let (width, height, states) = f.observer.toplevel_configures.last().expect("configure");
+        assert_eq!((*width, *height), expected);
+        for edge in [
+            xdg_toplevel::State::TiledLeft,
+            xdg_toplevel::State::TiledRight,
+            xdg_toplevel::State::TiledTop,
+            xdg_toplevel::State::TiledBottom,
+        ] {
+            assert_eq!(
+                states.contains(&(edge as u32)),
+                layout == ToplevelLayout::Tiled
+            );
+        }
+    }
 }
 
 #[test]

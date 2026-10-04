@@ -8033,6 +8033,7 @@ dependencies = [
  "weld-sway-config",
  "weld-tile",
  "weld-window",
+ "weld-window-ui",
 ]
 
 [[package]]
@@ -8111,6 +8112,7 @@ version = "0.1.0"
 dependencies = [
  "bevy",
  "weld-app",
+ "weld-client",
  "weld-window",
 ]
 
@@ -8121,6 +8123,7 @@ dependencies = [
  "bevy",
  "tracing",
  "weld-app",
+ "weld-client",
  "weld-core",
  "weld-input",
 ]

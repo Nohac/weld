@@ -42,7 +42,10 @@ The existing calloop loop dispatches directly against compositor state.
 Backend notifications accumulate in a same-thread queue and are drained by the
 existing native drivers. There is no additional render clock or video worker.
 
-Normal X11 windows publish ordinary toplevel roles. Transients publish parent
+Normal X11 windows publish ordinary toplevel roles with minimum/maximum size
+hints and generic dialog/splash/utility/toolbar classification. Master centers
+unparented special or fixed-size windows in the selected output work area;
+explicit transients center over their parent. Transients publish parent
 relationships. Override-redirect menus publish popup roles relative to a resolved
 toplevel; nested transient menus resolve to that root. For missing transient
 hints, Weld uses a matching application's pointer/keyboard target and preserves
@@ -118,7 +121,10 @@ updates; client-defined cursor artwork remains application-owned.
 The WM's fullscreen/minimize policy, pointer locking and confinement, X11/Wayland clipboard
 and drag-and-drop bridging, X11-specific scale policy, resize increments/aspect
 hints, and application activation requests need separate validation or support.
-Current resize constraints cover minimum/maximum dimensions. WM-requested close
+Floating resize constraints cover minimum/maximum dimensions; tiled/fullscreen
+requests override them. Tiled X11 clients receive both maximized flags, matching
+[Sway's XWayland policy](https://github.com/swaywm/sway/blob/1.12/sway/desktop/xwayland.c).
+WM-requested close
 still needs a dedicated interactive check. X11 root-coordinate bounds require
 windows to fit the advertised output space; larger remote presentations need
 additional virtual-output sizing policy. X11 restacking and Wayland input use

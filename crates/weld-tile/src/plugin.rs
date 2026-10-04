@@ -72,6 +72,7 @@ impl Plugin for TilePlugin {
             .init_resource::<LayoutDirty>()
             .add_observer(intent)
             .add_observer(clear_tile_hints)
+            .add_observer(mark_tiled_window)
             .add_systems(
                 PreUpdate,
                 sync_split_edges
@@ -267,6 +268,10 @@ impl AdmissionFamilies<'_, '_> {
         self.clients
             .client_entity(window)
             .is_some_and(|client| self.parents.contains(client))
+            || self
+                .clients
+                .mapped_client(window)
+                .is_some_and(|client| client.hints().prefers_floating())
     }
 }
 
@@ -401,7 +406,19 @@ fn admit_windows(
 fn clear_tile_hints(event: On<Remove, TileParent>, mut commands: Commands) {
     commands
         .entity(event.entity)
-        .try_remove::<(SoleTiledWindow, WindowSplitEdge)>();
+        .try_remove::<(SoleTiledWindow, WindowSplitEdge, weld_window::TiledWindow)>();
+}
+
+fn mark_tiled_window(
+    event: On<bevy::ecs::lifecycle::Add, TileParent>,
+    windows: Query<(), With<ManagedWindow>>,
+    mut commands: Commands,
+) {
+    if windows.contains(event.entity) {
+        commands
+            .entity(event.entity)
+            .insert(weld_window::TiledWindow);
+    }
 }
 
 type WorkspaceLayouts<'w, 's> = Query<

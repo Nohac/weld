@@ -2998,6 +2998,7 @@ mod tests {
                     weld_client::ToplevelState {
                         parent: None,
                         decoration: weld_client::WindowDecoration::ServerSide,
+                        hints: Default::default(),
                     },
                 )),
             });

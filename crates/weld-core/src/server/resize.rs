@@ -6,6 +6,7 @@ use crate::surface::{Extent, SurfaceId};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct PendingResize {
+    pub(super) layout: weld_client::ToplevelLayout,
     pub(super) logical_size: Extent,
     pub(super) resizing: bool,
     pub(super) fullscreen: bool,
@@ -62,6 +63,7 @@ mod tests {
 
     const fn request(width: u32, height: u32, resizing: bool) -> PendingResize {
         PendingResize {
+            layout: weld_client::ToplevelLayout::Floating,
             logical_size: Extent::new(width, height),
             resizing,
             fullscreen: false,

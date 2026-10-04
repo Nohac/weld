@@ -397,6 +397,7 @@ mod tests {
                     ToplevelState {
                         parent: None,
                         decoration: WindowDecoration::ClientSide,
+                        hints: Default::default(),
                     },
                 )),
             }),

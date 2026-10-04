@@ -1537,7 +1537,7 @@ mod tests {
         );
         assert!(
             take_surface_actions(app.world_mut()).contains(&SurfaceAction::Resize {
-                layout: Default::default(),
+                layout: weld_client::ToplevelLayout::Tiled,
                 surface,
                 logical_size: (outer.size - Vec2::splat(16.0)).as_uvec2(),
                 resizing: false,
@@ -1872,6 +1872,7 @@ mod tests {
                 weld_client::ToplevelState {
                     parent: None,
                     decoration,
+                    hints: Default::default(),
                 },
             )),
         }

@@ -165,6 +165,7 @@ mod tests {
             kind: ClientSurfaceEventKind::Role(ClientSurfaceRole::Toplevel(ToplevelState {
                 parent: None,
                 decoration: WindowDecoration::ServerSide,
+                hints: Default::default(),
             })),
         }
     }
@@ -247,6 +248,7 @@ mod tests {
             kind: ClientSurfaceEventKind::Role(ClientSurfaceRole::Toplevel(ToplevelState {
                 parent: None,
                 decoration: WindowDecoration::ClientSide,
+                hints: Default::default(),
             })),
         });
         runtime.drain_events(&mut ClientEventQueue::default(), &mut Vec::new());
@@ -285,6 +287,7 @@ mod tests {
             kind: ClientSurfaceEventKind::Role(ClientSurfaceRole::Toplevel(ToplevelState {
                 parent: None,
                 decoration: WindowDecoration::ServerSide,
+                hints: Default::default(),
             })),
         });
         assert!(runtime.apply_command(endpoint.map(HoistSessionId::new(1), source)));
@@ -329,6 +332,7 @@ mod tests {
             kind: ClientSurfaceEventKind::Role(ClientSurfaceRole::Toplevel(ToplevelState {
                 parent: None,
                 decoration: WindowDecoration::ClientSide,
+                hints: Default::default(),
             })),
         });
         upstream.borrow_mut().events.push(ClientSurfaceEvent {

@@ -236,6 +236,7 @@ impl ConfigureSizing {
             Self::Initial if configure_fits(root, logical, size, 1.0) => {
                 *self = Self::AwaitingSize(revision, size);
                 Some(ClientSurfaceRequestKind::Configure {
+                    layout: Default::default(),
                     logical_size: size,
                     resizing: false,
                     fullscreen: false,
@@ -272,6 +273,7 @@ impl ConfigureSizing {
                 let logical_size = preferences.bounded_logical_size(logical, root)?;
                 *self = Self::AwaitingSize(revision, logical_size);
                 Some(ClientSurfaceRequestKind::Configure {
+                    layout: Default::default(),
                     logical_size,
                     resizing: false,
                     fullscreen: false,

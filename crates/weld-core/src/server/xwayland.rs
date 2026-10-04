@@ -307,7 +307,7 @@ impl ServerState {
         let Some(window) = self.xwayland.windows.get(&window_id) else {
             return;
         };
-        let Some((id, _)) = &window.surface else {
+        let Some((id, surface)) = &window.surface else {
             return;
         };
         let id = *id;
@@ -333,6 +333,11 @@ impl ServerState {
         } else {
             ClientSurfaceRole::Toplevel(ClientToplevelState {
                 parent: parent_id,
+                hints: WindowSurface::X11 {
+                    window: window.native.clone(),
+                    surface: surface.clone(),
+                }
+                .hints(),
                 decoration: if window.native.is_decorated() {
                     WindowDecoration::ClientSide
                 } else {
@@ -360,6 +365,7 @@ impl ServerState {
             toplevel.parent = parent_id;
             if let ClientSurfaceRole::Toplevel(state) = role {
                 toplevel.decoration = state.decoration;
+                toplevel.hints = state.hints;
             }
         }
         if window.published_metadata.as_ref() != Some(&metadata) {

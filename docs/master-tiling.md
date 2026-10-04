@@ -345,12 +345,13 @@ receive the mean existing share, and flattening preserves internal proportions.
 
 ## Deliberate boundaries
 
-Tabbed/stacked layouts,
-client-size constraint policy, complete tiled-state protocol hints, persistent
-matching and IPC remain follow-up slices. Popups keep the existing presentation
-path rather than becoming tiling leaves. Related toplevel dialogs currently tile
-as ordinary windows when no parent is declared. Declared transient toplevels
-float and center over their parent's final geometry. Popups retain their own
+Tabbed/stacked layouts, resize-increment/aspect hints, persistent matching and
+IPC remain follow-up slices. Popups keep the existing presentation path rather
+than becoming tiling leaves. Declared transient toplevels float and center over
+their parent's geometry. Unparented dialog, splash, utility and toolbar windows,
+and windows fixed on either axis, float and center in the active workspace's
+output work area. These decisions use protocol hints, never application names.
+Popups retain their own
 protocol positioning and never become floating managed windows.
 
 ### Mixed floating and tiled windows
@@ -365,8 +366,13 @@ window identity and hoist state are preserved.
 `FloatBehaviorPlugin` supplies movement, resizing and stacking for those marked
 windows. `FloatPlugin` remains the separate floating-first admission assembly.
 Workspaces remember floating selection and support moving floating windows to
-another workspace without adding a tile. Declared-parent detection is the first
-dialog policy; fixed-size/type hints and rules are subsequent milestones.
+another workspace without adding a tile. Native Wayland and X11 size hints and
+X11 window types travel with the toplevel role, including through hoisting.
+Floating geometry and configure requests respect minimum/maximum client sizes;
+tiled and fullscreen configures use the assigned area. Wayland clients receive
+tiled-edge state, and X11 clients receive the maximized state used for tiling.
+The layout mode travels atomically with size/resizing/fullscreen, including on
+remote reclaim. Rebuild both hoist peers after this wire-shape change.
 Cross-output workspace transfers preserve output-local freeform geometry;
 clamping a large floating window onto a smaller destination remains a follow-up.
 
@@ -391,8 +397,11 @@ changes replace affected SSD projections before presentation metrics are
 reconciled, preserving floating client-content size and allowing tiled layout
 to keep its outer rectangle. Color changes update existing roots. Popup mounts
 follow the replacement root through the shared window presentation contract.
-Native client-side decorations remain owned by the application; these settings
-control Weld's frames, including the frames around opaque remote content.
+An explicit per-window border rule or border command requests compositor-owned
+presentation even when the client declares its own decorations. The same frame
+decision is used by both presentation paths. Existing controls drawn inside the
+application's content remain intact. Global default styles select metrics for
+Weld frames, including frames around opaque remote content.
 Mode classification happens before presentation claim so a newly admitted dialog
 gets its floating frame metrics before centering. Per-window style belongs to
 the durable window and intentionally survives vacancy and occupant replacement.

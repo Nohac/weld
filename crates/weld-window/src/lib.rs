@@ -32,9 +32,9 @@ use bevy::{
 };
 use weld_app::output::{OutputGeometry, OutputId, OutputPosition, WeldOutput};
 use weld_app::surface::{
-    ClientProvenance, ClientSource, ClientSourceId, ClientToplevel, ClientToplevelParent,
-    MappedSurface, SurfaceAction, SurfaceActionQueue, SurfaceCommitRevisions, SurfaceId,
-    SurfaceSystems, ToplevelResizeEdge,
+    ClientProvenance, ClientSource, ClientSourceId, ClientToplevel, ClientToplevelHints,
+    ClientToplevelParent, MappedSurface, SurfaceAction, SurfaceActionQueue, SurfaceCommitRevisions,
+    SurfaceId, SurfaceSystems, ToplevelResizeEdge,
 };
 
 /// Stable process-independent identity for a managed window.
@@ -89,6 +89,10 @@ pub struct WindowZOrder(pub i32);
 /// Selects freeform geometry and interaction within the owning workspace.
 #[derive(Component, Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct FloatingWindow;
+
+/// The window's geometry is assigned by a tiling layout.
+#[derive(Component, Clone, Copy, Debug, Default)]
+pub struct TiledWindow;
 
 /// Shell policy requesting a compositor-owned frame around the client content.
 #[derive(Component, Clone, Copy, Debug, Default)]
@@ -193,9 +197,35 @@ pub struct ResolvedWindowClient {
     source: ClientSource,
     toplevel: ClientToplevel,
     mapped: MappedSurface,
+    hints: weld_client::ToplevelHints,
 }
 
 impl ResolvedWindowClient {
+    pub const fn hints(self) -> weld_client::ToplevelHints {
+        self.hints
+    }
+    /// Apply client limits without quantizing interactive logical geometry.
+    pub fn constrain_content_size(self, size: Vec2) -> Vec2 {
+        let minimum = Vec2::new(
+            self.hints.min_size.width as f32,
+            self.hints.min_size.height as f32,
+        )
+        .max(Vec2::ONE);
+        let maximum = Vec2::new(
+            if self.hints.max_size.width == 0 {
+                f32::INFINITY
+            } else {
+                self.hints.max_size.width as f32
+            },
+            if self.hints.max_size.height == 0 {
+                f32::INFINITY
+            } else {
+                self.hints.max_size.height as f32
+            },
+        )
+        .max(minimum);
+        size.max(minimum).min(maximum)
+    }
     pub const fn entity(self) -> Entity {
         self.entity
     }
@@ -228,6 +258,7 @@ pub struct WindowClientResolver<'w, 's> {
             &'static ClientSource,
             &'static ClientToplevel,
             Option<&'static MappedSurface>,
+            Option<&'static ClientToplevelHints>,
         ),
     >,
 }
@@ -246,12 +277,13 @@ impl WindowClientResolver<'_, '_> {
 
     pub fn mapped_client(&self, window: Entity) -> Option<ResolvedWindowClient> {
         let entity = self.client_entity(window)?;
-        let (source, toplevel, mapped) = self.clients.get(entity).ok()?;
+        let (source, toplevel, mapped, hints) = self.clients.get(entity).ok()?;
         Some(ResolvedWindowClient {
             entity,
             source: *source,
             toplevel: *toplevel,
             mapped: *mapped?,
+            hints: hints.map_or_else(Default::default, |hints| hints.0),
         })
     }
 
@@ -911,6 +943,9 @@ impl Plugin for WindowPlugin {
             .add_systems(
                 PreUpdate,
                 (
+                    constrain_floating_geometry
+                        .after(WindowSystems::Management)
+                        .before(WindowSystems::OutputAssignment),
                     reconcile_presentation_insets.in_set(WindowSystems::PresentationMetrics),
                     (reconcile_window_sizes, remove_unretained_vacancies)
                         .chain()
@@ -942,6 +977,7 @@ pub struct ClientResizeState {
     requested_size: UVec2,
     requested_resizing: bool,
     requested_fullscreen: bool,
+    requested_layout: weld_client::ToplevelLayout,
     pending: Option<PendingClientResize>,
 }
 
@@ -953,6 +989,7 @@ struct PendingClientResize {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct TerminalClientResize {
+    layout: weld_client::ToplevelLayout,
     surface: SurfaceId,
     logical_size: UVec2,
     fullscreen: bool,
@@ -965,6 +1002,7 @@ impl Default for ClientResizeState {
             requested_size: UVec2::ONE,
             requested_resizing: false,
             requested_fullscreen: false,
+            requested_layout: Default::default(),
             pending: None,
         }
     }
@@ -1009,6 +1047,7 @@ impl ClientResizeState {
     fn clear_client(&mut self) -> Option<TerminalClientResize> {
         let surface = self.surface?;
         let terminal = self.requested_resizing.then_some(TerminalClientResize {
+            layout: self.requested_layout,
             surface,
             logical_size: self.requested_size,
             fullscreen: self.requested_fullscreen,
@@ -1027,12 +1066,14 @@ impl ClientResizeState {
         requested_size: UVec2,
         resizing: bool,
         fullscreen: bool,
+        layout: weld_client::ToplevelLayout,
         after_revision: u64,
     ) {
         self.surface = Some(surface);
         self.requested_size = requested_size;
         self.requested_resizing = resizing;
         self.requested_fullscreen = fullscreen;
+        self.requested_layout = layout;
         self.pending = Some(PendingClientResize {
             surface,
             after_revision,
@@ -1121,6 +1162,38 @@ fn reconcile_presentation_insets(mut windows: InsetWindows, roots: Query<&Presen
     }
 }
 
+type ConstrainedFloatingWindows<'w, 's> = Query<
+    'w,
+    's,
+    (
+        Entity,
+        &'static mut WindowGeometry,
+        Option<&'static PrimaryWindowPresentation>,
+    ),
+    (With<FloatingWindow>, Without<fullscreen::WindowFullscreen>),
+>;
+
+fn constrain_floating_geometry(
+    mut windows: ConstrainedFloatingWindows,
+    roots: Query<&PresentationInsets>,
+    clients: WindowClientResolver,
+) {
+    for (window, mut geometry, presentation) in &mut windows {
+        let Some(client) = clients.mapped_client(window) else {
+            continue;
+        };
+        let insets = presentation
+            .and_then(|root| roots.get(root.entity()).ok())
+            .copied()
+            .unwrap_or_default()
+            .extent();
+        let size = client.constrain_content_size(geometry.size - insets) + insets;
+        if geometry.size != size {
+            geometry.size = size;
+        }
+    }
+}
+
 type ResizeWindows<'w, 's> = Query<
     'w,
     's,
@@ -1132,6 +1205,7 @@ type ResizeWindows<'w, 's> = Query<
         Option<&'static WindowInteractionSession>,
         Has<fullscreen::WindowFullscreen>,
         Has<fullscreen::PendingFullscreenConfigure>,
+        Has<TiledWindow>,
     ),
 >;
 
@@ -1142,12 +1216,21 @@ fn reconcile_window_sizes(
     revisions: Res<SurfaceCommitRevisions>,
     mut actions: ResMut<SurfaceActionQueue>,
 ) {
-    for (window, geometry, mut resize, presentation, interaction, fullscreen, pending_fullscreen) in
-        &mut windows
+    for (
+        window,
+        geometry,
+        mut resize,
+        presentation,
+        interaction,
+        fullscreen,
+        pending_fullscreen,
+        tiled,
+    ) in &mut windows
     {
         let Some(client) = clients.mapped_client(window) else {
             if let Some(terminal) = resize.clear_client() {
                 actions.push(SurfaceAction::Resize {
+                    layout: terminal.layout,
                     surface: terminal.surface,
                     logical_size: terminal.logical_size,
                     resizing: false,
@@ -1160,6 +1243,7 @@ fn reconcile_window_sizes(
         let revision = revisions.revision(surface);
         if let Some(terminal) = resize.observe_commit(surface, revision) {
             actions.push(SurfaceAction::Resize {
+                layout: terminal.layout,
                 surface: terminal.surface,
                 logical_size: terminal.logical_size,
                 resizing: false,
@@ -1189,14 +1273,21 @@ fn reconcile_window_sizes(
                     kind: WindowInteractionKind::Resize(_),
                 })
             );
+        let layout = if tiled {
+            weld_client::ToplevelLayout::Tiled
+        } else {
+            weld_client::ToplevelLayout::Floating
+        };
         if requested == resize.requested_size
             && resizing == resize.requested_resizing
             && fullscreen == resize.requested_fullscreen
+            && layout == resize.requested_layout
         {
             continue;
         }
-        resize.request(surface, requested, resizing, fullscreen, revision);
+        resize.request(surface, requested, resizing, fullscreen, layout, revision);
         actions.push(SurfaceAction::Resize {
+            layout,
             surface,
             logical_size: requested,
             resizing,
@@ -1611,7 +1702,14 @@ mod tests {
     fn resize_settles_on_a_new_commit_even_when_the_client_uses_another_size() {
         let surface = SurfaceId::for_test(71);
         let mut resize = ClientResizeState::default();
-        resize.request(surface, UVec2::new(503, 409), true, false, 12);
+        resize.request(
+            surface,
+            UVec2::new(503, 409),
+            true,
+            false,
+            Default::default(),
+            12,
+        );
 
         assert_eq!(resize.observe_commit(surface, 13), None);
 
@@ -1623,7 +1721,14 @@ mod tests {
     fn resize_remains_pending_until_the_surface_revision_advances() {
         let surface = SurfaceId::for_test(72);
         let mut resize = ClientResizeState::default();
-        resize.request(surface, UVec2::new(503, 409), true, false, 12);
+        resize.request(
+            surface,
+            UVec2::new(503, 409),
+            true,
+            false,
+            Default::default(),
+            12,
+        );
 
         assert_eq!(resize.observe_commit(surface, 12), None);
 
@@ -1651,6 +1756,7 @@ mod tests {
         app.update();
         assert!(
             take_surface_actions(app.world_mut()).contains(&SurfaceAction::Resize {
+                layout: Default::default(),
                 surface,
                 logical_size: UVec2::new(320, 240),
                 resizing: true,
@@ -1662,6 +1768,7 @@ mod tests {
         app.update();
         assert!(
             take_surface_actions(app.world_mut()).contains(&SurfaceAction::Resize {
+                layout: Default::default(),
                 surface,
                 logical_size: UVec2::new(320, 240),
                 resizing: false,
@@ -1718,6 +1825,7 @@ mod tests {
             assert_eq!(
                 requests,
                 vec![SurfaceAction::Resize {
+                    layout: Default::default(),
                     surface,
                     logical_size: UVec2::new(320, 240),
                     resizing: false,
@@ -1896,6 +2004,7 @@ mod tests {
 
         assert!(
             take_surface_actions(app.world_mut()).contains(&SurfaceAction::Resize {
+                layout: Default::default(),
                 surface: SurfaceId::for_test(9),
                 logical_size: UVec2::new(330, 240),
                 resizing: false,

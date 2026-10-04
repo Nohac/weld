@@ -23,11 +23,12 @@ pub mod workspace;
 pub mod surface {
     pub use crate::surface_impl::{
         ClientDecorated, ClientId, ClientPopup, ClientProvenance, ClientSource, ClientSourceId,
-        ClientSurface, ClientToplevel, ClientToplevelParent, ClientWindowMetadata, MappedSurface,
-        PendingClientFullscreen, ServerDecorated, SurfaceAction, SurfaceActionQueue,
-        SurfaceAlphaMode, SurfaceCommitRevisions, SurfaceId, SurfaceLayerId, SurfaceNode,
-        SurfaceSystems, SurfaceView, ToplevelInteractionRequest, ToplevelInteractionRequestKind,
-        ToplevelResizeEdge, WindowDecoration, register_client_source,
+        ClientSurface, ClientToplevel, ClientToplevelHints, ClientToplevelParent,
+        ClientWindowMetadata, MappedSurface, PendingClientFullscreen, ServerDecorated,
+        SurfaceAction, SurfaceActionQueue, SurfaceAlphaMode, SurfaceCommitRevisions, SurfaceId,
+        SurfaceLayerId, SurfaceNode, SurfaceSystems, SurfaceView, ToplevelInteractionRequest,
+        ToplevelInteractionRequestKind, ToplevelResizeEdge, WindowDecoration,
+        register_client_source,
     };
 
     #[cfg(feature = "test-support")]

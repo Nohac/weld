@@ -677,6 +677,7 @@ impl Controller {
         let accepted = lock(&self.shared.session.input).configure(
             target,
             ClientSurfaceRequestKind::Configure {
+                layout: Default::default(),
                 logical_size: size,
                 resizing: false,
                 fullscreen: false,

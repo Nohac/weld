@@ -101,6 +101,10 @@ pub struct ClientToplevel {
     pub surface: SurfaceId,
 }
 
+/// Protocol-provided placement and size hints for an application window.
+#[derive(Component, Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ClientToplevelHints(pub weld_client::ToplevelHints);
+
 /// Parent toplevel declared by the client for dialog and family policy.
 #[derive(Component, Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ClientToplevelParent {
@@ -250,6 +254,7 @@ pub enum SurfaceAction {
     },
     Resize {
         surface: SurfaceId,
+        layout: weld_client::ToplevelLayout,
         logical_size: bevy::math::UVec2,
         resizing: bool,
         fullscreen: bool,
@@ -724,6 +729,15 @@ fn apply_host_surface_events(world: &mut World) {
                         ensure_window_entity(world, &mut registry, surface, toplevel.decoration)
                     {
                         set_decoration_marker(world, entity, toplevel.decoration);
+                        if world
+                            .get::<ClientToplevelHints>(entity)
+                            .map(|hints| hints.0)
+                            != Some(toplevel.hints)
+                        {
+                            world
+                                .entity_mut(entity)
+                                .insert(ClientToplevelHints(toplevel.hints));
+                        }
                         set_toplevel_parent(world, &registry, surface, toplevel.parent);
                         apply_pending_snapshot(world, &mut registry, surface);
                     }
@@ -1776,6 +1790,7 @@ mod tests {
                     weld_client::ToplevelState {
                         parent: None,
                         decoration: WindowDecoration::ClientSide,
+                        hints: Default::default(),
                     },
                 )),
             },
@@ -1998,6 +2013,7 @@ mod tests {
                     weld_client::ToplevelState {
                         parent: Some(first_parent),
                         decoration: WindowDecoration::ClientSide,
+                        hints: Default::default(),
                     },
                 )),
             },
@@ -2024,6 +2040,7 @@ mod tests {
                     weld_client::ToplevelState {
                         parent: Some(second_parent),
                         decoration: WindowDecoration::ClientSide,
+                        hints: Default::default(),
                     },
                 )),
             },
@@ -2044,6 +2061,7 @@ mod tests {
                     weld_client::ToplevelState {
                         parent: None,
                         decoration: WindowDecoration::ClientSide,
+                        hints: Default::default(),
                     },
                 )),
             },

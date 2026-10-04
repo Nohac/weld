@@ -11,15 +11,16 @@ use bevy::{
         entity::Entity,
         observer::On,
         query::{QueryData, With, Without},
-        system::{Commands, Query, Res},
+        system::{Commands, Query, Res, SystemParam},
     },
     math::Vec2,
 };
 use weld_app::surface::ClientToplevelParent;
 use weld_window::{
-    FloatingWindow, FocusedWindow, ManagedBy, ManagedWindow, WindowClientResolver, WindowCommand,
-    WindowCommandKind, WindowGeometry, WindowIntent, WindowIntentKind, WindowZOrder,
-    fullscreen::WindowFullscreen, workspace::WorkspaceMember,
+    FloatingWindow, FocusedWindow, ManagedBy, ManagedWindow, PresentationInsets,
+    PrimaryWindowPresentation, WindowClientResolver, WindowCommand, WindowCommandKind,
+    WindowGeometry, WindowIntent, WindowIntentKind, WindowZOrder, fullscreen::WindowFullscreen,
+    workspace::WorkspaceMember,
 };
 
 #[derive(Component, Clone, Copy)]
@@ -37,8 +38,15 @@ pub(crate) struct PendingDialogPlacement;
 
 type CenteredDialogs = (With<PendingDialogPlacement>, With<FloatingWindow>);
 
+#[derive(SystemParam)]
+pub(crate) struct DialogFrames<'w, 's> {
+    presentations: Query<'w, 's, &'static PrimaryWindowPresentation>,
+    insets: Query<'w, 's, &'static PresentationInsets>,
+}
+
 /// Center after initial parent layout, including simultaneously mapped families.
 pub(crate) fn center_dialogs(
+    frames: DialogFrames,
     pending: Query<(Entity, &WorkspaceMember), CenteredDialogs>,
     mut geometry: Query<&mut WindowGeometry>,
     rectangles: Query<&LayoutRect>,
@@ -58,6 +66,17 @@ pub(crate) fn center_dialogs(
         if let Some(bounds) = bounds
             && let Ok(mut geometry) = geometry.get_mut(window)
         {
+            let inset = frames
+                .presentations
+                .get(window)
+                .ok()
+                .and_then(|root| frames.insets.get(root.entity()).ok())
+                .copied()
+                .unwrap_or_default()
+                .extent();
+            if let Some(client) = clients.mapped_client(window) {
+                geometry.size = client.constrain_content_size(geometry.size - inset) + inset;
+            }
             let position = bounds.position + (bounds.size - geometry.size) * 0.5;
             if geometry.position != position {
                 geometry.position = position;

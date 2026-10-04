@@ -10,4 +10,5 @@ weld-app = { path = "../weld-app" }
 weld-window = { path = "../weld-window" }
 
 [dev-dependencies]
+weld-client = { path = "../weld-client" }
 weld-app = { path = "../weld-app", features = ["test-support"] }

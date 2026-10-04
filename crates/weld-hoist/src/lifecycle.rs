@@ -412,6 +412,7 @@ pub(super) struct MaintainParams<'w, 's> {
     source_clients: Query<'w, 's, Option<&'static MappedSurface>, With<ClientToplevel>>,
     windows: Query<'w, 's, (&'static WindowGeometry, Option<&'static WindowOutput>)>,
     fullscreen: Query<'w, 's, (), With<weld_window::fullscreen::WindowFullscreen>>,
+    tiled: Query<'w, 's, (), With<weld_window::TiledWindow>>,
     receivers: Query<
         'w,
         's,
@@ -561,6 +562,11 @@ pub(super) fn maintain_sessions(mut params: MaintainParams) {
         if !endpoint.has_local_receiver() {
             let after_revision = params.revisions.revision(session.surface);
             params.actions.push(SurfaceAction::Resize {
+                layout: if params.tiled.contains(source) {
+                    weld_client::ToplevelLayout::Tiled
+                } else {
+                    weld_client::ToplevelLayout::Floating
+                },
                 surface: session.surface,
                 logical_size: target_size,
                 resizing: false,

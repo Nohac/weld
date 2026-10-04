@@ -56,6 +56,8 @@ pub(super) struct ToplevelState {
     pub(super) surface: WindowSurface,
     pub(super) decoration: WindowDecoration,
     pub(super) parent: Option<SurfaceId>,
+    pub(super) hints: weld_client::ToplevelHints,
+    layout: Option<weld_client::ToplevelLayout>,
     pub(super) tree: SurfaceTreeState,
     pub(super) outputs: SurfaceOutputAssignment,
     pub(super) preferred_scale_120: Option<u32>,
@@ -75,6 +77,8 @@ impl ToplevelState {
             surface: WindowSurface::X11 { window, surface },
             decoration: WindowDecoration::ServerSide,
             parent: None,
+            hints: Default::default(),
+            layout: Default::default(),
             tree: SurfaceTreeState::default(),
             outputs: SurfaceOutputAssignment::primary(output),
             preferred_scale_120: None,
@@ -235,7 +239,9 @@ impl ServerState {
         requested: Extent,
         resizing: bool,
         fullscreen: bool,
+        layout: weld_client::ToplevelLayout,
     ) {
+        let layout_changed = self.set_toplevel_layout(surface, layout);
         let fullscreen_changed = self.set_toplevel_fullscreen(surface, fullscreen);
         let size_changed = self.stage_toplevel_size(surface, requested);
         let state_changed = self.set_toplevel_resize_source(
@@ -245,8 +251,24 @@ impl ServerState {
         );
         self.send_pending_toplevel_configure(
             surface,
-            size_changed || state_changed || fullscreen_changed,
+            size_changed || state_changed || fullscreen_changed || layout_changed,
         );
+    }
+
+    fn set_toplevel_layout(
+        &mut self,
+        surface: SurfaceId,
+        layout: weld_client::ToplevelLayout,
+    ) -> bool {
+        let Some(toplevel) = self.toplevels.get_mut(surface) else {
+            return false;
+        };
+        if toplevel.layout == Some(layout) {
+            return false;
+        }
+        toplevel.layout = Some(layout);
+        toplevel.surface.set_layout(layout);
+        true
     }
 
     fn set_toplevel_fullscreen(&mut self, surface: SurfaceId, fullscreen: bool) -> bool {
@@ -274,6 +296,8 @@ impl ServerState {
         surface: SurfaceId,
         pending: Option<PendingResize>,
     ) {
+        let layout_changed =
+            pending.is_some_and(|request| self.set_toplevel_layout(surface, request.layout));
         let fullscreen_changed = pending
             .is_some_and(|request| self.set_toplevel_fullscreen(surface, request.fullscreen));
         let size_changed =
@@ -289,7 +313,11 @@ impl ServerState {
             self.set_toplevel_resize_source(surface, ResizeSource::ProtocolGrab, false);
         self.send_pending_toplevel_configure(
             surface,
-            size_changed || policy_changed || protocol_changed || fullscreen_changed,
+            size_changed
+                || policy_changed
+                || protocol_changed
+                || fullscreen_changed
+                || layout_changed,
         );
     }
 
@@ -324,9 +352,11 @@ impl ServerState {
             warn!(?surface, "ignored a resize request for an unknown surface");
             return false;
         };
-        toplevel
-            .surface
-            .stage_size(requested, toplevel.fullscreen.unwrap_or(false))
+        toplevel.surface.stage_size(
+            requested,
+            toplevel.fullscreen.unwrap_or(false),
+            toplevel.layout.unwrap_or_default(),
+        )
     }
 
     fn record_server_side_decoration(&mut self, surface: &ToplevelSurface) {
@@ -345,6 +375,7 @@ impl ServerState {
             kind: PendingSurfaceEventKind::Role(ClientSurfaceRole::Toplevel(ClientToplevelState {
                 parent: toplevel.parent,
                 decoration: WindowDecoration::ServerSide,
+                hints: toplevel.hints,
             })),
         });
     }
@@ -659,6 +690,22 @@ impl ServerState {
             return;
         };
         let geometry = toplevel.surface.geometry();
+        if matches!(toplevel.surface, WindowSurface::Xdg(_))
+            && let hints = toplevel.surface.hints()
+            && hints != toplevel.hints
+        {
+            toplevel.hints = hints;
+            self.pending_surface_events.push_back(PendingSurfaceEvent {
+                surface: surface_id,
+                kind: PendingSurfaceEventKind::Role(ClientSurfaceRole::Toplevel(
+                    ClientToplevelState {
+                        parent: toplevel.parent,
+                        decoration: toplevel.decoration,
+                        hints,
+                    },
+                )),
+            });
+        }
         let snapshot = toplevel.tree.update(surface_id, root, releases, geometry);
         if snapshot.root.is_none() {
             self.clear_input_focus_for_surface(root, self.event_time());
@@ -903,6 +950,8 @@ impl XdgShellHandler for ServerState {
             surface: WindowSurface::Xdg(surface),
             decoration: WindowDecoration::ClientSide,
             parent: None,
+            hints: Default::default(),
+            layout: Default::default(),
             tree: SurfaceTreeState::default(),
             outputs: SurfaceOutputAssignment::primary(self.primary_output),
             preferred_scale_120: None,
@@ -925,6 +974,7 @@ impl XdgShellHandler for ServerState {
             kind: PendingSurfaceEventKind::Role(ClientSurfaceRole::Toplevel(ClientToplevelState {
                 parent: None,
                 decoration: WindowDecoration::ClientSide,
+                hints: Default::default(),
             })),
         });
         info!(surface_id = id.local(), "created a nested xdg-toplevel");
@@ -945,15 +995,15 @@ impl XdgShellHandler for ServerState {
         if let Some(toplevel) = self.toplevels.get_mut(surface_id) {
             toplevel.parent = parent;
         }
-        let decoration = self
-            .toplevels
-            .get(surface_id)
-            .map_or(WindowDecoration::ClientSide, |toplevel| toplevel.decoration);
+        let Some(toplevel) = self.toplevels.get(surface_id) else {
+            return;
+        };
         self.pending_surface_events.push_back(PendingSurfaceEvent {
             surface: surface_id,
             kind: PendingSurfaceEventKind::Role(ClientSurfaceRole::Toplevel(ClientToplevelState {
                 parent,
-                decoration,
+                decoration: toplevel.decoration,
+                hints: toplevel.hints,
             })),
         });
     }
@@ -1115,16 +1165,6 @@ fn window_resize_edge(edges: xdg_toplevel::ResizeEdge) -> Option<WindowResizeEdg
     }
 }
 
-pub(super) fn constrain_dimension(requested: i32, minimum: i32, maximum: i32) -> i32 {
-    let minimum = minimum.max(1);
-    let maximum = if maximum > 0 {
-        maximum.max(minimum)
-    } else {
-        i32::MAX
-    };
-    requested.clamp(minimum, maximum)
-}
-
 impl OutputHandler for ServerState {
     fn output_bound(&mut self, output: Output, resource: WlOutput) {
         self.workspace_output_bound(output, resource);
@@ -1220,13 +1260,5 @@ mod tests {
             }),
             Some(second)
         );
-    }
-
-    #[test]
-    fn resize_dimensions_follow_committed_client_constraints() {
-        assert_eq!(constrain_dimension(10, 20, 100), 20);
-        assert_eq!(constrain_dimension(60, 20, 100), 60);
-        assert_eq!(constrain_dimension(120, 20, 100), 100);
-        assert_eq!(constrain_dimension(120, 20, 0), 120);
     }
 }

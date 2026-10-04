@@ -392,6 +392,7 @@ mod tests {
         let role = ClientSurfaceRole::Toplevel(ToplevelState {
             parent: Some(SurfaceId::for_test(3)),
             decoration: WindowDecoration::ServerSide,
+            hints: Default::default(),
         });
 
         let translated = translate_non_commit_event(PendingSurfaceEvent {

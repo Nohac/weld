@@ -339,6 +339,7 @@ fn tiled_csd_resize_uses_the_shared_protocol_lifetime() {
     );
     assert!(
         take_surface_actions(app.world_mut()).contains(&SurfaceAction::Resize {
+            layout: weld_client::ToplevelLayout::Tiled,
             surface,
             logical_size: UVec2::new(440, 600),
             resizing: true,
@@ -358,6 +359,7 @@ fn tiled_csd_resize_uses_the_shared_protocol_lifetime() {
     );
     assert!(
         take_surface_actions(app.world_mut()).contains(&SurfaceAction::Resize {
+            layout: weld_client::ToplevelLayout::Tiled,
             surface,
             logical_size: UVec2::new(440, 600),
             resizing: false,
@@ -825,6 +827,129 @@ fn declared_dialog_is_centered_on_parent_without_retiling_it() {
 }
 
 #[test]
+fn independent_special_windows_center_and_floating_limits_do_not_constrain_tiles() {
+    use weld_app::surface::ClientToplevelHints;
+    use weld_client::{Extent, ToplevelHints, ToplevelKind, ToplevelLayout};
+    for kind in [
+        ToplevelKind::Dialog,
+        ToplevelKind::Splash,
+        ToplevelKind::Utility,
+        ToplevelKind::Toolbar,
+        ToplevelKind::Normal,
+    ] {
+        let mut app = app();
+        let surface = SurfaceId::for_test(510);
+        let output_size = if kind == ToplevelKind::Splash {
+            let output = app
+                .world_mut()
+                .spawn((
+                    WeldOutput {
+                        id: OutputId::new(2),
+                    },
+                    OutputGeometry::from_physical(UVec2::new(1000, 800), 1.0),
+                ))
+                .id();
+            app.world_mut()
+                .run_system_once(
+                    move |mut creation: weld_window::workspace::WorkspaceCreation,
+                          mut commands: Commands| {
+                        let workspace = creation
+                            .create("2".into(), output)
+                            .expect("second workspace");
+                        commands.trigger(weld_window::workspace::WorkspaceRequest::SetVisible {
+                            workspace,
+                            visible: true,
+                        });
+                        commands
+                            .trigger(weld_window::workspace::WorkspaceRequest::Focus(workspace));
+                    },
+                )
+                .expect("select second output");
+            UVec2::new(1000, 800)
+        } else {
+            UVec2::new(800, 600)
+        };
+        let hints = ToplevelHints {
+            kind,
+            min_size: Extent::new(400, 300),
+            max_size: Extent::new(
+                if kind == ToplevelKind::Normal {
+                    400
+                } else {
+                    600
+                },
+                500,
+            ),
+        };
+        let client = app
+            .world_mut()
+            .spawn((
+                ClientSource {
+                    id: surface.source(),
+                    provenance: ClientProvenance::Local,
+                },
+                ClientToplevel { surface },
+                ClientToplevelHints(hints),
+                MappedSurface {
+                    logical_size: Vec2::new(200.0, 150.0),
+                    visual_size: Vec2::new(200.0, 150.0),
+                    visual_offset: Vec2::ZERO,
+                    opaque: true,
+                    alpha_mode: Default::default(),
+                },
+            ))
+            .id();
+        app.update();
+        let window = app.world().get::<OccupiesWindow>(client).expect("window").0;
+        assert!(
+            app.world()
+                .get::<weld_window::FloatingWindow>(window)
+                .is_some()
+        );
+        assert!(
+            app.world()
+                .get::<weld_window::TiledWindow>(window)
+                .is_none()
+        );
+        assert_eq!(
+            geometry(&app, window),
+            WindowGeometry {
+                position: if kind == ToplevelKind::Splash {
+                    Vec2::new(300.0, 250.0)
+                } else {
+                    Vec2::new(200.0, 150.0)
+                },
+                size: Vec2::new(400.0, 300.0)
+            }
+        );
+        app.world_mut().entity_mut(window).insert(WindowGeometry {
+            position: Vec2::ZERO,
+            size: Vec2::splat(1000.0),
+        });
+        app.update();
+        assert_eq!(
+            geometry(&app, window).size,
+            Vec2::new(hints.max_size.width as f32, 500.0)
+        );
+        take_surface_actions(app.world_mut());
+        app.world_mut().trigger(TileFloatingRequest {
+            window: Some(window),
+            enabled: Some(false),
+        });
+        app.update();
+        assert!(
+            app.world()
+                .get::<weld_window::TiledWindow>(window)
+                .is_some()
+        );
+        assert_eq!(geometry(&app, window).size, output_size.as_vec2());
+        assert!(take_surface_actions(app.world_mut()).iter().any(|action| matches!(action,
+            SurfaceAction::Resize { layout: ToplevelLayout::Tiled, logical_size, .. } if *logical_size == output_size
+        )));
+    }
+}
+
+#[test]
 fn panel_work_area_reflows_tiles_without_changing_output_geometry() {
     let mut app = app();
     let window = window(&mut app, 1);
@@ -948,6 +1073,7 @@ fn occupant_detach_and_reclaim_preserve_layout_and_use_shared_resize_effects() {
     app.update();
     assert!(
         take_surface_actions(app.world_mut()).contains(&SurfaceAction::Resize {
+            layout: weld_client::ToplevelLayout::Tiled,
             surface,
             logical_size: UVec2::new(796, 578),
             resizing: false,
@@ -996,6 +1122,7 @@ fn occupant_detach_and_reclaim_preserve_layout_and_use_shared_resize_effects() {
     assert_eq!(app.world().get::<TileParent>(first), Some(&parent));
     assert!(
         take_surface_actions(app.world_mut()).contains(&SurfaceAction::Resize {
+            layout: weld_client::ToplevelLayout::Tiled,
             surface,
             logical_size: UVec2::new(396, 578),
             resizing: false,

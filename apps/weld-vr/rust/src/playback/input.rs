@@ -841,6 +841,7 @@ mod tests {
             .expect("register");
         let target = target(0);
         let kind = ClientSurfaceRequestKind::Configure {
+            layout: Default::default(),
             logical_size: weld_client::Extent::new(900, 600),
             resizing: false,
             fullscreen: false,
