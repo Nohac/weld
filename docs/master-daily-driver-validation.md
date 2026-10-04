@@ -22,6 +22,26 @@ Each implemented milestone gets focused regression tests, independent code
 review and its own commit. Physical DRM interaction is left for the user's
 return; bounded nested runs and deterministic policy tests run during development.
 
+## Open daily-driver observations
+
+### Rare apparent missing keyboard input in Foot (2026-10-04)
+
+The user reports occasional apparently dropped Enter presses and other keys in
+local Foot under the DRM backend, without hoisting. It is rare and has no
+reliable reproduction. Whether the input is actually absent or its resulting
+repaint is delayed remains unknown; no cause or fix has been established.
+
+The initial code inspection found ordinary key presses/releases forwarded before
+paced application updates, with coalescing limited to pointer motion. The repeat
+guard filters repeated events rather than ordinary presses. Available logs lack
+per-key delivery evidence. The recent hidden-window callback-demand changes are
+an investigation candidate, not an established regression.
+
+On recurrence, check whether pointer movement or a later redraw reveals the
+missing change. Then correlate shortcut consumption and keyboard focus/routing
+with client commits, callback demand and presentation. Any diagnostic key trace
+should be opt-in and restricted to a controlled test, avoiding ordinary typing.
+
 ## Launching
 
 From the repository root, in the development shell:
