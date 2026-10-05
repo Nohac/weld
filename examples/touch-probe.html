@@ -1,0 +1,44 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Weld native touch probe</title>
+<style>
+  body { margin: 0; background: #10202b; color: #fff; font: 18px system-ui; }
+  header { padding: 16px; position: sticky; top: 0; background: #10202b; }
+  #pad { margin: 12px; height: 28vh; background: #236873; touch-action: none;
+    border-radius: 12px; padding: 16px; }
+  #scroll { margin: 12px; height: 32vh; overflow: auto; background: #26394d; padding: 16px; }
+  .row { height: 70px; border-bottom: 1px solid #7098ac; }
+  p { margin: 6px 0; }
+</style>
+<header><strong>Weld native touch probe</strong><p id="support"></p><p id="counts"></p><p id="scroll-count"></p></header>
+<div id="pad">Tap or drag here. Try two fingers together.<p id="points"></p></div>
+<div id="scroll"></div>
+<script>
+  const counts = { start: 0, move: 0, end: 0, cancel: 0, max: 0, mouse: 0 };
+  const pad = document.querySelector('#pad');
+  const list = document.querySelector('#scroll');
+  document.querySelector('#support').textContent = `Browser touch capacity: ${navigator.maxTouchPoints}`;
+  const update = () => {
+    document.querySelector('#counts').textContent = `Down ${counts.start} · Move ${counts.move} · Up ${counts.end} · Cancel ${counts.cancel} · Max fingers ${counts.max} · Mouse ${counts.mouse}`;
+    document.querySelector('#scroll-count').textContent = `Scroll position: ${Math.round(list.scrollTop)}`;
+  };
+  for (const phase of ['start', 'move', 'end', 'cancel']) {
+    pad.addEventListener(`touch${phase}`, event => {
+      event.preventDefault();
+      counts[phase] += event.changedTouches.length;
+      counts.max = Math.max(counts.max, event.touches.length);
+      document.querySelector('#points').textContent = Array.from(event.touches, touch =>
+        `${touch.identifier}: ${Math.round(touch.clientX)}, ${Math.round(touch.clientY)}`).join(' / ');
+      pad.style.background = event.touches.length ? '#8a492f' : '#236873';
+      update();
+    }, { passive: false });
+  }
+  pad.addEventListener('mousedown', () => { counts.mouse++; update(); });
+  for (let index = 1; index <= 30; index++) {
+    const row = document.createElement('div');
+    row.className = 'row'; row.textContent = `Scroll with a finger — row ${index}`; list.append(row);
+  }
+  list.addEventListener('scroll', update);
+  update();
+</script>

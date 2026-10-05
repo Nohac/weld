@@ -16,6 +16,7 @@ mod metadata;
 mod pending;
 mod presentation;
 mod surface;
+mod touch;
 #[cfg(feature = "serde")]
 mod wire;
 
@@ -40,9 +41,10 @@ pub use id::{
 pub use input::{
     ButtonState, ClientInputController, ClientInputEvent, ClientInputTarget, ClientKeyboardRoute,
     ClientPointerRoute, ClientPointerRouteUpdate, InputDelta, InputEventKind, InputPosition,
-    InputTransform, KeyboardKeyState, LinuxButtonCode, LinuxKeycode, PointerGesture,
-    PointerGestureKind, RawScrollFrame, RawScrollPhase, RawScrollSource, RelativeMotion,
-    RuntimeInputEvent, RuntimeInputEventKind, TouchpadHold, TouchpadPinch, TouchpadSwipe,
+    InputTransform, KeyboardKeyState, LinuxButtonCode, LinuxKeycode, MAX_TOUCH_CONTACTS,
+    PointerGesture, PointerGestureKind, RawScrollFrame, RawScrollPhase, RawScrollSource,
+    RelativeMotion, RuntimeInputEvent, RuntimeInputEventKind, TouchEvent, TouchId, TouchpadHold,
+    TouchpadPinch, TouchpadSwipe,
 };
 pub use input_geometry::SurfaceInputGeometry;
 pub use metadata::{ClientSurfaceMetadata, MAX_SURFACE_LABEL_BYTES, SurfaceMetadataError};

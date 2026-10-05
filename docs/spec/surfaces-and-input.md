@@ -256,13 +256,13 @@ identity, down/move/up/cancel and frame semantics. Shell navigation remains
 separate from application input and must consume its complete gesture once
 claimed; the current gesture-consumption gap is not resolved by this Direction.
 
-## First native-touch slice — Direction
+## First native-touch slice — Implemented
 
-Start with phone-to-host application input through the shared client runtime and
-ordered hoist control path. Carry contact identity, down/move/up/cancel and frame
-boundaries; namespaces and bounded contact allocation belong to the controller.
-Resolve each contact's target at down and retain it until up or cancellation,
-including when motion leaves the original window. Reuse surface geometry and
+Phone-to-host application input uses the shared client runtime and
+ordered hoist control path. It carries contact identity, down/move/up/cancel and frame
+boundaries; each controller is limited to 32 active contacts and pending targets.
+Each contact's target resolves at down and remains captured until up or cancellation,
+including when motion leaves the original window. Routes reuse surface geometry and
 scale transforms so touch addresses the displayed content.
 
 The host selects native Wayland touch delivery when the application has bound
@@ -277,9 +277,11 @@ removal, reclaim and disconnect must cancel affected contacts. Queuing may
 coalesce compatible motion, but must preserve contact lifecycle and frame
 ordering. Shell-owned gestures consume their entire sequence.
 
-Validate contact routing, multiple fingers, cancellation and fallback with
-headless protocol clients before phone testing. Native text input/IME, automatic
-keyboard display and WM touch move/resize gestures remain separate slices.
+Headless protocol tests cover contact routing, multiple fingers, cancellation,
+late bindings and fallback. The Pixel/Chrome probe received four simultaneous
+contacts, matching down/up counts and native scrolling without mouse events.
+Native text input/IME, automatic keyboard display, raw DRM touchscreen ingress,
+touch DnD and WM touch move/resize gestures remain separate slices.
 
 ## Open work — Exploration
 

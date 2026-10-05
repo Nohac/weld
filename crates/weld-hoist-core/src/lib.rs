@@ -3,6 +3,7 @@
 pub mod gamepad;
 mod loopback;
 mod relay;
+mod touch;
 
 pub use relay::{
     DestinationPortCommand, DestinationPortEvent, DestinationPortRecord, DestinationRelayAdapter,

@@ -124,8 +124,9 @@ Weld is a workspace of reusable layers and one standard distribution:
   Iroh/client runtime and Android decoder. Its GLES adapter converts acquired
   images into a reusable GPU texture on Bevy's device and returns native-image
   leases behind release fences. The first shell presents one root window with
-  touch-as-pointer input. Development enrollment, supported paths and remaining
-  phone integration are recorded in its [README](../apps/weld-mobile/README.md).
+  native touch input and host-selected pointer fallback. Development enrollment,
+  supported paths and remaining phone integration are recorded in its
+  [README](../apps/weld-mobile/README.md).
 - `weldwm` is the standard distribution. It requests a backend, configures the
   `WeldApp` returned by the builder with plugins and shortcuts, and supplies
   the executable. It is one possible assembly of the reusable crates, not the
@@ -287,8 +288,20 @@ devices/globals and returns borrowed desktop contexts. Dead client contexts are
 removed from Smithay's registry. Existing protocol resources retain the selection
 association needed for late destruction.
 
-Native touchscreen delivery is a subsequent slice; the phone still sends mouse
-input. Tests cover native seats, first-seat fallback, late binding, overlapping
+The phone sends contact IDs, down/motion/up/cancel and frame boundaries through
+the shared runtime and ordered input channel. Each contact retains its original
+surface/layer and coordinate transform. Host routing allocates bounded native
+slots per input context and chooses native `wl_touch` when the app binds it,
+otherwise one primary-contact pointer fallback. Mode and context remain pinned
+until the gesture finishes, including late seat bindings. Touch holds participate
+in controller arbitration. Retirement, disconnect and phone lifecycle/mapping
+changes cancel contacts; destroying a subsurface also cancels its context.
+Wayland cancellation applies to the whole native context, while transport
+ledgers retire their target-scoped records. Adjacent motion may coalesce only
+for the same contact and target, with frame/lifecycle events as barriers.
+Raw DRM touchscreen ingestion, touch DnD and text/IME remain separate work.
+
+Tests cover native seats, first-seat fallback, late binding, overlapping
 holds, independent applications, clipboard handoff and real shared-process Kitty
 input. Binding interfaces demonstrates readiness, not full toolkit multi-seat
 correctness; application-level checks remain useful.

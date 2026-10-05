@@ -313,12 +313,18 @@ pub enum ClientInputTarget {
     Keyboard {
         surface: ClientSurfaceId,
     },
+    Touch {
+        surface: ClientSurfaceId,
+        layer: SurfaceLayerId,
+    },
 }
 
 impl ClientInputTarget {
     pub const fn surface(self) -> ClientSurfaceId {
         match self {
-            Self::Pointer { surface, .. } | Self::Keyboard { surface } => surface,
+            Self::Pointer { surface, .. }
+            | Self::Touch { surface, .. }
+            | Self::Keyboard { surface } => surface,
         }
     }
 }
@@ -363,6 +369,55 @@ pub enum InputEventKind {
         keycode: LinuxKeycode,
         state: KeyboardKeyState,
     },
+    Touch {
+        event: TouchEvent,
+    },
+}
+
+/// Producer-local contact identity, scoped by the trusted input controller.
+#[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct TouchId(pub u64);
+
+/// Maximum simultaneous contacts accepted from one controller.
+pub const MAX_TOUCH_CONTACTS: usize = 32;
+
+/// Ordered contact lifecycle. Frame ends a logical batch; cancel aborts the
+/// interaction on the addressed target, including every contact in its native context.
+#[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum TouchEvent {
+    Down {
+        id: TouchId,
+        position: InputPosition,
+    },
+    Motion {
+        id: TouchId,
+        position: InputPosition,
+    },
+    Up {
+        id: TouchId,
+    },
+    Frame,
+    Cancel,
+}
+
+impl TouchEvent {
+    pub const fn id(self) -> Option<TouchId> {
+        match self {
+            Self::Down { id, .. } | Self::Motion { id, .. } | Self::Up { id } => Some(id),
+            Self::Frame | Self::Cancel => None,
+        }
+    }
+
+    pub fn is_valid(self) -> bool {
+        match self {
+            Self::Down { position, .. } | Self::Motion { position, .. } => {
+                position.x.is_finite() && position.y.is_finite()
+            }
+            _ => true,
+        }
+    }
 }
 
 /// Unconsumed host input entering the device-paced client runtime.

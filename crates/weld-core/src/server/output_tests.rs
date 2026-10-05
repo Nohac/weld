@@ -8,6 +8,8 @@ mod input_binding_tests;
 mod input_seat_tests;
 #[path = "layer_tests.rs"]
 mod layer_tests;
+#[path = "touch_tests.rs"]
+mod touch_tests;
 #[path = "workspace_tests.rs"]
 mod workspace_tests;
 
@@ -55,6 +57,7 @@ struct ObservedSurface {
 
 #[derive(Default)]
 struct Observer {
+    touch: touch_tests::Probe,
     input: input_seat_tests::Probe,
     selection: input_binding_tests::SelectionProbe,
     workspaces: workspace_tests::Probe,

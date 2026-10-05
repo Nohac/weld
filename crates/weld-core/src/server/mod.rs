@@ -19,6 +19,8 @@ mod seat_bindings;
 mod shm;
 mod surface_tree;
 mod toplevel;
+mod touch;
+mod touch_grab;
 mod window;
 mod workspace;
 mod xwayland;
@@ -122,6 +124,7 @@ pub struct ServerState {
     local_input: Rc<InputSeat>,
     remote_inputs: HashMap<weld_client::ClientInputController, Rc<InputSeat>>,
     input_bindings: Vec<seat_bindings::InputBinding>,
+    touch: touch::TouchRouting,
     keyboard_mapper: crate::input::KeyboardMapper,
     pending_keymap: Option<crate::input::KeyboardKeymap>,
     default_keymap: crate::input::KeyboardKeymap,
@@ -209,6 +212,7 @@ impl ServerState {
         seat.add_keyboard(Default::default(), 200, 25)
             .context("failed to initialize the compositor keyboard keymap")?;
         seat.add_pointer();
+        seat.add_touch();
 
         let primary_output = outputs
             .iter()
@@ -363,6 +367,7 @@ impl ServerState {
             local_input: InputSeat::new(seat, None),
             remote_inputs: HashMap::new(),
             input_bindings: Vec::new(),
+            touch: touch::TouchRouting::default(),
             keyboard_mapper,
             pending_keymap: None,
             default_keymap,

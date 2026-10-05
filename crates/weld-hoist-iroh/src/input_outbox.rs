@@ -1,5 +1,5 @@
 //! Synchronous input admission and one asynchronous control writer.
-//! Like ApplicationInputBuffer, only adjacent absolute motions can coalesce.
+//! Adjacent compatible pointer motions or same-contact touch motions can coalesce.
 //! Every other record (including PointerLeft) is an ordering barrier.
 
 use std::{
@@ -83,7 +83,7 @@ impl InputOutbox {
             DestinationMessage::Gamepad(_) => 5,
         };
         state.received[kind] = state.received[kind].saturating_add(1);
-        if is_pointer_motion(&packet) {
+        if is_motion(&packet) {
             state.observations.motions_received =
                 state.observations.motions_received.saturating_add(1);
         }
@@ -161,7 +161,7 @@ impl InputOutbox {
             };
             let observations = &mut state.observations;
             observations.writes_completed = observations.writes_completed.saturating_add(1);
-            if is_pointer_motion(packet) {
+            if is_motion(packet) {
                 observations.motions_written = observations.motions_written.saturating_add(1);
             }
             observations.framed_bytes = observations
@@ -212,9 +212,9 @@ impl InputOutbox {
     }
 }
 
-fn is_pointer_motion(packet: &DestinationEnvelope) -> bool {
+fn is_motion(packet: &DestinationEnvelope) -> bool {
     matches!(&packet.message, DestinationMessage::Input(input)
-        if matches!(input.event, InputEventKind::PointerMotion { .. }))
+        if matches!(input.event, InputEventKind::PointerMotion { .. } | InputEventKind::Touch { event: weld_client::TouchEvent::Motion { .. } }))
 }
 
 fn coalesce_motion(previous: &DestinationEnvelope, next: &mut DestinationEnvelope) -> bool {
@@ -223,10 +223,21 @@ fn coalesce_motion(previous: &DestinationEnvelope, next: &mut DestinationEnvelop
     else {
         return false;
     };
-    if previous.session != next.session
-        || previous_input.target != next_input.target
-        || !matches!(previous_input.target, ClientInputTarget::Pointer { .. })
+    if previous.session != next.session || previous_input.target != next_input.target {
+        return false;
+    }
+    if let (
+        InputEventKind::Touch {
+            event: weld_client::TouchEvent::Motion { id: old, .. },
+        },
+        InputEventKind::Touch {
+            event: weld_client::TouchEvent::Motion { id: new, .. },
+        },
+    ) = (&previous_input.event, &next_input.event)
     {
+        return matches!(previous_input.target, ClientInputTarget::Touch { .. }) && old == new;
+    }
+    if !matches!(previous_input.target, ClientInputTarget::Pointer { .. }) {
         return false;
     }
     let (
@@ -534,6 +545,46 @@ mod tests {
             queue.push(motion(3)).expect("after");
             assert_eq!(queue.state.lock().expect("state").records.len(), 3);
         }
+    }
+
+    #[tokio::test]
+    async fn touch_motion_coalesces_only_within_a_contact_and_frame() {
+        use weld_client::{TouchEvent, TouchId};
+        let queue = InputOutbox::default();
+        let packet = |id, x| {
+            let mut packet = motion(x);
+            if let DestinationMessage::Input(input) = &mut packet.message {
+                let surface = input.target.surface();
+                input.target = ClientInputTarget::Touch {
+                    surface,
+                    layer: SurfaceLayerId::new(1),
+                };
+                input.event = InputEventKind::Touch {
+                    event: TouchEvent::Motion {
+                        id: TouchId(id),
+                        position: InputPosition::new(f64::from(x), 0.0),
+                    },
+                };
+            }
+            packet
+        };
+        queue.push(packet(1, 1)).expect("first motion");
+        queue.push(packet(1, 2)).expect("same contact");
+        queue.push(packet(2, 3)).expect("different contact");
+        let mut frame = packet(2, 4);
+        if let DestinationMessage::Input(input) = &mut frame.message {
+            input.event = InputEventKind::Touch {
+                event: TouchEvent::Frame,
+            };
+        }
+        queue.push(frame).expect("frame");
+        queue.push(packet(2, 5)).expect("next frame motion");
+        assert_eq!(queue.state.lock().expect("state").records.len(), 4);
+        let newest = queue.recv().await.expect("motion");
+        assert!(
+            matches!(newest.message, DestinationMessage::Input(input) if matches!(input.event,
+            InputEventKind::Touch { event: TouchEvent::Motion { id: TouchId(1), position } } if position.x == 2.0))
+        );
     }
 
     #[tokio::test]

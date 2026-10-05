@@ -777,7 +777,7 @@ impl ServerState {
         }
     }
 
-    fn pointer_focus(
+    pub(super) fn pointer_focus(
         &self,
         position: InputPosition,
         target: Option<SurfaceHit>,
@@ -817,6 +817,7 @@ impl ServerState {
     }
 
     pub(super) fn release_seat_input(&mut self, input_seat: &InputSeat, time: u32) {
+        self.cancel_touch_context(input_seat, time);
         self.clear_selection_focus(&input_seat.native);
         input_seat.keyboard_repeats.borrow_mut().clear();
         self.dismiss_popup_grab(input_seat, time);
@@ -887,6 +888,7 @@ impl ServerState {
     }
 
     pub(super) fn retire_input_target(&mut self, surface: SurfaceId, time: u32) {
+        self.retire_touch_target(surface, time);
         let inputs = self.input_seats().cloned().collect::<Vec<_>>();
         for input in inputs {
             input.admission.borrow_mut().retire_surface(surface);
@@ -919,6 +921,7 @@ impl ServerState {
     }
 
     pub(super) fn clear_input_focus_for_surface(&mut self, surface: &WlSurface, time: u32) {
+        self.retire_touch_surface(surface, time);
         if let Some(id) = self
             .toplevels
             .id_for_surface(surface)
@@ -1180,6 +1183,12 @@ fn transition_pending_focus(
 impl PointerConstraintsHandler for ServerState {}
 
 impl SeatHandler for ServerState {
+    fn touch_down_grab(
+        &mut self,
+        start: smithay::input::touch::GrabStartData<Self>,
+    ) -> impl smithay::input::touch::TouchGrab<Self> {
+        super::touch_grab::ContactGrab::new(start)
+    }
     type KeyboardFocus = KeyboardFocus;
     type PointerFocus = WlSurface;
     type TouchFocus = WlSurface;

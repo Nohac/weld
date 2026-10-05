@@ -77,10 +77,13 @@ the Android UI thread asynchronously at most twice a second, with an immediate
 refresh on window-size changes. Presentation waits for matching-size insets.
 Large viewport requests are reduced to leave room inside the decoder dimension
 ceiling; this is a shell bound, not hardware capability negotiation.
-One finger maps to primary-button press, captured motion and release. The
-shared surface-input geometry handles crop/scale coordinates and input regions.
-Focus loss, cancellation, rotation/mapping changes and queue overflow release
-held input. An epoch guards
+Contacts carry stable IDs and down/motion/up/cancel/frame events through the
+shared runtime. The host chooses native Wayland touch for applications binding
+it, otherwise primary-finger mouse emulation. Both choices stay fixed through
+the gesture. The shared surface-input geometry handles crop/scale coordinates
+and input regions, capturing each contact's initial target. Focus loss,
+cancellation, rotation/mapping changes and queue overflow cancel held contacts.
+An epoch guards
 input and decoded-frame publication across window unmap/destruction.
 
 The receiver selects the first toplevel and requests 60 Hz while active. Other
@@ -133,6 +136,18 @@ wgpu's error logger during startup. Android/N0 relay connection attempts also
 emitted deadline warnings; the validated stream selected a direct IPv4 path.
 Internet-only relay operation, long background suspension and additional phone
 GPUs remain unqualified.
+
+## Native touch validation
+
+`examples/touch-probe.html` distinguishes native multi-touch from mouse events
+and includes a finger-scrollable list. Open it in a private browser launched by
+`scripts/run-mobile-hoist`. On Pixel 8 Pro, Chrome recorded four simultaneous
+contacts, 20 matching down/up events, zero mouse presses and scrolling. The
+probe used `--disable-gpu --ozone-platform=wayland` because this Chrome build's
+GPU buffers hit the source VA-API import format whitelist. That limitation is
+separate from native touch. Firefox uses subsurfaces which this phone shell does
+not yet present. The host's native protocol tests also cover cancellation,
+controller isolation, first-seat compatibility and pointer fallback.
 
 ## Next product slices
 

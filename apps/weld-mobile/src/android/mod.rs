@@ -20,9 +20,7 @@ use std::{
     sync::Arc,
     time::{Duration, Instant},
 };
-use weld_client::{
-    ButtonState, ClientPointerRoute, InputEventKind, InputPosition, LinuxButtonCode,
-};
+use weld_client::{ClientPointerRoute, InputPosition, MAX_TOUCH_CONTACTS, TouchEvent, TouchId};
 
 #[derive(Resource)]
 struct Receiver(Session);
@@ -34,8 +32,8 @@ struct Stream {
 #[derive(Component, Clone, Default)]
 struct VideoPanel;
 #[derive(Default, Resource)]
-struct Pointer {
-    held: Option<(u64, ClientPointerRoute)>,
+struct Contacts {
+    held: std::collections::HashMap<u64, ClientPointerRoute>,
     clock: Option<Instant>,
     mapping: Option<(u64, [f64; 4], [f64; 2])>,
 }
@@ -49,7 +47,7 @@ struct Presentation {
 pub fn install(app: &mut App) {
     browser::install(app);
     app.add_plugins(ExtractResourcePlugin::<Stream>::default())
-        .init_resource::<Pointer>()
+        .init_resource::<Contacts>()
         .init_resource::<Presentation>()
         .init_resource::<insets::Insets>()
         .add_systems(Startup, start)
@@ -90,7 +88,7 @@ fn lifecycle(
     receiver: Option<Res<Receiver>>,
     mut lifecycle: MessageReader<AppLifecycle>,
     mut focus: MessageReader<WindowFocused>,
-    mut pointer: ResMut<Pointer>,
+    mut contacts: ResMut<Contacts>,
 ) {
     let Some(receiver) = receiver else {
         return;
@@ -99,13 +97,13 @@ fn lifecycle(
         let active = matches!(event, AppLifecycle::Running | AppLifecycle::WillResume);
         receiver.0.set_active(active);
         if !active {
-            pointer.held = None;
+            contacts.held.clear();
         }
     }
     for event in focus.read() {
         if !event.focused {
+            contacts.held.clear();
             receiver.0.reset_input();
-            pointer.held = None;
         }
     }
 }
@@ -208,7 +206,7 @@ fn touch(
     receiver: Option<Res<Receiver>>,
     windows: Query<&Window, With<PrimaryWindow>>,
     mut events: MessageReader<TouchInput>,
-    mut pointer: ResMut<Pointer>,
+    mut contacts: ResMut<Contacts>,
     presentation: Res<Presentation>,
 ) {
     let Some(receiver) = receiver else {
@@ -230,7 +228,10 @@ fn touch(
             .load(std::sync::atomic::Ordering::Acquire)
     {
         events.clear();
-        pointer.held = None;
+        if !contacts.held.is_empty() {
+            receiver.0.reset_input();
+        }
+        contacts.held.clear();
         return;
     }
     let displayed = receiver
@@ -242,85 +243,106 @@ fn touch(
         .and_then(|value| value.clone());
     let (Some((epoch, displayed)), Some(viewport)) = (displayed, presentation.viewport) else {
         events.clear();
-        if pointer.held.take().is_some() {
+        if !contacts.held.is_empty() {
+            contacts.held.clear();
             receiver.0.reset_input();
         }
-        pointer.mapping = None;
+        contacts.mapping = None;
         return;
     };
     let rect = fit_rect(viewport.video, displayed.logical_size);
     let mapping = Some((epoch, rect, displayed.logical_size));
-    if pointer.mapping != mapping {
-        pointer.mapping = mapping;
-        if pointer.held.take().is_some() {
+    if contacts.mapping != mapping {
+        contacts.mapping = mapping;
+        if !contacts.held.is_empty() {
+            contacts.held.clear();
             receiver.0.reset_input();
             events.clear();
             return;
         }
     }
+    let mut last = None;
     for touch in events.read() {
         let position = InputPosition::new(f64::from(touch.position.x), f64::from(touch.position.y));
         let (route, focus, event) = match touch.phase {
-            TouchPhase::Started if pointer.held.is_none() => {
+            TouchPhase::Started
+                if contacts.held.len() < MAX_TOUCH_CONTACTS
+                    && !contacts.held.contains_key(&touch.id) =>
+            {
                 let Some(route) = displayed.pointer_route(rect, position) else {
                     continue;
                 };
-                pointer.held = Some((touch.id, route));
+                let focus = contacts.held.is_empty();
+                contacts.held.insert(touch.id, route);
                 (
                     route,
-                    true,
-                    InputEventKind::PointerButton {
-                        position: Some(position),
-                        button: LinuxButtonCode(0x110),
-                        state: ButtonState::Pressed,
-                    },
-                )
-            }
-            TouchPhase::Moved if pointer.held.is_some_and(|(id, _)| id == touch.id) => {
-                let Some((_, route)) = pointer.held else {
-                    continue;
-                };
-                (
-                    route,
-                    false,
-                    InputEventKind::PointerMotion {
+                    focus,
+                    TouchEvent::Down {
+                        id: TouchId(touch.id),
                         position,
-                        relative: None,
                     },
                 )
             }
-            TouchPhase::Ended | TouchPhase::Canceled
-                if pointer.held.is_some_and(|(id, _)| id == touch.id) =>
-            {
-                let Some((_, route)) = pointer.held.take() else {
+            TouchPhase::Moved if contacts.held.contains_key(&touch.id) => {
+                let Some(route) = contacts.held.get(&touch.id).copied() else {
                     continue;
                 };
                 (
                     route,
                     false,
-                    InputEventKind::PointerButton {
-                        position: Some(position),
-                        button: LinuxButtonCode(0x110),
-                        state: ButtonState::Released,
+                    TouchEvent::Motion {
+                        id: TouchId(touch.id),
+                        position,
+                    },
+                )
+            }
+            TouchPhase::Ended | TouchPhase::Canceled if contacts.held.contains_key(&touch.id) => {
+                let Some(route) = contacts.held.remove(&touch.id) else {
+                    continue;
+                };
+                (
+                    route,
+                    false,
+                    if touch.phase == TouchPhase::Canceled {
+                        TouchEvent::Cancel
+                    } else {
+                        TouchEvent::Up {
+                            id: TouchId(touch.id),
+                        }
                     },
                 )
             }
             _ => continue,
         };
-        let time = pointer
+        let time = contacts
             .clock
             .get_or_insert_with(Instant::now)
             .elapsed()
             .as_millis() as u32;
+        if touch.phase == TouchPhase::Canceled {
+            contacts.held.clear();
+        }
         if !receiver.0.input(Input {
             epoch,
             route,
-            position,
             event,
             focus,
             time,
         }) {
-            pointer.held = None;
+            contacts.held.clear();
+            return;
         }
+        last = Some((route, time));
+    }
+    if let Some((route, time)) = last
+        && !receiver.0.input(Input {
+            epoch,
+            route,
+            event: TouchEvent::Frame,
+            focus: false,
+            time,
+        })
+    {
+        contacts.held.clear();
     }
 }

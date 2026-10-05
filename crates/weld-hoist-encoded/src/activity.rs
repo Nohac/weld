@@ -384,6 +384,15 @@ impl Activity {
                     attention.layer = Some(layer);
                 }
                 match &input.event {
+                    InputEventKind::Touch { event } => {
+                        if matches!(
+                            event,
+                            weld_client::TouchEvent::Down { .. }
+                                | weld_client::TouchEvent::Motion { .. }
+                        ) {
+                            attention.interaction = Some(now);
+                        }
+                    }
                     InputEventKind::Keyboard { state, .. } => {
                         if *state == KeyboardKeyState::Pressed
                             || (*state == KeyboardKeyState::Repeated && focused)

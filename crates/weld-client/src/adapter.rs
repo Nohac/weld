@@ -397,6 +397,7 @@ struct KeyboardCapture {
 /// application update.
 #[derive(Default)]
 pub struct ClientRuntime {
+    pub(super) touch: crate::touch::TouchRouting,
     adapters: BTreeMap<ClientSourceId, ClientRuntimeAdapter>,
     scratch_events: ClientEventQueue,
     generated_events: ClientEventQueue,
@@ -910,6 +911,9 @@ impl ClientRuntime {
     ) -> ClientInputDispatchResult {
         let RuntimeInputEvent { event, time } = event;
         match event {
+            RuntimeInputEventKind::Input(InputEventKind::Touch { event }) => {
+                self.dispatch_touch(self.pointer_route, event, time)
+            }
             RuntimeInputEventKind::Input(InputEventKind::PointerMotion { position, relative }) => {
                 self.pointer_position = Some(position);
                 self.dispatch_pointer(
@@ -1065,6 +1069,7 @@ impl ClientRuntime {
     }
 
     pub fn host_focus_lost(&mut self, time: u32) -> ClientInputDispatchResult {
+        self.dispatch_touch(None, crate::TouchEvent::Cancel, time);
         let delivered = !self.adapters.is_empty();
         for adapter in self.adapters.values_mut() {
             adapter.driver.host_focus_lost(time);
@@ -1122,7 +1127,9 @@ impl ClientRuntime {
             | InputEventKind::PointerAxis { position, .. } => {
                 *position = local;
             }
-            InputEventKind::PointerGesture { .. } | InputEventKind::Keyboard { .. } => {}
+            InputEventKind::PointerGesture { .. }
+            | InputEventKind::Keyboard { .. }
+            | InputEventKind::Touch { .. } => {}
         }
         self.dispatch_to(
             route.surface.source(),
@@ -1256,7 +1263,7 @@ impl ClientRuntime {
         result
     }
 
-    fn dispatch_to(
+    pub(super) fn dispatch_to(
         &mut self,
         source: ClientSourceId,
         event: ClientInputEvent,
@@ -1277,7 +1284,7 @@ impl ClientRuntime {
         }
     }
 
-    fn resolved_pointer_route(
+    pub(super) fn resolved_pointer_route(
         &self,
         route: Option<ClientPointerRoute>,
     ) -> Result<Option<ClientPointerRoute>, ClientInputDispatchResult> {
@@ -1347,6 +1354,7 @@ impl ClientRuntime {
     }
 
     fn forget_surface(&mut self, surface: ClientSurfaceId) {
+        self.cancel_surface_touch(surface);
         self.cursors.remove(&surface);
         let destroyed_keys = self
             .keyboard_captures
@@ -1447,6 +1455,8 @@ fn track_cursor_surface(
 
 #[cfg(test)]
 mod tests {
+    #[path = "touch_tests.rs"]
+    mod touch_tests;
     use std::{cell::RefCell, rc::Rc};
 
     use super::*;

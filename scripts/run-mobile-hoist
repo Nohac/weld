@@ -141,7 +141,7 @@ def main():
         with (directory / "receiver.log").open("w") as log:
             logcat = subprocess.Popen([*adb, "logcat", "-v", "threadtime", "--pid", pid],
                 stdout=log, stderr=subprocess.STDOUT)
-            print(f"Phone receiver running for {args.seconds}s. Touch clicks/drags; Ctrl-C stops this test.", flush=True)
+            print(f"Phone receiver running for {args.seconds}s. Touch input enabled; Ctrl-C stops this test.", flush=True)
             until = time.monotonic() + args.seconds
             next_check = 0.0
             while not stopped and time.monotonic() < until:

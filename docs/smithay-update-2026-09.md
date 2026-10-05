@@ -6,9 +6,11 @@ Updated the full vendored subtree from
 [Provenance](../vendor/smithay.upstream) pins the exact revision. Keep updates
 in the existing squashed-subtree history, separate from Weld's API adapters.
 
-The only deviations from that upstream tree remain the two existing patches:
+At the time of this refresh, the two existing patches were:
 omitting Smithay's nested workspace table and retaining
 `DrmDeviceFd::new_unprivileged` for render-node explicit synchronization.
+Later local patches, including keyboard-v10, input contexts and native touch
+cancellation, are recorded in [the current patch inventory](../vendor/smithay.upstream).
 
 ## Integration changes
 

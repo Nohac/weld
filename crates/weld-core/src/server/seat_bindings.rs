@@ -19,13 +19,14 @@ pub(super) struct SelectionGroup(pub RefCell<Seat<ServerState>>);
 pub(super) struct SelectionFocus(pub RefCell<Option<smithay::input::WeakSeat<ServerState>>>);
 
 #[derive(Clone, Copy)]
-enum Device {
+pub(super) enum Device {
+    Touch,
     Keyboard,
     Pointer,
 }
 
 impl InputSeat {
-    fn busy(&self) -> bool {
+    pub(super) fn busy(&self) -> bool {
         self.native.get_keyboard().is_some_and(|keyboard| {
             self.keyboard_repeats.borrow().has_pressed_keys() || keyboard.is_grabbed()
         }) || self
@@ -35,10 +36,16 @@ impl InputSeat {
             || !self.pressed_pointer_buttons.borrow().is_empty()
             || self.active_gesture.get().is_some()
             || self.finger_scroll.get()
+            || self.touch_count.get() != 0
+            || self.touch_pending.get()
     }
 
     fn bound(&self, client: &Client, device: Device) -> bool {
         match device {
+            Device::Touch => self
+                .native
+                .get_touch()
+                .is_some_and(|touch| touch.client_touch(client).next().is_some()),
             Device::Keyboard => self
                 .native
                 .get_keyboard()
@@ -67,6 +74,7 @@ impl ServerState {
                 let binding = self.input_bindings.remove(index);
                 let mut native = binding.input.native.clone();
                 native.remove_pointer();
+                native.remove_touch();
                 native.remove_keyboard();
                 self.seat_state.remove_seat(&native);
             } else {
@@ -108,6 +116,7 @@ impl ServerState {
             }
             let mut native = input.native.clone();
             native.remove_pointer();
+            native.remove_touch();
             native.remove_keyboard();
             self.seat_state.remove_seat(&native);
             self.input_bindings.remove(index);
@@ -144,6 +153,7 @@ impl ServerState {
             return None;
         }
         native.add_pointer();
+        native.add_touch();
         native
             .user_data()
             .insert_if_missing(|| SelectionGroup(RefCell::new(global.clone())));
@@ -157,14 +167,17 @@ impl ServerState {
         Some(native)
     }
 
-    fn controller_seat(&self, controller: Option<ClientInputController>) -> Option<Rc<InputSeat>> {
+    pub(super) fn controller_seat(
+        &self,
+        controller: Option<ClientInputController>,
+    ) -> Option<Rc<InputSeat>> {
         match controller {
             None => Some(self.local_input.clone()),
             Some(controller) => self.remote_inputs.get(&controller).cloned(),
         }
     }
 
-    fn input_client(&self, surface: SurfaceId) -> Option<Client> {
+    pub(super) fn input_client(&self, surface: SurfaceId) -> Option<Client> {
         self.toplevels
             .get(surface)
             .map(|window| window.surface.wl_surface())
@@ -182,7 +195,7 @@ impl ServerState {
             .client()
     }
 
-    fn select_binding(
+    pub(super) fn select_binding(
         &mut self,
         controller: Option<ClientInputController>,
         surface: SurfaceId,
@@ -203,8 +216,12 @@ impl ServerState {
                     binding.client == client
                         && binding.published == controller
                         && controller.is_some()
-                        && binding.input.bound(&client, Device::Keyboard)
-                        && binding.input.bound(&client, Device::Pointer)
+                        && if matches!(device, Device::Touch) {
+                            binding.input.bound(&client, Device::Touch)
+                        } else {
+                            binding.input.bound(&client, Device::Keyboard)
+                                && binding.input.bound(&client, Device::Pointer)
+                        }
                 })
             })
             .or_else(|| {
@@ -235,6 +252,21 @@ impl ServerState {
             self.configure_seat_repeat(&input);
         }
         Some(input)
+    }
+
+    pub(super) fn track_pointer_binding(
+        &mut self,
+        logical: &InputSeat,
+        input: Rc<InputSeat>,
+        time: u32,
+    ) {
+        let previous = logical.pointer_binding.borrow_mut().replace(input.clone());
+        if let Some(previous) = previous
+            && previous.controller.get() == logical.controller.get()
+            && !Rc::ptr_eq(&previous, &input)
+        {
+            self.clear_seat_pointer(&previous, time);
+        }
     }
 
     pub(super) fn route_controller_focus(
@@ -268,6 +300,10 @@ impl ServerState {
         controller: Option<ClientInputController>,
         event: ClientInputEvent,
     ) {
+        if let InputEventKind::Touch { event: touch } = event.event {
+            self.route_touch(controller, event.target, touch, event.time);
+            return;
+        }
         let Some(logical) = self.controller_seat(controller) else {
             return;
         };
@@ -313,13 +349,7 @@ impl ServerState {
                 self.route_controller_focus(controller, desired);
             }
         } else {
-            let previous = logical.pointer_binding.borrow_mut().replace(input.clone());
-            if let Some(previous) = previous
-                && previous.controller.get() == controller
-                && !Rc::ptr_eq(&previous, &input)
-            {
-                self.clear_seat_pointer(&previous, event.time);
-            }
+            self.track_pointer_binding(&logical, input.clone(), event.time);
             if restore_keyboard
                 && let Some(focus) = desired
                 && self.input_client(focus) == self.input_client(event.target.surface())

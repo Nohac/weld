@@ -17,8 +17,9 @@ use weld_client::{
     ClientBufferId, ClientBufferLease, ClientBufferMetadata, ClientBufferUseId, ClientEventQueue,
     ClientFocusRequest, ClientPointerRoute, ClientRequest, ClientRuntime, ClientSourceId,
     ClientSurfaceEventKind, ClientSurfaceId, ClientSurfaceRequest, ClientSurfaceRequestKind,
-    ClientSurfaceRole, Extent, InputEventKind, InputPosition, PresentationRate, RuntimeInputEvent,
+    ClientSurfaceRole, Extent, InputPosition, PresentationRate, RuntimeInputEvent,
     RuntimeInputEventKind, SurfaceBufferChange, SurfaceContentView, SurfaceInputGeometry,
+    TouchEvent,
 };
 use weld_hoist_encoded::{DecodedFramePublisher, EncodedDestinationTransport};
 use weld_hoist_iroh::pairing::{ApplicationInfo, PairingInvitation, PairingProgress};
@@ -79,8 +80,7 @@ impl Shared {
 pub(super) struct Input {
     pub epoch: u64,
     pub route: ClientPointerRoute,
-    pub position: InputPosition,
-    pub event: InputEventKind,
+    pub event: TouchEvent,
     pub focus: bool,
     pub time: u32,
 }
@@ -629,42 +629,14 @@ fn stream(
             {
                 continue;
             }
-            runtime.set_pointer_route(Some(input.route));
+            // Touch has its own captured routes; it never changes pointer hover.
             if input.focus {
                 runtime.apply_request(ClientRequest::Focus(ClientFocusRequest {
                     source: input.route.surface.source(),
                     surface: Some(input.route.surface),
                 }));
             }
-            if !matches!(input.event, InputEventKind::PointerMotion { .. }) {
-                runtime.dispatch_unconsumed_input(RuntimeInputEvent::new(
-                    RuntimeInputEventKind::Input(InputEventKind::PointerMotion {
-                        position: input.position,
-                        relative: None,
-                    }),
-                    input.time,
-                ));
-            }
-            let leave = matches!(
-                input.event,
-                InputEventKind::PointerButton {
-                    state: weld_client::ButtonState::Released,
-                    ..
-                }
-            );
-            runtime.dispatch_unconsumed_input(RuntimeInputEvent::new(
-                RuntimeInputEventKind::Input(input.event),
-                input.time,
-            ));
-            if leave {
-                runtime.dispatch_unconsumed_input(RuntimeInputEvent::new(
-                    RuntimeInputEventKind::Input(InputEventKind::PointerLeft {
-                        position: input.position,
-                    }),
-                    input.time,
-                ));
-                runtime.set_pointer_route(None);
-            }
+            runtime.dispatch_touch(Some(input.route), input.event, input.time);
         }
         let wait = runtime
             .next_deadline()
@@ -755,10 +727,9 @@ mod tests {
                 layer: SurfaceLayerId::new(1),
                 transform: InputTransform::IDENTITY,
             },
-            position: InputPosition::default(),
-            event: InputEventKind::PointerMotion {
-                position: InputPosition::default(),
-                relative: None,
+            event: TouchEvent::Down {
+                id: weld_client::TouchId(1),
+                position: weld_client::InputPosition::default(),
             },
             focus: false,
             time: 1,

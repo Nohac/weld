@@ -1183,6 +1183,26 @@ impl DestinationRelayAdapter {
         }
     }
 
+    fn forward_input(
+        &mut self,
+        session: HoistSessionId,
+        source: ClientSurfaceId,
+        mut event: ClientInputEvent,
+    ) {
+        event.target = match event.target {
+            ClientInputTarget::Touch { layer, .. } => ClientInputTarget::Touch {
+                surface: source,
+                layer,
+            },
+            ClientInputTarget::Pointer { layer, .. } => ClientInputTarget::Pointer {
+                surface: source,
+                layer,
+            },
+            ClientInputTarget::Keyboard { .. } => ClientInputTarget::Keyboard { surface: source },
+        };
+        self.send_destination(session, DestinationMessage::input(event));
+    }
+
     fn destroy_surface(&mut self, source: ClientSurfaceId, notify_port: bool) {
         self.cursor_updates
             .remove(&relocated_surface(self.descriptor.id, source));
@@ -1310,7 +1330,7 @@ impl ClientAdapter for DestinationRelayAdapter {
         self.send_destination(session, DestinationMessage::Request(request));
     }
 
-    fn apply_input(&mut self, mut event: ClientInputEvent) {
+    fn apply_input(&mut self, event: ClientInputEvent) {
         let destination = event.target.surface();
         let Some(source) = self.source_surface(destination) else {
             return;
@@ -1321,14 +1341,7 @@ impl ClientAdapter for DestinationRelayAdapter {
         if !self.input.observe_input(&event) {
             return;
         }
-        event.target = match event.target {
-            ClientInputTarget::Pointer { layer, .. } => ClientInputTarget::Pointer {
-                surface: source,
-                layer,
-            },
-            ClientInputTarget::Keyboard { .. } => ClientInputTarget::Keyboard { surface: source },
-        };
-        self.send_destination(session, DestinationMessage::input(event));
+        self.forward_input(session, source, event);
     }
 
     fn apply_command(&mut self, _command: ClientAdapterCommandEnvelope) {}
@@ -1343,7 +1356,14 @@ impl ClientAdapter for DestinationRelayAdapter {
             match effect {
                 ClientAdapterEffect::InputDisconnected { .. }
                 | ClientAdapterEffect::InputConnected { .. } => {}
-                ClientAdapterEffect::Input(input) => self.apply_input(input),
+                ClientAdapterEffect::Input(input) => {
+                    if let Some(source) = self.source_surface(input.target.surface())
+                        && let Some(session) = self.sessions.get(&source).copied()
+                    {
+                        // Teardown already drained the ledger; preserve its admitted cancellation.
+                        self.forward_input(session, source, input);
+                    }
+                }
                 ClientAdapterEffect::Request(request) => {
                     // apply_request needs the previous destination to route a
                     // source-qualified focus clear after the ledger is drained.
@@ -1410,6 +1430,7 @@ fn rewrite_request_surface(request: &mut ClientRequest, source: ClientSurfaceId)
 
 #[derive(Default)]
 struct RemoteInputState {
+    touch: crate::touch::TouchLedger,
     keys: HashMap<LinuxKeycode, RemoteKeyCapture>,
     buttons: HashMap<LinuxButtonCode, (ClientInputTarget, Option<InputPosition>)>,
     gestures: Vec<(PointerGestureKind, ClientInputTarget)>,
@@ -1434,6 +1455,7 @@ impl RemoteInputState {
     // accepts delivery. In particular, a failed press was never forwarded.
     fn accepts_input(&self, target: &ClientInputTarget, event: &InputEventKind) -> bool {
         match event {
+            InputEventKind::Touch { event } => self.touch.accepts(*target, *event),
             InputEventKind::Keyboard {
                 keycode,
                 state: KeyboardKeyState::Repeated,
@@ -1457,6 +1479,10 @@ impl RemoteInputState {
     }
 
     fn observe_input(&mut self, input: &ClientInputEvent) -> bool {
+        if let InputEventKind::Touch { event } = input.event {
+            self.last_time = input.time;
+            return self.touch.observe(input.target, event);
+        }
         if let InputEventKind::Keyboard {
             state: KeyboardKeyState::Repeated,
             ..
@@ -1533,7 +1559,9 @@ impl RemoteInputState {
                     }
                 }
             }
-            InputEventKind::PointerLeft { .. } | InputEventKind::PointerAxis { .. } => {}
+            InputEventKind::PointerLeft { .. }
+            | InputEventKind::PointerAxis { .. }
+            | InputEventKind::Touch { .. } => {}
         }
         true
     }
@@ -1545,6 +1573,21 @@ impl RemoteInputState {
     ) -> Vec<ClientAdapterEffect> {
         let mut effects = Vec::new();
         let time = self.last_time;
+        effects.extend(
+            self.touch
+                .retire(&should_release)
+                .into_iter()
+                .map(|target| {
+                    ClientAdapterEffect::Input(ClientInputEvent {
+                        target,
+                        host_position: None,
+                        event: InputEventKind::Touch {
+                            event: weld_client::TouchEvent::Cancel,
+                        },
+                        time,
+                    })
+                }),
+        );
         effects.extend(
             self.buttons
                 .extract_if(|_, (target, _)| should_release(target.surface()))
@@ -1625,6 +1668,8 @@ impl RemoteInputState {
 #[cfg(test)]
 mod tests {
     mod presentation_tests;
+    #[path = "touch_tests.rs"]
+    mod touch_tests;
     use std::{cell::RefCell, fmt, rc::Rc};
 
     use weld_client::{

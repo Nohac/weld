@@ -21,6 +21,10 @@ use weld_client::{ClientFocusRequest, ClientInputEvent};
 // finish before calling Smithay.
 pub(super) struct InputSeat {
     pub native: Seat<ServerState>,
+    pub touch_mode: Cell<Option<super::touch::TouchMode>>,
+    pub touch_count: Cell<usize>,
+    pub touch_pending: Cell<bool>,
+    pub touch_primary: Cell<Option<weld_client::TouchId>>,
     pub controller: Cell<Option<weld_client::ClientInputController>>,
     pub admission: RefCell<super::input_admission::InputAdmission>,
     pub active_gesture: Cell<Option<weld_client::PointerGestureKind>>,
@@ -48,6 +52,10 @@ impl InputSeat {
     ) -> Rc<Self> {
         Rc::new(Self {
             native,
+            touch_mode: Cell::new(None),
+            touch_count: Cell::new(0),
+            touch_pending: Cell::new(false),
+            touch_primary: Cell::new(None),
             controller: Cell::new(controller),
             admission: RefCell::default(),
             active_gesture: Cell::new(None),
@@ -121,6 +129,7 @@ impl ServerState {
             return None;
         }
         native.add_pointer();
+        native.add_touch();
         let input = InputSeat::new(native, Some(controller));
         self.remote_inputs.insert(controller, input.clone());
         self.configure_seat_repeat(&input);
@@ -153,6 +162,7 @@ impl ServerState {
             );
             let mut native = input.native.clone();
             native.remove_pointer();
+            native.remove_touch();
             native.remove_keyboard();
             if let Some(global) = input.native.global() {
                 self.display_handle.remove_global::<Self>(global);
