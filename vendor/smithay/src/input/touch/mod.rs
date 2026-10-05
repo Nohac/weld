@@ -671,25 +671,24 @@ impl<D: SeatHandler + 'static> TouchInternal<D> {
     }
 
     fn cancel(&mut self, data: &mut D, seat: &Seat<D>) {
-        let Some(marker) = self.pending_frame.take() else {
-            tracing::warn!("cancel called without prior events");
-            return;
-        };
-
+        // Cancellation applies to every active contact, including contacts whose
+        // last update was already framed.
+        let marker = self.frame_marker();
+        self.pending_frame = None;
         for state in self.focus.values_mut() {
-            if state.current.map(|c| c == state.pending).unwrap_or(false) {
-                continue;
-            }
-
-            state.current = Some(marker);
-
-            if let Some((focus, _)) = state.focus.take() {
+            for focus in state
+                .focus
+                .take()
+                .map(|(focus, _)| focus)
+                .into_iter()
+                .chain(state.frame_pending.take())
+            {
                 if focus.last_frame(seat, data) != Some(marker) {
                     focus.cancel(seat, data, marker);
                 }
             }
         }
-
+        self.focus.clear();
         frame_marker::remove(marker.0);
     }
 
