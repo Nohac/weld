@@ -38,6 +38,8 @@ const MAX_DEVICES: usize = 32;
 pub struct DevicePermissions {
     pub browse: bool,
     pub hoist: bool,
+    #[serde(default)]
+    pub diagnostics: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -302,6 +304,38 @@ impl PairingHost {
             }
         });
         Ok(())
+    }
+    /// Explicit local consent to exchange reports for sessions with this device.
+    pub fn set_diagnostics(&self, identity: &str, enabled: bool) -> Result<()> {
+        let mut state = self
+            .0
+            .lock()
+            .map_err(|_| anyhow::anyhow!("pairing state poisoned"))?;
+        let mut devices = state.devices.clone();
+        devices
+            .get_mut(identity)
+            .context("device is not paired")?
+            .permissions
+            .diagnostics = enabled;
+        state
+            .store
+            .as_ref()
+            .context("pairing storage unavailable")?
+            .save(&devices)?;
+        state.devices = devices;
+        Ok(())
+    }
+    pub(crate) fn permits_diagnostics(&self, identity: EndpointId) -> bool {
+        self.0
+            .lock()
+            .ok()
+            .and_then(|state| {
+                state
+                    .devices
+                    .get(&identity.to_string())
+                    .map(|device| device.permissions.diagnostics)
+            })
+            .unwrap_or(false)
     }
     fn claim(
         &self,

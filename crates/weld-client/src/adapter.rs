@@ -207,6 +207,7 @@ impl ClientRuntimeAdapter {
 
 /// Pre-run registration split between the native runtime and application ingress.
 pub struct ClientAdapterRegistration {
+    diagnostics: Option<weld_diagnostics::Recorder>,
     runtime: ClientRuntimeAdapter,
     importer: Box<dyn Any>,
 }
@@ -222,6 +223,7 @@ impl ClientAdapterRegistration {
     {
         Self {
             runtime: ClientRuntimeAdapter::new(descriptor, driver),
+            diagnostics: None,
             importer: Box::new(importer),
         }
     }
@@ -231,10 +233,16 @@ impl ClientAdapterRegistration {
         ClientAdapterRegistrationParts {
             runtime: self.runtime,
             importer: ClientImporterRegistration {
+                diagnostics: self.diagnostics,
                 descriptor,
                 importer: self.importer,
             },
         }
+    }
+    /// Attach the session recorder consumed by presentation-side observations.
+    pub fn with_diagnostics(mut self, diagnostics: Option<weld_diagnostics::Recorder>) -> Self {
+        self.diagnostics = diagnostics;
+        self
     }
 }
 
@@ -244,6 +252,7 @@ pub struct ClientAdapterRegistrationParts {
 }
 
 pub struct ClientImporterRegistration {
+    pub diagnostics: Option<weld_diagnostics::Recorder>,
     pub descriptor: ClientSourceDescriptor,
     pub importer: Box<dyn Any>,
 }

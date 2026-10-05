@@ -10,6 +10,9 @@ use weld_hoist_iroh::pairing::ApplicationInfo;
 
 #[derive(Component, Clone, Default)]
 enum Action {
+    Diagnostics,
+    CollectReport,
+    CloseReport,
     Hoist(ApplicationInfo),
     Paste,
     Scan,
@@ -27,6 +30,7 @@ struct BrowserState {
 }
 #[derive(PartialEq)]
 struct BrowserSignature {
+    report: Option<String>,
     catalogue: Vec<ApplicationInfo>,
     message: String,
     browser: bool,
@@ -76,6 +80,15 @@ fn actions(
             continue;
         }
         match action {
+            Action::Diagnostics => {
+                browser.page = 0;
+                receiver.0.show_report(true);
+            }
+            Action::CollectReport => receiver.0.collect_report(),
+            Action::CloseReport => {
+                browser.page = 0;
+                receiver.0.show_report(false);
+            }
             Action::Hoist(application) => receiver.0.hoist(application.clone()),
             Action::Paste => enrollment.paste = true,
             Action::Scan => enrollment.scan = true,
@@ -163,13 +176,19 @@ fn draw(
         .unwrap_or_default();
     let browser = shared.browser.load(Ordering::Acquire);
     let displaying = shared.displayed.lock().is_ok_and(|frame| frame.is_some());
+    let report = shared
+        .show_report
+        .load(Ordering::Acquire)
+        .then(|| shared.reports.text());
     let page_size = presentation.viewport.map_or(1, |viewport| {
         ((viewport.safe[3] - 280.0) / 96.0).floor().clamp(1.0, 4.0) as usize
     });
-    state.page = state
-        .page
-        .min(catalogue.len().saturating_sub(1) / page_size);
+    state.page = state.page.min(report.as_ref().map_or_else(
+        || catalogue.len().saturating_sub(1) / page_size,
+        |text| text.chars().count().saturating_sub(1) / 600,
+    ));
     let signature = BrowserSignature {
+        report: report.clone(),
         catalogue: catalogue.clone(),
         message: message.clone(),
         browser,
@@ -195,10 +214,39 @@ fn draw(
         return;
     };
     if browser {
+        if let Some(report) = report {
+            let page: String = report.chars().skip(state.page * 600).take(600).collect();
+            let mut controls: Vec<Box<dyn SceneList>> = vec![
+                Box::new(button("Back to applications".into(), Action::CloseReport)),
+                Box::new(button(
+                    "Share & collect peer report".into(),
+                    Action::CollectReport,
+                )),
+                Box::new(button("Reconnect".into(), Action::Reconnect)),
+            ];
+            if state.page > 0 {
+                controls.push(Box::new(button("Previous".into(), Action::Previous)));
+            }
+            if (state.page + 1) * 600 < report.chars().count() {
+                controls.push(Box::new(button("Next".into(), Action::Next)));
+            }
+            commands.spawn_scene(bsn! {
+                BrowserRoot
+                GlobalZIndex(10)
+                Node { position_type: PositionType::Absolute, left: px(viewport.safe[0] as f32), top: px(viewport.safe[1] as f32), width: px(viewport.safe[2] as f32), height: px(viewport.safe[3] as f32), flex_direction: FlexDirection::Column, padding: UiRect::all(px(12)) }
+                BackgroundColor(Color::srgb(0.035, 0.045, 0.065))
+                Children [
+                    (Text::new(page) TextFont { font_size: FontSize::Px(14.0) } TextColor(Color::WHITE)),
+                    (Node { flex_direction: FlexDirection::Row, flex_wrap: FlexWrap::Wrap } Children [{controls}]),
+                ]
+            });
+            return;
+        }
         let mut rows: Vec<Box<dyn SceneList>> = vec![
             Box::new(button("Scan pairing QR".into(), Action::Scan)),
             Box::new(button("Paste pairing link".into(), Action::Paste)),
             Box::new(button("Reconnect".into(), Action::Reconnect)),
+            Box::new(button("Session diagnostics".into(), Action::Diagnostics)),
         ];
         for application in catalogue
             .iter()

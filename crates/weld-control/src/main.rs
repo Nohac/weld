@@ -3,6 +3,7 @@ use clap::{Parser, Subcommand};
 use qrcode::{QrCode, render::unicode};
 use std::{
     io::{self, Write},
+    os::unix::fs::OpenOptionsExt,
     path::PathBuf,
     thread,
     time::{Duration, Instant},
@@ -21,6 +22,10 @@ struct Arguments {
 }
 #[derive(Subcommand)]
 enum Command {
+    Diagnostics {
+        #[command(subcommand)]
+        command: Diagnostics,
+    },
     Pair,
     Devices {
         #[command(subcommand)]
@@ -30,11 +35,46 @@ enum Command {
 #[derive(Subcommand)]
 enum Devices {
     List,
-    Revoke { identity: String },
+    Revoke {
+        identity: String,
+    },
+    Diagnostics {
+        identity: String,
+        #[arg(long, action = clap::ArgAction::Set)]
+        enabled: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum Diagnostics {
+    List,
+    Explain {
+        id: weld_diagnostics::SessionId,
+        #[arg(long)]
+        verbose: bool,
+    },
+    Export {
+        id: weld_diagnostics::SessionId,
+        #[arg(long)]
+        output: PathBuf,
+    },
+    ExplainFile {
+        path: PathBuf,
+        #[arg(long)]
+        verbose: bool,
+    },
 }
 
 fn main() -> Result<()> {
     let args = Arguments::parse();
+    if let Command::Diagnostics {
+        command: Diagnostics::ExplainFile { path, verbose },
+    } = &args.command
+    {
+        let bundle = weld_diagnostics::ReportBundle::read(std::fs::File::open(path)?)?;
+        print!("{}", weld_diagnostics::explain(&bundle).render(*verbose));
+        return Ok(());
+    }
     let path = match args.socket {
         Some(path) => path,
         None => socket_path(
@@ -45,6 +85,50 @@ fn main() -> Result<()> {
         )?,
     };
     match args.command {
+        Command::Diagnostics { command } => match command {
+            Diagnostics::List => {
+                let Response::DiagnosticSessions(sessions) =
+                    call(&path, &Request::DiagnosticSessions)?
+                else {
+                    anyhow::bail!("unexpected diagnostics response");
+                };
+                for (id, endpoint, ended, peer) in sessions {
+                    println!(
+                        "{id}  {endpoint:?}  {}  peer-report={peer}",
+                        if ended { "ended" } else { "active" }
+                    );
+                }
+            }
+            Diagnostics::Explain { id, verbose } => {
+                let Response::DiagnosticReport(bundle) =
+                    call(&path, &Request::DiagnosticReport(id))?
+                else {
+                    anyhow::bail!("unexpected diagnostics response");
+                };
+                print!("{}", weld_diagnostics::explain(&bundle).render(verbose));
+            }
+            Diagnostics::Export { id, output } => {
+                let Response::DiagnosticReport(bundle) =
+                    call(&path, &Request::DiagnosticReport(id))?
+                else {
+                    anyhow::bail!("unexpected diagnostics response");
+                };
+                let file = std::fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .mode(0o600)
+                    .open(&output)?;
+                bundle.write(file)?;
+                println!("Saved {}", output.display());
+            }
+            Diagnostics::ExplainFile { .. } => anyhow::bail!("offline report already handled"),
+        },
+        Command::Devices {
+            command: Devices::Diagnostics { identity, enabled },
+        } => {
+            call(&path, &Request::DiagnosticsPermission { identity, enabled })?;
+            println!("Session-scoped diagnostic exchange enabled={enabled}");
+        }
         Command::Pair => {
             let Response::Invitation(link) = call(&path, &Request::Pair)? else {
                 anyhow::bail!("unexpected pairing response");
@@ -79,6 +163,7 @@ fn main() -> Result<()> {
                             permissions: DevicePermissions {
                                 browse: true,
                                 hoist: true,
+                                diagnostics: false,
                             },
                         },
                     )?;
@@ -99,11 +184,12 @@ fn main() -> Result<()> {
             };
             for device in devices {
                 println!(
-                    "{}  {:?}  browse={} hoist={}",
+                    "{}  {:?}  browse={} hoist={} diagnostics={}",
                     device.identity,
                     device.name,
                     device.permissions.browse,
-                    device.permissions.hoist
+                    device.permissions.hoist,
+                    device.permissions.diagnostics
                 );
             }
         }

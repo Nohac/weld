@@ -4,6 +4,7 @@ mod enrollment;
 mod insets;
 mod receiver;
 mod renderer;
+mod reporting;
 
 use crate::geometry::{Viewport, fit_rect};
 use bevy::{

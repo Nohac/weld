@@ -192,6 +192,7 @@ impl IrohHost {
             worker: Mutex::new(Some(worker)),
             done: Mutex::new(done_rx),
             accepting: Arc::new(AtomicBool::new(false)),
+            reports: crate::DiagnosticReports::default(),
         });
         *owner
             .lock()
@@ -207,6 +208,10 @@ impl IrohHost {
 
     pub fn pairing(&self) -> crate::pairing::PairingHost {
         self.pairing.clone()
+    }
+
+    pub fn diagnostics(&self) -> crate::DiagnosticReports {
+        self.lifetime.reports.clone()
     }
 
     pub fn begin_device_session(
@@ -512,6 +517,7 @@ impl IrohHost {
 }
 
 pub(crate) struct HostLifetime {
+    pub(crate) reports: crate::DiagnosticReports,
     commands: mpsc::UnboundedSender<HostCommand>,
     worker: Mutex<Option<thread::JoinHandle<()>>>,
     done: Mutex<std_mpsc::Receiver<()>>,

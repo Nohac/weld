@@ -6,6 +6,13 @@ project intent and future direction without presenting it as current behavior.
 
 Weld is a workspace of reusable layers and one standard distribution:
 
+- `weld-diagnostics` owns bounded typed session evidence, validated report
+  bundles and conservative, deterministic explanations. It uses local monotonic
+  timelines; platform integrations supply measurements and retain authorization.
+  Client importer registrations can carry an optional session recorder so
+  presentation observations reach the correct connection. See
+  [Session diagnostics](session-diagnostics.md) for commands, peer collection
+  permission, privacy boundaries and current limitations.
 - `weld-sway-config` parses unexpanded Sway configuration spelling and reports
   source-aware structural errors. Its default parser depends only on Winnow.
   The optional `input` module translates keyboard directives and binding chords

@@ -19,6 +19,7 @@ fn permissions() -> DevicePermissions {
     DevicePermissions {
         browse: true,
         hoist: true,
+        diagnostics: false,
     }
 }
 fn wait(mut ready: impl FnMut() -> bool) {
@@ -188,6 +189,62 @@ fn real_endpoint_enrollment_catalogue_and_revocation_share_the_same_identity() {
     };
     desktop.publish(id, vec![application.clone()]);
     wait(|| session.applications() == vec![application.clone()]);
+    let report = session
+        .peer
+        .diagnostics()
+        .expect("recorder")
+        .snapshot()
+        .expect("report");
+    assert_eq!(
+        report.session,
+        peers[0]
+            .1
+            .diagnostics()
+            .expect("source recorder")
+            .snapshot()
+            .expect("report")
+            .session
+    );
+    session
+        .collect_diagnostics(report.clone())
+        .expect("request without permission");
+    let mut response = None;
+    wait(|| {
+        response = session.take_diagnostics();
+        response.is_some()
+    });
+    assert!(
+        response.take().expect("reply").is_none(),
+        "pairing alone does not authorize report exchange"
+    );
+    authority
+        .set_diagnostics(receiver_identity.public_id().as_str(), true)
+        .expect("grant diagnostics");
+    // The request gate deliberately limits collection to once per second.
+    thread::sleep(Duration::from_millis(1050));
+    session
+        .collect_diagnostics(report.clone())
+        .expect("authorized collection");
+    wait(|| {
+        response = session.take_diagnostics();
+        response.is_some()
+    });
+    let peer_report = response.expect("reply").expect("report");
+    assert_eq!(peer_report.session, report.session);
+    assert_eq!(peer_report.endpoint, weld_diagnostics::Endpoint::Source);
+    assert!(
+        source
+            .diagnostics()
+            .get(report.session)
+            .expect("archive")
+            .peer
+            .is_some()
+    );
+    let stranger = iroh::SecretKey::generate().public();
+    assert!(
+        source.diagnostics().exchange(stranger, report).is_err(),
+        "unrelated peer cannot access session"
+    );
     session.hoist(7).expect("request");
     wait(|| {
         for action in desktop.take_actions() {

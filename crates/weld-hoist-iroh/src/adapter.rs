@@ -115,6 +115,7 @@ pub fn destination_registration_with_backend<P: DecodedFramePublisher>(
 ) -> ClientAdapterRegistration {
     let descriptor = ClientSourceDescriptor::new(destination_source, ClientProvenance::Relocated);
     let importer = publisher.client_importer();
+    let diagnostics = peer.diagnostics();
     ClientAdapterRegistration::new(
         descriptor,
         DestinationRelayAdapter::new(
@@ -125,4 +126,5 @@ pub fn destination_registration_with_backend<P: DecodedFramePublisher>(
         .with_gamepad(gamepad),
         importer,
     )
+    .with_diagnostics(diagnostics)
 }

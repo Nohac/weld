@@ -110,6 +110,10 @@ content layout; a desktop application is not automatically a mobile-responsive U
 
 ## Current limits
 
+Session reports and explicit permission-scoped peer collection are described in
+[Session diagnostics](session-diagnostics.md). Diagnostics permission is separate
+from browsing/hoisting and defaults to disabled.
+
 The phone presents one root surface at a time; multi-window family presentation,
 popups and keyboard/IME are later work. Hoisting uses the ordinary family lifecycle,
 so related windows may follow the root even though the phone does not yet display

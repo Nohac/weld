@@ -76,6 +76,7 @@ impl SourceListener {
 pub(crate) struct PendingConnection {
     pub connection: Connection,
     armed: bool,
+    close_reason: &'static [u8],
 }
 
 impl PendingConnection {
@@ -83,19 +84,23 @@ impl PendingConnection {
         Self {
             connection,
             armed: true,
+            close_reason: b"weld bootstrap not admitted",
         }
     }
 
     pub fn hand_off(&mut self) {
         self.armed = false;
     }
+
+    pub(crate) fn admitted_session(&mut self) {
+        self.close_reason = b"weld device session ended";
+    }
 }
 
 impl Drop for PendingConnection {
     fn drop(&mut self) {
         if self.armed {
-            self.connection
-                .close(1_u32.into(), b"weld bootstrap not admitted");
+            self.connection.close(1_u32.into(), self.close_reason);
         }
     }
 }

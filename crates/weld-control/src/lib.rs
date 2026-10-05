@@ -23,6 +23,12 @@ use weld_hoist_iroh::{
 
 #[derive(Serialize, Deserialize)]
 pub enum Request {
+    DiagnosticSessions,
+    DiagnosticReport(weld_diagnostics::SessionId),
+    DiagnosticsPermission {
+        identity: String,
+        enabled: bool,
+    },
     Pair,
     Pending,
     Approve {
@@ -36,6 +42,15 @@ pub enum Request {
 }
 #[derive(Serialize, Deserialize)]
 pub enum Response {
+    DiagnosticSessions(
+        Vec<(
+            weld_diagnostics::SessionId,
+            weld_diagnostics::Endpoint,
+            bool,
+            bool,
+        )>,
+    ),
+    DiagnosticReport(Box<weld_diagnostics::ReportBundle>),
     Invitation(String),
     Pending(Option<PairingCandidate>),
     Devices(Vec<PairedDevice>),
@@ -80,7 +95,7 @@ pub fn call(path: &Path, request: &Request) -> Result<Response> {
     stream.set_read_timeout(Some(Duration::from_secs(40)))?;
     stream.set_write_timeout(Some(Duration::from_secs(3)))?;
     write(&mut stream, request)?;
-    match read(&mut stream)? {
+    match read_bounded(&mut stream, weld_diagnostics::MAX_EXPORT_BYTES as usize)? {
         Response::Error(error) => anyhow::bail!("{error}"),
         response => Ok(response),
     }
@@ -238,29 +253,63 @@ impl Owner {
         Ok(host)
     }
     fn request(&mut self, request: Request) -> Result<Response> {
-        let name = self.name.clone();
-        let host = self.host()?;
-        let pairing = host.pairing();
         Ok(match request {
-            Request::Pair => {
-                Response::Invitation(pairing.invite(&host.connection_profile()?, name)?.link()?)
+            Request::DiagnosticSessions => Response::DiagnosticSessions(
+                self.host
+                    .as_ref()
+                    .map(|host| {
+                        host.diagnostics()
+                            .list()
+                            .into_iter()
+                            .map(|bundle| {
+                                (
+                                    bundle.local.session,
+                                    bundle.local.endpoint,
+                                    bundle.local.ended,
+                                    bundle.peer.is_some(),
+                                )
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default(),
+            ),
+            Request::DiagnosticReport(id) => Response::DiagnosticReport(Box::new(
+                self.host
+                    .as_ref()
+                    .and_then(|host| host.diagnostics().get(id))
+                    .context("diagnostic session unavailable or evicted")?,
+            )),
+            Request::DiagnosticsPermission { identity, enabled } => {
+                self.host()?.pairing().set_diagnostics(&identity, enabled)?;
+                Response::Ok
             }
-            Request::Pending => Response::Pending(pairing.pending()?),
+            Request::Pair => {
+                let name = self.name.clone();
+                let host = self.host()?;
+                Response::Invitation(
+                    host.pairing()
+                        .invite(&host.connection_profile()?, name)?
+                        .link()?,
+                )
+            }
+            Request::Pending => Response::Pending(self.host()?.pairing().pending()?),
             Request::Approve {
                 identity,
                 verification,
                 permissions,
             } => {
-                pairing.approve(&identity, &verification, permissions)?;
+                self.host()?
+                    .pairing()
+                    .approve(&identity, &verification, permissions)?;
                 Response::Ok
             }
             Request::Cancel => {
-                pairing.cancel()?;
+                self.host()?.pairing().cancel()?;
                 Response::Ok
             }
-            Request::Devices => Response::Devices(pairing.devices()?),
+            Request::Devices => Response::Devices(self.host()?.pairing().devices()?),
             Request::Revoke(identity) => {
-                pairing.revoke(&identity)?;
+                self.host()?.pairing().revoke(&identity)?;
                 Response::Ok
             }
         })
@@ -269,16 +318,22 @@ impl Owner {
 
 fn write(stream: &mut UnixStream, value: &impl Serialize) -> Result<()> {
     let bytes = serde_json::to_vec(value)?;
-    ensure!(bytes.len() <= 65536, "control response too large");
+    ensure!(
+        bytes.len() as u64 <= weld_diagnostics::MAX_EXPORT_BYTES,
+        "control response too large"
+    );
     stream.write_all(&(bytes.len() as u32).to_le_bytes())?;
     stream.write_all(&bytes)?;
     Ok(())
 }
 fn read<T: DeserializeOwned>(stream: &mut UnixStream) -> Result<T> {
+    read_bounded(stream, 65536)
+}
+fn read_bounded<T: DeserializeOwned>(stream: &mut UnixStream, limit: usize) -> Result<T> {
     let mut length = [0; 4];
     stream.read_exact(&mut length)?;
     let length = u32::from_le_bytes(length) as usize;
-    ensure!(length <= 65536, "control record too large");
+    ensure!(length <= limit, "control record too large");
     let mut bytes = vec![0; length];
     stream.read_exact(&mut bytes)?;
     Ok(serde_json::from_slice(&bytes)?)
@@ -289,6 +344,32 @@ mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
     use weld_hoist_iroh::IrohNotifier;
+
+    #[test]
+    fn diagnostic_queries_do_not_start_a_network_host_or_create_device_storage() {
+        let directory = tempfile::tempdir().expect("directory");
+        let storage = directory.path().join("devices");
+        let notifier = IrohNotifier::new(|| Ok(()));
+        let mut owner = Owner {
+            directory: storage.clone(),
+            host: None,
+            enabled: false,
+            desktop: DesktopSessions::new(notifier.clone(), notifier, weld_media::VideoCodec::H264),
+            name: "test".into(),
+        };
+        assert!(
+            matches!(owner.request(Request::DiagnosticSessions).expect("list"), Response::DiagnosticSessions(sessions) if sessions.is_empty())
+        );
+        assert!(
+            owner
+                .request(Request::DiagnosticReport(weld_diagnostics::SessionId(
+                    [0; 16]
+                )))
+                .is_err()
+        );
+        assert!(owner.host.is_none());
+        assert!(!storage.exists());
+    }
 
     #[test]
     fn private_control_socket_rejects_oversized_records_and_keeps_serving() {

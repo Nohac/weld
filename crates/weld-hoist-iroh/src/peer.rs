@@ -30,14 +30,20 @@ pub(super) const QUEUE_CAPACITY: usize = 256;
 const MEDIA_STREAM_MAGIC: [u8; 8] = *b"weldmed1";
 
 struct PeerState<T> {
+    diagnostics: Option<weld_diagnostics::Recorder>,
     incoming: IncomingQueue<T>,
     connection: Connection,
     notifier: IrohNotifier,
 }
 
 impl<T> PeerState<T> {
-    fn new(connection: Connection, notifier: IrohNotifier) -> Self {
+    fn new(
+        connection: Connection,
+        notifier: IrohNotifier,
+        diagnostics: Option<weld_diagnostics::Recorder>,
+    ) -> Self {
         Self {
+            diagnostics,
             incoming: IncomingQueue::new(notifier.clone()),
             connection,
             notifier,
@@ -60,6 +66,17 @@ impl<T> PeerState<T> {
             self.connection.close(1_u32.into(), b"weld peer closed");
         }
     }
+
+    fn record_error(&self, operation: weld_diagnostics::Operation) {
+        if self.connection.close_reason().is_none()
+            && let Some(recorder) = &self.diagnostics
+        {
+            recorder.record(weld_diagnostics::Observation::Failure {
+                operation,
+                cause: weld_diagnostics::Cause::ProtocolOrIo,
+            });
+        }
+    }
 }
 
 /// Source-facing half of one authenticated Iroh peer connection.
@@ -75,6 +92,9 @@ pub struct IrohSourcePeer {
 }
 
 impl IrohSourcePeer {
+    pub fn diagnostics(&self) -> Option<weld_diagnostics::Recorder> {
+        self.state.diagnostics.clone()
+    }
     pub fn identity(&self) -> &IrohPeerIdentity {
         &self.identity
     }
@@ -89,6 +109,9 @@ impl IrohSourcePeer {
 }
 
 impl EncodedSourceTransport for IrohSourcePeer {
+    fn diagnostics(&self) -> Option<weld_diagnostics::Recorder> {
+        self.diagnostics()
+    }
     fn try_send(
         &self,
         packet: SourceTransportPacket,
@@ -162,6 +185,9 @@ pub struct IrohDestinationPeer {
 }
 
 impl IrohDestinationPeer {
+    pub fn diagnostics(&self) -> Option<weld_diagnostics::Recorder> {
+        self.state.diagnostics.clone()
+    }
     pub fn identity(&self) -> &IrohPeerIdentity {
         &self.identity
     }
@@ -176,6 +202,9 @@ impl IrohDestinationPeer {
 }
 
 impl EncodedDestinationTransport for IrohDestinationPeer {
+    fn diagnostics(&self) -> Option<weld_diagnostics::Recorder> {
+        self.diagnostics()
+    }
     fn send(&self, packet: DestinationEnvelope) -> HoistPortResult<()> {
         self.control.push(packet).map_err(|error| {
             self.state.fail();
@@ -236,9 +265,12 @@ pub(crate) fn spawn_source_peer(
     notifier: IrohNotifier,
     codec: VideoCodec,
 ) -> IrohSourcePeer {
-    let path = crate::diagnostics::observe(&connection);
+    let diagnostics = host
+        .reports
+        .start(&connection, weld_diagnostics::Endpoint::Source);
+    let path = crate::diagnostics::observe(&connection, diagnostics.clone());
     let identity = IrohPeerIdentity(connection.remote_id().to_string());
-    let state = Arc::new(PeerState::new(connection.clone(), notifier));
+    let state = Arc::new(PeerState::new(connection.clone(), notifier, diagnostics));
     let (control_tx, control_rx) = mpsc::channel(QUEUE_CAPACITY);
     let (media_tx, media_rx) = MediaSender::channel(QUEUE_CAPACITY);
     tokio::spawn(run_source_peer(
@@ -269,9 +301,16 @@ pub(crate) fn spawn_destination_peer(
     notifier: IrohNotifier,
     codec: VideoCodec,
 ) -> IrohDestinationPeer {
-    crate::diagnostics::observe(&connection);
+    let diagnostics = host
+        .reports
+        .start(&connection, weld_diagnostics::Endpoint::Receiver);
+    crate::diagnostics::observe(&connection, diagnostics.clone());
     let identity = IrohPeerIdentity(connection.remote_id().to_string());
-    let state = Arc::new(PeerState::new(connection.clone(), notifier.clone()));
+    let state = Arc::new(PeerState::new(
+        connection.clone(),
+        notifier.clone(),
+        diagnostics,
+    ));
     // Two maximum-sized AUs fit in 64 MiB. Reserve before reading a body so
     // an additional blocked reader cannot allocate a third AU outside the bound.
     let media = Arc::new(IncomingQueue::with_capacity(notifier, 2));
@@ -325,7 +364,10 @@ async fn run_source_peer(
         Ok::<(), anyhow::Error>(())
     };
     tokio::select! {
-        result = async { tokio::try_join!(control_writer, control_reader, media_writer) } => {
+        result = async { tokio::try_join!(
+            observe_io(&state, weld_diagnostics::Operation::Control, control_writer),
+            observe_io(&state, weld_diagnostics::Operation::Control, control_reader),
+            observe_io(&state, weld_diagnostics::Operation::Media, media_writer)) } => {
             if let Err(error) = result {
                 tracing::warn!(error = %format_args!("{error:#}"), "Iroh source peer stopped");
             }
@@ -349,7 +391,10 @@ async fn run_destination_peer(
     let control_reader = read_source_control(&state.incoming, control_recv);
     let media = read_source_media(&incoming_media, media_recv);
     tokio::select! {
-        result = async { tokio::try_join!(control_writer, control_reader, media) } => {
+        result = async { tokio::try_join!(
+            observe_io(&state, weld_diagnostics::Operation::Control, control_writer),
+            observe_io(&state, weld_diagnostics::Operation::Control, control_reader),
+            observe_io(&state, weld_diagnostics::Operation::Media, media)) } => {
             if let Err(error) = result {
                 tracing::warn!(error = %format_args!("{error:#}"), "Iroh destination peer stopped");
             }
@@ -361,6 +406,18 @@ async fn run_destination_peer(
     outgoing_control.close();
     incoming_media.fail();
     state.fail();
+}
+
+async fn observe_io<T, R>(
+    state: &PeerState<T>,
+    operation: weld_diagnostics::Operation,
+    future: impl std::future::Future<Output = Result<R>>,
+) -> Result<R> {
+    let result = future.await;
+    if result.is_err() {
+        state.record_error(operation);
+    }
+    result
 }
 
 async fn read_destination_control<R: AsyncRead + Unpin>(

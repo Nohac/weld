@@ -36,6 +36,19 @@ impl PresentationDiagnostics {
         let superseded = stats.superseded;
         let stale = stats.stale;
         let invalidated = stats.invalidated;
+        if let Some(recorder) = shared.reports.recorder() {
+            recorder.record(weld_diagnostics::Observation::Stage {
+                stage: weld_diagnostics::Stage::Presentation,
+                sample: weld_diagnostics::StageSample {
+                    interval_us: weld_diagnostics::micros(elapsed),
+                    completed: self.frames,
+                    work_max_us: weld_diagnostics::micros(self.conversion.maximum),
+                    superseded: superseded.saturating_sub(self.superseded),
+                    stale: stale.saturating_sub(self.stale),
+                    ..Default::default()
+                },
+            });
+        }
         if self.frames > 0 || published != self.published {
             tracing::info!(target: "weld_mobile_diag",
                 interval_us = elapsed.as_micros(),

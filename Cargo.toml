@@ -14,6 +14,7 @@ test-support = ["weld-app/test-support"]
 
 [workspace]
 members = [
+  "crates/weld-diagnostics",
   "crates/weld-app",
   "crates/weld-client",
   "crates/weld-core",

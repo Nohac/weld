@@ -55,6 +55,9 @@ pub enum SourceTransportPacket {
 
 /// Nonblocking transport half used by the encoded source port.
 pub trait EncodedSourceTransport {
+    fn diagnostics(&self) -> Option<weld_diagnostics::Recorder> {
+        None
+    }
     /// Busy returns the exact unsent record; it is not a connection failure.
     fn try_send(
         &self,
@@ -79,6 +82,9 @@ pub enum SendStatus<T> {
 
 /// Nonblocking transport half used by the encoded destination port.
 pub trait EncodedDestinationTransport {
+    fn diagnostics(&self) -> Option<weld_diagnostics::Recorder> {
+        None
+    }
     fn send(&self, packet: DestinationEnvelope) -> HoistPortResult<()>;
     fn drain(&self, budget: ReceiveBudget) -> HoistPortResult<Vec<SourceTransportPacket>>;
     /// Rearm buffered work after the consumer advances and recomputes its room.
@@ -260,6 +266,7 @@ struct EncodedSourceState {
     last_timestamp_micros: u64,
     dump: Option<AccessUnitDump>,
     observations: SourceObservations,
+    diagnostics: Option<weld_diagnostics::Recorder>,
     rates: Option<EncoderRates>,
 }
 
@@ -292,6 +299,7 @@ impl EncodedSourceState {
             last_timestamp_micros: 0,
             dump: None,
             observations: SourceObservations::new(started_at),
+            diagnostics: None,
             rates,
         }
     }
@@ -509,8 +517,24 @@ impl EncodedSourceState {
             self.report_budget();
         }
         if let Some(report) = report {
-            report.emit();
+            report.emit(self.diagnostics.as_ref());
             if let Some(snapshot) = transport(now) {
+                if let Some(recorder) = &self.diagnostics {
+                    recorder.record(weld_diagnostics::Observation::Stage {
+                        stage: weld_diagnostics::Stage::TransportSend,
+                        sample: weld_diagnostics::StageSample {
+                            pending: snapshot.media.pending_records as u64,
+                            oldest_pending_us: weld_diagnostics::micros(
+                                snapshot.media.oldest_pending_age,
+                            ),
+                            work_max_us: snapshot
+                                .media
+                                .active_write_age
+                                .map_or(0, weld_diagnostics::micros),
+                            ..Default::default()
+                        },
+                    });
+                }
                 snapshot.emit();
             }
         }
@@ -998,9 +1022,11 @@ impl<T: EncodedSourceTransport> EncodedSourcePort<T> {
     }
 
     fn new(transport: T, backend: Box<dyn EncodeBackend>) -> Self {
+        let mut state = EncodedSourceState::new(backend);
+        state.diagnostics = transport.diagnostics();
         Self {
             transport,
-            state: Some(EncodedSourceState::new(backend)),
+            state: Some(state),
             output: SourceOutput::default(),
         }
     }
@@ -1324,6 +1350,7 @@ struct EncodedDestinationState<P: DecodedFramePublisher> {
     next_buffer: Option<u64>,
     next_use: Option<u64>,
     observations: DestinationObservations,
+    diagnostics: Option<weld_diagnostics::Recorder>,
 }
 
 impl<P: DecodedFramePublisher> EncodedDestinationState<P> {
@@ -1351,6 +1378,7 @@ impl<P: DecodedFramePublisher> EncodedDestinationState<P> {
             next_buffer: Some(1),
             next_use: Some(1),
             observations: DestinationObservations::new(Instant::now()),
+            diagnostics: None,
         }
     }
 
@@ -1952,7 +1980,7 @@ impl<P: DecodedFramePublisher> EncodedDestinationState<P> {
         }
         let gauges = self.observation_gauges(now);
         if let Some(report) = self.observations.take_report(now, gauges, final_report) {
-            report.emit();
+            report.emit(self.diagnostics.as_ref());
         }
     }
 
@@ -1991,9 +2019,11 @@ impl<T: EncodedDestinationTransport, P: DecodedFramePublisher> EncodedDestinatio
         descriptor: ClientSourceDescriptor,
         publisher: P,
     ) -> Self {
+        let mut state = EncodedDestinationState::new(backend, descriptor, publisher);
+        state.diagnostics = transport.diagnostics();
         Self {
             transport,
-            state: Some(EncodedDestinationState::new(backend, descriptor, publisher)),
+            state: Some(state),
         }
     }
 

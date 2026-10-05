@@ -285,6 +285,7 @@ pub fn rendering_shell_with_outputs(
     app.add_plugins(WeldAppPlugin::new(configurations, heads)?);
     configure(&mut app);
     let importer = weld_client::ClientImporterRegistration {
+        diagnostics: None,
         descriptor: weld_client::ClientSourceDescriptor::new(
             weld_core::WAYLAND_CLIENT_SOURCE,
             weld_client::ClientProvenance::Local,

@@ -27,6 +27,7 @@ tokio = { workspace = true, features = ["macros"] }
 tracing.workspace = true
 zeroize.workspace = true
 weld-client = { path = "../weld-client" }
+weld-diagnostics = { path = "../weld-diagnostics" }
 weld-core = { path = "../weld-core", optional = true }
 weld-hoist-core = { path = "../weld-hoist-core" }
 weld-hoist-encoded = { path = "../weld-hoist-encoded" }

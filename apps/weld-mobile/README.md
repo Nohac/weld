@@ -185,6 +185,11 @@ controller isolation, first-seat compatibility and pointer fallback.
 
 ## Next product slices
 
+The application browser includes **Session diagnostics**, with offline retained
+evidence and explicit host report collection. See
+[Session diagnostics](../../docs/session-diagnostics.md) for the desktop grant,
+CLI export and first-slice limitations.
+
 Device pairing and an authorized running-window browser are implemented.
 An explicit host-owned remote-launch catalog and automatic keyboard/IME remain
 future work. Touch input is sufficient for the current flow. The test launcher's

@@ -7861,6 +7861,7 @@ dependencies = [
  "weld-app",
  "weld-client",
  "weld-core",
+ "weld-diagnostics",
  "weld-input",
  "weld-presenter",
  "wgpu",
@@ -7873,6 +7874,7 @@ version = "0.1.0"
 dependencies = [
  "cursor-icon",
  "serde",
+ "weld-diagnostics",
 ]
 
 [[package]]
@@ -7886,6 +7888,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
+ "weld-diagnostics",
  "weld-hoist-iroh",
  "weld-media",
  "xdg",
@@ -7917,6 +7920,14 @@ dependencies = [
  "winit",
  "x11-dl",
  "xcursor",
+]
+
+[[package]]
+name = "weld-diagnostics"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -7971,6 +7982,7 @@ dependencies = [
  "tracing",
  "weld-client",
  "weld-core",
+ "weld-diagnostics",
  "weld-hoist-core",
  "weld-hoist-protocol",
  "weld-media",
@@ -7999,6 +8011,7 @@ dependencies = [
  "tracing",
  "weld-client",
  "weld-core",
+ "weld-diagnostics",
  "weld-hoist-core",
  "weld-hoist-encoded",
  "weld-hoist-protocol",

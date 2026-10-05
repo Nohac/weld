@@ -2,6 +2,9 @@
 
 #[cfg(any(target_os = "android", test))]
 mod geometry;
+#[cfg(test)]
+#[path = "android/reporting.rs"]
+mod reporting;
 #[cfg(any(target_os = "android", test))]
 mod startup;
 

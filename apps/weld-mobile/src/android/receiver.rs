@@ -41,6 +41,9 @@ pub(super) struct Frame {
 }
 #[derive(Default)]
 pub(super) struct Shared {
+    pub reports: super::reporting::Reports,
+    pub show_report: AtomicBool,
+    collect_report: AtomicBool,
     redraw: Option<Arc<dyn Fn() + Send + Sync>>,
     pub latest: Mutex<PresentationMailbox<Frame>>,
     pub displayed: Mutex<Option<(u64, SurfaceInputGeometry)>>,
@@ -96,6 +99,16 @@ pub(super) struct Session {
     worker: Option<JoinHandle<()>>,
 }
 impl Session {
+    pub fn show_report(&self, show: bool) {
+        self.shared.show_report.store(show, Ordering::Release);
+        self.shared.request_redraw();
+    }
+    pub fn collect_report(&self) {
+        self.shared.reports.notice("Collection requested. Reconnect if offline. This shares this session's sanitized report with its host.");
+        self.shared.collect_report.store(true, Ordering::Release);
+        self.shared.request_redraw();
+        self.wake();
+    }
     pub fn set_development(&self, development: bool) {
         let mode = if development { 2 } else { 1 };
         let previous = self.shared.mode.swap(mode, Ordering::AcqRel);
@@ -139,6 +152,10 @@ impl Session {
     }
     /// Return true when Android should leave the app instead of returning a hoist.
     pub fn back(&self) -> bool {
+        if self.shared.show_report.swap(false, Ordering::AcqRel) {
+            self.shared.request_redraw();
+            return false;
+        }
         if self.shared.paired.load(Ordering::Acquire)
             && !self.shared.browser.load(Ordering::Acquire)
         {
@@ -162,6 +179,7 @@ impl Session {
             ..Default::default()
         });
         shared.active.store(true, Ordering::Release);
+        shared.reports.open(directory.clone());
         let context = shared.clone();
         let (input, events) = mpsc::sync_channel(128);
         let worker = thread::Builder::new()
@@ -245,6 +263,9 @@ fn run(directory: PathBuf, shared: &Shared, input: Receiver<Input>) -> Result<()
     shared.message("Open a Weld pairing link or use Paste pairing link");
     let mut connect = true;
     while !shared.stopped.load(Ordering::Acquire) {
+        if let Err(error) = shared.reports.persist_finished() {
+            tracing::warn!(%error, "could not save phone diagnostic report");
+        }
         let mode = shared.mode.load(Ordering::Acquire);
         if mode == 0 {
             thread::park_timeout(Duration::from_millis(100));
@@ -397,6 +418,11 @@ fn stream(
         }
     };
     let connection = Connection(peer);
+    if let Some(recorder) = connection.0.diagnostics() {
+        shared
+            .reports
+            .attach(connection.0.identity().as_str().to_owned(), recorder);
+    }
     shared.message(format!(
         "Connected ({:?}); choose an application",
         connection.0.codec()
@@ -427,6 +453,23 @@ fn stream(
         && !shared.retry.load(Ordering::Acquire)
     {
         if let Some(device) = &device {
+            if shared.collect_report.swap(false, Ordering::AcqRel) {
+                let result = shared
+                    .reports
+                    .for_peer(connection.0.identity().as_str())
+                    .and_then(|report| device.collect_diagnostics(report));
+                if let Err(error) = result {
+                    shared.reports.notice(error.to_string());
+                }
+                shared.request_redraw();
+            }
+            if let Some(reply) = device.take_diagnostics() {
+                match reply {
+                    Some(report) => if let Err(error) = shared.reports.merge(report) { shared.reports.notice(error.to_string()); },
+                    None => shared.reports.notice("Host denied collection, report expired, or collection was too frequent. Grant session diagnostics with weldctl devices diagnostics."),
+                }
+                shared.request_redraw();
+            }
             if let Some(error) = device.take_error() {
                 shared.message(error);
                 shared.clear();

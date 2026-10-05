@@ -28,7 +28,7 @@ pub struct ClientPresentationInbox {
     mapped: HashSet<ClientSurfaceId>,
     pending: VecDeque<Record>,
     intervals: HashMap<ClientSourceId, Duration>,
-    completed: PresentationQueueStats,
+    completed: HashMap<ClientSourceId, PresentationQueueStats>,
 }
 
 enum Record {
@@ -214,9 +214,24 @@ impl ClientPresentationInbox {
     }
 
     pub fn stats(&self) -> PresentationQueueStats {
-        let mut result = self.completed;
+        let mut result = PresentationQueueStats::default();
+        for stats in self.completed.values() {
+            result += *stats;
+        }
         for record in &self.pending {
             if let Record::Frames { queue, .. } = record {
+                result += queue.stats();
+            }
+        }
+        result
+    }
+
+    pub fn stats_for_source(&self, source: ClientSourceId) -> PresentationQueueStats {
+        let mut result = self.completed.get(&source).copied().unwrap_or_default();
+        for record in &self.pending {
+            if let Record::Frames { surface, queue, .. } = record
+                && surface.source() == source
+            {
                 result += queue.stats();
             }
         }
@@ -250,7 +265,7 @@ impl ClientPresentationInbox {
                         barrier,
                     });
                 } else {
-                    self.completed += queue.stats();
+                    *self.completed.entry(surface.source()).or_default() += queue.stats();
                 }
                 commit.map(|commit| ClientSurfaceEvent {
                     surface,
@@ -329,6 +344,27 @@ mod tests {
                 _ => 0,
             })
             .collect()
+    }
+
+    #[test]
+    fn source_statistics_stay_separate_across_queue_drains() {
+        let first = ClientSourceId::new(1);
+        let second = ClientSourceId::new(2);
+        let mut inbox = ClientPresentationInbox::default();
+        let now = Instant::now();
+        inbox.push_at(event(true, 1), now);
+        inbox.push_at(event(true, 2), now);
+        let mut other = event(true, 1);
+        other.surface = ClientSurfaceId::new(ClientId::new(second, 1), 1);
+        inbox.push_at(other, now);
+        assert_eq!(inbox.stats_for_source(first).superseded, 1);
+        assert_eq!(inbox.stats_for_source(second).superseded, 0);
+        assert_eq!(inbox.drain_ready(now).count(), 2);
+        assert_eq!(inbox.stats_for_source(first).superseded, 1);
+        assert_eq!(inbox.stats_for_source(second).superseded, 0);
+        assert_eq!(inbox.stats_for_source(first).selected, 1);
+        assert_eq!(inbox.stats_for_source(second).selected, 1);
+        assert_eq!(inbox.stats().selected, 2);
     }
 
     #[test]

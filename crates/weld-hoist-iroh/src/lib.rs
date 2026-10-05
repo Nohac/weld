@@ -20,6 +20,7 @@ mod peer;
 mod pending_source;
 mod private_file;
 mod rendezvous;
+mod reports;
 
 pub use adapter::{
     IrohDestinationEndpoint, IrohSourceOptions, destination_registration_with_backend,
@@ -38,6 +39,7 @@ pub use native::{
 pub use notifier::IrohNotifier;
 pub use peer::{IrohDestinationPeer, IrohSourcePeer};
 pub use pending_source::pending_source_registration_with_backend;
+pub use reports::DiagnosticReports;
 
 /// Authenticated Iroh endpoint identity, kept opaque to Weld policy.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -69,6 +71,37 @@ mod tests {
     };
 
     use super::*;
+
+    pub(crate) async fn connection_pair() -> (
+        iroh::Endpoint,
+        iroh::Endpoint,
+        iroh::endpoint::Connection,
+        iroh::endpoint::Connection,
+    ) {
+        use iroh::endpoint::presets;
+        const ALPN: &[u8] = b"weld-diagnostic-test";
+        let source = iroh::Endpoint::builder(presets::Minimal)
+            .alpns(vec![ALPN.to_vec()])
+            .bind()
+            .await
+            .expect("source");
+        let receiver = iroh::Endpoint::builder(presets::Minimal)
+            .bind()
+            .await
+            .expect("receiver");
+        let (local, remote) = tokio::join!(
+            async {
+                source
+                    .accept()
+                    .await
+                    .expect("incoming")
+                    .await
+                    .expect("accepted")
+            },
+            receiver.connect(source.addr(), ALPN)
+        );
+        (source, receiver, local, remote.expect("connected"))
+    }
 
     fn send_source(
         source: &impl EncodedSourceTransport,

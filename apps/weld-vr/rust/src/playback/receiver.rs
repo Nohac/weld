@@ -143,6 +143,7 @@ pub(super) fn run_session(
             Ok(peer) => {
                 backoff = Duration::from_secs(1);
                 let connection = Connection(peer);
+                let recorder = connection.0.diagnostics();
                 tracing::info!(target: "weld_vr_diag", codec = ?connection.0.codec(), "negotiated Godot hoist codec");
                 let backend = Backend::new(
                     target.clone(),
@@ -208,7 +209,7 @@ pub(super) fn run_session(
                         );
                     }
                     input::service(shared, &mut runtime);
-                    shared.session.observations.report(false);
+                    shared.session.observations.report(false, recorder.as_ref());
                     // Transport wake_if_readable and codec/credit notifications
                     // retain an unpark token even when they race this wait.
                     let wait =
@@ -222,7 +223,7 @@ pub(super) fn run_session(
                     thread::park_timeout(wait);
                 }
                 inventory.clear();
-                shared.session.observations.report(true);
+                shared.session.observations.report(true, recorder.as_ref());
                 lock(&shared.session.input).invalidate();
                 input::service(shared, &mut runtime);
                 shared.message("Disconnected; waiting for source restart");

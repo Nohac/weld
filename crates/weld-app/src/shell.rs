@@ -96,6 +96,13 @@ pub struct AppShell {
     dmabuf_importer: Option<DmabufImporter>,
     pending_surfaces: ClientPresentationInbox,
     last_presentation_report: Option<Instant>,
+    diagnostics: HashMap<
+        ClientSourceId,
+        (
+            weld_diagnostics::Recorder,
+            weld_client::PresentationQueueStats,
+        ),
+    >,
     cursor: CursorHostTracker,
     pending_input: ApplicationInputBuffer,
     client_importers: HashSet<ClientSourceId>,
@@ -340,6 +347,7 @@ impl AppShell {
             tracing::trace_span!(target: crate::PROFILE_TARGET, "weld_app_shell_startup").entered();
 
         let mut client_importers = HashSet::new();
+        let mut diagnostics = HashMap::new();
         let mut pending_surfaces = ClientPresentationInbox::default();
         let interval = context
             .outputs
@@ -349,6 +357,9 @@ impl AppShell {
             .unwrap_or_else(|| weld_client::PresentationRate::HZ_60.interval());
         for importer in importers {
             let source = importer.descriptor.id;
+            if let Some(recorder) = importer.diagnostics {
+                diagnostics.insert(source, (recorder, Default::default()));
+            }
             if importer.descriptor.provenance == weld_client::ClientProvenance::Relocated {
                 pending_surfaces.smooth_source(source, interval);
             }
@@ -447,6 +458,7 @@ impl AppShell {
             dmabuf_importer,
             pending_surfaces,
             last_presentation_report: None,
+            diagnostics,
             cursor: CursorHostTracker::default(),
             pending_input: ApplicationInputBuffer::default(),
             client_importers,
@@ -469,6 +481,22 @@ impl AppShell {
             .is_none_or(|previous| now.duration_since(previous) >= Duration::from_secs(1))
         {
             let stats = self.pending_surfaces.stats();
+            for (source, (recorder, previous)) in &mut self.diagnostics {
+                let current = self.pending_surfaces.stats_for_source(*source);
+                recorder.record(weld_diagnostics::Observation::Stage {
+                    stage: weld_diagnostics::Stage::Presentation,
+                    sample: weld_diagnostics::StageSample {
+                        interval_us: self
+                            .last_presentation_report
+                            .map_or(0, |last| weld_diagnostics::micros(now.duration_since(last))),
+                        completed: current.selected.saturating_sub(previous.selected),
+                        superseded: current.superseded.saturating_sub(previous.superseded),
+                        stale: current.stale.saturating_sub(previous.stale),
+                        ..Default::default()
+                    },
+                });
+                *previous = current;
+            }
             tracing::debug!(target: "weld_media_diag",
                 submitted_total = stats.submitted, selected_total = stats.selected,
                 superseded_total = stats.superseded, stale_total = stats.stale,

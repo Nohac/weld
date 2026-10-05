@@ -164,11 +164,13 @@ enum Request {
     List,
     Hoist(u64),
     Release,
+    Diagnostics(Box<weld_diagnostics::Report>),
 }
 #[derive(Serialize, Deserialize)]
 enum Reply {
     Catalogue(Vec<ApplicationInfo>),
     Accepted(bool),
+    Diagnostics(Option<Box<weld_diagnostics::Report>>),
 }
 #[derive(Serialize, Deserialize)]
 struct Hello {
@@ -224,16 +226,38 @@ pub(crate) async fn accept_session(
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |id| id.checked_add(1))
             .map_err(|_| anyhow::anyhow!("device session IDs exhausted"))?,
     );
+    let recorder = peer.diagnostics();
     desktop.join(id, peer)?;
     let _joined = JoinedSession {
         desktop: desktop.clone(),
         id,
     };
     async {
+        let mut last_collection = None;
         loop {
-            let request: Request =
-                tokio::time::timeout(Duration::from_secs(15), read_record(&mut recv)).await??;
+            let request: Request = session_io(
+                &connection,
+                Duration::from_secs(15),
+                weld_diagnostics::Operation::SessionRead,
+                recorder.as_ref(),
+                read_record(&mut recv),
+            )
+            .await?;
             let reply = match request {
+                Request::Diagnostics(report) => {
+                    let allowed = authority.permits_diagnostics(connection.remote_id())
+                        && last_collection
+                            .is_none_or(|last: Instant| last.elapsed() >= Duration::from_secs(1));
+                    last_collection = Some(Instant::now());
+                    let response = if allowed {
+                        host.upgrade().and_then(|host| {
+                            host.reports.exchange(connection.remote_id(), *report).ok()
+                        })
+                    } else {
+                        None
+                    };
+                    Reply::Diagnostics(response.map(Box::new))
+                }
                 Request::List => Reply::Catalogue(desktop.catalogue(id)?),
                 Request::Hoist(window) => {
                     ensure!(permissions.hoist, "hoisting not permitted");
@@ -254,7 +278,14 @@ pub(crate) async fn accept_session(
                     Reply::Accepted(tokio::time::timeout(Duration::from_secs(3), wait).await??)
                 }
             };
-            tokio::time::timeout(Duration::from_secs(5), write_record(&mut send, &reply)).await??;
+            session_io(
+                &connection,
+                Duration::from_secs(5),
+                weld_diagnostics::Operation::SessionWrite,
+                recorder.as_ref(),
+                write_record(&mut send, &reply),
+            )
+            .await?;
         }
     }
     .await
@@ -262,12 +293,23 @@ pub(crate) async fn accept_session(
 
 /// Receiver media peer plus an independent, bounded application-control channel.
 pub struct DeviceSession {
+    diagnostic_reply: Arc<Mutex<Option<Option<weld_diagnostics::Report>>>>,
     pub peer: IrohDestinationPeer,
     catalogue: Arc<Mutex<Vec<ApplicationInfo>>>,
     commands: mpsc::Sender<Request>,
     error: Arc<Mutex<Option<String>>>,
 }
 impl DeviceSession {
+    /// Explicit collection also shares this endpoint's sanitized session evidence.
+    pub fn collect_diagnostics(&self, report: weld_diagnostics::Report) -> Result<()> {
+        report.validate().map_err(anyhow::Error::msg)?;
+        self.commands
+            .try_send(Request::Diagnostics(Box::new(report)))
+            .map_err(|_| anyhow::anyhow!("device diagnostic request queue unavailable"))
+    }
+    pub fn take_diagnostics(&self) -> Option<Option<weld_diagnostics::Report>> {
+        self.diagnostic_reply.lock().ok()?.take()
+    }
     pub fn take_error(&self) -> Option<String> {
         self.error.lock().ok().and_then(|mut error| error.take())
     }
@@ -352,7 +394,7 @@ pub(crate) async fn connect_session(
         );
         Ok::<_, anyhow::Error>((guard, send, recv, peer))
     };
-    let (guard, mut send, mut recv, peer) =
+    let (mut guard, mut send, mut recv, peer) =
         match tokio::time::timeout(Duration::from_secs(15), setup)
             .await
             .context("device connection timed out")
@@ -365,11 +407,15 @@ pub(crate) async fn connect_session(
                 return Ok(());
             }
         };
+    guard.admitted_session();
+    let recorder = peer.diagnostics();
+    let diagnostic_reply = Arc::new(Mutex::new(None));
     let catalogue = Arc::new(Mutex::new(Vec::new()));
     let error = Arc::new(Mutex::new(None));
     let (commands, mut requests) = mpsc::channel(16);
     if result
         .send(Ok(DeviceSession {
+            diagnostic_reply: diagnostic_reply.clone(),
             peer,
             catalogue: catalogue.clone(),
             commands,
@@ -386,9 +432,31 @@ pub(crate) async fn connect_session(
             command = requests.recv() => match command { Some(command) => command, None => break },
             _ = tokio::time::sleep(Duration::from_millis(500)) => Request::List,
         };
-        tokio::time::timeout(Duration::from_secs(5), write_record(&mut send, &request)).await??;
-        let reply = tokio::time::timeout(Duration::from_secs(5), read_record(&mut recv)).await??;
+        session_io(
+            &guard.connection,
+            Duration::from_secs(5),
+            weld_diagnostics::Operation::SessionWrite,
+            recorder.as_ref(),
+            write_record(&mut send, &request),
+        )
+        .await?;
+        let reply = session_io(
+            &guard.connection,
+            Duration::from_secs(5),
+            weld_diagnostics::Operation::SessionRead,
+            recorder.as_ref(),
+            read_record(&mut recv),
+        )
+        .await?;
         match reply {
+            Reply::Diagnostics(report) => {
+                if let Some(report) = &report {
+                    report.validate().map_err(anyhow::Error::msg)?;
+                }
+                if let Ok(mut slot) = diagnostic_reply.lock() {
+                    *slot = Some(report.map(|report| *report));
+                }
+            }
             Reply::Catalogue(applications) => {
                 ensure!(applications.len() <= 256, "catalogue exceeds bound");
                 *catalogue
@@ -405,4 +473,85 @@ pub(crate) async fn connect_session(
         notifier.notify()?;
     }
     Ok(())
+}
+
+/// Preserve the initiating failure before dropping the live connection guard.
+async fn session_io<T>(
+    connection: &Connection,
+    duration: Duration,
+    operation: weld_diagnostics::Operation,
+    recorder: Option<&weld_diagnostics::Recorder>,
+    future: impl std::future::Future<Output = Result<T>>,
+) -> Result<T> {
+    let result = tokio::time::timeout(duration, future).await;
+    let cause = match &result {
+        Err(_) => Some(weld_diagnostics::Cause::Timeout),
+        Ok(Err(_)) if connection.close_reason().is_none() => {
+            Some(weld_diagnostics::Cause::ProtocolOrIo)
+        }
+        Ok(Err(_)) => None,
+        Ok(Ok(_)) => None,
+    };
+    if let (Some(recorder), Some(cause)) = (recorder, cause) {
+        recorder.record(weld_diagnostics::Observation::Failure { operation, cause });
+    }
+    result.with_context(|| format!("device session {operation:?} deadline expired"))?
+}
+
+#[cfg(test)]
+mod diagnostic_tests {
+    use super::*;
+    use weld_diagnostics::{Cause, Endpoint, Observation, Operation, Recorder, SessionId};
+
+    #[tokio::test]
+    async fn session_deadline_records_the_original_operation_before_teardown() {
+        let (source, receiver, connection, remote) = crate::tests::connection_pair().await;
+        let recorder = Recorder::new(SessionId([4; 16]), Endpoint::Receiver);
+        let result: Result<()> = session_io(
+            &connection,
+            Duration::ZERO,
+            Operation::SessionRead,
+            Some(&recorder),
+            std::future::pending(),
+        )
+        .await;
+        assert!(result.is_err());
+        recorder.record(Observation::Failure {
+            operation: Operation::Connection,
+            cause: Cause::LocalShutdown,
+        });
+        assert_eq!(
+            recorder
+                .snapshot()
+                .expect("report")
+                .first_failure
+                .expect("first")
+                .observation,
+            Observation::Failure {
+                operation: Operation::SessionRead,
+                cause: Cause::Timeout
+            }
+        );
+        connection.close(0_u32.into(), b"test completed");
+        let clean = Recorder::new(SessionId([5; 16]), Endpoint::Receiver);
+        let result: Result<()> = session_io(
+            &connection,
+            Duration::from_secs(1),
+            Operation::SessionRead,
+            Some(&clean),
+            async { anyhow::bail!("closed stream") },
+        )
+        .await;
+        assert!(result.is_err());
+        assert!(
+            clean
+                .snapshot()
+                .expect("clean report")
+                .first_failure
+                .is_none()
+        );
+        drop(remote);
+        source.close().await;
+        receiver.close().await;
+    }
 }

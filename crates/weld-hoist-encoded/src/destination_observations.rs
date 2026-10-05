@@ -98,13 +98,43 @@ pub(super) struct DestinationReport {
 }
 
 impl DestinationReport {
-    pub fn emit(self) {
+    pub fn emit(self, recorder: Option<&weld_diagnostics::Recorder>) {
         let Self {
             elapsed,
             counters,
             gauges,
             final_report,
         } = self;
+        if let Some(recorder) = recorder {
+            use weld_diagnostics::{Cause, Observation, Operation, Stage, StageSample, micros};
+            recorder.record(Observation::Stage {
+                stage: Stage::Receive,
+                sample: StageSample {
+                    interval_us: micros(elapsed),
+                    completed: counters.media_received,
+                    pending: gauges.pending_events as u64,
+                    oldest_pending_us: micros(gauges.oldest_control_age),
+                    ..Default::default()
+                },
+            });
+            recorder.record(Observation::Stage {
+                stage: Stage::Decode,
+                sample: StageSample {
+                    interval_us: micros(elapsed),
+                    completed: counters.decode_wall.samples,
+                    pending: gauges.decode_jobs_in_flight as u64,
+                    oldest_pending_us: micros(gauges.active_decode_age),
+                    work_max_us: micros(counters.worker_residence.maximum),
+                    ..Default::default()
+                },
+            });
+            if counters.codec_failures > 0 {
+                recorder.record(Observation::Failure {
+                    operation: Operation::Decode,
+                    cause: Cause::Codec,
+                });
+            }
+        }
         tracing::debug!(
             target: "weld_media_diag",
             interval_us = elapsed.as_micros(),

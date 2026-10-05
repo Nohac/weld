@@ -76,13 +76,22 @@ impl PathMonitor {
     }
 }
 
-pub(crate) fn observe(connection: &Connection) -> PathMonitor {
+pub(crate) fn observe(
+    connection: &Connection,
+    recorder: Option<weld_diagnostics::Recorder>,
+) -> PathMonitor {
     let monitor = PathMonitor::default();
     let weak = connection.weak_handle();
     let mut events = connection.path_events();
     let closed = weak.closed();
     let peer = connection.remote_id();
-    snapshot(connection, &monitor, false, Some("initial"));
+    snapshot(
+        connection,
+        &monitor,
+        false,
+        Some("initial"),
+        recorder.as_ref(),
+    );
     let observer = monitor.clone();
     tokio::spawn(async move {
         let mut interval = tokio::time::interval_at(
@@ -92,9 +101,9 @@ pub(crate) fn observe(connection: &Connection) -> PathMonitor {
         interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
         let mut last_log = Instant::now();
         tokio::pin!(closed);
-        loop {
+        let reason = loop {
             tokio::select! {
-                _ = &mut closed => break,
+                reason = &mut closed => break reason,
                 event = events.next() => {
                     let (uncertain, reason) = match event {
                         Some(PathEvent::Selected { id, remote_addr, .. }) => {
@@ -106,19 +115,38 @@ pub(crate) fn observe(connection: &Connection) -> PathMonitor {
                             (true, Some("resnapshot"))
                         }
                         Some(_) => (false, None),
-                        None => break,
+                        None => break (&mut closed).await,
                     };
-                    if let Some(connection) = weak.upgrade() { snapshot(&connection, &observer, uncertain, reason); }
-                    else { break; }
+                    if let Some(connection) = weak.upgrade() { snapshot(&connection, &observer, uncertain, reason, recorder.as_ref()); }
+                    else { break (&mut closed).await; }
                 }
                 _ = interval.tick() => {
                     let reason = if last_log.elapsed() >= Duration::from_secs(5) {
                         last_log = Instant::now(); Some("periodic")
                     } else { None };
-                    if let Some(connection) = weak.upgrade() { snapshot(&connection, &observer, false, reason); }
-                    else { break; }
+                    if let Some(connection) = weak.upgrade() { snapshot(&connection, &observer, false, reason, recorder.as_ref()); }
+                    else { break (&mut closed).await; }
                 }
             }
+        };
+        // The registered weak close future retains the reason even after the
+        // final connection handle is dropped. Every observer exit freezes the report.
+        if let Some(recorder) = &recorder {
+            use weld_diagnostics::{Cause, Observation, Operation};
+            let cause = match reason.map(|closed| closed.reason) {
+                Some(iroh::endpoint::ConnectionError::LocallyClosed) | None => None,
+                Some(iroh::endpoint::ConnectionError::ApplicationClosed(_)) => {
+                    Some(Cause::PeerClosed)
+                }
+                Some(_) => Some(Cause::TransportLost),
+            };
+            if let Some(cause) = cause {
+                recorder.record(Observation::Failure {
+                    operation: Operation::Connection,
+                    cause,
+                });
+            }
+            recorder.record(Observation::Ended);
         }
         observer.update(None, false);
         tracing::debug!(target: TARGET, %peer, "Iroh path observation ended");
@@ -131,6 +159,7 @@ fn snapshot(
     monitor: &PathMonitor,
     uncertain: bool,
     reason: Option<&'static str>,
+    recorder: Option<&weld_diagnostics::Recorder>,
 ) {
     if connection.close_reason().is_some() {
         monitor.update(None, uncertain);
@@ -156,14 +185,48 @@ fn snapshot(
             )),
             uncertain,
         );
+        if let Some(recorder) = recorder
+            && let Some(sample) = monitor.snapshot()
+        {
+            use weld_diagnostics::{NetworkSample, Observation, PathKind};
+            if reason == Some("initial") || uncertain {
+                let kind = match path_kind(path.remote_addr()) {
+                    "ipv4" => PathKind::Ipv4,
+                    "ipv6" => PathKind::Ipv6,
+                    "relay" => PathKind::Relay,
+                    "adb" => PathKind::Adb,
+                    _ => PathKind::Other,
+                };
+                recorder.record(Observation::Path(kind));
+            }
+            recorder.record(Observation::Network(NetworkSample {
+                epoch: sample.epoch,
+                rtt_us: weld_diagnostics::micros(sample.rtt),
+                congestion_window_bytes: sample.congestion_window_bytes,
+                sent_bytes: sample.sent_bytes,
+                received_bytes: sample.received_bytes,
+                lost_packets: sample.lost_packets,
+                congestion_events: sample.congestion_events,
+            }));
+        }
         if let Some(reason) = reason {
             tracing::debug!(target: TARGET,
                 peer = %connection.remote_id(), path = ?path.id(),
                 transport = path_kind(path.remote_addr()), rtt_ms = stats.rtt.as_secs_f64() * 1000.0,
+                sent_bytes = stats.udp_tx.bytes, received_bytes = stats.udp_rx.bytes,
+                congestion_window_bytes = stats.cwnd, lost_packets = stats.lost_packets,
+                congestion_events = stats.congestion_events,
                 reason, "Iroh selected path snapshot");
         }
     } else {
         monitor.update(None, uncertain);
+        if (uncertain || reason == Some("initial"))
+            && let Some(recorder) = recorder
+        {
+            recorder.record(weld_diagnostics::Observation::Path(
+                weld_diagnostics::PathKind::Unavailable,
+            ));
+        }
         if let Some(reason) = reason {
             tracing::debug!(target: TARGET, peer = %connection.remote_id(), reason, "Iroh has no selected path");
         }
@@ -183,6 +246,31 @@ fn path_kind(address: &TransportAddr) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn dropping_the_last_connection_always_finishes_its_report() {
+        use weld_diagnostics::{Endpoint, Recorder, SessionId};
+        for explicit_close in [false, true] {
+            let (source, receiver, connection, remote) = crate::tests::connection_pair().await;
+            let recorder = Recorder::new(SessionId([7; 16]), Endpoint::Source);
+            observe(&connection, Some(recorder.clone()));
+            if explicit_close {
+                connection.close(0_u32.into(), b"test completed");
+            }
+            drop(connection);
+            tokio::time::timeout(Duration::from_secs(3), async {
+                while !recorder.snapshot().expect("report").ended {
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+            })
+            .await
+            .expect("observer must terminate for either close path");
+            assert!(recorder.snapshot().expect("report").first_failure.is_none());
+            drop(remote);
+            source.close().await;
+            receiver.close().await;
+        }
+    }
 
     fn sample(now: Instant, bytes: u64) -> NetworkPathSnapshot {
         NetworkPathSnapshot {

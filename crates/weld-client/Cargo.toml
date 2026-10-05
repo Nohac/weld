@@ -9,5 +9,6 @@ serde = ["dep:serde", "cursor-icon/serde"]
 test-support = []
 
 [dependencies]
+weld-diagnostics = { path = "../weld-diagnostics" }
 cursor-icon.workspace = true
 serde = { workspace = true, optional = true }

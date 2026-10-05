@@ -35,6 +35,7 @@ pub(super) struct Observations {
     pub render_wait_max_us: AtomicU64,
     discarded: [AtomicU64; 5],
     clock: Mutex<Option<(Instant, Instant)>>,
+    reported: Mutex<[u64; 3]>,
 }
 impl Observations {
     #[cfg(test)]
@@ -49,15 +50,37 @@ impl Observations {
         self.wait_us.fetch_add(micros(age), Ordering::Relaxed);
         self.wait_max_us.fetch_max(micros(age), Ordering::Relaxed);
     }
-    pub fn report(&self, final_report: bool) {
+    pub fn report(&self, final_report: bool, recorder: Option<&weld_diagnostics::Recorder>) {
         let now = Instant::now();
         let mut clock = lock(&self.clock);
         let (start, previous) = clock.get_or_insert((now, now));
         if !final_report && now.duration_since(*previous) < Duration::from_secs(1) {
             return;
         }
+        let elapsed = now.duration_since(*previous);
         *previous = now;
         let load = |counter: &AtomicU64| counter.load(Ordering::Relaxed);
+        let import_max_us = self.import_max_us.swap(0, Ordering::Relaxed);
+        let current = [
+            load(&self.imported),
+            load(&self.discarded[0]),
+            load(&self.discarded[1]),
+        ];
+        let mut reported = lock(&self.reported);
+        if let Some(recorder) = recorder {
+            recorder.record(weld_diagnostics::Observation::Stage {
+                stage: weld_diagnostics::Stage::Presentation,
+                sample: weld_diagnostics::StageSample {
+                    interval_us: micros(elapsed),
+                    completed: current[0].saturating_sub(reported[0]),
+                    superseded: current[1].saturating_sub(reported[1]),
+                    stale: current[2].saturating_sub(reported[2]),
+                    work_max_us: import_max_us,
+                    ..Default::default()
+                },
+            });
+        }
+        *reported = current;
         tracing::debug!(target: "weld_vr_diag",
             elapsed_us = micros(now.duration_since(*start)), final_report,
             decoded_total = load(&self.decoded), imported_total = load(&self.imported),
@@ -70,7 +93,7 @@ impl Observations {
             commit_gap_max_us = self.commit_gap_max_us.swap(0, Ordering::Relaxed),
             commit_bursts_total = load(&self.commit_bursts),
             import_cpu_total_us = load(&self.import_us),
-            import_cpu_max_us = self.import_max_us.swap(0, Ordering::Relaxed),
+            import_cpu_max_us = import_max_us,
             render_handoff_max_us = self.render_wait_max_us.swap(0, Ordering::Relaxed),
             "presentation observations");
     }

@@ -3868,6 +3868,15 @@ version = "0.1.0"
 dependencies = [
  "cursor-icon",
  "serde",
+ "weld-diagnostics",
+]
+
+[[package]]
+name = "weld-diagnostics"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -3886,6 +3895,7 @@ dependencies = [
  "anyhow",
  "tracing",
  "weld-client",
+ "weld-diagnostics",
  "weld-hoist-core",
  "weld-hoist-protocol",
  "weld-media",
@@ -3911,6 +3921,7 @@ dependencies = [
  "tokio",
  "tracing",
  "weld-client",
+ "weld-diagnostics",
  "weld-hoist-core",
  "weld-hoist-encoded",
  "weld-hoist-protocol",
@@ -3974,6 +3985,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "weld-client",
+ "weld-diagnostics",
  "weld-hoist-core",
  "weld-hoist-encoded",
  "weld-hoist-iroh",

@@ -10,6 +10,7 @@ native = ["dep:weld-core"]
 vaapi = ["native", "dep:weld-media-vaapi", "dep:rustix"]
 
 [dependencies]
+weld-diagnostics = { path = "../weld-diagnostics" }
 anyhow.workspace = true
 rustix = { workspace = true, optional = true }
 tracing.workspace = true
