@@ -328,14 +328,20 @@ where
 {
     fn bind(
         &self,
-        _state: &mut D,
+        state: &mut D,
         _dh: &DisplayHandle,
-        _client: &wayland_server::Client,
+        client: &wayland_server::Client,
         resource: New<WlSeat>,
         data_init: &mut DataInit<'_, D>,
     ) {
+        let seat = state.bind_seat(
+            client,
+            Seat {
+                arc: self.arc.clone(),
+            },
+        );
         let data = SeatUserData {
-            arc: self.arc.clone(),
+            arc: seat.arc.clone(),
         };
 
         let resource = data_init.init(resource, data);
@@ -344,7 +350,7 @@ where
             resource.name(self.arc.name.clone());
         }
 
-        let mut inner = self.arc.inner.lock().unwrap();
+        let mut inner = seat.arc.inner.lock().unwrap();
         resource.capabilities(inner.compute_caps());
         inner.known_seats.push(resource.downgrade());
     }

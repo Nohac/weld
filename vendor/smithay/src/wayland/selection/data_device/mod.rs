@@ -123,6 +123,12 @@ pub trait DataDeviceHandler: Sized + SelectionHandler + WaylandDndGrabHandler {
     /// [DataDeviceState] getter
     fn data_device_state(&mut self) -> &mut DataDeviceState;
 
+    /// Selection group for an application input context. Input grabs and focus
+    /// authorization continue to use the original seat.
+    fn data_device_seat(&self, seat: &Seat<Self>) -> Seat<Self> {
+        seat.clone()
+    }
+
     /// Action chooser for DnD negotiation
     fn action_choice(&mut self, available: WlDndAction, preferred: WlDndAction) -> WlDndAction {
         default_action_chooser(available, preferred)
@@ -428,7 +434,8 @@ impl<D: SeatHandler + DataDeviceHandler + 'static> DndFocus<D> for WlSurface {
         location: Point<f64, Logical>,
         serial: &Serial,
     ) -> Option<Self::OfferData<S>> {
-        let seat_data = seat
+        let selection_seat = _data.data_device_seat(seat);
+        let seat_data = selection_seat
             .user_data()
             .get::<RefCell<SeatData<D::SelectionUserData>>>()
             .unwrap()
@@ -506,7 +513,8 @@ impl<D: SeatHandler + DataDeviceHandler + 'static> DndFocus<D> for WlSurface {
         location: Point<f64, Logical>,
         time: InputTime,
     ) {
-        let seat_data = seat
+        let selection_seat = _data.data_device_seat(seat);
+        let seat_data = selection_seat
             .user_data()
             .get::<RefCell<SeatData<D::SelectionUserData>>>()
             .unwrap()
@@ -534,7 +542,8 @@ impl<D: SeatHandler + DataDeviceHandler + 'static> DndFocus<D> for WlSurface {
     }
 
     fn leave<S: Source>(&self, _data: &mut D, _offer: Option<&mut WlOfferData<S>>, seat: &Seat<D>) {
-        let seat_data = seat
+        let selection_seat = _data.data_device_seat(seat);
+        let seat_data = selection_seat
             .user_data()
             .get::<RefCell<SeatData<D::SelectionUserData>>>()
             .unwrap()
@@ -547,7 +556,8 @@ impl<D: SeatHandler + DataDeviceHandler + 'static> DndFocus<D> for WlSurface {
     }
 
     fn drop<S: Source>(&self, _data: &mut D, offer: Option<&mut WlOfferData<S>>, seat: &Seat<D>) {
-        let seat_data = seat
+        let selection_seat = _data.data_device_seat(seat);
+        let seat_data = selection_seat
             .user_data()
             .get::<RefCell<SeatData<D::SelectionUserData>>>()
             .unwrap()
@@ -596,6 +606,34 @@ impl DataDeviceState {
     /// [WlDataDeviceManager] GlobalId getter
     pub fn global(&self) -> GlobalId {
         self.manager_global.clone()
+    }
+}
+
+/// Move the data devices bound to one input context between selection groups.
+/// Existing clipboard sources remain with their original group.
+pub fn move_data_devices<D: DataDeviceHandler + 'static>(input: &Seat<D>, from: &Seat<D>, to: &Seat<D>) {
+    if from == to {
+        return;
+    }
+    let Some(previous) = from.user_data().get::<RefCell<SeatData<D::SelectionUserData>>>() else {
+        return;
+    };
+    let mut moved = Vec::new();
+    previous.borrow_mut().retain_devices(|device| {
+        let belongs = matches!(device, super::device::SelectionDevice::DataDevice(_))
+            && Seat::<D>::from_resource(&device.seat()).as_ref() == Some(input);
+        if belongs {
+            moved.push(device.clone());
+        }
+        !belongs
+    });
+    to.user_data()
+        .insert_if_missing(|| RefCell::new(SeatData::<D::SelectionUserData>::new()));
+    if let Some(next) = to.user_data().get::<RefCell<SeatData<D::SelectionUserData>>>() {
+        let mut next = next.borrow_mut();
+        for device in moved {
+            next.add_device(device);
+        }
     }
 }
 
@@ -821,6 +859,7 @@ mod handlers {
                 wl_data_device_manager::Request::GetDataDevice { id, seat: wl_seat } => {
                     match Seat::<D>::from_resource(&wl_seat) {
                         Some(seat) => {
+                            let seat = _state.data_device_seat(&seat);
                             seat.user_data()
                                 .insert_if_missing(|| RefCell::new(SeatData::<D::SelectionUserData>::new()));
 

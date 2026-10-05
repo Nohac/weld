@@ -59,6 +59,7 @@ where
             None => return,
         };
 
+        let selection_seat = handler.data_device_seat(&seat);
         match request {
             wl_data_device::Request::StartDrag {
                 source,
@@ -146,7 +147,7 @@ where
             }
             wl_data_device::Request::SetSelection { source, .. } => {
                 let seat_data = match seat.get_keyboard() {
-                    Some(keyboard) if keyboard.client_of_object_has_focus(&resource.id()) => seat
+                    Some(keyboard) if keyboard.client_of_object_has_focus(&resource.id()) => selection_seat
                         .user_data()
                         .get::<RefCell<SeatData<D::SelectionUserData>>>()
                         .unwrap(),
@@ -174,7 +175,7 @@ where
                 handler.new_selection(
                     SelectionTarget::Clipboard,
                     source.clone().map(|provider| SelectionSource { provider }),
-                    seat.clone(),
+                    selection_seat.clone(),
                 );
 
                 // The client has kbd focus, it can set the selection
@@ -182,7 +183,7 @@ where
                     .borrow_mut()
                     .set_clipboard_selection::<D>(dh, source.map(OfferReplySource::Client));
             }
-            wl_data_device::Request::Release => seat
+            wl_data_device::Request::Release => selection_seat
                 .user_data()
                 .get::<RefCell<SeatData<D::SelectionUserData>>>()
                 .unwrap()
@@ -198,6 +199,7 @@ where
 
     fn destroyed(&self, _state: &mut D, _client: wayland_server::backend::ClientId, resource: &WlDataDevice) {
         if let Some(seat) = Seat::<D>::from_resource(&self.wl_seat) {
+            let seat = _state.data_device_seat(&seat);
             if let Some(seat_data) = seat.user_data().get::<RefCell<SeatData<D::SelectionUserData>>>() {
                 seat_data.borrow_mut().retain_devices(|ndd| match ndd {
                     SelectionDevice::DataDevice(ndd) => ndd != resource,

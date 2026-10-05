@@ -163,6 +163,15 @@ pub trait SeatHandler: Sized + 'static {
     /// [SeatState] getter
     fn seat_state(&mut self) -> &mut SeatState<Self>;
 
+    /// Select the native input context backing one client's seat binding.
+    ///
+    /// The advertised name remains the global's name. The returned seat must
+    /// be registered in [`SeatState`] and provide the advertised capabilities.
+    #[cfg(feature = "wayland_frontend")]
+    fn bind_seat(&mut self, _client: &wayland_server::Client, seat: Seat<Self>) -> Seat<Self> {
+        seat
+    }
+
     /// Callback that will be notified whenever the focus of the seat changes.
     fn focus_changed(&mut self, _seat: &Seat<Self>, _focused: Option<&Self::KeyboardFocus>) {}
 
@@ -337,6 +346,19 @@ impl<D: SeatHandler> Default for SeatState<D> {
 }
 
 impl<D: SeatHandler> SeatState<D> {
+    /// Release the registry's ownership of a retired seat.
+    ///
+    /// Clear active input and remove its devices and Wayland global before
+    /// calling this. Existing protocol resources retain their own handles.
+    pub fn remove_seat(&mut self, seat: &Seat<D>) {
+        self.seats.retain(|registered| registered != seat);
+    }
+
+    /// Iterate over registered seats.
+    pub fn seats(&self) -> impl Iterator<Item = &Seat<D>> {
+        self.seats.iter()
+    }
+
     /// Create new delegate SeatState
     pub fn new() -> Self {
         Self { seats: Vec::new() }

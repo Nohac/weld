@@ -15,10 +15,7 @@ use wayland_server::{
     },
 };
 
-use crate::input::{
-    Seat,
-    dnd::{DndAction, Source, SourceMetadata},
-};
+use crate::input::dnd::{DndAction, Source, SourceMetadata};
 use crate::utils::{IsAlive, alive_tracker::AliveTracker};
 use crate::wayland::Dispatch2;
 use crate::wayland::selection::offer::OfferReplySource;
@@ -81,31 +78,23 @@ where
     fn destroyed(&self, state: &mut D, _client: ClientId, source: &WlDataSource) {
         self.alive_tracker.destroy_notify();
 
-        // Remove the source from the used ones.
-        let seat = match state
-            .data_device_state()
-            .used_sources
-            .remove(source)
-            .as_ref()
-            .and_then(Seat::<D>::from_resource)
-        {
-            Some(seat) => seat,
-            None => return,
-        };
-
-        let mut seat_data = seat
-            .user_data()
-            .get::<RefCell<SeatData<D::SelectionUserData>>>()
-            .unwrap()
-            .borrow_mut();
-
-        match seat_data.get_clipboard_selection() {
-            Some(OfferReplySource::Client(SelectionSourceProvider::DataDevice(set_source)))
-                if set_source == source =>
+        if state.data_device_state().used_sources.remove(source).is_none() {
+            return;
+        }
+        // A context may have moved to another group since it supplied this source.
+        // Clear the actual owner, without cancelling the new group's selection.
+        let seats = state.seat_state().seats().cloned().collect::<Vec<_>>();
+        for seat in seats {
+            let Some(data) = seat.user_data().get::<RefCell<SeatData<D::SelectionUserData>>>() else {
+                continue;
+            };
+            let mut data = data.borrow_mut();
+            if matches!(data.get_clipboard_selection(),
+                Some(OfferReplySource::Client(SelectionSourceProvider::DataDevice(current)))
+                    if current == source)
             {
-                seat_data.set_clipboard_selection::<D>(&self.display_handle, None)
+                data.set_clipboard_selection::<D>(&self.display_handle, None);
             }
-            _ => (),
         }
     }
 }
