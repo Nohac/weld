@@ -57,8 +57,8 @@ impl Viewport {
             f64::from(window[1]) / density,
         ];
         let scale_120 = (density * 120.0).round() as u32;
-        // Reserve room for decorations and legacy integer-scale buffers within
-        // the receiver's 4096-pixel dimension ceiling.
+        // Provisional phone request-size policy, including legacy integer-scale
+        // buffers. Actual decoder support is validated when opening the codec.
         let max_logical = 3840.0 / f64::from(scale_120.div_ceil(120));
         let reduction = (max_logical / video[2].max(video[3])).min(1.0);
         Some(Self {

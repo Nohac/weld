@@ -6,6 +6,7 @@ use anyhow::{Context, Result};
 use bevy::{
     app::App,
     asset::{Assets, Handle, RenderAssetUsages},
+    ecs::change_detection::Mut,
     image::Image,
     render::{
         RenderApp,
@@ -13,6 +14,7 @@ use bevy::{
         render_resource::{DefaultImageSampler, Texture, TextureView},
         texture::GpuImage,
     },
+    ui_render::ImageNodeBindGroups,
 };
 use tracing::warn;
 use weld_core::{
@@ -164,41 +166,47 @@ impl ImportedImageRegistry for BevyImageRegistry<'_> {
             .get_resource::<DefaultImageSampler>()
             .context("Bevy default image sampler is unavailable")?
             .clone();
-        let mut gpu_images = render_app
+        render_app
             .world_mut()
-            .get_resource_mut::<RenderAssets<GpuImage>>()
-            .context("Bevy GPU image assets are unavailable")?;
-        for image in images {
-            if self.installed.contains(&image.id) {
-                continue;
-            }
-            let handle = self
-                .handles
-                .get(&image.id)
-                .context("DMA-BUF promotion has no Bevy placeholder")?;
-            gpu_images.insert(
-                handle.id(),
-                GpuImage {
-                    texture: Texture::from(image.texture.clone()),
-                    texture_view: TextureView::from(image.view.clone()),
-                    sampler: (*sampler).clone(),
-                    texture_descriptor: wgpu::TextureDescriptor {
-                        label: Some("weld direct client DMA-BUF"),
-                        size: image.texture.size(),
-                        mip_level_count: 1,
-                        sample_count: 1,
-                        dimension: wgpu::TextureDimension::D2,
-                        format: image.format,
-                        usage: wgpu::TextureUsages::TEXTURE_BINDING,
-                        view_formats: &[],
-                    },
-                    texture_view_descriptor: None,
-                    had_data: false,
+            .try_resource_scope(
+                |world, mut gpu_images: Mut<RenderAssets<GpuImage>>| -> Result<()> {
+                    let mut bindings = world.get_resource_mut::<ImageNodeBindGroups>();
+                    for image in images {
+                        if self.installed.contains(&image.id) {
+                            continue;
+                        }
+                        let handle = self
+                            .handles
+                            .get(&image.id)
+                            .context("DMA-BUF promotion has no Bevy placeholder")?;
+                        weld_presenter::publish_image(
+                            &mut gpu_images,
+                            bindings.as_deref_mut(),
+                            handle.id(),
+                            GpuImage {
+                                texture: Texture::from(image.texture.clone()),
+                                texture_view: TextureView::from(image.view.clone()),
+                                sampler: (*sampler).clone(),
+                                texture_descriptor: wgpu::TextureDescriptor {
+                                    label: Some("weld direct client DMA-BUF"),
+                                    size: image.texture.size(),
+                                    mip_level_count: 1,
+                                    sample_count: 1,
+                                    dimension: wgpu::TextureDimension::D2,
+                                    format: image.format,
+                                    usage: wgpu::TextureUsages::TEXTURE_BINDING,
+                                    view_formats: &[],
+                                },
+                                texture_view_descriptor: None,
+                                had_data: false,
+                            },
+                        );
+                        self.installed.insert(image.id);
+                    }
+                    Ok(())
                 },
-            );
-            self.installed.insert(image.id);
-        }
-        Ok(())
+            )
+            .context("Bevy GPU image assets are unavailable")?
     }
 
     fn prune(&mut self, images: &[ImportId]) {
@@ -209,14 +217,19 @@ impl ImportedImageRegistry for BevyImageRegistry<'_> {
             .iter()
             .filter_map(|id| self.handles.remove(id))
             .collect::<Vec<_>>();
-        if let Some(render_app) = self.app.get_sub_app_mut(RenderApp)
-            && let Some(mut gpu_images) = render_app
-                .world_mut()
-                .get_resource_mut::<RenderAssets<GpuImage>>()
-        {
-            for handle in &handles {
-                gpu_images.remove(handle.id());
-            }
+        if let Some(render_app) = self.app.get_sub_app_mut(RenderApp) {
+            let _ = render_app.world_mut().try_resource_scope(
+                |world, mut images: Mut<RenderAssets<GpuImage>>| {
+                    let mut bindings = world.get_resource_mut::<ImageNodeBindGroups>();
+                    for handle in &handles {
+                        weld_presenter::retire_image(
+                            &mut images,
+                            bindings.as_deref_mut(),
+                            handle.id(),
+                        );
+                    }
+                },
+            );
         }
         if let Some(mut assets) = self.app.world_mut().get_resource_mut::<Assets<Image>>() {
             for handle in handles {

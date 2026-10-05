@@ -14,14 +14,15 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 anyhow = "1"
 bevy = { version = "=0.19.1", default-features = false, features = [
-    "std", "async_executor", "multi_threaded", "bevy_log", "bevy_winit",
+    "std", "async_executor", "bevy_log", "bevy_winit",
     "scene", "ui_bevy_render", "default_font",
 ] }
 bevy_render = { version = "=0.19.1", features = ["gles"] }
 wgpu = { version = "=30.0.0", default-features = false, features = ["gles"] }
 tracing = "0.1"
 weld-client = { path = "../../crates/weld-client" }
-weld-hoist-encoded = { path = "../../crates/weld-hoist-encoded" }
+weld-presenter = { path = "../../crates/weld-presenter" }
+weld-hoist-encoded = { path = "../../crates/weld-hoist-encoded", features = ["android"] }
 weld-hoist-iroh = { path = "../../crates/weld-hoist-iroh" }
 weld-media = { path = "../../crates/weld-media", features = ["decode", "config"] }
 

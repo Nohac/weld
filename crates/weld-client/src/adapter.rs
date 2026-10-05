@@ -11,11 +11,12 @@ use std::{
 };
 
 use crate::{
-    ButtonState, ClientCursor, ClientCursorUpdate, ClientEventQueue, ClientInputEvent,
-    ClientInputTarget, ClientKeyboardRoute, ClientPointerRoute, ClientPointerRouteUpdate,
-    ClientRequest, ClientSourceDescriptor, ClientSourceId, ClientSurfaceId, InputEventKind,
-    KeyboardKeyState, LinuxButtonCode, LinuxKeycode, PointerGesture, PointerGestureKind,
-    RawScrollFrame, RawScrollPhase, RawScrollSource, RuntimeInputEvent, RuntimeInputEventKind,
+    ButtonState, ClientCursor, ClientCursorUpdate, ClientEventQueue, ClientEventSink,
+    ClientInputEvent, ClientInputTarget, ClientKeyboardRoute, ClientPointerRoute,
+    ClientPointerRouteUpdate, ClientRequest, ClientSourceDescriptor, ClientSourceId,
+    ClientSurfaceId, InputEventKind, KeyboardKeyState, LinuxButtonCode, LinuxKeycode,
+    PointerGesture, PointerGestureKind, RawScrollFrame, RawScrollPhase, RawScrollSource,
+    RuntimeInputEvent, RuntimeInputEventKind,
 };
 
 /// One client source driven by the native runtime.
@@ -544,7 +545,7 @@ impl ClientRuntime {
 
     pub fn drain_events(
         &mut self,
-        events: &mut ClientEventQueue,
+        events: &mut impl ClientEventSink,
         invalid: &mut Vec<ClientRuntimeEventError>,
     ) {
         // Retirement rejects aliases removed during this drain. Destroyed-event
@@ -582,7 +583,7 @@ impl ClientRuntime {
             if matches!(&event.kind, crate::ClientSurfaceEventKind::Destroyed) {
                 self.scratch_destroyed.push(event.surface);
             }
-            events.push(event);
+            events.push_event(event);
         }
         for index in 0..self.scratch_destroyed.len() {
             let surface = self.scratch_destroyed[index];
@@ -625,7 +626,7 @@ impl ClientRuntime {
                     if matches!(&event.kind, crate::ClientSurfaceEventKind::Destroyed) {
                         self.scratch_destroyed.push(event.surface);
                     }
-                    events.push(event);
+                    events.push_event(event);
                 } else {
                     invalid.push(ClientRuntimeEventError {
                         registered_source: source,

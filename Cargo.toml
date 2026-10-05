@@ -21,6 +21,7 @@ members = [
   "crates/weld-float",
   "crates/weld-gamepad",
   "crates/weld-input",
+  "crates/weld-presenter",
   "crates/weld-i3-quirks",
   "crates/weld-hoist",
   "crates/weld-hoist-core",
@@ -60,6 +61,12 @@ bevy = { version = "=0.19.1", default-features = false, features = [
   "ui_picking",
 ] }
 bevy_dylib = "=0.19.1"
+bevy_app = { version = "=0.19.1", default-features = false, features = ["std"] }
+bevy_ecs = { version = "=0.19.1", default-features = false, features = ["std"] }
+bevy_asset = { version = "=0.19.1", default-features = false }
+bevy_image = { version = "=0.19.1", default-features = false }
+bevy_render = { version = "=0.19.1", default-features = false }
+bevy_ui_render = { version = "=0.19.1", default-features = false }
 bevy_winit = { version = "=0.19.1", default-features = false }
 calloop = { version = "0.14.4", features = ["signals"] }
 clap = { version = "4.5", features = ["derive"] }

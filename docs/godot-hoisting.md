@@ -184,6 +184,11 @@ is pinned for that producer lifetime; edits require a new start.
   imports and rendering never hold an inventory lock. Topology and layer epochs
   reject obsolete publications after layout or lifecycle changes. Small
   publication/mailbox locks remain; this is not a lock-free pipeline.
+- The coordinator's lifecycle inbox and bounded presentation mailbox come from
+  `weld-client`, shared with desktop Weld and mobile. The two-slot age policy
+  retains the established XR behavior; inline slots avoid queue allocations.
+  Native evictions and lifecycle drains are released outside their queue locks.
+  Godot still owns native image import, frame credits, and composition layers.
 - Android still uses `weld-media-android`: FFmpeg/`ffmpeg-next`, `ndk_codec=1`,
   MediaCodec to acquired native ImageReader buffers. Linux uses existing
   FFmpeg/VA-API. Context construction/calls/destruction stay on pool workers.

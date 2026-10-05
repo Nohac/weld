@@ -71,12 +71,13 @@ tests cover geometry, startup fallback, Back/return and input/mailbox behavior;
 they passed on the Pixel. Android Back dispatch/backgrounding was exercised on
 the development fixture; paired return policy is also covered by a focused test.
 
-Android stable system-bar and camera-cutout insets, plus a 64 logical-pixel
-status strip, remain outside the video/touch area. The insets adapter samples
+The video/touch area includes the camera cutout; browser controls respect
+Android's stable system-bar and camera-cutout insets. The insets adapter samples
 the Android UI thread asynchronously at most twice a second, with an immediate
 refresh on window-size changes. Presentation waits for matching-size insets.
-Large viewport requests are reduced to leave room inside the decoder dimension
-ceiling; this is a shell bound, not hardware capability negotiation.
+Large viewport requests use a provisional shell size budget. The codec validates
+its actual supported extent when opened; there is no hardcoded 4096-square
+hardware claim. Proactive codec-capability negotiation remains future work.
 Contacts carry stable IDs and down/motion/up/cancel/frame events through the
 shared runtime. The host chooses native Wayland touch for applications binding
 it, otherwise primary-finger mouse emulation. Both choices stay fixed through
@@ -101,12 +102,29 @@ change invalidates Bevy's image bind group. Pipelined Bevy rendering is disabled
 for this initial single-context integration. A fence-export failure falls back
 to synchronous GPU completion with a warning; it never downloads pixels.
 
-The decode adapter uses the shared bounded, stream-affine pool with two workers,
-one outstanding job per worker, and eight generation slots. Throughput tuning
-and pipelined decode remain to be qualified. ImageReader waits and decoder jobs
+The decode adapter now lives in `weld-hoist-encoded::android` and uses the shared
+pool defaults: up to four workers, eight jobs, sixteen generation slots and
+two in-flight jobs per worker. These are admission budgets, not hardware
+capabilities. Same-generation input can be submitted while the preceding output
+is pending; reordered native outputs are retained against their exact job.
+ImageReader waits and decoder jobs
 have bounded deadlines. Foreground loss pauses source frame demand while the
 control connection remains available; Android may still suspend/kill background
 processes, which this proof does not automatically recover from.
+
+Presentation uses `weld-client::PresentationMailbox`, extracted from the XR
+receiver and also used by desktop Weld. It keeps at most two native images,
+skips stale history after a stall, and shows a final frame without prefill.
+Resize/input-layout changes invalidate queued history. The coordinator retains
+protocol leases; only owned native images cross to the Bevy adapter. Queue
+locks are released before native-image destruction or GPU conversion.
+
+The Bevy setup and image publication helpers are shared with desktop Weld.
+The phone omits Bevy's multithreaded schedule feature and wakes Winit for new
+frames, UI changes and input instead of continuously redrawing unchanged video.
+A 100 ms foreground fallback services viewport settling and Android insets.
+`weld_mobile_diag` reports bounded publication, selection/drop and GPU-conversion
+timings. These measure individual stages, not end-to-end latency or scanout.
 
 ## Validation, 2026-10-04
 
@@ -136,6 +154,22 @@ wgpu's error logger during startup. Android/N0 relay connection attempts also
 emitted deadline warnings; the validated stream selected a direct IPv4 path.
 Internet-only relay operation, long background suspension and additional phone
 GPUs remain unqualified.
+
+## Shared presentation validation, 2026-10-05
+
+The shared-handoff APK passed startup and a paired Steam scrolling test on the
+Pixel. A 12.084 s active sample published 722 frames and converted/published
+721 to Bevy (59.67/s), with one capacity supersession, no stale or lifecycle
+discards, and no reported codec failure. Mean handoff age was 3.18 ms (15.10 ms
+maximum); mean conversion-call time was 1.47 ms (3.21 ms maximum). A later
+isolated update was presented without another frame. These are receiver-stage
+observations, not measured input-to-photon latency or a guarantee of evenly
+spaced scanout. The phone still lacks explicit 60-to-120 Hz phase alignment.
+
+The private AV1 Weld-to-Weld fixture also completed its 25-second run. Portable
+queue tests cover retained buffers, lifecycle barriers, final-frame delivery,
+drop accounting and native release outside locks. Godot's 109 Rust tests pass;
+a new physical XR regression and sustained image-budget stress remain unqualified.
 
 ## Native touch validation
 

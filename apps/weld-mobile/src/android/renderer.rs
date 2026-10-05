@@ -10,10 +10,11 @@ use std::{
     num::NonZeroU32,
     os::fd::{FromRawFd, OwnedFd},
     ptr::NonNull,
+    time::Instant,
 };
 use wgpu::{Extent3d, TextureDimension, TextureFormat, TextureUsages, TextureUses};
 
-use super::{Stream, receiver::Frame};
+use super::{Stream, diagnostics::PresentationDiagnostics, receiver::Frame};
 
 struct Converter {
     native: NonNull<c_void>,
@@ -33,6 +34,7 @@ pub(super) struct VideoRenderer {
     converter: Option<Converter>,
     failed: bool,
     frames: u64,
+    diagnostics: PresentationDiagnostics,
 }
 impl Converter {
     fn new(device: &RenderDevice) -> Result<Self> {
@@ -212,16 +214,24 @@ pub(super) fn present(
     if state.failed {
         return;
     }
-    let frame = stream
-        .shared
-        .latest
-        .lock()
-        .ok()
-        .and_then(|mut latest| latest.take());
+    state.diagnostics.report(&stream.shared);
+    let selection = stream.shared.latest.lock().ok().map(|mut queue| {
+        let (frame, _, expired) = queue.pop(Instant::now());
+        (frame, expired, !queue.is_empty())
+    });
+    let Some((frame, expired, more)) = selection else {
+        return;
+    };
+    drop(expired);
+    if more {
+        stream.shared.request_redraw();
+    }
     let Some(frame) = frame else {
         return;
     };
     let epoch = frame.epoch;
+    let age = frame.ready_at.elapsed();
+    let started = Instant::now();
     let result = (|| {
         if state.converter.is_none() {
             state.converter = Some(Converter::new(&device)?);
@@ -243,16 +253,23 @@ pub(super) fn present(
                 {
                     return;
                 }
-                if images
-                    .get(stream.image.id())
-                    .is_none_or(|current| current.texture.id() != image.texture.id())
-                {
-                    bindings.values.remove(&stream.image.id());
-                }
-                images.insert(stream.image.id(), image);
+                weld_presenter::publish_image(
+                    &mut images,
+                    Some(&mut bindings),
+                    stream.image.id(),
+                    image,
+                );
+                let changed = displayed.as_ref().is_none_or(|(previous_epoch, previous)| {
+                    *previous_epoch != epoch || previous != &input
+                });
                 *displayed = Some((epoch, input));
+                drop(displayed);
+                if changed {
+                    stream.shared.request_redraw();
+                }
             }
             state.frames += 1;
+            state.diagnostics.record(age, started.elapsed());
             if state.frames == 1 || state.frames.is_multiple_of(300) {
                 info!(
                     frames = state.frames,

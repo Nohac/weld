@@ -19,8 +19,9 @@ use std::{
     time::{Duration, Instant},
 };
 use weld_client::{
-    ClientBufferId, ClientBufferLease, ClientBufferMetadata, ClientBufferUseId, ClientEventQueue,
-    ClientRequest, ClientRuntime, ClientSourceId, Extent, PresentationRate,
+    ClientBufferId, ClientBufferLease, ClientBufferMetadata, ClientBufferUseId,
+    ClientPresentationInbox, ClientRequest, ClientRuntime, ClientSourceId, Extent,
+    PresentationRate,
 };
 use weld_hoist_encoded::{DecodedFramePublisher, EncodedDestinationTransport};
 use weld_hoist_iroh::{
@@ -170,7 +171,7 @@ pub(super) fn run_session(
                 let latest_rate = lock(&shared.session.presentation_rate).unwrap_or(rate);
                 // No surfaces yet; establish the preference before their Role events.
                 inventory.set_presentation_rate(latest_rate);
-                let mut events = ClientEventQueue::default();
+                let mut events = ClientPresentationInbox::default();
                 let mut invalid_events = Vec::new();
                 let mut invalid_effects = Vec::new();
 

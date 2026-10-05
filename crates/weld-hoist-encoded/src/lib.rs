@@ -1,6 +1,8 @@
 //! Transport-neutral encoded hoist scheduling and codec integration.
 
 mod activity;
+#[cfg(all(feature = "android", target_os = "android"))]
+pub mod android;
 mod bitrate;
 mod budget;
 mod codec;

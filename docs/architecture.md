@@ -25,8 +25,12 @@ Weld is a workspace of reusable layers and one standard distribution:
   unchanged polls skip keymap cloning and equality checks, while actual edits
   retain semantic deduplication even between application updates.
 - `weld-client` defines the runtime-independent client adapter, surface,
-  buffer-lease, request, and input contracts. It has no Smithay, Bevy, wgpu,
+  buffer-lease, request, input, and bounded presentation-handoff contracts. It has no Smithay, Bevy, wgpu,
   codec, or transport dependency.
+- `weld-presenter` owns the shared Bevy execution setup and GPU-image publication
+  boundary used by the desktop and phone. Native importers supply synchronized
+  GPU images; publication preserves stable texture bindings and invalidates
+  bindings when the imported image changes.
 - `weld-core` owns Smithay, Wayland and XWayland protocol state, native input sources,
   backend event loops, DMA-BUF ownership, and native presentation adapters. It
   has no Bevy dependency.
@@ -82,7 +86,9 @@ Weld is a workspace of reusable layers and one standard distribution:
   decoded-frame publication. Its default dependency graph has no compositor or
   native graphics dependency. The optional `native` integration supplies Linux
   buffer preparation and DMA-BUF publication; `vaapi` additionally supplies the
-  hardware codec binding. Port policy and publication run on the caller thread;
+  hardware codec binding. The optional `android` integration supplies the
+  MediaCodec decode-pool provider and acquired-image lease publisher.
+  Port policy and publication run on the caller thread;
   native codecs run on bounded workers. Bindings move only control records and
   compressed access units.
 - `weld-hoist-local` owns the Linux-local Postcard/Unix-seqpacket binding,
@@ -737,7 +743,7 @@ after its final consumer drops it. Snapshot mutation uses explicit copy-on-write
 admitted consumers can take uniquely owned state without cloning its vectors.
 
 `weld-client::PendingClientEvents` owns pending-state coalescing for the client
-runtime, local presenter, and encoded source. Each consumer keeps its own queue
+runtime and encoded source. Each consumer keeps its own queue
 and cadence; encoded queues also separate hoist sessions. Within an ordered
 segment, interleaved surfaces retain their latest unobserved commit and carry
 forward retained-layer content. Replacing a snapshot drops that consumer's old
@@ -746,6 +752,32 @@ metadata coalesces independently within the segment. Retained-buffer merging
 allocates no temporary lookup table, and fully replaced inventories need no
 snapshot mutation. Bounded queues admit replacements at capacity and reject new
 records without modifying existing pending state.
+
+All three presenters consume `ClientPresentationInbox`, which uses the same
+ordered-coalescing decisions as `PendingClientEvents`. It preserves lifecycle
+barriers and carries unobserved retained-layer buffers forward. Its
+`PresentationMailbox` is also the native-image handoff used by Godot and mobile.
+The mailbox has inline storage for either the latest snapshot or two snapshots
+with jitter smoothing. Smoothing selects immediately, retains a final frame
+without requiring another arrival, and skips the older of two frames after
+two nominal display intervals (at most 34 ms). Layout/inventory changes retire
+queued history; controls collapse preceding history before crossing the barrier.
+
+Desktop local surfaces use latest mode. Relocated surfaces use smoothing before
+GPU import, conservatively bounded by the fastest configured output interval;
+another policy opportunity is requested while a final snapshot remains queued.
+Godot and mobile drain client events on their coordinator thread and apply
+smoothing at the owned-image handoff to the display thread. Thus they do not
+add a second jitter queue at client-event ingress. Display opportunities remain
+owned by each native host, Winit, or OpenXR; the common queue makes no sleep,
+GPU, or platform calls. Its counters distinguish selected, capacity-superseded,
+stale, and invalidated snapshots, separately from network loss and scanout.
+This is bounded selection, not phase-locked playback: a 60 Hz source on a
+120 Hz display is not yet explicitly assigned every second display refresh.
+The mobile age bound currently follows its requested 60 Hz stream interval.
+Native evictions and drains transfer ownership so Android/Godot image release
+can run outside queue locks. Godot retains its window inventory, frame-credit
+budget and native composition-layer presentation.
 
 At the next main advance `AppShell` resolves the surviving leases before ECS
 ingress and asks the core-owned DMA-BUF manager to resolve a

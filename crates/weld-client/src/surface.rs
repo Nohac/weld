@@ -395,6 +395,18 @@ pub enum ClientSurfaceEventKind {
 #[derive(Default)]
 pub struct ClientEventQueue(crate::PendingClientEvents<()>);
 
+/// Consumer of validated adapter events. Presentation hosts may retain events
+/// directly in their own paced inbox instead of copying through another queue.
+pub trait ClientEventSink {
+    fn push_event(&mut self, event: ClientSurfaceEvent);
+}
+
+impl ClientEventSink for ClientEventQueue {
+    fn push_event(&mut self, event: ClientSurfaceEvent) {
+        self.push(event);
+    }
+}
+
 impl ClientEventQueue {
     pub fn push(&mut self, event: ClientSurfaceEvent) {
         self.0.push((), event);

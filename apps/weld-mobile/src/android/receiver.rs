@@ -4,7 +4,6 @@ use anyhow::{Context, Result, ensure};
 use std::{
     cell::RefCell,
     path::PathBuf,
-    rc::Rc,
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering},
@@ -14,14 +13,14 @@ use std::{
     time::{Duration, Instant},
 };
 use weld_client::{
-    ClientBufferId, ClientBufferLease, ClientBufferMetadata, ClientBufferUseId, ClientEventQueue,
-    ClientFocusRequest, ClientPointerRoute, ClientRequest, ClientRuntime, ClientSourceId,
-    ClientSurfaceEventKind, ClientSurfaceId, ClientSurfaceRequest, ClientSurfaceRequestKind,
-    ClientSurfaceRole, Extent, InputPosition, PresentationRate, RuntimeInputEvent,
-    RuntimeInputEventKind, SurfaceBufferChange, SurfaceContentView, SurfaceInputGeometry,
-    TouchEvent,
+    ClientFocusRequest, ClientPointerRoute, ClientPresentationInbox, ClientRequest, ClientRuntime,
+    ClientSourceId, ClientSurfaceEventKind, ClientSurfaceId, ClientSurfaceRequest,
+    ClientSurfaceRequestKind, ClientSurfaceRole, InputPosition, PresentationMailbox,
+    PresentationRate, RuntimeInputEvent, RuntimeInputEventKind, SurfaceBufferChange,
+    SurfaceContentView, SurfaceInputGeometry, TouchEvent,
 };
-use weld_hoist_encoded::{DecodedFramePublisher, EncodedDestinationTransport};
+use weld_hoist_encoded::EncodedDestinationTransport;
+use weld_hoist_encoded::android::{AndroidDecodeBackend, AndroidFramePublisher};
 use weld_hoist_iroh::pairing::{ApplicationInfo, PairingInvitation, PairingProgress};
 use weld_hoist_iroh::{
     IrohConnectionProfile, IrohDestinationPeer, IrohDeviceIdentity, IrohDnsPolicy, IrohHost,
@@ -30,11 +29,11 @@ use weld_hoist_iroh::{
 use weld_media::VideoCodec;
 use weld_media_android::AndroidImage;
 
-use super::decode::Backend;
 use crate::geometry::WindowPreference;
 use crate::startup::InitialPresentation;
 
 pub(super) struct Frame {
+    pub ready_at: Instant,
     pub epoch: u64,
     pub image: AndroidImage,
     pub view: SurfaceContentView,
@@ -42,7 +41,8 @@ pub(super) struct Frame {
 }
 #[derive(Default)]
 pub(super) struct Shared {
-    pub latest: Mutex<Option<Frame>>,
+    redraw: Option<Arc<dyn Fn() + Send + Sync>>,
+    pub latest: Mutex<PresentationMailbox<Frame>>,
     pub displayed: Mutex<Option<(u64, SurfaceInputGeometry)>>,
     pub status: Mutex<String>,
     pub stopped: AtomicBool,
@@ -60,21 +60,27 @@ pub(super) struct Shared {
     mode: AtomicU8,
 }
 impl Shared {
+    pub fn request_redraw(&self) {
+        if let Some(redraw) = &self.redraw {
+            redraw();
+        }
+    }
     pub fn message(&self, message: impl Into<String>) {
         let message = message.into();
         tracing::info!("{message}");
         if let Ok(mut status) = self.status.lock() {
             *status = message;
         }
+        self.request_redraw();
     }
     fn clear(&self) {
         self.epoch.fetch_add(1, Ordering::AcqRel);
-        if let Ok(mut frame) = self.latest.lock() {
-            *frame = None;
-        }
+        let retired = self.latest.lock().ok().map(|mut queue| queue.drain());
+        drop(retired);
         if let Ok(mut displayed) = self.displayed.lock() {
             *displayed = None;
         }
+        self.request_redraw();
     }
 }
 pub(super) struct Input {
@@ -147,8 +153,14 @@ impl Session {
         self.shared.retry.store(true, Ordering::Release);
         self.wake();
     }
-    pub fn start(directory: PathBuf) -> Result<Self> {
-        let shared = Arc::new(Shared::default());
+    pub fn start(directory: PathBuf, redraw: impl Fn() + Send + Sync + 'static) -> Result<Self> {
+        let shared = Arc::new(Shared {
+            redraw: Some(Arc::new(redraw)),
+            latest: Mutex::new(PresentationMailbox::smoothing(
+                PresentationRate::HZ_60.interval(),
+            )),
+            ..Default::default()
+        });
         shared.active.store(true, Ordering::Release);
         let context = shared.clone();
         let (input, events) = mpsc::sync_channel(128);
@@ -210,27 +222,6 @@ impl Drop for Session {
     }
 }
 
-struct Publisher;
-impl DecodedFramePublisher for Publisher {
-    type Buffer = AndroidImage;
-    type ClientImporter = ();
-    fn client_importer(&self) {}
-    fn publish(
-        &mut self,
-        image: AndroidImage,
-        buffer: ClientBufferId,
-        use_id: ClientBufferUseId,
-    ) -> Result<ClientBufferLease> {
-        let info = image.info();
-        Ok(ClientBufferLease::new(
-            buffer,
-            use_id,
-            ClientBufferMetadata::new(Extent::new(info.width, info.height), true),
-            Rc::new(RefCell::new(Some(image))),
-            |_| {},
-        )?)
-    }
-}
 struct Connection(IrohDestinationPeer);
 impl Drop for Connection {
     fn drop(&mut self) {
@@ -410,12 +401,13 @@ fn stream(
         "Connected ({:?}); choose an application",
         connection.0.codec()
     ));
-    let backend = Backend::new(connection.0.codec())?;
+    let owner = thread::current();
+    let backend = AndroidDecodeBackend::new(connection.0.codec(), move || owner.unpark());
     let registration = destination_registration_with_backend(
         connection.0.clone(),
         ClientSourceId::new(0),
         ClientSourceId::new(1),
-        Publisher,
+        AndroidFramePublisher,
         Box::new(backend),
         None,
     );
@@ -425,7 +417,7 @@ fn stream(
     let mut requested = None;
     let mut configured = None;
     let mut initial = InitialPresentation::default();
-    let mut events = ClientEventQueue::default();
+    let mut presentation = ClientPresentationInbox::default();
     let mut invalid_events = Vec::new();
     let mut invalid_effects = Vec::new();
     let mut active = shared.active.load(Ordering::Acquire);
@@ -449,7 +441,11 @@ fn stream(
                 reset(&mut runtime);
             }
             if let Ok(mut catalogue) = shared.catalogue.lock() {
-                *catalogue = device.applications();
+                let next = device.applications();
+                if *catalogue != next {
+                    *catalogue = next;
+                    shared.request_redraw();
+                }
             }
             if shared.release.swap(false, Ordering::AcqRel) {
                 device.release()?;
@@ -484,14 +480,14 @@ fn stream(
                 &mut initial,
             )?;
         }
-        runtime.drain_events(&mut events, &mut invalid_events);
+        runtime.drain_events(&mut presentation, &mut invalid_events);
         runtime.apply_pending_effects(&mut invalid_effects);
         runtime.apply_pending_presentations(&mut invalid_effects);
         ensure!(
             invalid_events.is_empty() && invalid_effects.is_empty(),
             "invalid receiver events/effects"
         );
-        while let Some(event) = events.pop_front() {
+        while let Some(event) = presentation.pop_front() {
             let id = event.surface;
             match event.kind {
                 ClientSurfaceEventKind::Role(role) => {
@@ -561,6 +557,7 @@ fn stream(
                                         .collect(),
                                 };
                                 let frame = Frame {
+                                    ready_at: Instant::now(),
                                     epoch: shared.epoch.load(Ordering::Acquire),
                                     image,
                                     view,
@@ -688,10 +685,29 @@ fn configure(
 }
 
 fn publish(shared: &Shared, frame: Frame) -> Result<()> {
-    *shared
-        .latest
-        .lock()
-        .map_err(|_| anyhow::anyhow!("frame mailbox poisoned"))? = Some(frame);
+    let (replaced, retired, wake) = {
+        let mut queue = shared
+            .latest
+            .lock()
+            .map_err(|_| anyhow::anyhow!("frame mailbox poisoned"))?;
+        let retired = if queue.newest().is_some_and(|previous| {
+            previous.epoch != frame.epoch
+                || previous.view != frame.view
+                || previous.input != frame.input
+        }) {
+            Some(queue.drain())
+        } else {
+            None
+        };
+        let wake = queue.is_empty();
+        let replaced = queue.push(frame, Instant::now());
+        (replaced, retired, wake)
+    };
+    drop(replaced);
+    drop(retired);
+    if wake {
+        shared.request_redraw();
+    }
     Ok(())
 }
 fn reset(runtime: &mut ClientRuntime) {
@@ -717,6 +733,7 @@ fn rate(runtime: &mut ClientRuntime, surface: ClientSurfaceId, active: bool) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use weld_client::Extent;
     use weld_client::{ClientId, InputTransform, SurfaceLayerId};
 
     fn input() -> Input {

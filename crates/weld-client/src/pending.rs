@@ -2,6 +2,7 @@
 
 use std::collections::VecDeque;
 
+use crate::pending_order::{self, Insertion, Kind, Record};
 use crate::{ClientSurfaceEvent, ClientSurfaceEventKind};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -23,12 +24,6 @@ pub struct PendingClientEvents<Scope = ()> {
 
 struct PendingEvent<Scope> {
     record: (Scope, ClientSurfaceEvent),
-    barrier: bool,
-}
-
-#[derive(Default)]
-struct Insertion {
-    replacement: Option<usize>,
     barrier: bool,
 }
 
@@ -64,59 +59,22 @@ impl<Scope: Eq> PendingClientEvents<Scope> {
     }
 
     fn plan(&self, scope: &Scope, event: &ClientSurfaceEvent) -> Insertion {
-        match &event.kind {
-            ClientSurfaceEventKind::Commit(current) => {
-                for index in (0..self.events.len()).rev() {
-                    let pending = &self.events[index];
-                    let (previous_scope, previous) = &pending.record;
-                    match &previous.kind {
-                        ClientSurfaceEventKind::Metadata(_) => continue,
-                        ClientSurfaceEventKind::Commit(previous_commit) => {
-                            if previous.surface == event.surface {
-                                let compatible = previous_scope == scope
-                                    && previous_commit.mapped == current.mapped;
-                                return Insertion {
-                                    replacement: compatible.then_some(index),
-                                    barrier: !compatible || pending.barrier,
-                                };
-                            }
-                            if pending.barrier {
-                                break;
-                            }
-                        }
-                        _ => break,
-                    }
-                }
-                return Insertion {
-                    replacement: None,
-                    barrier: !current.mapped,
-                };
-            }
-            ClientSurfaceEventKind::Metadata(_) => {
-                for (index, pending) in self.events.iter().enumerate().rev() {
-                    let (previous_scope, previous) = &pending.record;
-                    if previous_scope == scope
-                        && previous.surface == event.surface
-                        && matches!(previous.kind, ClientSurfaceEventKind::Metadata(_))
-                    {
-                        return Insertion {
-                            replacement: Some(index),
-                            barrier: false,
-                        };
-                    }
-                    if pending.barrier
-                        || !matches!(
-                            previous.kind,
-                            ClientSurfaceEventKind::Metadata(_) | ClientSurfaceEventKind::Commit(_)
-                        )
-                    {
-                        break;
-                    }
-                }
-            }
-            _ => {}
-        }
-        Insertion::default()
+        pending_order::plan(
+            event.surface,
+            Kind::of(event),
+            self.events.iter().enumerate().map(|(index, pending)| {
+                let (previous_scope, previous) = &pending.record;
+                (
+                    index,
+                    Record {
+                        surface: previous.surface,
+                        kind: Kind::of(previous),
+                        same_scope: previous_scope == scope,
+                        barrier: pending.barrier,
+                    },
+                )
+            }),
+        )
     }
 
     fn insert(

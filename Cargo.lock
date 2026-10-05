@@ -7862,6 +7862,7 @@ dependencies = [
  "weld-client",
  "weld-core",
  "weld-input",
+ "weld-presenter",
  "wgpu",
  "winit",
 ]
@@ -7973,6 +7974,7 @@ dependencies = [
  "weld-hoist-core",
  "weld-hoist-protocol",
  "weld-media",
+ "weld-media-android",
  "weld-media-vaapi",
 ]
 
@@ -8105,6 +8107,18 @@ dependencies = [
  "libc",
  "tracing",
  "weld-media",
+]
+
+[[package]]
+name = "weld-presenter"
+version = "0.1.0"
+dependencies = [
+ "bevy_app",
+ "bevy_asset",
+ "bevy_ecs",
+ "bevy_image",
+ "bevy_render",
+ "bevy_ui_render",
 ]
 
 [[package]]

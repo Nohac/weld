@@ -4,6 +4,7 @@ use std::{
     collections::{HashMap, HashSet},
     rc::Rc,
     sync::Arc,
+    time::{Duration, Instant},
 };
 
 use anyhow::{Context, Result, bail};
@@ -67,9 +68,9 @@ use crate::workspace::{
     DesktopWorkspace, DesktopWorkspaceActivation, DesktopWorkspaceId, DesktopWorkspaces,
 };
 use weld_client::{
-    ClientFocusRequest, ClientImporterRegistration, ClientOutputId, ClientRequest, ClientSourceId,
-    ClientSurfaceEvent, ClientSurfaceEventKind, ClientSurfaceRequest, ClientSurfaceRequestKind,
-    PendingClientEvents, SurfaceBufferChange,
+    ClientFocusRequest, ClientImporterRegistration, ClientOutputId, ClientPresentationInbox,
+    ClientRequest, ClientSourceId, ClientSurfaceEvent, ClientSurfaceEventKind,
+    ClientSurfaceRequest, ClientSurfaceRequestKind, PresentationDemand, SurfaceBufferChange,
 };
 use weld_core::host::{
     CaptureRequest, CompositionDestination, CompositionFrame, CompositionOutputFrame,
@@ -93,8 +94,8 @@ pub struct AppShell {
     outputs: HashMap<OutputId, AppOutput>,
     redraw_requests: RedrawRequests,
     dmabuf_importer: Option<DmabufImporter>,
-    surface_demand: SurfaceCompositionDemand,
-    pending_surfaces: PendingClientEvents,
+    pending_surfaces: ClientPresentationInbox,
+    last_presentation_report: Option<Instant>,
     cursor: CursorHostTracker,
     pending_input: ApplicationInputBuffer,
     client_importers: HashSet<ClientSourceId>,
@@ -198,41 +199,6 @@ impl OwnedCompositionTarget {
     }
 }
 
-#[derive(Default)]
-struct SurfaceCompositionDemand {
-    mapped_surfaces: HashSet<crate::surface::SurfaceId>,
-}
-
-impl SurfaceCompositionDemand {
-    fn classify(&mut self, event: &ClientSurfaceEvent) -> CompositionDemand {
-        let surface = event.surface;
-        match &event.kind {
-            ClientSurfaceEventKind::Commit(snapshot) if snapshot.mapped => {
-                if self.mapped_surfaces.insert(surface) {
-                    CompositionDemand::Settle
-                } else {
-                    CompositionDemand::Ordinary
-                }
-            }
-            ClientSurfaceEventKind::Commit(_) => {
-                if self.mapped_surfaces.remove(&surface) {
-                    CompositionDemand::Settle
-                } else {
-                    CompositionDemand::Ordinary
-                }
-            }
-            ClientSurfaceEventKind::Destroyed => {
-                self.mapped_surfaces.remove(&surface);
-                CompositionDemand::Settle
-            }
-            ClientSurfaceEventKind::Interaction(_)
-            | ClientSurfaceEventKind::Metadata(_)
-            | ClientSurfaceEventKind::StateRequest(_) => CompositionDemand::Ordinary,
-            ClientSurfaceEventKind::Role(_) => CompositionDemand::Settle,
-        }
-    }
-}
-
 /// Installs Weld's application model without selecting a window policy.
 pub(crate) struct WeldAppPlugin {
     outputs: Vec<OutputConfiguration>,
@@ -324,8 +290,7 @@ impl Plugin for WeldAppPlugin {
 
 /// Shared compositor UI assembly for the live shell and main-only benchmarks.
 pub(crate) fn compositor_plugins() -> PluginGroupBuilder {
-    DefaultPlugins
-        .build()
+    weld_presenter::presentation_plugins(DefaultPlugins.build())
         .disable::<AnimationPlugin>()
         .disable::<GizmoPlugin>()
         .add_before::<SpritePlugin>(TextureAtlasPlugin)
@@ -375,8 +340,18 @@ impl AppShell {
             tracing::trace_span!(target: crate::PROFILE_TARGET, "weld_app_shell_startup").entered();
 
         let mut client_importers = HashSet::new();
+        let mut pending_surfaces = ClientPresentationInbox::default();
+        let interval = context
+            .outputs
+            .iter()
+            .map(|output| output.presentation_rate().interval())
+            .min()
+            .unwrap_or_else(|| weld_client::PresentationRate::HZ_60.interval());
         for importer in importers {
             let source = importer.descriptor.id;
+            if importer.descriptor.provenance == weld_client::ClientProvenance::Relocated {
+                pending_surfaces.smooth_source(source, interval);
+            }
             if !crate::surface::register_client_source(app.world_mut(), importer.descriptor) {
                 bail!(
                     "client source {} is registered more than once",
@@ -470,8 +445,8 @@ impl AppShell {
             outputs,
             redraw_requests,
             dmabuf_importer,
-            surface_demand: SurfaceCompositionDemand::default(),
-            pending_surfaces: PendingClientEvents::default(),
+            pending_surfaces,
+            last_presentation_report: None,
             cursor: CursorHostTracker::default(),
             pending_input: ApplicationInputBuffer::default(),
             client_importers,
@@ -484,13 +459,27 @@ impl AppShell {
             tracing::trace_span!(target: crate::PROFILE_TARGET, "weld_app_advance_composition")
                 .entered();
         let mut pending = std::mem::take(&mut self.pending_surfaces);
-        for (_, event) in pending.drain() {
+        for event in pending.drain() {
             self.apply_client_event(event);
         }
         self.pending_surfaces = pending;
+        let now = Instant::now();
+        if self
+            .last_presentation_report
+            .is_none_or(|previous| now.duration_since(previous) >= Duration::from_secs(1))
+        {
+            let stats = self.pending_surfaces.stats();
+            tracing::debug!(target: "weld_media_diag",
+                submitted_total = stats.submitted, selected_total = stats.selected,
+                superseded_total = stats.superseded, stale_total = stats.stale,
+                invalidated_total = stats.invalidated,
+                "desktop presentation handoff observations");
+            self.last_presentation_report = Some(now);
+        }
         enqueue_application_input_batch(self.app.world_mut(), &mut self.pending_input);
         set_input_update_time(self.app.world_mut(), input_time);
-        advance_main_app(&mut self.app, &mut self.redraw_requests)
+        let redraw = advance_main_app(&mut self.app, &mut self.redraw_requests);
+        redraw || self.pending_surfaces.has_pending()
     }
 
     pub fn service_remote_debug(&mut self) {
@@ -620,6 +609,13 @@ impl AppShell {
     }
 
     pub fn update_output_topology(&mut self, configurations: &[OutputConfiguration]) {
+        if let Some(interval) = configurations
+            .iter()
+            .map(|output| output.presentation_rate().interval())
+            .min()
+        {
+            self.pending_surfaces.set_interval(interval);
+        }
         crate::input::update_output_configurations(self.app.world_mut(), configurations);
         for configuration in configurations {
             let Some(output) = self.outputs.get_mut(&configuration.id()) else {
@@ -671,11 +667,10 @@ impl AppShell {
     }
 
     pub fn enqueue_client_event(&mut self, event: ClientSurfaceEvent) -> CompositionDemand {
-        let demand = self.surface_demand.classify(&event);
-        // Relay observation has already happened in ClientRuntime. This inbox
-        // belongs to the local presenter and follows its application cadence.
-        self.pending_surfaces.push((), event);
-        demand
+        match self.pending_surfaces.push(event) {
+            PresentationDemand::Content => CompositionDemand::Ordinary,
+            PresentationDemand::Structure => CompositionDemand::Settle,
+        }
     }
 
     fn apply_client_event(&mut self, event: ClientSurfaceEvent) {
@@ -1301,18 +1296,15 @@ mod tests {
     use super::{
         App, AppShell, ClientBufferAccessResolution, CompositionTargetContract,
         ManualTextureViewHandle, ManualTextureViews, Messages, OutputGeometry,
-        OwnedCompositionTarget, PRIMARY_OUTPUT_ID, RedrawRequests, SurfaceCompositionDemand, UVec2,
-        WeldOutput, advance_main_app, disable_ui_rounding_on_roots, disconnect_render_time,
-        insert_manual_view, render_composition_app, resolve_client_buffer_access,
-        spawn_compositor_camera, validate_external_target,
+        OwnedCompositionTarget, PRIMARY_OUTPUT_ID, RedrawRequests, UVec2, WeldOutput,
+        advance_main_app, disable_ui_rounding_on_roots, disconnect_render_time, insert_manual_view,
+        render_composition_app, resolve_client_buffer_access, spawn_compositor_camera,
+        validate_external_target,
     };
     use weld_client::{
         ClientCommitRevision, ClientSurfaceCommit, ClientSurfaceEvent, ClientSurfaceEventKind,
     };
-    use weld_core::{
-        CompositionDemand,
-        surface::{Extent, SurfaceId},
-    };
+    use weld_core::surface::{Extent, SurfaceId};
 
     #[cfg(feature = "test-support")]
     use bevy::{
@@ -1684,40 +1676,6 @@ mod tests {
     }
 
     #[test]
-    fn only_the_first_snapshot_of_a_mapping_requests_settling() {
-        let surface = SurfaceId::for_test(1);
-        let mut demand = SurfaceCompositionDemand::default();
-
-        assert_eq!(
-            demand.classify(&snapshot_event(surface, true)),
-            CompositionDemand::Settle
-        );
-        assert_eq!(
-            demand.classify(&snapshot_event(surface, true)),
-            CompositionDemand::Ordinary
-        );
-    }
-
-    #[test]
-    fn an_unmapped_surface_settles_again_when_it_is_remapped() {
-        let surface = SurfaceId::for_test(1);
-        let mut demand = SurfaceCompositionDemand::default();
-
-        assert_eq!(
-            demand.classify(&snapshot_event(surface, true)),
-            CompositionDemand::Settle
-        );
-        assert_eq!(
-            demand.classify(&snapshot_event(surface, false)),
-            CompositionDemand::Settle
-        );
-        assert_eq!(
-            demand.classify(&snapshot_event(surface, true)),
-            CompositionDemand::Settle
-        );
-    }
-
-    #[test]
     fn consumes_redraw_requests_once_after_each_app_update() {
         let (mut app, mut requests) = test_app();
 
@@ -1804,6 +1762,44 @@ mod tests {
                 .and_then(ComputedUiTargetCamera::get),
             Some(camera),
         );
+    }
+
+    #[cfg(feature = "test-support")]
+    #[test]
+    fn remote_jitter_rearms_a_policy_tick_for_the_final_snapshot() {
+        let (mut shell, _, _, _) = crate::benchmark::rendering_shell_with_outputs(
+            vec![diagnostic_output(
+                PRIMARY_OUTPUT_ID,
+                LogicalPoint::ZERO,
+                true,
+                0.0,
+            )],
+            |_| {},
+        )
+        .expect("diagnostic GPU shell");
+        for tick in 0..10 {
+            shell.advance_main(tick);
+        }
+        assert!(!shell.advance_main(10), "idle policy requests no more work");
+        let surface = SurfaceId::for_test(1);
+        shell.pending_surfaces.smooth_source(
+            surface.source(),
+            weld_client::PresentationRate::HZ_60.interval(),
+        );
+        // Keep age expiry out of this integration check; the portable queue
+        // tests exercise expiry with an explicit clock.
+        let arrival = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        for _ in 0..2 {
+            shell
+                .pending_surfaces
+                .push_at(snapshot_event(surface, true), arrival);
+        }
+        assert!(shell.advance_main(11));
+        assert!(shell.pending_surfaces.has_pending());
+        assert_eq!(shell.pending_surfaces.stats().selected, 1);
+        shell.advance_main(12);
+        assert!(!shell.pending_surfaces.has_pending());
+        assert_eq!(shell.pending_surfaces.stats().selected, 2);
     }
 
     #[cfg(feature = "test-support")]

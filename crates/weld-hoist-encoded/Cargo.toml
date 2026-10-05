@@ -5,6 +5,7 @@ edition.workspace = true
 publish.workspace = true
 
 [features]
+android = ["dep:weld-media-android", "weld-media/decode"]
 native = ["dep:weld-core"]
 vaapi = ["native", "dep:weld-media-vaapi", "dep:rustix"]
 
@@ -18,3 +19,6 @@ weld-hoist-core = { path = "../weld-hoist-core" }
 weld-hoist-protocol = { path = "../weld-hoist-protocol" }
 weld-media = { path = "../weld-media" }
 weld-media-vaapi = { path = "../weld-media-vaapi", optional = true }
+
+[target.'cfg(target_os = "android")'.dependencies]
+weld-media-android = { path = "../weld-media-android", optional = true }

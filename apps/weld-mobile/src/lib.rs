@@ -13,10 +13,10 @@ mod platform;
 mod platform;
 
 use bevy::{
+    log::LogPlugin,
     prelude::*,
     render::{
         RenderPlugin,
-        pipelined_rendering::PipelinedRenderingPlugin,
         settings::{Backends, RenderCreation, WgpuSettings, WgpuSettingsPriority},
     },
 };
@@ -26,7 +26,11 @@ pub fn main() {
     let mut app = App::new();
     app.insert_resource(ClearColor(Color::srgb(0.035, 0.045, 0.065)))
         .add_plugins(
-            DefaultPlugins
+            weld_presenter::presentation_plugins(DefaultPlugins.build())
+                .set(LogPlugin {
+                    filter: "info,weld_media_diag=debug,weld_network_diag=debug".into(),
+                    ..default()
+                })
                 .set(WindowPlugin {
                     primary_window: Some(Window {
                         title: "Weld Mobile".into(),
@@ -41,8 +45,7 @@ pub fn main() {
                         ..default()
                     })),
                     ..default()
-                })
-                .disable::<PipelinedRenderingPlugin>(),
+                }),
         )
         .add_systems(Startup, setup);
     platform::install(&mut app);

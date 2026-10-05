@@ -1,5 +1,5 @@
 mod browser;
-mod decode;
+mod diagnostics;
 mod enrollment;
 mod insets;
 mod receiver;
@@ -14,6 +14,7 @@ use bevy::{
         extract_resource::{ExtractResource, ExtractResourcePlugin},
     },
     window::{AppLifecycle, PrimaryWindow, WindowFocused},
+    winit::{EventLoopProxyWrapper, UpdateMode, WinitSettings, WinitUserEvent},
 };
 use receiver::{Input, Session, Shared};
 use std::{
@@ -46,6 +47,12 @@ struct Presentation {
 
 pub fn install(app: &mut App) {
     browser::install(app);
+    // Native input and receiver publication wake presentation immediately.
+    // The fallback services viewport settling and asynchronous inset discovery.
+    app.insert_resource(WinitSettings {
+        focused_mode: UpdateMode::reactive(Duration::from_millis(100)),
+        unfocused_mode: UpdateMode::reactive_low_power(Duration::from_secs(1)),
+    });
     app.add_plugins(ExtractResourcePlugin::<Stream>::default())
         .init_resource::<Contacts>()
         .init_resource::<Presentation>()
@@ -60,12 +67,21 @@ pub fn install(app: &mut App) {
         );
 }
 
-fn start(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
+fn start(
+    mut commands: Commands,
+    mut images: ResMut<Assets<Image>>,
+    proxy: Res<EventLoopProxyWrapper>,
+) {
+    let proxy = (**proxy).clone();
     let result = bevy::android::ANDROID_APP
         .get()
         .and_then(|app| app.internal_data_path())
         .ok_or_else(|| anyhow::anyhow!("Android private files directory missing"))
-        .and_then(|directory| Session::start(directory.join("weld-device")));
+        .and_then(|directory| {
+            Session::start(directory.join("weld-device"), move || {
+                let _ = proxy.send_event(WinitUserEvent::WakeUp);
+            })
+        });
     match result {
         Ok(session) => {
             let image = images.add(Image::default());

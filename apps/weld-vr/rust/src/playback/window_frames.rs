@@ -1,7 +1,7 @@
 //! Two complete window snapshots, not independent layer FIFOs. Retained layers
 //! share an owned pixel slot so discarding a snapshot cannot lose their pixels.
 use super::observations::{Discard, micros};
-use super::{Shared, frame::Frame, input, lock, mailbox::Mailbox, session::Pane};
+use super::{Shared, frame::Frame, input, lock, session::Pane};
 use std::{
     collections::BTreeMap,
     sync::{
@@ -10,6 +10,7 @@ use std::{
     },
     time::{Duration, Instant},
 };
+use weld_client::PresentationMailbox as Mailbox;
 use weld_client::{InputPosition, SurfaceContentView, SurfaceLayerId};
 
 struct PixelSlot<T> {
@@ -105,7 +106,7 @@ impl WindowChannel {
         let discarded = {
             let mut pending = lock(&self.pending);
             self.epoch.fetch_add(1, Ordering::AcqRel);
-            pending.drain().collect::<Vec<_>>()
+            pending.drain()
         };
         for (_, snapshot) in discarded {
             discard(snapshot, reason);

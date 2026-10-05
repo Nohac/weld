@@ -5,7 +5,6 @@
 //! replay instead of risking buffer reuse.
 mod frame;
 mod input;
-mod mailbox;
 mod observations;
 mod receiver;
 mod receiver_decode;
@@ -16,7 +15,7 @@ mod stress;
 mod window_frames;
 
 use frame::Frame;
-use mailbox::Mailbox;
+use weld_client::PresentationMailbox as Mailbox;
 
 use crate::{
     fixture,
@@ -143,13 +142,12 @@ impl Shared {
                 .discard(observations::Discard::Lifecycle);
             return;
         }
-        if matches!(
-            latest.push(
-                PresentationUpdate::Frame { frame, view, input },
-                Instant::now()
-            ),
-            Some(PresentationUpdate::Frame { .. })
-        ) {
+        let replaced = latest.push(
+            PresentationUpdate::Frame { frame, view, input },
+            Instant::now(),
+        );
+        drop(latest);
+        if matches!(replaced, Some(PresentationUpdate::Frame { .. })) {
             self.replaced.fetch_add(1, Ordering::Relaxed);
             self.session
                 .observations
@@ -177,14 +175,17 @@ impl Shared {
     fn clear(&self) {
         let mut latest = lock(&self.latest);
         self.epoch.fetch_add(1, Ordering::AcqRel);
-        self.record_discarded_updates(&mut latest);
+        let retired = latest.drain();
         latest.reset(PresentationUpdate::Clear);
+        drop(latest);
+        self.record_discarded_updates(retired);
     }
     fn discard_pending_updates(&self) {
-        self.record_discarded_updates(&mut lock(&self.latest));
+        let retired = lock(&self.latest).drain();
+        self.record_discarded_updates(retired);
     }
-    fn record_discarded_updates(&self, latest: &mut Mailbox<PresentationUpdate>) {
-        for update in latest.drain() {
+    fn record_discarded_updates(&self, retired: impl Iterator<Item = PresentationUpdate>) {
+        for update in retired {
             if matches!(update, PresentationUpdate::Frame { .. }) {
                 self.session
                     .observations
@@ -338,7 +339,7 @@ impl Controller {
         }
         let (update, age, dropped, epoch) = {
             let mut latest = lock(&self.shared.latest);
-            let (update, age, dropped) = latest.take(Instant::now());
+            let (update, age, dropped) = latest.pop(Instant::now());
             (
                 update,
                 age,
@@ -348,7 +349,8 @@ impl Controller {
         };
         self.shared
             .replaced
-            .fetch_add(dropped as u64, Ordering::Relaxed);
+            .fetch_add(u64::from(dropped.is_some()), Ordering::Relaxed);
+        drop(dropped);
         let Some(update) = update else {
             if let Some(stats) = &self.shared.diagnostic {
                 stats.empty.fetch_add(1, Ordering::Relaxed);
