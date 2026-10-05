@@ -93,7 +93,6 @@ struct LoopbackDestinationPort {
     queues: Rc<RefCell<LoopbackQueues>>,
     destination: ClientSourceId,
     next_buffer_use: Option<u64>,
-    aliases: Rc<RefCell<VecDeque<ClientRouteAliasUpdate>>>,
 }
 
 impl LoopbackDestinationPort {
@@ -153,25 +152,10 @@ impl HoistDestinationPort for LoopbackDestinationPort {
                 .borrow_mut()
                 .destination_to_source
                 .push_back(envelope),
-            DestinationPortCommand::RouteMapped {
-                source,
-                destination,
-            } => self.aliases.borrow_mut().push_back(ClientRouteAliasUpdate {
-                destination,
-                source: Some(source),
-            }),
-            DestinationPortCommand::RouteUnmapped { destination } => {
-                self.aliases.borrow_mut().push_back(ClientRouteAliasUpdate {
-                    destination,
-                    source: None,
-                });
-            }
+            DestinationPortCommand::RouteMapped { .. }
+            | DestinationPortCommand::RouteUnmapped { .. } => {}
         }
         Ok(())
-    }
-
-    fn drain_route_alias_updates(&mut self, updates: &mut Vec<ClientRouteAliasUpdate>) {
-        updates.extend(self.aliases.borrow_mut().drain(..));
     }
 
     fn disconnect(&mut self) {
@@ -188,6 +172,9 @@ struct LoopbackClientAdapter {
 }
 
 impl ClientAdapter for LoopbackClientAdapter {
+    fn input_source(&self) -> Option<ClientSourceId> {
+        self.source.input_source()
+    }
     fn presentation_source(&self) -> Option<ClientSourceId> {
         self.source.presentation_source()
     }
@@ -211,9 +198,7 @@ impl ClientAdapter for LoopbackClientAdapter {
         self.destination.drain_cursor_updates(updates);
     }
     fn drain_events(&mut self, events: &mut ClientEventQueue) {
-        // Pump source commands into the in-process queue before the destination
-        // drains it. Route aliases therefore exist when the runtime collects
-        // alias updates later in this same drain.
+        // Pump source commands before publishing the destination's surface inventory.
         self.source.drain_events(events);
         self.destination.drain_events(&mut self.events);
         while let Some(event) = self.events.pop_front() {
@@ -230,6 +215,7 @@ impl ClientAdapter for LoopbackClientAdapter {
 
     fn apply_input(&mut self, event: ClientInputEvent) {
         self.destination.apply_input(event);
+        self.source.drain_events(&mut self.events);
     }
 
     fn apply_command(&mut self, command: ClientAdapterCommandEnvelope) {
@@ -240,6 +226,7 @@ impl ClientAdapter for LoopbackClientAdapter {
     fn host_focus_lost(&mut self, time: u32) {
         self.source.host_focus_lost(time);
         self.destination.host_focus_lost(time);
+        self.source.drain_events(&mut self.events);
     }
 
     fn observe_event(&mut self, event: &ClientSurfaceEvent) {
@@ -265,7 +252,6 @@ pub(crate) fn registration(
     descriptor: ClientSourceDescriptor,
 ) -> ClientAdapterRegistration {
     let queues = Rc::new(RefCell::new(LoopbackQueues::default()));
-    let aliases = Rc::new(RefCell::new(VecDeque::new()));
     let source = SourceRelayAdapter::new(
         upstream,
         LoopbackSourcePort {
@@ -279,7 +265,6 @@ pub(crate) fn registration(
             queues,
             destination: descriptor.id,
             next_buffer_use: Some(1),
-            aliases: aliases.clone(),
         },
     );
     ClientAdapterRegistration::new(

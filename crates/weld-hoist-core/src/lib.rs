@@ -181,6 +181,22 @@ mod tests {
     struct UpstreamAdapter(Rc<RefCell<UpstreamRecord>>);
 
     impl ClientAdapter for UpstreamAdapter {
+        fn apply_remote_input(
+            &mut self,
+            _: weld_client::ClientInputController,
+            event: ClientInputEvent,
+        ) -> bool {
+            self.apply_input(event);
+            true
+        }
+        fn apply_remote_focus(
+            &mut self,
+            _: weld_client::ClientInputController,
+            focus: ClientFocusRequest,
+        ) -> bool {
+            self.apply_request(ClientRequest::Focus(focus));
+            true
+        }
         fn drain_cursor_updates(&mut self, updates: &mut Vec<weld_client::ClientCursorUpdate>) {
             updates.append(&mut self.0.borrow_mut().cursors);
         }
@@ -204,6 +220,13 @@ mod tests {
 
     fn source(source: ClientSourceId, local: u64) -> ClientSurfaceId {
         ClientSurfaceId::new(weld_client::ClientId::new(source, 1), local)
+    }
+
+    fn flush_effects(runtime: &mut ClientRuntime) {
+        runtime.drain_events(&mut ClientEventQueue::default(), &mut Vec::new());
+        let mut errors = Vec::new();
+        runtime.apply_pending_effects(&mut errors);
+        assert!(errors.is_empty(), "{errors:?}");
     }
 
     fn runtime() -> (ClientRuntime, Rc<RefCell<UpstreamRecord>>, LoopbackEndpoint) {
@@ -269,7 +292,7 @@ mod tests {
         assert_eq!(
             runtime.pointer_cursor(),
             Some((
-                surface,
+                endpoint.destination(surface),
                 weld_client::ClientCursor::Named(weld_client::CursorIcon::Text)
             ))
         );
@@ -312,6 +335,7 @@ mod tests {
                 kind: ClientSurfaceRequestKind::Close,
             }))
         );
+        flush_effects(&mut runtime);
         assert_eq!(
             upstream.borrow().requests.last(),
             Some(&ClientRequest::Surface(ClientSurfaceRequest {
@@ -322,7 +346,7 @@ mod tests {
     }
 
     #[test]
-    fn mapped_owner_auto_maps_popups_and_unmap_retires_the_alias() {
+    fn mapped_owner_auto_maps_popups_and_unmap_retires_input_access() {
         let (mut runtime, upstream, endpoint) = runtime();
         let owner = source(ClientSourceId::new(0), 1);
         let popup = source(ClientSourceId::new(0), 2);
@@ -355,11 +379,13 @@ mod tests {
         assert!(runtime.apply_command(endpoint.unmap(owner)));
         runtime.drain_events(&mut events, &mut invalid);
         assert!(
-            !runtime.apply_request(ClientRequest::Surface(ClientSurfaceRequest {
+            runtime.apply_request(ClientRequest::Surface(ClientSurfaceRequest {
                 surface: endpoint.destination(owner),
                 kind: ClientSurfaceRequestKind::Close,
             }))
         );
+        flush_effects(&mut runtime);
+        assert!(!upstream.borrow().requests.iter().any(|request| matches!(request, ClientRequest::Surface(request) if request.kind == ClientSurfaceRequestKind::Close)));
     }
 
     #[test]
@@ -527,7 +553,7 @@ mod tests {
     }
 
     #[test]
-    fn focus_alias_rewrites_surface_and_source() {
+    fn loopback_focus_uses_the_authorized_peer_seat() {
         let (mut runtime, upstream, endpoint) = runtime();
         let surface = source(ClientSourceId::new(0), 5);
         upstream.borrow_mut().events.push(toplevel_event(surface));
@@ -541,6 +567,7 @@ mod tests {
                 surface: Some(endpoint.destination(surface)),
             }))
         );
+        flush_effects(&mut runtime);
         assert_eq!(
             upstream.borrow().requests.last(),
             Some(&ClientRequest::Focus(ClientFocusRequest {
@@ -561,7 +588,7 @@ mod tests {
     }
 
     #[test]
-    fn duplicate_map_and_unknown_unmap_do_not_retire_the_live_alias() {
+    fn duplicate_map_and_unknown_unmap_preserve_the_live_route() {
         let (mut runtime, upstream, endpoint) = runtime();
         let surface = source(ClientSourceId::new(0), 11);
         upstream.borrow_mut().events.push(toplevel_event(surface));
@@ -582,6 +609,7 @@ mod tests {
                 kind: ClientSurfaceRequestKind::Close,
             }))
         );
+        flush_effects(&mut runtime);
         assert_eq!(
             upstream.borrow().requests.last(),
             Some(&ClientRequest::Surface(ClientSurfaceRequest {

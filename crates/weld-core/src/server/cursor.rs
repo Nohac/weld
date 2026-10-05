@@ -47,16 +47,20 @@ impl ServerState {
         self.shell_cursor_override = active;
     }
 
-    pub(super) fn set_shell_cursor_ownership(&mut self, owned: bool) {
-        if self.shell_owns_cursor == owned {
+    pub(super) fn set_shell_cursor_ownership(
+        &mut self,
+        input_seat: &super::input_seat::InputSeat,
+        owned: bool,
+    ) {
+        if input_seat.shell_owns_cursor.get() == owned {
             return;
         }
-        self.shell_owns_cursor = owned;
+        input_seat.shell_owns_cursor.set(owned);
         if !owned {
-            self.cursor_feedback_dirty = true;
+            input_seat.cursor_feedback_dirty.set(true);
             let default = CursorImageStatus::default_named();
-            if self.cursor_status != default {
-                self.cursor_status = default;
+            if *input_seat.cursor_status.borrow() != default {
+                *input_seat.cursor_status.borrow_mut() = default;
             }
         }
     }
@@ -86,10 +90,12 @@ impl ServerState {
 
     pub(super) fn remove_cursor_surface(&mut self, surface: &WlSurface) {
         self.cursor_surfaces.surfaces.remove(&surface.id());
-        if matches!(&self.cursor_status, CursorImageStatus::Surface(current) if current == surface)
-        {
-            self.cursor_status = CursorImageStatus::default_named();
-            self.cursor_feedback_dirty = true;
+        for input_seat in self.input_seats() {
+            let matches = matches!(&*input_seat.cursor_status.borrow(), CursorImageStatus::Surface(current) if current == surface);
+            if matches {
+                *input_seat.cursor_status.borrow_mut() = CursorImageStatus::default_named();
+                input_seat.cursor_feedback_dirty.set(true);
+            }
         }
     }
 
@@ -97,7 +103,7 @@ impl ServerState {
         let selected = select_cursor(
             self.shell_cursor,
             self.shell_cursor_override,
-            self.shell_owns_cursor,
+            self.local_input.shell_owns_cursor.get(),
             clients.pointer_cursor(),
         );
         if self.presented_cursor.as_ref() == Some(&selected) {
@@ -107,12 +113,16 @@ impl ServerState {
         Some(selected)
     }
 
-    pub(super) fn set_client_cursor_image(&mut self, image: CursorImageStatus) {
+    pub(super) fn set_client_cursor_image(
+        &mut self,
+        input_seat: &super::input_seat::InputSeat,
+        image: CursorImageStatus,
+    ) {
         if let CursorImageStatus::Surface(surface) = &image {
             self.refresh_cursor_surface(surface);
         }
-        self.cursor_status = image;
-        self.cursor_feedback_dirty = true;
+        *input_seat.cursor_status.borrow_mut() = image;
+        input_seat.cursor_feedback_dirty.set(true);
     }
 
     fn refresh_cursor_surface(&mut self, surface: &WlSurface) {
@@ -216,9 +226,11 @@ impl ServerState {
             None => self.refresh_retained_cursor_view(surface, buffer_scale, buffer_transform),
         }
 
-        if matches!(&self.cursor_status, CursorImageStatus::Surface(current) if current == surface)
-        {
-            self.cursor_feedback_dirty = true;
+        for input_seat in self.input_seats() {
+            if matches!(&*input_seat.cursor_status.borrow(), CursorImageStatus::Surface(current) if current == surface)
+            {
+                input_seat.cursor_feedback_dirty.set(true);
+            }
         }
     }
 
@@ -270,11 +282,22 @@ impl ServerState {
     /// Must run after dispatch returns: Smithay can call cursor_image while
     /// holding its pointer mutex, so that callback cannot query current_focus.
     pub(crate) fn flush_cursor_feedback(&mut self) {
-        if !self.cursor_feedback_dirty || self.shell_owns_cursor {
+        for input in self
+            .input_seats()
+            .filter(|input| input.cursor_feedback_dirty.get() && !input.shell_owns_cursor.get())
+            .cloned()
+            .collect::<Vec<_>>()
+        {
+            self.flush_seat_cursor_feedback(&input);
+        }
+    }
+
+    fn flush_seat_cursor_feedback(&mut self, input_seat: &super::input_seat::InputSeat) {
+        if !input_seat.cursor_feedback_dirty.get() || input_seat.shell_owns_cursor.get() {
             return;
         }
-        let Some(focus) = self
-            .seat
+        let Some(focus) = input_seat
+            .native
             .get_pointer()
             .and_then(|pointer| pointer.current_focus())
         else {
@@ -289,8 +312,8 @@ impl ServerState {
         else {
             return;
         };
-        self.cursor_feedback_dirty = false;
-        let cursor = match &self.cursor_status {
+        input_seat.cursor_feedback_dirty.set(false);
+        let cursor = match &*input_seat.cursor_status.borrow() {
             CursorImageStatus::Hidden => CursorImage::Hidden,
             CursorImageStatus::Named(icon) => CursorImage::Named(*icon),
             CursorImageStatus::Surface(surface) => {

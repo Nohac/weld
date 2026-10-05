@@ -2,6 +2,14 @@
 
 use crate::{ClientSurfaceId, SurfaceLayerId};
 
+/// Host-local input controller, scoped by its trusted adapter registration.
+/// Multiplexed adapters assign a fresh connection number for each peer.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct ClientInputController {
+    pub adapter: crate::ClientSourceId,
+    pub connection: u64,
+}
+
 /// Press or release state shared by all input adapters.
 #[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

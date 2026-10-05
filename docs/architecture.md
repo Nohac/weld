@@ -243,9 +243,59 @@ apply between input batches. `weld-app` retains client routing, refresh-paced
 input buffering, Bevy/Leafwing projection and the DRM-specific VT policy. It
 re-exports the binding API for existing plugin consumers.
 
+Each connected hoist client owns one logical input seat shared by all of its
+windows. The desktop retains its own seat. `ClientRuntime` stamps trusted
+adapter effects with `ClientInputController` (registered adapter plus connection
+number); the peer does not transmit or choose this host identity. The paired
+desktop adapter supplies separate connection numbers for its multiplexed peers.
+Remote focus goes directly to the native adapter and leaves the desktop's
+keyboard route intact. Relays continue authorizing every target surface and
+hoist session before producing input effects.
+
+Core separates logical controllers from application-visible seat contexts. A
+Smithay bind hook supplies a stable private context for each (client connection,
+advertised seat). Native peer routing waits for both keyboard and pointer bindings
+so focus and grabs share a context; otherwise it uses that application's original
+desktop context. This supports
+first-seat-only applications without disturbing unrelated applications. Each
+context owns focus, button/key holds, popup grabs, repeat policy and cursor intent.
+Both routes use the same native delivery code.
+
+Fallback ownership changes between input sequences. A held key, button, gesture,
+finger scroll or protocol grab prevents another controller taking the context.
+Explicit focus or an intentional interaction can take over an idle context;
+passive hover and late leave/release events preserve the other controller's focus.
+Rejected presses suppress their later repeats/releases. Native bindings arriving
+during a fallback hold become eligible after the hold ends. A single-seat
+application still has one effective focus at a time; overlapping controllers are
+arbitrated. Different native contexts remain independent. The current shell
+hoists a whole application connection; a core regression also exercises two
+Kitty OS windows on one connection with different controllers.
+
+Clipboard storage belongs to the logical controller. A Smithay selection hook
+groups data devices while keeping grab and focus authorization on their stable
+input context. On handoff, devices move groups and existing selections stay
+with their original group. Selection focus tracks its owning context so an
+inactive application's handoff cannot clear another application's clipboard
+focus. Source destruction clears its original group.
+
+State remains accessible during synchronous Smithay callbacks; cell borrows end
+before delivery. Remote keyboards use compositor-owned repeats and the configured
+legacy fallback. Keymap reload waits for all held keys. Activation remains set
+while any context focuses the toplevel. Disconnect releases input, retires peer
+devices/globals and returns borrowed desktop contexts. Dead client contexts are
+removed from Smithay's registry. Existing protocol resources retain the selection
+association needed for late destruction.
+
+Native touchscreen delivery is a subsequent slice; the phone still sends mouse
+input. Tests cover native seats, first-seat fallback, late binding, overlapping
+holds, independent applications, clipboard handoff and real shared-process Kitty
+input. Binding interfaces demonstrates readiness, not full toolkit multi-seat
+correctness; application-level checks remain useful.
+
 The local, Iroh, and loopback bindings enter the same relay implementation.
-Loopback contributes only in-process queues, buffer-lease relay, and route
-aliases; the local binding contributes Postcard, Unix descriptors, DMA-BUF or
+Loopback contributes in-process queues and buffer-lease relay;
+the local binding contributes Postcard, Unix descriptors, DMA-BUF or
 SHM import/export, and calloop wakes; and the Iroh binding contributes QUIC
 connectivity, framing, and network wakes. Both encoded bindings use the same
 `weld-hoist-encoded` ports rather than implementing another client-surface or
@@ -1029,8 +1079,9 @@ occupant or transport-specific branch in the window primitive.
 current atomic role and commit state, and republishes selected surfaces under
 an independent Relocated source namespace. Buffer replacements reuse the
 upstream lease's erased access payload; completing the destination lease drops
-one upstream consumer. Runtime route aliases rewrite destination input, focus,
-close, resize, and output requests back to the source surface. Owner-related
+one upstream consumer. The destination relay rewrites input, focus, close, resize
+and output requests back to the source surface, preserving the loopback client's
+independent seat. Owner-related
 popups are mapped automatically. Relay-generated events are published in the
 same runtime drain but are not recursively observed, preventing relay cycles.
 

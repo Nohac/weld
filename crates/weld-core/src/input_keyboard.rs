@@ -16,6 +16,17 @@ pub(crate) struct KeyboardRepeatTracker {
 }
 
 impl KeyboardRepeatTracker {
+    pub(crate) fn keys_for_surface(&self, surface: ClientSurfaceId) -> Vec<LinuxKeycode> {
+        self.held
+            .iter()
+            .filter_map(|(key, held)| (held.surface == surface).then_some(*key))
+            .collect()
+    }
+
+    pub(crate) fn has_pressed_keys(&self) -> bool {
+        !self.held.is_empty()
+    }
+
     pub(crate) fn observe(
         &mut self,
         surface: ClientSurfaceId,
@@ -33,10 +44,7 @@ impl KeyboardRepeatTracker {
                 );
                 true
             }
-            KeyboardKeyState::Released => {
-                self.held.remove(&keycode);
-                true
-            }
+            KeyboardKeyState::Released => self.held.remove(&keycode).is_some(),
             KeyboardKeyState::Repeated => self
                 .held
                 .get(&keycode)

@@ -35,6 +35,33 @@ pub trait ClientAdapter {
     fn apply_command(&mut self, command: ClientAdapterCommandEnvelope);
     fn host_focus_lost(&mut self, time: u32);
 
+    /// Registration-time authority for an independent remote input controller.
+    fn input_source(&self) -> Option<ClientSourceId> {
+        None
+    }
+
+    /// Delivers peer input using the runtime-assigned controller identity.
+    fn apply_remote_input(
+        &mut self,
+        _controller: crate::ClientInputController,
+        _event: ClientInputEvent,
+    ) -> bool {
+        false
+    }
+
+    fn apply_remote_focus(
+        &mut self,
+        _controller: crate::ClientInputController,
+        _focus: crate::ClientFocusRequest,
+    ) -> bool {
+        false
+    }
+
+    /// Retires only this controller's input devices and held state.
+    fn retire_remote_input(&mut self, _controller: crate::ClientInputController) {}
+
+    fn connect_remote_input(&mut self, _controller: crate::ClientInputController) {}
+
     /// Observes one validated event from another local-provenance adapter.
     /// Relocated events are not observed recursively.
     fn observe_event(&mut self, _event: &crate::ClientSurfaceEvent) {}
@@ -50,6 +77,9 @@ pub trait ClientAdapter {
 
     /// Publishes already-addressed work received from an external adapter.
     fn drain_effects(&mut self, _effects: &mut Vec<ClientAdapterEffect>) {}
+
+    /// Effects from multiple connections, each scoped within this adapter.
+    fn drain_controller_effects(&mut self, _effects: &mut Vec<(u64, ClientAdapterEffect)>) {}
 
     /// Publishes adapter-owned allocations that can no longer be reused.
     fn drain_retired_buffers(&mut self, _buffers: &mut Vec<crate::ClientBufferId>) {}
@@ -77,6 +107,8 @@ pub trait ClientAdapter {
 pub enum ClientAdapterEffect {
     Request(ClientRequest),
     Input(ClientInputEvent),
+    InputDisconnected { source: ClientSourceId },
+    InputConnected { source: ClientSourceId },
 }
 
 impl ClientAdapterEffect {
@@ -84,6 +116,7 @@ impl ClientAdapterEffect {
         match self {
             Self::Request(request) => request.source(),
             Self::Input(event) => Some(event.target.surface().source()),
+            Self::InputDisconnected { source } | Self::InputConnected { source } => Some(*source),
         }
     }
 }
@@ -372,7 +405,8 @@ pub struct ClientRuntime {
     sourced_alias_updates: Vec<(ClientSourceId, ClientRouteAliasUpdate)>,
     observed_adapters: Vec<ClientSourceId>,
     scratch_effects: Vec<ClientAdapterEffect>,
-    pending_effects: Vec<(ClientSourceId, ClientAdapterEffect)>,
+    pending_effects: Vec<(crate::ClientInputController, ClientAdapterEffect)>,
+    scratch_controller_effects: Vec<(u64, ClientAdapterEffect)>,
     scratch_retired_buffers: Vec<crate::ClientBufferId>,
     retired_buffers: Vec<crate::ClientBufferId>,
     aliases: HashMap<ClientSurfaceId, ClientSurfaceId>,
@@ -610,14 +644,36 @@ impl ClientRuntime {
 
         for (source, adapter) in &mut self.adapters {
             adapter.driver.drain_effects(&mut self.scratch_effects);
-            self.pending_effects.extend(
-                self.scratch_effects
-                    .drain(..)
-                    .map(|effect| (*source, effect)),
-            );
+            self.pending_effects
+                .extend(self.scratch_effects.drain(..).map(|effect| {
+                    (
+                        crate::ClientInputController {
+                            adapter: *source,
+                            connection: 0,
+                        },
+                        effect,
+                    )
+                }));
         }
 
         for (source, adapter) in &mut self.adapters {
+            adapter
+                .driver
+                .drain_controller_effects(&mut self.scratch_controller_effects);
+            self.pending_effects
+                .extend(
+                    self.scratch_controller_effects
+                        .drain(..)
+                        .map(|(connection, effect)| {
+                            (
+                                crate::ClientInputController {
+                                    adapter: *source,
+                                    connection,
+                                },
+                                effect,
+                            )
+                        }),
+                );
             adapter
                 .driver
                 .drain_retired_buffers(&mut self.scratch_retired_buffers);
@@ -688,11 +744,50 @@ impl ClientRuntime {
     /// Applies external adapter work immediately after one event drain.
     pub fn apply_pending_effects(&mut self, invalid: &mut Vec<ClientRuntimeEffectError>) {
         let effects = std::mem::take(&mut self.pending_effects);
-        for (adapter, effect) in effects {
+        for (controller, effect) in effects {
+            let adapter = controller.adapter;
             let target = effect.target_source();
-            let applied = match effect {
-                ClientAdapterEffect::Request(request) => self.apply_request(request),
-                ClientAdapterEffect::Input(event) => self.apply_targeted_input(event),
+            let scope = self
+                .adapters
+                .get(&adapter)
+                .and_then(|entry| entry.driver.input_source());
+            let applied = if let Some(scope) = scope {
+                if target != Some(scope) {
+                    false
+                } else if let Some(destination) = self.adapters.get_mut(&scope) {
+                    match effect {
+                        ClientAdapterEffect::Input(event) => {
+                            destination.driver.apply_remote_input(controller, event)
+                        }
+                        ClientAdapterEffect::Request(ClientRequest::Focus(focus)) => {
+                            focus
+                                .surface
+                                .is_none_or(|surface| surface.source() == scope)
+                                && destination.driver.apply_remote_focus(controller, focus)
+                        }
+                        ClientAdapterEffect::InputDisconnected { .. } => {
+                            destination.driver.retire_remote_input(controller);
+                            true
+                        }
+                        ClientAdapterEffect::InputConnected { .. } => {
+                            destination.driver.connect_remote_input(controller);
+                            true
+                        }
+                        ClientAdapterEffect::Request(request) => {
+                            destination.driver.apply_request(request);
+                            true
+                        }
+                    }
+                } else {
+                    false
+                }
+            } else {
+                match effect {
+                    ClientAdapterEffect::Request(request) => self.apply_request(request),
+                    ClientAdapterEffect::Input(event) => self.apply_targeted_input(event),
+                    ClientAdapterEffect::InputDisconnected { .. }
+                    | ClientAdapterEffect::InputConnected { .. } => false,
+                }
             };
             if !applied {
                 invalid.push(ClientRuntimeEffectError { adapter, target });
@@ -1369,6 +1464,9 @@ mod tests {
         focus_lost: Vec<u32>,
         requests: Vec<ClientRequest>,
         commands: usize,
+        remote_inputs: Vec<(crate::ClientInputController, ClientInputEvent)>,
+        remote_focus: Vec<(crate::ClientInputController, crate::ClientFocusRequest)>,
+        retired_controllers: Vec<crate::ClientInputController>,
     }
 
     struct RecordingAdapter(Rc<RefCell<AdapterRecord>>);
@@ -1388,6 +1486,25 @@ mod tests {
     }
 
     impl ClientAdapter for RecordingAdapter {
+        fn apply_remote_input(
+            &mut self,
+            controller: crate::ClientInputController,
+            event: ClientInputEvent,
+        ) -> bool {
+            self.0.borrow_mut().remote_inputs.push((controller, event));
+            true
+        }
+        fn apply_remote_focus(
+            &mut self,
+            controller: crate::ClientInputController,
+            focus: crate::ClientFocusRequest,
+        ) -> bool {
+            self.0.borrow_mut().remote_focus.push((controller, focus));
+            true
+        }
+        fn retire_remote_input(&mut self, controller: crate::ClientInputController) {
+            self.0.borrow_mut().retired_controllers.push(controller);
+        }
         fn drain_events(&mut self, events: &mut ClientEventQueue) {
             while let Some(event) = self.0.borrow_mut().events.pop_front() {
                 events.push(event);
@@ -1427,6 +1544,131 @@ mod tests {
             ))
             .expect("unique test source");
         record
+    }
+
+    struct ControllerAdapter(Vec<(u64, ClientAdapterEffect)>);
+
+    impl ClientAdapter for ControllerAdapter {
+        fn input_source(&self) -> Option<ClientSourceId> {
+            Some(ClientSourceId::new(0))
+        }
+        fn drain_controller_effects(&mut self, effects: &mut Vec<(u64, ClientAdapterEffect)>) {
+            effects.append(&mut self.0);
+        }
+        fn drain_events(&mut self, _: &mut ClientEventQueue) {}
+        fn apply_request(&mut self, _: ClientRequest) {}
+        fn apply_input(&mut self, _: ClientInputEvent) {}
+        fn apply_command(&mut self, _: ClientAdapterCommandEnvelope) {}
+        fn host_focus_lost(&mut self, _: u32) {}
+    }
+
+    #[test]
+    fn remote_connections_keep_focus_and_disconnect_outside_the_desktop_route() {
+        let mut runtime = ClientRuntime::default();
+        let native = register(&mut runtime, 0);
+        let local = surface(0, 1, 1);
+        runtime.apply_request(ClientRequest::Focus(crate::ClientFocusRequest {
+            source: local.source(),
+            surface: Some(local),
+        }));
+        for adapter in [7, 8] {
+            let mut effects = Vec::new();
+            for connection in [1, 2] {
+                let target = surface(0, adapter, connection);
+                effects.push((
+                    connection,
+                    ClientAdapterEffect::Request(ClientRequest::Focus(crate::ClientFocusRequest {
+                        source: target.source(),
+                        surface: Some(target),
+                    })),
+                ));
+                effects.push((
+                    connection,
+                    ClientAdapterEffect::Input(ClientInputEvent {
+                        target: ClientInputTarget::Keyboard { surface: target },
+                        host_position: None,
+                        event: InputEventKind::Keyboard {
+                            keycode: LinuxKeycode(30),
+                            state: KeyboardKeyState::Pressed,
+                        },
+                        time: 1,
+                    }),
+                ));
+            }
+            effects.push((
+                1,
+                ClientAdapterEffect::InputDisconnected {
+                    source: ClientSourceId::new(0),
+                },
+            ));
+            runtime
+                .register(ClientRuntimeAdapter::new(
+                    ClientSourceDescriptor::new(
+                        ClientSourceId::new(adapter),
+                        ClientProvenance::Relocated,
+                    ),
+                    ControllerAdapter(effects),
+                ))
+                .expect("register controller");
+        }
+        runtime.drain_events(&mut ClientEventQueue::default(), &mut Vec::new());
+        let mut errors = Vec::new();
+        runtime.apply_pending_effects(&mut errors);
+        assert!(errors.is_empty());
+        assert_eq!(
+            runtime.keyboard_route,
+            Some(ClientKeyboardRoute { surface: local })
+        );
+        let record = native.borrow();
+        assert_eq!(
+            record.requests.len(),
+            1,
+            "remote focus cannot clear or replace local focus"
+        );
+        assert_eq!(record.remote_focus.len(), 4);
+        assert_eq!(record.remote_inputs.len(), 4);
+        assert_eq!(
+            record
+                .remote_inputs
+                .iter()
+                .map(|(controller, _)| *controller)
+                .collect::<HashSet<_>>()
+                .len(),
+            4
+        );
+        assert_eq!(
+            record
+                .retired_controllers
+                .iter()
+                .map(|controller| controller.connection)
+                .collect::<Vec<_>>(),
+            [1, 1]
+        );
+    }
+
+    #[test]
+    fn controller_authority_rejects_effects_for_another_upstream() {
+        let mut runtime = ClientRuntime::default();
+        register(&mut runtime, 0);
+        let foreign = register(&mut runtime, 2);
+        runtime
+            .register(ClientRuntimeAdapter::new(
+                ClientSourceDescriptor::new(ClientSourceId::new(7), ClientProvenance::Relocated),
+                ControllerAdapter(vec![(
+                    1,
+                    ClientAdapterEffect::Request(ClientRequest::Focus(crate::ClientFocusRequest {
+                        source: ClientSourceId::new(2),
+                        surface: Some(surface(2, 1, 1)),
+                    })),
+                )]),
+            ))
+            .expect("register");
+        runtime.drain_events(&mut ClientEventQueue::default(), &mut Vec::new());
+        let mut errors = Vec::new();
+        runtime.apply_pending_effects(&mut errors);
+        assert_eq!(errors.len(), 1);
+        assert!(foreign.borrow().requests.is_empty());
+        assert!(foreign.borrow().remote_focus.is_empty());
     }
 
     #[test]

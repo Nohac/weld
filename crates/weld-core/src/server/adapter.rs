@@ -77,6 +77,13 @@ impl WaylandClientBridge {
 }
 
 pub(crate) enum WaylandClientWork {
+    RemoteInput(weld_client::ClientInputController, ClientInputEvent),
+    RemoteFocus(
+        weld_client::ClientInputController,
+        weld_client::ClientFocusRequest,
+    ),
+    RetireInput(weld_client::ClientInputController),
+    ConnectInput(weld_client::ClientInputController),
     Request(ClientRequest),
     Input(ClientInputEvent),
     HostFocusLost(u32),
@@ -323,6 +330,34 @@ fn translate_non_commit_event(event: PendingSurfaceEvent) -> Option<ClientSurfac
 }
 
 impl ClientAdapter for WaylandClientAdapter {
+    fn connect_remote_input(&mut self, controller: weld_client::ClientInputController) {
+        self.bridge
+            .push_work(WaylandClientWork::ConnectInput(controller));
+    }
+    fn apply_remote_input(
+        &mut self,
+        controller: weld_client::ClientInputController,
+        event: ClientInputEvent,
+    ) -> bool {
+        self.bridge
+            .push_work(WaylandClientWork::RemoteInput(controller, event));
+        true
+    }
+
+    fn apply_remote_focus(
+        &mut self,
+        controller: weld_client::ClientInputController,
+        focus: weld_client::ClientFocusRequest,
+    ) -> bool {
+        self.bridge
+            .push_work(WaylandClientWork::RemoteFocus(controller, focus));
+        true
+    }
+
+    fn retire_remote_input(&mut self, controller: weld_client::ClientInputController) {
+        self.bridge
+            .push_work(WaylandClientWork::RetireInput(controller));
+    }
     fn apply_presentation(
         &mut self,
         claimant: weld_client::ClientSourceId,

@@ -1,6 +1,6 @@
 //! Smithay seat delivery and protocol focus application.
 
-use std::borrow::Cow;
+use std::{borrow::Cow, cell::RefCell};
 
 use smithay::{
     backend::input::{
@@ -49,6 +49,7 @@ use crate::{
     surface::{SurfaceId, WindowDecoration, WindowInteractionRequestKind, WindowResizeEdge},
 };
 
+use super::input_seat::InputSeat;
 use super::keyboard_focus::KeyboardFocus;
 use super::{PendingSurfaceEvent, PendingSurfaceEventKind, ServerState};
 
@@ -58,7 +59,28 @@ pub(super) struct OrdinaryImplicitGrab {
 }
 
 impl ServerState {
+    fn clear_selection_focus(&mut self, seat: &Seat<Self>) {
+        let group = self.data_device_seat(seat);
+        if let Some(owner) = group
+            .user_data()
+            .get::<super::seat_bindings::SelectionFocus>()
+            && owner
+                .0
+                .borrow()
+                .as_ref()
+                .and_then(smithay::input::WeakSeat::upgrade)
+                .as_ref()
+                == Some(seat)
+        {
+            owner.0.borrow_mut().take();
+            set_data_device_focus(&self.display_handle, &group, None);
+        }
+    }
     pub(super) fn apply_client_input(&mut self, input: ClientInputEvent) {
+        self.route_controller_input(None, input);
+    }
+
+    pub(super) fn deliver_client_input(&mut self, input_seat: &InputSeat, input: ClientInputEvent) {
         let ClientInputEvent {
             target,
             host_position,
@@ -74,8 +96,9 @@ impl ServerState {
                 ClientInputTarget::Pointer { surface, layer },
                 InputEventKind::PointerMotion { position, relative },
             ) => {
-                let host_position = host_position.unwrap_or(self.pointer_position);
+                let host_position = host_position.unwrap_or(input_seat.pointer_position.get());
                 self.apply_pointer_motion(
+                    input_seat,
                     host_position,
                     Some(SurfaceHit {
                         surface,
@@ -88,7 +111,8 @@ impl ServerState {
             }
             (ClientInputTarget::Pointer { .. }, InputEventKind::PointerLeft { .. }) => {
                 self.apply_pointer_motion(
-                    host_position.unwrap_or(self.pointer_position),
+                    input_seat,
+                    host_position.unwrap_or(input_seat.pointer_position.get()),
                     None,
                     None,
                     time,
@@ -108,7 +132,8 @@ impl ServerState {
                     local_position,
                 });
                 self.apply_pointer_button(
-                    host_position.unwrap_or(self.pointer_position),
+                    input_seat,
+                    host_position.unwrap_or(input_seat.pointer_position.get()),
                     target,
                     button.0,
                     state,
@@ -116,15 +141,15 @@ impl ServerState {
                 );
             }
             (ClientInputTarget::Pointer { .. }, InputEventKind::PointerAxis { axis, .. }) => {
-                self.apply_pointer_axis(axis, time)
+                self.apply_pointer_axis(input_seat, axis, time)
             }
             (ClientInputTarget::Pointer { .. }, InputEventKind::PointerGesture { gesture }) => {
-                self.apply_pointer_gesture(gesture, time)
+                self.apply_pointer_gesture(input_seat, gesture, time)
             }
             (
                 ClientInputTarget::Keyboard { surface },
                 InputEventKind::Keyboard { keycode, state },
-            ) => self.apply_keyboard_input(surface, keycode, state, time),
+            ) => self.apply_keyboard_input(input_seat, surface, keycode, state, time),
             (target, event) => {
                 warn!(
                     ?target,
@@ -137,6 +162,7 @@ impl ServerState {
 
     fn apply_keyboard_input(
         &mut self,
+        input_seat: &InputSeat,
         surface: SurfaceId,
         keycode: crate::input::LinuxKeycode,
         state: KeyboardKeyState,
@@ -146,12 +172,16 @@ impl ServerState {
             warn!(keycode = keycode.0, "ignored an overflowing keyboard code");
             return;
         };
-        let Some(keyboard) = self.seat.get_keyboard() else {
+        let Some(keyboard) = input_seat.native.get_keyboard() else {
             warn!("ignored keyboard input because the seat has no keyboard");
             return;
         };
-        if !self.keyboard_repeats.observe(surface, keycode, state)
+        if !input_seat
+            .keyboard_repeats
+            .borrow_mut()
+            .observe(surface, keycode, state)
             || (state == KeyboardKeyState::Repeated
+                && input_seat.controller.get().is_none()
                 && self.keyboard_repeat_mode != KeyboardRepeatMode::Compositor)
         {
             trace!(
@@ -160,7 +190,7 @@ impl ServerState {
             );
             return;
         }
-        if self.keyboard_diagnostic_dirty
+        if input_seat.keyboard_diagnostic_dirty.get()
             && let Some(client) = keyboard
                 .current_focus()
                 .and_then(|surface| surface.wl_surface().and_then(|surface| surface.client()))
@@ -171,7 +201,7 @@ impl ServerState {
                 .collect();
             tracing::info!(?surface, ?versions, repeat_mode = ?self.keyboard_repeat_mode,
                 legacy_repeat = ?self.legacy_key_repeat, "focused client keyboard repeat support");
-            self.keyboard_diagnostic_dirty = false;
+            input_seat.keyboard_diagnostic_dirty.set(false);
         }
         keyboard.input::<(), _>(
             self,
@@ -186,7 +216,9 @@ impl ServerState {
     pub(crate) fn set_legacy_key_repeat(&mut self, legacy: LegacyKeyRepeat) {
         if self.legacy_key_repeat != legacy {
             self.legacy_key_repeat = legacy;
-            self.keyboard_diagnostic_dirty = true;
+            for input in self.input_seats() {
+                input.keyboard_diagnostic_dirty.set(true);
+            }
             if legacy != LegacyKeyRepeat::Client
                 && self.keyboard_repeat_mode == KeyboardRepeatMode::Client
             {
@@ -200,10 +232,20 @@ impl ServerState {
     }
 
     pub(super) fn configure_keyboard_repeat(&mut self) {
-        let Some(keyboard) = self.seat.get_keyboard() else {
+        for input in self.input_seats().cloned().collect::<Vec<_>>() {
+            self.configure_seat_repeat(&input);
+        }
+    }
+
+    pub(super) fn configure_seat_repeat(&mut self, input_seat: &InputSeat) {
+        let Some(keyboard) = input_seat.native.get_keyboard() else {
             return;
         };
-        let mode = match self.keyboard_repeat_mode {
+        let mode = match if input_seat.controller.get().is_some() {
+            KeyboardRepeatMode::Compositor
+        } else {
+            self.keyboard_repeat_mode
+        } {
             KeyboardRepeatMode::Client => RepeatMode::Client,
             KeyboardRepeatMode::Compositor => RepeatMode::Compositor {
                 legacy_repeat: match self.legacy_key_repeat {
@@ -217,24 +259,31 @@ impl ServerState {
     }
 
     pub(super) fn focus_toplevel(&mut self, requested: Option<SurfaceId>) {
+        self.route_controller_focus(None, requested);
+    }
+
+    pub(super) fn focus_seat(&mut self, input_seat: &InputSeat, requested: Option<SurfaceId>) {
         if requested.is_none() {
-            self.dismiss_popup_grab(self.event_time());
+            self.dismiss_popup_grab(input_seat, self.event_time());
         }
-        let grabbed = self
-            .seat
+        let grabbed = input_seat
+            .native
             .get_pointer()
             .is_some_and(|pointer| pointer.is_grabbed());
-        let grabbed =
-            focus_request_remains_protected(grabbed, self.ordinary_implicit_grab, requested);
+        let grabbed = focus_request_remains_protected(
+            grabbed,
+            input_seat.ordinary_implicit_grab.get(),
+            requested,
+        );
         let Some(requested) = transition_pending_focus(
-            &mut self.pending_focus,
+            &mut input_seat.pending_focus.borrow_mut(),
             grabbed,
             FocusTransition::Request(requested),
         ) else {
             debug!(?requested, "queued a focus request during a pointer grab");
             return;
         };
-        self.apply_toplevel_focus(requested);
+        self.apply_toplevel_focus(input_seat, requested);
     }
 
     pub(super) fn begin_pointer_move(
@@ -266,9 +315,9 @@ impl ServerState {
         let Some(seat) = Seat::<Self>::from_resource(&seat_resource) else {
             return;
         };
-        if seat != self.seat {
+        let Some(input_seat) = self.input_for_native(&seat) else {
             return;
-        }
+        };
         let Some(pointer) = seat.get_pointer() else {
             return;
         };
@@ -294,7 +343,14 @@ impl ServerState {
             return;
         }
 
-        self.install_window_grab(surface_id, pointer, start_data, serial, interaction);
+        self.install_window_grab(
+            &input_seat,
+            surface_id,
+            pointer,
+            start_data,
+            serial,
+            interaction,
+        );
     }
 
     pub(super) fn begin_x11_interaction(
@@ -303,32 +359,35 @@ impl ServerState {
         button: u32,
         edges: Option<WindowResizeEdge>,
     ) {
-        let Some(pointer) = self.seat.get_pointer() else {
-            return;
-        };
-        let Some(start_data) = pointer.grab_start_data() else {
-            return;
-        };
-        let Some((focused, _)) = &start_data.focus else {
-            return;
-        };
         let Some(window) = self.toplevels.get(surface_id) else {
             return;
         };
-        if super::surface_tree::owning_root(focused) != *window.surface.wl_surface() {
-            return;
-        }
         let linux_button = match button {
             1 => 0x110,
             2 => 0x112,
             3 => 0x111,
             _ => return,
         };
-        if !self.pressed_pointer_buttons.contains(&linux_button) {
+        let candidate = self.input_seats().find_map(|input| {
+            if !input
+                .pressed_pointer_buttons
+                .borrow()
+                .contains(&linux_button)
+            {
+                return None;
+            }
+            let pointer = input.native.get_pointer()?;
+            let start_data = pointer.grab_start_data()?;
+            let (focused, _) = start_data.focus.as_ref()?;
+            (super::surface_tree::owning_root(focused) == *window.surface.wl_surface())
+                .then(|| (input.clone(), pointer, start_data))
+        });
+        let Some((input_seat, pointer, start_data)) = candidate else {
             return;
-        }
+        };
         let interaction = edges.map_or(PointerInteraction::Move, PointerInteraction::Resize);
         self.install_window_grab(
+            &input_seat,
             surface_id,
             pointer,
             start_data,
@@ -339,6 +398,7 @@ impl ServerState {
 
     fn install_window_grab(
         &mut self,
+        input_seat: &InputSeat,
         surface_id: SurfaceId,
         pointer: PointerHandle<Self>,
         start_data: GrabStartData<Self>,
@@ -359,7 +419,7 @@ impl ServerState {
             serial,
             Focus::Clear,
         );
-        self.ordinary_implicit_grab = None;
+        input_seat.ordinary_implicit_grab.set(None);
         // Installing a grab unsets any previous grab. Stage the new resize state
         // afterwards so replacing a grab cannot clear the state we just entered.
         if matches!(interaction, PointerInteraction::Resize(_)) {
@@ -371,7 +431,7 @@ impl ServerState {
         });
     }
 
-    fn apply_toplevel_focus(&mut self, requested: Option<SurfaceId>) {
+    fn apply_toplevel_focus(&mut self, input_seat: &InputSeat, requested: Option<SurfaceId>) {
         if let Some(layer) = requested.and_then(|id| self.layers.0.get(id)) {
             if !layer.surface.layer_surface().alive()
                 || !layer.tree.client_mapped(layer.surface.wl_surface())
@@ -384,14 +444,15 @@ impl ServerState {
                 return;
             }
             let surface = layer.surface.wl_surface().clone();
-            if let Some(previous) = self
-                .focused_toplevel
-                .take()
-                .and_then(|id| self.toplevels.get(id))
+            if let Some(previous_id) = input_seat.focused_toplevel.take()
+                && !self
+                    .input_seats()
+                    .any(|other| other.focused_toplevel.get() == Some(previous_id))
+                && let Some(previous) = self.toplevels.get(previous_id)
             {
                 previous.surface.set_activated(false);
             }
-            if let Some(keyboard) = self.seat.get_keyboard() {
+            if let Some(keyboard) = input_seat.native.get_keyboard() {
                 keyboard.set_focus(self, Some(surface.into()), SERIAL_COUNTER.next_serial());
             }
             return;
@@ -410,44 +471,53 @@ impl ServerState {
             }
             None => None,
         };
-        let previous = self.focused_toplevel.and_then(|id| {
+        let previous = input_seat.focused_toplevel.get().and_then(|id| {
             self.toplevels
                 .get(id)
                 .map(|toplevel| (id, toplevel.surface.clone()))
         });
 
         let next_id = next.as_ref().map(|(id, _)| *id);
-        if self.focused_toplevel != next_id {
-            if let Some((_, surface)) = &previous {
+        if input_seat.focused_toplevel.get() != next_id {
+            if let Some((previous_id, surface)) = &previous
+                && !self.input_seats().any(|other| {
+                    other.native != input_seat.native
+                        && other.focused_toplevel.get() == Some(*previous_id)
+                })
+            {
                 surface.set_activated(false);
             }
             if let Some((_, surface)) = &next {
                 self.raise_x11_surface(surface.wl_surface());
                 surface.set_activated(true);
             }
-            self.focused_toplevel = next_id;
+            input_seat.focused_toplevel.set(next_id);
         }
 
         let keyboard_focus = next
             .as_ref()
             .map(|(_, surface)| KeyboardFocus::from(surface));
-        if let Some(keyboard) = self.seat.get_keyboard() {
+        if keyboard_focus.is_none() {
+            self.clear_selection_focus(&input_seat.native);
+        }
+        if let Some(keyboard) = input_seat.native.get_keyboard() {
             keyboard.set_focus(self, keyboard_focus, SERIAL_COUNTER.next_serial());
         }
     }
 
     fn apply_pointer_motion(
         &mut self,
+        input_seat: &InputSeat,
         position: InputPosition,
         target: Option<SurfaceHit>,
         relative: Option<RelativeMotion>,
         time: u32,
     ) {
-        let Some(pointer) = self.seat.get_pointer() else {
+        let Some(pointer) = input_seat.native.get_pointer() else {
             warn!("ignored pointer motion because the seat has no pointer");
             return;
         };
-        self.pointer_position = position;
+        input_seat.pointer_position.set(position);
         let focus = self.pointer_focus(position, target);
         if !pointer.is_grabbed()
             && let Some((surface, _)) = &focus
@@ -457,7 +527,7 @@ impl ServerState {
         let shell_owns_cursor = shell_owns_cursor(
             focus.is_none(),
             pointer.is_grabbed(),
-            self.ordinary_implicit_grab,
+            input_seat.ordinary_implicit_grab.get(),
         );
         pointer.motion(
             self,
@@ -480,23 +550,32 @@ impl ServerState {
             );
         }
         pointer.frame(self);
-        self.set_shell_cursor_ownership(shell_owns_cursor);
-        self.retry_pending_focus(pointer.is_grabbed());
+        self.set_shell_cursor_ownership(input_seat, shell_owns_cursor);
+        self.retry_pending_focus(input_seat, pointer.is_grabbed());
     }
 
     fn apply_pointer_button(
         &mut self,
+        input_seat: &InputSeat,
         position: InputPosition,
         target: Option<SurfaceHit>,
         button: u32,
         state: ButtonState,
         time: u32,
     ) {
-        let Some(pointer) = self.seat.get_pointer() else {
+        let Some(pointer) = input_seat.native.get_pointer() else {
             warn!("ignored pointer button because the seat has no pointer");
             return;
         };
-        self.pointer_position = position;
+        if state == ButtonState::Released
+            && !input_seat
+                .pressed_pointer_buttons
+                .borrow()
+                .contains(&button)
+        {
+            return;
+        }
+        input_seat.pointer_position.set(position);
         let serial = SERIAL_COUNTER.next_serial();
         let focus = self.pointer_focus(position, target);
         let pointer_was_grabbed = pointer.is_grabbed();
@@ -509,14 +588,14 @@ impl ServerState {
             resolved_surface = ?focus.as_ref().map(|(surface, _)| surface.id()),
             current_surface = ?pointer.current_focus().map(|surface| surface.id()),
             pointer_was_grabbed,
-            popup_grab_active = self.popup_grab.as_ref().is_some_and(|grab| !grab.has_ended()),
-            modifiers = ?self.seat.get_keyboard().map(|keyboard| keyboard.modifier_state()),
+            popup_grab_active = input_seat.popup_grab.borrow().as_ref().is_some_and(|grab| !grab.has_ended()),
+            modifiers = ?input_seat.native.get_keyboard().map(|keyboard| keyboard.modifier_state()),
             "source pointer button before delivery"
         );
         let shell_owns_cursor = shell_owns_cursor(
             focus.is_none(),
             pointer_was_grabbed,
-            self.ordinary_implicit_grab,
+            input_seat.ordinary_implicit_grab.get(),
         );
         pointer.motion(
             self,
@@ -529,17 +608,27 @@ impl ServerState {
         );
         match state {
             ButtonState::Pressed => {
-                if self.pressed_pointer_buttons.is_empty() && !pointer_was_grabbed {
-                    self.ordinary_implicit_grab = Some(OrdinaryImplicitGrab {
-                        owner: target.map(|target| target.surface),
-                    });
+                if input_seat.pressed_pointer_buttons.borrow_mut().is_empty()
+                    && !pointer_was_grabbed
+                {
+                    input_seat
+                        .ordinary_implicit_grab
+                        .set(Some(OrdinaryImplicitGrab {
+                            owner: target.map(|target| target.surface),
+                        }));
                 }
-                self.pressed_pointer_buttons.insert(button);
+                input_seat
+                    .pressed_pointer_buttons
+                    .borrow_mut()
+                    .insert(button);
             }
             ButtonState::Released => {
-                self.pressed_pointer_buttons.remove(&button);
-                if self.pressed_pointer_buttons.is_empty() {
-                    self.ordinary_implicit_grab = None;
+                input_seat
+                    .pressed_pointer_buttons
+                    .borrow_mut()
+                    .remove(&button);
+                if input_seat.pressed_pointer_buttons.borrow_mut().is_empty() {
+                    input_seat.ordinary_implicit_grab.set(None);
                 }
             }
         }
@@ -558,32 +647,48 @@ impl ServerState {
             time, button, ?state,
             current_surface = ?pointer.current_focus().map(|surface| surface.id()),
             grabbed = pointer.is_grabbed(),
-            pressed_buttons = ?self.pressed_pointer_buttons,
+            pressed_buttons = ?input_seat.pressed_pointer_buttons.borrow_mut(),
             "source pointer button after delivery"
         );
-        self.set_shell_cursor_ownership(shell_owns_cursor);
-        self.retry_pending_focus(pointer.is_grabbed());
+        self.set_shell_cursor_ownership(input_seat, shell_owns_cursor);
+        self.retry_pending_focus(input_seat, pointer.is_grabbed());
     }
 
-    fn apply_pointer_axis(&mut self, axis: RawScrollFrame, time: u32) {
+    fn apply_pointer_axis(&mut self, input_seat: &InputSeat, axis: RawScrollFrame, time: u32) {
         trace!(?axis, "delivering pointer axis to Smithay's current focus");
-        let Some(pointer) = self.seat.get_pointer() else {
+        let Some(pointer) = input_seat.native.get_pointer() else {
             warn!("ignored pointer axis because the seat has no pointer");
             return;
         };
         let Some(frame) = smithay_axis_frame(axis, time) else {
             return;
         };
+        if axis.source == RawScrollSource::Finger {
+            input_seat.finger_scroll.set(!matches!(
+                axis.phase,
+                crate::input::RawScrollPhase::Ended | crate::input::RawScrollPhase::Cancelled
+            ));
+        }
         pointer.axis(self, frame);
         pointer.frame(self);
-        self.retry_pending_focus(pointer.is_grabbed());
+        self.retry_pending_focus(input_seat, pointer.is_grabbed());
     }
 
-    fn apply_pointer_gesture(&mut self, gesture: PointerGesture, time: u32) {
-        let Some(pointer) = self.seat.get_pointer() else {
+    fn apply_pointer_gesture(
+        &mut self,
+        input_seat: &InputSeat,
+        gesture: PointerGesture,
+        time: u32,
+    ) {
+        let Some(pointer) = input_seat.native.get_pointer() else {
             warn!("ignored touchpad gesture because the seat has no pointer");
             return;
         };
+        if gesture.is_begin() {
+            input_seat.active_gesture.set(Some(gesture.kind()));
+        } else if gesture.is_end() {
+            input_seat.active_gesture.set(None);
+        }
         match gesture {
             PointerGesture::Swipe(TouchpadSwipe::Begin { fingers }) => {
                 pointer.gesture_swipe_begin(
@@ -708,15 +813,42 @@ impl ServerState {
     }
 
     pub(super) fn release_host_input(&mut self, time: u32) {
-        self.keyboard_repeats.clear();
-        // Ordinary focus clearing is intentionally ignored by active popup
-        // grabs. End the protocol grab first so losing nested host focus cannot
-        // leave a client menu open and holding Weld's seat.
-        self.dismiss_popup_grab(time);
-        self.ordinary_implicit_grab = None;
+        self.release_controller_input(None, time);
+    }
+
+    pub(super) fn release_seat_input(&mut self, input_seat: &InputSeat, time: u32) {
+        self.clear_selection_focus(&input_seat.native);
+        input_seat.keyboard_repeats.borrow_mut().clear();
+        self.dismiss_popup_grab(input_seat, time);
+        self.release_seat_pointer(input_seat, time);
         let serial = SERIAL_COUNTER.next_serial();
-        if let Some(pointer) = self.seat.get_pointer() {
-            for button in std::mem::take(&mut self.pressed_pointer_buttons) {
+        if let Some(keyboard) = input_seat.native.get_keyboard() {
+            keyboard.release_source(self, KeyboardSource::MAIN);
+            keyboard.set_focus(self, None, serial);
+        }
+        transition_pending_focus(
+            &mut input_seat.pending_focus.borrow_mut(),
+            false,
+            FocusTransition::HostFocusLost,
+        );
+    }
+
+    fn release_seat_pointer(&mut self, input_seat: &InputSeat, time: u32) {
+        if let Some(gesture) = input_seat.active_gesture.take() {
+            self.apply_pointer_gesture(input_seat, gesture.cancelled(), time);
+        }
+        if input_seat.finger_scroll.replace(false) {
+            self.apply_pointer_axis(
+                input_seat,
+                RawScrollFrame::cancelled_finger(true, true),
+                time,
+            );
+        }
+        input_seat.ordinary_implicit_grab.set(None);
+        let serial = SERIAL_COUNTER.next_serial();
+        if let Some(pointer) = input_seat.native.get_pointer() {
+            let buttons = std::mem::take(&mut *input_seat.pressed_pointer_buttons.borrow_mut());
+            for button in buttons {
                 pointer.button(
                     self,
                     &ButtonEvent {
@@ -731,63 +863,120 @@ impl ServerState {
                 self,
                 None,
                 &MotionEvent {
-                    location: compositor_point(self.pointer_position),
+                    location: compositor_point(input_seat.pointer_position.get()),
                     serial,
                     time: InputTime::from_millis(time),
                 },
             );
             pointer.frame(self);
         } else {
-            self.pressed_pointer_buttons.clear();
+            input_seat.pressed_pointer_buttons.borrow_mut().clear();
             warn!("could not release host pointer state because the seat has no pointer");
         }
-
-        if let Some(keyboard) = self.seat.get_keyboard() {
-            keyboard.release_source(self, KeyboardSource::MAIN);
-            keyboard.set_focus(self, None, serial);
-        }
-        transition_pending_focus(
-            &mut self.pending_focus,
-            false,
-            FocusTransition::HostFocusLost,
-        );
     }
 
-    fn retry_pending_focus(&mut self, grabbed: bool) {
+    fn retry_pending_focus(&mut self, input_seat: &InputSeat, grabbed: bool) {
         let Some(requested) = transition_pending_focus(
-            &mut self.pending_focus,
+            &mut input_seat.pending_focus.borrow_mut(),
             grabbed,
             FocusTransition::PointerDelivered,
         ) else {
             return;
         };
-        self.focus_toplevel(requested);
+        self.focus_seat(input_seat, requested);
+    }
+
+    pub(super) fn retire_input_target(&mut self, surface: SurfaceId, time: u32) {
+        let inputs = self.input_seats().cloned().collect::<Vec<_>>();
+        for input in inputs {
+            input.admission.borrow_mut().retire_surface(surface);
+            if input.desired_focus.get() == Some(surface) {
+                input.desired_focus.set(None);
+            }
+            if input.focused_toplevel.get() == Some(surface) {
+                self.release_seat_input(&input, time);
+                self.focus_seat(&input, None);
+            } else {
+                let keys = input.keyboard_repeats.borrow().keys_for_surface(surface);
+                for key in keys {
+                    self.apply_keyboard_input(
+                        &input,
+                        surface,
+                        key,
+                        KeyboardKeyState::Released,
+                        time,
+                    );
+                }
+                if input
+                    .ordinary_implicit_grab
+                    .get()
+                    .is_some_and(|grab| grab.owner == Some(surface))
+                {
+                    self.release_seat_pointer(&input, time);
+                }
+            }
+        }
     }
 
     pub(super) fn clear_input_focus_for_surface(&mut self, surface: &WlSurface, time: u32) {
-        let serial = SERIAL_COUNTER.next_serial();
-        if let Some(pointer) = self.seat.get_pointer()
-            && pointer.current_focus().as_ref() == Some(surface)
+        if let Some(id) = self
+            .toplevels
+            .id_for_surface(surface)
+            .or_else(|| self.popups.id_for_surface(surface))
+            .or_else(|| self.layers.id_for_surface(surface))
         {
-            pointer.motion(
-                self,
-                None,
-                &MotionEvent {
-                    location: compositor_point(self.pointer_position),
-                    serial,
-                    time: InputTime::from_millis(time),
-                },
-            );
-            pointer.frame(self);
+            self.retire_input_target(id, time);
         }
-        if let Some(keyboard) = self.seat.get_keyboard()
-            && keyboard
-                .current_focus()
-                .and_then(|focus| focus.wl_surface().map(Cow::into_owned))
-                .as_ref()
-                == Some(surface)
-        {
-            keyboard.set_focus(self, None, serial);
+        for input in self.input_seats().cloned().collect::<Vec<_>>() {
+            self.clear_seat_focus_for_surface(&input, surface, time);
+        }
+    }
+
+    pub(super) fn clear_seat_pointer(&mut self, input_seat: &InputSeat, time: u32) {
+        self.apply_pointer_motion(
+            input_seat,
+            input_seat.pointer_position.get(),
+            None,
+            None,
+            time,
+        );
+    }
+
+    fn clear_seat_focus_for_surface(
+        &mut self,
+        input_seat: &InputSeat,
+        surface: &WlSurface,
+        time: u32,
+    ) {
+        let pointer_matches = input_seat
+            .native
+            .get_pointer()
+            .and_then(|pointer| pointer.current_focus())
+            .as_ref()
+            == Some(surface);
+        let keyboard_matches = input_seat
+            .native
+            .get_keyboard()
+            .and_then(|keyboard| keyboard.current_focus())
+            .and_then(|focus| focus.wl_surface().map(Cow::into_owned))
+            .as_ref()
+            == Some(surface);
+        if pointer_matches {
+            self.release_seat_pointer(input_seat, time);
+        }
+        let popup_ended = input_seat
+            .popup_grab
+            .borrow()
+            .as_ref()
+            .is_some_and(|grab| grab.has_ended());
+        if popup_ended {
+            self.dismiss_popup_grab(input_seat, time);
+        }
+        if keyboard_matches {
+            self.clear_selection_focus(&input_seat.native);
+            if let Some(keyboard) = input_seat.native.get_keyboard() {
+                keyboard.set_focus(self, None, SERIAL_COUNTER.next_serial());
+            }
         }
     }
 }
@@ -999,17 +1188,40 @@ impl SeatHandler for ServerState {
         &mut self.seat_state
     }
 
+    fn bind_seat(
+        &mut self,
+        client: &smithay::reexports::wayland_server::Client,
+        seat: Seat<Self>,
+    ) -> Seat<Self> {
+        self.bind_input_seat(client, &seat).unwrap_or(seat)
+    }
+
     fn focus_changed(&mut self, seat: &Seat<Self>, focused: Option<&KeyboardFocus>) {
-        self.keyboard_repeats.focus_changed();
-        self.keyboard_diagnostic_dirty = true;
+        let Some(input_seat) = self.input_for_native(seat) else {
+            return;
+        };
+        input_seat.keyboard_repeats.borrow_mut().focus_changed();
+        input_seat.keyboard_diagnostic_dirty.set(true);
         let client = focused
             .and_then(|focus| focus.wl_surface())
             .and_then(|surface| self.display_handle.get_client(surface.id()).ok());
-        set_data_device_focus(&self.display_handle, seat, client);
+        let selection_seat = self.data_device_seat(seat);
+        selection_seat
+            .user_data()
+            .insert_if_missing(|| super::seat_bindings::SelectionFocus(RefCell::default()));
+        if let Some(owner) = selection_seat
+            .user_data()
+            .get::<super::seat_bindings::SelectionFocus>()
+        {
+            *owner.0.borrow_mut() = Some(seat.downgrade());
+        }
+        set_data_device_focus(&self.display_handle, &selection_seat, client);
     }
 
-    fn cursor_image(&mut self, _seat: &Seat<Self>, image: CursorImageStatus) {
-        self.set_client_cursor_image(image);
+    fn cursor_image(&mut self, seat: &Seat<Self>, image: CursorImageStatus) {
+        if let Some(input) = self.input_for_native(seat) {
+            self.set_client_cursor_image(&input, image);
+        }
     }
 }
 
@@ -1022,6 +1234,13 @@ impl SelectionHandler for ServerState {
 }
 
 impl DataDeviceHandler for ServerState {
+    fn data_device_seat(&self, seat: &Seat<Self>) -> Seat<Self> {
+        seat.user_data()
+            .get::<super::seat_bindings::SelectionGroup>()
+            .map(|group| group.0.borrow().clone())
+            .unwrap_or_else(|| seat.clone())
+    }
+
     fn data_device_state(&mut self) -> &mut DataDeviceState {
         &mut self.data_device_state
     }

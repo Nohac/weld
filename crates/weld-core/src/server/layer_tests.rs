@@ -260,7 +260,12 @@ fn panel_reservation_launcher_focus_and_remap_follow_protocol_lifecycle() {
     f.server.focus_toplevel(Some(id));
     assert_eq!(
         f.server
-            .seat
+            .local_input
+            .keyboard_binding
+            .borrow()
+            .as_ref()
+            .expect("local binding")
+            .native
             .get_keyboard()
             .expect("keyboard")
             .current_focus(),
@@ -285,7 +290,8 @@ fn panel_reservation_launcher_focus_and_remap_follow_protocol_lifecycle() {
     f.sync();
     assert_eq!(
         f.server
-            .seat
+            .local_input
+            .native
             .get_keyboard()
             .expect("keyboard")
             .current_focus(),

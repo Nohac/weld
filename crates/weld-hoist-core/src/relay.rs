@@ -168,6 +168,7 @@ pub struct SourceRelayAdapter {
     admission: SourceAdmission,
     next_session: Option<u64>,
     admission_started: bool,
+    input_started: bool,
     presentations: HashMap<ClientSurfaceId, ClientPresentationClaim>,
     presentation_updates: Vec<ClientPresentationUpdate>,
 }
@@ -220,6 +221,7 @@ impl SourceRelayAdapter {
             admission,
             next_session: Some(1),
             admission_started: false,
+            input_started: false,
             presentations: HashMap::new(),
             presentation_updates: Vec::new(),
         }
@@ -571,6 +573,12 @@ impl SourceRelayAdapter {
             }
         };
         if self.port.ready() {
+            if !self.input_started {
+                self.input_started = true;
+                self.effects.push(ClientAdapterEffect::InputConnected {
+                    source: self.upstream_source,
+                });
+            }
             let status = self.gamepad.advertise();
             self.gamepad_status(status);
             if self.failed {
@@ -753,6 +761,9 @@ impl SourceRelayAdapter {
             self.remote_input
                 .release_effects(self.upstream_source, |_| true),
         );
+        self.effects.push(ClientAdapterEffect::InputDisconnected {
+            source: self.upstream_source,
+        });
         self.effects
             .extend(self.mappings.keys().copied().map(|surface| {
                 ClientAdapterEffect::Request(ClientRequest::Surface(
@@ -865,6 +876,9 @@ impl SourceRelayAdapter {
 }
 
 impl ClientAdapter for SourceRelayAdapter {
+    fn input_source(&self) -> Option<ClientSourceId> {
+        Some(self.upstream_source)
+    }
     fn next_deadline(&self) -> Option<Instant> {
         if self.failed {
             None
@@ -1327,6 +1341,8 @@ impl ClientAdapter for DestinationRelayAdapter {
                 break;
             }
             match effect {
+                ClientAdapterEffect::InputDisconnected { .. }
+                | ClientAdapterEffect::InputConnected { .. } => {}
                 ClientAdapterEffect::Input(input) => self.apply_input(input),
                 ClientAdapterEffect::Request(request) => {
                     // apply_request needs the previous destination to route a
@@ -1771,7 +1787,12 @@ mod tests {
                 ..Default::default()
             }
         })));
-        assert!(source.effects.is_empty());
+        assert_eq!(
+            source.effects,
+            [ClientAdapterEffect::InputConnected {
+                source: ClientSourceId::new(1)
+            }]
+        );
         assert_eq!(
             state.borrow().accepted,
             0,
@@ -2872,6 +2893,9 @@ mod tests {
         assert_eq!(
             effects,
             vec![
+                ClientAdapterEffect::InputConnected {
+                    source: surface.source()
+                },
                 ClientAdapterEffect::Request(request),
                 ClientAdapterEffect::Input(input),
             ]
@@ -2927,7 +2951,12 @@ mod tests {
 
         assert!(!state.borrow().disconnected);
         assert_eq!(state.borrow().accepted, 0);
-        assert!(effects.is_empty());
+        assert_eq!(
+            effects,
+            [ClientAdapterEffect::InputConnected {
+                source: surface.source()
+            }]
+        );
     }
 
     #[test]

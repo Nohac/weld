@@ -101,6 +101,7 @@ pub fn desktop_source_registration(
                 endpoints: endpoints.clone(),
                 budget,
                 factory: Box::new(factory),
+                pending_effects: Vec::new(),
             },
             ControlOnlyClientImporter,
         ),
@@ -121,8 +122,12 @@ struct DesktopAdapter {
     endpoints: DesktopEndpoints,
     budget: SharedBitrateBudget,
     factory: Box<dyn Fn(VideoCodec) -> Result<Box<dyn EncodeBackend>>>,
+    pending_effects: Vec<ClientAdapterEffect>,
 }
 impl ClientAdapter for DesktopAdapter {
+    fn input_source(&self) -> Option<ClientSourceId> {
+        self.inventory.input_source()
+    }
     fn next_deadline(&self) -> Option<Instant> {
         self.relays
             .values()
@@ -227,9 +232,14 @@ impl ClientAdapter for DesktopAdapter {
         self.relays
             .retain(|_, active| active.peer.is_available() || !active.effects_drained);
     }
-    fn drain_effects(&mut self, effects: &mut Vec<ClientAdapterEffect>) {
-        for active in self.relays.values_mut() {
-            active.relay.drain_effects(effects);
+    fn drain_controller_effects(&mut self, effects: &mut Vec<(u64, ClientAdapterEffect)>) {
+        for (session, active) in &mut self.relays {
+            active.relay.drain_effects(&mut self.pending_effects);
+            effects.extend(
+                self.pending_effects
+                    .drain(..)
+                    .map(|effect| (session.0, effect)),
+            );
             active.effects_drained = true;
         }
         // Failure releases and presentation withdrawals drain before retirement.

@@ -1067,10 +1067,13 @@ impl ServerState {
             return;
         };
         self.forget_presentation(id);
+        self.retire_input_target(id, self.event_time());
         self.clear_input_focus_for_surface(wl_surface, self.event_time());
         self.leave_all_outputs(wl_surface);
-        if self.focused_toplevel == Some(id) {
-            self.focused_toplevel = None;
+        for input in self.input_seats() {
+            if input.focused_toplevel.get() == Some(id) {
+                input.focused_toplevel.set(None);
+            }
         }
         self.pending_resizes.discard(id);
         self.pending_surface_events.push_back(PendingSurfaceEvent {

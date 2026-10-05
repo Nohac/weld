@@ -23,10 +23,14 @@ impl ServerState {
         if self.pending_keymap.is_none() || self.keyboard_mapper.has_pressed_keys() {
             return Ok(());
         }
-        let Some(keyboard) = self.seat.get_keyboard() else {
-            return Ok(());
-        };
-        if !keyboard.pressed_keys().is_empty() {
+        let keyboards = self
+            .input_seats()
+            .filter_map(|input| input.native.get_keyboard())
+            .collect::<Vec<_>>();
+        if keyboards
+            .iter()
+            .any(|keyboard| !keyboard.pressed_keys().is_empty())
+        {
             return Ok(());
         }
         let Some(keymap) = self.pending_keymap.as_ref() else {
@@ -36,7 +40,10 @@ impl ServerState {
         // releases use the same map as their presses. Both interpreters switch
         // between input batches, after the new map has compiled successfully.
         let mapper = KeyboardMapper::new(keymap.clone())?;
-        keyboard.set_keymap_from_string(self, keymap.as_str().to_owned())?;
+        let keymap_text = keymap.as_str().to_owned();
+        for keyboard in keyboards {
+            keyboard.set_keymap_from_string(self, keymap_text.clone())?;
+        }
         self.keyboard_mapper = mapper;
         self.pending_keymap = None;
         tracing::info!("applied keyboard keymap");
@@ -119,7 +126,7 @@ mod tests {
                 legacy_repeat: LegacyKeyRepeat::Disabled,
             }))
             .expect("settings");
-        let keyboard = server.seat.get_keyboard().expect("keyboard");
+        let keyboard = server.local_input.native.get_keyboard().expect("keyboard");
         let event = |state| {
             RawSeatEvent::new(
                 RawSeatEventKind::Keyboard {

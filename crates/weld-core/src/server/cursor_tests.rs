@@ -40,7 +40,7 @@ fn cursor_frames_complete_across_focus_changes_without_window_presentation() {
         )
         .expect("other cursor");
     give_role(&other_native_cursor, CURSOR_IMAGE_ROLE).expect("other cursor role");
-    let pointer = f.server.seat.get_pointer().expect("pointer");
+    let pointer = f.server.local_input.native.get_pointer().expect("pointer");
     pointer.motion(
         &mut f.server,
         Some((native_root.clone(), (0.0, 0.0).into())),
@@ -50,9 +50,12 @@ fn cursor_frames_complete_across_focus_changes_without_window_presentation() {
             time: InputTime::from_millis(1),
         },
     );
-    f.server.set_shell_cursor_ownership(false);
     f.server
-        .set_client_cursor_image(CursorImageStatus::Surface(native_cursor));
+        .set_shell_cursor_ownership(&f.server.local_input.clone(), false);
+    f.server.set_client_cursor_image(
+        &f.server.local_input.clone(),
+        CursorImageStatus::Surface(native_cursor),
+    );
     for expected in 1..=4 {
         if expected == 2 || expected == 3 {
             let entering = expected == 3;
@@ -65,10 +68,13 @@ fn cursor_frames_complete_across_focus_changes_without_window_presentation() {
                     time: InputTime::from_millis(expected),
                 },
             );
-            f.server.set_shell_cursor_ownership(!entering);
-        } else if expected == 4 {
             f.server
-                .set_client_cursor_image(CursorImageStatus::Surface(other_native_cursor.clone()));
+                .set_shell_cursor_ownership(&f.server.local_input.clone(), !entering);
+        } else if expected == 4 {
+            f.server.set_client_cursor_image(
+                &f.server.local_input.clone(),
+                CursorImageStatus::Surface(other_native_cursor.clone()),
+            );
         }
         cursor.attach(Some(&f.buffer()), 0, 0);
         cursor.frame(&f.queue.handle(), true);

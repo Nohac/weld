@@ -240,6 +240,7 @@ impl WlrLayerShellHandler for ServerState {
             layer_map_for_output(&output).unmap_layer(&layer.surface);
         }
         self.forget_presentation(id);
+        self.retire_input_target(id, self.event_time());
         self.clear_input_focus_for_surface(surface.wl_surface(), self.event_time());
         self.pending_surface_events.push_back(PendingSurfaceEvent {
             surface: id,

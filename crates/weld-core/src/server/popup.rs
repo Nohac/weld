@@ -186,6 +186,7 @@ impl ServerState {
             return;
         };
         self.forget_presentation(id);
+        self.retire_input_target(id, self.event_time());
         self.clear_input_focus_for_surface(wl_surface, self.event_time());
         self.leave_all_outputs(wl_surface);
         self.presentation_requested = true;
@@ -254,10 +255,9 @@ impl ServerState {
             warn!("ignored an xdg-popup grab from an unknown seat");
             return;
         };
-        if seat != self.seat {
-            warn!("ignored an xdg-popup grab from a different seat");
+        let Some(input_seat) = self.input_for_native(&seat) else {
             return;
-        }
+        };
 
         let kind = PopupKind::Xdg(surface);
         let Ok(root) = find_popup_root_surface(&kind) else {
@@ -303,18 +303,23 @@ impl ServerState {
         if let Some(pointer) = pointer {
             pointer.set_grab(self, PopupPointerGrab::new(&grab), serial, Focus::Keep);
         }
-        self.ordinary_implicit_grab = None;
-        self.popup_grab = Some(grab);
+        input_seat.ordinary_implicit_grab.set(None);
+        *input_seat.popup_grab.borrow_mut() = Some(grab);
     }
 
     /// End only our popup grabs. Callers clear keyboard focus immediately after
     /// this, including the keyboard-only case where there is no pointer cascade.
-    pub(super) fn dismiss_popup_grab(&mut self, time: u32) {
-        if let Some(mut grab) = self.popup_grab.take() {
+    pub(super) fn dismiss_popup_grab(
+        &mut self,
+        input_seat: &super::input_seat::InputSeat,
+        time: u32,
+    ) {
+        let grab = input_seat.popup_grab.borrow_mut().take();
+        if let Some(mut grab) = grab {
             let serial = grab.serial();
             let previous_serial = grab.previous_serial();
             grab.ungrab(PopupUngrabStrategy::All);
-            if let Some(pointer) = self.seat.get_pointer()
+            if let Some(pointer) = input_seat.native.get_pointer()
                 && popup_grab_matches(serial, previous_serial, |serial| pointer.has_grab(serial))
             {
                 pointer.unset_grab(
@@ -323,7 +328,7 @@ impl ServerState {
                     InputTime::from_millis(time),
                 );
             }
-            if let Some(keyboard) = self.seat.get_keyboard()
+            if let Some(keyboard) = input_seat.native.get_keyboard()
                 && popup_grab_matches(serial, previous_serial, |serial| keyboard.has_grab(serial))
             {
                 keyboard.unset_grab(self);

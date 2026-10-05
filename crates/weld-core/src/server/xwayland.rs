@@ -246,9 +246,18 @@ impl ServerState {
         let known_owner = match window.published_role {
             Some(ClientSurfaceRole::Popup(popup)) => Some(popup.owner),
             _ => self
-                .seat
-                .get_pointer()
-                .and_then(|pointer| pointer.current_focus())
+                .input_seats()
+                .filter_map(|input| {
+                    input
+                        .native
+                        .get_pointer()
+                        .and_then(|pointer| pointer.current_focus())
+                })
+                .find(|surface| {
+                    self.toplevels
+                        .id_for_surface(&super::surface_tree::owning_root(surface))
+                        .is_some_and(|id| id.client() == window.client)
+                })
                 .and_then(|surface| {
                     self.toplevels
                         .id_for_surface(&super::surface_tree::owning_root(&surface))
@@ -267,7 +276,11 @@ impl ServerState {
                         _ => None,
                     }
                 })
-                .or(self.focused_toplevel),
+                .or_else(|| {
+                    self.input_seats()
+                        .filter_map(|input| input.focused_toplevel.get())
+                        .find(|id| id.client() == window.client)
+                }),
         };
         let mut parent_id = window.native.is_transient_for().or_else(|| {
             window

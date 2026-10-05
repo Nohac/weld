@@ -2,6 +2,10 @@
 
 #[path = "cursor_tests.rs"]
 mod cursor_tests;
+#[path = "input_binding_tests.rs"]
+mod input_binding_tests;
+#[path = "input_seat_tests.rs"]
+mod input_seat_tests;
 #[path = "layer_tests.rs"]
 mod layer_tests;
 #[path = "workspace_tests.rs"]
@@ -51,6 +55,8 @@ struct ObservedSurface {
 
 #[derive(Default)]
 struct Observer {
+    input: input_seat_tests::Probe,
+    selection: input_binding_tests::SelectionProbe,
     workspaces: workspace_tests::Probe,
     layers: Option<
         wayland_protocols_wlr::layer_shell::v1::client::zwlr_layer_shell_v1::ZwlrLayerShellV1,
@@ -85,6 +91,22 @@ impl Dispatch<wl_registry::WlRegistry, ()> for Observer {
         } = event
         {
             match interface.as_str() {
+                "wl_data_device_manager" => {
+                    state.selection.manager = Some(registry.bind(name, version.min(3), qh, ()));
+                }
+                "wl_seat" => {
+                    if state.input.first_only {
+                        state.input.deferred.push((registry.clone(), name, version));
+                        return;
+                    }
+                    let seat = registry.bind::<wayland_client::protocol::wl_seat::WlSeat, _, _>(
+                        name,
+                        version.min(10),
+                        qh,
+                        name,
+                    );
+                    state.selection.seats.push(seat);
+                }
                 "ext_workspace_manager_v1" => {
                     state.workspaces.manager = Some(registry.bind(name, 1, qh, ()));
                 }

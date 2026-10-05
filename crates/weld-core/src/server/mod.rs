@@ -3,6 +3,8 @@
 mod adapter;
 mod cursor;
 mod dmabuf;
+mod input_admission;
+mod input_seat;
 mod keyboard;
 mod keyboard_focus;
 mod layer;
@@ -13,6 +15,7 @@ mod popup;
 mod presentation;
 mod resize;
 mod seat;
+mod seat_bindings;
 mod shm;
 mod surface_tree;
 mod toplevel;
@@ -30,8 +33,9 @@ pub use surface_tree::{
 };
 
 use std::{
-    collections::{HashMap, HashSet, VecDeque},
+    collections::{HashMap, VecDeque},
     ffi::OsString,
+    rc::Rc,
     sync::Arc,
     time::Instant,
 };
@@ -39,8 +43,8 @@ use std::{
 use anyhow::{Context, Result, bail};
 use smithay::{
     backend::allocator::dmabuf::DmabufSource,
-    desktop::{PopupGrab, PopupManager},
-    input::{Seat, SeatState, pointer::CursorImageStatus},
+    desktop::PopupManager,
+    input::SeatState,
     output::Output,
     reexports::{
         calloop::{
@@ -77,15 +81,15 @@ use weld_client::{
 use crate::{
     OutputId,
     dmabuf::{DmabufCapabilities, DmabufEvent, DmabufReleaseId, DmabufSourceCache},
-    input::{InputPosition, KeyboardRepeatMode, KeyboardRepeatTracker, LegacyKeyRepeat},
+    input::{KeyboardRepeatMode, LegacyKeyRepeat},
     surface::{SurfaceId, WindowInteractionRequestKind},
 };
 use cursor::CursorSurfaceStore;
 use dmabuf::{DmabufProtocol, DmabufReleaseStore};
+use input_seat::InputSeat;
 use output::install_output_metrics;
 use popup::PopupStore;
 use resize::{PendingResize, PendingResizeRequests};
-use seat::OrdinaryImplicitGrab;
 use toplevel::ToplevelStore;
 
 // Keep this stable name in sync with scripts/run-app.
@@ -115,7 +119,9 @@ pub struct ServerState {
     _output_manager_state: OutputManagerState,
     seat_state: SeatState<Self>,
     data_device_state: DataDeviceState,
-    seat: Seat<Self>,
+    local_input: Rc<InputSeat>,
+    remote_inputs: HashMap<weld_client::ClientInputController, Rc<InputSeat>>,
+    input_bindings: Vec<seat_bindings::InputBinding>,
     keyboard_mapper: crate::input::KeyboardMapper,
     pending_keymap: Option<crate::input::KeyboardKeymap>,
     default_keymap: crate::input::KeyboardKeymap,
@@ -125,13 +131,8 @@ pub struct ServerState {
     toplevels: ToplevelStore,
     popups: PopupStore,
     popup_manager: PopupManager,
-    popup_grab: Option<PopupGrab<Self>>,
-    focused_toplevel: Option<SurfaceId>,
     keyboard_repeat_mode: KeyboardRepeatMode,
     legacy_key_repeat: LegacyKeyRepeat,
-    keyboard_repeats: KeyboardRepeatTracker,
-    keyboard_diagnostic_dirty: bool,
-    pending_focus: Option<Option<SurfaceId>>,
     pending_resizes: PendingResizeRequests,
     pending_surface_events: WaylandClientBridge,
     presentation_requested: bool,
@@ -142,16 +143,8 @@ pub struct ServerState {
     next_surface_id: Option<u64>,
     next_client_id: Option<u64>,
     started_at: Instant,
-    pointer_position: InputPosition,
-    ordinary_implicit_grab: Option<OrdinaryImplicitGrab>,
-    // This mirrors delivered presses only so host focus loss can synthesize
-    // matching releases; ECS pointer routing remains the policy authority.
-    pressed_pointer_buttons: HashSet<u32>,
-    cursor_status: CursorImageStatus,
     shell_cursor: crate::cursor::CursorAppearance,
-    shell_owns_cursor: bool,
     cursor_surfaces: CursorSurfaceStore,
-    cursor_feedback_dirty: bool,
     presented_cursor: Option<crate::cursor::CursorImage>,
     shell_cursor_override: bool,
     dmabuf_blocker_installer: Option<Box<dyn Fn(DmabufSource, Client) -> bool>>,
@@ -367,7 +360,9 @@ impl ServerState {
             _output_manager_state: output_manager_state,
             seat_state,
             data_device_state,
-            seat,
+            local_input: InputSeat::new(seat, None),
+            remote_inputs: HashMap::new(),
+            input_bindings: Vec::new(),
             keyboard_mapper,
             pending_keymap: None,
             default_keymap,
@@ -377,13 +372,8 @@ impl ServerState {
             toplevels: ToplevelStore::default(),
             popups: PopupStore::default(),
             popup_manager: PopupManager::default(),
-            popup_grab: None,
-            focused_toplevel: None,
             keyboard_repeat_mode,
             legacy_key_repeat: LegacyKeyRepeat::default(),
-            keyboard_repeats: KeyboardRepeatTracker::default(),
-            keyboard_diagnostic_dirty: true,
-            pending_focus: None,
             pending_resizes: PendingResizeRequests::default(),
             pending_surface_events: client_bridge,
             presentation_requested: false,
@@ -394,21 +384,15 @@ impl ServerState {
             next_surface_id: Some(1),
             next_client_id: Some(1),
             started_at,
-            pointer_position: InputPosition::default(),
-            ordinary_implicit_grab: None,
-            pressed_pointer_buttons: HashSet::new(),
-            cursor_status: CursorImageStatus::default_named(),
             shell_cursor: crate::cursor::CursorAppearance::default(),
-            shell_owns_cursor: true,
             cursor_surfaces: CursorSurfaceStore::default(),
-            cursor_feedback_dirty: true,
             presented_cursor: None,
             shell_cursor_override: false,
             dmabuf_blocker_installer,
             syncobj_blocker_installer,
         };
         state.configure_keyboard_repeat();
-        if let Some(keyboard) = state.seat.get_keyboard() {
+        if let Some(keyboard) = state.local_input.native.get_keyboard() {
             let keymap = state.default_keymap.as_str().to_owned();
             keyboard.set_keymap_from_string(&mut state, keymap)?;
         }
@@ -483,9 +467,21 @@ impl ServerState {
     }
 
     pub fn flush_clients(&mut self) {
+        self.cleanup_input_bindings();
         self.popup_manager.cleanup();
-        if self.popup_grab.as_ref().is_some_and(PopupGrab::has_ended) {
-            self.popup_grab = None;
+        let ended = self
+            .input_seats()
+            .filter(|input| {
+                input
+                    .popup_grab
+                    .borrow()
+                    .as_ref()
+                    .is_some_and(|grab| grab.has_ended())
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        for input in ended {
+            self.dismiss_popup_grab(&input, self.event_time());
         }
         self.flush_protocol_events();
     }
@@ -500,6 +496,16 @@ impl ServerState {
     pub(crate) fn apply_pending_client_work(&mut self) {
         while let Some(work) = self.pending_surface_events.pop_work() {
             match work {
+                WaylandClientWork::RemoteInput(controller, event) => {
+                    self.remote_client_input(controller, event)
+                }
+                WaylandClientWork::RemoteFocus(controller, focus) => {
+                    self.remote_client_focus(controller, focus)
+                }
+                WaylandClientWork::RetireInput(controller) => self.retire_remote_seat(controller),
+                WaylandClientWork::ConnectInput(controller) => {
+                    self.remote_input(controller);
+                }
                 WaylandClientWork::Request(request) => self.apply_client_request(request),
                 WaylandClientWork::Input(event) => self.apply_client_input(event),
                 WaylandClientWork::HostFocusLost(time) => self.release_host_input(time),

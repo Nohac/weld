@@ -38,11 +38,11 @@ pub use id::{
     ClientSurfaceId, ControlOnlyClientImporter, PassthroughClientImporter, SurfaceLayerId,
 };
 pub use input::{
-    ButtonState, ClientInputEvent, ClientInputTarget, ClientKeyboardRoute, ClientPointerRoute,
-    ClientPointerRouteUpdate, InputDelta, InputEventKind, InputPosition, InputTransform,
-    KeyboardKeyState, LinuxButtonCode, LinuxKeycode, PointerGesture, PointerGestureKind,
-    RawScrollFrame, RawScrollPhase, RawScrollSource, RelativeMotion, RuntimeInputEvent,
-    RuntimeInputEventKind, TouchpadHold, TouchpadPinch, TouchpadSwipe,
+    ButtonState, ClientInputController, ClientInputEvent, ClientInputTarget, ClientKeyboardRoute,
+    ClientPointerRoute, ClientPointerRouteUpdate, InputDelta, InputEventKind, InputPosition,
+    InputTransform, KeyboardKeyState, LinuxButtonCode, LinuxKeycode, PointerGesture,
+    PointerGestureKind, RawScrollFrame, RawScrollPhase, RawScrollSource, RelativeMotion,
+    RuntimeInputEvent, RuntimeInputEventKind, TouchpadHold, TouchpadPinch, TouchpadSwipe,
 };
 pub use input_geometry::SurfaceInputGeometry;
 pub use metadata::{ClientSurfaceMetadata, MAX_SURFACE_LABEL_BYTES, SurfaceMetadataError};
