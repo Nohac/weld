@@ -256,6 +256,31 @@ identity, down/move/up/cancel and frame semantics. Shell navigation remains
 separate from application input and must consume its complete gesture once
 claimed; the current gesture-consumption gap is not resolved by this Direction.
 
+## First native-touch slice — Direction
+
+Start with phone-to-host application input through the shared client runtime and
+ordered hoist control path. Carry contact identity, down/move/up/cancel and frame
+boundaries; namespaces and bounded contact allocation belong to the controller.
+Resolve each contact's target at down and retain it until up or cancellation,
+including when motion leaves the original window. Reuse surface geometry and
+scale transforms so touch addresses the displayed content.
+
+The host selects native Wayland touch delivery when the application has bound
+the appropriate touch interface. Preserve a single-primary-contact pointer
+fallback for clients without that interface. Keep delivery mode and native
+context stable through the active interaction; never send both touch and
+emulated mouse presses for the same contact. Touch holds participate in seat
+ownership arbitration alongside keyboard, pointer and protocol grabs.
+
+Rotation or presentation replacement, shell navigation, suspension, target
+removal, reclaim and disconnect must cancel affected contacts. Queuing may
+coalesce compatible motion, but must preserve contact lifecycle and frame
+ordering. Shell-owned gestures consume their entire sequence.
+
+Validate contact routing, multiple fingers, cancellation and fallback with
+headless protocol clients before phone testing. Native text input/IME, automatic
+keyboard display and WM touch move/resize gestures remain separate slices.
+
 ## Open work — Exploration
 
 - Define the smallest transport-neutral view-set metadata and the corresponding

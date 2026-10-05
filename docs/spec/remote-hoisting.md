@@ -19,9 +19,10 @@ prevents an unresponsive client from trapping the source in that transition.
 
 This is a same-process loopback and deliberately has no serialization,
 networking, codec, peer identity, or authorization. It directly samples the
-source image rather than publishing a transport frame. Related independent
-xdg-toplevels are grouped by their client-declared parent chain. Existing and
-later mapped descendants join an active local family as independent
+source image rather than publishing a transport frame. Independent toplevels
+sharing a source client identity are grouped together, retaining declared
+parent relationships separately from same-client peer membership. Existing and
+later mapped members join an active local family as independent
 source/receiver pairs; popups and subsurfaces continue following their owning
 toplevel's surface tree. Reclaim from any member freezes admission, stages the
 captured members, and restores the family together. A member that leaves the
@@ -37,9 +38,10 @@ live members leaves that tombstone intact. A protocol unmap is not treated as
 destruction: it ends that member's hoist session and allows an eventual remap
 to use ordinary local presentation.
 
-This implemented relation is deliberately narrower than application or
-process inference. Unparented windows from the same executable or app ID do
-not automatically join. A newly mapped related dialog can be presented locally
+Grouping follows source client identity rather than matching executable names,
+app IDs or working directories. Unparented windows on one Wayland connection
+can therefore travel together, as with multiple Kitty OS windows. A newly mapped
+related dialog can be presented locally
 for one frame before window admission and follow-family policy observe it; that
 prototype transition remains to be tightened. A same-machine sibling-process
 native-buffer transport now exists as an architectural validation binding. It
@@ -48,6 +50,29 @@ pixels through sealed descriptors. An initial Iroh binding carries opaque
 encoded surfaces between sibling Weld processes. Complete pairing, dynamic
 peer admission, transient policy, and non-xdg family inference are not
 implemented.
+
+## Grouped catalogue targets — Direction
+
+The device catalogue should describe the unit the source will actually hoist.
+Today it lists individual managed windows, while selecting one can relocate
+other windows sharing its client identity. Presenting those entries as
+independent targets is misleading.
+
+Publish a source-authoritative target identity, application label, member window
+identities/titles, availability and current destination. A receiver can show
+"Kitty · 2 windows" as one selectable target, with expandable members and an
+initially selected member for presentation. Hoist and reclaim operate on the
+advertised group; membership changes update that group while it is visible.
+The source validates membership and authorization again when a request arrives.
+
+Preserve actual parent/dialog relationships independently of group membership.
+Shared client ownership does not imply that one window is another's child.
+Do not infer grouping from matching app IDs, executable names or working
+directories. Future per-window hoisting can expose smaller targets once source
+policy supports it; independent input controllers alone do not change admission.
+
+This catalogue/UI change is deferred. Current ownership and grouping details
+are recorded in [Architecture](../architecture.md).
 
 ## Hoisting layers and crate boundaries — Direction
 
