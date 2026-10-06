@@ -22,6 +22,7 @@ struct Arguments {
 }
 #[derive(Subcommand)]
 enum Command {
+    #[command(visible_aliases = ["diagnostic", "diag"])]
     Diagnostics {
         #[command(subcommand)]
         command: Diagnostics,
@@ -49,7 +50,8 @@ enum Devices {
 enum Diagnostics {
     List,
     Explain {
-        id: weld_diagnostics::SessionId,
+        /// Session to explain; defaults to the newest recorded session.
+        id: Option<weld_diagnostics::SessionId>,
         #[arg(long)]
         verbose: bool,
     },
@@ -100,11 +102,26 @@ fn main() -> Result<()> {
                 }
             }
             Diagnostics::Explain { id, verbose } => {
+                let id = match id {
+                    Some(id) => id,
+                    None => {
+                        let Response::DiagnosticSessions(sessions) =
+                            call(&path, &Request::DiagnosticSessions)?
+                        else {
+                            anyhow::bail!("unexpected diagnostics response");
+                        };
+                        sessions
+                            .last()
+                            .context("no diagnostic sessions recorded yet")?
+                            .0
+                    }
+                };
                 let Response::DiagnosticReport(bundle) =
                     call(&path, &Request::DiagnosticReport(id))?
                 else {
                     anyhow::bail!("unexpected diagnostics response");
                 };
+                println!("Session {id}");
                 print!("{}", weld_diagnostics::explain(&bundle).render(verbose));
             }
             Diagnostics::Export { id, output } => {

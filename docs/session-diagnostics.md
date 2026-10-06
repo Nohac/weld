@@ -14,6 +14,7 @@ automatically. Choose your actual Wayland session name:
 ```sh
 cargo build -p weldwm -p weld-control -j8
 weldctl --session weld-0 diagnostics list
+weldctl --session weld-0 diag explain
 weldctl --session weld-0 diagnostics explain SESSION_ID --verbose
 weldctl --session weld-0 diagnostics export SESSION_ID --output report.json
 weldctl diagnostics explain-file report.json --verbose
@@ -22,6 +23,8 @@ weldctl diagnostics explain-file report.json --verbose
 Exports create a new private file and refuse to overwrite an existing one.
 Offline explanation requires no running compositor. A session ID identifies
 one authenticated transport connection; several hoists can share that connection.
+Omitting the ID from `explain` selects the newest recorded session, whether
+active or ended, and prints its ID. `diagnostic` and `diag` alias `diagnostics`.
 
 ## Phone and peer evidence
 
