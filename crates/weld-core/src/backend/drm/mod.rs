@@ -16,7 +16,6 @@ mod output;
 mod presentation;
 mod renderer;
 mod schedule;
-mod vulkan;
 
 pub(crate) fn prepare(options: RunOptions, signals: Signals) -> Result<PreparedHost> {
     let bootstrap = device::prepare(&options)?;

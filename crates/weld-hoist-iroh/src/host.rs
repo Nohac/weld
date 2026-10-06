@@ -258,7 +258,7 @@ impl IrohHost {
     pub fn begin_device_session(
         &self,
         profile: IrohConnectionProfile,
-        codecs: Vec<VideoCodec>,
+        codecs: impl Into<crate::IrohReceiverPreferences>,
         notifier: IrohNotifier,
     ) -> Result<crate::pairing::PendingDeviceSession> {
         anyhow::ensure!(
@@ -272,7 +272,7 @@ impl IrohHost {
             .send(HostCommand::DeviceSession {
                 host: Arc::downgrade(&self.lifetime),
                 profile,
-                codecs,
+                codecs: codecs.into(),
                 notifier,
                 reply,
                 cancelled,
@@ -446,7 +446,7 @@ impl IrohHost {
     pub fn connect_destination(
         &self,
         ticket_path: impl AsRef<Path>,
-        supported_codecs: Vec<VideoCodec>,
+        supported_codecs: impl Into<crate::IrohReceiverPreferences>,
         notifier: IrohNotifier,
         startup_timeout: Duration,
     ) -> Result<IrohDestinationPeer> {
@@ -462,7 +462,7 @@ impl IrohHost {
             EndpointTicket::from_str(encoded.trim()).context("Iroh endpoint ticket is invalid")?;
         self.begin_connect_address(
             ConnectTarget::Address(ticket.endpoint_addr().clone()),
-            supported_codecs,
+            supported_codecs.into(),
             notifier,
             deadline,
         )?
@@ -474,7 +474,7 @@ impl IrohHost {
     pub fn begin_connect_profile(
         &self,
         profile: &IrohConnectionProfile,
-        supported_codecs: Vec<VideoCodec>,
+        supported_codecs: impl Into<crate::IrohReceiverPreferences>,
         notifier: IrohNotifier,
         startup_timeout: Duration,
     ) -> Result<PendingDestinationConnection> {
@@ -497,7 +497,7 @@ impl IrohHost {
             } else {
                 ConnectTarget::Address(profile.endpoint_addr()?)
             },
-            supported_codecs,
+            supported_codecs.into(),
             notifier,
             deadline,
         )
@@ -506,7 +506,7 @@ impl IrohHost {
     fn begin_connect_address(
         &self,
         address: ConnectTarget,
-        supported_codecs: Vec<VideoCodec>,
+        supported_codecs: crate::IrohReceiverPreferences,
         notifier: IrohNotifier,
         deadline: Instant,
     ) -> Result<PendingDestinationConnection> {
@@ -767,7 +767,7 @@ enum HostCommand {
     DeviceSession {
         host: Weak<HostLifetime>,
         profile: IrohConnectionProfile,
-        codecs: Vec<VideoCodec>,
+        codecs: crate::IrohReceiverPreferences,
         notifier: IrohNotifier,
         reply: oneshot::Sender<Result<crate::pairing::DeviceSession, String>>,
         cancelled: oneshot::Receiver<()>,
@@ -792,7 +792,7 @@ enum HostCommand {
     ConnectDestination {
         host: Weak<HostLifetime>,
         address: ConnectTarget,
-        supported_codecs: Vec<VideoCodec>,
+        supported_codecs: crate::IrohReceiverPreferences,
         deadline: Instant,
         notifier: IrohNotifier,
         reply: oneshot::Sender<Result<IrohDestinationPeer, String>>,
@@ -1059,7 +1059,10 @@ async fn accept_source(
         bootstrap.recv,
         bootstrap.media,
         notifier,
-        codec,
+        crate::presentation::SourcePresentation {
+            codec,
+            stream_mode: bootstrap.stream_mode,
+        },
     );
     bootstrap.pending.hand_off();
     Ok(peer)
@@ -1069,7 +1072,7 @@ async fn connect_destination(
     host: Weak<HostLifetime>,
     endpoint: Endpoint,
     address: ConnectTarget,
-    supported_codecs: Vec<VideoCodec>,
+    supported_codecs: crate::IrohReceiverPreferences,
     deadline: Instant,
     notifier: IrohNotifier,
     links: Option<Arc<adb::Manager>>,

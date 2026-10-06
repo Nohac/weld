@@ -45,6 +45,7 @@ def main():
     parser.add_argument("--serial")
     parser.add_argument("--seconds", type=int, default=120)
     parser.add_argument("--codec", choices=("av1", "h264"), default="av1")
+    parser.add_argument("--xwayland", action="store_true", help="enable X11 applications in the isolated source")
     parser.add_argument("--no-build", action="store_true", help="use the installed APK and existing host build")
     parser.add_argument("command", nargs=argparse.REMAINDER)
     args = parser.parse_args()
@@ -124,7 +125,7 @@ def main():
         public = COMMON["identity"](wait(lambda: phone_read("public.identity")))
         COMMON["write_new"](directory / "viewer.identity", public + "\n")
         host = COMMON["LAUNCHER"]["OwnedHost"]("source",
-            COMMON["source_command"](directory, state, app, bitrate_mbps=8, codec=args.codec),
+            COMMON["source_command"](directory, state, app, bitrate_mbps=8, codec=args.codec, xwayland=args.xwayland),
             COMMON["source_environment"](runtime), ROOT, directory)
         wait(lambda: (directory / "source.profile").exists())
         profile = (directory / "source.profile").read_text()

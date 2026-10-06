@@ -33,6 +33,7 @@ async fn answer(connection: &Connection) {
             revision: ProtocolRevision::CURRENT,
             role: PeerRole::Destination,
             rejection: None,
+            stream_mode: weld_client::SurfaceStreamMode::Independent,
         },
     )
     .await

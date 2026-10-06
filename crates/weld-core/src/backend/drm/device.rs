@@ -30,12 +30,12 @@ use crate::{
     host::{RenderContext, RunOptions},
 };
 
+use crate::dmabuf::target::{adapter_matches_device, renderable_scanout_formats};
 use crate::runtime::gpu::{NativeGpu, import_channel};
 
 use super::{
     output::{SelectedOutput, select_outputs},
     renderer::DrmRenderState,
-    vulkan::{adapter_matches_device, renderable_scanout_formats},
 };
 
 pub(super) type OutputAllocator = GbmAllocator<DrmDeviceFd>;

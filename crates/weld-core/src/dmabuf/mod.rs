@@ -1,8 +1,11 @@
 //! Linux DMA-BUF capability discovery and GPU import.
 
+pub mod composition;
 mod device;
 mod manager;
 mod source;
+mod sync;
+pub(crate) mod target;
 
 pub use device::{
     DmabufCapabilities, ExternalDmabufCapabilities, ExternalDmabufFormat, request_weld_device,
@@ -76,7 +79,6 @@ impl ExternalDmabuf {
 /// Duplicates the native descriptors carried by one direct client-buffer lease.
 pub fn export_client_dmabuf(lease: &ClientBufferLease) -> anyhow::Result<ExternalDmabuf> {
     use anyhow::Context;
-    use smithay::backend::allocator::Buffer;
 
     let access = lease
         .access::<DirectClientBufferAccess>()
@@ -84,16 +86,21 @@ pub fn export_client_dmabuf(lease: &ClientBufferLease) -> anyhow::Result<Externa
     let DirectClientBufferAccess::Dmabuf(access) = access else {
         anyhow::bail!("client-buffer lease contains copied SHM pixels, not a DMA-BUF");
     };
-    let size = access.dmabuf.size();
+    export_dmabuf(&access.dmabuf)
+}
+
+fn export_dmabuf(dmabuf: &Dmabuf) -> anyhow::Result<ExternalDmabuf> {
+    use anyhow::Context;
+    use smithay::backend::allocator::Buffer;
+    let size = dmabuf.size();
     let extent = Extent::new(
         u32::try_from(size.w).context("negative DMA-BUF width")?,
         u32::try_from(size.h).context("negative DMA-BUF height")?,
     );
-    let planes = access
-        .dmabuf
+    let planes = dmabuf
         .handles()
-        .zip(access.dmabuf.offsets())
-        .zip(access.dmabuf.strides())
+        .zip(dmabuf.offsets())
+        .zip(dmabuf.strides())
         .map(|((file_descriptor, offset), stride)| {
             Ok(ExternalDmabufPlane {
                 file_descriptor: file_descriptor
@@ -104,12 +111,12 @@ pub fn export_client_dmabuf(lease: &ClientBufferLease) -> anyhow::Result<Externa
             })
         })
         .collect::<anyhow::Result<Vec<_>>>()?;
-    let format = access.dmabuf.format();
+    let format = dmabuf.format();
     Ok(ExternalDmabuf {
         extent,
         format: format.code as u32,
         modifier: format.modifier.into(),
-        flags: access.dmabuf.flags().bits(),
+        flags: dmabuf.flags().bits(),
         planes,
     })
 }

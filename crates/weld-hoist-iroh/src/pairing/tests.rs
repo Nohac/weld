@@ -165,7 +165,14 @@ fn real_endpoint_enrollment_catalogue_and_revocation_share_the_same_identity() {
         .expect("approval");
     wait(|| matches!(pairing.progress(), PairingProgress::Approved { .. }));
     let mut pending = receiver
-        .begin_device_session(profile, vec![VideoCodec::H264], notifier)
+        .begin_device_session(
+            profile,
+            crate::IrohReceiverPreferences {
+                codecs: vec![VideoCodec::H264],
+                stream_mode: weld_client::SurfaceStreamMode::Composited,
+            },
+            notifier,
+        )
         .expect("session");
     let mut session = None;
     wait(|| {
@@ -175,6 +182,10 @@ fn real_endpoint_enrollment_catalogue_and_revocation_share_the_same_identity() {
     let session = session.expect("session");
     let peers = desktop.take_peers();
     assert_eq!(peers.len(), 1);
+    assert_eq!(
+        weld_hoist_encoded::EncodedSourceTransport::stream_mode(&peers[0].1),
+        weld_client::SurfaceStreamMode::Composited
+    );
     let id = peers[0].0;
     let application = ApplicationInfo {
         window: 7,

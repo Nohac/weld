@@ -17,14 +17,14 @@ use weld_client::{
     ClientSourceId, ClientSurfaceEventKind, ClientSurfaceId, ClientSurfaceRequest,
     ClientSurfaceRequestKind, ClientSurfaceRole, InputPosition, PresentationMailbox,
     PresentationRate, RuntimeInputEvent, RuntimeInputEventKind, SurfaceBufferChange,
-    SurfaceContentView, SurfaceInputGeometry, TouchEvent,
+    SurfaceContentView, SurfaceInputGeometry, SurfaceStreamMode, TouchEvent,
 };
 use weld_hoist_encoded::EncodedDestinationTransport;
 use weld_hoist_encoded::android::{AndroidDecodeBackend, AndroidFramePublisher};
 use weld_hoist_iroh::pairing::{ApplicationInfo, PairingInvitation, PairingProgress};
 use weld_hoist_iroh::{
     IrohConnectionProfile, IrohDestinationPeer, IrohDeviceIdentity, IrohDnsPolicy, IrohHost,
-    IrohNotifier, IrohPeerIdentity, destination_registration_with_backend,
+    IrohNotifier, IrohPeerIdentity, IrohReceiverPreferences, destination_registration_with_backend,
 };
 use weld_media::VideoCodec;
 use weld_media_android::AndroidImage;
@@ -387,11 +387,15 @@ fn stream(
         Ok(())
     });
     shared.message("Connecting to approved Weld host");
+    let preferences = IrohReceiverPreferences {
+        codecs: vec![VideoCodec::Av1, VideoCodec::H264],
+        stream_mode: SurfaceStreamMode::Composited,
+    };
     let mut device = None;
     let peer = if paired {
         let mut pending = host.begin_device_session(
             profile.clone(),
-            vec![VideoCodec::Av1, VideoCodec::H264],
+            preferences,
             notifier.clone(),
         )?;
         loop {
@@ -409,7 +413,7 @@ fn stream(
     } else {
         let mut pending = host.begin_connect_profile(
             profile,
-            vec![VideoCodec::Av1, VideoCodec::H264],
+            preferences,
             notifier,
             Duration::from_secs(10),
         )?;
@@ -559,7 +563,9 @@ fn stream(
                         }
                         shared.message("Preparing application for the phone display");
                     }
-                    rate(&mut runtime, id, selected == Some(id) && active)?;
+                    if matches!(role, ClientSurfaceRole::Toplevel(_)) {
+                        rate(&mut runtime, id, selected == Some(id) && active)?;
+                    }
                 }
                 ClientSurfaceEventKind::Commit(commit) if selected == Some(id) => {
                     let commit = commit.into_state();

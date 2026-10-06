@@ -101,7 +101,7 @@ def write_new(path, text):
         output.write(text)
 
 
-def source_command(exchange, state, app, bitrate_mbps=16, codec="av1", gamepad=False, transport="n0"):
+def source_command(exchange, state, app, bitrate_mbps=16, codec="av1", gamepad=False, transport="n0", xwayland=False):
     return ["cargo", "run", "--locked", "--quiet", "--", "--backend", "headless",
             "--wayland-socket", "source", "--hoist-all", "--headless-window-size", "960x640",
             "--keyboard-repeat-mode", "compositor", "--legacy-key-repeat", "emulated",
@@ -111,7 +111,8 @@ def source_command(exchange, state, app, bitrate_mbps=16, codec="av1", gamepad=F
             "--hoist-iroh-publish-profile", str(exchange / "source.profile"),
             *(["--hoist-iroh-adb-listen", "127.0.0.1:0"] if transport == "adb" else ["--hoist-iroh-network", "n0"]), "--hoist-codec", codec,
             "--hoist-bitrate-target-mbps", str(bitrate_mbps),
-            *(["--hoist-gamepad"] if gamepad else []), "--", *app]
+            *(["--hoist-gamepad"] if gamepad else []),
+            *(["--xwayland"] if xwayland else []), "--", *app]
 
 
 def adb_profile_port(profile):

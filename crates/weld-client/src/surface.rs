@@ -458,6 +458,16 @@ pub enum ClientSurfaceRequestKind {
     },
 }
 
+/// Surface organization requested by an encoded presenter.
+#[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum SurfaceStreamMode {
+    #[default]
+    Independent,
+    /// One opaque viewport containing the toplevel, subsurfaces and popups.
+    Composited,
+}
+
 /// Source-addressed keyboard focus request; `None` clears that source's focus.
 #[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

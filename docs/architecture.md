@@ -103,6 +103,19 @@ Weld is a workspace of reusable layers and one standard distribution:
   Port policy and publication run on the caller thread;
   native codecs run on bounded workers. Bindings move only control records and
   compressed access units.
+  Encoded presenters can select independent surfaces or a composited viewport
+  during connection setup. Composited views retain a toplevel's subsurfaces and
+  popup tree, coalesce their changes through the ordinary root scheduler, and
+  route viewport input to the original surfaces with pinned touch/drag targets.
+  `weld-core` supplies the offscreen Vulkan compositor and reusable DMA-BUF
+  targets; the VA-API backend prepares that capability before surface admission.
+  Composition completes before encoding, and the encoder retains its target
+  until the corresponding packet completes. Backend input preparation currently
+  waits for GPU completion before handing the target to VA-API. Local DRM presentation and offscreen
+  composition share the native render-target imports and ownership barriers.
+  Iroh exchanges this preference through both development bootstrap and paired
+  session setup. The phone requests composited views; desktop and XR retain
+  independent surfaces by default.
 - `weld-hoist-local` owns the Linux-local Postcard/Unix-seqpacket binding,
   SCM_RIGHTS native-buffer transfer, optional opaque encoded-media binding,
   and source/destination relay ports. It depends on core's native import

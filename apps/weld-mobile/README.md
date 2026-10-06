@@ -87,11 +87,14 @@ cancellation, rotation/mapping changes and queue overflow cancel held contacts.
 An epoch guards
 input and decoded-frame publication across window unmap/destruction.
 
-The receiver selects the first toplevel and requests 60 Hz while active. Other
-surfaces receive paused presentation demand. This proof presents only the root
-layer: window switching, popups/subsurfaces, keyboard/IME, remote close/reclaim
-controls, and automatic reconnect are subsequent work. Existing protocol and
-receiver capabilities remain shared; those limitations belong to this shell.
+The receiver requests a composited viewport during connection setup, then
+selects a toplevel and requests 60 Hz while active. The shared source combines
+its root, subsurfaces and popup tree on the GPU before encoding one stream.
+Popup placement stays within the viewport; input is translated back to the
+original surface and each contact keeps its initial target until release.
+Opening, updating or removing a popup redraws an idle owner. Other toplevels
+receive paused presentation demand. Presentation of separate child toplevels,
+keyboard/IME and automatic reconnect remain subsequent work.
 
 Android's decoder supplies acquired native images. Under wgpu's GLES context
 lock, one conversion pass samples the external video image into a retained
@@ -177,11 +180,33 @@ a new physical XR regression and sustained image-budget stress remain unqualifie
 and includes a finger-scrollable list. Open it in a private browser launched by
 `scripts/run-mobile-hoist`. On Pixel 8 Pro, Chrome recorded four simultaneous
 contacts, 20 matching down/up events, zero mouse presses and scrolling. The
-probe used `--disable-gpu --ozone-platform=wayland` because this Chrome build's
-GPU buffers hit the source VA-API import format whitelist. That limitation is
-separate from native touch. Firefox uses subsurfaces which this phone shell does
-not yet present. The host's native protocol tests also cover cancellation,
+original probe used `--disable-gpu --ozone-platform=wayland` because this Chrome
+build's GPU buffers hit the direct VA-API import format whitelist. Composited
+views now normalize supported source formats on the GPU before encoding;
+the 2026-10-06 Chrome validation ran with GPU rendering enabled and displayed
+its native Wayland menu, including alpha edges.
+The host's native protocol tests also cover cancellation,
 controller isolation, first-seat compatibility and pointer fallback.
+
+For an idle-parent XWayland popup regression, build the fixture and run:
+
+```sh
+cargo build --locked -p weld-core --example x11_window_probe
+scripts/run-mobile-hoist --xwayland -- target/debug/examples/x11_window_probe --popup-cycle --seconds 150
+```
+
+The orange popup appears and disappears every ten seconds. The source log
+reports `popup=true` when a tap reaches it. Pixel validation retained one
+encoder stream through repeated popup lifecycles. The native GPU test additionally
+checks alpha blending, clipping and immutable leased render targets:
+
+```sh
+WELD_TEST_RENDER_NODE=/dev/dri/renderD128 cargo test --locked -p weld-core --features test-support --lib gpu_composes_alpha_and_clipping_and_keeps_leased_targets_immutable -- --ignored
+```
+
+Select the host's actual render node for that test. Rebuild both endpoints
+after the development/paired connection record change; saved identities and
+pairing grants remain valid.
 
 ## Next product slices
 

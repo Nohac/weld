@@ -15,6 +15,8 @@ mod pacing;
 mod scheduling;
 mod state;
 mod transport_observations;
+mod view;
+mod view_input;
 
 pub use activity::SchedulingPolicy;
 pub use bitrate::{

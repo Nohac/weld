@@ -7,6 +7,7 @@
 
 mod adapter;
 mod buffer;
+mod composition;
 mod cursor;
 mod geometry;
 mod id;
@@ -19,6 +20,7 @@ mod pending_order;
 mod presentation;
 mod presenter;
 mod surface;
+pub use composition::{ComposedBuffer, CompositionLayer};
 mod touch;
 #[cfg(feature = "serde")]
 mod wire;
@@ -64,8 +66,8 @@ pub use surface::{
     ClientSurfaceRequestKind, ClientSurfaceRole, ClientSurfaceState, DesktopLayer,
     LayerKeyboardInteractivity, LayerSurfaceState, PopupState, SurfaceAlphaMode,
     SurfaceBufferChange, SurfaceBufferUpdate, SurfaceContentView, SurfaceInputPlacement,
-    SurfaceInputRect, SurfaceLayerPlacement, SurfaceWindowGeometry, ToplevelHints,
-    ToplevelInteractionRequestKind, ToplevelKind, ToplevelLayout, ToplevelState,
+    SurfaceInputRect, SurfaceLayerPlacement, SurfaceStreamMode, SurfaceWindowGeometry,
+    ToplevelHints, ToplevelInteractionRequestKind, ToplevelKind, ToplevelLayout, ToplevelState,
     ToplevelStateRequestKind, WindowDecoration, WindowResizeEdge,
 };
 #[cfg(feature = "serde")]

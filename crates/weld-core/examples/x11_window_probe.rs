@@ -33,6 +33,9 @@ struct Options {
     /// Set the X11 fullscreen property before first mapping, then verify/restore it.
     #[arg(long)]
     initial_fullscreen: bool,
+    /// Open/close an override-redirect popup over an otherwise idle parent.
+    #[arg(long)]
+    popup_cycle: bool,
 }
 
 fn main() -> Result<()> {
@@ -123,10 +126,61 @@ fn main() -> Result<()> {
     let mut phase = 0u8;
     let mut fullscreen_phase = u8::from(options.initial_fullscreen);
     let mut auxiliaries = Vec::new();
+    let mut popup = None;
+    let mut popup_period = None;
+    let mut redraw = true;
     println!(
         "X11_PROBE_READY window={window}; type or click to change the counter/color, close through Weld to test WM_DELETE_WINDOW"
     );
     while started.elapsed() < Duration::from_secs(options.seconds) {
+        if options.popup_cycle {
+            let period = started.elapsed().as_secs() / 10;
+            if popup_period != Some(period) {
+                popup_period = Some(period);
+                if let Some(child) = popup.take() {
+                    connection.destroy_window(child)?;
+                }
+                if period % 2 == 1 {
+                    let child = connection.generate_id()?;
+                    let parent = connection.get_geometry(window)?.reply()?;
+                    connection
+                        .create_window(
+                            screen.root_depth,
+                            child,
+                            screen.root,
+                            parent.x + 40,
+                            parent.y + 80,
+                            240,
+                            120,
+                            0,
+                            WindowClass::INPUT_OUTPUT,
+                            screen.root_visual,
+                            &CreateWindowAux::new()
+                                .background_pixel(0xd06020)
+                                .override_redirect(1)
+                                .event_mask(
+                                    EventMask::BUTTON_PRESS
+                                        | EventMask::BUTTON_RELEASE
+                                        | EventMask::EXPOSURE,
+                                ),
+                        )?
+                        .check()?;
+                    connection.change_property32(
+                        PropMode::REPLACE,
+                        child,
+                        AtomEnum::WM_TRANSIENT_FOR,
+                        AtomEnum::WINDOW,
+                        &[window],
+                    )?;
+                    connection.map_window(child)?;
+                    popup = Some(child);
+                    println!("POPUP_OPEN window={child}");
+                } else {
+                    println!("POPUP_CLOSED");
+                }
+                connection.flush()?;
+            }
+        }
         if options.fullscreen || options.initial_fullscreen {
             let elapsed = started.elapsed().as_secs();
             if (fullscreen_phase == 0 && elapsed >= 2) || (fullscreen_phase == 2 && elapsed >= 7) {
@@ -229,6 +283,7 @@ fn main() -> Result<()> {
         while let Some(event) = connection.poll_for_event()? {
             match event {
                 Event::ConfigureNotify(event) if event.window == window => {
+                    redraw = true;
                     width = event.width;
                     height = event.height;
                     println!("CONFIGURE {width}x{height}");
@@ -240,7 +295,12 @@ fn main() -> Result<()> {
                 Event::KeyRelease(event) => println!("KEY_RELEASE {}", event.detail),
                 Event::ButtonPress(event) => {
                     presses += 1;
-                    println!("BUTTON_PRESS {} count={presses}", event.detail);
+                    println!(
+                        "BUTTON_PRESS {} count={presses} target={} popup={}",
+                        event.detail,
+                        event.event,
+                        popup == Some(event.event)
+                    );
                 }
                 Event::ButtonRelease(event) => println!("BUTTON_RELEASE {}", event.detail),
                 Event::FocusIn(_) => println!("FOCUS_IN"),
@@ -255,6 +315,11 @@ fn main() -> Result<()> {
                 _ => {}
             }
         }
+        if options.popup_cycle && !redraw {
+            thread::sleep(Duration::from_millis(16));
+            continue;
+        }
+        redraw = false;
         connection.change_gc(
             gc,
             &ChangeGCAux::new().foreground(0x204050 ^ ((presses % 16) << 16)),

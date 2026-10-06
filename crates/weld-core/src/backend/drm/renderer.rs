@@ -41,7 +41,9 @@ use crate::{
     surface::Extent,
 };
 
-use super::vulkan::{ForeignImageBarrier, foreign_image_barrier_command};
+use crate::dmabuf::target::{
+    ForeignImageBarrier, ImportedRenderTarget, foreign_image_barrier_command, import_render_target,
+};
 
 const SCANOUT_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Bgra8UnormSrgb;
 
@@ -111,13 +113,6 @@ pub(super) struct MemoryTexture {
     _texture: wgpu::Texture,
     bind_group: wgpu::BindGroup,
     extent: Extent,
-}
-
-struct ImportedScanout {
-    _texture: wgpu::Texture,
-    view: wgpu::TextureView,
-    image: vk::Image,
-    used: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -307,7 +302,7 @@ pub(super) struct DrmRenderState {
     context: ContextId<DrmTexture>,
     debug_flags: DebugFlags,
     formats: Vec<Format>,
-    imports: HashMap<WeakDmabuf, ImportedScanout>,
+    imports: HashMap<WeakDmabuf, ImportedRenderTarget>,
     blitter: CompositionBlitter,
     batch: RenderBatch,
     last_gpu_wait: Duration,
@@ -504,7 +499,7 @@ impl<'host> Renderer for DrmRenderer<'host> {
             .state
             .imports
             .get(&framebuffer.key)
-            .map(|imported| imported.used)
+            .map(|imported| imported.used.get())
             .ok_or_else(|| DrmRenderError::message("scanout import disappeared before render"))?;
         // SAFETY: the import cache retains the image through completion, and
         // this renderer owns acquire, render, and release on one queue.
@@ -524,7 +519,8 @@ impl<'host> Renderer for DrmRenderer<'host> {
             .imports
             .get_mut(&framebuffer.key)
             .ok_or_else(|| DrmRenderError::message("scanout import disappeared before render"))?
-            .used = true;
+            .used
+            .set(true);
         Ok(DrmFrame {
             device: &self.state.device,
             queue: &self.state.queue,
@@ -571,7 +567,8 @@ impl<'host> Bind<Dmabuf> for DrmRenderer<'host> {
         let key = target.weak();
         if let Entry::Vacant(entry) = self.state.imports.entry(key.clone()) {
             entry.insert(
-                import_scanout(&self.state.device, target).map_err(DrmRenderError::message)?,
+                import_render_target(&self.state.device, target, SCANOUT_FORMAT)
+                    .map_err(DrmRenderError::message)?,
             );
         }
         let imported = self
@@ -1029,84 +1026,6 @@ fn validate_scanout_target(dmabuf: &Dmabuf) -> Result<()> {
         bail!("DRM scanout refuses implicit DMA-BUF modifiers");
     }
     Ok(())
-}
-
-fn import_scanout(device: &wgpu::Device, dmabuf: &Dmabuf) -> Result<ImportedScanout> {
-    let size = dmabuf.size();
-    let width = u32::try_from(size.w).context("negative GBM buffer width")?;
-    let height = u32::try_from(size.h).context("negative GBM buffer height")?;
-    let fd = dmabuf
-        .handles()
-        .next()
-        .context("DMA-BUF has no plane")?
-        .try_clone_to_owned()
-        .context("failed to duplicate GBM buffer fd")?;
-    let stride = u64::from(dmabuf.strides().next().context("DMA-BUF has no stride")?);
-    let offset = u64::from(dmabuf.offsets().next().context("DMA-BUF has no offset")?);
-    let extent = wgpu::Extent3d {
-        width,
-        height,
-        depth_or_array_layers: 1,
-    };
-    let hal_descriptor = wgpu::hal::TextureDescriptor {
-        label: Some("Weld Smithay scanout import"),
-        size: extent,
-        mip_level_count: 1,
-        sample_count: 1,
-        dimension: wgpu::TextureDimension::D2,
-        format: SCANOUT_FORMAT,
-        usage: wgpu::TextureUses::COLOR_TARGET,
-        memory_flags: wgpu::hal::MemoryFlags::empty(),
-        view_formats: Vec::new(),
-    };
-    // SAFETY: capability discovery and Smithay selected this exact explicit,
-    // single-plane modifier for scanout and Vulkan color-attachment use.
-    let hal_texture = unsafe {
-        let raw = device
-            .as_hal::<wgpu::hal::api::Vulkan>()
-            .context("scanout device is not backed by Vulkan")?;
-        raw.texture_from_dmabuf_fd(
-            fd,
-            &hal_descriptor,
-            dmabuf.format().modifier.into(),
-            stride,
-            offset,
-        )?
-    };
-    let descriptor = wgpu::TextureDescriptor {
-        label: Some("Weld Smithay scanout import"),
-        size: extent,
-        mip_level_count: 1,
-        sample_count: 1,
-        dimension: wgpu::TextureDimension::D2,
-        format: SCANOUT_FORMAT,
-        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-        view_formats: &[],
-    };
-    // SAFETY: the HAL texture was created by this exact device and descriptor.
-    let texture = unsafe {
-        device.create_texture_from_hal::<wgpu::hal::api::Vulkan>(
-            hal_texture,
-            &descriptor,
-            wgpu::TextureUses::COLOR_TARGET,
-        )
-    };
-    // SAFETY: the texture is retained in the import cache while this raw image
-    // handle participates in ownership barriers.
-    let image = unsafe {
-        texture
-            .as_hal::<wgpu::hal::api::Vulkan>()
-            .context("imported scanout texture is not backed by Vulkan")?
-            .raw_handle()
-    };
-    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-    tracing::info!(format = ?dmabuf.format(), size = ?dmabuf.size(), "imported Smithay-owned scanout buffer");
-    Ok(ImportedScanout {
-        _texture: texture,
-        view,
-        image,
-        used: false,
-    })
 }
 
 fn validate_memory_size(data: &[u8], extent: Extent) -> Result<(), DrmRenderError> {

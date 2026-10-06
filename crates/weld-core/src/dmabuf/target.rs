@@ -1,19 +1,20 @@
-//! Vulkan interoperability required at Smithay's leased scanout boundary.
+//! Vulkan interoperability for leased, exportable render targets.
 
 use anyhow::{Context, Result};
 use ash::vk;
 use smithay::{
-    backend::allocator::{Format, Fourcc, Modifier},
+    backend::allocator::{Buffer, Format, Fourcc, Modifier, dmabuf::Dmabuf},
     reexports::rustix::fs::{Dev, major, minor},
 };
+use std::cell::Cell;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum ForeignImageBarrier {
+pub(crate) enum ForeignImageBarrier {
     Acquire,
     Release,
 }
 
-pub(super) fn adapter_matches_device(adapter: &wgpu::Adapter, device_id: Dev) -> bool {
+pub(crate) fn adapter_matches_device(adapter: &wgpu::Adapter, device_id: Dev) -> bool {
     // SAFETY: this guard only queries immutable Vulkan adapter properties.
     let Some(adapter) = (unsafe { adapter.as_hal::<wgpu::hal::api::Vulkan>() }) else {
         return false;
@@ -37,7 +38,7 @@ pub(super) fn adapter_matches_device(adapter: &wgpu::Adapter, device_id: Dev) ->
             && drm_properties.render_minor == selected_minor)
 }
 
-pub(super) fn renderable_scanout_formats(adapter: &wgpu::Adapter) -> Result<Vec<Format>> {
+pub(crate) fn renderable_scanout_formats(adapter: &wgpu::Adapter) -> Result<Vec<Format>> {
     let raw_adapter = unsafe { adapter.as_hal::<wgpu::hal::api::Vulkan>() }
         .context("scanout adapter is not backed by Vulkan")?;
     let instance = raw_adapter.shared_instance().raw_instance();
@@ -57,7 +58,7 @@ pub(super) fn renderable_scanout_formats(adapter: &wgpu::Adapter) -> Result<Vec<
     .collect())
 }
 
-fn modifiers_for_usage(
+pub(crate) fn modifiers_for_usage(
     instance: &ash::Instance,
     physical_device: vk::PhysicalDevice,
     format: vk::Format,
@@ -156,7 +157,7 @@ fn modifier_is_importable(
 /// `image` must belong to `raw_device`, remain alive through command completion,
 /// and be imported into `device`. `queue_family` must be the family used by
 /// `device`, and callers must submit acquire, render, and release in that order.
-pub(super) unsafe fn foreign_image_barrier_command(
+pub(crate) unsafe fn foreign_image_barrier_command(
     device: &wgpu::Device,
     raw_device: &ash::Device,
     queue_family: u32,
@@ -249,4 +250,92 @@ pub(super) unsafe fn foreign_image_barrier_command(
     };
     recorded.context("wgpu did not expose a Vulkan encoder for scanout ownership")?;
     Ok(encoder.finish())
+}
+
+pub(crate) struct ImportedRenderTarget {
+    pub(crate) texture: wgpu::Texture,
+    pub(crate) view: wgpu::TextureView,
+    pub(crate) image: vk::Image,
+    pub(crate) used: Cell<bool>,
+}
+
+pub(crate) fn import_render_target(
+    device: &wgpu::Device,
+    dmabuf: &Dmabuf,
+    format: wgpu::TextureFormat,
+) -> Result<ImportedRenderTarget> {
+    let size = dmabuf.size();
+    let width = u32::try_from(size.w).context("negative GBM buffer width")?;
+    let height = u32::try_from(size.h).context("negative GBM buffer height")?;
+    let fd = dmabuf
+        .handles()
+        .next()
+        .context("DMA-BUF has no plane")?
+        .try_clone_to_owned()
+        .context("failed to duplicate GBM buffer fd")?;
+    let stride = u64::from(dmabuf.strides().next().context("DMA-BUF has no stride")?);
+    let offset = u64::from(dmabuf.offsets().next().context("DMA-BUF has no offset")?);
+    let extent = wgpu::Extent3d {
+        width,
+        height,
+        depth_or_array_layers: 1,
+    };
+    let hal_descriptor = wgpu::hal::TextureDescriptor {
+        label: Some("Weld Smithay scanout import"),
+        size: extent,
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format,
+        usage: wgpu::TextureUses::COLOR_TARGET,
+        memory_flags: wgpu::hal::MemoryFlags::empty(),
+        view_formats: Vec::new(),
+    };
+    // SAFETY: capability discovery and Smithay selected this exact explicit,
+    // single-plane modifier for scanout and Vulkan color-attachment use.
+    let hal_texture = unsafe {
+        let raw = device
+            .as_hal::<wgpu::hal::api::Vulkan>()
+            .context("scanout device is not backed by Vulkan")?;
+        raw.texture_from_dmabuf_fd(
+            fd,
+            &hal_descriptor,
+            dmabuf.format().modifier.into(),
+            stride,
+            offset,
+        )?
+    };
+    let descriptor = wgpu::TextureDescriptor {
+        label: Some("Weld Smithay scanout import"),
+        size: extent,
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+        view_formats: &[],
+    };
+    // SAFETY: the HAL texture was created by this exact device and descriptor.
+    let texture = unsafe {
+        device.create_texture_from_hal::<wgpu::hal::api::Vulkan>(
+            hal_texture,
+            &descriptor,
+            wgpu::TextureUses::COLOR_TARGET,
+        )
+    };
+    // SAFETY: the texture is retained in the import cache while this raw image
+    // handle participates in ownership barriers.
+    let image = unsafe {
+        texture
+            .as_hal::<wgpu::hal::api::Vulkan>()
+            .context("imported scanout texture is not backed by Vulkan")?
+            .raw_handle()
+    };
+    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+    Ok(ImportedRenderTarget {
+        texture,
+        view,
+        image,
+        used: Cell::new(false),
+    })
 }

@@ -70,6 +70,14 @@ pub enum SubmitError<T> {
 }
 
 pub trait EncodeBackend {
+    /// Prepare resources for the negotiated presentation before admitting surfaces.
+    fn configure_stream_mode(&mut self, mode: weld_client::SurfaceStreamMode) -> Result<()> {
+        anyhow::ensure!(
+            mode == weld_client::SurfaceStreamMode::Independent,
+            "encoding backend does not support composed views"
+        );
+        Ok(())
+    }
     /// Optional configured operating ceiling, not necessarily a probed device
     /// maximum. Presenter preferences are independently enforced by the port.
     fn frame_rate_limit(&self) -> Option<PresentationRate> {
@@ -136,9 +144,10 @@ pub trait DecodedFramePublisher: 'static {
 
 #[cfg(feature = "vaapi")]
 mod vaapi {
-    use std::path::PathBuf;
+    use std::{cell::RefCell, path::PathBuf, rc::Rc};
 
     use anyhow::{Context, Result, ensure};
+    use weld_core::dmabuf::composition::SourceCompositor;
     use weld_core::dmabuf::{ExternalDmabuf, ExternalDmabufCapabilities, ExternalDmabufPlane};
     use weld_media::{MediaStreamId, StreamGeneration, VideoCodec};
     use weld_media_vaapi::{
@@ -147,7 +156,7 @@ mod vaapi {
         VaapiWorkerSubmitError,
     };
 
-    use weld_client::{ClientBufferLease, PresentationRate};
+    use weld_client::{ClientBufferLease, ComposedBuffer, PresentationRate};
 
     use super::{
         DecodeBackend, DecodeCompletion, DecodeRequest, DecodedFrame, EncodeBackend,
@@ -176,6 +185,8 @@ mod vaapi {
         // startup rate, not discovering a device's maximum operating rate.
         let limits = encoder_bitrate_limits(settings)?;
         Ok(Box::new(VaapiEncoder {
+            composition: RefCell::new(None),
+            render_node: render_node.clone(),
             worker: VaapiEncodeWorker::spawn(render_node, dump_directory, notify)?,
             settings,
             limits,
@@ -204,18 +215,45 @@ mod vaapi {
     }
 
     struct VaapiEncoder {
+        composition: RefCell<Option<SourceCompositor>>,
+        render_node: PathBuf,
         worker: VaapiEncodeWorker,
         settings: VaapiEncoderSettings,
         limits: EncoderBitrateLimits,
     }
 
     impl EncodeBackend for VaapiEncoder {
+        fn configure_stream_mode(&mut self, mode: weld_client::SurfaceStreamMode) -> Result<()> {
+            if mode == weld_client::SurfaceStreamMode::Composited {
+                *self.composition.get_mut() = Some(SourceCompositor::new(&self.render_node)?);
+            }
+            Ok(())
+        }
         fn default_frame_rate(&self) -> Option<PresentationRate> {
             // A fallback until the presenter claims the surface, not a probed
             // hardware maximum. Actual cadence is frozen in each request.
             Some(DEFAULT_FRAME_RATE)
         }
         fn prepare_input(&self, lease: &ClientBufferLease) -> Result<PreparedEncodeInput> {
+            if let Some(frame) = lease.access::<ComposedBuffer>() {
+                let mut compositor = self.composition.borrow_mut();
+                let image = compositor
+                    .as_mut()
+                    .context("source compositor unavailable")?
+                    .compose(frame)?;
+                let input = EncodeInput::Dmabuf(image.export()?);
+                let retained_lease = ClientBufferLease::new(
+                    lease.buffer(),
+                    lease.use_id(),
+                    lease.metadata(),
+                    Rc::new(image),
+                    |_| {},
+                )?;
+                return Ok(PreparedEncodeInput {
+                    input,
+                    retained_lease: Some(retained_lease),
+                });
+            }
             prepare_input(lease)
         }
 

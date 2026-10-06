@@ -2,12 +2,14 @@
 
 use std::{fmt, sync::Arc, time::Instant};
 
+use crate::presentation::SourcePresentation;
 use anyhow::{Context, Result, ensure};
 use iroh::endpoint::{Connection, RecvStream, SendStream};
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWrite},
     sync::mpsc,
 };
+use weld_client::SurfaceStreamMode;
 use weld_hoist_core::{HoistPortError, HoistPortResult};
 use weld_hoist_encoded::{
     EncodedDestinationTransport, EncodedSourceTransport, ReceiveBudget, SendStatus,
@@ -88,6 +90,7 @@ pub struct IrohSourcePeer {
     path: PathMonitor,
     identity: IrohPeerIdentity,
     codec: VideoCodec,
+    stream_mode: SurfaceStreamMode,
     _host: Arc<HostLifetime>,
 }
 
@@ -109,6 +112,9 @@ impl IrohSourcePeer {
 }
 
 impl EncodedSourceTransport for IrohSourcePeer {
+    fn stream_mode(&self) -> SurfaceStreamMode {
+        self.stream_mode
+    }
     fn diagnostics(&self) -> Option<weld_diagnostics::Recorder> {
         self.diagnostics()
     }
@@ -263,7 +269,7 @@ pub(crate) fn spawn_source_peer(
     control_recv: RecvStream,
     media_send: SendStream,
     notifier: IrohNotifier,
-    codec: VideoCodec,
+    presentation: SourcePresentation,
 ) -> IrohSourcePeer {
     let access = if connection.alpn() == crate::pairing::SESSION_ALPN {
         crate::reports::Access::Paired(host.diagnostic_permission.clone())
@@ -296,7 +302,8 @@ pub(crate) fn spawn_source_peer(
         media: media_tx,
         path,
         identity,
-        codec,
+        codec: presentation.codec,
+        stream_mode: presentation.stream_mode,
         _host: host,
     }
 }

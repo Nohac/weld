@@ -195,7 +195,10 @@ fn dropping_unclaimed_destination_result_disconnects_source() {
     let connecting = destination
         .begin_connect_profile(
             &profile(&source),
-            vec![VideoCodec::Av1],
+            crate::IrohReceiverPreferences {
+                codecs: vec![VideoCodec::Av1],
+                stream_mode: weld_client::SurfaceStreamMode::Composited,
+            },
             notifier(),
             Duration::from_secs(5),
         )
@@ -206,6 +209,10 @@ fn dropping_unclaimed_destination_result_disconnects_source() {
         peer.is_some()
     });
     let peer = peer.expect("source peer");
+    assert_eq!(
+        weld_hoist_encoded::EncodedSourceTransport::stream_mode(&peer),
+        weld_client::SurfaceStreamMode::Composited
+    );
     wait_until(|| {
         !connecting
             .result

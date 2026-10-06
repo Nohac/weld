@@ -55,6 +55,10 @@ pub enum SourceTransportPacket {
 
 /// Nonblocking transport half used by the encoded source port.
 pub trait EncodedSourceTransport {
+    /// Agreed during connection setup, before the first surface is admitted.
+    fn stream_mode(&self) -> weld_client::SurfaceStreamMode {
+        weld_client::SurfaceStreamMode::Independent
+    }
     fn diagnostics(&self) -> Option<weld_diagnostics::Recorder> {
         None
     }
@@ -268,6 +272,8 @@ struct EncodedSourceState {
     observations: SourceObservations,
     diagnostics: Option<weld_diagnostics::Recorder>,
     rates: Option<EncoderRates>,
+    views: crate::view::SourceViews,
+    view_input: crate::view_input::ViewInput,
 }
 
 impl EncodedSourceState {
@@ -301,6 +307,8 @@ impl EncodedSourceState {
             observations: SourceObservations::new(started_at),
             diagnostics: None,
             rates,
+            views: crate::view::SourceViews::default(),
+            view_input: crate::view_input::ViewInput::default(),
         }
     }
 
@@ -1006,6 +1014,11 @@ impl<T: EncodedSourceTransport> EncodedSourcePort<T> {
     ) -> Result<Self> {
         let mut port = Self::new(transport, backend);
         let configured = (|| -> Result<()> {
+            port.state
+                .as_mut()
+                .context("encoded source state unavailable")?
+                .backend
+                .configure_stream_mode(port.transport.stream_mode())?;
             if let Some(budget) = options.bitrate_budget {
                 port.set_bitrate_budget(budget)?;
             }
@@ -1023,6 +1036,7 @@ impl<T: EncodedSourceTransport> EncodedSourcePort<T> {
 
     fn new(transport: T, backend: Box<dyn EncodeBackend>) -> Self {
         let mut state = EncodedSourceState::new(backend);
+        state.views = crate::view::SourceViews::new(transport.stream_mode());
         state.diagnostics = transport.diagnostics();
         Self {
             transport,
@@ -1171,11 +1185,30 @@ impl<T: EncodedSourceTransport> HoistSourcePort for EncodedSourcePort<T> {
                 self.progress()
             }
             SourcePortCommand::Surface { session, event } => {
-                self.state
+                if self.transport.stream_mode() == weld_client::SurfaceStreamMode::Independent {
+                    self.state
+                        .as_mut()
+                        .ok_or_else(|| protocol_error("encoded source port is disconnected"))?
+                        .enqueue(session, event)
+                        .map_err(protocol_error)?;
+                    return self.progress();
+                }
+                let state = self
+                    .state
                     .as_mut()
-                    .ok_or_else(|| protocol_error("encoded source port is disconnected"))?
-                    .enqueue(session, event)
-                    .map_err(protocol_error)?;
+                    .ok_or_else(|| protocol_error("encoded source port is disconnected"))?;
+                if matches!(event.kind, ClientSurfaceEventKind::Destroyed)
+                    || matches!(&event.kind, ClientSurfaceEventKind::Commit(commit) if !commit.mapped)
+                {
+                    state.view_input.remove(event.surface);
+                }
+                for (session, event) in state
+                    .views
+                    .observe(session, event)
+                    .map_err(protocol_error)?
+                {
+                    state.enqueue(session, event).map_err(protocol_error)?;
+                }
                 self.progress()
             }
             SourcePortCommand::WithdrawSurface { session, surface } => {
@@ -1185,11 +1218,17 @@ impl<T: EncodedSourceTransport> HoistSourcePort for EncodedSourcePort<T> {
                         message: SourceMessage::Withdraw { surface },
                     }))
                     .map_err(protocol_error)?;
-                self.state
+                let state = self
+                    .state
                     .as_mut()
-                    .ok_or_else(|| protocol_error("encoded source port is disconnected"))?
-                    .cancel_surface(surface)
-                    .map_err(protocol_error)?;
+                    .ok_or_else(|| protocol_error("encoded source port is disconnected"))?;
+                state.cancel_surface(surface).map_err(protocol_error)?;
+                state.view_input.remove(surface);
+                if let Some((session, event)) =
+                    state.views.withdraw(surface).map_err(protocol_error)?
+                {
+                    state.enqueue(session, event).map_err(protocol_error)?;
+                }
                 self.progress()
             }
             SourcePortCommand::RetireUpstreamBuffer(_) => Ok(()),
@@ -1221,7 +1260,18 @@ impl<T: EncodedSourceTransport> HoistSourcePort for EncodedSourcePort<T> {
         state.drain().map_err(protocol_error)?;
         state.report_observations(false, |now| self.transport.observations(now));
         self.flush()?;
-        self.transport.drain()
+        let incoming = self.transport.drain()?;
+        if self.transport.stream_mode() == weld_client::SurfaceStreamMode::Independent {
+            return Ok(incoming);
+        }
+        let state = self
+            .state
+            .as_mut()
+            .ok_or_else(|| protocol_error("encoded source port is disconnected"))?;
+        Ok(incoming
+            .into_iter()
+            .flat_map(|envelope| state.view_input.route(&state.views, envelope))
+            .collect())
     }
 
     fn accept_destination(&mut self, envelope: &DestinationEnvelope) -> HoistPortResult<()> {
@@ -2335,6 +2385,7 @@ fn take_counter(counter: &mut Option<u64>, name: &str) -> Result<u64> {
 #[cfg(test)]
 mod tests {
     mod bitrate_tests;
+    mod composition_tests;
     mod configuration_tests;
     mod decode_tests;
     mod pacing_tests;
@@ -2360,6 +2411,7 @@ mod tests {
 
     #[derive(Default)]
     struct FakeSourceTransportState {
+        stream_mode: weld_client::SurfaceStreamMode,
         sent: Vec<SourceTransportPacket>,
         incoming: VecDeque<DestinationEnvelope>,
         disconnected: bool,
@@ -2371,6 +2423,9 @@ mod tests {
     struct FakeSourceTransport(Rc<RefCell<FakeSourceTransportState>>);
 
     impl EncodedSourceTransport for FakeSourceTransport {
+        fn stream_mode(&self) -> weld_client::SurfaceStreamMode {
+            self.0.borrow().stream_mode
+        }
         fn try_send(
             &self,
             packet: SourceTransportPacket,
@@ -2458,6 +2513,7 @@ mod tests {
 
     #[derive(Default)]
     struct FakeEncoderState {
+        compositions: Vec<Vec<ClientBufferUseId>>,
         retain_input: bool,
         submitted: Vec<(u64, MediaFrameId, Vec<u8>)>,
         completions: Vec<EncodeCompletion>,
@@ -2476,6 +2532,9 @@ mod tests {
     struct FakeEncoder(Rc<RefCell<FakeEncoderState>>);
 
     impl EncodeBackend for FakeEncoder {
+        fn configure_stream_mode(&mut self, _mode: weld_client::SurfaceStreamMode) -> Result<()> {
+            Ok(())
+        }
         fn frame_rate_limit(&self) -> Option<PresentationRate> {
             self.0.borrow().frame_rate_limit
         }
@@ -2483,10 +2542,21 @@ mod tests {
             self.0.borrow().default_frame_rate
         }
         fn prepare_input(&self, lease: &ClientBufferLease) -> Result<PreparedEncodeInput> {
-            let pixels = lease
-                .access::<Vec<u8>>()
-                .context("test pixel lease")?
-                .clone();
+            let pixels = if let Some(scene) = lease.access::<weld_client::ComposedBuffer>() {
+                self.0.borrow_mut().compositions.push(
+                    scene
+                        .layers
+                        .iter()
+                        .map(|layer| layer.buffer.use_id())
+                        .collect(),
+                );
+                vec![scene.layers.len() as u8; 4]
+            } else {
+                lease
+                    .access::<Vec<u8>>()
+                    .context("test pixel lease")?
+                    .clone()
+            };
             Ok(PreparedEncodeInput {
                 input: EncodeInput::PackedBgra {
                     width: lease.metadata().extent.width,

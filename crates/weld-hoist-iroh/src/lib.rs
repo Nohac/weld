@@ -17,6 +17,8 @@ mod native;
 mod notifier;
 pub mod pairing;
 mod peer;
+mod presentation;
+pub use presentation::IrohReceiverPreferences;
 mod pending_source;
 mod private_file;
 mod rendezvous;

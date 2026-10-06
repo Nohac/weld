@@ -174,7 +174,7 @@ enum Reply {
 }
 #[derive(Serialize, Deserialize)]
 struct Hello {
-    codecs: Vec<VideoCodec>,
+    preferences: crate::IrohReceiverPreferences,
 }
 #[derive(Serialize, Deserialize)]
 struct Welcome {
@@ -194,7 +194,7 @@ pub(crate) async fn accept_session(
     let hello: Hello =
         tokio::time::timeout(Duration::from_secs(5), read_record(&mut recv)).await??;
     ensure!(
-        hello.codecs.contains(&desktop.codec),
+        hello.preferences.codecs.contains(&desktop.codec),
         "receiver does not support host codec"
     );
     tokio::time::timeout(
@@ -218,7 +218,10 @@ pub(crate) async fn accept_session(
         control_recv,
         media,
         desktop.notifier.clone(),
-        desktop.codec,
+        crate::presentation::SourcePresentation {
+            codec: desktop.codec,
+            stream_mode: hello.preferences.stream_mode,
+        },
     );
     let id = SessionId(
         desktop
@@ -355,7 +358,7 @@ pub(crate) async fn connect_session(
     host: Weak<HostLifetime>,
     endpoint: Endpoint,
     profile: IrohConnectionProfile,
-    codecs: Vec<VideoCodec>,
+    preferences: crate::IrohReceiverPreferences,
     notifier: IrohNotifier,
     result: oneshot::Sender<Result<DeviceSession, String>>,
 ) -> Result<()> {
@@ -369,13 +372,13 @@ pub(crate) async fn connect_session(
         write_record(
             &mut send,
             &Hello {
-                codecs: codecs.clone(),
+                preferences: preferences.clone(),
             },
         )
         .await?;
         let welcome: Welcome = read_record(&mut recv).await?;
         ensure!(
-            codecs.contains(&welcome.codec),
+            preferences.codecs.contains(&welcome.codec),
             "host selected an unsupported codec"
         );
         let (control_send, mut control_recv) = guard.connection.accept_bi().await?;

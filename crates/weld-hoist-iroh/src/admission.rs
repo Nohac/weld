@@ -106,6 +106,7 @@ impl Drop for PendingConnection {
 }
 
 pub(crate) struct SourceBootstrap {
+    pub stream_mode: weld_client::SurfaceStreamMode,
     pub adb_route: Option<iroh_base::CustomAddr>,
     pub pending: PendingConnection,
     pub send: SendStream,
@@ -178,7 +179,7 @@ pub(crate) async fn accept_trusted_source(
                             bail!("Iroh destination rejected the session: {rejection}");
                         }
                         let media = pending.connection.open_uni().await?;
-                        Ok(SourceBootstrap { pending, send, recv, media, adb_route })
+                        Ok(SourceBootstrap { pending, send, recv, media, adb_route, stream_mode: answer.stream_mode })
                     }).await.context("Iroh handshake/bootstrap attempt timed out")?
                 });
             }
@@ -220,7 +221,7 @@ pub(crate) async fn connect_destination(
     connect_address(
         endpoint,
         ticket.endpoint_addr().clone(),
-        supported_codecs,
+        &crate::IrohReceiverPreferences::from(supported_codecs.to_vec()),
         deadline,
     )
     .await
@@ -229,7 +230,7 @@ pub(crate) async fn connect_destination(
 pub(crate) async fn connect_address(
     endpoint: &Endpoint,
     address: EndpointAddr,
-    supported_codecs: &[VideoCodec],
+    preferences: &crate::IrohReceiverPreferences,
     deadline: Instant,
 ) -> Result<DestinationBootstrap> {
     timeout_at(deadline, async {
@@ -241,7 +242,7 @@ pub(crate) async fn connect_address(
         );
         let (mut send, mut recv) = pending.connection.accept_bi().await?;
         let offer: BootstrapOffer = read_record(&mut recv).await?;
-        let rejection = validate_offer(&offer, supported_codecs)
+        let rejection = validate_offer(&offer, &preferences.codecs)
             .err()
             .map(|error| error.to_string());
         write_record(
@@ -250,6 +251,7 @@ pub(crate) async fn connect_address(
                 revision: ProtocolRevision::CURRENT,
                 role: PeerRole::Destination,
                 rejection: rejection.clone(),
+                stream_mode: preferences.stream_mode,
             },
         )
         .await?;
@@ -306,6 +308,7 @@ struct BootstrapAnswer {
     revision: ProtocolRevision,
     role: PeerRole,
     rejection: Option<String>,
+    stream_mode: weld_client::SurfaceStreamMode,
 }
 
 #[cfg(test)]
