@@ -113,9 +113,6 @@ Godot's report UI/export integration remains separate from the phone browser.
 - Rules distinguish observed deadline failures, queue delays and local frame
   discards from possible transport/processing contributors. Idle streams with
   no pending work do not generate a stall finding. Missing evidence is explicit.
-- OS network-interface transitions, Wi-Fi scans, thermal state, frame-level
-  cross-peer correlation and clock alignment are not collected in this slice.
-  A report cannot confidently blame a router or radio from RTT alone.
 
 Session-control deadlines remain unchanged: five seconds for client reads and
 writes, fifteen seconds for host reads. The original failing operation is now

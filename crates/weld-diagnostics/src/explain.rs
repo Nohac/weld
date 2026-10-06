@@ -44,10 +44,7 @@ pub fn explain(bundle: &ReportBundle) -> Explanation {
     }
     if bundle.peer.is_none() {
         result.limitations.push("Peer evidence is missing. Collect its matching session report after reconnecting, or import an export.".into());
-    } else {
-        result.limitations.push("Endpoint clocks are independent. Timelines are not aligned; peer observations are peer-reported evidence.".into());
     }
-    result.limitations.push("No OS Wi-Fi, interface-transition or thermal evidence was collected by this version. Transport observations cannot identify a faulty router or radio.".into());
     if result.findings.is_empty() {
         result.limitations.push("No supported failure or lag pattern was found in the retained evidence. This does not prove that the session was smooth.".into());
     }
@@ -178,12 +175,6 @@ fn analyze(report: &Report, result: &mut Explanation) {
             }
             _ => {}
         }
-    }
-    if report.overwritten_events > 0 {
-        result.limitations.push(format!(
-            "{:?}: {} older events were overwritten by the bounded recorder.",
-            report.endpoint, report.overwritten_events
-        ));
     }
 }
 

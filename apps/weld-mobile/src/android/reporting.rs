@@ -144,7 +144,7 @@ impl Reports {
             saved.bundle.peer = Some(peer);
             saved.bundle.validate().map_err(anyhow::Error::msg)?;
             state.saved = Some(saved.clone());
-            state.notice = "Peer evidence collected. Timelines use separate clocks.".into();
+            state.notice = "Peer evidence collected.".into();
             state.path.clone().map(|path| (path, saved))
         };
         if let Some((path, saved)) = save {
@@ -239,7 +239,6 @@ mod tests {
         peer.session = id;
         reopened.merge(peer).expect("same session");
         reopened.notice("Collected");
-        assert!(reopened.text().contains("Endpoint clocks are independent"));
         assert!(!reopened.text().contains("Peer evidence is missing"));
         let collection = Recorder::new(SessionId([10; 16]), Endpoint::Receiver);
         collection.record(Observation::Ended);
