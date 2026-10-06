@@ -4,7 +4,7 @@ use qrcode::{QrCode, render::unicode};
 use std::{
     io::{self, Write},
     os::unix::fs::OpenOptionsExt,
-    path::PathBuf,
+    path::{Path, PathBuf},
     thread,
     time::{Duration, Instant},
 };
@@ -116,20 +116,12 @@ fn main() -> Result<()> {
                             .0
                     }
                 };
-                let Response::DiagnosticReport(bundle) =
-                    call(&path, &Request::DiagnosticReport(id))?
-                else {
-                    anyhow::bail!("unexpected diagnostics response");
-                };
+                let bundle = collect_report(&path, id)?;
                 println!("Session {id}");
                 print!("{}", weld_diagnostics::explain(&bundle).render(verbose));
             }
             Diagnostics::Export { id, output } => {
-                let Response::DiagnosticReport(bundle) =
-                    call(&path, &Request::DiagnosticReport(id))?
-                else {
-                    anyhow::bail!("unexpected diagnostics response");
-                };
+                let bundle = collect_report(&path, id)?;
                 let file = std::fs::OpenOptions::new()
                     .write(true)
                     .create_new(true)
@@ -218,4 +210,21 @@ fn main() -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn collect_report(
+    path: &Path,
+    id: weld_diagnostics::SessionId,
+) -> Result<weld_diagnostics::ReportBundle> {
+    let Response::DiagnosticCollection(collection) = call(path, &Request::CollectDiagnostics(id))?
+    else {
+        anyhow::bail!("unexpected diagnostics response");
+    };
+    eprintln!("Peer: {}", collection.status);
+    if collection.status != weld_hoist_iroh::CollectionStatus::Collected
+        && collection.bundle.peer.is_some()
+    {
+        eprintln!("Using previously collected peer evidence.");
+    }
+    Ok(collection.bundle)
 }

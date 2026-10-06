@@ -265,9 +265,18 @@ pub(crate) fn spawn_source_peer(
     notifier: IrohNotifier,
     codec: VideoCodec,
 ) -> IrohSourcePeer {
+    let access = if connection.alpn() == crate::pairing::SESSION_ALPN {
+        crate::reports::Access::Paired(host.diagnostic_permission.clone())
+    } else {
+        crate::reports::Access::Participant
+    };
     let diagnostics = host
         .reports
-        .start(&connection, weld_diagnostics::Endpoint::Source);
+        .start(&connection, weld_diagnostics::Endpoint::Source, access);
+    tokio::spawn(crate::reports::serve(
+        host.reports.clone(),
+        connection.clone(),
+    ));
     let path = crate::diagnostics::observe(&connection, diagnostics.clone());
     let identity = IrohPeerIdentity(connection.remote_id().to_string());
     let state = Arc::new(PeerState::new(connection.clone(), notifier, diagnostics));
@@ -301,9 +310,15 @@ pub(crate) fn spawn_destination_peer(
     notifier: IrohNotifier,
     codec: VideoCodec,
 ) -> IrohDestinationPeer {
-    let diagnostics = host
-        .reports
-        .start(&connection, weld_diagnostics::Endpoint::Receiver);
+    let diagnostics = host.reports.start(
+        &connection,
+        weld_diagnostics::Endpoint::Receiver,
+        crate::reports::Access::Participant,
+    );
+    tokio::spawn(crate::reports::serve(
+        host.reports.clone(),
+        connection.clone(),
+    ));
     crate::diagnostics::observe(&connection, diagnostics.clone());
     let identity = IrohPeerIdentity(connection.remote_id().to_string());
     let state = Arc::new(PeerState::new(

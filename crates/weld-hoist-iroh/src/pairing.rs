@@ -14,7 +14,7 @@ use std::{
     fmt,
     path::Path,
     str::FromStr,
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, Weak},
     time::{Duration, Instant},
 };
 use tokio::sync::oneshot;
@@ -132,7 +132,21 @@ struct State {
 #[derive(Clone, Default)]
 pub struct PairingHost(Arc<Mutex<State>>);
 
+/// Live grant lookup retained by reports without retaining desktop peers.
+#[derive(Clone)]
+pub(crate) struct DiagnosticPermission(Weak<Mutex<State>>);
+impl DiagnosticPermission {
+    pub(crate) fn permits(&self, identity: EndpointId) -> bool {
+        self.0
+            .upgrade()
+            .is_some_and(|state| PairingHost(state).permits_diagnostics(identity))
+    }
+}
+
 impl PairingHost {
+    pub(crate) fn diagnostic_permission(&self) -> DiagnosticPermission {
+        DiagnosticPermission(Arc::downgrade(&self.0))
+    }
     pub fn shutdown(&self) {
         if let Ok(mut state) = self.0.lock() {
             state.invitation = None;

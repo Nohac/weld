@@ -25,6 +25,7 @@ use weld_hoist_iroh::{
 pub enum Request {
     DiagnosticSessions,
     DiagnosticReport(weld_diagnostics::SessionId),
+    CollectDiagnostics(weld_diagnostics::SessionId),
     DiagnosticsPermission {
         identity: String,
         enabled: bool,
@@ -51,6 +52,7 @@ pub enum Response {
         )>,
     ),
     DiagnosticReport(Box<weld_diagnostics::ReportBundle>),
+    DiagnosticCollection(Box<weld_hoist_iroh::DiagnosticCollection>),
     Invitation(String),
     Pending(Option<PairingCandidate>),
     Devices(Vec<PairedDevice>),
@@ -115,15 +117,24 @@ impl ControlService {
         desktop: DesktopSessions,
     ) -> Result<Self> {
         let socket = socket_path(session)?;
-        Self::start_at(socket, session, directory, existing, desktop)
+        Self::start_at(
+            socket,
+            session,
+            existing,
+            Some(PairingSetup { directory, desktop }),
+        )
+    }
+
+    /// Expose reports for an existing transport without enabling device enrollment.
+    pub fn start_diagnostics(session: &str, host: IrohHost) -> Result<Self> {
+        Self::start_at(socket_path(session)?, session, Some(host), None)
     }
 
     fn start_at(
         socket: PathBuf,
         session: &str,
-        directory: PathBuf,
         existing: Option<IrohHost>,
-        desktop: DesktopSessions,
+        pairing: Option<PairingSetup>,
     ) -> Result<Self> {
         let parent = socket.parent().context("control socket parent absent")?;
         match fs::DirBuilder::new().mode(0o700).create(parent) {
@@ -162,13 +173,16 @@ impl ControlService {
             .name("weld-control".into())
             .spawn(move || {
                 let mut owner = Owner {
-                    directory,
                     host: existing,
                     enabled: false,
-                    desktop,
+                    pairing,
                     name: session,
                 };
-                if owner.directory.join("devices.json").is_file() {
+                if owner
+                    .pairing
+                    .as_ref()
+                    .is_some_and(|setup| setup.directory.join("devices.json").is_file())
+                {
                     // Persisted approval also consents to listening on later starts.
                     // This worker never blocks the compositor's event loop.
                     if let Err(error) = owner.host() {
@@ -196,7 +210,9 @@ impl ControlService {
                         result.unwrap_or_else(|error| Response::Error(format!("{error:#}")));
                     let _ = write(&mut stream, &response);
                 }
-                if let Some(host) = owner.host {
+                if owner.enabled
+                    && let Some(host) = owner.host
+                {
                     host.pairing().shutdown();
                 }
             })?;
@@ -219,35 +235,43 @@ impl Drop for ControlService {
     }
 }
 
-struct Owner {
+struct PairingSetup {
     directory: PathBuf,
+    desktop: DesktopSessions,
+}
+struct Owner {
     host: Option<IrohHost>,
     enabled: bool,
-    desktop: DesktopSessions,
+    pairing: Option<PairingSetup>,
     name: String,
 }
 impl Owner {
     fn host(&mut self) -> Result<&IrohHost> {
+        let setup = self
+            .pairing
+            .as_ref()
+            .context("this instance exposes diagnostics only")?;
         if !self.enabled {
             fs::DirBuilder::new().recursive(true).mode(0o700).create(
-                self.directory
+                setup
+                    .directory
                     .parent()
                     .context("device directory parent absent")?,
             )?;
         }
         if self.host.is_none() {
-            let identity = IrohDeviceIdentity::load_or_create(&self.directory)?;
+            let identity = IrohDeviceIdentity::load_or_create(&setup.directory)?;
             self.host = Some(IrohHost::bind_with_identity(IrohNetwork::N0, &identity)?);
         }
         let host = self.host.as_ref().context("device endpoint unavailable")?;
         if !self.enabled {
-            let identity = IrohDeviceIdentity::load_or_create(&self.directory)?;
+            let identity = IrohDeviceIdentity::load_or_create(&setup.directory)?;
             ensure!(
                 host.connection_profile()?.peer() == &identity.public_id(),
                 "existing endpoint requires its matching device directory"
             );
-            host.pairing().enable(&self.directory)?;
-            host.pairing().set_desktop(self.desktop.clone())?;
+            host.pairing().enable(&setup.directory)?;
+            host.pairing().set_desktop(setup.desktop.clone())?;
             self.enabled = true;
         }
         Ok(host)
@@ -278,6 +302,12 @@ impl Owner {
                     .as_ref()
                     .and_then(|host| host.diagnostics().get(id))
                     .context("diagnostic session unavailable or evicted")?,
+            )),
+            Request::CollectDiagnostics(id) => Response::DiagnosticCollection(Box::new(
+                self.host
+                    .as_ref()
+                    .context("no diagnostic sessions recorded yet")?
+                    .collect_diagnostics(id)?,
             )),
             Request::DiagnosticsPermission { identity, enabled } => {
                 self.host()?.pairing().set_diagnostics(&identity, enabled)?;
@@ -351,10 +381,16 @@ mod tests {
         let storage = directory.path().join("devices");
         let notifier = IrohNotifier::new(|| Ok(()));
         let mut owner = Owner {
-            directory: storage.clone(),
             host: None,
             enabled: false,
-            desktop: DesktopSessions::new(notifier.clone(), notifier, weld_media::VideoCodec::H264),
+            pairing: Some(PairingSetup {
+                directory: storage.clone(),
+                desktop: DesktopSessions::new(
+                    notifier.clone(),
+                    notifier,
+                    weld_media::VideoCodec::H264,
+                ),
+            }),
             name: "test".into(),
         };
         assert!(
@@ -385,18 +421,22 @@ mod tests {
         let service = ControlService::start_at(
             socket.clone(),
             "test",
-            directory.path().to_owned(),
             Some(host.clone()),
-            desktop.clone(),
+            Some(PairingSetup {
+                directory: directory.path().to_owned(),
+                desktop: desktop.clone(),
+            }),
         )
         .expect("service");
         assert!(
             ControlService::start_at(
                 socket.clone(),
                 "test",
-                directory.path().to_owned(),
-                Some(host),
-                desktop
+                Some(host.clone()),
+                Some(PairingSetup {
+                    directory: directory.path().to_owned(),
+                    desktop
+                })
             )
             .is_err()
         );
@@ -426,6 +466,20 @@ mod tests {
         call(&socket, &Request::Cancel).expect("cancel");
         drop(service);
         assert!(!socket.exists());
+        let diagnostics = ControlService::start_at(socket.clone(), "test", Some(host), None)
+            .expect("diagnostics-only service");
+        assert!(matches!(
+            call(&socket, &Request::DiagnosticSessions).expect("diagnostics"),
+            Response::DiagnosticSessions(_)
+        ));
+        assert!(
+            call(&socket, &Request::Pair)
+                .err()
+                .expect("no enrollment")
+                .to_string()
+                .contains("diagnostics only")
+        );
+        drop(diagnostics);
     }
 
     #[test]

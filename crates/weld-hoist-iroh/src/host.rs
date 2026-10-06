@@ -193,6 +193,8 @@ impl IrohHost {
             done: Mutex::new(done_rx),
             accepting: Arc::new(AtomicBool::new(false)),
             reports: crate::DiagnosticReports::default(),
+            diagnostic_permission: pairing.diagnostic_permission(),
+            collecting: Arc::new(AtomicBool::new(false)),
         });
         *owner
             .lock()
@@ -212,6 +214,45 @@ impl IrohHost {
 
     pub fn diagnostics(&self) -> crate::DiagnosticReports {
         self.lifetime.reports.clone()
+    }
+
+    /// Collect matching evidence over an existing connection to the same peer.
+    /// Call from a control worker, outside an async runtime or compositor loop.
+    pub fn collect_diagnostics(
+        &self,
+        session: weld_diagnostics::SessionId,
+    ) -> Result<crate::DiagnosticCollection> {
+        let bundle = self
+            .lifetime
+            .reports
+            .get(session)
+            .context("diagnostic session unavailable or evicted")?;
+        if self
+            .lifetime
+            .collecting
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return Ok(crate::DiagnosticCollection {
+                bundle,
+                status: crate::CollectionStatus::Busy,
+            });
+        }
+        let guard = CollectionGuard(self.lifetime.collecting.clone());
+        let (reply, result) = oneshot::channel();
+        self.lifetime
+            .commands
+            .send(HostCommand::CollectDiagnostics {
+                reports: self.lifetime.reports.clone(),
+                session,
+                reply,
+                guard,
+            })
+            .map_err(|_| anyhow::anyhow!("Iroh host unavailable"))?;
+        result
+            .blocking_recv()
+            .context("Iroh host stopped during diagnostic collection")?
+            .map_err(anyhow::Error::msg)
     }
 
     pub fn begin_device_session(
@@ -518,6 +559,8 @@ impl IrohHost {
 
 pub(crate) struct HostLifetime {
     pub(crate) reports: crate::DiagnosticReports,
+    pub(crate) diagnostic_permission: crate::pairing::DiagnosticPermission,
+    collecting: Arc<AtomicBool>,
     commands: mpsc::UnboundedSender<HostCommand>,
     worker: Mutex<Option<thread::JoinHandle<()>>>,
     done: Mutex<std_mpsc::Receiver<()>>,
@@ -619,6 +662,13 @@ impl Drop for AcceptGuard {
     }
 }
 
+struct CollectionGuard(Arc<AtomicBool>);
+impl Drop for CollectionGuard {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
+    }
+}
+
 /// One cancellable outgoing connection. Drop closes even a connected result
 /// that has not yet been claimed; polling never blocks the application's thread.
 pub struct PendingDestinationConnection {
@@ -708,6 +758,12 @@ enum ConnectTarget {
 }
 
 enum HostCommand {
+    CollectDiagnostics {
+        reports: crate::DiagnosticReports,
+        session: weld_diagnostics::SessionId,
+        reply: oneshot::Sender<Result<crate::DiagnosticCollection, String>>,
+        guard: CollectionGuard,
+    },
     DeviceSession {
         host: Weak<HostLifetime>,
         profile: IrohConnectionProfile,
@@ -825,6 +881,21 @@ async fn run_host(
 
     while let Some(command) = commands.recv().await {
         match command {
+            HostCommand::CollectDiagnostics {
+                reports,
+                session,
+                reply,
+                guard,
+            } => {
+                tokio::spawn(async move {
+                    let result = reports
+                        .collect(session)
+                        .await
+                        .map_err(|error| format!("{error:#}"));
+                    drop(guard);
+                    let _ = reply.send(result);
+                });
+            }
             HostCommand::DeviceSession {
                 host,
                 profile,

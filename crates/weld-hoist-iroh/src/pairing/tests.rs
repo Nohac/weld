@@ -195,6 +195,21 @@ fn real_endpoint_enrollment_catalogue_and_revocation_share_the_same_identity() {
         .expect("recorder")
         .snapshot()
         .expect("report");
+    let collected = source
+        .collect_diagnostics(report.session)
+        .expect("desktop collection");
+    assert_eq!(collected.status, crate::CollectionStatus::Collected);
+    assert_eq!(
+        collected.bundle.peer.expect("phone report").endpoint,
+        weld_diagnostics::Endpoint::Receiver
+    );
+    assert_eq!(
+        receiver
+            .collect_diagnostics(report.session)
+            .expect("ungranted collection")
+            .status,
+        crate::CollectionStatus::Denied
+    );
     assert_eq!(
         report.session,
         peers[0]
@@ -222,6 +237,13 @@ fn real_endpoint_enrollment_catalogue_and_revocation_share_the_same_identity() {
         .expect("grant diagnostics");
     // The request gate deliberately limits collection to once per second.
     thread::sleep(Duration::from_millis(1050));
+    assert_eq!(
+        receiver
+            .collect_diagnostics(report.session)
+            .expect("granted collection")
+            .status,
+        crate::CollectionStatus::Collected
+    );
     session
         .collect_diagnostics(report.clone())
         .expect("authorized collection");
@@ -241,6 +263,18 @@ fn real_endpoint_enrollment_catalogue_and_revocation_share_the_same_identity() {
             .is_some()
     );
     let stranger = iroh::SecretKey::generate().public();
+    authority
+        .set_diagnostics(receiver_identity.public_id().as_str(), false)
+        .expect("remove report grant");
+    thread::sleep(Duration::from_millis(1050));
+    let denied = receiver
+        .collect_diagnostics(report.session)
+        .expect("grant rechecked");
+    assert_eq!(denied.status, crate::CollectionStatus::Denied);
+    assert!(
+        denied.bundle.peer.is_some(),
+        "cached evidence survives failed collection"
+    );
     assert!(
         source.diagnostics().exchange(stranger, report).is_err(),
         "unrelated peer cannot access session"

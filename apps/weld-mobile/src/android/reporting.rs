@@ -54,6 +54,15 @@ impl Reports {
             .as_ref()
             .map(|(_, recorder)| recorder.clone())
     }
+    pub fn saved_report(&self) -> Option<(String, Report)> {
+        let state = self.0.lock().ok()?;
+        let saved = state.saved.as_ref()?;
+        saved
+            .bundle
+            .local
+            .ended
+            .then(|| (saved.owner.clone(), saved.bundle.local.clone()))
+    }
     pub fn persist_finished(&self) -> Result<()> {
         let save = {
             let mut state = self
@@ -206,6 +215,14 @@ mod tests {
         drop(reports);
         let reopened = Reports::default();
         reopened.open(directory.path().to_owned());
+        assert_eq!(
+            reopened
+                .saved_report()
+                .expect("restorable report")
+                .1
+                .session,
+            id
+        );
         assert!(reopened.text().contains("deadline expired"));
         assert!(reopened.for_peer("another-host").is_err());
         assert_eq!(

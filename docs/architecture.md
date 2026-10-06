@@ -13,6 +13,11 @@ Weld is a workspace of reusable layers and one standard distribution:
   presentation observations reach the correct connection. See
   [Session diagnostics](session-diagnostics.md) for commands, peer collection
   permission, privacy boundaries and current limitations.
+  Authenticated peer collection lives in `weld-hoist-iroh`, alongside the
+  bounded report archive. It uses additional QUIC streams on admitted connections;
+  `weldctl` runs collection from its control worker. Receiver reports are scoped
+  to the approved source identity, and desktop grants are queried through a weak
+  authority handle so archived reports cannot retain desktop/peer lifetimes.
 - `weld-sway-config` parses unexpanded Sway configuration spelling and reports
   source-aware structural errors. Its default parser depends only on Winnow.
   The optional `input` module translates keyboard directives and binding chords

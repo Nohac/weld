@@ -39,7 +39,7 @@ pub use native::{
 pub use notifier::IrohNotifier;
 pub use peer::{IrohDestinationPeer, IrohSourcePeer};
 pub use pending_source::pending_source_registration_with_backend;
-pub use reports::DiagnosticReports;
+pub use reports::{CollectionStatus, DiagnosticCollection, DiagnosticReports};
 
 /// Authenticated Iroh endpoint identity, kept opaque to Weld policy.
 #[derive(Clone, Debug, Eq, PartialEq)]

@@ -300,6 +300,12 @@ fn run(directory: PathBuf, shared: &Shared, input: Receiver<Input>) -> Result<()
                     &identity,
                     IrohDnsPolicy::Public,
                 )?;
+                if let Some((owner, report)) = shared.reports.saved_report()
+                    && owner == profile.peer().as_str()
+                {
+                    host.diagnostics()
+                        .restore_receiver_report(profile.peer(), report)?;
+                }
                 stream(&host, &profile, shared, &input, paired)
             });
             shared.clear();

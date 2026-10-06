@@ -25,6 +25,21 @@ Offline explanation requires no running compositor. A session ID identifies
 one authenticated transport connection; several hoists can share that connection.
 Omitting the ID from `explain` selects the newest recorded session, whether
 active or ended, and prints its ID. `diagnostic` and `diag` alias `diagnostics`.
+Headless Iroh sources expose the same commands through a diagnostics-only control
+socket; pairing and application browsing remain desktop services.
+
+`explain` and `export` request the matching report from the other participant
+before producing their result. Collection uses an independent, bounded stream
+on an existing authenticated Iroh connection. A newer connection to the same
+identity can collect a retained report from an earlier session. Requests time
+out after three seconds and leave video/input running. One collection is allowed
+at a time per local host, and a peer serves at most one request per second.
+
+The CLI reports whether collection succeeded, was denied, timed out, or found
+the peer/report unavailable. Local evidence remains available, and previously
+collected peer evidence is retained and identified as cached when refresh fails.
+Both instances must run the updated build. An offline phone must reconnect before
+its report can be fetched; the desktop does not wake or launch a remote app.
 
 ## Phone and peer evidence
 
@@ -36,8 +51,13 @@ restart in its private `files/weld-device/diagnostics.json` storage.
 The saved incident takes precedence over live evidence. A clean reconnect used
 to collect its peer report preserves that incident; a later failure replaces it.
 
-Remote collection requires a separate permission, disabled for existing and
-new pairings by default:
+The phone automatically serves sanitized session reports to its approved host,
+restricted to sessions that host participated in. The same portable responder
+runs in desktop and Godot receivers. Explicitly trusted development hoist links
+also permit session-scoped collection in either direction.
+
+For the reverse direction, allowing a paired device to fetch the desktop's
+reports still requires the existing diagnostics grant (disabled by default):
 
 ```sh
 weldctl --session weld-0 devices list
@@ -49,8 +69,10 @@ sanitized local evidence and requests the host's matching report. If disconnecte
 use **Reconnect** to collect afterward. Both endpoints must run this implementation
 for collection. Ordinary pairing, browsing and hoisting are separate permissions.
 
-The host checks the authenticated device, the current diagnostics grant, session
-ownership, schema, role and bounds. Knowing another session's ID grants no access.
+The responder checks the authenticated device and target session's ownership and
+access policy; a paired desktop grant is checked afresh on every request.
+Responses must match the requested session and opposite endpoint role, schema
+and bounds. Knowing another session's ID grants no access.
 The phone also checks the saved report's host identity before uploading it.
 After successful collection, `weldctl diagnostics explain/export` contains both
 reports. Disabling the permission affects subsequent collection requests immediately:
@@ -59,10 +81,11 @@ reports. Disabling the permission affects subsequent collection requests immedia
 weldctl --session weld-0 devices diagnostics DEVICE_ID --enabled false
 ```
 
-The first collection flow is phone-initiated. Desktop-initiated retrieval from
-arbitrary peers, mesh traversal and applet UI are future work. Godot contributes
-transport, decode and presentation evidence through the same APIs; its report
-UI/export integration remains separate from the phone browser.
+The phone restores its last completed report into the shared archive before
+reconnecting, so the host can collect that incident after an app restart.
+Collection targets the other participant in the selected session. It does not
+traverse other devices or expose unrelated sessions, device-wide logs or files.
+Godot's report UI/export integration remains separate from the phone browser.
 
 ## Evidence and limits
 
@@ -107,9 +130,18 @@ path-reset rules, invalid imports, and real direct-Iroh session exchange with
 permission denial/grant and unrelated-peer rejection. The phone storage test
 checks offline reload and host-scoped collection. These tests exercise Weld's
 rules and authorization rather than JSON serialization round trips.
+Real-Iroh tests additionally cover desktop-initiated retrieval, live permission
+revocation, restored-report collection after reconnect, wrong-owner denial,
+request rate limiting and timeout isolation from other streams.
 
 The Pixel installation smoke test captured a real session-read timeout, saved
 its ended report in private storage, and successfully explained that report
 through `weldctl diagnostics explain-file`. The device was locked, so the report
 screen still needs a visual check. This validates capture and persistence, not
 a fix for the underlying timeout.
+
+Desktop-initiated collection was also validated during a live Pixel AV1 stream
+from an isolated headless host. `diag explain` fetched the receiver automatically;
+the exported bundle contained matching session IDs and receiver receive, decode
+and presentation evidence. Pairing controls remained unavailable on that
+diagnostics-only host.

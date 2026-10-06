@@ -19,6 +19,24 @@ struct State {
     events: VecDeque<Event>,
 }
 impl Recorder {
+    /// Restore a completed local report; further observations remain disabled.
+    pub fn from_finished_report(report: Report) -> Result<Self, &'static str> {
+        report.validate()?;
+        if !report.ended {
+            return Err("only completed diagnostic reports can be restored");
+        }
+        Ok(Self(Arc::new(Mutex::new(State {
+            session: report.session,
+            endpoint: report.endpoint,
+            start: Instant::now(),
+            unix_ms: report.started_unix_ms,
+            next: report.events.last().map_or(0, |event| event.sequence),
+            overwritten: report.overwritten_events,
+            ended: true,
+            first_failure: report.first_failure,
+            events: report.events.into(),
+        }))))
+    }
     pub fn new(session: SessionId, endpoint: Endpoint) -> Self {
         Self(Arc::new(Mutex::new(State {
             session,

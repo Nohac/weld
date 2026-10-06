@@ -18,6 +18,10 @@ pub(crate) fn run(arguments: AppArguments) -> Result<()> {
         return runtime.run();
     };
     let host = crate::iroh_host::bind(&arguments)?;
+    let _controls = weld_control::ControlService::start_diagnostics(
+        arguments.wayland_socket.as_deref().unwrap_or("weld-0"),
+        host.clone(),
+    )?;
     let codec = arguments.hoist_codec.unwrap_or_default().into();
     let capabilities = runtime
         .external_dmabuf_capabilities()?
