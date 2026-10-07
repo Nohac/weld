@@ -286,7 +286,8 @@ mod tests {
         ClientBufferLease, ClientBufferMetadata, ClientBufferUseId, ClientCommitRevision,
         ClientEventQueue, ClientId, ClientRequest, ClientSourceId, ClientSurfaceCommit,
         ClientSurfaceEvent, ClientSurfaceEventKind, ClientSurfaceId, ClientSurfaceRequest,
-        ClientSurfaceRequestKind, Extent, SurfaceBufferChange, SurfaceBufferUpdate, SurfaceLayerId,
+        ClientSurfaceRequestKind, ClientSurfaceRole, Extent, SurfaceBufferChange,
+        SurfaceBufferUpdate, SurfaceLayerId, ToplevelState, WindowDecoration,
         WireClientSurfaceEventKind, WireSurfaceBufferChange,
     };
     use weld_hoist_core::{HoistEndpointCommand, SourceRelayAdapter};
@@ -400,6 +401,14 @@ mod tests {
         let session = HoistSessionId::new(3);
         let mut adapter =
             SourceRelayAdapter::new(source_id, LocalSourcePort::new(source_connection.clone()));
+        adapter.observe_event(&ClientSurfaceEvent {
+            surface,
+            kind: ClientSurfaceEventKind::Role(ClientSurfaceRole::Toplevel(ToplevelState {
+                parent: None,
+                decoration: WindowDecoration::ServerSide,
+                hints: Default::default(),
+            })),
+        });
         adapter.apply_command(ClientAdapterCommandEnvelope::new(
             ClientSourceId::new(1),
             HoistEndpointCommand::Map {
@@ -408,9 +417,11 @@ mod tests {
             },
         ));
         source_connection.pump().expect("mapped surface send");
-        let _ = destination_connection
+        let mapped = destination_connection
             .drain::<LocalSourcePacket>()
             .expect("mapped surface record");
+        assert!(mapped.iter().any(|packet| packet.message.session == session
+            && matches!(packet.message.message, SourceMessage::Mapped { surface: mapped } if mapped == surface)));
 
         destination_connection
             .queue(
@@ -438,16 +449,20 @@ mod tests {
         let mut effects = Vec::new();
         adapter.drain_effects(&mut effects);
 
-        assert!(matches!(
-            effects.as_slice(),
-            [ClientAdapterEffect::Request(ClientRequest::Surface(request))]
-                if request.surface == surface
-                    && request.kind == (ClientSurfaceRequestKind::Configure {
+        assert_eq!(
+            effects,
+            vec![
+                ClientAdapterEffect::InputConnected { source: source_id },
+                ClientAdapterEffect::Request(ClientRequest::Surface(ClientSurfaceRequest {
+                    surface,
+                    kind: ClientSurfaceRequestKind::Configure {
                         layout: Default::default(),
                         logical_size: Extent::new(800, 600),
                         resizing: true,
-                fullscreen: false,
-                    })
-        ));
+                        fullscreen: false,
+                    },
+                })),
+            ]
+        );
     }
 }
