@@ -13,7 +13,6 @@ crate-type = ["cdylib", "rlib"]
 anyhow = "1"
 weld-media = { path = "../../crates/weld-media", features = ["config"] }
 
-[target.'cfg(target_os = "android")'.dependencies]
 anyrender = "=0.14.0"
 blitz-dom = { git = "https://github.com/DioxusLabs/blitz", rev = "d1b433edbc13da889228ae4f92908f7c28514019", default-features = false, features = ["custom-widget"] }
 blitz-paint = { git = "https://github.com/DioxusLabs/blitz", rev = "d1b433edbc13da889228ae4f92908f7c28514019", default-features = false, features = ["custom-widget"] }
@@ -23,16 +22,39 @@ peniko = "0.6"
 wgpu = { version = "=30.0.0", default-features = false, features = ["gles", "wgsl"] }
 wgpu_context = "=0.10.0"
 futures-timer = "3"
+log = "0.4"
+tracing = "0.1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+weld-client = { path = "../../crates/weld-client" }
+weld-hoist-encoded = { path = "../../crates/weld-hoist-encoded" }
+weld-hoist-iroh = { path = "../../crates/weld-hoist-iroh" }
+
+[target.'cfg(target_os = "android")'.dependencies]
 android-activity = { version = "0.6", features = ["native-activity"] }
 android_logger = "0.15"
-log = "0.4"
 weld-media-android = { path = "../../crates/weld-media-android" }
+weld-hoist-encoded = { path = "../../crates/weld-hoist-encoded", features = ["android"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+weld-media-vaapi = { path = "../../crates/weld-media-vaapi" }
+
+[patch.crates-io]
+cros-libva = { path = "../../vendor/cros-libva" }
+anyrender_vello_hybrid = { path = "vendor/anyrender_vello_hybrid" }
+# Linux GLES display-handle fix; provenance/removal in vendor/anyrender_vello_hybrid/README.weld.md.
+
+[[bin]]
+name = "dioxus-stream-probe"
+path = "src/main.rs"
 
 [build-dependencies]
 cc = "1"
+pkg-config = "0.3"
 
 [profile.dev]
-opt-level = 1
+opt-level = 3
 debug = 1
 incremental = false
 

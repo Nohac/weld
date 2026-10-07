@@ -39,7 +39,7 @@ def main():
                BINDGEN_EXTRA_CLANG_ARGS_aarch64_linux_android=
                f"--sysroot={toolchain}/sysroot --target=aarch64-linux-android28")
     run("cargo", "ndk", "-t", "arm64-v8a", "--platform", "28",
-        "check" if args.check else "build", "--locked", "--manifest-path", PROJECT / "Cargo.toml",
+        "check" if args.check else "build", "--lib", "--locked", "--manifest-path", PROJECT / "Cargo.toml",
         "-j", args.jobs, env=env, cwd=ROOT)
     if args.check:
         return

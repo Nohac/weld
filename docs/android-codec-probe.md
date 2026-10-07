@@ -111,6 +111,22 @@ alone does not prove hardware decoding.
 
 ## Phone evidence: 2026-09-11
 
+### Decoder-name classification trap
+
+The Pixel 8 Pro's **`c2.google.av1.decoder` is hardware-backed**. Its
+`MediaCodecInfo` flags are `hardware=true software=false vendor=true`, verified
+again on 2026-10-07 during the Dioxus streaming probe. Both the small fixture and
+1080p60 live AV1 selected this codec. The `google` prefix must not be interpreted
+as software decoding or as evidence of a fallback. Query the flags on the actual
+device before diagnosing decoder selection; high CPU usage also needs separate
+attribution to codec, import, renderer and driver work.
+
+```sh
+scripts/run-android-codec-probe --serial DEVICE_SERIAL --codec-info c2.google.av1.decoder
+```
+
+### Initial measurements
+
 Pixel 8 Pro, Android API37, ARM64; FFmpeg8.1.2 and NDK29. All three finite
 sequences passed with 12 decoded frames, 12 acquired GPU-sampleable images,
 matching timestamps and the expected 320x180 crop.

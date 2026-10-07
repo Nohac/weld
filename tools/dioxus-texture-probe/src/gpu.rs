@@ -22,7 +22,7 @@ impl Converter {
             .context("probe requires the GLES backend")?;
         let _context = hal.context().lock();
         // SAFETY: the converter is created on the locked current EGL context.
-        let native = NonNull::new(unsafe { weld_mobile_video_open() })
+        let native = NonNull::new(unsafe { weld_probe_video_open() })
             .context("EGL video import unavailable")?;
         Ok(Self {
             native,
@@ -45,8 +45,9 @@ impl Converter {
             "invalid crop"
         );
         ensure!(
-            width == 320 && height == 180,
-            "unexpected fixture dimensions"
+            width <= self.device.limits().max_texture_dimension_2d
+                && height <= self.device.limits().max_texture_dimension_2d,
+            "decoded extent exceeds renderer limit"
         );
         let descriptor = wgpu::TextureDescriptor {
             label: Some("Blitz Android decoded video"),
@@ -58,7 +59,7 @@ impl Converter {
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba8UnormSrgb,
+            format: wgpu::TextureFormat::Rgba8Unorm,
             usage: wgpu::TextureUsages::TEXTURE_BINDING,
             view_formats: &[],
         };
@@ -74,7 +75,7 @@ impl Converter {
                 let _context = hal.context().lock();
                 // SAFETY: positive dimensions; locked current context.
                 let name = NonZeroU32::new(unsafe {
-                    weld_mobile_video_texture(i32::try_from(width)?, i32::try_from(height)?)
+                    weld_probe_video_texture(i32::try_from(width)?, i32::try_from(height)?)
                 })
                 .context("texture allocation")?;
                 let desc = wgpu::hal::TextureDescriptor {
@@ -88,7 +89,7 @@ impl Converter {
                     memory_flags: wgpu::hal::MemoryFlags::empty(),
                     view_formats: vec![],
                 };
-                // SAFETY: C allocated this exact sRGB texture. HAL takes deletion ownership.
+                // SAFETY: C allocated this exact unorm texture. HAL takes deletion ownership.
                 (name, unsafe { hal.texture_from_raw(name, &desc, None) })
             };
             // SAFETY: matching device and allocation; convert initializes pixels before publication.
@@ -155,9 +156,9 @@ impl Drop for Converter {
     }
 }
 unsafe extern "C" {
-    fn weld_mobile_video_open() -> *mut c_void;
+    fn weld_probe_video_open() -> *mut c_void;
     fn weld_mobile_video_close(video: *mut c_void);
-    fn weld_mobile_video_texture(width: i32, height: i32) -> u32;
+    fn weld_probe_video_texture(width: i32, height: i32) -> u32;
     fn weld_mobile_video_draw(
         video: *mut c_void,
         buffer: *mut c_void,

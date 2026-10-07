@@ -106,6 +106,12 @@ directory under `/run/opengl-driver/lib/dri`; it deliberately does not force a
 vendor driver name. A missing FFmpeg or libva environment must be reported
 separately from a loaded driver that lacks a requested capability.
 
+For Android decoder investigations, read [Android codec evidence](docs/android-codec-probe.md)
+and query `MediaCodecInfo.isHardwareAccelerated()` / `isSoftwareOnly()` on the
+device before classifying the selected decoder. Names and prefixes are insufficient:
+the Pixel 8 Pro's `c2.google.av1.decoder` is a verified vendor hardware decoder.
+Use `scripts/run-android-codec-probe --serial DEVICE --codec-info CODEC_NAME`.
+
 `scripts/build-mobile` builds Rust through cargo-ndk and packages the Android
 activity and Google Code Scanner with a pinned Gradle wrapper. Its first build
 downloads Gradle and Maven dependencies; later builds reuse their caches.

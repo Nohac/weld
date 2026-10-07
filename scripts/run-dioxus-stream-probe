@@ -1,0 +1,170 @@
+#!/usr/bin/env python3
+"""Run a bounded, isolated live Weld stream in the Dioxus probe on Linux or Android."""
+import argparse
+import fcntl
+import hashlib
+import json
+import os
+from pathlib import Path
+import resource
+import runpy
+import signal
+import subprocess
+import tempfile
+import time
+
+ROOT = Path(__file__).resolve().parent.parent
+COMMON = runpy.run_path(str(ROOT / "scripts/run-godot-hoist"))
+PACKAGE = "org.weld.dioxusprobe"
+ACTIVITY = PACKAGE + "/android.app.NativeActivity"
+APP_DIRECTORY = "files/weld-probe"
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--desktop", action="store_true")
+    parser.add_argument("--serial")
+    parser.add_argument("--no-build", action="store_true")
+    parser.add_argument("--seconds", type=int, default=120)
+    parser.add_argument("--width", type=int, default=1920)
+    parser.add_argument("--height", type=int, default=1080)
+    parser.add_argument("--fps", type=int, default=60)
+    parser.add_argument("--codec", choices=("av1", "h264"), default="av1")
+    parser.add_argument("--bitrate-mbps", type=int, default=8)
+    parser.add_argument("command", nargs=argparse.REMAINDER)
+    args = parser.parse_args()
+    if not 1 <= args.seconds <= 1800 or not 1 <= args.fps <= 120:
+        parser.error("seconds must be 1..1800 and fps 1..120")
+    if not all(1 <= value <= 4096 for value in (args.width, args.height)) or not 1 <= args.bitrate_mbps <= 64:
+        parser.error("probe extent must be 1..4096 and bitrate 1..64 Mbps")
+    command = args.command
+    if command[:1] == ["--"]:
+        command = command[1:]
+    command = command or ["foot", "-e", "htop"]
+    os.umask(0o077)
+    resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
+    validation = ROOT / "target/validation"
+    validation.mkdir(parents=True, exist_ok=True)
+    directory = Path(tempfile.mkdtemp(prefix="dioxus-stream-", dir=validation))
+    receiver_directory = directory / "receiver"
+    receiver_directory.mkdir(mode=0o700)
+    runtime = directory / "runtime"
+    runtime.mkdir(mode=0o700)
+    settings = json.dumps(dict(width=args.width, height=args.height, fps=args.fps))
+    (receiver_directory / "live.json").write_text(settings)
+    env = dict(os.environ, CARGO_TARGET_DIR=str(ROOT / "target/dioxus-texture-probe/cargo"),
+               WELD_PROBE_DIRECTORY=str(receiver_directory), WGPU_BACKEND="gl",
+               WGPU_VALIDATION="0", WGPU_DEBUG="0",
+               RUST_LOG=os.environ.get("RUST_LOG", "info,wgpu_hal=error,weld_media_diag=debug,weld_network_diag=debug"))
+    adb = None if args.desktop else ["adb", *(["-s", args.serial] if args.serial else [])]
+    device_lock = None
+    if adb:
+        serial = subprocess.check_output([*adb, "get-serialno"], text=True, timeout=5).strip()
+        lock_directory = ROOT / "target/dioxus-texture-probe"
+        lock_directory.mkdir(parents=True, exist_ok=True)
+        device_lock = (lock_directory / (hashlib.sha256(serial.encode()).hexdigest() + ".lock")).open("a")
+        try:
+            fcntl.flock(device_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            parser.error("a Dioxus probe is already using this device; stop it first")
+    if args.desktop:
+        libraries = [subprocess.check_output(["pkg-config", "--variable=libdir", name], text=True).strip()
+                     for name in ("egl", "glesv2", "libavcodec", "libavformat", "libavutil", "libavfilter", "libva", "libva-drm")]
+        env["LD_LIBRARY_PATH"] = ":".join(dict.fromkeys([*env.get("LD_LIBRARY_PATH", "").split(":"), *libraries])).strip(":")
+    if not args.no_build:
+        subprocess.run(["cargo", "build", "--locked", "--bin", "weldwm", "-j8"], cwd=ROOT, check=True)
+        if args.desktop:
+            subprocess.run(["cargo", "build", "--locked", "--manifest-path", str(ROOT / "tools/dioxus-texture-probe/Cargo.toml"), "--bin", "dioxus-stream-probe", "-j8"], env=env, cwd=ROOT, check=True)
+        else:
+            subprocess.run([str(ROOT / "scripts/run-dioxus-texture-probe")], check=True)
+            subprocess.run([*adb, "install", "--no-incremental", "-r", str(ROOT / "target/dioxus-texture-probe/weld-dioxus-probe.apk")], check=True, timeout=180)
+    hosts = []
+    logcat = None
+    pid = None
+    stopped = False
+
+    def stop(_signal, _frame):
+        nonlocal stopped
+        stopped = True
+
+    for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+        signal.signal(sig, stop)
+
+    def device(*arguments, **kwargs):
+        return subprocess.run([*adb, *arguments], check=True, timeout=15, **kwargs)
+
+    def read_identity():
+        if args.desktop:
+            path = receiver_directory / "public.identity"
+            return path.read_text() if path.exists() else None
+        result = subprocess.run([*adb, "shell", "run-as", PACKAGE, "cat", APP_DIRECTORY + "/public.identity"], capture_output=True, text=True, timeout=5)
+        return result.stdout if result.returncode == 0 else None
+
+    def wait(predicate):
+        until = time.monotonic() + 60
+        while not stopped and time.monotonic() < until:
+            if any(host.exited() for host in hosts):
+                raise RuntimeError(f"probe process exited; inspect {directory}")
+            value = predicate()
+            if value:
+                return value
+            time.sleep(0.1)
+        raise RuntimeError("probe cancelled or startup timed out")
+
+    print(f"Logs: {directory}", flush=True)
+    print("Iroh N0 discovery/relays use the Internet. Only this run's headless application is shared.", flush=True)
+    try:
+        if args.desktop:
+            hosts.append(COMMON["LAUNCHER"]["OwnedHost"]("receiver", [str(ROOT / "target/dioxus-texture-probe/cargo/debug/dioxus-stream-probe")], env, ROOT, directory))
+        else:
+            device("shell", "am", "force-stop", PACKAGE)
+            device("shell", "run-as", PACKAGE, "mkdir", "-p", APP_DIRECTORY)
+            device("shell", "run-as", PACKAGE, "chmod", "700", APP_DIRECTORY)
+            device("shell", "run-as", PACKAGE, "rm", "-f", APP_DIRECTORY + "/source.profile")
+            device("shell", "-T", "run-as", PACKAGE, "sh", "-c", "'umask 077; cat > files/weld-probe/live.json'", input=settings, text=True)
+            device("shell", "am", "start", "-n", ACTIVITY)
+            pid = wait(lambda: subprocess.run([*adb, "shell", "pidof", PACKAGE], capture_output=True, text=True, timeout=5).stdout.strip())
+            with (directory / "receiver.log").open("w") as log:
+                logcat = subprocess.Popen([*adb, "logcat", "--pid", pid, "-v", "threadtime"], stdout=log, stderr=subprocess.STDOUT)
+        public = COMMON["identity"](wait(read_identity))
+        COMMON["write_new"](directory / "viewer.identity", public + "\n")
+        hosts.append(COMMON["LAUNCHER"]["OwnedHost"]("source", COMMON["source_command"](directory, directory, command, args.bitrate_mbps, args.codec), COMMON["source_environment"](runtime), ROOT, directory))
+        wait(lambda: (directory / "source.profile").exists())
+        profile = (directory / "source.profile").read_text()
+        COMMON["profile_peer"](profile)
+        if args.desktop:
+            COMMON["write_new"](receiver_directory / "source.profile", profile)
+        else:
+            device("shell", "-T", "run-as", PACKAGE, "sh", "-c", "'umask 077; cat > files/weld-probe/source.profile.pending && mv files/weld-probe/source.profile.pending files/weld-probe/source.profile'", input=profile, text=True)
+        print(f"Live probe: {args.width}x{args.height}, {args.fps} Hz, {args.codec}, {args.bitrate_mbps} Mbps; {args.seconds}s timeout.", flush=True)
+        until = time.monotonic() + args.seconds
+        next_check = 0.0
+        while not stopped and time.monotonic() < until:
+            if any(host.exited() for host in hosts):
+                raise RuntimeError(f"probe process exited; inspect {directory}")
+            if adb and time.monotonic() >= next_check:
+                actual = subprocess.run([*adb, "shell", "pidof", PACKAGE], capture_output=True, text=True, timeout=5).stdout.strip()
+                if actual != pid or logcat.poll() is not None:
+                    raise RuntimeError(f"Android receiver exited or was replaced; inspect {directory}")
+                next_check = time.monotonic() + 1
+            time.sleep(0.2)
+    finally:
+        if logcat is not None:
+            logcat.terminate()
+            try:
+                logcat.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                logcat.kill()
+                logcat.wait(timeout=5)
+        try:
+            if adb:
+                device("shell", "am", "force-stop", PACKAGE)
+                device("shell", "run-as", PACKAGE, "rm", "-f", APP_DIRECTORY + "/source.profile", APP_DIRECTORY + "/live.json")
+        finally:
+            for host in reversed(hosts):
+                host.close()
+    print(f"Probe stopped. Logs: {directory}", flush=True)
+
+
+if __name__ == "__main__":
+    main()
