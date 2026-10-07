@@ -19,3 +19,19 @@ Remove this patch when the upstream renderer/context passes the native display
 before adapter selection. Revalidate Linux Wayland startup and suspend/resume.
 
 Upstream: https://github.com/DioxusLabs/anyrender/tree/cf0f14776102ec775af61bcdcaac2ab345f4fafb
+
+## Completion-pacing experiment
+
+`probe_timing.rs` records per-second wall-time totals for the six render phases.
+The live probe calls `set_probe_nonblocking_poll` before launching the renderer;
+the default remains the upstream blocking completion wait. The opt-in replaces
+only the final `Device::poll(wait_indefinitely())` with `PollType::Poll`. WGPU
+continues owning resource tracking and completion callbacks, and the importers
+retain their image/fence contracts. This allows CPU work for a subsequent frame
+to overlap outstanding GPU work.
+
+The Pixel's measured completion wait fell from about 7.95 ms to 0.034 ms per
+frame, restoring approximately 60 selected frames/s. See the parent probe README
+for matched queue-policy comparisons and validation boundaries. Remove these
+diagnostic controls when an upstream asynchronous completion policy replaces
+the per-frame blocking wait and equivalent measurements are available.

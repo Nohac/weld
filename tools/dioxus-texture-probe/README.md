@@ -91,6 +91,55 @@ Linux requires a probe-local AnyRender display-handle fix documented in
 the upstream GLES initialization path accepts the native display. Runtime
 library paths preserve the caller's existing paths before pkg-config fallbacks.
 
+### Pixel pacing investigation
+
+The follow-up compared `--queue smoothing` (the default) with `--queue latest`,
+then independently changed the renderer's completion policy using
+`--nonblocking-poll`. Both targets retain blocking polling by default for the
+baseline comparison. The experiment stays within this isolated probe.
+
+On the same 1080p60 AV1 workload, with the Pixel display reporting 120 Hz:
+
+| Queue | GPU completion | Selected frames/s | Mailbox age | Decode-to-import age |
+| --- | --- | ---: | ---: | ---: |
+| Smoothing | Blocking | 57.54 | 13.18 ms | 13.49 ms |
+| Latest | Blocking | 54.16 | 5.86 ms | 6.16 ms |
+| Latest | Nonblocking | 59.90 | 0.82 ms | 1.13 ms |
+| Smoothing | Nonblocking | 59.97 | 0.88 ms | 1.19 ms |
+
+Removing the queue's history alone trades frame retention for lower age. The
+main bottleneck was AnyRender's unconditional `Device::poll(wait_indefinitely())`
+after every presentation. Its timed baseline spent 7.95 ms/frame there, alongside
+6.08 ms of scene construction (including video import). Nonblocking `Poll`
+reduced completion polling to 0.034 ms/frame. Presentation-call time changed
+from 1.10 to 1.36 ms/frame, so the removed wait was largely avoided rather than
+transferred to that call. Smoothing plus nonblocking had zero steady-state
+superseded/stale entries in the measured interval.
+
+```sh
+scripts/run-dioxus-stream-probe --serial DEVICE_SERIAL --nonblocking-poll -- \
+  mpv --no-config --no-audio --vo=gpu --gpu-context=wayland \
+  'av://lavfi:testsrc2=size=1920x1080:rate=60'
+```
+
+`probe_paint` records paint intervals and worker-request-to-widget-entry time.
+Follow-up redraws used to drain the jitter slot do not stamp the worker wake
+clock. `probe_render` splits scene construction, surface acquisition, command
+encoding, queue submission, presentation and completion polling. Each duration
+is wall time around that call; GPU execution can overlap the CPU after polling
+becomes nonblocking. Pause/startup windows should be excluded using elapsed
+time and the lifecycle logs.
+
+Evidence: `dioxus-stream-d1rnz140` (smoothing baseline),
+`dioxus-stream-uern0ugi` (timed latest baseline), `dioxus-stream-t4e88gft`
+(latest/nonblocking), and `dioxus-stream-4vtzxrti` (smoothing/nonblocking).
+The first baseline wake-clock implementation also counted self-requested draws;
+use those baseline runs for frame/queue/renderer metrics, and the corrected
+nonblocking runs for worker wake latency. Aggregates omit the first six and
+last two report windows. These short runs establish the pacing cause; longer
+thermal and GPU-completion lifecycle validation remains useful before adopting
+the renderer change in a production client.
+
 ## Validated on Pixel 8 Pro
 
 On 2026-10-07, the GLES build decoded and presented all 120 frames of its generated

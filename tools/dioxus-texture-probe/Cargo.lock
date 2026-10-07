@@ -6899,6 +6899,7 @@ dependencies = [
  "android_logger",
  "anyhow",
  "anyrender",
+ "anyrender_vello_hybrid",
  "blitz-dom",
  "blitz-paint",
  "blitz-shell",

@@ -14,6 +14,7 @@ anyhow = "1"
 weld-media = { path = "../../crates/weld-media", features = ["config"] }
 
 anyrender = "=0.14.0"
+anyrender_vello_hybrid = "=0.11.0"
 blitz-dom = { git = "https://github.com/DioxusLabs/blitz", rev = "d1b433edbc13da889228ae4f92908f7c28514019", default-features = false, features = ["custom-widget"] }
 blitz-paint = { git = "https://github.com/DioxusLabs/blitz", rev = "d1b433edbc13da889228ae4f92908f7c28514019", default-features = false, features = ["custom-widget"] }
 blitz-shell = { git = "https://github.com/DioxusLabs/blitz", rev = "d1b433edbc13da889228ae4f92908f7c28514019", default-features = false, features = ["custom-widget"] }

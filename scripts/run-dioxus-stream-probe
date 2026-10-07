@@ -29,6 +29,8 @@ def main():
     parser.add_argument("--width", type=int, default=1920)
     parser.add_argument("--height", type=int, default=1080)
     parser.add_argument("--fps", type=int, default=60)
+    parser.add_argument("--queue", choices=("smoothing", "latest"), default="smoothing")
+    parser.add_argument("--nonblocking-poll", action="store_true", help="experiment: poll GPU completion without waiting after each present")
     parser.add_argument("--codec", choices=("av1", "h264"), default="av1")
     parser.add_argument("--bitrate-mbps", type=int, default=8)
     parser.add_argument("command", nargs=argparse.REMAINDER)
@@ -50,7 +52,7 @@ def main():
     receiver_directory.mkdir(mode=0o700)
     runtime = directory / "runtime"
     runtime.mkdir(mode=0o700)
-    settings = json.dumps(dict(width=args.width, height=args.height, fps=args.fps))
+    settings = json.dumps(dict(width=args.width, height=args.height, fps=args.fps, queue=args.queue, nonblocking_poll=args.nonblocking_poll))
     (receiver_directory / "live.json").write_text(settings)
     env = dict(os.environ, CARGO_TARGET_DIR=str(ROOT / "target/dioxus-texture-probe/cargo"),
                WELD_PROBE_DIRECTORY=str(receiver_directory), WGPU_BACKEND="gl",

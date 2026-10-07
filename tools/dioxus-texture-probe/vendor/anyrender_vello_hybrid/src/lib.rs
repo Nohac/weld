@@ -6,6 +6,8 @@ mod scene;
 #[cfg(all(target_arch = "wasm32", feature = "webgl"))]
 mod webgl_scene;
 mod window_renderer;
+mod probe_timing;
+pub use probe_timing::set_probe_nonblocking_poll;
 
 pub use scene::ImageManager;
 pub use scene::VelloHybridScenePainter;

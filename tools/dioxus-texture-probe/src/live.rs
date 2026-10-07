@@ -17,7 +17,8 @@ use std::{
 };
 
 pub fn launch() -> Result<()> {
-    Settings::load(crate::DIRECTORY.get().context("probe directory missing")?)?;
+    let settings = Settings::load(crate::DIRECTORY.get().context("probe directory missing")?)?;
+    anyrender_vello_hybrid::set_probe_nonblocking_poll(settings.nonblocking_poll);
     dioxus_native::launch(app);
     Ok(())
 }
@@ -84,6 +85,7 @@ struct Video {
     maximum_gap: Duration,
     last_frame: Option<Instant>,
     report: Instant,
+    timing: crate::timing::PaintTiming,
 }
 impl Video {
     fn new(shared: Arc<Shared>) -> Self {
@@ -100,6 +102,7 @@ impl Video {
             maximum_gap: Duration::ZERO,
             last_frame: None,
             report: Instant::now(),
+            timing: crate::timing::PaintTiming::default(),
         }
     }
     fn advance(&mut self, ctx: &mut dyn RenderContext) -> Result<()> {
@@ -126,7 +129,7 @@ impl Video {
         };
         drop(retired);
         if pending {
-            (self.shared.redraw)();
+            self.shared.followup_redraw();
         }
         if let Some(frame) = frame {
             let start = Instant::now();
@@ -161,6 +164,7 @@ impl Video {
             self.sampled += 1;
         }
         if self.report.elapsed() >= Duration::from_secs(1) {
+            self.timing.report(self.report.elapsed());
             let stats = self
                 .shared
                 .frames
@@ -224,6 +228,10 @@ impl Widget for Video {
         }
     }
     fn destroy_surfaces(&mut self) {
+        self.timing.suspend();
+        if let Ok(mut wake) = self.shared.wake.lock() {
+            wake.take();
+        }
         self.shared.active.store(false, Ordering::Release);
         if let Ok(mut frames) = self.shared.frames.lock() {
             drop(frames.drain());
@@ -243,6 +251,14 @@ impl Widget for Video {
         height: u32,
         _: f64,
     ) -> anyrender::Scene {
+        let now = Instant::now();
+        let requested = self
+            .shared
+            .wake
+            .lock()
+            .ok()
+            .and_then(|mut wake| wake.take());
+        self.timing.paint(now, requested);
         if let Err(error) = self.advance(ctx) {
             self.shared
                 .message(format!("Presentation failed: {error:#}"));

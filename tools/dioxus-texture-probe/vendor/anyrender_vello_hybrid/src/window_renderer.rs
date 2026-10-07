@@ -155,6 +155,7 @@ pub struct VelloHybridWindowRenderer {
     scene: VelloHybridScene,
     config: VelloHybridRendererOptions,
     cached_images: FxHashMap<u64, ImageId>,
+    probe_timing: crate::probe_timing::Trace,
 }
 
 #[cfg(target_os = "linux")]
@@ -184,6 +185,7 @@ impl VelloHybridWindowRenderer {
             window_handle: None,
             scene: VelloHybridScene::new_with(0, 0, render_settings.level),
             cached_images: FxHashMap::default(),
+            probe_timing: crate::probe_timing::Trace::default(),
         }
     }
 
@@ -488,6 +490,7 @@ impl WindowRenderer for VelloHybridWindowRenderer {
     }
 
     fn render<F: FnOnce(&mut Self::ScenePainter<'_>)>(&mut self, draw_fn: F) {
+        let began = std::time::Instant::now();
         let RenderState::Active(state) = &mut self.render_state else {
             return;
         };
@@ -535,6 +538,7 @@ impl WindowRenderer for VelloHybridWindowRenderer {
         }
         // Regenerate the vello scene
         draw_fn(&mut scene_painter);
+        let scene_done = std::time::Instant::now();
         timer.record_time("cmd");
 
         let Ok(texture_view) = render_surface.target_texture_view() else {
@@ -545,6 +549,7 @@ impl WindowRenderer for VelloHybridWindowRenderer {
         };
 
         // Construct Vello Hybrid TextureBindings
+        let acquired = std::time::Instant::now();
         let mut texture_bindings = TextureBindings::new();
         for (resource_id, texture_view) in state.texture_bindings.iter() {
             texture_bindings.insert(TextureId(resource_id.into_ffi()), texture_view.clone());
@@ -568,7 +573,9 @@ impl WindowRenderer for VelloHybridWindowRenderer {
                 TargetInit::Clear(ClearSettings::default()),
             )
             .expect("failed to render to texture");
+        let encoded = std::time::Instant::now();
         render_surface.queue().submit([encoder.finish()]);
+        let submitted = std::time::Instant::now();
         timer.record_time("render");
 
         drop(texture_view);
@@ -578,11 +585,13 @@ impl WindowRenderer for VelloHybridWindowRenderer {
             return;
         }
         timer.record_time("present");
+        let presented = std::time::Instant::now();
 
         render_surface
             .device()
-            .poll(wgpu::PollType::wait_indefinitely())
+            .poll(if crate::probe_timing::nonblocking() { wgpu::PollType::Poll } else { wgpu::PollType::wait_indefinitely() })
             .unwrap();
+        self.probe_timing.record(crate::probe_timing::Sample { scene: scene_done - began, acquire: acquired - scene_done, encode: encoded - acquired, submit: submitted - encoded, present: presented - submitted, wait: presented.elapsed() });
 
         timer.record_time("wait");
         timer.print_times("vello_hybrid: ");

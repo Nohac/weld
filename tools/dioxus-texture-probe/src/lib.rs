@@ -4,6 +4,7 @@
 mod linux;
 mod live;
 mod session;
+mod timing;
 #[cfg(target_os = "linux")]
 use linux as platform;
 #[cfg(target_os = "android")]

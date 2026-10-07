@@ -29,12 +29,24 @@ use weld_hoist_iroh::{
 };
 use weld_media::{MediaStreamId, StreamGeneration, VideoCodec};
 
+#[derive(Clone, Copy, Debug, Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum QueuePolicy {
+    #[default]
+    Smoothing,
+    Latest,
+}
+
 #[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Settings {
     pub width: u32,
     pub height: u32,
     pub fps: u32,
+    #[serde(default)]
+    pub queue: QueuePolicy,
+    #[serde(default)]
+    pub nonblocking_poll: bool,
 }
 impl Settings {
     pub fn load(directory: &std::path::Path) -> Result<Self> {
@@ -103,7 +115,8 @@ impl DecodeBackend for TimedBackend {
     }
 }
 pub struct Shared {
-    pub redraw: Arc<dyn Fn() + Send + Sync>,
+    redraw: Arc<dyn Fn() + Send + Sync>,
+    pub wake: Mutex<crate::timing::Wake>,
     pub frames: Mutex<PresentationMailbox<Frame>>,
     pub status: Mutex<String>,
     pub stopped: AtomicBool,
@@ -112,13 +125,22 @@ pub struct Shared {
     pub clear: AtomicBool,
 }
 impl Shared {
+    pub fn followup_redraw(&self) {
+        (self.redraw)();
+    }
+    pub fn request_redraw(&self) {
+        if let Ok(mut wake) = self.wake.lock() {
+            wake.request(Instant::now());
+        }
+        (self.redraw)();
+    }
     pub fn message(&self, message: impl Into<String>) {
         let message = message.into();
         log::info!("{message}");
         if let Ok(mut status) = self.status.lock() {
             *status = message;
         }
-        (self.redraw)();
+        self.request_redraw();
     }
 }
 pub struct Session {
@@ -133,7 +155,13 @@ impl Session {
     ) -> Result<Self> {
         let shared = Arc::new(Shared {
             redraw,
-            frames: Mutex::new(PresentationMailbox::smoothing(settings.rate().interval())),
+            wake: Mutex::new(crate::timing::Wake::default()),
+            frames: Mutex::new(match settings.queue {
+                QueuePolicy::Smoothing => {
+                    PresentationMailbox::smoothing(settings.rate().interval())
+                }
+                QueuePolicy::Latest => PresentationMailbox::default(),
+            }),
             status: Mutex::new("Waiting for source profile".into()),
             stopped: AtomicBool::new(false),
             active: AtomicBool::new(true),
@@ -153,7 +181,7 @@ impl Session {
                     drop(frames.drain());
                 }
                 state.clear.store(true, Ordering::Release);
-                (state.redraw)();
+                state.request_redraw();
             })?;
         Ok(Self { shared, worker })
     }
@@ -195,6 +223,7 @@ impl DecodedFramePublisher for Publisher {
     }
 }
 fn receive(shared: &Shared, directory: PathBuf, settings: Settings) -> Result<()> {
+    log::info!("probe queue policy: {:?}", settings.queue);
     let identity = IrohDeviceIdentity::load_or_create(&directory)?;
     if !directory.join("public.identity").exists() {
         identity.publish_identity(directory.join("public.identity"))?;
@@ -336,7 +365,7 @@ fn receive(shared: &Shared, directory: PathBuf, settings: Settings) -> Result<()
                                         Instant::now(),
                                     );
                                 drop(old);
-                                (shared.redraw)();
+                                shared.request_redraw();
                             }
                         }
                     }
@@ -387,12 +416,24 @@ mod tests {
             (1920, 1080, 0),
             (1920, 1080, 121),
         ] {
-            assert!(Settings { width, height, fps }.validate().is_err());
+            assert!(
+                Settings {
+                    width,
+                    height,
+                    fps,
+                    queue: super::QueuePolicy::Smoothing,
+                    nonblocking_poll: false
+                }
+                .validate()
+                .is_err()
+            );
         }
         let settings = Settings {
             width: 1920,
             height: 1080,
             fps: 60,
+            queue: super::QueuePolicy::Smoothing,
+            nonblocking_poll: false,
         };
         assert!(settings.validate().is_ok());
         assert_eq!(settings.rate().millihertz(), 60_000);
