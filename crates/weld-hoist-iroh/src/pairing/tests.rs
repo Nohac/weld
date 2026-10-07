@@ -301,6 +301,12 @@ fn real_endpoint_enrollment_catalogue_and_revocation_share_the_same_identity() {
             {
                 assert_eq!(session, id);
                 assert_eq!(window, 7);
+                // A busy compositor used to tear down the peer after three seconds.
+                thread::sleep(Duration::from_millis(3200));
+                assert!(
+                    peers[0].1.is_available(),
+                    "slow desktop action keeps media live"
+                );
                 let _ = answer.send(true);
                 return true;
             }

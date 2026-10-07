@@ -17,7 +17,7 @@ use std::{
 };
 use tokio::sync::mpsc;
 use weld_client::ClientSurfaceId;
-use weld_hoist_encoded::EncodedSourceTransport;
+use weld_hoist_encoded::{EncodedDestinationTransport, EncodedSourceTransport};
 use weld_media::VideoCodec;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -270,7 +270,7 @@ pub(crate) async fn accept_session(
                         window,
                         answer,
                     })?;
-                    Reply::Accepted(tokio::time::timeout(Duration::from_secs(3), wait).await??)
+                    Reply::Accepted(wait_for_action(&connection, wait).await?)
                 }
                 Request::Release => {
                     let (answer, wait) = oneshot::channel();
@@ -278,7 +278,7 @@ pub(crate) async fn accept_session(
                         session: id,
                         answer,
                     })?;
-                    Reply::Accepted(tokio::time::timeout(Duration::from_secs(3), wait).await??)
+                    Reply::Accepted(wait_for_action(&connection, wait).await?)
                 }
             };
             session_io(
@@ -294,13 +294,30 @@ pub(crate) async fn accept_session(
     .await
 }
 
+async fn wait_for_action(connection: &Connection, answer: oneshot::Receiver<bool>) -> Result<bool> {
+    session_io(
+        connection,
+        Duration::from_secs(3),
+        weld_diagnostics::Operation::Control,
+        None,
+        async { answer.await.context("desktop action cancelled") },
+    )
+    .await
+}
+
 /// Receiver media peer plus an independent, bounded application-control channel.
+/// Dropping the session closes its peer and cancels any pending control exchange.
 pub struct DeviceSession {
     diagnostic_reply: Arc<Mutex<Option<Option<weld_diagnostics::Report>>>>,
     pub peer: IrohDestinationPeer,
     catalogue: Arc<Mutex<Vec<ApplicationInfo>>>,
     commands: mpsc::Sender<Request>,
     error: Arc<Mutex<Option<String>>>,
+}
+impl Drop for DeviceSession {
+    fn drop(&mut self) {
+        self.peer.disconnect();
+    }
 }
 impl DeviceSession {
     /// Explicit collection also shares this endpoint's sanitized session evidence.
@@ -478,83 +495,44 @@ pub(crate) async fn connect_session(
     Ok(())
 }
 
-/// Preserve the initiating failure before dropping the live connection guard.
+/// Keep a live session's partially transferred record across slow exchanges.
+/// The warning timer leaves the pinned operation intact; QUIC closure or an I/O
+/// error ends the wait. Requests stay ordered and execute once after recovery.
 async fn session_io<T>(
     connection: &Connection,
-    duration: Duration,
+    warn_after: Duration,
     operation: weld_diagnostics::Operation,
     recorder: Option<&weld_diagnostics::Recorder>,
     future: impl std::future::Future<Output = Result<T>>,
 ) -> Result<T> {
-    let result = tokio::time::timeout(duration, future).await;
-    let cause = match &result {
-        Err(_) => Some(weld_diagnostics::Cause::Timeout),
-        Ok(Err(_)) if connection.close_reason().is_none() => {
-            Some(weld_diagnostics::Cause::ProtocolOrIo)
+    let started = tokio::time::Instant::now();
+    tokio::pin!(future);
+    let result = tokio::select! {
+        result = &mut future => result,
+        reason = connection.closed() => return Err(reason.into()),
+        _ = tokio::time::sleep(warn_after) => {
+            tracing::warn!(?operation, "device session control exchange delayed; retaining pending operation");
+            let result = tokio::select! {
+                result = &mut future => result,
+                reason = connection.closed() => return Err(reason.into()),
+            };
+            if result.is_ok() {
+                tracing::info!(?operation, elapsed_ms = started.elapsed().as_millis(), "device session control exchange resumed");
+            }
+            result
         }
-        Ok(Err(_)) => None,
-        Ok(Ok(_)) => None,
     };
-    if let (Some(recorder), Some(cause)) = (recorder, cause) {
-        recorder.record(weld_diagnostics::Observation::Failure { operation, cause });
+    if result.is_err()
+        && connection.close_reason().is_none()
+        && let Some(recorder) = recorder
+    {
+        recorder.record(weld_diagnostics::Observation::Failure {
+            operation,
+            cause: weld_diagnostics::Cause::ProtocolOrIo,
+        });
     }
-    result.with_context(|| format!("device session {operation:?} deadline expired"))?
+    result.with_context(|| format!("device session {operation:?} failed"))
 }
 
 #[cfg(test)]
-mod diagnostic_tests {
-    use super::*;
-    use weld_diagnostics::{Cause, Endpoint, Observation, Operation, Recorder, SessionId};
-
-    #[tokio::test]
-    async fn session_deadline_records_the_original_operation_before_teardown() {
-        let (source, receiver, connection, remote) = crate::tests::connection_pair().await;
-        let recorder = Recorder::new(SessionId([4; 16]), Endpoint::Receiver);
-        let result: Result<()> = session_io(
-            &connection,
-            Duration::ZERO,
-            Operation::SessionRead,
-            Some(&recorder),
-            std::future::pending(),
-        )
-        .await;
-        assert!(result.is_err());
-        recorder.record(Observation::Failure {
-            operation: Operation::Connection,
-            cause: Cause::LocalShutdown,
-        });
-        assert_eq!(
-            recorder
-                .snapshot()
-                .expect("report")
-                .first_failure
-                .expect("first")
-                .observation,
-            Observation::Failure {
-                operation: Operation::SessionRead,
-                cause: Cause::Timeout
-            }
-        );
-        connection.close(0_u32.into(), b"test completed");
-        let clean = Recorder::new(SessionId([5; 16]), Endpoint::Receiver);
-        let result: Result<()> = session_io(
-            &connection,
-            Duration::from_secs(1),
-            Operation::SessionRead,
-            Some(&clean),
-            async { anyhow::bail!("closed stream") },
-        )
-        .await;
-        assert!(result.is_err());
-        assert!(
-            clean
-                .snapshot()
-                .expect("clean report")
-                .first_failure
-                .is_none()
-        );
-        drop(remote);
-        source.close().await;
-        receiver.close().await;
-    }
-}
+mod tests;

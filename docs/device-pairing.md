@@ -78,6 +78,17 @@ laptop; USB is needed only for installing this development APK.
 The ordinary desktop and pairing commands have no test timeout. The separate
 `run-mobile-hoist` development fixture remains bounded.
 
+After connection setup, slow application-control reads and writes retain their
+in-flight record until it completes or the connection closes. A warning marks
+the delay and a recovery log records completion. Hoist/release actions likewise
+wait for the desktop's answer while the connection is alive; catalogue polling
+resumes after that answer. Dropping the phone
+session cancels pending waits and closes its peer. Queued requests remain bounded
+and ordered, while media and input use their independent streams. Initial
+connection/authentication deadlines and malformed-record rejection still apply.
+Authenticated sessions remain admitted while QUIC is alive, including during
+control stalls; the endpoint retains its eight-session capacity limit.
+
 Streams use the full display, including the camera-cutout area; system bars can
 be revealed with Android's usual gestures. Back from the application list leaves
 Weld Mobile. The phone requests tiled sizing, so host-side floating size hints
