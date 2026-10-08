@@ -142,3 +142,64 @@ from an isolated headless host. `diag explain` fetched the receiver automaticall
 the exported bundle contained matching session IDs and receiver receive, decode
 and presentation evidence. Pairing controls remained unavailable on that
 diagnostics-only host.
+
+## Resolved scenario: periodic Wi-Fi scan stalls (2026-10-08)
+
+Status: user-validated workaround in one streaming session. Retain this case
+as evidence for a future diagnostics revision; further validation should establish
+how broadly the result applies.
+
+### Symptoms and environment
+
+Steam streamed from desktop Weld to a Pixel 8 Pro through Weld Connect had
+recurring longer lag spikes. Connecting the phone to a concurrent laptop hotspot
+improved general smoothness, but the longer spikes remained. The laptop used
+MediaTek MT7925 (`mt7925e`), kernel 7.2.8 and firmware `20260813113118`, with
+NetworkManager and wpa_supplicant. The hotspot and router uplink shared one radio
+on 5 GHz channel 36. Router signal was approximately -78 to -79 dBm; phone signal
+was approximately -36 dBm.
+
+### Evidence and intervention
+
+- Disabling uplink Wi-Fi power saving left the spikes reproducible. The driver
+  reported power saving off during the follow-up capture.
+- Passive `iw event -t` recording caught a full-band background scan from
+  22:12:33.440 to 22:12:40.946 local time: approximately 7.5 seconds. The user
+  reported another video spike during this capture.
+- Concurrent timestamped pings measured router RTT averages of 3.2 ms before,
+  32.7 ms during and 4.3 ms after the scan. Direct hotspot-to-phone averages
+  were 36.7, 36.8 and 41.3 ms respectively. The scan affected router latency;
+  the phone probe showed a less distinct relationship.
+- The source's Weld diagnostic report recorded an IPv4 path-selection event
+  during that interval. Endpoint reports retain independent clock origins;
+  precise cross-endpoint timing and the chosen destination address were not
+  established by this capture.
+- Locking the router profile to its current BSSID and reactivating it, while
+  retaining disabled power saving, produced user-reported resolution of the
+  recurring spikes. The hotspot and phone association remained active.
+
+NetworkManager's [BSSID setting](https://networkmanager.pages.freedesktop.org/NetworkManager/NetworkManager/settings-802-11-wireless.html)
+disables background roaming scans. Its
+[scan policy implementation](https://github.com/NetworkManager/NetworkManager/blob/main/src/core/supplicant/nm-supplicant-config.c)
+also documents why scanning disrupts AP clients. The observed improvement makes
+background scanning a strong contributor in this case. Driver/firmware scheduling,
+shared-radio operation and transport path changes remain possible mechanisms.
+The user's similar periodic stalls at home, with strong signal, remain a separate
+reproduction target.
+
+### Lessons for a future diagnostics revision
+
+Preserve scan start/end, interface/radio relationships, power-save state,
+signal/retry counters, driver/firmware versions and transport path changes when
+explicitly collecting an incident. Keep measured correlations, user-reported
+outcomes and proposed causes distinguishable. Record interventions and their
+results so a failed power-save experiment remains visible alongside the successful
+BSSID-lock experiment. This case is reference evidence for future tool work;
+the current change records documentation only.
+
+Related upstream reports provide comparison material:
+[MT7925 contention latency #1108](https://github.com/openwrt/mt76/issues/1108)
+explicitly ruled out scanning in its reproduction, and
+[firmware regression #1128](https://github.com/openwrt/mt76/issues/1128)
+tested weak-signal behavior with the same firmware build. Neither establishes
+the mechanism behind this session's scan-associated stalls.
