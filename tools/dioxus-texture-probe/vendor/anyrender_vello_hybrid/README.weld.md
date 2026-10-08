@@ -24,8 +24,9 @@ Upstream: https://github.com/DioxusLabs/anyrender/tree/cf0f14776102ec775af61bcdc
 
 `probe_timing.rs` records per-second wall-time totals for the six render phases.
 The live probe calls `set_probe_nonblocking_poll` before launching the renderer;
-the default remains the upstream blocking completion wait. The opt-in replaces
-only the final `Device::poll(wait_indefinitely())` with `PollType::Poll`. WGPU
+the default uses nonblocking completion polling. `--blocking-poll` restores the
+upstream wait for comparisons. The change replaces only the final
+`Device::poll(wait_indefinitely())` with `PollType::Poll`. WGPU
 continues owning resource tracking and completion callbacks, and the importers
 retain their image/fence contracts. This allows CPU work for a subsequent frame
 to overlap outstanding GPU work.

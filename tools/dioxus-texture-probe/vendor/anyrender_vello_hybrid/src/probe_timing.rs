@@ -3,7 +3,7 @@ use std::{
     sync::atomic::{AtomicBool, Ordering},
     time::{Duration, Instant},
 };
-static NONBLOCKING: AtomicBool = AtomicBool::new(false);
+static NONBLOCKING: AtomicBool = AtomicBool::new(true);
 pub fn set_probe_nonblocking_poll(enabled: bool) {
     NONBLOCKING.store(enabled, Ordering::Relaxed);
 }

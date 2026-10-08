@@ -33,6 +33,8 @@ requested source geometry/cadence, and `--bitrate-mbps` for the encoder budget.
 Defaults are 1920×1080, 60 Hz and 8 Mbps AV1. `--seconds` defaults to 120;
 Ctrl-C stops the owned processes. `--no-build` reuses the installed APK or Linux
 binary. Launching runs builds only; tests and Clippy are separate checks.
+GPU completion polling is nonblocking by default on both targets. Use
+`--blocking-poll` to reproduce the original completion-wait baseline.
 
 The source is a private headless Weld session using the usual Iroh admission
 and public-profile exchange. N0 discovery/relays contact the Internet. The probe
@@ -95,8 +97,9 @@ library paths preserve the caller's existing paths before pkg-config fallbacks.
 
 The follow-up compared `--queue smoothing` (the default) with `--queue latest`,
 then independently changed the renderer's completion policy using
-`--nonblocking-poll`. Both targets retain blocking polling by default for the
-baseline comparison. The experiment stays within this isolated probe.
+`--nonblocking-poll`. Nonblocking polling is now the default on both targets;
+`--blocking-poll` retains the baseline comparison. The change stays within this
+isolated probe.
 
 On the same 1080p60 AV1 workload, with the Pixel display reporting 120 Hz:
 

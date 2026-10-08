@@ -45,8 +45,11 @@ pub struct Settings {
     pub fps: u32,
     #[serde(default)]
     pub queue: QueuePolicy,
-    #[serde(default)]
+    #[serde(default = "default_nonblocking_poll")]
     pub nonblocking_poll: bool,
+}
+fn default_nonblocking_poll() -> bool {
+    true
 }
 impl Settings {
     pub fn load(directory: &std::path::Path) -> Result<Self> {
@@ -422,7 +425,7 @@ mod tests {
                     height,
                     fps,
                     queue: super::QueuePolicy::Smoothing,
-                    nonblocking_poll: false
+                    nonblocking_poll: true
                 }
                 .validate()
                 .is_err()
@@ -433,7 +436,7 @@ mod tests {
             height: 1080,
             fps: 60,
             queue: super::QueuePolicy::Smoothing,
-            nonblocking_poll: false,
+            nonblocking_poll: true,
         };
         assert!(settings.validate().is_ok());
         assert_eq!(settings.rate().millihertz(), 60_000);
