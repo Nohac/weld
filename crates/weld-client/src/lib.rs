@@ -19,8 +19,10 @@ mod pending;
 mod pending_order;
 mod presentation;
 mod presenter;
+mod startup;
 mod surface;
 pub use composition::{ComposedBuffer, CompositionLayer};
+pub use startup::{InitialPresentation, WindowPreference};
 mod touch;
 #[cfg(feature = "serde")]
 mod wire;

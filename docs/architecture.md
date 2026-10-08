@@ -39,6 +39,8 @@ Weld is a workspace of reusable layers and one standard distribution:
 - `weld-client` defines the runtime-independent client adapter, surface,
   buffer-lease, request, input, and bounded presentation-handoff contracts. It has no Smithay, Bevy, wgpu,
   codec, or transport dependency.
+  `WindowPreference` and `InitialPresentation` share viewport negotiation and
+  first-frame size gating between the phone shells.
 - `weld-presenter` owns the shared Bevy execution setup and GPU-image publication
   boundary used by the desktop and phone. Native importers supply synchronized
   GPU images; publication preserves stable texture bindings and invalidates
@@ -151,6 +153,21 @@ Weld is a workspace of reusable layers and one standard distribution:
   of Godot, transport and the decoder context lifetime. Both the diagnostic probe
   and Godot's Android provider use it. Portable codec configuration lives in
   `weld-media`'s light `config` feature.
+- `weld-video-gles` supplies the Linux VA-API and Android MediaCodec providers
+  and native-image import onto a WGPU 30 GLES device for the Dioxus probe and
+  Weld Connect. Importers retain native images through GPU completion. The
+  Android conversion C source is also compiled by Weld Mobile's Bevy importer.
+  This standalone package is checked through its consuming applications.
+- `apps/weld-connect` assembles the Dioxus Native/Blitz client for Linux and
+  Android. Its session worker owns pairing, catalogue requests and the portable
+  Iroh/client runtime; typed routes and CSS modules own presentation. Stream
+  widgets consume the shared bounded mailbox and GLES importer, and forward
+  touch through Weld's existing surface-input contracts. See
+  [Native Dioxus client](#native-dioxus-client) for launch and validation details.
+- `apps/android-platform` supplies the shared native activity for Weld Connect
+  and Weld Mobile: Google Code Scanner, pairing-link confirmation, explicit
+  clipboard access, Android Back, insets and immersive-mode control. Each app
+  retains its package identity, private state and activity subclass.
 - `apps/weld-mobile` assembles a Bevy Android receiver proof around the portable
   Iroh/client runtime and Android decoder. Its GLES adapter converts acquired
   images into a reusable GPU texture on Bevy's device and returns native-image
@@ -1527,3 +1544,51 @@ change, describe the ownership, boundary, and semantics it establishes. Judge
 pre-stable changes by whether they leave a coherent structure, not by diff
 size. Prefer smaller incremental changes after the structure and compatibility
 expectations have stabilized.
+
+## Native Dioxus client
+
+Build and launch Weld Connect from the development shell:
+
+```sh
+scripts/run-connect
+scripts/run-connect --android --serial DEVICE_SERIAL
+# Package without launching, or relaunch an existing build:
+scripts/run-connect --android --build-only
+scripts/run-connect --android --no-build --serial DEVICE_SERIAL
+```
+
+The launcher uses eight build jobs by default (`--jobs` overrides), packages CSS
+modules through the pinned Dioxus asset tool, and shares the probe's optimized
+Cargo cache under `target/dioxus-texture-probe/cargo`. Output lives in
+`target/connect`. Android builds use cargo-ndk, FFmpeg and Gradle from the existing
+development setup. The launch path performs builds and packaging; checks run
+separately. The shared AnyRender patch in `vendor/anyrender-vello-hybrid` supplies
+Linux display initialization and nonblocking GPU completion polling.
+
+The Android package is `org.weld.connect`, displayed as Weld Connect. Its signing
+key lives in the ignored `apps/weld-connect/.local` directory. Reinstalling with
+the same key retains pairing. Android client state lives in the app's private
+`files/connect` directory; Linux uses the platform application data directory,
+with `WELD_CONNECT_STATE` available for isolated runs.
+
+Create an invitation on the host with `weldctl --session weld-0 pair`, then scan
+the QR code, paste the link or enter it manually. Compare the verification codes
+and approve on the host. Saved hosts open into their running-window catalogue,
+with flat and application-ID-grouped views. Selecting a window requests a
+composited AV1/H.264 stream, tiled viewport sizing and 60 Hz presentation. Android
+Back returns to the catalogue and releases the hoist. Current stream interaction
+supports native touch; desktop primary-pointer input is translated to touch.
+
+Validation: the Pixel pairing/catalogue/stream flow was exercised with Steam;
+the Linux shell and the shared Linux/Android live-stream probe were checked.
+Connect store/grouping tests, shared startup-gate tests, Linux/Android Clippy,
+the probe regression check and the existing mobile build checks passed. The
+Wi-Fi investigation is recorded in [Session diagnostics](session-diagnostics.md#resolved-scenario-periodic-wi-fi-scan-stalls-2026-10-08).
+
+Follow-up validation should cover full Linux pairing/stream interaction, repeated
+Android activity recreation, background/resume, stream reopening and physical QR
+scanning. Review identified host-label validation after approval and inconsistent
+manual versus scanned device-name defaults as follow-ups. Activity recreation
+also needs to verify that the previous session releases the state-directory lock.
+Keyboard/IME, workspace/family grouping, thumbnails, remote application launch
+and multi-window desktop presentation remain future client slices.

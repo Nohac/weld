@@ -1,0 +1,29 @@
+[package]
+name = "weld-video-gles"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[dependencies]
+anyhow = "1"
+log = "0.4"
+wgpu = { version = "=30.0.0", default-features = false, features = ["gles"] }
+wgpu_context = "=0.10.0"
+weld-hoist-encoded = { path = "../weld-hoist-encoded" }
+weld-media = { path = "../weld-media" }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+weld-media-vaapi = { path = "../weld-media-vaapi" }
+
+[target.'cfg(target_os = "android")'.dependencies]
+weld-media-android = { path = "../weld-media-android" }
+weld-hoist-encoded = { path = "../weld-hoist-encoded", features = ["android"] }
+
+[build-dependencies]
+cc = "1"
+pkg-config = "0.3"
+
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"

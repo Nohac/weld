@@ -89,7 +89,7 @@ cumulative mailbox counters. These boundaries end before GPU execution and
 physical scanout; network transit is described separately by transport logs.
 
 Linux requires a probe-local AnyRender display-handle fix documented in
-[the vendor note](vendor/anyrender_vello_hybrid/README.weld.md). Remove it after
+[the vendor note](../../vendor/anyrender-vello-hybrid/README.weld.md). Remove it after
 the upstream GLES initialization path accepts the native display. Runtime
 library paths preserve the caller's existing paths before pkg-config fallbacks.
 

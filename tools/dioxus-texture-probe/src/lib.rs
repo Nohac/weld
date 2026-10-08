@@ -1,7 +1,13 @@
 //! Native Android/Linux texture import and live-stream validation for Dioxus/Blitz.
 
 #[cfg(target_os = "linux")]
-mod linux;
+mod linux {
+    pub use weld_video_gles::*;
+    pub const DNS: weld_hoist_iroh::IrohDnsPolicy = weld_hoist_iroh::IrohDnsPolicy::System;
+    pub fn consume_settings(_: &std::path::Path) -> anyhow::Result<()> {
+        Ok(())
+    }
+}
 mod live;
 mod session;
 mod timing;
@@ -30,7 +36,9 @@ mod android;
 #[path = "../../../apps/weld-vr/rust/src/fixture.rs"]
 mod fixture;
 #[cfg(target_os = "android")]
-mod gpu;
+mod gpu {
+    pub use weld_video_gles::Converter;
+}
 #[cfg(target_os = "android")]
 mod playback;
 

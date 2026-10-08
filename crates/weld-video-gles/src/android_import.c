@@ -1,6 +1,6 @@
 /* Reuse Weld's leased EGL import and state restoration with encoded-colour
  * output for Vello's unorm composition target. Called on the render thread. */
-#include "../../../apps/weld-mobile/src/android/video.c"
+#include "android_video.c"
 
 void *weld_probe_video_open(void) {
     const char *original = fragment_source;

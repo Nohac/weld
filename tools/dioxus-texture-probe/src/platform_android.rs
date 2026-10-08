@@ -1,10 +1,8 @@
-pub use crate::gpu::Converter;
+pub use weld_video_gles::{Converter, Image, backend, converter, extent};
 pub fn consume_settings(directory: &std::path::Path) -> Result<()> {
     Ok(std::fs::remove_file(directory.join("live.json"))?)
 }
 use anyhow::Result;
-use weld_hoist_encoded::{DecodeBackend, android::AndroidDecodeBackend};
-use weld_media::VideoCodec;
 #[derive(Default)]
 pub struct LogWriter(Vec<u8>);
 impl std::io::Write for LogWriter {
@@ -31,18 +29,4 @@ pub fn init_tracing() {
         log::warn!("tracing setup: {error}");
     }
 }
-pub fn converter(handle: &wgpu_context::DeviceHandle) -> Result<Converter> {
-    Converter::new(&handle.device)
-}
-pub use weld_media_android::AndroidImage as Image;
 pub const DNS: weld_hoist_iroh::IrohDnsPolicy = weld_hoist_iroh::IrohDnsPolicy::Public;
-pub fn extent(image: &Image) -> [u32; 2] {
-    let info = image.info();
-    [info.crop[2] - info.crop[0], info.crop[3] - info.crop[1]]
-}
-pub fn backend(codec: VideoCodec) -> Result<Box<dyn DecodeBackend<Output = Image>>> {
-    let thread = std::thread::current();
-    Ok(Box::new(AndroidDecodeBackend::new(codec, move || {
-        thread.unpark()
-    })))
-}

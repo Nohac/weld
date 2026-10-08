@@ -6,14 +6,10 @@ use weld_hoist_encoded::{
 };
 use weld_media::{MediaStreamId, StreamGeneration, VideoCodec, WorkerSubmitError};
 pub use weld_media_vaapi::VaapiDmabuf as Image;
-pub fn consume_settings(_directory: &std::path::Path) -> Result<()> {
-    Ok(())
-}
 use weld_media_vaapi::{VaapiDecodeRequest, VaapiDecodeWorker};
 pub fn converter(handle: &wgpu_context::DeviceHandle) -> Result<Converter> {
     Converter::new(handle)
 }
-pub const DNS: weld_hoist_iroh::IrohDnsPolicy = weld_hoist_iroh::IrohDnsPolicy::System;
 pub fn extent(image: &Image) -> [u32; 2] {
     [image.width, image.height]
 }

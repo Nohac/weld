@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-feature android:glEsVersion="0x00030000" android:required="true" />
+    <application android:label="Weld Connect" android:hasCode="true" android:enableOnBackInvokedCallback="true"
+        android:debuggable="true" android:allowBackup="false" android:extractNativeLibs="true"
+        android:theme="@android:style/Theme.Material.NoActionBar">
+        <meta-data android:name="com.google.mlkit.vision.DEPENDENCIES" android:value="barcode_ui" />
+        <activity android:name="org.weld.connect.WeldActivity" android:exported="true" android:launchMode="singleTask"
+            android:configChanges="orientation|screenSize|screenLayout|keyboardHidden|keyboard|navigation|density|uiMode">
+            <meta-data android:name="android.app.lib_name" android:value="weld_connect" />
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="weld" android:host="pair" />
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>

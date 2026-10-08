@@ -1,26 +1,5 @@
-use weld_client::{ClientSurfaceRequestKind, Extent, ToplevelLayout};
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct WindowPreference {
-    pub size: Extent,
-    pub scale_120: u32,
-}
-
-impl WindowPreference {
-    pub fn requests(self) -> [ClientSurfaceRequestKind; 2] {
-        [
-            ClientSurfaceRequestKind::SetPreferredScale {
-                scale_120: Some(self.scale_120),
-            },
-            ClientSurfaceRequestKind::Configure {
-                logical_size: self.size,
-                layout: ToplevelLayout::Tiled,
-                resizing: false,
-                fullscreen: false,
-            },
-        ]
-    }
-}
+use weld_client::Extent;
+pub(crate) use weld_client::WindowPreference;
 
 /// Logical presentation coordinates derived from Android's physical content area.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -96,6 +75,7 @@ pub(crate) fn fit_rect(area: [f64; 4], content: [f64; 2]) -> [f64; 4] {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use weld_client::{ClientSurfaceRequestKind, ToplevelLayout};
 
     #[test]
     fn phone_requests_scale_then_tiled_sizing_without_app_fullscreen() {

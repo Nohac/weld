@@ -1,4 +1,4 @@
-# Probe-local AnyRender patch
+# Weld native-client AnyRender patch
 
 Source: `anyrender_vello_hybrid` 0.11.0 from crates.io, upstream AnyRender commit
 `cf0f14776102ec775af61bcdcaac2ab345f4fafb`, directory
@@ -32,7 +32,8 @@ retain their image/fence contracts. This allows CPU work for a subsequent frame
 to overlap outstanding GPU work.
 
 The Pixel's measured completion wait fell from about 7.95 ms to 0.034 ms per
-frame, restoring approximately 60 selected frames/s. See the parent probe README
+frame, restoring approximately 60 selected frames/s. The probe and Weld Connect
+share this patch. See the [probe README](../../tools/dioxus-texture-probe/README.md)
 for matched queue-policy comparisons and validation boundaries. Remove these
 diagnostic controls when an upstream asynchronous completion policy replaces
 the per-frame blocking wait and equivalent measurements are available.

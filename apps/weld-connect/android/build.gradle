@@ -1,15 +1,11 @@
-plugins {
-    id 'com.android.application' version '8.13.2'
-}
-
-layout.buildDirectory = file('../../../target/mobile/android')
-
+plugins { id 'com.android.application' version '8.13.2' }
+layout.buildDirectory = file('../../../target/connect/android')
 android {
-    namespace = 'org.weld.mobile'
+    namespace = 'org.weld.connect'
     compileSdk = 36
     buildToolsVersion = '36.1.0'
     defaultConfig {
-        applicationId = 'org.weld.mobile'
+        applicationId = 'org.weld.connect'
         minSdk = 28
         targetSdk = 36
         versionCode = 1
@@ -19,20 +15,15 @@ android {
     sourceSets.main {
         manifest.srcFile '../AndroidManifest.xml'
         java.srcDirs = ['.', '../../android-platform']
-        jniLibs.srcDirs = ['../../../target/mobile/native']
+        jniLibs.srcDirs = ['../../../target/connect/native']
+        assets.srcDirs = ['../../../target/connect/android-assets']
     }
     compileOptions {
         sourceCompatibility JavaVersion.VERSION_1_8
         targetCompatibility JavaVersion.VERSION_1_8
     }
     buildTypes.debug { signingConfig = null }
-    packaging.jniLibs {
-        useLegacyPackaging = true
-        keepDebugSymbols += ['**/*.so']
-    }
+    packaging.jniLibs { useLegacyPackaging = true; keepDebugSymbols += ['**/*.so'] }
 }
-
 dependencyLocking { lockAllConfigurations() }
-dependencies {
-    implementation 'com.google.android.gms:play-services-code-scanner:16.1.0'
-}
+dependencies { implementation 'com.google.android.gms:play-services-code-scanner:16.1.0' }
