@@ -77,6 +77,20 @@ Headers show the current child title (or its remembered descendant's title),
 and clicking one activates that branch's remembered window. Fullscreen and
 hidden workspaces suppress the group UI. Header-wheel cycling is deferred.
 
+The `font` directive configures these titles, for example
+`font pango:monospace 8` or `font pango:DejaVu Sans Bold Italic 14px`.
+Pango parses the family, weight, slant and width. Plain sizes are points,
+converted at 96 logical pixels per inch; a `px` suffix selects logical pixels
+directly. Output scaling is then applied by the presenter. Header height adjusts
+with the font size, and long titles stay on one clipped line. An empty client
+title falls back to its app ID.
+
+Font changes apply on configuration reload. Invalid sizes reject the candidate
+and preserve the current configuration; sizes must be positive and at most 512
+logical pixels. Removing the directive restores 14px system sans-serif.
+Master warns and skips font directives requesting family fallback lists,
+variants, rotation, font variations or OpenType feature settings.
+
 Inactive tab/stack branches remain mapped and retain buffers and hoist slots.
 Only local presentation demand pauses; independent active remote/capture claims
 continue through the existing consumer policy. Layout geometry and header nodes

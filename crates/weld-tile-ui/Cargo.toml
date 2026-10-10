@@ -12,4 +12,5 @@ weld-tile = { path = "../weld-tile" }
 weld-ssd = { path = "../weld-ssd" }
 
 [dev-dependencies]
+weld-client = { path = "../weld-client" }
 weld-i3-quirks = { path = "../weld-i3-quirks" }

@@ -729,6 +729,34 @@ mod tests {
     }
 
     #[test]
+    fn font_reload_publishes_valid_typography_and_retains_it_on_invalid_input() {
+        let mut app = App::new();
+        app.add_plugins(MasterConfigPlugin {
+            path: example_path(),
+            initial: config::parse("font", "font pango:monospace 8").expect("initial font"),
+        });
+        assert!(
+            (app.world().resource::<SsdSettings>().title_font.size - 8.0 * 96.0 / 72.0).abs()
+                < 0.001
+        );
+        install(
+            &mut app,
+            config::parse("font", "font pango:serif Bold 20px").expect("replacement font"),
+        );
+        let accepted = app.world().resource::<SsdSettings>().clone();
+        let result =
+            config::parse("font", "font monospace 0").map(|candidate| install(&mut app, candidate));
+        assert!(result.is_err());
+        assert_eq!(*app.world().resource::<SsdSettings>(), accepted);
+        assert_eq!(accepted.title_font.size, 20.0);
+        install(&mut app, config::parse("empty", "").expect("default font"));
+        assert_eq!(
+            *app.world().resource::<SsdSettings>(),
+            SsdSettings::default()
+        );
+    }
+
+    #[test]
     fn startup_runs_once_and_only_exec_always_is_queued_on_reload() {
         let mut app = App::new();
         let source = "exec foot\nexec_always waybar\nexec rofi -show drun";

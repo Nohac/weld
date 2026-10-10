@@ -7,6 +7,7 @@ publish.workspace = true
 [dependencies]
 weld-float = { path = "../weld-float" }
 anyhow.workspace = true
+pango = { version = "=0.22.9", features = ["v1_56"] }
 bevy.workspace = true
 regex.workspace = true
 weld-app = { path = "../weld-app" }

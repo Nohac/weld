@@ -4,7 +4,9 @@ use std::collections::HashSet;
 
 mod style;
 use style::FrameGeometry;
-pub use style::{BorderRequest, BorderStyle, FrameColors, SsdSettings, WindowBorderStyle};
+pub use style::{
+    BorderRequest, BorderStyle, FrameColors, SsdSettings, TitleFont, WindowBorderStyle,
+};
 
 const PROFILE_TARGET: &str = "weld_profile";
 

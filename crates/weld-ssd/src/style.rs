@@ -3,6 +3,7 @@
 use bevy::{
     color::Color,
     ecs::{component::Component, event::Event, resource::Resource},
+    text::{FontSource, FontStyle, FontWeight, FontWidth, TextFont},
 };
 use weld_window::{PresentationInsets, ServerFrameRequested};
 
@@ -77,8 +78,9 @@ impl FrameColors {
 }
 
 /// Live decoration preferences, independent of configuration spelling.
-#[derive(Resource, Clone, Copy, Debug, PartialEq)]
+#[derive(Resource, Clone, Debug, PartialEq)]
 pub struct SsdSettings {
+    pub title_font: TitleFont,
     pub tiled: BorderStyle,
     pub floating: BorderStyle,
     /// Hide the border of a workspace's sole tiled slot, retaining normal headers.
@@ -95,6 +97,7 @@ pub struct SsdSettings {
 impl Default for SsdSettings {
     fn default() -> Self {
         Self {
+            title_font: TitleFont::default(),
             tiled: BorderStyle::Normal(3),
             floating: BorderStyle::Normal(3),
             hide_solo_border: false,
@@ -106,6 +109,46 @@ impl Default for SsdSettings {
             relocated_focused: FrameColors::from_border(super::RELOCATED_FOCUSED_BORDER),
             relocated_unfocused: FrameColors::from_border(super::RELOCATED_UNFOCUSED_BORDER),
         }
+    }
+}
+
+/// Resolved title typography in logical pixels; output scaling is applied by the presenter.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TitleFont {
+    pub family: FontSource,
+    pub size: f32,
+    pub weight: FontWeight,
+    pub style: FontStyle,
+    pub width: FontWidth,
+}
+
+impl Default for TitleFont {
+    fn default() -> Self {
+        Self {
+            family: FontSource::SansSerif,
+            size: 14.0,
+            weight: FontWeight::NORMAL,
+            style: FontStyle::Normal,
+            width: FontWidth::NORMAL,
+        }
+    }
+}
+
+impl TitleFont {
+    pub fn text_font(&self) -> TextFont {
+        TextFont {
+            font: self.family.clone(),
+            font_size: self.size.into(),
+            weight: self.weight,
+            style: self.style,
+            width: self.width,
+            ..Default::default()
+        }
+    }
+
+    /// Reserves a line box and vertical padding at the same scale as the text.
+    pub fn header_height(&self) -> u16 {
+        (self.size * 1.5 + 7.0).ceil().clamp(1.0, u16::MAX as f32) as u16
     }
 }
 

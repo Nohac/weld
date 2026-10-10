@@ -6,6 +6,7 @@
 
 pub mod config;
 mod focus;
+mod font;
 mod layout;
 mod movement;
 mod resize;

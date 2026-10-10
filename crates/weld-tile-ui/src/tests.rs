@@ -10,15 +10,18 @@ use bevy::{
         pointer::{Location, PointerId},
     },
     scene::ScenePlugin,
-    text::Font,
+    text::{Font, FontSource, FontStyle, FontWeight, LineBreak},
 };
 use weld_app::{
     output::{OutputGeometry, OutputId, PrimaryOutput, RendersOutput, WeldOutput},
     surface::SurfaceActionQueue,
 };
+use weld_client::ClientSurfaceMetadata;
 use weld_i3_quirks::{I3LayoutRequest, I3QuirksPlugin};
 use weld_tile::{TileLayout, TilePlugin};
-use weld_window::{ManagedWindow, WindowId, WindowPlugin, WindowVacancy, WindowVisibility};
+use weld_window::{
+    ManagedWindow, OccupiesWindow, WindowId, WindowPlugin, WindowVacancy, WindowVisibility,
+};
 
 fn setup() -> (App, Entity, Entity) {
     let mut app = App::new();
@@ -70,6 +73,88 @@ fn setup() -> (App, Entity, Entity) {
     app.update();
     app.update();
     (app, first, second)
+}
+
+#[test]
+fn tab_and_stack_titles_use_system_fonts_and_follow_client_metadata() {
+    let (mut app, first, _) = setup();
+    let metadata = |title: &str| {
+        ClientWindowMetadata(
+            ClientSurfaceMetadata::new("foot".into(), title.into()).expect("metadata"),
+        )
+    };
+    let client = app
+        .world_mut()
+        .spawn((OccupiesWindow(first), metadata("Terminal — one")))
+        .id();
+    for layout in [TileLayout::Tabbed, TileLayout::Stacked] {
+        app.world_mut().trigger(I3LayoutRequest::Set(layout));
+        for (title, expected) in [
+            ("Terminal — one", "Terminal — one"),
+            ("Renamed terminal", "Renamed terminal"),
+            ("", "foot"),
+        ] {
+            app.world_mut().entity_mut(client).insert(metadata(title));
+            app.update();
+            let label = app
+                .world_mut()
+                .query::<(&HeaderTarget, &Children)>()
+                .iter(app.world())
+                .find(|(target, _)| target.child == first)
+                .and_then(|(_, children)| children.first())
+                .copied()
+                .expect("title label");
+            assert_eq!(app.world().get::<Text>(label).expect("text").0, expected);
+            assert_eq!(
+                app.world().get::<TextFont>(label).expect("font").font,
+                FontSource::SansSerif
+            );
+            assert_eq!(
+                app.world()
+                    .get::<TextLayout>(label)
+                    .expect("layout")
+                    .linebreak,
+                LineBreak::NoWrap
+            );
+        }
+    }
+}
+
+#[test]
+fn font_reload_updates_header_text_and_reserved_height_together() {
+    let (mut app, _, _) = setup();
+    let before_height = app
+        .world()
+        .resource::<weld_tile::TilePresentationMetrics>()
+        .header_height;
+    let config = weld_i3_quirks::config::parse_with_extensions(
+        "font",
+        "font pango:serif Bold Italic 24px",
+        |_| Ok(()),
+    )
+    .expect("font config");
+    *app.world_mut().resource_mut::<SsdSettings>() = config.decorations;
+    app.update();
+    let height = app
+        .world()
+        .resource::<weld_tile::TilePresentationMetrics>()
+        .header_height;
+    assert!(height > before_height);
+    for (node, children) in app
+        .world_mut()
+        .query_filtered::<(&Node, &Children), With<HeaderTarget>>()
+        .iter(app.world())
+    {
+        assert_eq!(node.height, px(f32::from(height)));
+        let font = app
+            .world()
+            .get::<TextFont>(*children.first().expect("label"))
+            .expect("font");
+        assert_eq!(font.font, FontSource::Serif);
+        assert_eq!(font.font_size, bevy::text::FontSize::Px(24.0));
+        assert_eq!(font.weight, FontWeight::BOLD);
+        assert_eq!(font.style, FontStyle::Italic);
+    }
 }
 
 #[test]

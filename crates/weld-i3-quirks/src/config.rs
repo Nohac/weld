@@ -335,6 +335,7 @@ fn apply<Extension>(config: &mut Configuration<Extension>, statement: &Statement
         ("default_floating_border" | "new_float", style) => {
             config.decorations.floating = border_style(style)?
         }
+        ("font", description) => config.decorations.title_font = crate::font::parse(description)?,
         ("corner_radius", [radius]) => {
             config.decorations.corner_radius = radius
                 .parse::<u16>()
@@ -822,6 +823,42 @@ mod tests {
         );
         assert!(config.pointer.focus_follows_mouse);
         assert!(config.keymap.is_none());
+    }
+
+    #[test]
+    fn font_descriptions_translate_points_pixels_and_styles() {
+        use bevy::text::{FontSource, FontStyle, FontWeight, FontWidth};
+        let config = parse("font", "set $face monospace\nfont pango:$face 8").expect("font");
+        let font = config.decorations.title_font;
+        assert_eq!(font.family, FontSource::Monospace);
+        assert!((font.size - 8.0 * 96.0 / 72.0).abs() < 0.001);
+        let config = parse(
+            "font",
+            "font pango:DejaVu Sans Mono Bold Italic Condensed 18px",
+        )
+        .expect("font");
+        let font = config.decorations.title_font;
+        assert_eq!(font.family, FontSource::Family("DejaVu Sans Mono".into()));
+        assert_eq!(font.size, 18.0);
+        assert_eq!(font.weight, FontWeight::BOLD);
+        assert_eq!(font.style, FontStyle::Italic);
+        assert_eq!(font.width, FontWidth::CONDENSED);
+        assert_eq!(
+            parse("font", "font \"serif 12\"")
+                .expect("quoted font")
+                .decorations
+                .title_font
+                .family,
+            FontSource::Serif
+        );
+        for source in [
+            "font",
+            "font monospace",
+            "font monospace 0",
+            "font monospace 900px",
+        ] {
+            assert!(parse("font", source).is_err(), "{source}");
+        }
     }
 
     #[test]

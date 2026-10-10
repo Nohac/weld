@@ -96,6 +96,11 @@ building and `libfontconfig` at runtime. The shared Rust shell provides both;
 other environments must make Fontconfig available to `pkg-config` and the
 runtime loader.
 
+Sway font configuration uses Pango's font-description parser. Master requires
+Pango 1.56 or newer development/runtime libraries and their GLib dependencies;
+the shared Rust shell already supplies them. Parsed typography is published to
+the decoration settings, and Bevy resolves the selected installed font.
+
 DRM monitor identification uses `libdisplay-info` through Smithay's EDID helper.
 The current Rust bindings require the native library below 0.4; the shared
 Rust Nix shell supplies `libdisplay-info_0_3`. Reload that shell after adding

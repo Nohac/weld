@@ -35,6 +35,10 @@ pub(super) fn publish_metrics(
     if settings.group_border != width {
         settings.group_border = width;
     }
+    let height = style.title_font.header_height();
+    if settings.header_height != height {
+        settings.header_height = height;
+    }
 }
 
 #[derive(Component, Clone, PartialEq)]

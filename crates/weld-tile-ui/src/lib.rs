@@ -29,6 +29,7 @@ use bevy::{
         UiTargetCamera, px,
     },
     scene::{CommandsSceneExt, bsn},
+    text::TextLayout,
     window::{CursorIcon, RequestRedraw, SystemCursorIcon},
 };
 use weld_app::{output::OutputCompositionCamera, surface::ClientWindowMetadata};
@@ -54,6 +55,7 @@ struct HeaderVisual {
     geometry: WindowGeometry,
     camera: Entity,
     title: String,
+    font: TextFont,
     colors: FrameColors,
     radius: BorderRadius,
     divider: bool,
@@ -155,6 +157,7 @@ fn header_scene(target: HeaderTarget, visual: HeaderVisual) -> impl Scene {
     let label = visual.title.clone();
     let accessible = label.clone();
     let colors = visual.colors;
+    let font = visual.font.clone();
     let node = header_node(&visual);
     bsn! {
         template(move |_| Ok(node.clone()))
@@ -169,7 +172,8 @@ fn header_scene(target: HeaderTarget, visual: HeaderVisual) -> impl Scene {
         template(move |_| Ok(visual.clone()))
         Children [(
             Text::new(label)
-            TextFont { font_size: px(14.0) }
+            template(move |_| Ok(font.clone()))
+            TextLayout::no_wrap()
             TextColor({colors.foreground})
             Pickable::IGNORE
         )]
@@ -348,7 +352,7 @@ fn reconcile(
     tree: HeaderTree,
     headers: Query<(Entity, &TileHeaders)>,
     mut views: Query<HeaderView>,
-    mut labels: Query<(&mut Text, &mut TextColor)>,
+    mut labels: Query<(&mut Text, &mut TextColor, &mut TextFont)>,
     mut redraw: MessageWriter<RequestRedraw>,
     mut invalidations: Invalidations,
 ) {
@@ -395,6 +399,7 @@ fn reconcile(
                     geometry: header.geometry,
                     camera,
                     title: tree.title(header.child),
+                    font: tree.style.title_font.text_font(),
                     colors,
                     radius: BorderRadius::px(
                         if index == 0 { radius } else { 0.0 },
@@ -428,9 +433,12 @@ fn reconcile(
             .entity(view.entity)
             .insert(AccessibleLabel(next.title.clone()));
         for child in view.children {
-            if let Ok((mut text, mut color)) = labels.get_mut(*child) {
+            if let Ok((mut text, mut color, mut font)) = labels.get_mut(*child) {
                 **text = next.title.clone();
                 *color = TextColor(next.colors.foreground);
+                if *font != next.font {
+                    *font = next.font.clone();
+                }
             }
         }
         *view.visual = next;
