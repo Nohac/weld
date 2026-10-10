@@ -16,6 +16,7 @@ pub(super) struct Probe {
     pub deferred: Vec<(wayland_client::protocol::wl_registry::WlRegistry, u32, u32)>,
     names: HashMap<u32, String>,
     pub(super) keys: Vec<(u32, u32, wl_keyboard::KeyState)>,
+    modifiers: Vec<(u32, u32, u32)>,
     pub(super) buttons: Vec<(u32, u32, wl_pointer::ButtonState)>,
 }
 
@@ -237,16 +238,176 @@ impl Dispatch<wl_keyboard::WlKeyboard, u32> for Observer {
         _: &Connection,
         _: &QueueHandle<Self>,
     ) {
-        if let wl_keyboard::Event::Key {
-            key,
-            state: WEnum::Value(value),
-            ..
-        } = event
-        {
-            state.input.keys.push((*id, key, value));
+        match event {
+            wl_keyboard::Event::Key {
+                key,
+                state: WEnum::Value(value),
+                ..
+            } => state.input.keys.push((*id, key, value)),
+            wl_keyboard::Event::Modifiers {
+                mods_depressed,
+                mods_locked,
+                ..
+            } => {
+                state
+                    .input
+                    .modifiers
+                    .push((*id, mods_depressed, mods_locked));
+            }
+            _ => {}
         }
     }
 }
+
+#[test]
+#[ignore = "native socket fixture requires XDG_RUNTIME_DIR"]
+fn held_control_survives_closing_its_press_recipient_and_releases_on_the_next_window() {
+    let mut f = Fixture::new();
+    let keymap = crate::input::KeyboardKeymap::compile(&crate::input::KeymapConfig {
+        options: "ctrl:swapcaps".into(),
+        ..Default::default()
+    })
+    .expect("remapped Ctrl");
+    f.server
+        .synchronize_keyboard_settings(Some(crate::input::KeyboardSettings {
+            keymap: Some(keymap),
+            ..Default::default()
+        }))
+        .expect("keyboard settings");
+    let windows = [901, 902].map(|number| {
+        let surface = f.surface(number);
+        let (id, role) = f.toplevel(&surface);
+        surface.attach(Some(&f.buffer()), 0, 0);
+        surface.commit();
+        f.sync();
+        (id, surface, role)
+    });
+    let input = |surface, code, state| ClientInputEvent {
+        target: ClientInputTarget::Keyboard { surface },
+        host_position: None,
+        event: InputEventKind::Keyboard {
+            keycode: LinuxKeycode(code),
+            state,
+        },
+        time: 1,
+    };
+    let physical = |code, state| {
+        crate::input::RawSeatEvent::new(
+            crate::input::RawSeatEventKind::Keyboard {
+                keycode: LinuxKeycode(code),
+                logical_key: None,
+                state,
+            },
+            1,
+        )
+    };
+    f.server.route_controller_focus(None, Some(windows[0].0));
+    for code in [58, 32] {
+        f.server
+            .resolve_input(physical(code, KeyboardKeyState::Pressed));
+        f.server
+            .route_controller_input(None, input(windows[0].0, code, KeyboardKeyState::Pressed));
+    }
+    // Unmapping follows the terminal's Ctrl+D exit while both keys are held.
+    windows[0].1.attach(None, 0, 0);
+    windows[0].1.commit();
+    f.sync();
+    f.server.route_controller_focus(None, Some(windows[1].0));
+    f.sync();
+    assert_ne!(f.observer.input.modifiers.last().expect("modifiers").1, 0);
+    let binding = f
+        .server
+        .local_input
+        .keyboard_binding
+        .borrow()
+        .clone()
+        .expect("binding");
+    let keyboard = binding.native.get_keyboard().expect("keyboard");
+    assert!(keyboard.modifier_state().ctrl);
+    f.server
+        .resolve_input(physical(32, KeyboardKeyState::Released));
+    f.server
+        .resolve_input(physical(32, KeyboardKeyState::Pressed));
+    f.server
+        .route_controller_input(None, input(windows[1].0, 32, KeyboardKeyState::Pressed));
+    assert!(keyboard.modifier_state().ctrl, "the next D retains Ctrl");
+
+    // The original press route has gone; a raw release must still clear Ctrl.
+    f.server
+        .resolve_input(physical(58, KeyboardKeyState::Released));
+    f.sync();
+    assert!(!keyboard.modifier_state().ctrl);
+    assert_eq!(
+        f.observer
+            .input
+            .modifiers
+            .last()
+            .expect("released modifiers")
+            .1,
+        0
+    );
+}
+#[test]
+#[ignore = "native socket fixture requires XDG_RUNTIME_DIR"]
+fn local_keyboard_synchronization_preserves_caps_lock_and_layout_group() {
+    let mut f = Fixture::new();
+    let keymap = crate::input::KeyboardKeymap::compile(&crate::input::KeymapConfig {
+        layout: "us,no".into(),
+        options: "grp:alt_shift_toggle".into(),
+        ..Default::default()
+    })
+    .expect("two layouts");
+    f.server
+        .synchronize_keyboard_settings(Some(crate::input::KeyboardSettings {
+            keymap: Some(keymap),
+            ..Default::default()
+        }))
+        .expect("settings");
+    let surface = f.surface(903);
+    let (id, _) = f.toplevel(&surface);
+    surface.attach(Some(&f.buffer()), 0, 0);
+    surface.commit();
+    f.sync();
+    f.server.route_controller_focus(None, Some(id));
+    let binding = f
+        .server
+        .local_input
+        .keyboard_binding
+        .borrow()
+        .clone()
+        .expect("binding");
+    let keyboard = binding.native.get_keyboard().expect("keyboard");
+    for (code, state) in [
+        (58, KeyboardKeyState::Pressed),
+        (58, KeyboardKeyState::Released),
+        (56, KeyboardKeyState::Pressed),
+        (42, KeyboardKeyState::Pressed),
+        (42, KeyboardKeyState::Released),
+        (56, KeyboardKeyState::Released),
+    ] {
+        f.server.resolve_input(crate::input::RawSeatEvent::new(
+            crate::input::RawSeatEventKind::Keyboard {
+                keycode: LinuxKeycode(code),
+                logical_key: None,
+                state,
+            },
+            1,
+        ));
+        let mut event = key(id, state);
+        event.event = InputEventKind::Keyboard {
+            keycode: LinuxKeycode(code),
+            state,
+        };
+        f.server.route_controller_input(None, event);
+    }
+    assert!(keyboard.modifier_state().caps_lock);
+    assert_eq!(keyboard.modifier_state().serialized.layout_effective, 1);
+    f.server.release_seat_input(&binding, 2);
+    f.server.route_controller_focus(None, Some(id));
+    assert!(keyboard.modifier_state().caps_lock);
+    assert_eq!(keyboard.modifier_state().serialized.layout_effective, 1);
+}
+
 impl Dispatch<wl_pointer::WlPointer, u32> for Observer {
     fn event(
         state: &mut Self,

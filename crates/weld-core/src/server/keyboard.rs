@@ -1,12 +1,53 @@
 //! Publish one configured keymap to native clients and shell input resolution.
 
-use super::ServerState;
-use crate::input::{KeyboardMapper, KeyboardSettings, RawSeatEvent};
+use super::{ServerState, input_seat::InputSeat};
+use crate::input::{KeyboardMapper, KeyboardSettings, RawSeatEvent, RawSeatEventKind};
 use anyhow::Result;
+use smithay::input::keyboard::{KeyboardHandle, xkb};
 
 impl ServerState {
     pub(crate) fn resolve_input(&mut self, event: RawSeatEvent) -> RawSeatEvent {
-        self.keyboard_mapper.resolve(event)
+        let event = self.keyboard_mapper.resolve(event);
+        // Releases still update the active client after the press recipient has
+        // closed, or when the shell consumes the corresponding key event.
+        if matches!(
+            event.event,
+            RawSeatEventKind::Keyboard { .. } | RawSeatEventKind::HostFocusLost
+        ) {
+            let input = self.local_input.keyboard_binding.borrow().clone();
+            if let Some(input) = input {
+                self.synchronize_local_modifiers(&input);
+            }
+        }
+        event
+    }
+
+    pub(super) fn synchronize_local_modifiers(&mut self, input: &InputSeat) {
+        if input.controller.get().is_none()
+            && let Some(keyboard) = input.native.get_keyboard()
+        {
+            self.apply_local_modifiers(&keyboard);
+        }
+    }
+
+    pub(super) fn apply_local_modifiers(&mut self, keyboard: &KeyboardHandle<Self>) {
+        let state = self.keyboard_mapper.xkb_state();
+        let depressed = state.serialize_mods(xkb::STATE_MODS_DEPRESSED);
+        let latched = state.serialize_mods(xkb::STATE_MODS_LATCHED);
+        let locked = state.serialize_mods(xkb::STATE_MODS_LOCKED);
+        let layout_depressed = state.serialize_layout(xkb::STATE_LAYOUT_DEPRESSED);
+        let layout_latched = state.serialize_layout(xkb::STATE_LAYOUT_LATCHED);
+        let layout_locked = state.serialize_layout(xkb::STATE_LAYOUT_LOCKED);
+        keyboard.with_xkb_state(self, |mut context| {
+            context.set_modifier_masks(
+                depressed,
+                latched,
+                locked,
+                layout_depressed,
+                layout_latched,
+                layout_locked,
+            );
+        });
     }
 
     pub(crate) fn synchronize_keyboard_settings(

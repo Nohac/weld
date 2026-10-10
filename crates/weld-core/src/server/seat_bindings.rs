@@ -290,6 +290,7 @@ impl ServerState {
             self.focus_seat(&previous, None);
         }
         if let Some(next) = &next {
+            self.synchronize_local_modifiers(next);
             self.focus_seat(next, surface);
         }
         *logical.keyboard_binding.borrow_mut() = next;

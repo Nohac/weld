@@ -109,6 +109,11 @@ impl KeyboardMapper {
         !self.pressed.is_empty()
     }
 
+    /// Host keyboard state used to synchronize application-visible modifiers.
+    pub fn xkb_state(&self) -> &xkb::State {
+        &self.state
+    }
+
     pub fn resolve(&mut self, mut event: RawSeatEvent) -> RawSeatEvent {
         match &mut event.event {
             RawSeatEventKind::Keyboard {

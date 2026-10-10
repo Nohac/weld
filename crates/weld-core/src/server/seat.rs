@@ -4,7 +4,7 @@ use std::{borrow::Cow, cell::RefCell};
 
 use smithay::{
     backend::input::{
-        Axis, AxisSource, ButtonState as SmithayButtonState, InputTime, KeyEvent, Keycode,
+        Axis, AxisSource, ButtonState as SmithayButtonState, InputTime, KeyEvent, KeyState, Keycode,
     },
     input::{
         Seat, SeatHandler,
@@ -202,6 +202,31 @@ impl ServerState {
             tracing::info!(?surface, ?versions, repeat_mode = ?self.keyboard_repeat_mode,
                 legacy_repeat = ?self.legacy_key_repeat, "focused client keyboard repeat support");
             input_seat.keyboard_diagnostic_dirty.set(false);
+        }
+        if input_seat.controller.get().is_none()
+            && let Some(transition) = state.transition()
+        {
+            let (_, modifiers_changed) = keyboard.input_intercept(
+                self,
+                Keycode::new(native_keycode),
+                match transition {
+                    ButtonState::Pressed => KeyState::Pressed,
+                    ButtonState::Released => KeyState::Released,
+                },
+                |_, _, _| (),
+            );
+            // Per-client key tracking owns press/release delivery; the physical
+            // mapper owns modifiers across client focus changes and destruction.
+            self.apply_local_modifiers(&keyboard);
+            keyboard.input_forward(
+                self,
+                Keycode::new(native_keycode),
+                smithay_key_state(state),
+                SERIAL_COUNTER.next_serial(),
+                InputTime::from_millis(time),
+                modifiers_changed,
+            );
+            return;
         }
         keyboard.input::<(), _>(
             self,
