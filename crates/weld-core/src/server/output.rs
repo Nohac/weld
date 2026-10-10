@@ -82,10 +82,11 @@ impl OutputMetrics {
     }
 
     fn validate_logical_size(self) -> Result<()> {
-        if f64::from(self.physical_width) / self.scale_factor < 1.0
-            || f64::from(self.physical_height) / self.scale_factor < 1.0
-        {
-            bail!("output scale leaves less than one logical pixel on an axis");
+        for physical in [self.physical_width, self.physical_height] {
+            let logical = f64::from(physical) / self.scale_factor;
+            if !logical.is_finite() || !(1.0..=f64::from(i32::MAX)).contains(&logical) {
+                bail!("logical output dimensions exceed the Wayland integer range");
+            }
         }
         Ok(())
     }
@@ -151,6 +152,14 @@ mod tests {
         assert!(OutputMetrics::new(0, 800, OutputScale::default()).is_err());
         let excessive_scale = OutputScale::new(1_000.0).expect("valid positive scale");
         assert!(OutputMetrics::new(800, 600, excessive_scale).is_err());
+        assert!(
+            OutputMetrics::new(
+                800,
+                600,
+                OutputScale::new(f64::MIN_POSITIVE).expect("positive scale")
+            )
+            .is_err()
+        );
     }
 
     #[test]

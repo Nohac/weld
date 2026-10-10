@@ -14,7 +14,11 @@ use smithay::{
     output::{Mode as SmithayMode, PhysicalProperties},
     reexports::drm::control::{Device as ControlDevice, Mode, ModeTypeFlags, connector, crtc},
 };
-use smithay_drm_extras::drm_scanner::{DrmScanEvent, DrmScanner};
+use smithay_drm_extras::{
+    display_info,
+    drm_scanner::{DrmScanEvent, DrmScanner},
+};
+use weld_output::{OutputSelector, OutputSettings};
 
 pub(super) struct SelectedOutput {
     pub(super) connector: connector::Info,
@@ -25,11 +29,13 @@ pub(super) struct SelectedOutput {
     pub(super) configuration: OutputConfiguration,
     pub(super) definition: ServerOutputDefinition,
     pub(super) frame_interval: Duration,
+    pub(super) default_scale: OutputScale,
 }
 
 pub(super) fn select_outputs(
     drm: &DrmDeviceFd,
     primary_scale: OutputScale,
+    settings: &OutputSettings,
 ) -> Result<Vec<SelectedOutput>> {
     let mut scanner: DrmScanner = DrmScanner::new();
     let mut connected = scanner
@@ -53,7 +59,6 @@ pub(super) fn select_outputs(
     if connected.is_empty() {
         anyhow::bail!("no connected desktop connector with a usable CRTC and mode");
     }
-
     let mut discovered = connected
         .into_iter()
         .enumerate()
@@ -67,10 +72,7 @@ pub(super) fn select_outputs(
             .context("selected DRM connector has no mode")?;
             let mode = connector.modes()[mode_index];
             let id = OutputId::new(index as u64 + 1);
-            let name = connector_name(&connector);
-            let physical_size = connector
-                .size()
-                .and_then(|(width, height)| OutputPhysicalSize::new(width, height));
+            let (head, properties) = read_output_identity(drm, &connector, id)?;
             let mode_size = mode.size();
             let extent = Extent::new(u32::from(mode_size.0), u32::from(mode_size.1));
             let scale = if index == 0 {
@@ -78,56 +80,41 @@ pub(super) fn select_outputs(
             } else {
                 OutputScale::default()
             };
+            let scale = settings.scale_for(head.name(), head.monitor_identifier()).unwrap_or(scale);
+            tracing::info!(connector = %head.name(), identifier = ?head.monitor_identifier(), scale = scale.value(), "configured DRM output");
             let configuration = OutputConfiguration::new(
                 id,
                 extent,
                 scale,
                 LogicalPoint::ZERO,
                 index == 0,
-                physical_size,
+                head.physical_size(),
             )?;
             let rate = weld_client::PresentationRate::try_from(u32::try_from(
                 SmithayMode::from(mode).refresh,
             )?)
             .map_err(anyhow::Error::msg)?;
             let configuration = configuration.with_presentation_rate(rate);
-            Ok::<_, anyhow::Error>((connector, crtc, mode, name, physical_size, configuration))
+            Ok::<_, anyhow::Error>((connector, crtc, mode, head, properties, configuration))
         })
         .collect::<Result<Vec<_>>>()?;
     let mut configurations = discovered.iter().map(|entry| entry.5).collect::<Vec<_>>();
     center_primary_below_others(&mut configurations)?;
+    warn_unmatched_outputs(settings, discovered.iter().map(|entry| &entry.3));
 
     discovered
         .drain(..)
         .zip(configurations)
         .map(
-            |((connector, crtc, mode, name, physical_size, _), configuration)| {
+            |((connector, crtc, mode, head, properties, _), configuration)| {
                 let id = configuration.id();
                 let smithay_mode = SmithayMode::from(mode);
                 let metrics = metrics_for_configuration(configuration, mode)?;
-                let head = OutputHead::new(id, name.clone(), physical_size);
-                let physical_size_for_protocol = physical_size
-                    .map(|size| {
-                        Ok::<_, anyhow::Error>((
-                            i32::try_from(size.width_millimeters())
-                                .context("connector physical width exceeds i32")?,
-                            i32::try_from(size.height_millimeters())
-                                .context("connector physical height exceeds i32")?,
-                        ))
-                    })
-                    .transpose()?
-                    .unwrap_or_default();
                 let definition = ServerOutputDefinition {
                     id,
                     descriptor: OutputDescriptor {
-                        name: name.clone(),
-                        physical_properties: PhysicalProperties {
-                            size: physical_size_for_protocol.into(),
-                            subpixel: connector.subpixel().into(),
-                            make: "Unknown".to_owned(),
-                            model: name.clone(),
-                            serial_number: "Unknown".to_owned(),
-                        },
+                        name: head.name().to_owned(),
+                        physical_properties: properties,
                     },
                     metrics,
                     logical_position: (
@@ -145,10 +132,99 @@ pub(super) fn select_outputs(
                     configuration,
                     definition,
                     frame_interval: refresh_interval(smithay_mode.refresh)?,
+                    default_scale: if configuration.is_primary() {
+                        primary_scale
+                    } else {
+                        OutputScale::default()
+                    },
                 })
             },
         )
         .collect()
+}
+
+fn read_output_identity(
+    drm: &DrmDeviceFd,
+    connector: &connector::Info,
+    id: OutputId,
+) -> Result<(OutputHead, PhysicalProperties)> {
+    let physical_size = connector
+        .size()
+        .and_then(|(width, height)| OutputPhysicalSize::new(width, height));
+    let monitor = display_info::for_connector(drm, connector.handle());
+    let make = monitor
+        .as_ref()
+        .and_then(|info| info.make())
+        .unwrap_or_else(|| "Unknown".into());
+    let model = monitor
+        .as_ref()
+        .and_then(|info| info.model())
+        .unwrap_or_else(|| "Unknown".into());
+    let serial_number = monitor
+        .as_ref()
+        .and_then(|info| info.serial())
+        .unwrap_or_else(|| "Unknown".into());
+    let identifier = monitor
+        .as_ref()
+        .map(|_| format!("{make} {model} {serial_number}"));
+    let head = OutputHead::new(id, connector_name(connector), physical_size)
+        .with_monitor_identifier(identifier);
+    let size = physical_size
+        .map(|size| {
+            Ok::<_, anyhow::Error>((
+                i32::try_from(size.width_millimeters())
+                    .context("connector physical width exceeds i32")?,
+                i32::try_from(size.height_millimeters())
+                    .context("connector physical height exceeds i32")?,
+            ))
+        })
+        .transpose()?
+        .unwrap_or_default();
+    Ok((
+        head,
+        PhysicalProperties {
+            size: size.into(),
+            subpixel: connector.subpixel().into(),
+            make,
+            model,
+            serial_number,
+        },
+    ))
+}
+
+pub(super) fn warn_unmatched_outputs<'a>(
+    settings: &OutputSettings,
+    outputs: impl Iterator<Item = &'a OutputHead> + Clone,
+) {
+    for rule in &settings.scales {
+        if let OutputSelector::Named(name) = &rule.selector
+            && !outputs.clone().any(|output| {
+                rule.selector
+                    .matches(output.name(), output.monitor_identifier())
+            })
+        {
+            tracing::warn!(selector = %name, "output scale rule has no matching connector or monitor identifier");
+        }
+    }
+}
+
+/// Validate the complete candidate before changing protocol or presentation state.
+pub(super) fn rescale_outputs(
+    current: &[OutputConfiguration],
+    scales: impl IntoIterator<Item = (OutputId, OutputScale)>,
+) -> Result<Vec<OutputConfiguration>> {
+    let mut candidate = current.to_vec();
+    for (id, scale) in scales {
+        let output = candidate
+            .iter_mut()
+            .find(|output| output.id() == id)
+            .context("scaled output is not configured")?;
+        *output = output.with_scale(scale)?;
+        OutputMetrics::new(output.extent().width, output.extent().height, scale)?;
+    }
+    center_primary_below_others(&mut candidate)?;
+    crate::OutputLayout::new(0, candidate.clone())?;
+    Ok(candidate)
 }
 
 pub(super) fn center_primary_below_others(
@@ -339,7 +415,7 @@ fn refresh_interval(refresh_millihertz: i32) -> Result<Duration> {
 mod tests {
     use super::{
         center_primary_below_others, connector_order, preferred_mode_index, refresh_interval,
-        scale_matching_physical_density,
+        rescale_outputs, scale_matching_physical_density,
     };
     use crate::{
         OutputConfiguration, OutputId, OutputLayout, OutputScale, OutputTopology,
@@ -347,6 +423,33 @@ mod tests {
         surface::{Extent, LogicalPoint},
     };
     use std::time::Duration;
+
+    #[test]
+    fn fractional_preferences_recompute_logical_geometry_and_reject_partial_updates() {
+        let current = vec![configuration(1, 2240, 1400, 1.0, true)];
+        let scaled = rescale_outputs(
+            &current,
+            [(OutputId::new(1), "1.25".parse().expect("scale"))],
+        )
+        .expect("candidate");
+        assert_eq!(scaled[0].logical_width(), 1792.0);
+        assert_eq!(scaled[0].logical_height(), 1120.0);
+        assert_eq!(scaled[0].extent(), current[0].extent());
+        let restored = rescale_outputs(&scaled, [(OutputId::new(1), OutputScale::default())])
+            .expect("default");
+        assert_eq!(restored[0].scale(), current[0].scale());
+        assert!(
+            rescale_outputs(
+                &current,
+                [
+                    (OutputId::new(1), "1.25".parse().expect("scale")),
+                    (OutputId::new(1), "2000".parse().expect("positive factor")),
+                ]
+            )
+            .is_err()
+        );
+        assert_eq!(current[0].scale(), OutputScale::default());
+    }
 
     #[test]
     fn refresh_interval_uses_millihertz_without_assuming_sixty_hertz() {

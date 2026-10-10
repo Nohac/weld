@@ -1,5 +1,11 @@
 //! Application-facing output state and composition-camera ownership.
 
+use bevy::ecs::{
+    change_detection::DetectChanges,
+    resource::Resource,
+    system::{Res, SystemState},
+    world::World,
+};
 use bevy::{
     ecs::{component::Component, entity::Entity},
     math::{UVec2, Vec2},
@@ -7,6 +13,25 @@ use bevy::{
 pub use weld_client::PresentationRate;
 use weld_core::{OutputConfiguration, OutputHead, surface::Extent};
 pub use weld_core::{OutputFootprintProvenance, OutputId};
+pub use weld_output::OutputSettings;
+
+/// Reloadable native output preferences supplied by the configuration assembly.
+#[derive(Resource, Clone, Debug, Default, PartialEq)]
+pub struct OutputPreferences(pub OutputSettings);
+
+pub(crate) struct OutputPreferencesReader(SystemState<Res<'static, OutputPreferences>>);
+
+impl OutputPreferencesReader {
+    pub(crate) fn new(world: &mut World) -> Self {
+        world.init_resource::<OutputPreferences>();
+        Self(SystemState::new(world))
+    }
+
+    pub(crate) fn take(&mut self, world: &World) -> Option<OutputSettings> {
+        let value = self.0.get(world).ok()?;
+        value.is_changed().then(|| value.0.clone())
+    }
+}
 
 /// An output available to application policy.
 #[derive(Component, Clone, Copy, Debug, Eq, PartialEq)]
@@ -195,6 +220,35 @@ fn valid_scale_factor(scale_factor: f64) -> f32 {
 mod tests {
     use super::*;
     use weld_core::OutputPhysicalSize;
+
+    #[test]
+    fn output_preferences_publish_initial_and_reload_values_once() {
+        let mut world = World::new();
+        let mut reader = OutputPreferencesReader::new(&mut world);
+        assert_eq!(reader.take(&world), Some(OutputSettings::default()));
+        assert_eq!(reader.take(&world), None);
+        world
+            .resource_mut::<OutputPreferences>()
+            .0
+            .scales
+            .push(weld_output::OutputScaleRule {
+                selector: weld_output::OutputSelector::All,
+                scale: "1.25".parse().expect("scale"),
+            });
+        let published = reader.take(&world).expect("updated preferences");
+        assert_eq!(
+            published
+                .scale_for("eDP-1", None)
+                .map(|scale| scale.value()),
+            Some(1.25)
+        );
+        assert_eq!(reader.take(&world), None);
+        // Reload is authoritative even when its values match the previous file.
+        world.resource_mut::<OutputPreferences>().0 = published.clone();
+        assert_eq!(reader.take(&world), Some(published));
+        world.resource_mut::<OutputPreferences>().0 = OutputSettings::default();
+        assert_eq!(reader.take(&world), Some(OutputSettings::default()));
+    }
 
     #[test]
     fn output_info_calculates_dpi_only_from_complete_physical_metadata() {

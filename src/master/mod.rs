@@ -24,6 +24,7 @@ use std::{
 use weld_app::{
     ActiveBackend,
     input::{ShellCommand, ShellCommands},
+    output::{OutputPreferences, OutputSettings},
 };
 use weld_float::FloatManagement;
 use weld_hoist::HoistWindow;
@@ -47,6 +48,10 @@ pub(crate) struct MasterConfigPlugin {
 }
 
 impl MasterConfigPlugin {
+    pub(crate) fn output_settings(&self) -> OutputSettings {
+        self.initial.outputs.clone()
+    }
+
     pub(crate) fn load(path: &Path) -> Result<Self> {
         let initial = read_configuration(path)?;
         let path = path.to_owned();
@@ -81,6 +86,7 @@ fn report_warnings(config: &Configuration) {
 impl Plugin for MasterConfigPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<ShellCommands>()
+            .init_resource::<OutputPreferences>()
             .init_resource::<WindowPointerSettings>()
             .init_resource::<SsdSettings>()
             .init_resource::<TileSettings>();
@@ -143,6 +149,7 @@ struct ConfigTarget<'w> {
     focus_wrapping: ResMut<'w, FocusWrapping>,
     workspaces: ResMut<'w, WorkspaceSettings>,
     keyboard: ResMut<'w, KeyboardSettings>,
+    outputs: ResMut<'w, OutputPreferences>,
     pointer: ResMut<'w, WindowPointerSettings>,
     decorations: ResMut<'w, SsdSettings>,
     window_rules: ResMut<'w, WindowRules>,
@@ -152,6 +159,7 @@ struct ConfigTarget<'w> {
 impl ConfigTarget<'_> {
     fn apply(&mut self, config: Configuration) {
         report_warnings(&config);
+        self.outputs.0 = config.outputs;
         *self.window_rules = config.window_rules;
         let startup = !self.state.initialized;
         self.state.pending_launches.extend(
@@ -579,6 +587,7 @@ mod tests {
     #[test]
     fn rejected_candidate_leaves_live_settings_and_bindings_unchanged() {
         let mut app = App::new();
+        app.init_resource::<OutputPreferences>();
         app.init_resource::<WindowRules>();
         app.init_resource::<WorkspaceSettings>();
         app.init_resource::<WindowPointerSettings>();
@@ -755,5 +764,46 @@ mod tests {
                 .actions
                 .contains_key(id)
         }));
+    }
+
+    #[test]
+    fn output_scale_configuration_replaces_preferences_and_bad_reload_retains_them() {
+        let initial = config::parse(
+            "initial",
+            "set $factor 1.25\noutput * scale $factor adaptive_sync on",
+        )
+        .expect("initial");
+        assert_eq!(initial.warnings.len(), 1);
+        let mut app = App::new();
+        app.add_plugins(MasterConfigPlugin {
+            path: example_path(),
+            initial,
+        });
+        let settings = app.world().resource::<OutputPreferences>().0.clone();
+        assert_eq!(
+            settings.scale_for("eDP-1", None).map(|scale| scale.value()),
+            Some(1.25)
+        );
+        let invalid =
+            config::parse("bad", "output * scale 0").map(|config| install(&mut app, config));
+        assert!(invalid.is_err());
+        assert_eq!(app.world().resource::<OutputPreferences>().0, settings);
+        install(
+            &mut app,
+            config::parse("replacement", "output * scale 1.5").expect("replacement"),
+        );
+        assert_eq!(
+            app.world()
+                .resource::<OutputPreferences>()
+                .0
+                .scale_for("eDP-1", None)
+                .map(|scale| scale.value()),
+            Some(1.5)
+        );
+        install(&mut app, config::parse("empty", "").expect("empty"));
+        assert_eq!(
+            app.world().resource::<OutputPreferences>().0,
+            OutputSettings::default()
+        );
     }
 }

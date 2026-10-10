@@ -48,8 +48,12 @@ mod diagnostic;
 pub mod evaluation;
 #[cfg(feature = "input")]
 pub mod input;
+#[cfg(feature = "output")]
+pub mod output;
 mod parser;
 mod syntax;
+#[cfg(any(feature = "input", feature = "output"))]
+mod value;
 
 pub use diagnostic::{Diagnostic, DiagnosticKind};
 pub use syntax::{Block, ParsedConfig, RawText, Statement};

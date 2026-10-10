@@ -223,17 +223,31 @@ impl PhysicalDesktop {
         Ok(())
     }
 
-    pub(super) fn update_configuration(
+    pub(super) fn update_configurations(
         &mut self,
-        output_id: OutputId,
-        configuration: crate::OutputConfiguration,
+        configurations: &[crate::OutputConfiguration],
     ) -> Result<()> {
-        let output = self
-            .output_mut(output_id)
-            .context("updated output is not physically available")?;
-        output.logical_origin = configuration.position();
-        output.scale = configuration.scale();
-        output.cursor.set_scale(configuration.scale().value())
+        let prepared = configurations
+            .iter()
+            .map(|configuration| {
+                let index = self
+                    .outputs
+                    .iter()
+                    .position(|output| output.id == configuration.id())
+                    .context("updated output is not physically available")?;
+                let cursor = self.outputs[index]
+                    .cursor
+                    .with_scale(configuration.scale().value())?;
+                Ok((index, configuration, cursor))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        for (index, configuration, cursor) in prepared {
+            let output = &mut self.outputs[index];
+            output.logical_origin = configuration.position();
+            output.scale = configuration.scale();
+            output.cursor = cursor;
+        }
+        Ok(())
     }
 
     pub(super) fn render(
@@ -448,10 +462,6 @@ impl PhysicalDesktop {
             frame,
             path,
         )
-    }
-
-    fn output_mut(&mut self, id: OutputId) -> Option<&mut PhysicalOutputState> {
-        self.outputs.iter_mut().find(|output| output.id == id)
     }
 }
 

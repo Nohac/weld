@@ -389,6 +389,11 @@ impl NativeDriver<NestedEvent> for NestedDriver {
             self.frame_state.request_composition();
             frame.work.render_composition = true;
         }
+        if let Some(settings) = shell.take_output_settings()
+            && !settings.scales.is_empty()
+        {
+            warn!("ignored configured output scales because nested scale is host-owned");
+        }
         for command in shell.take_host_commands() {
             command_exit_requested |=
                 apply_host_command(&mut state.children, &mut state.data.server, command)?;

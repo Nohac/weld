@@ -54,7 +54,7 @@ struct CursorResourceCache {
 #[derive(Clone, Debug, Default)]
 pub(super) struct CursorResources(Rc<RefCell<CursorResourceCache>>);
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub(super) struct CursorState {
     configuration: CursorConfiguration,
     image: CursorImage,
@@ -108,12 +108,13 @@ impl CursorState {
         self.position = position;
     }
 
-    pub(super) fn set_scale(&mut self, scale: f64) -> Result<()> {
-        if self.scale != scale {
-            self.scale = scale;
-            self.rebuild()?;
+    pub(super) fn with_scale(&self, scale: f64) -> Result<Self> {
+        let mut candidate = self.clone();
+        if candidate.scale != scale {
+            candidate.scale = scale;
+            candidate.rebuild()?;
         }
-        Ok(())
+        Ok(candidate)
     }
 
     pub(super) fn render_element<R>(
@@ -201,6 +202,10 @@ impl CursorState {
             images
         };
         let physical_size = scaled_extent(logical_size as f64, self.scale)?;
+        anyhow::ensure!(
+            physical_size <= 512,
+            "displayed cursor exceeds the 512-pixel raster bound"
+        );
         let image = images
             .iter()
             .min_by_key(|image| image.size.abs_diff(physical_size))
@@ -226,8 +231,8 @@ impl CursorState {
             hotspot,
             self.scale,
         )?;
-        // Named cursor entries remain small in ordinary use: cursor icons are
-        // finite and runtime output scale changes use quarter-step values.
+        // Reloads and interactive adjustments reuse rasters for previously
+        // selected theme, nominal-size, and scale combinations.
         self.resources
             .0
             .borrow_mut()
@@ -304,6 +309,23 @@ fn scale_coordinate(value: u32, source_extent: u32, target_extent: u32) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fractional_preferences_preserve_cursor_when_rescaling_fails() {
+        let cursor = CursorState::new(
+            CursorConfiguration::default(),
+            1.0,
+            CursorResources::default(),
+        )
+        .expect("initial cursor");
+        assert!(cursor.with_scale(0.001).is_err());
+        assert!(cursor.with_scale(1000.0).is_err());
+        assert_eq!(cursor.scale, 1.0);
+        assert!(cursor.normalized.is_some());
+        let scaled = cursor.with_scale(1.25).expect("fractional cursor");
+        assert_eq!(scaled.scale, 1.25);
+        assert_eq!(cursor.scale, 1.0);
+    }
 
     #[test]
     fn cursor_raster_extent_matches_supported_fractional_scales() {

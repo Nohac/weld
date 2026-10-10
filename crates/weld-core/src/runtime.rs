@@ -94,11 +94,7 @@ pub(crate) fn service_client_adapters(
     server.flush_pending_resizes();
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum OutputScaleAdjustment {
-    Increase,
-    Decrease,
-}
+pub use weld_output::OutputScaleAdjustment;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum HostCommand {

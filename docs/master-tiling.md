@@ -121,6 +121,22 @@ not provide Sway IPC compatibility.
 
 ## Supported configuration
 
+DRM output scale accepts connector names, quoted EDID identifiers, or `*`:
+
+```sway
+output * scale 1
+output "Example Panel SERIAL-7" scale 1.5
+```
+
+The identifier is the monitor's manufacturer, model and serial joined with spaces;
+startup logs print it alongside the connector and selected scale. Missing fields
+use `Unknown`. Outputs without readable EDID remain selectable by connector or `*`.
+Named scale rules override wildcard defaults; the last matching named rule wins.
+Line and block forms work at startup and on config reload. Removing a scale rule
+restores the startup fallback (`--scale` for the primary output, otherwise 1).
+Nested outputs retain the parent compositor's scale. Output positioning and
+adaptive sync are reported as unsupported while scale on the same line applies.
+
 - `set $name VALUE`, with ordered substitution in bindings, settings and commands.
   Values can refer to earlier definitions; redefinition affects later lines.
   Longer variable names match first. Expansion is single-pass, including inside

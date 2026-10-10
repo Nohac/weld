@@ -1,13 +1,11 @@
 //! Native output identity, validated logical layouts, and pointer topology.
 
-use std::str::FromStr;
-
-use anyhow::{Context, Result, bail};
+use anyhow::{Result, bail};
+pub use weld_output::OutputScale;
 
 use crate::{
     geometry::LogicalRect,
     input::{InputDelta, InputPosition},
-    runtime::OutputScaleAdjustment,
     surface::{Extent, LogicalPoint},
 };
 
@@ -155,6 +153,7 @@ pub struct OutputHead {
     id: OutputId,
     name: String,
     physical_size: Option<OutputPhysicalSize>,
+    monitor_identifier: Option<String>,
 }
 
 impl OutputHead {
@@ -167,7 +166,18 @@ impl OutputHead {
             id,
             name: name.into(),
             physical_size,
+            monitor_identifier: None,
         }
+    }
+
+    /// Attach an EDID manufacturer/model/serial identifier for configuration matching.
+    pub fn with_monitor_identifier(mut self, identifier: Option<String>) -> Self {
+        self.monitor_identifier = identifier;
+        self
+    }
+
+    pub fn monitor_identifier(&self) -> Option<&str> {
+        self.monitor_identifier.as_deref()
     }
 
     pub const fn id(&self) -> OutputId {
@@ -180,57 +190,6 @@ impl OutputHead {
 
     pub const fn physical_size(&self) -> Option<OutputPhysicalSize> {
         self.physical_size
-    }
-}
-
-/// Valid logical scale applied to a physical compositor output.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct OutputScale(f64);
-
-impl OutputScale {
-    const STEP: f64 = 0.25;
-
-    /// Validates a finite, positive output scale.
-    pub fn new(value: f64) -> Result<Self> {
-        if !value.is_finite() || value <= 0.0 {
-            bail!("output scale must be finite and positive");
-        }
-        Ok(Self(value))
-    }
-
-    /// Returns the validated scale factor.
-    pub const fn value(self) -> f64 {
-        self.0
-    }
-
-    /// Returns the next quarter-step scale in the requested direction.
-    pub fn adjust(self, adjustment: OutputScaleAdjustment) -> Option<Self> {
-        let next = match adjustment {
-            OutputScaleAdjustment::Increase => ((self.0 / Self::STEP).floor() + 1.0) * Self::STEP,
-            OutputScaleAdjustment::Decrease if self.0 <= Self::STEP => return None,
-            OutputScaleAdjustment::Decrease => {
-                (((self.0 / Self::STEP).ceil() - 1.0) * Self::STEP).max(Self::STEP)
-            }
-        };
-        Self::new(next).ok().filter(|next| *next != self)
-    }
-}
-
-impl Default for OutputScale {
-    fn default() -> Self {
-        Self(1.0)
-    }
-}
-
-impl FromStr for OutputScale {
-    type Err = anyhow::Error;
-
-    fn from_str(value: &str) -> Result<Self, Self::Err> {
-        Self::new(
-            value
-                .parse::<f64>()
-                .with_context(|| format!("invalid output scale {value:?}"))?,
-        )
     }
 }
 

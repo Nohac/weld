@@ -96,6 +96,11 @@ building and `libfontconfig` at runtime. The shared Rust shell provides both;
 other environments must make Fontconfig available to `pkg-config` and the
 runtime loader.
 
+DRM monitor identification uses `libdisplay-info` through Smithay's EDID helper.
+The current Rust bindings require the native library below 0.4; the shared
+Rust Nix shell supplies `libdisplay-info_0_3`. Reload that shell after adding
+this dependency so its headers, pkg-config metadata and runtime library are available.
+
 Hardware media work requires FFmpeg development/runtime libraries, libva
 development/runtime libraries, `libva-utils`, Clang, and bindgen. In
 particular, `libavcodec`, `libavfilter`, `libavformat`, and `libavutil` must be

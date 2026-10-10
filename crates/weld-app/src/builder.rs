@@ -24,6 +24,7 @@ use weld_core::{
 
 use crate::{
     debug::{DebugProtocolPlugin, configure_remote_debug},
+    output::{OutputPreferences, OutputSettings},
     shell::{AppShell, WeldAppPlugin, configure_rendering},
 };
 
@@ -72,6 +73,7 @@ pub struct WeldAppBuilder {
     screenshot: Option<PathBuf>,
     remote_debug: Option<String>,
     scale: Option<OutputScale>,
+    output_settings: OutputSettings,
     socket_name: Option<String>,
     keyboard_repeat_mode: Option<weld_core::input::KeyboardRepeatMode>,
     xwayland: bool,
@@ -117,6 +119,12 @@ impl WeldAppBuilder {
         self
     }
 
+    /// Supplies per-connector preferences before native output creation.
+    pub fn output_settings(mut self, settings: OutputSettings) -> Self {
+        self.output_settings = settings;
+        self
+    }
+
     /// Selects an explicit Wayland socket name for this compositor instance.
     pub fn socket_name(mut self, socket_name: Option<String>) -> Self {
         self.socket_name = socket_name;
@@ -155,12 +163,14 @@ impl WeldAppBuilder {
             .screenshot(self.screenshot)
             .remote_debug_enabled(self.remote_debug.is_some())
             .output_scale(self.scale)
+            .output_settings(self.output_settings.clone())
             .socket_name(self.socket_name)
             .keyboard_repeat_mode(self.keyboard_repeat_mode)
             .prepare()?;
 
         let context = prepared.render_context();
         let mut app = App::new();
+        app.insert_resource(OutputPreferences(self.output_settings));
         app.insert_resource(backend);
         configure_rendering(&mut app, context);
         app.add_plugins((

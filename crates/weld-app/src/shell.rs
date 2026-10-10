@@ -55,8 +55,8 @@ use crate::input::{
     take_virtual_terminal_switch_request,
 };
 use crate::output::{
-    OutputGeometry, OutputId, OutputInfo, OutputPlacement, OutputPosition, PrimaryOutput,
-    RendersOutput, WeldOutput,
+    OutputGeometry, OutputId, OutputInfo, OutputPlacement, OutputPosition, OutputPreferencesReader,
+    PrimaryOutput, RendersOutput, WeldOutput,
 };
 use crate::surface::{
     HostSurfaceEvent, HostSurfaceEventKind, SurfaceAction, SurfaceBufferContent,
@@ -90,6 +90,7 @@ const PRIMARY_OUTPUT_ID: OutputId = OutputId::new(1);
 pub struct AppShell {
     app: App,
     keyboard_settings: KeyboardSettingsReader,
+    output_preferences: OutputPreferencesReader,
     device: wgpu::Device,
     outputs: HashMap<OutputId, AppOutput>,
     redraw_requests: RedrawRequests,
@@ -448,10 +449,12 @@ impl AppShell {
         let dmabuf_importer =
             DmabufImporter::new(&context.device, &context.queue, &context.dmabuf)?;
         let keyboard_settings = KeyboardSettingsReader::new(app.world_mut());
+        let output_preferences = OutputPreferencesReader::new(app.world_mut());
 
         Ok(Self {
             app,
             keyboard_settings,
+            output_preferences,
             device: context.device,
             outputs,
             redraw_requests,
@@ -1071,6 +1074,10 @@ impl HostPolicy for AppShell {
 
     fn take_keyboard_settings(&mut self) -> Option<weld_input::KeyboardSettings> {
         self.keyboard_settings.take(self.app.world())
+    }
+
+    fn take_output_settings(&mut self) -> Option<crate::output::OutputSettings> {
+        self.output_preferences.take(self.app.world())
     }
 
     fn take_virtual_terminal_switch_request(&mut self) -> Option<i32> {

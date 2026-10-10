@@ -22,6 +22,11 @@ Weld is a workspace of reusable layers and one standard distribution:
   source-aware structural errors. Its default parser depends only on Winnow.
   The optional `input` module translates keyboard directives and binding chords
   into Weld input types.
+  The optional `output` module translates scale rules into `weld-output` settings.
+- `weld-output` owns validated scale factors and matching for connector names,
+  descriptive monitor identifiers and wildcard defaults. Master publishes complete
+  settings through `weld-app`; the native DRM host reads EDID, resolves each output,
+  and applies scale changes to protocol metrics, presentation and input topology.
 - `weld-i3-quirks` consumes that Sway output, interprets the supported settings
   and actions, applies criteria-based border rules, and supplies i3 tree-based focus,
   structural movement and branch-local close recovery.

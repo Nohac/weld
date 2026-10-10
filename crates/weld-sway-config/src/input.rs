@@ -39,9 +39,7 @@ pub struct Binding {
 /// Decodes a plain or fully quoted literal argument. Variables, escape sequences
 /// and unquoted command separators are rejected until their interpretation is supported.
 pub fn literal(value: &str) -> Result<&str> {
-    syntax::literal
-        .parse(value)
-        .map_err(|error| anyhow::anyhow!("invalid literal argument: {error}"))
+    crate::value::parse(value)
 }
 
 /// Compile input directives and leave other directives for the assembly.

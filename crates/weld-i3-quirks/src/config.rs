@@ -7,6 +7,7 @@ use crate::workspace::{
 use anyhow::{Context, Result, bail, ensure};
 use bevy::color::{Color, Srgba};
 use weld_input::{GlobalShortcut, KeyboardKeymap};
+use weld_output::OutputSettings;
 use weld_ssd::{BorderStyle, FrameColors, SsdSettings};
 use weld_sway_config::Statement;
 pub use weld_sway_config::evaluation::{ConfigWarning, UnsupportedPolicy, unsupported};
@@ -40,6 +41,7 @@ pub struct Configuration<Extension = ()> {
     pub focus_wrapping: FocusWrapping,
     pub bindings: Vec<(GlobalShortcut, Action<Extension>)>,
     pub keymap: Option<KeyboardKeymap>,
+    pub outputs: OutputSettings,
     pub workspaces: WorkspaceSettings,
     pub startup: Vec<StartupCommand>,
     pub pointer: WindowPointerSettings,
@@ -62,6 +64,7 @@ impl<Extension> Default for Configuration<Extension> {
             focus_wrapping: FocusWrapping::default(),
             bindings: Vec::new(),
             keymap: None,
+            outputs: Default::default(),
             workspaces: WorkspaceSettings::default(),
             startup: Vec::new(),
             pointer: WindowPointerSettings {
@@ -127,7 +130,16 @@ pub fn parse_with_policy<Extension>(
     }
     for statement in input.remaining {
         let line = line_of(source, statement)?;
-        let result = if statement.name().text() == "bar" && statement.block().is_some() {
+        let result = if statement.name().text() == "output" {
+            weld_sway_config::output::apply(
+                &mut config.outputs,
+                statement,
+                name,
+                source,
+                policy,
+                &mut config.warnings,
+            )
+        } else if statement.name().text() == "bar" && statement.block().is_some() {
             apply_bar(&mut config, statement, name, source, policy)
         } else {
             apply(&mut config, statement)

@@ -10,7 +10,8 @@ bevy.workspace = true
 regex.workspace = true
 weld-app = { path = "../weld-app" }
 weld-input = { path = "../weld-input", features = ["bevy"] }
-weld-sway-config = { path = "../weld-sway-config", features = ["input"] }
+weld-sway-config = { path = "../weld-sway-config", features = ["input", "output"] }
+weld-output = { path = "../weld-output" }
 weld-tile = { path = "../weld-tile" }
 weld-window = { path = "../weld-window" }
 weld-ssd = { path = "../weld-ssd" }

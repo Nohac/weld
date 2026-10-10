@@ -12,6 +12,7 @@ use anyhow::{Context, Result};
 use calloop::signals::{Signal, Signals};
 use tracing::warn;
 use weld_client::{ClientAdapterRegistration, ClientBufferUseId, ClientRuntimeAdapter};
+use weld_output::OutputSettings;
 
 use crate::{
     dmabuf::DmabufContext,
@@ -30,6 +31,7 @@ pub(crate) struct RunOptions {
     pub(crate) screenshot: Option<PathBuf>,
     pub(crate) remote_debug_enabled: bool,
     pub(crate) output_scale: OutputScale,
+    pub(crate) output_settings: OutputSettings,
     pub(crate) socket_name: Option<String>,
     pub(crate) keyboard_repeat_mode: Option<KeyboardRepeatMode>,
     pub(crate) xwayland: bool,
@@ -96,6 +98,12 @@ impl HostBuilder {
         self
     }
 
+    /// Supplies preferences resolved by each native output's connector name.
+    pub fn output_settings(mut self, settings: OutputSettings) -> Self {
+        self.options.output_settings = settings;
+        self
+    }
+
     /// Selects an explicit Wayland socket name for this compositor instance.
     pub fn socket_name(mut self, socket_name: Option<String>) -> Self {
         self.options.socket_name = socket_name;
@@ -115,7 +123,9 @@ impl HostBuilder {
         // application workers. Subsequently created threads inherit it.
         let signals = Signals::new(&[Signal::SIGINT, Signal::SIGTERM])
             .context("failed to initialize process signal handling")?;
-        if self.output_scale.is_some() && self.backend == HostBackend::Nested {
+        if (self.output_scale.is_some() || !self.options.output_settings.scales.is_empty())
+            && self.backend == HostBackend::Nested
+        {
             warn!("ignored explicit output scale because the nested backend follows its host");
         }
         self.options.output_scale = self.output_scale.unwrap_or_default();
@@ -409,6 +419,10 @@ pub trait HostPolicy {
     fn take_host_commands(&mut self) -> Vec<HostCommand>;
     /// Publishes changed keyboard policy before the next native input batch.
     fn take_keyboard_settings(&mut self) -> Option<crate::input::KeyboardSettings> {
+        None
+    }
+    /// Publishes a complete replacement of native output preferences.
+    fn take_output_settings(&mut self) -> Option<OutputSettings> {
         None
     }
     fn take_virtual_terminal_switch_request(&mut self) -> Option<i32>;

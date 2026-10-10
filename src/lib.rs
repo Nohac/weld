@@ -124,6 +124,7 @@ pub fn run(arguments: AppArguments) -> Result<()> {
         .screenshot(arguments.screenshot)
         .remote_debug(arguments.remote_debug)
         .scale(arguments.scale)
+        .output_settings(master_config.output_settings())
         .socket_name(arguments.wayland_socket)
         .keyboard_repeat_mode(arguments.keyboard_repeat_mode.map(Into::into))
         .build()?;

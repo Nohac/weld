@@ -543,6 +543,49 @@ impl NativeDriver<HostEvent> for DrmDriver {
                 .unwrap_or(now + self.fastest_interval),
             SessionTarget::InactiveOwned => now + self.fastest_interval,
         };
+        if let Some(settings) = application.take_output_settings() {
+            super::output::warn_unmatched_outputs(
+                &settings,
+                self.selected_outputs.iter().map(|output| &output.head),
+            );
+            let scales = self.selected_outputs.iter().map(|output| {
+                (
+                    output.id,
+                    settings
+                        .scale_for(output.head.name(), output.head.monitor_identifier())
+                        .unwrap_or(output.default_scale),
+                )
+            });
+            match super::output::rescale_outputs(&self.current_configurations, scales) {
+                Ok(candidate) if candidate != self.current_configurations => {
+                    self.output_layout_revision = self.output_layout_revision.saturating_add(1);
+                    let result = OutputScaleUpdate {
+                        selected: &self.selected_outputs,
+                        current: &mut self.current_configurations,
+                        layout_revision: self.output_layout_revision,
+                        desktop: &mut self.desktop,
+                        server: &mut state.data.server,
+                        application,
+                        input: &mut self.input,
+                        clients: &mut state.clients,
+                    }
+                    .publish(candidate);
+                    match result {
+                        Ok(()) => {
+                            self.frame_state.request_composition();
+                            self.presentation_schedule.request_composition_all();
+                        }
+                        Err(error) => {
+                            warn!(%error, "output preferences rejected; retaining current output geometry")
+                        }
+                    }
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    warn!(%error, "output preferences rejected; retaining current output geometry")
+                }
+            }
+        }
         for command in application.take_host_commands() {
             match state.children.apply(&state.data.server, command)? {
                 HostCommandEffect::Continue => {}
@@ -841,36 +884,40 @@ struct OutputScaleUpdate<'a> {
 
 impl OutputScaleUpdate<'_> {
     fn apply(self, output_id: crate::OutputId, scale: OutputScale) -> Result<()> {
-        let output = self
-            .current
-            .iter_mut()
-            .find(|output| output.id() == output_id)
-            .context("scaled output is not configured")?;
-        *output = output.with_scale(scale)?;
-        super::output::center_primary_below_others(self.current)?;
-        for configuration in self.current.iter().copied() {
-            let selected = self
-                .selected
-                .iter()
-                .find(|selected| selected.id == configuration.id())
-                .context("configured output is not backed by DRM")?;
-            let metrics = super::output::metrics_for_configuration(configuration, selected.mode)?;
-            self.server.update_output_metrics(
-                configuration.id(),
-                metrics,
-                (
-                    super::output::logical_coordinate(configuration.position().x)?,
-                    super::output::logical_coordinate(configuration.position().y)?,
-                ),
-            );
-            self.desktop
-                .update_configuration(configuration.id(), configuration)?;
+        let candidate = super::output::rescale_outputs(self.current, [(output_id, scale)])?;
+        self.publish(candidate)
+    }
+
+    fn publish(self, candidate: Vec<OutputConfiguration>) -> Result<()> {
+        let topology =
+            OutputTopology::new(OutputLayout::new(self.layout_revision, candidate.clone())?);
+        let metrics = candidate
+            .iter()
+            .copied()
+            .map(|configuration| {
+                let selected = self
+                    .selected
+                    .iter()
+                    .find(|selected| selected.id == configuration.id())
+                    .context("configured output is not backed by DRM")?;
+                let metrics =
+                    super::output::metrics_for_configuration(configuration, selected.mode)?;
+                Ok((
+                    configuration.id(),
+                    metrics,
+                    (
+                        super::output::logical_coordinate(configuration.position().x)?,
+                        super::output::logical_coordinate(configuration.position().y)?,
+                    ),
+                ))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        self.desktop.update_configurations(&candidate)?;
+        for (id, metrics, position) in metrics {
+            self.server.update_output_metrics(id, metrics, position);
         }
+        *self.current = candidate;
         self.application.update_output_topology(self.current);
-        let topology = OutputTopology::new(OutputLayout::new(
-            self.layout_revision,
-            self.current.clone(),
-        )?);
         if let Some(event) = self.input.update_output_topology(topology)
             && self.application.enqueue_input_event(event.clone())
         {
@@ -880,6 +927,7 @@ impl OutputScaleUpdate<'_> {
         self.desktop
             .set_cursor_position(self.input.pointer_position());
         self.desktop.request_all_compositions();
+        info!(scales = ?self.current.iter().map(|output| (output.id(), output.scale().value())).collect::<Vec<_>>(), "updated output scales");
         Ok(())
     }
 }

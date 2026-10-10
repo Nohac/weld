@@ -79,7 +79,7 @@ pub(super) fn prepare(options: &RunOptions) -> Result<DrmBootstrap> {
         )
         .with_context(|| format!("failed to open DRM device {}", device_path.display()))?;
     let drm_fd = DrmDeviceFd::new(DeviceFd::from(fd));
-    let selected_outputs = select_outputs(&drm_fd, options.output_scale)?;
+    let selected_outputs = select_outputs(&drm_fd, options.output_scale, &options.output_settings)?;
 
     let mut descriptor = wgpu::InstanceDescriptor::new_without_display_handle_from_env();
     descriptor.backends = wgpu::Backends::VULKAN;

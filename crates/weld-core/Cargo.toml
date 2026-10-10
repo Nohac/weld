@@ -31,6 +31,7 @@ tracing.workspace = true
 wayland-sys = { version = "0.31.11", features = ["client", "dlopen"] }
 weld-client = { path = "../weld-client" }
 weld-input = { path = "../weld-input" }
+weld-output = { path = "../weld-output" }
 wgpu = { workspace = true, features = ["drm", "naga-ir", "vulkan", "wgsl"] }
 winit = { workspace = true, features = ["rwh_06", "wayland", "wayland-dlopen", "x11"] }
 x11-dl.workspace = true
