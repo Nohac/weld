@@ -5,7 +5,7 @@ use bevy::{
         component::Component,
         entity::Entity,
         event::Event,
-        lifecycle::Remove,
+        lifecycle::{Insert, Remove},
         message::MessageWriter,
         observer::On,
         query::With,
@@ -51,6 +51,7 @@ impl Workspace {
     pub const fn visible(&self) -> bool {
         self.visible
     }
+    /// Selection order: remembered focus first, newly attached candidates last.
     pub fn recent(&self) -> impl Iterator<Item = Entity> + '_ {
         self.history.iter().copied()
     }
@@ -189,6 +190,39 @@ pub(crate) fn removed(
 pub struct WorkspaceMemberMoved {
     pub window: Entity,
     pub previous: Entity,
+}
+
+/// Retain every member as a focus candidate, including windows admitted to an
+/// inactive workspace. Re-inserting membership preserves existing recency.
+pub(crate) fn member_inserted(
+    event: On<Insert, WorkspaceMember>,
+    members: Query<&WorkspaceMember, With<ManagedWindow>>,
+    mut workspaces: Query<&mut Workspace>,
+) {
+    let Ok(member) = members.get(event.entity) else {
+        return;
+    };
+    let Ok(mut workspace) = workspaces.get_mut(member.0) else {
+        return;
+    };
+    workspace
+        .history
+        .retain(|window| members.get(*window).is_ok_and(|other| other.0 == member.0));
+    if !workspace.history.contains(&event.entity) {
+        workspace.history.push(event.entity);
+    }
+}
+
+pub(crate) fn member_removed(
+    event: On<Remove, WorkspaceMember>,
+    members: Query<&WorkspaceMember>,
+    mut workspaces: Query<&mut Workspace>,
+) {
+    if let Ok(member) = members.get(event.entity)
+        && let Ok(mut workspace) = workspaces.get_mut(member.0)
+    {
+        workspace.history.retain(|window| *window != event.entity);
+    }
 }
 
 pub(crate) fn member_moved(
@@ -515,5 +549,63 @@ mod tests {
                 .expect("recreate")
                 .is_some()
         );
+    }
+
+    #[test]
+    fn attached_candidates_preserve_recency_and_disappear_on_removal() {
+        let (mut app, _, first, _) = setup();
+        app.init_resource::<weld_app::surface::SurfaceActionQueue>();
+        let older = app
+            .world_mut()
+            .spawn((
+                ManagedWindow {
+                    id: WindowId::new(1),
+                },
+                WorkspaceMember(first),
+            ))
+            .id();
+        let newer = app
+            .world_mut()
+            .spawn((
+                ManagedWindow {
+                    id: WindowId::new(2),
+                },
+                WorkspaceMember(first),
+            ))
+            .id();
+        let order = |app: &App| {
+            app.world()
+                .get::<Workspace>(first)
+                .expect("workspace")
+                .recent()
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(order(&app), vec![older, newer]);
+        assert_eq!(app.world().resource::<FocusedWindow>().entity(), None);
+        request(
+            &mut app,
+            WorkspaceRequest::SetVisible {
+                workspace: first,
+                visible: true,
+            },
+        );
+        request(
+            &mut app,
+            WorkspaceRequest::Select {
+                workspace: first,
+                window: Some(newer),
+            },
+        );
+        assert_eq!(order(&app), vec![newer, older]);
+        app.world_mut()
+            .entity_mut(older)
+            .insert(WorkspaceMember(first));
+        assert_eq!(order(&app), vec![newer, older]);
+        app.world_mut().despawn(newer);
+        assert_eq!(order(&app), vec![older]);
+        app.world_mut()
+            .entity_mut(older)
+            .remove::<WorkspaceMember>();
+        assert!(order(&app).is_empty());
     }
 }

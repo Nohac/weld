@@ -884,6 +884,8 @@ impl Plugin for WindowPlugin {
             .add_observer(workspace::remember_focus)
             .add_observer(workspace::removed)
             .add_observer(workspace::member_moved)
+            .add_observer(workspace::member_inserted)
+            .add_observer(workspace::member_removed)
             .init_resource::<FocusedWindow>()
             .init_resource::<AppliedClientFocus>()
             .init_resource::<SurfaceCommitRevisions>()

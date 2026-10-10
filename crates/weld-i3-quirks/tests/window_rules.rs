@@ -10,7 +10,7 @@ use weld_app::{
     output::{OutputGeometry, OutputId, PrimaryOutput, WeldOutput},
     surface::{
         ClientProvenance, ClientSource, ClientToplevel, ClientToplevelHints, ClientWindowMetadata,
-        MappedSurface, SurfaceActionQueue, SurfaceId,
+        MappedSurface, SurfaceAction, SurfaceActionQueue, SurfaceId, take_surface_actions,
     },
 };
 use weld_client::{ClientSurfaceMetadata, ToplevelHints, ToplevelKind};
@@ -136,6 +136,41 @@ fn rule_sequence_places_background_window_before_first_publication() {
             .position,
         Vec2::new(40.0, 60.0)
     );
+    app.world_mut()
+        .trigger(I3WorkspaceRequest::Switch(WorkspaceTarget::Number(
+            "3".into(),
+        )));
+    app.update();
+    assert_eq!(
+        app.world().resource::<FocusedWindow>().entity(),
+        Some(utility)
+    );
+    assert!(
+        take_surface_actions(app.world_mut()).contains(&SurfaceAction::Focus {
+            surface: Some(SurfaceId::for_test(2)),
+        })
+    );
+}
+
+#[test]
+fn focus_mode_toggle_finds_a_floating_window_that_has_never_been_focused() {
+    let mut app = app("for_window [app_id=utility] floating enable\nno_focus [app_id=utility]");
+    let main_client = client(&mut app, 1, "editor", "Main", ToplevelKind::Normal);
+    app.update();
+    let main = window(&app, main_client);
+    let utility_client = client(&mut app, 2, "utility", "Tools", ToplevelKind::Normal);
+    app.update();
+    let utility = window(&app, utility_client);
+    assert_eq!(app.world().resource::<FocusedWindow>().entity(), Some(main));
+    app.world_mut().trigger(weld_i3_quirks::I3FocusModeToggle);
+    app.update();
+    assert_eq!(
+        app.world().resource::<FocusedWindow>().entity(),
+        Some(utility)
+    );
+    app.world_mut().trigger(weld_i3_quirks::I3FocusModeToggle);
+    app.update();
+    assert_eq!(app.world().resource::<FocusedWindow>().entity(), Some(main));
 }
 
 #[test]
