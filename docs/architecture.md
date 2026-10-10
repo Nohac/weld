@@ -33,11 +33,17 @@ Weld is a workspace of reusable layers and one standard distribution:
   settings through `weld-app`; the native DRM host reads EDID, resolves each output,
   and applies scale changes to protocol metrics, presentation and input topology.
 - `weld-i3-quirks` consumes that Sway output, interprets the supported settings
-  and actions, applies criteria-based border rules, and supplies i3 tree-based focus,
+  and actions, applies criteria-based window rules, and supplies i3 tree-based focus,
   structural movement and branch-local close recovery.
   It uses the shared tree and node-focus history. Master owns file selection,
   atomic settings/binding publication, reload and distribution effects. Future
   config/behavior combinations will be shaped by a second concrete backend.
+  Rule evaluation runs in `WindowSystems::AdmissionPolicy`: it supplies initial
+  plane/focus preferences and explicit workspace membership before manager
+  admission. Per-occupant actions run in source order after manager ownership
+  exists; late metadata matches and reloads target that window explicitly.
+  `weld-tile` consumes the admission preferences, and existing tile/floating
+  commands own subsequent geometry and membership changes.
 - `weld-input` owns raw seat records, compiled XKB configuration, keyboard
   resolution, and repeat settings. Its optional Bevy integration owns keyboard
   and pointer shortcut matching, owner-scoped binding modes, replacement, press/release consumption

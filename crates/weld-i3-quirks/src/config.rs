@@ -275,16 +275,13 @@ fn apply<Extension>(config: &mut Configuration<Extension>, statement: &Statement
         .map(|argument| argument.text())
         .collect();
     match (statement.name().text(), args.as_slice()) {
-        ("for_window", [criteria, "border", style @ ..]) => {
-            if style.iter().any(|word| word.contains([',', ';'])) {
-                return Err(unsupported(
-                    "window-rule command sequences are not supported",
-                ));
-            }
-            config
-                .window_rules
-                .add_border(criteria, border_style(style)?)?;
+        ("for_window", [criteria, commands @ ..]) => config
+            .window_rules
+            .add_commands(criteria, &commands.join(" "))?,
+        ("assign", [criteria, target @ ..]) => {
+            config.window_rules.add_assignment(criteria, target)?
         }
+        ("no_focus", [criteria]) => config.window_rules.add_no_focus(criteria)?,
         (directive @ ("exec" | "exec_always"), command) => {
             config.startup.push(StartupCommand {
                 command: exec_command(command)?,
@@ -407,7 +404,7 @@ fn axis(value: &str) -> Result<SplitAxis> {
     }
 }
 
-fn border_style(words: &[&str]) -> Result<BorderStyle> {
+pub(crate) fn border_style(words: &[&str]) -> Result<BorderStyle> {
     let (kind, width) = match words {
         ["none"] => return Ok(BorderStyle::None),
         [kind @ ("normal" | "pixel")] => (*kind, 3),
@@ -704,7 +701,7 @@ fn exec_command(words: &[&str]) -> Result<String> {
     Ok(words.join(" "))
 }
 
-fn workspace_target(words: &[&str]) -> Result<WorkspaceTarget> {
+pub(crate) fn workspace_target(words: &[&str]) -> Result<WorkspaceTarget> {
     if let ["number", name @ ..] = words {
         let name = workspace_name(name)?;
         ensure!(

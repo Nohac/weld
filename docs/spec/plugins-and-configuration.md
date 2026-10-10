@@ -81,6 +81,35 @@ Remote app discovery and launch are part of the authenticated
 [launcher federation](remote-hoisting.md#launcher-federation--direction), not
 an implicit extension of local administrative IPC.
 
+## Window-property inspection and rule authoring — Exploration
+
+Make the properties used for matching discoverable through both local tooling
+and an in-desktop inspector. Candidate commands are:
+
+- `weldctl windows list`, with an optional `--json` representation, to list
+  stable window IDs, titles, workspace/output membership and matching metadata.
+- `weldctl windows inspect --pick`, with an xprop-like pointer selection:
+  highlight a candidate, click to inspect it, and cancel with Escape. Consume
+  the selection click so inspection does not activate a control in the app.
+- Inspection by stable window ID for scripts and repeatable queries.
+
+A configurable binding could show a translucent property overlay directly on
+the focused or pointed-at window. The targeting choice and visual treatment
+need testing. Keep the window identifiable and the property text readable;
+provide a copy action for individual values, the complete report, and a suggested
+matching criterion. Dismissal should restore ordinary input handling.
+
+CLI and overlay should consume the same property snapshot: Wayland `app_id`,
+X11 `class` and `instance`, title, source/backend, and stable window/workspace
+identities where available. Show which fields are available for that window.
+Generated Sway criteria should escape both regex and config-string syntax and
+anchor exact matches. Prefer application identity; let the user opt into title
+matching because titles often change. Copying a suggestion leaves applying or
+saving a rule to an explicit user action.
+
+This could also help users choose criteria for
+[persistent frames](window-management.md#persistent-frames--direction).
+
 ## Open work — Exploration
 
 - Capability resources for privileged plugin actions.

@@ -92,6 +92,24 @@ pub struct WindowZOrder(pub i32);
 #[derive(Component, Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct FloatingWindow;
 
+/// Initial placement and activation preferences supplied before manager admission.
+#[derive(Component, Clone, Copy, Debug, PartialEq)]
+pub struct WindowAdmissionPreferences {
+    /// An explicit plane choice overrides client dialog/fixed-size hints.
+    pub floating: Option<bool>,
+    /// Whether this window may take focus when admitted alongside other windows.
+    pub focus: bool,
+}
+
+impl Default for WindowAdmissionPreferences {
+    fn default() -> Self {
+        Self {
+            floating: None,
+            focus: true,
+        }
+    }
+}
+
 /// The window's geometry is assigned by a tiling layout.
 #[derive(Component, Clone, Copy, Debug, Default)]
 pub struct TiledWindow;
@@ -659,6 +677,7 @@ impl WindowRegistry {
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, SystemSet)]
 pub enum WindowSystems {
     Admission,
+    AdmissionPolicy,
     PresentationRevoke,
     PresentationClaim,
     PresentationMetrics,
@@ -875,6 +894,7 @@ impl Plugin for WindowPlugin {
                 PreUpdate,
                 (
                     WindowSystems::Admission,
+                    WindowSystems::AdmissionPolicy,
                     WindowSystems::PresentationRevoke,
                     WindowSystems::PresentationClaim,
                     WindowSystems::PresentationMetrics,

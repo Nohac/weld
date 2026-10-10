@@ -20,9 +20,10 @@ use weld_window::workspace::{
     FocusedWorkspace, Workspace, WorkspaceMember, WorkspaceOutput, WorkspaceWindows,
 };
 use weld_window::{
-    FloatingWindow, FocusedWindow, ManagedBy, ManagedWindow, SoleTiledWindow, WindowClientResolver,
-    WindowCommand, WindowCommandKind, WindowGeometry, WindowIntent, WindowIntentKind, WindowOutput,
-    WindowSplitEdge, WindowSystems, WindowVisibility, WindowZOrder,
+    FloatingWindow, FocusedWindow, ManagedBy, ManagedWindow, SoleTiledWindow,
+    WindowAdmissionPreferences, WindowClientResolver, WindowCommand, WindowCommandKind,
+    WindowGeometry, WindowIntent, WindowIntentKind, WindowOutput, WindowSplitEdge, WindowSystems,
+    WindowVisibility, WindowZOrder,
 };
 
 use std::collections::HashMap;
@@ -132,7 +133,7 @@ impl Plugin for TilePlugin {
             .add_systems(
                 PreUpdate,
                 classify_dialogs
-                    .after(WindowSystems::Admission)
+                    .after(WindowSystems::AdmissionPolicy)
                     .before(WindowSystems::PresentationRevoke),
             )
             .configure_sets(
@@ -294,6 +295,7 @@ struct AdmissionFamilies<'w, 's> {
     geometry: Query<'w, 's, &'static WindowGeometry>,
     memberships: Query<'w, 's, &'static WorkspaceMember>,
     floating: Query<'w, 's, (), With<FloatingWindow>>,
+    preferences: Query<'w, 's, &'static WindowAdmissionPreferences>,
 }
 
 impl AdmissionFamilies<'_, '_> {
@@ -303,6 +305,11 @@ impl AdmissionFamilies<'_, '_> {
         self.clients.window_for_surface(parent.surface)
     }
     fn is_dialog(&self, window: Entity) -> bool {
+        if let Ok(preferences) = self.preferences.get(window)
+            && let Some(floating) = preferences.floating
+        {
+            return floating;
+        }
         self.clients
             .client_entity(window)
             .is_some_and(|client| self.parents.contains(client))
@@ -398,8 +405,27 @@ fn admit_windows(
             })
             .map_or(container.children.len(), |index| index + 1);
         let mut offset = 0;
+        let mut population = families
+            .memberships
+            .iter()
+            .filter(|member| member.0 == root)
+            .count()
+            + ordered
+                .iter()
+                .filter(|(_, window)| !families.memberships.contains(*window))
+                .count();
+        population = population.saturating_sub(ordered.len());
         for (_, window) in ordered.iter().copied() {
-            if families.is_dialog(window) || families.floating.contains(window) {
+            population += 1;
+            let floating = families
+                .preferences
+                .get(window)
+                .ok()
+                .and_then(|preferences| preferences.floating)
+                .unwrap_or_else(|| {
+                    families.is_dialog(window) || families.floating.contains(window)
+                });
+            if floating {
                 let initial = families.geometry.get(window).copied().unwrap_or_default();
                 let size = initial.size.max(bevy::math::Vec2::ONE);
                 editor.commands.entity(window).insert((
@@ -417,6 +443,7 @@ fn admit_windows(
                         .insert(crate::floating::PendingDialogPlacement);
                 }
             } else {
+                editor.commands.entity(window).remove::<FloatingWindow>();
                 container.children.insert(
                     insertion + offset,
                     TileChild {
@@ -440,12 +467,20 @@ fn admit_windows(
                     WindowVisibility::Hidden
                 },
             ));
-            if selected == Some(root) {
+            let focus_on_map = families
+                .preferences
+                .get(window)
+                .map_or(true, |preferences| preferences.focus);
+            if selected == Some(root) && (focus_on_map || population == 1) {
                 editor.commands.trigger(WindowCommand {
                     window,
                     kind: WindowCommandKind::Focus,
                 });
             }
+            editor
+                .commands
+                .entity(window)
+                .remove::<WindowAdmissionPreferences>();
         }
         editor.dirty.0 = true;
     }

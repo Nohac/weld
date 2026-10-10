@@ -247,20 +247,42 @@ adaptive sync are reported as unsupported while scale on the same line applies.
   `weld output-debug`, and `weld scale increase|decrease|physical`. Scale bindings
   are registered only on DRM. Persistent-window matching is not yet exposed.
 
-- `for_window [CRITERIA] border normal|pixel [N]|none` applies a per-window frame
-  choice. Criteria support `all` and regex matches for `app_id`, `class`,
+- `for_window [CRITERIA] COMMAND[, COMMAND...]` applies ordered commands to the
+  matching window. Supported actions are `border normal|pixel [N]|none`,
+  `floating enable|disable`, `move [container|window] to workspace [number] NAME`,
+  `move workspace [number] NAME`, and `move absolute position X Y`.
+  Absolute positions use logical output-layout coordinates and apply to floating
+  windows. Quoted commas stay inside their argument. An unsupported action skips
+  its entire rule under the warning policy.
+  Criteria support `all` and regex matches for `app_id`, `class`,
   `instance`, and `title`, combined with AND. Missing native/X11 properties match
   as empty strings, following [Sway's criteria matching](https://github.com/swaywm/sway/blob/1.12/sway/criteria.c).
   Thus `[class="^.*"]` also matches native Wayland windows. Rules run in source
   order, once per matching occupant, including when a later title first matches.
-  Later title changes preserve manual border toggles. Successful reload retries
+  Later title changes preserve manual placement and border changes. Successful reload retries
   the new rules against existing windows; removing a rule leaves its previously
-  applied border choice intact. Matching uses Rust `regex`; PCRE-only constructs
+  applied state intact. Matching uses Rust `regex`; PCRE-only constructs
   such as look-around/backreferences and dynamic `__focused__` matching are not
   supported. X11 class remains the neutral application label for hoisting, while
   criteria distinguish class/instance from native Wayland `app_id`.
+- `assign [CRITERIA] [→] [workspace] [number] NAME` chooses the first matching
+  assignment during initial admission. Numbered targets reuse an existing
+  numbered workspace such as `3:tools`. Later title changes and reloads leave
+  already-admitted windows in place; use `for_window ... move ...` for a
+  once-per-match move.
+- `no_focus [CRITERIA]` suppresses automatic activation of a newly admitted
+  window. The first window on an empty active workspace still receives focus;
+  explicit navigation and pointer activation remain available.
+  Initial plane/workspace preferences are applied before manager admission,
+  and explicit-window actions preserve focus when moving a background window.
 
-Includes, general criteria commands, command sequences, and other blocks remain follow-ups.
+The rule slice has parser and policy integration coverage for command lists,
+initial placement, batched admission, focus, late titles, assignment precedence,
+and reload. Manual validation used Foot's app-ID override with the user's
+existing floating/workspace rule.
+
+Includes, general criteria commands, binding command sequences, semicolon-separated
+rule commands, output assignments, and other blocks remain follow-ups.
 `include` remains an error to avoid silently dropping a file's essential bindings.
 Unknown input devices, unsupported keys, SwayFX effects and other window-rule actions warn and
 skip. Volume, mute, play/pause, next and previous media-key names are supported;

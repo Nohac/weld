@@ -15,7 +15,7 @@ use weld_window::workspace::{
     WorkspaceOutput, WorkspaceRequest,
 };
 use weld_window::workspace_protocol::ActivateWorkspace;
-use weld_window::{FocusedWindow, ManagedWindow};
+use weld_window::{FocusedWindow, ManagedBy, ManagedWindow};
 
 /// Workspace selector in i3 command vocabulary.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -48,6 +48,13 @@ pub struct WorkspaceSettings {
 pub enum I3WorkspaceRequest {
     Switch(WorkspaceTarget),
     MoveWindow(WorkspaceTarget),
+}
+
+/// Assign or transfer one explicit window without following it to the target.
+#[derive(Event, Clone, Debug)]
+pub struct I3WindowWorkspaceRequest {
+    pub window: Entity,
+    pub target: WorkspaceTarget,
 }
 
 #[derive(Resource, Default)]
@@ -101,6 +108,19 @@ pub(crate) fn number(name: &str) -> Option<u32> {
 }
 
 impl WorkspaceView<'_, '_> {
+    fn resolve(
+        &self,
+        target: &WorkspaceTarget,
+        creation: &mut WorkspaceCreation,
+    ) -> Option<Entity> {
+        self.find(target).or_else(|| {
+            let name = self.creation_name(target)?;
+            let output = self
+                .preferred_output(&name)
+                .or_else(|| self.current_output())?;
+            creation.create(name, output)
+        })
+    }
     fn current_output(&self) -> Option<Entity> {
         self.selected
             .entity()
@@ -257,13 +277,7 @@ pub(crate) fn request(
     if matches!(event.event(), I3WorkspaceRequest::MoveWindow(_)) && focus.entity().is_none() {
         return;
     }
-    let workspace = view.find(target).or_else(|| {
-        let name = view.creation_name(target)?;
-        let output = view
-            .preferred_output(&name)
-            .or_else(|| view.current_output())?;
-        creation.create(name, output)
-    });
+    let workspace = view.resolve(target, &mut creation);
     let Some(workspace) = workspace else { return };
     match event.event() {
         I3WorkspaceRequest::Switch(_) => commands.trigger(Resolved::Switch(workspace)),
@@ -272,6 +286,36 @@ pub(crate) fn request(
                 commands.trigger(Resolved::Move { window, workspace });
             }
         }
+    }
+}
+
+pub(crate) fn move_explicit(
+    event: On<I3WindowWorkspaceRequest>,
+    view: WorkspaceView,
+    windows: Query<Option<&ManagedBy>, bevy::ecs::query::With<ManagedWindow>>,
+    mut creation: WorkspaceCreation,
+    mut pending: ResMut<TileCommands>,
+    mut commands: Commands,
+) {
+    let Ok(owner) = windows.get(event.window) else {
+        return;
+    };
+    if view.current_output().is_none() {
+        let _ = pending.defer(event.event().clone());
+        return;
+    }
+    let Some(workspace) = view.resolve(&event.target, &mut creation) else {
+        return;
+    };
+    if owner.is_none() {
+        commands
+            .entity(event.window)
+            .insert(WorkspaceMember(workspace));
+    } else {
+        commands.trigger(Resolved::Move {
+            window: event.window,
+            workspace,
+        });
     }
 }
 
@@ -349,14 +393,20 @@ pub(crate) fn apply_resolved(
                 workspace,
                 anchor,
             });
-            commands.trigger(AfterMove {
-                // Moving a workspace selection leaves the workspace entity in
-                // place; verify the transfer through one of its selected leaves.
-                window: tree.descend(window).unwrap_or(window),
-                source,
-                destination: workspace,
-                ancestors,
-            });
+            if sticky
+                .focus
+                .entity()
+                .is_some_and(|focused| focused == window || tree.belongs_to(focused, window))
+            {
+                commands.trigger(AfterMove {
+                    // Moving a workspace selection leaves the workspace entity in
+                    // place; verify the transfer through one of its selected leaves.
+                    window: tree.descend(window).unwrap_or(window),
+                    source,
+                    destination: workspace,
+                    ancestors,
+                });
+            }
         }
     }
 }

@@ -42,6 +42,8 @@
 #![deny(missing_docs)]
 
 #[cfg(feature = "evaluate")]
+pub mod commands;
+#[cfg(feature = "evaluate")]
 pub mod criteria;
 mod diagnostic;
 #[cfg(feature = "evaluate")]

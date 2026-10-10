@@ -64,6 +64,8 @@ impl Plugin for I3QuirksPlugin {
             .init_resource::<workspace::WorkspaceSettings>()
             .init_resource::<workspace::PreviousWorkspace>()
             .add_observer(workspace::request)
+            .add_observer(workspace::move_explicit)
+            .add_observer(window_rules::execute)
             .add_observer(workspace::activate_existing)
             .add_observer(workspace::apply_resolved)
             .add_observer(workspace::finish_switch)
@@ -86,14 +88,19 @@ impl Plugin for I3QuirksPlugin {
             .add_systems(PreUpdate, focus::refresh_path.in_set(TileSystems::Layout));
         app.add_systems(
             PreUpdate,
-            window_rules::apply
-                .after(weld_window::WindowSystems::Admission)
-                .before(weld_window::WindowSystems::PresentationRevoke),
+            window_rules::apply.in_set(weld_window::WindowSystems::AdmissionPolicy),
         );
         app.add_systems(
             PreUpdate,
             workspace::prepare
-                .before(TileSystems::RecoverFocus)
+                .before(window_rules::apply)
+                .in_set(weld_window::WindowSystems::AdmissionPolicy),
+        );
+        app.add_systems(
+            PreUpdate,
+            window_rules::dispatch
+                .after(TileSystems::Prepare)
+                .before(TileSystems::Commands)
                 .in_set(weld_window::WindowSystems::Management),
         );
         app.add_systems(

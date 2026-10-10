@@ -10,7 +10,7 @@ input = ["evaluate", "dep:weld-input"]
 output = ["evaluate", "dep:weld-output"]
 
 [dependencies]
-winnow.workspace = true
+winnow = { workspace = true, features = ["ascii"] }
 anyhow = { workspace = true, optional = true }
 weld-input = { path = "../weld-input", features = ["bevy"], optional = true }
 weld-output = { path = "../weld-output", optional = true }
