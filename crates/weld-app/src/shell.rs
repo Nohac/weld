@@ -1010,6 +1010,10 @@ impl HostPolicy for AppShell {
         AppShell::enqueue_input_event(self, event)
     }
 
+    fn restore_input_focus(&mut self) {
+        crate::layer_shell::restore_input_focus(self.app.world_mut());
+    }
+
     fn advance_main(&mut self, input_time: u32) -> bool {
         AppShell::advance_main(self, input_time)
     }

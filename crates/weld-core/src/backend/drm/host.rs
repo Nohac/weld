@@ -411,6 +411,7 @@ impl NativeDriver<HostEvent> for DrmDriver {
                     self.desktop.activate()?;
                     self.presentation_schedule.activate_all();
                     self.target = SessionTarget::ActivePhysical;
+                    application.restore_input_focus();
                     self.frame_state.request_composition();
                 }
                 HostEvent::Drm {

@@ -408,6 +408,9 @@ pub trait HostPolicy {
     /// Buffers an input event for the next application frame and returns
     /// whether core should also forward it to the focused client immediately.
     fn enqueue_input_event(&mut self, event: RawSeatEvent) -> bool;
+    /// Reasserts the current keyboard selection after the native session resumes.
+    /// Publish the resulting focus request through [`Self::take_client_requests`].
+    fn restore_input_focus(&mut self) {}
     /// Advances policy and requests another paced update when returning true.
     /// With a local presenter this also requests composition. A presenter-free
     /// host does not render or impose Bevy's startup-settle passes.

@@ -265,6 +265,12 @@ fn pointer_focus(
     });
 }
 
+pub(crate) fn restore_input_focus(world: &mut World) {
+    if let Some(mut focus) = world.get_resource_mut::<LayerFocus>() {
+        focus.reassert = true;
+    }
+}
+
 pub(crate) fn resolve_focus_actions(
     world: &mut World,
     actions: Vec<SurfaceAction>,
@@ -456,6 +462,44 @@ mod tests {
             );
             assert!(resolve_focus_actions(app.world_mut(), vec![]).is_empty());
         }
+    }
+
+    #[test]
+    fn session_resume_reasserts_the_current_selection_once_including_layer_focus() {
+        let mut world = World::new();
+        world.init_resource::<LayerFocus>();
+        let ordinary = SurfaceId::for_test(1);
+        let launcher = SurfaceId::for_test(2);
+        let action = |surface| SurfaceAction::Focus { surface };
+        resolve_focus_actions(&mut world, vec![action(Some(ordinary))]);
+
+        for (on_demand, exclusive, selected) in [
+            (None, None, ordinary),
+            (Some(launcher), None, launcher),
+            (None, Some(launcher), launcher),
+        ] {
+            {
+                let mut focus = world.resource_mut::<LayerFocus>();
+                focus.on_demand = on_demand;
+                focus.exclusive = exclusive;
+            }
+            resolve_focus_actions(&mut world, vec![]);
+            assert!(resolve_focus_actions(&mut world, vec![]).is_empty());
+            restore_input_focus(&mut world);
+            assert_eq!(
+                resolve_focus_actions(&mut world, vec![]),
+                vec![action(Some(selected))]
+            );
+            assert!(resolve_focus_actions(&mut world, vec![]).is_empty());
+        }
+
+        // Policy may close or replace the selected window while the VT is inactive.
+        world.resource_mut::<LayerFocus>().exclusive = None;
+        restore_input_focus(&mut world);
+        assert_eq!(
+            resolve_focus_actions(&mut world, vec![action(None)]),
+            vec![action(None)]
+        );
     }
 
     #[test]
