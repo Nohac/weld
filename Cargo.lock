@@ -8270,6 +8270,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "weld-sway-ipc"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bytes",
+ "futures-util",
+ "rustix 1.1.4",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "xdg",
+]
+
+[[package]]
 name = "weld-tile"
 version = "0.1.0"
 dependencies = [
@@ -8341,6 +8358,7 @@ dependencies = [
  "weld-media",
  "weld-media-vaapi",
  "weld-ssd",
+ "weld-sway-ipc",
  "weld-tile",
  "weld-tile-ui",
  "weld-window",

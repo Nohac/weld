@@ -28,6 +28,92 @@ fn key(code: u32, state: KeyboardKeyState) -> RawSeatEvent {
 }
 
 #[test]
+fn modes_switch_within_one_input_batch_and_preserve_held_releases_on_reload() {
+    let mut app = App::new();
+    app.add_plugins(GlobalShortcutPlugin);
+    let mut owner = GlobalShortcutSet::default();
+    let chord = |key| GlobalShortcut::new(key, GlobalShortcutModifiers::default());
+    let definitions = || {
+        vec![
+            GlobalShortcutMode {
+                name: "default".into(),
+                bindings: vec![(chord(KeyCode::KeyR), Some("resize".into()))],
+            },
+            GlobalShortcutMode {
+                name: "resize".into(),
+                bindings: vec![
+                    (chord(KeyCode::KeyA), None),
+                    (chord(KeyCode::Escape), Some("default".into())),
+                ],
+            },
+        ]
+    };
+    let ids = owner
+        .replace_modes(
+            &mut app.world_mut().resource_mut::<GlobalShortcutRegistry>(),
+            definitions(),
+        )
+        .expect("valid modes");
+    assert!(!filter_global_shortcut_event(
+        app.world_mut(),
+        &key(30, KeyboardKeyState::Pressed)
+    ));
+    filter_global_shortcut_event(app.world_mut(), &key(30, KeyboardKeyState::Released));
+    for code in [19, 30] {
+        assert!(filter_global_shortcut_event(
+            app.world_mut(),
+            &key(code, KeyboardKeyState::Pressed)
+        ));
+    }
+    assert_eq!(owner.active_mode(app.world().resource()), Some("resize"));
+    let mut cursor = MessageCursor::<GlobalShortcutPressed>::default();
+    assert_eq!(
+        cursor
+            .read(app.world().resource::<Messages<GlobalShortcutPressed>>())
+            .map(|event| event.shortcut())
+            .collect::<Vec<_>>(),
+        [ids[0][0], ids[1][0]]
+    );
+    owner
+        .replace_modes(
+            &mut app.world_mut().resource_mut::<GlobalShortcutRegistry>(),
+            definitions(),
+        )
+        .expect("reload");
+    assert_eq!(owner.active_mode(app.world().resource()), Some("resize"));
+    assert!(filter_global_shortcut_event(
+        app.world_mut(),
+        &key(1, KeyboardKeyState::Pressed)
+    ));
+    assert_eq!(owner.active_mode(app.world().resource()), Some("default"));
+    for code in [19, 30, 1] {
+        assert!(filter_global_shortcut_event(
+            app.world_mut(),
+            &key(code, KeyboardKeyState::Repeated)
+        ));
+        assert!(filter_global_shortcut_event(
+            app.world_mut(),
+            &key(code, KeyboardKeyState::Released)
+        ));
+    }
+    filter_global_shortcut_event(app.world_mut(), &key(19, KeyboardKeyState::Pressed));
+    owner
+        .replace_modes(
+            &mut app.world_mut().resource_mut::<GlobalShortcutRegistry>(),
+            vec![GlobalShortcutMode {
+                name: "default".into(),
+                bindings: vec![],
+            }],
+        )
+        .expect("mode removed");
+    assert_eq!(owner.active_mode(app.world().resource()), Some("default"));
+    assert!(filter_global_shortcut_event(
+        app.world_mut(),
+        &key(19, KeyboardKeyState::Released)
+    ));
+}
+
+#[test]
 fn remapped_control_matches_and_consumes_repeat_and_release_across_binding_reload() {
     let mut mapper = mapper();
     let mut app = App::new();

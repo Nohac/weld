@@ -19,6 +19,8 @@ pub struct InputConfiguration<'a> {
     pub keymap: Option<KeyboardKeymap>,
     /// Native chords paired with commands for the assembly's action translator.
     pub bindings: Vec<Binding>,
+    /// Named keyboard contexts, activated by the configuration assembly.
+    pub modes: Vec<BindingMode>,
     /// Statements owned by other configuration consumers, in source order.
     pub remaining: Vec<&'a Statement>,
     /// Unsupported input features skipped under the selected policy.
@@ -34,6 +36,17 @@ pub struct Binding {
     pub command: Vec<String>,
     /// One-based physical source line for action diagnostics.
     pub line: usize,
+}
+
+#[derive(Debug)]
+/// Bindings and display metadata for a named keyboard context.
+pub struct BindingMode {
+    /// Name referenced by mode-switch commands.
+    pub name: String,
+    /// Whether bars may interpret the name as Pango markup.
+    pub pango_markup: bool,
+    /// Chords active while this mode is selected.
+    pub bindings: Vec<Binding>,
 }
 
 /// Decodes a plain or fully quoted literal argument. Variables, escape sequences
@@ -79,26 +92,64 @@ pub fn compile_with_policy<'a>(
             )
             .map(|()| keyboard_configured = true),
             "bindsym" => (|| {
+                config
+                    .bindings
+                    .push(compile_binding(statement, line, &mut chords)?);
+                Ok(())
+            })(),
+            "mode" if statement.block().is_some() => (|| {
+                let words: Vec<_> = statement
+                    .arguments()
+                    .iter()
+                    .map(|word| word.text())
+                    .collect();
+                let (mode_name, pango_markup) = match words.as_slice() {
+                    [value] => (literal(value)?, false),
+                    ["--pango_markup", value] => (literal(value)?, true),
+                    _ => bail!("mode requires a name and optional --pango_markup flag"),
+                };
+                ensure!(!mode_name.is_empty(), "mode name must not be empty");
                 ensure!(
-                    statement.block().is_none(),
-                    "bindsym requires a command, not a block"
+                    !config.modes.iter().any(|mode| mode.name == mode_name),
+                    "duplicate binding mode"
                 );
-                let mut words = statement.arguments().iter().map(|word| word.text());
-                let chord = words.next().context("missing binding chord")?;
-                if chord.starts_with("--") {
-                    return Err(unsupported(format!(
-                        "unsupported bindsym flag {chord}; binding skipped"
-                    )));
+                let mut mode = BindingMode {
+                    name: mode_name.into(),
+                    pango_markup,
+                    bindings: Vec::new(),
+                };
+                let mut mode_chords = HashSet::new();
+                let block = statement.block().context("mode block missing")?;
+                for child in block.statements() {
+                    let child_line = line_of(source, child)?;
+                    let result = if child.name().text() == "bindsym" {
+                        compile_binding(
+                            child,
+                            child_line,
+                            if mode_name == "default" {
+                                &mut chords
+                            } else {
+                                &mut mode_chords
+                            },
+                        )
+                    } else {
+                        Err(unsupported(format!(
+                            "unsupported mode directive {}",
+                            child.name().text()
+                        )))
+                    };
+                    match result {
+                        Ok(binding) => mode.bindings.push(binding),
+                        Err(error) => {
+                            policy.handle(error, name, child_line, &mut config.warnings)?
+                        }
+                    }
                 }
-                let shortcut = binding(chord)?;
-                let command: Vec<_> = words.map(str::to_owned).collect();
-                ensure!(!command.is_empty(), "missing binding command");
-                ensure!(chords.insert(shortcut), "duplicate key binding");
-                config.bindings.push(Binding {
-                    shortcut,
-                    command,
-                    line,
-                });
+                if mode_name == "default" {
+                    config.bindings.extend(mode.bindings);
+                } else {
+                    config.modes.push(mode);
+                }
                 Ok(())
             })(),
             _ => {
@@ -122,6 +173,33 @@ pub fn compile_with_policy<'a>(
         );
     }
     Ok(config)
+}
+
+fn compile_binding(
+    statement: &Statement,
+    line: usize,
+    chords: &mut HashSet<GlobalShortcut>,
+) -> Result<Binding> {
+    ensure!(
+        statement.block().is_none(),
+        "bindsym requires a command, not a block"
+    );
+    let mut words = statement.arguments().iter().map(|word| word.text());
+    let chord = words.next().context("missing binding chord")?;
+    if chord.starts_with("--") {
+        return Err(unsupported(format!(
+            "unsupported bindsym flag {chord}; binding skipped"
+        )));
+    }
+    let shortcut = binding(chord)?;
+    let command: Vec<_> = words.map(str::to_owned).collect();
+    ensure!(!command.is_empty(), "missing binding command");
+    ensure!(chords.insert(shortcut), "duplicate key binding");
+    Ok(Binding {
+        shortcut,
+        command,
+        line,
+    })
 }
 
 fn apply_keyboard(
@@ -323,6 +401,7 @@ mod tests {
         Ok(InputConfiguration {
             keymap: config.keymap,
             bindings: config.bindings,
+            modes: config.modes,
             remaining: Vec::new(),
             warnings: config.warnings,
         })

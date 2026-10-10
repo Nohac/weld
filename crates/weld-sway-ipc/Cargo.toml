@@ -1,0 +1,18 @@
+[package]
+name = "weld-sway-ipc"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+bytes = "1"
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
+rustix = { workspace = true, features = ["process"] }
+serde.workspace = true
+serde_json = "1"
+tempfile = "3"
+tokio = { workspace = true, features = ["macros"] }
+tokio-util = { version = "0.7", features = ["codec"] }
+tracing.workspace = true
+xdg = "3"

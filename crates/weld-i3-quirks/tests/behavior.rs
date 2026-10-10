@@ -202,6 +202,66 @@ fn app() -> App {
     app
 }
 
+#[test]
+fn resize_amounts_select_percent_for_tiles_and_pixels_for_floating() {
+    let mut app = app();
+    app.add_plugins(weld_float::FloatBehaviorPlugin);
+    let _first = window(&mut app, 1);
+    let second = window(&mut app, 2);
+    let size = app
+        .world()
+        .get::<WindowGeometry>(second)
+        .expect("geometry")
+        .size;
+    let request = weld_i3_quirks::I3ResizeRequest {
+        axis: SplitAxis::Horizontal,
+        pixels: Some(10.0),
+        fraction: Some(0.1),
+    };
+    app.world_mut().trigger(request);
+    app.update();
+    let resized = *app.world().get::<WindowGeometry>(second).expect("geometry");
+    assert!((resized.size.x - size.x - 80.0).abs() < 0.01);
+    app.world_mut().trigger(TileFloatingRequest {
+        window: Some(second),
+        enabled: Some(true),
+    });
+    app.update();
+    let before = *app
+        .world()
+        .get::<WindowGeometry>(second)
+        .expect("floating geometry");
+    app.world_mut().trigger(request);
+    app.update();
+    let after = *app
+        .world()
+        .get::<WindowGeometry>(second)
+        .expect("resized floating geometry");
+    assert!((after.size.x - before.size.x - 10.0).abs() < 0.01);
+    assert!((after.position.x - before.position.x + 5.0).abs() < 0.01);
+    app.world_mut().trigger(TileFloatingRequest {
+        window: Some(second),
+        enabled: Some(false),
+    });
+    app.update();
+    let before = app
+        .world()
+        .get::<WindowGeometry>(second)
+        .expect("tile")
+        .size;
+    app.world_mut().trigger(weld_i3_quirks::I3ResizeRequest {
+        fraction: None,
+        ..request
+    });
+    app.update();
+    let after = app
+        .world()
+        .get::<WindowGeometry>(second)
+        .expect("tile")
+        .size;
+    assert!((after.x - before.x - 10.0).abs() < 0.01);
+}
+
 fn output(app: &mut App) {
     app.world_mut().spawn((
         WeldOutput {

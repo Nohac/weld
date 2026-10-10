@@ -5,6 +5,7 @@ edition.workspace = true
 publish.workspace = true
 
 [dependencies]
+weld-float = { path = "../weld-float" }
 anyhow.workspace = true
 bevy.workspace = true
 regex.workspace = true
@@ -19,6 +20,5 @@ weld-ssd = { path = "../weld-ssd" }
 [dev-dependencies]
 weld-window-ui = { path = "../weld-window-ui" }
 weld-client = { path = "../weld-client" }
-weld-float = { path = "../weld-float" }
 indoc.workspace = true
 weld-app = { path = "../weld-app", features = ["test-support"] }

@@ -1,6 +1,7 @@
 //! Configuration-neutral global shortcut matching and press/release ownership.
 
-use std::collections::HashSet;
+use anyhow::{Result, ensure};
+use std::collections::{HashMap, HashSet};
 
 use bevy::{
     app::{App, Plugin},
@@ -103,17 +104,29 @@ impl GlobalShortcutAppExt for App {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 struct RegisteredGlobalShortcut {
     id: GlobalShortcutId,
     chord: GlobalShortcut,
     exact_modifiers: bool,
+    mode: Option<(GlobalShortcutId, String)>,
+    switch_to: Option<String>,
+}
+
+/// One named, mutually exclusive set of chords. A transition takes effect at
+/// raw-input pace, before the next event in the same host dispatch batch.
+pub struct GlobalShortcutMode {
+    pub name: String,
+    pub bindings: Vec<(GlobalShortcut, Option<String>)>,
 }
 
 /// Owner-scoped live bindings. Replacement removes only this set, assigns fresh
 /// IDs, and preserves consumed key releases. Already queued old IDs are obsolete.
 #[derive(Default)]
-pub struct GlobalShortcutSet(Vec<GlobalShortcutId>);
+pub struct GlobalShortcutSet {
+    ids: Vec<GlobalShortcutId>,
+    mode_group: Option<GlobalShortcutId>,
+}
 
 impl GlobalShortcutSet {
     /// Replaces bindings atomically through the shared registry. Call with an
@@ -125,12 +138,73 @@ impl GlobalShortcutSet {
     ) -> Vec<GlobalShortcutId> {
         state
             .application_shortcuts
-            .retain(|entry| !self.0.contains(&entry.id));
-        self.0 = shortcuts
+            .retain(|entry| !self.ids.contains(&entry.id));
+        if let Some(group) = self.mode_group.take() {
+            state.active_modes.remove(&group);
+        }
+        self.ids = shortcuts
             .into_iter()
             .map(|chord| state.register(chord, true))
             .collect();
-        self.0.clone()
+        self.ids.clone()
+    }
+
+    /// Replace all modes atomically, retaining the active mode if still defined.
+    /// Returns IDs in the same mode/binding order as the input.
+    pub fn replace_modes(
+        &mut self,
+        state: &mut GlobalShortcutRegistry,
+        modes: Vec<GlobalShortcutMode>,
+    ) -> Result<Vec<Vec<GlobalShortcutId>>> {
+        let names: HashSet<_> = modes.iter().map(|mode| mode.name.as_str()).collect();
+        ensure!(
+            names.len() == modes.len() && names.contains("default"),
+            "shortcut modes need unique names and a default mode"
+        );
+        for mode in &modes {
+            let mut chords = HashSet::new();
+            for (chord, target) in &mode.bindings {
+                ensure!(chords.insert(*chord), "duplicate chord in shortcut mode");
+                ensure!(
+                    target
+                        .as_deref()
+                        .is_none_or(|target| names.contains(target)),
+                    "shortcut transition targets an undefined mode"
+                );
+            }
+        }
+        let active = self
+            .active_mode(state)
+            .filter(|active| names.contains(active))
+            .unwrap_or("default")
+            .to_owned();
+        self.replace(state, []);
+        let group = GlobalShortcutId(state.next_id);
+        state.next_id = state.next_id.saturating_add(1);
+        state.active_modes.insert(group, active);
+        self.mode_group = Some(group);
+        let mut result = Vec::with_capacity(modes.len());
+        for mode in modes {
+            let mut ids = Vec::with_capacity(mode.bindings.len());
+            for (chord, switch_to) in mode.bindings {
+                let id = state.register(chord, true);
+                if let Some(entry) = state.application_shortcuts.last_mut() {
+                    entry.mode = Some((group, mode.name.clone()));
+                    entry.switch_to = switch_to;
+                }
+                self.ids.push(id);
+                ids.push(id);
+            }
+            result.push(ids);
+        }
+        Ok(result)
+    }
+
+    pub fn active_mode<'a>(&self, state: &'a GlobalShortcutRegistry) -> Option<&'a str> {
+        state
+            .active_modes
+            .get(&self.mode_group?)
+            .map(String::as_str)
     }
 }
 
@@ -141,6 +215,7 @@ pub struct GlobalShortcutRegistry {
     next_id: u64,
     application_shortcuts: Vec<RegisteredGlobalShortcut>,
     pressed: HashSet<LinuxKeycode>,
+    active_modes: HashMap<GlobalShortcutId, String>,
 }
 
 impl GlobalShortcutRegistry {
@@ -151,6 +226,8 @@ impl GlobalShortcutRegistry {
             id,
             chord,
             exact_modifiers,
+            mode: None,
+            switch_to: None,
         });
         id
     }
@@ -212,11 +289,14 @@ pub fn filter_global_shortcut_event(world: &mut World, event: &RawSeatEvent) -> 
                 .modifiers
                 .unwrap_or_else(|| SeatModifiers::from_pressed_keys(&shortcuts.pressed));
             let trigger = convert_physical_key_code(PhysicalKey::from_scancode(keycode.0));
-            shortcuts
+            let matched = shortcuts
                 .application_shortcuts
                 .iter()
                 .find(|shortcut| {
                     shortcut.chord.trigger == trigger
+                        && shortcut.mode.as_ref().is_none_or(|(group, mode)| {
+                            shortcuts.active_modes.get(group) == Some(mode)
+                        })
                         && shortcut.chord.modifiers.matches(modifiers)
                         && (!shortcut.exact_modifiers
                             || shortcut.chord.modifiers
@@ -227,7 +307,14 @@ pub fn filter_global_shortcut_event(world: &mut World, event: &RawSeatEvent) -> 
                                     super_key: modifiers.super_key,
                                 })
                 })
-                .map(|shortcut| shortcut.id)
+                .cloned();
+            if let Some(shortcut) = &matched
+                && let Some((group, _)) = &shortcut.mode
+                && let Some(target) = &shortcut.switch_to
+            {
+                shortcuts.active_modes.insert(*group, target.clone());
+            }
+            matched.map(|shortcut| shortcut.id)
         }
     };
 

@@ -95,6 +95,7 @@ impl Plugin for FloatBehaviorPlugin {
         )
         .init_resource::<WindowStack>()
         .add_observer(handle_window_intent)
+        .add_observer(resize_by_command)
         .add_observer(accept_pointer_interaction)
         .add_observer(remove_floating)
         .add_observer(clear_fullscreen_anchor)
@@ -107,6 +108,43 @@ impl Plugin for FloatBehaviorPlugin {
                 .in_set(FloatManagement),
         );
     }
+}
+
+/// Center-preserving logical resize, constrained by the client's size hints.
+#[derive(bevy::ecs::event::Event, Clone, Copy, Debug)]
+pub struct FloatingResizeRequest {
+    pub window: Entity,
+    pub delta: Vec2,
+}
+
+fn resize_by_command(event: On<FloatingResizeRequest>, mut params: HandleWindowIntentParams) {
+    if !event.delta.is_finite() || params.fullscreen.contains(event.window) {
+        return;
+    }
+    let Ok((mut geometry, _, _, interaction)) = params.windows.get_mut(event.window) else {
+        return;
+    };
+    if interaction.is_some() {
+        return;
+    }
+    let insets = params
+        .presentations
+        .get(event.window)
+        .ok()
+        .and_then(|presentation| params.insets.get(presentation.entity()).ok())
+        .copied()
+        .unwrap_or_default()
+        .extent();
+    let desired = (geometry.size + event.delta).max(insets + Vec2::ONE);
+    let size = params
+        .clients
+        .mapped_client(event.window)
+        .map_or(desired, |client| {
+            client.constrain_content_size(desired - insets) + insets
+        });
+    let change = size - geometry.size;
+    geometry.size = size;
+    geometry.position -= change / 2.0;
 }
 
 fn accept_pointer_interaction(

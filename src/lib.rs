@@ -117,7 +117,15 @@ pub fn run(arguments: AppArguments) -> Result<()> {
         _ => None,
     };
 
+    let mode_service = weld_sway_ipc::PreparedModeService::bind()?;
     let mut app = WeldApp::builder()
+        .client_environment(vec![
+            (
+                "SWAYSOCK".into(),
+                mode_service.socket_path().into_os_string(),
+            ),
+            ("I3SOCK".into(), mode_service.socket_path().into_os_string()),
+        ])
         .xwayland(arguments.xwayland)
         .backend(backend)
         .launch(arguments.client)
@@ -128,6 +136,8 @@ pub fn run(arguments: AppArguments) -> Result<()> {
         .socket_name(arguments.wayland_socket)
         .keyboard_repeat_mode(arguments.keyboard_repeat_mode.map(Into::into))
         .build()?;
+    let mode_service = mode_service.start()?;
+    app.insert_resource(master::ModeStatus(mode_service.publisher()));
     app.insert_resource(weld_app::input::KeyboardSettings {
         legacy_repeat: arguments
             .legacy_key_repeat

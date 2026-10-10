@@ -2,7 +2,7 @@
   "layer": "top",
   "position": "top",
   "height": 30,
-  "modules-left": ["ext/workspaces"],
+  "modules-left": ["ext/workspaces", "sway/mode"],
   "modules-right": ["clock"],
   "ext/workspaces": {
     "format": "{name}",

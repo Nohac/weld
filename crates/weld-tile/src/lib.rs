@@ -303,6 +303,11 @@ pub enum TileOperation {
         axis: SplitAxis,
         fraction: f32,
     },
+    /// Adjust this branch against a sibling by logical pixels.
+    ResizePixels {
+        axis: SplitAxis,
+        pixels: f32,
+    },
 }
 
 /// Bounded, ordered native operations. Producers can retry on a full queue.

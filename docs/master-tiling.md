@@ -113,11 +113,12 @@ cargo run -- --validate-config --config ~/.config/sway/config
 ```
 
 The check reports usable binding/startup-command counts and every skipped feature.
-An `exec` command is preserved, not checked for availability or compatibility:
-for example, `swaymsg exit` still addresses Sway, not Weld. Use a binding to Weld's
-supported `exit` command when running a Sway-derived config. Waybar's Sway IPC
-modules also need their Weld-supported equivalents; loading a bar command does
-not provide Sway IPC compatibility.
+An `exec` command is preserved and resolved by the shell when launched. Use a
+binding to Weld's supported `exit` command to end the session. Children launched
+by Weld receive its private `SWAYSOCK` and `I3SOCK`. The endpoint supports binding
+mode queries and subscriptions, including Waybar's `sway/mode` module.
+Workspace buttons use `ext-workspace-v1`; IPC command execution and other Sway
+query families remain follow-ups.
 
 ## Supported configuration
 
@@ -224,13 +225,24 @@ adaptive sync are reported as unsupported while scale on the same line applies.
   the bar application owns its configuration. No default `swaybar` is started.
 - Bound commands: `splith`, `splitv`, `split h|v|horizontal|vertical`,
   `focus left|right|up|down`, `move left|right|up|down`,
-  `resize grow|shrink width|height N ppt`, `kill`, `reload`, `exit`, and `exec COMMAND`.
+  `resize grow|shrink width|height N px|ppt [or M px|ppt]`, `mode NAME`,
+  `kill`, `reload`, `exit`, and `exec COMMAND`.
+  When both resize units are supplied, tiled layouts use the percentage amount
+  and floating windows use logical pixels. Floating resizes preserve the window's
+  center and respect client size limits.
   Exec runs the preserved shell command through `sh -c` when invoked, never
   during parsing. A whole-command pair of outer quotes is removed when it is
   the sole argument; quotes within a multi-argument command are retained for
   the shell. Bound `exec_always` behaves like bound `exec`.
   Bindings fire once per fresh press, not
   repeatedly while held.
+- `mode [--pango_markup] NAME { bindsym ... }` defines a binding context.
+  `mode NAME` switches context before the next raw input event. Successful reload
+  keeps the current mode when it remains defined, otherwise selects `default`;
+  releases of consumed shortcut keys remain consumed across the transition.
+  Waybar receives the current mode on subscription and subsequent mode changes.
+  From a terminal launched inside Weld, `swaymsg -t get_binding_state` queries
+  the active name and `swaymsg -t get_binding_modes` lists configured modes.
 - Weld-specific commands use the existing command grammar: `weld hoist`,
   `weld output-debug`, and `weld scale increase|decrease|physical`. Scale bindings
   are registered only on DRM. Persistent-window matching is not yet exposed.
@@ -248,8 +260,7 @@ adaptive sync are reported as unsupported while scale on the same line applies.
   supported. X11 class remains the neutral application label for hoisting, while
   criteria distinguish class/instance from native Wayland `app_id`.
 
-Includes, general criteria commands, command sequences, modes, and other blocks remain follow-ups.
-Unsupported mode blocks are skipped whole, so their bindings never become global.
+Includes, general criteria commands, command sequences, and other blocks remain follow-ups.
 `include` remains an error to avoid silently dropping a file's essential bindings.
 Unknown input devices, unsupported keys, SwayFX effects and other window-rule actions warn and
 skip. Volume, mute, play/pause, next and previous media-key names are supported;
@@ -338,8 +349,9 @@ workspaces or rewriting their layouts. Use a fresh workspace or restart the
 test to exercise a changed assignment. Master publishes workspace names, active
 states and output membership through `ext-workspace-v1`, including click-to-switch
 activation. See [desktop layer surfaces](layer-shell.md#workspace-controls).
-Sway IPC, pointer warping, blank-output pointer focus, `focus output`, `move workspace
-to output`, workspace rename, or automatic back-and-forth setting.
+Workspace IPC, pointer warping, blank-output pointer focus, `focus output`,
+`move workspace to output`, workspace rename, and the automatic back-and-forth
+setting remain follow-ups.
 
 Example:
 
@@ -432,7 +444,7 @@ receive the mean existing share, and flattening preserves internal proportions.
 
 ## Deliberate boundaries
 
-Resize-increment/aspect hints, persistent matching and
+Resize-increment/aspect hints, persistent matching and broader Sway
 IPC remain follow-up slices. Popups keep the existing presentation path rather
 than becoming tiling leaves. Declared transient toplevels float and center over
 their parent's geometry. Unparented dialog, splash, utility and toolbar windows,

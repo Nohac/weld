@@ -116,7 +116,10 @@ pub(crate) enum HostCommandEffect {
 }
 
 #[derive(Default)]
-pub(crate) struct ChildProcesses(Vec<Child>);
+pub(crate) struct ChildProcesses {
+    processes: Vec<Child>,
+    pub(crate) environment: Vec<(OsString, OsString)>,
+}
 
 impl ChildProcesses {
     pub(crate) fn spawn_requested(
@@ -152,7 +155,7 @@ impl ChildProcesses {
     }
 
     pub(crate) fn reap(&mut self) {
-        self.0.retain_mut(|process| {
+        self.processes.retain_mut(|process| {
             process
                 .try_wait()
                 .map(|status| status.is_none())
@@ -171,6 +174,7 @@ impl ChildProcesses {
         let mut command = Command::new(program);
         command.args(arguments);
         configure_client_command(&mut command, &server.socket_name, server.x11_display());
+        command.envs(self.environment.iter().cloned());
         let child = command
             .spawn()
             .with_context(|| format!("failed to spawn Wayland client {program:?}"))?;
@@ -180,7 +184,7 @@ impl ChildProcesses {
             process_id = child.id(),
             "launched Wayland client"
         );
-        self.0.push(child);
+        self.processes.push(child);
         Ok(())
     }
 }
@@ -197,6 +201,8 @@ fn configure_client_command(command: &mut Command, socket_name: &OsStr, x11_disp
         .env("NIXOS_OZONE_WL", "1")
         .env("XDG_SESSION_TYPE", "wayland")
         .env_remove("DISPLAY")
+        .env_remove("SWAYSOCK")
+        .env_remove("I3SOCK")
         .env_remove("WAYLAND_SOCKET");
     if let Some(display) = x11_display {
         command.env("DISPLAY", format!(":{display}"));
@@ -393,6 +399,8 @@ mod launch_tests {
             let mut command = Command::new("test-client");
             command
                 .env("DISPLAY", ":foreign")
+                .env("SWAYSOCK", "/foreign/sway.sock")
+                .env("I3SOCK", "/foreign/i3.sock")
                 .env("WAYLAND_SOCKET", "99");
             configure_client_command(&mut command, OsStr::new("weld-private"), display);
             let value = |name: &str| {
@@ -406,6 +414,8 @@ mod launch_tests {
                 Some(Some(OsStr::new("weld-private")))
             );
             assert_eq!(value("WAYLAND_SOCKET"), Some(None));
+            assert_eq!(value("SWAYSOCK"), Some(None));
+            assert_eq!(value("I3SOCK"), Some(None));
             assert_eq!(value("DISPLAY"), Some(display.map(|_| OsStr::new(":17"))));
             assert_eq!(
                 value("GDK_BACKEND"),

@@ -240,6 +240,7 @@ pub(super) fn run(
     }
     desktop.set_cursor_position(input.pointer_position());
 
+    runtime.state.children.environment = options.client_environment;
     let child_requested = runtime
         .state
         .children

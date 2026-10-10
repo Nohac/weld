@@ -68,6 +68,7 @@ impl WeldAppExt for App {
 /// Configures the immutable native roots of a [`WeldApp`].
 #[derive(Default)]
 pub struct WeldAppBuilder {
+    client_environment: Vec<(OsString, OsString)>,
     backend: Backend,
     client: Vec<OsString>,
     screenshot: Option<PathBuf>,
@@ -80,6 +81,11 @@ pub struct WeldAppBuilder {
 }
 
 impl WeldAppBuilder {
+    /// Supplies session-local service endpoints to launched applications.
+    pub fn client_environment(mut self, environment: Vec<(OsString, OsString)>) -> Self {
+        self.client_environment = environment;
+        self
+    }
     /// Enables a rootless XWayland server for this session's X11 applications.
     pub fn xwayland(mut self, enabled: bool) -> Self {
         self.xwayland = enabled;
@@ -164,6 +170,7 @@ impl WeldAppBuilder {
             .remote_debug_enabled(self.remote_debug.is_some())
             .output_scale(self.scale)
             .output_settings(self.output_settings.clone())
+            .client_environment(self.client_environment)
             .socket_name(self.socket_name)
             .keyboard_repeat_mode(self.keyboard_repeat_mode)
             .prepare()?;

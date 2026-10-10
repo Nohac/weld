@@ -23,6 +23,11 @@ Weld is a workspace of reusable layers and one standard distribution:
   The optional `input` module translates keyboard directives and binding chords
   into Weld input types.
   The optional `output` module translates scale rules into `weld-output` settings.
+- `weld-sway-ipc` serves binding-mode queries and subscriptions on a private
+  same-user Unix socket. Its bounded Tokio codec handles framing, protocol types
+  own message IDs and JSON, and connection tasks serve Master's mode snapshots.
+  The worker starts after native host signal masking; service teardown joins it
+  and removes the socket. Host-owned child launch environments carry the endpoint.
 - `weld-output` owns validated scale factors and matching for connector names,
   descriptive monitor identifiers and wildcard defaults. Master publishes complete
   settings through `weld-app`; the native DRM host reads EDID, resolves each output,
@@ -35,7 +40,7 @@ Weld is a workspace of reusable layers and one standard distribution:
   config/behavior combinations will be shaped by a second concrete backend.
 - `weld-input` owns raw seat records, compiled XKB configuration, keyboard
   resolution, and repeat settings. Its optional Bevy integration owns keyboard
-  and pointer shortcut matching, binding replacement, press/release consumption
+  and pointer shortcut matching, owner-scoped binding modes, replacement, press/release consumption
   and live-settings publication. Native hosts own the live XKB interpreter;
   application resources contain owned configuration and resolved input records.
   `AppShell` owns the cached Bevy change-detection reader for native settings;

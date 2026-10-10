@@ -7,6 +7,7 @@ use anyhow::{Context, Result};
 use bevy::{
     app::{App, Plugin, PreUpdate},
     ecs::{
+        change_detection::DetectChanges,
         event::Event,
         message::{MessageReader, Messages},
         observer::On,
@@ -32,8 +33,8 @@ use weld_i3_quirks::window_rules::WindowRules;
 use weld_i3_quirks::workspace::WorkspaceSettings;
 use weld_i3_quirks::{FocusWrapping, I3FocusRequest, I3MoveRequest, I3QuirksPlugin};
 use weld_input::{
-    GlobalShortcutId, GlobalShortcutPlugin, GlobalShortcutPressed, GlobalShortcutRegistry,
-    GlobalShortcutSet, KeyboardSettings,
+    GlobalShortcutId, GlobalShortcutMode, GlobalShortcutPlugin, GlobalShortcutPressed,
+    GlobalShortcutRegistry, GlobalShortcutSet, KeyboardSettings,
 };
 use weld_ssd::{BorderRequest, SsdSettings};
 use weld_tile::{TileRequest, TileSettings, TileSystems};
@@ -67,7 +68,7 @@ fn read_configuration(path: &Path) -> Result<Configuration> {
 
 pub(crate) fn validate_configuration(path: &Path) -> Result<()> {
     let config = read_configuration(path)?;
-    report_warnings(&config);
+    report_warnings(&config.warnings);
     tracing::info!(
         bindings = config.bindings.len(),
         startup_commands = config.startup.len(),
@@ -77,8 +78,8 @@ pub(crate) fn validate_configuration(path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn report_warnings(config: &Configuration) {
-    for warning in &config.warnings {
+fn report_warnings(warnings: &[weld_i3_quirks::config::ConfigWarning]) {
+    for warning in warnings {
         tracing::warn!(source = %warning.source, line = warning.line, reason = %warning.message, "skipped unsupported configuration feature");
     }
 }
@@ -104,6 +105,7 @@ impl Plugin for MasterConfigPlugin {
             path: self.path.clone(),
             shortcuts: GlobalShortcutSet::default(),
             actions: HashMap::new(),
+            mode_labels: Vec::new(),
             initialized: false,
             pending_launches: VecDeque::new(),
         })
@@ -116,7 +118,7 @@ impl Plugin for MasterConfigPlugin {
         .add_observer(dispatch_action)
         .add_systems(
             PreUpdate,
-            (handle_actions, launch_startup)
+            (handle_actions, publish_mode, launch_startup)
                 .chain()
                 .in_set(TileSystems::Actions),
         );
@@ -125,6 +127,8 @@ impl Plugin for MasterConfigPlugin {
         if let Err(error) = app
             .world_mut()
             .run_system_once_with(apply_configuration, self.initial.clone())
+            .map_err(|error| anyhow::anyhow!("{error}"))
+            .and_then(std::convert::identity)
         {
             tracing::error!(%error, "could not install Master configuration");
         }
@@ -136,8 +140,40 @@ struct ConfigState {
     path: PathBuf,
     shortcuts: GlobalShortcutSet,
     actions: HashMap<GlobalShortcutId, Action>,
+    mode_labels: Vec<(String, bool)>,
     initialized: bool,
     pending_launches: VecDeque<String>,
+}
+
+#[derive(Resource)]
+pub(crate) struct ModeStatus(pub weld_sway_ipc::ModePublisher);
+
+fn publish_mode(
+    state: Res<ConfigState>,
+    shortcuts: Res<GlobalShortcutRegistry>,
+    publisher: Option<Res<ModeStatus>>,
+) {
+    let Some(publisher) = publisher else {
+        return;
+    };
+    if !state.is_changed() && !shortcuts.is_changed() {
+        return;
+    }
+    let name = state.shortcuts.active_mode(&shortcuts).unwrap_or("default");
+    let pango_markup = state
+        .mode_labels
+        .iter()
+        .find(|(label, _)| label == name)
+        .is_some_and(|(_, markup)| *markup);
+    publisher.0.publish(weld_sway_ipc::ModeSnapshot {
+        name: name.to_owned(),
+        pango_markup,
+        names: state
+            .mode_labels
+            .iter()
+            .map(|(label, _)| label.clone())
+            .collect(),
+    });
 }
 
 /// These borrows make candidate publication atomic to other scheduled systems.
@@ -157,8 +193,56 @@ struct ConfigTarget<'w> {
 }
 
 impl ConfigTarget<'_> {
-    fn apply(&mut self, config: Configuration) {
-        report_warnings(&config);
+    fn apply(&mut self, config: Configuration) -> Result<()> {
+        let drm = self.backend.as_deref() == Some(&ActiveBackend::Drm);
+        let mut modes = vec![weld_i3_quirks::config::BindingMode {
+            name: "default".into(),
+            pango_markup: false,
+            bindings: config.bindings,
+        }];
+        modes.extend(config.modes);
+        for mode in &mut modes {
+            mode.bindings.retain(|(_, action)| {
+                !matches!(action, Action::Extension(DistributionAction::Shell(command)) if command.requires_drm() && !drm)
+            });
+        }
+        let definitions = modes
+            .iter()
+            .map(|mode| GlobalShortcutMode {
+                name: mode.name.clone(),
+                bindings: mode
+                    .bindings
+                    .iter()
+                    .map(|(chord, action)| {
+                        (
+                            *chord,
+                            match action {
+                                Action::Mode(target) => Some(target.clone()),
+                                _ => None,
+                            },
+                        )
+                    })
+                    .collect(),
+            })
+            .collect();
+        let ids = self
+            .state
+            .shortcuts
+            .replace_modes(&mut self.shortcuts, definitions)?;
+        self.state.mode_labels = modes
+            .iter()
+            .map(|mode| (mode.name.clone(), mode.pango_markup))
+            .collect();
+        self.state.actions = ids
+            .into_iter()
+            .flatten()
+            .zip(
+                modes
+                    .into_iter()
+                    .flat_map(|mode| mode.bindings.into_iter().map(|(_, action)| action)),
+            )
+            .collect();
+        report_warnings(&config.warnings);
         self.outputs.0 = config.outputs;
         *self.window_rules = config.window_rules;
         let startup = !self.state.initialized;
@@ -170,18 +254,6 @@ impl ConfigTarget<'_> {
                 .map(|command| command.command),
         );
         self.state.initialized = true;
-        let drm = self.backend.as_deref() == Some(&ActiveBackend::Drm);
-        let bindings: Vec<_> = config.bindings.into_iter().filter(|(_, action)| {
-            !matches!(action, Action::Extension(DistributionAction::Shell(command)) if command.requires_drm() && !drm)
-        }).collect();
-        let ids = self.state.shortcuts.replace(
-            &mut self.shortcuts,
-            bindings.iter().map(|binding| binding.0),
-        );
-        self.state.actions = ids
-            .into_iter()
-            .zip(bindings.into_iter().map(|binding| binding.1))
-            .collect();
         if *self.tiling != config.tiling {
             *self.tiling = config.tiling;
         }
@@ -200,11 +272,12 @@ impl ConfigTarget<'_> {
         if *self.decorations != config.decorations {
             *self.decorations = config.decorations;
         }
+        Ok(())
     }
 }
 
-fn apply_configuration(In(config): In<Configuration>, mut target: ConfigTarget) {
-    target.apply(config);
+fn apply_configuration(In(config): In<Configuration>, mut target: ConfigTarget) -> Result<()> {
+    target.apply(config)
 }
 
 fn launch_startup(
@@ -284,15 +357,18 @@ fn dispatch_action(
                 requests.write(ToggleOutputTopology);
             }
         }
-        Action::Reload => match read_configuration(&target.state.path) {
-            Ok(config) => {
-                target.apply(config);
-                tracing::info!("reloaded Master configuration");
+        Action::Mode(_) => {}
+        Action::Resize(request) => effects.commands.trigger(request),
+        Action::Reload => {
+            match read_configuration(&target.state.path).and_then(|config| target.apply(config)) {
+                Ok(()) => {
+                    tracing::info!("reloaded Master configuration");
+                }
+                Err(error) => {
+                    tracing::warn!(error = %format!("{error:#}"), "Master reload rejected; keeping current configuration")
+                }
             }
-            Err(error) => {
-                tracing::warn!(error = %format!("{error:#}"), "Master reload rejected; keeping current configuration")
-            }
-        },
+        }
         Action::Tile(operation) => effects.commands.trigger(TileRequest::Focused(operation)),
         Action::Layout(request) => effects.commands.trigger(request),
         Action::Floating(enabled) => effects.commands.trigger(weld_tile::TileFloatingRequest {
@@ -600,6 +676,7 @@ mod tests {
             path: example_path(),
             shortcuts: GlobalShortcutSet::default(),
             actions: HashMap::new(),
+            mode_labels: Vec::new(),
             initialized: false,
             pending_launches: VecDeque::new(),
         });
@@ -701,7 +778,8 @@ mod tests {
     fn install(app: &mut App, config: Configuration) {
         app.world_mut()
             .run_system_once_with(apply_configuration, config)
-            .expect("configuration system");
+            .expect("configuration system")
+            .expect("valid configuration");
     }
 
     #[test]
@@ -804,6 +882,75 @@ mod tests {
         assert_eq!(
             app.world().resource::<OutputPreferences>().0,
             OutputSettings::default()
+        );
+    }
+
+    #[test]
+    fn mode_switch_and_resize_in_one_raw_batch_use_the_new_context() {
+        let mut app = App::new();
+        app.init_resource::<SurfaceActionQueue>().add_plugins((
+            WindowPlugin, TilePlugin, MasterConfigPlugin {
+                path: example_path(),
+                initial: config::parse("modes", "bindsym r mode resize\nmode resize {\n bindsym Right resize grow width 10 px or 10 ppt\n bindsym Escape mode default\n}").expect("modes"),
+            },
+        ));
+        app.world_mut().spawn((
+            WeldOutput {
+                id: OutputId::new(1),
+            },
+            PrimaryOutput,
+            OutputGeometry::from_physical(UVec2::new(800, 600), 1.0),
+        ));
+        for id in 1..=2 {
+            app.world_mut().spawn((
+                ManagedWindow {
+                    id: WindowId::new(id),
+                },
+                WindowVacancy::Retain,
+            ));
+        }
+        app.update();
+        let focused = app
+            .world()
+            .resource::<FocusedWindow>()
+            .entity()
+            .expect("focus");
+        let before = app
+            .world()
+            .get::<weld_window::WindowGeometry>(focused)
+            .expect("geometry")
+            .size
+            .x;
+        for code in [19, 106, 1] {
+            for state in [
+                weld_input::KeyboardKeyState::Pressed,
+                weld_input::KeyboardKeyState::Released,
+            ] {
+                assert!(weld_input::filter_global_shortcut_event(
+                    app.world_mut(),
+                    &weld_input::RawSeatEvent::new(
+                        weld_input::RawSeatEventKind::Keyboard {
+                            keycode: weld_input::LinuxKeycode(code),
+                            logical_key: None,
+                            state,
+                        },
+                        0
+                    )
+                ));
+            }
+        }
+        app.update();
+        let after = app
+            .world()
+            .get::<weld_window::WindowGeometry>(focused)
+            .expect("geometry")
+            .size
+            .x;
+        assert!(after > before);
+        let state = app.world().resource::<ConfigState>();
+        assert_eq!(
+            state.shortcuts.active_mode(app.world().resource()),
+            Some("default")
         );
     }
 }

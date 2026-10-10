@@ -30,6 +30,7 @@ pub(crate) struct TreeEditor<'w, 's> {
     pub dirty: ResMut<'w, LayoutDirty>,
     pub history: ResMut<'w, TileFocusHistory>,
     pub roots: Query<'w, 's, Entity, With<TileWorkspace>>,
+    pub rects: Query<'w, 's, &'static LayoutRect>,
 }
 
 impl TreeEditor<'_, '_> {
@@ -204,8 +205,8 @@ impl TreeEditor<'_, '_> {
         self.dirty.0 = true;
     }
 
-    fn resize(&mut self, window: Entity, axis: SplitAxis, fraction: f32) {
-        if !fraction.is_finite() || fraction == 0.0 {
+    fn resize(&mut self, window: Entity, axis: SplitAxis, amount: f32, pixels: bool) {
+        if !amount.is_finite() || amount == 0.0 {
             return;
         }
         let mut branch = window;
@@ -227,6 +228,22 @@ impl TreeEditor<'_, '_> {
                     index - 1
                 };
                 let total = container.children[index].weight + container.children[other].weight;
+                let fraction = if pixels {
+                    let extent = [index, other]
+                        .into_iter()
+                        .filter_map(|index| self.rects.get(container.children[index].entity).ok())
+                        .map(|rect| match axis {
+                            SplitAxis::Horizontal => rect.0.size.x,
+                            SplitAxis::Vertical => rect.0.size.y,
+                        })
+                        .sum::<f32>();
+                    if extent <= 0.0 {
+                        return;
+                    }
+                    amount / extent
+                } else {
+                    amount
+                };
                 let share = (container.children[index].weight / total + fraction).clamp(0.05, 0.95);
                 if let Ok(mut container) = self.containers.get_mut(parent.0) {
                     container.children[index].weight = total * share;
@@ -306,7 +323,8 @@ pub(crate) fn apply_request(
                 editor.swap(window, next);
             }
         }
-        TileOperation::Resize { axis, fraction } => editor.resize(window, axis, fraction),
+        TileOperation::Resize { axis, fraction } => editor.resize(window, axis, fraction, false),
+        TileOperation::ResizePixels { axis, pixels } => editor.resize(window, axis, pixels, true),
     }
     if editor.dirty.0 {
         editor.commands.trigger(TileTreeChanged);

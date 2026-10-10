@@ -30,6 +30,8 @@ pub enum Action<Extension = ()> {
     Border(Option<BorderStyle>),
     Fullscreen(FullscreenAction),
     Reload,
+    Mode(String),
+    Resize(crate::I3ResizeRequest),
     Exec(String),
     Exit,
     Extension(Extension),
@@ -40,6 +42,7 @@ pub struct Configuration<Extension = ()> {
     pub tiling: TileSettings,
     pub focus_wrapping: FocusWrapping,
     pub bindings: Vec<(GlobalShortcut, Action<Extension>)>,
+    pub modes: Vec<BindingMode<Extension>>,
     pub keymap: Option<KeyboardKeymap>,
     pub outputs: OutputSettings,
     pub workspaces: WorkspaceSettings,
@@ -48,6 +51,13 @@ pub struct Configuration<Extension = ()> {
     pub decorations: SsdSettings,
     pub window_rules: crate::window_rules::WindowRules,
     pub warnings: Vec<ConfigWarning>,
+}
+
+#[derive(Clone, Debug)]
+pub struct BindingMode<Extension = ()> {
+    pub name: String,
+    pub pango_markup: bool,
+    pub bindings: Vec<(GlobalShortcut, Action<Extension>)>,
 }
 
 /// A validated shell command and its configuration-load execution policy.
@@ -63,6 +73,7 @@ impl<Extension> Default for Configuration<Extension> {
             tiling: TileSettings::default(),
             focus_wrapping: FocusWrapping::default(),
             bindings: Vec::new(),
+            modes: Vec::new(),
             keymap: None,
             outputs: Default::default(),
             workspaces: WorkspaceSettings::default(),
@@ -105,20 +116,13 @@ pub fn parse_with_policy<Extension>(
         warnings: input.warnings,
         ..Default::default()
     };
-    for binding in input.bindings {
-        let words: Vec<_> = binding.command.iter().map(String::as_str).collect();
-        let action = match action(&words, &extension) {
-            Ok(action) => action,
-            Err(error) => {
-                policy.handle(
-                    error.context(binding.command.join(" ")),
-                    name,
-                    binding.line,
-                    &mut config.warnings,
-                )?;
-                continue;
-            }
-        };
+    for (shortcut, action) in compile_bindings(
+        input.bindings,
+        name,
+        policy,
+        &extension,
+        &mut config.warnings,
+    )? {
         if let Action::Workspace(I3WorkspaceRequest::Switch(
             WorkspaceTarget::Name(name) | WorkspaceTarget::Number(name),
         )) = &action
@@ -126,7 +130,32 @@ pub fn parse_with_policy<Extension>(
         {
             config.workspaces.initial_names.push(name.clone());
         }
-        config.bindings.push((binding.shortcut, action));
+        config.bindings.push((shortcut, action));
+    }
+    for mode in input.modes {
+        config.modes.push(BindingMode {
+            name: mode.name,
+            pango_markup: mode.pango_markup,
+            bindings: compile_bindings(
+                mode.bindings,
+                name,
+                policy,
+                &extension,
+                &mut config.warnings,
+            )?,
+        });
+    }
+    for (_, action) in config
+        .bindings
+        .iter()
+        .chain(config.modes.iter().flat_map(|mode| &mode.bindings))
+    {
+        if let Action::Mode(target) = action {
+            ensure!(
+                target == "default" || config.modes.iter().any(|mode| &mode.name == target),
+                "{name}: binding targets undefined mode {target:?}"
+            );
+        }
     }
     for statement in input.remaining {
         let line = line_of(source, statement)?;
@@ -155,6 +184,29 @@ pub fn parse_with_policy<Extension>(
     }
     config.warnings.sort_by_key(|warning| warning.line);
     Ok(config)
+}
+
+fn compile_bindings<Extension>(
+    bindings: Vec<weld_sway_config::input::Binding>,
+    name: &str,
+    policy: UnsupportedPolicy,
+    extension: &impl Fn(&[&str]) -> Result<Extension>,
+    warnings: &mut Vec<ConfigWarning>,
+) -> Result<Vec<(GlobalShortcut, Action<Extension>)>> {
+    let mut compiled = Vec::with_capacity(bindings.len());
+    for binding in bindings {
+        let words: Vec<_> = binding.command.iter().map(String::as_str).collect();
+        match action(&words, extension) {
+            Ok(action) => compiled.push((binding.shortcut, action)),
+            Err(error) => policy.handle(
+                error.context(binding.command.join(" ")),
+                name,
+                binding.line,
+                warnings,
+            )?,
+        }
+    }
+    Ok(compiled)
 }
 
 fn apply_bar<Extension>(
@@ -512,7 +564,6 @@ fn action<Extension>(
 ) -> Result<Action<Extension>> {
     Ok(match words {
         ["focus", "tiling" | "floating"]
-        | ["mode", ..]
         | ["move", "scratchpad"]
         | ["move", "workspace", "to", "output", ..] => {
             return Err(unsupported(format!(
@@ -540,6 +591,11 @@ fn action<Extension>(
             Action::Exec(exec_command(command)?)
         }
         ["exit"] => Action::Exit,
+        ["mode", value] => {
+            let name = weld_sway_config::input::literal(value)?;
+            ensure!(!name.is_empty(), "mode name must not be empty");
+            Action::Mode(name.to_owned())
+        }
         ["layout", args @ ..] => Action::Layout(layout_action(args)?),
         ["splith"] | ["split", "h"] | ["split", "horizontal"] => {
             Action::Tile(TileOperation::Split(SplitAxis::Horizontal))
@@ -569,29 +625,8 @@ fn action<Extension>(
         ["floating", _] => bail!("floating mode must be enable, disable or toggle"),
         ["focus", value] => Action::Focus(direction(value)?),
         ["move", value] => Action::Move(direction(value)?),
-        [
-            "resize",
-            kind @ ("grow" | "shrink"),
-            dimension,
-            value,
-            "ppt",
-        ] => {
-            let percent = value
-                .parse::<u8>()
-                .context("resize percentage must be an integer")?;
-            ensure!(
-                (1..=100).contains(&percent),
-                "resize percentage must be between 1 and 100"
-            );
-            let axis = match *dimension {
-                "width" => SplitAxis::Horizontal,
-                "height" => SplitAxis::Vertical,
-                _ => bail!("resize dimension must be width or height"),
-            };
-            Action::Tile(TileOperation::Resize {
-                axis,
-                fraction: f32::from(percent) / 100.0 * if *kind == "grow" { 1.0 } else { -1.0 },
-            })
+        ["resize", kind @ ("grow" | "shrink"), dimension, amount @ ..] => {
+            Action::Resize(resize_request(kind, dimension, amount)?)
         }
         ["kill"] => Action::Tile(TileOperation::Close),
         ["reload"] => Action::Reload,
@@ -607,6 +642,48 @@ fn action<Extension>(
         }
         _ => Action::Extension(extension(words)?),
     })
+}
+
+fn resize_request(kind: &str, dimension: &str, words: &[&str]) -> Result<crate::I3ResizeRequest> {
+    let axis = match dimension {
+        "width" => SplitAxis::Horizontal,
+        "height" => SplitAxis::Vertical,
+        _ => bail!("resize dimension must be width or height"),
+    };
+    let amounts = match words {
+        [value, unit] => vec![(*value, *unit)],
+        [first, unit, "or", second, other] => vec![(*first, *unit), (*second, *other)],
+        _ => {
+            return Err(unsupported(
+                "resize requires an amount with px or ppt, optionally followed by an alternative",
+            ));
+        }
+    };
+    let mut request = crate::I3ResizeRequest {
+        axis,
+        pixels: None,
+        fraction: None,
+    };
+    for (value, unit) in amounts {
+        let value: u16 = value.parse().context("resize amount must be an integer")?;
+        ensure!(value > 0, "resize amount must be positive");
+        let sign = if kind == "grow" { 1.0 } else { -1.0 };
+        match unit {
+            "px" => {
+                ensure!(request.pixels.is_none(), "duplicate pixel resize amount");
+                request.pixels = Some(f32::from(value) * sign);
+            }
+            "ppt" => {
+                ensure!(
+                    value <= 100 && request.fraction.is_none(),
+                    "resize percentage must be 1 to 100 and specified once"
+                );
+                request.fraction = Some(f32::from(value) * sign / 100.0);
+            }
+            _ => bail!("resize unit must be px or ppt"),
+        }
+    }
+    Ok(request)
 }
 
 fn exec_command(words: &[&str]) -> Result<String> {
@@ -744,10 +821,49 @@ mod tests {
                 .iter()
                 .map(|warning| warning.line)
                 .collect::<Vec<_>>(),
-            [2, 5, 8, 13]
+            [2, 8, 13]
         );
         assert!(config.pointer.focus_follows_mouse);
         assert!(config.keymap.is_none());
+    }
+
+    #[test]
+    fn named_modes_expand_variables_and_translate_resize_alternatives() {
+        let config = parse(
+            "modes",
+            indoc! {r#"
+            set $resize Resize windows
+            bindsym Mod4+r mode "$resize"
+            bindsym h focus left
+            mode --pango_markup "$resize" {
+                bindsym h resize shrink height 10 px or 5 ppt
+                bindsym Return mode "default"
+                bindsym Escape mode "default"
+            }
+        "#},
+        )
+        .expect("modes");
+        assert_eq!(config.bindings.len(), 2);
+        assert_eq!(config.modes.len(), 1);
+        let mode = &config.modes[0];
+        assert_eq!(mode.name, "Resize windows");
+        assert!(mode.pango_markup);
+        assert_eq!(
+            mode.bindings[0].1,
+            Action::Resize(crate::I3ResizeRequest {
+                axis: SplitAxis::Vertical,
+                pixels: Some(-10.0),
+                fraction: Some(-0.05),
+            })
+        );
+        for invalid in [
+            "bindsym r mode missing",
+            "mode resize {\n bindsym r mode missing\n}",
+            "mode resize {\n bindsym h focus left\n bindsym h focus right\n}",
+            "bindsym h resize grow width 10 px or 20 px",
+        ] {
+            assert!(parse("invalid", invalid).is_err(), "{invalid}");
+        }
     }
 
     #[test]
@@ -971,9 +1087,10 @@ mod tests {
         assert_eq!(config.bindings[0].1, Action::Focus(Direction::Left));
         assert_eq!(
             config.bindings[1].1,
-            Action::Tile(TileOperation::Resize {
+            Action::Resize(crate::I3ResizeRequest {
                 axis: SplitAxis::Horizontal,
-                fraction: 0.05
+                pixels: None,
+                fraction: Some(0.05)
             })
         );
     }

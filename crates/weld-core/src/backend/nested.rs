@@ -162,6 +162,7 @@ pub(crate) fn prepare(options: RunOptions, signals: Signals) -> Result<PreparedH
                     )
                     .context("failed to register the nested host display wake source")?;
             }
+            runtime.state.children.environment = options.client_environment;
             let child_requested = runtime
                 .state
                 .children

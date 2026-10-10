@@ -27,6 +27,7 @@ use weld_client::{ClientPointerRouteUpdate, ClientRequest, ClientSurfaceEvent};
 /// Distribution options consumed by either host backend.
 #[derive(Default)]
 pub(crate) struct RunOptions {
+    pub(crate) client_environment: Vec<(OsString, OsString)>,
     pub(crate) client: Vec<OsString>,
     pub(crate) screenshot: Option<PathBuf>,
     pub(crate) remote_debug_enabled: bool,
@@ -54,6 +55,11 @@ pub struct HostBuilder {
 }
 
 impl HostBuilder {
+    /// Environment overrides for processes launched inside this compositor session.
+    pub fn client_environment(mut self, environment: Vec<(OsString, OsString)>) -> Self {
+        self.options.client_environment = environment;
+        self
+    }
     /// Enables this host's rootless X11 compatibility server.
     pub fn xwayland(mut self, enabled: bool) -> Self {
         self.options.xwayland = enabled;
