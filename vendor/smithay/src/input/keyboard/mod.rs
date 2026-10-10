@@ -645,15 +645,38 @@ impl XkbContext<'_> {
 
     /// Set layout of the keyboard to the given index.
     pub fn set_layout(&mut self, layout: Layout) {
-        let mut xkb = self.xkb.lock().unwrap();
-
-        let state = xkb.state.update_mask(
+        self.set_modifier_masks(
             self.mods_state.serialized.depressed,
             self.mods_state.serialized.latched,
             self.mods_state.serialized.locked,
             0,
             0,
             layout.0,
+        );
+    }
+
+    /// Apply serialized modifiers and layout groups from a keyboard using the same keymap.
+    ///
+    /// Preserves custom modifier masks, latches and locks. Changed modifiers are
+    /// published when the enclosing [`KeyboardHandle::with_xkb_state`] call finishes.
+    pub fn set_modifier_masks(
+        &mut self,
+        depressed: u32,
+        latched: u32,
+        locked: u32,
+        layout_depressed: u32,
+        layout_latched: u32,
+        layout_locked: u32,
+    ) {
+        let mut xkb = self.xkb.lock().unwrap();
+
+        let state = xkb.state.update_mask(
+            depressed,
+            latched,
+            locked,
+            layout_depressed,
+            layout_latched,
+            layout_locked,
         );
 
         if state != 0 {
