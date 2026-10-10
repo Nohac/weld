@@ -240,10 +240,10 @@ WELD_DRM_PACING_TRACE=1 scripts/run-weld-drm --config examples/master.sway.confi
 the interval expires, allowing its normal DRM shutdown to restore the console.
 The first command exercises ordinary validation. The environment flag enables
 the Khronos validation layer and synchronization validation for a focused GPU
-correctness run. `WELD_DRM_PACING_TRACE=1` records one diagnostic event per
+correctness run. The launcher enables DRM frame tracing by default, recording one diagnostic event per
 queued frame and vblank, including cursor-plane assignment, vblank sequence
-deltas, composition state, and GPU wait time. Compare behavior with a normal
-run because writing the trace can itself perturb frame timing. Output defaults
+deltas, composition state, and GPU wait time. Use `WELD_DRM_PACING_TRACE=0` for
+performance comparisons because writing the trace can itself perturb frame timing. Output defaults
 to `target/validation/weld-drm.log`.
 
 The probes and production DRM backend require a real TTY. See
