@@ -83,7 +83,7 @@ pub struct SsdSettings {
     pub title_font: TitleFont,
     pub tiled: BorderStyle,
     pub floating: BorderStyle,
-    /// Hide the border of a workspace's sole tiled slot, retaining normal headers.
+    /// Hide the outside border of a workspace's sole tiled frame, retaining headers.
     pub hide_solo_border: bool,
     pub corner_radius: u16,
     pub focused: FrameColors,

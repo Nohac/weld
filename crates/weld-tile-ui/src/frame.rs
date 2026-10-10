@@ -13,8 +13,8 @@ use bevy::{
     },
     picking::Pickable,
     prelude::{
-        BackgroundColor, BorderColor, BorderRadius, GlobalZIndex, Node, PositionType, Scene,
-        UiRect, UiTargetCamera, px,
+        BackgroundColor, BorderColor, BorderRadius, BoxShadow, GlobalZIndex, Node, PositionType,
+        Scene, UiRect, UiTargetCamera, px,
     },
     scene::{CommandsSceneExt, bsn},
     window::RequestRedraw,
@@ -35,6 +35,9 @@ pub(super) fn publish_metrics(
     if settings.group_border != width {
         settings.group_border = width;
     }
+    if settings.hide_solo_group_border != style.hide_solo_border {
+        settings.hide_solo_group_border = style.hide_solo_border;
+    }
     let height = style.title_font.header_height();
     if settings.header_height != height {
         settings.header_height = height;
@@ -50,6 +53,15 @@ pub(super) struct GroupFrame {
     width: f32,
     radius: f32,
     z: i32,
+    edge_to_edge: bool,
+}
+
+fn shadow(frame: &GroupFrame) -> BoxShadow {
+    if frame.edge_to_edge {
+        BoxShadow::default()
+    } else {
+        weld_ssd::window_shadow()
+    }
 }
 
 fn frame_node(frame: &GroupFrame) -> Node {
@@ -70,6 +82,7 @@ fn scene(frame: GroupFrame) -> impl Scene {
     let colors = frame.colors;
     let camera = frame.camera;
     let z = frame.z;
+    let shadow = shadow(&frame);
     bsn! {
         template(move |_| Ok(node.clone()))
         template(move |_| Ok(frame.clone()))
@@ -77,7 +90,7 @@ fn scene(frame: GroupFrame) -> impl Scene {
         GlobalZIndex(z)
         BackgroundColor({colors.background})
         BorderColor::all(colors.border)
-        template(move |_| Ok(weld_ssd::window_shadow()))
+        template(move |_| Ok(shadow.clone()))
         Pickable::IGNORE
     }
 }
@@ -92,6 +105,7 @@ pub(super) struct FrameView {
     border: &'static mut BorderColor,
     camera: &'static mut UiTargetCamera,
     z: &'static mut GlobalZIndex,
+    shadow: &'static mut BoxShadow,
 }
 
 pub(super) fn reconcile(
@@ -117,6 +131,7 @@ pub(super) fn reconcile(
         let Some(camera) = tree.camera(container) else {
             continue;
         };
+        let edge_to_edge = tree.edge_to_edge(container);
         desired.insert(
             container,
             GroupFrame {
@@ -128,13 +143,21 @@ pub(super) fn reconcile(
                 } else {
                     tree.style.unfocused
                 },
-                width: tree
-                    .style
-                    .tiled
-                    .width()
-                    .min(geometry.0.size.min_element() * 0.5),
-                radius: f32::from(tree.style.corner_radius.min(64)),
+                width: if edge_to_edge {
+                    0.0
+                } else {
+                    tree.style
+                        .tiled
+                        .width()
+                        .min(geometry.0.size.min_element() * 0.5)
+                },
+                radius: if edge_to_edge {
+                    0.0
+                } else {
+                    f32::from(tree.style.corner_radius.min(64))
+                },
                 z: tree.frame_z(container),
+                edge_to_edge,
             },
         );
     }
@@ -152,6 +175,7 @@ pub(super) fn reconcile(
         *view.border = BorderColor::all(next.colors.border);
         *view.camera = UiTargetCamera(next.camera);
         *view.z = GlobalZIndex(next.z);
+        *view.shadow = shadow(&next);
         *view.frame = next;
         redraw.write(RequestRedraw);
     }

@@ -74,7 +74,9 @@ outermost frame. Moving a window or group out restores its standalone styling.
 Group chrome follows the configured default tiled border and SSD palette;
 client-drawn controls inside window geometry remain application content.
 Headers show the current child title (or its remembered descendant's title),
-and clicking one activates that branch's remembered window. Fullscreen and
+and clicking one activates that branch's remembered window. Selecting a parent
+highlights all descendant headers; returning to a leaf restores its individual
+highlight in the same update. Fullscreen and
 hidden workspaces suppress the group UI. Header-wheel cycling is deferred.
 
 The `font` directive configures these titles, for example
@@ -168,9 +170,12 @@ adaptive sync are reported as unsupported while scale on the same line applies.
   Split-edge highlighting appears only after an explicit split command, on the
   right for horizontal insertion or bottom for vertical insertion. It clears
   when the split gains another child; an ordinary layout direction is unmarked.
-- `smart_gaps on|off` removes outer gaps around a sole tiled slot.
-- `smart_borders on|off` hides that slot's border. Pixel frames become bare;
+- `smart_gaps on|off` removes outer gaps around a sole outer tiled frame.
+  A tabbed or stacked group counts as one frame, including its nested splits.
+- `smart_borders on|off` hides that frame's border. Pixel frames become bare;
   normal frames retain their header. Floating windows keep their configured frame.
+  Tab/stack groups retain headers and internal dividers while their outside
+  border, shadow and rounded corners disappear.
   `no_gaps`, `inverse_outer` and runtime smart-setting commands remain unsupported.
 - `focus_wrapping no|yes|force|workspace` (default `yes`). Ordinary wrapping
   first searches ancestor splits for a directional neighbor, then uses the
@@ -544,10 +549,13 @@ the durable window and intentionally survives vacancy and occupant replacement.
 The example uses pixel borders for tiles and normal frames for floating windows.
 Alt+B cycles the selected frame; Blender launch moved to Alt+Shift+B.
 It enables smart gaps/borders, so a sole tile has no pixel frame or outer spacing.
-The tiler publishes `SoleTiledWindow` from retained workspace slots; SSD consumes
-that presentation fact without traversing the split tree. Floating windows are
-excluded and retained hoist placeholders count as slots. Settings and the
-per-window requested border style survive cardinality changes.
+The tiler publishes `WindowInSoloFrame` for every leaf in the workspace's sole
+outer frame. A tab/stack group shares this fact across all its descendants;
+adding a separate neighboring tile restores the configured outer spacing and
+chrome. Floating windows are excluded and retained hoist placeholders keep their
+tree slots. Initial admission publishes group geometry and styling before
+presentation claims, so new windows join their group on the first rendered frame.
+Settings and the per-window requested border style survive cardinality changes.
 Border toggles operate on that requested style, including while fullscreen;
 automatic hiding changes presentation without replacing the preference.
 

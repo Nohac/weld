@@ -253,7 +253,7 @@ fn removing_tile_membership_clears_the_presentation_hint_before_another_frame() 
     let window = window(&mut app, 1);
     assert!(
         app.world()
-            .get::<weld_window::SoleTiledWindow>(window)
+            .get::<weld_window::WindowInSoloFrame>(window)
             .is_some()
     );
     let parent = *app.world().get::<TileParent>(window).expect("parent");
@@ -261,7 +261,7 @@ fn removing_tile_membership_clears_the_presentation_hint_before_another_frame() 
     app.world_mut().flush();
     assert!(
         app.world()
-            .get::<weld_window::SoleTiledWindow>(window)
+            .get::<weld_window::WindowInSoloFrame>(window)
             .is_none()
     );
     assert!(
@@ -273,7 +273,7 @@ fn removing_tile_membership_clears_the_presentation_hint_before_another_frame() 
     app.update();
     assert!(
         app.world()
-            .get::<weld_window::SoleTiledWindow>(window)
+            .get::<weld_window::WindowInSoloFrame>(window)
             .is_some()
     );
 }
@@ -360,12 +360,12 @@ fn solo_presentation_hint_tracks_workspace_transfer_and_retired_ownership() {
     app.update();
     assert!(
         app.world()
-            .get::<weld_window::SoleTiledWindow>(first)
+            .get::<weld_window::WindowInSoloFrame>(first)
             .is_some()
     );
     assert!(
         app.world()
-            .get::<weld_window::SoleTiledWindow>(second)
+            .get::<weld_window::WindowInSoloFrame>(second)
             .is_some()
     );
     let other_manager = app.world_mut().spawn_empty().id();
@@ -375,12 +375,12 @@ fn solo_presentation_hint_tracks_workspace_transfer_and_retired_ownership() {
     app.update();
     assert!(
         app.world()
-            .get::<weld_window::SoleTiledWindow>(first)
+            .get::<weld_window::WindowInSoloFrame>(first)
             .is_none()
     );
     assert!(
         app.world()
-            .get::<weld_window::SoleTiledWindow>(second)
+            .get::<weld_window::WindowInSoloFrame>(second)
             .is_some()
     );
 }
@@ -404,19 +404,19 @@ fn smart_gaps_track_tiled_slots_while_floating_and_retained_windows_keep_identit
     );
     assert!(
         app.world()
-            .get::<weld_window::SoleTiledWindow>(first)
+            .get::<weld_window::WindowInSoloFrame>(first)
             .is_some()
     );
     let second = window(&mut app, 2);
     assert_eq!(geometry(&app, first).position, Vec2::splat(20.0));
     assert!(
         app.world()
-            .get::<weld_window::SoleTiledWindow>(first)
+            .get::<weld_window::WindowInSoloFrame>(first)
             .is_none()
     );
     assert!(
         app.world()
-            .get::<weld_window::SoleTiledWindow>(second)
+            .get::<weld_window::WindowInSoloFrame>(second)
             .is_none()
     );
     app.world_mut().trigger(TileFloatingRequest {
@@ -427,12 +427,12 @@ fn smart_gaps_track_tiled_slots_while_floating_and_retained_windows_keep_identit
     assert_eq!(geometry(&app, first).size, Vec2::new(800.0, 600.0));
     assert!(
         app.world()
-            .get::<weld_window::SoleTiledWindow>(first)
+            .get::<weld_window::WindowInSoloFrame>(first)
             .is_some()
     );
     assert!(
         app.world()
-            .get::<weld_window::SoleTiledWindow>(second)
+            .get::<weld_window::WindowInSoloFrame>(second)
             .is_none()
     );
     app.world_mut()
@@ -449,7 +449,7 @@ fn smart_gaps_track_tiled_slots_while_floating_and_retained_windows_keep_identit
     // The retained slot still participates even with no mapped occupant.
     assert!(
         app.world()
-            .get::<weld_window::SoleTiledWindow>(first)
+            .get::<weld_window::WindowInSoloFrame>(first)
             .is_some()
     );
     app.world_mut().trigger(TileFloatingRequest {
@@ -459,14 +459,14 @@ fn smart_gaps_track_tiled_slots_while_floating_and_retained_windows_keep_identit
     app.update();
     assert!(
         app.world()
-            .get::<weld_window::SoleTiledWindow>(first)
+            .get::<weld_window::WindowInSoloFrame>(first)
             .is_none()
     );
     app.world_mut().entity_mut(second).despawn();
     app.update();
     assert!(
         app.world()
-            .get::<weld_window::SoleTiledWindow>(first)
+            .get::<weld_window::WindowInSoloFrame>(first)
             .is_some()
     );
 }

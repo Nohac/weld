@@ -42,6 +42,7 @@ pub use selection::{TileSelect, TileSelection};
 pub enum TileSystems {
     /// Focus policies recover against the previous tree before removal compacts it.
     RecoverFocus,
+    /// Admit windows and publish initial layout/frame facts before presentation claims.
     Prepare,
     Commands,
     /// Distribution actions run after admission and before final layout.
@@ -157,7 +158,7 @@ pub struct TileSettings {
     pub inner_gap: u16,
     /// Logical pixels between the workspace and output edges.
     pub outer_gap: u16,
-    /// Remove workspace-edge gaps while exactly one tiled slot is present.
+    /// Remove workspace-edge gaps while one outer tiled frame occupies the workspace.
     pub hide_solo_gaps: bool,
     /// Initial orientation for new workspace roots.
     pub default_axis: SplitAxis,
@@ -181,6 +182,8 @@ pub struct TilePresentationMetrics {
     pub header_height: u16,
     /// Width of the outermost group's frame and its internal split dividers.
     pub group_border: u16,
+    /// Suppress the outside border of a workspace's sole overlapping group.
+    pub hide_solo_group_border: bool,
 }
 
 impl Default for TilePresentationMetrics {
@@ -188,6 +191,7 @@ impl Default for TilePresentationMetrics {
         Self {
             header_height: 28,
             group_border: 0,
+            hide_solo_group_border: false,
         }
     }
 }

@@ -49,6 +49,27 @@ pub(crate) fn bounds(
     }
 }
 
+/// Overlapping groups share one outer frame, including any nested content.
+pub(crate) fn has_single_frame(mut node: Entity, containers: &Query<&TileContainer>) -> bool {
+    for _ in 0..=crate::MAX_DEPTH {
+        let Ok(container) = containers.get(node) else {
+            return true;
+        };
+        let mut children = container.children();
+        let Some((child, _)) = children.next() else {
+            return false;
+        };
+        if !container.layout().is_split() {
+            return true;
+        }
+        if children.next().is_some() {
+            return false;
+        }
+        node = child;
+    }
+    false
+}
+
 fn initialize(
     editor: &mut TreeEditor,
     workspace: Entity,

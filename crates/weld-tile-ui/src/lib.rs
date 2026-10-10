@@ -38,8 +38,8 @@ use weld_tile::{
     TileContainer, TileFocusHistory, TileGeometry, TileHeaders, TileLayout, TileParent,
 };
 use weld_window::{
-    FocusedWindow, WindowClientResolver, WindowGeometry, WindowGroupSelected, WindowIntent,
-    WindowIntentKind, WindowInteractionSession, WindowOccupant, WindowSystems,
+    FocusedWindow, WindowClientResolver, WindowGeometry, WindowGroupSelected, WindowInSoloFrame,
+    WindowIntent, WindowIntentKind, WindowInteractionSession, WindowOccupant, WindowSystems,
     fullscreen::FullscreenOutput,
     workspace::{Workspace, WorkspaceOutput},
 };
@@ -192,9 +192,17 @@ struct HeaderTree<'w, 's> {
     metadata: Query<'w, 's, &'static ClientWindowMetadata>,
     focus: Res<'w, FocusedWindow>,
     style: Res<'w, SsdSettings>,
+    solo: Query<'w, 's, (), With<WindowInSoloFrame>>,
+    selected: Query<'w, 's, (), With<WindowGroupSelected>>,
 }
 
 impl HeaderTree<'_, '_> {
+    fn edge_to_edge(&self, node: Entity) -> bool {
+        self.style.hide_solo_border
+            && self
+                .leaf(node)
+                .is_some_and(|window| self.solo.contains(window))
+    }
     fn frame_z(&self, mut node: Entity) -> i32 {
         let mut depth = 0;
         while depth < weld_tile::MAX_DEPTH as i32
@@ -320,6 +328,7 @@ type HeaderChanges = Or<(
     Changed<FullscreenOutput>,
     Changed<WindowGroupSelected>,
     Changed<WindowInteractionSession>,
+    Changed<WindowInSoloFrame>,
 )>;
 
 #[derive(SystemParam)]
@@ -332,6 +341,7 @@ struct Invalidations<'w, 's> {
     fullscreen: RemovedComponents<'w, 's, FullscreenOutput>,
     selected: RemovedComponents<'w, 's, WindowGroupSelected>,
     interactions: RemovedComponents<'w, 's, WindowInteractionSession>,
+    solo: RemovedComponents<'w, 's, WindowInSoloFrame>,
 }
 
 impl Invalidations<'_, '_> {
@@ -342,7 +352,8 @@ impl Invalidations<'_, '_> {
             + self.occupants.read().count()
             + self.fullscreen.read().count()
             + self.selected.read().count()
-            + self.interactions.read().count();
+            + self.interactions.read().count()
+            + self.solo.read().count();
         removed != 0 || !self.changed.is_empty()
     }
 }
@@ -375,13 +386,18 @@ fn reconcile(
             .containers
             .get(container)
             .is_ok_and(|container| container.layout() == TileLayout::Tabbed);
-        let radius = if tree.in_group(container) {
+        let radius = if tree.in_group(container) || tree.edge_to_edge(container) {
             0.0
         } else {
             (f32::from(tree.style.corner_radius.min(64)) - tree.style.tiled.width()).max(0.0)
         };
         for (index, header) in headers.0.iter().enumerate() {
-            let colors = if header.selected {
+            let group_selected = tree
+                .leaf(header.child)
+                .is_some_and(|window| tree.selected.contains(window));
+            let colors = if group_selected {
+                tree.style.focused
+            } else if header.selected {
                 if tree.contains_focus(header.child) {
                     tree.style.focused
                 } else {

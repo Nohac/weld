@@ -105,12 +105,19 @@ pub(crate) fn apply_layout(_event: On<LayoutRequested>, mut layout: Layout) {
         redraw,
         ..
     } = &mut layout;
-    let settings = LayoutMetrics {
-        inner_gap: settings.inner_gap,
-        header_height: metrics.header_height,
-        group_border: metrics.group_border,
-    };
     for root in roots.iter() {
+        let settings = LayoutMetrics {
+            inner_gap: settings.inner_gap,
+            header_height: metrics.header_height,
+            group_border: metrics.group_border,
+            outer_group_border: if metrics.hide_solo_group_border
+                && crate::workspace::has_single_frame(root, containers)
+            {
+                0
+            } else {
+                metrics.group_border
+            },
+        };
         let Ok(rect) = geometry.rectangles.get(root).map(|rect| rect.0) else {
             continue;
         };
@@ -125,6 +132,7 @@ struct LayoutMetrics {
     inner_gap: u16,
     header_height: u16,
     group_border: u16,
+    outer_group_border: u16,
 }
 
 impl GeometryWriter<'_, '_> {
@@ -186,7 +194,7 @@ impl GeometryWriter<'_, '_> {
                 let border = if grouped {
                     0.0
                 } else {
-                    f32::from(settings.group_border).min(rect.size.min_element() * 0.5)
+                    f32::from(settings.outer_group_border).min(rect.size.min_element() * 0.5)
                 };
                 let inner = WindowGeometry {
                     position: rect.position + Vec2::splat(border),

@@ -135,9 +135,10 @@ pub struct StickyWindow;
 #[derive(Component, Clone, Copy, Debug, Default)]
 pub struct ServerFrameRequested;
 
-/// Presentation fact published by a tiler for its workspace's only tiled slot.
+/// The window belongs to its workspace's only outer tiled frame.
+/// All children of a sole tabbed or stacked group share this presentation fact.
 #[derive(Component, Clone, Copy, Debug, Default)]
-pub struct SoleTiledWindow;
+pub struct WindowInSoloFrame;
 
 /// Tiler-published border edge indicating an explicitly prepared split.
 #[derive(Component, Clone, Copy, Debug, Eq, PartialEq)]

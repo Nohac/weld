@@ -235,8 +235,11 @@ windows. History includes retained vacant slots; client keyboard focus
 still requires a live mapped occupant. `TileSelection` holds an explicit structural
 container target separately from `FocusedWindow`, which retains the client leaf.
 `TileSelect` validates a tree selection and descends branch history to its client.
-The tiler projects membership through `WindowGroupSelected`; SSD uses that marker
-for focused border colors. i3 chooses parent/child and directional targets, while
+The tiler projects membership through `WindowGroupSelected`; SSD and group headers
+use that marker for focused colors, including post-picking selection changes.
+Initial tree admission, geometry and group-frame facts precede presentation claims,
+so new windows start with their resolved decoration style.
+i3 chooses parent/child and directional targets, while
 native operations apply group resize, orientation, close and workspace transfer.
 Window activation and workspace changes reset structural selection; reconciliation
 clears retired groups. Tabbed and stacked containers retain ordered children,

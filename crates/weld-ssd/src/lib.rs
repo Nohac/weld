@@ -95,7 +95,7 @@ type StyledWindows<'w, 's> = Query<
         Has<FloatingWindow>,
         Option<&'static WindowBorderStyle>,
         Has<weld_window::fullscreen::WindowFullscreen>,
-        Has<weld_window::SoleTiledWindow>,
+        Has<weld_window::WindowInSoloFrame>,
         Option<&'static weld_window::WindowGroupHeader>,
     ),
     With<ManagedWindow>,
@@ -139,9 +139,12 @@ impl FrameStyles<'_, '_> {
             && !fullscreen
         {
             geometry.border = BorderStyle::None;
-            geometry.radius = (f32::from(self.settings.corner_radius.min(64))
-                - self.settings.tiled.width())
-            .max(0.0);
+            geometry.radius = if self.settings.hide_solo_border && sole_tile {
+                0.0
+            } else {
+                (f32::from(self.settings.corner_radius.min(64)) - self.settings.tiled.width())
+                    .max(0.0)
+            };
             geometry.joined_top = true;
             geometry.round_bottom_left = group_header.bottom_left;
             geometry.round_bottom_right = group_header.bottom_right;
@@ -1211,6 +1214,73 @@ mod tests {
     }
 
     #[test]
+    fn new_group_members_have_their_final_frame_on_the_first_update() {
+        for layout in [
+            weld_tile::TileLayout::Tabbed,
+            weld_tile::TileLayout::Stacked,
+        ] {
+            for decoration in [WindowDecoration::ServerSide, WindowDecoration::ClientSide] {
+                let mut app = tiled_test_app();
+                app.world_mut()
+                    .resource_mut::<SsdSettings>()
+                    .hide_solo_border = true;
+                let first = SurfaceId::for_test(717);
+                enqueue_surface_event(app.world_mut(), role(first, WindowDecoration::ServerSide));
+                enqueue_surface_event(app.world_mut(), frame(first, 320, 240));
+                app.update();
+                let window = app
+                    .world()
+                    .resource::<FocusedWindow>()
+                    .entity()
+                    .expect("window");
+                let container = app
+                    .world()
+                    .get::<weld_tile::TileParent>(window)
+                    .expect("parent")
+                    .entity();
+                app.world_mut()
+                    .trigger(weld_tile::TileSetLayout { container, layout });
+                app.update();
+                app.update();
+
+                let second = SurfaceId::for_test(718);
+                enqueue_surface_event(app.world_mut(), role(second, decoration));
+                enqueue_surface_event(app.world_mut(), frame(second, 320, 240));
+                app.update();
+                let window = app
+                    .world()
+                    .resource::<FocusedWindow>()
+                    .entity()
+                    .expect("new window");
+                let root = app
+                    .world()
+                    .get::<PrimaryWindowPresentation>(window)
+                    .expect("first presentation")
+                    .entity();
+                let style = app.world().get::<FrameGeometry>(root).expect("style");
+                assert_eq!(style.border, BorderStyle::None);
+                assert_eq!(style.radius, 0.0);
+                assert!(style.joined_top);
+                assert_eq!(
+                    app.world().get::<PresentationInsets>(root),
+                    Some(&PresentationInsets::default())
+                );
+                assert_eq!(
+                    app.world()
+                        .get::<Node>(root)
+                        .expect("frame node")
+                        .border_radius,
+                    BorderRadius::ZERO
+                );
+                assert_eq!(
+                    app.world().get::<BoxShadow>(root),
+                    Some(&BoxShadow::default())
+                );
+            }
+        }
+    }
+
+    #[test]
     fn group_content_joins_flush_and_restores_its_independent_frame() {
         let mut app = tiled_test_app();
         let surface = SurfaceId::for_test(719);
@@ -1529,6 +1599,42 @@ mod tests {
     }
 
     #[test]
+    fn group_content_corners_follow_the_solo_outer_frame_policy() {
+        let mut app = tiled_test_app();
+        let window = app
+            .world_mut()
+            .spawn((
+                weld_window::ManagedWindow {
+                    id: weld_window::WindowId::new(1),
+                },
+                weld_window::WindowGroupHeader {
+                    bottom_left: true,
+                    bottom_right: true,
+                },
+            ))
+            .id();
+        for (solo, hide, radius) in [(false, true, 6.0), (true, true, 0.0), (true, false, 6.0)] {
+            app.world_mut()
+                .resource_mut::<SsdSettings>()
+                .hide_solo_border = hide;
+            if solo {
+                app.world_mut()
+                    .entity_mut(window)
+                    .insert(weld_window::WindowInSoloFrame);
+            } else {
+                app.world_mut()
+                    .entity_mut(window)
+                    .remove::<weld_window::WindowInSoloFrame>();
+            }
+            app.world_mut()
+                .run_system_once(move |styles: FrameStyles| {
+                    assert_eq!(styles.geometry(window).radius, radius);
+                })
+                .expect("frame geometry");
+        }
+    }
+
+    #[test]
     fn solo_border_toggle_preserves_requested_width_with_gaps_and_retained_slots() {
         let mut app = tiled_test_app();
         {
@@ -1605,7 +1711,7 @@ mod tests {
         );
         assert!(
             app.world()
-                .get::<weld_window::SoleTiledWindow>(first)
+                .get::<weld_window::WindowInSoloFrame>(first)
                 .is_none(),
             "the vacant slot still shares its workspace with the second tile"
         );
@@ -1621,7 +1727,7 @@ mod tests {
         }
         assert!(
             app.world()
-                .get::<weld_window::SoleTiledWindow>(first)
+                .get::<weld_window::WindowInSoloFrame>(first)
                 .is_some()
         );
         let root = app

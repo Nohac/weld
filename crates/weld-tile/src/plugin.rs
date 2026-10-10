@@ -16,14 +16,12 @@ use bevy::{
 };
 use weld_app::output::{OutputGeometry, OutputWorkArea, WeldOutput};
 use weld_app::surface::ClientToplevelParent;
-use weld_window::workspace::{
-    FocusedWorkspace, Workspace, WorkspaceMember, WorkspaceOutput, WorkspaceWindows,
-};
+use weld_window::workspace::{FocusedWorkspace, Workspace, WorkspaceMember, WorkspaceOutput};
 use weld_window::{
-    FloatingWindow, FocusedWindow, ManagedBy, ManagedWindow, SoleTiledWindow,
-    WindowAdmissionPreferences, WindowClientResolver, WindowCommand, WindowCommandKind,
-    WindowGeometry, WindowIntent, WindowIntentKind, WindowOutput, WindowSplitEdge, WindowSystems,
-    WindowVisibility, WindowZOrder,
+    FloatingWindow, FocusedWindow, ManagedBy, ManagedWindow, WindowAdmissionPreferences,
+    WindowClientResolver, WindowCommand, WindowCommandKind, WindowGeometry, WindowInSoloFrame,
+    WindowIntent, WindowIntentKind, WindowOutput, WindowSplitEdge, WindowSystems, WindowVisibility,
+    WindowZOrder,
 };
 
 use std::collections::HashMap;
@@ -51,7 +49,7 @@ struct TiledWindow {
     output: Option<&'static WindowOutput>,
     z_order: &'static WindowZOrder,
     floating: Option<&'static FloatingWindow>,
-    sole_tile: Has<SoleTiledWindow>,
+    sole_tile: Has<WindowInSoloFrame>,
 }
 
 impl Plugin for TilePlugin {
@@ -67,7 +65,11 @@ impl Plugin for TilePlugin {
         );
         app.add_systems(
             PreUpdate,
-            (sync_visibility, layout::request_layout)
+            (
+                sync_visibility,
+                crate::selection::reconcile,
+                layout::request_layout,
+            )
                 .chain()
                 .in_set(TileSystems::LateLayout),
         );
@@ -134,13 +136,18 @@ impl Plugin for TilePlugin {
                 PreUpdate,
                 classify_dialogs
                     .after(WindowSystems::AdmissionPolicy)
+                    .before(TileSystems::RecoverFocus),
+            )
+            .configure_sets(
+                PreUpdate,
+                (TileSystems::RecoverFocus, TileSystems::Prepare)
+                    .chain()
+                    .after(WindowSystems::AdmissionPolicy)
                     .before(WindowSystems::PresentationRevoke),
             )
             .configure_sets(
                 PreUpdate,
                 (
-                    TileSystems::RecoverFocus,
-                    TileSystems::Prepare,
                     TileSystems::Commands,
                     TileSystems::Actions,
                     TileSystems::Layout,
@@ -158,6 +165,7 @@ impl Plugin for TilePlugin {
                     sync_visibility,
                     repair_focus,
                     layout::request_layout,
+                    sync_group_headers,
                 )
                     .chain()
                     .in_set(TileSystems::Prepare),
@@ -488,7 +496,7 @@ fn admit_windows(
 
 fn clear_tile_hints(event: On<Remove, TileParent>, mut commands: Commands) {
     commands.entity(event.entity).try_remove::<(
-        SoleTiledWindow,
+        WindowInSoloFrame,
         WindowSplitEdge,
         weld_window::TiledWindow,
         weld_window::WindowGroupHeader,
@@ -507,18 +515,21 @@ fn mark_tiled_window(
     }
 }
 
-type WorkspaceLayouts<'w, 's> = Query<
-    'w,
-    's,
-    (
-        Entity,
-        &'static Workspace,
-        Option<&'static WorkspaceOutput>,
-        Option<&'static WorkspaceWindows>,
-        &'static mut LayoutRect,
-    ),
-    With<TileWorkspace>,
->;
+#[derive(SystemParam)]
+struct WorkspaceLayouts<'w, 's> {
+    workspaces: Query<
+        'w,
+        's,
+        (
+            Entity,
+            &'static Workspace,
+            Option<&'static WorkspaceOutput>,
+            &'static mut LayoutRect,
+        ),
+        With<TileWorkspace>,
+    >,
+    containers: Query<'w, 's, &'static crate::TileContainer>,
+}
 
 fn sync_output(
     outputs: Query<(&OutputGeometry, Option<&OutputWorkArea>), With<WeldOutput>>,
@@ -527,25 +538,17 @@ fn sync_output(
     windows: Query<TiledWindow, With<ManagedWindow>>,
     mut dirty: ResMut<LayoutDirty>,
     mut commands: Commands,
-    mut sole_tiles: Local<HashMap<Entity, Option<Entity>>>,
+    mut sole_tiles: Local<HashMap<Entity, bool>>,
 ) {
     sole_tiles.clear();
-    for (workspace, _, output, members, mut bounds) in &mut workspaces {
-        let mut tiles = members
-            .into_iter()
-            .flat_map(WorkspaceWindows::iter)
-            .filter(|window| {
-                windows
-                    .get(*window)
-                    .is_ok_and(|window| window.owner.0 == workspace && window.floating.is_none())
-            });
-        let sole = tiles.next().filter(|_| tiles.next().is_none());
+    for (workspace, _, output, mut bounds) in &mut workspaces.workspaces {
+        let sole = workspace::has_single_frame(workspace, &workspaces.containers);
         sole_tiles.insert(workspace, sole);
         let Some(output) = output else { continue };
         let Ok((geometry, work_area)) = outputs.get(output.0) else {
             continue;
         };
-        let rect = workspace::bounds(geometry, work_area, &settings, sole.is_some());
+        let rect = workspace::bounds(geometry, work_area, &settings, sole);
         if bounds.0 != rect {
             bounds.0 = rect;
             dirty.0 = true;
@@ -556,18 +559,19 @@ fn sync_output(
     }
     for window in &windows {
         let sole = window.owner.0 == window.member.0
-            && sole_tiles.get(&window.member.0) == Some(&Some(window.entity));
+            && window.floating.is_none()
+            && sole_tiles.get(&window.member.0) == Some(&true);
         if sole != window.sole_tile {
             if sole {
-                commands.entity(window.entity).insert(SoleTiledWindow);
+                commands.entity(window.entity).insert(WindowInSoloFrame);
             } else {
-                commands.entity(window.entity).remove::<SoleTiledWindow>();
+                commands.entity(window.entity).remove::<WindowInSoloFrame>();
             }
         }
         if window.owner.0 != window.member.0 {
             continue;
         }
-        let Ok((_, _, output, _, _)) = workspaces.get(window.member.0) else {
+        let Ok((_, _, output, _)) = workspaces.workspaces.get(window.member.0) else {
             continue;
         };
         let output = output.filter(|output| outputs.contains(output.0));
@@ -642,17 +646,26 @@ fn sync_visibility(
     }
 }
 
+type GroupHeaderWindows<'w, 's> = Query<
+    'w,
+    's,
+    (
+        Entity,
+        &'static LayoutRect,
+        Option<&'static weld_window::WindowGroupHeader>,
+        Has<WindowInSoloFrame>,
+    ),
+    With<ManagedWindow>,
+>;
+
 fn sync_group_headers(
-    windows: Query<
-        (Entity, &LayoutRect, Option<&weld_window::WindowGroupHeader>),
-        With<ManagedWindow>,
-    >,
+    windows: GroupHeaderWindows,
     parents: Query<&TileParent>,
     containers: Query<(&crate::TileContainer, &LayoutRect)>,
     settings: Res<crate::TilePresentationMetrics>,
     mut commands: Commands,
 ) {
-    for (window, rect, current) in &windows {
+    for (window, rect, current, solo) in &windows {
         let mut node = window;
         let mut outer = None;
         for _ in 0..crate::MAX_DEPTH {
@@ -666,7 +679,11 @@ fn sync_group_headers(
             }
         }
         let grouped = outer.map(|bounds| {
-            let border = f32::from(settings.group_border).min(bounds.size.min_element() * 0.5);
+            let border = if solo && settings.hide_solo_group_border {
+                0.0
+            } else {
+                f32::from(settings.group_border).min(bounds.size.min_element() * 0.5)
+            };
             let bottom = (rect.0.position.y + rect.0.size.y
                 - (bounds.position.y + bounds.size.y - border))
                 .abs()

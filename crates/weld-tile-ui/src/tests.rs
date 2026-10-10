@@ -18,7 +18,7 @@ use weld_app::{
 };
 use weld_client::ClientSurfaceMetadata;
 use weld_i3_quirks::{I3LayoutRequest, I3QuirksPlugin};
-use weld_tile::{TileLayout, TilePlugin};
+use weld_tile::{SplitAxis, TileLayout, TilePlugin, TileSelect, TileSide, TileTreeEdit};
 use weld_window::{
     ManagedWindow, OccupiesWindow, WindowId, WindowPlugin, WindowVacancy, WindowVisibility,
 };
@@ -73,6 +73,227 @@ fn setup() -> (App, Entity, Entity) {
     app.update();
     app.update();
     (app, first, second)
+}
+
+#[test]
+fn selecting_a_group_highlights_all_its_headers_and_leaf_focus_restores_one() {
+    for layout in [TileLayout::Tabbed, TileLayout::Stacked] {
+        let (mut app, first, second) = setup();
+        app.world_mut().trigger(I3LayoutRequest::Set(layout));
+        app.update();
+        let root = app
+            .world()
+            .get::<TileParent>(second)
+            .expect("workspace")
+            .entity();
+        app.world_mut().trigger(TileSelect(root));
+        app.update();
+        let focused = app.world().resource::<SsdSettings>().focused;
+        let headers: Vec<_> = app
+            .world_mut()
+            .query::<(&HeaderTarget, &HeaderVisual)>()
+            .iter(app.world())
+            .map(|(target, visual)| (target.child, visual.colors))
+            .collect();
+        assert_eq!(headers.len(), 2);
+        assert!(headers.iter().all(|(_, colors)| *colors == focused));
+        app.world_mut().trigger(TileSelect(first));
+        app.update();
+        let unfocused = app.world().resource::<SsdSettings>().unfocused;
+        for (target, visual) in app
+            .world_mut()
+            .query::<(&HeaderTarget, &HeaderVisual)>()
+            .iter(app.world())
+        {
+            assert_eq!(
+                visual.colors,
+                if target.child == first {
+                    focused
+                } else {
+                    unfocused
+                }
+            );
+        }
+
+        app.world_mut().trigger(TileTreeEdit::WrapChildren {
+            container: root,
+            axis: SplitAxis::Horizontal,
+        });
+        app.update();
+        let group = app
+            .world()
+            .get::<TileParent>(first)
+            .expect("inner group")
+            .entity();
+        let neighbor = app
+            .world_mut()
+            .spawn((
+                ManagedWindow {
+                    id: WindowId::new(3),
+                },
+                WindowVacancy::Retain,
+            ))
+            .id();
+        app.update();
+        app.world_mut().trigger(TileTreeEdit::Place {
+            node: neighbor,
+            anchor: group,
+            side: TileSide::After,
+        });
+        app.world_mut().trigger(weld_tile::TileSetLayout {
+            container: root,
+            layout,
+        });
+        app.world_mut().trigger(TileSelect(group));
+        app.update();
+        let headers: Vec<_> = app
+            .world_mut()
+            .query::<(&HeaderTarget, &HeaderVisual)>()
+            .iter(app.world())
+            .map(|(target, visual)| (*target, visual.colors))
+            .collect();
+        assert_eq!(headers.len(), 4);
+        for (target, colors) in headers {
+            assert_eq!(
+                colors,
+                if target.child == neighbor {
+                    unfocused
+                } else {
+                    focused
+                }
+            );
+        }
+        app.world_mut().trigger(TileSelect(root));
+        app.update();
+        assert!(
+            app.world_mut()
+                .query::<&HeaderVisual>()
+                .iter(app.world())
+                .all(|visual| visual.colors == focused)
+        );
+    }
+}
+
+#[test]
+fn smart_outer_chrome_counts_a_tab_or_stack_group_as_one_frame() {
+    use weld_tile::{SplitAxis, TileSettings, TileSide, TileTreeEdit};
+    for layout in [TileLayout::Tabbed, TileLayout::Stacked] {
+        let (mut app, first, second) = setup();
+        app.world_mut()
+            .resource_mut::<TileSettings>()
+            .hide_solo_gaps = true;
+        app.world_mut()
+            .resource_mut::<SsdSettings>()
+            .hide_solo_border = true;
+        app.world_mut().trigger(I3LayoutRequest::Set(layout));
+        app.world_mut().despawn(first);
+        app.update();
+        assert_solo_group(&mut app, 1);
+        let root = app
+            .world()
+            .get::<TileParent>(second)
+            .expect("workspace")
+            .entity();
+        let third = app
+            .world_mut()
+            .spawn((
+                ManagedWindow {
+                    id: WindowId::new(3),
+                },
+                WindowVacancy::Retain,
+            ))
+            .id();
+        app.update();
+        assert_solo_group(&mut app, 2);
+
+        // An outer unary split still presents the same single group.
+        app.world_mut().trigger(TileTreeEdit::WrapChildren {
+            container: root,
+            axis: SplitAxis::Horizontal,
+        });
+        app.update();
+        assert_solo_group(&mut app, 2);
+        let group = app
+            .world()
+            .get::<TileParent>(third)
+            .expect("group")
+            .entity();
+        let neighbor = app
+            .world_mut()
+            .spawn((
+                ManagedWindow {
+                    id: WindowId::new(4),
+                },
+                WindowVacancy::Retain,
+            ))
+            .id();
+        app.update();
+        app.world_mut().trigger(TileTreeEdit::Place {
+            node: neighbor,
+            anchor: group,
+            side: TileSide::After,
+        });
+        app.update();
+        let frame = app
+            .world_mut()
+            .query_filtered::<&Node, With<frame::GroupFrame>>()
+            .single(app.world())
+            .expect("frame");
+        assert_eq!(frame.border, UiRect::all(px(3)));
+        assert_ne!(frame.border_radius, BorderRadius::ZERO);
+        assert_eq!(frame.left, px(8));
+        assert!(app.world().get::<WindowInSoloFrame>(second).is_none());
+        app.world_mut().despawn(neighbor);
+        app.update();
+        assert_solo_group(&mut app, 2);
+
+        app.world_mut()
+            .resource_mut::<TileSettings>()
+            .hide_solo_gaps = false;
+        app.world_mut()
+            .resource_mut::<SsdSettings>()
+            .hide_solo_border = false;
+        app.update();
+        let frame = app
+            .world_mut()
+            .query_filtered::<&Node, With<frame::GroupFrame>>()
+            .single(app.world())
+            .expect("frame");
+        assert_eq!(frame.border, UiRect::all(px(3)));
+        assert_ne!(frame.border_radius, BorderRadius::ZERO);
+        assert_eq!(frame.left, px(8));
+    }
+}
+
+fn assert_solo_group(app: &mut App, header_count: usize) {
+    let (frame, shadow) = app
+        .world_mut()
+        .query_filtered::<(&Node, &bevy::ui::BoxShadow), With<frame::GroupFrame>>()
+        .single(app.world())
+        .expect("one group frame");
+    assert_eq!((frame.left, frame.top), (px(0), px(0)));
+    assert_eq!((frame.width, frame.height), (px(800), px(600)));
+    assert_eq!(frame.border, UiRect::all(px(0)));
+    assert_eq!(frame.border_radius, BorderRadius::ZERO);
+    assert!(shadow.0.is_empty());
+    let mut count = 0;
+    for (header, node) in app
+        .world_mut()
+        .query::<(&HeaderTarget, &Node)>()
+        .iter(app.world())
+    {
+        count += 1;
+        assert_eq!(node.border_radius, BorderRadius::ZERO);
+        assert!(app.world().get::<WindowInSoloFrame>(header.child).is_some());
+        let body = app
+            .world()
+            .get::<WindowGeometry>(header.child)
+            .expect("content bounds");
+        assert_eq!(body.position.x, 0.0);
+        assert_eq!(body.size.x, 800.0);
+        assert_eq!(body.position.y + body.size.y, 600.0);
+    }
+    assert_eq!(count, header_count);
 }
 
 #[test]
@@ -316,6 +537,13 @@ fn fullscreen_hides_headers_and_restores_them_on_exit() {
 #[test]
 fn post_picking_selection_updates_visibility_and_headers_in_the_same_frame() {
     let (mut app, first, second) = setup();
+    let group = app
+        .world()
+        .get::<TileParent>(first)
+        .expect("group")
+        .entity();
+    app.world_mut().trigger(TileSelect(group));
+    app.update();
     app.add_systems(
         PreUpdate,
         (move |mut once: bevy::ecs::system::Local<bool>, mut commands: Commands| {
@@ -346,6 +574,14 @@ fn post_picking_selection_updates_visibility_and_headers_in_the_same_frame() {
         .find(|(target, _)| target.child == first)
         .expect("header");
     assert_eq!(header.1.0, focused_color);
+    let unfocused_color = app.world().resource::<SsdSettings>().unfocused.background;
+    let other = app
+        .world_mut()
+        .query::<(&HeaderTarget, &BackgroundColor)>()
+        .iter(app.world())
+        .find(|(target, _)| target.child == second)
+        .expect("other header");
+    assert_eq!(other.1.0, unfocused_color);
 }
 
 #[test]
@@ -556,8 +792,20 @@ fn management_reload_preserves_presenter_insets_and_border_changes_apply_in_the_
 fn inner_dividers_share_border_style_reserve_content_space_and_follow_visibility() {
     use weld_tile::{SplitAxis, TileOperation, TileRequest, TileSelect};
     use weld_window::{WindowCommand, WindowCommandKind};
-    for axis in [SplitAxis::Horizontal, SplitAxis::Vertical] {
+    for (axis, smart) in [
+        (SplitAxis::Horizontal, false),
+        (SplitAxis::Vertical, false),
+        (SplitAxis::Horizontal, true),
+        (SplitAxis::Vertical, true),
+    ] {
         let (mut app, first, second) = setup();
+        app.world_mut()
+            .resource_mut::<SsdSettings>()
+            .hide_solo_border = smart;
+        app.world_mut()
+            .resource_mut::<weld_tile::TileSettings>()
+            .hide_solo_gaps = smart;
+        app.update();
         app.world_mut()
             .trigger(TileRequest::Focused(TileOperation::Split(axis)));
         app.update();
