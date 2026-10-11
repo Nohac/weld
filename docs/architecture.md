@@ -1237,7 +1237,14 @@ retire after the last referencing session; endpoint IDs are never reused.
 Destination-only startup installs neither the registry nor `weld-hoist`.
 
 `weld-control` owns same-user CLI approval, private persistent trust and the local
-control socket. `weld-hoist-iroh::pairing` owns authenticated enrollment and an
+control socket. Its native launch RPC delegates to a bounded `weld-core`
+launch channel. The shared native loop services requests outside Bevy's frame
+gate and uses the existing child owner for display/cursor/session environment,
+process creation and reaping. Each request carries exact arguments and an
+absolute working directory; replies report process creation or spawn failure.
+Local launch is also installed for headless and destination-only assemblies.
+See [Native application launch](native-launch.md) for commands and validation.
+`weld-hoist-iroh::pairing` owns authenticated enrollment and an
 independent application catalog/control stream. Master translates approved
 requests into ordinary hoist/reclaim messages. The runtime-owned desktop relay
 forks cached source snapshots per connection, sharing upstream buffer leases and

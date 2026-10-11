@@ -1,0 +1,148 @@
+#!/usr/bin/env python3
+"""Validate native launch RPC in a private headless or nested Weld session."""
+
+import argparse
+import json
+import os
+from pathlib import Path
+import resource
+import signal
+import socket
+import subprocess
+import sys
+import tempfile
+import time
+
+
+def wait_for(host, predicate, description, seconds=20):
+    deadline = time.monotonic() + seconds
+    while not predicate():
+        if host.poll() is not None or time.monotonic() >= deadline:
+            raise RuntimeError(f"timed out waiting for {description}")
+        time.sleep(0.05)
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--nested", action="store_true")
+    parser.add_argument("--xwayland", action="store_true")
+    parser.add_argument("--no-build", action="store_true")
+    args = parser.parse_args()
+    root = Path(__file__).resolve().parent.parent
+    resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
+    if not args.no_build:
+        subprocess.run(["cargo", "build", "--locked", "-j8", "-p", "weldwm", "-p", "weld-control", "--bins"], cwd=root, check=True)
+        if not args.nested:
+            subprocess.run(["cargo", "build", "--locked", "-j8", "-p", "weld-core", "--example", "wayland_session_probe"], cwd=root, check=True)
+        if args.xwayland:
+            subprocess.run(["cargo", "build", "--locked", "-j8", "-p", "weld-core", "--example", "x11_window_probe"], cwd=root, check=True)
+    validation = root / "target/validation"
+    validation.mkdir(exist_ok=True)
+    run = Path(tempfile.mkdtemp(prefix="control-launch-", dir=validation))
+    display = run / "wayland"
+    control = run / "weld-control/wayland.sock"
+    config = run / "test.config"
+    config.write_text("font monospace 14\ndefault_border pixel 2\n")
+    environment = dict(os.environ, RUST_LOG="info")
+    if not args.nested:
+        environment["VK_DRIVER_FILES"] = str(run / "absent-vulkan-driver.json")
+        environment["VK_ICD_FILENAMES"] = environment["VK_DRIVER_FILES"]
+    options = ["--backend", "nested", "--config", str(config)] if args.nested else [
+        "--backend", "headless", "--headless-output", "640x480", "--scale", "1.5",
+    ]
+    if args.xwayland:
+        options.append("--xwayland")
+    command = ["cargo", "run", "--locked", "-p", "weldwm", "--", *options, "--wayland-socket", str(display)]
+    print(f"Logs: {run}", flush=True)
+    with (run / "host.log").open("w") as log:
+        host = subprocess.Popen(command, cwd=root, env=environment, stdout=log,
+                                stderr=subprocess.STDOUT, start_new_session=True)
+        try:
+            wait_for(host, lambda: control.exists() and display.exists(), "host sockets", seconds=45)
+            ctl = [str(root / "target/debug/weldctl"), "--session", str(display)]
+            failed = subprocess.run([*ctl, "launch", "--", "/weld-probe-missing-executable"],
+                                    capture_output=True, text=True, timeout=10)
+            if failed.returncode == 0 or "failed to spawn" not in failed.stderr:
+                raise RuntimeError(f"missing executable did not return spawn failure: {failed}")
+            bad_directory = subprocess.run([*ctl, "launch", "--cwd", str(run / "absent-directory"), "--", sys.executable],
+                                           capture_output=True, text=True, timeout=10)
+            if bad_directory.returncode == 0 or "failed to spawn" not in bad_directory.stderr:
+                raise RuntimeError(f"missing directory did not return spawn failure: {bad_directory}")
+            mode = "nested" if args.nested else "headless"
+            output = subprocess.check_output([
+                *ctl, "launch", "--cwd", str(run), "--", sys.executable,
+                str(Path(__file__).resolve()), "--child", mode,
+                "argument with spaces", "$(literal); untouched",
+            ], text=True, timeout=10)
+            wait_for(host, lambda: (run / "child.json").exists(), "launched child")
+            child = json.loads((run / "child.json").read_text())
+            assert str(child["pid"]) in output, (child, output)
+            assert child["cwd"] == str(run), child
+            assert child["argv"] == ["argument with spaces", "$(literal); untouched"], child
+            assert child["environment"]["WAYLAND_DISPLAY"] == str(display), child
+            assert "WAYLAND_SOCKET" not in child["environment"], child
+            assert bool(child["environment"].get("DISPLAY")) == args.xwayland, child
+            print("PASS exact arguments, working directory, display routing and failure recovery", flush=True)
+            if args.nested:
+                ipc = child["environment"]["SWAYSOCK"]
+                def mapped(name):
+                    tree = subprocess.check_output(["swaymsg", "-s", ipc, "-t", "get_tree", "-r"], text=True, timeout=5)
+                    return name in tree
+                wait_for(host, lambda: mapped("weld-launch-probe"), "Foot admission through native launch")
+                if args.xwayland:
+                    subprocess.run([*ctl, "launch", "--", str(root / "target/debug/examples/x11_window_probe"),
+                                    "--seconds", "2", "--title", "Weld X11 launch probe"], check=True, timeout=10)
+                    wait_for(host, lambda: mapped("Weld X11 launch probe"), "X11 admission through native launch")
+                    wait_for(host, lambda: "X11_PROBE_DONE" in (run / "host.log").read_text(), "X11 probe completion")
+                print("PASS native window admission and session IPC environment", flush=True)
+            else:
+                wait_for(host, lambda: "PASS dormant" in (run / "host.log").read_text(), "Wayland protocol probe")
+                print("PASS headless Wayland configure, buffer release and dormant frame demand", flush=True)
+            os.killpg(host.pid, signal.SIGTERM)
+            if host.wait(timeout=10) != 0:
+                raise RuntimeError("host shutdown failed")
+            assert not control.exists(), "control socket survived shutdown"
+            if args.xwayland and display.exists():
+                with socket.socket(socket.AF_UNIX) as connection:
+                    connection.settimeout(1)
+                    assert connection.connect_ex(str(display)) != 0, "Wayland endpoint still listening"
+                print("WARNING XWayland teardown left a stale Wayland socket file (existing host lifecycle issue)", flush=True)
+            else:
+                assert not display.exists(), "Wayland socket survived shutdown"
+            print("PASS host shutdown and control socket cleanup", flush=True)
+        finally:
+            # This runner owns this process group, including all RPC-launched children.
+            try:
+                os.killpg(host.pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+            try:
+                host.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                os.killpg(host.pid, signal.SIGKILL)
+                host.wait(timeout=5)
+
+
+def child():
+    root = Path(__file__).resolve().parent.parent
+    facts = {
+        "pid": os.getpid(), "cwd": os.getcwd(), "argv": sys.argv[3:],
+        "environment": {key: os.environ[key] for key in (
+            "WAYLAND_DISPLAY", "WAYLAND_SOCKET", "DISPLAY", "SWAYSOCK", "I3SOCK",
+        ) if key in os.environ},
+    }
+    # Rename makes readiness publication atomic for the supervising test.
+    Path("child.pending.json").write_text(json.dumps(facts))
+    Path("child.pending.json").rename("child.json")
+    if sys.argv[2] == "nested":
+        os.execvp("foot", ["foot", "--app-id=weld-launch-probe", "--title=Weld launch probe"])
+    probe = str(root / "target/debug/examples/wayland_session_probe")
+    os.execv(probe, [probe, "--dormant", "--expected-output", "640x480",
+                    "--expected-scale", "2", "--expected-size", "1100x300"])
+
+
+if __name__ == "__main__":
+    if len(sys.argv) > 2 and sys.argv[1] == "--child":
+        child()
+    else:
+        main()

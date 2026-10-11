@@ -27,6 +27,7 @@ use weld_client::{ClientPointerRouteUpdate, ClientRequest, ClientSurfaceEvent};
 /// Distribution options consumed by either host backend.
 #[derive(Default)]
 pub(crate) struct RunOptions {
+    pub(crate) launch_requests: Option<crate::runtime::launch::LaunchRequests>,
     pub(crate) client_environment: Vec<(OsString, OsString)>,
     pub(crate) client: Vec<OsString>,
     pub(crate) screenshot: Option<PathBuf>,
@@ -55,6 +56,11 @@ pub struct HostBuilder {
 }
 
 impl HostBuilder {
+    /// Installs administrative process launch requests on this host's event loop.
+    pub fn launch_requests(mut self, requests: crate::runtime::launch::LaunchRequests) -> Self {
+        self.options.launch_requests = Some(requests);
+        self
+    }
     /// Environment overrides for processes launched inside this compositor session.
     pub fn client_environment(mut self, environment: Vec<(OsString, OsString)>) -> Self {
         self.options.client_environment = environment;

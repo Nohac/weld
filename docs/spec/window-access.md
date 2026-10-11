@@ -1,5 +1,14 @@
 # Window access, control sessions and peek
 
+## Native launch foundation — Implemented
+
+`weldctl launch` starts ordinary applications through the existing native host
+launcher in nested, DRM and headless assemblies. It preserves arguments and the
+caller's working directory and reports process creation failures over local RPC.
+See [Native application launch](../native-launch.md) for the implemented scope
+and validation. The following sections describe the intended control-session,
+authorization and presentation layers.
+
 ## Use cases — Direction
 
 Weld should expose scoped application control for automation, guest and assist
@@ -64,6 +73,16 @@ auto-peek preference determines whether a controlled occupant appears locally;
 the same preference applies to hot reload and remote hoisting. Launch context
 must be established before new windows enter management so focus and permissions
 are correct on first admission.
+
+Use a private Wayland listening endpoint for session-aware launches and override
+the child's `WAYLAND_DISPLAY`. Accept those connections directly into the same
+host display, attaching trusted launch/session context at connection admission.
+Children that inherit the endpoint retain the association. Endpoint lifetime
+must cover delayed connections and descendants, and retire through the launch
+or session owner with bounded resource usage. Treat the endpoint as attribution;
+same-UID processes can still access its socket. Existing-daemon delegation may
+use an older connection, and shared XWayland uses `DISPLAY` instead, so those
+cases require explicit association or an isolated instance before granting access.
 
 Distinguish process-spawn completion, window association, first renderable frame
 and requested viewport settlement. Return a launch identity and report failures

@@ -14,14 +14,22 @@ pub(crate) fn run(arguments: AppArguments) -> Result<()> {
     let budget = bitrate_budget::for_source(&arguments)?;
     // Prepare first so GPU/network workers inherit the host shutdown mask.
     let mut runtime = HostRuntime::prepare(runtime_options(&arguments)?)?;
+    let (launcher, requests) = weld_core::runtime::launch::launch_channel()?;
+    runtime.add_launch_requests(requests)?;
+    let host = arguments
+        .hoist_iroh_listen
+        .as_ref()
+        .map(|_| crate::iroh_host::bind(&arguments))
+        .transpose()?;
+    let _controls = weld_control::ControlService::start_local(
+        arguments.wayland_socket.as_deref().unwrap_or("weld-0"),
+        host.clone(),
+        crate::control::launch_handler(launcher),
+    )?;
     let Some(ticket) = &arguments.hoist_iroh_listen else {
         return runtime.run();
     };
-    let host = crate::iroh_host::bind(&arguments)?;
-    let _controls = weld_control::ControlService::start_diagnostics(
-        arguments.wayland_socket.as_deref().unwrap_or("weld-0"),
-        host.clone(),
-    )?;
+    let host = host.context("Iroh source endpoint unavailable")?;
     let codec = arguments.hoist_codec.unwrap_or_default().into();
     let capabilities = runtime
         .external_dmabuf_capabilities()?

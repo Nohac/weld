@@ -59,6 +59,7 @@ pub(crate) fn install(
     app: &mut WeldApp,
     options: DeviceOptions,
     host: Option<IrohHost>,
+    launcher: weld_core::runtime::launch::ClientLauncher,
 ) -> Result<ControlService> {
     let policy = app.policy_wake()?;
     let (media, wake) = weld_core::host::client_runtime_notifier()?;
@@ -67,8 +68,13 @@ pub(crate) fn install(
         IrohNotifier::new(move || policy.notify()),
         options.codec,
     );
-    let controls =
-        ControlService::start(&options.session, options.directory, host, sessions.clone())?;
+    let controls = ControlService::start(
+        &options.session,
+        options.directory,
+        host,
+        sessions.clone(),
+        crate::control::launch_handler(launcher),
+    )?;
     let capabilities = app.external_dmabuf_capabilities()?;
     let budget = weld_hoist_encoded::SharedBitrateBudget::new(8_000_000)?;
     let (adapter, arrivals) = desktop_source_registration(

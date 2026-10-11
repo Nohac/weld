@@ -125,6 +125,14 @@ pub struct HostRuntime {
 }
 
 impl HostRuntime {
+    /// Services trusted launch requests through this session's shared child lifecycle.
+    pub fn add_launch_requests(
+        &mut self,
+        requests: super::launch::LaunchRequests,
+    ) -> Result<&mut Self> {
+        self.runtime.add_launch_requests(requests)?;
+        Ok(self)
+    }
     /// Opens the virtual Wayland host and optional GPU imports on the main thread.
     pub fn prepare(config: RuntimeOptions) -> Result<Self> {
         let signals = Signals::new(&[Signal::SIGINT, Signal::SIGTERM])

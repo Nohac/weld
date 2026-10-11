@@ -156,15 +156,16 @@ cargo run -- --backend nested --config examples/master.sway.config -- foot
 ```
 
 To open another application in an already-running Weld instance, use the
-client launcher from a second shell. It connects the application to Weld's
-`weld-0` Wayland socket and does not start another compositor:
+native control command from a second shell:
 
 ```text
-scripts/run-app foot
+weldctl --session weld-0 launch -- foot
 ```
 
-The launcher forces common toolkits onto their native Wayland backends and
-disables X11 fallback.
+This uses the session's current Wayland/XWayland and cursor configuration.
+`--cwd PATH` selects the application's working directory; by default it inherits
+the calling shell's directory. See [Native launch](docs/native-launch.md) for
+validation and process-versus-window readiness.
 
 For X11 clients, enable `--xwayland` and launch through Weld (CLI, config `exec`,
 or a terminal inside Weld), which supplies the session's private `DISPLAY`.

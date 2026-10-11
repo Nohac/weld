@@ -2,6 +2,7 @@
 
 mod arguments;
 mod bitrate_budget;
+mod control;
 mod devices;
 mod headless;
 mod iroh_host;
@@ -118,7 +119,13 @@ pub fn run(arguments: AppArguments) -> Result<()> {
     };
 
     let ipc_service = weld_sway_ipc::PreparedIpcService::bind()?;
+    let session_name = arguments
+        .wayland_socket
+        .clone()
+        .unwrap_or_else(|| "weld-0".into());
+    let (launcher, launch_requests) = weld_core::runtime::launch::launch_channel()?;
     let mut app = WeldApp::builder()
+        .launch_requests(launch_requests)
         .client_environment(vec![
             (
                 "SWAYSOCK".into(),
@@ -348,16 +355,26 @@ pub fn run(arguments: AppArguments) -> Result<()> {
     if enable_hoist_policy {
         app.add_plugins(HoistPlugin);
     }
-    let _device_controls = if enable_hoist_policy {
-        match device_options.and_then(|options| devices::install(&mut app, options, device_host)) {
-            Ok(controls) => Some(controls),
+    let _controls = if enable_hoist_policy {
+        match device_options.and_then(|options| {
+            devices::install(&mut app, options, device_host.clone(), launcher.clone())
+        }) {
+            Ok(controls) => controls,
             Err(error) => {
-                tracing::warn!(%error, "device pairing unavailable; continuing desktop session");
-                None
+                tracing::warn!(%error, "device pairing unavailable; serving local controls");
+                weld_control::ControlService::start_local(
+                    &session_name,
+                    device_host,
+                    control::launch_handler(launcher),
+                )?
             }
         }
     } else {
-        None
+        weld_control::ControlService::start_local(
+            &session_name,
+            device_host,
+            control::launch_handler(launcher),
+        )?
     };
     app.run()
 }

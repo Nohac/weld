@@ -125,6 +125,7 @@ impl<Event> RuntimeIntegration<Event> {
 pub(crate) struct NativeRuntime<Event: 'static> {
     pub event_loop: EventLoop<'static, ServerState>,
     pub state: HostState<Event>,
+    launches: Option<super::launch::LaunchQueue>,
 }
 
 impl<Event: 'static> NativeRuntime<Event> {
@@ -161,6 +162,7 @@ impl<Event: 'static> NativeRuntime<Event> {
             .context("failed to register process signals")?;
         Ok(Self {
             event_loop,
+            launches: None,
             state: HostState {
                 data: LoopData { server, events },
                 clients,
@@ -169,6 +171,20 @@ impl<Event: 'static> NativeRuntime<Event> {
                 capture_worker,
             },
         })
+    }
+
+    pub(crate) fn add_launch_requests(
+        &mut self,
+        requests: super::launch::LaunchRequests,
+    ) -> Result<()> {
+        anyhow::ensure!(
+            self.launches.is_none(),
+            "host launch service already installed"
+        );
+        let (queue, source) = requests.into_parts();
+        register_client_wake_sources(&self.event_loop.handle(), vec![source])?;
+        self.launches = Some(queue);
+        Ok(())
     }
 
     /// Absence of a native driver is ordinary hosting, not a no-op presenter.
@@ -251,6 +267,9 @@ impl<Event: 'static> NativeRuntime<Event> {
                 break;
             }
             self.state.data.server.poll_output_captures();
+            if let Some(launches) = &self.launches {
+                launches.service(&mut self.state.children, &self.state.data.server);
+            }
 
             {
                 let _span =

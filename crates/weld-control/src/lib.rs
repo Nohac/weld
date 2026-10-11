@@ -1,5 +1,7 @@
 //! Same-user control of a running Weld session and its device authority.
+pub mod launch;
 use anyhow::{Context, Result, ensure};
+use launch::{LaunchHandler, LaunchReceipt, LaunchRequest};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::{
     fs,
@@ -23,6 +25,7 @@ use weld_hoist_iroh::{
 
 #[derive(Serialize, Deserialize)]
 pub enum Request {
+    Launch(LaunchRequest),
     DiagnosticSessions,
     DiagnosticReport(weld_diagnostics::SessionId),
     CollectDiagnostics(weld_diagnostics::SessionId),
@@ -43,6 +46,7 @@ pub enum Request {
 }
 #[derive(Serialize, Deserialize)]
 pub enum Response {
+    Launched(LaunchReceipt),
     DiagnosticSessions(
         Vec<(
             weld_diagnostics::SessionId,
@@ -61,6 +65,19 @@ pub enum Response {
 }
 
 pub fn socket_path(session: &str) -> Result<PathBuf> {
+    let display = Path::new(session);
+    if display.is_absolute() {
+        let name = display
+            .file_name()
+            .and_then(|name| name.to_str())
+            .context("invalid Wayland socket filename")?;
+        validate_session(name)?;
+        return Ok(display
+            .parent()
+            .context("Wayland socket parent absent")?
+            .join("weld-control")
+            .join(format!("{name}.sock")));
+    }
     validate_session(session)?;
     let dirs = xdg::BaseDirectories::with_prefix("weld");
     Ok(dirs
@@ -115,6 +132,7 @@ impl ControlService {
         directory: PathBuf,
         existing: Option<IrohHost>,
         desktop: DesktopSessions,
+        launch: impl FnMut(LaunchRequest) -> Result<LaunchReceipt> + Send + 'static,
     ) -> Result<Self> {
         let socket = socket_path(session)?;
         Self::start_at(
@@ -122,12 +140,17 @@ impl ControlService {
             session,
             existing,
             Some(PairingSetup { directory, desktop }),
+            Box::new(launch),
         )
     }
 
-    /// Expose reports for an existing transport without enabling device enrollment.
-    pub fn start_diagnostics(session: &str, host: IrohHost) -> Result<Self> {
-        Self::start_at(socket_path(session)?, session, Some(host), None)
+    /// Serves native launch requests, with reports when a transport already exists.
+    pub fn start_local(
+        session: &str,
+        host: Option<IrohHost>,
+        launch: impl FnMut(LaunchRequest) -> Result<LaunchReceipt> + Send + 'static,
+    ) -> Result<Self> {
+        Self::start_at(socket_path(session)?, session, host, None, Box::new(launch))
     }
 
     fn start_at(
@@ -135,6 +158,7 @@ impl ControlService {
         session: &str,
         existing: Option<IrohHost>,
         pairing: Option<PairingSetup>,
+        launch: LaunchHandler,
     ) -> Result<Self> {
         let parent = socket.parent().context("control socket parent absent")?;
         match fs::DirBuilder::new().mode(0o700).create(parent) {
@@ -177,6 +201,7 @@ impl ControlService {
                     enabled: false,
                     pairing,
                     name: session,
+                    launch,
                 };
                 if owner
                     .pairing
@@ -240,6 +265,7 @@ struct PairingSetup {
     desktop: DesktopSessions,
 }
 struct Owner {
+    launch: LaunchHandler,
     host: Option<IrohHost>,
     enabled: bool,
     pairing: Option<PairingSetup>,
@@ -250,7 +276,7 @@ impl Owner {
         let setup = self
             .pairing
             .as_ref()
-            .context("this instance exposes diagnostics only")?;
+            .context("device enrollment unavailable for this instance")?;
         if !self.enabled {
             fs::DirBuilder::new().recursive(true).mode(0o700).create(
                 setup
@@ -278,6 +304,7 @@ impl Owner {
     }
     fn request(&mut self, request: Request) -> Result<Response> {
         Ok(match request {
+            Request::Launch(request) => Response::Launched((self.launch)(request)?),
             Request::DiagnosticSessions => Response::DiagnosticSessions(
                 self.host
                     .as_ref()
@@ -375,12 +402,17 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
     use weld_hoist_iroh::IrohNotifier;
 
+    fn unavailable_launch(_: LaunchRequest) -> Result<LaunchReceipt> {
+        anyhow::bail!("launch unavailable in fixture")
+    }
+
     #[test]
     fn diagnostic_queries_do_not_start_a_network_host_or_create_device_storage() {
         let directory = tempfile::tempdir().expect("directory");
         let storage = directory.path().join("devices");
         let notifier = IrohNotifier::new(|| Ok(()));
         let mut owner = Owner {
+            launch: Box::new(unavailable_launch),
             host: None,
             enabled: false,
             pairing: Some(PairingSetup {
@@ -426,6 +458,7 @@ mod tests {
                 directory: directory.path().to_owned(),
                 desktop: desktop.clone(),
             }),
+            Box::new(unavailable_launch),
         )
         .expect("service");
         assert!(
@@ -436,7 +469,8 @@ mod tests {
                 Some(PairingSetup {
                     directory: directory.path().to_owned(),
                     desktop
-                })
+                }),
+                Box::new(unavailable_launch),
             )
             .is_err()
         );
@@ -466,8 +500,14 @@ mod tests {
         call(&socket, &Request::Cancel).expect("cancel");
         drop(service);
         assert!(!socket.exists());
-        let diagnostics = ControlService::start_at(socket.clone(), "test", Some(host), None)
-            .expect("diagnostics-only service");
+        let diagnostics = ControlService::start_at(
+            socket.clone(),
+            "test",
+            Some(host),
+            None,
+            Box::new(unavailable_launch),
+        )
+        .expect("diagnostics-only service");
         assert!(matches!(
             call(&socket, &Request::DiagnosticSessions).expect("diagnostics"),
             Response::DiagnosticSessions(_)
@@ -477,9 +517,74 @@ mod tests {
                 .err()
                 .expect("no enrollment")
                 .to_string()
-                .contains("diagnostics only")
+                .contains("device enrollment unavailable")
         );
         drop(diagnostics);
+    }
+
+    #[test]
+    fn launch_rpc_preserves_arguments_and_errors_without_starting_network_services() {
+        let directory = tempfile::tempdir().expect("directory");
+        fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o700))
+            .expect("private directory");
+        let socket = directory.path().join("control.sock");
+        let expected_directory = directory.path().to_owned();
+        let service = ControlService::start_at(
+            socket.clone(),
+            "test",
+            None,
+            None,
+            Box::new(move |request| {
+                assert_eq!(request.directory, expected_directory);
+                assert_eq!(request.arguments, ["space in argument", "$(literal)"]);
+                ensure!(request.program == "available", "executable missing");
+                Ok(LaunchReceipt { process_id: 123 })
+            }),
+        )
+        .expect("service");
+        for program in ["missing", "available"] {
+            let response = call(
+                &socket,
+                &Request::Launch(LaunchRequest {
+                    program: program.into(),
+                    arguments: vec!["space in argument".into(), "$(literal)".into()],
+                    directory: directory.path().into(),
+                }),
+            );
+            if program == "missing" {
+                assert!(
+                    response
+                        .err()
+                        .expect("failure")
+                        .to_string()
+                        .contains("executable missing")
+                );
+            } else {
+                assert!(matches!(
+                    response.expect("launch"),
+                    Response::Launched(LaunchReceipt { process_id: 123 })
+                ));
+            }
+        }
+        assert!(
+            matches!(call(&socket, &Request::DiagnosticSessions).expect("diagnostics"), Response::DiagnosticSessions(sessions) if sessions.is_empty())
+        );
+        assert!(!directory.path().join("devices.json").exists());
+        drop(service);
+        assert!(!socket.exists());
+    }
+
+    #[test]
+    fn absolute_wayland_endpoints_have_distinct_private_control_directories() {
+        assert_eq!(
+            socket_path("/tmp/first/wayland").expect("socket"),
+            PathBuf::from("/tmp/first/weld-control/wayland.sock")
+        );
+        assert_eq!(
+            socket_path("/tmp/second/wayland").expect("socket"),
+            PathBuf::from("/tmp/second/weld-control/wayland.sock")
+        );
+        assert!(socket_path("/tmp/invalid\nname").is_err());
     }
 
     #[test]

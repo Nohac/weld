@@ -68,6 +68,7 @@ impl WeldAppExt for App {
 /// Configures the immutable native roots of a [`WeldApp`].
 #[derive(Default)]
 pub struct WeldAppBuilder {
+    launch_requests: Option<weld_core::runtime::launch::LaunchRequests>,
     client_environment: Vec<(OsString, OsString)>,
     backend: Backend,
     client: Vec<OsString>,
@@ -81,6 +82,11 @@ pub struct WeldAppBuilder {
 }
 
 impl WeldAppBuilder {
+    /// Installs the native launch service used by trusted session administration.
+    pub fn launch_requests(mut self, requests: weld_core::runtime::launch::LaunchRequests) -> Self {
+        self.launch_requests = Some(requests);
+        self
+    }
     /// Supplies session-local service endpoints to launched applications.
     pub fn client_environment(mut self, environment: Vec<(OsString, OsString)>) -> Self {
         self.client_environment = environment;
@@ -162,7 +168,7 @@ impl WeldAppBuilder {
         let requested_backend = self.backend;
         let backend = requested_backend.resolve(BackendEnvironment::detect());
         info!(?requested_backend, ?backend, "selected Weld backend");
-        let prepared = HostBuilder::new()
+        let mut host = HostBuilder::new()
             .xwayland(self.xwayland)
             .backend(backend.into())
             .launch(self.client)
@@ -172,8 +178,11 @@ impl WeldAppBuilder {
             .output_settings(self.output_settings.clone())
             .client_environment(self.client_environment)
             .socket_name(self.socket_name)
-            .keyboard_repeat_mode(self.keyboard_repeat_mode)
-            .prepare()?;
+            .keyboard_repeat_mode(self.keyboard_repeat_mode);
+        if let Some(requests) = self.launch_requests {
+            host = host.launch_requests(requests);
+        }
+        let prepared = host.prepare()?;
 
         let context = prepared.render_context();
         let mut app = App::new();

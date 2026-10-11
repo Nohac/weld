@@ -3,6 +3,7 @@
 mod assembly;
 pub(crate) mod callbacks;
 pub(crate) mod gpu;
+pub mod launch;
 pub(crate) mod native;
 #[cfg(feature = "test-support")]
 pub use assembly::probe as presentation_probe;
@@ -12,7 +13,7 @@ use std::{
     cell::RefCell,
     collections::VecDeque,
     ffi::{OsStr, OsString},
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::{Child, Command},
     rc::Rc,
     time::{Duration, Instant},
@@ -169,10 +170,23 @@ impl ChildProcesses {
         program: &OsStr,
         arguments: &[OsString],
     ) -> Result<()> {
+        self.spawn_at(server, program, arguments, None).map(|_| ())
+    }
+
+    fn spawn_at(
+        &mut self,
+        server: &ServerState,
+        program: &OsStr,
+        arguments: &[OsString],
+        directory: Option<&Path>,
+    ) -> Result<u32> {
         let _launch_span =
             tracing::trace_span!(target: crate::PROFILE_TARGET, "host_launch_client").entered();
         let mut command = Command::new(program);
         command.args(arguments);
+        if let Some(directory) = directory {
+            command.current_dir(directory);
+        }
         configure_client_command(
             &mut command,
             &server.socket_name,
@@ -189,8 +203,9 @@ impl ChildProcesses {
             process_id = child.id(),
             "launched Wayland client"
         );
+        let process_id = child.id();
         self.processes.push(child);
-        Ok(())
+        Ok(process_id)
     }
 }
 

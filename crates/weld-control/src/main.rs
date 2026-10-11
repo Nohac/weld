@@ -22,6 +22,15 @@ struct Arguments {
 }
 #[derive(Subcommand)]
 enum Command {
+    /// Launch an application in the selected Weld session.
+    Launch {
+        /// Working directory; defaults to the calling shell's current directory.
+        #[arg(long)]
+        cwd: Option<PathBuf>,
+        /// Executable and exact arguments, following --.
+        #[arg(required = true, num_args = 1.., last = true)]
+        command: Vec<String>,
+    },
     #[command(visible_aliases = ["diagnostic", "diag"])]
     Diagnostics {
         #[command(subcommand)]
@@ -87,6 +96,23 @@ fn main() -> Result<()> {
         )?,
     };
     match args.command {
+        Command::Launch { cwd, command } => {
+            let (program, arguments) = command
+                .split_first()
+                .context("launch needs an executable")?;
+            let current =
+                std::env::current_dir().context("could not determine launch directory")?;
+            let directory = cwd.map(|path| current.join(path)).unwrap_or(current);
+            let request = weld_control::launch::LaunchRequest {
+                program: program.clone(),
+                arguments: arguments.to_vec(),
+                directory,
+            };
+            let Response::Launched(receipt) = call(&path, &Request::Launch(request))? else {
+                anyhow::bail!("unexpected launch response");
+            };
+            println!("Started process {} in Weld.", receipt.process_id);
+        }
         Command::Diagnostics { command } => match command {
             Diagnostics::List => {
                 let Response::DiagnosticSessions(sessions) =

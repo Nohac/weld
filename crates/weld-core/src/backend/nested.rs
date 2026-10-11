@@ -172,6 +172,9 @@ pub(crate) fn prepare(options: RunOptions, signals: Signals) -> Result<PreparedH
                 host.cursor_dirty = true;
             }
             runtime.state.children.environment = options.client_environment;
+            if let Some(requests) = options.launch_requests {
+                runtime.add_launch_requests(requests)?;
+            }
             let child_requested = runtime
                 .state
                 .children
