@@ -452,7 +452,7 @@ fn handle_window_intent(intent: On<WindowIntent>, params: HandleWindowIntentPara
         WindowIntentKind::CloseRequested => {
             commands.trigger(WindowCommand {
                 window,
-                kind: WindowCommandKind::CloseOccupant,
+                kind: WindowCommandKind::Close,
             });
         }
         WindowIntentKind::MoveBy(delta) => {

@@ -24,6 +24,7 @@ use weld_hoist_ui::{
     DismissHoistTombstone, HoistPlaceholder, HoistPlaceholderMetrics, HoistPlaceholderState,
     ReclaimHoist,
 };
+use weld_window::persistence::PersistentWindow;
 use weld_window::{
     ClientResizeState, ManagedWindow, OccupiesWindow, PresentationInsets, PresentationOffset,
     PrimaryWindowPresentation, WindowAdmissionHold, WindowFamilyResolver, WindowGeometry,
@@ -425,6 +426,7 @@ pub(super) struct MaintainParams<'w, 's> {
     >,
     presentation_insets: Query<'w, 's, &'static PresentationInsets>,
     placeholders: Query<'w, 's, &'static mut HoistPlaceholder>,
+    persistent_windows: Query<'w, 's, (), With<PersistentWindow>>,
     families: WindowFamilyResolver<'w, 's>,
     endpoints: Res<'w, HoistEndpointRegistry>,
     adapter_commands: ResMut<'w, ClientAdapterCommandQueue>,
@@ -483,7 +485,18 @@ pub(super) fn maintain_sessions(mut params: MaintainParams) {
                     .adapter_commands
                     .push(endpoint.unmap(session.surface));
             }
-            if let Some(source) = session.source_window
+            if let Some(source) = session
+                .source_window
+                .filter(|source| params.persistent_windows.contains(*source))
+            {
+                params
+                    .commands
+                    .entity(source)
+                    .insert(session.original_vacancy)
+                    .remove::<(HoistedWindow, WindowPresentationOverride, HoistPlaceholder)>();
+                params.commands.entity(entity).despawn();
+                params.redraw.write(RequestRedraw);
+            } else if let Some(source) = session.source_window
                 && let Ok(mut placeholder) = params.placeholders.get_mut(source)
             {
                 placeholder.state = HoistPlaceholderState::Closed;

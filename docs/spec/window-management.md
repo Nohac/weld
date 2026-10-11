@@ -7,11 +7,12 @@ managed windows and optional client occupancy independently of UI;
 `weld-window-ui` supplies reusable unstyled Bevy UI presentation behavior;
 `weld-ssd` supplies the current opinionated decoration scene; and `weld-float`
 supplies optional freeform management policy. A client surface can disappear
-without despawning a managed window whose vacancy policy is `Retain`.
+without despawning a managed window whose vacancy policy is `Retain` or which
+has opted into persistence.
 
 The exact implemented ownership and dependency direction are documented in
-[Architecture](../architecture.md). Persistent matching and persistence below
-remain direction rather than completed features. `weld-tile`
+[Architecture](../architecture.md). Persistent frames and replacement matching
+are implemented within a running session; restart restoration remains direction. `weld-tile`
 now implements a native horizontal/vertical split tree with live gaps,
 directional focus, leaf swapping, proportional resize and retained slots in
 per-workspace trees with output assignment. See [Master tiling](../master-tiling.md).
@@ -98,7 +99,7 @@ mesh identities through the hoist boundary. Authorization, destination
 availability, geometry negotiation and handoff are required follow-ups, not
 implemented by local output assignment.
 
-## Persistent frames — Direction
+## Persistent frames — Implemented
 
 A **persistent frame** is an opt-in managed frame that survives the loss of its
 occupant. Its layout position remains reserved, and a later matching client
@@ -112,36 +113,38 @@ The same managed-frame mechanism may later support saved layouts, launch
 reservations, client crash recovery, and hoist placeholders without creating
 separate kinds of layout object.
 
-An interactive binding should be able to make the selected frame persistent
-and propose criteria from its current occupant. The user can choose or edit a
-combination of Wayland application ID, X11 class where applicable, and title.
-Application ID or class is normally more stable than title. The manager must
-make ambiguity policy explicit when several toplevels match, such as attaching
-the first eligible window, asking the user, or creating additional frames.
+Master exposes `weld persistent enable|disable|toggle [identifier]`. Automatic
+capture uses native app ID, X11 class plus instance, or title as a fallback.
+Explicit identifier choices are `app_id`, `class`, `instance`, and `title`.
+Captured values are exact matches, scoped to source, toplevel kind and whether
+the window has a parent. The oldest eligible vacant slot wins; each slot accepts
+one replacement. Geometry, workspace and tree identity survive replacement.
 
-Configuration should also support rules that automatically make matching
-frames persistent. The exact configuration syntax is not selected; an
-illustrative rule could express:
+Sway rules can enable persistence when a matching occupant appears:
 
-```text
-persistent-frame "game-preview" {
-    match app-id = "^ExampleGamePlayer$"
-    match title = "^Example Game Preview$"
-    workspace = 3
-    floating = true
-}
+```sway
+bindsym $mod+Shift+i weld persistent toggle
+for_window [app_id="^ExampleGamePlayer$"] weld persistent enable
 ```
 
-A rule may reserve a vacant frame in advance or mark a claimed frame persistent
-when its first occupant appears. Runtime-created frames may optionally persist
-across Weld restarts using stable Weld IDs and serialized project-owned state,
-never Bevy entities or native protocol objects.
+Closing an occupied persistent window closes the app and leaves a selectable
+placeholder with its captured criteria. Closing that empty slot removes it.
+Interactive toggles display the state and matching rule for 1.5 seconds.
+Persistent frame colors apply wherever the layout normally displays borders;
+smart borders and corners continue to follow the layout. See
+[Master tiling](../master-tiling.md#persistent-windows) for configuration.
 
 Matching is evidence for placement, not authority. It must not grant remote,
 input, launch, or other privileged capabilities, and matching an application
 must remain distinct from launching it. The term “persistent frame” also avoids
 overloading i3 and Sway's existing “sticky” behavior for floating windows that
 appear across workspaces.
+
+### Further persistence — Direction
+
+Future work can reserve empty frames before launching an app, edit captured
+criteria, and restore layouts across Weld restarts using stable Weld IDs and
+serialized project-owned state.
 
 ## Composable responsibilities — Direction
 

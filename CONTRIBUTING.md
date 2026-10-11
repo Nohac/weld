@@ -178,6 +178,7 @@ The development example config provides these backend-neutral shortcuts:
 - `Alt+Shift+B`: launch Blender
 - `Alt+B`: cycle the selected window's titlebar/border style
 - `Alt+H`: hoist or locally preview the focused occupied window
+- `Alt+Shift+I`: toggle persistence and show the captured replacement rule
 - `Alt+D/F/K/J` or `Alt+Arrow`: focus left/right/up/down
 - Add `Shift` to navigate a tile structurally through neighboring splits
 - `Alt+Control+Arrow`: adjust tile proportions

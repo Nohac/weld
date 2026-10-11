@@ -75,6 +75,11 @@ Weld is a workspace of reusable layers and one standard distribution:
   contracts, plus shared workspace identity, membership, output assignment and
   selection. Managed windows are distinct from the shorter-lived client
   surfaces that occupy them.
+  `PersistentWindow` captures a source-scoped client identity and independently
+  retains a vacant slot. Admission reserves the oldest eligible match per batch
+  and rebinds occupancy while preserving window and workspace/tree identity.
+  `WindowCommandKind::Close` closes an occupant or removes an empty persistent
+  slot; presentation overrides keep their own close workflow.
 - `weld-window-ui` projects managed windows into unstyled Bevy UI roots. It
   supplies reusable client-surface mounts, client-decorated and popup
   presentation, presentation arbitration, and pointer-to-window-intent
@@ -82,6 +87,11 @@ Weld is a workspace of reusable layers and one standard distribution:
 - `weld-ssd` supplies Weld's current opinionated BSN server-decoration scene.
   It validates the presentation contract but is optional policy that another
   shell or window manager can replace.
+  Vacant persistent frames show the captured match with configured placeholder
+  colors. Interactive persistence results feed a short, input-transparent notice;
+  configured persistence palettes share ordinary smart-border and corner policy.
+  SSD presentation identity includes the occupant surface, so same-update
+  replacement retires the old content mount.
 - `weld-float` supplies conventional freeform placement, focus, stacking,
   movement, and interactive-resize policy without owning UI entities.
   `FloatBehaviorPlugin` applies interaction to `FloatingWindow` members owned
@@ -1328,7 +1338,9 @@ placeholders. Members first admitted through automatic following while the
 client group is already active are receiver-only because they never occupied
 pre-hoist source layout. Reclaiming or unmapping members temporarily block
 further admission for that client. Closed tombstones retain their original
-layout slots but do not block admission or keep a client group active. A newly
+layout slots but do not block admission or keep a client group active. Persistent
+source windows instead release the hoist override and return to a matchable
+vacant slot when their client closes. A newly
 opened same-client replacement may therefore be followed without adopting or
 removing the old tombstone's slot. If no live session remains, a direct request
 may start a fresh family while old tombstones remain independently dismissible.

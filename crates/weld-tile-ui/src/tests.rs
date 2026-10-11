@@ -14,14 +14,104 @@ use bevy::{
 };
 use weld_app::{
     output::{OutputGeometry, OutputId, PrimaryOutput, RendersOutput, WeldOutput},
-    surface::SurfaceActionQueue,
+    surface::{
+        ClientProvenance, ClientSource, ClientToplevel, MappedSurface, SurfaceActionQueue,
+        SurfaceId,
+    },
 };
 use weld_client::ClientSurfaceMetadata;
 use weld_i3_quirks::{I3LayoutRequest, I3QuirksPlugin};
 use weld_tile::{SplitAxis, TileLayout, TilePlugin, TileSelect, TileSide, TileTreeEdit};
+use weld_window::persistence::{PersistenceAction, PersistenceMatch, WindowPersistenceRequest};
 use weld_window::{
     ManagedWindow, OccupiesWindow, WindowId, WindowPlugin, WindowVacancy, WindowVisibility,
 };
+
+#[test]
+fn persistent_palette_updates_the_group_frame_and_headers_together() {
+    for layout in [TileLayout::Tabbed, TileLayout::Stacked] {
+        let (mut app, first, second) = setup();
+        let settings = weld_i3_quirks::config::parse_with_extensions(
+            "colors",
+            concat!(
+                "client.persistent_focused #112233 #223344 #334455 #445566 #556677\n",
+                "client.persistent_unfocused #667788 #778899 #8899aa #99aabb #aabbcc\n"
+            ),
+            |_| Ok(()),
+        )
+        .expect("persistent palettes")
+        .decorations;
+        let focused = settings.persistent_focused;
+        let unfocused = settings.persistent_unfocused;
+        let normal = settings.focused;
+        *app.world_mut().resource_mut::<SsdSettings>() = settings;
+        let surface = SurfaceId::for_test(500);
+        app.world_mut().spawn((
+            OccupiesWindow(second),
+            ClientToplevel { surface },
+            ClientSource {
+                id: surface.source(),
+                provenance: ClientProvenance::Local,
+            },
+            ClientWindowMetadata(
+                ClientSurfaceMetadata::new("kitty".into(), "Terminal".into()).expect("metadata"),
+            ),
+            MappedSurface {
+                logical_size: Vec2::splat(100.0),
+                visual_size: Vec2::splat(100.0),
+                visual_offset: Vec2::ZERO,
+                opaque: true,
+                alpha_mode: Default::default(),
+            },
+        ));
+        app.world_mut().trigger(I3LayoutRequest::Set(layout));
+        app.world_mut().trigger(WindowPersistenceRequest {
+            window: Some(second),
+            action: PersistenceAction::Enable(PersistenceMatch::Auto),
+        });
+        app.update();
+        let frame = app
+            .world_mut()
+            .query_filtered::<&BorderColor, With<frame::GroupFrame>>()
+            .single(app.world())
+            .expect("group border");
+        assert_eq!(*frame, BorderColor::all(focused.border));
+        let header = app
+            .world_mut()
+            .query::<(&HeaderTarget, &HeaderVisual)>()
+            .iter(app.world())
+            .find(|(target, _)| target.child == second)
+            .expect("persistent tab");
+        assert_eq!(header.1.colors, focused);
+        app.world_mut().trigger(TileSelect(first));
+        app.update();
+        let frame = app
+            .world_mut()
+            .query_filtered::<&BorderColor, With<frame::GroupFrame>>()
+            .single(app.world())
+            .expect("ordinary group border");
+        assert_eq!(*frame, BorderColor::all(normal.border));
+        let header = app
+            .world_mut()
+            .query::<(&HeaderTarget, &HeaderVisual)>()
+            .iter(app.world())
+            .find(|(target, _)| target.child == second)
+            .expect("inactive persistent tab");
+        assert_eq!(header.1.colors, unfocused);
+        app.world_mut().trigger(TileSelect(second));
+        app.world_mut().trigger(WindowPersistenceRequest {
+            window: Some(second),
+            action: PersistenceAction::Disable,
+        });
+        app.update();
+        let frame = app
+            .world_mut()
+            .query_filtered::<&BorderColor, With<frame::GroupFrame>>()
+            .single(app.world())
+            .expect("ordinary group border");
+        assert_eq!(*frame, BorderColor::all(normal.border));
+    }
+}
 
 fn setup() -> (App, Entity, Entity) {
     let mut app = App::new();

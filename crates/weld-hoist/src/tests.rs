@@ -36,7 +36,7 @@ use weld_ssd::SsdPlugin;
 use weld_window::{
     ClientResizeState, OccupiesWindow, PrimaryWindowPresentation, TiledWindow, WindowAdmissionHold,
     WindowGeometry, WindowInteractionKind, WindowInteractionSession, WindowOccupant, WindowOutput,
-    WindowPlugin,
+    WindowPlugin, WindowPresentationOverride,
 };
 use weld_window_ui::WindowUiPlugin;
 
@@ -1558,6 +1558,49 @@ fn unavailable_session_endpoint_restores_its_source() {
             .count(),
         0
     );
+}
+
+#[test]
+fn persistent_source_returns_to_a_matchable_slot_after_remote_close() {
+    let (mut app, endpoint) = test_app();
+    let source_surface = surface(LOCAL_SOURCE, 49);
+    let source_client = map_surface(&mut app, source_surface, None, WindowDecoration::ServerSide);
+    app.world_mut()
+        .entity_mut(source_client)
+        .insert(weld_app::surface::ClientWindowMetadata(
+            weld_client::ClientSurfaceMetadata::new("preview".into(), "Preview".into())
+                .expect("metadata"),
+        ));
+    let source_window = window_for_client(&mut app, source_client);
+    app.world_mut()
+        .trigger(weld_window::persistence::WindowPersistenceRequest {
+            window: Some(source_window),
+            action: weld_window::persistence::PersistenceAction::Enable(
+                weld_window::persistence::PersistenceMatch::Auto,
+            ),
+        });
+    let (session, _) = begin_hoist(
+        &mut app,
+        endpoint,
+        source_window,
+        source_surface,
+        WindowDecoration::ServerSide,
+    );
+    destroy_surface(&mut app, source_surface);
+    app.update();
+    assert!(
+        app.world()
+            .get::<weld_window::persistence::PersistentWindow>(source_window)
+            .is_some()
+    );
+    assert!(
+        app.world()
+            .get::<WindowPresentationOverride>(source_window)
+            .is_none()
+    );
+    assert!(app.world().get::<WindowOccupant>(source_window).is_none());
+    assert!(!app.world().entities().contains(session));
+    assert!(app.world().get::<HoistPlaceholder>(source_window).is_none());
 }
 
 #[test]

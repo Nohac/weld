@@ -782,7 +782,7 @@ fn intent(
     }
     let kind = match event.kind {
         WindowIntentKind::Activate => WindowCommandKind::Focus,
-        WindowIntentKind::CloseRequested => WindowCommandKind::CloseOccupant,
+        WindowIntentKind::CloseRequested => WindowCommandKind::Close,
         WindowIntentKind::MoveBy(_)
         | WindowIntentKind::ResizeBy(_)
         | WindowIntentKind::InteractionEnded(_) => return,

@@ -17,6 +17,7 @@ use weld_app::output::OutputPosition;
 use weld_app::surface::{ClientWindowMetadata, MappedSurface, SurfaceId};
 use weld_ssd::{BorderStyle, WindowBorderStyle};
 use weld_tile::TileFloatingRequest;
+use weld_window::persistence::{PersistenceAction, WindowPersistenceRequest};
 use weld_window::{
     FloatingWindow, ManagedBy, ManagedWindow, WindowAdmissionPreferences, WindowClientResolver,
     WindowGeometry, WindowIntent, WindowIntentKind, WindowOutput,
@@ -46,6 +47,7 @@ enum RuleEffect {
 
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum RuleAction {
+    Persistent(PersistenceAction),
     Border(BorderStyle),
     Floating(bool),
     Workspace(WorkspaceTarget),
@@ -135,6 +137,14 @@ fn named_workspace(words: &[&str]) -> Result<WorkspaceTarget> {
 
 fn rule_action(words: &[&str]) -> Result<RuleAction> {
     Ok(match words {
+        ["weld", "persistent", args @ ..] => {
+            let action = crate::config::persistence_action(args)?;
+            ensure!(
+                !matches!(action, PersistenceAction::Toggle(_)),
+                "window rules require weld persistent enable or disable"
+            );
+            RuleAction::Persistent(action)
+        }
         ["border", style @ ..] => RuleAction::Border(border_style(style)?),
         ["floating", "enable"] => RuleAction::Floating(true),
         ["floating", "disable"] => RuleAction::Floating(false),
@@ -279,6 +289,10 @@ pub(crate) fn apply(
             added.push(index);
             for action in rule_actions {
                 match action {
+                    RuleAction::Persistent(action) => commands.trigger(WindowPersistenceRequest {
+                        window: Some(window),
+                        action: *action,
+                    }),
                     RuleAction::Border(style) => border = Some(*style),
                     RuleAction::Floating(enabled) if initial => {
                         preferences.floating = Some(*enabled)
@@ -291,7 +305,7 @@ pub(crate) fn apply(
                     }
                     _ => {}
                 }
-                if !matches!(action, RuleAction::Border(_)) {
+                if !matches!(action, RuleAction::Border(_) | RuleAction::Persistent(_)) {
                     actions.push(action.clone());
                 }
             }
@@ -353,6 +367,10 @@ pub(crate) fn execute(
 ) {
     let window = event.window;
     match &event.action {
+        RuleAction::Persistent(action) => commands.trigger(WindowPersistenceRequest {
+            window: Some(window),
+            action: *action,
+        }),
         RuleAction::Border(border) => {
             commands.entity(window).insert(WindowBorderStyle(*border));
         }

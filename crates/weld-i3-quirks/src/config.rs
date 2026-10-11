@@ -14,6 +14,7 @@ pub use weld_sway_config::evaluation::{ConfigWarning, UnsupportedPolicy, unsuppo
 use weld_sway_config::evaluation::{expand_variables, line_of};
 use weld_tile::{Direction, SplitAxis, TileOperation, TileSettings};
 use weld_window::fullscreen::{FullscreenAction, FullscreenMode};
+use weld_window::persistence::{PersistenceAction, PersistenceMatch};
 use weld_window::pointer::WindowPointerSettings;
 
 #[derive(Clone, Debug, PartialEq)]
@@ -28,6 +29,7 @@ pub enum Action<Extension = ()> {
     FocusHierarchy(crate::I3FocusHierarchy),
     Sticky(Option<bool>),
     Border(Option<BorderStyle>),
+    Persistent(PersistenceAction),
     Fullscreen(FullscreenAction),
     Reload,
     Mode(String),
@@ -349,7 +351,9 @@ fn apply<Extension>(config: &mut Configuration<Extension>, statement: &Statement
             kind @ ("client.focused"
             | "client.unfocused"
             | "client.focused_inactive"
-            | "client.placeholder"),
+            | "client.placeholder"
+            | "client.persistent_focused"
+            | "client.persistent_unfocused"),
             values,
         ) => {
             let colors = frame_colors(values)?;
@@ -357,6 +361,8 @@ fn apply<Extension>(config: &mut Configuration<Extension>, statement: &Statement
                 "client.focused" => config.decorations.focused = colors,
                 "client.focused_inactive" => config.decorations.focused_inactive = colors,
                 "client.placeholder" => config.decorations.placeholder = colors,
+                "client.persistent_focused" => config.decorations.persistent_focused = colors,
+                "client.persistent_unfocused" => config.decorations.persistent_unfocused = colors,
                 _ => config.decorations.unfocused = colors,
             }
         }
@@ -403,6 +409,32 @@ fn axis(value: &str) -> Result<SplitAxis> {
         "vertical" => Ok(SplitAxis::Vertical),
         _ => bail!("orientation must be horizontal or vertical"),
     }
+}
+
+pub(crate) fn persistence_action(words: &[&str]) -> Result<PersistenceAction> {
+    if words == ["disable"] {
+        return Ok(PersistenceAction::Disable);
+    }
+    let (action, field) = match words {
+        [action @ ("enable" | "toggle")] => (*action, PersistenceMatch::Auto),
+        [action @ ("enable" | "toggle"), field] => (
+            *action,
+            match *field {
+                "auto" => PersistenceMatch::Auto,
+                "app_id" => PersistenceMatch::AppId,
+                "class" => PersistenceMatch::Class,
+                "instance" => PersistenceMatch::Instance,
+                "title" => PersistenceMatch::Title,
+                _ => bail!("persistence identifier must be auto, app_id, class, instance or title"),
+            },
+        ),
+        _ => bail!("expected weld persistent enable|disable|toggle [identifier]"),
+    };
+    Ok(if action == "enable" {
+        PersistenceAction::Enable(field)
+    } else {
+        PersistenceAction::Toggle(field)
+    })
 }
 
 pub(crate) fn border_style(words: &[&str]) -> Result<BorderStyle> {
@@ -602,6 +634,7 @@ fn action<Extension>(
             Action::Tile(TileOperation::Split(SplitAxis::Vertical))
         }
         ["border", "toggle"] => Action::Border(None),
+        ["weld", "persistent", args @ ..] => Action::Persistent(persistence_action(args)?),
         ["fullscreen"] | ["fullscreen", "toggle"] => {
             Action::Fullscreen(FullscreenAction::Toggle(FullscreenMode::Normal))
         }
@@ -1113,12 +1146,17 @@ mod tests {
             default_orientation vertical
             bindsym Mod4+Left focus left
             bindsym Mod4+Control+Right resize grow width 5 ppt
+            bindsym Mod4+Shift+i weld persistent toggle
         "},
         )
         .expect("supported subset");
         assert_eq!(config.tiling.inner_gap, 12);
         assert_eq!(config.tiling.default_axis, SplitAxis::Vertical);
         assert_eq!(config.bindings[0].1, Action::Focus(Direction::Left));
+        assert_eq!(
+            config.bindings[2].1,
+            Action::Persistent(PersistenceAction::Toggle(PersistenceMatch::Auto))
+        );
         assert_eq!(
             config.bindings[1].1,
             Action::Resize(crate::I3ResizeRequest {
@@ -1139,7 +1177,7 @@ mod tests {
                 bindsym Mod4+Left focus left
                 bindsym Mod4+Left focus right
             "},
-            "bindsym Mod4+Left weld persistent toggle",
+            "bindsym Mod4+Left weld persistent enable missing_id",
         ] {
             assert!(parse("example", source).is_err(), "{source}");
         }

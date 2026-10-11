@@ -2,7 +2,9 @@
 
 use std::collections::HashSet;
 
+mod persistence_notice;
 mod style;
+mod vacant;
 use style::FrameGeometry;
 pub use style::{
     BorderRequest, BorderStyle, FrameColors, SsdSettings, TitleFont, WindowBorderStyle,
@@ -39,6 +41,7 @@ use weld_app::{
         SurfaceId, SurfaceView, ToplevelResizeEdge,
     },
 };
+use weld_window::persistence::PersistentWindow;
 use weld_window::{
     FloatingWindow, FocusedWindow, ManagedWindow, PresentationOffset, PresentsWindow,
     PrimaryWindowPresentation, WindowClientResolver, WindowCloseHandle, WindowGeometryAnchor,
@@ -86,6 +89,7 @@ struct FrameStyles<'w, 's> {
     frames: WindowFramePolicy<'w, 's>,
     settings: Res<'w, SsdSettings>,
     windows: StyledWindows<'w, 's>,
+    persistent_windows: Query<'w, 's, &'static PersistentWindow>,
 }
 
 type StyledWindows<'w, 's> = Query<
@@ -211,6 +215,11 @@ impl Plugin for SsdPlugin {
                 PreUpdate,
                 sync_focus_style.in_set(WindowSystems::UiReconcile),
             )
+            .add_systems(PreUpdate, vacant::sync.in_set(WindowSystems::UiReconcile))
+            .add_systems(
+                PreUpdate,
+                persistence_notice::sync.in_set(WindowSystems::FinalReconcile),
+            )
             .add_systems(
                 PreUpdate,
                 sync_focus_style.in_set(WindowSystems::FinalReconcile),
@@ -222,41 +231,55 @@ impl Plugin for SsdPlugin {
     }
 }
 
+type ClaimedSsdRoots<'w, 's> = Query<
+    'w,
+    's,
+    (
+        Entity,
+        &'static WindowProjection,
+        Option<&'static VacantSsdPresentation>,
+        &'static FrameGeometry,
+        &'static SsdContent,
+    ),
+    With<SsdPresentation>,
+>;
+
 fn revoke_ssd_presentations(
     mut commands: Commands,
-    roots: Query<
-        (
-            bevy::ecs::entity::Entity,
-            &WindowProjection,
-            Option<&VacantSsdPresentation>,
-            &FrameGeometry,
-        ),
-        With<SsdPresentation>,
-    >,
+    roots: ClaimedSsdRoots,
     windows: Query<(&WindowVacancy, Option<&WindowPresentationOverride>)>,
     clients: WindowClientResolver,
-    occupants: Query<(Option<&MappedSurface>, Has<ServerDecorated>), With<ClientToplevel>>,
+    occupants: Query<(
+        &ClientToplevel,
+        Option<&MappedSurface>,
+        Has<ServerDecorated>,
+    )>,
     styles: FrameStyles,
 ) {
-    for (root, projection, vacant_presentation, geometry) in &roots {
+    for (root, projection, vacant_presentation, geometry, content) in &roots {
         let still_server_decorated =
             windows
                 .get(projection.window())
                 .is_ok_and(|(vacancy, presentation_override)| {
                     presentation_override.is_none()
                         && clients.client_entity(projection.window()).map_or(
-                            vacant_presentation.is_some() && *vacancy == WindowVacancy::Retain,
+                            vacant_presentation.is_some()
+                                && (*vacancy == WindowVacancy::Retain
+                                    || styles.persistent_windows.contains(projection.window())),
                             |client| {
                                 vacant_presentation.is_none()
-                                    && occupants.get(client).is_ok_and(|(mapped, requested)| {
-                                        // Unmapping hides the frame; remapping resolves policy.
-                                        mapped.is_none()
-                                            || styles.frames.server_frame_required(
-                                                projection.window(),
-                                                requested,
-                                                mapped,
-                                            )
-                                    })
+                                    && occupants.get(client).is_ok_and(
+                                        |(toplevel, mapped, requested)| {
+                                            // Unmapping hides the frame; remapping resolves policy.
+                                            *content == SsdContent::Surface(toplevel.surface)
+                                                && (mapped.is_none()
+                                                    || styles.frames.server_frame_required(
+                                                        projection.window(),
+                                                        requested,
+                                                        mapped,
+                                                    ))
+                                        },
+                                    )
                             },
                         )
                 });
@@ -346,7 +369,11 @@ fn reconcile_ssd_projections(
                 }
                 SsdContent::Surface(toplevel.surface)
             }
-            None if *vacancy == WindowVacancy::Retain => SsdContent::Vacant,
+            None if *vacancy == WindowVacancy::Retain
+                || styles.persistent_windows.contains(window) =>
+            {
+                SsdContent::Vacant
+            }
             None => continue,
         };
         for output in intersections.iter() {
@@ -360,7 +387,7 @@ fn reconcile_ssd_projections(
                 continue;
             };
             let style = styles.geometry(window);
-            let root = spawn_ssd_scene(&mut commands, content, style);
+            let root = spawn_ssd_scene(&mut commands, content, style, window, &styles);
             let mut root_commands = commands.entity(root);
             root_commands.insert((
                 WindowProjection::new(window, output),
@@ -432,7 +459,11 @@ fn present_ssd_windows(
                 }
                 SsdContent::Surface(toplevel.surface)
             }
-            None if *vacancy == WindowVacancy::Retain => SsdContent::Vacant,
+            None if *vacancy == WindowVacancy::Retain
+                || styles.persistent_windows.contains(window) =>
+            {
+                SsdContent::Vacant
+            }
             None => continue,
         };
         let output = output.map(|output| output.0).or_else(|| {
@@ -449,7 +480,7 @@ fn present_ssd_windows(
             .and_then(|(_, camera, _)| camera)
             .and_then(OutputCompositionCamera::entity);
         let style = styles.geometry(window);
-        let root = spawn_ssd_scene(&mut commands, content, style);
+        let root = spawn_ssd_scene(&mut commands, content, style, window, &styles);
         commands.entity(root).insert((
             PresentsWindow(window),
             WindowProjection::new(window, output),
@@ -478,6 +509,7 @@ pub struct WindowFrameColors<'w, 's> {
     interactions: Query<'w, 's, (), With<WindowInteractionSession>>,
     splits: Query<'w, 's, &'static WindowSplitEdge, Without<FloatingWindow>>,
     parents: Query<'w, 's, &'static ClientToplevelParent>,
+    persistent_windows: Query<'w, 's, (), With<PersistentWindow>>,
 }
 
 impl WindowFrameColors<'_, '_> {
@@ -492,10 +524,17 @@ impl WindowFrameColors<'_, '_> {
     }
     fn palette(&self, window: Entity) -> FrameColors {
         let group_selected = self.selected_group.contains(window);
+        let focused = self.focus.entity() == Some(window) || group_selected;
+        if self.persistent_windows.contains(window) {
+            return if focused {
+                self.settings.persistent_focused
+            } else {
+                self.settings.persistent_unfocused
+            };
+        }
         if self.clients.client_entity(window).is_none() && !group_selected {
             return self.settings.placeholder;
         }
-        let focused = self.focus.entity() == Some(window) || group_selected;
         let relocated = self
             .clients
             .mapped_client(window)
@@ -602,18 +641,31 @@ fn sync_focus_style(
     }
 }
 
-#[derive(Clone, Copy, Eq, PartialEq)]
+#[derive(Component, Clone, Copy, Debug, Eq, PartialEq)]
 enum SsdContent {
     Surface(SurfaceId),
     Vacant,
 }
 
-fn spawn_ssd_scene(commands: &mut Commands, content: SsdContent, style: FrameGeometry) -> Entity {
+fn spawn_ssd_scene(
+    commands: &mut Commands,
+    content: SsdContent,
+    style: FrameGeometry,
+    window: Entity,
+    styles: &FrameStyles,
+) -> Entity {
     let root = match content {
         SsdContent::Surface(surface) => commands.spawn_scene(scene(surface, style)).id(),
-        SsdContent::Vacant => commands.spawn_scene(vacant_scene(style)).id(),
+        SsdContent::Vacant => commands
+            .spawn_scene(vacant::scene(
+                window,
+                style,
+                &styles.settings,
+                styles.persistent_windows.get(window).ok(),
+            ))
+            .id(),
     };
-    commands.entity(root).insert(style);
+    commands.entity(root).insert((style, content));
     root
 }
 
@@ -623,41 +675,10 @@ fn scene(surface: SurfaceId, style: FrameGeometry) -> impl Scene {
         SurfaceView::WindowGeometry,
         Node {
             overflow: Overflow::clip(),
-            border_radius: BorderRadius::px(
-                if style.border.header() > 0.0 || style.joined_top {
-                    0.0
-                } else {
-                    style.inner_radius()
-                },
-                if style.border.header() > 0.0 || style.joined_top {
-                    0.0
-                } else {
-                    style.inner_radius()
-                },
-                if style.round_bottom_right {
-                    style.inner_radius()
-                } else {
-                    0.0
-                },
-                if style.round_bottom_left {
-                    style.inner_radius()
-                } else {
-                    0.0
-                },
-            ),
+            border_radius: style.content_radius(),
             ..Default::default()
         },
     );
-    window_scene(content, style)
-}
-
-fn vacant_scene(style: FrameGeometry) -> impl Scene {
-    let content = bsn_list! {
-        (
-            Node { width: percent(100), height: percent(100) }
-            BackgroundColor(Color::srgb(0.10, 0.12, 0.16))
-        )
-    };
     window_scene(content, style)
 }
 
@@ -1211,6 +1232,309 @@ mod tests {
             )
             .expect("workspace setup");
         app
+    }
+
+    #[test]
+    fn persistence_respects_smart_borders_and_keeps_a_vacant_presentation() {
+        let mut app = tiled_test_app();
+        app.world_mut()
+            .resource_mut::<SsdSettings>()
+            .hide_solo_border = true;
+        app.world_mut().resource_mut::<SsdSettings>().tiled = BorderStyle::None;
+        let surface = SurfaceId::for_test(716);
+        enqueue_surface_event(app.world_mut(), role(surface, WindowDecoration::ClientSide));
+        enqueue_surface_event(app.world_mut(), frame(surface, 320, 240));
+        app.update();
+        let (client, window) = app
+            .world_mut()
+            .query::<(Entity, &OccupiesWindow)>()
+            .iter(app.world())
+            .map(|(client, slot)| (client, slot.0))
+            .next()
+            .expect("occupant");
+        app.world_mut()
+            .entity_mut(client)
+            .insert(weld_app::surface::ClientWindowMetadata(
+                weld_client::ClientSurfaceMetadata::new("preview".into(), "Game".into())
+                    .expect("metadata"),
+            ));
+        app.world_mut()
+            .trigger(weld_window::persistence::WindowPersistenceRequest {
+                window: Some(window),
+                action: weld_window::persistence::PersistenceAction::Enable(
+                    weld_window::persistence::PersistenceMatch::Auto,
+                ),
+            });
+        app.update();
+        let root = app
+            .world()
+            .get::<PrimaryWindowPresentation>(window)
+            .expect("persistent frame")
+            .entity();
+        assert_eq!(
+            app.world()
+                .get::<FrameGeometry>(root)
+                .expect("geometry")
+                .border,
+            BorderStyle::None
+        );
+        assert_eq!(
+            app.world()
+                .get::<FrameGeometry>(root)
+                .expect("geometry")
+                .radius,
+            0.0
+        );
+        let color = app
+            .world()
+            .resource::<SsdSettings>()
+            .persistent_focused
+            .child_border;
+        assert_eq!(
+            app.world().get::<BorderColor>(root),
+            Some(&BorderColor::all(color))
+        );
+        let replacement = SurfaceId::for_test(715);
+        app.world_mut()
+            .resource_mut::<SsdSettings>()
+            .hide_solo_border = false;
+        app.world_mut().resource_mut::<SsdSettings>().tiled = BorderStyle::Pixel(3);
+        app.world_mut().resource_mut::<SsdSettings>().corner_radius = 14;
+        app.update();
+        let root = app
+            .world()
+            .get::<PrimaryWindowPresentation>(window)
+            .expect("rounded frame")
+            .entity();
+        enqueue_surface_event(
+            app.world_mut(),
+            HostSurfaceEvent {
+                surface,
+                kind: HostSurfaceEventKind::Destroyed,
+            },
+        );
+        enqueue_surface_event(
+            app.world_mut(),
+            role(replacement, WindowDecoration::ClientSide),
+        );
+        enqueue_surface_event(
+            app.world_mut(),
+            HostSurfaceEvent {
+                surface: replacement,
+                kind: HostSurfaceEventKind::Metadata(
+                    weld_client::ClientSurfaceMetadata::new(
+                        "preview".into(),
+                        "Rebuilt game".into(),
+                    )
+                    .expect("metadata"),
+                ),
+            },
+        );
+        enqueue_surface_event(app.world_mut(), frame(replacement, 400, 300));
+        app.update();
+        let replacement_root = app
+            .world()
+            .get::<PrimaryWindowPresentation>(window)
+            .expect("replacement frame")
+            .entity();
+        assert_ne!(replacement_root, root);
+        assert_eq!(
+            app.world().get::<SsdContent>(replacement_root),
+            Some(&SsdContent::Surface(replacement))
+        );
+        assert!(app.world().get_entity(root).is_err());
+        enqueue_surface_event(
+            app.world_mut(),
+            HostSurfaceEvent {
+                surface: replacement,
+                kind: HostSurfaceEventKind::Destroyed,
+            },
+        );
+        app.update();
+        let root = app
+            .world()
+            .get::<PrimaryWindowPresentation>(window)
+            .expect("vacant frame")
+            .entity();
+        assert!(app.world().get::<VacantSsdPresentation>(root).is_some());
+        assert_eq!(
+            app.world().get::<Node>(root).expect("vacant root").display,
+            Display::Flex
+        );
+        let (label_entity, label, parent) = app
+            .world_mut()
+            .query::<(Entity, &bevy::prelude::Text, &bevy::ecs::hierarchy::ChildOf)>()
+            .iter(app.world())
+            .find(|(_, text, _)| text.0.contains("app_id = \"preview\""))
+            .map(|(entity, text, parent)| (entity, text.0.clone(), parent.parent()))
+            .expect("matching label");
+        assert!(label.contains("Persistent window"));
+        assert!(label.contains("Close this empty window"));
+        let background = app.world().resource::<SsdSettings>().placeholder.background;
+        assert_eq!(
+            app.world().get::<BackgroundColor>(parent),
+            Some(&BackgroundColor(background))
+        );
+        let content_node = app
+            .world()
+            .get::<Node>(parent)
+            .expect("placeholder content");
+        assert_eq!(content_node.border_radius, BorderRadius::all(px(11)));
+        assert_eq!(content_node.flex_grow, 1.0);
+        assert_eq!(content_node.flex_basis, px(0));
+        let mut font = app.world().resource::<SsdSettings>().title_font.text_font();
+        font.font_size = bevy::text::FontSize::Px(18.0);
+        assert_eq!(
+            app.world().get::<bevy::prelude::TextFont>(label_entity),
+            Some(&font)
+        );
+
+        let workspace = app
+            .world()
+            .get::<weld_window::workspace::WorkspaceMember>(window)
+            .expect("workspace")
+            .0;
+        app.world_mut()
+            .trigger(weld_window::workspace::WorkspaceRequest::SetVisible {
+                workspace,
+                visible: false,
+            });
+        app.update();
+        assert_eq!(
+            app.world().get::<Node>(root).expect("hidden root").display,
+            Display::None
+        );
+        app.world_mut()
+            .trigger(weld_window::workspace::WorkspaceRequest::SetVisible {
+                workspace,
+                visible: true,
+            });
+        app.world_mut()
+            .resource_mut::<SsdSettings>()
+            .placeholder
+            .background = Color::srgb(0.2, 0.25, 0.3);
+        app.world_mut()
+            .resource_mut::<SsdSettings>()
+            .title_font
+            .size = 19.0;
+        app.update();
+        assert_eq!(
+            app.world().get::<Node>(root).expect("visible root").display,
+            Display::Flex
+        );
+        assert_eq!(
+            app.world().get::<BackgroundColor>(parent),
+            Some(&BackgroundColor(Color::srgb(0.2, 0.25, 0.3)))
+        );
+        let font = app.world().resource::<SsdSettings>().title_font.text_font();
+        assert_eq!(
+            app.world().get::<bevy::prelude::TextFont>(label_entity),
+            Some(&font)
+        );
+        assert_eq!(
+            app.world().get::<BorderColor>(root),
+            Some(&BorderColor::all(color))
+        );
+        app.world_mut()
+            .trigger(weld_window::persistence::WindowPersistenceRequest {
+                window: Some(window),
+                action: weld_window::persistence::PersistenceAction::Disable,
+            });
+        app.update();
+        assert!(app.world().get_entity(window).is_err());
+        assert!(app.world().get_entity(root).is_err());
+    }
+
+    #[test]
+    fn persistence_toggle_notice_shows_the_rule_without_changing_focus_and_expires() {
+        use weld_window::persistence::{
+            PersistenceAction, PersistenceMatch, WindowPersistenceRequest,
+        };
+        let mut app = tiled_test_app();
+        app.world_mut().resource_mut::<SsdSettings>().corner_radius = 14;
+        let surface = SurfaceId::for_test(717);
+        enqueue_surface_event(app.world_mut(), role(surface, WindowDecoration::ServerSide));
+        enqueue_surface_event(app.world_mut(), frame(surface, 320, 240));
+        app.update();
+        let (client, window) = app
+            .world_mut()
+            .query::<(Entity, &OccupiesWindow)>()
+            .iter(app.world())
+            .map(|(client, slot)| (client, slot.0))
+            .next()
+            .expect("occupant");
+        app.world_mut()
+            .entity_mut(client)
+            .insert(weld_app::surface::ClientWindowMetadata(
+                weld_client::ClientSurfaceMetadata::new("preview".into(), "Game".into())
+                    .expect("metadata"),
+            ));
+        let focus = app.world().resource::<FocusedWindow>().entity();
+        let geometry = *app.world().get::<WindowGeometry>(window).expect("geometry");
+        for enabled in [true, false] {
+            app.world_mut().trigger(WindowPersistenceRequest {
+                window: Some(window),
+                action: PersistenceAction::Toggle(PersistenceMatch::Auto),
+            });
+            app.update();
+            assert_eq!(app.world().resource::<FocusedWindow>().entity(), focus);
+            assert_eq!(app.world().get::<WindowGeometry>(window), Some(&geometry));
+            let (notice, parent) = app.world_mut()
+                .query_filtered::<(Entity, &bevy::ecs::hierarchy::ChildOf), With<persistence_notice::PersistenceNotice>>()
+                .single(app.world()).map(|(entity, parent)| (entity, parent.parent())).expect("one notice");
+            assert_eq!(
+                parent,
+                app.world()
+                    .get::<PrimaryWindowPresentation>(window)
+                    .expect("presentation")
+                    .entity()
+            );
+            assert_eq!(app.world().get::<Pickable>(notice), Some(&Pickable::IGNORE));
+            let panel = app.world().get::<Children>(notice).expect("notice panel")[0];
+            assert_eq!(
+                app.world()
+                    .get::<Node>(panel)
+                    .expect("panel node")
+                    .border_radius,
+                BorderRadius::all(px(14)),
+            );
+            let state = if enabled { "enabled" } else { "disabled" };
+            assert!(
+                app.world_mut()
+                    .query::<&bevy::prelude::Text>()
+                    .iter(app.world())
+                    .any(|text| text.0
+                        == format!("Persistent window {state}\n\napp_id = \"preview\""))
+            );
+        }
+        for mut notice in app
+            .world_mut()
+            .query::<&mut persistence_notice::PersistenceNotice>()
+            .iter_mut(app.world_mut())
+        {
+            notice.expires = std::time::Instant::now();
+        }
+        app.update();
+        assert_eq!(
+            app.world_mut()
+                .query::<&persistence_notice::PersistenceNotice>()
+                .iter(app.world())
+                .count(),
+            0
+        );
+        app.world_mut().trigger(WindowPersistenceRequest {
+            window: Some(window),
+            action: PersistenceAction::Enable(PersistenceMatch::Auto),
+        });
+        app.update();
+        assert_eq!(
+            app.world_mut()
+                .query::<&persistence_notice::PersistenceNotice>()
+                .iter(app.world())
+                .count(),
+            0,
+            "config enable leaves the desktop quiet"
+        );
     }
 
     #[test]

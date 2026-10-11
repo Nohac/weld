@@ -9,11 +9,12 @@ const PROFILE_TARGET: &str = "weld_profile";
 mod activity;
 
 pub mod fullscreen;
+pub mod persistence;
 pub mod pointer;
 pub mod workspace;
 pub mod workspace_protocol;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use bevy::{
     app::{App, Plugin, PreUpdate},
@@ -619,7 +620,8 @@ pub enum WindowCommandKind {
     BeginInteraction(WindowInteractionKind),
     Focus,
     ClearFocus,
-    CloseOccupant,
+    /// Request client close, or remove an empty persistent slot.
+    Close,
     DetachOccupant,
     EndInteraction,
     RemoveWindow,
@@ -878,6 +880,8 @@ pub struct WindowPlugin;
 impl Plugin for WindowPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<WindowRegistry>()
+            .add_message::<persistence::WindowPersistenceToggled>()
+            .add_observer(persistence::request)
             .init_resource::<activity::PublishedActivity>()
             .init_resource::<workspace::WorkspaceIds>()
             .init_resource::<workspace::FocusedWorkspace>()
@@ -1117,13 +1121,23 @@ fn admit_mapped_toplevels(
     mut commands: Commands,
     mut registry: ResMut<WindowRegistry>,
     surfaces: UnclaimedToplevels,
+    persistent_windows: persistence::PersistenceAdmission,
 ) {
     let _admission_span =
         tracing::trace_span!(target: PROFILE_TARGET, "weld_window_admit_mapped_toplevels")
             .entered();
     let mut unclaimed = surfaces.iter().collect::<Vec<_>>();
     unclaimed.sort_unstable_by_key(|(_, toplevel, _)| toplevel.surface);
-    for (surface_entity, _, mapped) in unclaimed {
+    let mut reserved = HashSet::new();
+    for (surface_entity, toplevel, mapped) in unclaimed {
+        if let Some(window) =
+            persistent_windows.take_match(surface_entity, toplevel.surface.source(), &mut reserved)
+        {
+            commands
+                .entity(surface_entity)
+                .insert(OccupiesWindow(window));
+            continue;
+        }
         let managed = registry.allocate();
         let id = managed.id;
         let window = commands
@@ -1315,10 +1329,17 @@ fn reconcile_window_sizes(
     }
 }
 
-fn remove_unretained_vacancies(
-    mut commands: Commands,
-    windows: Query<(Entity, &WindowVacancy), Without<WindowOccupant>>,
-) {
+type UnretainedVacancies<'w, 's> = Query<
+    'w,
+    's,
+    (Entity, &'static WindowVacancy),
+    (
+        Without<WindowOccupant>,
+        Without<persistence::PersistentWindow>,
+    ),
+>;
+
+fn remove_unretained_vacancies(mut commands: Commands, windows: UnretainedVacancies) {
     for (window, vacancy) in &windows {
         if *vacancy == WindowVacancy::Remove {
             commands.entity(window).despawn();
@@ -1344,6 +1365,8 @@ struct ApplyWindowCommandParams<'w, 's> {
     focus: ResMut<'w, FocusedWindow>,
     applied_focus: ResMut<'w, AppliedClientFocus>,
     actions: ResMut<'w, SurfaceActionQueue>,
+    vacant_persistent_windows: persistence::AvailablePersistentWindows<'w, 's>,
+    redraw: bevy::ecs::message::MessageWriter<'w, RequestRedraw>,
 }
 
 fn apply_window_command(command: On<WindowCommand>, params: ApplyWindowCommandParams) {
@@ -1354,6 +1377,8 @@ fn apply_window_command(command: On<WindowCommand>, params: ApplyWindowCommandPa
         mut focus,
         mut applied_focus,
         mut actions,
+        vacant_persistent_windows,
+        mut redraw,
     } = params;
     let window = command.window;
     match command.kind {
@@ -1382,11 +1407,14 @@ fn apply_window_command(command: On<WindowCommand>, params: ApplyWindowCommandPa
                 });
             }
         }
-        WindowCommandKind::CloseOccupant => {
+        WindowCommandKind::Close => {
             if let Some(client) = clients.mapped_client(window) {
                 actions.push(SurfaceAction::Close {
                     surface: client.surface(),
                 });
+            } else if vacant_persistent_windows.contains(window) {
+                commands.entity(window).despawn();
+                redraw.write(RequestRedraw);
             }
         }
         WindowCommandKind::DetachOccupant => {

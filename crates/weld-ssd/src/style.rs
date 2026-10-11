@@ -4,6 +4,7 @@ use bevy::{
     color::Color,
     ecs::{component::Component, event::Event, resource::Resource},
     text::{FontSource, FontStyle, FontWeight, FontWidth, TextFont},
+    ui::BorderRadius,
 };
 use weld_window::{PresentationInsets, ServerFrameRequested};
 
@@ -90,6 +91,8 @@ pub struct SsdSettings {
     pub focused_inactive: FrameColors,
     pub unfocused: FrameColors,
     pub placeholder: FrameColors,
+    pub persistent_focused: FrameColors,
+    pub persistent_unfocused: FrameColors,
     pub relocated_focused: FrameColors,
     pub relocated_unfocused: FrameColors,
 }
@@ -106,6 +109,11 @@ impl Default for SsdSettings {
             focused_inactive: FrameColors::from_border(super::UNFOCUSED_BORDER),
             unfocused: FrameColors::from_border(super::UNFOCUSED_BORDER),
             placeholder: FrameColors::from_border(super::UNFOCUSED_BORDER),
+            persistent_focused: FrameColors {
+                indicator: Color::srgb(0.8, 1.0, 0.95),
+                ..FrameColors::from_border(Color::srgb(0.18, 0.83, 0.75))
+            },
+            persistent_unfocused: FrameColors::from_border(Color::srgb(0.08, 0.48, 0.43)),
             relocated_focused: FrameColors::from_border(super::RELOCATED_FOCUSED_BORDER),
             relocated_unfocused: FrameColors::from_border(super::RELOCATED_UNFOCUSED_BORDER),
         }
@@ -189,5 +197,27 @@ impl FrameGeometry {
     }
     pub fn inner_radius(self) -> f32 {
         (self.radius - self.border.width()).max(0.0)
+    }
+
+    pub fn content_radius(self) -> BorderRadius {
+        let top = if self.border.header() > 0.0 || self.joined_top {
+            0.0
+        } else {
+            self.inner_radius()
+        };
+        BorderRadius::px(
+            top,
+            top,
+            if self.round_bottom_right {
+                self.inner_radius()
+            } else {
+                0.0
+            },
+            if self.round_bottom_left {
+                self.inner_radius()
+            } else {
+                0.0
+            },
+        )
     }
 }

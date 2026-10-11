@@ -34,6 +34,7 @@ use weld_app::{
         MappedSurface, SurfaceAlphaMode, SurfaceView,
     },
 };
+use weld_window::persistence::PersistentWindow;
 use weld_window::{
     ManagedWindow, PresentationInsets, PresentationOffset, PresentsWindow,
     PrimaryWindowPresentation, ServerFrameRequested, WindowClientResolver, WindowGeometry,
@@ -82,6 +83,7 @@ pub struct WindowFramePolicy<'w, 's> {
 type FrameRequested = Or<(
     With<ServerFrameRequested>,
     With<weld_window::WindowGroupHeader>,
+    With<PersistentWindow>,
 )>;
 
 impl WindowFramePolicy<'_, '_> {
@@ -392,6 +394,7 @@ type WindowRootStateQuery<'w, 's> = Query<
         &'static WindowVacancy,
         Option<&'static WindowOccupant>,
         Has<FullscreenOccluded>,
+        Has<PersistentWindow>,
     ),
 >;
 
@@ -417,7 +420,7 @@ fn sync_window_roots(
 ) {
     let mut changed = false;
     for (projection, offset, mut z_index, mut node) in &mut roots {
-        let Ok((geometry, home, visibility, window_z, vacancy, occupant, occluded)) =
+        let Ok((geometry, home, visibility, window_z, vacancy, occupant, occluded, persistent)) =
             windows.get(projection.window())
         else {
             continue;
@@ -428,11 +431,14 @@ fn sync_window_roots(
         ) else {
             continue;
         };
-        let presentable = occupant.map_or(*vacancy == WindowVacancy::Retain, |occupant| {
-            occupants
-                .get(occupant.entity())
-                .is_ok_and(|mapped| mapped.is_some())
-        });
+        let presentable = occupant.map_or(
+            *vacancy == WindowVacancy::Retain || persistent,
+            |occupant| {
+                occupants
+                    .get(occupant.entity())
+                    .is_ok_and(|mapped| mapped.is_some())
+            },
+        );
         let allowed = visibility_policy
             .fullscreen
             .get(projection.output())

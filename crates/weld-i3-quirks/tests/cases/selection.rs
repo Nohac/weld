@@ -501,7 +501,7 @@ fn close_targets_every_leaf_of_the_selected_group_but_not_its_neighbor() {
     let (mut app, first, second, third, _) = nested();
     app.init_resource::<Closed>();
     app.add_observer(|event: On<WindowCommand>, mut closed: ResMut<Closed>| {
-        if event.kind == WindowCommandKind::CloseOccupant {
+        if event.kind == WindowCommandKind::Close {
             closed.0.push(event.window);
         }
     });

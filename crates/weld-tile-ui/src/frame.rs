@@ -138,11 +138,7 @@ pub(super) fn reconcile(
                 container,
                 geometry: geometry.0,
                 camera,
-                colors: if tree.contains_focus(container) {
-                    tree.style.focused
-                } else {
-                    tree.style.unfocused
-                },
+                colors: tree.colors(container, tree.contains_focus(container), false),
                 width: if edge_to_edge {
                     0.0
                 } else {

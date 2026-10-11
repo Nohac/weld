@@ -381,6 +381,14 @@ fn dispatch_action(
             .commands
             .trigger(weld_i3_quirks::I3StickyRequest(enabled)),
         Action::Border(style) => effects.commands.trigger(BorderRequest(style)),
+        Action::Persistent(action) => {
+            effects
+                .commands
+                .trigger(weld_window::persistence::WindowPersistenceRequest {
+                    window: None,
+                    action,
+                })
+        }
         Action::Fullscreen(action) => effects.commands.trigger(FullscreenRequest {
             window: None,
             action,

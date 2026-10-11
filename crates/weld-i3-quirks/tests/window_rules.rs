@@ -13,7 +13,7 @@ use weld_app::{
         MappedSurface, SurfaceAction, SurfaceActionQueue, SurfaceId, take_surface_actions,
     },
 };
-use weld_client::{ClientSurfaceMetadata, ToplevelHints, ToplevelKind};
+use weld_client::{ClientId, ClientSourceId, ClientSurfaceMetadata, ToplevelHints, ToplevelKind};
 use weld_float::FloatBehaviorPlugin;
 use weld_i3_quirks::{
     I3QuirksPlugin,
@@ -22,11 +22,275 @@ use weld_i3_quirks::{
 };
 use weld_ssd::{BorderStyle, WindowBorderStyle};
 use weld_tile::{TileParent, TilePlugin, TileSettings};
+use weld_window::persistence::{
+    PersistenceAction, PersistenceMatch, PersistentWindow, WindowPersistenceRequest,
+};
 use weld_window::{
     FloatingWindow, FocusedWindow, OccupiesWindow, WindowCommand, WindowCommandKind,
     WindowGeometry, WindowPlugin, WindowVisibility,
     workspace::{FocusedWorkspace, Workspace, WorkspaceMember},
 };
+
+#[test]
+fn persistence_rule_retains_slot_geometry_and_workspace_then_rebinds_a_new_occupant() {
+    let mut app = app(indoc! {r#"
+        for_window [app_id="^preview$"] weld persistent enable
+    "#});
+    let original = client(
+        &mut app,
+        700,
+        "preview",
+        "First build",
+        ToplevelKind::Normal,
+    );
+    app.update();
+    let slot = window(&app, original);
+    let neighbor = client(&mut app, 701, "terminal", "Terminal", ToplevelKind::Normal);
+    app.update();
+    let neighbor = window(&app, neighbor);
+    let geometry = *app.world().get::<WindowGeometry>(slot).expect("geometry");
+    let parent = app
+        .world()
+        .get::<TileParent>(slot)
+        .expect("parent")
+        .entity();
+    let member = app
+        .world()
+        .get::<WorkspaceMember>(slot)
+        .expect("workspace")
+        .0;
+    app.world_mut().despawn(original);
+    app.update();
+    assert!(app.world().get::<PersistentWindow>(slot).is_some());
+    assert!(
+        app.world()
+            .get::<weld_window::WindowOccupant>(slot)
+            .is_none()
+    );
+    assert_eq!(app.world().get::<WindowGeometry>(slot), Some(&geometry));
+    assert!(app.world().get_entity(neighbor).is_ok());
+
+    app.world_mut()
+        .trigger(I3WorkspaceRequest::Switch(WorkspaceTarget::Name(
+            "2".into(),
+        )));
+    app.update();
+    let replacement = client(
+        &mut app,
+        702,
+        "preview",
+        "Second build",
+        ToplevelKind::Normal,
+    );
+    app.update();
+    assert_eq!(window(&app, replacement), slot);
+    assert_eq!(app.world().get::<WindowGeometry>(slot), Some(&geometry));
+    assert_eq!(
+        app.world()
+            .get::<TileParent>(slot)
+            .expect("parent")
+            .entity(),
+        parent
+    );
+    assert_eq!(
+        app.world()
+            .get::<WorkspaceMember>(slot)
+            .expect("workspace")
+            .0,
+        member
+    );
+    assert_ne!(
+        app.world().resource::<FocusedWorkspace>().entity(),
+        Some(member)
+    );
+    assert_eq!(
+        app.world().get::<WindowVisibility>(slot),
+        Some(&WindowVisibility::Hidden)
+    );
+
+    app.world_mut().trigger(WindowPersistenceRequest {
+        window: Some(slot),
+        action: PersistenceAction::Disable,
+    });
+    app.update();
+    assert!(app.world().get::<PersistentWindow>(slot).is_none());
+    assert_eq!(window(&app, replacement), slot);
+    app.world_mut().despawn(replacement);
+    app.update();
+    assert!(app.world().get_entity(slot).is_err());
+}
+
+#[test]
+fn persistence_matching_reserves_each_vacant_slot_once_and_skips_special_or_held_windows() {
+    let mut app = app("");
+    let first = client(&mut app, 710, "preview.+", "First", ToplevelKind::Normal);
+    let second = client(&mut app, 711, "preview.+", "Second", ToplevelKind::Normal);
+    app.update();
+    let slots = [window(&app, first), window(&app, second)];
+    for slot in slots {
+        app.world_mut().trigger(WindowPersistenceRequest {
+            window: Some(slot),
+            action: PersistenceAction::Enable(PersistenceMatch::Auto),
+        });
+    }
+    app.world_mut().despawn(first);
+    app.world_mut().despawn(second);
+    app.update();
+    let wrong_id = client(&mut app, 712, "preview123", "Other", ToplevelKind::Normal);
+    let splash = client(&mut app, 713, "preview.+", "Loading", ToplevelKind::Splash);
+    let held = client(&mut app, 714, "preview.+", "Held", ToplevelKind::Normal);
+    app.world_mut()
+        .entity_mut(held)
+        .insert(weld_window::WindowAdmissionHold);
+    let remote = client(&mut app, 718, "preview.+", "Remote", ToplevelKind::Normal);
+    let remote_source = ClientSourceId::new(8);
+    app.world_mut().entity_mut(remote).insert((
+        ClientToplevel {
+            surface: SurfaceId::new(ClientId::new(remote_source, 1), 1),
+        },
+        ClientSource {
+            id: remote_source,
+            provenance: ClientProvenance::Relocated,
+        },
+    ));
+    app.update();
+    assert!(!slots.contains(&window(&app, wrong_id)));
+    assert!(!slots.contains(&window(&app, splash)));
+    assert!(!slots.contains(&window(&app, remote)));
+    assert!(app.world().get::<OccupiesWindow>(held).is_none());
+    for slot in slots {
+        assert!(
+            app.world()
+                .get::<weld_window::WindowOccupant>(slot)
+                .is_none()
+        );
+    }
+    let replacements = [
+        client(
+            &mut app,
+            715,
+            "preview.+",
+            "New first",
+            ToplevelKind::Normal,
+        ),
+        client(
+            &mut app,
+            716,
+            "preview.+",
+            "New second",
+            ToplevelKind::Normal,
+        ),
+        client(&mut app, 717, "preview.+", "Extra", ToplevelKind::Normal),
+    ];
+    app.update();
+    assert_eq!(window(&app, replacements[0]), slots[0]);
+    assert_eq!(window(&app, replacements[1]), slots[1]);
+    assert!(!slots.contains(&window(&app, replacements[2])));
+    app.world_mut().despawn(replacements[0]);
+    app.update();
+    app.world_mut().trigger(WindowPersistenceRequest {
+        window: Some(slots[0]),
+        action: PersistenceAction::Toggle(PersistenceMatch::Auto),
+    });
+    app.update();
+    assert!(app.world().get_entity(slots[0]).is_err());
+}
+
+#[test]
+fn title_persistence_is_stable_through_metadata_changes_and_config_reload() {
+    let source = "for_window [app_id=preview] weld persistent enable title";
+    let mut app = app(source);
+    let original = client(&mut app, 720, "preview", "Game", ToplevelKind::Normal);
+    app.update();
+    let slot = window(&app, original);
+    app.world_mut()
+        .entity_mut(original)
+        .insert(metadata("preview", "Game - paused"));
+    app.insert_resource(config(source).window_rules);
+    app.update();
+    app.world_mut().despawn(original);
+    app.update();
+    let wrong_title = client(&mut app, 721, "preview", "Editor", ToplevelKind::Normal);
+    let replacement = client(&mut app, 722, "preview", "Game", ToplevelKind::Normal);
+    app.update();
+    assert_ne!(window(&app, wrong_title), slot);
+    assert_eq!(window(&app, replacement), slot);
+}
+
+#[test]
+fn automatic_x11_persistence_matches_class_and_instance_without_matching_native_app_id() {
+    let mut app = app("");
+    let original = client(&mut app, 730, "Editor", "Document", ToplevelKind::Normal);
+    let x11 = |instance: &str| {
+        ClientWindowMetadata(ClientSurfaceMetadata::truncated_x11(
+            "Editor".into(),
+            instance.into(),
+            "Document".into(),
+        ))
+    };
+    app.world_mut().entity_mut(original).insert(x11("preview"));
+    app.update();
+    let slot = window(&app, original);
+    app.world_mut().trigger(WindowPersistenceRequest {
+        window: None,
+        action: PersistenceAction::Toggle(PersistenceMatch::Auto),
+    });
+    app.world_mut().despawn(original);
+    app.update();
+    let native = client(&mut app, 731, "Editor", "Document", ToplevelKind::Normal);
+    let other_instance = client(&mut app, 732, "Editor", "Document", ToplevelKind::Normal);
+    app.world_mut()
+        .entity_mut(other_instance)
+        .insert(x11("settings"));
+    let replacement = client(&mut app, 733, "Editor", "Document", ToplevelKind::Normal);
+    app.world_mut()
+        .entity_mut(replacement)
+        .insert(x11("preview"));
+    app.update();
+    assert_ne!(window(&app, native), slot);
+    assert_ne!(window(&app, other_instance), slot);
+    assert_eq!(window(&app, replacement), slot);
+}
+
+#[test]
+fn close_requests_exit_then_removes_only_the_empty_persistent_slot() {
+    let mut app = app("for_window [app_id=preview] weld persistent enable");
+    let original = client(&mut app, 740, "preview", "Game", ToplevelKind::Normal);
+    app.update();
+    let slot = window(&app, original);
+    take_surface_actions(app.world_mut());
+    for _ in 0..2 {
+        app.world_mut().trigger(WindowCommand {
+            window: slot,
+            kind: WindowCommandKind::Close,
+        });
+    }
+    app.update();
+    assert!(app.world().get::<PersistentWindow>(slot).is_some());
+    assert_eq!(window(&app, original), slot);
+    assert!(take_surface_actions(app.world_mut()).iter().any(|action| matches!(action, SurfaceAction::Close { surface } if *surface == SurfaceId::for_test(740))));
+    app.world_mut().despawn(original);
+    app.update();
+    let owner = app.world_mut().spawn_empty().id();
+    app.world_mut()
+        .entity_mut(slot)
+        .insert(weld_window::WindowPresentationOverride::new(owner));
+    app.world_mut().trigger(WindowCommand {
+        window: slot,
+        kind: WindowCommandKind::Close,
+    });
+    app.update();
+    assert!(app.world().get_entity(slot).is_ok());
+    app.world_mut()
+        .entity_mut(slot)
+        .remove::<weld_window::WindowPresentationOverride>();
+    app.world_mut().trigger(WindowCommand {
+        window: slot,
+        kind: WindowCommandKind::Close,
+    });
+    app.update();
+    assert!(app.world().get_entity(slot).is_err());
+}
 
 fn config(source: &str) -> Configuration {
     config::parse_with_extensions("fixture", source, |_| Err(config::unsupported("command")))

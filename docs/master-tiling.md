@@ -198,8 +198,9 @@ adaptive sync are reported as unsupported while scale on the same line applies.
   removes chrome, shadow and resize hit areas. Modifier-based floating controls
   remain available. An omitted width uses 3 pixels.
 - `corner_radius N`, 0..64 logical pixels, applies to decorated frames.
-- `client.focused`, `client.unfocused`, `client.focused_inactive` and
-  `client.placeholder` accept three to five `#RRGGBB`/`#RRGGBBAA` colors: border,
+- `client.focused`, `client.unfocused`, `client.focused_inactive`,
+  `client.placeholder`, `client.persistent_focused` and
+  `client.persistent_unfocused` accept three to five `#RRGGBB`/`#RRGGBBAA` colors: border,
   background, text, indicator and child border. Omitted indicator/child-border
   colors use the border and background colors respectively. Normal frames use the first
   color on the upper border and child-border color elsewhere; pixel frames
@@ -264,10 +265,12 @@ adaptive sync are reported as unsupported while scale on the same line applies.
   the active name and `swaymsg -t get_binding_modes` lists configured modes.
 - Weld-specific commands use the existing command grammar: `weld hoist`,
   `weld output-debug`, and `weld scale increase|decrease|physical`. Scale bindings
-  are registered only on DRM. Persistent-window matching is not yet exposed.
+  are registered only on DRM. `weld persistent enable|disable|toggle [identifier]`
+  controls [persistent windows](#persistent-windows).
 
 - `for_window [CRITERIA] COMMAND[, COMMAND...]` applies ordered commands to the
-  matching window. Supported actions are `border normal|pixel [N]|none`,
+  matching window. Supported actions are `weld persistent enable [identifier]`,
+  `weld persistent disable`, `border normal|pixel [N]|none`,
   `floating enable|disable`, `move [container|window] to workspace [number] NAME`,
   `move workspace [number] NAME`, and `move absolute position X Y`.
   Absolute positions use logical output-layout coordinates and apply to floating
@@ -483,9 +486,44 @@ leaf swap as a native primitive; Master's Sway `move` bindings use the i3
 policy instead. Resized shares follow same-parent reordering, cross-parent arrivals
 receive the mean existing share, and flattening preserves internal proportions.
 
+## Persistent windows
+
+```sway
+bindsym $mod+Shift+i weld persistent toggle
+for_window [app_id="^game-preview$"] weld persistent enable
+client.persistent_focused   #2dd4bf #134e4a #f0fdfa #ccfbf1 #2dd4bf
+client.persistent_unfocused #0f766e #132b29 #99f6e4 #5eead4 #0f766e
+```
+
+Enabling captures the current occupant's identity. The optional selector is
+`auto` (default), `app_id`, `class`, `instance`, or `title`. Automatic capture
+prefers native app ID or X11 class plus instance, then falls back to title.
+Replacement uses exact captured values; `for_window` keeps its usual regex
+criteria for deciding which apps initially become persistent. Repeated enable
+preserves the original capture across title changes and config reloads.
+
+Closing the app keeps its window ID, workspace, tile position or floating
+geometry. A replacement from the same source, with the same toplevel kind and
+parented status, occupies the oldest available matching slot. Occupied,
+presentation-overridden and admission-held candidates remain unavailable.
+Closing an empty persistent slot removes it. Disabling persistence restores
+ordinary vacancy cleanup. A hoisted persistent app that closes returns its
+source slot to the matching placeholder.
+
+Empty slots show a solid `client.placeholder` background, the captured match
+and a close hint. Placeholder text uses the configured font with an 18-logical-
+pixel minimum. Interactive toggles show a centered, input-transparent notice
+with the state and match for 1.5 seconds; its corners follow `corner_radius`.
+Config enable/disable rules apply quietly. Persistent palettes cover leaf
+frames, group headers and the active group's frame. Smart borders, gaps and
+solo-window corner suppression continue to apply.
+
+Retention lasts for the running Weld session. Config rules reapply at startup;
+saved layout restoration across Weld restarts is a future slice.
+
 ## Deliberate boundaries
 
-Resize-increment/aspect hints, persistent matching and broader Sway
+Resize-increment/aspect hints, restart layout restoration and broader Sway
 IPC remain follow-up slices. Popups keep the existing presentation path rather
 than becoming tiling leaves. Declared transient toplevels float and center over
 their parent's geometry. Unparented dialog, splash, utility and toolbar windows,

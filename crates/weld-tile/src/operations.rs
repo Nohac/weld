@@ -303,7 +303,7 @@ pub(crate) fn apply_request(
                 } else {
                     editor.commands.trigger(WindowCommand {
                         window: node,
-                        kind: WindowCommandKind::CloseOccupant,
+                        kind: WindowCommandKind::Close,
                     });
                 }
             }

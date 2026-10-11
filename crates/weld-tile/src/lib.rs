@@ -294,7 +294,7 @@ pub struct TileCommand {
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum TileOperation {
-    /// Requests client close without removing a retained window slot.
+    /// Requests client close, or removes an empty persistent slot.
     Close,
     /// Wrap the selected node for the next admission, or orient its sole-child
     /// parent. Selecting the workspace root changes its orientation directly.

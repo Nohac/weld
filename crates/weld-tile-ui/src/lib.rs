@@ -37,6 +37,7 @@ use weld_ssd::{FrameColors, SsdSettings};
 use weld_tile::{
     TileContainer, TileFocusHistory, TileGeometry, TileHeaders, TileLayout, TileParent,
 };
+use weld_window::persistence::PersistentWindow;
 use weld_window::{
     FocusedWindow, WindowClientResolver, WindowGeometry, WindowGroupSelected, WindowInSoloFrame,
     WindowIntent, WindowIntentKind, WindowInteractionSession, WindowOccupant, WindowSystems,
@@ -194,9 +195,28 @@ struct HeaderTree<'w, 's> {
     style: Res<'w, SsdSettings>,
     solo: Query<'w, 's, (), With<WindowInSoloFrame>>,
     selected: Query<'w, 's, (), With<WindowGroupSelected>>,
+    persistent_windows: Query<'w, 's, &'static PersistentWindow>,
 }
 
 impl HeaderTree<'_, '_> {
+    fn colors(&self, node: Entity, focused: bool, active: bool) -> FrameColors {
+        if self
+            .leaf(node)
+            .is_some_and(|leaf| self.persistent_windows.contains(leaf))
+        {
+            if focused {
+                self.style.persistent_focused
+            } else {
+                self.style.persistent_unfocused
+            }
+        } else if focused {
+            self.style.focused
+        } else if active {
+            self.style.focused_inactive
+        } else {
+            self.style.unfocused
+        }
+    }
     fn edge_to_edge(&self, node: Entity) -> bool {
         self.style.hide_solo_border
             && self
@@ -296,6 +316,12 @@ impl HeaderTree<'_, '_> {
                         title.chars().take(256).collect::<String>()
                     })
                     .filter(|title| !title.is_empty())
+                    .or_else(|| {
+                        self.persistent_windows
+                            .get(node)
+                            .ok()
+                            .map(|persistence| persistence.label().to_owned())
+                    })
                     .unwrap_or_else(|| "Window".into());
             }
         }
@@ -329,6 +355,7 @@ type HeaderChanges = Or<(
     Changed<WindowGroupSelected>,
     Changed<WindowInteractionSession>,
     Changed<WindowInSoloFrame>,
+    Changed<PersistentWindow>,
 )>;
 
 #[derive(SystemParam)]
@@ -342,6 +369,7 @@ struct Invalidations<'w, 's> {
     selected: RemovedComponents<'w, 's, WindowGroupSelected>,
     interactions: RemovedComponents<'w, 's, WindowInteractionSession>,
     solo: RemovedComponents<'w, 's, WindowInSoloFrame>,
+    persistent_windows: RemovedComponents<'w, 's, PersistentWindow>,
 }
 
 impl Invalidations<'_, '_> {
@@ -354,6 +382,7 @@ impl Invalidations<'_, '_> {
             + self.selected.read().count()
             + self.interactions.read().count()
             + self.solo.read().count();
+        let removed = removed + self.persistent_windows.read().count();
         removed != 0 || !self.changed.is_empty()
     }
 }
@@ -395,17 +424,11 @@ fn reconcile(
             let group_selected = tree
                 .leaf(header.child)
                 .is_some_and(|window| tree.selected.contains(window));
-            let colors = if group_selected {
-                tree.style.focused
-            } else if header.selected {
-                if tree.contains_focus(header.child) {
-                    tree.style.focused
-                } else {
-                    tree.style.focused_inactive
-                }
-            } else {
-                tree.style.unfocused
-            };
+            let colors = tree.colors(
+                header.child,
+                group_selected || (header.selected && tree.contains_focus(header.child)),
+                header.selected,
+            );
             desired.insert(
                 HeaderTarget {
                     container,
