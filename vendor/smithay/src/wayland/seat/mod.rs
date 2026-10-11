@@ -195,6 +195,16 @@ impl<D: SeatHandler + 'static> Seat<D> {
             .map(|arc| Self { arc })
     }
 
+    /// Retrieve the advertised seat that this resource was bound from.
+    ///
+    /// Data-control clients manage the named seat's selections even when
+    /// [`SeatHandler::bind_seat`] assigns application-specific input contexts.
+    pub fn global_from_resource(seat: &WlSeat) -> Option<Self> {
+        seat.data::<SeatUserData<D>>().map(|data| Self {
+            arc: data.global_arc.clone(),
+        })
+    }
+
     /// Retrieves [`WlSeat`] resources for a given client
     pub fn client_seats(&self, client: &Client) -> Vec<WlSeat> {
         self.arc
@@ -217,6 +227,7 @@ impl<D: SeatHandler + 'static> Seat<D> {
 /// User data for seat
 pub struct SeatUserData<D: SeatHandler> {
     arc: Arc<SeatRc<D>>,
+    global_arc: Arc<SeatRc<D>>,
 }
 
 impl<D: SeatHandler> fmt::Debug for SeatUserData<D> {
@@ -342,6 +353,7 @@ where
         );
         let data = SeatUserData {
             arc: seat.arc.clone(),
+            global_arc: self.arc.clone(),
         };
 
         let resource = data_init.init(resource, data);

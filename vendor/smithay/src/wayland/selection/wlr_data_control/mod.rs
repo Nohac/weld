@@ -214,7 +214,7 @@ mod handlers {
                     data_init.init(id, DataControlSourceUserData::new(dh.clone()));
                 }
                 zwlr_data_control_manager_v1::Request::GetDataDevice { id, seat: wl_seat } => {
-                    match Seat::<D>::from_resource(&wl_seat) {
+                    match Seat::<D>::global_from_resource(&wl_seat) {
                         Some(seat) => {
                             seat.user_data()
                                 .insert_if_missing(|| RefCell::new(SeatData::<D::SelectionUserData>::new()));

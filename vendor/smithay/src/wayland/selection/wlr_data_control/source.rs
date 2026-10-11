@@ -70,7 +70,7 @@ where
             .used_sources
             .remove(source)
             .as_ref()
-            .and_then(Seat::<D>::from_resource)
+            .and_then(Seat::<D>::global_from_resource)
         {
             Some(seat) => seat,
             None => return,

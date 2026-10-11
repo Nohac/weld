@@ -38,7 +38,7 @@ where
         dh: &DisplayHandle,
         _: &mut wayland_server::DataInit<'_, D>,
     ) {
-        let seat = match Seat::<D>::from_resource(&self.wl_seat) {
+        let seat = match Seat::<D>::global_from_resource(&self.wl_seat) {
             Some(seat) => seat,
             None => return,
         };
@@ -137,7 +137,7 @@ where
         _client: wayland_server::backend::ClientId,
         resource: &ExtDataControlDeviceV1,
     ) {
-        if let Some(seat) = Seat::<D>::from_resource(&self.wl_seat) {
+        if let Some(seat) = Seat::<D>::global_from_resource(&self.wl_seat) {
             if let Some(seat_data) = seat.user_data().get::<RefCell<SeatData<D::SelectionUserData>>>() {
                 seat_data.borrow_mut().retain_devices(|ndd| match ndd {
                     SelectionDevice::ExtDataControl(ndd) => ndd != resource,
