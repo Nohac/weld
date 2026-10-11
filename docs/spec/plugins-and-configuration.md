@@ -81,6 +81,10 @@ Remote app discovery and launch are part of the authenticated
 [launcher federation](remote-hoisting.md#launcher-federation--direction), not
 an implicit extension of local administrative IPC.
 
+[Window access](window-access.md) describes scoped control sessions, native
+launch/control operations, emergency revocation and an MCP adapter over those
+same authorized operations.
+
 ## Window-property inspection and rule authoring — Exploration
 
 Make the properties used for matching discoverable through both local tooling

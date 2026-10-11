@@ -35,6 +35,7 @@ bounded implementation sequence for shared budgets and adaptive bitrate.
 | [Core runtime](core-runtime.md) | Host loop, application lifecycle, and ownership boundaries |
 | [Surfaces and input](surfaces-and-input.md) | Wayland surface roles, seats, focus delivery, and input |
 | [Window management](window-management.md) | ECS frames, persistence, floating and tiling policy, and compatibility |
+| [Window access](window-access.md) | Scoped agent/guest control, authorized launch, persistent-slot access, peek and emergency revocation |
 | [Rendering](rendering.md) | Composition, buffer import, frame pacing, and display features |
 | [Plugins and configuration](plugins-and-configuration.md) | Extension API, reloadable policy, configuration, and IPC |
 | [Identity and meshes](identity-and-meshes.md) | Device trust, mesh membership, resource grants, wallet administration, and recovery |
