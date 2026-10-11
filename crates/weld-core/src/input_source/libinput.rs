@@ -1,5 +1,7 @@
 //! Libinput source for the backend-neutral raw input stream.
 
+mod settings;
+
 use smithay::backend::{
     input::{
         AbsolutePositionEvent, Axis, AxisSource, ButtonState, Event, GestureBeginEvent,
@@ -8,8 +10,7 @@ use smithay::backend::{
     },
     libinput::LibinputInputBackend,
 };
-use smithay::reexports::input::{ClickMethod, ClickfingerButtonMap, Device, TapButtonMap};
-use tracing::{debug, trace, warn};
+use tracing::trace;
 
 use crate::input::{
     ButtonState as WeldButtonState, InputDelta, InputPosition, KeyboardKeyState, LinuxButtonCode,
@@ -20,6 +21,7 @@ use crate::input::{
 use crate::output::OutputTopology;
 
 pub struct LibinputAdapter {
+    devices: settings::PointerDevices,
     topology: OutputTopology,
     pointer: InputPosition,
     finger_axes: ActiveScrollAxes,
@@ -37,12 +39,17 @@ impl LibinputAdapter {
     pub fn new(topology: OutputTopology) -> Self {
         let pointer = topology.primary_position(0.5, 0.5);
         Self {
+            devices: settings::PointerDevices::default(),
             topology,
             pointer,
             finger_axes: ActiveScrollAxes::default(),
             active_gesture: ActiveGesture::default(),
             last_event_time_msec: 0,
         }
+    }
+
+    pub fn configure_devices(&mut self, settings: weld_input::PointerDeviceSettings) {
+        self.devices.configure(settings);
     }
 
     pub fn initial_event(&self) -> RawSeatEvent {
@@ -60,8 +67,12 @@ impl LibinputAdapter {
         event: InputEvent<LibinputInputBackend>,
     ) -> [Option<RawSeatEvent>; 2] {
         let converted = match event {
-            InputEvent::DeviceAdded { mut device } => {
-                configure_pointer_device(&mut device);
+            InputEvent::DeviceAdded { device } => {
+                self.devices.add(device);
+                empty_batch()
+            }
+            InputEvent::DeviceRemoved { device } => {
+                self.devices.remove(&device);
                 empty_batch()
             }
             InputEvent::Keyboard { event, .. } => {
@@ -396,83 +407,9 @@ const fn single_event(event: Option<RawSeatEvent>) -> [Option<RawSeatEvent>; 2] 
     [event, None]
 }
 
-fn preferred_click_method(methods: &[ClickMethod]) -> Option<ClickMethod> {
-    methods
-        .contains(&ClickMethod::Clickfinger)
-        .then_some(ClickMethod::Clickfinger)
-}
-
-fn configure_pointer_device(device: &mut Device) {
-    configure_tapping(device);
-    configure_clickfinger(device);
-}
-
-fn configure_tapping(device: &mut Device) {
-    if device.config_tap_finger_count() == 0 {
-        return;
-    }
-    let left_right_middle = match device.config_tap_set_button_map(TapButtonMap::LeftRightMiddle) {
-        Ok(()) => true,
-        Err(error) => {
-            warn!(
-                device = ?device.sysname(),
-                ?error,
-                "failed to set tap-to-click left/right/middle mapping; using the device mapping"
-            );
-            false
-        }
-    };
-    if let Err(error) = device.config_tap_set_enabled(true) {
-        warn!(
-            device = ?device.sysname(),
-            ?error,
-            "failed to enable tap-to-click"
-        );
-        return;
-    }
-    if left_right_middle {
-        debug!(
-            device = ?device.sysname(),
-            "enabled one/two/three-finger left/right/middle taps"
-        );
-    } else {
-        debug!(device = ?device.sysname(), "enabled taps using the device button mapping");
-    }
-}
-
-fn configure_clickfinger(device: &mut Device) {
-    let Some(method) = preferred_click_method(&device.config_click_methods()) else {
-        return;
-    };
-    if let Err(error) = device.config_click_set_method(method) {
-        warn!(
-            device = ?device.sysname(),
-            ?error,
-            "failed to enable clickfinger touchpad clicks"
-        );
-        return;
-    }
-    if let Err(error) =
-        device.config_click_clickfinger_set_button_map(ClickfingerButtonMap::LeftRightMiddle)
-    {
-        warn!(
-            device = ?device.sysname(),
-            ?error,
-            "failed to set clickfinger left/right/middle mapping"
-        );
-        return;
-    }
-    debug!(
-        device = ?device.sysname(),
-        "enabled one/two/three-finger left/right/middle clicks"
-    );
-}
-
 #[cfg(test)]
 mod tests {
-    use smithay::reexports::input::ClickMethod;
-
-    use super::{ActiveGesture, LibinputAdapter, preferred_click_method};
+    use super::{ActiveGesture, LibinputAdapter};
     use crate::input::{
         InputDelta, InputPosition, PointerGesture, PointerGestureKind, RawScrollPhase,
         RawScrollSource, RawSeatEvent, RawSeatEventKind, TouchpadHold, TouchpadPinch,
@@ -598,15 +535,6 @@ mod tests {
         assert_eq!(frame.vertical, -30.0);
         assert_eq!(frame.horizontal_v120, Some(120));
         assert_eq!(frame.vertical_v120, Some(-240));
-    }
-
-    #[test]
-    fn clickfinger_is_selected_only_when_the_device_supports_it() {
-        assert_eq!(
-            preferred_click_method(&[ClickMethod::ButtonAreas, ClickMethod::Clickfinger]),
-            Some(ClickMethod::Clickfinger)
-        );
-        assert_eq!(preferred_click_method(&[ClickMethod::ButtonAreas]), None);
     }
 
     #[test]

@@ -24,7 +24,7 @@ use weld_client::{
     ClientRuntimeEventError,
 };
 
-use crate::server::ServerState;
+use crate::{cursor::CursorConfiguration, server::ServerState};
 
 pub(crate) const FRAME_INTERVAL: Duration = Duration::from_micros(16_667);
 pub(crate) const MAINTENANCE_INTERVAL: Duration = Duration::from_secs(1);
@@ -173,8 +173,13 @@ impl ChildProcesses {
             tracing::trace_span!(target: crate::PROFILE_TARGET, "host_launch_client").entered();
         let mut command = Command::new(program);
         command.args(arguments);
-        configure_client_command(&mut command, &server.socket_name, server.x11_display());
-        command.envs(self.environment.iter().cloned());
+        configure_client_command(
+            &mut command,
+            &server.socket_name,
+            server.x11_display(),
+            server.cursor_configuration(),
+            &self.environment,
+        );
         let child = command
             .spawn()
             .with_context(|| format!("failed to spawn Wayland client {program:?}"))?;
@@ -189,8 +194,14 @@ impl ChildProcesses {
     }
 }
 
-/// The native-only environment is also used by `scripts/run-app`.
-fn configure_client_command(command: &mut Command, socket_name: &OsStr, x11_display: Option<u32>) {
+/// Configures display endpoints, IPC overrides, and cursor defaults for child apps.
+fn configure_client_command(
+    command: &mut Command,
+    socket_name: &OsStr,
+    x11_display: Option<u32>,
+    cursor: &CursorConfiguration,
+    environment: &[(OsString, OsString)],
+) {
     command
         .env("WAYLAND_DISPLAY", socket_name)
         .env("GDK_BACKEND", "wayland")
@@ -216,6 +227,10 @@ fn configure_client_command(command: &mut Command, socket_name: &OsStr, x11_disp
             command.env_remove(key);
         }
     }
+    command
+        .envs(environment.iter().cloned())
+        .env("XCURSOR_THEME", cursor.theme())
+        .env("XCURSOR_SIZE", cursor.size().to_string());
 }
 
 #[derive(Debug)]
@@ -391,6 +406,7 @@ impl PendingCapture {
 #[cfg(test)]
 mod launch_tests {
     use super::{BackendEvents, configure_client_command};
+    use crate::cursor::CursorConfiguration;
     use std::{ffi::OsStr, process::Command};
 
     #[test]
@@ -399,10 +415,20 @@ mod launch_tests {
             let mut command = Command::new("test-client");
             command
                 .env("DISPLAY", ":foreign")
+                .env("XCURSOR_THEME", "Old")
+                .env("XCURSOR_SIZE", "24")
                 .env("SWAYSOCK", "/foreign/sway.sock")
                 .env("I3SOCK", "/foreign/i3.sock")
                 .env("WAYLAND_SOCKET", "99");
-            configure_client_command(&mut command, OsStr::new("weld-private"), display);
+            let cursor =
+                CursorConfiguration::new("Configured", 36).expect("valid cursor configuration");
+            configure_client_command(
+                &mut command,
+                OsStr::new("weld-private"),
+                display,
+                &cursor,
+                &[],
+            );
             let value = |name: &str| {
                 command
                     .get_envs()
@@ -414,6 +440,8 @@ mod launch_tests {
                 Some(Some(OsStr::new("weld-private")))
             );
             assert_eq!(value("WAYLAND_SOCKET"), Some(None));
+            assert_eq!(value("XCURSOR_THEME"), Some(Some(OsStr::new("Configured"))));
+            assert_eq!(value("XCURSOR_SIZE"), Some(Some(OsStr::new("36"))));
             assert_eq!(value("SWAYSOCK"), Some(None));
             assert_eq!(value("I3SOCK"), Some(None));
             assert_eq!(value("DISPLAY"), Some(display.map(|_| OsStr::new(":17"))));

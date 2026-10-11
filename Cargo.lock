@@ -8128,6 +8128,7 @@ dependencies = [
  "rustix 1.1.4",
  "smithay",
  "smithay-drm-extras",
+ "tempfile",
  "tracing",
  "tracing-subscriber",
  "wayland-client",
@@ -8141,6 +8142,7 @@ dependencies = [
  "winit",
  "x11-dl",
  "xcursor",
+ "xdg",
 ]
 
 [[package]]

@@ -15,7 +15,10 @@ use smithay::{
 use tracing::warn;
 use weld_client::{ClientCursorUpdate, ClientRuntime};
 
-use crate::cursor::{CursorAppearance, CursorImage, raster::canonical_cursor, unpremultiply_alpha};
+use crate::cursor::{
+    CursorAppearance, CursorConfiguration, CursorHostUpdate, CursorImage, raster::canonical_cursor,
+    unpremultiply_alpha,
+};
 
 use super::{
     ServerState,
@@ -39,6 +42,27 @@ enum CachedCursorSurface {
 }
 
 impl ServerState {
+    /// Applies session cursor policy and returns configuration for the native presenter.
+    pub(crate) fn apply_cursor_update(
+        &mut self,
+        update: CursorHostUpdate,
+    ) -> Option<CursorConfiguration> {
+        if let Some(appearance) = update.appearance {
+            self.set_shell_cursor(appearance);
+        }
+        if let Some(active) = update.override_client {
+            self.set_shell_cursor_override(active);
+        }
+        if let Some(configuration) = &update.configuration {
+            self.cursor_theme_link = crate::cursor::theme_links::expose(configuration.theme()).unwrap_or_else(|error| {
+                warn!(theme = configuration.theme(), %error, "could not expose cursor theme to application runtimes");
+                None
+            });
+            self.set_x11_cursor_configuration(configuration.clone());
+        }
+        update.configuration
+    }
+
     pub(crate) fn set_shell_cursor(&mut self, appearance: CursorAppearance) {
         self.shell_cursor = appearance;
     }

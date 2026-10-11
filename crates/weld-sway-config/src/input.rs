@@ -1,5 +1,6 @@
 //! Sway keyboard settings and binding chords translated into Weld input types.
 
+mod devices;
 mod syntax;
 
 use crate::evaluation::{ConfigWarning, UnsupportedPolicy, line_of, unsupported};
@@ -15,6 +16,10 @@ use winnow::Parser;
 /// Input configuration plus directives left for other subsystem translators.
 #[derive(Debug, Default)]
 pub struct InputConfiguration<'a> {
+    /// Physical pointer preferences, resolved when the native device is available.
+    pub pointer_devices: weld_input::PointerDeviceSettings,
+    /// Theme and optional size for compositor-owned cursor artwork.
+    pub cursor: Option<weld_input::CursorThemeSettings>,
     /// Compiled keymap; absence restores the native default.
     pub keymap: Option<KeyboardKeymap>,
     /// Native chords paired with commands for the assembly's action translator.
@@ -82,15 +87,9 @@ pub fn compile_with_policy<'a>(
     for statement in syntax.statements() {
         let line = line_of(source, statement)?;
         let result = match statement.name().text() {
-            "input" => apply_keyboard(
-                &mut keyboard,
-                statement,
-                name,
-                source,
-                policy,
-                &mut config.warnings,
-            )
-            .map(|()| keyboard_configured = true),
+            "input" => apply_devices(&mut config, &mut keyboard, statement, name, source, policy)
+                .map(|configured| keyboard_configured |= configured),
+            "seat" => devices::apply_seat(&mut config, statement, name, source, policy),
             "bindsym" => (|| {
                 config
                     .bindings
@@ -202,52 +201,54 @@ fn compile_binding(
     })
 }
 
-fn apply_keyboard(
-    config: &mut KeymapConfig,
+fn apply_devices(
+    config: &mut InputConfiguration,
+    keyboard: &mut KeymapConfig,
     statement: &Statement,
     name: &str,
     source: &str,
     policy: UnsupportedPolicy,
-    warnings: &mut Vec<ConfigWarning>,
-) -> Result<()> {
-    let mut args = statement.arguments().iter().map(|arg| arg.text());
+) -> Result<bool> {
+    let mut args = setting_arguments(statement);
     let selector = literal(args.next().context("missing input selector")?)?;
-    if !matches!(selector, "type:keyboard" | "*") {
-        return Err(unsupported(
-            "only type:keyboard and * keyboard input settings are supported",
-        ));
-    }
+    let mut keyboard_configured = false;
     if let Some(block) = statement.block() {
         ensure!(args.next().is_none(), "unexpected input block arguments");
         for child in block.statements() {
-            ensure!(
-                child.block().is_none(),
-                "nested keyboard configuration block"
-            );
-            let values: Vec<_> = child.arguments().iter().map(|arg| arg.text()).collect();
+            ensure!(child.block().is_none(), "nested input configuration block");
+            let values: Vec<_> = setting_arguments(child).collect();
             let [value] = values.as_slice() else {
                 bail!(
-                    "keyboard directive requires one value: {}",
+                    "input directive requires one value: {}",
                     child.header().text()
                 );
             };
-            if let Err(error) = keyboard_field(config, child.name().text(), value) {
-                policy.handle(
+            match devices::apply_field(config, keyboard, selector, child.name().text(), value) {
+                Ok(configured) => keyboard_configured |= configured,
+                Err(error) => policy.handle(
                     error.context(child.header().text().to_owned()),
                     name,
                     line_of(source, child)?,
-                    warnings,
-                )?;
+                    &mut config.warnings,
+                )?,
             }
         }
     } else {
         let words: Vec<_> = args.collect();
         let [field, value] = words.as_slice() else {
-            bail!("input requires a block or one keyboard directive and value");
+            bail!("input requires a block or one directive and value");
         };
-        keyboard_field(config, field, value)?;
+        keyboard_configured = devices::apply_field(config, keyboard, selector, field, value)?;
     }
-    Ok(())
+    Ok(keyboard_configured)
+}
+
+fn setting_arguments(statement: &Statement) -> impl Iterator<Item = &str> {
+    statement
+        .arguments()
+        .iter()
+        .map(|argument| argument.text())
+        .take_while(|word| !word.starts_with('#'))
 }
 
 fn keyboard_field(config: &mut KeymapConfig, field: &str, value: &str) -> Result<()> {
@@ -355,6 +356,9 @@ fn binding(value: &str) -> Result<GlobalShortcut> {
         "XF86AudioLowerVolume" => KeyCode::AudioVolumeDown,
         "XF86AudioMute" => KeyCode::AudioVolumeMute,
         "XF86AudioPlay" => KeyCode::MediaPlayPause,
+        "XF86AudioPause" => weld_input::physical_keycode(weld_input::LinuxKeycode(201)),
+        "XF86MonBrightnessDown" => weld_input::physical_keycode(weld_input::LinuxKeycode(224)),
+        "XF86MonBrightnessUp" => weld_input::physical_keycode(weld_input::LinuxKeycode(225)),
         "XF86AudioNext" => KeyCode::MediaTrackNext,
         "XF86AudioPrev" => KeyCode::MediaTrackPrevious,
         "equal" => KeyCode::Equal,
@@ -399,6 +403,8 @@ mod tests {
         let config = compile(name, source, &syntax)?;
         assert!(config.remaining.is_empty());
         Ok(InputConfiguration {
+            pointer_devices: config.pointer_devices,
+            cursor: config.cursor,
             keymap: config.keymap,
             bindings: config.bindings,
             modes: config.modes,
@@ -406,6 +412,50 @@ mod tests {
             warnings: config.warnings,
         })
     }
+    #[test]
+    fn pointer_and_cursor_directives_compile_without_configuring_a_keyboard() {
+        let config = parse_input(
+            "devices",
+            r#"
+            input "type:touchpad" {
+                tap enabled
+                tap_button_map lrm # Left, Right, Middle
+                click_method clickfinger
+            }
+            input * tap disabled
+            seat * {
+                xcursor_theme "Example Cursor" 30 # nominal size
+            }
+        "#,
+        )
+        .expect("device configuration");
+        assert!(config.keymap.is_none());
+        let resolved = config.pointer_devices.resolve("pad", true);
+        assert_eq!(resolved.tap, Some(true));
+        assert_eq!(
+            resolved.tap_button_map,
+            Some(weld_input::FingerButtonMap::LeftRightMiddle)
+        );
+        assert_eq!(
+            resolved.click_method,
+            Some(weld_input::TouchpadClickMethod::Clickfinger)
+        );
+        let cursor = config.cursor.expect("cursor");
+        assert_eq!(cursor.theme, "Example Cursor");
+        assert_eq!(cursor.size.map(|size| size.get()), Some(30));
+        for invalid in [
+            "input type:touchpad tap yes",
+            "input * tap_button_map invalid",
+            "input * click_method invalid",
+            "seat * xcursor_theme Default 0",
+        ] {
+            let syntax = crate::parse("invalid", invalid).expect("syntax");
+            assert!(
+                compile_with_policy("invalid", invalid, &syntax, UnsupportedPolicy::Warn).is_err()
+            );
+        }
+    }
+
     #[test]
     fn keyboard_blocks_and_inline_overrides_compile_into_native_settings() {
         let config = parse_input("keyboard", "input type:keyboard {\n xkb_layout us\n xkb_options \"ctrl:swapcaps\"\n}\ninput * xkb_options \"ctrl:swapcaps,altwin:swap_lalt_lwin\"").expect("input config");

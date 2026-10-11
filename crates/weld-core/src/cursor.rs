@@ -11,6 +11,7 @@ use anyhow::{Result, bail};
 
 pub(crate) mod raster;
 pub(crate) mod theme;
+pub(crate) mod theme_links;
 pub(crate) use weld_client::ClientCursor as CursorImage;
 pub use weld_client::CursorIcon;
 

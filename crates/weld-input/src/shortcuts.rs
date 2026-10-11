@@ -17,6 +17,11 @@ use crate::{ButtonState, LinuxKeycode, RawSeatEvent, RawSeatEventKind, SeatModif
 use bevy_winit::converters::convert_physical_key_code;
 use winit::{keyboard::PhysicalKey, platform::scancode::PhysicalKeyExtScancode};
 
+/// Physical binding identity for a Linux input key, including unnamed extended keys.
+pub fn physical_keycode(keycode: LinuxKeycode) -> KeyCode {
+    convert_physical_key_code(PhysicalKey::from_scancode(keycode.0))
+}
+
 /// Physical keys whose release belongs to a shell shortcut.
 #[derive(Resource, Default)]
 pub struct ConsumedShortcutKeys(pub HashSet<LinuxKeycode>);
@@ -288,7 +293,7 @@ pub fn filter_global_shortcut_event(world: &mut World, event: &RawSeatEvent) -> 
             let modifiers = event
                 .modifiers
                 .unwrap_or_else(|| SeatModifiers::from_pressed_keys(&shortcuts.pressed));
-            let trigger = convert_physical_key_code(PhysicalKey::from_scancode(keycode.0));
+            let trigger = physical_keycode(*keycode);
             let matched = shortcuts
                 .application_shortcuts
                 .iter()

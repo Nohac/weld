@@ -102,11 +102,12 @@ direct backend owns its keymap. DRM cursor motion can update presentation
 immediately from the completed composition, while also requesting one
 refresh-capped application composition for Bevy/Leafwing input and picking.
 
-Standalone DRM touchpads use clickfinger when the device supports it, mapping
-one, two, and three-finger physical clicks to left, right, and middle buttons.
-Tap-capable devices also enable one, two, and three-finger left, right, and
-middle taps. Tap-and-drag, drag-lock, and disable-while-typing retain their
-libinput defaults.
+Standalone DRM touchpads follow reloadable tap, tap-button-map and click-method
+preferences, with libinput defaults for omitted settings. The example config
+enables tapping, left/right/middle tap mapping and clickfinger. Preferences apply
+on hotplug as well as reload; exact-device rules override type and wildcard rules.
+Tap-and-drag, drag-lock, and disable-while-typing retain their libinput defaults.
+See [Master input configuration](../master-tiling.md#pointer-devices-and-cursor-reload).
 Libinput swipe, pinch, and hold gestures are exposed as full-fidelity Bevy
 messages and forwarded to clients through the Wayland pointer-gestures
 protocol. Gesture consumption is not implemented yet, so compositor plugins
@@ -117,6 +118,46 @@ device identity.
 The nested Linux backend does not receive equivalent gesture events from
 Winit; finger scrolling remains ordinary axis input rather than being guessed
 into a higher-level gesture.
+
+## Semantic cursor recognition — Exploration
+
+Let Weld render ordinary cursor shapes through the presenter's chosen theme,
+including when a legacy application supplies an image instead of a named shape.
+The motivating case is inconsistent X11 cursor artwork across application
+runtime environments; see the verified
+[Steam/NixOS theme-visibility investigation](../xwayland.md#steam-runtime-theme-visibility-on-nixos).
+
+Prefer explicit protocol shape requests. Investigate whether XFixes cursor names
+can recover useful shape information for X11 clients before introducing image
+recognition. Availability and reliability of those names still need validation.
+
+For image-only cursors, explore this path:
+
+1. Hash normalized cursor pixels, dimensions and hotspot when the image changes.
+2. Look up a persistent image-to-semantic-shape mapping.
+3. For an unknown image, keep displaying the original and classify it
+   asynchronously, outside input delivery and presentation deadlines.
+4. Cache confident matches as standard shapes such as pointer, text or resize.
+   Render recognized shapes through Weld's cursor theme on later appearances.
+
+Persist the semantic shape rather than themed output pixels, so changing the
+presenter's theme or scale automatically changes recognized cursor artwork.
+Exact hashes identify repeated images; visually equivalent cursors at different
+sizes or from different themes can have distinct mappings to the same shape.
+
+Classification needs an explicit custom/unknown result and a conservative
+confidence threshold. Preserve application-specific brush outlines, game
+cursors, meaningful hotspots and animated cursors until their semantics can be
+retained. User corrections should override classifier decisions, with a way to
+forget a mapping. Cache entries should retain decision provenance and a
+classifier revision so mistakes can be corrected without becoming permanent.
+
+Keep classification local, bound image sizes, cache growth and pending work,
+and discard obsolete results after cursor or focus changes. Recognition should
+serve desktop and remote presenters through the shared cursor model; theme
+resolution belongs to the final presenter. Model choice, animation handling,
+accuracy, cost and cache lifecycle remain experiments to validate before an
+implementation slice.
 
 ## Pointer capture and relative motion — Direction
 

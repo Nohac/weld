@@ -22,6 +22,7 @@ use std::{
     collections::{HashMap, VecDeque},
     path::{Path, PathBuf},
 };
+use weld_app::cursor::CursorSettings;
 use weld_app::{
     ActiveBackend,
     input::{ShellCommand, ShellCommands},
@@ -34,7 +35,7 @@ use weld_i3_quirks::workspace::WorkspaceSettings;
 use weld_i3_quirks::{FocusWrapping, I3FocusRequest, I3MoveRequest, I3QuirksPlugin};
 use weld_input::{
     GlobalShortcutId, GlobalShortcutMode, GlobalShortcutPlugin, GlobalShortcutPressed,
-    GlobalShortcutRegistry, GlobalShortcutSet, KeyboardSettings,
+    GlobalShortcutRegistry, GlobalShortcutSet, KeyboardSettings, PointerDeviceSettings,
 };
 use weld_ssd::{BorderRequest, SsdSettings};
 use weld_tile::{TileRequest, TileSettings, TileSystems};
@@ -87,6 +88,9 @@ fn report_warnings(warnings: &[weld_i3_quirks::config::ConfigWarning]) {
 impl Plugin for MasterConfigPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<ShellCommands>()
+            .init_resource::<PointerDeviceSettings>()
+            .init_resource::<CursorSettings>()
+            .init_resource::<InitialCursorSettings>()
             .init_resource::<OutputPreferences>()
             .init_resource::<WindowPointerSettings>()
             .init_resource::<SsdSettings>()
@@ -185,6 +189,9 @@ struct ConfigTarget<'w> {
     focus_wrapping: ResMut<'w, FocusWrapping>,
     workspaces: ResMut<'w, WorkspaceSettings>,
     keyboard: ResMut<'w, KeyboardSettings>,
+    pointer_devices: ResMut<'w, PointerDeviceSettings>,
+    cursor: ResMut<'w, CursorSettings>,
+    initial_cursor: Res<'w, InitialCursorSettings>,
     outputs: ResMut<'w, OutputPreferences>,
     pointer: ResMut<'w, WindowPointerSettings>,
     decorations: ResMut<'w, SsdSettings>,
@@ -194,6 +201,15 @@ struct ConfigTarget<'w> {
 
 impl ConfigTarget<'_> {
     fn apply(&mut self, config: Configuration) -> Result<()> {
+        let cursor = match &config.cursor {
+            Some(cursor) => CursorSettings::new(
+                &cursor.theme,
+                cursor
+                    .size
+                    .map_or(self.initial_cursor.0.size(), |size| size.get()),
+            )?,
+            None => self.initial_cursor.0.clone(),
+        };
         let drm = self.backend.as_deref() == Some(&ActiveBackend::Drm);
         let mut modes = vec![weld_i3_quirks::config::BindingMode {
             name: "default".into(),
@@ -266,6 +282,12 @@ impl ConfigTarget<'_> {
         if self.keyboard.keymap != config.keymap {
             self.keyboard.keymap = config.keymap;
         }
+        if *self.pointer_devices != config.pointer_devices {
+            *self.pointer_devices = config.pointer_devices;
+        }
+        if *self.cursor != cursor {
+            *self.cursor = cursor;
+        }
         if *self.pointer != config.pointer {
             *self.pointer = config.pointer;
         }
@@ -273,6 +295,15 @@ impl ConfigTarget<'_> {
             *self.decorations = config.decorations;
         }
         Ok(())
+    }
+}
+
+#[derive(Resource)]
+struct InitialCursorSettings(CursorSettings);
+
+impl bevy::ecs::world::FromWorld for InitialCursorSettings {
+    fn from_world(world: &mut bevy::ecs::world::World) -> Self {
+        Self(world.resource::<CursorSettings>().clone())
     }
 }
 
@@ -679,7 +710,10 @@ mod tests {
         app.add_plugins(GlobalShortcutPlugin)
             .init_resource::<TileSettings>()
             .init_resource::<FocusWrapping>()
-            .init_resource::<KeyboardSettings>();
+            .init_resource::<KeyboardSettings>()
+            .init_resource::<PointerDeviceSettings>()
+            .init_resource::<CursorSettings>()
+            .init_resource::<InitialCursorSettings>();
         app.insert_resource(ConfigState {
             path: example_path(),
             shortcuts: GlobalShortcutSet::default(),
@@ -734,6 +768,93 @@ mod tests {
 
     fn example_path() -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/master.sway.config")
+    }
+
+    #[test]
+    fn device_and_cursor_reload_publish_atomically_and_restore_startup_defaults() {
+        let mut app = App::new();
+        let baseline = CursorSettings::new("baseline", 22).expect("cursor");
+        app.insert_resource(baseline.clone());
+        app.add_plugins(MasterConfigPlugin {
+            path: example_path(),
+            initial: config::parse(
+                "devices",
+                "input type:touchpad tap enabled\nseat * xcursor_theme Example 30",
+            )
+            .expect("settings"),
+        });
+        let mut reader = weld_input::PointerDeviceSettingsReader::new(app.world_mut());
+        let initial = reader
+            .take(app.world())
+            .expect("initial device publication");
+        assert_eq!(initial.resolve("pad", true).tap, Some(true));
+        assert!(reader.take(app.world()).is_none());
+        assert_eq!(app.world().resource::<CursorSettings>().size(), 30);
+        assert_eq!(app.world().resource::<CursorSettings>().theme(), "Example");
+        let invalid = config::parse(
+            "invalid",
+            "input type:touchpad tap disabled\nseat * xcursor_theme Example 0",
+        )
+        .map(|candidate| install(&mut app, candidate));
+        assert!(invalid.is_err());
+        assert!(reader.take(app.world()).is_none());
+        assert_eq!(app.world().resource::<CursorSettings>().size(), 30);
+        install(
+            &mut app,
+            config::parse(
+                "reload",
+                "input type:touchpad tap disabled\nseat * xcursor_theme Other",
+            )
+            .expect("reload"),
+        );
+        assert_eq!(
+            reader
+                .take(app.world())
+                .expect("changed devices")
+                .resolve("pad", true)
+                .tap,
+            Some(false)
+        );
+        assert_eq!(app.world().resource::<CursorSettings>().size(), 22);
+        install(&mut app, config::parse("empty", "").expect("defaults"));
+        assert_eq!(
+            reader.take(app.world()),
+            Some(PointerDeviceSettings::default())
+        );
+        assert_eq!(*app.world().resource::<CursorSettings>(), baseline);
+    }
+
+    #[test]
+    fn extended_hardware_keys_match_native_events_and_consume_their_releases() {
+        use weld_input::{
+            KeyboardKeyState, LinuxKeycode, RawSeatEvent, RawSeatEventKind,
+            filter_global_shortcut_event,
+        };
+        let mut app = App::new();
+        app.add_plugins(MasterConfigPlugin {
+            path: example_path(),
+            initial: config::parse("keys", "bindsym XF86MonBrightnessDown exec lower\nbindsym XF86MonBrightnessUp exec raise\nbindsym XF86AudioPause exec pause").expect("bindings"),
+        });
+        for keycode in [224, 225, 201] {
+            for state in [KeyboardKeyState::Pressed, KeyboardKeyState::Released] {
+                let event = RawSeatEvent::new(
+                    RawSeatEventKind::Keyboard {
+                        keycode: LinuxKeycode(keycode),
+                        logical_key: None,
+                        state,
+                    },
+                    0,
+                );
+                assert!(filter_global_shortcut_event(app.world_mut(), &event));
+            }
+        }
+        assert_eq!(
+            app.world_mut()
+                .resource_mut::<Messages<GlobalShortcutPressed>>()
+                .drain()
+                .count(),
+            3
+        );
     }
 
     #[test]

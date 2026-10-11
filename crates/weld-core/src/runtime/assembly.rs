@@ -232,6 +232,13 @@ impl HostRuntime {
     /// Closing the display disconnects clients; this is not a process supervisor
     /// and does not kill arbitrary descendants of the launched command.
     pub fn run(mut self) -> Result<()> {
+        if let Some(policy) = &mut self.policy {
+            self.runtime
+                .state
+                .data
+                .server
+                .apply_cursor_update(policy.take_cursor_update());
+        }
         self.runtime
             .state
             .children

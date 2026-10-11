@@ -27,6 +27,7 @@ smithay = { workspace = true, features = [
     "xwayland",
 ] }
 smithay-drm-extras.workspace = true
+tempfile = "3"
 tracing.workspace = true
 wayland-sys = { version = "0.31.11", features = ["client", "dlopen"] }
 weld-client = { path = "../weld-client" }
@@ -36,6 +37,7 @@ wgpu = { workspace = true, features = ["drm", "naga-ir", "vulkan", "wgsl"] }
 winit = { workspace = true, features = ["rwh_06", "wayland", "wayland-dlopen", "x11"] }
 x11-dl.workspace = true
 xcursor.workspace = true
+xdg = "3.0.0"
 
 [dev-dependencies]
 clap.workspace = true

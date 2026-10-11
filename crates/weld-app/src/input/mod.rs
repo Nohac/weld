@@ -90,6 +90,7 @@ impl Plugin for InputBridgePlugin {
     fn build(&self, app: &mut App) {
         state::register(app);
         weld_input::register_keyboard_settings(app);
+        app.init_resource::<weld_input::PointerDeviceSettings>();
         projection::register(app, self.targets.clone());
         routing::register(app);
     }

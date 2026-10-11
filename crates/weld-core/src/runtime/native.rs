@@ -317,6 +317,10 @@ impl<Event: 'static> NativeRuntime<Event> {
                     policy_dirty = app.advance_main(started_at.elapsed().as_millis() as u32);
                     apply_policy_requests(&mut self.state, app);
                     let mut exit = app.should_exit();
+                    self.state
+                        .data
+                        .server
+                        .apply_cursor_update(app.take_cursor_update());
                     for command in app.take_host_commands() {
                         match self
                             .state
@@ -330,19 +334,6 @@ impl<Event: 'static> NativeRuntime<Event> {
                                 bail!("output scale command requires a native output policy")
                             }
                         }
-                    }
-                    let cursor = app.take_cursor_update();
-                    if let Some(configuration) = cursor.configuration {
-                        self.state
-                            .data
-                            .server
-                            .set_x11_cursor_configuration(configuration);
-                    }
-                    if let Some(appearance) = cursor.appearance {
-                        self.state.data.server.set_shell_cursor(appearance);
-                    }
-                    if let Some(active) = cursor.override_client {
-                        self.state.data.server.set_shell_cursor_override(active);
                     }
                     if app.take_virtual_terminal_switch_request().is_some() {
                         bail!("VT switching requires a native session");

@@ -119,7 +119,7 @@ pub(crate) fn prepare(options: RunOptions, signals: Signals) -> Result<PreparedH
     Ok(PreparedHost::new(
         context,
         vec![client_registration],
-        move |application, adapters, wake_sources| {
+        move |mut application, adapters, wake_sources| {
             let mut runtime = NativeRuntime::prepare(RuntimeSetup {
                 xwayland: options.xwayland,
                 server: ServerOptions {
@@ -161,6 +161,15 @@ pub(crate) fn prepare(options: RunOptions, signals: Signals) -> Result<PreparedH
                         |_, _, _| Ok(PostAction::Continue),
                     )
                     .context("failed to register the nested host display wake source")?;
+            }
+            if let Some(configuration) = runtime
+                .state
+                .data
+                .server
+                .apply_cursor_update(application.take_cursor_update())
+            {
+                host.cursor_configuration = configuration;
+                host.cursor_dirty = true;
             }
             runtime.state.children.environment = options.client_environment;
             let child_requested = runtime
@@ -395,24 +404,17 @@ impl NativeDriver<NestedEvent> for NestedDriver {
         {
             warn!("ignored configured output scales because nested scale is host-owned");
         }
+        if let Some(configuration) = state
+            .data
+            .server
+            .apply_cursor_update(shell.take_cursor_update())
+        {
+            self.host.cursor_configuration = configuration;
+            self.host.cursor_dirty = true;
+        }
         for command in shell.take_host_commands() {
             command_exit_requested |=
                 apply_host_command(&mut state.children, &mut state.data.server, command)?;
-        }
-        let cursor_update = shell.take_cursor_update();
-        if let Some(appearance) = cursor_update.appearance {
-            state.data.server.set_shell_cursor(appearance);
-        }
-        if let Some(active) = cursor_update.override_client {
-            state.data.server.set_shell_cursor_override(active);
-        }
-        if let Some(configuration) = cursor_update.configuration {
-            state
-                .data
-                .server
-                .set_x11_cursor_configuration(configuration.clone());
-            self.host.cursor_configuration = configuration;
-            self.host.cursor_dirty = true;
         }
         if shell.should_exit() {
             if self

@@ -430,6 +430,10 @@ pub trait HostPolicy {
     fn take_keyboard_settings(&mut self) -> Option<crate::input::KeyboardSettings> {
         None
     }
+    /// Publishes a complete replacement of physical pointer-device preferences.
+    fn take_pointer_device_settings(&mut self) -> Option<weld_input::PointerDeviceSettings> {
+        None
+    }
     /// Publishes a complete replacement of native output preferences.
     fn take_output_settings(&mut self) -> Option<OutputSettings> {
         None

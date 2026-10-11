@@ -109,6 +109,100 @@ game-launch smoke test, not broad game compatibility coverage.
 use it only for bounded diagnostic runs. The existing nested Vulkan acquisition
 fence validation messages also appear in these tests.
 
+## Cursor configuration and application runtimes
+
+Master's `seat * xcursor_theme THEME [SIZE]` configures the session cursor theme.
+Weld publishes the name and size through `Gtk/CursorThemeName` and
+`Gtk/CursorThemeSize` XSettings, the X11 `Xcursor.theme` and `Xcursor.size`
+resources, and `XCURSOR_THEME` / `XCURSOR_SIZE` for newly launched applications.
+Cursor configuration is applied before startup clients and before launch commands
+from the same policy update. Reload updates the X11 settings and Weld's own
+cursor rendering. Existing processes retain their launch environment, and
+application cursor caches may require an application restart.
+
+Selecting a cursor theme also exposes its installed artwork through
+`$XDG_DATA_HOME/icons/THEME` (normally `~/.local/share/icons/THEME`). Weld uses
+the `xdg` crate to resolve the data directory and `xcursor` to locate the selected
+theme's own default cursor. Existing files, directories and user/package-managed
+symlinks, including dangling links, take precedence and are left unchanged.
+
+Weld-created public links point to `../weld/cursor-themes/THEME/current`.
+That managed directory records the original installation path as `source` and
+its resolved directory as `current`. Selection on a subsequent startup or theme
+change refreshes `current` atomically, allowing a stable package/profile path to
+follow an upgraded installation. Updates are serialized across Weld instances.
+Resolution failures are logged, and the installed artwork is left untouched.
+Themes whose default cursor comes entirely from an inherited theme
+are left to normal theme discovery.
+
+Changing themes or shutting down normally releases the session's managed link.
+Shared file locks retain a theme while another Weld session has it selected; the
+last session removes the public link and its managed theme metadata. The shared
+update-lock file remains for coordination. Cleanup verifies that the public link
+still points to Weld's managed entry, preserving entries replaced by another
+tool. Cached cursors in existing apps may remain until the app reloads them.
+Forced termination can leave links behind; selecting that theme again with an
+available source adopts its managed lifetime and cleans it on the next release.
+Applications still need access
+to the underlying artwork within their runtime filesystem.
+
+XSettings communicates settings; applications still load the cursor artwork
+from their filesystem. Xcursor searches theme directories along its configured
+search path and falls back to inherited/default themes when artwork is missing.
+See the [XSettings specification](https://specifications.freedesktop.org/xsettings/latest/)
+and [Xcursor theme lookup documentation](https://xorg.freedesktop.org/archive/X11R7.5/doc/man/man3/XcursorSetTheme.3.html).
+
+### Steam runtime theme visibility on NixOS
+
+Investigation on 2026-10-11 found that Steam continued showing Bibata Modern Ice
+while Weld was configured for Bibata Modern Amber at size 50, even after restarting
+both applications. The observed boundary was Steam's Linux Runtime container
+around `steamwebhelper`:
+
+- Steam and its web helper both received `XCURSOR_THEME=Bibata-Modern-Amber`
+  and `XCURSOR_SIZE=50`.
+- Weld's X resource database and XSettings contained Amber. A GTK3 query against
+  Weld's X11 display also resolved Amber at size 50.
+- The host could read Amber under `/run/current-system/sw/share/icons`, but
+  that path was unavailable inside the web helper's runtime, despite appearing
+  in its `XCURSOR_PATH`.
+- Ice was available through the user's icon directories. Amber's underlying
+  Nix store files were accessible, but had no reachable entry in the runtime's
+  cursor search directories.
+- Adding `~/.local/share/icons/Bibata-Modern-Amber` as a symlink to the installed
+  theme made its cursor files readable from the existing web-helper container.
+  File visibility was verified directly, and the user subsequently confirmed
+  that the theme worked. Automatic link creation and cleanup were also manually
+  verified after implementing the managed-link lifecycle.
+
+This evidence identifies theme-file discovery as the remaining failure after
+settings publication was corrected. It also explains why querying a theme name
+successfully is insufficient to validate the application's rendered cursor.
+
+A [matching NixOS Steam issue](https://github.com/NixOS/nixpkgs/issues/437281)
+reports that a theme in `environment.systemPackages` can be unavailable to Steam.
+Its reported declarative workaround is to include the theme in Steam's environment:
+
+```nix
+programs.steam.extraPackages = [ pkgs.bibata-cursors ];
+```
+
+The [NixOS Steam module](https://github.com/NixOS/nixpkgs/blob/master/nixos/modules/programs/steam.nix)
+provides `extraPackages` for this purpose. The local investigation used the
+per-user symlink workaround; the declarative alternative still needs validation
+on this installation. Weld now automates exposure for missing user-theme entries
+as described above. The original manually created Amber link remains user-owned;
+automatic exposure leaves it untouched. Neither approach changes the selected
+global GTK theme.
+
+For similar reports, check the settings received by the affected process and
+whether that process can read the selected theme along its actual search path.
+Containerized helpers may have a different filesystem view from their launcher.
+Runtime/package integration determines access to theme files; Weld's user-data
+links cover runtimes that can read those directories and the resolved targets.
+Weld's shared cursor policy can additionally explore
+[semantic recognition of image-only cursors](spec/surfaces-and-input.md#semantic-cursor-recognition--exploration).
+
 ## Remaining compatibility work
 
 Relative motion and pointer position are delivered together, keeping XWayland's

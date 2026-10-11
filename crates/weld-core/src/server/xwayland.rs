@@ -1,5 +1,7 @@
 //! Rootless X11 lifecycle and window roles feeding the native surface pipeline.
 
+mod cursor_settings;
+
 use super::{
     ClientState, PendingSurfaceEvent, PendingSurfaceEventKind, ServerState,
     toplevel::{ToplevelState, allocate_surface_id},
@@ -26,7 +28,7 @@ use smithay::{
     },
     xwayland::{
         X11Surface, X11Wm, XWayland, XWaylandClientData, XWaylandEvent, XwmHandler,
-        xwm::{Reorder, ResizeEdge, WmWindowProperty, XwmId},
+        xwm::{Reorder, ResizeEdge, WmWindowProperty, XwmId, settings::Value as XSetting},
     },
 };
 use std::{collections::HashMap, process::Stdio, sync::Arc, time::Duration};
@@ -85,18 +87,45 @@ pub(super) fn compositor_state(client: &Client) -> &CompositorClientState {
 }
 
 impl ServerState {
+    pub(crate) fn cursor_configuration(&self) -> &CursorConfiguration {
+        &self.xwayland.cursor_configuration
+    }
+
     pub(crate) fn set_x11_cursor_configuration(&mut self, configuration: CursorConfiguration) {
         if self.xwayland.cursor_configuration != configuration {
             self.xwayland.cursor_configuration = configuration;
-            self.update_x11_default_cursor();
+            self.update_x11_cursor();
         }
     }
 
-    fn update_x11_default_cursor(&mut self) {
+    fn update_x11_cursor(&mut self) {
         let Some(wm) = &mut self.xwayland.wm else {
             return;
         };
         let configuration = &self.xwayland.cursor_configuration;
+        if let Some(display) = self.xwayland.display
+            && let Err(error) = cursor_settings::publish(display, configuration)
+        {
+            warn!(%error, "could not publish X11 cursor resources");
+        }
+        let settings_result = i32::try_from(configuration.size())
+            .context("cursor size exceeds the XSettings integer range")
+            .and_then(|size| {
+                wm.set_xsettings(
+                    [
+                        (
+                            "Gtk/CursorThemeName".into(),
+                            XSetting::String(configuration.theme().into()),
+                        ),
+                        ("Gtk/CursorThemeSize".into(), XSetting::Integer(size)),
+                    ]
+                    .into_iter(),
+                )
+                .context("could not publish X11 cursor settings")
+            });
+        if let Err(error) = settings_result {
+            warn!(%error, "could not notify X11 clients of the cursor theme");
+        }
         let images =
             load_theme_images(configuration.theme(), CursorIcon::Default).unwrap_or_else(|error| {
                 warn!(%error, "using built-in X11 default cursor");
@@ -173,7 +202,7 @@ impl ServerState {
                 match manager {
                     Ok(wm) => {
                         state.xwayland.wm = Some(wm);
-                        state.update_x11_default_cursor();
+                        state.update_x11_cursor();
                         info!(display = %format_args!(":{display_number}"), "rootless XWayland ready");
                     }
                     Err(error) => {

@@ -222,8 +222,17 @@ adaptive sync are reported as unsupported while scale on the same line applies.
 - `input type:keyboard { ... }` or `input * { ... }`, and their single-line
   forms, with `xkb_rules`, `xkb_model`, `xkb_layout`, `xkb_variant`, `xkb_options`.
   Values are literal XKB names, optionally quoted; empty quoted options clear
-  configured swaps. Per-device selectors remain a follow-up.
+  configured swaps. Per-device keyboard selectors remain a follow-up.
   Directives apply in source order to the single native seat.
+- `input type:touchpad { ... }` and single-line forms support `tap enabled|disabled`,
+  `tap_button_map lrm|lmr`, and `click_method none|button_areas|clickfinger`.
+  Wildcard `*` and exact `vendor:product:name` selectors also work for these
+  preferences. Exact identifiers override type rules, which override wildcard
+  rules; later declarations at the same specificity override individual fields.
+- `seat * xcursor_theme THEME [SIZE]`, also accepted inside a `seat *` block,
+  updates cursor artwork and logical size. Omitting size uses the startup size;
+  removing the directive restores the startup theme and size. Named seats remain
+  a follow-up. See [cursor configuration and runtime exposure](xwayland.md#cursor-configuration-and-application-runtimes).
 - `workspace NAME output CONNECTOR [FALLBACK...]`. The first available connector
   wins; `primary` and `nonprimary` are supported selectors. An exact name rule
   takes precedence over a digits-only number rule. The first directive for an
@@ -307,8 +316,8 @@ Includes, general criteria commands, binding command sequences, semicolon-separa
 rule commands, output assignments, and other blocks remain follow-ups.
 `include` remains an error to avoid silently dropping a file's essential bindings.
 Unknown input devices, unsupported keys, SwayFX effects and other window-rule actions warn and
-skip. Volume, mute, play/pause, next and previous media-key names are supported;
-brightness and the separate XF86AudioPause key remain unsupported.
+skip. Volume, mute, play/pause, next and previous media-key names are supported,
+along with `XF86MonBrightnessDown`, `XF86MonBrightnessUp` and `XF86AudioPause`.
 The pure parser preserves more syntax than
 the distribution currently interprets. Master configuration owns launcher, exit,
 output diagnostics and hoist bindings as well as tiling bindings. Reusable
@@ -344,6 +353,31 @@ publication occurs between input batches and waits for local and client-visible
 held keys to be released. A changed map starts with fresh lock/layout state;
 reloading an identical map leaves that state intact. Legacy repeat settings
 retain their existing ownership and are independent of XKB options.
+
+## Pointer devices and cursor reload
+
+The DRM backend applies typed pointer preferences between native input batches
+and reapplies them when devices are added. Removing a preference restores the
+device's libinput default. Unsupported hardware settings produce a warning.
+Nested sessions leave physical-device configuration with their parent compositor.
+
+```sway
+input type:touchpad {
+    tap enabled
+    tap_button_map lrm
+    click_method clickfinger
+}
+seat * xcursor_theme "Bibata-Modern-Amber" 30
+```
+
+Input and seat directives accept trailing comments. Invalid values for supported
+settings reject the candidate reload atomically, preserving current preferences.
+Cursor configuration is applied before new apps launch, including during reload.
+Named cursors use the configured artwork; X11 applications receive XSettings,
+X resources and launch-environment defaults. Managed theme links expose artwork
+through the user icon directory and are removed when the last Weld session
+releases that theme. See [XWayland](xwayland.md) for sandbox visibility and cache
+limitations.
 
 ## Ownership and live behavior
 
@@ -417,8 +451,8 @@ and managed-window leaves. Public queries expose container IDs, axes, weighted
 children and parent edges. Entity references are process-local; stable window
 and container IDs are separate. Persistence storage is not implemented.
 
-The Sway backend's optional input module translates keyboard directives and
-binding chords into `weld-input` types. Winnow captures chord tokens and quoted
+The Sway backend's optional input module translates keyboard, pointer-device,
+cursor directives and binding chords into `weld-input` types. Winnow captures chord tokens and quoted
 values; the translation layer validates modifier names and aliases. Master
 selects the file and installs typed settings. `weld-i3-quirks` consumes the Sway
 parser/input output and translates supported settings and actions. It owns

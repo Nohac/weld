@@ -6,7 +6,7 @@ use crate::workspace::{
 };
 use anyhow::{Context, Result, bail, ensure};
 use bevy::color::{Color, Srgba};
-use weld_input::{GlobalShortcut, KeyboardKeymap};
+use weld_input::{CursorThemeSettings, GlobalShortcut, KeyboardKeymap, PointerDeviceSettings};
 use weld_output::OutputSettings;
 use weld_ssd::{BorderStyle, FrameColors, SsdSettings};
 use weld_sway_config::Statement;
@@ -46,6 +46,8 @@ pub struct Configuration<Extension = ()> {
     pub bindings: Vec<(GlobalShortcut, Action<Extension>)>,
     pub modes: Vec<BindingMode<Extension>>,
     pub keymap: Option<KeyboardKeymap>,
+    pub pointer_devices: PointerDeviceSettings,
+    pub cursor: Option<CursorThemeSettings>,
     pub outputs: OutputSettings,
     pub workspaces: WorkspaceSettings,
     pub startup: Vec<StartupCommand>,
@@ -77,6 +79,8 @@ impl<Extension> Default for Configuration<Extension> {
             bindings: Vec::new(),
             modes: Vec::new(),
             keymap: None,
+            pointer_devices: Default::default(),
+            cursor: None,
             outputs: Default::default(),
             workspaces: WorkspaceSettings::default(),
             startup: Vec::new(),
@@ -115,6 +119,8 @@ pub fn parse_with_policy<Extension>(
     let input = weld_sway_config::input::compile_with_policy(name, source, &syntax, policy)?;
     let mut config = Configuration {
         keymap: input.keymap,
+        pointer_devices: input.pointer_devices,
+        cursor: input.cursor,
         warnings: input.warnings,
         ..Default::default()
     };
@@ -852,8 +858,9 @@ mod tests {
                 .iter()
                 .map(|warning| warning.line)
                 .collect::<Vec<_>>(),
-            [2, 8, 13]
+            [2, 13]
         );
+        assert_eq!(config.pointer_devices.resolve("pad", true).tap, Some(true));
         assert!(config.pointer.focus_follows_mouse);
         assert!(config.keymap.is_none());
     }

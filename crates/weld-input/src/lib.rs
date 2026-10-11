@@ -3,6 +3,7 @@
 //! Native hosts own [`KeyboardMapper`] and resolve input before shell filtering.
 //! The optional Bevy integration registers bindings and publishes live settings.
 
+mod device_settings;
 mod keymap;
 #[cfg(feature = "bevy")]
 mod pointer_shortcuts;
@@ -13,12 +14,15 @@ mod shortcuts;
 
 #[cfg(feature = "bevy")]
 pub use bevy::input::keyboard::KeyCode;
+pub use device_settings::*;
 pub use keymap::{KeyboardKeymap, KeyboardMapper, KeymapConfig};
 #[cfg(feature = "bevy")]
 pub use pointer_shortcuts::*;
 pub use raw::*;
 pub use settings::{KeyboardRepeatMode, KeyboardSettings, LegacyKeyRepeat};
 #[cfg(feature = "bevy")]
-pub use settings::{KeyboardSettingsReader, register_keyboard_settings};
+pub use settings::{
+    KeyboardSettingsReader, PointerDeviceSettingsReader, register_keyboard_settings,
+};
 #[cfg(feature = "bevy")]
 pub use shortcuts::*;

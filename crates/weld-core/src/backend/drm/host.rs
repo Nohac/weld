@@ -240,6 +240,14 @@ pub(super) fn run(
     }
     desktop.set_cursor_position(input.pointer_position());
 
+    if let Some(configuration) = runtime
+        .state
+        .data
+        .server
+        .apply_cursor_update(application.take_cursor_update())
+    {
+        desktop.set_cursor_configuration(configuration)?;
+    }
     runtime.state.children.environment = options.client_environment;
     let child_requested = runtime
         .state
@@ -354,8 +362,11 @@ impl NativeDriver<HostEvent> for DrmDriver {
     fn prepare_dispatch(
         &mut self,
         _: &mut HostState<HostEvent>,
-        _: &mut dyn ApplicationHost,
+        app: &mut dyn ApplicationHost,
     ) -> Result<bool> {
+        if let Some(settings) = app.take_pointer_device_settings() {
+            self.input.configure_devices(settings);
+        }
         let now = Instant::now();
         if self.input_pending && now >= self.next_input_update {
             self.frame_state.request_update();
@@ -588,6 +599,15 @@ impl NativeDriver<HostEvent> for DrmDriver {
                 }
             }
         }
+        if let Some(configuration) = state
+            .data
+            .server
+            .apply_cursor_update(application.take_cursor_update())
+        {
+            self.desktop.set_cursor_configuration(configuration)?;
+            self.presentation_schedule.request_present_all();
+            self.frame_state.request_present();
+        }
         for command in application.take_host_commands() {
             match state.children.apply(&state.data.server, command)? {
                 HostCommandEffect::Continue => {}
@@ -672,22 +692,6 @@ impl NativeDriver<HostEvent> for DrmDriver {
                     }
                 }
             }
-        }
-        let cursor_update = application.take_cursor_update();
-        if let Some(configuration) = cursor_update.configuration {
-            state
-                .data
-                .server
-                .set_x11_cursor_configuration(configuration.clone());
-            self.desktop.set_cursor_configuration(configuration)?;
-            self.presentation_schedule.request_present_all();
-            self.frame_state.request_present();
-        }
-        if let Some(appearance) = cursor_update.appearance {
-            state.data.server.set_shell_cursor(appearance);
-        }
-        if let Some(active) = cursor_update.override_client {
-            state.data.server.set_shell_cursor_override(active);
         }
         if let Some(vt) = application.take_virtual_terminal_switch_request() {
             self.target = SessionTarget::InactiveOwned;

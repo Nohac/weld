@@ -83,13 +83,14 @@ use weld_core::{
     ApplicationHost, CompositionDemand, CompositionHost, HostPolicy, OutputConfiguration,
     OutputHead, dmabuf::DirectClientBufferAccess,
 };
-use weld_input::KeyboardSettingsReader;
+use weld_input::{KeyboardSettingsReader, PointerDeviceSettingsReader};
 
 #[cfg(test)]
 const PRIMARY_OUTPUT_ID: OutputId = OutputId::new(1);
 pub struct AppShell {
     app: App,
     keyboard_settings: KeyboardSettingsReader,
+    pointer_device_settings: PointerDeviceSettingsReader,
     output_preferences: OutputPreferencesReader,
     device: wgpu::Device,
     outputs: HashMap<OutputId, AppOutput>,
@@ -449,11 +450,13 @@ impl AppShell {
         let dmabuf_importer =
             DmabufImporter::new(&context.device, &context.queue, &context.dmabuf)?;
         let keyboard_settings = KeyboardSettingsReader::new(app.world_mut());
+        let pointer_device_settings = PointerDeviceSettingsReader::new(app.world_mut());
         let output_preferences = OutputPreferencesReader::new(app.world_mut());
 
         Ok(Self {
             app,
             keyboard_settings,
+            pointer_device_settings,
             output_preferences,
             device: context.device,
             outputs,
@@ -1078,6 +1081,9 @@ impl HostPolicy for AppShell {
 
     fn take_keyboard_settings(&mut self) -> Option<weld_input::KeyboardSettings> {
         self.keyboard_settings.take(self.app.world())
+    }
+    fn take_pointer_device_settings(&mut self) -> Option<weld_input::PointerDeviceSettings> {
+        self.pointer_device_settings.take(self.app.world())
     }
 
     fn take_output_settings(&mut self) -> Option<crate::output::OutputSettings> {

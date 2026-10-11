@@ -31,10 +31,12 @@ pub struct KeyboardSettings {
 #[cfg(feature = "bevy")]
 mod integration {
     use super::KeyboardSettings;
+    use crate::PointerDeviceSettings;
     use bevy::{
         app::App,
         ecs::{
             change_detection::DetectChanges,
+            resource::Resource,
             system::{Res, SystemState},
             world::World,
         },
@@ -42,12 +44,15 @@ mod integration {
 
     /// Native publication history for the [`World`] supplied at construction.
     /// Keep this reader in the host alongside its application.
-    pub struct KeyboardSettingsReader {
-        reader: SystemState<Res<'static, KeyboardSettings>>,
-        value: Option<KeyboardSettings>,
+    pub struct SettingsReader<T: Resource + Clone + PartialEq> {
+        reader: SystemState<Res<'static, T>>,
+        value: Option<T>,
     }
 
-    impl KeyboardSettingsReader {
+    pub type KeyboardSettingsReader = SettingsReader<KeyboardSettings>;
+    pub type PointerDeviceSettingsReader = SettingsReader<PointerDeviceSettings>;
+
+    impl<T: Resource + Clone + PartialEq> SettingsReader<T> {
         pub fn new(world: &mut World) -> Self {
             Self {
                 reader: SystemState::new(world),
@@ -56,7 +61,7 @@ mod integration {
         }
 
         /// Read initial or changed settings from this reader's original world.
-        pub fn take(&mut self, world: &World) -> Option<KeyboardSettings> {
+        pub fn take(&mut self, world: &World) -> Option<T> {
             // SystemState advances its change-detection boundary on each
             // read, including host polls between application updates.
             let settings = self.reader.get(world).ok()?;
