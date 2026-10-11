@@ -24,6 +24,22 @@ return; bounded nested runs and deterministic policy tests run during developmen
 
 ## Open daily-driver observations
 
+### Intermittent black DRM startup with a working cursor (2026-10-11)
+
+A live failing session continued composing/submitting frames and receiving
+vblank completions. Waybar and the wallpaper process remained alive; launching
+Kitty produced a focused, visible window with correct output-scale geometry.
+Both output captures were entirely black, placing the missing content upstream
+of physical scanout. The precise composition failure remains unresolved.
+
+`scripts/run-weld-drm` now enables bounded `weld_render_state` diagnostics to
+correlate main-world cameras, extracted/prepared views, target attachments,
+pipeline readiness, 2D schedule visits and command buffers before submission.
+These observations describe renderer state and execution; capture establishes
+the resulting pixels. Preserve `target/validation/weld-drm.log` on recurrence.
+The added hooks passed a live nested capture/clipboard run and a report-rate
+regression; reproduction under DRM is still needed to identify the failure.
+
 ### Rare apparent missing keyboard input in Foot (2026-10-04)
 
 The user reports occasional apparently dropped Enter presses and other keys in

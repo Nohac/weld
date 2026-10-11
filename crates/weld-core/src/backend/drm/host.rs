@@ -395,6 +395,7 @@ impl NativeDriver<HostEvent> for DrmDriver {
             match event {
                 HostEvent::Exit => self.exit_requested = true,
                 HostEvent::Session(SessionEvent::PauseSession) => {
+                    tracing::debug!(target: "weld_render_state", "DRM session paused; composing to owned targets");
                     self.target = SessionTarget::InactiveOwned;
                     for event in self.input.cancel_active_input().into_iter().flatten() {
                         let event = state.data.server.resolve_input(event);
@@ -419,6 +420,7 @@ impl NativeDriver<HostEvent> for DrmDriver {
                     self.desktop.pause();
                 }
                 HostEvent::Session(SessionEvent::ActivateSession) => {
+                    tracing::debug!(target: "weld_render_state", "DRM session activated; restoring physical presentation");
                     self.libinput_context
                         .resume()
                         .map_err(|_| anyhow!("failed to resume libinput after VT activation"))?;

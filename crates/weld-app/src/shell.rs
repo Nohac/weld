@@ -1,5 +1,7 @@
 //! Bevy-owned compositor scene rendered into a Weld-owned wgpu texture.
 
+mod diagnostics;
+
 use std::{
     collections::{HashMap, HashSet},
     rc::Rc,
@@ -337,6 +339,7 @@ pub fn configure_rendering(app: &mut App, context: &RenderContext) {
             .init_resource::<SpriteAssetEvents>()
             .add_systems(ExtractSchedule, extract_sprite_events);
     }
+    diagnostics::install(app);
 }
 
 impl AppShell {

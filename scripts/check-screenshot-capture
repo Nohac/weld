@@ -28,7 +28,7 @@ def main():
     config = run / "capture.config"
     config.write_text("font monospace 14\ndefault_border pixel 2\n")
     socket = run / "wayland"
-    environment = dict(os.environ, RUST_LOG="warn")
+    environment = dict(os.environ, RUST_LOG=os.environ.get("RUST_LOG", "warn"))
     client_environment = dict(environment, WAYLAND_DISPLAY=str(socket))
     client_environment.pop("WAYLAND_SOCKET", None)
     children = []

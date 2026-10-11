@@ -252,6 +252,14 @@ deltas, composition state, and GPU wait time. Use `WELD_DRM_PACING_TRACE=0` for
 performance comparisons because writing the trace can itself perturb frame timing. Output defaults
 to `target/validation/weld-drm.log`.
 
+The launcher also enables bounded `weld_render_state=debug` diagnostics for
+camera extraction, render-target matching, visible surface counts, pipelines,
+2D schedule execution and pending command buffers. It records the first eight
+frames, coalesces changes to once per second, and emits ten-second heartbeats
+on rendering activity. `WELD_DRM_RENDER_TRACE=0` disables these diagnostics;
+disable both render and pacing tracing for performance measurements.
+Preserve the log before launching another run when investigating startup failures.
+
 The probes and production DRM backend require a real TTY. See
 [Direct DRM presentation](docs/drm-presentation.md) and
 [Smithay integration validation](docs/smithay-integration-validation.md) for
