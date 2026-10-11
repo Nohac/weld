@@ -60,8 +60,11 @@ neutral application-label field, with instance preserving the X11 origin for
 configuration criteria. These hints provide grouping, not a
 security boundary: clients sharing an X server retain X11's mutual access.
 
-An unmap retires the associated surface. Remapping gets a new surface identity
-and enters normal window/hoist admission. Startup failure is logged and closes
+An unmap retires the associated surface and clears `_NET_WM_STATE_FOCUSED` on
+the surviving X11 window. Remapping gets a new surface identity and enters
+normal window/hoist admission. Clearing activation lets a reused window receive
+a fresh activation-property transition when selected again.
+Startup failure is logged and closes
 the XWayland connection; asynchronous readiness has a ten-second deadline.
 XWayland disconnection retires its windows while native Wayland hosting continues.
 Automatic XWayland restart is a follow-up.
@@ -105,7 +108,17 @@ UI and interaction were confirmed through the same Iroh path, and the user
 successfully launched a game and verified the cursor-shape fix. This is one
 game-launch smoke test, not broad game compatibility coverage.
 
-`RUST_LOG=info,weld_surface_diag=trace` records import kind and frame activity;
+The probe's `--remap-focus` option checks activation before withdrawal, verifies
+that the withdrawn window has lost its focused property, then remaps it. This
+failed before the activation cleanup and passed afterward. Manual DRM validation
+also confirmed Steam reopening at the correct size after persisting it beside
+another tile, closing it, changing the group to tabs, reopening Steam behind the
+other tab, and selecting it. During diagnosis, X11 geometry and committed buffer
+dimensions were correct while direct X11 pixel captures still contained the
+old-width contents and a black remainder.
+
+`RUST_LOG=info,weld_surface_diag=trace` records import kind, committed geometry,
+resize requests, presentation demand and per-surface frame callbacks;
 use it only for bounded diagnostic runs. The existing nested Vulkan acquisition
 fence validation messages also appear in these tests.
 

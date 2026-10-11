@@ -435,6 +435,15 @@ impl ServerState {
             }
         }
         if let Some(window) = self.xwayland.windows.get_mut(&window_id) {
+            // X11 clients can remap the same window object. Retire its activation
+            // with the old surface so the next admission starts unfocused.
+            if window.native.alive()
+                && !window.native.is_override_redirect()
+                && window.native.is_activated()
+                && let Err(error) = window.native.set_activated(false)
+            {
+                warn!(%error, window_id, "could not clear withdrawn X11 activation");
+            }
             window.published_role = None;
             window.published_metadata = None;
             if let Some((_, surface)) = window.surface.take() {

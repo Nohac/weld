@@ -121,6 +121,145 @@ fn persistence_rule_retains_slot_geometry_and_workspace_then_rebinds_a_new_occup
 }
 
 #[test]
+fn resized_vacant_slots_configure_replacements_to_current_layout() {
+    for layout in [
+        weld_tile::TileLayout::Split(weld_tile::SplitAxis::Horizontal),
+        weld_tile::TileLayout::Tabbed,
+        weld_tile::TileLayout::Stacked,
+    ] {
+        let mut app = app("for_window [app_id=preview] weld persistent enable");
+        let original = client(&mut app, 750, "preview", "First", ToplevelKind::Normal);
+        app.update();
+        let slot = window(&app, original);
+        let parent = app
+            .world()
+            .get::<TileParent>(slot)
+            .expect("parent")
+            .entity();
+        app.world_mut().trigger(weld_tile::TileSetLayout {
+            container: parent,
+            layout,
+        });
+        app.update();
+        let old = *app
+            .world()
+            .get::<WindowGeometry>(slot)
+            .expect("old geometry");
+        app.world_mut().despawn(original);
+        app.update();
+        let output = app
+            .world_mut()
+            .query::<&mut OutputGeometry>()
+            .single_mut(app.world_mut())
+            .expect("output")
+            .into_inner();
+        *output = OutputGeometry::from_physical(UVec2::new(1200, 900), 1.0);
+        app.update();
+        let expected = *app
+            .world()
+            .get::<WindowGeometry>(slot)
+            .expect("resized placeholder");
+        assert_ne!(expected.size, old.size);
+        take_surface_actions(app.world_mut());
+        let replacement = client(&mut app, 751, "preview", "Second", ToplevelKind::Normal);
+        app.update();
+        assert_eq!(window(&app, replacement), slot);
+        assert_eq!(app.world().get::<WindowGeometry>(slot), Some(&expected));
+        let actions = take_surface_actions(app.world_mut());
+        assert!(
+            actions.iter().any(
+                |action| matches!(action, SurfaceAction::Resize { surface, logical_size, .. }
+            if *surface == SurfaceId::for_test(751) && *logical_size == expected.size.as_uvec2())
+            ),
+            "replacement configure missing for {layout:?}: {actions:?}"
+        );
+        assert!(
+            actions.iter().any(
+                |action| matches!(action, SurfaceAction::SetPresentation { surface, rate: Some(_) }
+            if *surface == SurfaceId::for_test(751))
+            ),
+            "replacement frame demand missing for {layout:?}: {actions:?}"
+        );
+    }
+}
+
+#[test]
+fn replacement_in_a_hidden_persistent_tab_is_resized_before_activation() {
+    for layout in [
+        weld_tile::TileLayout::Tabbed,
+        weld_tile::TileLayout::Stacked,
+    ] {
+        let mut app = app("for_window [app_id=preview] weld persistent enable");
+        let original = client(&mut app, 760, "preview", "First", ToplevelKind::Normal);
+        app.update();
+        let slot = window(&app, original);
+        let other = client(&mut app, 761, "terminal", "Other", ToplevelKind::Normal);
+        app.update();
+        let other = window(&app, other);
+        let old = *app
+            .world()
+            .get::<WindowGeometry>(slot)
+            .expect("split geometry");
+        app.world_mut().despawn(original);
+        app.update();
+        let parent = app
+            .world()
+            .get::<TileParent>(slot)
+            .expect("parent")
+            .entity();
+        app.world_mut().trigger(weld_tile::TileSetLayout {
+            container: parent,
+            layout,
+        });
+        app.update();
+        assert_eq!(
+            app.world().resource::<FocusedWindow>().entity(),
+            Some(other)
+        );
+        assert_eq!(
+            app.world().get::<WindowVisibility>(slot),
+            Some(&WindowVisibility::Hidden)
+        );
+        let expected = *app
+            .world()
+            .get::<WindowGeometry>(slot)
+            .expect("tab geometry");
+        assert_ne!(old.size, expected.size);
+        take_surface_actions(app.world_mut());
+        let replacement = client(&mut app, 762, "preview", "Second", ToplevelKind::Normal);
+        app.update();
+        assert_eq!(window(&app, replacement), slot);
+        assert_eq!(app.world().get::<WindowGeometry>(slot), Some(&expected));
+        assert_eq!(
+            app.world().get::<WindowVisibility>(slot),
+            Some(&WindowVisibility::Hidden)
+        );
+        let actions = take_surface_actions(app.world_mut());
+        assert!(
+            actions.iter().any(
+                |action| matches!(action, SurfaceAction::Resize { surface, logical_size, .. }
+            if *surface == SurfaceId::for_test(762) && *logical_size == expected.size.as_uvec2())
+            ),
+            "hidden replacement configure missing for {layout:?}: {actions:?}"
+        );
+        app.world_mut().trigger(WindowCommand {
+            window: slot,
+            kind: WindowCommandKind::Focus,
+        });
+        app.update();
+        assert_eq!(app.world().get::<WindowGeometry>(slot), Some(&expected));
+        let actions = take_surface_actions(app.world_mut());
+        assert!(
+            actions.iter().any(
+                |action| matches!(action, SurfaceAction::SetPresentation { surface, rate: Some(_) }
+            if *surface == SurfaceId::for_test(762))
+            ),
+            "activated replacement frame demand missing for {layout:?}: {actions:?}"
+        );
+    }
+}
+
+#[test]
 fn persistence_matching_reserves_each_vacant_slot_once_and_skips_special_or_held_windows() {
     let mut app = app("");
     let first = client(&mut app, 710, "preview.+", "First", ToplevelKind::Normal);

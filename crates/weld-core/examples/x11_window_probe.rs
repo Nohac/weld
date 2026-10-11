@@ -27,6 +27,9 @@ struct Options {
     title: String,
     #[arg(long)]
     lifecycle: bool,
+    /// Verify that a focused window loses its activation state on withdrawal.
+    #[arg(long, conflicts_with = "lifecycle")]
+    remap_focus: bool,
     /// Request and verify a fullscreen enter/exit cycle through the XWM.
     #[arg(long)]
     fullscreen: bool,
@@ -107,6 +110,10 @@ fn main() -> Result<()> {
         .intern_atom(false, b"_NET_WM_STATE_FULLSCREEN")?
         .reply()?
         .atom;
+    let focused_atom = connection
+        .intern_atom(false, b"_NET_WM_STATE_FOCUSED")?
+        .reply()?
+        .atom;
     if options.initial_fullscreen {
         connection.change_property32(
             PropMode::REPLACE,
@@ -133,6 +140,34 @@ fn main() -> Result<()> {
         "X11_PROBE_READY window={window}; type or click to change the counter/color, close through Weld to test WM_DELETE_WINDOW"
     );
     while started.elapsed() < Duration::from_secs(options.seconds) {
+        if options.remap_focus && phase == 0 && started.elapsed() >= Duration::from_secs(2) {
+            let state = connection
+                .get_property(false, window, state_atom, AtomEnum::ATOM, 0, 1024)?
+                .reply()?;
+            anyhow::ensure!(
+                state
+                    .value32()
+                    .is_some_and(|mut atoms| atoms.any(|atom| atom == focused_atom)),
+                "probe must be focused before withdrawal"
+            );
+            connection.unmap_window(window)?;
+            phase = 1;
+            println!("FOCUSED_ROOT_UNMAPPED");
+        }
+        if options.remap_focus && phase == 1 && started.elapsed() >= Duration::from_secs(3) {
+            let state = connection
+                .get_property(false, window, state_atom, AtomEnum::ATOM, 0, 1024)?
+                .reply()?;
+            anyhow::ensure!(
+                !state
+                    .value32()
+                    .is_some_and(|mut atoms| atoms.any(|atom| atom == focused_atom)),
+                "withdrawn window retained _NET_WM_STATE_FOCUSED"
+            );
+            connection.map_window(window)?;
+            phase = 2;
+            println!("WITHDRAWN_FOCUS_CLEARED_ROOT_REMAPPED");
+        }
         if options.popup_cycle {
             let period = started.elapsed().as_secs() / 10;
             if popup_period != Some(period) {

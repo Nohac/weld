@@ -1915,6 +1915,90 @@ mod tests {
 
     #[cfg(feature = "test-support")]
     #[test]
+    fn resized_hidden_surface_updates_layout_and_pixels_without_target_change() {
+        let (mut shell, _, device, queue) = crate::benchmark::rendering_shell_with_outputs(
+            vec![diagnostic_output(
+                PRIMARY_OUTPUT_ID,
+                LogicalPoint::ZERO,
+                true,
+                0.0,
+            )],
+            |_| {},
+        )
+        .expect("diagnostic GPU shell");
+        let surface = SurfaceId::for_test(1);
+        install_diagnostic_surface(&mut shell, surface, [0, 0, 255, 255]);
+        let camera = shell.outputs[&PRIMARY_OUTPUT_ID].camera;
+        let parent = shell
+            .app
+            .world_mut()
+            .spawn((
+                Node {
+                    width: px(64),
+                    height: px(64),
+                    display: bevy::ui::Display::None,
+                    ..Default::default()
+                },
+                UiTargetCamera(camera),
+            ))
+            .id();
+        let child = shell
+            .app
+            .world_mut()
+            .spawn((
+                SurfaceNode {
+                    surface,
+                    view: SurfaceView::FullSurface,
+                },
+                ChildOf(parent),
+            ))
+            .id();
+        let mut frames = Vec::new();
+        for tick in 0..5 {
+            shell.advance_main(tick);
+            shell
+                .render_outputs(&[owned_request(PRIMARY_OUTPUT_ID)], &mut frames)
+                .expect("hidden render");
+        }
+        shell
+            .app
+            .world_mut()
+            .get_mut::<Node>(parent)
+            .expect("parent")
+            .display = bevy::ui::Display::Flex;
+        shell.advance_main(5);
+        shell
+            .render_outputs(&[owned_request(PRIMARY_OUTPUT_ID)], &mut frames)
+            .expect("show old buffer");
+        update_diagnostic_surface_extent(&mut shell, surface, 64, |x, _| {
+            if x < 32 {
+                [0, 255, 0, 255]
+            } else {
+                [255, 0, 0, 255]
+            }
+        });
+        for tick in 6..10 {
+            shell.advance_main(tick);
+            shell
+                .render_outputs(&[owned_request(PRIMARY_OUTPUT_ID)], &mut frames)
+                .expect("resized render");
+        }
+        assert_eq!(
+            shell
+                .app
+                .world()
+                .get::<bevy::ui::ComputedNode>(child)
+                .expect("surface layout")
+                .size(),
+            bevy::math::Vec2::splat(64.0)
+        );
+        let pixels = render_owned_output(&mut shell, &device, &queue, PRIMARY_OUTPUT_ID);
+        let offset = (48 * 64 + 48) * 4;
+        assert_eq!(&pixels[offset..offset + 4], &[0, 0, 255, 255]);
+    }
+
+    #[cfg(feature = "test-support")]
+    #[test]
     fn sequential_output_passes_preserve_surface_material_updates() {
         let first = OutputId::new(1);
         let second = OutputId::new(2);
@@ -2211,22 +2295,29 @@ mod tests {
 
     #[cfg(feature = "test-support")]
     fn update_diagnostic_surface(shell: &mut AppShell, surface: SurfaceId, bgra: [u8; 4]) {
-        const SIZE: u32 = 32;
+        update_diagnostic_surface_extent(shell, surface, 32, |_, _| bgra);
+    }
+
+    #[cfg(feature = "test-support")]
+    fn update_diagnostic_surface_extent(
+        shell: &mut AppShell,
+        surface: SurfaceId,
+        size: u32,
+        pixel: impl Fn(u32, u32) -> [u8; 4],
+    ) {
         let view = SurfaceContentView {
             source_x: 0.0,
             source_y: 0.0,
-            source_width: SIZE as f32,
-            source_height: SIZE as f32,
-            logical_width: SIZE as f32,
-            logical_height: SIZE as f32,
+            source_width: size as f32,
+            source_height: size as f32,
+            logical_width: size as f32,
+            logical_height: size as f32,
         };
         let layer = SurfaceLayerId::new(1);
-        let pixels = bgra
-            .into_iter()
-            .cycle()
-            .take((SIZE * SIZE * 4) as usize)
+        let pixels = (0..size * size)
+            .flat_map(|index| pixel(index % size, index / size))
             .collect();
-        let metadata = weld_client::ClientBufferMetadata::new(Extent::new(SIZE, SIZE), true);
+        let metadata = weld_client::ClientBufferMetadata::new(Extent::new(size, size), true);
         let lease = weld_client::ClientBufferLease::new(
             weld_client::ClientBufferId::new(weld_core::WAYLAND_CLIENT_SOURCE, 1),
             weld_client::ClientBufferUseId::new(weld_core::WAYLAND_CLIENT_SOURCE, 1),

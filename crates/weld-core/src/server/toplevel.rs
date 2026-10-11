@@ -352,11 +352,14 @@ impl ServerState {
             warn!(?surface, "ignored a resize request for an unknown surface");
             return false;
         };
-        toplevel.surface.stage_size(
+        let changed = toplevel.surface.stage_size(
             requested,
             toplevel.fullscreen.unwrap_or(false),
             toplevel.layout.unwrap_or_default(),
-        )
+        );
+        tracing::trace!(target: "weld_surface_diag", ?surface, ?requested, changed,
+            layout = ?toplevel.layout, "staged client size");
+        changed
     }
 
     fn record_server_side_decoration(&mut self, surface: &ToplevelSurface) {
@@ -707,6 +710,16 @@ impl ServerState {
             });
         }
         let snapshot = toplevel.tree.update(surface_id, root, releases, geometry);
+        tracing::trace!(
+            target: "weld_surface_diag",
+            surface = ?surface_id,
+            mapped = snapshot.client_mapped,
+            native = self.presentation_claims.native(surface_id),
+            window_geometry_hint = ?geometry,
+            root_view = ?snapshot.root.as_ref().map(|root| root.view),
+            window_geometry = ?snapshot.window_geometry,
+            "committed surface geometry"
+        );
         if snapshot.root.is_none() {
             self.clear_input_focus_for_surface(root, self.event_time());
         }

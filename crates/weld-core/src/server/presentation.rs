@@ -122,6 +122,9 @@ pub(super) struct SurfaceCallbacks {
 impl SurfaceCallbacks {
     pub(super) fn complete(self, time: u32) {
         if self.surface.is_alive() {
+            tracing::trace!(target: "weld_surface_diag", surface = ?self.root,
+                wl_surface = ?self.surface.id(), count = self.callbacks.len(), time,
+                "delivered surface frame callbacks");
             for callback in self.callbacks {
                 if callback.is_alive() {
                     callback.done(time);
@@ -200,6 +203,10 @@ impl ServerState {
         let was_native = self.presentation_claims.native(surface);
         self.presentation_claims.local.insert(surface, rate);
         self.transition_callback_owner(surface, was_native);
+        tracing::trace!(target: "weld_surface_diag", ?surface, ?rate, was_native,
+            native = self.presentation_claims.native(surface),
+            callback_demand = self.presentation_claims.local_handoffs.contains(&surface),
+            "updated local presentation demand");
     }
 
     fn transition_callback_owner(&mut self, surface: SurfaceId, was_native: bool) {
