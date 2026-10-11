@@ -62,6 +62,7 @@ pub struct PendingSurfaceTreeSnapshot {
 }
 
 pub(super) struct SurfaceTreeState {
+    shm_only: bool,
     buffers: HashMap<ObjectId, CachedSurfaceBuffer>,
     nodes: Vec<TreeNode>,
     root_geometry: Option<Rectangle<i32, Logical>>,
@@ -80,6 +81,7 @@ struct TreeUpdateScratch {
 impl Default for SurfaceTreeState {
     fn default() -> Self {
         Self {
+            shm_only: false,
             buffers: HashMap::new(),
             nodes: Vec::new(),
             root_geometry: None,
@@ -189,6 +191,12 @@ impl Default for TraversalContext {
 }
 
 impl SurfaceTreeState {
+    pub(super) fn shm_only() -> Self {
+        Self {
+            shm_only: true,
+            ..Self::default()
+        }
+    }
     pub(super) fn should_process_commit(surface: &WlSurface) -> bool {
         !is_sync_subsurface(surface)
     }
@@ -361,6 +369,7 @@ impl SurfaceTreeState {
                     committed.buffer_transform,
                     release_point,
                     releases,
+                    self.shm_only,
                 );
                 cached.client_mapped = true;
                 match imported {
@@ -734,8 +743,14 @@ fn import_buffer(
     buffer_transform: wl_output::Transform,
     release_point: Option<DrmSyncPoint>,
     releases: &mut DmabufReleaseStore,
+    shm_only: bool,
 ) -> anyhow::Result<ImportedBuffer> {
     if let Ok(dmabuf) = get_dmabuf(buffer).cloned() {
+        if shm_only {
+            buffer.release();
+            signal_release_point(release_point, "SHM-only consumer declined DMA-BUF");
+            anyhow::bail!("surface consumer requires SHM buffers");
+        }
         let registered_release_point = release_point.clone();
         let imported = (|| {
             let size = dmabuf.size();

@@ -2,6 +2,7 @@
 
 mod settings;
 
+use input::{Device, DeviceCapability, Led};
 use smithay::backend::{
     input::{
         AbsolutePositionEvent, Axis, AxisSource, ButtonState, Event, GestureBeginEvent,
@@ -10,6 +11,7 @@ use smithay::backend::{
     },
     libinput::LibinputInputBackend,
 };
+use smithay::input::keyboard::LedState;
 use tracing::trace;
 
 use crate::input::{
@@ -21,6 +23,8 @@ use crate::input::{
 use crate::output::OutputTopology;
 
 pub struct LibinputAdapter {
+    keyboards: Vec<Device>,
+    keyboard_leds: Led,
     devices: settings::PointerDevices,
     topology: OutputTopology,
     pointer: InputPosition,
@@ -39,6 +43,8 @@ impl LibinputAdapter {
     pub fn new(topology: OutputTopology) -> Self {
         let pointer = topology.primary_position(0.5, 0.5);
         Self {
+            keyboards: Vec::new(),
+            keyboard_leds: Led::empty(),
             devices: settings::PointerDevices::default(),
             topology,
             pointer,
@@ -50,6 +56,17 @@ impl LibinputAdapter {
 
     pub fn configure_devices(&mut self, settings: weld_input::PointerDeviceSettings) {
         self.devices.configure(settings);
+    }
+
+    pub(crate) fn update_keyboard_leds(&mut self, state: LedState) {
+        let leds = Led::from(state);
+        if leds == self.keyboard_leds {
+            return;
+        }
+        self.keyboard_leds = leds;
+        for keyboard in &mut self.keyboards {
+            keyboard.led_update(leds);
+        }
     }
 
     pub fn initial_event(&self) -> RawSeatEvent {
@@ -68,10 +85,16 @@ impl LibinputAdapter {
     ) -> [Option<RawSeatEvent>; 2] {
         let converted = match event {
             InputEvent::DeviceAdded { device } => {
+                if device.has_capability(DeviceCapability::Keyboard) {
+                    let mut keyboard = device.clone();
+                    keyboard.led_update(self.keyboard_leds);
+                    self.keyboards.push(keyboard);
+                }
                 self.devices.add(device);
                 empty_batch()
             }
             InputEvent::DeviceRemoved { device } => {
+                self.keyboards.retain(|keyboard| keyboard != &device);
                 self.devices.remove(&device);
                 empty_batch()
             }

@@ -113,6 +113,53 @@ one-shot owned composition, writes the PNG through the shared readback helper,
 then requests a new direct physical composition. It never reads a scanout
 allocation or introduces an owned-to-scanout blit.
 
+## Session locking
+
+DRM sessions expose `ext-session-lock-v1`. Run `swaylock` from a terminal or
+an `exec` binding inside Weld; Swaylock owns password authentication through PAM.
+For a simple manual check:
+
+```sh
+swaylock --color 1e1e2e
+```
+
+The native host gives the locker exclusive local presentation and input.
+It clears each output to opaque black and composites the lock surface tree into
+the same leased DRM targets, using the existing device, queue and blitter.
+Lock confirmation waits for protected page flips on every output; generation
+tags exclude earlier desktop frames. Lock surfaces use the shared surface-tree
+importer, including the subsurface containing Swaylock's typing indicator,
+buffer release, scaling and frame callbacks. The current lock composition accepts
+SHM buffers with normal transforms; unsupported content retains the opaque fallback.
+Protocol advertisement is enabled for DRM presenters.
+
+Ctrl+Alt+F1–F12 remains available while locked, using Weld's configured modifiers.
+Returning to the Weld TTY preserves the lock. Ordinary desktop shortcuts and
+local application input remain blocked until the owning locker unlocks.
+The local XKB state also drives physical Caps, Num and Scroll Lock LEDs, including
+newly attached keyboards. Remote-seat modifiers leave those LEDs unchanged.
+
+Existing hoists continue streaming and receiving their remote client's input.
+Local output capture sessions are stopped and new capture requests are rejected
+while locked. If the locker disconnects, the local display stays covered; a new
+locker connected to the same Weld socket can take over authentication.
+
+The isolated regression suite checks competing lockers, output confirmation,
+disconnects, input isolation, continuing remote input/frame callbacks, configured
+XKB remappings and capture rejection. It also launches real Swaylock against a
+private two-output server and exercises repeated typing without submitting a
+password. Offscreen GPU readback verifies opaque fallback and scaled/clipped
+subsurface placement and removal:
+
+```sh
+cargo test -p weld-core --features test-support session_lock -- \
+  --include-ignored --test-threads=1
+```
+
+Manual DRM validation with the corrected typing indicator was reported working
+on 2026-10-11. For regressions, check authentication, TTY switching and return,
+configured modifier swaps, keyboard LEDs, and an active phone hoist during locking.
+
 ## Validation
 
 Run the production backend from a real TTY:

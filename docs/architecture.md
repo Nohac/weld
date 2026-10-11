@@ -75,6 +75,11 @@ Weld is a workspace of reusable layers and one standard distribution:
   a bounded worker owns GPU readback and optional PNG writing. The host validates
   and fills client SHM before signalling capture completion. See
   [Screenshots](screenshots.md) for supported tools and validation.
+  Its native session-lock boundary owns locker surfaces, local input isolation,
+  opaque output composition and confirmation after protected DRM page flips.
+  Lock subsurfaces share ordinary surface-tree import and callback handling;
+  authenticated remote hoists retain their independent input and presentation.
+  See [Session locking](drm-presentation.md#session-locking).
 - `weld-app` owns the Bevy application and render bridge, the plugin-facing
   application model, input projection, surface entities, and composition into
   a core-owned texture. Plugin APIs use Weld and Bevy types rather than

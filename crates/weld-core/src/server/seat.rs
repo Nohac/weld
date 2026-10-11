@@ -289,6 +289,9 @@ impl ServerState {
     }
 
     pub(super) fn focus_seat(&mut self, input_seat: &InputSeat, requested: Option<SurfaceId>) {
+        if self.session_locked() && input_seat.controller.get().is_none() && requested.is_some() {
+            return;
+        }
         if requested.is_none() {
             self.dismiss_popup_grab(input_seat, self.event_time());
         }
@@ -1349,7 +1352,7 @@ const fn smithay_button_state(state: ButtonState) -> SmithayButtonState {
     }
 }
 
-fn smithay_axis_frame(axis: RawScrollFrame, time: u32) -> Option<AxisFrame> {
+pub(super) fn smithay_axis_frame(axis: RawScrollFrame, time: u32) -> Option<AxisFrame> {
     if axis.horizontal == 0.0
         && axis.vertical == 0.0
         && axis.horizontal_v120.unwrap_or_default() == 0

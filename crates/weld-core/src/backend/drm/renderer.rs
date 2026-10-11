@@ -35,7 +35,7 @@ use crate::renderer::CompositionBlitter;
 use crate::{
     OutputId,
     host::{
-        CompositionDestination, CompositionHost, CompositionOutputFrame, CompositionOutputRequest,
+        CompositionDestination, CompositionOutputFrame, CompositionOutputRequest,
         CompositionTargetView,
     },
     surface::Extent,
@@ -190,7 +190,10 @@ impl RenderBatch {
 
     fn finish(
         &mut self,
-        host: &mut dyn CompositionHost,
+        compose: impl FnOnce(
+            &[CompositionOutputRequest],
+            &mut Vec<CompositionOutputFrame>,
+        ) -> Result<()>,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         raw_device: &ash::Device,
@@ -202,7 +205,7 @@ impl RenderBatch {
         let render_result = if self.requests.is_empty() {
             Ok(())
         } else {
-            host.render_outputs(&self.requests, &mut self.frames)
+            compose(&self.requests, &mut self.frames)
                 .and_then(|()| validate_composition_frames(&self.requests, &self.frames))
         };
         let release_result = self.submit_pending(device, queue, raw_device, queue_family);
@@ -366,9 +369,15 @@ impl DrmRenderState {
         self.batch.open()
     }
 
-    pub(super) fn finish_batch(&mut self, host: &mut dyn CompositionHost) -> Result<BatchFinish> {
+    pub(super) fn finish_batch(
+        &mut self,
+        compose: impl FnOnce(
+            &[CompositionOutputRequest],
+            &mut Vec<CompositionOutputFrame>,
+        ) -> Result<()>,
+    ) -> Result<BatchFinish> {
         let result = self.batch.finish(
-            host,
+            compose,
             &self.device,
             &self.queue,
             &self.raw_device,

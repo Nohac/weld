@@ -274,6 +274,9 @@ impl ServerState {
         controller: Option<ClientInputController>,
         surface: Option<SurfaceId>,
     ) {
+        if controller.is_none() && self.session_locked() {
+            return;
+        }
         let Some(logical) = self.controller_seat(controller) else {
             return;
         };
@@ -301,6 +304,9 @@ impl ServerState {
         controller: Option<ClientInputController>,
         event: ClientInputEvent,
     ) {
+        if controller.is_none() && self.session_locked() {
+            return;
+        }
         if let InputEventKind::Touch { event: touch } = event.event {
             self.route_touch(controller, event.target, touch, event.time);
             return;

@@ -23,6 +23,7 @@ use crate::runtime::gpu::NativeGpu;
 
 pub(crate) mod capture_task;
 pub(crate) mod composite;
+pub(crate) mod session_lock;
 use capture_task::{CaptureTask, CaptureWorker};
 
 pub(crate) use composite::CompositionBlitter;

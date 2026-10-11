@@ -17,6 +17,7 @@ mod presentation;
 mod resize;
 mod seat;
 mod seat_bindings;
+pub(crate) mod session_lock;
 mod shm;
 mod surface_tree;
 mod toplevel;
@@ -104,6 +105,7 @@ pub struct ServerState {
     pub socket_name: OsString,
     compositor_state: CompositorState,
     capture: capture::OutputCapture,
+    session_lock: session_lock::SessionLock,
     xdg_shell_state: XdgShellState,
     xwayland: xwayland::XwaylandState,
     layer_shell_state: smithay::wayland::shell::wlr_layer::WlrLayerShellState,
@@ -197,6 +199,7 @@ impl ServerState {
         let display_handle = display.handle();
         let compositor_state = CompositorState::new::<Self>(&display_handle);
         let capture = capture::OutputCapture::new(&display_handle);
+        let session_lock = session_lock::SessionLock::new(&display_handle);
         let xdg_shell_state = XdgShellState::new::<Self>(&display_handle);
         let xwayland = xwayland::XwaylandState::new(&display_handle);
         let layer_shell_state =
@@ -358,6 +361,7 @@ impl ServerState {
             socket_name,
             compositor_state,
             capture,
+            session_lock,
             xdg_shell_state,
             xwayland,
             layer_shell_state,
@@ -447,6 +451,7 @@ impl ServerState {
         if metrics_changed {
             self.send_all_surface_scales();
             self.arrange_layers(id);
+            self.configure_lock_output(id);
         }
     }
 

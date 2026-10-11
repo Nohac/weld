@@ -41,6 +41,7 @@ enum FrameAdmission {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct RetiredFrame {
+    pub(super) lock_generation: Option<u64>,
     pub(super) presentation_id: Option<u64>,
     pub(super) deferred_present: bool,
 }
@@ -83,6 +84,7 @@ impl FrameAdmission {
             return None;
         };
         Some(RetiredFrame {
+            lock_generation: None,
             presentation_id,
             deferred_present,
         })
@@ -111,6 +113,7 @@ struct PhysicalOutputState {
 }
 
 pub(super) struct PhysicalDesktop {
+    lock_composition: crate::renderer::session_lock::LockComposition,
     manager: OutputManager,
     render_state: DrmRenderState,
     outputs: Vec<PhysicalOutputState>,
@@ -178,6 +181,10 @@ impl PhysicalDesktop {
                 .context("Smithay failed to restore explicit output modifiers")?;
         }
         Ok(Self {
+            lock_composition: crate::renderer::session_lock::LockComposition::new(
+                render_state.device().clone(),
+                render_state.queue().clone(),
+            ),
             manager,
             render_state,
             outputs,
@@ -281,7 +288,8 @@ impl PhysicalDesktop {
         }
 
         self.render_state.begin_batch()?;
-        let prepared = match self.prepare_outputs(&indices) {
+        let lock_generation = server.lock_generation();
+        let prepared = match self.prepare_outputs(&indices, lock_generation.is_some()) {
             PrepareBatch::Ready(prepared) => prepared,
             PrepareBatch::Inactive => {
                 self.render_state.abort_batch();
@@ -289,10 +297,20 @@ impl PhysicalDesktop {
                 return Ok(outcome);
             }
         };
-        match self.render_state.finish_batch(host)? {
+        let result = if lock_generation.is_some() {
+            self.lock_composition.update(server.lock_images());
+            self.render_state.finish_batch(|requests, frames| {
+                self.lock_composition.render_outputs(requests, frames)
+            })?
+        } else {
+            self.lock_composition.update(HashMap::new());
+            self.render_state
+                .finish_batch(|requests, frames| host.render_outputs(requests, frames))?
+        };
+        match result {
             BatchFinish::Complete => {}
             BatchFinish::CompositionFailed(error) => {
-                warn!(%error, "Bevy DRM composition failed; retaining output damage for retry");
+                warn!(%error, "native output composition failed; retaining output damage for retry");
                 outcome
                     .retry
                     .extend(indices.iter().map(|index| self.outputs[*index].id));
@@ -305,7 +323,7 @@ impl PhysicalDesktop {
             .filter(|frame| !frame.empty)
             .map(|frame| self.outputs[frame.index].id)
             .collect::<Vec<_>>();
-        let presentation_id = stage_callbacks
+        let presentation_id = (stage_callbacks && lock_generation.is_none())
             .then(|| stage_callback_batch(callbacks, server, candidates.iter().copied()))
             .flatten();
         for frame in prepared {
@@ -314,10 +332,11 @@ impl PhysicalDesktop {
                 outcome.empty.push(output.id);
                 continue;
             }
-            match output
-                .output
-                .queue_frame(SubmittedFrame { presentation_id })
-            {
+            match output.output.queue_frame(SubmittedFrame {
+                presentation_id,
+                lock_generation: lock_generation
+                    .filter(|_| self.render_state.composition_drawn(output.id)),
+            }) {
                 Ok(()) => {
                     let completed = output
                         .admission
@@ -357,12 +376,16 @@ impl PhysicalDesktop {
         Ok(outcome)
     }
 
-    fn prepare_outputs(&mut self, indices: &[usize]) -> PrepareBatch {
+    fn prepare_outputs(&mut self, indices: &[usize], locked: bool) -> PrepareBatch {
         let mut prepared = Vec::with_capacity(indices.len());
         for index in indices.iter().copied() {
             let output = &mut self.outputs[index];
             let mut renderer = self.render_state.renderer(output.id);
-            let cursor = match output.cursor.render_element(&mut renderer) {
+            let cursor = match if locked {
+                Ok(None)
+            } else {
+                output.cursor.render_element(&mut renderer)
+            } {
                 Ok(cursor) => cursor,
                 Err(error) => {
                     output.available = false;
@@ -424,10 +447,12 @@ impl PhysicalDesktop {
         let Some(submitted) = submitted else {
             return Ok(None);
         };
-        let admission = output.admission.retire().unwrap_or(RetiredFrame {
+        let mut admission = output.admission.retire().unwrap_or(RetiredFrame {
+            lock_generation: None,
             presentation_id: None,
             deferred_present: false,
         });
+        admission.lock_generation = submitted.lock_generation;
         if submitted.presentation_id != admission.presentation_id {
             warn!(
                 output = ?output.id,
@@ -514,6 +539,7 @@ mod tests {
         assert_eq!(
             admission.retire(),
             Some(RetiredFrame {
+                lock_generation: None,
                 presentation_id: Some(7),
                 deferred_present: true,
             })

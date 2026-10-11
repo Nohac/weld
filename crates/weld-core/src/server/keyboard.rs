@@ -3,9 +3,13 @@
 use super::{ServerState, input_seat::InputSeat};
 use crate::input::{KeyboardMapper, KeyboardSettings, RawSeatEvent, RawSeatEventKind};
 use anyhow::Result;
-use smithay::input::keyboard::{KeyboardHandle, xkb};
+use smithay::input::keyboard::{KeyboardHandle, LedMapping, LedState, xkb};
 
 impl ServerState {
+    pub(crate) fn keyboard_leds(&self) -> LedState {
+        let state = self.keyboard_mapper.xkb_state();
+        LedState::from_state(state, &LedMapping::from_keymap(&state.get_keymap()))
+    }
     pub(crate) fn resolve_input(&mut self, event: RawSeatEvent) -> RawSeatEvent {
         let event = self.keyboard_mapper.resolve(event);
         // Releases still update the active client after the press recipient has

@@ -96,7 +96,7 @@ impl ImageCopyCaptureHandler for ServerState {
     }
 
     fn capture_constraints(&mut self, source: &ImageCaptureSource) -> Option<BufferConstraints> {
-        if !self.capture.enabled {
+        if !self.capture.enabled || self.session_locked() {
             return None;
         }
         let id = source.user_data().get::<OutputId>()?;
@@ -176,6 +176,14 @@ impl ImageCopyCaptureHandler for ServerState {
 }
 
 impl ServerState {
+    pub(super) fn stop_output_captures(&mut self) {
+        for pending in self.capture.pending.drain(..) {
+            pending.frame.fail(CaptureFailureReason::Stopped);
+        }
+        for session in self.capture.sessions.drain(..) {
+            session.stop();
+        }
+    }
     pub(crate) fn enable_output_capture(&mut self) {
         self.capture.enabled = true;
     }

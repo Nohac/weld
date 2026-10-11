@@ -6,7 +6,8 @@ Weld runs nested and directly on DRM, accepts multiple native Wayland
 xdg-toplevels and XDG popups, supports SHM and the advertised DMA-BUF subset,
 capability-gates explicit DMA-BUF synchronization, handles keyboard, pointer,
 scrolling, decorations, fractional client scaling, move/resize requests,
-screenshots, and structured tracing. The precise current surface and renderer
+screenshots, manual [DRM session locking](../drm-presentation.md#session-locking),
+and structured tracing. The precise current surface and renderer
 limits are recorded in [Architecture](../architecture.md).
 
 This is a development compositor, not yet a complete daily-driver platform.

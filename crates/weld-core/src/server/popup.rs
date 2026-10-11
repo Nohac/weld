@@ -258,6 +258,9 @@ impl ServerState {
         let Some(input_seat) = self.input_for_native(&seat) else {
             return;
         };
+        if self.session_locked() && input_seat.controller.get().is_none() {
+            return;
+        }
 
         let kind = PopupKind::Xdg(surface);
         let Ok(root) = find_popup_root_surface(&kind) else {

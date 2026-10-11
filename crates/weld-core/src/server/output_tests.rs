@@ -8,6 +8,8 @@ mod input_binding_tests;
 mod input_seat_tests;
 #[path = "layer_tests.rs"]
 mod layer_tests;
+#[path = "session_lock_tests.rs"]
+mod session_lock_tests;
 #[path = "touch_tests.rs"]
 mod touch_tests;
 #[path = "workspace_tests.rs"]
@@ -57,6 +59,7 @@ struct ObservedSurface {
 
 #[derive(Default)]
 struct Observer {
+    lock: session_lock_tests::Probe,
     touch: touch_tests::Probe,
     input: input_seat_tests::Probe,
     selection: input_binding_tests::SelectionProbe,
@@ -94,6 +97,9 @@ impl Dispatch<wl_registry::WlRegistry, ()> for Observer {
         } = event
         {
             match interface.as_str() {
+                "ext_session_lock_manager_v1" => {
+                    state.lock.manager = Some(registry.bind(name, 1, qh, ()));
+                }
                 "wl_data_device_manager" => {
                     state.selection.manager = Some(registry.bind(name, version.min(3), qh, ()));
                 }
@@ -282,12 +288,16 @@ struct Fixture {
 
 impl Fixture {
     fn new() -> Self {
+        Self::with_session_lock(false)
+    }
+
+    fn with_session_lock(enable: bool) -> Self {
         let event_loop = EventLoop::try_new().expect("event loop");
         let (_, receiver) = channel::channel();
         let display = Display::new().expect("display");
         let mut handle = display.handle();
         let socket = std::env::temp_dir().join(format!("weld-output-test-{}", std::process::id()));
-        let server = ServerState::new(
+        let mut server = ServerState::new(
             &event_loop.handle(),
             display,
             receiver,
@@ -322,6 +332,9 @@ impl Fixture {
             },
         )
         .expect("server");
+        if enable {
+            server.enable_session_lock();
+        }
         let (server_socket, client_socket) = UnixStream::pair().expect("socket pair");
         let client = handle
             .insert_client(

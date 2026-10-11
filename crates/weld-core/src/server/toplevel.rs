@@ -862,6 +862,9 @@ impl CompositorHandler for ServerState {
             return;
         }
         let root = owning_root(surface);
+        if self.commit_lock_surface(&root) {
+            return;
+        }
         tracing::trace!(target: "weld_surface_diag", surface = ?surface.id(), root = ?root.id(), "processed surface commit");
         let Some(surface_id) = self.toplevels.id_for_surface(&root) else {
             if !self.commit_layer(&root) && !self.commit_popup(&root) {
@@ -900,6 +903,9 @@ impl CompositorHandler for ServerState {
     }
 
     fn destroyed(&mut self, surface: &WlSurface) {
+        if self.remove_lock_surface(surface) {
+            return;
+        }
         self.remove_cursor_surface(surface);
         self.leave_all_outputs(surface);
         let root = owning_root(surface);

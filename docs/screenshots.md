@@ -40,6 +40,8 @@ in the tree and are excluded from Grimshot's application selection boxes.
 
 Local clients with access to Weld's Wayland socket can request captures. Portal
 permission prompts and browser/OBS PipeWire sharing are separate follow-up work.
+An active session lock stops output capture sessions and rejects new captures;
+capture tools can start a fresh session after unlock.
 
 Smithay owns protocol resources and validates capture buffers. Weld bounds
 active sessions and pending frames, cancels disconnected requests, refreshes

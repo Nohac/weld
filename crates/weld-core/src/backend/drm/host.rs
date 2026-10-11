@@ -45,6 +45,27 @@ enum HostEvent {
     Input(InputEvent<LibinputInputBackend>),
 }
 
+fn lock_terminal_switch(event: &RawSeatEvent) -> Option<i32> {
+    let RawSeatEventKind::Keyboard {
+        keycode,
+        state: crate::input::KeyboardKeyState::Pressed,
+        ..
+    } = event.event
+    else {
+        return None;
+    };
+    let modifiers = event.modifiers?;
+    if !modifiers.control || !modifiers.alt {
+        return None;
+    }
+    match keycode.0 {
+        59..=68 => i32::try_from(keycode.0 - 58).ok(),
+        87 => Some(11),
+        88 => Some(12),
+        _ => None,
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum SessionTarget {
     ActivePhysical,
@@ -187,6 +208,7 @@ pub(super) fn run(
         &selected_outputs,
         &runtime.state.data.server,
     )?;
+    runtime.state.data.server.enable_session_lock();
 
     let session_events = runtime.state.data.events.clone();
     runtime
@@ -321,6 +343,7 @@ pub(super) fn run(
         exit_requested,
         started_at,
         remote_debug_enabled: options.remote_debug_enabled,
+        session_locked: false,
     };
     runtime.run(
         RuntimeIntegration::Native {
@@ -356,14 +379,17 @@ struct DrmDriver {
     exit_requested: bool,
     started_at: Instant,
     remote_debug_enabled: bool,
+    session_locked: bool,
 }
 
 impl NativeDriver<HostEvent> for DrmDriver {
     fn prepare_dispatch(
         &mut self,
-        _: &mut HostState<HostEvent>,
+        state: &mut HostState<HostEvent>,
         app: &mut dyn ApplicationHost,
     ) -> Result<bool> {
+        self.input
+            .update_keyboard_leds(state.data.server.keyboard_leds());
         if !crate::runtime::finish_capture(&mut self.pending_capture, app)? {
             return Ok(false);
         }
@@ -399,6 +425,9 @@ impl NativeDriver<HostEvent> for DrmDriver {
                     self.target = SessionTarget::InactiveOwned;
                     for event in self.input.cancel_active_input().into_iter().flatten() {
                         let event = state.data.server.resolve_input(event);
+                        if state.data.server.dispatch_lock_input(&event) {
+                            continue;
+                        }
                         if application.enqueue_input_event(event.clone()) {
                             state
                                 .clients
@@ -411,10 +440,12 @@ impl NativeDriver<HostEvent> for DrmDriver {
                         self.input.last_event_time_msec(),
                     );
                     let focus_lost = state.data.server.resolve_input(focus_lost);
-                    let _ = application.enqueue_input_event(focus_lost.clone());
-                    state
-                        .clients
-                        .dispatch_unconsumed_input(focus_lost.into_runtime());
+                    if !state.data.server.dispatch_lock_input(&focus_lost) {
+                        let _ = application.enqueue_input_event(focus_lost.clone());
+                        state
+                            .clients
+                            .dispatch_unconsumed_input(focus_lost.into_runtime());
+                    }
                     state.data.server.apply_pending_client_work();
                     self.libinput_context.suspend();
                     self.desktop.pause();
@@ -427,7 +458,9 @@ impl NativeDriver<HostEvent> for DrmDriver {
                     self.desktop.activate()?;
                     self.presentation_schedule.activate_all();
                     self.target = SessionTarget::ActivePhysical;
-                    application.restore_input_focus();
+                    if !state.data.server.session_locked() {
+                        application.restore_input_focus();
+                    }
                     self.frame_state.request_composition();
                 }
                 HostEvent::Drm {
@@ -438,6 +471,10 @@ impl NativeDriver<HostEvent> for DrmDriver {
                     let sequence = metadata.map(|event| event.sequence);
                     let retired = self.desktop.retire(crtc)?;
                     if let Some((output, retired)) = retired {
+                        state
+                            .data
+                            .server
+                            .lock_frame_presented(output, retired.lock_generation);
                         let sequence_delta = sequence
                             .zip(self.output_vblank_sequence.get(&output).copied())
                             .map(|(current, previous)| current.wrapping_sub(previous));
@@ -490,6 +527,17 @@ impl NativeDriver<HostEvent> for DrmDriver {
                 HostEvent::Input(event) => {
                     for event in self.input.convert(event).into_iter().flatten() {
                         let event = state.data.server.resolve_input(event);
+                        if state.data.server.session_locked()
+                            && let Some(vt) = lock_terminal_switch(&event)
+                        {
+                            if let Err(error) = self.session.change_vt(vt) {
+                                warn!(%error, vt, "could not switch terminal; retaining session lock");
+                            }
+                            continue;
+                        }
+                        if state.data.server.dispatch_lock_input(&event) {
+                            continue;
+                        }
                         if matches!(event.event, RawSeatEventKind::PointerMotion { .. }) {
                             self.desktop
                                 .set_cursor_position(self.input.pointer_position());
@@ -522,10 +570,29 @@ impl NativeDriver<HostEvent> for DrmDriver {
         state: &mut HostState<HostEvent>,
         application: &mut dyn ApplicationHost,
     ) -> PolicyFrame {
+        let locked = state.data.server.session_locked();
+        if locked && !self.session_locked {
+            // Clear shell-held shortcuts and interactions before password input.
+            let _ = application.enqueue_input_event(RawSeatEvent::new(
+                RawSeatEventKind::HostFocusLost,
+                self.input.last_event_time_msec(),
+            ));
+        }
+        self.session_locked = locked;
+        if state.data.server.take_lock_redraw() {
+            self.frame_state.request_composition();
+            self.presentation_schedule.request_composition_all();
+            self.desktop.request_all_compositions();
+        }
+        if state.data.server.take_lock_focus_restore() {
+            self.desktop
+                .set_cursor_position(self.input.pointer_position());
+            application.restore_input_focus();
+        }
         if state.data.server.output_capture_requested() {
             self.frame_state.request_composition();
         }
-        if state.data.server.presentation_requested() {
+        if !locked && state.data.server.presentation_requested() {
             match self.target {
                 SessionTarget::ActivePhysical => {
                     self.frame_state.request_present();
@@ -721,7 +788,9 @@ impl NativeDriver<HostEvent> for DrmDriver {
     ) -> Result<bool> {
         let now = frame.now;
         // Client feedback is device/transport paced, independent of Bevy ticks.
-        if let Some(image) = state.data.server.take_cursor_image(&state.clients) {
+        if !state.data.server.session_locked()
+            && let Some(image) = state.data.server.take_cursor_image(&state.clients)
+        {
             self.desktop.set_cursor_image(image)?;
             self.presentation_schedule.request_present_all();
             self.frame_state.request_present();
@@ -735,7 +804,18 @@ impl NativeDriver<HostEvent> for DrmDriver {
                         .is_some_and(|composition| composition.has_surface_frame()))
         });
         let mut capture_forced_owned = false;
-        if frame.work.render_composition {
+        if state.data.server.session_locked() {
+            if let Some(capture) = self.pending_capture.take()
+                && let Some(id) = capture.remote_request_id
+                && let Some(composition) = application.composition()
+            {
+                composition.complete_capture(id, Err("session is locked".to_owned()));
+            }
+            if frame.work.render_composition {
+                self.desktop.request_all_compositions();
+                self.presentation_schedule.request_composition_all();
+            }
+        } else if frame.work.render_composition {
             self.frame_callbacks
                 .composition_rendered(state.data.server.presentation_requested());
             let protocol_capture = state.data.server.output_capture_requested();
@@ -851,8 +931,16 @@ impl NativeDriver<HostEvent> for DrmDriver {
                 .context("native presenter requires local composition")?
                 .take_capture_request()
         {
-            self.pending_capture = Some(PendingCapture::remote(request.request_id, request.path));
-            self.frame_state.request_composition();
+            if state.data.server.session_locked() {
+                if let Some(composition) = application.composition() {
+                    composition
+                        .complete_capture(request.request_id, Err("session is locked".to_owned()));
+                }
+            } else {
+                self.pending_capture =
+                    Some(PendingCapture::remote(request.request_id, request.path));
+                self.frame_state.request_composition();
+            }
         }
         if self
             .pending_capture
@@ -934,6 +1022,7 @@ impl OutputScaleUpdate<'_> {
         *self.current = candidate;
         self.application.update_output_topology(self.current);
         if let Some(event) = self.input.update_output_topology(topology)
+            && !self.server.dispatch_lock_input(&event)
             && self.application.enqueue_input_event(event.clone())
         {
             self.clients.dispatch_unconsumed_input(event.into_runtime());
@@ -958,6 +1047,45 @@ mod tests {
         SessionTarget, apply_physical_outcome, composition_route, physical_scene_ready,
         primary_output_index,
     };
+
+    #[test]
+    fn lock_preserves_only_ctrl_alt_function_key_terminal_switches() {
+        use crate::input::{KeyboardKeyState, LinuxKeycode, RawSeatEvent, RawSeatEventKind};
+        let event = |code, state, control, alt| {
+            RawSeatEvent::new(
+                RawSeatEventKind::Keyboard {
+                    keycode: LinuxKeycode(code),
+                    logical_key: None,
+                    state,
+                },
+                1,
+            )
+            .with_modifiers(weld_input::SeatModifiers {
+                control,
+                alt,
+                shift: false,
+                super_key: false,
+            })
+        };
+        for (code, tty) in (59..=68).zip(1..=10).chain([(87, 11), (88, 12)]) {
+            assert_eq!(
+                super::lock_terminal_switch(&event(code, KeyboardKeyState::Pressed, true, true)),
+                Some(tty)
+            );
+            assert_eq!(
+                super::lock_terminal_switch(&event(code, KeyboardKeyState::Released, true, true)),
+                None
+            );
+            assert_eq!(
+                super::lock_terminal_switch(&event(code, KeyboardKeyState::Pressed, false, true)),
+                None
+            );
+        }
+        assert_eq!(
+            super::lock_terminal_switch(&event(30, KeyboardKeyState::Pressed, true, true)),
+            None
+        );
+    }
 
     #[test]
     fn physical_redraw_waits_for_queued_surface_ingress() {
