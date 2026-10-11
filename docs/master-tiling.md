@@ -133,8 +133,9 @@ An `exec` command is preserved and resolved by the shell when launched. Use a
 binding to Weld's supported `exit` command to end the session. Children launched
 by Weld receive its private `SWAYSOCK` and `I3SOCK`. The endpoint supports binding
 mode queries and subscriptions, including Waybar's `sway/mode` module.
-Workspace buttons use `ext-workspace-v1`; IPC command execution and other Sway
-query families remain follow-ups.
+Tree/output queries support Grimshot's selectors. Workspace buttons use
+`ext-workspace-v1`; IPC command execution and the remaining Sway query families
+remain follow-ups.
 
 ## Supported configuration
 

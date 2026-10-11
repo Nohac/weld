@@ -23,6 +23,13 @@ Weld advertises each output's physical buffer size and captures the complete
 composition, including shell decorations and layer surfaces. The capture request
 selects whether the local cursor is included.
 
+Clipboard utilities use `ext-data-control-v1` or `wlr-data-control-v1` to transfer
+the image directly through the named logical seat. This preserves focus and
+layout: without data-control, `wl-copy` and `wl-paste` acquire focus through a
+temporary `wl-clipboard` toplevel, which caused a brief tiled-layout rearrangement.
+Clients admitted to the local Wayland socket can read and replace clipboard
+selections through these protocols.
+
 Grimshot's `active`, `window`, `output` and `anything` selectors use Weld's
 Sway IPC tree/output queries. Child applications inherit `SWAYSOCK` and `I3SOCK`.
 The tree includes nested tiling groups, floating windows, global logical geometry,
@@ -59,7 +66,8 @@ cargo test -p weldwm -p weld-core --features weld-core/test-support --lib \
 
 The script launches an isolated nested Weld and Foot, checks full/region PNGs,
 cursor capture, concurrent clients, cancellation, live IPC geometry,
-Grimshot active/output saving and clipboard byte equality. Logs and PNGs remain
+Grimshot active/output saving, clipboard byte equality and clipboard transfer
+without temporary toplevels. Logs and PNGs remain
 under `target/validation/screenshot-*`.
 The Vulkan regression overwrites a source texture between two queued captures
 and verifies every pixel of both asynchronous snapshots.

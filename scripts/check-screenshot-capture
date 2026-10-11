@@ -97,15 +97,19 @@ def main():
                 subprocess.run(["grimshot", "save", selector, str(destination)], env=client_environment, check=True, timeout=15)
                 assert min(png_size(destination.read_bytes())) > 0
             print("PASS live tree/output IPC and Grimshot active/output selectors", flush=True)
-            clipboard = subprocess.Popen(["wl-copy", "--foreground", "--type", "image/png"],
-                                         env=client_environment, stdin=subprocess.PIPE, start_new_session=True)
-            children.append(clipboard)
-            clipboard.stdin.write(full)
-            clipboard.stdin.close()
-            time.sleep(0.2)
-            copied = subprocess.check_output(["wl-paste", "--type", "image/png", "--no-newline"],
-                                             env=client_environment, timeout=5)
+            clipboard_environment = dict(client_environment, WAYLAND_DEBUG="client")
+            with (run / "clipboard.log").open("w") as clipboard_log:
+                clipboard = subprocess.Popen(["wl-copy", "--foreground", "--type", "image/png"],
+                                             env=clipboard_environment, stdin=subprocess.PIPE,
+                                             stderr=clipboard_log, start_new_session=True)
+                children.append(clipboard)
+                clipboard.stdin.write(full)
+                clipboard.stdin.close()
+                time.sleep(0.2)
+                copied = subprocess.check_output(["wl-paste", "--type", "image/png", "--no-newline"],
+                                                 env=clipboard_environment, stderr=clipboard_log, timeout=5)
             assert copied == full
+            assert ".get_toplevel(" not in (run / "clipboard.log").read_text(), "clipboard tools opened a temporary window"
             print("PASS Grimshot save and PNG clipboard round-trip", flush=True)
         finally:
             for process in [*children, host]:

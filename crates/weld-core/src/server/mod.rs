@@ -69,7 +69,7 @@ use smithay::{
         output::OutputManagerState,
         pointer_gestures::PointerGesturesState,
         relative_pointer::RelativePointerManagerState,
-        selection::data_device::DataDeviceState,
+        selection::{data_device::DataDeviceState, ext_data_control, wlr_data_control},
         shell::xdg::{XdgShellState, decoration::XdgDecorationState},
         shm::ShmState,
         socket::ListeningSocketSource,
@@ -123,6 +123,8 @@ pub struct ServerState {
     _output_manager_state: OutputManagerState,
     seat_state: SeatState<Self>,
     data_device_state: DataDeviceState,
+    ext_data_control_state: ext_data_control::DataControlState,
+    wlr_data_control_state: wlr_data_control::DataControlState,
     local_input: Rc<InputSeat>,
     remote_inputs: HashMap<weld_client::ClientInputController, Rc<InputSeat>>,
     input_bindings: Vec<seat_bindings::InputBinding>,
@@ -210,6 +212,12 @@ impl ServerState {
             FractionalScaleManagerState::new::<Self>(&display_handle);
         let output_manager_state = OutputManagerState::new_with_xdg_output::<Self>(&display_handle);
         let data_device_state = DataDeviceState::new::<Self>(&display_handle);
+        // Local Wayland clients may manage the clipboard directly, allowing
+        // clipboard utilities to transfer selections while keyboard focus stays put.
+        let ext_data_control_state =
+            ext_data_control::DataControlState::new::<Self, _>(&display_handle, None, |_| true);
+        let wlr_data_control_state =
+            wlr_data_control::DataControlState::new::<Self, _>(&display_handle, None, |_| true);
 
         let mut seat_state = SeatState::new();
         let mut seat = seat_state.new_wl_seat(&display_handle, seat_name);
@@ -369,6 +377,8 @@ impl ServerState {
             _output_manager_state: output_manager_state,
             seat_state,
             data_device_state,
+            ext_data_control_state,
+            wlr_data_control_state,
             local_input: InputSeat::new(seat, None),
             remote_inputs: HashMap::new(),
             input_bindings: Vec::new(),

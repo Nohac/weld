@@ -31,6 +31,7 @@ use smithay::{
             data_device::{
                 DataDeviceHandler, DataDeviceState, WaylandDndGrabHandler, set_data_device_focus,
             },
+            ext_data_control, wlr_data_control,
         },
         shell::xdg::ToplevelSurface,
     },
@@ -1265,6 +1266,18 @@ impl smithay::input::tablet::TabletSeatHandler for ServerState {
 
 impl SelectionHandler for ServerState {
     type SelectionUserData = ();
+}
+
+impl ext_data_control::DataControlHandler for ServerState {
+    fn data_control_state(&mut self) -> &mut ext_data_control::DataControlState {
+        &mut self.ext_data_control_state
+    }
+}
+
+impl wlr_data_control::DataControlHandler for ServerState {
+    fn data_control_state(&mut self) -> &mut wlr_data_control::DataControlState {
+        &mut self.wlr_data_control_state
+    }
 }
 
 impl DataDeviceHandler for ServerState {
