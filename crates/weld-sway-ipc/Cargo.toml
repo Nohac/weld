@@ -6,6 +6,10 @@ publish.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+bevy.workspace = true
+weld-app = { path = "../weld-app" }
+weld-window = { path = "../weld-window" }
+weld-tile = { path = "../weld-tile" }
 bytes = "1"
 futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
 rustix = { workspace = true, features = ["process"] }
@@ -16,3 +20,6 @@ tokio = { workspace = true, features = ["macros"] }
 tokio-util = { version = "0.7", features = ["codec"] }
 tracing.workspace = true
 xdg = "3"
+
+[dev-dependencies]
+weld-client = { path = "../weld-client" }

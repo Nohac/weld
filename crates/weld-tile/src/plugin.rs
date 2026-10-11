@@ -54,6 +54,7 @@ struct TiledWindow {
 
 impl Plugin for TilePlugin {
     fn build(&self, app: &mut App) {
+        crate::inspection::register(app);
         if !app.is_plugin_added::<WindowPointerPlugin>() {
             app.add_plugins(WindowPointerPlugin);
         }

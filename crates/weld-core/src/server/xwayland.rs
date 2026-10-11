@@ -391,7 +391,8 @@ impl ServerState {
             window.native.class(),
             window.native.instance(),
             window.native.title(),
-        );
+        )
+        .with_local_process_id(window.native.pid());
         let Some(window) = self.xwayland.windows.get_mut(&window_id) else {
             return;
         };

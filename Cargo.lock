@@ -8396,6 +8396,7 @@ name = "weld-sway-ipc"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "bevy",
  "bytes",
  "futures-util",
  "rustix 1.1.4",
@@ -8405,6 +8406,10 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tracing",
+ "weld-app",
+ "weld-client",
+ "weld-tile",
+ "weld-window",
  "xdg",
 ]
 

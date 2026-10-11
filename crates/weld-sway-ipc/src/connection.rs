@@ -1,8 +1,8 @@
-//! Typed mode queries and subscriptions for one admitted IPC client.
+//! Typed desktop queries and mode subscriptions for one admitted IPC client.
 
 use anyhow::{Context, Result};
 use futures_util::{SinkExt, StreamExt};
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 use tokio::{
     net::{UnixStream, unix::OwnedWriteHalf},
     sync::watch,
@@ -10,7 +10,7 @@ use tokio::{
 use tokio_util::codec::{FramedRead, FramedWrite};
 
 use crate::{
-    ModeSnapshot,
+    DesktopSnapshot, ModeSnapshot,
     codec::IpcCodec,
     protocol::{BindingState, EventKind, ModeEvent, Request, Response},
 };
@@ -20,6 +20,7 @@ type ReplyWriter = FramedWrite<OwnedWriteHalf, IpcCodec>;
 pub(crate) async fn run(
     stream: UnixStream,
     mut snapshot: watch::Receiver<ModeSnapshot>,
+    desktop: watch::Receiver<Arc<DesktopSnapshot>>,
 ) -> Result<()> {
     let (reader, writer) = stream.into_split();
     let mut requests = FramedRead::new(reader, IpcCodec);
@@ -33,6 +34,7 @@ pub(crate) async fn run(
                     return Ok(());
                 };
                 let current = snapshot.borrow().clone();
+                let desktop = Arc::clone(&desktop.borrow());
                 let response = match request? {
                     Request::Subscribe(events) => {
                         let success = events.iter().all(|event| *event == EventKind::Mode);
@@ -52,6 +54,8 @@ pub(crate) async fn run(
                         name: &current.name,
                     }),
                     Request::RunCommand => Response::CommandRejected,
+                    Request::GetOutputs => Response::Outputs(&desktop.outputs),
+                    Request::GetTree => Response::Tree(&desktop.tree),
                     Request::Unsupported(kind) => Response::Unsupported(kind),
                 };
                 send(&mut replies, response).await?;

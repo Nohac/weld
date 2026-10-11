@@ -13,6 +13,7 @@ pub struct ClientSurfaceMetadata {
     app_id: String,
     title: String,
     x11_instance: Option<String>,
+    local_process_id: Option<u32>,
 }
 
 impl ClientSurfaceMetadata {
@@ -24,6 +25,7 @@ impl ClientSurfaceMetadata {
             app_id,
             title,
             x11_instance: None,
+            local_process_id: None,
         })
     }
 
@@ -41,6 +43,7 @@ impl ClientSurfaceMetadata {
             app_id,
             title,
             x11_instance: None,
+            local_process_id: None,
         }
     }
     /// X11 class remains the cross-platform application label; instance also
@@ -63,6 +66,14 @@ impl ClientSurfaceMetadata {
     }
     pub fn app_id(&self) -> &str {
         &self.app_id
+    }
+    /// Native process hint, scoped to this host and omitted from transported metadata.
+    pub fn with_local_process_id(mut self, process_id: Option<u32>) -> Self {
+        self.local_process_id = process_id.filter(|pid| *pid > 0);
+        self
+    }
+    pub const fn local_process_id(&self) -> Option<u32> {
+        self.local_process_id
     }
     pub fn title(&self) -> &str {
         &self.title
@@ -115,6 +126,16 @@ impl From<ClientSurfaceMetadata> for WireMetadata {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(feature = "serde")]
+    #[test]
+    fn transport_excludes_host_local_process_hints() {
+        let local = ClientSurfaceMetadata::truncated("foot".into(), "Shell".into())
+            .with_local_process_id(Some(4242));
+        let remote =
+            ClientSurfaceMetadata::try_from(WireMetadata::from(local)).expect("wire metadata");
+        assert_eq!(remote.app_id(), "foot");
+        assert_eq!(remote.local_process_id(), None);
+    }
     #[test]
     fn native_truncation_preserves_utf8_and_wire_bounds_are_strict() {
         let title = "é".repeat(513);

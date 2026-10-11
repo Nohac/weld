@@ -13,6 +13,9 @@ grim -c screenshot-with-cursor.png
 grimshot save area screenshot.png
 grimshot copy area
 grimshot copy screen
+grimshot copy active
+grimshot copy window
+grimshot copy output
 ```
 
 Grim handles output stitching, region cropping and requested image scaling.
@@ -20,9 +23,11 @@ Weld advertises each output's physical buffer size and captures the complete
 composition, including shell decorations and layer surfaces. The capture request
 selects whether the local cursor is included.
 
-Grimshot's `active`, `window`, `output` and `anything` selectors also require
-Sway IPC tree/output queries. Adding those queries is the next compatibility
-step. The current IPC endpoint serves binding-mode requests.
+Grimshot's `active`, `window`, `output` and `anything` selectors use Weld's
+Sway IPC tree/output queries. Child applications inherit `SWAYSOCK` and `I3SOCK`.
+The tree includes nested tiling groups, floating windows, global logical geometry,
+selection, visibility and application metadata. Vacant persistent slots remain
+in the tree and are excluded from Grimshot's application selection boxes.
 
 ## Ownership and safety
 
@@ -53,8 +58,9 @@ cargo test -p weldwm -p weld-core --features weld-core/test-support --lib \
 ```
 
 The script launches an isolated nested Weld and Foot, checks full/region PNGs,
-cursor capture, concurrent clients, cancellation, Grimshot saving and clipboard
-byte equality. Logs and PNGs remain under `target/validation/screenshot-*`.
+cursor capture, concurrent clients, cancellation, live IPC geometry,
+Grimshot active/output saving and clipboard byte equality. Logs and PNGs remain
+under `target/validation/screenshot-*`.
 The Vulkan regression overwrites a source texture between two queued captures
 and verifies every pixel of both asynchronous snapshots.
 

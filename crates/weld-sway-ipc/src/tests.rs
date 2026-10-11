@@ -17,7 +17,7 @@ const MAGIC: &[u8; 6] = b"i3-ipc";
 const MAX_PAYLOAD: usize = 1_048_576;
 const MODE_EVENT: u32 = (1 << 31) | 2;
 
-fn connect(service: &ModeService) -> Client {
+fn connect(service: &IpcService) -> Client {
     let stream = Client::connect(service.socket_path()).expect("socket");
     stream
         .set_read_timeout(Some(Duration::from_secs(2)))
@@ -47,7 +47,7 @@ fn read(client: &mut Client) -> (u32, Vec<u8>) {
 #[test]
 fn subscriptions_replay_current_mode_and_keep_partial_requests_across_events() {
     let parent = tempfile::tempdir().expect("directory");
-    let service = PreparedModeService::bind_in(parent.path())
+    let service = PreparedIpcService::bind_in(parent.path())
         .expect("bind")
         .start()
         .expect("service");
@@ -104,7 +104,7 @@ fn subscriptions_replay_current_mode_and_keep_partial_requests_across_events() {
 #[test]
 fn oversized_requests_are_isolated_and_idle_connections_stop_with_the_service() {
     let parent = tempfile::tempdir().expect("directory");
-    let service = PreparedModeService::bind_in(parent.path())
+    let service = PreparedIpcService::bind_in(parent.path())
         .expect("bind")
         .start()
         .expect("service");
@@ -148,7 +148,7 @@ fn framing_retains_each_partial_prefix_and_consumes_one_coalesced_message() {
 #[test]
 fn pipelined_queries_keep_reply_types_and_malformed_json_is_isolated() {
     let parent = tempfile::tempdir().expect("directory");
-    let service = PreparedModeService::bind_in(parent.path())
+    let service = PreparedIpcService::bind_in(parent.path())
         .expect("bind")
         .start()
         .expect("service");
@@ -182,4 +182,63 @@ fn pipelined_queries_keep_reply_types_and_malformed_json_is_isolated() {
     assert_eq!(bad.read(&mut [0; 1]).expect("closed peer"), 0);
     client.write_all(&packet(12, b"")).expect("healthy query");
     assert_eq!(read(&mut client), (12, br#"{"name":"default"}"#.to_vec()));
+}
+
+#[test]
+fn desktop_queries_read_latest_snapshot_and_keep_mode_subscription_independent() {
+    let parent = tempfile::tempdir().expect("directory");
+    let service = PreparedIpcService::bind_in(parent.path())
+        .expect("bind")
+        .start()
+        .expect("service");
+    let mut client = connect(&service);
+    client
+        .write_all(&packet(2, br#"["mode"]"#))
+        .expect("subscribe");
+    assert_eq!(read(&mut client).0, 2);
+    assert_eq!(read(&mut client).0, MODE_EVENT);
+    let mut desktop = DesktopSnapshot::default();
+    let mut window = Node::new(
+        17,
+        NodeType::Con,
+        Rect {
+            x: -20,
+            y: 30,
+            width: 800,
+            height: 600,
+        },
+    );
+    window.pid = Some(4242);
+    window.focused = true;
+    window.visible = true;
+    desktop.tree.nodes.push(window);
+    desktop.outputs.push(Output {
+        name: "DP-1".into(),
+        active: true,
+        focused: true,
+        primary: true,
+        rect: Rect {
+            x: -800,
+            y: 0,
+            width: 800,
+            height: 600,
+        },
+        scale: 2.0,
+        current_workspace: Some("1".into()),
+    });
+    service.desktop_publisher().publish(desktop.clone());
+    client.write_all(&packet(4, b"")).expect("get tree");
+    let (kind, reply) = read(&mut client);
+    assert_eq!(kind, 4, "desktop changes must not emit mode events");
+    let tree: serde_json::Value = serde_json::from_slice(&reply).expect("tree");
+    assert_eq!(tree["nodes"][0]["pid"], 4242);
+    assert_eq!(tree["nodes"][0]["rect"]["x"], -20);
+    desktop.outputs[0].focused = false;
+    service.desktop_publisher().publish(desktop);
+    client.write_all(&packet(3, b"")).expect("get outputs");
+    let (kind, reply) = read(&mut client);
+    assert_eq!(kind, 3);
+    let outputs: serde_json::Value = serde_json::from_slice(&reply).expect("outputs");
+    assert_eq!(outputs[0]["focused"], false);
+    assert_eq!(outputs[0]["scale"], 2.0);
 }

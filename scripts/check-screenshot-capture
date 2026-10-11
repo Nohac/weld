@@ -2,11 +2,13 @@
 """Exercise Grim and clipboard capture in an isolated nested Weld session."""
 
 import concurrent.futures
+import json
 import os
 from pathlib import Path
 import signal
 import struct
 import subprocess
+import sys
 import tempfile
 import time
 
@@ -33,17 +35,17 @@ def main():
     with (run / "host.log").open("w") as log:
         host = subprocess.Popen([
             "cargo", "run", "-p", "weldwm", "--locked", "--", "--backend", "nested",
-            "--config", str(config), "--wayland-socket", str(socket), "--", "foot",
-            "--title=Weld capture test", "sh", "-c",
-            "printf '\033[44m\033[2J\033[HGrim capture test\n'; sleep 120",
+            "--config", str(config), "--wayland-socket", str(socket), "--",
+            sys.executable, str(Path(__file__).resolve()), "--client", str(run / "client.json"),
         ], cwd=root, env=environment, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
         try:
             deadline = time.monotonic() + 40
-            while not socket.exists():
+            while not socket.exists() or not (run / "client.json").exists():
                 if host.poll() is not None or time.monotonic() >= deadline:
                     raise RuntimeError(f"Weld did not start: {run / 'host.log'}")
                 time.sleep(0.05)
             time.sleep(2)
+            client_environment.update(json.loads((run / "client.json").read_text()))
 
             def capture(*options):
                 return subprocess.check_output(["grim", *options, "-"], env=client_environment, timeout=15)
@@ -80,6 +82,21 @@ def main():
             subprocess.run(["grimshot", "save", "screen", str(run / "grimshot.png")],
                            env=client_environment, check=True, timeout=15)
             assert png_size((run / "grimshot.png").read_bytes()) == dimensions
+            tree = json.loads(subprocess.check_output(["swaymsg", "-t", "get_tree", "-r"], env=client_environment, timeout=5))
+            outputs = json.loads(subprocess.check_output(["swaymsg", "-t", "get_outputs", "-r"], env=client_environment, timeout=5))
+            assert any(output["name"] == "weld-nested" and output["focused"] for output in outputs), outputs
+            def leaves(node):
+                if "pid" in node:
+                    yield node
+                for child in node["nodes"] + node["floating_nodes"]:
+                    yield from leaves(child)
+            windows = list(leaves(tree))
+            assert any(window["pid"] > 0 and window["focused"] and window["visible"] for window in windows), windows
+            for selector in ("active", "output"):
+                destination = run / f"grimshot-{selector}.png"
+                subprocess.run(["grimshot", "save", selector, str(destination)], env=client_environment, check=True, timeout=15)
+                assert min(png_size(destination.read_bytes())) > 0
+            print("PASS live tree/output IPC and Grimshot active/output selectors", flush=True)
             clipboard = subprocess.Popen(["wl-copy", "--foreground", "--type", "image/png"],
                                          env=client_environment, stdin=subprocess.PIPE, start_new_session=True)
             children.append(clipboard)
@@ -103,4 +120,9 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    if len(sys.argv) == 3 and sys.argv[1] == "--client":
+        Path(sys.argv[2]).write_text(json.dumps({key: os.environ[key] for key in ("SWAYSOCK", "WAYLAND_DISPLAY")}))
+        os.execvp("foot", ["foot", "--title=Weld capture test", "sh", "-c",
+                           "printf '\033[44m\033[2J\033[HGrim capture test\n'; sleep 120"])
+    else:
+        main()

@@ -8,6 +8,7 @@
 
 mod floating;
 mod history;
+pub mod inspection;
 mod layout;
 mod operations;
 mod plugin;
@@ -197,7 +198,7 @@ impl Default for TilePresentationMetrics {
 }
 
 /// Session-stable container identity; never expose Bevy entities to persistence.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct ContainerId(u64);
 
 impl ContainerId {

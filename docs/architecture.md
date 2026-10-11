@@ -23,9 +23,15 @@ Weld is a workspace of reusable layers and one standard distribution:
   The optional `input` module translates keyboard directives and binding chords
   into Weld input types.
   The optional `output` module translates scale rules into `weld-output` settings.
-- `weld-sway-ipc` serves binding-mode queries and subscriptions on a private
+- `weld-sway-ipc` serves desktop tree/output queries and binding-mode subscriptions on a private
   same-user Unix socket. Its bounded Tokio codec handles framing, protocol types
-  own message IDs and JSON, and connection tasks serve Master's mode snapshots.
+  own message IDs and JSON, and connection tasks serve immutable snapshots.
+  Installing `SwayIpcPlugin` enables domain-owned inspection for a session:
+  `weld-app` publishes outputs, `weld-window` publishes windows/workspaces, and
+  `weld-tile` publishes topology/selection. Their `Last` collection systems run
+  before IPC publication and retain unchanged inventories. The IPC adapter maps
+  stable domain IDs to Sway nodes and global logical rectangles. Master assembles
+  this integration and supplies binding-mode status from its config owner.
   The worker starts after native host signal masking; service teardown joins it
   and removes the socket. Host-owned child launch environments carry the endpoint.
 - `weld-output` owns validated scale factors and matching for connector names,

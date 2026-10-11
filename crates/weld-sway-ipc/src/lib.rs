@@ -1,10 +1,14 @@
-//! Bounded Sway IPC binding-mode status for desktop bars and local tools.
+//! Bounded Sway IPC desktop queries and binding-mode status for local tools.
 //!
 //! The compositor publishes owned snapshots. A dedicated asynchronous worker
 //! serves local sockets and isolates slow or malformed clients from input work.
 
 mod codec;
 mod connection;
+mod desktop;
+mod integration;
+pub use desktop::{DesktopSnapshot, Layout, Node, NodeType, Output, Rect, X11Properties};
+pub use integration::SwayIpcPlugin;
 mod protocol;
 
 #[cfg(test)]
@@ -15,6 +19,7 @@ use std::{
     fs,
     os::unix::{fs::PermissionsExt, net::UnixListener as StdListener},
     path::{Path, PathBuf},
+    sync::Arc,
     thread::{self, JoinHandle},
 };
 use tempfile::TempDir;
@@ -62,21 +67,22 @@ impl ModePublisher {
 }
 
 /// Owns a private socket directory, worker, and bounded client lifetime.
-pub struct ModeService {
+pub struct IpcService {
     directory: TempDir,
     publisher: ModePublisher,
+    desktop: DesktopPublisher,
     stop: Option<oneshot::Sender<()>>,
     worker: Option<JoinHandle<()>>,
 }
 
 /// Socket reservation before the host establishes its signal mask. Start the
 /// worker after native host preparation so it inherits the session's mask.
-pub struct PreparedModeService {
+pub struct PreparedIpcService {
     directory: TempDir,
     listener: StdListener,
 }
 
-impl PreparedModeService {
+impl PreparedIpcService {
     /// Reserve a private IPC socket in the user's XDG runtime directory.
     pub fn bind() -> Result<Self> {
         let directories = xdg::BaseDirectories::new();
@@ -104,29 +110,35 @@ impl PreparedModeService {
 
     /// Start serving after the host has established its thread signal mask.
     /// Dropping the returned service stops clients and removes its socket.
-    pub fn start(self) -> Result<ModeService> {
+    pub fn start(self) -> Result<IpcService> {
         let runtime = Builder::new_current_thread().enable_all().build()?;
         let listener = {
             let _guard = runtime.enter();
             UnixListener::from_std(self.listener)?
         };
         let (sender, receiver) = watch::channel(ModeSnapshot::default());
+        let (desktop_sender, desktop_receiver) =
+            watch::channel(Arc::new(DesktopSnapshot::default()));
         let (stop, stopped) = oneshot::channel();
         let worker = thread::Builder::new()
             .name("weld-sway-ipc".into())
             .spawn(move || {
-                runtime.block_on(serve(listener, receiver, stopped));
+                runtime.block_on(serve(listener, receiver, desktop_receiver, stopped));
             })?;
-        Ok(ModeService {
+        Ok(IpcService {
             directory: self.directory,
             publisher: ModePublisher(sender),
+            desktop: DesktopPublisher(desktop_sender),
             stop: Some(stop),
             worker: Some(worker),
         })
     }
 }
 
-impl ModeService {
+impl IpcService {
+    pub fn desktop_publisher(&self) -> DesktopPublisher {
+        self.desktop.clone()
+    }
     pub fn socket_path(&self) -> PathBuf {
         self.directory.path().join("ipc.sock")
     }
@@ -135,7 +147,7 @@ impl ModeService {
     }
 }
 
-impl Drop for ModeService {
+impl Drop for IpcService {
     fn drop(&mut self) {
         if let Some(stop) = self.stop.take() {
             let _ = stop.send(());
@@ -151,6 +163,7 @@ impl Drop for ModeService {
 async fn serve(
     listener: UnixListener,
     snapshot: watch::Receiver<ModeSnapshot>,
+    desktop: watch::Receiver<Arc<DesktopSnapshot>>,
     mut stop: oneshot::Receiver<()>,
 ) {
     let mut clients = JoinSet::new();
@@ -172,8 +185,9 @@ async fn serve(
                     continue;
                 }
                 let snapshot = snapshot.clone();
+                let desktop = desktop.clone();
                 clients.spawn(async move {
-                    if let Err(error) = connection::run(stream, snapshot).await {
+                    if let Err(error) = connection::run(stream, snapshot, desktop).await {
                         tracing::debug!(%error, "closed Sway IPC client");
                     }
                 });
@@ -182,4 +196,20 @@ async fn serve(
     }
     clients.abort_all();
     while clients.join_next().await.is_some() {}
+}
+
+/// Shares one immutable tree/output snapshot with the IPC worker.
+#[derive(Clone)]
+pub struct DesktopPublisher(watch::Sender<Arc<DesktopSnapshot>>);
+
+impl DesktopPublisher {
+    pub fn publish(&self, snapshot: DesktopSnapshot) {
+        self.0.send_if_modified(|current| {
+            if **current == snapshot {
+                return false;
+            }
+            *current = Arc::new(snapshot);
+            true
+        });
+    }
 }

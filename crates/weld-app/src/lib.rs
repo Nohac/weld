@@ -11,6 +11,7 @@ pub mod cursor;
 pub mod debug;
 mod dmabuf;
 pub mod input;
+pub mod inspection;
 pub mod layer;
 pub mod layer_shell;
 pub mod output;

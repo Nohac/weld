@@ -1111,9 +1111,14 @@ impl ServerState {
             ))
         });
         if let Some(metadata) = metadata {
+            let process_id = surface
+                .wl_surface()
+                .client()
+                .and_then(|client| client.get_credentials(&self.display_handle).ok())
+                .and_then(|credentials| u32::try_from(credentials.pid).ok());
             self.pending_surface_events.push_back(PendingSurfaceEvent {
                 surface: id,
-                kind: PendingSurfaceEventKind::Metadata(metadata),
+                kind: PendingSurfaceEventKind::Metadata(metadata.with_local_process_id(process_id)),
             });
         }
     }

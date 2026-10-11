@@ -5,6 +5,8 @@ use serde::{Deserialize, Serialize};
 
 const RUN_COMMAND: u32 = 0;
 const SUBSCRIBE: u32 = 2;
+const GET_OUTPUTS: u32 = 3;
+const GET_TREE: u32 = 4;
 const GET_BINDING_MODES: u32 = 8;
 const GET_BINDING_STATE: u32 = 12;
 const MODE_EVENT: u32 = (1 << 31) | 2;
@@ -31,6 +33,8 @@ pub(crate) enum Request {
     Subscribe(Vec<EventKind>),
     GetBindingModes,
     GetBindingState,
+    GetOutputs,
+    GetTree,
     Unsupported(u32),
 }
 
@@ -41,6 +45,8 @@ impl Request {
             SUBSCRIBE => Self::Subscribe(serde_json::from_slice(payload)?),
             GET_BINDING_MODES => Self::GetBindingModes,
             GET_BINDING_STATE => Self::GetBindingState,
+            GET_OUTPUTS => Self::GetOutputs,
+            GET_TREE => Self::GetTree,
             other => Self::Unsupported(other),
         })
     }
@@ -68,6 +74,8 @@ pub(crate) enum Response<'a> {
     BindingModes(&'a [String]),
     BindingState(BindingState<'a>),
     Mode(&'a ModeEvent),
+    Outputs(&'a [crate::Output]),
+    Tree(&'a crate::Node),
     CommandRejected,
     Unsupported(u32),
 }
@@ -87,6 +95,8 @@ impl Response<'_> {
             Self::BindingModes(names) => (GET_BINDING_MODES, serde_json::to_vec(names)?),
             Self::BindingState(state) => (GET_BINDING_STATE, serde_json::to_vec(&state)?),
             Self::Mode(event) => (MODE_EVENT, serde_json::to_vec(event)?),
+            Self::Outputs(outputs) => (GET_OUTPUTS, serde_json::to_vec(outputs)?),
+            Self::Tree(tree) => (GET_TREE, serde_json::to_vec(tree)?),
             Self::CommandRejected => (
                 RUN_COMMAND,
                 serde_json::to_vec(&[Failure {
