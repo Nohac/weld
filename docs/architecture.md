@@ -64,6 +64,11 @@ Weld is a workspace of reusable layers and one standard distribution:
 - `weld-core` owns Smithay, Wayland and XWayland protocol state, native input sources,
   backend event loops, DMA-BUF ownership, and native presentation adapters. It
   has no Bevy dependency.
+  Its output-capture host binds Smithay's image-copy-capture and output-source
+  protocols. Presenters submit ordered copies of completed composition textures;
+  a bounded worker owns GPU readback and optional PNG writing. The host validates
+  and fills client SHM before signalling capture completion. See
+  [Screenshots](screenshots.md) for supported tools and validation.
 - `weld-app` owns the Bevy application and render bridge, the plugin-facing
   application model, input projection, surface entities, and composition into
   a core-owned texture. Plugin APIs use Weld and Bevy types rather than

@@ -455,12 +455,33 @@ impl PhysicalDesktop {
         Ok(())
     }
 
-    pub(super) fn capture_owned(&self, frame: &CompositionFrame, path: &Path) -> Result<()> {
-        crate::renderer::capture_owned_frame(
+    pub(super) fn capture_protocol_output(
+        &self,
+        server: &mut crate::server::ServerState,
+        output: &crate::host::CompositionOutputFrame,
+        worker: &crate::renderer::capture_task::CaptureWorker,
+    ) {
+        server.capture_output_frame(
+            output.output,
+            &output.frame,
+            self.render_state.device(),
+            self.render_state.queue(),
+            worker,
+        );
+    }
+
+    pub(super) fn capture_owned(
+        &self,
+        frame: &CompositionFrame,
+        path: &Path,
+        worker: &crate::renderer::capture_task::CaptureWorker,
+    ) -> Result<crate::renderer::capture_task::CaptureTask> {
+        crate::renderer::capture_owned_frame_async(
             self.render_state.device(),
             self.render_state.queue(),
             frame,
             path,
+            worker,
         )
     }
 }

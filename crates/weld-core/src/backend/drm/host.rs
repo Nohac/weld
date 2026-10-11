@@ -364,6 +364,9 @@ impl NativeDriver<HostEvent> for DrmDriver {
         _: &mut HostState<HostEvent>,
         app: &mut dyn ApplicationHost,
     ) -> Result<bool> {
+        if !crate::runtime::finish_capture(&mut self.pending_capture, app)? {
+            return Ok(false);
+        }
         if let Some(settings) = app.take_pointer_device_settings() {
             self.input.configure_devices(settings);
         }
@@ -517,6 +520,9 @@ impl NativeDriver<HostEvent> for DrmDriver {
         state: &mut HostState<HostEvent>,
         application: &mut dyn ApplicationHost,
     ) -> PolicyFrame {
+        if state.data.server.output_capture_requested() {
+            self.frame_state.request_composition();
+        }
         if state.data.server.presentation_requested() {
             match self.target {
                 SessionTarget::ActivePhysical => {
@@ -720,16 +726,18 @@ impl NativeDriver<HostEvent> for DrmDriver {
         }
 
         let capture_ready = self.pending_capture.as_ref().is_some_and(|capture| {
-            !capture.wait_for_client
-                || application
-                    .composition()
-                    .is_some_and(|composition| composition.has_surface_frame())
+            capture.task.is_none()
+                && (!capture.wait_for_client
+                    || application
+                        .composition()
+                        .is_some_and(|composition| composition.has_surface_frame()))
         });
         let mut capture_forced_owned = false;
         if frame.work.render_composition {
             self.frame_callbacks
                 .composition_rendered(state.data.server.presentation_requested());
-            match composition_route(self.target, capture_ready) {
+            let protocol_capture = state.data.server.output_capture_requested();
+            match composition_route(self.target, capture_ready || protocol_capture) {
                 CompositionRoute::Owned {
                     complete_callbacks,
                     capture,
@@ -752,27 +760,26 @@ impl NativeDriver<HostEvent> for DrmDriver {
                             [],
                         );
                     }
-                    if capture {
+                    for output in &self.owned_frames {
+                        self.desktop.capture_protocol_output(
+                            &mut state.data.server,
+                            output,
+                            &state.capture_worker,
+                        );
+                    }
+                    if capture && capture_ready {
                         let capture = self
                             .pending_capture
-                            .take()
+                            .as_mut()
                             .context("ready capture request disappeared")?;
-                        let result = self
-                            .desktop
-                            .capture_owned(&frame.frame, &capture.path)
-                            .map_err(|error| error.to_string());
-                        match capture.remote_request_id {
-                            Some(request_id) => application
-                                .composition()
-                                .context("native presenter requires local composition")?
-                                .complete_capture(request_id, result),
-                            None => {
-                                result.map_err(anyhow::Error::msg)?;
-                                return Ok(false);
-                            }
-                        }
-                        capture_forced_owned = self.target == SessionTarget::ActivePhysical;
+                        let result = self.desktop.capture_owned(
+                            &frame.frame,
+                            &capture.path,
+                            &state.capture_worker,
+                        )?;
+                        capture.task = Some(result);
                     }
+                    capture_forced_owned = capture && self.target == SessionTarget::ActivePhysical;
                 }
                 CompositionRoute::Physical => {
                     self.desktop.request_all_compositions();

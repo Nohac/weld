@@ -38,6 +38,7 @@ pub(crate) struct HostState<Event> {
     pub clients: ClientRuntime,
     pub children: ChildProcesses,
     pub callbacks: CallbackLedger,
+    pub capture_worker: crate::renderer::capture_task::CaptureWorker,
 }
 
 pub(crate) struct PolicyFrame {
@@ -127,8 +128,11 @@ pub(crate) struct NativeRuntime<Event: 'static> {
 }
 
 impl<Event: 'static> NativeRuntime<Event> {
-    pub fn prepare(setup: RuntimeSetup<'_, Event>) -> Result<Self> {
+    pub fn prepare(mut setup: RuntimeSetup<'_, Event>) -> Result<Self> {
         let event_loop = EventLoop::try_new().context("failed to create native host event loop")?;
+        let (capture_wake, capture_source) = crate::host::client_runtime_notifier()?;
+        setup.wakes.push(capture_source);
+        let capture_worker = crate::renderer::capture_task::CaptureWorker::new(capture_wake)?;
         register_client_wake_sources(&event_loop.handle(), setup.wakes)?;
         let mut clients = ClientRuntime::default();
         for adapter in setup.adapters {
@@ -162,6 +166,7 @@ impl<Event: 'static> NativeRuntime<Event> {
                 clients,
                 children: ChildProcesses::default(),
                 callbacks: CallbackLedger::default(),
+                capture_worker,
             },
         })
     }
@@ -172,6 +177,9 @@ impl<Event: 'static> NativeRuntime<Event> {
         mut integration: RuntimeIntegration<Event>,
         interval: Duration,
     ) -> Result<()> {
+        if integration.driver().is_some() {
+            self.state.data.server.enable_output_capture();
+        }
         let result = self.serve(&mut integration, interval);
         if let Some((driver, _)) = integration.native() {
             driver.shutdown();
@@ -216,6 +224,14 @@ impl<Event: 'static> NativeRuntime<Event> {
                 .state
                 .data
                 .server
+                .output_capture_timeout(Instant::now())
+            {
+                timeout = timeout.min(deadline);
+            }
+            if let Some(deadline) = self
+                .state
+                .data
+                .server
                 .independent_callback_timeout(Instant::now())
             {
                 timeout = timeout.min(deadline);
@@ -234,6 +250,7 @@ impl<Event: 'static> NativeRuntime<Event> {
             } else if !self.state.data.events.is_empty() {
                 break;
             }
+            self.state.data.server.poll_output_captures();
 
             {
                 let _span =

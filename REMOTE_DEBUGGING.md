@@ -59,10 +59,9 @@ uv run --project tools/remote-debug weld-debug status
 uv run --project tools/remote-debug weld-debug screenshot target/weld-remote.png
 ```
 
-Screenshots contain the final nested composition: copied client SHM pixels
-followed by Bevy's transparent shell overlay. Weld re-renders those layers into
-an sRGB capture texture only on request, reads it back with aligned wgpu rows,
-and saves RGBA8 PNG data. Ordinary frames do not incur readback work.
-
-This first system is windowed-only. It does not provide a headless compositor,
-input injection, generic ECS mutation, or continuous frame streaming.
+Screenshots contain the completed client-plus-shell composition. Nested and DRM
+presenters submit readback only on request. A bounded worker waits for GPU copy
+completion, strips aligned row padding, and writes RGBA8 PNG data. Completion
+wakes the native host and updates the request status after the file is written.
+The same worker supplies the standard Wayland capture path described in
+[Screenshots](docs/screenshots.md).

@@ -263,6 +263,10 @@ never update the entire lockfile casually.
 
 ## Tests
 
+`scripts/check-screenshot-capture` validates Grim output/region capture and PNG
+clipboard delivery in a private nested session. See [Screenshots](docs/screenshots.md)
+for the asynchronous GPU snapshot regression and manual DRM checks.
+
 Add coverage when it validates a stable behavior, protects a contract, or
 reproduces a regression. Prefer deterministic ECS and policy tests over tests
 that require a display server or GPU. Use a nested or headless host for broader

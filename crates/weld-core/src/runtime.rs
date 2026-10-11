@@ -377,6 +377,7 @@ pub(crate) struct PendingCapture {
     pub(crate) remote_request_id: Option<u64>,
     pub(crate) deadline: Instant,
     pub(crate) wait_for_client: bool,
+    pub(crate) task: Option<crate::renderer::capture_task::CaptureTask>,
 }
 
 impl PendingCapture {
@@ -386,6 +387,7 @@ impl PendingCapture {
             remote_request_id: None,
             deadline: Instant::now() + CAPTURE_DEADLINE,
             wait_for_client,
+            task: None,
         }
     }
 
@@ -395,11 +397,38 @@ impl PendingCapture {
             remote_request_id: Some(request_id),
             deadline: Instant::now() + CAPTURE_DEADLINE,
             wait_for_client: false,
+            task: None,
         }
     }
 
     pub(crate) const fn is_startup(&self) -> bool {
         self.remote_request_id.is_none()
+    }
+}
+
+pub(crate) fn finish_capture(
+    pending: &mut Option<PendingCapture>,
+    application: &mut dyn crate::host::ApplicationHost,
+) -> Result<bool> {
+    let Some(result) = pending
+        .as_ref()
+        .and_then(|capture| capture.task.as_ref()?.poll())
+    else {
+        return Ok(true);
+    };
+    let capture = pending
+        .take()
+        .context("completed capture request disappeared")?;
+    if let Some(request_id) = capture.remote_request_id {
+        application
+            .composition()
+            .context("capture requires local composition")?
+            .complete_capture(request_id, result.map(|_| ()));
+        Ok(true)
+    } else {
+        result.map_err(anyhow::Error::msg)?;
+        tracing::info!(path = %capture.path.display(), "startup screenshot saved");
+        Ok(false)
     }
 }
 

@@ -21,15 +21,17 @@ use crate::dmabuf::{DmabufCapabilities, DmabufSourceCache};
 use crate::host::CompositionFrame;
 use crate::runtime::gpu::NativeGpu;
 
+pub(crate) mod capture_task;
 pub(crate) mod composite;
+use capture_task::{CaptureTask, CaptureWorker};
 
 pub(crate) use composite::CompositionBlitter;
 
 const CAPTURE_GPU_TIMEOUT: Duration = Duration::from_secs(5);
 
-pub struct FrameResult {
+pub(crate) struct FrameResult {
     pub presented: bool,
-    pub capture: Option<std::result::Result<(), String>>,
+    pub capture: Option<CaptureTask>,
 }
 
 pub struct NestedRenderer {
@@ -134,10 +136,11 @@ impl NestedRenderer {
         self.surface.configure(&self.device, &self.surface_config);
     }
 
-    pub fn render(
+    pub(crate) fn render(
         &mut self,
         composition: &wgpu::TextureView,
         capture_path: Option<&Path>,
+        capture_worker: &CaptureWorker,
     ) -> Result<FrameResult> {
         use wgpu::CurrentSurfaceTexture;
 
@@ -240,8 +243,12 @@ impl NestedRenderer {
         };
 
         let capture_result = capture.zip(capture_path).map(|(capture, path)| {
-            save_capture_readback(&self.device, capture, submission, path)
-                .map_err(|error| error.to_string())
+            capture_worker.submit(
+                self.device.clone(),
+                capture,
+                submission,
+                Some(path.to_owned()),
+            )
         });
 
         if reconfigure_after_present {
@@ -282,19 +289,41 @@ struct CaptureReadback {
     format: wgpu::TextureFormat,
 }
 
+#[cfg(feature = "test-support")]
 pub(crate) fn capture_owned_frame(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
     frame: &CompositionFrame,
     path: &Path,
 ) -> Result<()> {
+    let extent = frame.target().extent();
+    let pixels = read_owned_frame_rgba(device, queue, frame)?;
+    write_png(path, extent.width, extent.height, &pixels)
+}
+
+pub(crate) fn capture_owned_frame_async(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    frame: &CompositionFrame,
+    path: &Path,
+    worker: &CaptureWorker,
+) -> Result<CaptureTask> {
+    read_owned_frame_async(device, queue, frame, Some(path), worker)
+}
+
+pub(crate) fn read_owned_frame_async(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    frame: &CompositionFrame,
+    path: Option<&Path>,
+    worker: &CaptureWorker,
+) -> Result<CaptureTask> {
     let texture = frame
         .owned_texture()
         .context("capture requires an owned composition texture")?;
-    let target = frame.target();
-    let extent = target.extent();
+    let extent = frame.target().extent();
     let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-        label: Some("Weld owned composition readback"),
+        label: Some("Weld asynchronous composition readback"),
     });
     let capture = encode_capture_readback(
         device,
@@ -302,10 +331,15 @@ pub(crate) fn capture_owned_frame(
         texture,
         extent.width,
         extent.height,
-        target.format(),
+        frame.target().format(),
     );
     let submission = queue.submit([encoder.finish()]);
-    save_capture_readback(device, capture, submission, path)
+    Ok(worker.submit(
+        device.clone(),
+        capture,
+        submission,
+        path.map(Path::to_owned),
+    ))
 }
 
 #[cfg(feature = "test-support")]
@@ -374,30 +408,13 @@ fn encode_capture_readback(
         },
     );
     CaptureReadback {
-        retained_texture: None,
+        retained_texture: Some(texture.clone()),
         buffer,
         padded_bytes_per_row,
         width,
         height,
         format,
     }
-}
-
-fn save_capture_readback(
-    device: &wgpu::Device,
-    capture: CaptureReadback,
-    submission: wgpu::SubmissionIndex,
-    path: &Path,
-) -> Result<()> {
-    let _capture_span = tracing::trace_span!(
-        target: crate::PROFILE_TARGET,
-        "capture_readback_encode"
-    )
-    .entered();
-    let width = capture.width;
-    let height = capture.height;
-    let pixels = read_capture_readback(device, capture, submission)?;
-    write_png(path, width, height, &pixels)
 }
 
 fn read_capture_readback(

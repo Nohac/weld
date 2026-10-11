@@ -1,6 +1,7 @@
 //! Smithay Wayland-server boundary shared by host backends.
 
 mod adapter;
+mod capture;
 mod cursor;
 mod dmabuf;
 mod input_admission;
@@ -102,6 +103,7 @@ pub struct ServerState {
     pub display_handle: DisplayHandle,
     pub socket_name: OsString,
     compositor_state: CompositorState,
+    capture: capture::OutputCapture,
     xdg_shell_state: XdgShellState,
     xwayland: xwayland::XwaylandState,
     layer_shell_state: smithay::wayland::shell::wlr_layer::WlrLayerShellState,
@@ -192,6 +194,7 @@ impl ServerState {
         } = options;
         let display_handle = display.handle();
         let compositor_state = CompositorState::new::<Self>(&display_handle);
+        let capture = capture::OutputCapture::new(&display_handle);
         let xdg_shell_state = XdgShellState::new::<Self>(&display_handle);
         let xwayland = xwayland::XwaylandState::new(&display_handle);
         let layer_shell_state =
@@ -346,6 +349,7 @@ impl ServerState {
             display_handle,
             socket_name,
             compositor_state,
+            capture,
             xdg_shell_state,
             xwayland,
             layer_shell_state,

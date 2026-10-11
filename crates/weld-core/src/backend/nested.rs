@@ -232,6 +232,9 @@ impl NativeDriver<NestedEvent> for NestedDriver {
         state: &mut HostState<NestedEvent>,
         shell: &mut dyn ApplicationHost,
     ) -> Result<bool> {
+        if !crate::runtime::finish_capture(&mut self.pending_capture, shell)? {
+            return Ok(false);
+        }
         let pump_status = {
             let _pump_span =
                 tracing::trace_span!(target: crate::PROFILE_TARGET, "winit_pump_events").entered();
@@ -367,6 +370,9 @@ impl NativeDriver<NestedEvent> for NestedDriver {
         state: &mut HostState<NestedEvent>,
         shell: &mut dyn ApplicationHost,
     ) -> PolicyFrame {
+        if state.data.server.output_capture_requested() {
+            self.frame_state.request_composition();
+        }
         if state.data.server.presentation_requested() {
             self.frame_state.request_present();
         }
@@ -439,6 +445,11 @@ impl NativeDriver<NestedEvent> for NestedDriver {
         frame: PolicyFrame,
     ) -> Result<bool> {
         let mut request_next_composition = false;
+        apply_nested_cursor(
+            &mut self.host,
+            &self.host_event_loop,
+            state.data.server.take_cursor_image(&state.clients),
+        );
         if frame.work.advance_main {
             if frame.work.render_composition {
                 shell
@@ -450,6 +461,13 @@ impl NativeDriver<NestedEvent> for NestedDriver {
                     .pop()
                     .context("nested composition returned no output frame")?;
                 debug_assert!(self.composition_frames.is_empty());
+                state.data.server.capture_output_frame(
+                    composition.output,
+                    &composition.frame,
+                    self.renderer.device(),
+                    self.renderer.queue(),
+                    &state.capture_worker,
+                );
                 self.completed_composition = Some(composition.frame);
                 self.pending_presentation_id =
                     Some(crate::runtime::callbacks::stage_composition_callbacks(
@@ -463,12 +481,6 @@ impl NativeDriver<NestedEvent> for NestedDriver {
                 self.frame_state.application_advanced(frame.now);
             }
         }
-
-        apply_nested_cursor(
-            &mut self.host,
-            &self.host_event_loop,
-            state.data.server.take_cursor_image(&state.clients),
-        );
 
         if self.pending_capture.is_none()
             && let Some(request) = shell
@@ -497,6 +509,9 @@ impl NativeDriver<NestedEvent> for NestedDriver {
         }
 
         let capture_path = self.pending_capture.as_ref().and_then(|capture| {
+            if capture.task.is_some() {
+                return None;
+            }
             let client_ready = !capture.wait_for_client
                 || shell
                     .composition()
@@ -509,9 +524,11 @@ impl NativeDriver<NestedEvent> for NestedDriver {
         if self.frame_state.presentation_due()
             && let Some(composition) = self.completed_composition.as_ref()
         {
-            let frame = self
-                .renderer
-                .render(composition.target().view(), capture_path)?;
+            let frame = self.renderer.render(
+                composition.target().view(),
+                capture_path,
+                &state.capture_worker,
+            )?;
             if frame.presented {
                 self.frame_state.presented();
                 if let Some(presentation_id) = self.pending_presentation_id.take() {
@@ -524,27 +541,10 @@ impl NativeDriver<NestedEvent> for NestedDriver {
                     );
                 }
             }
-            if let Some(capture_result) = frame.capture
-                && let Some(capture) = self.pending_capture.take()
+            if let Some(task) = frame.capture
+                && let Some(capture) = self.pending_capture.as_mut()
             {
-                match capture.remote_request_id {
-                    Some(request_id) => {
-                        if let Err(error) = &capture_result {
-                            warn!(request_id, %error, "remote screenshot failed");
-                        }
-                        shell
-                            .composition()
-                            .context("native presenter requires local composition")?
-                            .complete_capture(request_id, capture_result);
-                    }
-                    None => match capture_result {
-                        Ok(()) => {
-                            info!(path = %capture.path.display(), "startup screenshot saved");
-                            return Ok(false);
-                        }
-                        Err(error) => bail!("startup screenshot failed: {error}"),
-                    },
-                }
+                capture.task = Some(task);
             }
         }
         // Keep this below presentation: a redraw requested while producing the
