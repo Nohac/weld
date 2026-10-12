@@ -25,8 +25,7 @@ use weld_hoist::HoistedWindow;
 use weld_remote_control::{Capabilities, Capture, CaptureJob, Grant, RemoteControlClient};
 use weld_remote_control_ui::{RemoteControlPanel, TakeBack, ToggleCapability};
 use weld_window::{
-    ManagedWindow, WindowExternalControl, WindowHeaderRequested, WindowOccupant, WindowProjection,
-    WindowSystems,
+    ManagedWindow, WindowExternalControl, WindowHeaderRequested, WindowOccupant, WindowSystems,
 };
 
 #[derive(Component)]
@@ -40,9 +39,6 @@ struct Controller(RemoteControlClient);
 
 #[derive(Resource)]
 struct Administration(Mutex<mpsc::Receiver<ControlRequest>>);
-
-#[derive(Component)]
-struct PeekClip(Overflow);
 
 pub(crate) fn install(app: &mut WeldApp, service: &WindowService) -> Result<()> {
     let policy = app.policy_wake()?;
@@ -88,7 +84,7 @@ pub(crate) fn install(app: &mut WeldApp, service: &WindowService) -> Result<()> 
         )
         .add_systems(
             PreUpdate,
-            (block_local_input, clip_peeks)
+            block_local_input
                 .after(WindowSystems::UiReconcile)
                 .before(PickingSystems::Backend),
         );
@@ -277,26 +273,6 @@ fn block_local_input(
     for (surface, popup) in &popups {
         if blocked.0.contains(&popup.owner) {
             blocked.0.insert(surface.surface);
-        }
-    }
-}
-
-fn clip_peeks(
-    mut commands: Commands,
-    controlled: Query<(), With<ControlledWindow>>,
-    mut roots: Query<(Entity, &WindowProjection, &mut Node, Option<&PeekClip>)>,
-) {
-    for (entity, projection, mut node, saved) in &mut roots {
-        if controlled.contains(projection.window()) {
-            if saved.is_none() {
-                commands.entity(entity).insert(PeekClip(node.overflow));
-            }
-            if node.overflow != Overflow::clip() {
-                node.overflow = Overflow::clip();
-            }
-        } else if let Some(saved) = saved {
-            node.overflow = saved.0;
-            commands.entity(entity).remove::<PeekClip>();
         }
     }
 }

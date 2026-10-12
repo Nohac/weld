@@ -1358,6 +1358,7 @@ mod tests {
     use bevy::{
         asset::{Assets, RenderAssetUsages},
         image::Image,
+        math::Vec2,
         prelude::{BackgroundColor, BorderRadius, BoxShadow, Color, PositionType, px},
         render::view::Msaa,
         ui::{
@@ -1376,7 +1377,7 @@ mod tests {
     };
 
     #[cfg(feature = "test-support")]
-    use crate::surface::{SurfaceNode, SurfaceView};
+    use crate::surface::{RoundedSurfaceClip, SurfaceNode, SurfaceView};
 
     #[derive(Resource, Default)]
     struct RenderCount(u32);
@@ -1911,6 +1912,117 @@ mod tests {
         );
         shell.advance_main(2);
         assert_eq!(completed.get(), 3, "idle updates do not repeat preparation");
+    }
+
+    #[cfg(feature = "test-support")]
+    #[test]
+    fn rounded_parent_clips_fitted_and_oversized_surfaces_identically() {
+        let (mut shell, _, device, queue) = crate::benchmark::rendering_shell_with_outputs(
+            vec![diagnostic_output(
+                PRIMARY_OUTPUT_ID,
+                LogicalPoint::ZERO,
+                true,
+                0.0,
+            )],
+            |_| {},
+        )
+        .expect("diagnostic GPU shell");
+        let surface = SurfaceId::for_test(1);
+        install_diagnostic_surface(&mut shell, surface, [0, 255, 0, 255]);
+        let camera = shell.outputs[&PRIMARY_OUTPUT_ID].camera;
+        let parent = shell
+            .app
+            .world_mut()
+            .spawn((
+                RoundedSurfaceClip,
+                Node {
+                    width: px(32),
+                    height: px(32),
+                    overflow: bevy::ui::Overflow::clip(),
+                    border_radius: BorderRadius::all(px(8)),
+                    ..Default::default()
+                },
+                BackgroundColor(Color::srgb(0.0, 0.0, 1.0)),
+                UiTargetCamera(camera),
+            ))
+            .id();
+        let child = shell
+            .app
+            .world_mut()
+            .spawn((
+                SurfaceNode {
+                    surface,
+                    view: SurfaceView::FullSurface,
+                },
+                Node {
+                    flex_shrink: 0.0,
+                    border_radius: BorderRadius::all(px(8)),
+                    ..Default::default()
+                },
+                ChildOf(parent),
+            ))
+            .id();
+        let mut images = Vec::new();
+        for size in [32, 64] {
+            update_diagnostic_surface_extent(&mut shell, surface, size, |_, _| [0, 255, 0, 255]);
+            for tick in 0..6 {
+                shell.advance_main(tick);
+                shell
+                    .render_outputs(&[owned_request(PRIMARY_OUTPUT_ID)], &mut Vec::new())
+                    .expect("render");
+            }
+            let clip = shell
+                .app
+                .world()
+                .get::<bevy::ui::CalculatedClip>(child)
+                .expect("inherited clip");
+            assert_eq!(clip.clip.size(), Vec2::splat(32.0));
+            assert_eq!(
+                shell
+                    .app
+                    .world()
+                    .get::<ChildOf>(child)
+                    .expect("parent")
+                    .parent(),
+                parent
+            );
+            images.push(render_owned_output(
+                &mut shell,
+                &device,
+                &queue,
+                PRIMARY_OUTPUT_ID,
+            ));
+        }
+        let differences = images[0]
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .zip(images[1].as_chunks::<4>().0)
+            .filter(|(a, b)| a != b)
+            .count();
+        eprintln!(
+            "fitted vs oversized: {differences} differing pixels; both inherit the same 32x32 clip"
+        );
+        assert_eq!(
+            differences, 0,
+            "rounding follows the inner viewport, preserving the app's independent size"
+        );
+        shell
+            .app
+            .world_mut()
+            .entity_mut(parent)
+            .remove::<RoundedSurfaceClip>();
+        for tick in 0..6 {
+            shell.advance_main(tick);
+            shell
+                .render_outputs(&[owned_request(PRIMARY_OUTPUT_ID)], &mut Vec::new())
+                .expect("render without rounded clip");
+        }
+        assert_ne!(
+            render_owned_output(&mut shell, &device, &queue, PRIMARY_OUTPUT_ID),
+            images[0],
+            "removing the container clip restores the child's independent rounding"
+        );
     }
 
     #[cfg(feature = "test-support")]

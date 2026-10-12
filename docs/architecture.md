@@ -124,6 +124,11 @@ Weld is a workspace of reusable layers and one standard distribution:
 - `weld-ssd` supplies Weld's current opinionated BSN server-decoration scene.
   It validates the presentation contract but is optional policy that another
   shell or window manager can replace.
+  Surface content lives in a bounded inner container beneath the header.
+  `RoundedSurfaceClip` makes that container's laid-out shape authoritative for
+  descendant surface layers, including oversized peeks and subsurfaces. The
+  surface renderer resolves the inherited mask after UI layout and refreshes
+  its cached material parameters only when that mask changes.
   Vacant persistent frames show the captured match with configured placeholder
   colors. Interactive persistence results feed a short, input-transparent notice;
   configured persistence palettes share ordinary smart-border and corner policy.

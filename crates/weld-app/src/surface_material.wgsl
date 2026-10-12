@@ -1,9 +1,16 @@
 #import bevy_ui::ui_vertex_output::{UiVertexOutput}
 
+struct SurfaceClipParameters {
+    x: vec4<f32>,
+    y: vec4<f32>,
+    radii: vec4<f32>,
+}
+
 struct SurfaceMaterialParameters {
     source_rect: vec4<f32>,
     buffer_size: vec2<f32>,
     flags: vec2<u32>,
+    clip: SurfaceClipParameters,
 }
 
 @group(1) @binding(0)
@@ -103,8 +110,22 @@ fn fragment(in: UiVertexOutput) -> @location(0) vec4<f32> {
         return vec4<f32>(0.0);
     }
     var color = sample_surface(source_pixel(in.uv));
-    let point = (in.uv - vec2<f32>(0.5)) * in.size;
-    let edge_alpha = saturate(0.5 - rounded_box_distance(point, in.size, in.border_radius));
+    var edge_alpha: f32;
+    if parameters.clip.x.w >= 0.0 {
+        let clip_size = 2.0 * vec2<f32>(parameters.clip.x.w, parameters.clip.y.w);
+        if any(clip_size <= vec2<f32>(0.0)) {
+            return vec4<f32>(0.0);
+        }
+        let clip_point = vec2<f32>(
+            dot(parameters.clip.x.xy, in.uv) + parameters.clip.x.z,
+            dot(parameters.clip.y.xy, in.uv) + parameters.clip.y.z,
+        );
+        let distance = rounded_box_distance(clip_point, clip_size, parameters.clip.radii);
+        edge_alpha = saturate(0.5 - distance / max(fwidth(distance), 0.0001));
+    } else {
+        let point = (in.uv - vec2<f32>(0.5)) * in.size;
+        edge_alpha = saturate(0.5 - rounded_box_distance(point, in.size, in.border_radius));
+    }
     color.a *= edge_alpha;
     return color;
 }

@@ -26,11 +26,11 @@ pub mod surface {
     pub use crate::surface_impl::{
         ClientDecorated, ClientId, ClientPopup, ClientProvenance, ClientSource, ClientSourceId,
         ClientSurface, ClientToplevel, ClientToplevelHints, ClientToplevelParent,
-        ClientWindowMetadata, MappedSurface, PendingClientFullscreen, ServerDecorated,
-        SurfaceAction, SurfaceActionQueue, SurfaceAlphaMode, SurfaceCommitRevisions, SurfaceId,
-        SurfaceLayerId, SurfaceNode, SurfaceSystems, SurfaceView, ToplevelInteractionRequest,
-        ToplevelInteractionRequestKind, ToplevelResizeEdge, WindowDecoration,
-        register_client_source,
+        ClientWindowMetadata, MappedSurface, PendingClientFullscreen, RoundedSurfaceClip,
+        ServerDecorated, SurfaceAction, SurfaceActionQueue, SurfaceAlphaMode,
+        SurfaceCommitRevisions, SurfaceId, SurfaceLayerId, SurfaceNode, SurfaceSystems,
+        SurfaceView, ToplevelInteractionRequest, ToplevelInteractionRequestKind,
+        ToplevelResizeEdge, WindowDecoration, register_client_source,
     };
 
     #[cfg(feature = "test-support")]
@@ -77,9 +77,9 @@ pub mod prelude {
         },
         surface::{
             ClientDecorated, ClientPopup, ClientSurface, ClientToplevel, ClientToplevelParent,
-            MappedSurface, ServerDecorated, SurfaceAction, SurfaceActionQueue, SurfaceId,
-            SurfaceNode, SurfaceView, ToplevelInteractionRequest, ToplevelInteractionRequestKind,
-            ToplevelResizeEdge, WindowDecoration,
+            MappedSurface, RoundedSurfaceClip, ServerDecorated, SurfaceAction, SurfaceActionQueue,
+            SurfaceId, SurfaceNode, SurfaceView, ToplevelInteractionRequest,
+            ToplevelInteractionRequestKind, ToplevelResizeEdge, WindowDecoration,
         },
     };
 }

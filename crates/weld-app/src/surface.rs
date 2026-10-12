@@ -8,7 +8,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 
 use bevy::{
-    app::{App, Plugin, PreUpdate},
+    app::{App, Plugin, PostUpdate, PreUpdate},
     asset::{Asset, AssetId, Assets, Handle, RenderAssetUsages, load_internal_asset, uuid_handle},
     ecs::{
         component::Component,
@@ -49,6 +49,10 @@ use weld_core::dmabuf::ImportId;
 mod binding;
 pub(crate) use binding::publish_surface_bindings;
 
+#[path = "surface/clip.rs"]
+mod clip;
+pub use clip::RoundedSurfaceClip;
+
 const SURFACE_MATERIAL_SHADER: Handle<Shader> =
     uuid_handle!("f69ff2a0-2dc4-4a34-8f64-bf77475398a1");
 
@@ -57,10 +61,11 @@ struct SurfaceMaterialParameters {
     source_rect: Vec4,
     buffer_size: Vec2,
     flags: UVec2,
+    clip: clip::ClipParameters,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-struct SurfaceParameterKey([u32; 8]);
+struct SurfaceParameterKey([u32; 20]);
 
 impl From<SurfaceMaterialParameters> for SurfaceParameterKey {
     fn from(parameters: SurfaceMaterialParameters) -> Self {
@@ -73,6 +78,18 @@ impl From<SurfaceMaterialParameters> for SurfaceParameterKey {
             parameters.buffer_size.y.to_bits(),
             parameters.flags.x,
             parameters.flags.y,
+            parameters.clip.x.x.to_bits(),
+            parameters.clip.x.y.to_bits(),
+            parameters.clip.x.z.to_bits(),
+            parameters.clip.x.w.to_bits(),
+            parameters.clip.y.x.to_bits(),
+            parameters.clip.y.y.to_bits(),
+            parameters.clip.y.z.to_bits(),
+            parameters.clip.y.w.to_bits(),
+            parameters.clip.radii.x.to_bits(),
+            parameters.clip.radii.y.to_bits(),
+            parameters.clip.radii.z.to_bits(),
+            parameters.clip.radii.w.to_bits(),
         ])
     }
 }
@@ -488,6 +505,12 @@ impl Plugin for SurfacePlugin {
                 sync_surface_nodes
                     .after(SurfaceSystems::FallbackPresentation)
                     .before(PickingSystems::Backend),
+            )
+            .add_systems(
+                PostUpdate,
+                clip::sync
+                    .after(bevy::ui::UiSystems::PostLayout)
+                    .before(bevy::asset::AssetEventSystems),
             );
         if let Some(render_app) = app.get_sub_app_mut(RenderApp) {
             binding::configure_render_app(render_app);
@@ -1637,6 +1660,7 @@ fn surface_material(
             ),
             buffer_size: Vec2::new(layer.pixel_size.0 as f32, layer.pixel_size.1 as f32),
             flags: UVec2::new(encoding, u32::from(y_inverted)),
+            clip: clip::ClipParameters::default(),
         },
     }
 }
@@ -1653,10 +1677,13 @@ fn update_surface_material(
     materials: &mut Assets<SurfaceUiMaterial>,
     selectors: &mut MaterialSelectorRegistry,
     node: &mut MaterialNode<SurfaceUiMaterial>,
-    expected: SurfaceUiMaterial,
+    mut expected: SurfaceUiMaterial,
     surface: SurfaceId,
     layer: SurfaceLayerId,
 ) {
+    if let Some(material) = materials.get(&node.0) {
+        expected.parameters.clip = material.parameters.clip;
+    }
     let parameters = expected.parameters.into();
     if let Some(mut material) = materials.get_mut(&node.0) {
         if *material != expected {

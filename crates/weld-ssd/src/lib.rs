@@ -25,11 +25,10 @@ use bevy::{
         template::{FromTemplate, template},
     },
     math::Vec2,
-    picking::Pickable,
     prelude::{
-        AlignItems, BackgroundColor, BorderColor, BorderRadius, BoxShadow, Button, Children,
-        Display, FlexDirection, GlobalZIndex, JustifyContent, Node, Overflow, PositionType, Rot2,
-        Scene, SceneList, UiRect, UiTargetCamera, UiTransform, ZIndex, percent, px,
+        AlignItems, BackgroundColor, BorderColor, BorderRadius, BoxShadow, Children, Display,
+        FlexDirection, GlobalZIndex, JustifyContent, Node, Overflow, PositionType, Scene,
+        SceneList, UiRect, UiTargetCamera, ZIndex, percent, px,
     },
     scene::{CommandsSceneExt, bsn, bsn_list},
     window::RequestRedraw,
@@ -37,14 +36,14 @@ use bevy::{
 use weld_app::{
     output::{OutputCompositionCamera, PrimaryOutput, WeldOutput},
     surface::{
-        ClientProvenance, ClientToplevel, ClientToplevelParent, MappedSurface, ServerDecorated,
-        SurfaceId, SurfaceView, ToplevelResizeEdge,
+        ClientProvenance, ClientToplevel, ClientToplevelParent, MappedSurface, RoundedSurfaceClip,
+        ServerDecorated, SurfaceId, SurfaceView, ToplevelResizeEdge,
     },
 };
 use weld_window::persistence::PersistentWindow;
 use weld_window::{
     FloatingWindow, FocusedWindow, ManagedWindow, PresentationOffset, PresentsWindow,
-    PrimaryWindowPresentation, WindowClientResolver, WindowCloseHandle, WindowGeometryAnchor,
+    PrimaryWindowPresentation, WindowClientResolver, WindowGeometryAnchor,
     WindowInteractionSession, WindowMoveHandle, WindowOutput, WindowOutputIntersections,
     WindowPresentationOverride, WindowProjection, WindowResizeHandle, WindowSplitEdge,
     WindowSystems, WindowVacancy, WindowZOrder,
@@ -54,7 +53,6 @@ use weld_window_ui::{WindowFramePolicy, surface_content_with_node};
 #[cfg(test)]
 const INNER_BORDER_RADIUS: f32 = 6.0;
 const HEADER_HEIGHT: f32 = 30.0;
-const CLOSE_BUTTON_SIZE: f32 = 22.0;
 const RESIZE_GRAB_EXTENT: f32 = 12.0;
 const FOCUSED_BORDER: Color = Color::srgb(0.35, 0.58, 0.88);
 const UNFOCUSED_BORDER: Color = Color::srgb(0.28, 0.34, 0.42);
@@ -73,9 +71,6 @@ struct WindowBody;
 /// Header mount for window-owned controls. Resolve its window with [`weld_window::WindowProjectionLookup`].
 #[derive(Component, Clone, Copy, Default)]
 pub struct FrameHeader;
-
-#[derive(Component, Clone, Copy, Default)]
-struct FrameForeground;
 
 #[derive(Component, FromTemplate)]
 #[relationship(relationship_target = FrameColorNodes)]
@@ -597,7 +592,7 @@ fn request_style_refresh(
 fn sync_focus_style(
     colors: WindowFrameColors,
     mut roots: FrameStyleRoots,
-    mut nodes: Query<(&mut BackgroundColor, Has<FrameHeader>)>,
+    mut nodes: Query<&mut BackgroundColor, With<FrameHeader>>,
     mut redraw: bevy::ecs::message::MessageWriter<RequestRedraw>,
 ) {
     let mut changed = false;
@@ -628,14 +623,10 @@ fn sync_focus_style(
             changed = true;
         }
         for child in &children.0 {
-            let Ok((mut background, header)) = nodes.get_mut(*child) else {
+            let Ok(mut background) = nodes.get_mut(*child) else {
                 continue;
             };
-            let expected = if header {
-                palette.background
-            } else {
-                palette.foreground
-            };
+            let expected = palette.background;
             if background.0 != expected {
                 background.0 = expected;
                 changed = true;
@@ -747,60 +738,20 @@ fn window_scene(content: impl SceneList, style: FrameGeometry) -> impl Scene {
                             ),
                         }
                         BackgroundColor(Color::srgb(0.14, 0.17, 0.22))
-                        Children [(
-                            Button
-                            WindowCloseHandle
-                            Node {
-                                width: px(CLOSE_BUTTON_SIZE),
-                                height: px(CLOSE_BUTTON_SIZE),
-                                flex_shrink: 0.0,
-                                margin: UiRect::right(px(4)),
-                                align_items: AlignItems::Center,
-                                justify_content: JustifyContent::Center,
-                                border_radius: BorderRadius::MAX,
-                            }
-                            BackgroundColor(Color::srgb(0.54, 0.16, 0.18))
-                            Children [(
-                                Pickable::IGNORE
-                                Node {
-                                    width: px(12),
-                                    height: px(12),
-                                    position_type: PositionType::Relative,
-                                }
-                                Children [
-                                    (
-                                        Pickable::IGNORE
-                                        FrameForeground
-                                        FrameColorOwner(#FrameRoot)
-                                        Node {
-                                            position_type: PositionType::Absolute,
-                                            left: px(0),
-                                            top: px(5),
-                                            width: px(12),
-                                            height: px(2),
-                                        }
-                                        UiTransform::from_rotation(Rot2::degrees(45.0))
-                                        BackgroundColor(Color::WHITE)
-                                    ),
-                                    (
-                                        Pickable::IGNORE
-                                        FrameForeground
-                                        FrameColorOwner(#FrameRoot)
-                                        Node {
-                                            position_type: PositionType::Absolute,
-                                            left: px(0),
-                                            top: px(5),
-                                            width: px(12),
-                                            height: px(2),
-                                        }
-                                        UiTransform::from_rotation(Rot2::degrees(-45.0))
-                                        BackgroundColor(Color::WHITE)
-                                    ),
-                                ]
-                            )]
-                        )]
                     ),
-                    {content},
+                    (
+                        RoundedSurfaceClip
+                        Node {
+                            width: percent(100),
+                            flex_grow: 1.0,
+                            flex_basis: px(0),
+                            min_width: px(0),
+                            min_height: px(0),
+                            overflow: Overflow::clip(),
+                            border_radius: {style.content_radius()},
+                        }
+                        Children [{content}]
+                    ),
                 ]
             ),
             {resize_handles},
@@ -935,7 +886,7 @@ mod tests {
         app::App,
         asset::{AssetApp, AssetPlugin, Assets},
         camera::{ManualTextureViewHandle, NormalizedRenderTarget},
-        ecs::system::RunSystemOnce,
+        ecs::{hierarchy::ChildOf, system::RunSystemOnce},
         image::Image,
         input::{
             ButtonState,
@@ -943,12 +894,13 @@ mod tests {
         },
         math::{UVec2, Vec2},
         picking::{
+            Pickable,
             backend::HitData,
-            events::{Click, Pointer, Press},
+            events::{Pointer, Press},
             pointer::{Location, PointerButton, PointerId},
         },
         scene::ScenePlugin,
-        ui::{Display, UiScale, widget::Button},
+        ui::{Display, UiScale},
         window::RequestRedraw,
     };
     use weld_app::{
@@ -966,9 +918,9 @@ mod tests {
     use weld_float::FloatPlugin;
     use weld_window::{
         FocusedWindow, OccupiesWindow, PresentationInsets, PresentationOffset,
-        PrimaryWindowPresentation, WindowCommand, WindowCommandKind, WindowGeometry,
-        WindowGeometryAnchor, WindowInteractionKind, WindowInteractionSession, WindowMoveHandle,
-        WindowPlugin, WindowResizeHandle, WindowVisibility, WindowZOrder,
+        PrimaryWindowPresentation, WindowCloseHandle, WindowCommand, WindowCommandKind,
+        WindowGeometry, WindowGeometryAnchor, WindowInteractionKind, WindowInteractionSession,
+        WindowMoveHandle, WindowPlugin, WindowResizeHandle, WindowVisibility, WindowZOrder,
     };
     use weld_window_ui::{PrimarySurfacePresentation, WindowUiPlugin};
 
@@ -2690,7 +2642,7 @@ mod tests {
     }
 
     #[test]
-    fn decoration_swap_preserves_content_size_and_close_targets_the_occupant() {
+    fn decoration_swap_preserves_content_size_and_header_dragging() {
         let mut app = test_app();
         let surface = SurfaceId::for_test(41);
         enqueue_surface_event(app.world_mut(), role(surface, WindowDecoration::ClientSide));
@@ -2759,33 +2711,18 @@ mod tests {
             .query_filtered::<bevy::ecs::entity::Entity, With<WindowMoveHandle>>()
             .single(app.world())
             .expect("SSD should expose one move handle");
-        let close_button = app
-            .world_mut()
-            .query_filtered::<bevy::ecs::entity::Entity, With<Button>>()
-            .single(app.world())
-            .expect("SSD should expose one close control");
+        assert_eq!(
+            app.world_mut()
+                .query_filtered::<Entity, With<WindowCloseHandle>>()
+                .iter(app.world())
+                .count(),
+            0
+        );
         let camera = app.world_mut().spawn_empty().id();
         let location = Location {
             target: NormalizedRenderTarget::TextureView(ManualTextureViewHandle(1)),
             position: Vec2::ZERO,
         };
-        app.world_mut().trigger(Pointer::new(
-            PointerId::Mouse,
-            location.clone(),
-            Press {
-                button: PointerButton::Primary,
-                hit: HitData::new(camera, 0.0, None, None),
-                count: 1,
-            },
-            close_button,
-        ));
-        app.update();
-        assert!(
-            app.world()
-                .get::<WindowInteractionSession>(window)
-                .is_none()
-        );
-
         let initial_position = app
             .world()
             .get::<WindowGeometry>(window)
@@ -2793,7 +2730,7 @@ mod tests {
             .position;
         app.world_mut().trigger(Pointer::new(
             PointerId::Mouse,
-            location.clone(),
+            location,
             Press {
                 button: PointerButton::Primary,
                 hit: HitData::new(camera, 0.0, None, None),
@@ -2819,21 +2756,6 @@ mod tests {
         );
         write_primary_button(&mut app, ButtonState::Released);
         app.update();
-
-        app.world_mut().trigger(Pointer::new(
-            PointerId::Mouse,
-            location,
-            Click {
-                button: PointerButton::Primary,
-                hit: HitData::new(camera, 0.0, None, None),
-                duration: std::time::Duration::ZERO,
-                count: 1,
-            },
-            close_button,
-        ));
-        app.update();
-
-        assert!(take_surface_actions(app.world_mut()).contains(&SurfaceAction::Close { surface }));
     }
 
     #[test]
@@ -2865,6 +2787,34 @@ mod tests {
         assert_eq!(
             content_node.border_radius,
             BorderRadius::px(0.0, 0.0, INNER_BORDER_RADIUS, INNER_BORDER_RADIUS,)
+        );
+        let content_parent = app
+            .world_mut()
+            .query_filtered::<&ChildOf, With<SurfaceNode>>()
+            .single(app.world())
+            .expect("content parent")
+            .parent();
+        assert!(
+            app.world()
+                .get::<RoundedSurfaceClip>(content_parent)
+                .is_some()
+        );
+        let viewport = app
+            .world()
+            .get::<Node>(content_parent)
+            .expect("inner viewport");
+        assert_eq!(viewport.overflow, Overflow::clip());
+        assert_eq!(viewport.flex_basis, px(0));
+        assert_eq!(viewport.flex_grow, 1.0);
+        assert_eq!(viewport.min_height, px(0));
+        assert_eq!(viewport.min_width, px(0));
+        assert_eq!(
+            viewport.border_radius,
+            BorderRadius::px(0.0, 0.0, INNER_BORDER_RADIUS, INNER_BORDER_RADIUS)
+        );
+        assert_eq!(
+            app.world().get::<Node>(root).expect("frame").overflow,
+            Overflow::visible()
         );
 
         let outer_size = app
