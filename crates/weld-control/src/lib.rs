@@ -122,7 +122,7 @@ pub fn call(path: &Path, request: &Request) -> Result<Response> {
     stream.set_read_timeout(Some(Duration::from_secs(40)))?;
     stream.set_write_timeout(Some(Duration::from_secs(3)))?;
     write(&mut stream, request)?;
-    match read_bounded(&mut stream, weld_diagnostics::MAX_EXPORT_BYTES as usize)? {
+    match read_bounded(&mut stream, MAX_CONTROL_RESPONSE_BYTES)? {
         Response::Error(error) => anyhow::bail!("{error}"),
         response => Ok(response),
     }
@@ -461,10 +461,12 @@ impl Owner {
     }
 }
 
+const MAX_CONTROL_RESPONSE_BYTES: usize = 96 * 1024 * 1024;
+
 fn write(stream: &mut UnixStream, value: &impl Serialize) -> Result<()> {
     let bytes = serde_json::to_vec(value)?;
     ensure!(
-        bytes.len() as u64 <= weld_diagnostics::MAX_EXPORT_BYTES,
+        bytes.len() <= MAX_CONTROL_RESPONSE_BYTES,
         "control response too large"
     );
     stream.write_all(&(bytes.len() as u32).to_le_bytes())?;
@@ -765,6 +767,7 @@ mod tests {
             focused: true,
             visible: true,
             floating: false,
+            control: None,
         };
         publisher.publish(vec![window.clone()]).expect("mapped");
         assert_eq!(

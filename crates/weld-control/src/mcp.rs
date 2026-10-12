@@ -52,6 +52,7 @@ impl ServerHandler for WindowMcp {
             .into());
         };
         let client = self.client.clone();
+        let capture = request.name == "window_capture";
         let result = tokio::task::spawn_blocking(move || {
             let _permit = permit;
             client.mcp_call(
@@ -62,6 +63,21 @@ impl ServerHandler for WindowMcp {
         .await
         .map_err(|error| ErrorData::internal_error(error.to_string(), None))?;
         Ok(match result {
+            Ok(mut value) if capture => {
+                let image = value
+                    .as_object_mut()
+                    .and_then(|object| object.remove("png_base64"));
+                match image.and_then(|image| image.as_str().map(str::to_owned)) {
+                    Some(image) => {
+                        let mut result = CallToolResult::structured(value);
+                        result.content.push(ContentBlock::image(image, "image/png"));
+                        result
+                    }
+                    None => {
+                        CallToolResult::error(vec![ContentBlock::text("capture returned no PNG")])
+                    }
+                }
+            }
             Ok(value) => CallToolResult::structured(value),
             Err(error) => CallToolResult::error(vec![ContentBlock::text(error)]),
         }
@@ -72,10 +88,15 @@ impl ServerHandler for WindowMcp {
 pub fn run(socket: PathBuf) -> Result<()> {
     let mut tools = WindowClient::mcp_tools()
         .into_iter()
+        .filter(|tool| tool["name"] != "window_control")
         .map(serde_json::from_value)
         .collect::<Result<Vec<Tool>, _>>()?;
     for tool in &mut tools {
-        tool.annotations = Some(ToolAnnotations::new().read_only(true));
+        let read_only = matches!(
+            tool.name.as_ref(),
+            "window_list" | "window_get" | "window_wait" | "window_capture"
+        );
+        tool.annotations = Some(ToolAnnotations::new().read_only(read_only));
     }
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()

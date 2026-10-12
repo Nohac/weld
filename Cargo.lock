@@ -8597,6 +8597,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "weld-agent"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "schemars",
+ "serde",
+ "tracing",
+ "uuid",
+ "weld-access",
+ "weld-client",
+ "weld-hoist-core",
+ "weld-hoist-protocol",
+]
+
+[[package]]
 name = "weld-app"
 version = "0.1.0"
 dependencies = [
@@ -8642,6 +8657,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "weld-access",
+ "weld-agent",
  "weld-diagnostics",
  "weld-hoist-iroh",
  "weld-media",
@@ -8725,6 +8741,7 @@ dependencies = [
 name = "weld-hoist-core"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "tracing",
  "weld-access",
  "weld-client",
@@ -8999,6 +9016,7 @@ name = "weldwm"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "base64",
  "bevy",
  "bevy_dylib",
  "clap",
@@ -9008,6 +9026,7 @@ dependencies = [
  "tracing-subscriber",
  "tracing-tracy",
  "weld-access",
+ "weld-agent",
  "weld-app",
  "weld-client",
  "weld-control",

@@ -9,13 +9,19 @@ See [Native application launch](../native-launch.md) for the implemented scope
 and validation. The following sections describe the intended control-session,
 authorization and presentation layers.
 
-## Native window inspection — Implemented
+## Native window control and peek — Implemented
 
 The same-user window service exposes list, inspect and bounded inventory-change
 waits through generated CLI/RPC/MCP interfaces. The standard distribution
 publishes domain-owned managed-window snapshots, including vacant persistent
-slots. See [Native window inspection](../native-window-control.md) for schemas,
-commands, lifetime and validation.
+slots. Local grants now provide independently seated keyboard/pointer input,
+application viewport configuration and composed PNG capture through CLI/RPC/MCP.
+The existing desktop frame stays visible as a native-size, clipped live peek;
+its geometry is independent of the agent-controlled viewport. Current grants
+cover the live occupant and expire on replacement. See
+[Native window control](../native-window-control.md) for schemas, commands,
+lifetime and validation. The sections below retain the broader access-policy
+and multi-participant direction.
 
 ## Use cases — Direction
 

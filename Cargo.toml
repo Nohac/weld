@@ -15,6 +15,7 @@ test-support = ["weld-app/test-support"]
 [workspace]
 members = [
   "crates/weld-access",
+  "crates/weld-agent",
   "crates/weld-diagnostics",
   "crates/weld-app",
   "crates/weld-client",
@@ -105,7 +106,9 @@ x11-dl = "2.21.0"
 xcursor = "0.3.11"
 
 [dependencies]
+base64 = "0.22.1"
 weld-access = { path = "crates/weld-access" }
+weld-agent = { path = "crates/weld-agent" }
 anyhow.workspace = true
 bevy.workspace = true
 bevy_dylib.workspace = true

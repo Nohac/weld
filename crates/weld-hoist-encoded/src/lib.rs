@@ -15,8 +15,7 @@ mod pacing;
 mod scheduling;
 mod state;
 mod transport_observations;
-mod view;
-mod view_input;
+use weld_hoist_core::{view, view_input};
 
 pub use activity::SchedulingPolicy;
 pub use bitrate::{

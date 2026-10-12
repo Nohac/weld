@@ -481,6 +481,11 @@ pub struct WindowPresentationOverride {
     owner: Entity,
 }
 
+/// An external controller owns the application's viewport and input.
+/// The desktop keeps its independently sized, read-only presentation.
+#[derive(Component, Clone, Copy, Debug, Default)]
+pub struct WindowExternalControl;
+
 impl WindowPresentationOverride {
     pub const fn new(owner: Entity) -> Self {
         Self { owner }
@@ -1205,7 +1210,11 @@ type ConstrainedFloatingWindows<'w, 's> = Query<
         &'static mut WindowGeometry,
         Option<&'static PrimaryWindowPresentation>,
     ),
-    (With<FloatingWindow>, Without<fullscreen::WindowFullscreen>),
+    (
+        With<FloatingWindow>,
+        Without<fullscreen::WindowFullscreen>,
+        Without<WindowExternalControl>,
+    ),
 >;
 
 fn constrain_floating_geometry(
@@ -1241,6 +1250,7 @@ type ResizeWindows<'w, 's> = Query<
         Has<fullscreen::WindowFullscreen>,
         Has<fullscreen::PendingFullscreenConfigure>,
         Has<TiledWindow>,
+        Has<WindowExternalControl>,
     ),
 >;
 
@@ -1260,8 +1270,13 @@ fn reconcile_window_sizes(
         fullscreen,
         pending_fullscreen,
         tiled,
+        external,
     ) in &mut windows
     {
+        if external {
+            resize.clear_client();
+            continue;
+        }
         let Some(client) = clients.mapped_client(window) else {
             if let Some(terminal) = resize.clear_client() {
                 actions.push(SurfaceAction::Resize {
@@ -1484,7 +1499,7 @@ fn end_window_interaction(world: &mut bevy::ecs::world::World, window: Entity) {
 fn reconcile_client_focus(
     focus: Res<FocusedWindow>,
     mut applied: ResMut<AppliedClientFocus>,
-    windows: Query<&WindowVisibility>,
+    windows: Query<&WindowVisibility, Without<WindowExternalControl>>,
     clients: WindowClientResolver,
     mut actions: ResMut<SurfaceActionQueue>,
 ) {
@@ -1906,6 +1921,65 @@ mod tests {
         assert_eq!(resize.observe_commit(surface, 12), None);
 
         assert_eq!(resize.pending_after_revision(surface), Some(12));
+    }
+
+    #[test]
+    fn external_control_keeps_frame_geometry_independent_and_restores_desktop_authority() {
+        let mut app = test_app();
+        let surface = SurfaceId::for_test(75);
+        let client = mapped_toplevel(&mut app, surface);
+        app.update();
+        let window = app.world().get::<OccupiesWindow>(client).expect("window").0;
+        app.world_mut().resource_mut::<FocusedWindow>().0 = Some(window);
+        app.update();
+        take_surface_actions(app.world_mut());
+        app.world_mut()
+            .entity_mut(window)
+            .insert(WindowExternalControl);
+        app.world_mut()
+            .get_mut::<WindowGeometry>(window)
+            .expect("frame")
+            .size = Vec2::new(700.0, 500.0);
+        app.update();
+        let actions = take_surface_actions(app.world_mut());
+        assert!(
+            !actions
+                .iter()
+                .any(|action| matches!(action, SurfaceAction::Resize { .. }))
+        );
+        assert!(actions.contains(&SurfaceAction::Focus { surface: None }));
+        app.world_mut()
+            .get_mut::<MappedSurface>(client)
+            .expect("app")
+            .logical_size = Vec2::new(1200.0, 800.0);
+        app.update();
+        assert_eq!(
+            app.world()
+                .get::<WindowGeometry>(window)
+                .expect("frame")
+                .size,
+            Vec2::new(700.0, 500.0)
+        );
+        assert!(
+            !take_surface_actions(app.world_mut())
+                .iter()
+                .any(|action| matches!(action, SurfaceAction::Resize { .. }))
+        );
+        app.world_mut()
+            .entity_mut(window)
+            .remove::<WindowExternalControl>();
+        app.update();
+        let actions = take_surface_actions(app.world_mut());
+        assert!(actions.contains(&SurfaceAction::Resize {
+            surface,
+            logical_size: UVec2::new(700, 500),
+            resizing: false,
+            fullscreen: false,
+            layout: Default::default()
+        }));
+        assert!(actions.contains(&SurfaceAction::Focus {
+            surface: Some(surface)
+        }));
     }
 
     #[test]

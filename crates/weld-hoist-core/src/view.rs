@@ -3,6 +3,7 @@
 
 use std::{collections::HashMap, rc::Rc};
 
+use crate::HoistSessionId;
 use anyhow::{Context, Result, ensure};
 use weld_client::{
     ClientBufferId, ClientBufferLease, ClientBufferMetadata, ClientBufferUseId,
@@ -12,7 +13,6 @@ use weld_client::{
     SurfaceBufferUpdate, SurfaceContentView, SurfaceInputPlacement, SurfaceInputRect,
     SurfaceLayerId, SurfaceLayerPlacement, SurfaceStreamMode, SurfaceWindowGeometry,
 };
-use weld_hoist_core::HoistSessionId;
 
 const MAX_VIEW_SURFACES: usize = 128;
 const MAX_VIEW_LAYERS: usize = 128;
@@ -25,7 +25,7 @@ struct Surface {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) struct ViewTarget {
+pub struct ViewTarget {
     pub session: HoistSessionId,
     pub surface: ClientSurfaceId,
     pub layer: SurfaceLayerId,
@@ -66,7 +66,7 @@ impl View {
 }
 
 #[derive(Default)]
-pub(crate) struct SourceViews {
+pub struct SourceViews {
     mode: SurfaceStreamMode,
     surfaces: HashMap<ClientSurfaceId, Surface>,
     views: HashMap<ClientSurfaceId, View>,

@@ -2,6 +2,7 @@
 """Validate native launch and window CLI/RPC/MCP in a private Weld session."""
 
 import argparse
+import base64
 import json
 import os
 from pathlib import Path
@@ -13,6 +14,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import tty
 
 
 def wait_for(host, predicate, description, seconds=20):
@@ -90,7 +92,7 @@ def main():
                     tree = subprocess.check_output(["swaymsg", "-s", ipc, "-t", "get_tree", "-r"], text=True, timeout=5)
                     return name in tree
                 wait_for(host, lambda: mapped("weld-launch-probe"), "Foot admission through native launch")
-                check_windows(ctl, control)
+                check_windows(ctl, control, host, run, display)
                 if args.xwayland:
                     subprocess.run([*ctl, "launch", "--", str(root / "target/debug/examples/x11_window_probe"),
                                     "--seconds", "2", "--title", "Weld X11 launch probe"], check=True, timeout=10)
@@ -125,7 +127,7 @@ def main():
                 host.wait(timeout=5)
 
 
-def check_windows(ctl, control):
+def check_windows(ctl, control, host, run, display):
     listing = json.loads(subprocess.check_output([*ctl, "window", "list", "--json"], text=True, timeout=10))
     window = next(window for window in listing["windows"] if window["app_id"] == "weld-launch-probe")
     details = json.loads(subprocess.check_output(
@@ -183,7 +185,10 @@ def check_windows(ctl, control):
             assert "tools" in initialized["capabilities"]
             send({"jsonrpc": "2.0", "method": "notifications/initialized"})
             tools = request(2, "tools/list", {})["tools"]
-            assert {tool["name"] for tool in tools} == {"window_list", "window_get", "window_wait"}
+            assert {tool["name"] for tool in tools} == {
+                "window_list", "window_get", "window_wait", "window_pointer", "window_click",
+                "window_button", "window_key", "window_resize", "window_capture",
+            }
             result = request(3, "tools/call", {"name": "window_get", "arguments": {"id": window["id"]}})
             assert not result.get("isError"), result
             assert result["structuredContent"]["id"] == window["id"], result
@@ -199,6 +204,7 @@ def check_windows(ctl, control):
                            check=True, capture_output=True, timeout=10)
             result = receive(6)
             assert result["structuredContent"]["revision"] > revision, result
+            check_agent(rpc, request, window["id"], host, run, display)
         finally:
             mcp.stdin.close()
             try:
@@ -209,6 +215,59 @@ def check_windows(ctl, control):
                 raise RuntimeError("MCP did not stop after stdin closed")
             assert mcp.returncode == 0, mcp.stderr.read().decode(errors="replace")
     print("PASS native window queries, full output schema, MCP initialize/list/call/errors/async wait", flush=True)
+
+
+def check_agent(rpc, mcp, identifier, host, run, display):
+    def invoke(method, **params):
+        reply = rpc(method, params)
+        assert "error" not in reply, reply
+        return reply["result"]
+    before = invoke("list")["windows"]
+    focused = [window["id"] for window in before if window["focused"]]
+    geometry = next(window["geometry"] for window in before if window["id"] == identifier)
+    invoke("control", id=identifier, enabled=True)
+    wait_for(host, lambda: invoke("get", id=identifier)["control"] is not None, "control grant")
+    handle = invoke("get", id=identifier)["control"]
+    wait_for(host, lambda: "result" in rpc("capture", {"control": handle}), "first controlled frame")
+    invoke("resize", control=handle, width=800, height=600)
+    def resized():
+        snapshot = invoke("capture", control=handle)
+        return snapshot["logical_width"] == 800 and snapshot["logical_height"] == 600
+    wait_for(host, resized, "independent agent viewport")
+    assert invoke("get", id=identifier)["geometry"] == geometry, "agent resize moved the peek frame"
+    for key in [30, 28]:
+        for pressed in [True, False]:
+            result = mcp(20 + key * 2 + int(pressed), "tools/call", {
+                "name": "window_key", "arguments": {"control": handle, "keycode": key, "pressed": pressed}})
+            assert not result.get("isError"), result
+    received = run / "input.bin"
+    wait_for(host, lambda: received.exists() and b"a\r" in received.read_bytes(), "independent terminal keyboard input")
+    invoke("click", control=handle, x=100, y=100, button=272)
+    wait_for(host, lambda: b"\x1b[<0;" in received.read_bytes(), "terminal pointer input")
+    after = invoke("list")["windows"]
+    assert [window["id"] for window in after if window["focused"]] == focused, "agent stole desktop focus"
+    result = mcp(200, "tools/call", {"name": "window_capture", "arguments": {"control": handle}})
+    assert not result.get("isError"), result
+    image = next(content for content in result["content"] if content["type"] == "image")
+    png = base64.b64decode(image["data"], validate=True)
+    assert png[:8] == b"\x89PNG\r\n\x1a\n", "MCP must return image pixels"
+    assert int.from_bytes(png[16:20], "big") == result["structuredContent"]["width"]
+    (run / "agent-window.png").write_bytes(png)
+    subprocess.run(["grim", str(run / "desktop-peek.png")], env=dict(os.environ, WAYLAND_DISPLAY=str(display)), check=True, timeout=10)
+    invoke("resize", control=handle, width=1600, height=1400)
+    wait_for(host, lambda: invoke("capture", control=handle)["logical_width"] == 1600, "oversized viewport")
+    assert invoke("get", id=identifier)["geometry"] == geometry
+    subprocess.run(["grim", str(run / "desktop-clipped-peek.png")], env=dict(os.environ, WAYLAND_DISPLAY=str(display)), check=True, timeout=10)
+    invoke("key", control=handle, keycode=29, pressed=True)
+    invoke("control", id=identifier, enabled=False)
+    wait_for(host, lambda: invoke("get", id=identifier)["control"] is None, "control retirement")
+    assert "error" in rpc("key", {"control": handle, "keycode": 30, "pressed": True})
+    assert "error" in rpc("capture", {"control": handle})
+    invoke("control", id=identifier, enabled=True)
+    wait_for(host, lambda: invoke("get", id=identifier)["control"] is not None, "replacement grant")
+    assert invoke("get", id=identifier)["control"] != handle, "old control handle reused"
+    invoke("control", id=identifier, enabled=False)
+    print("PASS independent input, viewport sizing, live peek, MCP image capture and grant retirement", flush=True)
 
 
 def child():
@@ -223,14 +282,24 @@ def child():
     Path("child.pending.json").write_text(json.dumps(facts))
     Path("child.pending.json").rename("child.json")
     if sys.argv[2] == "nested":
-        os.execvp("foot", ["foot", "--app-id=weld-launch-probe", "--title=Weld launch probe"])
+        os.execvp("foot", ["foot", "--app-id=weld-launch-probe", "--title=Weld launch probe",
+                           sys.executable, str(Path(__file__).resolve()), "--input-probe"])
     probe = str(root / "target/debug/examples/wayland_session_probe")
     os.execv(probe, [probe, "--dormant", "--expected-output", "640x480",
                     "--expected-scale", "2", "--expected-size", "1100x300"])
 
 
 if __name__ == "__main__":
-    if len(sys.argv) > 2 and sys.argv[1] == "--child":
+    if sys.argv[1:] == ["--input-probe"]:
+        tty.setraw(sys.stdin.fileno())
+        sys.stdout.write("\x1b[?1000h\x1b[?1006h\x1b[36mWeld agent input probe\x1b[0m\r\n")
+        sys.stdout.flush()
+        with Path("input.bin").open("ab", buffering=0) as received:
+            while data := os.read(sys.stdin.fileno(), 1024):
+                received.write(data)
+                sys.stdout.write(repr(data) + "\r\n")
+                sys.stdout.flush()
+    elif len(sys.argv) > 2 and sys.argv[1] == "--child":
         child()
     else:
         main()

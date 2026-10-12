@@ -11,6 +11,7 @@ pub(super) type Configuration = i3::Configuration<DistributionAction>;
 #[derive(Clone, Debug, PartialEq)]
 pub(super) enum DistributionAction {
     RevokeAccess,
+    ToggleAgentControl,
     Hoist,
     OutputTopology,
     ExclusiveFullscreen,
@@ -24,6 +25,7 @@ pub(super) fn parse(name: &str, source: &str) -> Result<Configuration> {
 fn extension(words: &[&str]) -> Result<DistributionAction> {
     Ok(match words {
         ["weld", "access", "revoke", "all"] => DistributionAction::RevokeAccess,
+        ["weld", "agent", "toggle"] => DistributionAction::ToggleAgentControl,
         ["weld", "hoist"] => DistributionAction::Hoist,
         ["weld", "fullscreen", "exclusive"] => DistributionAction::ExclusiveFullscreen,
         ["weld", "output-debug"] => DistributionAction::OutputTopology,

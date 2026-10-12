@@ -6,6 +6,16 @@ project intent and future direction without presenting it as current behavior.
 
 Weld is a workspace of reusable layers and one standard distribution:
 
+- `weld-agent` owns bounded local window-control operations, occupant-scoped
+  handles and native adapter servicing. It reuses the hoist source relay's input
+  seat and retirement ledger. Composed view geometry and hit testing live in
+  `weld-hoist-core` for both encoded presentation and agent capture.
+  The distribution attaches in-memory grants to managed windows and exposes
+  operations through `weld-control`. `WindowExternalControl` retains ordinary
+  local presentation while transferring application input and viewport authority.
+  On-demand native GPU snapshots reuse source composition and asynchronous
+  readback, retaining input leases until sampling completes. See
+  [Native window control](native-window-control.md).
 - `weld-access` owns in-memory session admission and revocable connection permits.
   The shared source relay checks those permits before accepting input and
   publishing frames. Revocation retires held input and presentation claims

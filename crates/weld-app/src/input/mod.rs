@@ -39,6 +39,7 @@ pub(crate) use projection::enqueue_raw_input;
 #[cfg(feature = "test-support")]
 pub(crate) use projection::enqueue_raw_input_batch;
 pub(crate) use projection::update_output_configurations;
+pub use routing::LocalInputBlockedSurfaces;
 pub(crate) use routing::take_input_effects;
 pub use shell_commands::{ShellCommand, ShellCommands};
 pub(crate) use state::set_input_update_time;

@@ -105,6 +105,33 @@ fn gpu_composes_alpha_and_clipping_and_keeps_leased_targets_immutable() -> Resul
     let third = compositor.compose(&frame)?;
     assert_eq!(third.export()?.extent, Extent::new(64, 64));
     assert_eq!(compositor.targets.len(), 2, "reuse released target storage");
+    let (wake, _source) = crate::host::client_runtime_notifier()?;
+    let mut capture = SourceCapture::new(Path::new(&path), wake)?;
+    let first = capture.capture(&frame)?;
+    frame.layers[0] = layer(
+        3,
+        [0, 200, 0, 255],
+        LogicalPoint::ZERO,
+        LogicalSize::new(32.0, 32.0),
+        true,
+    );
+    let second = capture.capture(&frame)?;
+    drop(frame);
+    for (mut task, expected) in [(first, [0, 0, 200, 255]), (second, [0, 200, 0, 255])] {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let png = loop {
+            if let Some(result) = task.poll() {
+                break result?;
+            }
+            ensure!(std::time::Instant::now() < deadline, "snapshot timed out");
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        };
+        let mut decoder = png::Decoder::new(std::io::Cursor::new(png)).read_info()?;
+        let mut pixels = vec![0; decoder.output_buffer_size().context("PNG size")?];
+        let info = decoder.next_frame(&mut pixels)?;
+        assert_eq!((info.width, info.height), (64, 64));
+        assert_eq!(&pixels[..4], &expected);
+    }
     Ok(())
 }
 

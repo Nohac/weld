@@ -1,5 +1,6 @@
 //! Standard Weld compositor distribution and backend selection.
 
+mod agent;
 mod arguments;
 mod bitrate_budget;
 mod control;
@@ -410,6 +411,7 @@ pub fn run(arguments: AppArguments) -> Result<()> {
         )?
     };
     app.add_plugins(control::windows::NativeWindowPlugin(_controls.windows()));
+    agent::install(&mut app, &_controls.windows())?;
     app.run()
 }
 

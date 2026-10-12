@@ -5,6 +5,7 @@ edition.workspace = true
 publish.workspace = true
 
 [dependencies]
+anyhow.workspace = true
 weld-access = { path = "../weld-access" }
 tracing.workspace = true
 weld-client = { path = "../weld-client" }

@@ -28,8 +28,13 @@ use crate::surface::SurfaceInputNode;
 use weld_client::{ClientPointerRoute, ClientPointerRouteUpdate, InputTransform};
 use weld_input::PublishedPointerTarget;
 
+/// Surfaces whose local presentation is a read-only view.
+#[derive(Resource, Default)]
+pub struct LocalInputBlockedSurfaces(pub HashSet<crate::surface::SurfaceId>);
+
 pub(super) fn register(app: &mut App) {
     app.init_resource::<InputEffects>()
+        .init_resource::<LocalInputBlockedSurfaces>()
         .init_resource::<PointerRoutingState>()
         .add_systems(
             PreUpdate,
@@ -74,6 +79,7 @@ fn resolve_input_effects(
     output_positions: Query<&OutputPosition>,
     update_time: Res<InputUpdateTime>,
     resources: InputRoutingResources,
+    blocked: Res<LocalInputBlockedSurfaces>,
 ) {
     let InputRoutingResources {
         mut pending,
@@ -102,15 +108,24 @@ fn resolve_input_effects(
     // Client protocol delivery is not performed here. Core retains this
     // frame-published target and independently forwards every raw event using
     // it until a later frame publishes a different target.
-    if !routing.pressed_buttons.is_empty() {
+    let blocked_grab = routing
+        .last_sent
+        .and_then(|route| route.target)
+        .is_some_and(|route| blocked.0.contains(&route.surface));
+    if !routing.pressed_buttons.is_empty() && !blocked_grab {
         return;
+    }
+    if blocked_grab {
+        routing.pressed_buttons.clear();
     }
     let picked = picked_pointer_target(&pointers, &picked_nodes, &cameras, &output_positions);
     published_target.0 = routing
         .pointer
         .host_position
         .and_then(|_| picked.map(|picked| picked.entity));
-    let target = picked.and_then(|picked| picked.surface);
+    let target = picked
+        .and_then(|picked| picked.surface)
+        .filter(|route| !blocked.0.contains(&route.surface));
     let current = routing
         .pointer
         .host_position

@@ -18,7 +18,7 @@ struct Pointer {
 }
 
 #[derive(Default)]
-pub(crate) struct ViewInput {
+pub struct ViewInput {
     pointers: HashMap<ClientSurfaceId, Pointer>,
     contacts: HashMap<(ClientSurfaceId, TouchId), ViewTarget>,
     touched: HashMap<ClientSurfaceId, Vec<ViewTarget>>,

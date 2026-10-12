@@ -29,6 +29,9 @@ use super::{
 
 const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Bgra8Unorm;
 
+mod capture;
+pub use capture::{SourceCapture, SourceCaptureTask};
+
 struct Target {
     imported: ImportedRenderTarget,
     dmabuf: Dmabuf,
@@ -214,6 +217,63 @@ impl SourceCompositor {
     }
 
     pub fn compose(&mut self, frame: &ComposedBuffer) -> Result<ComposedImage> {
+        let live = self.prepare(frame)?;
+        let target = self.target(frame.extent)?;
+        let images = self.input_images(&live);
+        let acquire = sampling_barrier_command(
+            &self.device,
+            &self.raw_device,
+            self.queue_family,
+            &images,
+            true,
+        )?;
+        let release = sampling_barrier_command(
+            &self.device,
+            &self.raw_device,
+            self.queue_family,
+            &images,
+            false,
+        )?;
+        // SAFETY: target storage is reserved through submission completion and the encoder lease.
+        let (target_acquire, target_release) = unsafe {
+            (
+                foreign_image_barrier_command(
+                    &self.device,
+                    &self.raw_device,
+                    self.queue_family,
+                    target.imported.image,
+                    target.imported.used.get(),
+                    ForeignImageBarrier::Acquire,
+                )?,
+                foreign_image_barrier_command(
+                    &self.device,
+                    &self.raw_device,
+                    self.queue_family,
+                    target.imported.image,
+                    true,
+                    ForeignImageBarrier::Release,
+                )?,
+            )
+        };
+        let mut encoder = self.device.create_command_encoder(&Default::default());
+        self.draw(frame, &target.imported.view, &mut encoder)?;
+        let submission = self.queue.submit(
+            acquire
+                .into_iter()
+                .chain([target_acquire, encoder.finish(), target_release])
+                .chain(release),
+        );
+        self.device
+            .poll(wgpu::PollType::Wait {
+                submission_index: Some(submission),
+                timeout: None,
+            })
+            .context("waiting for source composition")?;
+        target.imported.used.set(true);
+        Ok(ComposedImage { target })
+    }
+
+    fn prepare(&mut self, frame: &ComposedBuffer) -> Result<HashSet<ClientBufferId>> {
         let extent = frame.extent;
         let limit = self.device.limits().max_texture_dimension_2d;
         ensure!(
@@ -302,59 +362,28 @@ impl SourceCompositor {
             self.queue
                 .write_buffer(&self.geometry[index].buffer, 0, &bytes);
         }
-        let target = self.target(extent)?;
-        let images = self
-            .textures
+        Ok(live)
+    }
+
+    fn input_images(&self, live: &HashSet<ClientBufferId>) -> Vec<vk::Image> {
+        self.textures
             .iter()
             .filter(|(id, _)| live.contains(id))
             .filter_map(|(_, input)| input.image)
-            .collect::<Vec<_>>();
-        let acquire = sampling_barrier_command(
-            &self.device,
-            &self.raw_device,
-            self.queue_family,
-            &images,
-            true,
-        )?;
-        let release = sampling_barrier_command(
-            &self.device,
-            &self.raw_device,
-            self.queue_family,
-            &images,
-            false,
-        )?;
-        // SAFETY: target storage belongs to this device and is exclusively reserved
-        // through GPU completion and the subsequent encoder read.
-        let (target_acquire, target_release) = unsafe {
-            (
-                foreign_image_barrier_command(
-                    &self.device,
-                    &self.raw_device,
-                    self.queue_family,
-                    target.imported.image,
-                    target.imported.used.get(),
-                    ForeignImageBarrier::Acquire,
-                )?,
-                foreign_image_barrier_command(
-                    &self.device,
-                    &self.raw_device,
-                    self.queue_family,
-                    target.imported.image,
-                    true,
-                    ForeignImageBarrier::Release,
-                )?,
-            )
-        };
-        let mut encoder = self
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("source composition"),
-            });
+            .collect()
+    }
+
+    fn draw(
+        &self,
+        frame: &ComposedBuffer,
+        view: &wgpu::TextureView,
+        encoder: &mut wgpu::CommandEncoder,
+    ) -> Result<()> {
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("source composition"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &target.imported.view,
+                    view,
                     depth_slice: None,
                     resolve_target: None,
                     ops: wgpu::Operations {
@@ -378,20 +407,7 @@ impl SourceCompositor {
                 pass.draw(0..6, 0..1);
             }
         }
-        let submission = self.queue.submit(
-            acquire
-                .into_iter()
-                .chain([target_acquire, encoder.finish(), target_release])
-                .chain(release),
-        );
-        self.device
-            .poll(wgpu::PollType::Wait {
-                submission_index: Some(submission),
-                timeout: None,
-            })
-            .context("waiting for source composition")?;
-        target.imported.used.set(true);
-        Ok(ComposedImage { target })
+        Ok(())
     }
 
     fn target(&mut self, extent: Extent) -> Result<Rc<Target>> {

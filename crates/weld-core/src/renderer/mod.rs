@@ -281,7 +281,7 @@ impl FrameResult {
     }
 }
 
-struct CaptureReadback {
+pub(crate) struct CaptureReadback {
     retained_texture: Option<wgpu::Texture>,
     buffer: wgpu::Buffer,
     padded_bytes_per_row: u32,
@@ -370,7 +370,7 @@ pub fn read_owned_frame_rgba(
     read_capture_readback(device, capture, submission)
 }
 
-fn encode_capture_readback(
+pub(crate) fn encode_capture_readback(
     device: &wgpu::Device,
     encoder: &mut wgpu::CommandEncoder,
     texture: &wgpu::Texture,
@@ -490,7 +490,11 @@ fn decode_capture_rows(
 pub(crate) fn write_png(path: &Path, width: u32, height: u32, pixels: &[u8]) -> Result<()> {
     let file = File::create(path)
         .with_context(|| format!("failed to create screenshot {}", path.display()))?;
-    let mut encoder = png::Encoder::new(BufWriter::new(file), width, height);
+    encode_png(BufWriter::new(file), width, height, pixels)
+}
+
+fn encode_png(writer: impl std::io::Write, width: u32, height: u32, pixels: &[u8]) -> Result<()> {
+    let mut encoder = png::Encoder::new(writer, width, height);
     encoder.set_color(png::ColorType::Rgba);
     encoder.set_depth(png::BitDepth::Eight);
     let mut writer = encoder

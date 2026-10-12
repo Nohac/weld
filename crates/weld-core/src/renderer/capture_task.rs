@@ -24,9 +24,15 @@ struct Work {
     device: wgpu::Device,
     capture: CaptureReadback,
     submission: wgpu::SubmissionIndex,
-    path: Option<PathBuf>,
+    output: CaptureOutput,
     completion: SyncSender<Result<Vec<u8>, String>>,
     cancelled: Arc<AtomicBool>,
+}
+
+enum CaptureOutput {
+    Rgba,
+    Png,
+    File(PathBuf),
 }
 
 pub(crate) struct CaptureWorker {
@@ -49,13 +55,20 @@ impl CaptureWorker {
                         let (width, height) = (work.capture.width, work.capture.height);
                         let pixels =
                             read_capture_readback(&work.device, work.capture, work.submission)?;
-                        if let Some(path) = work.path {
-                            if !work.cancelled.load(Ordering::Acquire) {
-                                write_png(&path, width, height, &pixels)?;
+                        match work.output {
+                            CaptureOutput::File(path) => {
+                                if !work.cancelled.load(Ordering::Acquire) {
+                                    write_png(&path, width, height, &pixels)?;
+                                }
+                                Ok(Vec::new())
                             }
-                            return Ok(Vec::new());
+                            CaptureOutput::Png => {
+                                let mut bytes = Vec::new();
+                                super::encode_png(&mut bytes, width, height, &pixels)?;
+                                Ok(bytes)
+                            }
+                            CaptureOutput::Rgba => Ok(pixels),
                         }
-                        Ok(pixels)
                     })()
                     .map_err(|error| format!("{error:#}"));
                     let _ = work.completion.send(result);
@@ -73,13 +86,37 @@ impl CaptureWorker {
         submission: wgpu::SubmissionIndex,
         path: Option<PathBuf>,
     ) -> CaptureTask {
+        self.submit_output(
+            device,
+            capture,
+            submission,
+            path.map_or(CaptureOutput::Rgba, CaptureOutput::File),
+        )
+    }
+
+    pub(crate) fn submit_png(
+        &self,
+        device: wgpu::Device,
+        capture: CaptureReadback,
+        submission: wgpu::SubmissionIndex,
+    ) -> CaptureTask {
+        self.submit_output(device, capture, submission, CaptureOutput::Png)
+    }
+
+    fn submit_output(
+        &self,
+        device: wgpu::Device,
+        capture: CaptureReadback,
+        submission: wgpu::SubmissionIndex,
+        output: CaptureOutput,
+    ) -> CaptureTask {
         let (sender, completion) = mpsc::sync_channel(1);
         let cancelled = Arc::new(AtomicBool::new(false));
         let work = Work {
             device,
             capture,
             submission,
-            path,
+            output,
             completion: sender,
             cancelled: cancelled.clone(),
         };
