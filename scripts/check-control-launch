@@ -204,7 +204,7 @@ def check_windows(ctl, control, host, run, display):
                            check=True, capture_output=True, timeout=10)
             result = receive(6)
             assert result["structuredContent"]["revision"] > revision, result
-            check_agent(rpc, request, window["id"], host, run, display)
+            check_remote_control(rpc, request, window["id"], host, run, display)
         finally:
             mcp.stdin.close()
             try:
@@ -217,7 +217,7 @@ def check_windows(ctl, control, host, run, display):
     print("PASS native window queries, full output schema, MCP initialize/list/call/errors/async wait", flush=True)
 
 
-def check_agent(rpc, mcp, identifier, host, run, display):
+def check_remote_control(rpc, mcp, identifier, host, run, display):
     def invoke(method, **params):
         reply = rpc(method, params)
         assert "error" not in reply, reply
@@ -233,8 +233,8 @@ def check_agent(rpc, mcp, identifier, host, run, display):
     def resized():
         snapshot = invoke("capture", control=handle)
         return snapshot["logical_width"] == 800 and snapshot["logical_height"] == 600
-    wait_for(host, resized, "independent agent viewport")
-    assert invoke("get", id=identifier)["geometry"] == geometry, "agent resize moved the peek frame"
+    wait_for(host, resized, "independent remote viewport")
+    assert invoke("get", id=identifier)["geometry"] == geometry, "remote resize moved the peek frame"
     for key in [30, 28]:
         for pressed in [True, False]:
             result = mcp(20 + key * 2 + int(pressed), "tools/call", {
@@ -245,19 +245,30 @@ def check_agent(rpc, mcp, identifier, host, run, display):
     invoke("click", control=handle, x=100, y=100, button=272)
     wait_for(host, lambda: b"\x1b[<0;" in received.read_bytes(), "terminal pointer input")
     after = invoke("list")["windows"]
-    assert [window["id"] for window in after if window["focused"]] == focused, "agent stole desktop focus"
+    assert [window["id"] for window in after if window["focused"]] == focused, "remote input stole desktop focus"
     result = mcp(200, "tools/call", {"name": "window_capture", "arguments": {"control": handle}})
     assert not result.get("isError"), result
     image = next(content for content in result["content"] if content["type"] == "image")
     png = base64.b64decode(image["data"], validate=True)
     assert png[:8] == b"\x89PNG\r\n\x1a\n", "MCP must return image pixels"
     assert int.from_bytes(png[16:20], "big") == result["structuredContent"]["width"]
-    (run / "agent-window.png").write_bytes(png)
+    (run / "controlled-window.png").write_bytes(png)
     subprocess.run(["grim", str(run / "desktop-peek.png")], env=dict(os.environ, WAYLAND_DISPLAY=str(display)), check=True, timeout=10)
     invoke("resize", control=handle, width=1600, height=1400)
     wait_for(host, lambda: invoke("capture", control=handle)["logical_width"] == 1600, "oversized viewport")
     assert invoke("get", id=identifier)["geometry"] == geometry
     subprocess.run(["grim", str(run / "desktop-clipped-peek.png")], env=dict(os.environ, WAYLAND_DISPLAY=str(display)), check=True, timeout=10)
+    old_handle = handle
+    invoke("permissions", id=identifier, view=False, keyboard=True, pointer=False, resize=False)
+    wait_for(host, lambda: invoke("get", id=identifier)["control"] not in [None, old_handle], "permission handle rotation")
+    window = invoke("get", id=identifier)
+    handle = window["control"]
+    assert window["capabilities"] == dict(view=False, keyboard=True, pointer=False, resize=False)
+    assert "error" in rpc("capture", {"control": old_handle})
+    assert "error" in rpc("capture", {"control": handle})
+    assert "error" in rpc("click", {"control": handle, "x": 100, "y": 100, "button": 272})
+    assert "error" in rpc("resize", {"control": handle, "width": 400, "height": 300})
+    subprocess.run(["grim", str(run / "desktop-restricted-control.png")], env=dict(os.environ, WAYLAND_DISPLAY=str(display)), check=True, timeout=10)
     invoke("key", control=handle, keycode=29, pressed=True)
     invoke("control", id=identifier, enabled=False)
     wait_for(host, lambda: invoke("get", id=identifier)["control"] is None, "control retirement")
@@ -292,7 +303,7 @@ def child():
 if __name__ == "__main__":
     if sys.argv[1:] == ["--input-probe"]:
         tty.setraw(sys.stdin.fileno())
-        sys.stdout.write("\x1b[?1000h\x1b[?1006h\x1b[36mWeld agent input probe\x1b[0m\r\n")
+        sys.stdout.write("\x1b[?1000h\x1b[?1006h\x1b[36mWeld remote input probe\x1b[0m\r\n")
         sys.stdout.flush()
         with Path("input.bin").open("ab", buffering=0) as received:
             while data := os.read(sys.stdin.fileno(), 1024):

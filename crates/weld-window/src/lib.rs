@@ -486,6 +486,10 @@ pub struct WindowPresentationOverride {
 #[derive(Component, Clone, Copy, Debug, Default)]
 pub struct WindowExternalControl;
 
+/// Keeps compositor-owned window controls visible with every border style.
+#[derive(Component, Clone, Copy, Debug, Default)]
+pub struct WindowHeaderRequested;
+
 impl WindowPresentationOverride {
     pub const fn new(owner: Entity) -> Self {
         Self { owner }

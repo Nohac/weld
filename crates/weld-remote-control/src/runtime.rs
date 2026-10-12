@@ -1,7 +1,8 @@
-//! Native-thread agent endpoint over the ordinary hoist relay and composed view.
+//! Native-thread remote-control endpoint over the shared relay and composed view.
 
 use crate::{
-    AgentClient, Capture, CaptureJob, Command, GrantState, Operation, Pending, Reply, Snapshot,
+    Capture, CaptureJob, Command, GrantState, Operation, Pending, RemoteControlClient, Reply,
+    Snapshot,
 };
 use anyhow::{Context, Result, ensure};
 use std::{
@@ -118,7 +119,9 @@ impl HoistSourcePort for Port {
         state.views = SourceViews::new(SurfaceStreamMode::Composited);
         state.messages.clear();
         for pending in state.accepted.drain(..) {
-            let _ = pending.reply.send(Err("agent relay disconnected".into()));
+            let _ = pending
+                .reply
+                .send(Err("remote control relay disconnected".into()));
         }
     }
 }
@@ -147,7 +150,7 @@ pub fn registration(
     source: ClientSourceId,
     wake: impl Fn() + Send + Sync + 'static,
     capture: impl Capture + 'static,
-) -> (ClientAdapterRegistration, AgentClient) {
+) -> (ClientAdapterRegistration, RemoteControlClient) {
     let (sender, requests) = mpsc::sync_channel(64);
     let state = Rc::new(RefCell::new(State {
         grants: HashMap::new(),
@@ -174,7 +177,7 @@ pub fn registration(
             adapter,
             PassthroughClientImporter,
         ),
-        AgentClient {
+        RemoteControlClient {
             sender,
             grants: Arc::new(Mutex::new(HashMap::new())),
             wake: Arc::new(wake),
@@ -202,6 +205,13 @@ impl Adapter {
     }
 
     fn execute(&mut self, pending: &Pending) -> Result<Option<(Box<dyn CaptureJob>, Snapshot)>> {
+        ensure!(
+            pending
+                .grant
+                .capabilities
+                .allows(pending.operation.capability()),
+            "window capability is disabled"
+        );
         ensure!(
             pending.deadline > Instant::now() && pending.grant.permit.is_authorized(),
             "window control expired or revoked"

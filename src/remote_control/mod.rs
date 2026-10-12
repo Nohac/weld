@@ -1,4 +1,4 @@
-//! Local control grants bind native input/capture to an occupied desktop slot.
+//! Remote control grants bind native input/capture to an occupied desktop slot.
 
 use crate::control::SessionAccess;
 use anyhow::{Context, Result, ensure};
@@ -9,22 +9,24 @@ use std::{
     sync::{Mutex, mpsc},
     time::Instant,
 };
-use weld_agent::{AgentClient, Capture, CaptureJob, Grant};
 use weld_app::{
     WeldApp,
     input::LocalInputBlockedSurfaces,
     surface::{ClientPopup, ClientSurface, ClientToplevel, MappedSurface},
 };
 use weld_client::{ClientSourceId, ComposedBuffer};
-use weld_control::windows::{ControlRequest, WindowService};
+use weld_control::windows::{ControlAction, ControlRequest, WindowService};
 use weld_core::{
     WAYLAND_CLIENT_SOURCE,
     dmabuf::composition::{SourceCapture, SourceCaptureTask},
     host::{ClientRuntimeNotifier, client_runtime_notifier},
 };
 use weld_hoist::HoistedWindow;
+use weld_remote_control::{Capabilities, Capture, CaptureJob, Grant, RemoteControlClient};
+use weld_remote_control_ui::{RemoteControlPanel, TakeBack, ToggleCapability};
 use weld_window::{
-    ManagedWindow, WindowExternalControl, WindowOccupant, WindowProjection, WindowSystems,
+    ManagedWindow, WindowExternalControl, WindowHeaderRequested, WindowOccupant, WindowProjection,
+    WindowSystems,
 };
 
 #[derive(Component)]
@@ -34,7 +36,7 @@ pub(crate) struct ControlledWindow(pub Grant);
 pub(crate) struct ToggleControl(pub Entity);
 
 #[derive(Resource)]
-struct Controller(AgentClient);
+struct Controller(RemoteControlClient);
 
 #[derive(Resource)]
 struct Administration(Mutex<mpsc::Receiver<ControlRequest>>);
@@ -52,20 +54,20 @@ pub(crate) fn install(app: &mut WeldApp, service: &WindowService) -> Result<()> 
         wake: native.clone(),
         backend: None,
     };
-    let (adapter, client) = weld_agent::registration(
+    let (adapter, client) = weld_remote_control::registration(
         WAYLAND_CLIENT_SOURCE,
         ClientSourceId::new(3),
         move || {
             if let Err(error) = native.notify() {
-                tracing::warn!(%error, "could not wake agent input");
+                tracing::warn!(%error, "could not wake remote control input");
             }
         },
         capture,
     );
     let requests = service
-        .attach_agent(client.clone(), move || {
+        .attach_controller(client.clone(), move || {
             if let Err(error) = policy.notify() {
-                tracing::warn!(%error, "could not wake agent policy");
+                tracing::warn!(%error, "could not wake remote control policy");
             }
         })
         .map_err(anyhow::Error::msg)?;
@@ -75,6 +77,8 @@ pub(crate) fn install(app: &mut WeldApp, service: &WindowService) -> Result<()> 
         .insert_resource(Administration(Mutex::new(requests)));
     app.app_mut()
         .add_observer(toggle)
+        .add_observer(update_capability)
+        .add_observer(take_back)
         .add_systems(
             PreUpdate,
             (retire, administer)
@@ -88,6 +92,7 @@ pub(crate) fn install(app: &mut WeldApp, service: &WindowService) -> Result<()> 
                 .after(WindowSystems::UiReconcile)
                 .before(PickingSystems::Backend),
         );
+    weld_remote_control_ui::install(app.app_mut())?;
     Ok(())
 }
 
@@ -112,23 +117,45 @@ type ControllableWindows<'w, 's> = Query<
 >;
 
 impl Grants<'_, '_> {
-    fn set(&mut self, window: Entity, enabled: bool) -> Result<()> {
+    fn set(&mut self, window: Entity, action: ControlAction) -> Result<()> {
         let (occupant, existing, hoisted) = self
             .windows
             .get(window)
             .context("window is vacant or unavailable")?;
-        if !enabled {
-            self.commands
-                .entity(window)
-                .remove::<(ControlledWindow, WindowExternalControl)>();
-            return Ok(());
-        }
-        if existing.is_some() {
-            return Ok(());
-        }
+        let capabilities = match action {
+            ControlAction::Disable => {
+                if let Some(existing) = existing {
+                    existing.0.revoke();
+                }
+                self.commands.entity(window).remove::<(
+                    ControlledWindow,
+                    RemoteControlPanel,
+                    WindowExternalControl,
+                    WindowHeaderRequested,
+                )>();
+                return Ok(());
+            }
+            ControlAction::Enable => {
+                if existing.is_some_and(|existing| existing.0.active()) {
+                    return Ok(());
+                }
+                Capabilities::ALL
+            }
+            ControlAction::Permissions(capabilities) => {
+                let existing = existing
+                    .filter(|existing| existing.0.active())
+                    .context("remote control is disabled")?;
+                if existing.0.capabilities() == capabilities {
+                    return Ok(());
+                }
+                // Rotate the handle so queued work and held input retire under the old grant.
+                existing.0.revoke();
+                capabilities
+            }
+        };
         ensure!(
             !hoisted,
-            "reclaim the hoisted window before enabling agent control"
+            "reclaim the hoisted window before enabling remote control"
         );
         let surface = self
             .clients
@@ -137,13 +164,16 @@ impl Grants<'_, '_> {
             .surface;
         ensure!(
             surface.source() == WAYLAND_CLIENT_SOURCE,
-            "agent control requires a locally hosted application"
+            "remote control requires a locally hosted application"
         );
-        let permit = self.access.0.open("local-agent".into())?;
-        let grant = self.controller.0.grant(surface, permit)?;
-        self.commands
-            .entity(window)
-            .insert((ControlledWindow(grant), WindowExternalControl));
+        let permit = self.access.0.open("remote-control".into())?;
+        let grant = self.controller.0.grant(surface, permit, capabilities)?;
+        self.commands.entity(window).insert((
+            ControlledWindow(grant),
+            RemoteControlPanel(capabilities),
+            WindowExternalControl,
+            WindowHeaderRequested,
+        ));
         Ok(())
     }
 }
@@ -153,8 +183,36 @@ fn toggle(event: On<ToggleControl>, mut grants: Grants) {
         .windows
         .get(event.0)
         .is_ok_and(|(_, current, _)| current.is_none());
-    if let Err(error) = grants.set(event.0, enabled) {
-        tracing::warn!(%error, "could not toggle agent control");
+    if let Err(error) = grants.set(
+        event.0,
+        if enabled {
+            ControlAction::Enable
+        } else {
+            ControlAction::Disable
+        },
+    ) {
+        tracing::warn!(%error, "could not toggle remote control");
+    }
+}
+
+fn update_capability(event: On<ToggleCapability>, mut grants: Grants) {
+    let Some(mut capabilities) = grants
+        .windows
+        .get(event.window)
+        .ok()
+        .and_then(|(_, control, _)| control.map(|control| control.0.capabilities()))
+    else {
+        return;
+    };
+    capabilities.toggle(event.capability);
+    if let Err(error) = grants.set(event.window, ControlAction::Permissions(capabilities)) {
+        tracing::warn!(%error, "could not change remote control permissions");
+    }
+}
+
+fn take_back(event: On<TakeBack>, mut grants: Grants) {
+    if let Err(error) = grants.set(event.0, ControlAction::Disable) {
+        tracing::warn!(%error, "could not take back remote control");
     }
 }
 
@@ -174,7 +232,7 @@ fn administer(
                 .iter()
                 .find(|(_, window)| window.id.raw().to_string() == request.id)
                 .context("window unavailable")
-                .and_then(|(entity, _)| grants.set(entity, request.enabled))
+                .and_then(|(entity, _)| grants.set(entity, request.action))
         };
         let _ = request
             .completion
@@ -197,9 +255,12 @@ fn retire(
             .and_then(|occupant| clients.get(occupant.entity()).ok())
             .map(|client| client.surface);
         if !control.0.active() || current != Some(control.0.surface()) || hoisted {
-            commands
-                .entity(window)
-                .remove::<(ControlledWindow, WindowExternalControl)>();
+            commands.entity(window).remove::<(
+                ControlledWindow,
+                RemoteControlPanel,
+                WindowExternalControl,
+                WindowHeaderRequested,
+            )>();
         }
     }
 }

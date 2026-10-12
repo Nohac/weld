@@ -6,7 +6,7 @@ publish.workspace = true
 
 [dependencies]
 weld-access = { path = "../weld-access" }
-weld-agent = { path = "../weld-agent" }
+weld-remote-control = { path = "../weld-remote-control" }
 anyhow.workspace = true
 clap.workspace = true
 qrcode = { version = "0.14.1", default-features = false }

@@ -88,7 +88,7 @@ impl ServerHandler for WindowMcp {
 pub fn run(socket: PathBuf) -> Result<()> {
     let mut tools = WindowClient::mcp_tools()
         .into_iter()
-        .filter(|tool| tool["name"] != "window_control")
+        .filter(|tool| tool["name"] != "window_control" && tool["name"] != "window_permissions")
         .map(serde_json::from_value)
         .collect::<Result<Vec<Tool>, _>>()?;
     for tool in &mut tools {

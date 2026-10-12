@@ -21,15 +21,15 @@ weldctl --session weld-0 window wait --after 1 --timeout-ms 5000 --json
 Use an ID/revision from your own listing. Window, workspace and output IDs are
 opaque strings belonging to the running host. Geometry uses logical compositor
 coordinates. Listings include application labels, occupancy, focus, visibility
-and floating state. A non-null `control` handle permits agent view, keyboard,
-pointer and viewport control of that particular application incarnation.
+and floating state. A non-null `control` handle identifies a grant for that
+particular application incarnation; `capabilities` lists its enabled permissions.
 
-## Agent control and live peek
+## Remote control and live peek
 
 Enable control from the desktop using this Sway-config binding:
 
 ```text
-bindsym $mod+Control+i weld agent toggle
+bindsym $mod+Control+i weld control toggle
 ```
 
 The repository example includes it. Alternatively, select the managed window
@@ -39,6 +39,22 @@ from `window list` and grant control through the local administrative CLI:
 weldctl --session weld-0 window control WINDOW_ID --enabled
 weldctl --session weld-0 window list --json
 ```
+
+Controlled windows keep a header with View, Keyboard, Pointer, Resize and
+Take back controls. Enabled permissions have an underline; disabled icons are
+dimmed. Narrow frames show icons, and wider frames also show labels. The header
+uses the configured title font and normal or persistent-window palette.
+
+The local CLI can replace the enabled permissions (omitted flags disable them):
+
+```sh
+weldctl --session weld-0 window permissions WINDOW_ID --view --pointer
+```
+
+Changing permissions retires the previous handle and its held input, then issues
+a fresh handle. Controllers reconcile the inventory before continuing; requests
+using the retired handle fail. The desktop peek remains visible when View is
+disabled; that permission controls remote pixel capture.
 
 Use the resulting `control` handle for operations:
 
@@ -52,17 +68,17 @@ weldctl --session weld-0 window control WINDOW_ID
 ```
 
 The final command revokes control. `weldctl access revoke all` and the existing
-`weld access revoke all` binding also revoke agent grants. After global revocation,
+`weld access revoke all` binding also revoke remote-control grants. After global revocation,
 `weldctl access allow` explicitly enables new grants again.
 
-One independent local-agent seat serves the granted windows. Operations preserve
+One independent remote-control seat serves the granted windows. Operations preserve
 the desktop's selected window. Keyboard codes are Linux evdev codes interpreted
 through the configured host keymap. Pointer positions use window-local logical
 coordinates; button codes are 272/273/274 for left/right/middle. Individual
 `button` and `key` operations require matching release edges. Revocation releases
 held input through the shared hoist relay.
 
-The desktop frame remains a live, read-only peek. The agent configures the app's
+The desktop frame remains a live, read-only peek. The controller configures the app's
 viewport independently; moving or resizing the desktop frame changes only the
 peek. Content stays at its natural logical size, anchored at the upper left and
 clipped to the frame. Taking back control restores desktop input and resizing.
@@ -131,7 +147,7 @@ weldctl --session weld-0 mcp
 
 The generated tools are `window_list`, `window_get`, `window_wait`,
 `window_pointer`, `window_click`, `window_button`, `window_key`, `window_resize`
-and `window_capture`. Administrative grant creation is exposed through the local
+and `window_capture`. Administrative grant creation and permission changes are exposed through the local
 CLI/RPC and desktop binding. MCP control tools require an existing grant handle.
 `server-less` supplies their descriptions and dispatch; the official Rust MCP
 SDK supplies initialization, protocol negotiation and stdio lifecycle.

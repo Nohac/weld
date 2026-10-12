@@ -1,4 +1,6 @@
+//! Control handoff and input retirement regressions.
 use super::*;
+use crate::Capabilities;
 use std::time::Duration;
 use weld_access::AccessAuthority;
 use weld_client::{
@@ -15,8 +17,53 @@ impl Capture for NoCapture {
     }
 }
 
+#[test]
+fn restricted_grants_reject_operations_at_both_request_boundaries() {
+    let upstream = ClientSourceId::new(0);
+    let surface = ClientSurfaceId::new(ClientId::new(upstream, 1), 1);
+    let authority = AccessAuthority::new(|| {});
+    let (registration, client) = registration(upstream, ClientSourceId::new(3), || {}, NoCapture);
+    let mut adapter = registration.into_parts().runtime.driver;
+    map(&mut *adapter, surface);
+    let grant = client
+        .grant(
+            surface,
+            authority.open("restricted".into()).expect("permit"),
+            Capabilities::default(),
+        )
+        .expect("grant");
+    let mut events = ClientEventQueue::default();
+    adapter.drain_events(&mut events);
+    for operation in [
+        Operation::Capture,
+        Operation::Key {
+            keycode: 30,
+            pressed: true,
+        },
+        Operation::Pointer { x: 1.0, y: 2.0 },
+        Operation::Button {
+            button: 272,
+            pressed: true,
+        },
+        Operation::Click {
+            x: 1.0,
+            y: 2.0,
+            button: 272,
+        },
+        Operation::Resize {
+            width: 800,
+            height: 600,
+        },
+    ] {
+        assert!(client.request(grant.id(), operation.clone()).is_err());
+        let queued = pending(&client, &grant.state, operation);
+        adapter.drain_events(&mut events);
+        assert!(queued.try_recv().expect("rejection").is_err());
+    }
+}
+
 fn pending(
-    client: &AgentClient,
+    client: &RemoteControlClient,
     grant: &GrantState,
     operation: Operation,
 ) -> mpsc::Receiver<Result<Reply, String>> {
@@ -96,7 +143,11 @@ fn revoke_rejects_queued_input_and_releases_held_keys_before_a_new_grant() {
     let mut adapter = registration.into_parts().runtime.driver;
     map(&mut *adapter, surface);
     let grant = client
-        .grant(surface, authority.open("test".into()).expect("permit"))
+        .grant(
+            surface,
+            authority.open("test".into()).expect("permit"),
+            Capabilities::ALL,
+        )
         .expect("grant");
     let mut events = ClientEventQueue::default();
     adapter.drain_events(&mut events);
@@ -160,7 +211,11 @@ fn revoke_rejects_queued_input_and_releases_held_keys_before_a_new_grant() {
         })
     )));
     let replacement = client
-        .grant(surface, authority.open("next".into()).expect("permit"))
+        .grant(
+            surface,
+            authority.open("next".into()).expect("permit"),
+            Capabilities::ALL,
+        )
         .expect("new grant");
     assert_ne!(old, replacement.id());
     assert!(client.request(&old, Operation::Capture).is_err());

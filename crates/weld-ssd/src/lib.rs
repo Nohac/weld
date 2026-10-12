@@ -70,8 +70,9 @@ struct VacantSsdPresentation;
 #[derive(Component, Clone, Copy, Debug, Default)]
 struct WindowBody;
 
+/// Header mount for window-owned controls. Resolve its window with [`weld_window::WindowProjectionLookup`].
 #[derive(Component, Clone, Copy, Default)]
-struct FrameHeader;
+pub struct FrameHeader;
 
 #[derive(Component, Clone, Copy, Default)]
 struct FrameForeground;
@@ -90,6 +91,7 @@ struct FrameStyles<'w, 's> {
     settings: Res<'w, SsdSettings>,
     windows: StyledWindows<'w, 's>,
     persistent_windows: Query<'w, 's, &'static PersistentWindow>,
+    headers: Query<'w, 's, (), With<weld_window::WindowHeaderRequested>>,
 }
 
 type StyledWindows<'w, 's> = Query<
@@ -166,6 +168,9 @@ impl FrameStyles<'_, '_> {
             if geometry.border == BorderStyle::None {
                 geometry.radius = 0.0;
             }
+        }
+        if self.headers.contains(window) {
+            geometry.requested_header = Some(f32::from(self.settings.title_font.header_height()));
         }
         geometry
     }
@@ -394,8 +399,8 @@ fn reconcile_ssd_projections(
                 UiTargetCamera(camera),
                 SsdPresentation,
                 PresentationOffset::default(),
-                style.border.insets(),
-                WindowGeometryAnchor(Vec2::new(0.0, style.border.header())),
+                style.insets(),
+                WindowGeometryAnchor(Vec2::new(0.0, style.header())),
                 GlobalZIndex(z_order.0),
             ));
             if content == SsdContent::Vacant {
@@ -486,8 +491,8 @@ fn present_ssd_windows(
             WindowProjection::new(window, output),
             SsdPresentation,
             PresentationOffset::default(),
-            style.border.insets(),
-            WindowGeometryAnchor(Vec2::new(0.0, style.border.header())),
+            style.insets(),
+            WindowGeometryAnchor(Vec2::new(0.0, style.header())),
             GlobalZIndex(z_order.0),
         ));
         if content == SsdContent::Vacant {
@@ -522,7 +527,8 @@ impl WindowFrameColors<'_, '_> {
             palette.child_border
         }
     }
-    fn palette(&self, window: Entity) -> FrameColors {
+    /// Configured frame palette for the window's focus, persistence and provenance.
+    pub fn palette(&self, window: Entity) -> FrameColors {
         let group_selected = self.selected_group.contains(window);
         let focused = self.focus.entity() == Some(window) || group_selected;
         if self.persistent_windows.contains(window) {
@@ -727,9 +733,9 @@ fn window_scene(content: impl SceneList, style: FrameGeometry) -> impl Scene {
                         FrameHeader
                         FrameColorOwner(#FrameRoot)
                         Node {
-                            display: {if style.border.header() > 0.0 { Display::Flex } else { Display::None }},
+                            display: {if style.header() > 0.0 { Display::Flex } else { Display::None }},
                             width: percent(100),
-                            height: px(style.border.header()),
+                            height: px(style.header()),
                             flex_shrink: 0.0,
                             align_items: AlignItems::Center,
                             justify_content: JustifyContent::FlexEnd,
@@ -747,6 +753,7 @@ fn window_scene(content: impl SceneList, style: FrameGeometry) -> impl Scene {
                             Node {
                                 width: px(CLOSE_BUTTON_SIZE),
                                 height: px(CLOSE_BUTTON_SIZE),
+                                flex_shrink: 0.0,
                                 margin: UiRect::right(px(4)),
                                 align_items: AlignItems::Center,
                                 justify_content: JustifyContent::Center,
@@ -1665,6 +1672,92 @@ mod tests {
         let style = *app.world().get::<FrameGeometry>(root).expect("style");
         assert!(!style.joined_top);
         assert!(matches!(style.border, BorderStyle::Normal(_)));
+    }
+
+    #[test]
+    fn requested_header_retains_solo_and_group_border_policy_and_retires_cleanly() {
+        for grouped in [false, true] {
+            let mut app = tiled_test_app();
+            {
+                let mut settings = app.world_mut().resource_mut::<SsdSettings>();
+                settings.tiled = BorderStyle::Pixel(2);
+                settings.hide_solo_border = true;
+                settings.title_font.size = 18.0;
+            }
+            let surface = SurfaceId::for_test(725);
+            enqueue_surface_event(app.world_mut(), role(surface, WindowDecoration::ClientSide));
+            enqueue_surface_event(app.world_mut(), frame(surface, 320, 240));
+            app.update();
+            app.update();
+            let window = app
+                .world()
+                .resource::<FocusedWindow>()
+                .entity()
+                .expect("window");
+            app.world_mut()
+                .entity_mut(window)
+                .insert(WindowBorderStyle(BorderStyle::Pixel(2)));
+            if grouped {
+                let container = app
+                    .world()
+                    .get::<weld_tile::TileParent>(window)
+                    .expect("parent")
+                    .entity();
+                app.world_mut().trigger(weld_tile::TileSetLayout {
+                    container,
+                    layout: weld_tile::TileLayout::Tabbed,
+                });
+            }
+            app.update();
+            app.update();
+            let original_root = app
+                .world()
+                .get::<PrimaryWindowPresentation>(window)
+                .expect("presentation")
+                .entity();
+            let original = *app
+                .world()
+                .get::<FrameGeometry>(original_root)
+                .expect("style");
+            app.world_mut()
+                .entity_mut(window)
+                .insert(weld_window::WindowHeaderRequested);
+            app.update();
+            app.update();
+            let root = app
+                .world()
+                .get::<PrimaryWindowPresentation>(window)
+                .expect("header presentation")
+                .entity();
+            let style = *app.world().get::<FrameGeometry>(root).expect("style");
+            assert_eq!(style.border, original.border);
+            assert_eq!(style.radius, original.radius);
+            assert_eq!(style.header(), 34.0);
+            assert_eq!(style.content_radius().top_left, px(0));
+            assert_eq!(
+                app.world().get::<PresentationInsets>(root),
+                Some(&style.insets())
+            );
+            assert_eq!(
+                app.world_mut()
+                    .query_filtered::<&Node, With<FrameHeader>>()
+                    .iter(app.world())
+                    .filter(|node| node.display != Display::None)
+                    .count(),
+                1
+            );
+            app.world_mut()
+                .entity_mut(window)
+                .remove::<weld_window::WindowHeaderRequested>();
+            app.update();
+            app.update();
+            let root = app
+                .world()
+                .get::<PrimaryWindowPresentation>(window)
+                .expect("restored presentation")
+                .entity();
+            assert_eq!(app.world().get::<FrameGeometry>(root), Some(&original));
+        }
     }
 
     #[test]

@@ -1,6 +1,6 @@
 //! Publishes the window owner's inventory to native control consumers.
 
-use crate::agent::ControlledWindow;
+use crate::remote_control::ControlledWindow;
 use bevy::prelude::*;
 use weld_app::inspection::{InspectionPlugin, InspectionSystems};
 use weld_control::windows::{Rect, WindowInfo, WindowService};
@@ -61,6 +61,10 @@ fn publish(
                 .iter()
                 .find(|(window, control)| window.id == *id && control.0.active())
                 .map(|(_, control)| control.0.id().to_owned()),
+            capabilities: controlled
+                .iter()
+                .find(|(window, control)| window.id == *id && control.0.active())
+                .map(|(_, control)| control.0.capabilities()),
         })
         .collect();
     if let Err(error) = publisher.0.publish(snapshot) {

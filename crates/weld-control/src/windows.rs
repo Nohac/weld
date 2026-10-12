@@ -10,7 +10,7 @@ use std::{
     time::{Duration, Instant},
 };
 use tokio::sync::watch;
-use weld_agent::{AgentClient, Operation, Reply, Snapshot};
+use weld_remote_control::{Capabilities, Operation, RemoteControlClient, Reply, Snapshot};
 
 /// Logical compositor coordinates.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -37,6 +37,7 @@ pub struct WindowInfo {
     pub floating: bool,
     /// Occupant-scoped handle for permitted input, resizing and capture.
     pub control: Option<String>,
+    pub capabilities: Option<Capabilities>,
 }
 
 impl fmt::Display for WindowInfo {
@@ -55,15 +56,22 @@ impl fmt::Display for WindowInfo {
 #[derive(Clone)]
 pub struct WindowService {
     snapshot: watch::Sender<Option<WindowCatalogue>>,
-    agent: Arc<Mutex<Option<AgentClient>>>,
+    controller: Arc<Mutex<Option<RemoteControlClient>>>,
     administrator: Arc<Mutex<Option<Administrator>>>,
 }
 
-type Administrator = Arc<dyn Fn(String, bool) -> Result<(), String> + Send + Sync>;
+type Administrator = Arc<dyn Fn(String, ControlAction) -> Result<(), String> + Send + Sync>;
+
+#[derive(Clone, Copy)]
+pub enum ControlAction {
+    Enable,
+    Disable,
+    Permissions(Capabilities),
+}
 
 pub struct ControlRequest {
     pub id: String,
-    pub enabled: bool,
+    pub action: ControlAction,
     pub deadline: Instant,
     pub completion: mpsc::SyncSender<Result<(), String>>,
 }
@@ -87,30 +95,33 @@ impl Default for WindowService {
     fn default() -> Self {
         Self {
             snapshot: watch::channel(None).0,
-            agent: Default::default(),
+            controller: Default::default(),
             administrator: Default::default(),
         }
     }
 }
 
 impl WindowService {
-    pub fn attach_agent(
+    pub fn attach_controller(
         &self,
-        agent: AgentClient,
+        controller: RemoteControlClient,
         wake: impl Fn() + Send + Sync + 'static,
     ) -> Result<mpsc::Receiver<ControlRequest>, String> {
         let (sender, requests) = mpsc::sync_channel(16);
-        *self.agent.lock().map_err(|_| "agent service unavailable")? = Some(agent);
+        *self
+            .controller
+            .lock()
+            .map_err(|_| "controller service unavailable")? = Some(controller);
         *self
             .administrator
             .lock()
-            .map_err(|_| "agent administration unavailable")? =
-            Some(Arc::new(move |id, enabled| {
+            .map_err(|_| "controller administration unavailable")? =
+            Some(Arc::new(move |id, action| {
                 let (completion, response) = mpsc::sync_channel(1);
                 sender
                     .try_send(ControlRequest {
                         id,
-                        enabled,
+                        action,
                         deadline: Instant::now() + Duration::from_secs(3),
                         completion,
                     })
@@ -124,15 +135,26 @@ impl WindowService {
     }
 
     fn operate(&self, control: String, operation: Operation) -> Result<Reply, String> {
-        let agent = self
-            .agent
+        let controller = self
+            .controller
             .lock()
-            .map_err(|_| "agent service unavailable")?
+            .map_err(|_| "controller service unavailable")?
             .clone()
-            .ok_or("agent control unavailable")?;
-        agent
+            .ok_or("remote control unavailable")?;
+        controller
             .request(&control, operation)
             .map_err(|error| error.to_string())
+    }
+
+    fn administer(&self, id: String, action: ControlAction) -> Result<String, String> {
+        let administrator = self
+            .administrator
+            .lock()
+            .map_err(|_| "control administration unavailable")?
+            .clone()
+            .ok_or("remote control unavailable")?;
+        administrator(id, action)?;
+        Ok("accepted".into())
     }
 
     pub(crate) fn close(&self) {
@@ -169,19 +191,39 @@ impl WindowService {
 
 #[server_less::jsonrpc]
 impl WindowService {
-    /// Enable or revoke agent control through the local administrative CLI.
+    /// Enable or revoke remote control through the local administrative CLI.
     pub fn control(&self, id: String, enabled: bool) -> Result<String, String> {
-        let administrator = self
-            .administrator
-            .lock()
-            .map_err(|_| "agent administration unavailable")?
-            .clone()
-            .ok_or("agent control unavailable")?;
-        administrator(id, enabled)?;
-        Ok("accepted".into())
+        self.administer(
+            id,
+            if enabled {
+                ControlAction::Enable
+            } else {
+                ControlAction::Disable
+            },
+        )
     }
 
-    /// Move the independent agent pointer in window-local logical coordinates.
+    /// Replace the enabled window's remote-control permissions.
+    pub fn permissions(
+        &self,
+        id: String,
+        view: bool,
+        keyboard: bool,
+        pointer: bool,
+        resize: bool,
+    ) -> Result<String, String> {
+        self.administer(
+            id,
+            ControlAction::Permissions(Capabilities {
+                view,
+                keyboard,
+                pointer,
+                resize,
+            }),
+        )
+    }
+
+    /// Move the independent controller pointer in window-local logical coordinates.
     pub fn pointer(&self, control: String, x: f64, y: f64) -> Result<String, String> {
         self.operate(control, Operation::Pointer { x, y })?;
         Ok("accepted".into())
@@ -191,7 +233,7 @@ impl WindowService {
         self.operate(control, Operation::Click { x, y, button })?;
         Ok("accepted".into())
     }
-    /// Send a button edge at the agent pointer's last position.
+    /// Send a button edge at the controller pointer's last position.
     pub fn button(&self, control: String, button: u32, pressed: bool) -> Result<String, String> {
         self.operate(control, Operation::Button { button, pressed })?;
         Ok("accepted".into())
@@ -296,11 +338,26 @@ impl WindowClient {
 #[server_less::cli(name = "window")]
 #[server_less::mcp(namespace = "window")]
 impl WindowClient {
-    /// Enable or revoke agent control. This administrative command is available through the local CLI.
+    /// Enable or revoke remote control. This administrative command is available through the local CLI.
     pub fn control(&self, id: String, enabled: bool) -> Result<String, String> {
         self.request("control", json!({"id":id,"enabled":enabled}))
     }
-    /// Move the agent pointer in window-local logical coordinates.
+
+    /// Replace remote-control permissions through the local administrative CLI. Omitted flags disable their capability.
+    pub fn permissions(
+        &self,
+        id: String,
+        view: bool,
+        keyboard: bool,
+        pointer: bool,
+        resize: bool,
+    ) -> Result<String, String> {
+        self.request(
+            "permissions",
+            json!({"id":id,"view":view,"keyboard":keyboard,"pointer":pointer,"resize":resize}),
+        )
+    }
+    /// Move the controller pointer in window-local logical coordinates.
     pub fn pointer(&self, control: String, x: f64, y: f64) -> Result<String, String> {
         self.request("pointer", json!({"control":control,"x":x,"y":y}))
     }

@@ -167,6 +167,7 @@ pub(crate) struct FrameGeometry {
     pub joined_top: bool,
     pub round_bottom_left: bool,
     pub round_bottom_right: bool,
+    pub requested_header: Option<f32>,
 }
 
 impl FrameGeometry {
@@ -185,6 +186,7 @@ impl FrameGeometry {
         );
         Self {
             border,
+            requested_header: None,
             joined_top: false,
             round_bottom_left: true,
             round_bottom_right: true,
@@ -200,7 +202,7 @@ impl FrameGeometry {
     }
 
     pub fn content_radius(self) -> BorderRadius {
-        let top = if self.border.header() > 0.0 || self.joined_top {
+        let top = if self.header() > 0.0 || self.joined_top {
             0.0
         } else {
             self.inner_radius()
@@ -219,5 +221,18 @@ impl FrameGeometry {
                 0.0
             },
         )
+    }
+
+    pub fn header(self) -> f32 {
+        self.requested_header
+            .unwrap_or_else(|| self.border.header())
+    }
+
+    pub fn insets(self) -> PresentationInsets {
+        if self.requested_header.is_none() {
+            return self.border.insets();
+        }
+        let border = self.border.width();
+        PresentationInsets::new(border, border + self.header(), border, border)
     }
 }

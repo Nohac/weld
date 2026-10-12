@@ -1,6 +1,5 @@
 //! Standard Weld compositor distribution and backend selection.
 
-mod agent;
 mod arguments;
 mod bitrate_budget;
 mod control;
@@ -9,6 +8,7 @@ mod headless;
 mod iroh_host;
 mod master;
 mod overlay;
+mod remote_control;
 mod telemetry;
 
 #[cfg(feature = "test-support")]
@@ -411,7 +411,7 @@ pub fn run(arguments: AppArguments) -> Result<()> {
         )?
     };
     app.add_plugins(control::windows::NativeWindowPlugin(_controls.windows()));
-    agent::install(&mut app, &_controls.windows())?;
+    remote_control::install(&mut app, &_controls.windows())?;
     app.run()
 }
 

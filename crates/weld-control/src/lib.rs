@@ -768,6 +768,7 @@ mod tests {
             visible: true,
             floating: false,
             control: None,
+            capabilities: None,
         };
         publisher.publish(vec![window.clone()]).expect("mapped");
         assert_eq!(

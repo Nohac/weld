@@ -364,11 +364,11 @@ fn dispatch_action(
         return;
     };
     match action {
-        Action::Extension(DistributionAction::ToggleAgentControl) => {
+        Action::Extension(DistributionAction::ToggleRemoteControl) => {
             if let Some(window) = effects.focus.entity() {
                 effects
                     .commands
-                    .trigger(crate::agent::ToggleControl(window));
+                    .trigger(crate::remote_control::ToggleControl(window));
             }
         }
         Action::Extension(DistributionAction::RevokeAccess) => {

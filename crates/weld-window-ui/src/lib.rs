@@ -82,6 +82,7 @@ pub struct WindowFramePolicy<'w, 's> {
 
 type FrameRequested = Or<(
     With<ServerFrameRequested>,
+    With<weld_window::WindowHeaderRequested>,
     With<weld_window::WindowGroupHeader>,
     With<PersistentWindow>,
 )>;

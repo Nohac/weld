@@ -1,6 +1,8 @@
-//! Local window-control requests serviced by the shared native client relay.
+//! Remote window-control requests serviced by the shared native client relay.
 
+mod permissions;
 mod runtime;
+pub use permissions::{Capabilities, Capability};
 pub use runtime::registration;
 
 use anyhow::{Context, Result, ensure};
@@ -54,6 +56,7 @@ struct GrantState {
     id: String,
     surface: ClientSurfaceId,
     permit: AccessSession,
+    capabilities: Capabilities,
 }
 
 /// Occupant-scoped permission. The window owner retires it on replacement or revoke.
@@ -63,6 +66,14 @@ pub struct Grant {
 }
 
 impl Grant {
+    pub fn capabilities(&self) -> Capabilities {
+        self.state.capabilities
+    }
+
+    pub fn revoke(&self) {
+        self.state.permit.end();
+        (self.wake)();
+    }
     pub fn id(&self) -> &str {
         &self.state.id
     }
@@ -76,8 +87,7 @@ impl Grant {
 
 impl Drop for Grant {
     fn drop(&mut self) {
-        self.state.permit.end();
-        (self.wake)();
+        self.revoke();
     }
 }
 
@@ -94,33 +104,39 @@ enum Command {
 }
 
 #[derive(Clone)]
-pub struct AgentClient {
+pub struct RemoteControlClient {
     sender: mpsc::SyncSender<Command>,
     grants: Arc<Mutex<HashMap<String, Arc<GrantState>>>>,
     wake: Arc<dyn Fn() + Send + Sync>,
 }
 
-impl AgentClient {
-    pub fn grant(&self, surface: ClientSurfaceId, permit: AccessSession) -> Result<Grant> {
+impl RemoteControlClient {
+    pub fn grant(
+        &self,
+        surface: ClientSurfaceId,
+        permit: AccessSession,
+        capabilities: Capabilities,
+    ) -> Result<Grant> {
         ensure!(permit.is_authorized(), "access session revoked");
         let state = Arc::new(GrantState {
             id: uuid::Uuid::new_v4().to_string(),
             surface,
             permit,
+            capabilities,
         });
         let mut grants = self
             .grants
             .lock()
-            .map_err(|_| anyhow::anyhow!("agent registry unavailable"))?;
+            .map_err(|_| anyhow::anyhow!("remote control registry unavailable"))?;
         grants.retain(|_, grant| grant.permit.is_authorized());
-        ensure!(grants.len() < 64, "agent window capacity reached");
+        ensure!(grants.len() < 64, "remote control window capacity reached");
         ensure!(
             !grants.values().any(|grant| grant.surface == surface),
             "window already controlled"
         );
         self.sender
             .try_send(Command::Grant(state.clone()))
-            .map_err(|_| anyhow::anyhow!("agent queue unavailable or full"))?;
+            .map_err(|_| anyhow::anyhow!("remote control queue unavailable or full"))?;
         grants.insert(state.id.clone(), state.clone());
         drop(grants);
         (self.wake)();
@@ -134,11 +150,15 @@ impl AgentClient {
         let grant = self
             .grants
             .lock()
-            .map_err(|_| anyhow::anyhow!("agent registry unavailable"))?
+            .map_err(|_| anyhow::anyhow!("remote control registry unavailable"))?
             .get(control)
             .cloned()
             .context("window control unavailable")?;
         ensure!(grant.permit.is_authorized(), "window control revoked");
+        ensure!(
+            grant.capabilities.allows(operation.capability()),
+            "window capability is disabled"
+        );
         let (reply, response) = mpsc::sync_channel(1);
         self.sender
             .try_send(Command::Operation(Pending {
@@ -147,11 +167,11 @@ impl AgentClient {
                 deadline: Instant::now() + Duration::from_secs(5),
                 reply,
             }))
-            .map_err(|_| anyhow::anyhow!("agent queue unavailable or full"))?;
+            .map_err(|_| anyhow::anyhow!("remote control queue unavailable or full"))?;
         (self.wake)();
         let result = response
             .recv_timeout(Duration::from_secs(6))
-            .context("agent operation completion unknown; do not retry automatically")?
+            .context("remote control operation completion unknown; do not retry automatically")?
             .map_err(anyhow::Error::msg)?;
         ensure!(
             grant.permit.is_authorized(),

@@ -15,7 +15,8 @@ test-support = ["weld-app/test-support"]
 [workspace]
 members = [
   "crates/weld-access",
-  "crates/weld-agent",
+  "crates/weld-remote-control",
+  "crates/weld-remote-control-ui",
   "crates/weld-diagnostics",
   "crates/weld-app",
   "crates/weld-client",
@@ -54,11 +55,14 @@ edition = "2024"
 publish = false
 
 [workspace.dependencies]
+bevy_lucide = "=0.1.1"
 zeroize = "1"
 anyhow = "1.0.100"
 ash = "0.38.0"
 bevy = { version = "=0.19.1", default-features = false, features = [
   "bevy_remote",
+  "bevy_log",
+  "bevy_ui_widgets",
   "scene",
   "std",
   "system_font_discovery",
@@ -106,9 +110,10 @@ x11-dl = "2.21.0"
 xcursor = "0.3.11"
 
 [dependencies]
+weld-remote-control-ui = { path = "crates/weld-remote-control-ui" }
 base64 = "0.22.1"
 weld-access = { path = "crates/weld-access" }
-weld-agent = { path = "crates/weld-agent" }
+weld-remote-control = { path = "crates/weld-remote-control" }
 anyhow.workspace = true
 bevy.workspace = true
 bevy_dylib.workspace = true
