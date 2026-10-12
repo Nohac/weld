@@ -5,9 +5,9 @@ use std::time::Duration;
 use weld_access::AccessAuthority;
 use weld_client::{
     ClientBufferLease, ClientBufferMetadata, ClientBufferUseId, ClientCommitRevision, ClientId,
-    ClientSurfaceRole, ClientSurfaceState, LogicalPoint, SurfaceAlphaMode, SurfaceBufferUpdate,
-    SurfaceContentView, SurfaceLayerId, SurfaceLayerPlacement, ToplevelHints, ToplevelState,
-    WindowDecoration,
+    ClientSurfaceRole, ClientSurfaceState, LogicalPoint, LogicalSize, SurfaceAlphaMode,
+    SurfaceBufferUpdate, SurfaceContentView, SurfaceInputPlacement, SurfaceInputRect,
+    SurfaceLayerId, SurfaceLayerPlacement, ToplevelHints, ToplevelState, WindowDecoration,
 };
 
 struct NoCapture;
@@ -15,6 +15,97 @@ impl Capture for NoCapture {
     fn begin(&mut self, _: &ComposedBuffer) -> Result<Box<dyn CaptureJob>> {
         anyhow::bail!("capture unused by input test")
     }
+}
+
+#[test]
+fn local_takeover_releases_remote_holds_and_rejects_work_queued_before_resume() {
+    let upstream = ClientSourceId::new(0);
+    let surface = ClientSurfaceId::new(ClientId::new(upstream, 1), 1);
+    let authority = AccessAuthority::new(|| {});
+    let (registration, client) = registration(upstream, ClientSourceId::new(3), || {}, NoCapture);
+    let mut adapter = registration.into_parts().runtime.driver;
+    map(&mut *adapter, surface);
+    let grant = client
+        .grant(
+            surface,
+            authority.open("test".into()).expect("permit"),
+            Capabilities::ALL,
+        )
+        .expect("grant");
+    let mut events = ClientEventQueue::default();
+    let mut effects = Vec::new();
+    adapter.drain_events(&mut events);
+    let key = pending(
+        &client,
+        &grant.state,
+        Operation::Key {
+            keycode: 30,
+            pressed: true,
+        },
+    );
+    let button = pending(&client, &grant.state, Operation::Pointer { x: 2., y: 2. });
+    let press = pending(
+        &client,
+        &grant.state,
+        Operation::Button {
+            button: 272,
+            pressed: true,
+        },
+    );
+    adapter.drain_events(&mut events);
+    adapter.drain_effects(&mut effects);
+    for response in [key, button, press] {
+        assert!(response.try_recv().expect("reply").is_ok());
+    }
+    effects.clear();
+    let stale = pending(
+        &client,
+        &grant.state,
+        Operation::Key {
+            keycode: 31,
+            pressed: true,
+        },
+    );
+    grant.set_local_input(true);
+    assert!(
+        client
+            .request(
+                grant.id(),
+                Operation::Key {
+                    keycode: 32,
+                    pressed: true
+                }
+            )
+            .is_err()
+    );
+    adapter.drain_events(&mut events);
+    adapter.drain_effects(&mut effects);
+    assert!(stale.try_recv().expect("stale response").is_err());
+    assert!(effects.iter().any(|effect| matches!(effect, ClientAdapterEffect::Input(input) if matches!(input.event, InputEventKind::Keyboard { keycode: LinuxKeycode(30), state: KeyboardKeyState::Released }))));
+    assert!(effects.iter().any(|effect| matches!(effect, ClientAdapterEffect::Input(input) if matches!(input.event, InputEventKind::PointerButton { state: ButtonState::Released, .. }))));
+    let paused = pending(
+        &client,
+        &grant.state,
+        Operation::Key {
+            keycode: 33,
+            pressed: true,
+        },
+    );
+    grant.set_local_input(false);
+    adapter.drain_events(&mut events);
+    assert!(paused.try_recv().expect("paused response").is_err());
+    let resumed = pending(
+        &client,
+        &grant.state,
+        Operation::Key {
+            keycode: 34,
+            pressed: true,
+        },
+    );
+    adapter.drain_events(&mut events);
+    adapter.drain_effects(&mut effects);
+    assert!(resumed.try_recv().expect("resumed response").is_ok());
+    assert!(grant.active());
 }
 
 #[test]
@@ -72,6 +163,7 @@ fn pending(
     client
         .sender
         .try_send(Command::Operation(Pending {
+            input_epoch: state.input_epoch.load(Ordering::Acquire),
             grant: state,
             operation,
             deadline: Instant::now() + Duration::from_secs(5),
@@ -123,7 +215,14 @@ fn map(adapter: &mut dyn ClientAdapter, surface: ClientSurfaceId) {
                 }),
                 window_geometry: None,
                 overlays: Vec::new(),
-                inputs: Vec::new(),
+                inputs: vec![SurfaceInputPlacement {
+                    layer,
+                    position: LogicalPoint::ZERO,
+                    regions: vec![SurfaceInputRect {
+                        position: LogicalPoint::ZERO,
+                        size: LogicalSize::new(32., 24.),
+                    }],
+                }],
                 buffers: vec![SurfaceBufferUpdate {
                     layer,
                     change: SurfaceBufferChange::Replaced { metadata, buffer },

@@ -10,7 +10,11 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
-    sync::{Arc, Mutex, mpsc},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicU64, Ordering},
+        mpsc,
+    },
     time::{Duration, Instant},
 };
 use weld_access::AccessSession;
@@ -57,6 +61,9 @@ struct GrantState {
     surface: ClientSurfaceId,
     permit: AccessSession,
     capabilities: Capabilities,
+    // Odd epochs grant local input; each handoff invalidates queued remote mutations.
+    input_epoch: AtomicU64,
+    input_epoch_applied: AtomicU64,
 }
 
 /// Occupant-scoped permission. The window owner retires it on replacement or revoke.
@@ -66,6 +73,24 @@ pub struct Grant {
 }
 
 impl Grant {
+    /// The native relay has drained held remote input for the current local takeover.
+    pub fn local_input_ready(&self) -> bool {
+        let epoch = self.state.input_epoch.load(Ordering::Acquire);
+        !epoch.is_multiple_of(2) && self.state.input_epoch_applied.load(Ordering::Acquire) == epoch
+    }
+    /// Pause remote input during local takeover while preserving view permission.
+    pub fn set_local_input(&self, local: bool) {
+        let changed =
+            self.state
+                .input_epoch
+                .try_update(Ordering::AcqRel, Ordering::Acquire, |epoch| {
+                    (!epoch.is_multiple_of(2) != local).then(|| epoch.wrapping_add(1))
+                });
+        if changed.is_ok() {
+            (self.wake)();
+        }
+    }
+
     pub fn capabilities(&self) -> Capabilities {
         self.state.capabilities
     }
@@ -96,6 +121,7 @@ struct Pending {
     operation: Operation,
     deadline: Instant,
     reply: mpsc::SyncSender<Result<Reply, String>>,
+    input_epoch: u64,
 }
 
 enum Command {
@@ -123,6 +149,8 @@ impl RemoteControlClient {
             surface,
             permit,
             capabilities,
+            input_epoch: AtomicU64::new(0),
+            input_epoch_applied: AtomicU64::new(0),
         });
         let mut grants = self
             .grants
@@ -155,6 +183,11 @@ impl RemoteControlClient {
             .cloned()
             .context("window control unavailable")?;
         ensure!(grant.permit.is_authorized(), "window control revoked");
+        let input_epoch = grant.input_epoch.load(Ordering::Acquire);
+        ensure!(
+            matches!(operation, Operation::Capture) || input_epoch.is_multiple_of(2),
+            "local interaction owns this window"
+        );
         ensure!(
             grant.capabilities.allows(operation.capability()),
             "window capability is disabled"
@@ -163,6 +196,7 @@ impl RemoteControlClient {
         self.sender
             .try_send(Command::Operation(Pending {
                 grant: grant.clone(),
+                input_epoch,
                 operation,
                 deadline: Instant::now() + Duration::from_secs(5),
                 reply,

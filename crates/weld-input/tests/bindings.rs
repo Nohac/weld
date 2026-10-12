@@ -28,6 +28,127 @@ fn key(code: u32, state: KeyboardKeyState) -> RawSeatEvent {
 }
 
 #[test]
+fn modifier_hold_tracks_both_press_orders_and_retains_the_toggle_chord() {
+    for order in [[58, 56], [56, 58]] {
+        let mut app = App::new();
+        app.add_plugins(GlobalShortcutPlugin);
+        app.register_pointer_shortcut(PointerShortcut::new(
+            MouseButton::Left,
+            PointerShortcutModifiers::super_key(),
+        ));
+        let mut owner = GlobalShortcutSet::default();
+        let modifiers = GlobalShortcutModifiers {
+            control: true,
+            super_key: true,
+            ..Default::default()
+        };
+        let ids = owner.replace(
+            &mut app.world_mut().resource_mut::<GlobalShortcutRegistry>(),
+            [
+                GlobalShortcut::held(modifiers),
+                GlobalShortcut::new(KeyCode::KeyO, modifiers),
+            ],
+        );
+        app.world_mut()
+            .resource_mut::<GlobalShortcutRegistry>()
+            .set_hold_enabled(ids[0], true);
+        let mut mapper = mapper();
+        for code in order {
+            let event = mapper.resolve(key(code, KeyboardKeyState::Pressed));
+            filter_global_shortcut_event(app.world_mut(), &event);
+        }
+        assert!(
+            app.world()
+                .resource::<GlobalShortcutRegistry>()
+                .is_held(ids[0])
+        );
+        let click = mapper.resolve(RawSeatEvent::new(
+            RawSeatEventKind::PointerButton {
+                position: Some(InputPosition::new(10., 10.)),
+                button: LinuxButtonCode(272),
+                state: ButtonState::Pressed,
+            },
+            2,
+        ));
+        assert!(
+            !filter_pointer_shortcut_event(app.world_mut(), &click),
+            "quick interaction must not become a modifier-drag"
+        );
+        assert!(filter_global_shortcut_event(
+            app.world_mut(),
+            &mapper.resolve(key(24, KeyboardKeyState::Pressed))
+        ));
+        assert!(
+            app.world()
+                .resource::<GlobalShortcutRegistry>()
+                .is_held(ids[0])
+        );
+        filter_global_shortcut_event(
+            app.world_mut(),
+            &mapper.resolve(key(order[0], KeyboardKeyState::Released)),
+        );
+        assert!(
+            !app.world()
+                .resource::<GlobalShortcutRegistry>()
+                .is_held(ids[0])
+        );
+        assert_ne!(
+            app.world()
+                .resource::<GlobalShortcutRegistry>()
+                .suppressed_modifiers(),
+            SeatModifiers::default()
+        );
+        filter_global_shortcut_event(
+            app.world_mut(),
+            &mapper.resolve(key(order[1], KeyboardKeyState::Released)),
+        );
+        assert_eq!(
+            app.world()
+                .resource::<GlobalShortcutRegistry>()
+                .suppressed_modifiers(),
+            SeatModifiers::default()
+        );
+        for code in order {
+            filter_global_shortcut_event(
+                app.world_mut(),
+                &mapper.resolve(key(code, KeyboardKeyState::Pressed)),
+            );
+        }
+        assert!(
+            app.world()
+                .resource::<GlobalShortcutRegistry>()
+                .is_held(ids[0])
+        );
+        filter_global_shortcut_event(
+            app.world_mut(),
+            &RawSeatEvent::new(
+                RawSeatEventKind::PointerMotion {
+                    position: InputPosition::new(12., 10.),
+                    relative: None,
+                },
+                3,
+            )
+            .with_modifiers(SeatModifiers::default()),
+        );
+        assert!(
+            !app.world()
+                .resource::<GlobalShortcutRegistry>()
+                .is_held(ids[0]),
+            "native modifier state repairs releases delivered while the shell was inactive"
+        );
+        filter_global_shortcut_event(
+            app.world_mut(),
+            &RawSeatEvent::new(RawSeatEventKind::HostFocusLost, 2),
+        );
+        assert!(
+            !app.world()
+                .resource::<GlobalShortcutRegistry>()
+                .is_held(ids[0])
+        );
+    }
+}
+
+#[test]
 fn modes_switch_within_one_input_batch_and_preserve_held_releases_on_reload() {
     let mut app = App::new();
     app.add_plugins(GlobalShortcutPlugin);

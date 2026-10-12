@@ -30,6 +30,8 @@ Enable control from the desktop using this Sway-config binding:
 
 ```text
 bindsym $mod+Control+i weld control toggle
+bindsym $mod+Control weld control interact hold
+bindsym $mod+Control+o weld control interact toggle
 ```
 
 The repository example includes it. Alternatively, select the managed window
@@ -78,15 +80,26 @@ coordinates; button codes are 272/273/274 for left/right/middle. Individual
 `button` and `key` operations require matching release edges. Revocation releases
 held input through the shared hoist relay.
 
-The desktop frame remains a live, read-only peek. The controller configures the app's
+The desktop frame initially remains a live, read-only peek. Hold the configured
+modifier chord to use the focused window locally, or use the toggle binding to
+keep local keyboard and pointer input enabled after releasing the chord. The
+header shows **Local interaction** while takeover is active. Its modifiers are
+consumed for application input and window-manager pointer shortcuts. The native
+relay releases remote holds before local input activates; queued remote input
+from an earlier ownership epoch is rejected. Remote capture remains available.
+
+The controller configures the app's
 viewport independently; moving or resizing the desktop frame changes only the
 peek. Content stays at its natural logical size, anchored at the upper left and
 clipped to the frame. Taking back control restores desktop input and resizing.
 Scale-to-fit remains a later presentation improvement.
 
 Grants expire on unmapping, occupant replacement, revocation or session exit.
-Regranting creates a fresh handle. Persistent slots retain their layout while
-their replacement applications require fresh control grants. Ordinary managed
+Persistent slots retain their in-memory permission policy and control header
+while empty. Permissions remain editable alongside the existing waiting
+placeholder; a matching replacement automatically gets a fresh handle with
+those permissions. Taking back control or globally revoking access clears the
+remembered authorization. Restarting Weld also clears it. Ordinary managed
 local application windows are eligible; hoisted windows must first be reclaimed.
 
 Input acknowledgements mean accepted native effects. Applications process those

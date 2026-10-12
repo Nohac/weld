@@ -481,10 +481,14 @@ pub struct WindowPresentationOverride {
     owner: Entity,
 }
 
-/// An external controller owns the application's viewport and input.
-/// The desktop keeps its independently sized, read-only presentation.
+/// An external controller owns the application's viewport size.
+/// The desktop keeps its independently sized presentation.
 #[derive(Component, Clone, Copy, Debug, Default)]
 pub struct WindowExternalControl;
+
+/// Local keyboard focus is withheld while another input owner controls the window.
+#[derive(Component, Clone, Copy, Debug, Default)]
+pub struct WindowLocalInputBlocked;
 
 /// Keeps compositor-owned window controls visible with every border style.
 #[derive(Component, Clone, Copy, Debug, Default)]
@@ -1503,7 +1507,7 @@ fn end_window_interaction(world: &mut bevy::ecs::world::World, window: Entity) {
 fn reconcile_client_focus(
     focus: Res<FocusedWindow>,
     mut applied: ResMut<AppliedClientFocus>,
-    windows: Query<&WindowVisibility, Without<WindowExternalControl>>,
+    windows: Query<&WindowVisibility, Without<WindowLocalInputBlocked>>,
     clients: WindowClientResolver,
     mut actions: ResMut<SurfaceActionQueue>,
 ) {
@@ -1939,7 +1943,7 @@ mod tests {
         take_surface_actions(app.world_mut());
         app.world_mut()
             .entity_mut(window)
-            .insert(WindowExternalControl);
+            .insert((WindowExternalControl, WindowLocalInputBlocked));
         app.world_mut()
             .get_mut::<WindowGeometry>(window)
             .expect("frame")
@@ -1971,7 +1975,7 @@ mod tests {
         );
         app.world_mut()
             .entity_mut(window)
-            .remove::<WindowExternalControl>();
+            .remove::<(WindowExternalControl, WindowLocalInputBlocked)>();
         app.update();
         let actions = take_surface_actions(app.world_mut());
         assert!(actions.contains(&SurfaceAction::Resize {

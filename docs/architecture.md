@@ -11,8 +11,13 @@ Weld is a workspace of reusable layers and one standard distribution:
   seat and retirement ledger. Composed view geometry and hit testing live in
   `weld-hoist-core` for both encoded presentation and remote-control capture.
   The distribution attaches in-memory grants to managed windows and exposes
-  operations through `weld-control`. `WindowExternalControl` retains ordinary
-  local presentation while transferring application input and viewport authority.
+  operations through `weld-control`. Persistent slots retain an authorized
+  permission policy independently of occupant-scoped grants. `WindowExternalControl`
+  retains independent viewport sizing; `WindowLocalInputBlocked` controls local
+  keyboard focus separately. Local takeover pauses remote mutations using an
+  ownership epoch and waits for native held-input retirement before enabling
+  local input. Modifier-only shortcut state lives in `weld-input`; native keyboard
+  delivery masks the consumed modifiers while shell matching keeps physical state.
   On-demand native GPU snapshots reuse source composition and asynchronous
   readback, retaining input leases until sampling completes. See
   [Native window control](native-window-control.md).

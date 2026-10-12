@@ -11,6 +11,9 @@ impl ServerState {
         LedState::from_state(state, &LedMapping::from_keymap(&state.get_keymap()))
     }
     pub(crate) fn resolve_input(&mut self, event: RawSeatEvent) -> RawSeatEvent {
+        if matches!(event.event, RawSeatEventKind::HostFocusLost) {
+            self.suppressed_local_modifiers = weld_input::SeatModifiers::default();
+        }
         let event = self.keyboard_mapper.resolve(event);
         // Releases still update the active client after the press recipient has
         // closed, or when the shell consumes the corresponding key event.
@@ -36,9 +39,21 @@ impl ServerState {
 
     pub(super) fn apply_local_modifiers(&mut self, keyboard: &KeyboardHandle<Self>) {
         let state = self.keyboard_mapper.xkb_state();
-        let depressed = state.serialize_mods(xkb::STATE_MODS_DEPRESSED);
-        let latched = state.serialize_mods(xkb::STATE_MODS_LATCHED);
-        let locked = state.serialize_mods(xkb::STATE_MODS_LOCKED);
+        let keymap = state.get_keymap();
+        let suppressed = self.suppressed_local_modifiers;
+        let mask = [
+            (suppressed.control, xkb::MOD_NAME_CTRL),
+            (suppressed.alt, xkb::MOD_NAME_ALT),
+            (suppressed.shift, xkb::MOD_NAME_SHIFT),
+            (suppressed.super_key, xkb::MOD_NAME_LOGO),
+        ]
+        .into_iter()
+        .filter(|(enabled, _)| *enabled)
+        .filter_map(|(_, name)| 1_u32.checked_shl(keymap.mod_get_index(name)))
+        .fold(0, |mask, bit| mask | bit);
+        let depressed = state.serialize_mods(xkb::STATE_MODS_DEPRESSED) & !mask;
+        let latched = state.serialize_mods(xkb::STATE_MODS_LATCHED) & !mask;
+        let locked = state.serialize_mods(xkb::STATE_MODS_LOCKED) & !mask;
         let layout_depressed = state.serialize_layout(xkb::STATE_LAYOUT_DEPRESSED);
         let layout_latched = state.serialize_layout(xkb::STATE_LAYOUT_LATCHED);
         let layout_locked = state.serialize_layout(xkb::STATE_LAYOUT_LOCKED);
@@ -52,6 +67,17 @@ impl ServerState {
                 layout_locked,
             );
         });
+    }
+
+    pub(crate) fn suppress_local_modifiers(&mut self, modifiers: weld_input::SeatModifiers) {
+        if self.suppressed_local_modifiers == modifiers {
+            return;
+        }
+        self.suppressed_local_modifiers = modifiers;
+        let input = self.local_input.keyboard_binding.borrow().clone();
+        if let Some(input) = input {
+            self.synchronize_local_modifiers(&input);
+        }
     }
 
     pub(crate) fn synchronize_keyboard_settings(
@@ -192,6 +218,25 @@ mod tests {
             InputTime::from_millis(1),
             |_, _, _| FilterResult::Forward,
         );
+        assert!(keyboard.modifier_state().ctrl);
+        server.suppress_local_modifiers(weld_input::SeatModifiers {
+            control: true,
+            ..Default::default()
+        });
+        server.apply_local_modifiers(&keyboard);
+        assert!(
+            !keyboard.modifier_state().ctrl,
+            "takeover modifiers stay out of the client map"
+        );
+        assert!(
+            server
+                .keyboard_mapper
+                .xkb_state()
+                .mod_name_is_active(xkb::MOD_NAME_CTRL, xkb::STATE_MODS_EFFECTIVE),
+            "shell matching retains the physical modifier state"
+        );
+        server.suppress_local_modifiers(weld_input::SeatModifiers::default());
+        server.apply_local_modifiers(&keyboard);
         assert!(keyboard.modifier_state().ctrl);
         server
             .synchronize_keyboard_settings(Some(KeyboardSettings::default()))

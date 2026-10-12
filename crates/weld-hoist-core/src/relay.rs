@@ -175,6 +175,13 @@ pub struct SourceRelayAdapter {
 }
 
 impl SourceRelayAdapter {
+    /// Release held input for a set of surfaces while retaining their presentation claims.
+    pub fn release_input(&mut self, owns: impl Fn(ClientSurfaceId) -> bool) {
+        self.effects.extend(
+            self.remote_input
+                .release_effects(self.upstream_source, owns),
+        );
+    }
     /// Starts an independent peer from the latest observed local surface inventory.
     /// Buffer snapshots retain their ordinary shared leases until that peer releases them.
     pub fn fork(&self, port: impl HoistSourcePort + 'static) -> Self {

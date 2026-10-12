@@ -3,6 +3,7 @@
 mod config;
 
 use crate::overlay::ToggleOutputTopology;
+use crate::remote_control::LocalInteractionBindings;
 use anyhow::{Context, Result};
 use bevy::{
     app::{App, Plugin, PreUpdate},
@@ -87,7 +88,8 @@ fn report_warnings(warnings: &[weld_i3_quirks::config::ConfigWarning]) {
 
 impl Plugin for MasterConfigPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<ShellCommands>()
+        app.init_resource::<LocalInteractionBindings>()
+            .init_resource::<ShellCommands>()
             .init_resource::<PointerDeviceSettings>()
             .init_resource::<CursorSettings>()
             .init_resource::<InitialCursorSettings>()
@@ -183,6 +185,7 @@ fn publish_mode(
 /// These borrows make candidate publication atomic to other scheduled systems.
 #[derive(SystemParam)]
 struct ConfigTarget<'w> {
+    local_interaction: ResMut<'w, LocalInteractionBindings>,
     state: ResMut<'w, ConfigState>,
     shortcuts: ResMut<'w, GlobalShortcutRegistry>,
     tiling: ResMut<'w, TileSettings>,
@@ -257,6 +260,18 @@ impl ConfigTarget<'_> {
                     .into_iter()
                     .flat_map(|mode| mode.bindings.into_iter().map(|(_, action)| action)),
             )
+            .collect();
+        self.local_interaction.0 = self
+            .state
+            .actions
+            .iter()
+            .filter(|(_, action)| {
+                matches!(
+                    action,
+                    Action::Extension(DistributionAction::HoldLocalInteraction)
+                )
+            })
+            .map(|(id, _)| *id)
             .collect();
         report_warnings(&config.warnings);
         self.outputs.0 = config.outputs;
@@ -364,6 +379,14 @@ fn dispatch_action(
         return;
     };
     match action {
+        Action::Extension(DistributionAction::HoldLocalInteraction) => {}
+        Action::Extension(DistributionAction::ToggleLocalInteraction) => {
+            if let Some(window) = effects.focus.entity() {
+                effects
+                    .commands
+                    .trigger(crate::remote_control::ToggleLocalInteraction(window));
+            }
+        }
         Action::Extension(DistributionAction::ToggleRemoteControl) => {
             if let Some(window) = effects.focus.entity() {
                 effects
@@ -717,6 +740,7 @@ mod tests {
     #[test]
     fn rejected_candidate_leaves_live_settings_and_bindings_unchanged() {
         let mut app = App::new();
+        app.init_resource::<LocalInteractionBindings>();
         app.init_resource::<OutputPreferences>();
         app.init_resource::<WindowRules>();
         app.init_resource::<WorkspaceSettings>();

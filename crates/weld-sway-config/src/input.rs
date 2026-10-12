@@ -303,9 +303,13 @@ fn resolve_modifiers(parts: Vec<syntax::Modifier<'_>>) -> Result<GlobalShortcutM
 }
 
 fn binding(value: &str) -> Result<GlobalShortcut> {
-    let (parts, key) = syntax::chord
+    let (mut parts, key) = syntax::chord
         .parse(value)
         .map_err(|error| anyhow::anyhow!("invalid binding chord: {error}"))?;
+    if matches!(key, "Mod4" | "Mod1" | "Control" | "Ctrl" | "Shift") {
+        parts.push(syntax::Modifier(key));
+        return Ok(GlobalShortcut::held(resolve_modifiers(parts)?));
+    }
     let modifiers = resolve_modifiers(parts)?;
     // Trigger names currently select physical positions; modifier matching uses
     // the configured XKB state supplied by the native host.

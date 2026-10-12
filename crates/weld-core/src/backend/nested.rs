@@ -276,7 +276,12 @@ impl NativeDriver<NestedEvent> for NestedDriver {
             let mut event_count = 0_usize;
             for event in self.host.input.drain() {
                 let event = state.data.server.resolve_input(event);
-                if shell.enqueue_input_event(event.clone()) {
+                let forward = shell.enqueue_input_event(event.clone());
+                state
+                    .data
+                    .server
+                    .suppress_local_modifiers(shell.suppressed_local_modifiers());
+                if forward {
                     state
                         .clients
                         .dispatch_unconsumed_input(event.into_runtime());

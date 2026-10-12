@@ -23,6 +23,10 @@ use weld_window::{WindowGeometry, WindowOccupant, WindowProjectionLookup, Window
 #[derive(Component, Clone, Copy, Debug, PartialEq)]
 pub struct RemoteControlPanel(pub Capabilities);
 
+/// The local user currently owns this window's keyboard and pointer input.
+#[derive(Component)]
+pub struct LocalInteractionActive;
+
 /// User request to toggle one permission; the control owner validates the live grant.
 #[derive(Event)]
 pub struct ToggleCapability {
@@ -283,22 +287,35 @@ fn foreground(colors: FrameColors, enabled: bool) -> Color {
 }
 
 fn sync_titles(
-    controls: Query<&WindowOccupant, With<RemoteControlPanel>>,
+    controls: Query<
+        (Option<&WindowOccupant>, Has<LocalInteractionActive>),
+        With<RemoteControlPanel>,
+    >,
     metadata: Query<&ClientWindowMetadata>,
     palette: WindowFrameColors,
     settings: Res<SsdSettings>,
     mut titles: Query<(&HeaderTitle, &mut Text, &mut TextColor, &mut TextFont)>,
 ) {
     for (title, mut text, mut color, mut font) in &mut titles {
-        let Ok(occupant) = controls.get(title.0) else {
+        let Ok((occupant, local)) = controls.get(title.0) else {
             continue;
         };
-        let label = metadata
-            .get(occupant.entity())
+        let label = occupant
+            .and_then(|occupant| metadata.get(occupant.entity()).ok())
             .map(|metadata| metadata.0.title())
-            .unwrap_or("Window");
-        if text.0.strip_prefix("Remote control · ") != Some(label) {
-            **text = format!("Remote control · {label}");
+            .unwrap_or("");
+        let prefix = if local {
+            "Local interaction"
+        } else {
+            "Remote control"
+        };
+        let label = if label.is_empty() {
+            prefix.to_owned()
+        } else {
+            format!("{prefix} · {label}")
+        };
+        if text.0 != label {
+            **text = label;
         }
         color.set_if_neq(TextColor(palette.palette(title.0).foreground));
         font.set_if_neq(settings.title_font.text_font());

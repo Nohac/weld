@@ -414,6 +414,10 @@ pub trait HostPolicy {
     /// Buffers an input event for the next application frame and returns
     /// whether core should also forward it to the focused client immediately.
     fn enqueue_input_event(&mut self, event: RawSeatEvent) -> bool;
+    /// Effective shortcut modifiers withheld from local application keyboards.
+    fn suppressed_local_modifiers(&self) -> weld_input::SeatModifiers {
+        weld_input::SeatModifiers::default()
+    }
     /// Reasserts the current keyboard selection after the native session resumes.
     /// Publish the resulting focus request through [`Self::take_client_requests`].
     fn restore_input_focus(&mut self) {}

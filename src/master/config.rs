@@ -12,6 +12,8 @@ pub(super) type Configuration = i3::Configuration<DistributionAction>;
 pub(super) enum DistributionAction {
     RevokeAccess,
     ToggleRemoteControl,
+    HoldLocalInteraction,
+    ToggleLocalInteraction,
     Hoist,
     OutputTopology,
     ExclusiveFullscreen,
@@ -19,13 +21,30 @@ pub(super) enum DistributionAction {
 }
 
 pub(super) fn parse(name: &str, source: &str) -> Result<Configuration> {
-    i3::parse_with_policy(name, source, UnsupportedPolicy::Warn, extension)
+    let config = i3::parse_with_policy(name, source, UnsupportedPolicy::Warn, extension)?;
+    for (chord, action) in config
+        .bindings
+        .iter()
+        .chain(config.modes.iter().flat_map(|mode| &mode.bindings))
+    {
+        anyhow::ensure!(
+            chord.trigger.is_none()
+                == matches!(
+                    action,
+                    Action::Extension(DistributionAction::HoldLocalInteraction)
+                ),
+            "modifier-only chords require weld control interact hold"
+        );
+    }
+    Ok(config)
 }
 
 fn extension(words: &[&str]) -> Result<DistributionAction> {
     Ok(match words {
         ["weld", "access", "revoke", "all"] => DistributionAction::RevokeAccess,
         ["weld", "control", "toggle"] => DistributionAction::ToggleRemoteControl,
+        ["weld", "control", "interact", "hold"] => DistributionAction::HoldLocalInteraction,
+        ["weld", "control", "interact", "toggle"] => DistributionAction::ToggleLocalInteraction,
         ["weld", "hoist"] => DistributionAction::Hoist,
         ["weld", "fullscreen", "exclusive"] => DistributionAction::ExclusiveFullscreen,
         ["weld", "output-debug"] => DistributionAction::OutputTopology,
@@ -111,18 +130,20 @@ mod tests {
         )));
         assert!(!config.bindings.iter().any(|(chord, _)| matches!(
             chord.trigger,
-            KeyCode::F1
-                | KeyCode::F2
-                | KeyCode::F3
-                | KeyCode::F4
-                | KeyCode::F5
-                | KeyCode::F6
-                | KeyCode::F7
-                | KeyCode::F8
-                | KeyCode::F9
-                | KeyCode::F10
-                | KeyCode::F11
-                | KeyCode::F12
+            Some(
+                KeyCode::F1
+                    | KeyCode::F2
+                    | KeyCode::F3
+                    | KeyCode::F4
+                    | KeyCode::F5
+                    | KeyCode::F6
+                    | KeyCode::F7
+                    | KeyCode::F8
+                    | KeyCode::F9
+                    | KeyCode::F10
+                    | KeyCode::F11
+                    | KeyCode::F12
+            )
         )));
         assert_eq!(
             extension(&["weld", "hoist"]).expect("extension"),

@@ -1,6 +1,6 @@
 //! Publishes the window owner's inventory to native control consumers.
 
-use crate::remote_control::ControlledWindow;
+use crate::remote_control::{ControlPolicy, ControlledWindow};
 use bevy::prelude::*;
 use weld_app::inspection::{InspectionPlugin, InspectionSystems};
 use weld_control::windows::{Rect, WindowInfo, WindowService};
@@ -26,12 +26,17 @@ fn publish(
     windows: Res<WindowInventory>,
     publisher: Res<Publisher>,
     controlled: Query<(&ManagedWindow, Ref<ControlledWindow>)>,
+    policies: Query<(&ManagedWindow, Ref<ControlPolicy>)>,
     mut retired: RemovedComponents<ControlledWindow>,
+    mut removed_policies: RemovedComponents<ControlPolicy>,
 ) {
     let removed = retired.read().count() > 0;
+    let policy_removed = removed_policies.read().count() > 0;
     if !windows.is_changed()
         && !publisher.is_added()
         && !removed
+        && !policy_removed
+        && !policies.iter().any(|(_, policy)| policy.is_changed())
         && !controlled.iter().any(|(_, control)| control.is_changed())
     {
         return;
@@ -61,10 +66,10 @@ fn publish(
                 .iter()
                 .find(|(window, control)| window.id == *id && control.0.active())
                 .map(|(_, control)| control.0.id().to_owned()),
-            capabilities: controlled
+            capabilities: policies
                 .iter()
-                .find(|(window, control)| window.id == *id && control.0.active())
-                .map(|(_, control)| control.0.capabilities()),
+                .find(|(window, _)| window.id == *id)
+                .map(|(_, policy)| policy.capabilities),
         })
         .collect();
     if let Err(error) = publisher.0.publish(snapshot) {

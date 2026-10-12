@@ -1020,6 +1020,14 @@ impl HostPolicy for AppShell {
         crate::layer_shell::restore_input_focus(self.app.world_mut());
     }
 
+    fn suppressed_local_modifiers(&self) -> weld_input::SeatModifiers {
+        self.app
+            .world()
+            .get_resource::<weld_input::GlobalShortcutRegistry>()
+            .map(weld_input::GlobalShortcutRegistry::suppressed_modifiers)
+            .unwrap_or_default()
+    }
+
     fn advance_main(&mut self, input_time: u32) -> bool {
         AppShell::advance_main(self, input_time)
     }

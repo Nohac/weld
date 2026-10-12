@@ -15,6 +15,7 @@ use bevy::{
 
 use crate::{ButtonState, LinuxKeycode, RawSeatEvent, RawSeatEventKind, SeatModifiers};
 use bevy_winit::converters::convert_physical_key_code;
+use winit::keyboard::{Key, NamedKey};
 use winit::{keyboard::PhysicalKey, platform::scancode::PhysicalKeyExtScancode};
 
 /// Physical binding identity for a Linux input key, including unnamed extended keys.
@@ -62,16 +63,28 @@ impl GlobalShortcutModifiers {
     }
 }
 
-/// A physical keyboard chord consumed before client delivery.
+/// A keyboard or modifier-only chord consumed before client delivery.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct GlobalShortcut {
-    pub trigger: KeyCode,
+    /// A physical key, or `None` for a held modifier-only chord.
+    pub trigger: Option<KeyCode>,
     pub modifiers: GlobalShortcutModifiers,
 }
 
 impl GlobalShortcut {
     pub const fn new(trigger: KeyCode, modifiers: GlobalShortcutModifiers) -> Self {
-        Self { trigger, modifiers }
+        Self {
+            trigger: Some(trigger),
+            modifiers,
+        }
+    }
+
+    /// A modifier-only chord whose active state can be observed until release.
+    pub const fn held(modifiers: GlobalShortcutModifiers) -> Self {
+        Self {
+            trigger: None,
+            modifiers,
+        }
     }
 }
 
@@ -144,6 +157,8 @@ impl GlobalShortcutSet {
         state
             .application_shortcuts
             .retain(|entry| !self.ids.contains(&entry.id));
+        state.held.retain(|id| !self.ids.contains(id));
+        state.enabled_holds.retain(|id| !self.ids.contains(id));
         if let Some(group) = self.mode_group.take() {
             state.active_modes.remove(&group);
         }
@@ -221,9 +236,63 @@ pub struct GlobalShortcutRegistry {
     application_shortcuts: Vec<RegisteredGlobalShortcut>,
     pressed: HashSet<LinuxKeycode>,
     active_modes: HashMap<GlobalShortcutId, String>,
+    held: HashSet<GlobalShortcutId>,
+    enabled_holds: HashSet<GlobalShortcutId>,
+    suppressed: SeatModifiers,
+    modifiers: SeatModifiers,
 }
 
 impl GlobalShortcutRegistry {
+    /// Whether the owner currently permits this modifier-only chord to activate.
+    pub fn hold_enabled(&self, id: GlobalShortcutId) -> bool {
+        self.enabled_holds.contains(&id)
+    }
+    fn update_holds(&mut self, modifiers: SeatModifiers) {
+        self.modifiers = modifiers;
+        self.held.clear();
+        for shortcut in &self.application_shortcuts {
+            if shortcut.chord.trigger.is_none()
+                && self.enabled_holds.contains(&shortcut.id)
+                && shortcut
+                    .mode
+                    .as_ref()
+                    .is_none_or(|(group, mode)| self.active_modes.get(group) == Some(mode))
+                && shortcut.chord.modifiers.matches(modifiers)
+            {
+                self.held.insert(shortcut.id);
+                self.suppressed.control |= shortcut.chord.modifiers.control;
+                self.suppressed.alt |= shortcut.chord.modifiers.alt;
+                self.suppressed.shift |= shortcut.chord.modifiers.shift;
+                self.suppressed.super_key |= shortcut.chord.modifiers.super_key;
+            }
+        }
+        self.suppressed.control &= modifiers.control;
+        self.suppressed.alt &= modifiers.alt;
+        self.suppressed.shift &= modifiers.shift;
+        self.suppressed.super_key &= modifiers.super_key;
+    }
+
+    /// Gate a modifier-only chord according to the current application context.
+    pub fn set_hold_enabled(&mut self, id: GlobalShortcutId, enabled: bool) {
+        if enabled {
+            self.enabled_holds.insert(id);
+            self.update_holds(self.modifiers);
+        } else {
+            self.enabled_holds.remove(&id);
+            self.held.remove(&id);
+        }
+    }
+
+    /// Whether an enabled modifier-only chord is physically held in the active mode.
+    pub fn is_held(&self, id: GlobalShortcutId) -> bool {
+        self.held.contains(&id)
+    }
+
+    /// Shortcut modifiers withheld from local applications until physically released.
+    pub fn suppressed_modifiers(&self) -> SeatModifiers {
+        self.suppressed
+    }
+
     fn register(&mut self, chord: GlobalShortcut, exact_modifiers: bool) -> GlobalShortcutId {
         let id = GlobalShortcutId(self.next_id);
         self.next_id = self.next_id.saturating_add(1);
@@ -264,9 +333,19 @@ pub fn filter_global_shortcut_event(world: &mut World, event: &RawSeatEvent) -> 
             && let Some(mut shortcuts) = world.get_resource_mut::<GlobalShortcutRegistry>()
         {
             shortcuts.pressed.clear();
+            shortcuts.held.clear();
+            shortcuts.suppressed = SeatModifiers::default();
+            shortcuts.modifiers = SeatModifiers::default();
             if let Some(mut consumed) = world.get_resource_mut::<ConsumedShortcutKeys>() {
                 consumed.0.clear();
             }
+        } else if let Some(modifiers) = event.modifiers
+            && world
+                .get_resource::<GlobalShortcutRegistry>()
+                .is_some_and(|shortcuts| shortcuts.modifiers != modifiers)
+            && let Some(mut shortcuts) = world.get_resource_mut::<GlobalShortcutRegistry>()
+        {
+            shortcuts.update_holds(modifiers);
         }
         return false;
     };
@@ -287,6 +366,10 @@ pub fn filter_global_shortcut_event(world: &mut World, event: &RawSeatEvent) -> 
                 false
             }
         };
+        let modifiers = event
+            .modifiers
+            .unwrap_or_else(|| SeatModifiers::from_pressed_keys(&shortcuts.pressed));
+        shortcuts.update_holds(modifiers);
         if !newly_pressed {
             None
         } else {
@@ -298,7 +381,7 @@ pub fn filter_global_shortcut_event(world: &mut World, event: &RawSeatEvent) -> 
                 .application_shortcuts
                 .iter()
                 .find(|shortcut| {
-                    shortcut.chord.trigger == trigger
+                    shortcut.chord.trigger == Some(trigger)
                         && shortcut.mode.as_ref().is_none_or(|(group, mode)| {
                             shortcuts.active_modes.get(group) == Some(mode)
                         })
@@ -326,7 +409,23 @@ pub fn filter_global_shortcut_event(world: &mut World, event: &RawSeatEvent) -> 
     let consumed = world
         .get_resource::<ConsumedShortcutKeys>()
         .is_some_and(|consumed| consumed.0.contains(keycode));
-    if application_shortcut.is_some() {
+    let modifier_consumed = state == ButtonState::Pressed
+        && world
+            .get_resource::<GlobalShortcutRegistry>()
+            .is_some_and(|registry| match &event.event {
+                RawSeatEventKind::Keyboard {
+                    logical_key: Some(Key::Named(key)),
+                    ..
+                } => match key {
+                    NamedKey::Control => registry.suppressed.control,
+                    NamedKey::Super => registry.suppressed.super_key,
+                    NamedKey::Alt => registry.suppressed.alt,
+                    NamedKey::Shift => registry.suppressed.shift,
+                    _ => false,
+                },
+                _ => false,
+            });
+    if application_shortcut.is_some() || modifier_consumed {
         if let Some(mut consumed) = world.get_resource_mut::<ConsumedShortcutKeys>() {
             consumed.0.insert(*keycode);
         }

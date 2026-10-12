@@ -422,6 +422,10 @@ pub(crate) fn apply_policy_requests<Event>(
 ) {
     let _span =
         tracing::trace_span!(target: crate::PROFILE_TARGET, "weld_apply_policy_results").entered();
+    state
+        .data
+        .server
+        .suppress_local_modifiers(policy.suppressed_local_modifiers());
     if let Some(workspaces) = policy.take_desktop_workspaces() {
         state.data.server.publish_workspaces(workspaces);
     }

@@ -15,8 +15,8 @@ use bevy::{
 };
 
 use crate::{
-    ButtonState, InputPosition, LinuxButtonCode, LinuxKeycode, RawSeatEvent, RawSeatEventKind,
-    SeatModifiers,
+    ButtonState, GlobalShortcutRegistry, InputPosition, LinuxButtonCode, LinuxKeycode,
+    RawSeatEvent, RawSeatEventKind, SeatModifiers,
 };
 
 /// Modifier requirements for a shell-owned pointer shortcut.
@@ -215,22 +215,25 @@ fn filter_pointer_button(
             .is_some_and(|mut registry| registry.captured_buttons.remove(&button));
     }
 
+    let suppressed = world
+        .get_resource::<GlobalShortcutRegistry>()
+        .map(GlobalShortcutRegistry::suppressed_modifiers)
+        .unwrap_or_default();
+
     let matches = {
         let Some(registry) = world.get_resource::<PointerShortcutRegistry>() else {
             return false;
         };
+        let mut modifiers =
+            modifiers.unwrap_or_else(|| SeatModifiers::from_pressed_keys(&registry.pressed_keys));
+        modifiers.control &= !suppressed.control;
+        modifiers.alt &= !suppressed.alt;
+        modifiers.shift &= !suppressed.shift;
+        modifiers.super_key &= !suppressed.super_key;
         registry
             .shortcuts
             .iter()
-            .filter(|&&shortcut| {
-                shortcut_matches(
-                    shortcut,
-                    button,
-                    modifiers.unwrap_or_else(|| {
-                        SeatModifiers::from_pressed_keys(&registry.pressed_keys)
-                    }),
-                )
-            })
+            .filter(|&&shortcut| shortcut_matches(shortcut, button, modifiers))
             .map(|shortcut| shortcut.id)
             .collect::<Vec<_>>()
     };

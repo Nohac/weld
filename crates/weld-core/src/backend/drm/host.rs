@@ -431,7 +431,12 @@ impl NativeDriver<HostEvent> for DrmDriver {
                         if state.data.server.dispatch_lock_input(&event) {
                             continue;
                         }
-                        if application.enqueue_input_event(event.clone()) {
+                        let forward = application.enqueue_input_event(event.clone());
+                        state
+                            .data
+                            .server
+                            .suppress_local_modifiers(application.suppressed_local_modifiers());
+                        if forward {
                             state
                                 .clients
                                 .dispatch_unconsumed_input(event.into_runtime());
@@ -547,7 +552,12 @@ impl NativeDriver<HostEvent> for DrmDriver {
                             self.presentation_schedule.request_present_all();
                             self.frame_state.request_present();
                         }
-                        if application.enqueue_input_event(event.clone()) {
+                        let forward = application.enqueue_input_event(event.clone());
+                        state
+                            .data
+                            .server
+                            .suppress_local_modifiers(application.suppressed_local_modifiers());
+                        if forward {
                             state
                                 .clients
                                 .dispatch_unconsumed_input(event.into_runtime());

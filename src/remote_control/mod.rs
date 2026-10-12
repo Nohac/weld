@@ -1,5 +1,8 @@
 //! Remote control grants bind native input/capture to an occupied desktop slot.
 
+#[cfg(test)]
+mod tests;
+
 use crate::control::SessionAccess;
 use anyhow::{Context, Result, ensure};
 use base64::{Engine, engine::general_purpose::STANDARD};
@@ -23,13 +26,35 @@ use weld_core::{
 };
 use weld_hoist::HoistedWindow;
 use weld_remote_control::{Capabilities, Capture, CaptureJob, Grant, RemoteControlClient};
-use weld_remote_control_ui::{RemoteControlPanel, TakeBack, ToggleCapability};
+use weld_remote_control_ui::{
+    LocalInteractionActive, RemoteControlPanel, TakeBack, ToggleCapability,
+};
 use weld_window::{
-    ManagedWindow, WindowExternalControl, WindowHeaderRequested, WindowOccupant, WindowSystems,
+    FocusedWindow, ManagedWindow, WindowExternalControl, WindowHeaderRequested,
+    WindowLocalInputBlocked, WindowOccupant, WindowSystems, persistence::PersistentWindow,
 };
 
 #[derive(Component)]
 pub(crate) struct ControlledWindow(pub Grant);
+
+#[derive(Component)]
+pub(crate) struct ControlPolicy {
+    permit: weld_access::AccessSession,
+    pub(crate) capabilities: Capabilities,
+    local: bool,
+}
+
+impl Drop for ControlPolicy {
+    fn drop(&mut self) {
+        self.permit.end();
+    }
+}
+
+#[derive(Event)]
+pub(crate) struct ToggleLocalInteraction(pub Entity);
+
+#[derive(Resource, Default)]
+pub(crate) struct LocalInteractionBindings(pub Vec<weld_input::GlobalShortcutId>);
 
 #[derive(Event)]
 pub(crate) struct ToggleControl(pub Entity);
@@ -72,19 +97,22 @@ pub(crate) fn install(app: &mut WeldApp, service: &WindowService) -> Result<()> 
         .insert_resource(Controller(client))
         .insert_resource(Administration(Mutex::new(requests)));
     app.app_mut()
+        .init_resource::<LocalInteractionBindings>()
         .add_observer(toggle)
         .add_observer(update_capability)
         .add_observer(take_back)
+        .add_observer(toggle_local)
         .add_systems(
             PreUpdate,
-            (retire, administer)
+            (reconcile, administer)
                 .chain()
                 .after(WindowSystems::AdmissionPolicy)
                 .before(WindowSystems::PresentationRevoke),
         )
         .add_systems(
             PreUpdate,
-            block_local_input
+            (sync_local_interaction, block_local_input)
+                .chain()
                 .after(WindowSystems::UiReconcile)
                 .before(PickingSystems::Backend),
         );
@@ -105,16 +133,18 @@ type ControllableWindows<'w, 's> = Query<
     'w,
     's,
     (
-        &'static WindowOccupant,
+        Option<&'static WindowOccupant>,
         Option<&'static ControlledWindow>,
+        Option<&'static ControlPolicy>,
         Has<HoistedWindow>,
+        Has<PersistentWindow>,
     ),
     With<ManagedWindow>,
 >;
 
 impl Grants<'_, '_> {
     fn set(&mut self, window: Entity, action: ControlAction) -> Result<()> {
-        let (occupant, existing, hoisted) = self
+        let (occupant, existing, policy, hoisted, persistent) = self
             .windows
             .get(window)
             .context("window is vacant or unavailable")?;
@@ -124,28 +154,33 @@ impl Grants<'_, '_> {
                     existing.0.revoke();
                 }
                 self.commands.entity(window).remove::<(
+                    ControlPolicy,
                     ControlledWindow,
                     RemoteControlPanel,
                     WindowExternalControl,
+                    WindowLocalInputBlocked,
                     WindowHeaderRequested,
+                    LocalInteractionActive,
                 )>();
                 return Ok(());
             }
             ControlAction::Enable => {
-                if existing.is_some_and(|existing| existing.0.active()) {
+                if policy.is_some_and(|policy| policy.permit.is_authorized()) {
                     return Ok(());
                 }
                 Capabilities::ALL
             }
             ControlAction::Permissions(capabilities) => {
-                let existing = existing
-                    .filter(|existing| existing.0.active())
+                let policy = policy
+                    .filter(|policy| policy.permit.is_authorized())
                     .context("remote control is disabled")?;
-                if existing.0.capabilities() == capabilities {
+                if policy.capabilities == capabilities {
                     return Ok(());
                 }
                 // Rotate the handle so queued work and held input retire under the old grant.
-                existing.0.revoke();
+                if let Some(existing) = existing {
+                    existing.0.revoke();
+                }
                 capabilities
             }
         };
@@ -153,23 +188,44 @@ impl Grants<'_, '_> {
             !hoisted,
             "reclaim the hoisted window before enabling remote control"
         );
-        let surface = self
-            .clients
-            .get(occupant.entity())
-            .context("window has no mapped application")?
-            .surface;
+        let surface = occupant
+            .and_then(|occupant| self.clients.get(occupant.entity()).ok())
+            .map(|client| client.surface);
         ensure!(
-            surface.source() == WAYLAND_CLIENT_SOURCE,
-            "remote control requires a locally hosted application"
+            surface.is_some() || persistent,
+            "window has no mapped application"
         );
-        let permit = self.access.0.open("remote-control".into())?;
-        let grant = self.controller.0.grant(surface, permit, capabilities)?;
-        self.commands.entity(window).insert((
-            ControlledWindow(grant),
+        if let Some(surface) = surface {
+            ensure!(
+                surface.source() == WAYLAND_CLIENT_SOURCE,
+                "remote control requires a locally hosted application"
+            );
+        }
+        let local = policy.is_some_and(|policy| policy.local);
+        let policy = ControlPolicy {
+            permit: self.access.0.open("remote-control".into())?,
+            capabilities,
+            local,
+        };
+        let grant = surface
+            .map(|surface| {
+                let permit = self.access.0.open("remote-control".into())?;
+                self.controller.0.grant(surface, permit, capabilities)
+            })
+            .transpose()?;
+        let mut entity = self.commands.entity(window);
+        entity.insert((
+            policy,
             RemoteControlPanel(capabilities),
-            WindowExternalControl,
             WindowHeaderRequested,
         ));
+        if let Some(grant) = grant {
+            entity.insert((
+                ControlledWindow(grant),
+                WindowExternalControl,
+                WindowLocalInputBlocked,
+            ));
+        }
         Ok(())
     }
 }
@@ -178,7 +234,7 @@ fn toggle(event: On<ToggleControl>, mut grants: Grants) {
     let enabled = grants
         .windows
         .get(event.0)
-        .is_ok_and(|(_, current, _)| current.is_none());
+        .is_ok_and(|(_, _, policy, _, _)| policy.is_none());
     if let Err(error) = grants.set(
         event.0,
         if enabled {
@@ -196,7 +252,7 @@ fn update_capability(event: On<ToggleCapability>, mut grants: Grants) {
         .windows
         .get(event.window)
         .ok()
-        .and_then(|(_, control, _)| control.map(|control| control.0.capabilities()))
+        .and_then(|(_, _, policy, _, _)| policy.map(|policy| policy.capabilities))
     else {
         return;
     };
@@ -236,43 +292,164 @@ fn administer(
     }
 }
 
-fn retire(
-    mut commands: Commands,
-    windows: Query<(
-        Entity,
-        &ControlledWindow,
-        Option<&WindowOccupant>,
-        Has<HoistedWindow>,
-    )>,
-    clients: Query<&ClientToplevel, With<MappedSurface>>,
+fn toggle_local(
+    event: On<ToggleLocalInteraction>,
+    mut policies: Query<&mut ControlPolicy, With<WindowOccupant>>,
 ) {
-    for (window, control, occupant, hoisted) in &windows {
+    if let Ok(mut policy) = policies.get_mut(event.0) {
+        policy.local = !policy.local;
+    }
+}
+
+type RememberedControlWindows<'w, 's> = Query<
+    'w,
+    's,
+    (
+        Entity,
+        &'static ControlPolicy,
+        Option<&'static ControlledWindow>,
+        Option<&'static WindowOccupant>,
+        Has<HoistedWindow>,
+        Has<PersistentWindow>,
+    ),
+>;
+
+fn reconcile(
+    mut commands: Commands,
+    windows: RememberedControlWindows,
+    clients: Query<&ClientToplevel, With<MappedSurface>>,
+    controller: Res<Controller>,
+    access: Res<SessionAccess>,
+) {
+    for (window, policy, control, occupant, hoisted, persistent) in &windows {
         let current = occupant
             .and_then(|occupant| clients.get(occupant.entity()).ok())
             .map(|client| client.surface);
-        if !control.0.active() || current != Some(control.0.surface()) || hoisted {
+        if !policy.permit.is_authorized() || hoisted || (current.is_none() && !persistent) {
             commands.entity(window).remove::<(
+                ControlPolicy,
                 ControlledWindow,
                 RemoteControlPanel,
                 WindowExternalControl,
+                WindowLocalInputBlocked,
                 WindowHeaderRequested,
+                LocalInteractionActive,
             )>();
+            continue;
+        }
+        if control.is_some_and(|control| control.0.active() && current == Some(control.0.surface()))
+        {
+            continue;
+        }
+        if let Some(control) = control {
+            control.0.revoke();
+        }
+        commands.entity(window).remove::<(
+            ControlledWindow,
+            WindowExternalControl,
+            WindowLocalInputBlocked,
+        )>();
+        if let Some(surface) = current {
+            let grant = access
+                .0
+                .open("remote-control".into())
+                .and_then(|permit| controller.0.grant(surface, permit, policy.capabilities));
+            match grant {
+                Ok(grant) => {
+                    commands.entity(window).insert((
+                        ControlledWindow(grant),
+                        WindowExternalControl,
+                        WindowLocalInputBlocked,
+                    ));
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "could not restore persistent window control");
+                    commands.entity(window).remove::<(
+                        ControlPolicy,
+                        RemoteControlPanel,
+                        WindowHeaderRequested,
+                    )>();
+                }
+            }
         }
     }
 }
 
 fn block_local_input(
     mut blocked: ResMut<LocalInputBlockedSurfaces>,
-    windows: Query<&ControlledWindow>,
+    windows: Query<(&ControlledWindow, Has<WindowLocalInputBlocked>)>,
     popups: Query<(&ClientSurface, &ClientPopup)>,
 ) {
     blocked.0.clear();
-    blocked
-        .0
-        .extend(windows.iter().map(|window| window.0.surface()));
+    blocked.0.extend(
+        windows
+            .iter()
+            .filter(|(_, blocked)| *blocked)
+            .map(|(window, _)| window.0.surface()),
+    );
     for (surface, popup) in &popups {
         if blocked.0.contains(&popup.owner) {
             blocked.0.insert(surface.surface);
+        }
+    }
+}
+
+type InputOwnershipWindows<'w, 's> = Query<
+    'w,
+    's,
+    (
+        Entity,
+        &'static ControlPolicy,
+        Option<&'static ControlledWindow>,
+        Has<LocalInteractionActive>,
+        Has<WindowLocalInputBlocked>,
+    ),
+>;
+
+fn sync_local_interaction(
+    mut commands: Commands,
+    focus: Res<FocusedWindow>,
+    bindings: Res<LocalInteractionBindings>,
+    mut shortcuts: ResMut<weld_input::GlobalShortcutRegistry>,
+    mut redraw: MessageWriter<bevy::window::RequestRedraw>,
+    windows: InputOwnershipWindows,
+) {
+    let available = focus.entity().is_some_and(|focused| {
+        windows
+            .get(focused)
+            .is_ok_and(|(_, policy, control, _, _)| {
+                policy.permit.is_authorized() && control.is_some()
+            })
+    });
+    for id in &bindings.0 {
+        if shortcuts.hold_enabled(*id) != available {
+            shortcuts.set_hold_enabled(*id, available);
+        }
+    }
+    let held = bindings.0.iter().any(|id| shortcuts.is_held(*id));
+    for (window, policy, control, was_local, was_blocked) in &windows {
+        let requested = policy.local || (held && focus.entity() == Some(window));
+        if let Some(control) = control {
+            control.0.set_local_input(requested);
+        }
+        let local = requested && control.is_some_and(|control| control.0.local_input_ready());
+        if requested && control.is_some() && !local {
+            redraw.write(bevy::window::RequestRedraw);
+        }
+        if local != was_local {
+            if local {
+                commands.entity(window).insert(LocalInteractionActive);
+            } else {
+                commands.entity(window).remove::<LocalInteractionActive>();
+            }
+        }
+        let blocked = control.is_some() && !local;
+        if was_blocked != blocked {
+            if blocked {
+                commands.entity(window).insert(WindowLocalInputBlocked);
+            } else {
+                commands.entity(window).remove::<WindowLocalInputBlocked>();
+            }
         }
     }
 }

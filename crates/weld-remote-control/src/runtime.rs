@@ -9,7 +9,7 @@ use std::{
     cell::RefCell,
     collections::HashMap,
     rc::Rc,
-    sync::{Arc, Mutex, mpsc},
+    sync::{Arc, Mutex, atomic::Ordering, mpsc},
     time::Instant,
 };
 use weld_client::{
@@ -102,10 +102,12 @@ impl HoistSourcePort for Port {
     }
     fn effects_drained(&mut self) {
         for pending in self.0.borrow_mut().accepted.drain(..) {
-            let result = if pending.grant.permit.is_authorized() {
+            let result = if pending.grant.permit.is_authorized()
+                && pending.grant.input_epoch.load(Ordering::Acquire) == pending.input_epoch
+            {
                 Ok(Reply::Applied)
             } else {
-                Err("window control revoked".into())
+                Err("window control revoked or input ownership changed".into())
             };
             let _ = pending.reply.send(result);
         }
@@ -143,6 +145,7 @@ struct Adapter {
     capturing: Vec<Capturing>,
     positions: HashMap<ClientSurfaceId, InputPosition>,
     started: Instant,
+    input_epochs: HashMap<ClientSurfaceId, u64>,
 }
 
 pub fn registration(
@@ -170,6 +173,7 @@ pub fn registration(
         capturing: Vec::new(),
         positions: HashMap::new(),
         started: Instant::now(),
+        input_epochs: HashMap::new(),
     };
     (
         ClientAdapterRegistration::new(
@@ -186,6 +190,27 @@ pub fn registration(
 }
 
 impl Adapter {
+    fn synchronize_input_ownership(&mut self) {
+        let mut state = self.state.borrow_mut();
+        for (surface, grant) in &state.grants {
+            let epoch = grant.input_epoch.load(Ordering::Acquire);
+            if self
+                .input_epochs
+                .insert(*surface, epoch)
+                .is_some_and(|previous| previous != epoch)
+            {
+                self.relay
+                    .release_input(|member| state.views.root(member) == Some(*surface));
+                self.positions.remove(surface);
+            }
+        }
+        for (surface, epoch) in &self.input_epochs {
+            if !epoch.is_multiple_of(2) {
+                state.input.remove(*surface);
+            }
+        }
+    }
+
     fn retire(&mut self) {
         let retired: Vec<_> = self
             .state
@@ -201,10 +226,17 @@ impl Adapter {
                 HoistEndpointCommand::Unmap { source },
             ));
             self.positions.remove(&source);
+            self.input_epochs.remove(&source);
         }
     }
 
     fn execute(&mut self, pending: &Pending) -> Result<Option<(Box<dyn CaptureJob>, Snapshot)>> {
+        let epoch = pending.grant.input_epoch.load(Ordering::Acquire);
+        ensure!(
+            matches!(pending.operation, Operation::Capture)
+                || (epoch.is_multiple_of(2) && epoch == pending.input_epoch),
+            "local interaction interrupted remote input"
+        );
         ensure!(
             pending
                 .grant
@@ -427,6 +459,7 @@ impl ClientAdapter for Adapter {
     }
     fn drain_events(&mut self, events: &mut ClientEventQueue) {
         self.retire();
+        self.synchronize_input_ownership();
         for _ in 0..64 {
             let Ok(command) = self.requests.try_recv() else {
                 break;
@@ -438,6 +471,8 @@ impl ClientAdapter for Adapter {
                     }
                     let surface = grant.surface;
                     let session = HoistSessionId::new(grant.permit.id().0);
+                    self.input_epochs
+                        .insert(surface, grant.input_epoch.load(Ordering::Acquire));
                     self.state.borrow_mut().grants.insert(surface, grant);
                     self.relay.apply_command(ClientAdapterCommandEnvelope::new(
                         self.source,
@@ -506,7 +541,13 @@ impl ClientAdapter for Adapter {
     }
     fn drain_effects(&mut self, effects: &mut Vec<ClientAdapterEffect>) {
         self.retire();
+        self.synchronize_input_ownership();
         self.relay.drain_effects(effects);
+        for (surface, grant) in &self.state.borrow().grants {
+            if let Some(epoch) = self.input_epochs.get(surface) {
+                grant.input_epoch_applied.store(*epoch, Ordering::Release);
+            }
+        }
     }
     fn drain_presentation_claims(&mut self, updates: &mut Vec<ClientPresentationUpdate>) {
         self.retire();
