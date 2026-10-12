@@ -16,7 +16,7 @@ pub mod benchmark;
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use overlay::DistributionOverlayPlugin;
+use overlay::OutputTopologyOverlayPlugin;
 use std::time::Duration;
 use weld_app::{
     WeldApp,
@@ -375,7 +375,7 @@ pub fn run(arguments: AppArguments) -> Result<()> {
         weld_float::FloatBehaviorPlugin,
         GlobalShortcutPlugin,
         VirtualTerminalShortcutPlugin,
-        DistributionOverlayPlugin,
+        OutputTopologyOverlayPlugin,
         master_config,
     ));
     if enable_hoist_policy {

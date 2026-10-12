@@ -1,7 +1,7 @@
-//! Standard-distribution watermark and output-topology diagnostics.
+//! Output-topology diagnostics.
 
 use bevy::{
-    app::{App, Plugin, Startup, Update},
+    app::{App, Plugin, Update},
     ecs::{
         change_detection::{DetectChanges, Ref},
         component::Component,
@@ -14,30 +14,25 @@ use bevy::{
     math::{UVec2, Vec2},
     picking::Pickable,
     prelude::{
-        AlignItems, BackgroundColor, BorderColor, BorderRadius, ChildOf, Children, Color, Display,
+        AlignItems, BackgroundColor, BorderColor, BorderRadius, ChildOf, Children, Color,
         GlobalZIndex, Node, PositionType, UiRect, UiTargetCamera, px,
     },
     scene::{CommandsSceneExt, Scene, bsn},
     text::{FontSourceTemplate, TextColor, TextFont},
-    ui::widget::{Text, TextShadow},
+    ui::widget::Text,
 };
-use weld_app::layer_shell::DesktopLayerVisibility;
 use weld_app::output::{
     OutputCompositionCamera, OutputFootprintProvenance, OutputGeometry, OutputInfo,
     OutputPlacement, OutputPosition, PrimaryOutput, WeldOutput,
 };
 
-pub(crate) struct DistributionOverlayPlugin;
+pub(crate) struct OutputTopologyOverlayPlugin;
 
-impl Plugin for DistributionOverlayPlugin {
+impl Plugin for OutputTopologyOverlayPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<OutputTopologyOverlayState>()
             .add_message::<ToggleOutputTopology>()
-            .add_systems(Startup, spawn_distribution_overlay)
-            .add_systems(
-                Update,
-                (update_output_topology_overlay, hide_fullscreen_watermark),
-            );
+            .add_systems(Update, update_output_topology_overlay);
     }
 }
 
@@ -53,24 +48,6 @@ struct OutputTopologyOverlayState {
 
 #[derive(Component)]
 struct OutputTopologyOverlay;
-
-#[derive(Component, Clone, Default)]
-struct DistributionWatermark;
-
-fn hide_fullscreen_watermark(
-    outputs: Query<Option<&DesktopLayerVisibility>, With<PrimaryOutput>>,
-    mut watermark: Query<&mut Node, With<DistributionWatermark>>,
-) {
-    let hidden = outputs
-        .iter()
-        .any(|policy| policy.is_some_and(|policy| *policy != DesktopLayerVisibility::All));
-    let display = if hidden { Display::None } else { Display::Flex };
-    for mut node in &mut watermark {
-        if node.display != display {
-            node.display = display;
-        }
-    }
-}
 
 #[derive(Clone)]
 struct OutputTopologySnapshot {
@@ -96,32 +73,6 @@ type OutputTopologyQueryItem<'world> = (
     Ref<'world, OutputPosition>,
     Option<&'world PrimaryOutput>,
 );
-
-fn spawn_distribution_overlay(mut commands: Commands) {
-    commands.spawn_scene(bsn! {
-        DistributionWatermark
-        Pickable::IGNORE
-        Node {
-            position_type: PositionType::Absolute,
-            top: px(24),
-            right: px(24),
-            width: px(240),
-            height: px(88),
-            padding: UiRect::all(px(16)),
-            align_items: AlignItems::Center,
-            border_radius: BorderRadius::all(px(18)),
-        }
-        Text("Weld Master")
-        TextFont {
-            font: FontSourceTemplate::Monospace,
-            font_size: px(20.0),
-        }
-        TextColor(Color::srgb(0.9, 0.9, 0.9))
-        TextShadow
-        BackgroundColor(Color::srgba(0.08, 0.34, 0.48, 0.82))
-        GlobalZIndex(weld_app::layer::SHELL_Z_INDEX)
-    });
-}
 
 fn update_output_topology_overlay(
     mut commands: Commands,
