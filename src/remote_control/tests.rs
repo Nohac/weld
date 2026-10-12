@@ -39,6 +39,7 @@ fn fixture() -> (App, ClientAdapterRegistration) {
         .add_observer(update_capability)
         .add_observer(take_back)
         .add_observer(toggle_local)
+        .add_observer(fit_to_frame)
         .add_systems(
             PreUpdate,
             reconcile
@@ -223,4 +224,49 @@ fn local_interaction_preserves_remote_permissions_and_independent_viewport() {
     app.update();
     assert!(app.world().get::<WindowLocalInputBlocked>(window).is_some());
     assert!(app.world().get::<LocalInteractionActive>(window).is_none());
+}
+
+#[test]
+fn fitting_uses_content_extent_without_transferring_viewport_ownership() {
+    use weld_app::surface::take_surface_actions;
+    use weld_window::PresentsWindow;
+
+    let (mut app, _adapter) = fixture();
+    let (_, window) = occupant(&mut app, 520);
+    app.world_mut().trigger(ToggleControl(window));
+    app.update();
+    app.world_mut().spawn((
+        PresentsWindow(window),
+        PresentationInsets::new(3., 27., 3., 3.),
+    ));
+    app.update();
+    app.world_mut()
+        .get_mut::<WindowGeometry>(window)
+        .expect("geometry")
+        .size = Vec2::new(806., 630.);
+    take_surface_actions(app.world_mut());
+    app.world_mut().trigger(FitToFrame(window));
+    let actions = take_surface_actions(app.world_mut());
+    assert_eq!(
+        actions,
+        vec![SurfaceAction::Resize {
+            surface: SurfaceId::for_test(520),
+            logical_size: UVec2::new(800, 600),
+            layout: ToplevelLayout::Tiled,
+            resizing: false,
+            fullscreen: false,
+        }]
+    );
+    assert!(app.world().get::<WindowExternalControl>(window).is_some());
+    assert!(app.world().get::<WindowLocalInputBlocked>(window).is_some());
+    app.world_mut()
+        .get_mut::<WindowGeometry>(window)
+        .expect("geometry")
+        .size = Vec2::new(906., 730.);
+    app.update();
+    assert!(
+        !take_surface_actions(app.world_mut())
+            .iter()
+            .any(|action| matches!(action, SurfaceAction::Resize { .. }))
+    );
 }

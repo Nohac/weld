@@ -38,9 +38,19 @@ pub struct ToggleCapability {
 #[derive(Event)]
 pub struct TakeBack(pub Entity);
 
-#[derive(Clone, Copy)]
+/// User request to toggle sustained local keyboard and pointer interaction.
+#[derive(Event)]
+pub struct ToggleLocalInteraction(pub Entity);
+
+/// User request to configure the application to the frame's current content area.
+#[derive(Event)]
+pub struct FitToFrame(pub Entity);
+
+#[derive(Clone, Copy, Debug, PartialEq)]
 enum Action {
     Toggle(Capability),
+    Interact,
+    Fit,
     TakeBack,
 }
 
@@ -51,13 +61,16 @@ impl Action {
             Self::Toggle(Capability::Keyboard) => "Keyboard",
             Self::Toggle(Capability::Pointer) => "Pointer",
             Self::Toggle(Capability::Resize) => "Resize",
+            Self::Interact => "Interact",
+            Self::Fit => "Fit",
             Self::TakeBack => "Take back",
         }
     }
-    fn enabled(self, capabilities: Capabilities) -> bool {
+    fn enabled(self, capabilities: Capabilities, local: bool) -> bool {
         match self {
             Self::Toggle(capability) => capabilities.allows(capability),
-            Self::TakeBack => false,
+            Self::Interact => local,
+            Self::Fit | Self::TakeBack => false,
         }
     }
 }
@@ -105,6 +118,11 @@ pub fn install(app: &mut App) -> Result<()> {
             Action::Toggle(Capability::Resize),
             include_str!("../assets/lucide/maximize.svg"),
         ),
+        (
+            Action::Interact,
+            include_str!("../assets/lucide/user-round.svg"),
+        ),
+        (Action::Fit, include_str!("../assets/lucide/maximize.svg")),
         (Action::TakeBack, include_str!("../assets/lucide/power.svg")),
     ] {
         let svg = Svg::parse(source)
@@ -274,6 +292,8 @@ fn click(
             capability,
         }),
         Action::TakeBack => commands.trigger(TakeBack(button.window)),
+        Action::Interact => commands.trigger(ToggleLocalInteraction(button.window)),
+        Action::Fit => commands.trigger(FitToFrame(button.window)),
     }
     redraw.write(RequestRedraw);
 }
@@ -324,21 +344,29 @@ fn sync_titles(
 
 fn sync_buttons(
     mut commands: Commands,
-    controls: Query<&RemoteControlPanel>,
+    controls: Query<(&RemoteControlPanel, Has<LocalInteractionActive>)>,
     palette: WindowFrameColors,
     mut buttons: Query<(
         Entity,
         &ControlButton,
         &mut BorderColor,
+        &mut BackgroundColor,
         &mut PermissionLabel,
     )>,
 ) {
-    for (entity, button, mut border, mut label) in &mut buttons {
-        let Ok(control) = controls.get(button.window) else {
+    for (entity, button, mut border, mut background, mut label) in &mut buttons {
+        let Ok((control, local)) = controls.get(button.window) else {
             continue;
         };
-        let enabled = button.action.enabled(control.0);
+        let enabled = button.action.enabled(control.0, local);
         let colors = palette.palette(button.window);
+        background.set_if_neq(BackgroundColor(
+            if matches!(button.action, Action::Interact) && local {
+                colors.indicator.with_alpha(0.25)
+            } else {
+                Color::NONE
+            },
+        ));
         border.set_if_neq(BorderColor::all(if enabled {
             colors.indicator
         } else {
@@ -352,6 +380,8 @@ fn sync_buttons(
         let value = match button.action {
             Action::Toggle(_) => format!("Remote {}: {}", button.action.label(), suffix),
             Action::TakeBack => "Take back control".into(),
+            Action::Interact => format!("Local interaction: {suffix}"),
+            Action::Fit => "Fit app to frame".into(),
         };
         commands.entity(entity).insert(AccessibleLabel::new(value));
     }
@@ -370,17 +400,18 @@ type Foregrounds<'w, 's> = Query<
 >;
 
 fn sync_foregrounds(
-    controls: Query<&RemoteControlPanel>,
+    controls: Query<(&RemoteControlPanel, Has<LocalInteractionActive>)>,
     palette: WindowFrameColors,
     settings: Res<SsdSettings>,
     geometry: Query<&WindowGeometry>,
     mut foregrounds: Foregrounds,
 ) {
     for (ButtonForeground(button), image, color, font, mut node) in &mut foregrounds {
-        let Ok(control) = controls.get(button.window) else {
+        let Ok((control, local)) = controls.get(button.window) else {
             continue;
         };
-        let enabled = matches!(button.action, Action::TakeBack) || button.action.enabled(control.0);
+        let enabled = matches!(button.action, Action::TakeBack | Action::Fit)
+            || button.action.enabled(control.0, local);
         let tint = foreground(palette.palette(button.window), enabled);
         if let Some(mut image) = image
             && image.color != tint
@@ -394,7 +425,7 @@ fn sync_foregrounds(
             font.set_if_neq(settings.title_font.text_font());
             let compact = geometry
                 .get(button.window)
-                .is_ok_and(|geometry| geometry.size.x < 200.0 + settings.title_font.size * 37.0);
+                .is_ok_and(|geometry| geometry.size.x < 200.0 + settings.title_font.size * 48.0);
             let display = if compact {
                 Display::None
             } else {
@@ -423,7 +454,7 @@ mod tests {
     use weld_window::{FocusedWindow, WindowProjection};
 
     #[derive(Resource, Default)]
-    struct Actions(Vec<(Entity, Option<Capability>)>);
+    struct Actions(Vec<(Entity, Action)>);
 
     #[test]
     fn mounted_controls_emit_scoped_actions_update_in_place_and_retire() {
@@ -440,11 +471,21 @@ mod tests {
         .add_message::<RequestRedraw>()
         .add_observer(
             |event: On<ToggleCapability>, mut actions: ResMut<Actions>| {
-                actions.0.push((event.window, Some(event.capability)));
+                actions
+                    .0
+                    .push((event.window, Action::Toggle(event.capability)));
             },
         )
         .add_observer(|event: On<TakeBack>, mut actions: ResMut<Actions>| {
-            actions.0.push((event.0, None));
+            actions.0.push((event.0, Action::TakeBack));
+        })
+        .add_observer(
+            |event: On<ToggleLocalInteraction>, mut actions: ResMut<Actions>| {
+                actions.0.push((event.0, Action::Interact));
+            },
+        )
+        .add_observer(|event: On<FitToFrame>, mut actions: ResMut<Actions>| {
+            actions.0.push((event.0, Action::Fit));
         });
         install(&mut app).expect("icons");
         let window = app
@@ -467,7 +508,7 @@ mod tests {
             .iter(app.world())
             .map(|(entity, button)| (entity, *button))
             .collect();
-        assert_eq!(buttons.len(), 5);
+        assert_eq!(buttons.len(), 7);
         for (entity, target) in &buttons {
             app.world_mut().trigger(Pointer::new(
                 PointerId::Mouse,
@@ -491,15 +532,45 @@ mod tests {
                 .last()
                 .copied()
                 .expect("action");
+            assert_eq!(action, (window, target.action));
+        }
+        let interact = buttons
+            .iter()
+            .find(|(_, button)| matches!(button.action, Action::Interact))
+            .expect("local interaction button")
+            .0;
+        for active in [true, false, true, false] {
+            if active {
+                app.world_mut()
+                    .entity_mut(window)
+                    .insert(LocalInteractionActive);
+            } else {
+                app.world_mut()
+                    .entity_mut(window)
+                    .remove::<LocalInteractionActive>();
+            }
+            app.update();
             assert_eq!(
-                action,
-                (
-                    window,
-                    match target.action {
-                        Action::Toggle(capability) => Some(capability),
-                        Action::TakeBack => None,
-                    }
+                app.world()
+                    .get::<AccessibleLabel>(interact)
+                    .expect("label")
+                    .0,
+                format!(
+                    "Local interaction: {}",
+                    if active { "enabled" } else { "disabled" }
                 )
+            );
+            assert_eq!(
+                app.world()
+                    .get::<BackgroundColor>(interact)
+                    .expect("background")
+                    .0
+                    != Color::NONE,
+                active
+            );
+            assert_eq!(
+                app.world().get::<BorderColor>(interact) != Some(&BorderColor::all(Color::NONE)),
+                active
             );
         }
         app.world_mut()

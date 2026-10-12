@@ -15,9 +15,12 @@ use std::{
 use weld_app::{
     WeldApp,
     input::LocalInputBlockedSurfaces,
-    surface::{ClientPopup, ClientSurface, ClientToplevel, MappedSurface},
+    surface::{
+        ClientPopup, ClientSurface, ClientToplevel, MappedSurface, SurfaceAction,
+        SurfaceActionQueue,
+    },
 };
-use weld_client::{ClientSourceId, ComposedBuffer};
+use weld_client::{ClientSourceId, ComposedBuffer, ToplevelLayout};
 use weld_control::windows::{ControlAction, ControlRequest, WindowService};
 use weld_core::{
     WAYLAND_CLIENT_SOURCE,
@@ -26,12 +29,14 @@ use weld_core::{
 };
 use weld_hoist::HoistedWindow;
 use weld_remote_control::{Capabilities, Capture, CaptureJob, Grant, RemoteControlClient};
+pub(crate) use weld_remote_control_ui::ToggleLocalInteraction;
 use weld_remote_control_ui::{
-    LocalInteractionActive, RemoteControlPanel, TakeBack, ToggleCapability,
+    FitToFrame, LocalInteractionActive, RemoteControlPanel, TakeBack, ToggleCapability,
 };
 use weld_window::{
-    FocusedWindow, ManagedWindow, WindowExternalControl, WindowHeaderRequested,
-    WindowLocalInputBlocked, WindowOccupant, WindowSystems, persistence::PersistentWindow,
+    FocusedWindow, ManagedWindow, PresentationInsets, PrimaryWindowPresentation,
+    WindowExternalControl, WindowGeometry, WindowHeaderRequested, WindowLocalInputBlocked,
+    WindowOccupant, WindowSystems, persistence::PersistentWindow, rounded_client_size,
 };
 
 #[derive(Component)]
@@ -49,9 +54,6 @@ impl Drop for ControlPolicy {
         self.permit.end();
     }
 }
-
-#[derive(Event)]
-pub(crate) struct ToggleLocalInteraction(pub Entity);
 
 #[derive(Resource, Default)]
 pub(crate) struct LocalInteractionBindings(pub Vec<weld_input::GlobalShortcutId>);
@@ -102,6 +104,7 @@ pub(crate) fn install(app: &mut WeldApp, service: &WindowService) -> Result<()> 
         .add_observer(update_capability)
         .add_observer(take_back)
         .add_observer(toggle_local)
+        .add_observer(fit_to_frame)
         .add_systems(
             PreUpdate,
             (reconcile, administer)
@@ -299,6 +302,35 @@ fn toggle_local(
     if let Ok(mut policy) = policies.get_mut(event.0) {
         policy.local = !policy.local;
     }
+}
+
+fn fit_to_frame(
+    event: On<FitToFrame>,
+    windows: Query<(
+        &ControlledWindow,
+        &WindowGeometry,
+        Option<&PrimaryWindowPresentation>,
+    )>,
+    insets: Query<&PresentationInsets>,
+    mut actions: ResMut<SurfaceActionQueue>,
+) {
+    let Ok((control, geometry, presentation)) = windows.get(event.0) else {
+        return;
+    };
+    if !control.0.active() {
+        return;
+    }
+    let insets = presentation
+        .and_then(|presentation| insets.get(presentation.entity()).ok())
+        .copied()
+        .unwrap_or_default();
+    actions.push(SurfaceAction::Resize {
+        surface: control.0.surface(),
+        logical_size: rounded_client_size(geometry.size - insets.extent()),
+        layout: ToplevelLayout::Tiled,
+        resizing: false,
+        fullscreen: false,
+    });
 }
 
 type RememberedControlWindows<'w, 's> = Query<

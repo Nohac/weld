@@ -83,7 +83,9 @@ held input through the shared hoist relay.
 The desktop frame initially remains a live, read-only peek. Hold the configured
 modifier chord to use the focused window locally, or use the toggle binding to
 keep local keyboard and pointer input enabled after releasing the chord. The
-header shows **Local interaction** while takeover is active. Its modifiers are
+header shows **Local interaction** while takeover is active. The **Interact**
+button toggles sustained local interaction and highlights whenever local input
+is active, including while holding the configured chord. Its modifiers are
 consumed for application input and window-manager pointer shortcuts. The native
 relay releases remote holds before local input activates; queued remote input
 from an earlier ownership epoch is rejected. Remote capture remains available.
@@ -92,6 +94,9 @@ The controller configures the app's
 viewport independently; moving or resizing the desktop frame changes only the
 peek. Content stays at its natural logical size, anchored at the upper left and
 clipped to the frame. Taking back control restores desktop input and resizing.
+The header's **Fit** button sends a one-time application resize to the frame's
+current content area, excluding borders and the titlebar. Later frame changes
+continue to resize only the peek.
 Scale-to-fit remains a later presentation improvement.
 
 Grants expire on unmapping, occupant replacement, revocation or session exit.
