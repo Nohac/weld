@@ -18,6 +18,7 @@ use crate::{
 
 #[derive(Default)]
 struct LoopbackQueues {
+    closed: bool,
     source_to_destination: VecDeque<DestinationPortRecord>,
     destination_to_source: VecDeque<DestinationEnvelope>,
 }
@@ -28,6 +29,9 @@ struct LoopbackSourcePort {
 
 impl HoistSourcePort for LoopbackSourcePort {
     fn submit(&mut self, command: SourcePortCommand) -> HoistPortResult<()> {
+        if self.queues.borrow().closed {
+            return Err(std::io::Error::other("loopback session closed").into());
+        }
         let record = match command {
             SourcePortCommand::Gamepad(status) => DestinationPortRecord {
                 session: weld_hoist_protocol::gamepad::GAMEPAD_SESSION,
@@ -64,6 +68,9 @@ impl HoistSourcePort for LoopbackSourcePort {
     }
 
     fn poll(&mut self) -> HoistPortResult<Vec<DestinationEnvelope>> {
+        if self.queues.borrow().closed {
+            return Err(std::io::Error::other("loopback session closed").into());
+        }
         Ok(self
             .queues
             .borrow_mut()
@@ -84,6 +91,7 @@ impl HoistSourcePort for LoopbackSourcePort {
 
     fn disconnect(&mut self) {
         let mut queues = self.queues.borrow_mut();
+        queues.closed = true;
         queues.source_to_destination.clear();
         queues.destination_to_source.clear();
     }
@@ -127,6 +135,9 @@ impl LoopbackDestinationPort {
 
 impl HoistDestinationPort for LoopbackDestinationPort {
     fn poll(&mut self) -> HoistPortResult<Vec<DestinationPortRecord>> {
+        if self.queues.borrow().closed {
+            return Err(std::io::Error::other("loopback session closed").into());
+        }
         let records = self
             .queues
             .borrow_mut()
@@ -145,6 +156,9 @@ impl HoistDestinationPort for LoopbackDestinationPort {
     }
 
     fn submit(&mut self, command: DestinationPortCommand) -> HoistPortResult<()> {
+        if self.queues.borrow().closed {
+            return Err(std::io::Error::other("loopback session closed").into());
+        }
         match command {
             DestinationPortCommand::FocusCleared => {}
             DestinationPortCommand::Message(envelope) => self
@@ -160,6 +174,7 @@ impl HoistDestinationPort for LoopbackDestinationPort {
 
     fn disconnect(&mut self) {
         let mut queues = self.queues.borrow_mut();
+        queues.closed = true;
         queues.source_to_destination.clear();
         queues.destination_to_source.clear();
     }

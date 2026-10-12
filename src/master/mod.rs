@@ -346,6 +346,7 @@ fn handle_actions(mut pressed: MessageReader<GlobalShortcutPressed>, mut command
 
 #[derive(SystemParam)]
 struct ActionEffects<'w, 's> {
+    access: Option<Res<'w, crate::control::SessionAccess>>,
     focus: Res<'w, FocusedWindow>,
     shell: ResMut<'w, ShellCommands>,
     hoist: Option<ResMut<'w, Messages<HoistWindow>>>,
@@ -363,6 +364,13 @@ fn dispatch_action(
         return;
     };
     match action {
+        Action::Extension(DistributionAction::RevokeAccess) => {
+            if let Some(access) = &effects.access {
+                if let Err(error) = access.0.revoke_all() {
+                    tracing::warn!(%error, "could not revoke external access");
+                }
+            }
+        }
         Action::Focus(direction) => effects.commands.trigger(I3FocusRequest(direction)),
         Action::Move(direction) => effects.commands.trigger(I3MoveRequest(direction)),
         Action::Workspace(request) => effects.commands.trigger(request),

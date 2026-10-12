@@ -213,6 +213,15 @@ pub struct ClientAdapterRegistration {
 }
 
 impl ClientAdapterRegistration {
+    /// Applies adapter-private configuration before runtime registration and ingress.
+    pub fn configure(&mut self, payload: impl Any + Send + Sync) {
+        self.runtime
+            .driver
+            .apply_command(ClientAdapterCommandEnvelope::new(
+                self.runtime.descriptor.id,
+                payload,
+            ));
+    }
     pub fn new<I>(
         descriptor: ClientSourceDescriptor,
         driver: impl ClientAdapter + 'static,

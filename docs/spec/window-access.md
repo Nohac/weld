@@ -11,6 +11,10 @@ authorization and presentation layers.
 
 ## Use cases — Direction
 
+Live access grants and control sessions belong to the running Weld session and
+are kept in memory. Restarting Weld retires them. Future explicit window rules
+may establish fresh grants; saved device pairing remains a separate concern.
+
 Weld should expose scoped application control for automation, guest and assist
 sessions through the same window, input and presentation primitives as hoisting.
 

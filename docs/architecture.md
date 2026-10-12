@@ -6,6 +6,12 @@ project intent and future direction without presenting it as current behavior.
 
 Weld is a workspace of reusable layers and one standard distribution:
 
+- `weld-access` owns in-memory session admission and revocable connection permits.
+  The shared source relay checks those permits before accepting input and
+  publishing frames. Revocation retires held input and presentation claims
+  through the existing hoist cleanup path. Local, loopback and Iroh source
+  assemblies share the authority used by native control and the emergency binding.
+  See [Access sessions](access-sessions.md) for commands and validation.
 - `weld-diagnostics` owns bounded typed session evidence, validated report
   bundles and conservative, deterministic explanations. It uses local monotonic
   timelines; platform integrations supply measurements and retain authorization.

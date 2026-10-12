@@ -143,6 +143,13 @@ pub fn run(arguments: AppArguments) -> Result<()> {
         .socket_name(arguments.wayland_socket)
         .keyboard_repeat_mode(arguments.keyboard_repeat_mode.map(Into::into))
         .build()?;
+    let access_wake = app.policy_wake()?;
+    let access = weld_access::AccessAuthority::new(move || {
+        if let Err(error) = access_wake.notify() {
+            tracing::warn!(%error, "could not wake access retirement");
+        }
+    });
+    app.insert_resource(control::SessionAccess(access.clone()));
     let ipc_service = ipc_service.start()?;
     app.insert_resource(master::ModeStatus(ipc_service.publisher()));
     app.add_plugins(weld_sway_ipc::SwayIpcPlugin(
@@ -175,6 +182,11 @@ pub fn run(arguments: AppArguments) -> Result<()> {
                         adapter_source,
                         adapter_source,
                     );
+                    let (adapter, endpoint) = weld_hoist_core::access::authorize_source(
+                        adapter,
+                        endpoint,
+                        access.open("local-peer".into())?,
+                    );
                     app.add_client_wake_source(transport.control.runtime_wake_source())
                         .add_client_adapter(adapter)
                         .insert_resource(HoistEndpointRegistry::with_default(endpoint));
@@ -195,6 +207,11 @@ pub fn run(arguments: AppArguments) -> Result<()> {
                             bitrate_budget,
                         },
                     )?;
+                    let (adapter, endpoint) = weld_hoist_core::access::authorize_source(
+                        adapter,
+                        endpoint,
+                        access.open("local-peer".into())?,
+                    );
                     for wake in wakes {
                         app.add_client_wake_source(wake);
                     }
@@ -270,6 +287,7 @@ pub fn run(arguments: AppArguments) -> Result<()> {
             );
             let capabilities = required_external_capabilities(&app)?;
             let adapter_source = weld_client::ClientSourceId::new(1);
+            let source_access = access.open(format!("iroh:{}", peer.identity().as_str()))?;
             let (adapter, endpoint, codec_wake) = iroh_source_registration(
                 peer,
                 adapter_source,
@@ -285,6 +303,8 @@ pub fn run(arguments: AppArguments) -> Result<()> {
                         .then(|| Box::new(weld_gamepad::UinputGamepadProvider) as _),
                 },
             )?;
+            let (adapter, endpoint) =
+                weld_hoist_core::access::authorize_source(adapter, endpoint, source_access);
             app.add_client_wake_source(network_wake)
                 .add_client_wake_source(codec_wake)
                 .add_client_adapter(adapter)
@@ -335,6 +355,11 @@ pub fn run(arguments: AppArguments) -> Result<()> {
                 weld_core::WAYLAND_CLIENT_SOURCE,
                 weld_client::ClientSourceId::new(1),
             );
+            let (adapter, endpoint) = weld_hoist_core::access::authorize_source(
+                adapter,
+                endpoint,
+                access.open("loopback".into())?,
+            );
             app.add_client_adapter(adapter)
                 .insert_resource(HoistEndpointRegistry::with_default(endpoint));
         }
@@ -357,7 +382,13 @@ pub fn run(arguments: AppArguments) -> Result<()> {
     }
     let _controls = if enable_hoist_policy {
         match device_options.and_then(|options| {
-            devices::install(&mut app, options, device_host.clone(), launcher.clone())
+            devices::install(
+                &mut app,
+                options,
+                device_host.clone(),
+                launcher.clone(),
+                access.clone(),
+            )
         }) {
             Ok(controls) => controls,
             Err(error) => {
@@ -365,6 +396,7 @@ pub fn run(arguments: AppArguments) -> Result<()> {
                 weld_control::ControlService::start_local(
                     &session_name,
                     device_host,
+                    access,
                     control::launch_handler(launcher),
                 )?
             }
@@ -373,6 +405,7 @@ pub fn run(arguments: AppArguments) -> Result<()> {
         weld_control::ControlService::start_local(
             &session_name,
             device_host,
+            access,
             control::launch_handler(launcher),
         )?
     };

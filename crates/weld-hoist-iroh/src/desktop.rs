@@ -28,6 +28,7 @@ use weld_media::VideoCodec;
 
 #[derive(Clone)]
 pub struct DesktopEndpoint {
+    access: weld_access::AccessSession,
     pub session: SessionId,
     peer: IrohSourcePeer,
     source: ClientSourceId,
@@ -39,7 +40,7 @@ struct RoutedCommand {
 }
 impl HoistEndpoint for DesktopEndpoint {
     fn is_available(&self) -> bool {
-        self.peer.is_available()
+        self.access.is_authorized() && self.peer.is_available()
     }
     fn has_local_receiver(&self) -> bool {
         false
@@ -138,7 +139,11 @@ impl ClientAdapter for DesktopAdapter {
         self.inventory.presentation_source()
     }
     fn drain_events(&mut self, events: &mut ClientEventQueue) {
-        for (session, peer) in self.sessions.take_peers() {
+        for (session, peer, access) in self.sessions.take_peers() {
+            if !access.is_authorized() {
+                peer.disconnect();
+                continue;
+            }
             let result = (|| -> Result<()> {
                 let backend = (self.factory)(peer.codec())?;
                 let port = EncodedSourcePort::configured(
@@ -149,7 +154,7 @@ impl ClientAdapter for DesktopAdapter {
                         access_unit_dump: None,
                     },
                 )?;
-                let relay = self.inventory.fork(port);
+                let relay = self.inventory.fork(port).with_access(access.clone());
                 // Each connection receives a fresh policy namespace; remote shells
                 // retain their own destination namespace in their own runtime.
                 let destination = ClientSourceId::new(
@@ -172,6 +177,7 @@ impl ClientAdapter for DesktopAdapter {
                     .lock()
                     .map_err(|_| anyhow::anyhow!("endpoint handoff poisoned"))?
                     .push(DesktopEndpoint {
+                        access,
                         session,
                         peer: peer.clone(),
                         source: self.source,

@@ -60,6 +60,7 @@ pub(crate) fn install(
     options: DeviceOptions,
     host: Option<IrohHost>,
     launcher: weld_core::runtime::launch::ClientLauncher,
+    access: weld_access::AccessAuthority,
 ) -> Result<ControlService> {
     let policy = app.policy_wake()?;
     let (media, wake) = weld_core::host::client_runtime_notifier()?;
@@ -67,12 +68,14 @@ pub(crate) fn install(
         media.clone().into(),
         IrohNotifier::new(move || policy.notify()),
         options.codec,
-    );
+    )
+    .with_access(access.clone());
     let controls = ControlService::start(
         &options.session,
         options.directory,
         host,
         sessions.clone(),
+        access,
         crate::control::launch_handler(launcher),
     )?;
     let capabilities = app.external_dmabuf_capabilities()?;

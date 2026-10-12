@@ -8068,6 +8068,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "weld-access"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "serde",
+]
+
+[[package]]
 name = "weld-app"
 version = "0.1.0"
 dependencies = [
@@ -8108,6 +8116,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
+ "weld-access",
  "weld-diagnostics",
  "weld-hoist-iroh",
  "weld-media",
@@ -8192,6 +8201,7 @@ name = "weld-hoist-core"
 version = "0.1.0"
 dependencies = [
  "tracing",
+ "weld-access",
  "weld-client",
  "weld-hoist-protocol",
 ]
@@ -8232,6 +8242,7 @@ dependencies = [
  "serde_json",
  "tokio",
  "tracing",
+ "weld-access",
  "weld-client",
  "weld-core",
  "weld-diagnostics",
@@ -8471,6 +8482,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "tracing-tracy",
+ "weld-access",
  "weld-app",
  "weld-client",
  "weld-control",
@@ -8478,6 +8490,7 @@ dependencies = [
  "weld-float",
  "weld-gamepad",
  "weld-hoist",
+ "weld-hoist-core",
  "weld-hoist-encoded",
  "weld-hoist-iroh",
  "weld-hoist-local",

@@ -8,6 +8,7 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
+use weld_control::access::AccessRequest;
 use weld_control::{Request, Response, call, socket_path};
 use weld_hoist_iroh::pairing::DevicePermissions;
 
@@ -22,6 +23,11 @@ struct Arguments {
 }
 #[derive(Subcommand)]
 enum Command {
+    /// Inspect and revoke external application-control sessions.
+    Access {
+        #[command(subcommand)]
+        command: Access,
+    },
     /// Launch an application in the selected Weld session.
     Launch {
         /// Working directory; defaults to the calling shell's current directory.
@@ -53,6 +59,22 @@ enum Devices {
         #[arg(long, action = clap::ArgAction::Set)]
         enabled: bool,
     },
+}
+
+#[derive(Subcommand)]
+enum Access {
+    Status {
+        #[arg(long)]
+        json: bool,
+    },
+    Revoke {
+        #[arg(long, conflicts_with = "session", required_unless_present = "session")]
+        all: bool,
+        #[arg(long)]
+        session: Option<u64>,
+    },
+    /// Permit fresh connections under existing local and paired-device approvals.
+    Allow,
 }
 
 #[derive(Subcommand)]
@@ -96,6 +118,50 @@ fn main() -> Result<()> {
         )?,
     };
     match args.command {
+        Command::Access { command } => {
+            let request = match command {
+                Access::Status { .. } => AccessRequest::Status,
+                Access::Revoke { all: true, .. } => AccessRequest::RevokeAll,
+                Access::Revoke {
+                    session: Some(id), ..
+                } => AccessRequest::Revoke(weld_access::AccessSessionId(id)),
+                Access::Revoke { .. } => anyhow::bail!("select --all or --session ID"),
+                Access::Allow => AccessRequest::Allow,
+            };
+            match call(&path, &Request::Access(request))? {
+                Response::AccessStatus(status) => {
+                    if matches!(command, Access::Status { json: true }) {
+                        println!("{}", serde_json::to_string_pretty(&status)?);
+                    } else {
+                        println!(
+                            "New access sessions: {}",
+                            if status.accepting {
+                                "enabled"
+                            } else {
+                                "blocked"
+                            }
+                        );
+                        for session in status.sessions {
+                            println!(
+                                "{}  {}  {}",
+                                session.id.0,
+                                if session.authorized {
+                                    "authorized"
+                                } else {
+                                    "ended"
+                                },
+                                session.participant
+                            );
+                        }
+                        for participant in status.blocked_participants {
+                            println!("Reconnect blocked: {participant}");
+                        }
+                    }
+                }
+                Response::Ok => println!("Access policy updated."),
+                _ => anyhow::bail!("unexpected access response"),
+            }
+        }
         Command::Launch { cwd, command } => {
             let (program, arguments) = command
                 .split_first()

@@ -14,6 +14,7 @@ test-support = ["weld-app/test-support"]
 
 [workspace]
 members = [
+  "crates/weld-access",
   "crates/weld-diagnostics",
   "crates/weld-app",
   "crates/weld-client",
@@ -104,6 +105,7 @@ x11-dl = "2.21.0"
 xcursor = "0.3.11"
 
 [dependencies]
+weld-access = { path = "crates/weld-access" }
 anyhow.workspace = true
 bevy.workspace = true
 bevy_dylib.workspace = true
@@ -123,6 +125,7 @@ weld-i3-quirks = { path = "crates/weld-i3-quirks" }
 weld-sway-ipc = { path = "crates/weld-sway-ipc" }
 weld-gamepad = { path = "crates/weld-gamepad" }
 weld-hoist = { path = "crates/weld-hoist" }
+weld-hoist-core = { path = "crates/weld-hoist-core" }
 weld-hoist-iroh = { path = "crates/weld-hoist-iroh", features = ["vaapi"] }
 weld-hoist-encoded = { path = "crates/weld-hoist-encoded" }
 weld-hoist-local = { path = "crates/weld-hoist-local", features = ["encoded-vaapi"] }

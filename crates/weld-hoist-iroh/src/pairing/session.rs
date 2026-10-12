@@ -16,6 +16,7 @@ use std::{
     },
 };
 use tokio::sync::mpsc;
+use weld_access::{AccessAuthority, AccessSession};
 use weld_client::ClientSurfaceId;
 use weld_hoist_encoded::{EncodedDestinationTransport, EncodedSourceTransport};
 use weld_media::VideoCodec;
@@ -46,12 +47,13 @@ pub enum DeviceAction {
 }
 
 struct DesktopState {
-    peers: VecDeque<(SessionId, IrohSourcePeer)>,
+    peers: VecDeque<(SessionId, IrohSourcePeer, AccessSession)>,
     actions: VecDeque<DeviceAction>,
-    catalogues: BTreeMap<SessionId, Vec<ApplicationInfo>>,
+    catalogues: BTreeMap<SessionId, (Vec<ApplicationInfo>, AccessSession)>,
 }
 #[derive(Clone)]
 pub struct DesktopSessions {
+    access: AccessAuthority,
     state: Arc<Mutex<DesktopState>>,
     next: Arc<AtomicU64>,
     notifier: IrohNotifier,
@@ -61,16 +63,24 @@ pub struct DesktopSessions {
 impl DesktopSessions {
     pub(super) fn close(&self) {
         if let Ok(mut state) = self.state.lock() {
-            for (_, peer) in state.peers.drain(..) {
+            for (_, peer, access) in state.peers.drain(..) {
+                access.end();
                 peer.disconnect();
             }
             state.actions.clear();
+            for (_, access) in state.catalogues.values() {
+                access.end();
+            }
             state.catalogues.clear();
         }
         let _ = self.policy.notify();
     }
     pub fn new(notifier: IrohNotifier, policy: IrohNotifier, codec: VideoCodec) -> Self {
+        let wake = notifier.clone();
         Self {
+            access: AccessAuthority::new(move || {
+                let _ = wake.notify();
+            }),
             state: Arc::new(Mutex::new(DesktopState {
                 peers: VecDeque::new(),
                 actions: VecDeque::new(),
@@ -82,7 +92,12 @@ impl DesktopSessions {
             codec,
         }
     }
-    pub fn take_peers(&self) -> Vec<(SessionId, IrohSourcePeer)> {
+    /// Shares the host's admission latch and administrative session inventory.
+    pub fn with_access(mut self, access: AccessAuthority) -> Self {
+        self.access = access;
+        self
+    }
+    pub fn take_peers(&self) -> Vec<(SessionId, IrohSourcePeer, AccessSession)> {
         self.state
             .lock()
             .map(|mut state| state.peers.drain(..).collect())
@@ -98,7 +113,11 @@ impl DesktopSessions {
         if let Ok(mut state) = self.state.lock()
             && let Some(catalogue) = state.catalogues.get_mut(&session)
         {
-            *catalogue = applications.into_iter().take(256).collect();
+            catalogue.0 = if catalogue.1.is_authorized() {
+                applications.into_iter().take(256).collect()
+            } else {
+                Vec::new()
+            };
         }
     }
     fn catalogue(&self, session: SessionId) -> Result<Vec<ApplicationInfo>> {
@@ -107,10 +126,11 @@ impl DesktopSessions {
             .map_err(|_| anyhow::anyhow!("desktop state unavailable"))?
             .catalogues
             .get(&session)
-            .cloned()
+            .filter(|(_, access)| access.is_authorized())
+            .map(|(applications, _)| applications.clone())
             .context("desktop session ended")
     }
-    fn join(&self, id: SessionId, peer: IrohSourcePeer) -> Result<()> {
+    fn join(&self, id: SessionId, peer: IrohSourcePeer, access: AccessSession) -> Result<()> {
         let mut state = self
             .state
             .lock()
@@ -119,16 +139,19 @@ impl DesktopSessions {
             state.peers.len() < 8 && state.catalogues.len() < 8,
             "desktop session capacity reached"
         );
-        state.peers.push_back((id, peer));
-        state.catalogues.insert(id, Vec::new());
+        ensure!(access.is_authorized(), "desktop access revoked");
+        state.peers.push_back((id, peer, access.clone()));
+        state.catalogues.insert(id, (Vec::new(), access));
         drop(state);
         self.policy.notify()?;
         Ok(())
     }
     fn leave(&self, session: SessionId) {
         if let Ok(mut state) = self.state.lock() {
-            state.catalogues.remove(&session);
-            state.peers.retain(|(id, _)| *id != session);
+            if let Some((_, access)) = state.catalogues.remove(&session) {
+                access.end();
+            }
+            state.peers.retain(|(id, _, _)| *id != session);
             state.actions.retain(|action| match action {
                 DeviceAction::Hoist { session: id, .. }
                 | DeviceAction::Release { session: id, .. } => *id != session,
@@ -142,6 +165,16 @@ impl DesktopSessions {
             .lock()
             .map_err(|_| anyhow::anyhow!("desktop state unavailable"))?;
         ensure!(state.actions.len() < 64, "desktop command queue full");
+        let session = match &action {
+            DeviceAction::Hoist { session, .. } | DeviceAction::Release { session, .. } => session,
+        };
+        ensure!(
+            state
+                .catalogues
+                .get(session)
+                .is_some_and(|(_, access)| access.is_authorized()),
+            "desktop access revoked"
+        );
         state.actions.push_back(action);
         drop(state);
         self.policy.notify()?;
@@ -189,6 +222,9 @@ pub(crate) async fn accept_session(
     let permissions = authority.authorize(&connection)?;
     ensure!(permissions.browse, "application browsing not permitted");
     let desktop = authority.desktop()?;
+    let access = desktop
+        .access
+        .open(format!("device:{}", connection.remote_id()))?;
     let (mut send, mut recv) =
         tokio::time::timeout(Duration::from_secs(5), connection.accept_bi()).await??;
     let hello: Hello =
@@ -230,7 +266,7 @@ pub(crate) async fn accept_session(
             .map_err(|_| anyhow::anyhow!("device session IDs exhausted"))?,
     );
     let recorder = peer.diagnostics();
-    desktop.join(id, peer)?;
+    desktop.join(id, peer, access.clone())?;
     let _joined = JoinedSession {
         desktop: desktop.clone(),
         id,
@@ -281,6 +317,7 @@ pub(crate) async fn accept_session(
                     Reply::Accepted(wait_for_action(&connection, wait).await?)
                 }
             };
+            ensure!(access.is_authorized(), "desktop access revoked");
             session_io(
                 &connection,
                 Duration::from_secs(5),

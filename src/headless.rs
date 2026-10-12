@@ -16,6 +16,13 @@ pub(crate) fn run(arguments: AppArguments) -> Result<()> {
     let mut runtime = HostRuntime::prepare(runtime_options(&arguments)?)?;
     let (launcher, requests) = weld_core::runtime::launch::launch_channel()?;
     runtime.add_launch_requests(requests)?;
+    let (access_wake, wake_source) = client_runtime_notifier()?;
+    runtime.add_client_wake_source(wake_source)?;
+    let access = weld_access::AccessAuthority::new(move || {
+        if let Err(error) = access_wake.notify() {
+            tracing::warn!(%error, "could not wake access retirement");
+        }
+    });
     let host = arguments
         .hoist_iroh_listen
         .as_ref()
@@ -24,6 +31,7 @@ pub(crate) fn run(arguments: AppArguments) -> Result<()> {
     let _controls = weld_control::ControlService::start_local(
         arguments.wayland_socket.as_deref().unwrap_or("weld-0"),
         host.clone(),
+        access.clone(),
         crate::control::launch_handler(launcher),
     )?;
     let Some(ticket) = &arguments.hoist_iroh_listen else {
@@ -46,7 +54,7 @@ pub(crate) fn run(arguments: AppArguments) -> Result<()> {
         notifier.into(),
         std::time::Duration::from_secs(arguments.hoist_iroh_timeout.unwrap_or(120)),
     )?;
-    let (adapter, codec_wake) = pending_source_registration(
+    let (mut adapter, codec_wake) = pending_source_registration(
         pending,
         IrohSourceRegistrationOptions {
             upstream_source: weld_core::WAYLAND_CLIENT_SOURCE,
@@ -60,6 +68,10 @@ pub(crate) fn run(arguments: AppArguments) -> Result<()> {
                 .then(|| Box::new(weld_gamepad::UinputGamepadProvider) as _),
         },
     )?;
+    weld_hoist_core::access::authorize_registration(
+        &mut adapter,
+        access.open("headless-iroh-peer".into())?,
+    );
     runtime
         .add_client_wake_source(network_wake)?
         .add_client_wake_source(codec_wake)?

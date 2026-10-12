@@ -1,4 +1,5 @@
 //! Same-user control of a running Weld session and its device authority.
+pub mod access;
 pub mod launch;
 use anyhow::{Context, Result, ensure};
 use launch::{LaunchHandler, LaunchReceipt, LaunchRequest};
@@ -12,12 +13,13 @@ use std::{
     },
     path::{Path, PathBuf},
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicBool, Ordering},
     },
     thread::{self, JoinHandle},
     time::Duration,
 };
+use weld_access::{AccessAuthority, AccessStatus};
 use weld_hoist_iroh::{
     IrohDeviceIdentity, IrohHost, IrohNetwork,
     pairing::{DesktopSessions, DevicePermissions, PairedDevice, PairingCandidate},
@@ -25,6 +27,7 @@ use weld_hoist_iroh::{
 
 #[derive(Serialize, Deserialize)]
 pub enum Request {
+    Access(access::AccessRequest),
     Launch(LaunchRequest),
     DiagnosticSessions,
     DiagnosticReport(weld_diagnostics::SessionId),
@@ -46,6 +49,7 @@ pub enum Request {
 }
 #[derive(Serialize, Deserialize)]
 pub enum Response {
+    AccessStatus(AccessStatus),
     Launched(LaunchReceipt),
     DiagnosticSessions(
         Vec<(
@@ -132,6 +136,7 @@ impl ControlService {
         directory: PathBuf,
         existing: Option<IrohHost>,
         desktop: DesktopSessions,
+        access: AccessAuthority,
         launch: impl FnMut(LaunchRequest) -> Result<LaunchReceipt> + Send + 'static,
     ) -> Result<Self> {
         let socket = socket_path(session)?;
@@ -140,6 +145,7 @@ impl ControlService {
             session,
             existing,
             Some(PairingSetup { directory, desktop }),
+            access,
             Box::new(launch),
         )
     }
@@ -148,9 +154,17 @@ impl ControlService {
     pub fn start_local(
         session: &str,
         host: Option<IrohHost>,
+        access: AccessAuthority,
         launch: impl FnMut(LaunchRequest) -> Result<LaunchReceipt> + Send + 'static,
     ) -> Result<Self> {
-        Self::start_at(socket_path(session)?, session, host, None, Box::new(launch))
+        Self::start_at(
+            socket_path(session)?,
+            session,
+            host,
+            None,
+            access,
+            Box::new(launch),
+        )
     }
 
     fn start_at(
@@ -158,6 +172,7 @@ impl ControlService {
         session: &str,
         existing: Option<IrohHost>,
         pairing: Option<PairingSetup>,
+        access: AccessAuthority,
         launch: LaunchHandler,
     ) -> Result<Self> {
         let parent = socket.parent().context("control socket parent absent")?;
@@ -202,6 +217,7 @@ impl ControlService {
                     pairing,
                     name: session,
                     launch,
+                    access: access.clone(),
                 };
                 if owner
                     .pairing
@@ -214,6 +230,8 @@ impl ControlService {
                         eprintln!("could not restore Weld device service: {error:#}");
                     }
                 }
+                let owner = Arc::new(Mutex::new(owner));
+                let mut connections: Vec<JoinHandle<()>> = Vec::new();
                 for stream in listener.incoming() {
                     if stopped.load(Ordering::Acquire) {
                         break;
@@ -221,22 +239,38 @@ impl ControlService {
                     let Ok(mut stream) = stream else {
                         break;
                     };
-                    let result = (|| -> Result<Response> {
-                        let credentials = rustix::net::sockopt::socket_peercred(&stream)?;
-                        ensure!(
-                            credentials.uid == rustix::process::geteuid(),
-                            "control client belongs to another user"
+                    let mut index = 0;
+                    while index < connections.len() {
+                        if connections[index].is_finished() {
+                            let _ = connections.swap_remove(index).join();
+                        } else {
+                            index += 1;
+                        }
+                    }
+                    if connections.len() >= 16 {
+                        let _ = stream.set_write_timeout(Some(Duration::from_secs(1)));
+                        let _ = write(
+                            &mut stream,
+                            &Response::Error("control connection capacity reached".into()),
                         );
-                        stream.set_read_timeout(Some(Duration::from_secs(3)))?;
-                        stream.set_write_timeout(Some(Duration::from_secs(3)))?;
-                        owner.request(read(&mut stream)?)
-                    })();
-                    let response =
-                        result.unwrap_or_else(|error| Response::Error(format!("{error:#}")));
-                    let _ = write(&mut stream, &response);
+                        continue;
+                    }
+                    let owner = owner.clone();
+                    let access = access.clone();
+                    match thread::Builder::new()
+                        .name("weld-control-request".into())
+                        .spawn(move || serve_connection(stream, owner, access))
+                    {
+                        Ok(connection) => connections.push(connection),
+                        Err(error) => eprintln!("could not start control request: {error}"),
+                    }
                 }
-                if owner.enabled
-                    && let Some(host) = owner.host
+                for connection in connections {
+                    let _ = connection.join();
+                }
+                if let Ok(owner) = owner.lock()
+                    && owner.enabled
+                    && let Some(host) = &owner.host
                 {
                     host.pairing().shutdown();
                 }
@@ -248,6 +282,30 @@ impl ControlService {
             _lock: lock,
         })
     }
+}
+
+fn serve_connection(mut stream: UnixStream, owner: Arc<Mutex<Owner>>, access: AccessAuthority) {
+    let result = (|| -> Result<Response> {
+        let credentials = rustix::net::sockopt::socket_peercred(&stream)?;
+        ensure!(
+            credentials.uid == rustix::process::geteuid(),
+            "control client belongs to another user"
+        );
+        stream.set_read_timeout(Some(Duration::from_secs(3)))?;
+        stream.set_write_timeout(Some(Duration::from_secs(3)))?;
+        let request = read(&mut stream)?;
+        // Access retirement remains responsive while a launch or diagnostic
+        // collection waits on the serialized service owner.
+        if let Request::Access(request) = request {
+            return request.execute(&access);
+        }
+        owner
+            .lock()
+            .map_err(|_| anyhow::anyhow!("control service unavailable"))?
+            .request(request)
+    })();
+    let response = result.unwrap_or_else(|error| Response::Error(format!("{error:#}")));
+    let _ = write(&mut stream, &response);
 }
 impl Drop for ControlService {
     fn drop(&mut self) {
@@ -265,6 +323,7 @@ struct PairingSetup {
     desktop: DesktopSessions,
 }
 struct Owner {
+    access: AccessAuthority,
     launch: LaunchHandler,
     host: Option<IrohHost>,
     enabled: bool,
@@ -304,6 +363,7 @@ impl Owner {
     }
     fn request(&mut self, request: Request) -> Result<Response> {
         Ok(match request {
+            Request::Access(request) => request.execute(&self.access)?,
             Request::Launch(request) => Response::Launched((self.launch)(request)?),
             Request::DiagnosticSessions => Response::DiagnosticSessions(
                 self.host
@@ -412,6 +472,7 @@ mod tests {
         let storage = directory.path().join("devices");
         let notifier = IrohNotifier::new(|| Ok(()));
         let mut owner = Owner {
+            access: AccessAuthority::new(|| {}),
             launch: Box::new(unavailable_launch),
             host: None,
             enabled: false,
@@ -458,6 +519,7 @@ mod tests {
                 directory: directory.path().to_owned(),
                 desktop: desktop.clone(),
             }),
+            AccessAuthority::new(|| {}),
             Box::new(unavailable_launch),
         )
         .expect("service");
@@ -470,6 +532,7 @@ mod tests {
                     directory: directory.path().to_owned(),
                     desktop
                 }),
+                AccessAuthority::new(|| {}),
                 Box::new(unavailable_launch),
             )
             .is_err()
@@ -505,6 +568,7 @@ mod tests {
             "test",
             Some(host),
             None,
+            AccessAuthority::new(|| {}),
             Box::new(unavailable_launch),
         )
         .expect("diagnostics-only service");
@@ -534,6 +598,7 @@ mod tests {
             "test",
             None,
             None,
+            AccessAuthority::new(|| {}),
             Box::new(move |request| {
                 assert_eq!(request.directory, expected_directory);
                 assert_eq!(request.arguments, ["space in argument", "$(literal)"]);
@@ -572,6 +637,64 @@ mod tests {
         assert!(!directory.path().join("devices.json").exists());
         drop(service);
         assert!(!socket.exists());
+    }
+
+    #[test]
+    fn access_revocation_bypasses_a_blocked_launch_request() {
+        let directory = tempfile::tempdir().expect("directory");
+        fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o700))
+            .expect("private directory");
+        let socket = directory.path().join("control.sock");
+        let access = AccessAuthority::new(|| {});
+        let permit = access.open("test-peer".into()).expect("permit");
+        let (entered, started) = std::sync::mpsc::channel();
+        let (release, wait) = std::sync::mpsc::channel();
+        let service = ControlService::start_at(
+            socket.clone(),
+            "test",
+            None,
+            None,
+            access,
+            Box::new(move |_| {
+                entered.send(()).expect("entered");
+                wait.recv_timeout(Duration::from_secs(5)).expect("release");
+                Ok(LaunchReceipt { process_id: 123 })
+            }),
+        )
+        .expect("service");
+        let launch_socket = socket.clone();
+        let launch = thread::spawn(move || {
+            call(
+                &launch_socket,
+                &Request::Launch(LaunchRequest {
+                    program: "test".into(),
+                    arguments: Vec::new(),
+                    directory: PathBuf::from("/tmp"),
+                }),
+            )
+        });
+        started
+            .recv_timeout(Duration::from_secs(2))
+            .expect("launch started");
+        let (answer, result) = std::sync::mpsc::channel();
+        let revoke = thread::spawn(move || {
+            let response = call(&socket, &Request::Access(access::AccessRequest::RevokeAll));
+            let _ = answer.send(response);
+        });
+        let response = result.recv_timeout(Duration::from_secs(2));
+        let revoked_before_release = !permit.is_authorized();
+        release.send(()).expect("release launch");
+        launch
+            .join()
+            .expect("launch worker")
+            .expect("launch response");
+        revoke.join().expect("revoke worker");
+        assert!(matches!(
+            response.expect("prompt revoke").expect("revoke response"),
+            Response::Ok
+        ));
+        assert!(revoked_before_release);
+        drop(service);
     }
 
     #[test]
