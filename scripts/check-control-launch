@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""Validate native launch RPC in a private headless or nested Weld session."""
+"""Validate native launch and window CLI/RPC/MCP in a private Weld session."""
 
 import argparse
 import json
 import os
 from pathlib import Path
 import resource
+import select
 import signal
 import socket
 import subprocess
@@ -89,6 +90,7 @@ def main():
                     tree = subprocess.check_output(["swaymsg", "-s", ipc, "-t", "get_tree", "-r"], text=True, timeout=5)
                     return name in tree
                 wait_for(host, lambda: mapped("weld-launch-probe"), "Foot admission through native launch")
+                check_windows(ctl, control)
                 if args.xwayland:
                     subprocess.run([*ctl, "launch", "--", str(root / "target/debug/examples/x11_window_probe"),
                                     "--seconds", "2", "--title", "Weld X11 launch probe"], check=True, timeout=10)
@@ -121,6 +123,92 @@ def main():
             except subprocess.TimeoutExpired:
                 os.killpg(host.pid, signal.SIGKILL)
                 host.wait(timeout=5)
+
+
+def check_windows(ctl, control):
+    listing = json.loads(subprocess.check_output([*ctl, "window", "list", "--json"], text=True, timeout=10))
+    window = next(window for window in listing["windows"] if window["app_id"] == "weld-launch-probe")
+    details = json.loads(subprocess.check_output(
+        [*ctl, "window", "get", window["id"], "--json"], text=True, timeout=10))
+    assert details == window
+    def rpc(method, params):
+        with socket.socket(socket.AF_UNIX) as connection:
+            connection.settimeout(5)
+            connection.connect(str(control))
+            body = json.dumps({"Window": {
+                "jsonrpc": "2.0", "id": "validation", "method": method, "params": params,
+            }}).encode()
+            connection.sendall(len(body).to_bytes(4, "little") + body)
+            def exact(length):
+                data = bytearray()
+                while len(data) < length:
+                    chunk = connection.recv(length - len(data))
+                    if not chunk:
+                        raise RuntimeError("window RPC disconnected before reply")
+                    data.extend(chunk)
+                return data
+            length = int.from_bytes(exact(4), "little")
+            assert length <= 16 * 1024 * 1024
+            response = json.loads(exact(length))["Window"]
+            assert response["id"] == "validation", response
+            return response
+    assert rpc("get", {"id": window["id"]})["result"] == details
+    assert any(item["id"] == window["id"] for item in rpc("list", {})["result"]["windows"])
+    assert rpc("missing_method", {})["error"]["code"] == -32601
+    assert "error" in rpc("get", {"id": 123})
+    schema = json.loads(subprocess.check_output(
+        [*ctl, "window", "get", "--output-schema"], text=True, timeout=10))
+    assert schema["properties"]["id"]["type"] == "string", schema
+    assert "geometry" in schema["properties"], schema
+    with subprocess.Popen([*ctl, "mcp"], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                          stderr=subprocess.PIPE) as mcp:
+        def send(message):
+            mcp.stdin.write(json.dumps(message).encode() + b"\n")
+            mcp.stdin.flush()
+        def request(identifier, method, params):
+            send({"jsonrpc": "2.0", "id": identifier, "method": method, "params": params})
+            return receive(identifier)
+        def receive(identifier):
+            if not select.select([mcp.stdout], [], [], 10)[0]:
+                raise RuntimeError(f"MCP timed out on request {identifier}")
+            reply = json.loads(mcp.stdout.readline())
+            assert reply.get("id") == identifier, reply
+            assert "error" not in reply, reply
+            return reply["result"]
+        try:
+            initialized = request(1, "initialize", {
+                "protocolVersion": "2025-11-25", "capabilities": {},
+                "clientInfo": {"name": "weld-window-validation", "version": "1"},
+            })
+            assert "tools" in initialized["capabilities"]
+            send({"jsonrpc": "2.0", "method": "notifications/initialized"})
+            tools = request(2, "tools/list", {})["tools"]
+            assert {tool["name"] for tool in tools} == {"window_list", "window_get", "window_wait"}
+            result = request(3, "tools/call", {"name": "window_get", "arguments": {"id": window["id"]}})
+            assert not result.get("isError"), result
+            assert result["structuredContent"]["id"] == window["id"], result
+            result = request(4, "tools/call", {"name": "window_get", "arguments": {"id": "absent"}})
+            assert result.get("isError"), result
+            result = request(5, "tools/call", {"name": "window_wait", "arguments": {
+                "after": 0, "timeout_ms": 1000}})
+            assert result["structuredContent"]["revision"] >= listing["revision"], result
+            revision = result["structuredContent"]["revision"]
+            send({"jsonrpc": "2.0", "id": 6, "method": "tools/call", "params": {
+                "name": "window_wait", "arguments": {"after": revision, "timeout_ms": 5000}}})
+            subprocess.run([*ctl, "launch", "--", "foot", "--app-id=weld-window-wait-probe"],
+                           check=True, capture_output=True, timeout=10)
+            result = receive(6)
+            assert result["structuredContent"]["revision"] > revision, result
+        finally:
+            mcp.stdin.close()
+            try:
+                mcp.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                mcp.kill()
+                mcp.wait(timeout=5)
+                raise RuntimeError("MCP did not stop after stdin closed")
+            assert mcp.returncode == 0, mcp.stderr.read().decode(errors="replace")
+    print("PASS native window queries, full output schema, MCP initialize/list/call/errors/async wait", flush=True)
 
 
 def child():

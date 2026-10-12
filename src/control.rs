@@ -1,5 +1,7 @@
 //! Connects local administrative RPC to the native host's process launcher.
 
+pub(crate) mod windows;
+
 use anyhow::Result;
 use bevy::prelude::Resource;
 use weld_access::AccessAuthority;

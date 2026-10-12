@@ -23,6 +23,14 @@ struct Arguments {
 }
 #[derive(Subcommand)]
 enum Command {
+    /// Serve window inspection tools to an MCP client over stdin/stdout.
+    Mcp,
+    /// Query the running host's managed windows.
+    #[command(disable_help_flag = true)]
+    Window {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        arguments: Vec<String>,
+    },
     /// Inspect and revoke external application-control sessions.
     Access {
         #[command(subcommand)]
@@ -118,6 +126,12 @@ fn main() -> Result<()> {
         )?,
     };
     match args.command {
+        Command::Mcp => weld_control::mcp::run(path)?,
+        Command::Window { arguments } => {
+            weld_control::windows::WindowClient::new(path)
+                .cli_run_with(std::iter::once("window".to_owned()).chain(arguments))
+                .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+        }
         Command::Access { command } => {
             let request = match command {
                 Access::Status { .. } => AccessRequest::Status,

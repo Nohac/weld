@@ -9,6 +9,14 @@ See [Native application launch](../native-launch.md) for the implemented scope
 and validation. The following sections describe the intended control-session,
 authorization and presentation layers.
 
+## Native window inspection — Implemented
+
+The same-user window service exposes list, inspect and bounded inventory-change
+waits through generated CLI/RPC/MCP interfaces. The standard distribution
+publishes domain-owned managed-window snapshots, including vacant persistent
+slots. See [Native window inspection](../native-window-control.md) for schemas,
+commands, lifetime and validation.
+
 ## Use cases — Direction
 
 Live access grants and control sessions belong to the running Weld session and

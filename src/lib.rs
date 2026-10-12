@@ -409,6 +409,7 @@ pub fn run(arguments: AppArguments) -> Result<()> {
             control::launch_handler(launcher),
         )?
     };
+    app.add_plugins(control::windows::NativeWindowPlugin(_controls.windows()));
     app.run()
 }
 

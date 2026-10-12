@@ -1,6 +1,8 @@
 //! Same-user control of a running Weld session and its device authority.
 pub mod access;
 pub mod launch;
+pub mod mcp;
+pub mod windows;
 use anyhow::{Context, Result, ensure};
 use launch::{LaunchHandler, LaunchReceipt, LaunchRequest};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
@@ -27,6 +29,7 @@ use weld_hoist_iroh::{
 
 #[derive(Serialize, Deserialize)]
 pub enum Request {
+    Window(serde_json::Value),
     Access(access::AccessRequest),
     Launch(LaunchRequest),
     DiagnosticSessions,
@@ -49,6 +52,7 @@ pub enum Request {
 }
 #[derive(Serialize, Deserialize)]
 pub enum Response {
+    Window(serde_json::Value),
     AccessStatus(AccessStatus),
     Launched(LaunchReceipt),
     DiagnosticSessions(
@@ -125,12 +129,16 @@ pub fn call(path: &Path, request: &Request) -> Result<Response> {
 }
 
 pub struct ControlService {
+    windows: windows::WindowService,
     socket: PathBuf,
     stop: Arc<AtomicBool>,
     worker: Option<JoinHandle<()>>,
     _lock: fs::File,
 }
 impl ControlService {
+    pub fn windows(&self) -> windows::WindowService {
+        self.windows.clone()
+    }
     pub fn start(
         session: &str,
         directory: PathBuf,
@@ -208,6 +216,8 @@ impl ControlService {
         let stop = Arc::new(AtomicBool::new(false));
         let stopped = stop.clone();
         let session = session.to_owned();
+        let windows = windows::WindowService::default();
+        let window_queries = windows.clone();
         let worker = thread::Builder::new()
             .name("weld-control".into())
             .spawn(move || {
@@ -257,9 +267,10 @@ impl ControlService {
                     }
                     let owner = owner.clone();
                     let access = access.clone();
+                    let windows = window_queries.clone();
                     match thread::Builder::new()
                         .name("weld-control-request".into())
-                        .spawn(move || serve_connection(stream, owner, access))
+                        .spawn(move || serve_connection(stream, owner, access, windows))
                     {
                         Ok(connection) => connections.push(connection),
                         Err(error) => eprintln!("could not start control request: {error}"),
@@ -276,6 +287,7 @@ impl ControlService {
                 }
             })?;
         Ok(Self {
+            windows,
             socket,
             stop,
             worker: Some(worker),
@@ -284,7 +296,12 @@ impl ControlService {
     }
 }
 
-fn serve_connection(mut stream: UnixStream, owner: Arc<Mutex<Owner>>, access: AccessAuthority) {
+fn serve_connection(
+    mut stream: UnixStream,
+    owner: Arc<Mutex<Owner>>,
+    access: AccessAuthority,
+    windows: windows::WindowService,
+) {
     let result = (|| -> Result<Response> {
         let credentials = rustix::net::sockopt::socket_peercred(&stream)?;
         ensure!(
@@ -294,6 +311,15 @@ fn serve_connection(mut stream: UnixStream, owner: Arc<Mutex<Owner>>, access: Ac
         stream.set_read_timeout(Some(Duration::from_secs(3)))?;
         stream.set_write_timeout(Some(Duration::from_secs(3)))?;
         let request = read(&mut stream)?;
+        if let Request::Window(request) = request {
+            ensure!(request.is_object(), "expected one window RPC request");
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()?;
+            return Ok(Response::Window(
+                runtime.block_on(windows.jsonrpc_handle_async(request)),
+            ));
+        }
         // Access retirement remains responsive while a launch or diagnostic
         // collection waits on the serialized service owner.
         if let Request::Access(request) = request {
@@ -310,6 +336,7 @@ fn serve_connection(mut stream: UnixStream, owner: Arc<Mutex<Owner>>, access: Ac
 impl Drop for ControlService {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Release);
+        self.windows.close();
         let _ = UnixStream::connect(&self.socket);
         if let Some(worker) = self.worker.take() {
             let _ = worker.join();
@@ -363,6 +390,7 @@ impl Owner {
     }
     fn request(&mut self, request: Request) -> Result<Response> {
         Ok(match request {
+            Request::Window(_) => anyhow::bail!("window requests require the window service"),
             Request::Access(request) => request.execute(&self.access)?,
             Request::Launch(request) => Response::Launched((self.launch)(request)?),
             Request::DiagnosticSessions => Response::DiagnosticSessions(
@@ -695,6 +723,63 @@ mod tests {
         ));
         assert!(revoked_before_release);
         drop(service);
+    }
+
+    #[test]
+    fn window_rpc_waits_for_publication_and_reports_retired_windows() {
+        let directory = tempfile::tempdir().expect("directory");
+        fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o700))
+            .expect("private directory");
+        let socket = directory.path().join("control.sock");
+        let service = ControlService::start_at(
+            socket.clone(),
+            "test",
+            None,
+            None,
+            AccessAuthority::new(|| {}),
+            Box::new(unavailable_launch),
+        )
+        .expect("service");
+        let publisher = service.windows();
+        let client = windows::WindowClient::new(socket);
+        assert!(client.list().is_err(), "uninstalled manager is explicit");
+        publisher.publish(Vec::new()).expect("empty inventory");
+        let initial = client.list().expect("initial");
+        publisher.publish(Vec::new()).expect("unchanged");
+        assert_eq!(client.list().expect("unchanged").revision, initial.revision);
+        let waiting = client.clone();
+        let wait = thread::spawn(move || waiting.wait(initial.revision, 2000));
+        let window = windows::WindowInfo {
+            id: "9007199254740993".into(),
+            app_id: Some("test".into()),
+            title: Some("Window".into()),
+            workspace: Some("1".into()),
+            output: Some("1".into()),
+            geometry: windows::Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 800.0,
+                height: 600.0,
+            },
+            occupied: true,
+            focused: true,
+            visible: true,
+            floating: false,
+        };
+        publisher.publish(vec![window.clone()]).expect("mapped");
+        assert_eq!(
+            wait.join().expect("worker").expect("changed").windows,
+            vec![window.clone()]
+        );
+        assert_eq!(client.get(window.id.clone()).expect("inspect"), window);
+        publisher.publish(Vec::new()).expect("closed");
+        assert!(client.get(window.id).is_err());
+        assert!(
+            client
+                .wait(client.list().expect("current").revision, 1)
+                .is_err()
+        );
+        assert!(client.wait(0, 20_001).is_err());
     }
 
     #[test]

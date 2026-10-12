@@ -1250,6 +1250,13 @@ process creation and reaping. Each request carries exact arguments and an
 absolute working directory; replies report process creation or spawn failure.
 Local launch is also installed for headless and destination-only assemblies.
 See [Native application launch](native-launch.md) for commands and validation.
+`weld-control::windows` serves owned managed-window snapshots published after
+the domain inspection collectors. A coalesced revision supports bounded async
+waits without holding the compositor or the serialized pairing/launch handler.
+`server-less` generates native JSON-RPC dispatch and the socket client's CLI/MCP
+interfaces. Schemars supplies field-level wire schemas; the official MCP SDK
+owns the stdio lifecycle in `weldctl mcp`. See
+[Native window inspection](native-window-control.md) for commands and validation.
 `weld-hoist-iroh::pairing` owns authenticated enrollment and an
 independent application catalog/control stream. Master translates approved
 requests into ordinary hoist/reclaim messages. The runtime-owned desktop relay
