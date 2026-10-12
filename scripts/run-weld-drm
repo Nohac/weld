@@ -11,6 +11,7 @@ script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 repository_root="$(cd -- "${script_dir}/.." && pwd)"
 log_path="${WELD_DRM_LOG:-${repository_root}/target/validation/weld-drm.log}"
 run_seconds=""
+socket_options=(--wayland-socket weld-drm-test)
 
 case "${1:-}" in
     --seconds)
@@ -27,6 +28,13 @@ esac
 if [[ -n "${run_seconds}" && ! "${run_seconds}" =~ ^[1-9][0-9]*$ ]]; then
     fail "--seconds requires a positive integer"
 fi
+
+for argument in "$@"; do
+    case "${argument}" in
+        --) break ;;
+        --wayland-socket|--wayland-socket=*) socket_options=(); break ;;
+    esac
+done
 
 [[ -t 0 && -t 1 ]] || fail "this compositor must run interactively from a real TTY"
 command -v cargo >/dev/null 2>&1 || fail "cargo is not available"
@@ -56,7 +64,7 @@ cd -- "${repository_root}"
 printf 'Writing Weld DRM output to %s\n' "${log_path}" >&2
 set +e
 if [[ -n "${run_seconds}" ]]; then
-    cargo run -- --backend drm "$@" > >(tee "${log_path}") 2>&1 &
+    cargo run -- --backend drm "${socket_options[@]}" "$@" > >(tee "${log_path}") 2>&1 &
     cargo_pid=$!
     (
         weld_pid=""
@@ -82,7 +90,7 @@ if [[ -n "${run_seconds}" ]]; then
     kill "${watchdog_pid}" 2>/dev/null || true
     wait "${watchdog_pid}" 2>/dev/null || true
 else
-    cargo run -- --backend drm "$@" 2>&1 | tee "${log_path}"
+    cargo run -- --backend drm "${socket_options[@]}" "$@" 2>&1 | tee "${log_path}"
     status=${PIPESTATUS[0]}
 fi
 set -e

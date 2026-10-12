@@ -82,6 +82,12 @@ from the root workspace dependency. Keep that set centralized: crate-local
 feature additions make package-specific Cargo commands build another Bevy
 artifact instead of reusing the distribution's prebuilt Bevy artifacts.
 
+Include `-p weldwm` when selecting desktop leaf-crate tests, for example
+`cargo test -p weldwm -p weld-input --test bindings`. The full application also
+unifies features through transitive dependencies such as Leafwing. Keeping that
+package selected preserves the application feature graph while running the
+requested test target.
+
 Release executables do not reference the development dylib and remain
 standalone. Cargo still builds an unused `libbevy_dylib` artifact because
 dependencies cannot vary by profile; do not make the helper optional, since
@@ -252,6 +258,10 @@ queued frame and vblank, including cursor-plane assignment, vblank sequence
 deltas, composition state, and GPU wait time. Use `WELD_DRM_PACING_TRACE=0` for
 performance comparisons because writing the trace can itself perturb frame timing. Output defaults
 to `target/validation/weld-drm.log`.
+
+The DRM test launcher defaults to `--wayland-socket weld-drm-test`, keeping its
+Wayland and native-control endpoints separate from the login session's `weld-0`.
+Pass `--wayland-socket NAME` to choose another test socket.
 
 The launcher also enables bounded `weld_render_state=debug` diagnostics for
 camera extraction, render-target matching, visible surface counts, pipelines,
