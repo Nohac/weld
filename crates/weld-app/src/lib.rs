@@ -5,6 +5,7 @@ pub(crate) const PROFILE_TARGET: &str = "weld_profile";
 #[cfg(feature = "test-support")]
 #[doc(hidden)]
 pub mod benchmark;
+pub mod border;
 mod builder;
 pub mod client;
 pub mod cursor;

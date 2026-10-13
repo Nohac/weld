@@ -340,6 +340,7 @@ pub fn configure_rendering(app: &mut App, context: &RenderContext) {
             .add_systems(ExtractSchedule, extract_sprite_events);
     }
     diagnostics::install(app);
+    crate::border::install(app);
 }
 
 impl AppShell {
@@ -1920,6 +1921,186 @@ mod tests {
         );
         shell.advance_main(2);
         assert_eq!(completed.get(), 3, "idle updates do not repeat preparation");
+    }
+
+    #[cfg(feature = "test-support")]
+    #[test]
+    fn border_underlap_covers_fractional_content_join_without_changing_layout() {
+        use crate::border::BorderUnderlap;
+        use bevy::{
+            prelude::{BorderColor, FlexDirection, percent},
+            ui::{ComputedNode, UiGlobalTransform, UiRect},
+        };
+
+        let output = OutputConfiguration::new(
+            PRIMARY_OUTPUT_ID,
+            Extent::new(64, 64),
+            "1.25".parse().expect("scale"),
+            LogicalPoint::ZERO,
+            true,
+            None,
+        )
+        .expect("output");
+        let (mut shell, _, device, queue) =
+            crate::benchmark::rendering_shell_with_outputs(vec![output], |_| {})
+                .expect("GPU shell");
+        let surface = SurfaceId::for_test(1);
+        install_diagnostic_surface(&mut shell, surface, [255; 4]);
+        update_diagnostic_surface_scaled(&mut shell, surface, 43, 34., |_, _| [255; 4]);
+        let camera = shell.outputs[&PRIMARY_OUTPUT_ID].camera;
+        let frame = shell
+            .app
+            .world_mut()
+            .spawn((
+                Node {
+                    position_type: PositionType::Absolute,
+                    left: px(5.25),
+                    top: px(5.25),
+                    width: px(40.),
+                    height: px(40.),
+                    border: UiRect::all(px(3.)),
+                    flex_direction: FlexDirection::Column,
+                    border_radius: BorderRadius::all(px(8.)),
+                    ..Default::default()
+                },
+                BorderColor::all(Color::WHITE),
+                UiTargetCamera(camera),
+            ))
+            .id();
+        let body = shell
+            .app
+            .world_mut()
+            .spawn((
+                Node {
+                    width: percent(100),
+                    height: percent(100),
+                    flex_direction: FlexDirection::Column,
+                    overflow: bevy::ui::Overflow::clip(),
+                    border_radius: BorderRadius::all(px(5.)),
+                    ..Default::default()
+                },
+                BackgroundColor(Color::srgb(1., 0., 1.)),
+                ChildOf(frame),
+            ))
+            .id();
+        let clip = shell
+            .app
+            .world_mut()
+            .spawn((
+                RoundedSurfaceClip,
+                Node {
+                    width: percent(100),
+                    height: percent(100),
+                    overflow: bevy::ui::Overflow::clip(),
+                    border_radius: BorderRadius::all(px(5.)),
+                    ..Default::default()
+                },
+                ChildOf(body),
+            ))
+            .id();
+        let content = shell
+            .app
+            .world_mut()
+            .spawn((
+                SurfaceNode {
+                    surface,
+                    view: SurfaceView::FullSurface,
+                },
+                Node {
+                    flex_shrink: 0.,
+                    ..Default::default()
+                },
+                ChildOf(clip),
+            ))
+            .id();
+        let mut before = None;
+        for underlap in [false, true] {
+            if underlap {
+                shell
+                    .app
+                    .world_mut()
+                    .entity_mut(frame)
+                    .insert(BorderUnderlap(body));
+            }
+            for tick in 0..6 {
+                shell.advance_main(tick);
+                shell
+                    .render_outputs(&[owned_request(PRIMARY_OUTPUT_ID)], &mut Vec::new())
+                    .expect("settle");
+            }
+            let geometry = (
+                *shell.app.world().get::<ComputedNode>(frame).expect("frame"),
+                *shell
+                    .app
+                    .world()
+                    .get::<ComputedNode>(content)
+                    .expect("surface"),
+                *shell
+                    .app
+                    .world()
+                    .get::<UiGlobalTransform>(content)
+                    .expect("transform"),
+            );
+            let pixels = render_owned_output(&mut shell, &device, &queue, PRIMARY_OUTPUT_ID);
+            let offset = (31 * 64 + 10) * 4;
+            if underlap {
+                assert_eq!(
+                    Some(geometry),
+                    before,
+                    "paint overlap preserves layout and surface transform"
+                );
+                assert_eq!(
+                    &pixels[offset..offset + 4],
+                    &[255; 4],
+                    "contrasting backing must not leak through the join"
+                );
+            } else {
+                assert_ne!(
+                    &pixels[offset..offset + 4],
+                    &[255; 4],
+                    "fixture exposes seam"
+                );
+                before = Some(geometry);
+            }
+        }
+        for origin in [5., 5.2, 5.4, 5.6] {
+            {
+                let mut node = shell.app.world_mut().get_mut::<Node>(frame).expect("frame");
+                node.left = px(origin);
+                node.top = px(origin);
+            }
+            for tick in 0..3 {
+                shell.advance_main(tick);
+                shell
+                    .render_outputs(&[owned_request(PRIMARY_OUTPUT_ID)], &mut Vec::new())
+                    .expect("settle moved frame");
+            }
+            let pixels = render_owned_output(&mut shell, &device, &queue, PRIMARY_OUTPUT_ID);
+            for coordinate in 8..55 {
+                for (x, y) in [(coordinate, 31), (31, coordinate)] {
+                    let offset = (y * 64 + x) * 4;
+                    assert_eq!(
+                        &pixels[offset..offset + 4],
+                        &[255; 4],
+                        "seam at ({x}, {y}), logical origin {origin}"
+                    );
+                }
+            }
+        }
+        update_diagnostic_surface_scaled(&mut shell, surface, 43, 34., |_, _| [0, 255, 0, 255]);
+        for tick in 0..3 {
+            shell.advance_main(tick);
+            shell
+                .render_outputs(&[owned_request(PRIMARY_OUTPUT_ID)], &mut Vec::new())
+                .expect("settle contrasting client");
+        }
+        let pixels = render_owned_output(&mut shell, &device, &queue, PRIMARY_OUTPUT_ID);
+        let offset = (31 * 64 + 12) * 4;
+        assert_eq!(
+            &pixels[offset..offset + 4],
+            &[0, 255, 0, 255],
+            "client covers overlap"
+        );
     }
 
     #[cfg(feature = "test-support")]

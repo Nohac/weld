@@ -1055,6 +1055,15 @@ A Vulkan checkerboard regression verifies texel-exact content inside a smooth
 fractional-scale frame, alongside subtree, marker-removal and input-transform
 tests.
 
+`weld_app::border::BorderUnderlap` extends existing solid border paint inward by
+one physical pixel. Its backing-node reference places that same border draw above
+the frame background and below client content, covering the antialiased join as
+the frame moves through fractional positions. Layout, surface sampling and input
+geometry retain their original dimensions. SSD and group frames share this path;
+configured edge colours and split highlights remain owned by `BorderColor`.
+A GPU regression checks all four edges at fractional positions, unchanged layout,
+and client content painting above the overlap.
+
 Wayland ARGB channels are premultiplied in their encoded representation while
 Bevy UI blends straight alpha. The surface material loads source texels from
 the imported non-sRGB view, unpremultiplies encoded RGB (or forces alpha for X

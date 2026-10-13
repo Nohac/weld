@@ -34,6 +34,7 @@ use bevy::{
     window::RequestRedraw,
 };
 use weld_app::{
+    border::BorderUnderlap,
     output::{OutputCompositionCamera, PrimaryOutput, WeldOutput},
     surface::{
         ClientProvenance, ClientToplevel, ClientToplevelParent, MappedSurface, RoundedSurfaceClip,
@@ -687,6 +688,7 @@ fn window_scene(content: impl SceneList, style: FrameGeometry) -> impl Scene {
     });
     bsn! {
         #FrameRoot
+        BorderUnderlap(#Body)
         Node {
             position_type: PositionType::Absolute,
             flex_direction: FlexDirection::Column,
@@ -702,6 +704,7 @@ fn window_scene(content: impl SceneList, style: FrameGeometry) -> impl Scene {
         template(move |_| Ok(if style.border == BorderStyle::None { BoxShadow::default() } else { window_shadow() }))
         Children [
             (
+                #Body
                 WindowBody
                 Node {
                     width: percent(100),
