@@ -1924,6 +1924,134 @@ mod tests {
 
     #[cfg(feature = "test-support")]
     #[test]
+    fn snapped_surface_keeps_native_texels_inside_a_smooth_fractional_frame() {
+        use crate::pixel_snap::PixelSnap;
+        use bevy::{
+            math::Vec2,
+            ui::{ComputedNode, UiGlobalTransform, UiRect},
+        };
+
+        let output = OutputConfiguration::new(
+            PRIMARY_OUTPUT_ID,
+            Extent::new(64, 64),
+            "1.25".parse().expect("scale"),
+            LogicalPoint::ZERO,
+            true,
+            None,
+        )
+        .expect("output");
+        let (mut shell, _, device, queue) =
+            crate::benchmark::rendering_shell_with_outputs(vec![output], |_| {})
+                .expect("diagnostic GPU shell");
+        let surface = SurfaceId::for_test(1);
+        install_diagnostic_surface(&mut shell, surface, [0, 0, 0, 255]);
+        update_diagnostic_surface_scaled(&mut shell, surface, 19, 15., |x, y| {
+            let channel = if (x + y).is_multiple_of(2) { 255 } else { 0 };
+            [channel, channel, channel, 255]
+        });
+        let camera = shell.outputs[&PRIMARY_OUTPUT_ID].camera;
+        let frame = shell
+            .app
+            .world_mut()
+            .spawn((
+                Node {
+                    position_type: PositionType::Absolute,
+                    left: px(10.3),
+                    top: px(7.4),
+                    width: px(32.),
+                    height: px(32.),
+                    padding: UiRect::all(px(2.2)),
+                    ..Default::default()
+                },
+                BackgroundColor(Color::srgb(0., 0., 1.)),
+                UiTargetCamera(camera),
+            ))
+            .id();
+        let clip = shell
+            .app
+            .world_mut()
+            .spawn((
+                RoundedSurfaceClip,
+                Node {
+                    width: px(25.),
+                    height: px(25.),
+                    border_radius: BorderRadius::all(px(4.)),
+                    overflow: bevy::ui::Overflow::clip(),
+                    ..Default::default()
+                },
+                ChildOf(frame),
+            ))
+            .id();
+        let content = shell
+            .app
+            .world_mut()
+            .spawn((
+                SurfaceNode {
+                    surface,
+                    view: SurfaceView::FullSurface,
+                },
+                Node {
+                    flex_shrink: 0.,
+                    ..Default::default()
+                },
+                ChildOf(clip),
+            ))
+            .id();
+        for tick in 0..6 {
+            shell.advance_main(tick);
+            shell
+                .render_outputs(&[owned_request(PRIMARY_OUTPUT_ID)], &mut Vec::new())
+                .expect("settle");
+        }
+        let world = shell.app.world();
+        let node = world.get::<ComputedNode>(content).expect("content");
+        let transform = world.get::<UiGlobalTransform>(content).expect("transform");
+        let origin = transform.transform_point2(-0.5 * node.size());
+        assert!(origin.abs_diff_eq(origin.round(), 0.0001));
+        assert!(
+            transform
+                .transform_vector2(node.size())
+                .abs_diff_eq(Vec2::splat(19.), 0.0001)
+        );
+        let frame_node = world.get::<ComputedNode>(frame).expect("frame");
+        let frame_origin = world
+            .get::<UiGlobalTransform>(frame)
+            .expect("frame transform")
+            .transform_point2(-0.5 * frame_node.size());
+        assert!(frame_origin.abs_diff_eq(Vec2::new(12.875, 9.25), 0.0001));
+        let pixels = render_owned_output(&mut shell, &device, &queue, PRIMARY_OUTPUT_ID);
+        for y in 5..16 {
+            for x in 5..16 {
+                let offset =
+                    ((origin.y.round() as usize + y) * 64 + origin.x.round() as usize + x) * 4;
+                let channel = if (x + y).is_multiple_of(2) { 255 } else { 0 };
+                assert_eq!(
+                    &pixels[offset..offset + 4],
+                    &[channel, channel, channel, 255],
+                    "texel {x},{y}"
+                );
+            }
+        }
+        shell
+            .app
+            .world_mut()
+            .entity_mut(content)
+            .remove::<PixelSnap>();
+        for tick in 6..9 {
+            shell.advance_main(tick);
+            shell
+                .render_outputs(&[owned_request(PRIMARY_OUTPUT_ID)], &mut Vec::new())
+                .expect("unsnapped");
+        }
+        let unaligned = render_owned_output(&mut shell, &device, &queue, PRIMARY_OUTPUT_ID);
+        assert_ne!(
+            unaligned, pixels,
+            "removing the marker restores the original filtered presentation"
+        );
+    }
+
+    #[cfg(feature = "test-support")]
+    #[test]
     fn rounded_parent_clips_fitted_and_oversized_surfaces_identically() {
         let (mut shell, _, device, queue) = crate::benchmark::rendering_shell_with_outputs(
             vec![diagnostic_output(
@@ -2425,13 +2553,24 @@ mod tests {
         size: u32,
         pixel: impl Fn(u32, u32) -> [u8; 4],
     ) {
+        update_diagnostic_surface_scaled(shell, surface, size, size as f32, pixel);
+    }
+
+    #[cfg(feature = "test-support")]
+    fn update_diagnostic_surface_scaled(
+        shell: &mut AppShell,
+        surface: SurfaceId,
+        size: u32,
+        logical_size: f32,
+        pixel: impl Fn(u32, u32) -> [u8; 4],
+    ) {
         let view = SurfaceContentView {
             source_x: 0.0,
             source_y: 0.0,
             source_width: size as f32,
             source_height: size as f32,
-            logical_width: size as f32,
-            logical_height: size as f32,
+            logical_width: logical_size,
+            logical_height: logical_size,
         };
         let layer = SurfaceLayerId::new(1);
         let pixels = (0..size * size)

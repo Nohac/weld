@@ -7,6 +7,7 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 
+use crate::pixel_snap::{PixelSnap, PixelSnapPlugin, PixelSnapSize, PixelSnapSystems};
 use bevy::{
     app::{App, Plugin, PostUpdate, PreUpdate},
     asset::{Asset, AssetId, Assets, Handle, RenderAssetUsages, load_internal_asset, uuid_handle},
@@ -52,6 +53,8 @@ pub(crate) use binding::publish_surface_bindings;
 #[path = "surface/clip.rs"]
 mod clip;
 pub use clip::RoundedSurfaceClip;
+#[path = "surface/snap.rs"]
+mod snap;
 
 const SURFACE_MATERIAL_SHADER: Handle<Shader> =
     uuid_handle!("f69ff2a0-2dc4-4a34-8f64-bf77475398a1");
@@ -250,7 +253,7 @@ pub enum SurfaceView {
 /// Plugins should decorate or arrange this component's entity rather than
 /// depending on its internal material and ignored overlay children.
 #[derive(Component, Clone, Copy, Debug, Eq, PartialEq)]
-#[require(MaterialNode<SurfaceUiMaterial>, Node)]
+#[require(MaterialNode<SurfaceUiMaterial>, Node, PixelSnap, PixelSnapSize, LayoutConfig { use_rounding: false })]
 pub struct SurfaceNode {
     pub surface: SurfaceId,
     pub view: SurfaceView,
@@ -477,7 +480,10 @@ impl Plugin for SurfacePlugin {
             "surface_material.wgsl",
             Shader::from_wgsl
         );
-        app.add_plugins(UiMaterialPlugin::<SurfaceUiMaterial>::default());
+        app.add_plugins((
+            UiMaterialPlugin::<SurfaceUiMaterial>::default(),
+            PixelSnapPlugin,
+        ));
         crate::layer_shell::register(app);
         app.init_resource::<ClientSources>()
             .init_resource::<SurfaceEventQueue>()
@@ -505,6 +511,12 @@ impl Plugin for SurfacePlugin {
                 sync_surface_nodes
                     .after(SurfaceSystems::FallbackPresentation)
                     .before(PickingSystems::Backend),
+            )
+            .add_systems(
+                PostUpdate,
+                snap::prepare
+                    .after(bevy::ui::UiSystems::Layout)
+                    .before(PixelSnapSystems),
             )
             .add_systems(
                 PostUpdate,
@@ -1528,7 +1540,9 @@ fn sync_surface_nodes(params: SyncSurfaceNodesParams) {
                         .spawn((
                             expected_target,
                             Pickable::default(),
-                            LayoutConfig { use_rounding: true },
+                            LayoutConfig {
+                                use_rounding: false,
+                            },
                             expected_node,
                             ChildOf(entity),
                         ))

@@ -1043,6 +1043,18 @@ release duty with an RAII completion token. Violating this invariant retains
 an explicit release point and its timeline import device, not only the legacy
 buffer release.
 
+`weld_app::pixel_snap::PixelSnap` aligns a UI subtree's final physical origin
+after layout and before clipping. Ancestors retain continuous geometry, so
+decorations and rounded content boundaries move smoothly. Descendant rendering
+and input regions inherit the same adjustment. Surface mounts require this
+marker and use unrounded layout; when an integral source crop differs from its
+physical layout size by at most one pixel, the surface presenter supplies its
+native texel extent. Authored scaling and fractional crops retain their sampling
+ratio. Rotated, sheared and reflected nodes retain their authored transform.
+A Vulkan checkerboard regression verifies texel-exact content inside a smooth
+fractional-scale frame, alongside subtree, marker-removal and input-transform
+tests.
+
 Wayland ARGB channels are premultiplied in their encoded representation while
 Bevy UI blends straight alpha. The surface material loads source texels from
 the imported non-sRGB view, unpremultiplies encoded RGB (or forces alpha for X

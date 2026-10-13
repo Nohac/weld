@@ -5,7 +5,6 @@ use bevy::{
     picking::Pickable,
     prelude::{Display, Node},
     scene::{SceneList, bsn_list},
-    ui::LayoutConfig,
 };
 use weld_app::surface::{SurfaceId, SurfaceNode, SurfaceView};
 
@@ -26,7 +25,6 @@ pub fn surface_content_with_node(
         (
             template(move |_| Ok(SurfaceNode { surface, view }))
             Pickable::IGNORE
-            LayoutConfig { use_rounding: true }
             template(move |_| Ok(node.clone()))
         )
     }

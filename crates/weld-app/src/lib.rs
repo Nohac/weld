@@ -15,6 +15,7 @@ pub mod inspection;
 pub mod layer;
 pub mod layer_shell;
 pub mod output;
+pub mod pixel_snap;
 mod shell;
 #[path = "surface.rs"]
 mod surface_impl;
@@ -75,6 +76,7 @@ pub mod prelude {
             OutputCompositionCamera, OutputFootprintProvenance, OutputGeometry, OutputId,
             OutputInfo, OutputPlacement, OutputPosition, PrimaryOutput, RendersOutput, WeldOutput,
         },
+        pixel_snap::PixelSnap,
         surface::{
             ClientDecorated, ClientPopup, ClientSurface, ClientToplevel, ClientToplevelParent,
             MappedSurface, RoundedSurfaceClip, ServerDecorated, SurfaceAction, SurfaceActionQueue,
