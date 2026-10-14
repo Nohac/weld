@@ -1,6 +1,6 @@
 //! Stdio lifecycle for the window client's generated MCP tools.
 
-use crate::windows::WindowClient;
+use crate::windows::{WindowCatalogue, WindowClient};
 use anyhow::Result;
 use rmcp::{
     ErrorData, RoleServer, ServerHandler, ServiceExt,
@@ -17,6 +17,20 @@ struct WindowMcp {
     client: WindowClient,
     tools: Vec<Tool>,
     calls: Arc<Semaphore>,
+}
+
+struct InventoryTools(WindowClient);
+
+#[server_less::mcp(namespace = "window")]
+impl InventoryTools {
+    /// List control-enabled windows, including waiting persistent slots. Set all_windows to true to include the entire desktop inventory.
+    pub fn list(&self, all_windows: Option<bool>) -> Result<WindowCatalogue, String> {
+        if all_windows.unwrap_or(false) {
+            self.0.list()
+        } else {
+            self.0.find(None, None, Some(true))
+        }
+    }
 }
 
 impl ServerHandler for WindowMcp {
@@ -58,10 +72,12 @@ impl ServerHandler for WindowMcp {
         );
         let result = tokio::task::spawn_blocking(move || {
             let _permit = permit;
-            client.mcp_call(
-                &request.name,
-                serde_json::Value::Object(request.arguments.unwrap_or_default()),
-            )
+            let arguments = serde_json::Value::Object(request.arguments.unwrap_or_default());
+            if request.name == "window_list" {
+                InventoryTools(client).mcp_call(&request.name, arguments)
+            } else {
+                client.mcp_call(&request.name, arguments)
+            }
         })
         .await
         .map_err(|error| ErrorData::internal_error(error.to_string(), None))?;
@@ -91,7 +107,13 @@ impl ServerHandler for WindowMcp {
 pub fn run(socket: PathBuf) -> Result<()> {
     let mut tools = WindowClient::mcp_tools()
         .into_iter()
-        .filter(|tool| tool["name"] != "window_control" && tool["name"] != "window_permissions")
+        .filter(|tool| {
+            !matches!(
+                tool["name"].as_str(),
+                Some("window_control" | "window_permissions" | "window_list")
+            )
+        })
+        .chain(InventoryTools::mcp_tools())
         .map(serde_json::from_value)
         .collect::<Result<Vec<Tool>, _>>()?;
     for tool in &mut tools {
@@ -104,6 +126,7 @@ pub fn run(socket: PathBuf) -> Result<()> {
                 | "window_capture_after"
                 | "window_find"
                 | "window_resolve"
+                | "window_accessibility"
         );
         tool.annotations = Some(ToolAnnotations::new().read_only(read_only));
     }

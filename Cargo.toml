@@ -14,6 +14,7 @@ test-support = ["weld-app/test-support"]
 
 [workspace]
 members = [
+  "crates/weld-accessibility",
   "crates/weld-access",
   "crates/weld-remote-control",
   "crates/weld-remote-control-ui",

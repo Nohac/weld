@@ -6,6 +6,7 @@ publish.workspace = true
 
 [dependencies]
 weld-access = { path = "../weld-access" }
+weld-accessibility = { path = "../weld-accessibility" }
 weld-remote-control = { path = "../weld-remote-control" }
 anyhow.workspace = true
 clap.workspace = true

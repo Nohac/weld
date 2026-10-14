@@ -30,6 +30,12 @@ Weld is a workspace of reusable layers and one standard distribution:
   permissions and handles UI requests; the native control owner enforces them.
   SSD owns header geometry and the normal/persistent palettes. Bundled Lucide
   SVGs use `bevy_lucide`'s DPI-sized image cache.
+- `weld-accessibility` owns asynchronous AT-SPI association, bounded traversal
+  and filtered read-only observations. `weld-control` supplies credentialed native
+  process identity, singleton-window checks and an occupant-scoped View permit
+  from `weld-remote-control`. Permission and association are checked again before
+  publishing a result. The control worker exposes the same query through CLI,
+  RPC and MCP; application accessibility calls run outside compositor scheduling.
 - `weld-access` owns in-memory session admission and revocable connection permits.
   The shared source relay checks those permits before accepting input and
   publishing frames. Revocation retires held input and presentation claims

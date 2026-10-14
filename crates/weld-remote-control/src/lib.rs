@@ -173,6 +173,22 @@ pub struct Grant {
     wake: Arc<dyn Fn() + Send + Sync>,
 }
 
+/// View authorization retained across an asynchronous inspection of this incarnation.
+#[derive(Clone)]
+pub struct ViewPermission(Arc<GrantState>);
+
+impl ViewPermission {
+    /// Revalidate the original incarnation's live View grant.
+    pub fn validate(&self) -> Result<()> {
+        ensure!(self.0.permit.is_authorized(), "window control revoked");
+        ensure!(
+            self.0.capabilities.view,
+            "window view capability is disabled"
+        );
+        Ok(())
+    }
+}
+
 impl Grant {
     /// The native relay has drained held remote input for the current local takeover.
     pub fn local_input_ready(&self) -> bool {
@@ -258,6 +274,21 @@ pub struct RemoteControlClient {
 }
 
 impl RemoteControlClient {
+    /// Retain revocable View authorization for an asynchronous reader.
+    pub fn authorize_view(&self, control: &str) -> Result<ViewPermission> {
+        let grant = self
+            .grants
+            .lock()
+            .map_err(|_| anyhow::anyhow!("remote control registry unavailable"))?
+            .active
+            .get(control)
+            .cloned()
+            .context("window control unavailable")?;
+        let permission = ViewPermission(grant);
+        permission.validate()?;
+        Ok(permission)
+    }
+
     /// Latest retained geometry for a live control token, without a GPU readback.
     pub fn viewport(&self, control: &str) -> Option<Viewport> {
         let grant = self.grants.lock().ok()?.active.get(control)?.clone();

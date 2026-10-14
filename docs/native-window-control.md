@@ -76,7 +76,7 @@ Changing permissions retires the previous handle and its held input, then issues
 a fresh handle. The slot shorthand resolves to the new handle. Controllers using
 an incarnation ID reconcile the inventory before continuing; requests
 using the retired handle fail. The desktop peek remains visible when View is
-disabled; that permission controls remote pixel capture.
+disabled; that permission controls remote pixel capture and accessibility inspection.
 
 Use the resulting `control` handle for operations:
 
@@ -225,7 +225,10 @@ weldctl --session weld-0 mcp
 
 The generated tools include inventory `list`, `find`, `get`, `resolve`, `wait`;
 input `pointer`, `click`, `button`, `key`, `press_key`, `chord`, `scroll`;
-viewport `resize`, `scale`; and `capture`, `capture_after`, all prefixed `window_`.
+viewport `resize`, `scale`; and `capture`, `capture_after`, `accessibility`, all prefixed `window_`.
+MCP `window_list` defaults to control-enabled windows, including waiting persistent
+slots. Pass `{"all_windows":true}` for the whole inventory. CLI/RPC `list` retains
+the full inventory; `find` provides explicit application and control filters.
 Administrative grant creation and permission changes are exposed through the local
 CLI/RPC and desktop binding. MCP control tools require an existing grant handle.
 `server-less` supplies their descriptions and dispatch; the official Rust MCP
@@ -235,14 +238,60 @@ content block, allowing vision-capable agents to inspect the window directly.
 Tool failures carry readable errors.
 The bridge allows eight concurrent calls and performs blocking local RPC on
 worker threads. An interrupted call's local RPC may continue until its bounded
-wait completes. The endpoint runs as the same OS user. The current slice provides
-pixel-based interaction; accessibility trees remain a separate follow-up.
+wait completes. The endpoint runs as the same OS user.
+
+## Accessibility inspection
+
+Weld enables the session's AT-SPI `IsEnabled` flag when attaching its desktop
+control service. Applications with an enabled accessibility bridge can then
+publish their trees. This leaves the screen-reader setting unchanged.
+
+Enable View access on a window, then use its copied control key:
+
+```sh
+weldctl --session weld-0 window accessibility --control w12 --max-nodes 64 --json
+weldctl --session weld-0 window accessibility --control w12 --query save --role button --max-nodes 8 --json
+weldctl --session weld-0 window accessibility --control w12 --max-depth 2 --json
+```
+
+The equivalent MCP tool is `window_accessibility`, with `control`, `query`,
+`role`, `max_nodes` and `max_depth` arguments. Text search matches a substring
+of the accessible name or application-supplied accessible ID; role matching is
+exact. Both use lowercase comparison, and filters combine. Root depth is zero.
+Results default to 256 nodes and depth 24, with maximums of 1024 and 24. Traversal
+visits at most 1024 objects within a three-second request deadline and allows
+two simultaneous inspections per host. Matching nodes carry role, name, states,
+advertised actions and provider window-relative bounds. Bounds retain the
+toolkit's coordinate units; check their relationship to the application's
+viewport before using them as input coordinates.
+
+`truncated` reports an incomplete traversal; `visited_nodes` distinguishes work
+performed from matches returned. A node's `incomplete` flag marks unavailable
+or shortened properties. IDs and parent IDs belong to one observation; filtered
+results can omit a node's parent. These observations follow a changing UI and
+should be refreshed before relying on old bounds. Actions are descriptive;
+interaction continues through the existing pointer and keyboard operations.
+
+The initial association requires exactly one managed native Wayland window for
+the credentialed process and exactly one AT-SPI window owned by that same process.
+Weld rechecks the association and original View grant before returning the tree.
+Multiple windows report `ambiguous`; missing providers or unsupported native
+credentials report `unavailable`. X11 association, cross-process embedded trees
+and precise multi-window association require further identity support.
+
+AccessKit-based applications must compile their Linux AT-SPI bridge. Draftship's
+Blitz revision `d1b433edbc13da889228ae4f92908f7c28514019` enables shell accessibility
+but disables the default features of `accesskit_xplat`; its resolved dependencies
+omit `accesskit_unix`. Enabling the session flag alone cannot expose that build's
+tree. The application needs the Linux bridge and its async backend enabled;
+see the pinned [workspace dependency](https://github.com/DioxusLabs/blitz/blob/d1b433edbc13da889228ae4f92908f7c28514019/Cargo.toml)
+and [bridge features](https://github.com/DioxusLabs/blitz/blob/d1b433edbc13da889228ae4f92908f7c28514019/packages/accesskit_xplat/Cargo.toml).
 
 ## Remaining Draftship feedback
 
 The next input slice is whole-string UTF-8 insertion/paste with an explicit
-clipboard-preservation contract for the controlled seat. Accessibility snapshots,
-role/name targeting and actions need application-to-AT-SPI identity validation.
+clipboard-preservation contract for the controlled seat. Accessibility action
+execution and broader window association remain follow-ups.
 Launch-bound window readiness, process filters, structured ownership refusals and
 ownership-change waits, and general multi-step input batches remain follow-ups.
 The 2026-10-14 Draftship validation motivates these additions; the current frame
@@ -251,8 +300,9 @@ checkpoint supplies a bounded newer-frame observation for screenshot-based tests
 ## Validation
 
 ```sh
-cargo test --locked -p weld-control --lib
+cargo test --locked -p weldwm -p weld-control -p weld-remote-control -p weld-accessibility --lib
 scripts/check-control-launch --nested
+scripts/check-control-launch --nested --accessibility-app /path/to/zenity
 scripts/check-control-launch --nested --xwayland
 ```
 
@@ -264,6 +314,11 @@ The same runner verifies real terminal input through MCP, pointer input,
 unchanged desktop focus, independently sized 800×600 and 1600×1400 application
 viewports, native-size clipped desktop peeks, MCP PNG content, revocation and
 fresh grant identities. It saves window and desktop PNGs beside its logs.
+The optional Zenity probe validates a real GTK accessibility tree through CLI,
+RPC and MCP, name/role filtering, depth/result limits, View revocation and
+control-only MCP listing with an explicit full-inventory override. Its tree is
+saved as `accessibility.json`. The validated GTK entry dialog exposes 17 nodes,
+including the entry field and both buttons, with window-relative bounds.
 The XWayland-enabled run also validated the existing X11 launch probe; its
 shutdown still reports the previously recorded stale Wayland socket file after
 confirming the endpoint is no longer listening.

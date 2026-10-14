@@ -757,6 +757,7 @@ mod tests {
             title: Some("Window".into()),
             workspace: Some("1".into()),
             output: Some("1".into()),
+            wayland_process_id: None,
             desktop_slot: windows::Rect {
                 x: 0.0,
                 y: 0.0,

@@ -9,7 +9,8 @@ use std::{
     sync::{Arc, Mutex, mpsc},
     time::{Duration, Instant},
 };
-use tokio::sync::watch;
+use tokio::sync::{Semaphore, watch};
+use weld_accessibility::Snapshot as AccessibilitySnapshot;
 use weld_remote_control::{
     Capabilities, InputReceipt, Operation, RemoteControlClient, Reply, Snapshot, Viewport,
 };
@@ -32,6 +33,8 @@ pub struct WindowInfo {
     pub title: Option<String>,
     pub workspace: Option<String>,
     pub output: Option<String>,
+    /// Native Wayland connection's process credentials, when available.
+    pub wayland_process_id: Option<u32>,
     /// Desktop slot in compositor-global logical coordinates, including decorations.
     pub desktop_slot: Rect,
     /// Current captured application's independent viewport, once its first frame arrives.
@@ -65,6 +68,7 @@ pub struct WindowService {
     snapshot: watch::Sender<Option<WindowCatalogue>>,
     controller: Arc<Mutex<Option<RemoteControlClient>>>,
     administrator: Arc<Mutex<Option<Administrator>>>,
+    accessibility_calls: Arc<Semaphore>,
 }
 
 type Administrator = Arc<dyn Fn(String, ControlAction) -> Result<(), String> + Send + Sync>;
@@ -104,6 +108,7 @@ impl Default for WindowService {
             snapshot: watch::channel(None).0,
             controller: Default::default(),
             administrator: Default::default(),
+            accessibility_calls: Arc::new(Semaphore::new(2)),
         }
     }
 }
@@ -115,6 +120,21 @@ impl WindowService {
         wake: impl Fn() + Send + Sync + 'static,
     ) -> Result<mpsc::Receiver<ControlRequest>, String> {
         let (sender, requests) = mpsc::sync_channel(16);
+        if let Err(error) = std::thread::Builder::new()
+            .name("weld-accessibility-enable".into())
+            .spawn(|| {
+                let result = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .map_err(anyhow::Error::from)
+                    .and_then(|runtime| runtime.block_on(weld_accessibility::enable_session()));
+                if let Err(error) = result {
+                    eprintln!("could not enable session accessibility: {error:#}");
+                }
+            })
+        {
+            eprintln!("could not start session accessibility enablement: {error}");
+        }
         *self
             .controller
             .lock()
@@ -353,6 +373,73 @@ impl WindowService {
             },
         )
     }
+    /// Inspect a native window's accessibility tree with View permission. Query matches name/ID substrings, role matches exactly (both case-insensitive). max_nodes limits results (default 256, maximum 1024); max_depth limits traversal (default/maximum 24, root is 0).
+    pub async fn accessibility(
+        &self,
+        control: String,
+        max_nodes: Option<u32>,
+        max_depth: Option<u32>,
+        query: Option<String>,
+        role: Option<String>,
+    ) -> Result<AccessibilitySnapshot, String> {
+        let _capacity = self
+            .accessibility_calls
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| "accessibility inspection busy")?;
+        let control = self.resolve_control(control)?;
+        let controller = self
+            .controller
+            .lock()
+            .map_err(|_| "controller service unavailable")?
+            .clone()
+            .ok_or("remote control unavailable")?;
+        let permission = controller
+            .authorize_view(&control)
+            .map_err(|error| error.to_string())?;
+        let catalogue = self.list()?;
+        let window = catalogue
+            .windows
+            .iter()
+            .find(|window| window.control.as_ref() == Some(&control))
+            .ok_or("control window unavailable")?;
+        let Some(process_id) = window.wayland_process_id else {
+            return Ok(AccessibilitySnapshot::unavailable(
+                "native Wayland process credentials are required for window association",
+            ));
+        };
+        if catalogue
+            .windows
+            .iter()
+            .filter(|window| window.occupied && window.wayland_process_id == Some(process_id))
+            .count()
+            != 1
+        {
+            return Ok(AccessibilitySnapshot::ambiguous(
+                "multiple managed windows share this process; exact accessibility-window association is required",
+            ));
+        }
+        let selection = weld_accessibility::Query {
+            max_nodes: max_nodes.unwrap_or(256),
+            max_depth: max_depth.unwrap_or(24),
+            query,
+            role,
+        };
+        let result = weld_accessibility::inspect(process_id, selection, || permission.validate())
+            .await
+            .map_err(|error| error.to_string())?;
+        permission.validate().map_err(|error| error.to_string())?;
+        let latest = self.list()?;
+        let matches: Vec<_> = latest
+            .windows
+            .iter()
+            .filter(|window| window.occupied && window.wayland_process_id == Some(process_id))
+            .collect();
+        if !matches!(matches.as_slice(), [window] if window.control.as_ref() == Some(&control)) {
+            return Err("window association changed during accessibility inspection".into());
+        }
+        Ok(result)
+    }
     /// List managed windows, including vacant persistent slots.
     pub fn list(&self) -> Result<WindowCatalogue, String> {
         let mut catalogue = self
@@ -585,6 +672,20 @@ impl WindowClient {
         self.request(
             "capture_after",
             json!({"control":control,"sequence":sequence,"timeout_ms":timeout_ms}),
+        )
+    }
+    /// Inspect a native window's accessibility tree with View permission. Query matches name/ID substrings, role matches exactly (both case-insensitive). max_nodes limits results (default 256, maximum 1024); max_depth limits traversal (default/maximum 24, root is 0).
+    pub fn accessibility(
+        &self,
+        control: String,
+        max_nodes: Option<u32>,
+        max_depth: Option<u32>,
+        query: Option<String>,
+        role: Option<String>,
+    ) -> Result<AccessibilitySnapshot, String> {
+        self.request(
+            "accessibility",
+            json!({"control":control,"max_nodes":max_nodes,"max_depth":max_depth,"query":query,"role":role}),
         )
     }
     /// Filter windows by exact app ID, occupancy and enabled control policy.

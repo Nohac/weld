@@ -52,6 +52,11 @@ fn publish(
                 .workspace
                 .map(|workspace| workspace.raw().to_string()),
             output: window.output.map(|output| output.raw().to_string()),
+            wayland_process_id: window
+                .occupant
+                .as_ref()
+                .filter(|app| app.x11_class().is_none())
+                .and_then(|app| app.local_process_id()),
             desktop_slot: Rect {
                 x: window.geometry.position.x,
                 y: window.geometry.position.y,

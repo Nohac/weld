@@ -30,7 +30,10 @@ def main():
     parser.add_argument("--nested", action="store_true")
     parser.add_argument("--xwayland", action="store_true")
     parser.add_argument("--no-build", action="store_true")
+    parser.add_argument("--accessibility-app", metavar="ZENITY", help="Validate AT-SPI with this Zenity executable (requires --nested)")
     args = parser.parse_args()
+    if args.accessibility_app and not args.nested:
+        parser.error("--accessibility-app requires --nested")
     root = Path(__file__).resolve().parent.parent
     resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
     if not args.no_build:
@@ -92,7 +95,7 @@ def main():
                     tree = subprocess.check_output(["swaymsg", "-s", ipc, "-t", "get_tree", "-r"], text=True, timeout=5)
                     return name in tree
                 wait_for(host, lambda: mapped("weld-launch-probe"), "Foot admission through native launch")
-                check_windows(ctl, control, host, run, display)
+                check_windows(ctl, control, host, run, display, args.accessibility_app)
                 if args.xwayland:
                     subprocess.run([*ctl, "launch", "--", str(root / "target/debug/examples/x11_window_probe"),
                                     "--seconds", "2", "--title", "Weld X11 launch probe"], check=True, timeout=10)
@@ -127,7 +130,7 @@ def main():
                 host.wait(timeout=5)
 
 
-def check_windows(ctl, control, host, run, display):
+def check_windows(ctl, control, host, run, display, accessibility_app):
     listing = json.loads(subprocess.check_output([*ctl, "window", "list", "--json"], text=True, timeout=10))
     window = next(window for window in listing["windows"] if window["app_id"] == "weld-launch-probe")
     details = json.loads(subprocess.check_output(
@@ -185,18 +188,25 @@ def check_windows(ctl, control, host, run, display):
             assert "tools" in initialized["capabilities"]
             send({"jsonrpc": "2.0", "method": "notifications/initialized"})
             tools = request(2, "tools/list", {})["tools"]
+            list_tool = next(tool for tool in tools if tool["name"] == "window_list")
+            assert "all_windows" in list_tool["inputSchema"]["properties"], list_tool
             assert {tool["name"] for tool in tools} == {
                 "window_list", "window_get", "window_wait", "window_pointer", "window_click",
                 "window_button", "window_key", "window_resize", "window_capture",
                 "window_press_key", "window_chord", "window_scroll", "window_capture_after", "window_find",
                 "window_resolve",
                 "window_scale",
+                "window_accessibility",
             }
             result = request(3, "tools/call", {"name": "window_get", "arguments": {"id": window["id"]}})
             assert not result.get("isError"), result
             assert result["structuredContent"]["id"] == window["id"], result
             result = request(4, "tools/call", {"name": "window_get", "arguments": {"id": "absent"}})
             assert result.get("isError"), result
+            empty = request(401, "tools/call", {"name": "window_list", "arguments": {}})
+            assert empty["structuredContent"]["windows"] == [], empty
+            complete = request(402, "tools/call", {"name": "window_list", "arguments": {"all_windows": True}})
+            assert any(item["id"] == window["id"] for item in complete["structuredContent"]["windows"]), complete
             result = request(5, "tools/call", {"name": "window_wait", "arguments": {
                 "after": 0, "timeout_ms": 1000}})
             assert result["structuredContent"]["revision"] >= listing["revision"], result
@@ -208,6 +218,8 @@ def check_windows(ctl, control, host, run, display):
             result = receive(6)
             assert result["structuredContent"]["revision"] > revision, result
             check_remote_control(rpc, request, window["id"], host, run, display)
+            if accessibility_app:
+                check_accessibility(ctl, rpc, request, host, run, accessibility_app)
         finally:
             mcp.stdin.close()
             try:
@@ -232,6 +244,8 @@ def check_remote_control(rpc, mcp, identifier, host, run, display):
     wait_for(host, lambda: invoke("get", id=identifier)["control"] is not None, "control grant")
     handle = invoke("get", id=identifier)["control"]
     key = invoke("get", id=identifier)["control_key"]
+    controlled = mcp(403, "tools/call", {"name": "window_list", "arguments": {}})
+    assert [item["id"] for item in controlled["structuredContent"]["windows"]] == [identifier], controlled
     assert invoke("resolve", key=key)["control"] == handle
     assert len(handle) == 8 and key == "w" + identifier
     subprocess.run([str(Path(__file__).resolve().parent.parent / "target/debug/weldctl"),
@@ -303,6 +317,8 @@ def check_remote_control(rpc, mcp, identifier, host, run, display):
     assert invoke("resolve", key=key)["control"] == handle, "slot shorthand follows the new grant"
     assert "error" in rpc("capture", {"control": old_handle})
     assert "error" in rpc("capture", {"control": handle})
+    assert "error" in rpc("accessibility", {"control": handle})
+    assert "error" in rpc("accessibility", {"control": old_handle})
     assert "error" in rpc("click", {"control": handle, "x": 100, "y": 100, "button": 272})
     assert "error" in rpc("resize", {"control": handle, "width": 400, "height": 300})
     subprocess.run(["grim", str(run / "desktop-restricted-control.png")], env=dict(os.environ, WAYLAND_DISPLAY=str(display)), check=True, timeout=10)
@@ -317,6 +333,56 @@ def check_remote_control(rpc, mcp, identifier, host, run, display):
     assert invoke("resolve", key=key)["control"] == invoke("get", id=identifier)["control"]
     invoke("control", id=identifier, enabled=False)
     print("PASS independent input, viewport sizing, live peek, MCP image capture and grant retirement", flush=True)
+
+
+def check_accessibility(ctl, rpc, mcp, host, run, program):
+    title = "Weld accessibility probe"
+    subprocess.run([*ctl, "launch", "--", "env", "GTK_A11Y=atspi", "GDK_BACKEND=wayland", "LC_ALL=C",
+                    program, "--entry", "--title=" + title, "--text=Accessible test entry",
+                    "--entry-text=Probe value"], check=True, capture_output=True, timeout=10)
+    def window():
+        return next((item for item in rpc("list", {})["result"]["windows"] if item["title"] == title), None)
+    wait_for(host, lambda: window() is not None, "GTK probe window")
+    identifier = window()["id"]
+    assert "result" in rpc("control", {"id": identifier, "enabled": True})
+    wait_for(host, lambda: window()["control"] is not None, "GTK control grant")
+    key = window()["control_key"]
+    def inspect():
+        reply = rpc("accessibility", {"control": key, "max_nodes": 256})
+        assert "error" not in reply, reply
+        return reply["result"]
+    wait_for(host, lambda: inspect()["status"] == "ready", "GTK AT-SPI registration")
+    tree = inspect()
+    (run / "accessibility.json").write_text(json.dumps(tree, indent=2))
+    assert not tree["truncated"], tree
+    assert any(node["name"] == title for node in tree["nodes"]), tree
+    assert any(node["role"] == "button" and node["bounds"] for node in tree["nodes"]), tree
+    assert any(node["role"] in ["text", "entry"] for node in tree["nodes"]), tree
+    tiny = rpc("accessibility", {"control": key, "max_nodes": 1})["result"]
+    assert len(tiny["nodes"]) == 1 and tiny["truncated"], tiny
+    filtered = rpc("accessibility", {"control": key, "role": "BUTTON", "query": "ok"})["result"]
+    assert filtered["nodes"] and all(node["role"] == "button" and "ok" in node["name"].lower() for node in filtered["nodes"]), filtered
+    assert filtered["visited_nodes"] > len(filtered["nodes"]), filtered
+    shallow = rpc("accessibility", {"control": key, "max_depth": 0})["result"]
+    assert len(shallow["nodes"]) == 1 and shallow["truncated"], shallow
+    assert "error" in rpc("accessibility", {"control": key, "max_nodes": 0})
+    result = mcp(500, "tools/call", {"name": "window_accessibility", "arguments": {
+        "control": key, "max_nodes": 8, "role": "button", "query": "ok"}})
+    assert not result.get("isError"), result
+    assert result["structuredContent"]["status"] == "ready", result
+    assert len(result["structuredContent"]["nodes"]) == 1, result
+    cli = json.loads(subprocess.check_output([*ctl, "window", "accessibility", "--control", key,
+                                             "--max-nodes", "8", "--role", "button", "--query", "ok",
+                                             "--json"], text=True, timeout=10))
+    assert cli["status"] == "ready", cli
+    assert len(cli["nodes"]) == 1 and cli["nodes"][0]["name"] == "OK", cli
+    handle = window()["control"]
+    assert "result" in rpc("permissions", {"id": identifier, "view": False, "keyboard": True,
+                                           "pointer": False, "resize": False})
+    wait_for(host, lambda: window()["control"] != handle, "GTK view revocation")
+    assert "error" in rpc("accessibility", {"control": key})
+    assert "error" in rpc("accessibility", {"control": handle})
+    print("PASS GTK accessibility tree through CLI/RPC/MCP, node limits and view revocation", flush=True)
 
 
 def child():

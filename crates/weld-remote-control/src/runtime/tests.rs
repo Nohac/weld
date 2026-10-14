@@ -17,6 +17,52 @@ impl Capture for NoCapture {
     }
 }
 
+#[test]
+fn retained_view_permission_expires_with_its_incarnation() {
+    let upstream = ClientSourceId::new(0);
+    let surface = ClientSurfaceId::new(ClientId::new(upstream, 1), 1);
+    let authority = AccessAuthority::new(|| {});
+    let (_registration, client) = registration(upstream, ClientSourceId::new(3), || {}, NoCapture);
+    let grant = client
+        .grant(
+            surface,
+            authority.open("test".into()).expect("permit"),
+            Capabilities::ALL,
+        )
+        .expect("grant");
+    let permission = client.authorize_view(grant.id()).expect("view permission");
+    grant.set_local_input(true);
+    assert!(
+        permission.validate().is_ok(),
+        "local interaction preserves read access"
+    );
+    grant.revoke();
+    let replacement = client
+        .grant(
+            surface,
+            authority.open("replacement".into()).expect("permit"),
+            Capabilities::ALL,
+        )
+        .expect("replacement");
+    assert!(
+        permission.validate().is_err(),
+        "old reader must not follow replacement"
+    );
+    assert!(client.authorize_view(replacement.id()).is_ok());
+    replacement.revoke();
+    let restricted = client
+        .grant(
+            surface,
+            authority.open("restricted".into()).expect("permit"),
+            Capabilities {
+                view: false,
+                ..Capabilities::ALL
+            },
+        )
+        .expect("restricted");
+    assert!(client.authorize_view(restricted.id()).is_err());
+}
+
 struct ImmediateCapture;
 impl Capture for ImmediateCapture {
     fn begin(&mut self, _: &ComposedBuffer) -> Result<Box<dyn CaptureJob>> {
