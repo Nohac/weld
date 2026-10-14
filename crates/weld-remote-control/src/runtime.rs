@@ -1,5 +1,7 @@
 //! Native-thread remote-control endpoint over the shared relay and composed view.
 
+mod sequence;
+
 use crate::{
     Capture, CaptureJob, Command, ControlRegistry, GrantState, InputCoordinates, InputReceipt,
     InputStage, Operation, Pending, PixelScale, RemoteControlClient, Reply, Snapshot, Viewport,
@@ -191,6 +193,8 @@ enum Execution {
 }
 
 struct Adapter {
+    batch: Option<sequence::Batch>,
+    keyboard_queries: Vec<weld_client::ClientKeyboardQuery>,
     source: ClientSourceId,
     upstream: ClientSourceId,
     relay: SourceRelayAdapter,
@@ -224,6 +228,8 @@ pub fn registration(
         sequence: 0,
     }));
     let adapter = Adapter {
+        batch: None,
+        keyboard_queries: Vec::new(),
         source,
         upstream,
         relay: SourceRelayAdapter::new(upstream, Port(state.clone())),
@@ -295,7 +301,7 @@ impl Adapter {
         }
     }
 
-    fn execute(&mut self, pending: &Pending) -> Result<Execution> {
+    fn validate_pending(&self, pending: &Pending) -> Result<()> {
         let epoch = pending.grant.input_epoch.load(Ordering::Acquire);
         ensure!(
             pending.operation.is_capture()
@@ -317,6 +323,19 @@ impl Adapter {
             pending.deadline > Instant::now(),
             "operation timed out before completion"
         );
+        ensure!(
+            self.state
+                .borrow()
+                .grants
+                .get(&pending.grant.surface)
+                .is_some_and(|grant| Arc::ptr_eq(grant, &pending.grant)),
+            "stale window control"
+        );
+        Ok(())
+    }
+
+    fn execute(&mut self, pending: &Pending) -> Result<Execution> {
+        self.validate_pending(pending)?;
         let surface = pending.grant.surface;
         let mut state = self.state.borrow_mut();
         ensure!(
@@ -371,6 +390,9 @@ impl Adapter {
             })),
         };
         match pending.operation.clone() {
+            Operation::Sequence { .. } => {
+                anyhow::bail!("input sequence requires scheduled execution")
+            }
             Operation::Pointer { x, y } => {
                 let position = valid_position(x, y)?;
                 self.positions.insert(surface, position);
@@ -680,6 +702,9 @@ impl Adapter {
 }
 
 impl ClientAdapter for Adapter {
+    fn drain_keyboard_queries(&mut self, queries: &mut Vec<weld_client::ClientKeyboardQuery>) {
+        queries.append(&mut self.keyboard_queries);
+    }
     fn input_source(&self) -> Option<ClientSourceId> {
         Some(self.upstream)
     }
@@ -693,6 +718,7 @@ impl ClientAdapter for Adapter {
             .map(|capture| capture.pending.deadline)
             .chain(self.waiting.iter().map(|pending| pending.deadline))
             .chain(self.relay.next_deadline())
+            .chain(self.batch.as_ref().map(sequence::Batch::deadline))
             .min()
     }
     fn drain_events(&mut self, events: &mut ClientEventQueue) {
@@ -733,6 +759,21 @@ impl ClientAdapter for Adapter {
                     });
                 }
                 Command::Operation(pending)
+                    if self.batch.is_some() && !pending.operation.is_capture() =>
+                {
+                    let _ = pending.reply.send(Err(
+                        "an input sequence is already running on this controller".into(),
+                    ));
+                }
+                Command::Operation(pending)
+                    if matches!(
+                        pending.operation,
+                        Operation::Sequence { .. } | Operation::TypeText { .. }
+                    ) =>
+                {
+                    self.start_sequence(pending, Instant::now());
+                }
+                Command::Operation(pending)
                     if pending.operation.is_capture()
                         && self.waiting.len() + self.capturing.len() >= 4 =>
                 {
@@ -759,6 +800,7 @@ impl ClientAdapter for Adapter {
                 },
             }
         }
+        self.progress_sequence(Instant::now());
         self.relay.drain_events(events);
         for pending in std::mem::take(&mut self.waiting) {
             match self.execute(&pending) {

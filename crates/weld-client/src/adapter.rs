@@ -32,6 +32,18 @@ pub struct ClientInputRetirement {
 /// Implementations are deliberately caller-driven. They must not start their
 /// own application loop or assume an async runtime.
 pub trait ClientAdapter {
+    /// Read-only key-name queries, routed through this adapter's registered input source.
+    fn drain_keyboard_queries(&mut self, _queries: &mut Vec<crate::ClientKeyboardQuery>) {}
+
+    fn resolve_keyboard_query(
+        &mut self,
+        _controller: crate::ClientInputController,
+        query: crate::ClientKeyboardQuery,
+    ) {
+        let _ = query
+            .reply
+            .send(Err("keyboard name resolution unavailable".into()));
+    }
     /// Next caller-driven service deadline, or None when ordinary external
     /// wakes suffice. An overdue deadline requires immediate drain_events work;
     /// servicing must consume it or move it forward, never leave a busy loop.
@@ -776,6 +788,29 @@ impl ClientRuntime {
 
     /// Applies external adapter work immediately after one event drain.
     pub fn apply_pending_effects(&mut self, invalid: &mut Vec<ClientRuntimeEffectError>) {
+        let mut queries = Vec::new();
+        for (adapter, entry) in &mut self.adapters {
+            let mut pending = Vec::new();
+            entry.driver.drain_keyboard_queries(&mut pending);
+            queries.extend(
+                pending
+                    .into_iter()
+                    .map(|query| (*adapter, entry.driver.input_source(), query)),
+            );
+        }
+        for (adapter, source, query) in queries {
+            if let Some(destination) = source.and_then(|source| self.adapters.get_mut(&source)) {
+                destination.driver.resolve_keyboard_query(
+                    crate::ClientInputController {
+                        adapter,
+                        connection: query.connection,
+                    },
+                    query,
+                );
+            } else {
+                let _ = query.reply.send(Err("keyboard source unavailable".into()));
+            }
+        }
         let effects = std::mem::take(&mut self.pending_effects);
         for (controller, effect) in effects {
             let adapter = controller.adapter;

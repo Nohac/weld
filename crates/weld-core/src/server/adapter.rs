@@ -77,6 +77,10 @@ impl WaylandClientBridge {
 }
 
 pub(crate) enum WaylandClientWork {
+    ResolveKeys(
+        weld_client::ClientInputController,
+        weld_client::ClientKeyboardQuery,
+    ),
     RemoteInput(weld_client::ClientInputController, ClientInputEvent),
     RemoteFocus(
         weld_client::ClientInputController,
@@ -343,6 +347,15 @@ impl ClientAdapter for WaylandClientAdapter {
         self.bridge
             .push_work(WaylandClientWork::RemoteInput(controller, event));
         true
+    }
+
+    fn resolve_keyboard_query(
+        &mut self,
+        controller: weld_client::ClientInputController,
+        query: weld_client::ClientKeyboardQuery,
+    ) {
+        self.bridge
+            .push_work(WaylandClientWork::ResolveKeys(controller, query));
     }
 
     fn apply_remote_focus(

@@ -524,6 +524,9 @@ impl ServerState {
     pub(crate) fn apply_pending_client_work(&mut self) {
         while let Some(work) = self.pending_surface_events.pop_work() {
             match work {
+                WaylandClientWork::ResolveKeys(controller, query) => {
+                    self.resolve_remote_keys(controller, query);
+                }
                 WaylandClientWork::RemoteInput(controller, event) => {
                     self.remote_client_input(controller, event)
                 }

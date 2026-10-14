@@ -137,6 +137,54 @@ were interpreted using the wrong mapping and could trigger shortcuts, including
 closing the dialog. X11 requires a separate text delivery backend. Existing
 key/chord operations remain available for X11.
 
+### Input sequences
+
+`window_input` combines text and complete named keypresses/chords in one call:
+
+```json
+{
+  "control": "w6",
+  "actions": ["some text", {"key": "Return"}, "more text", {"key": "BackSpace"}, {"chord": ["Control", "a"]}],
+  "typing_interval_ms": 25
+}
+```
+
+CLI equivalent:
+
+```sh
+weldctl --session weld-0 window input --params-json '{"control":"w6","actions":["hello",{"key":"Return"}],"typing_interval_ms":25}' --json
+```
+
+All actions are validated before execution, including native key-name resolution
+and text-backend eligibility. Named keys use XKB names, with aliases `Control`/
+`Ctrl`, `Shift`, `Alt`, `Super`, `Enter` and `Backspace`. Keys resolve through the
+controller's configured layout at admission, so Caps/Ctrl remapping is respected.
+Chord modifiers are explicit; use text strings for exact character casing.
+Key-only sequences also work with XWayland.
+
+The interval defaults to zero and applies between Unicode scalar values within
+each text action. It accepts 0–1000 ms, up to 64 actions and 4096 combined UTF-8
+text bytes, with at most 25 seconds of planned typing. The host schedules each
+step through native deadlines and gives the whole request a 30-second deadline.
+Each chord releases its keys before another step or delay. A delayed host resumes
+from the current time, preserving spacing instead of sending overdue characters
+in a burst. `type-text` uses this same executor at zero interval.
+
+The response reports `complete`, `completed_actions`, `typed_characters`, the last
+`receipt`, and an optional `error`. Counts describe the prefix acknowledged by the
+relay. `in_flight` marks a dispatched step whose completion is uncertain; inspect
+the app before retrying interrupted work. Revocation, local takeover, replacement
+or expiry stops remaining actions. The request retains its original occupant
+even when addressed through a persistent-slot shorthand.
+
+One sequence owns the remote controller at a time. Other remote mutations return
+a busy error while it runs; inventory and capture remain available. Application
+reactions are asynchronous: split the sequence and inspect/wait when a step opens
+a dialog or otherwise changes the intended input target. A successful final
+receipt can be used with `capture-after`.
+
+### Local interaction
+
 The desktop frame initially remains a live, read-only peek. Hold the configured
 modifier chord to use the focused window locally, or use the toggle binding to
 keep local keyboard and pointer input enabled after releasing the chord. The
@@ -256,7 +304,7 @@ weldctl --session weld-0 mcp
 ```
 
 The generated tools include inventory `list`, `find`, `get`, `resolve`, `wait`;
-input `pointer`, `click`, `button`, `key`, `press_key`, `chord`, `type_text`, `scroll`;
+input `input`, `pointer`, `click`, `button`, `key`, `press_key`, `chord`, `type_text`, `scroll`;
 viewport `resize`, `scale`; and `capture`, `capture_after`, `accessibility`, all prefixed `window_`.
 MCP `window_list` defaults to control-enabled windows, including waiting persistent
 slots. Pass `{"all_windows":true}` for the whole inventory. CLI/RPC `list` retains
@@ -335,7 +383,7 @@ execution, bounded text/value inspection with sensitive-field handling, and
 broader window association remain follow-ups. Mixed-version capability diagnostics
 would make method/field mismatches during upgrades easier to identify.
 Launch-bound window readiness, process filters, structured ownership refusals and
-ownership-change waits, and general multi-step input batches remain follow-ups.
+ownership-change waits, and mixed pointer/keyboard batches remain follow-ups.
 The 2026-10-14 Draftship validation motivates these additions; the current frame
 checkpoint supplies a bounded newer-frame observation for screenshot-based tests.
 

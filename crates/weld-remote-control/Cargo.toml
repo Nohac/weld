@@ -9,6 +9,7 @@ anyhow.workspace = true
 base64 = "0.22"
 uuid = { version = "1", features = ["v4"] }
 serde.workspace = true
+serde_json = "1"
 schemars = "1"
 weld-access = { path = "../weld-access" }
 weld-client = { path = "../weld-client" }

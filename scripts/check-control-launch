@@ -2,6 +2,7 @@
 """Validate native launch and window CLI/RPC/MCP in a private Weld session."""
 
 import argparse
+import concurrent.futures
 import base64
 import json
 import os
@@ -51,7 +52,7 @@ def main():
     display = run / "wayland"
     control = run / "weld-control/wayland.sock"
     config = run / "test.config"
-    config.write_text("font monospace 14\ndefault_border pixel 2\n")
+    config.write_text("font monospace 14\ndefault_border pixel 2\ninput * {\n xkb_options ctrl:swapcaps\n}\n")
     environment = dict(os.environ, RUST_LOG="info")
     if not args.nested:
         environment["VK_DRIVER_FILES"] = str(run / "absent-vulkan-driver.json")
@@ -192,6 +193,9 @@ def check_windows(ctl, control, host, run, display, accessibility_app, text_app,
             send({"jsonrpc": "2.0", "method": "notifications/initialized"})
             tools = request(2, "tools/list", {})["tools"]
             list_tool = next(tool for tool in tools if tool["name"] == "window_list")
+            input_tool = next(tool for tool in tools if tool["name"] == "window_input")
+            action_schema = input_tool["inputSchema"]["properties"]["actions"]["items"]
+            assert len(action_schema["anyOf"]) == 3, action_schema
             assert "all_windows" in list_tool["inputSchema"]["properties"], list_tool
             assert {tool["name"] for tool in tools} == {
                 "window_list", "window_get", "window_wait", "window_pointer", "window_click",
@@ -200,6 +204,7 @@ def check_windows(ctl, control, host, run, display, accessibility_app, text_app,
                 "window_resolve",
                 "window_scale",
                 "window_type_text",
+                "window_input",
                 "window_accessibility",
             }
             result = request(3, "tools/call", {"name": "window_get", "arguments": {"id": window["id"]}})
@@ -308,6 +313,20 @@ def check_remote_control(rpc, mcp, identifier, host, run, display):
     assert "error" in rpc("type_text", {"control": key, "text": "must not be typed"})
     invoke("key", control=handle, keycode=42, pressed=False)
     assert received.read_bytes() == before_invalid, "rejected text emitted partial input"
+    for actions in [["must not type", {"key": "NotAKey"}], ["must not type", {"chord": ["Ctrl", "Control"]}]]:
+        assert "error" in rpc("input", {"control": key, "actions": actions})
+    assert received.read_bytes() == before_invalid, "invalid tail emitted earlier actions"
+    actions = ["seq", {"key": "Return"}, "abc", {"key": "BackSpace"}, {"chord": ["Control", "a"]}, {"key": "Return"}]
+    result = mcp(182, "tools/call", {"name": "window_input", "arguments": {"control": key, "actions": actions}})
+    assert not result.get("isError"), result
+    progress = result["structuredContent"]
+    assert progress["complete"] and progress["completed_actions"] == 6 and progress["typed_characters"] == 6, progress
+    assert progress["receipt"]["stage"] == "effects_queued", progress
+    wait_for(host, lambda: b"seq\rabc\x7f\x01\r" in received.read_bytes(), "named keys and remapped Control chord")
+    started = time.monotonic()
+    progress = invoke("input", control=key, actions=["paced"], typing_interval_ms=40)
+    assert progress["complete"] and time.monotonic() - started >= 0.15, progress
+    wait_for(host, lambda: received.read_bytes().endswith(b"paced"), "paced text")
     invoke("click", control=handle, x=100, y=100, button=272)
     wait_for(host, lambda: b"\x1b[<0;" in received.read_bytes(), "terminal pointer input")
     invoke("scroll", control=handle, x=100, y=100, horizontal=0, vertical=1, wheel=True)
@@ -344,7 +363,7 @@ def check_remote_control(rpc, mcp, identifier, host, run, display):
     assert "error" in rpc("click", {"control": handle, "x": 100, "y": 100, "button": 272})
     assert "error" in rpc("resize", {"control": handle, "width": 400, "height": 300})
     subprocess.run(["grim", str(run / "desktop-restricted-control.png")], env=dict(os.environ, WAYLAND_DISPLAY=str(display)), check=True, timeout=10)
-    invoke("key", control=handle, keycode=29, pressed=True)
+    invoke("key", control=handle, keycode=58, pressed=True)
     invoke("control", id=identifier, enabled=False)
     wait_for(host, lambda: invoke("get", id=identifier)["control"] is None, "control retirement")
     assert "error" in rpc("key", {"control": handle, "keycode": 30, "pressed": True})
@@ -353,7 +372,17 @@ def check_remote_control(rpc, mcp, identifier, host, run, display):
     wait_for(host, lambda: invoke("get", id=identifier)["control"] is not None, "replacement grant")
     assert invoke("get", id=identifier)["control"] != handle, "old control ID reused"
     assert invoke("resolve", key=key)["control"] == invoke("get", id=identifier)["control"]
-    invoke("control", id=identifier, enabled=False)
+    offset = len(received.read_bytes())
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+        typing = executor.submit(rpc, "input", {"control": key, "actions": ["Z" * 20], "typing_interval_ms": 100})
+        wait_for(host, lambda: len(received.read_bytes()) > offset, "paced input started")
+        assert invoke("get", id=identifier)["control"], "queries blocked during typing"
+        invoke("control", id=identifier, enabled=False)
+        progress = typing.result(timeout=5)["result"]
+        assert not progress["complete"] and progress["completed_actions"] == 0 and progress["error"], progress
+        assert 0 < progress["typed_characters"] < 20, progress
+        time.sleep(0.25)
+        assert received.read_bytes()[offset:] == b"Z" * progress["typed_characters"], progress
     print("PASS independent input, viewport sizing, live peek, MCP image capture and grant retirement", flush=True)
 
 
@@ -377,7 +406,7 @@ def check_text_entry(ctl, rpc, host, run, program, backend):
     if backend == "x11":
         assert result.returncode != 0 and "native Wayland" in json.loads(result.stdout)["error"], result
         # Confirm refusal leaves the field empty and normal key input usable.
-        assert "result" in rpc("press_key", {"control": control, "keycode": 30})
+        assert "result" in rpc("input", {"control": control, "actions": [{"key": "a"}]})
         text = "a"
     else:
         assert result.returncode == 0, result.stderr

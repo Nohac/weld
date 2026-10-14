@@ -1,7 +1,7 @@
 //! Stdio lifecycle for the window client's generated MCP tools.
 
 use crate::windows::{WindowCatalogue, WindowClient};
-use anyhow::Result;
+use anyhow::{Context, Result};
 use rmcp::{
     ErrorData, RoleServer, ServerHandler, ServiceExt,
     model::{
@@ -117,6 +117,19 @@ pub fn run(socket: PathBuf) -> Result<()> {
         .map(serde_json::from_value)
         .collect::<Result<Vec<Tool>, _>>()?;
     for tool in &mut tools {
+        if tool.name == "window_input" {
+            // The upstream macro emits primitive parameter types; publish the
+            // action union from the same Rust type used by CLI/RPC dispatch.
+            let schema = schemars::generate::SchemaSettings::default()
+                .with(|settings| settings.inline_subschemas = true)
+                .into_generator()
+                .into_root_schema_for::<Vec<weld_remote_control::InputAction>>();
+            let properties = Arc::make_mut(&mut tool.input_schema)
+                .get_mut("properties")
+                .and_then(serde_json::Value::as_object_mut)
+                .context("generated input tool has no parameter properties")?;
+            properties.insert("actions".into(), serde_json::to_value(schema)?);
+        }
         let read_only = matches!(
             tool.name.as_ref(),
             "window_list"

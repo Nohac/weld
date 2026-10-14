@@ -28,6 +28,11 @@ Weld is a workspace of reusable layers and one standard distribution:
   Whole-text operations use a bounded `weld-client::TextInput` keyboard event.
   Native Wayland delivery translates it into Smithay's temporary keysym batches,
   preserving clipboard selections and the seat's physical keymap state.
+  `weld-remote-control` validates keyboard sequences, resolves named keys through
+  source-scoped native queries, and schedules paced text with adapter deadlines.
+  Every step retains the initial grant and ownership epoch; receipts track
+  completed progress across interruption. CLI/RPC/MCP share the action union,
+  with Schemars supplying its mixed string/object MCP schema.
   On-demand native GPU snapshots reuse source composition and asynchronous
   readback, retaining input leases until sampling completes. See
   [Native window control](native-window-control.md).

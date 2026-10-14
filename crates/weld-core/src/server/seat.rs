@@ -60,6 +60,50 @@ pub(super) struct OrdinaryImplicitGrab {
 }
 
 impl ServerState {
+    pub(super) fn resolve_remote_keys(
+        &mut self,
+        controller: weld_client::ClientInputController,
+        query: weld_client::ClientKeyboardQuery,
+    ) {
+        let input = self.remote_input(controller);
+        let result = (|| {
+            let input = input.ok_or("keyboard controller unavailable")?;
+            let keyboard = input.native.get_keyboard().ok_or("keyboard unavailable")?;
+            if query.names.len() > 1024 {
+                return Err("too many key names".to_owned());
+            }
+            query
+                .names
+                .iter()
+                .map(|name| {
+                    if name.len() > 64 || name.contains('\0') {
+                        return Err("invalid key name".into());
+                    }
+                    let canonical = match name.as_str() {
+                        "Control" | "Ctrl" => "Control_L",
+                        "Shift" => "Shift_L",
+                        "Alt" => "Alt_L",
+                        "Super" => "Super_L",
+                        "Enter" => "Return",
+                        "Backspace" => "BackSpace",
+                        name => name,
+                    };
+                    let symbol = xkb::keysym_from_name(canonical, xkb::KEYSYM_NO_FLAGS);
+                    if symbol.raw() == 0 {
+                        return Err(format!("unknown key name: {name}"));
+                    }
+                    keyboard
+                        .keycode_for_keysym(symbol)
+                        .and_then(|code| code.raw().checked_sub(8))
+                        .filter(|code| *code > 0 && *code <= 767)
+                        .map(weld_client::LinuxKeycode)
+                        .ok_or_else(|| format!("key absent from active keyboard layout: {name}"))
+                })
+                .collect()
+        })();
+        let _ = query.reply.send(result);
+    }
+
     fn clear_selection_focus(&mut self, seat: &Seat<Self>) {
         let group = self.data_device_seat(seat);
         if let Some(owner) = group

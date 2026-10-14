@@ -9400,6 +9400,7 @@ dependencies = [
  "base64",
  "schemars",
  "serde",
+ "serde_json",
  "tracing",
  "uuid",
  "weld-access",

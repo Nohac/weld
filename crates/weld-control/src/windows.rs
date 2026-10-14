@@ -12,7 +12,8 @@ use std::{
 use tokio::sync::{Semaphore, watch};
 use weld_accessibility::Snapshot as AccessibilitySnapshot;
 use weld_remote_control::{
-    Capabilities, InputReceipt, Operation, RemoteControlClient, Reply, Snapshot, Viewport,
+    Capabilities, InputAction, InputReceipt, InputSequenceResult, Operation, RemoteControlClient,
+    Reply, Snapshot, Viewport,
 };
 
 /// Logical compositor coordinates.
@@ -189,17 +190,19 @@ impl WindowService {
         Ok(target)
     }
 
-    fn input(&self, control: String, operation: Operation) -> Result<InputReceipt, String> {
+    fn send_input(&self, control: String, operation: Operation) -> Result<InputReceipt, String> {
         match self.operate(control, operation)? {
             Reply::Input(receipt) => Ok(receipt),
-            Reply::Snapshot(_) => Err("input returned a capture".into()),
+            Reply::Snapshot(_) | Reply::Sequence(_) => {
+                Err("input returned an unexpected result".into())
+            }
         }
     }
 
     fn snapshot(&self, control: String, operation: Operation) -> Result<Snapshot, String> {
         match self.operate(control, operation)? {
             Reply::Snapshot(snapshot) => Ok(snapshot),
-            Reply::Input(_) => Err("capture returned no pixels".into()),
+            Reply::Input(_) | Reply::Sequence(_) => Err("capture returned no pixels".into()),
         }
     }
 
@@ -282,7 +285,7 @@ impl WindowService {
 
     /// Move the independent controller pointer in window-local logical coordinates.
     pub fn pointer(&self, control: String, x: f64, y: f64) -> Result<InputReceipt, String> {
-        self.input(control, Operation::Pointer { x, y })
+        self.send_input(control, Operation::Pointer { x, y })
     }
     /// Click a Linux pointer button (272 left, 273 right, 274 middle).
     pub fn click(
@@ -292,7 +295,7 @@ impl WindowService {
         y: f64,
         button: u32,
     ) -> Result<InputReceipt, String> {
-        self.input(control, Operation::Click { x, y, button })
+        self.send_input(control, Operation::Click { x, y, button })
     }
     /// Send a button edge at the controller pointer's last position.
     pub fn button(
@@ -301,7 +304,7 @@ impl WindowService {
         button: u32,
         pressed: bool,
     ) -> Result<InputReceipt, String> {
-        self.input(control, Operation::Button { button, pressed })
+        self.send_input(control, Operation::Button { button, pressed })
     }
     /// Send an evdev key edge using the host's configured keymap.
     pub fn key(
@@ -310,11 +313,11 @@ impl WindowService {
         keycode: u32,
         pressed: bool,
     ) -> Result<InputReceipt, String> {
-        self.input(control, Operation::Key { keycode, pressed })
+        self.send_input(control, Operation::Key { keycode, pressed })
     }
     /// Press and release one evdev key in a single native operation.
     pub fn press_key(&self, control: String, keycode: u32) -> Result<InputReceipt, String> {
-        self.input(
+        self.send_input(
             control,
             Operation::Chord {
                 keycodes: vec![keycode],
@@ -323,11 +326,29 @@ impl WindowService {
     }
     /// Press an ordered chord and release in reverse order. All keys are validated before dispatch.
     pub fn chord(&self, control: String, keycodes: Vec<u32>) -> Result<InputReceipt, String> {
-        self.input(control, Operation::Chord { keycodes })
+        self.send_input(control, Operation::Chord { keycodes })
     }
     /// Type 1–4096 UTF-8 bytes into a native Wayland window, preserving the clipboard. Newlines press Enter; tabs press Tab. Release held remote keys first. XWayland is unsupported.
     pub fn type_text(&self, control: String, text: String) -> Result<InputReceipt, String> {
-        self.input(control, Operation::TypeText { text })
+        self.send_input(control, Operation::TypeText { text })
+    }
+    /// Run ordered text strings, named keypresses and chords. Optional typing_interval_ms paces text; default zero. Returns completed progress and a final receipt.
+    pub fn input(
+        &self,
+        control: String,
+        actions: Vec<InputAction>,
+        typing_interval_ms: Option<u32>,
+    ) -> Result<InputSequenceResult, String> {
+        match self.operate(
+            control,
+            Operation::Sequence {
+                actions,
+                typing_interval_ms: typing_interval_ms.unwrap_or(0),
+            },
+        )? {
+            Reply::Sequence(result) => Ok(result),
+            _ => Err("input sequence returned an unexpected result".into()),
+        }
     }
     /// Scroll at window-local logical x/y. Wheel deltas are notches; otherwise logical pixels in one completed finger gesture. Positive deltas scroll right/down.
     pub fn scroll(
@@ -339,7 +360,7 @@ impl WindowService {
         vertical: f64,
         wheel: bool,
     ) -> Result<InputReceipt, String> {
-        self.input(
+        self.send_input(
             control,
             Operation::Scroll {
                 x,
@@ -352,11 +373,11 @@ impl WindowService {
     }
     /// Configure the application's logical viewport, independently of its desktop peek.
     pub fn resize(&self, control: String, width: u32, height: u32) -> Result<InputReceipt, String> {
-        self.input(control, Operation::Resize { width, height })
+        self.send_input(control, Operation::Resize { width, height })
     }
     /// Request the application's rendering scale, rounded to 1/120 units. Omit factor to restore the output's scale. Logical viewport size stays unchanged.
     pub fn scale(&self, control: String, factor: Option<f64>) -> Result<InputReceipt, String> {
-        self.input(control, Operation::Scale { factor })
+        self.send_input(control, Operation::Scale { factor })
     }
     /// Capture the controlled application and its contained popups as a PNG.
     pub fn capture(&self, control: String) -> Result<Snapshot, String> {
@@ -642,6 +663,18 @@ impl WindowClient {
     /// Type a full Unicode string (1–4096 UTF-8 bytes) into a native Wayland window without changing the clipboard. Newlines press Enter; tabs press Tab. No implicit Enter is added. Release held remote keys first. XWayland is unsupported.
     pub fn type_text(&self, control: String, text: String) -> Result<InputReceipt, String> {
         self.request("type_text", json!({"control":control,"text":text}))
+    }
+    /// Run 1–64 actions: text strings, {"key":"Return"}, or {"chord":["Control","a"]}. Keys use the configured layout. Optional typing_interval_ms (0–1000, default 0) paces Unicode characters; planned typing is limited to 25s and 4096 text bytes. Text requires native Wayland. Reports completed progress; no automatic retry after interruption. Wait/inspect separately for application reactions.
+    pub fn input(
+        &self,
+        control: String,
+        actions: Vec<InputAction>,
+        typing_interval_ms: Option<u32>,
+    ) -> Result<InputSequenceResult, String> {
+        self.request(
+            "input",
+            json!({"control":control,"actions":actions,"typing_interval_ms":typing_interval_ms}),
+        )
     }
     /// Scroll at logical x/y. With --wheel, deltas are notches; otherwise logical pixels in one completed finger gesture. Positive is right/down.
     pub fn scroll(

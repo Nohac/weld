@@ -13,6 +13,7 @@ mod geometry;
 mod id;
 mod input;
 mod input_geometry;
+mod keyboard_query;
 mod mailbox;
 mod metadata;
 mod pending;
@@ -55,6 +56,7 @@ pub use input::{
     TouchpadPinch, TouchpadSwipe,
 };
 pub use input_geometry::SurfaceInputGeometry;
+pub use keyboard_query::ClientKeyboardQuery;
 pub use mailbox::{PresentationMailbox, PresentationQueueStats};
 pub use metadata::{ClientSurfaceMetadata, MAX_SURFACE_LABEL_BYTES, SurfaceMetadataError};
 pub use pending::{PendingClientEvents, PendingEventUpdate};

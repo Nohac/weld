@@ -2,8 +2,10 @@
 
 mod permissions;
 mod runtime;
+mod sequence;
 pub use permissions::{Capabilities, Capability};
 pub use runtime::registration;
+pub use sequence::{InputAction, InputSequenceResult};
 
 use anyhow::{Context, Result, ensure};
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
@@ -104,6 +106,10 @@ impl std::fmt::Display for Snapshot {
 
 #[derive(Clone, Debug)]
 pub enum Operation {
+    Sequence {
+        actions: Vec<InputAction>,
+        typing_interval_ms: u32,
+    },
     Pointer {
         x: f64,
         y: f64,
@@ -156,6 +162,7 @@ impl Operation {
 
 pub enum Reply {
     Input(InputReceipt),
+    Sequence(InputSequenceResult),
     Snapshot(Snapshot),
 }
 
@@ -369,6 +376,7 @@ impl RemoteControlClient {
         );
         let (reply, response) = mpsc::sync_channel(1);
         let timeout = match &operation {
+            Operation::Sequence { .. } => Duration::from_secs(30),
             Operation::CaptureAfter { timeout_ms, .. } => {
                 ensure!(
                     (1..=5000).contains(timeout_ms),
@@ -389,11 +397,11 @@ impl RemoteControlClient {
             .map_err(|_| anyhow::anyhow!("remote control queue unavailable or full"))?;
         (self.wake)();
         let result = response
-            .recv_timeout(Duration::from_secs(6))
+            .recv_timeout(timeout + Duration::from_secs(1))
             .context("remote control operation completion unknown; do not retry automatically")?
             .map_err(anyhow::Error::msg)?;
         ensure!(
-            grant.permit.is_authorized(),
+            matches!(&result, Reply::Sequence(_)) || grant.permit.is_authorized(),
             "window control revoked before delivery"
         );
         Ok(result)

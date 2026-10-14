@@ -322,6 +322,7 @@ fn whole_text_uses_one_keyboard_effect_and_respects_ownership_and_permissions() 
     let response = pending(&client, &grant.state, operation.clone());
     adapter.drain_events(&mut events);
     adapter.drain_effects(&mut effects);
+    adapter.drain_events(&mut events);
     assert!(response.try_recv().expect("receipt").is_ok());
     let text: Vec<_> = effects
         .iter()
@@ -478,6 +479,109 @@ fn local_takeover_releases_remote_holds_and_rejects_work_queued_before_resume() 
     adapter.drain_effects(&mut effects);
     assert!(resumed.try_recv().expect("resumed response").is_ok());
     assert!(grant.active());
+}
+
+#[test]
+fn paced_sequence_stops_on_takeover_and_key_resolution_precedes_all_input() {
+    let upstream = ClientSourceId::new(0);
+    let surface = ClientSurfaceId::new(ClientId::new(upstream, 1), 1);
+    let authority = AccessAuthority::new(|| {});
+    let (registration, client) = registration(upstream, ClientSourceId::new(3), || {}, NoCapture);
+    let mut adapter = registration.into_parts().runtime.driver;
+    map(&mut *adapter, surface);
+    let grant = client
+        .grant(
+            surface,
+            authority.open("test".into()).expect("permit"),
+            Capabilities::ALL,
+        )
+        .expect("grant");
+    let mut events = ClientEventQueue::default();
+    let mut effects = Vec::new();
+    adapter.drain_events(&mut events);
+    adapter.drain_effects(&mut effects);
+    effects.clear();
+    let failed = pending(
+        &client,
+        &grant.state,
+        Operation::Sequence {
+            actions: vec![
+                crate::InputAction::Text("prefix".into()),
+                crate::InputAction::Key {
+                    key: "missing".into(),
+                },
+            ],
+            typing_interval_ms: 0,
+        },
+    );
+    adapter.drain_events(&mut events);
+    adapter.drain_effects(&mut effects);
+    assert!(effects.is_empty());
+    let mut queries = Vec::new();
+    adapter.drain_keyboard_queries(&mut queries);
+    assert_eq!(queries.len(), 1);
+    queries
+        .remove(0)
+        .reply
+        .send(Err("key absent from active layout".into()))
+        .expect("resolution");
+    adapter.drain_events(&mut events);
+    adapter.drain_effects(&mut effects);
+    assert!(failed.try_recv().expect("refusal").is_err());
+    assert!(effects.is_empty());
+    let paced = pending(
+        &client,
+        &grant.state,
+        Operation::Sequence {
+            actions: vec![crate::InputAction::Text("é🦀".into())],
+            typing_interval_ms: 1000,
+        },
+    );
+    let before = Instant::now();
+    adapter.drain_events(&mut events);
+    adapter.drain_effects(&mut effects);
+    assert!(
+        adapter.next_deadline().expect("typing deadline") >= before + Duration::from_millis(1000)
+    );
+    let texts: Vec<_> = effects
+        .iter()
+        .filter_map(|effect| match effect {
+            ClientAdapterEffect::Input(ClientInputEvent {
+                event: InputEventKind::Text { text },
+                ..
+            }) => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(texts, vec!["é"]);
+    let busy = pending(
+        &client,
+        &grant.state,
+        Operation::Chord { keycodes: vec![30] },
+    );
+    grant.set_local_input(true);
+    adapter.drain_events(&mut events);
+    adapter.drain_effects(&mut effects);
+    let Reply::Sequence(result) = paced.try_recv().expect("stopped").expect("progress") else {
+        panic!("expected progress");
+    };
+    assert!(!result.complete);
+    assert_eq!(result.typed_characters, 1);
+    assert_eq!(result.completed_actions, 0);
+    assert!(result.receipt.is_some());
+    assert!(!result.in_flight);
+    assert!(busy.try_recv().expect("busy refusal").is_err());
+    effects.clear();
+    grant.set_local_input(false);
+    adapter.drain_events(&mut events);
+    adapter.drain_effects(&mut effects);
+    assert!(!effects.iter().any(|effect| matches!(
+        effect,
+        ClientAdapterEffect::Input(ClientInputEvent {
+            event: InputEventKind::Text { .. },
+            ..
+        })
+    )));
 }
 
 #[test]
