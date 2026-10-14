@@ -21,16 +21,16 @@ use winit::keyboard::Key;
 use super::{
     ApplicationInputBuffer, GlobalShortcut, GlobalShortcutAppExt, GlobalShortcutModifiers,
     GlobalShortcutPlugin, GlobalShortcutPressed, GlobalShortcutRegistry, GlobalShortcutSet,
-    InputBridgePlugin, InputOutputTarget, PointerShortcut, PointerShortcutAppExt,
-    PointerShortcutModifiers, TouchpadGesture, VirtualTerminalShortcutPlugin,
-    enqueue_application_input_batch, enqueue_raw_input, filter_global_shortcut_event,
-    filter_pointer_shortcut_event, filter_virtual_terminal_event,
+    InputBridgePlugin, InputOutputTarget, LocalInputBlockedSurfaces, PointerShortcut,
+    PointerShortcutAppExt, PointerShortcutModifiers, TouchpadGesture,
+    VirtualTerminalShortcutPlugin, enqueue_application_input_batch, enqueue_raw_input,
+    filter_global_shortcut_event, filter_pointer_shortcut_event, filter_virtual_terminal_event,
     raw::{
         ButtonState, InputDelta, InputPosition, LinuxButtonCode, LinuxKeycode, PointerGesture,
         RawSeatEvent, RawSeatEventKind, TouchpadPinch,
     },
     shell_commands::take_commands as take_host_commands,
-    take_input_effects, take_virtual_terminal_switch_request,
+    take_input_effects, take_input_retirements, take_virtual_terminal_switch_request,
 };
 use crate::ActiveBackend;
 use weld_core::{
@@ -711,4 +711,32 @@ fn host_focus_loss_releases_leafwing_inputs() {
             .resource::<bevy::input::ButtonInput<MouseButton>>()
             .pressed(MouseButton::Left)
     );
+}
+
+#[test]
+fn blocking_a_surface_publishes_one_retirement_per_takeover() {
+    let (mut app, _) = projection_test_app();
+    let surface = crate::surface::SurfaceId::for_test(91);
+    app.world_mut()
+        .resource_mut::<LocalInputBlockedSurfaces>()
+        .0
+        .insert(surface);
+    app.update();
+    let retired = take_input_retirements(app.world_mut());
+    assert_eq!(retired.len(), 1);
+    assert_eq!(retired[0].surface, surface);
+    app.update();
+    assert!(take_input_retirements(app.world_mut()).is_empty());
+    app.world_mut()
+        .resource_mut::<LocalInputBlockedSurfaces>()
+        .0
+        .clear();
+    app.update();
+    assert!(take_input_retirements(app.world_mut()).is_empty());
+    app.world_mut()
+        .resource_mut::<LocalInputBlockedSurfaces>()
+        .0
+        .insert(surface);
+    app.update();
+    assert_eq!(take_input_retirements(app.world_mut()).len(), 1);
 }

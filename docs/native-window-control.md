@@ -122,6 +122,13 @@ consumed for application input and window-manager pointer shortcuts. The native
 relay releases remote holds before local input activates; queued remote input
 from an earlier ownership epoch is rejected. Remote capture remains available.
 
+Blocked application content shows the cursor theme's **Not allowed** shape;
+header controls and shell resize handles keep their own cursors. Ending local
+interaction releases that surface's held keys and buttons, cancels touch,
+gestures and finger scrolling, and sends pointer leave. Late physical release
+events are consumed before routing input to another window. Other windows and
+remote controllers retain their input state.
+
 The controller configures the app's
 viewport independently; moving or resizing the desktop frame changes only the
 peek. Content stays at its natural logical size, anchored at the upper left and
@@ -229,6 +236,13 @@ viewport `resize`, `scale`; and `capture`, `capture_after`, `accessibility`, all
 MCP `window_list` defaults to control-enabled windows, including waiting persistent
 slots. Pass `{"all_windows":true}` for the whole inventory. CLI/RPC `list` retains
 the full inventory; `find` provides explicit application and control filters.
+For equivalent filtered CLI queries:
+
+```sh
+weldctl --session weld-0 window find --controlled true --json
+weldctl --session weld-0 window find draftship --occupied true --controlled true --json
+```
+
 Administrative grant creation and permission changes are exposed through the local
 CLI/RPC and desktop binding. MCP control tools require an existing grant handle.
 `server-less` supplies their descriptions and dispatch; the official Rust MCP
@@ -280,10 +294,11 @@ credentials report `unavailable`. X11 association, cross-process embedded trees
 and precise multi-window association require further identity support.
 
 AccessKit-based applications must compile their Linux AT-SPI bridge. Draftship's
-Blitz revision `d1b433edbc13da889228ae4f92908f7c28514019` enables shell accessibility
-but disables the default features of `accesskit_xplat`; its resolved dependencies
-omit `accesskit_unix`. Enabling the session flag alone cannot expose that build's
-tree. The application needs the Linux bridge and its async backend enabled;
+initial build with Blitz revision `d1b433edbc13da889228ae4f92908f7c28514019`
+omitted `accesskit_unix` because `accesskit_xplat`'s default features were disabled.
+Enabling `accesskit_unix` and its `async-io` backend exposed the tree successfully.
+The provider currently supplies roles and text values, with mostly empty names,
+missing bounds and no advertised actions;
 see the pinned [workspace dependency](https://github.com/DioxusLabs/blitz/blob/d1b433edbc13da889228ae4f92908f7c28514019/Cargo.toml)
 and [bridge features](https://github.com/DioxusLabs/blitz/blob/d1b433edbc13da889228ae4f92908f7c28514019/packages/accesskit_xplat/Cargo.toml).
 
@@ -291,7 +306,9 @@ and [bridge features](https://github.com/DioxusLabs/blitz/blob/d1b433edbc13da889
 
 The next input slice is whole-string UTF-8 insertion/paste with an explicit
 clipboard-preservation contract for the controlled seat. Accessibility action
-execution and broader window association remain follow-ups.
+execution, bounded text/value inspection with sensitive-field handling, and
+broader window association remain follow-ups. Mixed-version capability diagnostics
+would make method/field mismatches during upgrades easier to identify.
 Launch-bound window readiness, process filters, structured ownership refusals and
 ownership-change waits, and general multi-step input batches remain follow-ups.
 The 2026-10-14 Draftship validation motivates these additions; the current frame

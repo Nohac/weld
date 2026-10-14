@@ -22,6 +22,9 @@ Weld is a workspace of reusable layers and one standard distribution:
   ownership epoch and waits for native held-input retirement before enabling
   local input. Modifier-only shortcut state lives in `weld-input`; native keyboard
   delivery masks the consumed modifiers while shell matching keeps physical state.
+  Returning to remote input retires surface-scoped local sequences in
+  `ClientRuntime` before publishing new focus and pointer routes. Native cleanup
+  targets local seats; late physical releases are consumed by the shared runtime.
   On-demand native GPU snapshots reuse source composition and asynchronous
   readback, retaining input leases until sampling completes. See
   [Native window control](native-window-control.md).

@@ -1,6 +1,6 @@
 //! Smithay seat delivery and protocol focus application.
 
-use std::{borrow::Cow, cell::RefCell};
+use std::{borrow::Cow, cell::RefCell, rc::Rc};
 
 use smithay::{
     backend::input::{
@@ -919,6 +919,24 @@ impl ServerState {
     pub(super) fn retire_input_target(&mut self, surface: SurfaceId, time: u32) {
         self.retire_touch_target(surface, time);
         let inputs = self.input_seats().cloned().collect::<Vec<_>>();
+        self.retire_input_target_in_seats(surface, time, inputs);
+    }
+
+    pub(super) fn retire_local_input_target(&mut self, surface: SurfaceId, time: u32) {
+        let inputs = self
+            .input_seats()
+            .filter(|input| input.controller.get().is_none())
+            .cloned()
+            .collect();
+        self.retire_input_target_in_seats(surface, time, inputs);
+    }
+
+    fn retire_input_target_in_seats(
+        &mut self,
+        surface: SurfaceId,
+        time: u32,
+        inputs: Vec<Rc<InputSeat>>,
+    ) {
         for input in inputs {
             input.admission.borrow_mut().retire_surface(surface);
             if input.desired_focus.get() == Some(surface) {

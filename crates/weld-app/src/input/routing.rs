@@ -34,6 +34,7 @@ pub struct LocalInputBlockedSurfaces(pub HashSet<crate::surface::SurfaceId>);
 
 pub(super) fn register(app: &mut App) {
     app.init_resource::<InputEffects>()
+        .init_resource::<InputRetirements>()
         .init_resource::<LocalInputBlockedSurfaces>()
         .init_resource::<PointerRoutingState>()
         .add_systems(
@@ -48,6 +49,9 @@ pub(super) fn register(app: &mut App) {
 #[derive(Resource, Default)]
 struct InputEffects(VecDeque<ClientPointerRouteUpdate>);
 
+#[derive(Resource, Default)]
+struct InputRetirements(Vec<weld_client::ClientInputRetirement>);
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct ResolvedPointer {
     target: Option<ClientPointerRoute>,
@@ -58,6 +62,14 @@ struct PointerRoutingState {
     pointer: PointerPositionState,
     last_sent: Option<ResolvedPointer>,
     pressed_buttons: HashSet<LinuxButtonCode>,
+    blocked: HashSet<crate::surface::SurfaceId>,
+}
+
+pub(crate) fn take_input_retirements(world: &mut World) -> Vec<weld_client::ClientInputRetirement> {
+    world
+        .get_resource_mut::<InputRetirements>()
+        .map(|mut pending| std::mem::take(&mut pending.0))
+        .unwrap_or_default()
 }
 
 pub(crate) fn take_input_effects(world: &mut World) -> Vec<ClientPointerRouteUpdate> {
@@ -86,6 +98,7 @@ fn resolve_input_effects(
         mut effects,
         mut routing,
         mut published_target,
+        mut retirements,
     } = resources;
 
     let trace_button = tracing::enabled!(target: "weld_input_diag", tracing::Level::DEBUG)
@@ -94,6 +107,15 @@ fn resolve_input_effects(
             .iter()
             .any(|event| matches!(event.event, RawSeatEventKind::PointerButton { .. }));
     replay_input_batch(&mut routing, pending.0.drain(..));
+    retirements
+        .0
+        .extend(blocked.0.difference(&routing.blocked).map(|surface| {
+            weld_client::ClientInputRetirement {
+                surface: *surface,
+                time: update_time.0,
+            }
+        }));
+    routing.blocked.clone_from(&blocked.0);
     if trace_button {
         let picked = picked_pointer_target(&pointers, &picked_nodes, &cameras, &output_positions);
         tracing::debug!(
@@ -147,6 +169,7 @@ struct InputRoutingResources<'w> {
     effects: ResMut<'w, InputEffects>,
     routing: ResMut<'w, PointerRoutingState>,
     published_target: ResMut<'w, PublishedPointerTarget>,
+    retirements: ResMut<'w, InputRetirements>,
 }
 
 fn replay_input_batch(

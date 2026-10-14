@@ -1083,6 +1083,10 @@ impl HostPolicy for AppShell {
         AppShell::take_pointer_route_updates(self)
     }
 
+    fn take_local_input_retirements(&mut self) -> Vec<weld_client::ClientInputRetirement> {
+        crate::input::take_input_retirements(self.app.world_mut())
+    }
+
     fn take_cursor_update(&mut self) -> weld_core::cursor::CursorHostUpdate {
         AppShell::take_cursor_update(self)
     }

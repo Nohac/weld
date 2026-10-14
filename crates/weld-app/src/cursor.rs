@@ -18,7 +18,10 @@ use weld_core::cursor::{
 
 pub use bevy::window::{CursorIcon, SystemCursorIcon};
 
-use crate::input::InputSystems;
+use crate::{
+    input::{InputSystems, LocalInputBlockedSurfaces},
+    surface::SurfaceInputNode,
+};
 
 /// Cursor scheduling hooks for systems that publish compositor-owned shapes.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, SystemSet)]
@@ -133,7 +136,18 @@ fn resolve_hovered_cursor(
     parents: Query<&ChildOf>,
     mut requests: MessageReader<CursorRequest>,
     mut resolved: ResMut<ResolvedCursor>,
+    surfaces: Query<&SurfaceInputNode>,
+    blocked: Res<LocalInputBlockedSurfaces>,
 ) {
+    let blocked_content = hover_map
+        .get(&PointerId::Mouse)
+        .and_then(|hovered| {
+            hovered
+                .iter()
+                .min_by(|left, right| left.1.depth.total_cmp(&right.1.depth))
+        })
+        .and_then(|(entity, _)| surfaces.get(*entity).ok())
+        .is_some_and(|node| blocked.0.contains(&node.surface));
     let hovered = hover_map
         .get(&PointerId::Mouse)
         .and_then(|hovered| {
@@ -148,7 +162,12 @@ fn resolve_hovered_cursor(
         })
         .unwrap_or_default();
     let request = requests.read().last();
-    let override_client = request.is_some();
+    let override_client = request.is_some() || blocked_content;
+    let hovered = if blocked_content {
+        CursorAppearance::Named(CoreCursorIcon::NotAllowed)
+    } else {
+        hovered
+    };
     let appearance = request.map_or(hovered, |request| {
         CursorAppearance::Named(core_cursor_icon(request.0))
     });
@@ -220,6 +239,7 @@ mod tests {
     };
 
     use super::*;
+    use crate::surface::{SurfaceId, SurfaceLayerId};
 
     #[test]
     fn cursor_handoff_reports_only_changed_host_state() {
@@ -272,6 +292,7 @@ mod tests {
     fn hovered_child_inherits_a_bevy_cursor_icon_from_its_ui_parent() {
         let mut app = App::new();
         app.init_resource::<HoverMap>()
+            .init_resource::<LocalInputBlockedSurfaces>()
             .init_resource::<ResolvedCursor>()
             .add_message::<CursorRequest>()
             .add_systems(PreUpdate, resolve_hovered_cursor);
@@ -295,6 +316,90 @@ mod tests {
         assert_eq!(
             app.world().resource::<ResolvedCursor>().appearance,
             CursorAppearance::Named(CoreCursorIcon::EwResize)
+        );
+    }
+
+    #[test]
+    fn blocked_content_cursor_tracks_stationary_permission_changes_and_shell_controls() {
+        let mut app = App::new();
+        app.init_resource::<HoverMap>()
+            .init_resource::<LocalInputBlockedSurfaces>()
+            .init_resource::<ResolvedCursor>()
+            .add_message::<CursorRequest>()
+            .add_systems(PreUpdate, resolve_hovered_cursor);
+        let surface = SurfaceId::for_test(1);
+        let content = app
+            .world_mut()
+            .spawn((
+                SurfaceInputNode {
+                    surface,
+                    layer: SurfaceLayerId::new(1),
+                    local_origin: Vec2::ZERO,
+                },
+                CursorIcon::System(SystemCursorIcon::Text),
+            ))
+            .id();
+        let header = app
+            .world_mut()
+            .spawn(CursorIcon::System(SystemCursorIcon::Pointer))
+            .id();
+        let camera = app.world_mut().spawn_empty().id();
+        app.world_mut()
+            .resource_mut::<HoverMap>()
+            .entry(PointerId::Mouse)
+            .or_default()
+            .insert(content, HitData::new(camera, 1., None, None));
+        for blocked in [true, false, true] {
+            let mut surfaces = app.world_mut().resource_mut::<LocalInputBlockedSurfaces>();
+            if blocked {
+                surfaces.0.insert(surface);
+            } else {
+                surfaces.0.clear();
+            }
+            app.update();
+            let resolved = app.world().resource::<ResolvedCursor>();
+            assert_eq!(resolved.override_client, blocked);
+            assert_eq!(
+                resolved.appearance,
+                CursorAppearance::Named(if blocked {
+                    CoreCursorIcon::NotAllowed
+                } else {
+                    CoreCursorIcon::Text
+                })
+            );
+        }
+        app.world_mut()
+            .write_message(CursorRequest(SystemCursorIcon::EwResize));
+        app.update();
+        assert_eq!(
+            app.world().resource::<ResolvedCursor>().appearance,
+            CursorAppearance::Named(CoreCursorIcon::EwResize)
+        );
+        app.update();
+        assert_eq!(
+            app.world().resource::<ResolvedCursor>().appearance,
+            CursorAppearance::Named(CoreCursorIcon::NotAllowed)
+        );
+        app.world_mut()
+            .resource_mut::<HoverMap>()
+            .entry(PointerId::Mouse)
+            .or_default()
+            .insert(header, HitData::new(camera, 0., None, None));
+        app.update();
+        let resolved = app.world().resource::<ResolvedCursor>();
+        assert_eq!(
+            resolved.appearance,
+            CursorAppearance::Named(CoreCursorIcon::Pointer)
+        );
+        assert!(
+            !resolved.override_client,
+            "shell controls remain usable above blocked content"
+        );
+        app.world_mut().resource_mut::<HoverMap>().clear();
+        app.update();
+        assert_eq!(
+            app.world().resource::<ResolvedCursor>().appearance,
+            CursorAppearance::default()
         );
     }
 }

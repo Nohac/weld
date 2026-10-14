@@ -429,6 +429,10 @@ pub(crate) fn apply_policy_requests<Event>(
     if let Some(workspaces) = policy.take_desktop_workspaces() {
         state.data.server.publish_workspaces(workspaces);
     }
+    for retirement in policy.take_local_input_retirements() {
+        state.clients.retire_local_input(retirement);
+    }
+    state.data.server.apply_pending_client_work();
     for request in policy.take_client_requests() {
         if !state.clients.apply_request(request) {
             tracing::warn!("ignored a request for an unregistered client source");

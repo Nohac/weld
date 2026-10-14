@@ -537,6 +537,9 @@ impl ServerState {
                 WaylandClientWork::Request(request) => self.apply_client_request(request),
                 WaylandClientWork::Input(event) => self.apply_client_input(event),
                 WaylandClientWork::HostFocusLost(time) => self.release_host_input(time),
+                WaylandClientWork::RetireLocalInput(surface, time) => {
+                    self.retire_local_input_target(surface, time)
+                }
                 WaylandClientWork::Presentation(claimant, update) => {
                     self.apply_presentation_claim(claimant, update)
                 }

@@ -30,8 +30,8 @@ mod wire;
 pub use adapter::{
     ClientAdapter, ClientAdapterCommandEnvelope, ClientAdapterEffect, ClientAdapterRegistration,
     ClientAdapterRegistrationParts, ClientImporterRegistration, ClientInputDispatchResult,
-    ClientRouteAliasUpdate, ClientRuntime, ClientRuntimeAdapter, ClientRuntimeEffectError,
-    ClientRuntimeEventError, ClientRuntimeRegistrationError,
+    ClientInputRetirement, ClientRouteAliasUpdate, ClientRuntime, ClientRuntimeAdapter,
+    ClientRuntimeEffectError, ClientRuntimeEventError, ClientRuntimeRegistrationError,
 };
 pub use buffer::{
     ClientBufferId, ClientBufferLease, ClientBufferLeaseSourceMismatch, ClientBufferMetadata,

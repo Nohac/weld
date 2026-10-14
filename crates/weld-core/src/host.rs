@@ -434,6 +434,10 @@ pub trait HostPolicy {
     fn update_output_work_area(&mut self, _output: OutputId, _area: crate::geometry::LogicalRect) {}
     fn should_exit(&self) -> bool;
     fn take_pointer_route_updates(&mut self) -> Vec<ClientPointerRouteUpdate>;
+    /// Retires newly blocked local input before publishing focus and pointer routes.
+    fn take_local_input_retirements(&mut self) -> Vec<weld_client::ClientInputRetirement> {
+        Vec::new()
+    }
     fn take_cursor_update(&mut self) -> crate::cursor::CursorHostUpdate;
     fn take_host_commands(&mut self) -> Vec<HostCommand>;
     /// Publishes changed keyboard policy before the next native input batch.

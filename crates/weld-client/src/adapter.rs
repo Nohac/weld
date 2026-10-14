@@ -1,5 +1,6 @@
 //! Caller-driven adapter registry and device-paced input routing.
 
+mod local_input;
 #[cfg(test)]
 mod presentation_tests;
 
@@ -19,6 +20,13 @@ use crate::{
     RuntimeInputEvent, RuntimeInputEventKind,
 };
 
+/// Ends local input ownership for one surface before publishing its new routes.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ClientInputRetirement {
+    pub surface: ClientSurfaceId,
+    pub time: u32,
+}
+
 /// One client source driven by the native runtime.
 ///
 /// Implementations are deliberately caller-driven. They must not start their
@@ -35,6 +43,9 @@ pub trait ClientAdapter {
     fn apply_input(&mut self, event: ClientInputEvent);
     fn apply_command(&mut self, command: ClientAdapterCommandEnvelope);
     fn host_focus_lost(&mut self, time: u32);
+
+    /// Releases native grabs and focus after the runtime retires this surface's local sequences.
+    fn retire_local_input(&mut self, _surface: ClientSurfaceId, _time: u32) {}
 
     /// Registration-time authority for an independent remote input controller.
     fn input_source(&self) -> Option<ClientSourceId> {
@@ -436,6 +447,8 @@ pub struct ClientRuntime {
     keyboard_route: Option<ClientKeyboardRoute>,
     // Resolve once on press: focus/alias changes must not strand the release.
     keyboard_captures: HashMap<LinuxKeycode, KeyboardCapture>,
+    retired_local_keys: HashSet<LinuxKeycode>,
+    retired_local_buttons: HashSet<LinuxButtonCode>,
     pointer_capture: PointerCapture,
     gesture_capture: Option<GestureCapture>,
     finger_scroll_capture: Option<FingerScrollCapture>,
@@ -929,6 +942,9 @@ impl ClientRuntime {
         event: RuntimeInputEvent,
     ) -> ClientInputDispatchResult {
         let RuntimeInputEvent { event, time } = event;
+        if self.consume_retired_local_edge(&event) {
+            return ClientInputDispatchResult::NoRoute;
+        }
         match event {
             RuntimeInputEventKind::Input(InputEventKind::Touch { event }) => {
                 self.dispatch_touch(self.pointer_route, event, time)
@@ -1100,6 +1116,8 @@ impl ClientRuntime {
         self.keyboard_route = None;
         self.pointer_capture = PointerCapture::Idle;
         self.keyboard_captures.clear();
+        self.retired_local_keys.clear();
+        self.retired_local_buttons.clear();
         self.gesture_capture = None;
         self.finger_scroll_capture = None;
         self.pressed_buttons.clear();
@@ -1496,6 +1514,7 @@ mod tests {
         remote_inputs: Vec<(crate::ClientInputController, ClientInputEvent)>,
         remote_focus: Vec<(crate::ClientInputController, crate::ClientFocusRequest)>,
         retired_controllers: Vec<crate::ClientInputController>,
+        retired_local_inputs: Vec<(ClientSurfaceId, u32)>,
     }
 
     struct RecordingAdapter(Rc<RefCell<AdapterRecord>>);
@@ -1515,6 +1534,12 @@ mod tests {
     }
 
     impl ClientAdapter for RecordingAdapter {
+        fn retire_local_input(&mut self, surface: ClientSurfaceId, time: u32) {
+            self.0
+                .borrow_mut()
+                .retired_local_inputs
+                .push((surface, time));
+        }
         fn apply_remote_input(
             &mut self,
             controller: crate::ClientInputController,
@@ -2157,6 +2182,227 @@ mod tests {
         runtime.set_keyboard_route(route);
         assert!(!runtime.apply_request(ClientRequest::ClearFocus));
         assert_eq!(runtime.keyboard_route, route);
+    }
+
+    #[test]
+    fn local_handoff_releases_only_its_surface_and_swallows_late_physical_edges() {
+        let mut runtime = ClientRuntime::default();
+        let first = register(&mut runtime, 1);
+        let second = register(&mut runtime, 2);
+        let controlled = surface(1, 1, 1);
+        let other = surface(2, 1, 1);
+        let pointer = |surface| {
+            Some(ClientPointerRoute {
+                surface,
+                layer: crate::SurfaceLayerId::new(1),
+                transform: crate::InputTransform::IDENTITY,
+            })
+        };
+        let key = |code, state| {
+            RuntimeInputEvent::new(
+                RuntimeInputEventKind::Input(InputEventKind::Keyboard {
+                    keycode: LinuxKeycode(code),
+                    state,
+                }),
+                1,
+            )
+        };
+        let button = |state| {
+            RuntimeInputEvent::new(
+                RuntimeInputEventKind::Input(InputEventKind::PointerButton {
+                    position: Some(crate::InputPosition::new(5., 5.)),
+                    button: LinuxButtonCode(272),
+                    state,
+                }),
+                1,
+            )
+        };
+        runtime.set_keyboard_route(Some(ClientKeyboardRoute {
+            surface: controlled,
+        }));
+        runtime.set_pointer_route(pointer(controlled));
+        runtime.dispatch_unconsumed_input(key(42, KeyboardKeyState::Pressed));
+        runtime.dispatch_unconsumed_input(button(ButtonState::Pressed));
+        runtime.set_keyboard_route(Some(ClientKeyboardRoute { surface: other }));
+        runtime.dispatch_unconsumed_input(key(30, KeyboardKeyState::Pressed));
+        runtime.set_pointer_route(pointer(other));
+        runtime.retire_local_input(ClientInputRetirement {
+            surface: controlled,
+            time: 2,
+        });
+        let old = first.borrow();
+        assert!(old.inputs.iter().any(|event| matches!(
+            event.event,
+            InputEventKind::Keyboard {
+                state: KeyboardKeyState::Released,
+                ..
+            }
+        )));
+        assert!(old.inputs.iter().any(|event| matches!(
+            event.event,
+            InputEventKind::PointerButton {
+                state: ButtonState::Released,
+                ..
+            }
+        )));
+        assert!(matches!(
+            old.inputs.last().map(|event| &event.event),
+            Some(InputEventKind::PointerLeft { .. })
+        ));
+        assert_eq!(old.retired_local_inputs, vec![(controlled, 2)]);
+        drop(old);
+        assert_eq!(
+            runtime.keyboard_route,
+            Some(ClientKeyboardRoute { surface: other })
+        );
+        assert!(runtime.keyboard_captures.contains_key(&LinuxKeycode(30)));
+        assert_eq!(runtime.pointer_route, pointer(other));
+        let old_count = first.borrow().inputs.len();
+        let other_count = second.borrow().inputs.len();
+        for event in [
+            key(42, KeyboardKeyState::Repeated),
+            key(42, KeyboardKeyState::Released),
+            button(ButtonState::Released),
+        ] {
+            assert_eq!(
+                runtime.dispatch_unconsumed_input(event),
+                ClientInputDispatchResult::NoRoute
+            );
+        }
+        assert_eq!(first.borrow().inputs.len(), old_count);
+        assert_eq!(second.borrow().inputs.len(), other_count);
+        for event in [
+            key(42, KeyboardKeyState::Pressed),
+            key(42, KeyboardKeyState::Released),
+            button(ButtonState::Pressed),
+            button(ButtonState::Released),
+            key(30, KeyboardKeyState::Released),
+        ] {
+            assert_eq!(
+                runtime.dispatch_unconsumed_input(event),
+                ClientInputDispatchResult::Delivered
+            );
+        }
+        assert_eq!(second.borrow().inputs.len(), other_count + 5);
+        assert!(second.borrow().retired_local_inputs.is_empty());
+        runtime.dispatch_unconsumed_input(key(42, KeyboardKeyState::Pressed));
+        runtime.retire_local_input(ClientInputRetirement {
+            surface: other,
+            time: 3,
+        });
+        assert!(runtime.keyboard_route.is_none());
+        runtime.set_keyboard_route(Some(ClientKeyboardRoute {
+            surface: controlled,
+        }));
+        assert_eq!(
+            runtime.dispatch_unconsumed_input(key(42, KeyboardKeyState::Pressed)),
+            ClientInputDispatchResult::Delivered,
+            "a fresh press recovers when a shell shortcut consumed the physical release"
+        );
+    }
+
+    #[test]
+    fn local_handoff_cancels_touch_gestures_and_finger_scroll() {
+        let mut runtime = ClientRuntime::default();
+        let first = register(&mut runtime, 1);
+        let second = register(&mut runtime, 2);
+        let controlled = surface(1, 1, 1);
+        let route = |surface| {
+            Some(ClientPointerRoute {
+                surface,
+                layer: SurfaceLayerId::new(1),
+                transform: InputTransform::IDENTITY,
+            })
+        };
+        runtime.set_pointer_route(route(controlled));
+        let scroll = RawScrollFrame {
+            source: RawScrollSource::Finger,
+            phase: RawScrollPhase::Started,
+            horizontal: 0.,
+            vertical: 1.,
+            horizontal_v120: None,
+            vertical_v120: None,
+            horizontal_stop: false,
+            vertical_stop: false,
+        };
+        for event in [
+            InputEventKind::Touch {
+                event: crate::TouchEvent::Down {
+                    id: crate::TouchId(1),
+                    position: InputPosition::new(2., 3.),
+                },
+            },
+            InputEventKind::PointerGesture {
+                gesture: PointerGesture::Swipe(crate::TouchpadSwipe::Begin { fingers: 3 }),
+            },
+            InputEventKind::PointerAxis {
+                position: None,
+                axis: scroll,
+            },
+        ] {
+            assert_eq!(
+                runtime.dispatch_unconsumed_input(RuntimeInputEvent::new(
+                    RuntimeInputEventKind::Input(event),
+                    1
+                )),
+                ClientInputDispatchResult::Delivered
+            );
+        }
+        runtime.retire_local_input(ClientInputRetirement {
+            surface: controlled,
+            time: 2,
+        });
+        let inputs = &first.borrow().inputs;
+        assert!(inputs.iter().any(|input| matches!(
+            input.event,
+            InputEventKind::Touch {
+                event: crate::TouchEvent::Cancel
+            }
+        )));
+        assert!(inputs.iter().any(|input| matches!(
+            input.event,
+            InputEventKind::PointerGesture {
+                gesture: PointerGesture::Swipe(crate::TouchpadSwipe::End { cancelled: true })
+            }
+        )));
+        assert!(inputs.iter().any(|input| matches!(
+            input.event,
+            InputEventKind::PointerAxis {
+                axis: RawScrollFrame {
+                    phase: RawScrollPhase::Cancelled,
+                    vertical_stop: true,
+                    ..
+                },
+                ..
+            }
+        )));
+        runtime.set_pointer_route(route(surface(2, 1, 1)));
+        for event in [
+            InputEventKind::Touch {
+                event: crate::TouchEvent::Up {
+                    id: crate::TouchId(1),
+                },
+            },
+            InputEventKind::PointerGesture {
+                gesture: PointerGesture::Swipe(crate::TouchpadSwipe::End { cancelled: false }),
+            },
+            InputEventKind::PointerAxis {
+                position: None,
+                axis: RawScrollFrame {
+                    phase: RawScrollPhase::Moved,
+                    ..scroll
+                },
+            },
+        ] {
+            assert_eq!(
+                runtime.dispatch_unconsumed_input(RuntimeInputEvent::new(
+                    RuntimeInputEventKind::Input(event),
+                    3
+                )),
+                ClientInputDispatchResult::NoRoute
+            );
+        }
+        assert!(second.borrow().inputs.is_empty());
     }
 
     #[test]

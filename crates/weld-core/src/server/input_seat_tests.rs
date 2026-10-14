@@ -18,6 +18,7 @@ pub(super) struct Probe {
     pub(super) keys: Vec<(u32, u32, wl_keyboard::KeyState)>,
     modifiers: Vec<(u32, u32, u32)>,
     pub(super) buttons: Vec<(u32, u32, wl_pointer::ButtonState)>,
+    pointer_leaves: usize,
 }
 
 #[test]
@@ -417,15 +418,18 @@ impl Dispatch<wl_pointer::WlPointer, u32> for Observer {
         _: &Connection,
         _: &QueueHandle<Self>,
     ) {
-        if let wl_pointer::Event::Button {
-            serial,
-            button,
-            state: WEnum::Value(value),
-            ..
-        } = event
-        {
-            state.input.buttons.push((*id, button, value));
-            state.input.last_button_serial = Some(serial);
+        match event {
+            wl_pointer::Event::Button {
+                serial,
+                button,
+                state: WEnum::Value(value),
+                ..
+            } => {
+                state.input.buttons.push((*id, button, value));
+                state.input.last_button_serial = Some(serial);
+            }
+            wl_pointer::Event::Leave { .. } => state.input.pointer_leaves += 1,
+            _ => {}
         }
     }
 }
@@ -455,6 +459,120 @@ pub(super) fn button(surface: SurfaceId, state: ButtonState) -> ClientInputEvent
         },
         time: 1,
     }
+}
+
+#[test]
+#[ignore = "native socket fixture requires XDG_RUNTIME_DIR"]
+fn local_surface_handoff_releases_native_holds_without_retiring_peer_input() {
+    let mut f = Fixture::new();
+    let mut windows = Vec::new();
+    for number in [911, 912] {
+        let surface = f.surface(number);
+        let (id, _) = f.toplevel(&surface);
+        surface.attach(Some(&f.buffer()), 0, 0);
+        surface.commit();
+        windows.push(id);
+    }
+    f.sync();
+    let peer = ClientInputController {
+        adapter: ClientSourceId::new(7),
+        connection: 1,
+    };
+    f.server.remote_input(peer).expect("peer seat");
+    for _ in 0..3 {
+        f.sync();
+    }
+    f.server.focus_toplevel(Some(windows[0]));
+    f.server
+        .apply_client_input(key(windows[0], KeyboardKeyState::Pressed));
+    f.server
+        .apply_client_input(button(windows[0], ButtonState::Pressed));
+    f.server.remote_client_focus(
+        peer,
+        ClientFocusRequest {
+            source: windows[1].source(),
+            surface: Some(windows[1]),
+        },
+    );
+    f.server
+        .remote_client_input(peer, key(windows[1], KeyboardKeyState::Pressed));
+    f.server
+        .remote_client_input(peer, button(windows[1], ButtonState::Pressed));
+    f.sync();
+    let local = f
+        .server
+        .local_input
+        .keyboard_binding
+        .borrow()
+        .clone()
+        .expect("local binding");
+    let remote = f.server.remote_inputs[&peer]
+        .keyboard_binding
+        .borrow()
+        .clone()
+        .expect("peer binding");
+    let releases_before = f
+        .observer
+        .input
+        .buttons
+        .iter()
+        .filter(|(_, _, state)| *state == wl_pointer::ButtonState::Released)
+        .count();
+    let keys_before = f
+        .observer
+        .input
+        .keys
+        .iter()
+        .filter(|(_, _, state)| *state == wl_keyboard::KeyState::Released)
+        .count();
+    let leaves_before = f.observer.input.pointer_leaves;
+    f.server.retire_local_input_target(windows[0], 2);
+    f.sync();
+    let keyboard = local.native.get_keyboard().expect("keyboard");
+    assert!(keyboard.pressed_keys().is_empty());
+    assert!(keyboard.current_focus().is_none());
+    assert_eq!(
+        f.observer
+            .input
+            .keys
+            .iter()
+            .filter(|(_, _, state)| *state == wl_keyboard::KeyState::Released)
+            .count(),
+        keys_before + 1
+    );
+    assert_eq!(f.observer.input.pointer_leaves, leaves_before + 1);
+    assert!(local.pressed_pointer_buttons.borrow().is_empty());
+    assert!(
+        local
+            .native
+            .get_pointer()
+            .expect("pointer")
+            .current_focus()
+            .is_none()
+    );
+    assert_eq!(
+        f.observer
+            .input
+            .buttons
+            .iter()
+            .filter(|(_, _, state)| *state == wl_pointer::ButtonState::Released)
+            .count(),
+        releases_before + 1
+    );
+    assert_eq!(
+        remote
+            .native
+            .get_keyboard()
+            .expect("peer keyboard")
+            .pressed_keys()
+            .len(),
+        1
+    );
+    assert_eq!(remote.pressed_pointer_buttons.borrow().len(), 1);
+    assert_eq!(
+        f.server.remote_inputs[&peer].desired_focus.get(),
+        Some(windows[1])
+    );
 }
 
 #[test]

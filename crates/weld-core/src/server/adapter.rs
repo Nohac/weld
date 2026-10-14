@@ -11,8 +11,8 @@ use weld_client::{
     ClientAdapter, ClientAdapterCommandEnvelope, ClientAdapterRegistration, ClientBufferId,
     ClientBufferLease, ClientBufferMetadata, ClientBufferUseId, ClientCommitRevision,
     ClientEventQueue, ClientInputEvent, ClientProvenance, ClientRequest, ClientSourceDescriptor,
-    ClientSurfaceCommit, ClientSurfaceEvent, ClientSurfaceEventKind, SurfaceAlphaMode,
-    SurfaceBufferChange, SurfaceBufferUpdate,
+    ClientSurfaceCommit, ClientSurfaceEvent, ClientSurfaceEventKind, ClientSurfaceId,
+    SurfaceAlphaMode, SurfaceBufferChange, SurfaceBufferUpdate,
 };
 
 use crate::{
@@ -87,6 +87,7 @@ pub(crate) enum WaylandClientWork {
     Request(ClientRequest),
     Input(ClientInputEvent),
     HostFocusLost(u32),
+    RetireLocalInput(ClientSurfaceId, u32),
     Presentation(
         weld_client::ClientSourceId,
         weld_client::ClientPresentationUpdate,
@@ -405,6 +406,11 @@ impl ClientAdapter for WaylandClientAdapter {
     fn host_focus_lost(&mut self, time: u32) {
         self.bridge
             .push_work(WaylandClientWork::HostFocusLost(time));
+    }
+
+    fn retire_local_input(&mut self, surface: ClientSurfaceId, time: u32) {
+        self.bridge
+            .push_work(WaylandClientWork::RetireLocalInput(surface, time));
     }
 
     fn drain_retired_buffers(&mut self, buffers: &mut Vec<ClientBufferId>) {
