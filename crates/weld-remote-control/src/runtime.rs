@@ -1,13 +1,13 @@
 //! Native-thread remote-control endpoint over the shared relay and composed view.
 
 use crate::{
-    Capture, CaptureJob, Command, GrantState, Operation, Pending, RemoteControlClient, Reply,
-    Snapshot,
+    Capture, CaptureJob, Command, ControlRegistry, GrantState, InputCoordinates, InputReceipt,
+    InputStage, Operation, Pending, PixelScale, RemoteControlClient, Reply, Snapshot, Viewport,
 };
 use anyhow::{Context, Result, ensure};
 use std::{
     cell::RefCell,
-    collections::HashMap,
+    collections::{HashMap, HashSet, VecDeque},
     rc::Rc,
     sync::{Arc, Mutex, atomic::Ordering, mpsc},
     time::Instant,
@@ -20,7 +20,8 @@ use weld_client::{
     ClientSurfaceEvent, ClientSurfaceEventKind, ClientSurfaceId, ClientSurfaceRequest,
     ClientSurfaceRequestKind, ComposedBuffer, Extent, InputEventKind, InputPosition,
     KeyboardKeyState, LinuxButtonCode, LinuxKeycode, PassthroughClientImporter, PresentationRate,
-    SurfaceBufferChange, SurfaceStreamMode, ToplevelLayout,
+    RawScrollFrame, RawScrollPhase, RawScrollSource, SurfaceBufferChange, SurfaceStreamMode,
+    ToplevelLayout,
 };
 use weld_hoist_core::{
     HoistEndpointCommand, HoistPortResult, HoistSessionId, HoistSourcePort, SourcePortCommand,
@@ -35,6 +36,8 @@ struct State {
     frames: HashMap<ClientSurfaceId, ClientSurfaceCommit>,
     messages: Vec<DestinationEnvelope>,
     accepted: Vec<Pending>,
+    checkpoints: HashMap<ClientSurfaceId, VecDeque<(u64, Option<u64>)>>,
+    sequence: u64,
 }
 
 struct Port(Rc<RefCell<State>>);
@@ -51,6 +54,31 @@ impl HoistSourcePort for Port {
                                 && let Some(grant) = state.grants.get(&event.surface)
                             {
                                 grant.permit.end();
+                            }
+                            if let Some(grant) = state.grants.get(&event.surface)
+                                && let Ok(mut viewport) = grant.viewport.lock()
+                            {
+                                let next =
+                                    commit
+                                        .buffers
+                                        .iter()
+                                        .find_map(|update| match &update.change {
+                                            SurfaceBufferChange::Replaced { buffer, .. } => buffer
+                                                .access::<ComposedBuffer>()
+                                                .map(|scene| Viewport {
+                                                    logical_width: scene.logical_size.width,
+                                                    logical_height: scene.logical_size.height,
+                                                    pixel_width: scene.extent.width,
+                                                    pixel_height: scene.extent.height,
+                                                    input_coordinates:
+                                                        InputCoordinates::WindowLocalLogical,
+                                                    pixel_scale: PixelScale::for_frame(scene),
+                                                }),
+                                            _ => None,
+                                        });
+                                if next.is_some() || !commit.mapped {
+                                    *viewport = next;
+                                }
                             }
                             state.frames.insert(event.surface, commit);
                         }
@@ -83,6 +111,7 @@ impl HoistSourcePort for Port {
                     state.frames.insert(event.surface, commit);
                 }
                 state.input.remove(surface);
+                state.checkpoints.remove(&surface);
                 if let Some(grant) = state.grants.remove(&surface) {
                     grant.permit.end();
                 }
@@ -101,11 +130,30 @@ impl HoistSourcePort for Port {
         Ok(())
     }
     fn effects_drained(&mut self) {
-        for pending in self.0.borrow_mut().accepted.drain(..) {
+        let mut state = self.0.borrow_mut();
+        for pending in std::mem::take(&mut state.accepted) {
             let result = if pending.grant.permit.is_authorized()
                 && pending.grant.input_epoch.load(Ordering::Acquire) == pending.input_epoch
             {
-                Ok(Reply::Applied)
+                if let Some(sequence) = state.sequence.checked_add(1) {
+                    state.sequence = sequence;
+                    let revision = state
+                        .frames
+                        .get(&pending.grant.surface)
+                        .map(|frame| frame.revision.raw());
+                    let checkpoints = state.checkpoints.entry(pending.grant.surface).or_default();
+                    if checkpoints.len() == 128 {
+                        checkpoints.pop_front();
+                    }
+                    checkpoints.push_back((sequence, revision));
+                    Ok(Reply::Input(InputReceipt {
+                        sequence: sequence.to_string(),
+                        stage: InputStage::EffectsQueued,
+                        frame_revision: revision.map(|revision| revision.to_string()),
+                    }))
+                } else {
+                    Err("input sequences exhausted".into())
+                }
             } else {
                 Err("window control revoked or input ownership changed".into())
             };
@@ -118,6 +166,7 @@ impl HoistSourcePort for Port {
             grant.permit.end();
         }
         state.frames.clear();
+        state.checkpoints.clear();
         state.views = SourceViews::new(SurfaceStreamMode::Composited);
         state.messages.clear();
         for pending in state.accepted.drain(..) {
@@ -135,6 +184,12 @@ struct Capturing {
     replied: bool,
 }
 
+enum Execution {
+    Effects,
+    Capture(Box<dyn CaptureJob>, Snapshot),
+    Wait,
+}
+
 struct Adapter {
     source: ClientSourceId,
     upstream: ClientSourceId,
@@ -143,7 +198,9 @@ struct Adapter {
     requests: mpsc::Receiver<Command>,
     capture: Box<dyn Capture>,
     capturing: Vec<Capturing>,
+    waiting: Vec<Pending>,
     positions: HashMap<ClientSurfaceId, InputPosition>,
+    held_keys: HashMap<ClientSurfaceId, HashSet<u32>>,
     started: Instant,
     input_epochs: HashMap<ClientSurfaceId, u64>,
 }
@@ -162,6 +219,8 @@ pub fn registration(
         frames: HashMap::new(),
         messages: Vec::new(),
         accepted: Vec::new(),
+        checkpoints: HashMap::new(),
+        sequence: 0,
     }));
     let adapter = Adapter {
         source,
@@ -171,7 +230,9 @@ pub fn registration(
         requests,
         capture: Box::new(capture),
         capturing: Vec::new(),
+        waiting: Vec::new(),
         positions: HashMap::new(),
+        held_keys: HashMap::new(),
         started: Instant::now(),
         input_epochs: HashMap::new(),
     };
@@ -183,7 +244,7 @@ pub fn registration(
         ),
         RemoteControlClient {
             sender,
-            grants: Arc::new(Mutex::new(HashMap::new())),
+            grants: Arc::new(Mutex::new(ControlRegistry::default())),
             wake: Arc::new(wake),
         },
     )
@@ -202,6 +263,7 @@ impl Adapter {
                 self.relay
                     .release_input(|member| state.views.root(member) == Some(*surface));
                 self.positions.remove(surface);
+                self.held_keys.remove(surface);
             }
         }
         for (surface, epoch) in &self.input_epochs {
@@ -226,14 +288,15 @@ impl Adapter {
                 HoistEndpointCommand::Unmap { source },
             ));
             self.positions.remove(&source);
+            self.held_keys.remove(&source);
             self.input_epochs.remove(&source);
         }
     }
 
-    fn execute(&mut self, pending: &Pending) -> Result<Option<(Box<dyn CaptureJob>, Snapshot)>> {
+    fn execute(&mut self, pending: &Pending) -> Result<Execution> {
         let epoch = pending.grant.input_epoch.load(Ordering::Acquire);
         ensure!(
-            matches!(pending.operation, Operation::Capture)
+            pending.operation.is_capture()
                 || (epoch.is_multiple_of(2) && epoch == pending.input_epoch),
             "local interaction interrupted remote input"
         );
@@ -245,8 +308,12 @@ impl Adapter {
             "window capability is disabled"
         );
         ensure!(
-            pending.deadline > Instant::now() && pending.grant.permit.is_authorized(),
-            "window control expired or revoked"
+            pending.grant.permit.is_authorized(),
+            "window control revoked"
+        );
+        ensure!(
+            pending.deadline > Instant::now(),
+            "operation timed out before completion"
         );
         let surface = pending.grant.surface;
         let mut state = self.state.borrow_mut();
@@ -301,7 +368,7 @@ impl Adapter {
                 surface: Some(surface),
             })),
         };
-        match pending.operation {
+        match pending.operation.clone() {
             Operation::Pointer { x, y } => {
                 let position = valid_position(x, y)?;
                 self.positions.insert(surface, position);
@@ -379,6 +446,112 @@ impl Adapter {
                         },
                     },
                 ));
+                let held = self.held_keys.entry(surface).or_default();
+                if pressed {
+                    held.insert(keycode);
+                } else {
+                    held.remove(&keycode);
+                }
+            }
+            Operation::Chord { keycodes } => {
+                ensure!(
+                    !keycodes.is_empty() && keycodes.len() <= 16,
+                    "a chord needs 1 to 16 keycodes"
+                );
+                let mut unique = HashSet::new();
+                for key in &keycodes {
+                    ensure!(
+                        *key > 0 && *key <= 767 && unique.insert(*key),
+                        "invalid or duplicate chord keycode"
+                    );
+                    ensure!(
+                        !self
+                            .held_keys
+                            .get(&surface)
+                            .is_some_and(|held| held.contains(key)),
+                        "chord key is already held; release it first"
+                    );
+                }
+                messages.push(focus);
+                for (key, state) in keycodes
+                    .iter()
+                    .map(|key| (key, KeyboardKeyState::Pressed))
+                    .chain(
+                        keycodes
+                            .iter()
+                            .rev()
+                            .map(|key| (key, KeyboardKeyState::Released)),
+                    )
+                {
+                    messages.push(event(
+                        ClientInputTarget::Keyboard { surface },
+                        InputEventKind::Keyboard {
+                            keycode: LinuxKeycode(*key),
+                            state,
+                        },
+                    ));
+                }
+            }
+            Operation::Scroll {
+                x,
+                y,
+                horizontal,
+                vertical,
+                wheel,
+            } => {
+                let position = valid_position(x, y)?;
+                ensure!(
+                    horizontal.is_finite()
+                        && vertical.is_finite()
+                        && horizontal.abs() <= 1_000_000.
+                        && vertical.abs() <= 1_000_000.,
+                    "invalid scroll delta"
+                );
+                self.positions.insert(surface, position);
+                messages.push(event(
+                    pointer,
+                    InputEventKind::PointerMotion {
+                        position,
+                        relative: None,
+                    },
+                ));
+                let axis = RawScrollFrame {
+                    source: if wheel {
+                        RawScrollSource::Wheel
+                    } else {
+                        RawScrollSource::Finger
+                    },
+                    phase: RawScrollPhase::Moved,
+                    horizontal: horizontal * if wheel { 15. } else { 1. },
+                    vertical: vertical * if wheel { 15. } else { 1. },
+                    horizontal_v120: wheel.then_some((horizontal * 120.).round() as i32),
+                    vertical_v120: wheel.then_some((vertical * 120.).round() as i32),
+                    horizontal_stop: false,
+                    vertical_stop: false,
+                };
+                messages.push(event(
+                    pointer,
+                    InputEventKind::PointerAxis {
+                        position: Some(position),
+                        axis,
+                    },
+                ));
+                if !wheel {
+                    messages.push(event(
+                        pointer,
+                        InputEventKind::PointerAxis {
+                            position: Some(position),
+                            axis: RawScrollFrame {
+                                phase: RawScrollPhase::Ended,
+                                horizontal: 0.,
+                                vertical: 0.,
+                                horizontal_stop: horizontal != 0.,
+                                vertical_stop: vertical != 0.,
+                                ..axis
+                            },
+                        },
+                    ));
+                }
             }
             Operation::Resize { width, height } => {
                 ensure!(
@@ -403,7 +576,50 @@ impl Adapter {
                     )),
                 });
             }
-            Operation::Capture => {
+            Operation::Scale { factor } => {
+                let scale_120 = factor
+                    .map(|factor| {
+                        let units = (factor * 120.).round();
+                        ensure!(
+                            factor.is_finite()
+                                && factor > 0.
+                                && (1.0..=f64::from(u32::MAX)).contains(&units),
+                            "scale must be positive and representable in 1/120 units"
+                        );
+                        Ok(units as u32)
+                    })
+                    .transpose()?;
+                messages.push(DestinationEnvelope {
+                    session,
+                    message: DestinationMessage::Request(ClientRequest::Surface(
+                        ClientSurfaceRequest {
+                            surface,
+                            kind: ClientSurfaceRequestKind::SetPreferredScale { scale_120 },
+                        },
+                    )),
+                });
+            }
+            Operation::Capture | Operation::CaptureAfter { .. } => {
+                let after_sequence =
+                    if let Operation::CaptureAfter { sequence, .. } = &pending.operation {
+                        let sequence_number =
+                            sequence.parse::<u64>().context("invalid input sequence")?;
+                        let (_, revision) = state
+                            .checkpoints
+                            .get(&surface)
+                            .and_then(|checkpoints| {
+                                checkpoints
+                                    .iter()
+                                    .find(|(candidate, _)| *candidate == sequence_number)
+                            })
+                            .context("input checkpoint expired or belongs to another window")?;
+                        if revision.is_some_and(|revision| frame.revision.raw() <= revision) {
+                            return Ok(Execution::Wait);
+                        }
+                        Some(sequence.clone())
+                    } else {
+                        None
+                    };
                 ensure!(self.capturing.len() < 4, "window capture busy");
                 let scene = frame
                     .buffers
@@ -416,7 +632,7 @@ impl Adapter {
                     })
                     .context("composed window frame unavailable")?;
                 let job = self.capture.begin(scene)?;
-                return Ok(Some((
+                return Ok(Execution::Capture(
                     job,
                     Snapshot {
                         width: scene.extent.width,
@@ -424,9 +640,12 @@ impl Adapter {
                         logical_width: scene.logical_size.width,
                         logical_height: scene.logical_size.height,
                         revision: frame.revision.raw().to_string(),
+                        after_sequence,
+                        input_coordinates: InputCoordinates::WindowLocalLogical,
+                        pixel_scale: PixelScale::for_frame(scene),
                         png_base64: String::new(),
                     },
-                )));
+                ));
             }
         }
         for message in messages {
@@ -438,7 +657,7 @@ impl Adapter {
             } = &mut *state;
             messages.extend(input.route(views, message));
         }
-        Ok(None)
+        Ok(Execution::Effects)
     }
 }
 
@@ -454,6 +673,7 @@ impl ClientAdapter for Adapter {
             .iter()
             .filter(|capture| !capture.replied)
             .map(|capture| capture.pending.deadline)
+            .chain(self.waiting.iter().map(|pending| pending.deadline))
             .chain(self.relay.next_deadline())
             .min()
     }
@@ -470,6 +690,7 @@ impl ClientAdapter for Adapter {
                         continue;
                     }
                     let surface = grant.surface;
+                    self.state.borrow_mut().checkpoints.remove(&surface);
                     let session = HoistSessionId::new(grant.permit.id().0);
                     self.input_epochs
                         .insert(surface, grant.input_epoch.load(Ordering::Acquire));
@@ -493,14 +714,27 @@ impl ClientAdapter for Adapter {
                         )),
                     });
                 }
+                Command::Operation(pending)
+                    if pending.operation.is_capture()
+                        && self.waiting.len() + self.capturing.len() >= 4 =>
+                {
+                    let _ = pending.reply.send(Err("window capture busy".into()));
+                }
                 Command::Operation(pending) => match self.execute(&pending) {
-                    Ok(Some((job, snapshot))) => self.capturing.push(Capturing {
+                    Ok(Execution::Capture(job, snapshot)) => self.capturing.push(Capturing {
                         pending,
                         job,
                         snapshot,
                         replied: false,
                     }),
-                    Ok(None) => self.state.borrow_mut().accepted.push(pending),
+                    Ok(Execution::Effects) => self.state.borrow_mut().accepted.push(pending),
+                    Ok(Execution::Wait) => {
+                        if self.waiting.len() + self.capturing.len() < 4 {
+                            self.waiting.push(pending);
+                        } else {
+                            let _ = pending.reply.send(Err("window capture busy".into()));
+                        }
+                    }
                     Err(error) => {
                         let _ = pending.reply.send(Err(error.to_string()));
                     }
@@ -508,6 +742,25 @@ impl ClientAdapter for Adapter {
             }
         }
         self.relay.drain_events(events);
+        for pending in std::mem::take(&mut self.waiting) {
+            match self.execute(&pending) {
+                Ok(Execution::Capture(job, snapshot)) => self.capturing.push(Capturing {
+                    pending,
+                    job,
+                    snapshot,
+                    replied: false,
+                }),
+                Ok(Execution::Wait) => self.waiting.push(pending),
+                Ok(Execution::Effects) => {
+                    let _ = pending
+                        .reply
+                        .send(Err("capture produced input effects".into()));
+                }
+                Err(error) => {
+                    let _ = pending.reply.send(Err(error.to_string()));
+                }
+            }
+        }
         let mut index = 0;
         while index < self.capturing.len() {
             let capture = &mut self.capturing[index];

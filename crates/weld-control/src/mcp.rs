@@ -52,7 +52,10 @@ impl ServerHandler for WindowMcp {
             .into());
         };
         let client = self.client.clone();
-        let capture = request.name == "window_capture";
+        let capture = matches!(
+            request.name.as_ref(),
+            "window_capture" | "window_capture_after"
+        );
         let result = tokio::task::spawn_blocking(move || {
             let _permit = permit;
             client.mcp_call(
@@ -94,7 +97,13 @@ pub fn run(socket: PathBuf) -> Result<()> {
     for tool in &mut tools {
         let read_only = matches!(
             tool.name.as_ref(),
-            "window_list" | "window_get" | "window_wait" | "window_capture"
+            "window_list"
+                | "window_get"
+                | "window_wait"
+                | "window_capture"
+                | "window_capture_after"
+                | "window_find"
+                | "window_resolve"
         );
         tool.annotations = Some(ToolAnnotations::new().read_only(read_only));
     }

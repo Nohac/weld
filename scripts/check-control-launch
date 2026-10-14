@@ -161,7 +161,7 @@ def check_windows(ctl, control, host, run, display):
     schema = json.loads(subprocess.check_output(
         [*ctl, "window", "get", "--output-schema"], text=True, timeout=10))
     assert schema["properties"]["id"]["type"] == "string", schema
-    assert "geometry" in schema["properties"], schema
+    assert "desktop_slot" in schema["properties"] and "application_viewport" in schema["properties"], schema
     with subprocess.Popen([*ctl, "mcp"], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                           stderr=subprocess.PIPE) as mcp:
         def send(message):
@@ -188,6 +188,9 @@ def check_windows(ctl, control, host, run, display):
             assert {tool["name"] for tool in tools} == {
                 "window_list", "window_get", "window_wait", "window_pointer", "window_click",
                 "window_button", "window_key", "window_resize", "window_capture",
+                "window_press_key", "window_chord", "window_scroll", "window_capture_after", "window_find",
+                "window_resolve",
+                "window_scale",
             }
             result = request(3, "tools/call", {"name": "window_get", "arguments": {"id": window["id"]}})
             assert not result.get("isError"), result
@@ -224,31 +227,64 @@ def check_remote_control(rpc, mcp, identifier, host, run, display):
         return reply["result"]
     before = invoke("list")["windows"]
     focused = [window["id"] for window in before if window["focused"]]
-    geometry = next(window["geometry"] for window in before if window["id"] == identifier)
+    geometry = next(window["desktop_slot"] for window in before if window["id"] == identifier)
     invoke("control", id=identifier, enabled=True)
     wait_for(host, lambda: invoke("get", id=identifier)["control"] is not None, "control grant")
     handle = invoke("get", id=identifier)["control"]
+    key = invoke("get", id=identifier)["control_key"]
+    assert invoke("resolve", key=key)["control"] == handle
+    assert len(handle) == 8 and key == "w" + identifier
+    subprocess.run([str(Path(__file__).resolve().parent.parent / "target/debug/weldctl"),
+                    "--session", str(display), "launch", "--", "wl-copy",
+                    "--type", "text/plain;charset=utf-8", "--", key], check=True, capture_output=True, timeout=10)
+    def copied():
+        result = subprocess.run(["wl-paste", "--no-newline"],
+                                env=dict(os.environ, WAYLAND_DISPLAY=str(display)),
+                                capture_output=True, text=True, timeout=5)
+        return result.returncode == 0 and result.stdout == key
+    wait_for(host, copied, "clipboard control shorthand")
     wait_for(host, lambda: "result" in rpc("capture", {"control": handle}), "first controlled frame")
-    invoke("resize", control=handle, width=800, height=600)
+    receipt = invoke("resize", control=key, width=800, height=600)
+    snapshot = invoke("capture_after", control=handle, sequence=receipt["sequence"], timeout_ms=5000)
+    assert int(snapshot["revision"]) > int(receipt["frame_revision"])
+    assert snapshot["after_sequence"] == receipt["sequence"]
     def resized():
         snapshot = invoke("capture", control=handle)
         return snapshot["logical_width"] == 800 and snapshot["logical_height"] == 600
     wait_for(host, resized, "independent remote viewport")
-    assert invoke("get", id=identifier)["geometry"] == geometry, "remote resize moved the peek frame"
-    for key in [30, 28]:
+    assert invoke("get", id=identifier)["desktop_slot"] == geometry, "remote resize moved the peek frame"
+    assert invoke("get", id=identifier)["application_viewport"]["logical_width"] == 800
+    invoke("scale", control=key, factor=1.5)
+    wait_for(host, lambda: invoke("capture", control=key)["pixel_scale"]["x"] == 1.5, "fractional app scale")
+    assert invoke("get", id=identifier)["desktop_slot"] == geometry
+    invoke("scale", control=key, factor=None)
+    app_id = next(window["app_id"] for window in before if window["id"] == identifier)
+    matches = invoke("find", app_id=app_id, occupied=True, controlled=True)["windows"]
+    assert [window["id"] for window in matches] == [identifier]
+    for keycode in [30, 28]:
         for pressed in [True, False]:
-            result = mcp(20 + key * 2 + int(pressed), "tools/call", {
-                "name": "window_key", "arguments": {"control": handle, "keycode": key, "pressed": pressed}})
+            result = mcp(20 + keycode * 2 + int(pressed), "tools/call", {
+                "name": "window_key", "arguments": {"control": handle, "keycode": keycode, "pressed": pressed}})
             assert not result.get("isError"), result
     received = run / "input.bin"
     wait_for(host, lambda: received.exists() and b"a\r" in received.read_bytes(), "independent terminal keyboard input")
+    invoke("press_key", control=handle, keycode=48)
+    wait_for(host, lambda: b"b" in received.read_bytes(), "atomic key press")
+    result = mcp(180, "tools/call", {"name": "window_chord", "arguments": {"control": key, "keycodes": [42, 46]}})
+    assert not result.get("isError"), result
+    wait_for(host, lambda: b"C" in received.read_bytes(), "atomic key chord")
     invoke("click", control=handle, x=100, y=100, button=272)
     wait_for(host, lambda: b"\x1b[<0;" in received.read_bytes(), "terminal pointer input")
+    invoke("scroll", control=handle, x=100, y=100, horizontal=0, vertical=1, wheel=True)
+    wait_for(host, lambda: b"\x1b[<65;" in received.read_bytes(), "wheel input")
     after = invoke("list")["windows"]
     assert [window["id"] for window in after if window["focused"]] == focused, "remote input stole desktop focus"
-    result = mcp(200, "tools/call", {"name": "window_capture", "arguments": {"control": handle}})
+    receipt = invoke("press_key", control=handle, keycode=32)
+    result = mcp(200, "tools/call", {"name": "window_capture_after", "arguments": {
+        "control": key, "sequence": receipt["sequence"], "timeout_ms": 5000}})
     assert not result.get("isError"), result
     image = next(content for content in result["content"] if content["type"] == "image")
+    assert result["structuredContent"]["after_sequence"] == receipt["sequence"]
     png = base64.b64decode(image["data"], validate=True)
     assert png[:8] == b"\x89PNG\r\n\x1a\n", "MCP must return image pixels"
     assert int.from_bytes(png[16:20], "big") == result["structuredContent"]["width"]
@@ -256,14 +292,15 @@ def check_remote_control(rpc, mcp, identifier, host, run, display):
     subprocess.run(["grim", str(run / "desktop-peek.png")], env=dict(os.environ, WAYLAND_DISPLAY=str(display)), check=True, timeout=10)
     invoke("resize", control=handle, width=1600, height=1400)
     wait_for(host, lambda: invoke("capture", control=handle)["logical_width"] == 1600, "oversized viewport")
-    assert invoke("get", id=identifier)["geometry"] == geometry
+    assert invoke("get", id=identifier)["desktop_slot"] == geometry
     subprocess.run(["grim", str(run / "desktop-clipped-peek.png")], env=dict(os.environ, WAYLAND_DISPLAY=str(display)), check=True, timeout=10)
     old_handle = handle
     invoke("permissions", id=identifier, view=False, keyboard=True, pointer=False, resize=False)
-    wait_for(host, lambda: invoke("get", id=identifier)["control"] not in [None, old_handle], "permission handle rotation")
+    wait_for(host, lambda: invoke("get", id=identifier)["control"] not in [None, old_handle], "permission change")
     window = invoke("get", id=identifier)
     handle = window["control"]
     assert window["capabilities"] == dict(view=False, keyboard=True, pointer=False, resize=False)
+    assert invoke("resolve", key=key)["control"] == handle, "slot shorthand follows the new grant"
     assert "error" in rpc("capture", {"control": old_handle})
     assert "error" in rpc("capture", {"control": handle})
     assert "error" in rpc("click", {"control": handle, "x": 100, "y": 100, "button": 272})
@@ -276,7 +313,8 @@ def check_remote_control(rpc, mcp, identifier, host, run, display):
     assert "error" in rpc("capture", {"control": handle})
     invoke("control", id=identifier, enabled=True)
     wait_for(host, lambda: invoke("get", id=identifier)["control"] is not None, "replacement grant")
-    assert invoke("get", id=identifier)["control"] != handle, "old control handle reused"
+    assert invoke("get", id=identifier)["control"] != handle, "old control ID reused"
+    assert invoke("resolve", key=key)["control"] == invoke("get", id=identifier)["control"]
     invoke("control", id=identifier, enabled=False)
     print("PASS independent input, viewport sizing, live peek, MCP image capture and grant retirement", flush=True)
 

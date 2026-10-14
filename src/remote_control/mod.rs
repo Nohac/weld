@@ -14,7 +14,7 @@ use std::{
 };
 use weld_app::{
     WeldApp,
-    input::LocalInputBlockedSurfaces,
+    input::{LocalInputBlockedSurfaces, ShellCommand, ShellCommands},
     surface::{
         ClientPopup, ClientSurface, ClientToplevel, MappedSurface, SurfaceAction,
         SurfaceActionQueue,
@@ -31,7 +31,8 @@ use weld_hoist::HoistedWindow;
 use weld_remote_control::{Capabilities, Capture, CaptureJob, Grant, RemoteControlClient};
 pub(crate) use weld_remote_control_ui::ToggleLocalInteraction;
 use weld_remote_control_ui::{
-    FitToFrame, LocalInteractionActive, RemoteControlPanel, TakeBack, ToggleCapability,
+    CopyControlKey, FitToFrame, LocalInteractionActive, RemoteControlPanel, TakeBack,
+    ToggleCapability,
 };
 use weld_window::{
     FocusedWindow, ManagedWindow, PresentationInsets, PrimaryWindowPresentation,
@@ -44,6 +45,7 @@ pub(crate) struct ControlledWindow(pub Grant);
 
 #[derive(Component)]
 pub(crate) struct ControlPolicy {
+    pub(crate) key: String,
     permit: weld_access::AccessSession,
     pub(crate) capabilities: Capabilities,
     local: bool,
@@ -105,6 +107,7 @@ pub(crate) fn install(app: &mut WeldApp, service: &WindowService) -> Result<()> 
         .add_observer(take_back)
         .add_observer(toggle_local)
         .add_observer(fit_to_frame)
+        .add_observer(copy_control_key)
         .add_systems(
             PreUpdate,
             (reconcile, administer)
@@ -141,16 +144,17 @@ type ControllableWindows<'w, 's> = Query<
         Option<&'static ControlPolicy>,
         Has<HoistedWindow>,
         Has<PersistentWindow>,
+        &'static ManagedWindow,
     ),
     With<ManagedWindow>,
 >;
 
 impl Grants<'_, '_> {
     fn set(&mut self, window: Entity, action: ControlAction) -> Result<()> {
-        let (occupant, existing, policy, hoisted, persistent) = self
-            .windows
-            .get(window)
-            .context("window is vacant or unavailable")?;
+        let (occupant, existing, policy, hoisted, persistent, managed) =
+            self.windows
+                .get(window)
+                .context("window is vacant or unavailable")?;
         let capabilities = match action {
             ControlAction::Disable => {
                 if let Some(existing) = existing {
@@ -180,7 +184,7 @@ impl Grants<'_, '_> {
                 if policy.capabilities == capabilities {
                     return Ok(());
                 }
-                // Rotate the handle so queued work and held input retire under the old grant.
+                // Retire queued work and held input under the old incarnation grant.
                 if let Some(existing) = existing {
                     existing.0.revoke();
                 }
@@ -206,6 +210,7 @@ impl Grants<'_, '_> {
         }
         let local = policy.is_some_and(|policy| policy.local);
         let policy = ControlPolicy {
+            key: format!("w{}", managed.id.raw()),
             permit: self.access.0.open("remote-control".into())?,
             capabilities,
             local,
@@ -237,7 +242,7 @@ fn toggle(event: On<ToggleControl>, mut grants: Grants) {
     let enabled = grants
         .windows
         .get(event.0)
-        .is_ok_and(|(_, _, policy, _, _)| policy.is_none());
+        .is_ok_and(|(_, _, policy, _, _, _)| policy.is_none());
     if let Err(error) = grants.set(
         event.0,
         if enabled {
@@ -255,7 +260,7 @@ fn update_capability(event: On<ToggleCapability>, mut grants: Grants) {
         .windows
         .get(event.window)
         .ok()
-        .and_then(|(_, _, policy, _, _)| policy.map(|policy| policy.capabilities))
+        .and_then(|(_, _, policy, _, _, _)| policy.map(|policy| policy.capabilities))
     else {
         return;
     };
@@ -331,6 +336,44 @@ fn fit_to_frame(
         resizing: false,
         fullscreen: false,
     });
+}
+
+fn copy_control_key(
+    event: On<CopyControlKey>,
+    policies: Query<(
+        &ControlPolicy,
+        Option<&ControlledWindow>,
+        Has<PersistentWindow>,
+    )>,
+    mut commands: ResMut<ShellCommands>,
+) {
+    let Ok((policy, control, persistent)) = policies.get(event.0) else {
+        return;
+    };
+    if !policy.permit.is_authorized() {
+        return;
+    }
+    let key = if persistent {
+        policy.key.clone()
+    } else if let Some(control) = control {
+        control.0.id().to_owned()
+    } else {
+        return;
+    };
+    if commands
+        .push(ShellCommand::Launch {
+            program: "wl-copy".into(),
+            arguments: vec![
+                "--type".into(),
+                "text/plain;charset=utf-8".into(),
+                "--".into(),
+                key,
+            ],
+        })
+        .is_err()
+    {
+        tracing::warn!("could not queue clipboard copy");
+    }
 }
 
 type RememberedControlWindows<'w, 's> = Query<

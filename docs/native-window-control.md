@@ -19,10 +19,25 @@ weldctl --session weld-0 window wait --after 1 --timeout-ms 5000 --json
 ```
 
 Use an ID/revision from your own listing. Window, workspace and output IDs are
-opaque strings belonging to the running host. Geometry uses logical compositor
-coordinates. Listings include application labels, occupancy, focus, visibility
-and floating state. A non-null `control` handle identifies a grant for that
-particular application incarnation; `capabilities` lists its enabled permissions.
+opaque strings belonging to the running host. `desktop_slot` uses logical compositor
+coordinates and includes decoration. `application_viewport` reports the controlled
+app's independent logical dimensions, capture pixel dimensions and `pixel_scale`.
+Input uses `window_local_logical` coordinates; divide a capture pixel position by
+the corresponding pixel scale to obtain an input position. The viewport becomes
+available after the first controlled frame arrives.
+
+Listings include application labels, occupancy, focus, visibility and floating
+state. `control` is a random eight-character ID for the current application
+incarnation, such as `k7Qm2xNp`. IDs are collision-checked and never reused within
+the running session. `control_key`, such as `w12`, is a slot shorthand that resolves
+to its current control ID. `capabilities` lists enabled permissions.
+
+`window resolve w12 --json` resolves a copied shorthand. Operations accept either
+form in their `control` argument. An incarnation ID fails after replacement;
+using a shorthand deliberately follows the slot's current authorized occupant.
+Empty persistent slots retain their shorthand and report that they are waiting
+for an application. Resolution occurs once per request; queued operations remain
+bound to the resolved incarnation and are cancelled when it retires.
 
 ## Remote control and live peek
 
@@ -38,35 +53,42 @@ The repository example includes it. Alternatively, select the managed window
 from `window list` and grant control through the local administrative CLI:
 
 ```sh
-weldctl --session weld-0 window control WINDOW_ID --enabled
+weldctl --session weld-0 window control --id WINDOW_ID --enabled
 weldctl --session weld-0 window list --json
 ```
 
-Controlled windows keep a header with View, Keyboard, Pointer, Resize and
-Take back controls. Enabled permissions have an underline; disabled icons are
+Controlled windows keep a header with View, Keyboard, Pointer, Resize, Interact,
+Fit, Copy ID and Take back controls. Copy ID copies the stable shorthand for a
+persistent slot and the incarnation ID for an ordinary window. It remains
+available on vacant persistent slots. Clipboard delivery uses `wl-copy` against
+the running Weld session; install `wl-clipboard` for this button.
+Enabled permissions have an underline; disabled icons are
 dimmed. Narrow frames show icons, and wider frames also show labels. The header
 uses the configured title font and normal or persistent-window palette.
 
 The local CLI can replace the enabled permissions (omitted flags disable them):
 
 ```sh
-weldctl --session weld-0 window permissions WINDOW_ID --view --pointer
+weldctl --session weld-0 window permissions --id WINDOW_ID --view --pointer
 ```
 
 Changing permissions retires the previous handle and its held input, then issues
-a fresh handle. Controllers reconcile the inventory before continuing; requests
+a fresh handle. The slot shorthand resolves to the new handle. Controllers using
+an incarnation ID reconcile the inventory before continuing; requests
 using the retired handle fail. The desktop peek remains visible when View is
 disabled; that permission controls remote pixel capture.
 
 Use the resulting `control` handle for operations:
 
 ```sh
-weldctl --session weld-0 window resize CONTROL --width 1000 --height 700
-weldctl --session weld-0 window click CONTROL --x 100 --y 100 --button 272
-weldctl --session weld-0 window key CONTROL --keycode 30 --pressed
-weldctl --session weld-0 window key CONTROL --keycode 30
+weldctl --session weld-0 window resize --control CONTROL --width 1000 --height 700
+weldctl --session weld-0 window scale --control CONTROL --factor 1.5
+weldctl --session weld-0 window click --control CONTROL --x 100 --y 100 --button 272
+weldctl --session weld-0 window press-key --control CONTROL --keycode 30
+weldctl --session weld-0 window chord --control CONTROL --keycodes 29 --keycodes 30
+weldctl --session weld-0 window scroll --control CONTROL --x 100 --y 100 --horizontal 0 --vertical 1 --wheel
 weldctl --session weld-0 window capture CONTROL --json
-weldctl --session weld-0 window control WINDOW_ID
+weldctl --session weld-0 window control --id WINDOW_ID
 ```
 
 The final command revokes control. `weldctl access revoke all` and the existing
@@ -79,6 +101,16 @@ through the configured host keymap. Pointer positions use window-local logical
 coordinates; button codes are 272/273/274 for left/right/middle. Individual
 `button` and `key` operations require matching release edges. Revocation releases
 held input through the shared hoist relay.
+
+`press-key` and `chord` validate the complete operation before dispatch. Chords
+press in the supplied order and release in reverse order within one native batch.
+They reject duplicate keys and keys already held through the low-level API.
+Scroll positions are logical. With `--wheel`, deltas are wheel notches, including
+fractional notches at v120 precision; otherwise they are logical pixels in one
+completed finger gesture. Positive deltas scroll right/down. `scale` uses the shared
+preferred-scale request, rounded to 1/120 units, under the Resize permission.
+Omitting `--factor` restores the output's scale. Logical viewport size stays fixed;
+capture metadata reports the application's actual raster density.
 
 The desktop frame initially remains a live, read-only peek. Hold the configured
 modifier chord to use the focused window locally, or use the toggle binding to
@@ -107,13 +139,41 @@ those permissions. Taking back control or globally revoking access clears the
 remembered authorization. Restarting Weld also clears it. Ordinary managed
 local application windows are eligible; hoisted windows must first be reclaimed.
 
-Input acknowledgements mean accepted native effects. Applications process those
-events asynchronously. Capture returns the latest retained composition and its
-revision; an immediate capture can therefore precede the app's next repaint.
-PNG pixel dimensions and logical dimensions are both returned for coordinate
-conversion. Captures include contained popups and use a 64 MiB readback budget.
-At most four captures and 64 queued native operations are retained. Expired
-operations fail, and callers must not automatically retry uncertain input.
+Input and viewport operations return a receipt with `sequence`,
+`stage: "effects_queued"` and the retained `frame_revision` at that boundary.
+The native relay has handed off its effects; application processing follows
+asynchronously. `capture` reads the latest retained composition. `capture-after`
+waits for a composition revision newer than the receipt's checkpoint, then performs
+the synchronized readback. Its deadline includes waiting and readback, and accepts
+1–5000 milliseconds. A static app that produces no new frame times out. Animations
+can produce an unrelated frame first, so callers still check the intended UI result
+in the pixels. Frame revisions describe retained composition; inventory revisions
+describe managed-window metadata.
+
+Captures include contained popups and use a 64 MiB readback budget. At most four
+captures/waits and 64 queued native operations are retained. The most recent 128
+checkpoints per controlled application are available. Retired or expired checkpoints
+fail explicitly. Expired operations fail, and callers must not automatically retry
+uncertain input.
+
+## Native testing loop
+
+Launch one app through `weldctl launch -- PROGRAM ...`, then resolve it with
+`window find --app-id APP_ID --occupied true --json`. Obtain local authorization
+through the header or `window control`, and retain the copied shorthand for a
+persistent slot. Use `window resolve` to inspect its current permissions and viewport.
+
+```sh
+receipt=$(weldctl --session weld-0 window click --control w12 --x 100 --y 100 --button 272 --json)
+sequence=$(printf '%s' "$receipt" | jq -r .sequence)
+weldctl --session weld-0 window capture-after --control w12 --sequence "$sequence" --timeout-ms 3000 --json
+```
+
+Check the resulting pixels, use `press-key`/`chord` to test keyboard behavior, then
+resize the logical viewport or request a rendering scale and inspect the next
+capture. After rebuilding an app, `window resolve w12` returns its fresh control
+ID when the replacement occupies the remembered slot. A preceding incarnation's
+input checkpoint is retired along with it.
 
 `wait` returns the latest inventory after its revision changes. Unchanged
 publication preserves the revision. Timeouts are errors and range from 1 to
@@ -163,9 +223,10 @@ Configure an MCP client to launch:
 weldctl --session weld-0 mcp
 ```
 
-The generated tools are `window_list`, `window_get`, `window_wait`,
-`window_pointer`, `window_click`, `window_button`, `window_key`, `window_resize`
-and `window_capture`. Administrative grant creation and permission changes are exposed through the local
+The generated tools include inventory `list`, `find`, `get`, `resolve`, `wait`;
+input `pointer`, `click`, `button`, `key`, `press_key`, `chord`, `scroll`;
+viewport `resize`, `scale`; and `capture`, `capture_after`, all prefixed `window_`.
+Administrative grant creation and permission changes are exposed through the local
 CLI/RPC and desktop binding. MCP control tools require an existing grant handle.
 `server-less` supplies their descriptions and dispatch; the official Rust MCP
 SDK supplies initialization, protocol negotiation and stdio lifecycle.
@@ -176,6 +237,16 @@ The bridge allows eight concurrent calls and performs blocking local RPC on
 worker threads. An interrupted call's local RPC may continue until its bounded
 wait completes. The endpoint runs as the same OS user. The current slice provides
 pixel-based interaction; accessibility trees remain a separate follow-up.
+
+## Remaining Draftship feedback
+
+The next input slice is whole-string UTF-8 insertion/paste with an explicit
+clipboard-preservation contract for the controlled seat. Accessibility snapshots,
+role/name targeting and actions need application-to-AT-SPI identity validation.
+Launch-bound window readiness, process filters, structured ownership refusals and
+ownership-change waits, and general multi-step input batches remain follow-ups.
+The 2026-10-14 Draftship validation motivates these additions; the current frame
+checkpoint supplies a bounded newer-frame observation for screenshot-based tests.
 
 ## Validation
 

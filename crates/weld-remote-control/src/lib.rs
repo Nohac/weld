@@ -6,10 +6,11 @@ pub use permissions::{Capabilities, Capability};
 pub use runtime::registration;
 
 use anyhow::{Context, Result, ensure};
+use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     sync::{
         Arc, Mutex,
         atomic::{AtomicU64, Ordering},
@@ -28,7 +29,67 @@ pub struct Snapshot {
     pub logical_width: f32,
     pub logical_height: f32,
     pub revision: String,
+    /// Input checkpoint whose following commit was captured, when requested.
+    pub after_sequence: Option<String>,
+    /// Positions passed to input operations are relative to this logical viewport.
+    pub input_coordinates: InputCoordinates,
+    pub pixel_scale: PixelScale,
     pub png_base64: String,
+}
+
+/// Coordinate contract shared by capture and viewport inspection.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum InputCoordinates {
+    WindowLocalLogical,
+}
+
+/// Capture pixels per logical input unit on each axis.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct PixelScale {
+    pub x: f32,
+    pub y: f32,
+}
+
+impl PixelScale {
+    fn for_frame(scene: &ComposedBuffer) -> Self {
+        Self {
+            x: scene.extent.width as f32 / scene.logical_size.width,
+            y: scene.extent.height as f32 / scene.logical_size.height,
+        }
+    }
+}
+
+/// Current application coordinates and the corresponding capture raster.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct Viewport {
+    pub logical_width: f32,
+    pub logical_height: f32,
+    pub pixel_width: u32,
+    pub pixel_height: u32,
+    pub input_coordinates: InputCoordinates,
+    pub pixel_scale: PixelScale,
+}
+
+/// Native effects have left the relay queue; application processing is asynchronous.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+pub struct InputReceipt {
+    pub sequence: String,
+    pub stage: InputStage,
+    /// Latest retained frame when the native effects were queued for delivery.
+    pub frame_revision: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum InputStage {
+    EffectsQueued,
+}
+
+impl std::fmt::Display for InputReceipt {
+    fn fmt(&self, output: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(output, "effects queued; sequence {}", self.sequence)
+    }
 }
 
 impl std::fmt::Display for Snapshot {
@@ -43,16 +104,55 @@ impl std::fmt::Display for Snapshot {
 
 #[derive(Clone, Debug)]
 pub enum Operation {
-    Pointer { x: f64, y: f64 },
-    Button { button: u32, pressed: bool },
-    Click { x: f64, y: f64, button: u32 },
-    Key { keycode: u32, pressed: bool },
-    Resize { width: u32, height: u32 },
+    Pointer {
+        x: f64,
+        y: f64,
+    },
+    Button {
+        button: u32,
+        pressed: bool,
+    },
+    Click {
+        x: f64,
+        y: f64,
+        button: u32,
+    },
+    Key {
+        keycode: u32,
+        pressed: bool,
+    },
+    Chord {
+        keycodes: Vec<u32>,
+    },
+    Scroll {
+        x: f64,
+        y: f64,
+        horizontal: f64,
+        vertical: f64,
+        wheel: bool,
+    },
+    Resize {
+        width: u32,
+        height: u32,
+    },
+    Scale {
+        factor: Option<f64>,
+    },
     Capture,
+    CaptureAfter {
+        sequence: String,
+        timeout_ms: u32,
+    },
+}
+
+impl Operation {
+    fn is_capture(&self) -> bool {
+        matches!(self, Self::Capture | Self::CaptureAfter { .. })
+    }
 }
 
 pub enum Reply {
-    Applied,
+    Input(InputReceipt),
     Snapshot(Snapshot),
 }
 
@@ -64,6 +164,7 @@ struct GrantState {
     // Odd epochs grant local input; each handoff invalidates queued remote mutations.
     input_epoch: AtomicU64,
     input_epoch_applied: AtomicU64,
+    viewport: Mutex<Option<Viewport>>,
 }
 
 /// Occupant-scoped permission. The window owner retires it on replacement or revoke.
@@ -129,14 +230,43 @@ enum Command {
     Operation(Pending),
 }
 
+#[derive(Default)]
+struct ControlRegistry {
+    active: HashMap<String, Arc<GrantState>>,
+    issued: HashSet<String>,
+}
+
+impl ControlRegistry {
+    fn allocate_id(&mut self) -> Result<String> {
+        for _ in 0..16 {
+            let uuid = uuid::Uuid::new_v4();
+            let id = URL_SAFE_NO_PAD.encode(&uuid.as_bytes()[..6]);
+            // Reserve w-prefixed slot shorthands and keep IDs usable as CLI positionals.
+            if !id.starts_with('w') && !id.starts_with('-') && self.issued.insert(id.clone()) {
+                return Ok(id);
+            }
+        }
+        anyhow::bail!("could not allocate a unique control ID")
+    }
+}
+
 #[derive(Clone)]
 pub struct RemoteControlClient {
     sender: mpsc::SyncSender<Command>,
-    grants: Arc<Mutex<HashMap<String, Arc<GrantState>>>>,
+    grants: Arc<Mutex<ControlRegistry>>,
     wake: Arc<dyn Fn() + Send + Sync>,
 }
 
 impl RemoteControlClient {
+    /// Latest retained geometry for a live control token, without a GPU readback.
+    pub fn viewport(&self, control: &str) -> Option<Viewport> {
+        let grant = self.grants.lock().ok()?.active.get(control)?.clone();
+        if !grant.permit.is_authorized() {
+            return None;
+        }
+        grant.viewport.lock().ok()?.clone()
+    }
+
     pub fn grant(
         &self,
         surface: ClientSurfaceId,
@@ -144,29 +274,39 @@ impl RemoteControlClient {
         capabilities: Capabilities,
     ) -> Result<Grant> {
         ensure!(permit.is_authorized(), "access session revoked");
+        let mut registry = self
+            .grants
+            .lock()
+            .map_err(|_| anyhow::anyhow!("remote control registry unavailable"))?;
+        registry
+            .active
+            .retain(|_, grant| grant.permit.is_authorized());
+        ensure!(
+            registry.active.len() < 64,
+            "remote control window capacity reached"
+        );
+        ensure!(
+            !registry
+                .active
+                .values()
+                .any(|grant| grant.surface == surface),
+            "window already controlled"
+        );
+        let id = registry.allocate_id()?;
         let state = Arc::new(GrantState {
-            id: uuid::Uuid::new_v4().to_string(),
+            id,
             surface,
             permit,
             capabilities,
             input_epoch: AtomicU64::new(0),
             input_epoch_applied: AtomicU64::new(0),
+            viewport: Mutex::new(None),
         });
-        let mut grants = self
-            .grants
-            .lock()
-            .map_err(|_| anyhow::anyhow!("remote control registry unavailable"))?;
-        grants.retain(|_, grant| grant.permit.is_authorized());
-        ensure!(grants.len() < 64, "remote control window capacity reached");
-        ensure!(
-            !grants.values().any(|grant| grant.surface == surface),
-            "window already controlled"
-        );
         self.sender
             .try_send(Command::Grant(state.clone()))
             .map_err(|_| anyhow::anyhow!("remote control queue unavailable or full"))?;
-        grants.insert(state.id.clone(), state.clone());
-        drop(grants);
+        registry.active.insert(state.id.clone(), state.clone());
+        drop(registry);
         (self.wake)();
         Ok(Grant {
             state,
@@ -179,13 +319,14 @@ impl RemoteControlClient {
             .grants
             .lock()
             .map_err(|_| anyhow::anyhow!("remote control registry unavailable"))?
+            .active
             .get(control)
             .cloned()
             .context("window control unavailable")?;
         ensure!(grant.permit.is_authorized(), "window control revoked");
         let input_epoch = grant.input_epoch.load(Ordering::Acquire);
         ensure!(
-            matches!(operation, Operation::Capture) || input_epoch.is_multiple_of(2),
+            operation.is_capture() || input_epoch.is_multiple_of(2),
             "local interaction owns this window"
         );
         ensure!(
@@ -193,12 +334,22 @@ impl RemoteControlClient {
             "window capability is disabled"
         );
         let (reply, response) = mpsc::sync_channel(1);
+        let timeout = match &operation {
+            Operation::CaptureAfter { timeout_ms, .. } => {
+                ensure!(
+                    (1..=5000).contains(timeout_ms),
+                    "timeout_ms must be between 1 and 5000"
+                );
+                Duration::from_millis(u64::from(*timeout_ms))
+            }
+            _ => Duration::from_secs(5),
+        };
         self.sender
             .try_send(Command::Operation(Pending {
                 grant: grant.clone(),
                 input_epoch,
                 operation,
-                deadline: Instant::now() + Duration::from_secs(5),
+                deadline: Instant::now() + timeout,
                 reply,
             }))
             .map_err(|_| anyhow::anyhow!("remote control queue unavailable or full"))?;

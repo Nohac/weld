@@ -17,6 +17,239 @@ impl Capture for NoCapture {
     }
 }
 
+struct ImmediateCapture;
+impl Capture for ImmediateCapture {
+    fn begin(&mut self, _: &ComposedBuffer) -> Result<Box<dyn CaptureJob>> {
+        Ok(Box::new(ImmediateCapture))
+    }
+}
+impl CaptureJob for ImmediateCapture {
+    fn poll(&mut self) -> Option<Result<String>> {
+        Some(Ok("test-pixels".into()))
+    }
+}
+
+#[test]
+fn capture_checkpoint_waits_for_a_later_commit_and_rejects_retired_incarnations() {
+    let upstream = ClientSourceId::new(0);
+    let surface = ClientSurfaceId::new(ClientId::new(upstream, 1), 1);
+    let authority = AccessAuthority::new(|| {});
+    let (registration, client) =
+        registration(upstream, ClientSourceId::new(3), || {}, ImmediateCapture);
+    let mut adapter = registration.into_parts().runtime.driver;
+    map(&mut *adapter, surface);
+    let grant = client
+        .grant(
+            surface,
+            authority.open("test".into()).expect("permit"),
+            Capabilities::ALL,
+        )
+        .expect("grant");
+    assert_eq!(grant.id().len(), 8);
+    assert!(!grant.id().starts_with('w'));
+    let mut events = ClientEventQueue::default();
+    let mut effects = Vec::new();
+    adapter.drain_events(&mut events);
+    let input = pending(
+        &client,
+        &grant.state,
+        Operation::Chord { keycodes: vec![30] },
+    );
+    adapter.drain_events(&mut events);
+    assert!(
+        matches!(input.try_recv(), Err(mpsc::TryRecvError::Empty)),
+        "receipt waits for native effects"
+    );
+    adapter.drain_effects(&mut effects);
+    let Reply::Input(receipt) = input.try_recv().expect("receipt").expect("queued") else {
+        panic!("expected receipt");
+    };
+    let wait = pending(
+        &client,
+        &grant.state,
+        Operation::CaptureAfter {
+            sequence: receipt.sequence.clone(),
+            timeout_ms: 5000,
+        },
+    );
+    adapter.drain_events(&mut events);
+    assert!(
+        matches!(wait.try_recv(), Err(mpsc::TryRecvError::Empty)),
+        "old retained pixels cannot satisfy checkpoint"
+    );
+    let expired = pending_until(
+        &client,
+        &grant.state,
+        Operation::CaptureAfter {
+            sequence: receipt.sequence.clone(),
+            timeout_ms: 1,
+        },
+        Instant::now(),
+    );
+    adapter.drain_events(&mut events);
+    assert!(
+        matches!(expired.try_recv().expect("expired wait completes"), Err(error) if error.contains("timed out"))
+    );
+    map_revision(&mut *adapter, surface, 2);
+    adapter.drain_events(&mut events);
+    let Reply::Snapshot(snapshot) = wait.try_recv().expect("capture completed").expect("pixels")
+    else {
+        panic!("expected snapshot");
+    };
+    assert_eq!(snapshot.after_sequence.as_ref(), Some(&receipt.sequence));
+    assert!(
+        snapshot.revision.parse::<u64>().expect("revision")
+            > receipt
+                .frame_revision
+                .expect("baseline")
+                .parse::<u64>()
+                .expect("baseline revision")
+    );
+    assert_eq!(
+        client.viewport(grant.id()).expect("viewport").logical_width,
+        32.
+    );
+
+    let input = pending(&client, &grant.state, Operation::Pointer { x: 2., y: 2. });
+    adapter.drain_events(&mut events);
+    adapter.drain_effects(&mut effects);
+    let Reply::Input(receipt) = input.try_recv().expect("receipt").expect("queued") else {
+        panic!("expected receipt");
+    };
+    let wait = pending(
+        &client,
+        &grant.state,
+        Operation::CaptureAfter {
+            sequence: receipt.sequence.clone(),
+            timeout_ms: 5000,
+        },
+    );
+    adapter.drain_events(&mut events);
+    grant.revoke();
+    let replacement = client
+        .grant(
+            surface,
+            authority.open("replacement".into()).expect("permit"),
+            Capabilities::ALL,
+        )
+        .expect("replacement");
+    map_revision(&mut *adapter, surface, 3);
+    adapter.drain_events(&mut events);
+    assert!(wait.try_recv().expect("retired wait completes").is_err());
+    let stale = pending(
+        &client,
+        &replacement.state,
+        Operation::CaptureAfter {
+            sequence: receipt.sequence,
+            timeout_ms: 5000,
+        },
+    );
+    adapter.drain_events(&mut events);
+    assert!(
+        stale
+            .try_recv()
+            .expect("stale checkpoint completes")
+            .is_err()
+    );
+}
+
+#[test]
+fn chords_release_in_reverse_order_and_scroll_keeps_source_units() {
+    let upstream = ClientSourceId::new(0);
+    let surface = ClientSurfaceId::new(ClientId::new(upstream, 1), 1);
+    let authority = AccessAuthority::new(|| {});
+    let (registration, client) = registration(upstream, ClientSourceId::new(3), || {}, NoCapture);
+    let mut adapter = registration.into_parts().runtime.driver;
+    map(&mut *adapter, surface);
+    let grant = client
+        .grant(
+            surface,
+            authority.open("test".into()).expect("permit"),
+            Capabilities::ALL,
+        )
+        .expect("grant");
+    let mut events = ClientEventQueue::default();
+    let mut effects = Vec::new();
+    adapter.drain_events(&mut events);
+    let reply = pending(
+        &client,
+        &grant.state,
+        Operation::Chord {
+            keycodes: vec![29, 30],
+        },
+    );
+    adapter.drain_events(&mut events);
+    adapter.drain_effects(&mut effects);
+    assert!(reply.try_recv().expect("reply").is_ok());
+    let keys: Vec<_> = effects
+        .iter()
+        .filter_map(|effect| match effect {
+            ClientAdapterEffect::Input(ClientInputEvent {
+                event: InputEventKind::Keyboard { keycode, state },
+                ..
+            }) => Some((keycode.0, *state)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        keys,
+        vec![
+            (29, KeyboardKeyState::Pressed),
+            (30, KeyboardKeyState::Pressed),
+            (30, KeyboardKeyState::Released),
+            (29, KeyboardKeyState::Released)
+        ]
+    );
+    effects.clear();
+    let invalid = pending(
+        &client,
+        &grant.state,
+        Operation::Chord {
+            keycodes: vec![42, 42],
+        },
+    );
+    adapter.drain_events(&mut events);
+    adapter.drain_effects(&mut effects);
+    assert!(invalid.try_recv().expect("reply").is_err());
+    assert!(
+        effects.is_empty(),
+        "invalid chord emits no partial key presses"
+    );
+    for wheel in [true, false] {
+        let reply = pending(
+            &client,
+            &grant.state,
+            Operation::Scroll {
+                x: 2.,
+                y: 2.,
+                horizontal: 0.,
+                vertical: 1.,
+                wheel,
+            },
+        );
+        adapter.drain_events(&mut events);
+        adapter.drain_effects(&mut effects);
+        assert!(reply.try_recv().expect("reply").is_ok());
+        let axes: Vec<_> = effects
+            .iter()
+            .filter_map(|effect| match effect {
+                ClientAdapterEffect::Input(ClientInputEvent {
+                    event: InputEventKind::PointerAxis { axis, .. },
+                    ..
+                }) => Some(*axis),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(axes[0].vertical_v120, wheel.then_some(120));
+        assert_eq!(axes[0].vertical, if wheel { 15. } else { 1. });
+        assert_eq!(axes.len(), if wheel { 1 } else { 2 });
+        if !wheel {
+            assert!(axes[1].vertical_stop);
+        }
+        effects.clear();
+    }
+}
+
 #[test]
 fn local_takeover_releases_remote_holds_and_rejects_work_queued_before_resume() {
     let upstream = ClientSourceId::new(0);
@@ -145,6 +378,21 @@ fn restricted_grants_reject_operations_at_both_request_boundaries() {
             width: 800,
             height: 600,
         },
+        Operation::Scale { factor: Some(1.5) },
+        Operation::Chord {
+            keycodes: vec![29, 30],
+        },
+        Operation::Scroll {
+            x: 1.,
+            y: 1.,
+            horizontal: 0.,
+            vertical: 1.,
+            wheel: true,
+        },
+        Operation::CaptureAfter {
+            sequence: "1".into(),
+            timeout_ms: 1,
+        },
     ] {
         assert!(client.request(grant.id(), operation.clone()).is_err());
         let queued = pending(&client, &grant.state, operation);
@@ -158,7 +406,21 @@ fn pending(
     grant: &GrantState,
     operation: Operation,
 ) -> mpsc::Receiver<Result<Reply, String>> {
-    let state = client.grants.lock().expect("registry")[&grant.id].clone();
+    pending_until(
+        client,
+        grant,
+        operation,
+        Instant::now() + Duration::from_secs(5),
+    )
+}
+
+fn pending_until(
+    client: &RemoteControlClient,
+    grant: &GrantState,
+    operation: Operation,
+    deadline: Instant,
+) -> mpsc::Receiver<Result<Reply, String>> {
+    let state = client.grants.lock().expect("registry").active[&grant.id].clone();
     let (reply, response) = mpsc::sync_channel(1);
     client
         .sender
@@ -166,7 +428,7 @@ fn pending(
             input_epoch: state.input_epoch.load(Ordering::Acquire),
             grant: state,
             operation,
-            deadline: Instant::now() + Duration::from_secs(5),
+            deadline,
             reply,
         }))
         .expect("queue");
@@ -174,6 +436,10 @@ fn pending(
 }
 
 fn map(adapter: &mut dyn ClientAdapter, surface: ClientSurfaceId) {
+    map_revision(adapter, surface, 1);
+}
+
+fn map_revision(adapter: &mut dyn ClientAdapter, surface: ClientSurfaceId, revision: u64) {
     adapter.observe_event(&ClientSurfaceEvent {
         surface,
         kind: ClientSurfaceEventKind::Role(ClientSurfaceRole::Toplevel(ToplevelState {
@@ -205,7 +471,7 @@ fn map(adapter: &mut dyn ClientAdapter, surface: ClientSurfaceId) {
         surface,
         kind: ClientSurfaceEventKind::Commit(
             ClientSurfaceState {
-                revision: ClientCommitRevision::new(1),
+                revision: ClientCommitRevision::new(revision),
                 alpha_mode: SurfaceAlphaMode::Preserved,
                 mapped: true,
                 root: Some(SurfaceLayerPlacement {
@@ -263,7 +529,7 @@ fn revoke_rejects_queued_input_and_releases_held_keys_before_a_new_grant() {
     adapter.drain_effects(&mut effects);
     assert!(matches!(
         pressed.try_recv().expect("ack").expect("accepted"),
-        Reply::Applied
+        Reply::Input(_)
     ));
     assert!(effects.iter().any(|effect| matches!(
         effect,
@@ -316,6 +582,10 @@ fn revoke_rejects_queued_input_and_releases_held_keys_before_a_new_grant() {
             Capabilities::ALL,
         )
         .expect("new grant");
-    assert_ne!(old, replacement.id());
+    assert_ne!(
+        old,
+        replacement.id(),
+        "new incarnation has a fresh control ID"
+    );
     assert!(client.request(&old, Operation::Capture).is_err());
 }

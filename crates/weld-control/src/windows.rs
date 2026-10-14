@@ -10,7 +10,9 @@ use std::{
     time::{Duration, Instant},
 };
 use tokio::sync::watch;
-use weld_remote_control::{Capabilities, Operation, RemoteControlClient, Reply, Snapshot};
+use weld_remote_control::{
+    Capabilities, InputReceipt, Operation, RemoteControlClient, Reply, Snapshot, Viewport,
+};
 
 /// Logical compositor coordinates.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -30,13 +32,18 @@ pub struct WindowInfo {
     pub title: Option<String>,
     pub workspace: Option<String>,
     pub output: Option<String>,
-    pub geometry: Rect,
+    /// Desktop slot in compositor-global logical coordinates, including decorations.
+    pub desktop_slot: Rect,
+    /// Current captured application's independent viewport, once its first frame arrives.
+    pub application_viewport: Option<Viewport>,
     pub occupied: bool,
     pub focused: bool,
     pub visible: bool,
     pub floating: bool,
-    /// Occupant-scoped handle for permitted input, resizing and capture.
+    /// Short control ID for this application incarnation; retired on replacement.
     pub control: Option<String>,
+    /// Slot shorthand that resolves to the current control ID, including after relaunch.
+    pub control_key: Option<String>,
     pub capabilities: Option<Capabilities>,
 }
 
@@ -135,6 +142,7 @@ impl WindowService {
     }
 
     fn operate(&self, control: String, operation: Operation) -> Result<Reply, String> {
+        let control = self.resolve_control(control)?;
         let controller = self
             .controller
             .lock()
@@ -144,6 +152,35 @@ impl WindowService {
         controller
             .request(&control, operation)
             .map_err(|error| error.to_string())
+    }
+
+    fn resolve_control(&self, target: String) -> Result<String, String> {
+        if let Some(window) = self.snapshot.borrow().as_ref().and_then(|catalogue| {
+            catalogue
+                .windows
+                .iter()
+                .find(|window| window.control_key.as_ref() == Some(&target))
+        }) {
+            return window
+                .control
+                .clone()
+                .ok_or_else(|| "waiting for application in persistent slot".into());
+        }
+        Ok(target)
+    }
+
+    fn input(&self, control: String, operation: Operation) -> Result<InputReceipt, String> {
+        match self.operate(control, operation)? {
+            Reply::Input(receipt) => Ok(receipt),
+            Reply::Snapshot(_) => Err("input returned a capture".into()),
+        }
+    }
+
+    fn snapshot(&self, control: String, operation: Operation) -> Result<Snapshot, String> {
+        match self.operate(control, operation)? {
+            Reply::Snapshot(snapshot) => Ok(snapshot),
+            Reply::Input(_) => Err("capture returned no pixels".into()),
+        }
     }
 
     fn administer(&self, id: String, action: ControlAction) -> Result<String, String> {
@@ -224,43 +261,137 @@ impl WindowService {
     }
 
     /// Move the independent controller pointer in window-local logical coordinates.
-    pub fn pointer(&self, control: String, x: f64, y: f64) -> Result<String, String> {
-        self.operate(control, Operation::Pointer { x, y })?;
-        Ok("accepted".into())
+    pub fn pointer(&self, control: String, x: f64, y: f64) -> Result<InputReceipt, String> {
+        self.input(control, Operation::Pointer { x, y })
     }
     /// Click a Linux pointer button (272 left, 273 right, 274 middle).
-    pub fn click(&self, control: String, x: f64, y: f64, button: u32) -> Result<String, String> {
-        self.operate(control, Operation::Click { x, y, button })?;
-        Ok("accepted".into())
+    pub fn click(
+        &self,
+        control: String,
+        x: f64,
+        y: f64,
+        button: u32,
+    ) -> Result<InputReceipt, String> {
+        self.input(control, Operation::Click { x, y, button })
     }
     /// Send a button edge at the controller pointer's last position.
-    pub fn button(&self, control: String, button: u32, pressed: bool) -> Result<String, String> {
-        self.operate(control, Operation::Button { button, pressed })?;
-        Ok("accepted".into())
+    pub fn button(
+        &self,
+        control: String,
+        button: u32,
+        pressed: bool,
+    ) -> Result<InputReceipt, String> {
+        self.input(control, Operation::Button { button, pressed })
     }
     /// Send an evdev key edge using the host's configured keymap.
-    pub fn key(&self, control: String, keycode: u32, pressed: bool) -> Result<String, String> {
-        self.operate(control, Operation::Key { keycode, pressed })?;
-        Ok("accepted".into())
+    pub fn key(
+        &self,
+        control: String,
+        keycode: u32,
+        pressed: bool,
+    ) -> Result<InputReceipt, String> {
+        self.input(control, Operation::Key { keycode, pressed })
+    }
+    /// Press and release one evdev key in a single native operation.
+    pub fn press_key(&self, control: String, keycode: u32) -> Result<InputReceipt, String> {
+        self.input(
+            control,
+            Operation::Chord {
+                keycodes: vec![keycode],
+            },
+        )
+    }
+    /// Press an ordered chord and release in reverse order. All keys are validated before dispatch.
+    pub fn chord(&self, control: String, keycodes: Vec<u32>) -> Result<InputReceipt, String> {
+        self.input(control, Operation::Chord { keycodes })
+    }
+    /// Scroll at window-local logical x/y. Wheel deltas are notches; otherwise logical pixels in one completed finger gesture. Positive deltas scroll right/down.
+    pub fn scroll(
+        &self,
+        control: String,
+        x: f64,
+        y: f64,
+        horizontal: f64,
+        vertical: f64,
+        wheel: bool,
+    ) -> Result<InputReceipt, String> {
+        self.input(
+            control,
+            Operation::Scroll {
+                x,
+                y,
+                horizontal,
+                vertical,
+                wheel,
+            },
+        )
     }
     /// Configure the application's logical viewport, independently of its desktop peek.
-    pub fn resize(&self, control: String, width: u32, height: u32) -> Result<String, String> {
-        self.operate(control, Operation::Resize { width, height })?;
-        Ok("accepted".into())
+    pub fn resize(&self, control: String, width: u32, height: u32) -> Result<InputReceipt, String> {
+        self.input(control, Operation::Resize { width, height })
+    }
+    /// Request the application's rendering scale, rounded to 1/120 units. Omit factor to restore the output's scale. Logical viewport size stays unchanged.
+    pub fn scale(&self, control: String, factor: Option<f64>) -> Result<InputReceipt, String> {
+        self.input(control, Operation::Scale { factor })
     }
     /// Capture the controlled application and its contained popups as a PNG.
     pub fn capture(&self, control: String) -> Result<Snapshot, String> {
-        match self.operate(control, Operation::Capture)? {
-            Reply::Snapshot(snapshot) => Ok(snapshot),
-            Reply::Applied => Err("capture returned no pixels".into()),
-        }
+        self.snapshot(control, Operation::Capture)
+    }
+    /// Wait up to 5000 ms for a commit newer than an input checkpoint, then capture it. Animations may commit before an input's intended UI result.
+    pub fn capture_after(
+        &self,
+        control: String,
+        sequence: String,
+        timeout_ms: u32,
+    ) -> Result<Snapshot, String> {
+        self.snapshot(
+            control,
+            Operation::CaptureAfter {
+                sequence,
+                timeout_ms,
+            },
+        )
     }
     /// List managed windows, including vacant persistent slots.
     pub fn list(&self) -> Result<WindowCatalogue, String> {
-        self.snapshot
+        let mut catalogue = self
+            .snapshot
             .borrow()
             .clone()
-            .ok_or_else(|| "window management unavailable in this session".into())
+            .ok_or_else(|| "window management unavailable in this session".to_owned())?;
+        if let Some(controller) = self
+            .controller
+            .lock()
+            .map_err(|_| "controller service unavailable")?
+            .as_ref()
+        {
+            for window in &mut catalogue.windows {
+                window.application_viewport = window
+                    .control
+                    .as_deref()
+                    .and_then(|control| controller.viewport(control));
+            }
+        }
+        Ok(catalogue)
+    }
+
+    /// Filter the inventory by exact app ID, occupancy and enabled control policy.
+    pub fn find(
+        &self,
+        app_id: Option<String>,
+        occupied: Option<bool>,
+        controlled: Option<bool>,
+    ) -> Result<WindowCatalogue, String> {
+        let mut catalogue = self.list()?;
+        catalogue.windows.retain(|window| {
+            app_id
+                .as_ref()
+                .is_none_or(|app_id| window.app_id.as_ref() == Some(app_id))
+                && occupied.is_none_or(|occupied| window.occupied == occupied)
+                && controlled.is_none_or(|controlled| window.control_key.is_some() == controlled)
+        });
+        Ok(catalogue)
     }
 
     /// Inspect a managed window by its session-local identity.
@@ -270,6 +401,17 @@ impl WindowService {
             .into_iter()
             .find(|window| window.id == id)
             .ok_or_else(|| format!("window {id} is unavailable"))
+    }
+
+    /// Resolve a copied slot shorthand or incarnation control ID to its current window and permissions.
+    pub fn resolve(&self, key: String) -> Result<WindowInfo, String> {
+        self.list()?
+            .windows
+            .into_iter()
+            .find(|window| {
+                window.control_key.as_ref() == Some(&key) || window.control.as_ref() == Some(&key)
+            })
+            .ok_or_else(|| "control target unavailable".into())
     }
 
     /// Wait up to 20 seconds for a newer inventory revision.
@@ -358,40 +500,104 @@ impl WindowClient {
         )
     }
     /// Move the controller pointer in window-local logical coordinates.
-    pub fn pointer(&self, control: String, x: f64, y: f64) -> Result<String, String> {
+    pub fn pointer(&self, control: String, x: f64, y: f64) -> Result<InputReceipt, String> {
         self.request("pointer", json!({"control":control,"x":x,"y":y}))
     }
     /// Click a Linux pointer button (272 left, 273 right, 274 middle).
-    pub fn click(&self, control: String, x: f64, y: f64, button: u32) -> Result<String, String> {
+    pub fn click(
+        &self,
+        control: String,
+        x: f64,
+        y: f64,
+        button: u32,
+    ) -> Result<InputReceipt, String> {
         self.request(
             "click",
             json!({"control":control,"x":x,"y":y,"button":button}),
         )
     }
     /// Send a button edge at the last pointer position; release every pressed button.
-    pub fn button(&self, control: String, button: u32, pressed: bool) -> Result<String, String> {
+    pub fn button(
+        &self,
+        control: String,
+        button: u32,
+        pressed: bool,
+    ) -> Result<InputReceipt, String> {
         self.request(
             "button",
             json!({"control":control,"button":button,"pressed":pressed}),
         )
     }
     /// Send an evdev key edge; release every pressed key. Host keymap remappings apply.
-    pub fn key(&self, control: String, keycode: u32, pressed: bool) -> Result<String, String> {
+    pub fn key(
+        &self,
+        control: String,
+        keycode: u32,
+        pressed: bool,
+    ) -> Result<InputReceipt, String> {
         self.request(
             "key",
             json!({"control":control,"keycode":keycode,"pressed":pressed}),
         )
     }
+    /// Press and release one evdev key atomically. Host keymap remappings apply.
+    pub fn press_key(&self, control: String, keycode: u32) -> Result<InputReceipt, String> {
+        self.request("press_key", json!({"control":control,"keycode":keycode}))
+    }
+    /// Press ordered evdev keys, then release in reverse order. Validates the whole chord first.
+    pub fn chord(&self, control: String, keycodes: Vec<u32>) -> Result<InputReceipt, String> {
+        self.request("chord", json!({"control":control,"keycodes":keycodes}))
+    }
+    /// Scroll at logical x/y. With --wheel, deltas are notches; otherwise logical pixels in one completed finger gesture. Positive is right/down.
+    pub fn scroll(
+        &self,
+        control: String,
+        x: f64,
+        y: f64,
+        horizontal: f64,
+        vertical: f64,
+        wheel: bool,
+    ) -> Result<InputReceipt, String> {
+        self.request("scroll", json!({"control":control,"x":x,"y":y,"horizontal":horizontal,"vertical":vertical,"wheel":wheel}))
+    }
     /// Resize the application's logical viewport while preserving the desktop peek's geometry.
-    pub fn resize(&self, control: String, width: u32, height: u32) -> Result<String, String> {
+    pub fn resize(&self, control: String, width: u32, height: u32) -> Result<InputReceipt, String> {
         self.request(
             "resize",
             json!({"control":control,"width":width,"height":height}),
         )
     }
+    /// Request app rendering density (for example 1.5). Omit factor to restore the output's scale. Requires resize permission; capture reports the actual scale.
+    pub fn scale(&self, control: String, factor: Option<f64>) -> Result<InputReceipt, String> {
+        self.request("scale", json!({"control":control,"factor":factor}))
+    }
     /// Read a synchronized PNG of the controlled window and its contained popups.
     pub fn capture(&self, control: String) -> Result<Snapshot, String> {
         self.request("capture", json!({"control":control}))
+    }
+    /// Capture a commit newer than an input receipt's sequence, with a 1..5000 ms timeout. Check pixels for the intended UI result.
+    pub fn capture_after(
+        &self,
+        control: String,
+        sequence: String,
+        timeout_ms: u32,
+    ) -> Result<Snapshot, String> {
+        self.request(
+            "capture_after",
+            json!({"control":control,"sequence":sequence,"timeout_ms":timeout_ms}),
+        )
+    }
+    /// Filter windows by exact app ID, occupancy and enabled control policy.
+    pub fn find(
+        &self,
+        app_id: Option<String>,
+        occupied: Option<bool>,
+        controlled: Option<bool>,
+    ) -> Result<WindowCatalogue, String> {
+        self.request(
+            "find",
+            json!({"app_id":app_id,"occupied":occupied,"controlled":controlled}),
+        )
     }
     /// List managed windows, including vacant persistent slots.
     pub fn list(&self) -> Result<WindowCatalogue, String> {
@@ -401,6 +607,11 @@ impl WindowClient {
     /// Inspect a managed window by its session-local identity.
     pub fn get(&self, id: String) -> Result<WindowInfo, String> {
         self.request("get", json!({"id": id}))
+    }
+
+    /// Resolve a copied slot shorthand (w12) or short incarnation control ID to its window and current permissions.
+    pub fn resolve(&self, key: String) -> Result<WindowInfo, String> {
+        self.request("resolve", json!({"key":key}))
     }
 
     /// Wait up to 20 seconds for a newer inventory revision.

@@ -52,12 +52,13 @@ fn publish(
                 .workspace
                 .map(|workspace| workspace.raw().to_string()),
             output: window.output.map(|output| output.raw().to_string()),
-            geometry: Rect {
+            desktop_slot: Rect {
                 x: window.geometry.position.x,
                 y: window.geometry.position.y,
                 width: window.geometry.size.x,
                 height: window.geometry.size.y,
             },
+            application_viewport: None,
             occupied: window.occupant.is_some(),
             focused: windows.focused() == Some(*id),
             visible: window.visible,
@@ -66,6 +67,10 @@ fn publish(
                 .iter()
                 .find(|(window, control)| window.id == *id && control.0.active())
                 .map(|(_, control)| control.0.id().to_owned()),
+            control_key: policies
+                .iter()
+                .find(|(window, _)| window.id == *id)
+                .map(|(_, policy)| policy.key.clone()),
             capabilities: policies
                 .iter()
                 .find(|(window, _)| window.id == *id)

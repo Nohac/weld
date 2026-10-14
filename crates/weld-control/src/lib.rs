@@ -757,17 +757,19 @@ mod tests {
             title: Some("Window".into()),
             workspace: Some("1".into()),
             output: Some("1".into()),
-            geometry: windows::Rect {
+            desktop_slot: windows::Rect {
                 x: 0.0,
                 y: 0.0,
                 width: 800.0,
                 height: 600.0,
             },
+            application_viewport: None,
             occupied: true,
             focused: true,
             visible: true,
             floating: false,
             control: None,
+            control_key: None,
             capabilities: None,
         };
         publisher.publish(vec![window.clone()]).expect("mapped");
@@ -776,6 +778,46 @@ mod tests {
             vec![window.clone()]
         );
         assert_eq!(client.get(window.id.clone()).expect("inspect"), window);
+        let mut controlled = window.clone();
+        controlled.control = Some("AbCdEf12".into());
+        controlled.control_key = Some("w12".into());
+        publisher
+            .publish(vec![controlled.clone()])
+            .expect("control");
+        assert_eq!(client.resolve("w12".into()).expect("resolve"), controlled);
+        controlled.occupied = false;
+        controlled.control = None;
+        publisher
+            .publish(vec![controlled.clone()])
+            .expect("vacant slot");
+        assert_eq!(
+            client.resolve("w12".into()).expect("vacant shorthand"),
+            controlled
+        );
+        assert!(
+            client
+                .capture("w12".into())
+                .err()
+                .expect("vacant capture")
+                .contains("waiting for application")
+        );
+        assert_eq!(
+            client
+                .find(Some("test".into()), Some(false), Some(true))
+                .expect("controlled empty filter")
+                .windows,
+            vec![controlled.clone()]
+        );
+        controlled.occupied = true;
+        controlled.control = Some("RsTuVw34".into());
+        publisher
+            .publish(vec![controlled.clone()])
+            .expect("replacement");
+        assert_eq!(
+            client.resolve("w12".into()).expect("replacement shorthand"),
+            controlled
+        );
+        assert!(client.resolve("AbCdEf12".into()).is_err());
         publisher.publish(Vec::new()).expect("closed");
         assert!(client.get(window.id).is_err());
         assert!(

@@ -52,10 +52,13 @@ impl Capabilities {
 impl Operation {
     pub(crate) const fn capability(&self) -> Capability {
         match self {
-            Self::Capture => Capability::View,
-            Self::Key { .. } => Capability::Keyboard,
-            Self::Pointer { .. } | Self::Click { .. } | Self::Button { .. } => Capability::Pointer,
-            Self::Resize { .. } => Capability::Resize,
+            Self::Capture | Self::CaptureAfter { .. } => Capability::View,
+            Self::Key { .. } | Self::Chord { .. } => Capability::Keyboard,
+            Self::Pointer { .. }
+            | Self::Click { .. }
+            | Self::Button { .. }
+            | Self::Scroll { .. } => Capability::Pointer,
+            Self::Resize { .. } | Self::Scale { .. } => Capability::Resize,
         }
     }
 }

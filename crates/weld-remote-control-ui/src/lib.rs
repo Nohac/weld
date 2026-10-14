@@ -46,11 +46,16 @@ pub struct ToggleLocalInteraction(pub Entity);
 #[derive(Event)]
 pub struct FitToFrame(pub Entity);
 
+/// User request to copy the window's reusable control key.
+#[derive(Event)]
+pub struct CopyControlKey(pub Entity);
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Action {
     Toggle(Capability),
     Interact,
     Fit,
+    Copy,
     TakeBack,
 }
 
@@ -63,6 +68,7 @@ impl Action {
             Self::Toggle(Capability::Resize) => "Resize",
             Self::Interact => "Interact",
             Self::Fit => "Fit",
+            Self::Copy => "Copy ID",
             Self::TakeBack => "Take back",
         }
     }
@@ -70,7 +76,7 @@ impl Action {
         match self {
             Self::Toggle(capability) => capabilities.allows(capability),
             Self::Interact => local,
-            Self::Fit | Self::TakeBack => false,
+            Self::Fit | Self::TakeBack | Self::Copy => false,
         }
     }
 }
@@ -123,6 +129,7 @@ pub fn install(app: &mut App) -> Result<()> {
             include_str!("../assets/lucide/user-round.svg"),
         ),
         (Action::Fit, include_str!("../assets/lucide/maximize.svg")),
+        (Action::Copy, include_str!("../assets/lucide/copy.svg")),
         (Action::TakeBack, include_str!("../assets/lucide/power.svg")),
     ] {
         let svg = Svg::parse(source)
@@ -294,6 +301,7 @@ fn click(
         Action::TakeBack => commands.trigger(TakeBack(button.window)),
         Action::Interact => commands.trigger(ToggleLocalInteraction(button.window)),
         Action::Fit => commands.trigger(FitToFrame(button.window)),
+        Action::Copy => commands.trigger(CopyControlKey(button.window)),
     }
     redraw.write(RequestRedraw);
 }
@@ -382,6 +390,7 @@ fn sync_buttons(
             Action::TakeBack => "Take back control".into(),
             Action::Interact => format!("Local interaction: {suffix}"),
             Action::Fit => "Fit app to frame".into(),
+            Action::Copy => "Copy remote control ID".into(),
         };
         commands.entity(entity).insert(AccessibleLabel::new(value));
     }
@@ -410,7 +419,7 @@ fn sync_foregrounds(
         let Ok((control, local)) = controls.get(button.window) else {
             continue;
         };
-        let enabled = matches!(button.action, Action::TakeBack | Action::Fit)
+        let enabled = matches!(button.action, Action::TakeBack | Action::Fit | Action::Copy)
             || button.action.enabled(control.0, local);
         let tint = foreground(palette.palette(button.window), enabled);
         if let Some(mut image) = image
@@ -486,6 +495,9 @@ mod tests {
         )
         .add_observer(|event: On<FitToFrame>, mut actions: ResMut<Actions>| {
             actions.0.push((event.0, Action::Fit));
+        })
+        .add_observer(|event: On<CopyControlKey>, mut actions: ResMut<Actions>| {
+            actions.0.push((event.0, Action::Copy));
         });
         install(&mut app).expect("icons");
         let window = app
@@ -508,7 +520,7 @@ mod tests {
             .iter(app.world())
             .map(|(entity, button)| (entity, *button))
             .collect();
-        assert_eq!(buttons.len(), 7);
+        assert_eq!(buttons.len(), 8);
         for (entity, target) in &buttons {
             app.world_mut().trigger(Pointer::new(
                 PointerId::Mouse,

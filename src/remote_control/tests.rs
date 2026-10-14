@@ -103,6 +103,12 @@ fn persistent_slot_retains_editable_permissions_and_global_revoke_clears_them() 
         .0
         .id()
         .to_owned();
+    let shorthand = app
+        .world()
+        .get::<ControlPolicy>(window)
+        .expect("policy")
+        .key
+        .clone();
     app.world_mut().despawn(client);
     app.update();
     assert!(app.world().get::<ControlledWindow>(window).is_none());
@@ -127,7 +133,18 @@ fn persistent_slot_retains_editable_permissions_and_global_revoke_clears_them() 
         .get::<ControlledWindow>(window)
         .expect("fresh grant")
         .0;
-    assert_ne!(grant.id(), original);
+    assert_ne!(
+        grant.id(),
+        original,
+        "replacement receives a fresh control ID"
+    );
+    assert_eq!(
+        app.world()
+            .get::<ControlPolicy>(window)
+            .expect("replacement policy")
+            .key,
+        shorthand
+    );
     assert!(!grant.capabilities().keyboard);
     app.world_mut().despawn(replacement);
     app.update();

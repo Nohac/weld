@@ -12,7 +12,11 @@ Weld is a workspace of reusable layers and one standard distribution:
   `weld-hoist-core` for both encoded presentation and remote-control capture.
   The distribution attaches in-memory grants to managed windows and exposes
   operations through `weld-control`. Persistent slots retain an authorized
-  permission policy independently of occupant-scoped grants. `WindowExternalControl`
+  permission policy independently of occupant-scoped grants. Random eight-character control IDs identify
+  application incarnations, while slot shorthands resolve once to the current grant.
+  Bounded input checkpoints record the retained composition revision when native
+  effects leave the relay queue. Capture waits require a newer composition revision
+  and retain the resolved grant through asynchronous readback. `WindowExternalControl`
   retains independent viewport sizing; `WindowLocalInputBlocked` controls local
   keyboard focus separately. Local takeover pauses remote mutations using an
   ownership epoch and waits for native held-input retirement before enabling
