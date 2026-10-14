@@ -297,6 +297,99 @@ fn chords_release_in_reverse_order_and_scroll_keeps_source_units() {
 }
 
 #[test]
+fn whole_text_uses_one_keyboard_effect_and_respects_ownership_and_permissions() {
+    let upstream = ClientSourceId::new(0);
+    let surface = ClientSurfaceId::new(ClientId::new(upstream, 1), 1);
+    let authority = AccessAuthority::new(|| {});
+    let (registration, client) = registration(upstream, ClientSourceId::new(3), || {}, NoCapture);
+    let mut adapter = registration.into_parts().runtime.driver;
+    map(&mut *adapter, surface);
+    let grant = client
+        .grant(
+            surface,
+            authority.open("test".into()).expect("permit"),
+            Capabilities::ALL,
+        )
+        .expect("grant");
+    let mut events = ClientEventQueue::default();
+    let mut effects = Vec::new();
+    adapter.drain_events(&mut events);
+    adapter.drain_effects(&mut effects);
+    effects.clear();
+    let operation = Operation::TypeText {
+        text: "Hello æøå 世界 🦀".into(),
+    };
+    let response = pending(&client, &grant.state, operation.clone());
+    adapter.drain_events(&mut events);
+    adapter.drain_effects(&mut effects);
+    assert!(response.try_recv().expect("receipt").is_ok());
+    let text: Vec<_> = effects
+        .iter()
+        .filter_map(|effect| match effect {
+            ClientAdapterEffect::Input(ClientInputEvent {
+                target,
+                event: InputEventKind::Text { text },
+                ..
+            }) => Some((*target, text.as_str())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        text,
+        vec![(ClientInputTarget::Keyboard { surface }, "Hello æøå 世界 🦀")]
+    );
+    effects.clear();
+    adapter.observe_event(&ClientSurfaceEvent {
+        surface,
+        kind: ClientSurfaceEventKind::Metadata(weld_client::ClientSurfaceMetadata::truncated_x11(
+            "test".into(),
+            "test".into(),
+            "test".into(),
+        )),
+    });
+    let unsupported = pending(&client, &grant.state, operation.clone());
+    adapter.drain_events(&mut events);
+    adapter.drain_effects(&mut effects);
+    assert!(
+        matches!(unsupported.try_recv().expect("X11 refusal"), Err(error) if error.contains("native Wayland"))
+    );
+    assert!(
+        effects.is_empty(),
+        "unsupported typing must not even change focus"
+    );
+    adapter.observe_event(&ClientSurfaceEvent {
+        surface,
+        kind: ClientSurfaceEventKind::Metadata(weld_client::ClientSurfaceMetadata::default()),
+    });
+    let queued = pending(&client, &grant.state, operation.clone());
+    grant.set_local_input(true);
+    assert!(client.request(grant.id(), operation.clone()).is_err());
+    adapter.drain_events(&mut events);
+    adapter.drain_effects(&mut effects);
+    assert!(queued.try_recv().expect("ownership refusal").is_err());
+    assert!(!effects.iter().any(|effect| matches!(
+        effect,
+        ClientAdapterEffect::Input(ClientInputEvent {
+            event: InputEventKind::Text { .. },
+            ..
+        })
+    )));
+    grant.revoke();
+    adapter.drain_events(&mut events);
+    let restricted = client
+        .grant(
+            surface,
+            authority.open("restricted".into()).expect("permit"),
+            Capabilities {
+                keyboard: false,
+                ..Capabilities::ALL
+            },
+        )
+        .expect("restricted grant");
+    assert!(client.request(restricted.id(), operation).is_err());
+}
+
+#[test]
 fn local_takeover_releases_remote_holds_and_rejects_work_queued_before_resume() {
     let upstream = ClientSourceId::new(0);
     let surface = ClientSurfaceId::new(ClientId::new(upstream, 1), 1);
@@ -486,6 +579,10 @@ fn map(adapter: &mut dyn ClientAdapter, surface: ClientSurfaceId) {
 }
 
 fn map_revision(adapter: &mut dyn ClientAdapter, surface: ClientSurfaceId, revision: u64) {
+    adapter.observe_event(&ClientSurfaceEvent {
+        surface,
+        kind: ClientSurfaceEventKind::Metadata(weld_client::ClientSurfaceMetadata::default()),
+    });
     adapter.observe_event(&ClientSurfaceEvent {
         surface,
         kind: ClientSurfaceEventKind::Role(ClientSurfaceRole::Toplevel(ToplevelState {

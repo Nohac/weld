@@ -384,6 +384,9 @@ impl Activity {
                     attention.layer = Some(layer);
                 }
                 match &input.event {
+                    InputEventKind::Text { .. } => {
+                        attention.interaction = Some(now);
+                    }
                     InputEventKind::Touch { event } => {
                         if matches!(
                             event,

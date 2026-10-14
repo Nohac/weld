@@ -1099,6 +1099,24 @@ impl ClientRuntime {
                 }
                 result
             }
+            RuntimeInputEventKind::Input(InputEventKind::Text { text }) => {
+                let route = match self.resolved_keyboard_route(self.keyboard_route) {
+                    Ok(Some(route)) => route,
+                    Ok(None) => return ClientInputDispatchResult::NoRoute,
+                    Err(error) => return error,
+                };
+                self.dispatch_to(
+                    route.surface.source(),
+                    ClientInputEvent {
+                        target: ClientInputTarget::Keyboard {
+                            surface: route.surface,
+                        },
+                        host_position: None,
+                        event: InputEventKind::Text { text },
+                        time,
+                    },
+                )
+            }
             RuntimeInputEventKind::HostFocusLost => self.host_focus_lost(time),
         }
     }
@@ -1165,6 +1183,7 @@ impl ClientRuntime {
                 *position = local;
             }
             InputEventKind::PointerGesture { .. }
+            | InputEventKind::Text { .. }
             | InputEventKind::Keyboard { .. }
             | InputEventKind::Touch { .. } => {}
         }

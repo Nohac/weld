@@ -372,6 +372,9 @@ pub enum InputEventKind {
     Touch {
         event: TouchEvent,
     },
+    Text {
+        text: crate::TextInput,
+    },
 }
 
 /// Producer-local contact identity, scoped by the trusted input controller.

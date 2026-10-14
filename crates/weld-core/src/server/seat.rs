@@ -9,7 +9,7 @@ use smithay::{
     input::{
         Seat, SeatHandler,
         dnd::{DnDGrab, DndGrabHandler, GrabType, Source},
-        keyboard::{FilterResult, KeyboardSource, LegacyRepeat, RepeatMode},
+        keyboard::{FilterResult, KeyboardSource, LegacyRepeat, RepeatMode, xkb},
         pointer::{
             AxisFrame, ButtonEvent, CursorImageStatus, Focus, GestureHoldBeginEvent,
             GestureHoldEndEvent, GesturePinchBeginEvent, GesturePinchEndEvent,
@@ -151,6 +151,29 @@ impl ServerState {
                 ClientInputTarget::Keyboard { surface },
                 InputEventKind::Keyboard { keycode, state },
             ) => self.apply_keyboard_input(input_seat, surface, keycode, state, time),
+            (ClientInputTarget::Keyboard { surface }, InputEventKind::Text { text }) => {
+                if input_seat.focused_toplevel.get() != Some(surface) {
+                    return;
+                }
+                if let Some(keyboard) = input_seat.native.get_keyboard() {
+                    if !matches!(keyboard.current_focus(), Some(KeyboardFocus::Wayland(_))) {
+                        return;
+                    }
+                    let keysyms: Vec<_> = text
+                        .as_str()
+                        .chars()
+                        .map(|character| match character {
+                            '\n' => xkb::Keysym::new(xkb::keysyms::KEY_Return),
+                            '\t' => xkb::Keysym::new(xkb::keysyms::KEY_Tab),
+                            character => xkb::utf32_to_keysym(u32::from(character)),
+                        })
+                        .collect();
+                    // Smithay assigns temporary keycodes 9..=255 per injection map.
+                    for batch in keysyms.chunks(247) {
+                        keyboard.inject_text_keysyms(self, batch);
+                    }
+                }
+            }
             (target, event) => {
                 warn!(
                     ?target,

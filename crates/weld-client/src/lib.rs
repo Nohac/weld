@@ -21,6 +21,7 @@ mod presentation;
 mod presenter;
 mod startup;
 mod surface;
+mod text;
 pub use composition::{ComposedBuffer, CompositionLayer};
 pub use startup::{InitialPresentation, WindowPreference};
 mod touch;
@@ -72,6 +73,7 @@ pub use surface::{
     ToplevelHints, ToplevelInteractionRequestKind, ToplevelKind, ToplevelLayout, ToplevelState,
     ToplevelStateRequestKind, WindowDecoration, WindowResizeEdge,
 };
+pub use text::TextInput;
 #[cfg(feature = "serde")]
 pub use wire::{
     WireClientInputEvent, WireClientSurfaceCommit, WireClientSurfaceEvent,

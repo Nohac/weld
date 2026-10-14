@@ -1631,6 +1631,7 @@ impl RemoteInputState {
             }
             InputEventKind::PointerLeft { .. }
             | InputEventKind::PointerAxis { .. }
+            | InputEventKind::Text { .. }
             | InputEventKind::Touch { .. } => {}
         }
         true

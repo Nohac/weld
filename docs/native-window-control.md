@@ -112,6 +112,31 @@ preferred-scale request, rounded to 1/120 units, under the Resize permission.
 Omitting `--factor` restores the output's scale. Logical viewport size stays fixed;
 capture metadata reports the application's actual raster density.
 
+`type-text` types a complete Unicode string in one request through the controlled
+keyboard seat:
+
+```sh
+weldctl --session weld-0 window type-text --control w6 --text 'Hello æøå 世界 🦀' --json
+```
+
+The equivalent MCP tool is `window_type_text` with `control` and `text` arguments.
+It requires Keyboard permission and remote input ownership. Each request accepts
+1–4096 UTF-8 bytes; longer input can be split at character boundaries. Explicit
+newlines press Enter and tabs press Tab. Other control characters are rejected,
+and Enter is added only when requested. Release low-level remote key holds first.
+The result is an ordinary input receipt usable with `capture-after`.
+
+Native Wayland delivery uses Smithay's temporary Unicode keysym mappings in
+batches of at most 247 characters, restoring the seat keymap and modifier state
+after each batch. Clipboard selections remain untouched. Tests verify exact
+received UTF-8 bytes in Foot and a GTK entry, including multi-batch strings.
+
+XWayland text requests currently return an explicit unsupported error before
+focus or input effects. In the GTK/X11 probe, rapid temporary keymap changes
+were interpreted using the wrong mapping and could trigger shortcuts, including
+closing the dialog. X11 requires a separate text delivery backend. Existing
+key/chord operations remain available for X11.
+
 The desktop frame initially remains a live, read-only peek. Hold the configured
 modifier chord to use the focused window locally, or use the toggle binding to
 keep local keyboard and pointer input enabled after releasing the chord. The
@@ -231,7 +256,7 @@ weldctl --session weld-0 mcp
 ```
 
 The generated tools include inventory `list`, `find`, `get`, `resolve`, `wait`;
-input `pointer`, `click`, `button`, `key`, `press_key`, `chord`, `scroll`;
+input `pointer`, `click`, `button`, `key`, `press_key`, `chord`, `type_text`, `scroll`;
 viewport `resize`, `scale`; and `capture`, `capture_after`, `accessibility`, all prefixed `window_`.
 MCP `window_list` defaults to control-enabled windows, including waiting persistent
 slots. Pass `{"all_windows":true}` for the whole inventory. CLI/RPC `list` retains
@@ -304,8 +329,8 @@ and [bridge features](https://github.com/DioxusLabs/blitz/blob/d1b433edbc13da889
 
 ## Remaining Draftship feedback
 
-The next input slice is whole-string UTF-8 insertion/paste with an explicit
-clipboard-preservation contract for the controlled seat. Accessibility action
+Whole-string UTF-8 typing is available for native Wayland windows. X11 text
+delivery and explicit paste semantics remain follow-ups. Accessibility action
 execution, bounded text/value inspection with sensitive-field handling, and
 broader window association remain follow-ups. Mixed-version capability diagnostics
 would make method/field mismatches during upgrades easier to identify.
@@ -321,6 +346,7 @@ cargo test --locked -p weldwm -p weld-control -p weld-remote-control -p weld-acc
 scripts/check-control-launch --nested
 scripts/check-control-launch --nested --accessibility-app /path/to/zenity
 scripts/check-control-launch --nested --xwayland
+scripts/check-control-launch --nested --xwayland --text-app /path/to/zenity
 ```
 
 Validated against a real nested Foot window: CLI/direct RPC result agreement,

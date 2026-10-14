@@ -31,9 +31,12 @@ def main():
     parser.add_argument("--xwayland", action="store_true")
     parser.add_argument("--no-build", action="store_true")
     parser.add_argument("--accessibility-app", metavar="ZENITY", help="Validate AT-SPI with this Zenity executable (requires --nested)")
+    parser.add_argument("--text-app", metavar="ZENITY", help="Validate Unicode typing in a GTK entry on Wayland and, with --xwayland, X11")
     args = parser.parse_args()
     if args.accessibility_app and not args.nested:
         parser.error("--accessibility-app requires --nested")
+    if args.text_app and not args.nested:
+        parser.error("--text-app requires --nested")
     root = Path(__file__).resolve().parent.parent
     resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
     if not args.no_build:
@@ -95,7 +98,7 @@ def main():
                     tree = subprocess.check_output(["swaymsg", "-s", ipc, "-t", "get_tree", "-r"], text=True, timeout=5)
                     return name in tree
                 wait_for(host, lambda: mapped("weld-launch-probe"), "Foot admission through native launch")
-                check_windows(ctl, control, host, run, display, args.accessibility_app)
+                check_windows(ctl, control, host, run, display, args.accessibility_app, args.text_app, args.xwayland)
                 if args.xwayland:
                     subprocess.run([*ctl, "launch", "--", str(root / "target/debug/examples/x11_window_probe"),
                                     "--seconds", "2", "--title", "Weld X11 launch probe"], check=True, timeout=10)
@@ -130,7 +133,7 @@ def main():
                 host.wait(timeout=5)
 
 
-def check_windows(ctl, control, host, run, display, accessibility_app):
+def check_windows(ctl, control, host, run, display, accessibility_app, text_app, xwayland):
     listing = json.loads(subprocess.check_output([*ctl, "window", "list", "--json"], text=True, timeout=10))
     window = next(window for window in listing["windows"] if window["app_id"] == "weld-launch-probe")
     details = json.loads(subprocess.check_output(
@@ -196,6 +199,7 @@ def check_windows(ctl, control, host, run, display, accessibility_app):
                 "window_press_key", "window_chord", "window_scroll", "window_capture_after", "window_find",
                 "window_resolve",
                 "window_scale",
+                "window_type_text",
                 "window_accessibility",
             }
             result = request(3, "tools/call", {"name": "window_get", "arguments": {"id": window["id"]}})
@@ -220,6 +224,9 @@ def check_windows(ctl, control, host, run, display, accessibility_app):
             check_remote_control(rpc, request, window["id"], host, run, display)
             if accessibility_app:
                 check_accessibility(ctl, rpc, request, host, run, accessibility_app)
+            if text_app:
+                for backend in (["wayland", "x11"] if xwayland else ["wayland"]):
+                    check_text_entry(ctl, rpc, host, run, text_app, backend)
         finally:
             mcp.stdin.close()
             try:
@@ -287,6 +294,20 @@ def check_remote_control(rpc, mcp, identifier, host, run, display):
     result = mcp(180, "tools/call", {"name": "window_chord", "arguments": {"control": key, "keycodes": [42, 46]}})
     assert not result.get("isError"), result
     wait_for(host, lambda: b"C" in received.read_bytes(), "atomic key chord")
+    text = "Hei æøå — 世界 🦀 'quotes' \\" + "0123456789" * 60 + "\tend\n"
+    result = mcp(181, "tools/call", {"name": "window_type_text", "arguments": {"control": key, "text": text}})
+    assert not result.get("isError"), result
+    assert result["structuredContent"]["stage"] == "effects_queued", result
+    wait_for(host, lambda: text.replace("\n", "\r").encode() in received.read_bytes(), "whole Unicode text across keymap batches")
+    invoke("press_key", control=handle, keycode=44)
+    wait_for(host, lambda: received.read_bytes().endswith(b"z"), "normal keymap restored after text")
+    assert copied(), "text input replaced the clipboard"
+    before_invalid = received.read_bytes()
+    assert "error" in rpc("type_text", {"control": key, "text": "valid prefix\u0000invalid"})
+    invoke("key", control=handle, keycode=42, pressed=True)
+    assert "error" in rpc("type_text", {"control": key, "text": "must not be typed"})
+    invoke("key", control=handle, keycode=42, pressed=False)
+    assert received.read_bytes() == before_invalid, "rejected text emitted partial input"
     invoke("click", control=handle, x=100, y=100, button=272)
     wait_for(host, lambda: b"\x1b[<0;" in received.read_bytes(), "terminal pointer input")
     invoke("scroll", control=handle, x=100, y=100, horizontal=0, vertical=1, wheel=True)
@@ -316,6 +337,7 @@ def check_remote_control(rpc, mcp, identifier, host, run, display):
     assert window["capabilities"] == dict(view=False, keyboard=True, pointer=False, resize=False)
     assert invoke("resolve", key=key)["control"] == handle, "slot shorthand follows the new grant"
     assert "error" in rpc("capture", {"control": old_handle})
+    assert "error" in rpc("type_text", {"control": old_handle, "text": "retired"})
     assert "error" in rpc("capture", {"control": handle})
     assert "error" in rpc("accessibility", {"control": handle})
     assert "error" in rpc("accessibility", {"control": old_handle})
@@ -333,6 +355,37 @@ def check_remote_control(rpc, mcp, identifier, host, run, display):
     assert invoke("resolve", key=key)["control"] == invoke("get", id=identifier)["control"]
     invoke("control", id=identifier, enabled=False)
     print("PASS independent input, viewport sizing, live peek, MCP image capture and grant retirement", flush=True)
+
+
+def check_text_entry(ctl, rpc, host, run, program, backend):
+    title = "Weld text probe " + backend
+    output = run / ("text-" + backend + ".txt")
+    launcher = "import subprocess,sys; result=subprocess.run(sys.argv[2:],capture_output=True,check=True); open(sys.argv[1],'wb').write(result.stdout)"
+    subprocess.run([*ctl, "launch", "--", "env", "GDK_BACKEND=" + backend,
+                    sys.executable, "-c", launcher, str(output), program,
+                    "--entry", "--title=" + title, "--text=Unicode input probe"], check=True, capture_output=True, timeout=10)
+    def window():
+        return next((item for item in rpc("list", {})["result"]["windows"] if item["title"] == title), None)
+    wait_for(host, lambda: window() is not None, "text entry " + backend)
+    identifier = window()["id"]
+    assert "result" in rpc("control", {"id": identifier, "enabled": True})
+    wait_for(host, lambda: window()["control"] is not None, "text entry grant")
+    control = window()["control"]
+    wait_for(host, lambda: "result" in rpc("capture", {"control": control}), "text entry ready")
+    text = "Hello Æøå 世界 🦀 " + "abc123" * 100
+    result = subprocess.run([*ctl, "window", "type-text", "--control=" + control, "--text=" + text, "--json"], capture_output=True, text=True, timeout=10)
+    if backend == "x11":
+        assert result.returncode != 0 and "native Wayland" in json.loads(result.stdout)["error"], result
+        # Confirm refusal leaves the field empty and normal key input usable.
+        assert "result" in rpc("press_key", {"control": control, "keycode": 30})
+        text = "a"
+    else:
+        assert result.returncode == 0, result.stderr
+    assert "result" in rpc("press_key", {"control": control, "keycode": 28})
+    wait_for(host, output.exists, "submitted text entry " + backend)
+    actual = output.read_text().rstrip("\n")
+    assert actual == text, (backend, actual, text)
+    print("PASS " + ("X11 text refusal without partial input" if backend == "x11" else "Unicode GTK text entry and keymap restoration"), flush=True)
 
 
 def check_accessibility(ctl, rpc, mcp, host, run, program):

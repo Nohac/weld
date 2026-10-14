@@ -201,6 +201,7 @@ struct Adapter {
     waiting: Vec<Pending>,
     positions: HashMap<ClientSurfaceId, InputPosition>,
     held_keys: HashMap<ClientSurfaceId, HashSet<u32>>,
+    text_surfaces: HashSet<ClientSurfaceId>,
     started: Instant,
     input_epochs: HashMap<ClientSurfaceId, u64>,
 }
@@ -233,6 +234,7 @@ pub fn registration(
         waiting: Vec::new(),
         positions: HashMap::new(),
         held_keys: HashMap::new(),
+        text_surfaces: HashSet::new(),
         started: Instant::now(),
         input_epochs: HashMap::new(),
     };
@@ -491,6 +493,22 @@ impl Adapter {
                         },
                     ));
                 }
+            }
+            Operation::TypeText { text } => {
+                let text = weld_client::TextInput::try_from(text).map_err(anyhow::Error::msg)?;
+                ensure!(
+                    self.text_surfaces.contains(&surface),
+                    "whole-text input requires a native Wayland window; XWayland needs a separate text delivery backend"
+                );
+                ensure!(
+                    self.held_keys.values().all(HashSet::is_empty),
+                    "release held remote keys before typing text"
+                );
+                messages.push(focus);
+                messages.push(event(
+                    ClientInputTarget::Keyboard { surface },
+                    InputEventKind::Text { text },
+                ));
             }
             Operation::Scroll {
                 x,
@@ -807,6 +825,19 @@ impl ClientAdapter for Adapter {
         self.relay.drain_presentation_claims(updates);
     }
     fn observe_event(&mut self, event: &ClientSurfaceEvent) {
+        match &event.kind {
+            ClientSurfaceEventKind::Metadata(metadata) => {
+                if metadata.x11_class().is_none() {
+                    self.text_surfaces.insert(event.surface);
+                } else {
+                    self.text_surfaces.remove(&event.surface);
+                }
+            }
+            ClientSurfaceEventKind::Destroyed => {
+                self.text_surfaces.remove(&event.surface);
+            }
+            _ => {}
+        }
         self.relay.observe_event(event);
     }
     fn observe_cursor_update(&mut self, update: &ClientCursorUpdate) {

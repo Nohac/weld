@@ -25,6 +25,9 @@ Weld is a workspace of reusable layers and one standard distribution:
   Returning to remote input retires surface-scoped local sequences in
   `ClientRuntime` before publishing new focus and pointer routes. Native cleanup
   targets local seats; late physical releases are consumed by the shared runtime.
+  Whole-text operations use a bounded `weld-client::TextInput` keyboard event.
+  Native Wayland delivery translates it into Smithay's temporary keysym batches,
+  preserving clipboard selections and the seat's physical keymap state.
   On-demand native GPU snapshots reuse source composition and asynchronous
   readback, retaining input leases until sampling completes. See
   [Native window control](native-window-control.md).

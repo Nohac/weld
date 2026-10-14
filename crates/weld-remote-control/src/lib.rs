@@ -124,6 +124,9 @@ pub enum Operation {
     Chord {
         keycodes: Vec<u32>,
     },
+    TypeText {
+        text: String,
+    },
     Scroll {
         x: f64,
         y: f64,

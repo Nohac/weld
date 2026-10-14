@@ -325,6 +325,10 @@ impl WindowService {
     pub fn chord(&self, control: String, keycodes: Vec<u32>) -> Result<InputReceipt, String> {
         self.input(control, Operation::Chord { keycodes })
     }
+    /// Type 1–4096 UTF-8 bytes into a native Wayland window, preserving the clipboard. Newlines press Enter; tabs press Tab. Release held remote keys first. XWayland is unsupported.
+    pub fn type_text(&self, control: String, text: String) -> Result<InputReceipt, String> {
+        self.input(control, Operation::TypeText { text })
+    }
     /// Scroll at window-local logical x/y. Wheel deltas are notches; otherwise logical pixels in one completed finger gesture. Positive deltas scroll right/down.
     pub fn scroll(
         &self,
@@ -634,6 +638,10 @@ impl WindowClient {
     /// Press ordered evdev keys, then release in reverse order. Validates the whole chord first.
     pub fn chord(&self, control: String, keycodes: Vec<u32>) -> Result<InputReceipt, String> {
         self.request("chord", json!({"control":control,"keycodes":keycodes}))
+    }
+    /// Type a full Unicode string (1–4096 UTF-8 bytes) into a native Wayland window without changing the clipboard. Newlines press Enter; tabs press Tab. No implicit Enter is added. Release held remote keys first. XWayland is unsupported.
+    pub fn type_text(&self, control: String, text: String) -> Result<InputReceipt, String> {
+        self.request("type_text", json!({"control":control,"text":text}))
     }
     /// Scroll at logical x/y. With --wheel, deltas are notches; otherwise logical pixels in one completed finger gesture. Positive is right/down.
     pub fn scroll(

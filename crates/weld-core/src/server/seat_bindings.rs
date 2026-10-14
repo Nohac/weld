@@ -322,7 +322,10 @@ impl ServerState {
         {
             return;
         }
-        let keyboard = matches!(event.event, InputEventKind::Keyboard { .. });
+        let keyboard = matches!(
+            event.event,
+            InputEventKind::Keyboard { .. } | InputEventKind::Text { .. }
+        );
         let device = if keyboard {
             Device::Keyboard
         } else {

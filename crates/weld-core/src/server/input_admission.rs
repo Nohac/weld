@@ -101,6 +101,7 @@ impl InputAdmission {
 /// A wheel step is an atomic interaction; finger scroll and gestures have a begin.
 pub(super) fn starts_interaction(event: &InputEventKind) -> bool {
     match event {
+        InputEventKind::Text { .. } => true,
         InputEventKind::Keyboard {
             state: KeyboardKeyState::Pressed,
             ..
