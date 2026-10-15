@@ -103,7 +103,7 @@ content layout; a desktop application is not automatically a mobile-responsive U
 - Model names are untrusted labels. Approval requires the code displayed on the
   intended phone, not merely a familiar name. Phone-side confirmation precedes
   enrollment; successful enrollment replaces the phone's one saved desktop.
-- Approval currently grants browsing and interactive hoisting of running apps.
+- Approval currently grants browsing, thumbnail previews and interactive hoisting of running apps.
   This is powerful desktop access: a terminal or other controlled application
   can itself run commands. There is no dedicated remote-launch API or app whitelist
   in this slice, and this permission is not an application sandbox.
@@ -118,6 +118,53 @@ content layout; a desktop application is not automatically a mobile-responsive U
   requires Play services and uses Google's SDK and its
   diagnostics/telemetry behavior. Weld requests no camera permission. The
   dependency and packaging tool versions are pinned; Android Studio is unnecessary.
+
+## Thumbnail protocol
+
+`DeviceSession::thumbnail` requests one catalogue occupant using its window ID
+and `ClientSurfaceId`. The optional cached revision produces an `Unchanged`
+response when the host still has the same snapshot. Replies include snapshot age
+and a stale flag, or `Pending`, `Unavailable`, or `Denied`. Clients scope cached
+revisions to the current connection and discard previews when occupants disappear.
+
+The transport-neutral records live in `weld-hoist-protocol::thumbnail`. Iroh
+establishes a dedicated bidirectional `weldthm1` stream during paired-session
+setup. Replies carry a bounded Postcard header followed by raw PNG bytes.
+Dimensions are capped at 320 pixels per edge and payloads at 512 KiB. Receivers
+validate these bounds before allocation; image consumers must also bound PNG
+decoding and verify the actual dimensions against the advertised extent.
+
+`DesktopSessions` owns a shared, memory-only 32-entry cache. Authorized requests
+coalesce into capture tickets; one ticket is current at a time, with a two-second
+minimum refresh interval per target. The producer services
+`take_thumbnail_capture`, marks composition changes with `invalidate_thumbnail`,
+and returns an image or failure through `complete_thumbnail_capture`. Tickets
+expire after five seconds. Removed occupants, ended access sessions and expired
+tickets cannot publish late results. Unchanged catalogues skip cache pruning.
+The producer must bound its GPU work and retain dormant-workspace behavior.
+
+Each client queues at most one request behind its active exchange. The server
+limits replies to four per second. A ten-second transfer timeout closes only
+the preview lane; catalogue, input and media continue. Reconnecting establishes
+a fresh lane. Disconnect drops its pending requests. The cache retains at most
+16 MiB of encoded snapshots, with shared references for transfers in progress.
+
+Thumbnail access has its own `DevicePermissions::thumbnails` grant. Existing
+trust records default it to false; pair again through the updated consent prompt
+to grant it. Listing titles alone grants no pixels. Every request checks current
+paired-device permission and membership in that connection's authorized catalogue.
+
+This slice supplies and tests the protocol, cache and capture-producer boundary.
+Native GPU thumbnail capture and Weld Connect preview cards are the next slice;
+the desktop currently has no thumbnail producer. Rebuild paired client and host
+together for the additional session stream.
+
+Validation: the pairing endpoint test transfers a 256-KiB synthetic payload,
+checks conditional replies and live permission denial, and continues control
+traffic afterward. The delayed-session test leaves a thumbnail request unanswered
+while catalogue exchanges recover, then checks cancellation on owner drop.
+Policy tests cover coalescing, refresh intervals, dirty-during-capture state,
+cache limits, removal, revocation, expired tickets and malformed wire bounds.
 
 ## Current limits
 

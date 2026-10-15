@@ -7,6 +7,7 @@
 use std::fmt;
 
 pub mod gamepad;
+pub mod thumbnail;
 
 use serde::{Deserialize, Serialize};
 use weld_client::{

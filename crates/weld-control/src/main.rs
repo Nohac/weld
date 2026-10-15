@@ -261,7 +261,7 @@ fn main() -> Result<()> {
                         candidate.name, candidate.identity
                     );
                     print!(
-                        "Allow browsing and hoisting running applications? Type the code shown on the phone (empty cancels): "
+                        "Allow browsing, thumbnail previews and hoisting running applications? Type the code shown on the phone (empty cancels): "
                     );
                     io::stdout().flush()?;
                     let mut answer = String::new();
@@ -279,6 +279,7 @@ fn main() -> Result<()> {
                                 browse: true,
                                 hoist: true,
                                 diagnostics: false,
+                                thumbnails: true,
                             },
                         },
                     )?;
@@ -299,12 +300,13 @@ fn main() -> Result<()> {
             };
             for device in devices {
                 println!(
-                    "{}  {:?}  browse={} hoist={} diagnostics={}",
+                    "{}  {:?}  browse={} hoist={} diagnostics={} thumbnails={}",
                     device.identity,
                     device.name,
                     device.permissions.browse,
                     device.permissions.hoist,
-                    device.permissions.diagnostics
+                    device.permissions.diagnostics,
+                    device.permissions.thumbnails
                 );
             }
         }

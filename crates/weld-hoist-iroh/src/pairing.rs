@@ -3,6 +3,7 @@ mod session;
 mod storage;
 #[cfg(test)]
 mod tests;
+pub mod thumbnail;
 mod wire;
 
 use anyhow::{Context, Result, ensure};
@@ -40,6 +41,9 @@ pub struct DevicePermissions {
     pub hoist: bool,
     #[serde(default)]
     pub diagnostics: bool,
+    /// Permission to fetch application pixels while browsing the catalogue.
+    #[serde(default)]
+    pub thumbnails: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -348,6 +352,18 @@ impl PairingHost {
                     .devices
                     .get(&identity.to_string())
                     .map(|device| device.permissions.diagnostics)
+            })
+            .unwrap_or(false)
+    }
+    fn permits_thumbnails(&self, identity: EndpointId) -> bool {
+        self.0
+            .lock()
+            .ok()
+            .and_then(|state| {
+                state
+                    .devices
+                    .get(&identity.to_string())
+                    .map(|device| device.permissions.browse && device.permissions.thumbnails)
             })
             .unwrap_or(false)
     }

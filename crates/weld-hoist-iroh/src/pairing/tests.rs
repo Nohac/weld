@@ -20,7 +20,17 @@ fn permissions() -> DevicePermissions {
         browse: true,
         hoist: true,
         diagnostics: false,
+        thumbnails: true,
     }
+}
+
+#[test]
+fn existing_browse_grants_require_explicit_thumbnail_consent() {
+    let existing: DevicePermissions =
+        serde_json::from_str(r#"{"browse":true,"hoist":true,"diagnostics":false}"#)
+            .expect("existing grant");
+    assert!(!existing.thumbnails);
+    assert!(!DevicePermissions::default().thumbnails);
 }
 fn wait(mut ready: impl FnMut() -> bool) {
     let deadline = Instant::now() + Duration::from_secs(5);
@@ -200,6 +210,70 @@ fn real_endpoint_enrollment_catalogue_and_revocation_share_the_same_identity() {
     };
     desktop.publish(id, vec![application.clone()]);
     wait(|| session.applications() == vec![application.clone()]);
+    {
+        use thumbnail::{ThumbnailImage, ThumbnailRequest, ThumbnailStatus, ThumbnailTarget};
+        let target = ThumbnailTarget {
+            window: application.window,
+            surface: application.surface,
+        };
+        let request = ThumbnailRequest {
+            target,
+            if_revision: None,
+        };
+        let fetch = |request| {
+            let mut pending = session.thumbnail(request).expect("thumbnail request");
+            let mut response = None;
+            wait(|| {
+                response = pending.poll().expect("thumbnail poll");
+                response.is_some()
+            });
+            response.expect("thumbnail reply")
+        };
+        assert_eq!(fetch(request).reply.status, ThumbnailStatus::Pending);
+        let capture = desktop.take_thumbnail_capture().expect("capture demand");
+        let png = vec![7; 256 * 1024];
+        assert!(desktop.complete_thumbnail_capture(
+            capture,
+            Some(ThumbnailImage::new(320, 180, png.clone()).expect("image"))
+        ));
+        let image = fetch(request);
+        assert_eq!(image.image.expect("payload").png(), png);
+        let ThumbnailStatus::Image { revision, .. } = image.reply.status else {
+            panic!("image status");
+        };
+        assert!(matches!(
+            fetch(ThumbnailRequest {
+                if_revision: Some(revision),
+                ..request
+            })
+            .reply
+            .status,
+            ThumbnailStatus::Unchanged { .. }
+        ));
+        authority
+            .0
+            .lock()
+            .expect("state")
+            .devices
+            .get_mut(&candidate.identity)
+            .expect("device")
+            .permissions
+            .thumbnails = false;
+        assert_eq!(fetch(request).reply.status, ThumbnailStatus::Denied);
+        session
+            .release()
+            .expect("control remains live after denied preview");
+        wait(|| {
+            let actions = desktop.take_actions();
+            let ready = !actions.is_empty();
+            for action in actions {
+                if let DeviceAction::Release { answer, .. } = action {
+                    let _ = answer.send(true);
+                }
+            }
+            ready
+        });
+    }
     let report = session
         .peer
         .diagnostics()

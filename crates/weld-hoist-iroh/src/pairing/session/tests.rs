@@ -55,6 +55,11 @@ async fn live_session_recovers_a_late_reply_and_owner_drop_cancels_the_next_wait
         .expect("control marker");
     let mut media = connection.open_uni().await.expect("media");
     media.write_all(b"weldmed1").await.expect("media marker");
+    let (mut thumbnails, mut thumbnail_requests) = connection.open_bi().await.expect("thumbnails");
+    thumbnails
+        .write_all(thumbnail::MARKER)
+        .await
+        .expect("thumbnail marker");
     let session = timeout(Duration::from_secs(2), async {
         loop {
             if let Some(session) = pending.poll().expect("poll") {
@@ -65,6 +70,23 @@ async fn live_session_recovers_a_late_reply_and_owner_drop_cancels_the_next_wait
     })
     .await
     .expect("ready session");
+    let preview_request = thumbnail::ThumbnailRequest {
+        target: thumbnail::ThumbnailTarget {
+            window: 1,
+            surface: ClientSurfaceId::new(
+                weld_client::ClientId::new(weld_client::ClientSourceId::new(1), 1),
+                1,
+            ),
+        },
+        if_revision: None,
+    };
+    let mut preview = session.thumbnail(preview_request).expect("preview request");
+    let received: thumbnail::ThumbnailRequest =
+        timeout(Duration::from_secs(2), read_record(&mut thumbnail_requests))
+            .await
+            .expect("independent preview request")
+            .expect("preview record");
+    assert_eq!(received, preview_request);
     let _: Request = timeout(Duration::from_secs(2), read_record(&mut recv))
         .await
         .expect("request arrives")
@@ -86,10 +108,15 @@ async fn live_session_recovers_a_late_reply_and_owner_drop_cancels_the_next_wait
         .await
         .expect("polling resumes after recovery")
         .expect("next request");
+    assert!(
+        preview.poll().expect("preview still pending").is_none(),
+        "catalogue progressed while preview was stalled"
+    );
     drop(session);
     timeout(Duration::from_secs(2), connection.closed())
         .await
         .expect("dropping the owner cancels the stalled session");
+    assert!(preview.poll().is_err());
     source.close().await;
 }
 

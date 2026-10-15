@@ -46,18 +46,31 @@ pub enum DeviceAction {
     },
 }
 
-struct DesktopState {
+pub(super) struct DesktopState {
     peers: VecDeque<(SessionId, IrohSourcePeer, AccessSession)>,
     actions: VecDeque<DeviceAction>,
-    catalogues: BTreeMap<SessionId, (Vec<ApplicationInfo>, AccessSession)>,
+    pub(super) catalogues: BTreeMap<SessionId, (Vec<ApplicationInfo>, AccessSession)>,
+    pub(super) thumbnails: thumbnail::Cache,
+}
+impl DesktopState {
+    pub(super) fn prune_thumbnails(&mut self) {
+        self.thumbnails.retain(|target| {
+            self.catalogues.values().any(|(apps, access)| {
+                access.is_authorized()
+                    && apps
+                        .iter()
+                        .any(|app| app.window == target.window && app.surface == target.surface)
+            })
+        });
+    }
 }
 #[derive(Clone)]
 pub struct DesktopSessions {
     access: AccessAuthority,
-    state: Arc<Mutex<DesktopState>>,
+    pub(super) state: Arc<Mutex<DesktopState>>,
     next: Arc<AtomicU64>,
     notifier: IrohNotifier,
-    policy: IrohNotifier,
+    pub(super) policy: IrohNotifier,
     codec: VideoCodec,
 }
 impl DesktopSessions {
@@ -72,6 +85,7 @@ impl DesktopSessions {
                 access.end();
             }
             state.catalogues.clear();
+            state.prune_thumbnails();
         }
         let _ = self.policy.notify();
     }
@@ -85,6 +99,7 @@ impl DesktopSessions {
                 peers: VecDeque::new(),
                 actions: VecDeque::new(),
                 catalogues: BTreeMap::new(),
+                thumbnails: thumbnail::Cache::default(),
             })),
             next: Arc::new(AtomicU64::new(1)),
             notifier,
@@ -109,15 +124,19 @@ impl DesktopSessions {
             .map(|mut state| state.actions.drain(..).collect())
             .unwrap_or_default()
     }
-    pub fn publish(&self, session: SessionId, applications: Vec<ApplicationInfo>) {
+    pub fn publish(&self, session: SessionId, mut applications: Vec<ApplicationInfo>) {
         if let Ok(mut state) = self.state.lock()
             && let Some(catalogue) = state.catalogues.get_mut(&session)
         {
-            catalogue.0 = if catalogue.1.is_authorized() {
-                applications.into_iter().take(256).collect()
-            } else {
-                Vec::new()
-            };
+            if !catalogue.1.is_authorized() {
+                applications.clear();
+            }
+            applications.truncate(256);
+            if catalogue.0 == applications {
+                return;
+            }
+            catalogue.0 = applications;
+            state.prune_thumbnails();
         }
     }
     fn catalogue(&self, session: SessionId) -> Result<Vec<ApplicationInfo>> {
@@ -156,6 +175,7 @@ impl DesktopSessions {
                 DeviceAction::Hoist { session: id, .. }
                 | DeviceAction::Release { session: id, .. } => *id != session,
             });
+            state.prune_thumbnails();
         }
         let _ = self.policy.notify();
     }
@@ -247,6 +267,14 @@ pub(crate) async fn accept_session(
         tokio::time::timeout(Duration::from_secs(5), connection.open_bi()).await??;
     tokio::time::timeout(Duration::from_secs(5), control_send.write_all(b"weldctl1")).await??;
     let media = tokio::time::timeout(Duration::from_secs(5), connection.open_uni()).await??;
+    // Establish the dedicated preview lane before the peer's diagnostic stream acceptor starts.
+    let (mut thumbnail_send, thumbnail_recv) =
+        tokio::time::timeout(Duration::from_secs(5), connection.open_bi()).await??;
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        thumbnail_send.write_all(thumbnail::MARKER),
+    )
+    .await??;
     let peer = spawn_source_peer(
         host.upgrade().context("Iroh host closed")?,
         connection.clone(),
@@ -271,7 +299,7 @@ pub(crate) async fn accept_session(
         desktop: desktop.clone(),
         id,
     };
-    async {
+    let control = async {
         let mut last_collection = None;
         loop {
             let request: Request = session_io(
@@ -327,8 +355,21 @@ pub(crate) async fn accept_session(
             )
             .await?;
         }
+    };
+    let previews = thumbnail::serve(
+        desktop.clone(),
+        id,
+        authority.clone(),
+        connection.clone(),
+        thumbnail_send,
+        thumbnail_recv,
+    );
+    tokio::pin!(previews);
+    tokio::pin!(control);
+    tokio::select! {
+        result = &mut control => result,
+        _ = &mut previews => control.await,
     }
-    .await
 }
 
 async fn wait_for_action(connection: &Connection, answer: oneshot::Receiver<bool>) -> Result<bool> {
@@ -345,6 +386,7 @@ async fn wait_for_action(connection: &Connection, answer: oneshot::Receiver<bool
 /// Receiver media peer plus an independent, bounded application-control channel.
 /// Dropping the session closes its peer and cancels any pending control exchange.
 pub struct DeviceSession {
+    thumbnails: thumbnail::Client,
     diagnostic_reply: Arc<Mutex<Option<Option<weld_diagnostics::Report>>>>,
     pub peer: IrohDestinationPeer,
     catalogue: Arc<Mutex<Vec<ApplicationInfo>>>,
@@ -357,6 +399,14 @@ impl Drop for DeviceSession {
     }
 }
 impl DeviceSession {
+    /// Request a small preview without blocking catalogue updates or hoist commands.
+    /// Retain revisions only for this connection's lifetime.
+    pub fn thumbnail(
+        &self,
+        request: thumbnail::ThumbnailRequest,
+    ) -> Result<thumbnail::PendingThumbnail> {
+        self.thumbnails.request(request)
+    }
     /// Explicit collection also shares this endpoint's sanitized session evidence.
     pub fn collect_diagnostics(&self, report: weld_diagnostics::Report) -> Result<()> {
         report.validate().map_err(anyhow::Error::msg)?;
@@ -440,6 +490,15 @@ pub(crate) async fn connect_session(
         control_recv.read_exact(&mut marker).await?;
         ensure!(&marker == b"weldctl1", "invalid device media channel");
         let media = guard.connection.accept_uni().await?;
+        let (thumbnail_send, mut thumbnail_recv) = guard.connection.accept_bi().await?;
+        thumbnail_recv.read_exact(&mut marker).await?;
+        ensure!(&marker == thumbnail::MARKER, "invalid thumbnail channel");
+        let thumbnails = thumbnail::Client::start(
+            guard.connection.clone(),
+            thumbnail_send,
+            thumbnail_recv,
+            notifier.clone(),
+        );
         let peer = spawn_destination_peer(
             host.upgrade().context("Iroh host closed")?,
             guard.connection.clone(),
@@ -449,9 +508,9 @@ pub(crate) async fn connect_session(
             notifier.clone(),
             welcome.codec,
         );
-        Ok::<_, anyhow::Error>((guard, send, recv, peer))
+        Ok::<_, anyhow::Error>((guard, send, recv, peer, thumbnails))
     };
-    let (mut guard, mut send, mut recv, peer) =
+    let (mut guard, mut send, mut recv, peer, thumbnails) =
         match tokio::time::timeout(Duration::from_secs(15), setup)
             .await
             .context("device connection timed out")
@@ -472,6 +531,7 @@ pub(crate) async fn connect_session(
     let (commands, mut requests) = mpsc::channel(16);
     if result
         .send(Ok(DeviceSession {
+            thumbnails,
             diagnostic_reply: diagnostic_reply.clone(),
             peer,
             catalogue: catalogue.clone(),

@@ -181,7 +181,7 @@ Weld is a workspace of reusable layers and one standard distribution:
 - `weld-hoist-protocol` owns the serializable, transport-neutral hoist record
   subset shared by current bindings: exact revision and session identities,
   source and destination envelopes, surface modes, and
-  encoded access-unit metadata. It contains no compositor, application,
+  encoded access-unit metadata and bounded thumbnail request/reply records. It contains no compositor, application,
   codec-backend, or transport implementation.
 - `weld-hoist-core` owns transport-independent hoist identities, source and
   destination relay policy, and the Bevy-free loopback binding. Its relay
@@ -222,6 +222,11 @@ Weld is a workspace of reusable layers and one standard distribution:
   independent QUIC control and encoded-media streams. Iroh and Tokio types do
   not cross its registration boundary. Its default graph is compositor-free;
   optional native/VA-API registration uses the same portable peer machinery.
+  Paired desktop sessions expose an independent thumbnail lane and a bounded,
+  shared snapshot cache. Catalogue occupancy and live grants authorize requests;
+  asynchronous capture tickets protect replacement and revocation boundaries.
+  Capture producers supply small PNG images through the session API. See
+  [Thumbnail protocol](device-pairing.md#thumbnail-protocol).
   Its opt-in ADB carrier routes bounded encrypted QUIC packets over loopback
   TCP tunnels without changing those peer streams. A private link manager owns
   socket lifetimes, unique route IDs, pending-link limits and failure isolation;
