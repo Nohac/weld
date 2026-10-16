@@ -122,6 +122,35 @@ hoist-family IDs and diagnostic correlation IDs distinct.
   Iroh-specific `DeviceSession` API and poll catalogues. Replace these with shared
   service publication and change notifications.
 
+### Concurrent mixed-transport connections
+
+A host can serve Iroh, Unix and loopback connections concurrently through the
+same session controller and shared service instances. Assemblies register
+multiple transport listeners; each accepted connection carries its own delivery
+handle, authenticated peer evidence and negotiated capabilities. Transport
+selection is per connection.
+
+Allocate host-unique connection/session generations across all bindings. Scope
+peer-supplied request and stream IDs to that connection so identical IDs on
+different carriers cannot collide. Route replies and effects through the
+originating session's delivery handle. Multiple connections from one verified
+principal remain distinct sessions; cross-transport identity equivalence requires
+explicit verified association.
+
+Catalogue state, thumbnail capture deduplication and host-wide codec/capture
+budgets are shared across connections, with permission-filtered views and
+per-session request accounting. Apply fair admission and service budgets across
+carriers, plus per-principal limits where identity association is established.
+Central presentation/input claim arbitration resolves competing requests for the
+same application using the existing ownership policy.
+
+A slow or disconnected connection retires its own pending work and claims while
+other sessions continue. Revoking a session affects that session; revoking a
+principal affects every connection associated with that principal. Outstanding
+shared capture work can continue for remaining authorized consumers, with each
+result checked against its receiving session's current permissions. Starting or
+stopping one listener preserves sessions owned by other bindings.
+
 ### Event-driven state ownership
 
 Each session state machine has one mutable owner. A host controller owns admitted
@@ -201,7 +230,9 @@ order, including simultaneous disconnect/revoke and abandoned callers.
    applicable session/service handlers, including a real local service exchange.
    Keep native descriptor transfer and encoded delivery capabilities explicit.
    Verify differing transport capabilities produce deliberate unsupported
-   outcomes rather than independently implemented policy.
+   outcomes rather than independently implemented policy. Enable simultaneous
+   listener registration and exercise mixed-transport sessions against the same
+   host controller and service budgets.
 
 5. **Migrate all consumers and remove transitional code.** Update `weldctl`,
    Weld desktop/headless launchers, Weld Connect, Mobile and the Godot receiver
@@ -228,6 +259,11 @@ the shared service boundary is in place and this refactor is validated.
   hoist/release, denied requests, shared thumbnail cache behavior, late service
   results, stalled preview delivery, input retirement and reconnection. Test
   native-buffer capability separately from portable encoded/service behavior.
+- Run Unix and Iroh clients concurrently against one host. Verify shared cache
+  deduplication and budgets, isolated reply routing with overlapping peer IDs,
+  conflicting hoist claims, and independent progress while one connection stalls,
+  disconnects or loses access. Exercise per-session and principal-wide revocation,
+  reconnect generations, and listener shutdown with another carrier still active.
 - Exercise paired client/host and headless-to-desktop flows, preserve existing
   pairings, and validate Connect and Godot consumers on available hardware.
   Keep physical checks distinct from automated protocol evidence.
