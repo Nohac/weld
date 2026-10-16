@@ -10,6 +10,9 @@ use weld_hoist_protocol::thumbnail::{
 #[derive(Default)]
 struct MemoryLane(VecDeque<Vec<u8>>);
 impl PacketSend for MemoryLane {
+    async fn finish(&mut self) -> Result<()> {
+        Ok(())
+    }
     async fn send(&mut self, packet: &[u8]) -> Result<()> {
         self.0.push_back(packet.to_vec());
         Ok(())

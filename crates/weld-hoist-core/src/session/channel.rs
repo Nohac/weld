@@ -16,6 +16,8 @@ const HEADER_BYTES: usize = 192 * 1024;
 /// Ordered packet writes. Dropping the owner cancels an incomplete transfer.
 pub trait PacketSend: Send {
     fn send(&mut self, packet: &[u8]) -> impl Future<Output = Result<()>> + Send;
+    /// Complete the write half while retaining already queued packet data.
+    fn finish(&mut self) -> impl Future<Output = Result<()>> + Send;
 }
 
 /// Ordered packet reads, bounded before allocating payload storage.

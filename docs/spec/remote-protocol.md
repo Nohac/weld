@@ -108,8 +108,9 @@ hoist-family IDs and diagnostic correlation IDs distinct.
 - `pairing.rs` and `pairing/storage.rs` combine enrollment/trust decisions,
   persistence and live Iroh connections. Separate decisions, storage effects
   and connection closure.
-- `reports.rs` and `reports/remote.rs` mix report ownership/permission decisions
-  with connection routing and RPC delivery.
+- The report archive and owner/role/consent checks now live in `weld-diagnostics`.
+  Core's diagnostic driver owns deadlines, request budgets and reply validation;
+  Iroh retains correlation-ID derivation and authenticated connection routing.
 - `desktop.rs`, `adapter.rs`, `native.rs` and `pending_source.rs` assemble relays
   and codecs inside the Iroh crate. Move reusable assembly to shared/native
   integration owners, leaving carrier setup in the binding.
@@ -217,8 +218,9 @@ and Mobile use the shared `DeviceClient` handle. Enrollment, confirmation expiry
 trust grants and revocation now run in a shared authority worker. Its storage
 adapter preserves existing trust files, and listeners supply authenticated,
 namespace-scoped identity and connection cleanup handles. Semantic input queuing
-also has a shared owner. Diagnostic archive policy and relay assembly remain
-in progress. Communicating development peers require rebuilding together for
+also has a shared owner. Diagnostic archive and collection policy now have shared
+owners as well. Reusable relay assembly and negotiation integration remain in
+progress. Communicating development peers require rebuilding together for
 the new service envelope and catalogue subscription.
 
 1. **Extract the shared protocol vocabulary.** Inventory current wire records,
@@ -305,10 +307,11 @@ module responsibilities, leaked service decisions, coupled implementation change
 and unclear public boundaries. Shared owners, typed effects and cross-binding
 behavior tests are the acceptance evidence for correcting those failures.
 
-Current design review: 6/10. Source/receiver services and enrollment/trust decisions
-have shared owners and transport-facing interfaces. Remaining failures are mixed
-archive responsibilities, leaked input/relay-assembly decisions and coupled
-binding changes; milestones 3–4 move those owners into shared modules.
+Current design review: 7.5/10. Source/receiver services, enrollment/trust, input
+coalescing and diagnostic policy have shared owners. Two checklist failures remain:
+relay assembly mixes reusable policy with binding setup, and changes to that
+assembly still require binding-specific edits. Milestone 4 establishes shared
+assembly and negotiation entry points to close those ownership gaps.
 
 RPC framework evaluation is deferred until these ownership changes land.
 Postcard remains the encoding for the current ordered request/reply protocol.

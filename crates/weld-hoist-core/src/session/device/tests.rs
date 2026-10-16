@@ -9,6 +9,9 @@ use weld_client::{ClientId, ClientSourceId, ClientSurfaceId};
 struct Writer(Sender<Vec<u8>>);
 struct Reader(Receiver<Vec<u8>>);
 impl PacketSend for Writer {
+    async fn finish(&mut self) -> Result<()> {
+        Ok(())
+    }
     async fn send(&mut self, bytes: &[u8]) -> Result<()> {
         self.0.send(bytes.to_vec()).await.context("closed writer")
     }

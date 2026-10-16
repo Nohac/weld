@@ -55,14 +55,18 @@ Weld is a workspace of reusable layers and one standard distribution:
   See [Access sessions](access-sessions.md) for commands and validation.
 - `weld-diagnostics` owns bounded typed session evidence, validated report
   bundles and conservative, deterministic explanations. It uses local monotonic
-  timelines; platform integrations supply measurements and retain authorization.
+  timelines; integrations supply measurements and live consent lookups.
   Client importer registrations can carry an optional session recorder so
   presentation observations reach the correct connection. See
   [Session diagnostics](session-diagnostics.md) for commands, peer collection
   permission, privacy boundaries and current limitations.
-  Authenticated peer collection lives in `weld-hoist-iroh`, alongside the
-  bounded report archive. It uses additional QUIC streams on admitted connections;
-  `weldctl` runs collection from its control worker. Receiver reports are scoped
+  `ReportArchive` owns bounded report storage, authenticated ownership/role checks
+  and current consent checks. Its internal lock covers archive lookup and snapshot
+  replacement; permission callbacks and network I/O run outside that lock.
+  `weld-hoist-core::session::diagnostics` owns collection deadlines, request budgets
+  and reply validation over independent packet lanes. Iroh derives correlation
+  IDs and routes these lanes through admitted connections; `weldctl` runs collection
+  from its control worker. Receiver reports are scoped
   to the approved source identity, and desktop grants are queried through a weak
   authority handle so archived reports cannot retain desktop/peer lifetimes.
 - `weld-sway-config` parses unexpanded Sway configuration spelling and reports
@@ -250,7 +254,7 @@ Weld is a workspace of reusable layers and one standard distribution:
   Paired desktop connections supply an independent packet lane to core's shared
   service driver. Its pairing integration supplies Iroh identity evidence,
   dialing links, stream setup and the existing private trust-file format.
-  Diagnostics routing and relay assembly are being migrated under the
+  Reusable relay assembly is being migrated under the
   [session/transport refactor](spec/remote-protocol.md#protocolsessiontransport-refactor--direction).
   Its opt-in ADB carrier routes bounded encrypted QUIC packets over loopback
   TCP tunnels without changing those peer streams. A private link manager owns

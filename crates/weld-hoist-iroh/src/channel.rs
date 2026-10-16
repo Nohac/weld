@@ -15,11 +15,6 @@ impl PacketLane {
             recv: PacketReader(recv),
         }
     }
-    pub async fn finish(&mut self) -> Result<()> {
-        self.send.0.finish()?;
-        self.send.0.stopped().await?;
-        Ok(())
-    }
 }
 pub(crate) struct PacketWriter(pub SendStream);
 pub(crate) struct PacketReader(pub RecvStream);
@@ -34,6 +29,9 @@ impl Drop for PacketReader {
     }
 }
 impl PacketSend for PacketLane {
+    async fn finish(&mut self) -> Result<()> {
+        self.send.finish().await
+    }
     async fn send(&mut self, packet: &[u8]) -> Result<()> {
         self.send.send(packet).await
     }
@@ -44,6 +42,11 @@ impl PacketReceive for PacketLane {
     }
 }
 impl PacketSend for PacketWriter {
+    async fn finish(&mut self) -> Result<()> {
+        self.0.finish()?;
+        self.0.stopped().await?;
+        Ok(())
+    }
     async fn send(&mut self, packet: &[u8]) -> Result<()> {
         let length = u32::try_from(packet.len())?;
         self.0.write_all(&length.to_le_bytes()).await?;

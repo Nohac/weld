@@ -20,6 +20,7 @@ use weld_hoist_protocol::device::{ApplicationInfo, DevicePermissions};
 
 pub mod channel;
 pub mod device;
+pub mod diagnostics;
 pub mod pairing;
 pub mod services;
 pub mod thumbnail;

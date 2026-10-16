@@ -3,6 +3,7 @@ use super::*;
 use crate::channel::PacketLane;
 pub use enrollment::PairingProgress;
 use iroh::Endpoint;
+use weld_hoist_core::session::channel::PacketSend;
 use weld_hoist_core::session::pairing::enrollment;
 
 pub(crate) const PAIR_ALPN: &[u8] = b"weld/pair/1";

@@ -2,6 +2,8 @@
 //! Native integrations supply measurements; reports contain local monotonic
 //! offsets and a shared session identifier, never assumed synchronized clocks.
 
+pub mod archive;
+pub mod collection;
 mod explain;
 mod recorder;
 mod report;

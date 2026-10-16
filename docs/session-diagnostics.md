@@ -93,7 +93,7 @@ Godot's report UI/export integration remains separate from the phone browser.
   is preserved independently of ring eviction. Ended recorders stop changing.
   At several stage samples per second, retained detailed history is roughly a
   minute, not the whole session. First-failure context can therefore be evicted.
-  An Iroh host retains the most recent 16 session recorders in memory. Host
+  The shared report archive retains the most recent 16 session recorders in memory. Host
   restart or archive eviction can make old peer reports unavailable.
 - A dedicated TLS-exporter label derives the same public correlation identifier
   at each endpoint. It is never used as a credential. Reports contain no device

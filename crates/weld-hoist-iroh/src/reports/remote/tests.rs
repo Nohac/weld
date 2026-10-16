@@ -1,5 +1,6 @@
 use super::*;
 use crate::{IrohPeerIdentity, reports::Access};
+use std::time::Duration;
 use weld_diagnostics::{Endpoint, Observation};
 
 #[tokio::test]
@@ -23,11 +24,13 @@ async fn restored_report_is_scoped_to_its_peer_and_collectable_after_reconnect()
         .expect("restore");
     let stranger = iroh::SecretKey::generate().public();
     assert!(matches!(
-        restored.local_for_peer(stranger, id),
+        restored.archive.local_for_peer(&stranger, id),
         Err(CollectionStatus::Unavailable)
     ));
     assert!(matches!(
-        restored.local_for_peer(source_endpoint.id(), SessionId([0; 16])),
+        restored
+            .archive
+            .local_for_peer(&source_endpoint.id(), SessionId([0; 16])),
         Err(CollectionStatus::Unavailable)
     ));
     let alpn = source.alpn().to_vec();
