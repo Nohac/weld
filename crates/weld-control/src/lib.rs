@@ -512,7 +512,8 @@ mod tests {
                     notifier.clone(),
                     notifier,
                     weld_media::VideoCodec::H264,
-                ),
+                )
+                .expect("session service"),
             }),
             name: "test".into(),
         };
@@ -540,7 +541,8 @@ mod tests {
         let host = IrohHost::bind_with_identity(IrohNetwork::Direct, &identity).expect("endpoint");
         let notifier = IrohNotifier::new(|| Ok(()));
         let desktop =
-            DesktopSessions::new(notifier.clone(), notifier, weld_media::VideoCodec::H264);
+            DesktopSessions::new(notifier.clone(), notifier, weld_media::VideoCodec::H264)
+                .expect("session service");
         let service = ControlService::start_at(
             socket.clone(),
             "test",

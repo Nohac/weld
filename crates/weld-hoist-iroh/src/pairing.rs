@@ -3,7 +3,6 @@ mod session;
 mod storage;
 #[cfg(test)]
 mod tests;
-pub mod thumbnail;
 mod wire;
 
 use anyhow::{Context, Result, ensure};
@@ -329,17 +328,13 @@ impl PairingHost {
             })
             .unwrap_or(false)
     }
-    fn permits_thumbnails(&self, identity: EndpointId) -> bool {
+    fn permissions(&self, identity: EndpointId) -> Option<DevicePermissions> {
         self.0
             .lock()
-            .ok()
-            .and_then(|state| {
-                state
-                    .devices
-                    .get(&identity.to_string())
-                    .map(|device| device.permissions.browse && device.permissions.thumbnails)
-            })
-            .unwrap_or(false)
+            .ok()?
+            .devices
+            .get(&identity.to_string())
+            .map(|device| device.permissions)
     }
     fn claim(
         &self,

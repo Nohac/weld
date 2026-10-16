@@ -6972,6 +6972,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "weld-access"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "serde",
+]
+
+[[package]]
 name = "weld-client"
 version = "0.1.0"
 dependencies = [
@@ -6992,7 +7000,14 @@ dependencies = [
 name = "weld-hoist-core"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
+ "async-channel",
+ "async-io",
+ "futures-lite",
+ "postcard",
+ "serde",
  "tracing",
+ "weld-access",
  "weld-client",
  "weld-hoist-protocol",
 ]
@@ -7030,6 +7045,7 @@ dependencies = [
  "serde_json",
  "tokio",
  "tracing",
+ "weld-access",
  "weld-client",
  "weld-diagnostics",
  "weld-hoist-core",
@@ -7045,6 +7061,7 @@ version = "0.1.0"
 dependencies = [
  "serde",
  "weld-client",
+ "weld-diagnostics",
  "weld-media",
 ]
 

@@ -8,6 +8,10 @@ use tokio::{
 };
 use weld_client::ClientSurfaceId;
 use weld_diagnostics::{Cause, Endpoint, Observation, Operation, Recorder};
+use weld_hoist_protocol::{
+    service::{LANE_MARKER, ServiceRequest},
+    thumbnail,
+};
 
 const WARNING: Duration = Duration::from_millis(5);
 const STALL: Duration = Duration::from_millis(25);
@@ -58,7 +62,7 @@ async fn live_session_recovers_a_late_reply_and_owner_drop_cancels_the_next_wait
     media.write_all(b"weldmed1").await.expect("media marker");
     let (mut thumbnails, mut thumbnail_requests) = connection.open_bi().await.expect("thumbnails");
     thumbnails
-        .write_all(thumbnail::MARKER)
+        .write_all(LANE_MARKER)
         .await
         .expect("thumbnail marker");
     let session = timeout(Duration::from_secs(2), async {
@@ -81,12 +85,16 @@ async fn live_session_recovers_a_late_reply_and_owner_drop_cancels_the_next_wait
         },
         if_revision: None,
     };
-    let mut preview = session.thumbnail(preview_request).expect("preview request");
-    let received: thumbnail::ThumbnailRequest =
+    let mut preview = session
+        .services
+        .thumbnail(preview_request)
+        .expect("preview request");
+    let received: ServiceRequest =
         timeout(Duration::from_secs(2), read_record(&mut thumbnail_requests))
             .await
             .expect("independent preview request")
             .expect("preview record");
+    let ServiceRequest::Thumbnail(received) = received;
     assert_eq!(received, preview_request);
     let _: Request = timeout(Duration::from_secs(2), read_record(&mut recv))
         .await
@@ -105,6 +113,9 @@ async fn live_session_recovers_a_late_reply_and_owner_drop_cancels_the_next_wait
         "the old five-second deadline must preserve the peer"
     );
     send.write_all(&reply[2..]).await.expect("remaining reply");
+    session
+        .release()
+        .expect("explicit command after stalled reply");
     let _: Request = timeout(Duration::from_secs(2), read_record(&mut recv))
         .await
         .expect("polling resumes after recovery")

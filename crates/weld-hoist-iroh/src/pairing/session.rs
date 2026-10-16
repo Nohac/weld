@@ -3,206 +3,140 @@ use super::*;
 use crate::{
     IrohDestinationPeer, IrohSourcePeer,
     admission::PendingConnection,
+    channel::{LaneTask, PacketLane},
     framing::{read_record, write_record},
     host::HostLifetime,
     peer::{spawn_destination_peer, spawn_source_peer},
 };
 use iroh::Endpoint;
-use std::{
-    collections::VecDeque,
-    sync::{
-        Weak,
-        atomic::{AtomicU64, Ordering},
-    },
-};
+use std::{collections::VecDeque, sync::Weak};
 use tokio::sync::mpsc;
 use weld_access::{AccessAuthority, AccessSession};
+use weld_hoist_core::session::services::{ServiceClient, ServiceSession};
 use weld_hoist_encoded::{EncodedDestinationTransport, EncodedSourceTransport};
+use weld_hoist_protocol::service::LANE_MARKER;
 use weld_media::VideoCodec;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-pub struct SessionId(pub u64);
-
+pub use weld_hoist_core::session::{DeviceAction, SessionId};
+use weld_hoist_core::session::{Pending, SessionService, reply_channel};
 use weld_hoist_protocol::device::{
     ApplicationInfo, DeviceHello as Hello, DeviceReply as Reply, DeviceRequest as Request,
     DeviceWelcome as Welcome,
 };
 
-pub enum DeviceAction {
-    Hoist {
-        session: SessionId,
-        window: u64,
-        answer: oneshot::Sender<bool>,
-    },
-    Release {
-        session: SessionId,
-        answer: oneshot::Sender<bool>,
-    },
-}
-
-pub(super) struct DesktopState {
-    peers: VecDeque<(SessionId, IrohSourcePeer, AccessSession)>,
-    actions: VecDeque<DeviceAction>,
-    pub(super) catalogues: BTreeMap<SessionId, (Vec<ApplicationInfo>, AccessSession)>,
-    pub(super) thumbnails: thumbnail::Cache,
-}
-impl DesktopState {
-    pub(super) fn prune_thumbnails(&mut self) {
-        self.thumbnails.retain(|target| {
-            self.catalogues.values().any(|(apps, access)| {
-                access.is_authorized()
-                    && apps
-                        .iter()
-                        .any(|app| app.window == target.window && app.surface == target.surface)
-            })
-        });
-    }
-}
+/// Transport-owned peer handoff plus a handle to shared application services.
 #[derive(Clone)]
 pub struct DesktopSessions {
     access: AccessAuthority,
-    pub(super) state: Arc<Mutex<DesktopState>>,
-    next: Arc<AtomicU64>,
+    peers: Arc<Mutex<VecDeque<(SessionId, IrohSourcePeer, AccessSession)>>>,
+    services: SessionService,
     notifier: IrohNotifier,
-    pub(super) policy: IrohNotifier,
+    policy: IrohNotifier,
     codec: VideoCodec,
 }
 impl DesktopSessions {
     pub(super) fn close(&self) {
-        if let Ok(mut state) = self.state.lock() {
-            for (_, peer, access) in state.peers.drain(..) {
-                access.end();
+        if let Ok(mut peers) = self.peers.lock() {
+            for (_, peer, access) in peers.drain(..) {
+                self.services.leave(&access);
                 peer.disconnect();
             }
-            state.actions.clear();
-            for (_, access) in state.catalogues.values() {
-                access.end();
-            }
-            state.catalogues.clear();
-            state.prune_thumbnails();
         }
         let _ = self.policy.notify();
     }
-    pub fn new(notifier: IrohNotifier, policy: IrohNotifier, codec: VideoCodec) -> Self {
+    pub fn new(notifier: IrohNotifier, policy: IrohNotifier, codec: VideoCodec) -> Result<Self> {
+        let wake = policy.clone();
+        let services = SessionService::start(move || {
+            let _ = wake.notify();
+        })?;
+        Ok(Self::with_service(notifier, policy, codec, services))
+    }
+    /// Attach this binding to the same service used by other transport listeners.
+    pub fn with_service(
+        notifier: IrohNotifier,
+        policy: IrohNotifier,
+        codec: VideoCodec,
+        services: SessionService,
+    ) -> Self {
         let wake = notifier.clone();
         Self {
             access: AccessAuthority::new(move || {
                 let _ = wake.notify();
             }),
-            state: Arc::new(Mutex::new(DesktopState {
-                peers: VecDeque::new(),
-                actions: VecDeque::new(),
-                catalogues: BTreeMap::new(),
-                thumbnails: thumbnail::Cache::default(),
-            })),
-            next: Arc::new(AtomicU64::new(1)),
+            peers: Arc::new(Mutex::new(VecDeque::new())),
+            services,
             notifier,
             policy,
             codec,
         }
     }
-    /// Shares the host's admission latch and administrative session inventory.
+    pub fn services(&self) -> &SessionService {
+        &self.services
+    }
     pub fn with_access(mut self, access: AccessAuthority) -> Self {
         self.access = access;
         self
     }
     pub fn take_peers(&self) -> Vec<(SessionId, IrohSourcePeer, AccessSession)> {
-        self.state
+        self.peers
             .lock()
-            .map(|mut state| state.peers.drain(..).collect())
+            .map(|mut peers| peers.drain(..).collect())
             .unwrap_or_default()
     }
     pub fn take_actions(&self) -> Vec<DeviceAction> {
-        self.state
-            .lock()
-            .map(|mut state| state.actions.drain(..).collect())
-            .unwrap_or_default()
+        self.services.take_actions()
     }
-    pub fn publish(&self, session: SessionId, mut applications: Vec<ApplicationInfo>) {
-        if let Ok(mut state) = self.state.lock()
-            && let Some(catalogue) = state.catalogues.get_mut(&session)
-        {
-            if !catalogue.1.is_authorized() {
-                applications.clear();
-            }
-            applications.truncate(256);
-            if catalogue.0 == applications {
-                return;
-            }
-            catalogue.0 = applications;
-            state.prune_thumbnails();
+    pub fn publish(&self, session: SessionId, applications: Vec<ApplicationInfo>) -> Result<()> {
+        self.services.publish(session, applications)
+    }
+    async fn catalogue(&self, session: SessionId) -> Result<Vec<ApplicationInfo>> {
+        self.services.catalogue(session).await
+    }
+    async fn join(
+        &self,
+        peer: IrohSourcePeer,
+        access: AccessSession,
+        permissions: DevicePermissions,
+    ) -> Result<SessionId> {
+        let id = self
+            .services
+            .join(access.clone(), permissions)?
+            .wait()
+            .await??;
+        let admitted = (|| {
+            let mut peers = self
+                .peers
+                .lock()
+                .map_err(|_| anyhow::anyhow!("peer handoff unavailable"))?;
+            ensure!(peers.len() < 8, "peer handoff full");
+            peers.push_back((id, peer.clone(), access.clone()));
+            Ok::<(), anyhow::Error>(())
+        })();
+        if let Err(error) = admitted {
+            self.services.leave(&access);
+            peer.disconnect();
+            return Err(error);
         }
-    }
-    fn catalogue(&self, session: SessionId) -> Result<Vec<ApplicationInfo>> {
-        self.state
-            .lock()
-            .map_err(|_| anyhow::anyhow!("desktop state unavailable"))?
-            .catalogues
-            .get(&session)
-            .filter(|(_, access)| access.is_authorized())
-            .map(|(applications, _)| applications.clone())
-            .context("desktop session ended")
-    }
-    fn join(&self, id: SessionId, peer: IrohSourcePeer, access: AccessSession) -> Result<()> {
-        let mut state = self
-            .state
-            .lock()
-            .map_err(|_| anyhow::anyhow!("desktop state unavailable"))?;
-        ensure!(
-            state.peers.len() < 8 && state.catalogues.len() < 8,
-            "desktop session capacity reached"
-        );
-        ensure!(access.is_authorized(), "desktop access revoked");
-        state.peers.push_back((id, peer, access.clone()));
-        state.catalogues.insert(id, (Vec::new(), access));
-        drop(state);
         self.policy.notify()?;
-        Ok(())
+        Ok(id)
     }
-    fn leave(&self, session: SessionId) {
-        if let Ok(mut state) = self.state.lock() {
-            if let Some((_, access)) = state.catalogues.remove(&session) {
-                access.end();
-            }
-            state.peers.retain(|(id, _, _)| *id != session);
-            state.actions.retain(|action| match action {
-                DeviceAction::Hoist { session: id, .. }
-                | DeviceAction::Release { session: id, .. } => *id != session,
-            });
-            state.prune_thumbnails();
+    fn leave(&self, session: SessionId, access: &AccessSession) {
+        self.services.leave(access);
+        if let Ok(mut peers) = self.peers.lock() {
+            peers.retain(|(id, _, _)| *id != session);
         }
         let _ = self.policy.notify();
-    }
-    fn action(&self, action: DeviceAction) -> Result<()> {
-        let mut state = self
-            .state
-            .lock()
-            .map_err(|_| anyhow::anyhow!("desktop state unavailable"))?;
-        ensure!(state.actions.len() < 64, "desktop command queue full");
-        let session = match &action {
-            DeviceAction::Hoist { session, .. } | DeviceAction::Release { session, .. } => session,
-        };
-        ensure!(
-            state
-                .catalogues
-                .get(session)
-                .is_some_and(|(_, access)| access.is_authorized()),
-            "desktop access revoked"
-        );
-        state.actions.push_back(action);
-        drop(state);
-        self.policy.notify()?;
-        Ok(())
     }
 }
 
 struct JoinedSession {
     desktop: DesktopSessions,
     id: SessionId,
+    access: AccessSession,
 }
 impl Drop for JoinedSession {
     fn drop(&mut self) {
-        self.desktop.leave(self.id);
+        self.desktop.leave(self.id, &self.access);
     }
 }
 
@@ -239,14 +173,10 @@ pub(crate) async fn accept_session(
         tokio::time::timeout(Duration::from_secs(5), connection.open_bi()).await??;
     tokio::time::timeout(Duration::from_secs(5), control_send.write_all(b"weldctl1")).await??;
     let media = tokio::time::timeout(Duration::from_secs(5), connection.open_uni()).await??;
-    // Establish the dedicated preview lane before the peer's diagnostic stream acceptor starts.
-    let (mut thumbnail_send, thumbnail_recv) =
+    // Establish the service lane before the peer's diagnostic stream acceptor starts.
+    let (mut service_send, service_recv) =
         tokio::time::timeout(Duration::from_secs(5), connection.open_bi()).await??;
-    tokio::time::timeout(
-        Duration::from_secs(5),
-        thumbnail_send.write_all(thumbnail::MARKER),
-    )
-    .await??;
+    tokio::time::timeout(Duration::from_secs(5), service_send.write_all(LANE_MARKER)).await??;
     let peer = spawn_source_peer(
         host.upgrade().context("Iroh host closed")?,
         connection.clone(),
@@ -259,30 +189,43 @@ pub(crate) async fn accept_session(
             stream_mode: hello.preferences.stream_mode,
         },
     );
-    let id = SessionId(
-        desktop
-            .next
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |id| id.checked_add(1))
-            .map_err(|_| anyhow::anyhow!("device session IDs exhausted"))?,
-    );
     let recorder = peer.diagnostics();
-    desktop.join(id, peer, access.clone())?;
+    let id = desktop.join(peer, access.clone(), permissions).await?;
     let _joined = JoinedSession {
         desktop: desktop.clone(),
         id,
+        access: access.clone(),
     };
     let control = async {
         let mut last_collection = None;
+        let mut catalogue_updates: Option<weld_hoist_core::session::CatalogueSubscription> = None;
         loop {
-            let request: Request = session_io(
-                &connection,
-                Duration::from_secs(15),
-                weld_diagnostics::Operation::SessionRead,
-                recorder.as_ref(),
-                read_record(&mut recv),
-            )
-            .await?;
+            let reading = read_record::<_, Request>(&mut recv);
+            tokio::pin!(reading);
+            let request = loop {
+                let changed = async {
+                    match &catalogue_updates {
+                        Some(updates) => updates.next().await,
+                        None => std::future::pending().await,
+                    }
+                };
+                tokio::select! {
+                    request = &mut reading => break request?,
+                    snapshot = changed => {
+                        let snapshot = snapshot?;
+                        ensure!(access.is_authorized(), "desktop access revoked");
+                        session_io(&connection, Duration::from_secs(5),
+                            weld_diagnostics::Operation::SessionWrite, recorder.as_ref(),
+                            write_record(&mut send, &Reply::Catalogue(snapshot.applications.to_vec()))).await?;
+                    }
+                    reason = connection.closed() => return Err(reason.into()),
+                }
+            };
             let reply = match request {
+                Request::Subscribe => {
+                    catalogue_updates = Some(desktop.services.subscribe(id).await?);
+                    Reply::Accepted(true)
+                }
                 Request::Diagnostics(report) => {
                     let allowed = authority.permits_diagnostics(connection.remote_id())
                         && last_collection
@@ -297,23 +240,29 @@ pub(crate) async fn accept_session(
                     };
                     Reply::Diagnostics(response.map(Box::new))
                 }
-                Request::List => Reply::Catalogue(desktop.catalogue(id)?),
+                Request::List => Reply::Catalogue(desktop.catalogue(id).await?),
                 Request::Hoist(window) => {
                     ensure!(permissions.hoist, "hoisting not permitted");
-                    let (answer, wait) = oneshot::channel();
-                    desktop.action(DeviceAction::Hoist {
-                        session: id,
-                        window,
-                        answer,
-                    })?;
+                    let (answer, wait) = reply_channel();
+                    desktop
+                        .services
+                        .action(DeviceAction::Hoist {
+                            session: id,
+                            window,
+                            answer,
+                        })
+                        .await?;
                     Reply::Accepted(wait_for_action(&connection, wait).await?)
                 }
                 Request::Release => {
-                    let (answer, wait) = oneshot::channel();
-                    desktop.action(DeviceAction::Release {
-                        session: id,
-                        answer,
-                    })?;
+                    let (answer, wait) = reply_channel();
+                    desktop
+                        .services
+                        .action(DeviceAction::Release {
+                            session: id,
+                            answer,
+                        })
+                        .await?;
                     Reply::Accepted(wait_for_action(&connection, wait).await?)
                 }
             };
@@ -328,29 +277,35 @@ pub(crate) async fn accept_session(
             .await?;
         }
     };
-    let previews = thumbnail::serve(
-        desktop.clone(),
+    let service_context = ServiceSession {
+        service: desktop.services.clone(),
         id,
-        authority.clone(),
-        connection.clone(),
-        thumbnail_send,
-        thumbnail_recv,
-    );
-    tokio::pin!(previews);
+        access: access.clone(),
+    };
+    let service_authority = authority.clone();
+    let peer_identity = connection.remote_id();
+    let service_lane = service_context
+        .serve(PacketLane::new(service_send, service_recv), move || {
+            service_authority.permissions(peer_identity)
+        });
+    tokio::pin!(service_lane);
     tokio::pin!(control);
     tokio::select! {
         result = &mut control => result,
-        _ = &mut previews => control.await,
+        result = &mut service_lane => {
+            if let Err(error) = result { tracing::debug!(%error, "service lane ended"); }
+            control.await
+        },
     }
 }
 
-async fn wait_for_action(connection: &Connection, answer: oneshot::Receiver<bool>) -> Result<bool> {
+async fn wait_for_action(connection: &Connection, answer: Pending<bool>) -> Result<bool> {
     session_io(
         connection,
         Duration::from_secs(3),
         weld_diagnostics::Operation::Control,
         None,
-        async { answer.await.context("desktop action cancelled") },
+        answer.wait(),
     )
     .await
 }
@@ -358,7 +313,8 @@ async fn wait_for_action(connection: &Connection, answer: oneshot::Receiver<bool
 /// Receiver media peer plus an independent, bounded application-control channel.
 /// Dropping the session closes its peer and cancels any pending control exchange.
 pub struct DeviceSession {
-    thumbnails: thumbnail::Client,
+    pub services: ServiceClient,
+    _service_task: LaneTask,
     diagnostic_reply: Arc<Mutex<Option<Option<weld_diagnostics::Report>>>>,
     pub peer: IrohDestinationPeer,
     catalogue: Arc<Mutex<Vec<ApplicationInfo>>>,
@@ -371,14 +327,6 @@ impl Drop for DeviceSession {
     }
 }
 impl DeviceSession {
-    /// Request a small preview without blocking catalogue updates or hoist commands.
-    /// Retain revisions only for this connection's lifetime.
-    pub fn thumbnail(
-        &self,
-        request: thumbnail::ThumbnailRequest,
-    ) -> Result<thumbnail::PendingThumbnail> {
-        self.thumbnails.request(request)
-    }
     /// Explicit collection also shares this endpoint's sanitized session evidence.
     pub fn collect_diagnostics(&self, report: weld_diagnostics::Report) -> Result<()> {
         report.validate().map_err(anyhow::Error::msg)?;
@@ -462,15 +410,22 @@ pub(crate) async fn connect_session(
         control_recv.read_exact(&mut marker).await?;
         ensure!(&marker == b"weldctl1", "invalid device media channel");
         let media = guard.connection.accept_uni().await?;
-        let (thumbnail_send, mut thumbnail_recv) = guard.connection.accept_bi().await?;
-        thumbnail_recv.read_exact(&mut marker).await?;
-        ensure!(&marker == thumbnail::MARKER, "invalid thumbnail channel");
-        let thumbnails = thumbnail::Client::start(
-            guard.connection.clone(),
-            thumbnail_send,
-            thumbnail_recv,
-            notifier.clone(),
-        );
+        let (service_send, mut service_recv) = guard.connection.accept_bi().await?;
+        service_recv.read_exact(&mut marker).await?;
+        ensure!(&marker == LANE_MARKER, "invalid service channel");
+        let service_wake = notifier.clone();
+        let (services, driver) = ServiceClient::new(move || {
+            let _ = service_wake.notify();
+        });
+        let service_connection = guard.connection.clone();
+        let service_task = LaneTask(tokio::spawn(async move {
+            tokio::select! {
+                result = driver.run(PacketLane::new(service_send, service_recv)) => {
+                    if let Err(error) = result { tracing::debug!(%error, "service lane ended"); }
+                },
+                _ = service_connection.closed() => {},
+            }
+        }));
         let peer = spawn_destination_peer(
             host.upgrade().context("Iroh host closed")?,
             guard.connection.clone(),
@@ -480,9 +435,9 @@ pub(crate) async fn connect_session(
             notifier.clone(),
             welcome.codec,
         );
-        Ok::<_, anyhow::Error>((guard, send, recv, peer, thumbnails))
+        Ok::<_, anyhow::Error>((guard, send, recv, peer, services, service_task))
     };
-    let (mut guard, mut send, mut recv, peer, thumbnails) =
+    let (mut guard, mut send, mut recv, peer, services, service_task) =
         match tokio::time::timeout(Duration::from_secs(15), setup)
             .await
             .context("device connection timed out")
@@ -503,7 +458,8 @@ pub(crate) async fn connect_session(
     let (commands, mut requests) = mpsc::channel(16);
     if result
         .send(Ok(DeviceSession {
-            thumbnails,
+            services,
+            _service_task: service_task,
             diagnostic_reply: diagnostic_reply.clone(),
             peer,
             catalogue: catalogue.clone(),
@@ -515,53 +471,65 @@ pub(crate) async fn connect_session(
         return Ok(());
     }
     notifier.notify()?;
-    loop {
-        let request = tokio::select! {
-            _ = guard.connection.closed() => break,
-            command = requests.recv() => match command { Some(command) => command, None => break },
-            _ = tokio::time::sleep(Duration::from_millis(500)) => Request::List,
-        };
+    let receiving = async {
+        loop {
+            let reply: Reply = match read_record(&mut recv).await {
+                Ok(reply) => reply,
+                Err(error) => break Err::<(), _>(error),
+            };
+            match reply {
+                Reply::Diagnostics(report) => {
+                    if let Some(report) = &report {
+                        report.validate().map_err(anyhow::Error::msg)?;
+                    }
+                    if let Ok(mut slot) = diagnostic_reply.lock() {
+                        *slot = Some(report.map(|report| *report));
+                    }
+                }
+                Reply::Catalogue(applications) => {
+                    ensure!(applications.len() <= 256, "catalogue exceeds bound");
+                    *catalogue
+                        .lock()
+                        .map_err(|_| anyhow::anyhow!("catalogue unavailable"))? = applications;
+                }
+                Reply::Accepted(false) => {
+                    if let Ok(mut error) = error.lock() {
+                        *error =
+                            Some("The application is no longer available for this request".into());
+                    }
+                }
+                Reply::Accepted(true) => {}
+            }
+
+            notifier.notify()?;
+        }
+    };
+    let sending = async {
         session_io(
             &guard.connection,
             Duration::from_secs(5),
             weld_diagnostics::Operation::SessionWrite,
             recorder.as_ref(),
-            write_record(&mut send, &request),
+            write_record(&mut send, &Request::Subscribe),
         )
         .await?;
-        let reply = session_io(
-            &guard.connection,
-            Duration::from_secs(5),
-            weld_diagnostics::Operation::SessionRead,
-            recorder.as_ref(),
-            read_record(&mut recv),
-        )
-        .await?;
-        match reply {
-            Reply::Diagnostics(report) => {
-                if let Some(report) = &report {
-                    report.validate().map_err(anyhow::Error::msg)?;
-                }
-                if let Ok(mut slot) = diagnostic_reply.lock() {
-                    *slot = Some(report.map(|report| *report));
-                }
-            }
-            Reply::Catalogue(applications) => {
-                ensure!(applications.len() <= 256, "catalogue exceeds bound");
-                *catalogue
-                    .lock()
-                    .map_err(|_| anyhow::anyhow!("catalogue unavailable"))? = applications;
-            }
-            Reply::Accepted(false) => {
-                if let Ok(mut error) = error.lock() {
-                    *error = Some("The application is no longer available for this request".into());
-                }
-            }
-            Reply::Accepted(true) => {}
+        while let Some(request) = requests.recv().await {
+            session_io(
+                &guard.connection,
+                Duration::from_secs(5),
+                weld_diagnostics::Operation::SessionWrite,
+                recorder.as_ref(),
+                write_record(&mut send, &request),
+            )
+            .await?;
         }
-        notifier.notify()?;
+        Ok::<(), anyhow::Error>(())
+    };
+    tokio::select! {
+        result = receiving => result,
+        result = sending => result,
+        _ = guard.connection.closed() => Ok(()),
     }
-    Ok(())
 }
 
 /// Keep a live session's partially transferred record across slow exchanges.

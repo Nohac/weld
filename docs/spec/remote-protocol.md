@@ -68,7 +68,7 @@ protocol.
 
 ## Protocol/session/transport refactor — Direction
 
-This is the next architectural refactor, ahead of native thumbnail capture and
+This refactor is in progress, ahead of native thumbnail capture and
 client preview UI. The target is one behavioral implementation shared by Iroh,
 Unix and loopback bindings. Preserve existing user-visible flows and performance
 while moving ownership; scope follows the implemented protocols and services.
@@ -102,8 +102,9 @@ hoist-family IDs and diagnostic correlation IDs distinct.
 
 - `weld-hoist-iroh/src/pairing/session.rs` mixes application records, mutable
   catalogues, request policy, Iroh peers and Tokio response channels.
-- `pairing/thumbnail.rs` mixes refresh/eviction/capture policy with QUIC I/O and
-  reaches into the shared desktop mutex. Extract the policy and its tests.
+- The former `pairing/thumbnail.rs` mixed refresh/eviction/capture policy with
+  QUIC I/O. Its service handling, request pacing and cache now live in core;
+  Iroh supplies generic bounded packet I/O.
 - `pairing.rs` and `pairing/storage.rs` combine enrollment/trust decisions,
   persistence and live Iroh connections. Separate decisions, storage effects
   and connection closure.
@@ -200,8 +201,14 @@ order, including simultaneous disconnect/revoke and abandoned callers.
 
 Progress: the protocol-record extraction is implemented. Device/catalogue,
 enrollment, receiver preferences and bootstrap records now have shared owners;
-Iroh and Unix consume them with unchanged wire representations. Session state,
-service ownership and driver migration remain the following milestones.
+Iroh and Unix consume them. The source service owner now allocates session IDs,
+handles bounded events, publishes coalesced catalogue changes and shares thumbnail
+capture/cache policy. Thumbnail service dispatch, authorization checks, deadlines
+and request pacing also moved to core; Iroh supplies a generic packet lane.
+The real endpoint tests cover these paths. Destination catalogue state, main
+device dispatch, trust/diagnostics policy and mixed-binding integration remain
+in progress. Communicating development peers require rebuilding together for
+the new service envelope and catalogue subscription.
 
 1. **Extract the shared protocol vocabulary.** Inventory current wire records,
    identities, capabilities and handshake behavior across both bindings. Move

@@ -6,6 +6,11 @@ publish.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+async-channel = "2.5"
+async-io = "2.6"
+futures-lite.workspace = true
+postcard.workspace = true
+serde.workspace = true
 weld-access = { path = "../weld-access" }
 tracing.workspace = true
 weld-client = { path = "../weld-client" }

@@ -3,6 +3,7 @@
 mod adapter;
 mod adb;
 mod admission;
+mod channel;
 mod desktop;
 mod device;
 mod diagnostics;

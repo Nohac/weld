@@ -40,6 +40,15 @@ fn wait(mut ready: impl FnMut() -> bool) {
     }
 }
 
+fn service_reply<T>(mut pending: weld_hoist_core::session::Pending<T>) -> T {
+    let mut result = None;
+    wait(|| {
+        result = pending.poll().expect("service response");
+        result.is_some()
+    });
+    result.expect("service result")
+}
+
 #[test]
 fn invitation_requires_secret_matching_candidate_and_live_confirmation() {
     let directory = ExchangeDirectory::new();
@@ -156,7 +165,8 @@ fn real_endpoint_enrollment_catalogue_and_revocation_share_the_same_identity() {
     let authority = source.pairing();
     authority.enable(&source_dir.0).expect("trust store");
     let notifier = IrohNotifier::new(|| Ok(()));
-    let desktop = DesktopSessions::new(notifier.clone(), notifier.clone(), VideoCodec::H264);
+    let desktop = DesktopSessions::new(notifier.clone(), notifier.clone(), VideoCodec::H264)
+        .expect("session service");
     authority.set_desktop(desktop.clone()).expect("desktop");
     let profile = source.connection_profile().expect("profile");
     let invitation = authority.invite(&profile, "Laptop".into()).expect("invite");
@@ -208,10 +218,14 @@ fn real_endpoint_enrollment_catalogue_and_revocation_share_the_same_identity() {
         available: true,
         hoisted_here: false,
     };
-    desktop.publish(id, vec![application.clone()]);
+    desktop
+        .publish(id, vec![application.clone()])
+        .expect("catalogue");
     wait(|| session.applications() == vec![application.clone()]);
     {
-        use thumbnail::{ThumbnailImage, ThumbnailRequest, ThumbnailStatus, ThumbnailTarget};
+        use weld_hoist_core::session::thumbnail::{
+            ThumbnailImage, ThumbnailRequest, ThumbnailStatus, ThumbnailTarget,
+        };
         let target = ThumbnailTarget {
             window: application.window,
             surface: application.surface,
@@ -221,7 +235,10 @@ fn real_endpoint_enrollment_catalogue_and_revocation_share_the_same_identity() {
             if_revision: None,
         };
         let fetch = |request| {
-            let mut pending = session.thumbnail(request).expect("thumbnail request");
+            let mut pending = session
+                .services
+                .thumbnail(request)
+                .expect("thumbnail request");
             let mut response = None;
             wait(|| {
                 response = pending.poll().expect("thumbnail poll");
@@ -230,11 +247,22 @@ fn real_endpoint_enrollment_catalogue_and_revocation_share_the_same_identity() {
             response.expect("thumbnail reply")
         };
         assert_eq!(fetch(request).reply.status, ThumbnailStatus::Pending);
-        let capture = desktop.take_thumbnail_capture().expect("capture demand");
+        let capture = service_reply(
+            desktop
+                .services()
+                .take_thumbnail_capture()
+                .expect("capture demand"),
+        )
+        .expect("capture ticket");
         let png = vec![7; 256 * 1024];
-        assert!(desktop.complete_thumbnail_capture(
-            capture,
-            Some(ThumbnailImage::new(320, 180, png.clone()).expect("image"))
+        assert!(service_reply(
+            desktop
+                .services()
+                .complete_thumbnail_capture(
+                    capture,
+                    Some(ThumbnailImage::new(320, 180, png.clone()).expect("image"))
+                )
+                .expect("capture completion")
         ));
         let image = fetch(request);
         assert_eq!(image.image.expect("payload").png(), png);

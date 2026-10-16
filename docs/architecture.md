@@ -193,6 +193,13 @@ Weld is a workspace of reusable layers and one standard distribution:
   integration. The relays own surface admission, session authorization,
   source-authoritative identity relocation, popup and parent relationships,
   scale reset, focus, and remote-input cleanup.
+  Its `session` module owns source-session IDs, authorized catalogues, coalesced
+  catalogue subscriptions, cancellable host actions and a shared thumbnail cache.
+  A bounded mailbox feeds one service worker; transport listeners can attach to
+  the same owner. Shared service drivers enforce request budgets, deadlines,
+  authorization and payload validation over bounded packet lanes. Capture
+  producers complete asynchronous tickets through `SessionService`. See
+  [Thumbnail protocol](device-pairing.md#thumbnail-protocol).
 - `weld-hoist-encoded` owns transport-neutral encoded commit scheduling,
   local backpressure, resize coalescing, codec worker contracts, and atomic
   decoded-frame publication. Its default dependency graph has no compositor or
@@ -226,11 +233,10 @@ Weld is a workspace of reusable layers and one standard distribution:
   independent QUIC control and encoded-media streams. Iroh and Tokio types do
   not cross its registration boundary. Its default graph is compositor-free;
   optional native/VA-API registration uses the same portable peer machinery.
-  Paired desktop sessions expose an independent thumbnail lane and a bounded,
-  shared snapshot cache. Catalogue occupancy and live grants authorize requests;
-  asynchronous capture tickets protect replacement and revocation boundaries.
-  Capture producers supply small PNG images through the session API. See
-  [Thumbnail protocol](device-pairing.md#thumbnail-protocol).
+  Paired desktop connections supply an independent packet lane to core's shared
+  service driver. Enrollment, trust, diagnostics routing and main session
+  dispatch are being migrated under the
+  [session/transport refactor](spec/remote-protocol.md#protocolsessiontransport-refactor--direction).
   Its opt-in ADB carrier routes bounded encrypted QUIC packets over loopback
   TCP tunnels without changing those peer streams. A private link manager owns
   socket lifetimes, unique route IDs, pending-link limits and failure isolation;

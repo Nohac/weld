@@ -1,5 +1,6 @@
 //! Master-owned approval controls and remote application selection.
 use anyhow::{Context, Result};
+use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 use std::{
     collections::{BTreeMap, HashSet},
@@ -68,7 +69,7 @@ pub(crate) fn install(
         media.clone().into(),
         IrohNotifier::new(move || policy.notify()),
         options.codec,
-    )
+    )?
     .with_access(access.clone());
     let controls = ControlService::start(
         &options.session,
@@ -241,6 +242,52 @@ fn remote_actions(
 #[cfg(test)]
 mod tests;
 
+#[derive(SystemParam)]
+struct CatalogueChanges<'w, 's> {
+    windows: Query<'w, 's, (), WindowCatalogueChanged>,
+    clients: Query<'w, 's, (), ClientCatalogueChanged>,
+    sessions: Query<'w, 's, (), Changed<HoistSession>>,
+    removed_windows: RemovedComponents<'w, 's, ManagedWindow>,
+    removed_occupants: RemovedComponents<'w, 's, WindowOccupant>,
+    removed_hoists: RemovedComponents<'w, 's, HoistedWindow>,
+    unmapped: RemovedComponents<'w, 's, MappedSurface>,
+    removed_metadata: RemovedComponents<'w, 's, ClientWindowMetadata>,
+    removed_sessions: RemovedComponents<'w, 's, HoistSession>,
+    removed_clients: RemovedComponents<'w, 's, ClientToplevel>,
+}
+type WindowCatalogueChanged = Or<(
+    Changed<ManagedWindow>,
+    Changed<WindowOccupant>,
+    Changed<HoistedWindow>,
+)>;
+type ClientCatalogueChanged = Or<(
+    Added<MappedSurface>,
+    Changed<ClientToplevel>,
+    Changed<ClientWindowMetadata>,
+)>;
+impl CatalogueChanges<'_, '_> {
+    fn changed(&mut self) -> bool {
+        let removals = [
+            self.removed_windows.read().count(),
+            self.removed_occupants.read().count(),
+            self.removed_hoists.read().count(),
+            self.unmapped.read().count(),
+            self.removed_metadata.read().count(),
+            self.removed_sessions.read().count(),
+            self.removed_clients.read().count(),
+        ];
+        removals.into_iter().any(|count| count != 0)
+            || !self.windows.is_empty()
+            || !self.clients.is_empty()
+            || !self.sessions.is_empty()
+    }
+}
+#[derive(Default)]
+struct CataloguePublication {
+    endpoints: Vec<(SessionId, HoistEndpointId)>,
+    retry: bool,
+}
+
 fn publish_catalogues(
     devices: Res<Devices>,
     windows: Query<(
@@ -250,7 +297,25 @@ fn publish_catalogues(
     )>,
     clients: Query<(&ClientToplevel, Option<&ClientWindowMetadata>), With<MappedSurface>>,
     sessions: Query<&HoistSession>,
+    mut changes: CatalogueChanges,
+    mut publication: Local<CataloguePublication>,
 ) {
+    let changed = changes.changed();
+    let same_endpoints = publication.endpoints.iter().copied().eq(devices
+        .endpoints
+        .iter()
+        .map(|(id, endpoint)| (*id, *endpoint)));
+    if !changed && same_endpoints && !publication.retry {
+        return;
+    }
+    publication.endpoints.clear();
+    publication.endpoints.extend(
+        devices
+            .endpoints
+            .iter()
+            .map(|(id, endpoint)| (*id, *endpoint)),
+    );
+    publication.retry = false;
     for (id, endpoint) in &devices.endpoints {
         let occupied = sessions.iter().any(|session| {
             session.endpoint() == *endpoint
@@ -286,6 +351,9 @@ fn publish_catalogues(
             });
         }
         catalogue.sort_by_key(|application| application.window);
-        devices.sessions.publish(*id, catalogue);
+        if let Err(error) = devices.sessions.publish(*id, catalogue) {
+            publication.retry = true;
+            tracing::warn!(%error, "could not publish device catalogue");
+        }
     }
 }

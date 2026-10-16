@@ -4,6 +4,7 @@ pub mod access;
 pub mod gamepad;
 mod loopback;
 mod relay;
+pub mod session;
 mod touch;
 pub mod view;
 pub mod view_input;

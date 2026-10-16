@@ -59,6 +59,7 @@ pub enum DeviceRequest {
     Hoist(u64),
     Release,
     Diagnostics(Box<weld_diagnostics::Report>),
+    Subscribe,
 }
 #[derive(Serialize, Deserialize)]
 pub enum DeviceReply {

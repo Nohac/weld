@@ -17,8 +17,8 @@ use tokio::{
     task::JoinSet,
     time::{Instant, timeout, timeout_at},
 };
-use weld_hoist_protocol::{ProtocolRevision, SurfaceMode};
 use weld_hoist_protocol::bootstrap::{BootstrapAnswer, BootstrapOffer, PeerRole};
+use weld_hoist_protocol::{ProtocolRevision, SurfaceMode};
 use weld_media::VideoCodec;
 
 #[cfg(test)]

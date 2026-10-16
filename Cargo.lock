@@ -9215,6 +9215,11 @@ name = "weld-hoist-core"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-channel",
+ "async-io",
+ "futures-lite",
+ "postcard",
+ "serde",
  "tracing",
  "weld-access",
  "weld-client",

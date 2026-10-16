@@ -10,6 +10,7 @@ pub mod bootstrap;
 pub mod device;
 pub mod gamepad;
 pub mod presentation;
+pub mod service;
 pub mod thumbnail;
 
 use serde::{Deserialize, Serialize};

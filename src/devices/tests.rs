@@ -4,10 +4,10 @@ use bevy::{
     ecs::{message::Messages, system::RunSystemOnce},
     scene::ScenePlugin,
 };
-use tokio::sync::oneshot;
 use weld_app::{client::ClientAdapterCommandQueue, surface::SurfacePlugin};
 use weld_client::{ClientId, ClientSurfaceId};
 use weld_hoist::{HoistPlugin, loopback_registration};
+use weld_hoist_core::session::{Pending, reply_channel};
 use weld_window::{OccupiesWindow, WindowId, WindowPlugin};
 
 fn fixture() -> (App, [HoistEndpointId; 2]) {
@@ -42,7 +42,8 @@ fn fixture() -> (App, [HoistEndpointId; 2]) {
                 IrohNotifier::new(|| Ok(())),
                 IrohNotifier::new(|| Ok(())),
                 VideoCodec::Av1,
-            ),
+            )
+            .expect("session service"),
             arrivals: DesktopEndpoints::default(),
             endpoints: [(SessionId(1), endpoints[0]), (SessionId(2), endpoints[1])].into(),
         });
@@ -72,8 +73,8 @@ fn window(app: &mut App, id: u64, client: u64) -> Entity {
     entity
 }
 
-fn request(session: u64, window: u64) -> (DeviceAction, oneshot::Receiver<bool>) {
-    let (answer, wait) = oneshot::channel();
+fn request(session: u64, window: u64) -> (DeviceAction, Pending<bool>) {
+    let (answer, wait) = reply_channel();
     (
         DeviceAction::Hoist {
             session: SessionId(session),
@@ -94,8 +95,13 @@ fn selection_and_release_are_scoped_to_the_approved_endpoint() {
     app.world_mut()
         .run_system_once_with(remote_actions, vec![first, second])
         .expect("actions");
-    assert!(accepted.try_recv().expect("first"));
-    assert!(!rejected.try_recv().expect("same-tick second family"));
+    assert!(accepted.poll().expect("response ready").expect("first"));
+    assert!(
+        !rejected
+            .poll()
+            .expect("response ready")
+            .expect("same-tick second family")
+    );
     app.update();
     assert_eq!(
         app.world_mut()
@@ -111,9 +117,24 @@ fn selection_and_release_are_scoped_to_the_approved_endpoint() {
     app.world_mut()
         .run_system_once_with(remote_actions, vec![second, steal, own])
         .expect("actions");
-    assert!(!rejected.try_recv().expect("occupied device"));
-    assert!(!stolen.try_recv().expect("other device owns window"));
-    assert!(allowed.try_recv().expect("independent window"));
+    assert!(
+        !rejected
+            .poll()
+            .expect("response ready")
+            .expect("occupied device")
+    );
+    assert!(
+        !stolen
+            .poll()
+            .expect("response ready")
+            .expect("other device owns window")
+    );
+    assert!(
+        allowed
+            .poll()
+            .expect("response ready")
+            .expect("independent window")
+    );
     app.update();
     let expected: Vec<Entity> = app
         .world_mut()
@@ -122,7 +143,7 @@ fn selection_and_release_are_scoped_to_the_approved_endpoint() {
         .filter_map(|(entity, session)| (session.endpoint() == endpoints[0]).then_some(entity))
         .collect();
     assert_eq!(expected.len(), 1);
-    let (answer, mut released) = oneshot::channel();
+    let (answer, mut released) = reply_channel();
     app.world_mut()
         .run_system_once_with(
             remote_actions,
@@ -132,7 +153,12 @@ fn selection_and_release_are_scoped_to_the_approved_endpoint() {
             }],
         )
         .expect("release");
-    assert!(released.try_recv().expect("release accepted"));
+    assert!(
+        released
+            .poll()
+            .expect("response ready")
+            .expect("release accepted")
+    );
     let actual: Vec<Entity> = app
         .world_mut()
         .resource_mut::<Messages<ReclaimHoist>>()
@@ -154,10 +180,11 @@ fn cancelled_requests_never_hoist_and_one_client_cannot_be_split_between_devices
     app.world_mut()
         .run_system_once_with(remote_actions, vec![cancelled, first, second])
         .expect("actions");
-    assert!(accepted.try_recv().expect("accepted"));
+    assert!(accepted.poll().expect("response ready").expect("accepted"));
     assert!(
         !rejected
-            .try_recv()
+            .poll()
+            .expect("response ready")
             .expect("same client cannot cross endpoints")
     );
     assert_eq!(
@@ -167,4 +194,48 @@ fn cancelled_requests_never_hoist_and_one_client_cannot_be_split_between_devices
             .count(),
         1
     );
+}
+
+#[test]
+fn catalogue_change_detection_tracks_lifecycle_without_republishing_idle_frames() {
+    #[derive(Resource, Default)]
+    struct Changes(usize);
+    let mut app = App::new();
+    app.init_resource::<Changes>().add_systems(
+        Update,
+        |mut changes: CatalogueChanges, mut count: ResMut<Changes>| {
+            if changes.changed() {
+                count.0 += 1;
+            }
+        },
+    );
+    let entity = app
+        .world_mut()
+        .spawn(ManagedWindow {
+            id: WindowId::new(1),
+        })
+        .id();
+    app.update();
+    assert_eq!(app.world().resource::<Changes>().0, 1);
+    app.update();
+    app.update();
+    assert_eq!(app.world().resource::<Changes>().0, 1);
+    app.world_mut()
+        .entity_mut(entity)
+        .insert(ClientWindowMetadata(
+            weld_client::ClientSurfaceMetadata::new("app".into(), "Title".into())
+                .expect("metadata"),
+        ));
+    app.update();
+    assert_eq!(app.world().resource::<Changes>().0, 2);
+    app.world_mut()
+        .entity_mut(entity)
+        .remove::<ClientWindowMetadata>();
+    app.update();
+    assert_eq!(app.world().resource::<Changes>().0, 3);
+    app.world_mut().despawn(entity);
+    app.update();
+    assert_eq!(app.world().resource::<Changes>().0, 4);
+    app.update();
+    assert_eq!(app.world().resource::<Changes>().0, 4);
 }
