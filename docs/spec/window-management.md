@@ -99,6 +99,75 @@ mesh identities through the hoist boundary. Authorization, destination
 availability, geometry negotiation and handoff are required follow-ups, not
 implemented by local output assignment.
 
+## Window portals — Exploration
+
+A **window portal** gives one running application window a remembered placement
+in each participating workspace. The same terminal could occupy a small tile
+in the top-left corner of one workspace and fill the screen on another.
+Switching workspaces brings that same live application into the destination
+workspace's placement, preserving its contents and application state.
+
+Each portal retains workspace-local layout state: its tiling position or
+floating geometry, fullscreen state, and place in focus history. Moving or
+resizing one portal updates that workspace's arrangement. The user chooses
+which workspaces contain a portal to the shared application window. Sticky
+windows provide cross-workspace visibility; portals additionally remember a
+different arrangement in each workspace.
+
+### Copy/paste interaction
+
+Proposed configurable bindings are `Mod+Ctrl+C` to copy a reference to the
+focused window and `Mod+Ctrl+V` to create a portal on the current workspace.
+The original frame stays in place. Pasting inserts the portal at the current
+layout selection using the destination workspace's placement policy; its size
+and fullscreen state can then be adjusted independently. Repeated pastes can
+make the same live window available on additional workspaces.
+
+This reference belongs to compositor-owned window-copy state, preserving the
+ordinary text/image clipboard. A copied reference should retain a stable window
+identity, with an explicit unavailable result if its target disappears. Copying
+a persistent frame references that durable slot and follows its current occupant.
+Behavior when pasting into a workspace that already contains a portal to the
+same window follows a one-placement-per-workspace limit: activate the existing
+placement.
+
+The model separates the shared live window identity from its workspace-local
+presentation frames. Removing a portal and closing the shared application need
+distinct, clear actions because the latter affects every portal.
+
+### Portals to persistent frames
+
+For game development, a coding workspace can contain a persistent preview slot,
+while a testing workspace contains a fullscreen portal to that same slot.
+Switching between them presents the same running game at each workspace's size.
+When rebuilding closes the preview, both placements retain their layout and
+show the slot's waiting state. Once a replacement occupies the source slot,
+both presentations follow that new occupant automatically.
+
+The source slot owns replacement matching. Its portals reference the occupant
+resolved by that slot, preserving one shared application binding through each
+restart. Copying the slot while vacant should also work. Removing the source
+slot itself requires an explicit dependent-portal lifecycle policy when this
+feature is implemented.
+
+### Single live presentation
+
+Portals provide alternative placements with a hard limit of one live
+presentation per shared application window, including its original frame.
+The active placement owns the application's configured size and preferred
+scale. Switching from the small tile to the fullscreen portal resizes the real
+application to its new space. Hidden portals retain their layout without
+issuing competing configures or keeping the application rendering by themselves.
+
+When participating workspaces are visible on multiple monitors, activating a
+placement transfers the live presentation to it. Other visible placements keep
+their reserved geometry and show a placeholder indicating that the application
+is presented elsewhere. Workspace-entry and activation rules should make the
+handoff predictable; hover-triggered handoffs need particular care with
+focus-follows-mouse. Popup placement, focus handoff and held-input cleanup must
+follow the active presentation consistently. Arbitration with hoisting and
+remote control remains an implementation design question.
+
 ## Persistent frames — Implemented
 
 A **persistent frame** is an opt-in managed frame that survives the loss of its
