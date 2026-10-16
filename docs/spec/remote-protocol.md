@@ -66,6 +66,185 @@ and encoded-payload production. This responsibility split is defined here;
 neither adapter exposes its library or platform types through the semantic
 protocol.
 
+## Protocol/session/transport refactor — Direction
+
+This is the next architectural refactor, ahead of native thumbnail capture and
+client preview UI. The target is one behavioral implementation shared by Iroh,
+Unix and loopback bindings. Preserve existing user-visible flows and performance
+while moving ownership; scope follows the implemented protocols and services.
+
+### Ownership
+
+| Layer | Responsibility |
+| --- | --- |
+| `weld-hoist-protocol` | Typed messages, IDs, capabilities, structural validation and payload bounds |
+| `weld-hoist-core::session` | Source/destination session state machines, request correlation, authorization enforcement, lifecycle events and effects |
+| Shared service modules | Catalogue subscriptions, thumbnail cache/scheduling, pairing/trust decisions and diagnostic collection policy |
+| `weld-hoist-encoded` and native providers | Media scheduling, codecs, buffer import/export and capture execution |
+| Transport bindings | Connection establishment, authenticated peer evidence, logical-lane delivery, framing, byte/descriptor ownership, bounded I/O and transport observations |
+| Runtime/distribution integration | Own session drivers, execute host effects, supply backends/persistence and connect app shells to shared APIs |
+
+Start session, catalogue, pairing and thumbnail behavior as cohesive modules in
+`weld-hoist-core`. Keep report/archive behavior with `weld-diagnostics` where its
+existing responsibility fits, and reuse `weld-access` for revocable permits.
+Extract further crates only when concrete dependency or runtime boundaries
+require them. `weld-core` continues to supply native compositor capabilities.
+
+Protocol records stay portable and data-oriented. Validation of legal state
+transitions belongs to sessions. Encoding/decoding maps records at the binding
+boundary; carrier-specific descriptor bookkeeping remains with the Unix binding.
+Authentication evidence identifies its mechanism and scope: Iroh's verified
+public key and Unix peer credentials remain distinct evidence interpreted by
+the shared admission policy. Keep wire session IDs, local connection generations,
+hoist-family IDs and diagnostic correlation IDs distinct.
+
+### Evidence and migration targets
+
+- `weld-hoist-iroh/src/pairing/session.rs` mixes application records, mutable
+  catalogues, request policy, Iroh peers and Tokio response channels.
+- `pairing/thumbnail.rs` mixes refresh/eviction/capture policy with QUIC I/O and
+  reaches into the shared desktop mutex. Extract the policy and its tests.
+- `pairing.rs` and `pairing/storage.rs` combine enrollment/trust decisions,
+  persistence and live Iroh connections. Separate decisions, storage effects
+  and connection closure.
+- `reports.rs` and `reports/remote.rs` mix report ownership/permission decisions
+  with connection routing and RPC delivery.
+- `desktop.rs`, `adapter.rs`, `native.rs` and `pending_source.rs` assemble relays
+  and codecs inside the Iroh crate. Move reusable assembly to shared/native
+  integration owners, leaving carrier setup in the binding.
+- `input_outbox.rs` implements semantic motion/touch/gamepad coalescing and
+  ordering barriers. Share this policy while retaining carrier-specific writer
+  wakeups and write-completion measurements.
+- Audit Iroh admission and Unix `bootstrap.rs`, `source.rs`, `destination.rs`
+  and `encoded_transport.rs` together. Common negotiation and lifecycle policy
+  belongs in shared sessions; socket/descriptor mechanics belong in the binding.
+- `src/devices.rs` republishes catalogues from `PostUpdate`; shells consume the
+  Iroh-specific `DeviceSession` API and poll catalogues. Replace these with shared
+  service publication and change notifications.
+
+### Event-driven state ownership
+
+Each session state machine has one mutable owner. A host controller owns admitted
+sessions and host-wide services such as the shared thumbnail cache. Its driver
+services bounded events and explicit deadlines using the existing runtime wakeup
+integration. Core state transitions remain synchronous and runtime-independent;
+transport tasks, host integration and service workers communicate through typed
+handles. The native driver must progress independently of Bevy rendering and
+display refresh. Receiver workers use the same state machine.
+
+Inputs include connection establishment/loss, received requests, catalogue
+changes, permission changes, host-operation completion, capture completion and
+deadline expiry. Outputs include replies/events, host-operation requests,
+capture work, persistence requests, connection closure and new deadlines.
+Effect completions carry session generation and operation identity. Late
+completion after revoke, disconnect or occupant replacement is rejected.
+
+Publish immutable, revisioned snapshots for readers. Catalogue changes originate
+from admission, removal, metadata and availability changes; coalesce repeated
+updates before publication. A subscriber receives an initial authorized snapshot
+and subsequent changes. Bound pending notifications and recover from a skipped
+revision with a current snapshot. Unchanged content causes no periodic network
+poll or per-frame catalogue reconstruction.
+
+Separate ordered input/control, media and background-service lanes. Preserve
+existing relay ports, batching, media ownership and decode/presentation handoffs.
+High-rate frame/input delivery uses those paths directly; service work must not
+introduce a global actor queue or roundtrip gating each frame. Extract semantic
+input coalescing into the shared path, preserving discrete-event barriers.
+
+Bound event counts and payload bytes, apply fair per-session drain budgets and
+re-arm wakeups when work remains. Latest-value data may coalesce; accepted
+discrete operations preserve order. Queue saturation reports busy/backpressure
+through explicit outcomes. Revoke/disconnect cleanup has guaranteed delivery
+outside saturable ordinary request queues. Keep the immediate revocable permit
+check at effect execution/publication boundaries, even while cleanup is queued.
+Retain narrowly scoped synchronization for messaging and snapshot publication;
+remove externally shared mutable session/service state.
+
+Use explicit operation deadlines and cancellation. Preserve partially transferred
+live control records across temporary network stalls. Disposable thumbnail
+failure remains isolated to its lane. Session teardown cancels pending service
+work and retires input, presentation claims and buffer leases in the established
+order, including simultaneous disconnect/revoke and abandoned callers.
+
+### Commit-sized milestones
+
+1. **Extract the shared protocol vocabulary.** Inventory current wire records,
+   identities, capabilities and handshake behavior across both bindings. Move
+   application/session, enrollment and service records to their shared protocol
+   owners and migrate existing callers in the same commit. Record baseline
+   pairing, reclaim, input and streaming checks before behavior moves.
+
+2. **Introduce the event-owned session controller and shared services.** Replace
+   `DesktopSessions` mutable shared state with core-owned source/destination
+   session machines and bounded command/event handles. Move catalogue and
+   thumbnail policy with their behavioral tests, and connect the real Iroh and
+   desktop consumers. Implement initial snapshot/change subscription, explicit
+   deadlines, correlation and teardown. Capture completion remains a backend
+   effect, ready for the later GPU producer. Preserve the existing frame/input
+   paths while changing control ownership.
+
+3. **Separate trust and diagnostic services from Iroh.** Move enrollment,
+   invitation expiry, grant changes, report access and collection decisions to
+   shared owners. Supply private trust storage as an integration adapter and
+   perform filesystem work outside compositor servicing. Approval becomes
+   effective after successful durable persistence; revocation invalidates live
+   permits immediately and reports persistence failures explicitly. Preserve
+   stored keys, session-specific trust directories, grants and pairing links
+   through the migration. Transport identities and dialing hints stay in their
+   appropriate binding adapters.
+
+4. **Finish interchangeable binding integration.** Move common handshake,
+   negotiation, semantic input coalescing and relay assembly out of transports.
+   Use shared registration in `weld-hoist-encoded` for encoded paths and native
+   integration for descriptor-backed paths. Wire Unix and loopback to the same
+   applicable session/service handlers, including a real local service exchange.
+   Keep native descriptor transfer and encoded delivery capabilities explicit.
+   Verify differing transport capabilities produce deliberate unsupported
+   outcomes rather than independently implemented policy.
+
+5. **Migrate all consumers and remove transitional code.** Update `weldctl`,
+   Weld desktop/headless launchers, Weld Connect, Mobile and the Godot receiver
+   to shared session APIs. Some caller changes necessarily land in earlier
+   milestones; this final pass removes remaining Iroh-specific service types,
+   duplicated state, polling and temporary forwarding APIs. Update implemented
+   architecture documentation after the cross-binding checks pass.
+
+Each milestone must leave working consumers and pass its focused checks before
+commit. Rebuild communicating development peers together when wire setup changes;
+preserve user identities and saved trust. Installed desktop/phone binaries remain
+unchanged until deployment is requested. Continue thumbnail capture/UI work once
+the shared service boundary is in place and this refactor is validated.
+
+### Validation and completion criteria
+
+- Deterministic session tests feed events and explicit time, then inspect replies
+  and effects. Cover authorization, request ordering, replacement, timeout,
+  cancellation, revoke/disconnect races and cleanup completion.
+- Move existing policy tests with their owner. Keep framing, partial reads,
+  descriptor lifetime and connection-loss tests in the corresponding binding.
+  Validate behavior rather than serialization-library roundtrips.
+- Run common scenarios through loopback, Unix and direct Iroh: catalogue changes,
+  hoist/release, denied requests, shared thumbnail cache behavior, late service
+  results, stalled preview delivery, input retirement and reconnection. Test
+  native-buffer capability separately from portable encoded/service behavior.
+- Exercise paired client/host and headless-to-desktop flows, preserve existing
+  pairings, and validate Connect and Godot consumers on available hardware.
+  Keep physical checks distinct from automated protocol evidence.
+- Compare before/after optimized runs under the same workload: idle wakeups,
+  catalogue network traffic, control/input latency, CPU and queue/byte high-water
+  marks. Stress slow clients and concurrent service requests during streaming.
+  Verify bounded memory and absence of frame-ack or display-tick dependencies.
+- Completion means adding a catalogue/thumbnail rule changes its shared owner
+  and tests, while every binding inherits the behavior. Transport crates expose
+  connection and delivery mechanisms; session tests run without Iroh, sockets,
+  a compositor or a display. Document any required narrow locks and their scope.
+
+Design-review baseline: 5/10. Four checklist failures drive this plan: mixed
+module responsibilities, leaked service decisions, coupled implementation changes
+and unclear public boundaries. Shared owners, typed effects and cross-binding
+behavior tests are the acceptance evidence for correcting those failures.
+
 ## Session handshake — Direction
 
 A peer session progresses through explicit states:
