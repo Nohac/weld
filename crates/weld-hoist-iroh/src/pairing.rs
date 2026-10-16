@@ -21,9 +21,7 @@ use std::{
 use tokio::sync::oneshot;
 
 use crate::{IrohConnectionProfile, IrohNetwork, IrohNotifier};
-pub use session::{
-    ApplicationInfo, DesktopSessions, DeviceAction, DeviceSession, PendingDeviceSession, SessionId,
-};
+pub use session::{DesktopSessions, DeviceAction, DeviceSession, PendingDeviceSession, SessionId};
 pub(crate) use session::{accept_session, connect_session};
 use storage::TrustStore;
 pub(crate) use wire::{PAIR_ALPN, SESSION_ALPN};
@@ -33,26 +31,9 @@ pub(crate) use wire::{accept, connect};
 const INVITATION_LIFETIME: Duration = Duration::from_secs(120);
 const MAX_DEVICES: usize = 32;
 
-/// Capabilities approved locally for a paired endpoint.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct DevicePermissions {
-    pub browse: bool,
-    pub hoist: bool,
-    #[serde(default)]
-    pub diagnostics: bool,
-    /// Permission to fetch application pixels while browsing the catalogue.
-    #[serde(default)]
-    pub thumbnails: bool,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct PairedDevice {
-    pub identity: String,
-    pub name: String,
-    pub permissions: DevicePermissions,
-}
+pub use weld_hoist_protocol::device::{
+    ApplicationInfo, DevicePermissions, PairedDevice, PairingCandidate,
+};
 
 /// Public dialing hints and a one-time enrollment credential. Debug redacts it.
 #[derive(Clone, Serialize, Deserialize)]
@@ -108,13 +89,6 @@ impl FromStr for PairingInvitation {
         invitation.profile()?;
         Ok(invitation)
     }
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct PairingCandidate {
-    pub identity: String,
-    pub name: String,
-    pub verification: String,
 }
 
 struct Invitation {

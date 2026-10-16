@@ -17,22 +17,16 @@ use std::{
 };
 use tokio::sync::mpsc;
 use weld_access::{AccessAuthority, AccessSession};
-use weld_client::ClientSurfaceId;
 use weld_hoist_encoded::{EncodedDestinationTransport, EncodedSourceTransport};
 use weld_media::VideoCodec;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct SessionId(pub u64);
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ApplicationInfo {
-    pub window: u64,
-    pub surface: ClientSurfaceId,
-    pub title: String,
-    pub app_id: String,
-    pub available: bool,
-    pub hoisted_here: bool,
-}
+use weld_hoist_protocol::device::{
+    ApplicationInfo, DeviceHello as Hello, DeviceReply as Reply, DeviceRequest as Request,
+    DeviceWelcome as Welcome,
+};
 
 pub enum DeviceAction {
     Hoist {
@@ -210,28 +204,6 @@ impl Drop for JoinedSession {
     fn drop(&mut self) {
         self.desktop.leave(self.id);
     }
-}
-
-#[derive(Serialize, Deserialize)]
-enum Request {
-    List,
-    Hoist(u64),
-    Release,
-    Diagnostics(Box<weld_diagnostics::Report>),
-}
-#[derive(Serialize, Deserialize)]
-enum Reply {
-    Catalogue(Vec<ApplicationInfo>),
-    Accepted(bool),
-    Diagnostics(Option<Box<weld_diagnostics::Report>>),
-}
-#[derive(Serialize, Deserialize)]
-struct Hello {
-    preferences: crate::IrohReceiverPreferences,
-}
-#[derive(Serialize, Deserialize)]
-struct Welcome {
-    codec: VideoCodec,
 }
 
 pub(crate) async fn accept_session(

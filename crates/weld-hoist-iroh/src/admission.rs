@@ -13,12 +13,12 @@ use iroh::{
 };
 #[cfg(test)]
 use iroh_tickets::endpoint::EndpointTicket;
-use serde::{Deserialize, Serialize};
 use tokio::{
     task::JoinSet,
     time::{Instant, timeout, timeout_at},
 };
 use weld_hoist_protocol::{ProtocolRevision, SurfaceMode};
+use weld_hoist_protocol::bootstrap::{BootstrapAnswer, BootstrapOffer, PeerRole};
 use weld_media::VideoCodec;
 
 #[cfg(test)]
@@ -288,27 +288,6 @@ fn validate_offer(offer: &BootstrapOffer, supported_codecs: &[VideoCodec]) -> Re
         "Iroh source selected an unsupported codec"
     );
     Ok(())
-}
-
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-enum PeerRole {
-    Source,
-    Destination,
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-struct BootstrapOffer {
-    revision: ProtocolRevision,
-    role: PeerRole,
-    mode: SurfaceMode,
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-struct BootstrapAnswer {
-    revision: ProtocolRevision,
-    role: PeerRole,
-    rejection: Option<String>,
-    stream_mode: weld_client::SurfaceStreamMode,
 }
 
 #[cfg(test)]

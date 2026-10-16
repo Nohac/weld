@@ -6,7 +6,10 @@
 
 use std::fmt;
 
+pub mod bootstrap;
+pub mod device;
 pub mod gamepad;
+pub mod presentation;
 pub mod thumbnail;
 
 use serde::{Deserialize, Serialize};

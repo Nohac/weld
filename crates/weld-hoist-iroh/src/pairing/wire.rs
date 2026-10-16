@@ -6,16 +6,7 @@ use tokio::time::timeout_at;
 pub(crate) const PAIR_ALPN: &[u8] = b"weld/pair/1";
 pub(crate) const SESSION_ALPN: &[u8] = b"weld/device/1";
 
-#[derive(Serialize, Deserialize)]
-struct PairRequest {
-    token: [u8; 32],
-    name: String,
-}
-#[derive(Serialize, Deserialize)]
-enum PairReply {
-    Verify(String),
-    Approved(DevicePermissions),
-}
+use weld_hoist_protocol::device::{PairReply, PairRequest};
 
 pub(crate) async fn accept(host: PairingHost, connection: Connection) -> Result<()> {
     let deadline = Instant::now() + INVITATION_LIFETIME;

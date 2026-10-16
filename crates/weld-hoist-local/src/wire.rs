@@ -40,6 +40,7 @@ use weld_hoist_protocol::{
     SourceMessage,
 };
 
+pub(crate) use weld_hoist_protocol::bootstrap::BootstrapAcknowledgement as LocalBootstrapAcknowledgement;
 pub use weld_hoist_protocol::{
     DestinationEnvelope as LocalDestinationPacket, DestinationMessage as LocalDestinationMessage,
     SurfaceMode as LocalSurfaceMode,
@@ -50,12 +51,6 @@ pub(crate) struct LocalBootstrapOffer {
     pub revision: ProtocolRevision,
     pub mode: LocalSurfaceMode,
     pub media_descriptor: Option<u16>,
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-pub(crate) struct LocalBootstrapAcknowledgement {
-    pub revision: ProtocolRevision,
-    pub rejection: Option<String>,
 }
 
 /// One DMA-BUF plane whose descriptor is attached to the containing packet.

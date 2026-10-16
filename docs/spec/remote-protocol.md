@@ -198,6 +198,11 @@ order, including simultaneous disconnect/revoke and abandoned callers.
 
 ### Commit-sized milestones
 
+Progress: the protocol-record extraction is implemented. Device/catalogue,
+enrollment, receiver preferences and bootstrap records now have shared owners;
+Iroh and Unix consume them with unchanged wire representations. Session state,
+service ownership and driver migration remain the following milestones.
+
 1. **Extract the shared protocol vocabulary.** Inventory current wire records,
    identities, capabilities and handshake behavior across both bindings. Move
    application/session, enrollment and service records to their shared protocol

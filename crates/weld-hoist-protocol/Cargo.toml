@@ -6,6 +6,7 @@ publish.workspace = true
 
 [dependencies]
 serde.workspace = true
+weld-diagnostics = { path = "../weld-diagnostics" }
 weld-client = { path = "../weld-client", features = ["serde"] }
 weld-media = { path = "../weld-media", features = ["serde"] }
 

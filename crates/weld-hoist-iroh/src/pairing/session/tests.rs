@@ -6,6 +6,7 @@ use tokio::{
     io::{AsyncWriteExt, duplex},
     time::timeout,
 };
+use weld_client::ClientSurfaceId;
 use weld_diagnostics::{Cause, Endpoint, Observation, Operation, Recorder};
 
 const WARNING: Duration = Duration::from_millis(5);

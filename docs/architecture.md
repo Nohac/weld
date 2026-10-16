@@ -181,7 +181,11 @@ Weld is a workspace of reusable layers and one standard distribution:
 - `weld-hoist-protocol` owns the serializable, transport-neutral hoist record
   subset shared by current bindings: exact revision and session identities,
   source and destination envelopes, surface modes, and
-  encoded access-unit metadata and bounded thumbnail request/reply records. It contains no compositor, application,
+  encoded access-unit metadata and bounded thumbnail request/reply records.
+  Its `device`, `presentation` and `bootstrap` modules also own application
+  catalogues, device grants, enrollment/control messages and negotiation records.
+  Bindings consume these records; Iroh's existing public paths temporarily
+  re-export them during the session-owner migration. It contains no compositor, application,
   codec-backend, or transport implementation.
 - `weld-hoist-core` owns transport-independent hoist identities, source and
   destination relay policy, and the Bevy-free loopback binding. Its relay
