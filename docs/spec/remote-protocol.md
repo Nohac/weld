@@ -123,7 +123,12 @@ hoist-family IDs and diagnostic correlation IDs distinct.
   Iroh-specific `DeviceSession` API and poll catalogues. Replace these with shared
   service publication and change notifications.
 
-### Concurrent mixed-transport connections
+### Common listener admission target
+
+The current slice establishes shared admission, policy and session lifecycle.
+Simultaneous multi-transport listener wiring and mixed-transport runtime testing
+are deferred. The eventual target is for each supported listener to supply an
+authenticated connection to the same host session-processing path.
 
 A host can serve Iroh, Unix and loopback connections concurrently through the
 same session controller and shared service instances. Assemblies register
@@ -208,8 +213,11 @@ and request pacing also moved to core; Iroh supplies a generic packet lane.
 The real endpoint tests cover these paths. Source and receiver device control
 drivers now also live in core, including catalogue publication, command dispatch,
 diagnostic request pacing and retention of delayed partial operations. Connect
-and Mobile use the shared `DeviceClient` handle. Trust/diagnostics archive policy
-and mixed-binding integration remain in progress. Communicating development peers require rebuilding together for
+and Mobile use the shared `DeviceClient` handle. Enrollment, confirmation expiry,
+trust grants and revocation now run in a shared authority worker. Its storage
+adapter preserves existing trust files, and listeners supply authenticated,
+namespace-scoped identity and connection cleanup handles. Diagnostic archive
+policy and input/relay assembly remain in progress. Communicating development peers require rebuilding together for
 the new service envelope and catalogue subscription.
 
 1. **Extract the shared protocol vocabulary.** Inventory current wire records,
@@ -241,12 +249,12 @@ the new service envelope and catalogue subscription.
    negotiation, semantic input coalescing and relay assembly out of transports.
    Use shared registration in `weld-hoist-encoded` for encoded paths and native
    integration for descriptor-backed paths. Wire Unix and loopback to the same
-   applicable session/service handlers, including a real local service exchange.
+   applicable session/service handlers as their listener integrations are added.
    Keep native descriptor transfer and encoded delivery capabilities explicit.
    Verify differing transport capabilities produce deliberate unsupported
-   outcomes rather than independently implemented policy. Enable simultaneous
-   listener registration and exercise mixed-transport sessions against the same
-   host controller and service budgets.
+   outcomes rather than independently implemented policy. Preserve a common
+   admission boundary for future simultaneous listeners; their runtime wiring
+   and mixed-transport validation are a subsequent feature slice.
 
 5. **Migrate all consumers and remove transitional code.** Update `weldctl`,
    Weld desktop/headless launchers, Weld Connect, Mobile and the Godot receiver
@@ -273,7 +281,8 @@ the shared service boundary is in place and this refactor is validated.
   hoist/release, denied requests, shared thumbnail cache behavior, late service
   results, stalled preview delivery, input retirement and reconnection. Test
   native-buffer capability separately from portable encoded/service behavior.
-- Run Unix and Iroh clients concurrently against one host. Verify shared cache
+- Deferred multi-listener validation: run Unix and Iroh clients concurrently
+  against one host. Verify shared cache
   deduplication and budgets, isolated reply routing with overlapping peer IDs,
   conflicting hoist claims, and independent progress while one connection stalls,
   disconnects or loses access. Exercise per-session and principal-wide revocation,
@@ -295,10 +304,10 @@ module responsibilities, leaked service decisions, coupled implementation change
 and unclear public boundaries. Shared owners, typed effects and cross-binding
 behavior tests are the acceptance evidence for correcting those failures.
 
-Current design review: 6/10. Source/receiver service decisions have shared owners
-and packet-only driver interfaces. Remaining failures are mixed trust/archive
-responsibilities, leaked relay-assembly decisions and coupled binding changes;
-milestones 3–4 move those owners and validate actual concurrent bindings.
+Current design review: 6/10. Source/receiver services and enrollment/trust decisions
+have shared owners and transport-facing interfaces. Remaining failures are mixed
+archive responsibilities, leaked input/relay-assembly decisions and coupled
+binding changes; milestones 3–4 move those owners into shared modules.
 
 RPC framework evaluation is deferred until these ownership changes land.
 Postcard remains the encoding for the current ordered request/reply protocol.

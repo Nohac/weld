@@ -9218,6 +9218,7 @@ dependencies = [
  "async-channel",
  "async-io",
  "futures-lite",
+ "getrandom 0.3.4",
  "postcard",
  "serde",
  "tracing",

@@ -204,6 +204,13 @@ Weld is a workspace of reusable layers and one standard distribution:
   diagnostic request pacing and delayed-operation handling. Receiver drivers
   publish immutable catalogue snapshots and bounded completion notifications to
   `DeviceClient`; a short read/write lock protects only snapshot replacement.
+  `session::pairing` owns enrollment, invitation expiry, confirmation, grants and
+  connection admission. A bounded worker serializes decisions and durable writes;
+  readers use published grant snapshots. Authentication namespaces scope identity
+  strings. Approval follows successful persistence; revocation retires permits
+  and closes admitted connections before saving, with explicit retry after a
+  persistence failure. Listener adapters supply authenticated identity,
+  connection controls and private storage.
 - `weld-hoist-encoded` owns transport-neutral encoded commit scheduling,
   local backpressure, resize coalescing, codec worker contracts, and atomic
   decoded-frame publication. Its default dependency graph has no compositor or
@@ -238,7 +245,9 @@ Weld is a workspace of reusable layers and one standard distribution:
   not cross its registration boundary. Its default graph is compositor-free;
   optional native/VA-API registration uses the same portable peer machinery.
   Paired desktop connections supply an independent packet lane to core's shared
-  service driver. Enrollment, trust and diagnostics routing are being migrated under the
+  service driver. Its pairing integration supplies Iroh identity evidence,
+  dialing links, stream setup and the existing private trust-file format.
+  Diagnostics routing and relay assembly are being migrated under the
   [session/transport refactor](spec/remote-protocol.md#protocolsessiontransport-refactor--direction).
   Its opt-in ADB carrier routes bounded encrypted QUIC packets over loopback
   TCP tunnels without changing those peer streams. A private link manager owns
@@ -1342,8 +1351,8 @@ waits without holding the compositor or the serialized pairing/launch handler.
 interfaces. Schemars supplies field-level wire schemas; the official MCP SDK
 owns the stdio lifecycle in `weldctl mcp`. See
 [Native window inspection](native-window-control.md) for commands and validation.
-`weld-hoist-iroh::pairing` owns authenticated enrollment and supplies the
-application control stream to `weld-hoist-core::session` drivers. Core owns
+`weld-hoist-iroh::pairing` supplies authenticated connections and enrollment /
+application control streams to `weld-hoist-core::session` drivers. Core owns
 catalogue subscriptions and command dispatch. Master translates approved
 requests into ordinary hoist/reclaim messages. The runtime-owned desktop relay
 forks cached source snapshots per connection, sharing upstream buffer leases and

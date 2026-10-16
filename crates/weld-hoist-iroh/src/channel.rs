@@ -15,6 +15,11 @@ impl PacketLane {
             recv: PacketReader(recv),
         }
     }
+    pub async fn finish(&mut self) -> Result<()> {
+        self.send.0.finish()?;
+        self.send.0.stopped().await?;
+        Ok(())
+    }
 }
 pub(crate) struct PacketWriter(pub SendStream);
 pub(crate) struct PacketReader(pub RecvStream);

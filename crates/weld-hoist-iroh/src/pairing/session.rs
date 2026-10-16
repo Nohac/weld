@@ -148,8 +148,6 @@ pub(crate) async fn accept_session(
     authority: PairingHost,
     connection: Connection,
 ) -> Result<()> {
-    let permissions = authority.authorize(&connection)?;
-    ensure!(permissions.browse, "application browsing not permitted");
     let desktop = authority.desktop()?;
     let access = desktop
         .access
@@ -159,6 +157,8 @@ pub(crate) async fn accept_session(
         id: None,
         access: access.clone(),
     };
+    let permissions = authority.admit(&connection, access.clone()).await?;
+    ensure!(permissions.browse, "application browsing not permitted");
     let (mut send, mut recv) =
         tokio::time::timeout(Duration::from_secs(5), connection.accept_bi()).await??;
     let hello: Hello =

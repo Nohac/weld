@@ -1,7 +1,8 @@
-use super::{MAX_DEVICES, PairedDevice, validate_name};
+use super::PairedDevice;
 use crate::{IrohPeerIdentity, private_file::PrivateDirectory};
 use anyhow::{Result, ensure};
 use std::{collections::BTreeMap, ffi::OsStr, fs::File, io::Read, path::Path};
+use weld_hoist_core::session::pairing::TrustStorage;
 
 pub(super) struct TrustStore {
     directory: PrivateDirectory,
@@ -17,7 +18,9 @@ impl TrustStore {
             _lock: lock,
         })
     }
-    pub fn load(&self) -> Result<BTreeMap<String, PairedDevice>> {
+}
+impl TrustStorage for TrustStore {
+    fn load(&self) -> Result<BTreeMap<String, PairedDevice>> {
         let Some(file) = self.directory.open_file(OsStr::new("devices.json"))? else {
             return Ok(BTreeMap::new());
         };
@@ -25,10 +28,6 @@ impl TrustStore {
         file.take(65537).read_to_end(&mut bytes)?;
         ensure!(bytes.len() <= 65536, "device database too large");
         let devices: Vec<PairedDevice> = serde_json::from_slice(&bytes)?;
-        ensure!(
-            devices.len() <= MAX_DEVICES,
-            "device database exceeds limit"
-        );
         let mut records = BTreeMap::new();
         for device in devices {
             let identity: IrohPeerIdentity = device.identity.parse()?;
@@ -36,7 +35,6 @@ impl TrustStore {
                 identity.as_str() == device.identity,
                 "device identity is not canonical"
             );
-            validate_name(&device.name)?;
             ensure!(
                 records.insert(device.identity.clone(), device).is_none(),
                 "duplicate paired device"
@@ -44,7 +42,7 @@ impl TrustStore {
         }
         Ok(records)
     }
-    pub fn save(&self, records: &BTreeMap<String, PairedDevice>) -> Result<()> {
+    fn save(&self, records: &BTreeMap<String, PairedDevice>) -> Result<()> {
         self.directory.replace(
             OsStr::new("devices.json"),
             &serde_json::to_vec(&records.values().collect::<Vec<_>>())?,

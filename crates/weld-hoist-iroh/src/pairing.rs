@@ -10,12 +10,11 @@ use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use iroh::{EndpointId, endpoint::Connection};
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::BTreeMap,
     fmt,
     path::Path,
     str::FromStr,
-    sync::{Arc, Mutex, Weak},
-    time::{Duration, Instant},
+    sync::{Arc, Mutex, OnceLock, Weak},
+    time::Duration,
 };
 use tokio::sync::oneshot;
 
@@ -23,12 +22,15 @@ use crate::{IrohConnectionProfile, IrohNetwork, IrohNotifier};
 pub use session::{DesktopSessions, DeviceAction, DeviceSession, PendingDeviceSession, SessionId};
 pub(crate) use session::{accept_session, connect_session};
 use storage::TrustStore;
+use weld_access::AccessSession;
+use weld_hoist_core::session::pairing::{
+    AuthenticatedPeer, ConnectionControl, PairingAuthority, validate_name,
+};
 pub(crate) use wire::{PAIR_ALPN, SESSION_ALPN};
 pub use wire::{PairingProgress, PendingPairing};
 pub(crate) use wire::{accept, connect};
 
-const INVITATION_LIFETIME: Duration = Duration::from_secs(120);
-const MAX_DEVICES: usize = 32;
+const IDENTITY_NAMESPACE: &str = "iroh";
 
 pub use weld_hoist_protocol::device::{
     ApplicationInfo, DevicePermissions, PairedDevice, PairingCandidate,
@@ -90,76 +92,93 @@ impl FromStr for PairingInvitation {
     }
 }
 
-struct Invitation {
-    token: [u8; 32],
-    expires: Instant,
-    candidate: Option<(PairingCandidate, oneshot::Sender<bool>)>,
-}
-
 #[derive(Default)]
-struct State {
-    store: Option<TrustStore>,
-    devices: BTreeMap<String, PairedDevice>,
-    invitation: Option<Invitation>,
-    connections: Vec<Connection>,
-    desktop: Option<DesktopSessions>,
+struct Binding {
+    authority: OnceLock<PairingAuthority>,
+    desktop: Mutex<Option<DesktopSessions>>,
 }
 
-/// Thread-safe authority shared by local controls and authenticated connections.
+/// Listener integration for shared enrollment and trust services.
 #[derive(Clone, Default)]
-pub struct PairingHost(Arc<Mutex<State>>);
+pub struct PairingHost(Arc<Binding>);
 
 /// Live grant lookup retained by reports without retaining desktop peers.
 #[derive(Clone)]
-pub(crate) struct DiagnosticPermission(Weak<Mutex<State>>);
+pub(crate) struct DiagnosticPermission(Weak<Binding>);
 impl DiagnosticPermission {
     pub(crate) fn permits(&self, identity: EndpointId) -> bool {
         self.0
             .upgrade()
-            .is_some_and(|state| PairingHost(state).permits_diagnostics(identity))
+            .is_some_and(|binding| PairingHost(binding).permits_diagnostics(identity))
+    }
+}
+struct ConnectionLease(iroh::endpoint::WeakConnectionHandle);
+impl ConnectionControl for ConnectionLease {
+    fn is_connected(&self) -> bool {
+        self.0
+            .upgrade()
+            .is_some_and(|connection| connection.close_reason().is_none())
+    }
+    fn close(&self) {
+        if let Some(connection) = self.0.upgrade() {
+            connection.close(1_u32.into(), b"device access ended");
+        }
     }
 }
 
+fn authenticated(identity: EndpointId) -> Result<AuthenticatedPeer> {
+    AuthenticatedPeer::new(IDENTITY_NAMESPACE, identity.to_string())
+}
+
 impl PairingHost {
+    fn authority(&self) -> Result<&PairingAuthority> {
+        self.0
+            .authority
+            .get()
+            .context("pairing storage is not enabled")
+    }
     pub(crate) fn diagnostic_permission(&self) -> DiagnosticPermission {
         DiagnosticPermission(Arc::downgrade(&self.0))
     }
     pub fn shutdown(&self) {
-        if let Ok(mut state) = self.0.lock() {
-            state.invitation = None;
-            for connection in state.connections.drain(..) {
-                connection.close(1u32.into(), b"desktop stopped");
-            }
-            if let Some(desktop) = state.desktop.take() {
-                desktop.close();
-            }
+        if let Some(authority) = self.0.authority.get() {
+            authority.shutdown();
+        }
+        if let Ok(mut desktop) = self.0.desktop.lock()
+            && let Some(desktop) = desktop.take()
+        {
+            desktop.close();
         }
     }
     pub fn set_desktop(&self, desktop: DesktopSessions) -> Result<()> {
-        self.0
+        *self
+            .0
+            .desktop
             .lock()
-            .map_err(|_| anyhow::anyhow!("pairing state poisoned"))?
-            .desktop = Some(desktop);
+            .map_err(|_| anyhow::anyhow!("desktop handoff unavailable"))? = Some(desktop);
         Ok(())
     }
     fn desktop(&self) -> Result<DesktopSessions> {
         self.0
-            .lock()
-            .map_err(|_| anyhow::anyhow!("pairing state poisoned"))?
             .desktop
+            .lock()
+            .map_err(|_| anyhow::anyhow!("desktop handoff unavailable"))?
             .clone()
             .context("desktop sharing is unavailable")
     }
     pub fn enable(&self, directory: &Path) -> Result<()> {
-        let mut state = self
-            .0
-            .lock()
-            .map_err(|_| anyhow::anyhow!("pairing state poisoned"))?;
-        ensure!(state.store.is_none(), "pairing storage already enabled");
-        let store = TrustStore::open(directory)?;
-        state.devices = store.load()?;
-        state.store = Some(store);
-        Ok(())
+        ensure!(
+            self.0.authority.get().is_none(),
+            "pairing storage already enabled"
+        );
+        let directory = directory.to_owned();
+        let authority = PairingAuthority::start(IDENTITY_NAMESPACE.into(), move || {
+            TrustStore::open(&directory)
+        })?;
+        self.0
+            .authority
+            .set(authority)
+            .map_err(|_| anyhow::anyhow!("pairing storage already enabled"))
     }
     pub fn invite(
         &self,
@@ -171,17 +190,7 @@ impl PairingHost {
             profile.network() != IrohNetwork::Adb,
             "pairing requires an IP transport"
         );
-        let token = random()?;
-        let mut state = self
-            .0
-            .lock()
-            .map_err(|_| anyhow::anyhow!("pairing state poisoned"))?;
-        ensure!(state.store.is_some(), "pairing storage is not enabled");
-        state.invitation = Some(Invitation {
-            token,
-            expires: Instant::now() + INVITATION_LIFETIME,
-            candidate: None,
-        });
+        let token = self.authority()?.invite()?;
         Ok(PairingInvitation {
             host: profile.peer().as_str().into(),
             name,
@@ -191,17 +200,7 @@ impl PairingHost {
         })
     }
     pub fn pending(&self) -> Result<Option<PairingCandidate>> {
-        let mut state = self
-            .0
-            .lock()
-            .map_err(|_| anyhow::anyhow!("pairing state poisoned"))?;
-        expire(&mut state);
-        Ok(state.invitation.as_ref().and_then(|invite| {
-            invite
-                .candidate
-                .as_ref()
-                .map(|(candidate, _)| candidate.clone())
-        }))
+        self.authority()?.pending()
     }
     pub fn approve(
         &self,
@@ -209,206 +208,42 @@ impl PairingHost {
         verification: &str,
         permissions: DevicePermissions,
     ) -> Result<()> {
-        let mut state = self
-            .0
-            .lock()
-            .map_err(|_| anyhow::anyhow!("pairing state poisoned"))?;
-        expire(&mut state);
-        let candidate = state
-            .invitation
-            .as_ref()
-            .and_then(|invite| invite.candidate.as_ref())
-            .context("no pending pairing request")?;
-        ensure!(
-            candidate.0.identity == identity && candidate.0.verification == verification,
-            "pairing verification does not match"
-        );
-        ensure!(!candidate.1.is_closed(), "pairing requester disconnected");
-        ensure!(
-            state.devices.len() < MAX_DEVICES || state.devices.contains_key(identity),
-            "paired device limit reached"
-        );
-        let device = PairedDevice {
-            identity: identity.into(),
-            name: candidate.0.name.clone(),
-            permissions,
-        };
-        let mut devices = state.devices.clone();
-        devices.insert(identity.into(), device);
-        state
-            .store
-            .as_ref()
-            .context("pairing storage is unavailable")?
-            .save(&devices)?;
-        state.devices = devices;
-        state.connections.retain(|connection| {
-            if connection.remote_id().to_string() == identity {
-                connection.close(1u32.into(), b"device approval changed");
-                false
-            } else {
-                connection.close_reason().is_none()
-            }
-        });
-        if let Some(invitation) = state.invitation.take()
-            && let Some((_, answer)) = invitation.candidate
-        {
-            let _ = answer.send(true);
-        }
-        Ok(())
+        self.authority()?
+            .approve(identity.into(), verification.into(), permissions)
     }
     pub fn cancel(&self) -> Result<()> {
-        self.0
-            .lock()
-            .map_err(|_| anyhow::anyhow!("pairing state poisoned"))?
-            .invitation = None;
-        Ok(())
+        self.authority()?.cancel()
     }
     pub fn devices(&self) -> Result<Vec<PairedDevice>> {
-        Ok(self
-            .0
-            .lock()
-            .map_err(|_| anyhow::anyhow!("pairing state poisoned"))?
-            .devices
-            .values()
-            .cloned()
-            .collect())
+        self.authority()?.devices()
     }
     pub fn revoke(&self, identity: &str) -> Result<()> {
-        let mut state = self
-            .0
-            .lock()
-            .map_err(|_| anyhow::anyhow!("pairing state poisoned"))?;
-        let mut devices = state.devices.clone();
-        ensure!(devices.remove(identity).is_some(), "device is not paired");
-        state
-            .store
-            .as_ref()
-            .context("pairing storage is unavailable")?
-            .save(&devices)?;
-        state.devices = devices;
-        state.connections.retain(|connection| {
-            if connection.remote_id().to_string() == identity {
-                connection.close(1u32.into(), b"device revoked");
-                false
-            } else {
-                connection.close_reason().is_none()
-            }
-        });
-        Ok(())
+        self.authority()?.revoke(identity.into())
     }
-    /// Explicit local consent to exchange reports for sessions with this device.
     pub fn set_diagnostics(&self, identity: &str, enabled: bool) -> Result<()> {
-        let mut state = self
-            .0
-            .lock()
-            .map_err(|_| anyhow::anyhow!("pairing state poisoned"))?;
-        let mut devices = state.devices.clone();
-        devices
-            .get_mut(identity)
-            .context("device is not paired")?
-            .permissions
-            .diagnostics = enabled;
-        state
-            .store
-            .as_ref()
-            .context("pairing storage unavailable")?
-            .save(&devices)?;
-        state.devices = devices;
-        Ok(())
+        self.authority()?.set_diagnostics(identity.into(), enabled)
     }
     pub(crate) fn permits_diagnostics(&self, identity: EndpointId) -> bool {
-        self.0
-            .lock()
-            .ok()
-            .and_then(|state| {
-                state
-                    .devices
-                    .get(&identity.to_string())
-                    .map(|device| device.permissions.diagnostics)
-            })
-            .unwrap_or(false)
+        self.permissions(identity)
+            .is_some_and(|permissions| permissions.diagnostics)
     }
     fn permissions(&self, identity: EndpointId) -> Option<DevicePermissions> {
-        self.0
-            .lock()
+        self.authority()
             .ok()?
-            .devices
-            .get(&identity.to_string())
-            .map(|device| device.permissions)
+            .permissions(&authenticated(identity).ok()?)
     }
-    fn claim(
+    async fn admit(
         &self,
-        identity: EndpointId,
-        token: [u8; 32],
-        name: String,
-    ) -> Result<(PairingCandidate, oneshot::Receiver<bool>, Instant)> {
-        validate_name(&name)?;
-        let mut state = self
-            .0
-            .lock()
-            .map_err(|_| anyhow::anyhow!("pairing state poisoned"))?;
-        expire(&mut state);
-        let invite = state
-            .invitation
-            .as_mut()
-            .context("pairing invitation expired or absent")?;
-        ensure!(
-            invite.candidate.is_none(),
-            "pairing invitation already claimed"
-        );
-        let mismatch = invite
-            .token
-            .iter()
-            .zip(token)
-            .fold(0u8, |sum, (a, b)| sum | (a ^ b));
-        ensure!(mismatch == 0, "invalid pairing invitation");
-        let bytes: [u8; 3] = random()?;
-        let candidate = PairingCandidate {
-            identity: identity.to_string(),
-            name,
-            verification: bytes.iter().map(|b| format!("{b:02X}")).collect::<String>(),
-        };
-        let (answer, wait) = oneshot::channel();
-        invite.token.fill(0);
-        invite.candidate = Some((candidate.clone(), answer));
-        Ok((candidate, wait, invite.expires))
+        connection: &Connection,
+        access: AccessSession,
+    ) -> Result<DevicePermissions> {
+        self.authority()?
+            .admit(
+                authenticated(connection.remote_id())?,
+                access,
+                ConnectionLease(connection.weak_handle()),
+            )?
+            .wait()
+            .await?
     }
-    pub(crate) fn authorize(&self, connection: &Connection) -> Result<DevicePermissions> {
-        let mut state = self
-            .0
-            .lock()
-            .map_err(|_| anyhow::anyhow!("pairing state poisoned"))?;
-        let permissions = state
-            .devices
-            .get(&connection.remote_id().to_string())
-            .context("device is not paired")?
-            .permissions;
-        state.connections.retain(|c| c.close_reason().is_none());
-        ensure!(state.connections.len() < 8, "device session limit reached");
-        state.connections.push(connection.clone());
-        Ok(permissions)
-    }
-}
-
-fn expire(state: &mut State) {
-    if state
-        .invitation
-        .as_ref()
-        .is_some_and(|invite| Instant::now() >= invite.expires)
-    {
-        state.invitation = None;
-    }
-}
-fn random<const N: usize>() -> Result<[u8; N]> {
-    let mut bytes = [0; N];
-    getrandom::fill(&mut bytes)
-        .map_err(|error| anyhow::anyhow!("OS randomness unavailable: {error}"))?;
-    Ok(bytes)
-}
-fn validate_name(name: &str) -> Result<()> {
-    ensure!(
-        !name.is_empty() && name.len() <= 80 && !name.chars().any(char::is_control),
-        "device name must be 1..80 bytes without controls"
-    );
-    Ok(())
 }

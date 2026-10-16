@@ -175,6 +175,11 @@ cache limits, removal, revocation, expired tickets and malformed wire bounds.
 
 ## Current limits
 
+Enrollment and trust policy run on the shared authority worker. Existing identity
+keys, pairing links and `devices.json` records keep their format. Revocation
+retires live permits before saving; a save failure is reported explicitly and
+the same revoke command can retry persistence while access remains disabled.
+
 Session reports and explicit permission-scoped peer collection are described in
 [Session diagnostics](session-diagnostics.md). Diagnostics permission is separate
 from browsing/hoisting and defaults to disabled.

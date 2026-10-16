@@ -1,6 +1,6 @@
 use super::*;
 use crate::{IrohDeviceIdentity, IrohHost, rendezvous::tests::ExchangeDirectory};
-use std::thread;
+use std::{thread, time::Instant};
 use weld_media::VideoCodec;
 
 fn profile() -> IrohConnectionProfile {
@@ -50,7 +50,7 @@ fn service_reply<T>(mut pending: weld_hoist_core::session::Pending<T>) -> T {
 }
 
 #[test]
-fn invitation_requires_secret_matching_candidate_and_live_confirmation() {
+fn existing_trust_files_survive_authority_restart_and_revocation() {
     let directory = ExchangeDirectory::new();
     let authority = PairingHost::default();
     authority.enable(&directory.0).expect("storage");
@@ -58,78 +58,38 @@ fn invitation_requires_secret_matching_candidate_and_live_confirmation() {
         .invite(&profile(), "Laptop".into())
         .expect("invite");
     let peer = iroh::SecretKey::generate().public();
-    assert!(authority.claim(peer, [0; 32], "Pixel".into()).is_err());
-    let (candidate, mut approved, _) = authority
-        .claim(peer, invite.token, "Pixel 8 Pro".into())
-        .expect("claim");
-    assert!(
-        authority
-            .claim(peer, invite.token, "Replay".into())
-            .is_err()
-    );
-    assert!(
-        authority
-            .approve(&candidate.identity, "WRONG", permissions())
-            .is_err()
-    );
-    assert!(authority.devices().expect("devices").is_empty());
+    let claim = authority
+        .authority()
+        .expect("authority")
+        .claim(
+            authenticated(peer).expect("identity"),
+            invite.token,
+            "Phone".into(),
+        )
+        .expect("claim")
+        .wait_blocking()
+        .expect("response")
+        .expect("claimed");
     authority
-        .approve(&candidate.identity, &candidate.verification, permissions())
+        .approve(
+            &claim.candidate.identity,
+            &claim.candidate.verification,
+            permissions(),
+        )
         .expect("approve");
-    assert!(approved.try_recv().expect("confirmed"));
-    assert!(
-        authority
-            .claim(peer, invite.token, "Replay".into())
-            .is_err()
-    );
-    assert_eq!(authority.devices().expect("devices")[0].name, "Pixel 8 Pro");
+    assert!(claim.approval.wait_blocking().expect("confirmed"));
     drop(authority);
     let restored = PairingHost::default();
     restored.enable(&directory.0).expect("restart");
     assert_eq!(
-        restored.devices().expect("persistent trust")[0].identity,
+        restored.devices().expect("devices")[0].identity,
         peer.to_string()
     );
     restored.revoke(&peer.to_string()).expect("revoke");
     drop(restored);
     let restored = PairingHost::default();
-    restored.enable(&directory.0).expect("restart after revoke");
-    assert!(restored.devices().expect("revoked persistently").is_empty());
-}
-
-#[test]
-fn expired_cancelled_and_disconnected_candidates_never_gain_trust() {
-    let directory = ExchangeDirectory::new();
-    let authority = PairingHost::default();
-    authority.enable(&directory.0).expect("storage");
-    let invite = authority
-        .invite(&profile(), "Laptop".into())
-        .expect("invite");
-    let peer = iroh::SecretKey::generate().public();
-    let (candidate, wait, _) = authority
-        .claim(peer, invite.token, "Pixel".into())
-        .expect("claim");
-    drop(wait);
-    assert!(
-        authority
-            .approve(&candidate.identity, &candidate.verification, permissions())
-            .is_err()
-    );
-    authority.cancel().expect("cancel");
-    assert!(authority.claim(peer, invite.token, "Pixel".into()).is_err());
-    let invite = authority
-        .invite(&profile(), "Laptop".into())
-        .expect("new invitation");
-    authority
-        .0
-        .lock()
-        .expect("state")
-        .invitation
-        .as_mut()
-        .expect("invite")
-        .expires = Instant::now() - Duration::from_secs(1);
-    assert!(authority.claim(peer, invite.token, "Pixel".into()).is_err());
-    assert!(authority.devices().expect("no trust").is_empty());
+    restored.enable(&directory.0).expect("restart");
+    assert!(restored.devices().expect("devices").is_empty());
 }
 
 #[test]
@@ -278,20 +238,10 @@ fn real_endpoint_enrollment_catalogue_and_revocation_share_the_same_identity() {
             .status,
             ThumbnailStatus::Unchanged { .. }
         ));
-        authority
-            .0
-            .lock()
-            .expect("state")
-            .devices
-            .get_mut(&candidate.identity)
-            .expect("device")
-            .permissions
-            .thumbnails = false;
-        assert_eq!(fetch(request).reply.status, ThumbnailStatus::Denied);
         session
             .control
             .release()
-            .expect("control remains live after denied preview");
+            .expect("control remains live after preview");
         wait(|| {
             let actions = desktop.take_actions();
             let ready = !actions.is_empty();

@@ -9,6 +9,7 @@ anyhow.workspace = true
 async-channel = "2.5"
 async-io = "2.6"
 futures-lite.workspace = true
+getrandom = "0.3.4"
 postcard.workspace = true
 serde.workspace = true
 weld-access = { path = "../weld-access" }

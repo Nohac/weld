@@ -20,6 +20,7 @@ use weld_hoist_protocol::device::{ApplicationInfo, DevicePermissions};
 
 pub mod channel;
 pub mod device;
+pub mod pairing;
 pub mod services;
 pub mod thumbnail;
 
@@ -63,6 +64,12 @@ impl<T> Pending<T> {
     }
     pub async fn wait(self) -> Result<T> {
         self.0.recv().await.context("session operation cancelled")
+    }
+    /// Wait on a local administration or startup thread.
+    pub fn wait_blocking(self) -> Result<T> {
+        self.0
+            .recv_blocking()
+            .context("session operation cancelled")
     }
 }
 
