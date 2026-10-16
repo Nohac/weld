@@ -9,12 +9,54 @@ use tokio::{
 use weld_client::ClientSurfaceId;
 use weld_diagnostics::{Cause, Endpoint, Observation, Operation, Recorder};
 use weld_hoist_protocol::{
+    device::{DeviceReply as Reply, DeviceRequest as Request},
     service::{LANE_MARKER, ServiceRequest},
     thumbnail,
 };
 
 const WARNING: Duration = Duration::from_millis(5);
 const STALL: Duration = Duration::from_millis(25);
+
+#[test]
+fn cancelled_admission_retires_permit_before_session_id_is_published() {
+    let desktop = DesktopSessions::new(
+        IrohNotifier::new(|| Ok(())),
+        IrohNotifier::new(|| Ok(())),
+        VideoCodec::H264,
+    )
+    .expect("desktop");
+    let access = desktop.access.open("test".into()).expect("permit");
+    let joining = JoinedSession {
+        desktop: desktop.clone(),
+        id: None,
+        access: access.clone(),
+    };
+    let id = futures_lite::future::block_on(
+        desktop
+            .services
+            .join(access.clone(), DevicePermissions::default())
+            .expect("join")
+            .wait(),
+    )
+    .expect("reply")
+    .expect("joined");
+    drop(joining);
+    assert!(!access.is_authorized());
+    assert!(futures_lite::future::block_on(desktop.services.subscribe(id)).is_err());
+}
+
+async fn session_io<T>(
+    connection: &Connection,
+    warn_after: Duration,
+    operation: Operation,
+    recorder: Option<&Recorder>,
+    future: impl std::future::Future<Output = Result<T>>,
+) -> Result<T> {
+    tokio::select! {
+        result = weld_hoist_core::session::channel::retain_operation(warn_after, operation, recorder, future) => result,
+        reason = connection.closed() => Err(reason.into()),
+    }
+}
 
 #[tokio::test]
 async fn live_session_recovers_a_late_reply_and_owner_drop_cancels_the_next_wait() {
@@ -114,6 +156,7 @@ async fn live_session_recovers_a_late_reply_and_owner_drop_cancels_the_next_wait
     );
     send.write_all(&reply[2..]).await.expect("remaining reply");
     session
+        .control
         .release()
         .expect("explicit command after stalled reply");
     let _: Request = timeout(Duration::from_secs(2), read_record(&mut recv))

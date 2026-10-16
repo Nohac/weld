@@ -221,7 +221,7 @@ fn real_endpoint_enrollment_catalogue_and_revocation_share_the_same_identity() {
     desktop
         .publish(id, vec![application.clone()])
         .expect("catalogue");
-    wait(|| session.applications() == vec![application.clone()]);
+    wait(|| session.control.applications() == vec![application.clone()]);
     {
         use weld_hoist_core::session::thumbnail::{
             ThumbnailImage, ThumbnailRequest, ThumbnailStatus, ThumbnailTarget,
@@ -289,6 +289,7 @@ fn real_endpoint_enrollment_catalogue_and_revocation_share_the_same_identity() {
             .thumbnails = false;
         assert_eq!(fetch(request).reply.status, ThumbnailStatus::Denied);
         session
+            .control
             .release()
             .expect("control remains live after denied preview");
         wait(|| {
@@ -334,11 +335,12 @@ fn real_endpoint_enrollment_catalogue_and_revocation_share_the_same_identity() {
             .session
     );
     session
+        .control
         .collect_diagnostics(report.clone())
         .expect("request without permission");
     let mut response = None;
     wait(|| {
-        response = session.take_diagnostics();
+        response = session.control.take_diagnostics();
         response.is_some()
     });
     assert!(
@@ -358,10 +360,11 @@ fn real_endpoint_enrollment_catalogue_and_revocation_share_the_same_identity() {
         crate::CollectionStatus::Collected
     );
     session
+        .control
         .collect_diagnostics(report.clone())
         .expect("authorized collection");
     wait(|| {
-        response = session.take_diagnostics();
+        response = session.control.take_diagnostics();
         response.is_some()
     });
     let peer_report = response.expect("reply").expect("report");
@@ -392,7 +395,7 @@ fn real_endpoint_enrollment_catalogue_and_revocation_share_the_same_identity() {
         source.diagnostics().exchange(stranger, report).is_err(),
         "unrelated peer cannot access session"
     );
-    session.hoist(7).expect("request");
+    session.control.hoist(7).expect("request");
     wait(|| {
         for action in desktop.take_actions() {
             if let DeviceAction::Hoist {

@@ -393,11 +393,8 @@ fn stream(
     };
     let mut device = None;
     let peer = if paired {
-        let mut pending = host.begin_device_session(
-            profile.clone(),
-            preferences,
-            notifier.clone(),
-        )?;
+        let mut pending =
+            host.begin_device_session(profile.clone(), preferences, notifier.clone())?;
         loop {
             ensure!(
                 !shared.stopped.load(Ordering::Acquire) && !has_invitation(shared),
@@ -411,12 +408,8 @@ fn stream(
             thread::park_timeout(Duration::from_millis(100));
         }
     } else {
-        let mut pending = host.begin_connect_profile(
-            profile,
-            preferences,
-            notifier,
-            Duration::from_secs(10),
-        )?;
+        let mut pending =
+            host.begin_connect_profile(profile, preferences, notifier, Duration::from_secs(10))?;
         loop {
             if shared.stopped.load(Ordering::Acquire) || has_invitation(shared) {
                 return Ok(());
@@ -467,20 +460,20 @@ fn stream(
                 let result = shared
                     .reports
                     .for_peer(connection.0.identity().as_str())
-                    .and_then(|report| device.collect_diagnostics(report));
+                    .and_then(|report| device.control.collect_diagnostics(report));
                 if let Err(error) = result {
                     shared.reports.notice(error.to_string());
                 }
                 shared.request_redraw();
             }
-            if let Some(reply) = device.take_diagnostics() {
+            if let Some(reply) = device.control.take_diagnostics() {
                 match reply {
                     Some(report) => if let Err(error) = shared.reports.merge(report) { shared.reports.notice(error.to_string()); },
                     None => shared.reports.notice("Host denied collection, report expired, or collection was too frequent. Grant session diagnostics with weldctl devices diagnostics."),
                 }
                 shared.request_redraw();
             }
-            if let Some(error) = device.take_error() {
+            if let Some(error) = device.control.take_error() {
                 shared.message(error);
                 shared.clear();
                 shared.browser.store(true, Ordering::Release);
@@ -494,14 +487,14 @@ fn stream(
                 reset(&mut runtime);
             }
             if let Ok(mut catalogue) = shared.catalogue.lock() {
-                let next = device.applications();
+                let next = device.control.applications();
                 if *catalogue != next {
                     *catalogue = next;
                     shared.request_redraw();
                 }
             }
             if shared.release.swap(false, Ordering::AcqRel) {
-                device.release()?;
+                device.control.release()?;
                 selected = None;
                 configured = None;
                 initial = InitialPresentation::default();
@@ -516,7 +509,7 @@ fn stream(
             if let Some(application) = next
                 && requested != Some(application.window)
             {
-                device.hoist(application.window)?;
+                device.control.hoist(application.window)?;
                 requested = Some(application.window);
             }
         }

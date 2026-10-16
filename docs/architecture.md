@@ -200,6 +200,10 @@ Weld is a workspace of reusable layers and one standard distribution:
   authorization and payload validation over bounded packet lanes. Capture
   producers complete asynchronous tickets through `SessionService`. See
   [Thumbnail protocol](device-pairing.md#thumbnail-protocol).
+  The device control driver owns catalogue subscriptions, hoist/release dispatch,
+  diagnostic request pacing and delayed-operation handling. Receiver drivers
+  publish immutable catalogue snapshots and bounded completion notifications to
+  `DeviceClient`; a short read/write lock protects only snapshot replacement.
 - `weld-hoist-encoded` owns transport-neutral encoded commit scheduling,
   local backpressure, resize coalescing, codec worker contracts, and atomic
   decoded-frame publication. Its default dependency graph has no compositor or
@@ -234,8 +238,7 @@ Weld is a workspace of reusable layers and one standard distribution:
   not cross its registration boundary. Its default graph is compositor-free;
   optional native/VA-API registration uses the same portable peer machinery.
   Paired desktop connections supply an independent packet lane to core's shared
-  service driver. Enrollment, trust, diagnostics routing and main session
-  dispatch are being migrated under the
+  service driver. Enrollment, trust and diagnostics routing are being migrated under the
   [session/transport refactor](spec/remote-protocol.md#protocolsessiontransport-refactor--direction).
   Its opt-in ADB carrier routes bounded encrypted QUIC packets over loopback
   TCP tunnels without changing those peer streams. A private link manager owns
@@ -1339,8 +1342,9 @@ waits without holding the compositor or the serialized pairing/launch handler.
 interfaces. Schemars supplies field-level wire schemas; the official MCP SDK
 owns the stdio lifecycle in `weldctl mcp`. See
 [Native window inspection](native-window-control.md) for commands and validation.
-`weld-hoist-iroh::pairing` owns authenticated enrollment and an
-independent application catalog/control stream. Master translates approved
+`weld-hoist-iroh::pairing` owns authenticated enrollment and supplies the
+application control stream to `weld-hoist-core::session` drivers. Core owns
+catalogue subscriptions and command dispatch. Master translates approved
 requests into ordinary hoist/reclaim messages. The runtime-owned desktop relay
 forks cached source snapshots per connection, sharing upstream buffer leases and
 the existing encoded source pipeline. A separate coalesced policy wake services

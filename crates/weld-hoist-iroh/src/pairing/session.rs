@@ -3,14 +3,13 @@ use super::*;
 use crate::{
     IrohDestinationPeer, IrohSourcePeer,
     admission::PendingConnection,
-    channel::{LaneTask, PacketLane},
+    channel::{LaneTask, PacketLane, PacketReader, PacketWriter},
     framing::{read_record, write_record},
     host::HostLifetime,
     peer::{spawn_destination_peer, spawn_source_peer},
 };
 use iroh::Endpoint;
 use std::{collections::VecDeque, sync::Weak};
-use tokio::sync::mpsc;
 use weld_access::{AccessAuthority, AccessSession};
 use weld_hoist_core::session::services::{ServiceClient, ServiceSession};
 use weld_hoist_encoded::{EncodedDestinationTransport, EncodedSourceTransport};
@@ -18,10 +17,9 @@ use weld_hoist_protocol::service::LANE_MARKER;
 use weld_media::VideoCodec;
 
 pub use weld_hoist_core::session::{DeviceAction, SessionId};
-use weld_hoist_core::session::{Pending, SessionService, reply_channel};
+use weld_hoist_core::session::{SessionService, device::DeviceClient};
 use weld_hoist_protocol::device::{
-    ApplicationInfo, DeviceHello as Hello, DeviceReply as Reply, DeviceRequest as Request,
-    DeviceWelcome as Welcome,
+    ApplicationInfo, DeviceHello as Hello, DeviceWelcome as Welcome,
 };
 
 /// Transport-owned peer handoff plus a handle to shared application services.
@@ -89,9 +87,6 @@ impl DesktopSessions {
     pub fn publish(&self, session: SessionId, applications: Vec<ApplicationInfo>) -> Result<()> {
         self.services.publish(session, applications)
     }
-    async fn catalogue(&self, session: SessionId) -> Result<Vec<ApplicationInfo>> {
-        self.services.catalogue(session).await
-    }
     async fn join(
         &self,
         peer: IrohSourcePeer,
@@ -117,7 +112,11 @@ impl DesktopSessions {
             peer.disconnect();
             return Err(error);
         }
-        self.policy.notify()?;
+        if let Err(error) = self.policy.notify() {
+            self.leave(id, &access);
+            peer.disconnect();
+            return Err(error.into());
+        }
         Ok(id)
     }
     fn leave(&self, session: SessionId, access: &AccessSession) {
@@ -131,12 +130,16 @@ impl DesktopSessions {
 
 struct JoinedSession {
     desktop: DesktopSessions,
-    id: SessionId,
+    id: Option<SessionId>,
     access: AccessSession,
 }
 impl Drop for JoinedSession {
     fn drop(&mut self) {
-        self.desktop.leave(self.id, &self.access);
+        if let Some(id) = self.id {
+            self.desktop.leave(id, &self.access);
+        } else {
+            self.desktop.services.leave(&self.access);
+        }
     }
 }
 
@@ -151,6 +154,11 @@ pub(crate) async fn accept_session(
     let access = desktop
         .access
         .open(format!("device:{}", connection.remote_id()))?;
+    let mut joined = JoinedSession {
+        desktop: desktop.clone(),
+        id: None,
+        access: access.clone(),
+    };
     let (mut send, mut recv) =
         tokio::time::timeout(Duration::from_secs(5), connection.accept_bi()).await??;
     let hello: Hello =
@@ -191,92 +199,7 @@ pub(crate) async fn accept_session(
     );
     let recorder = peer.diagnostics();
     let id = desktop.join(peer, access.clone(), permissions).await?;
-    let _joined = JoinedSession {
-        desktop: desktop.clone(),
-        id,
-        access: access.clone(),
-    };
-    let control = async {
-        let mut last_collection = None;
-        let mut catalogue_updates: Option<weld_hoist_core::session::CatalogueSubscription> = None;
-        loop {
-            let reading = read_record::<_, Request>(&mut recv);
-            tokio::pin!(reading);
-            let request = loop {
-                let changed = async {
-                    match &catalogue_updates {
-                        Some(updates) => updates.next().await,
-                        None => std::future::pending().await,
-                    }
-                };
-                tokio::select! {
-                    request = &mut reading => break request?,
-                    snapshot = changed => {
-                        let snapshot = snapshot?;
-                        ensure!(access.is_authorized(), "desktop access revoked");
-                        session_io(&connection, Duration::from_secs(5),
-                            weld_diagnostics::Operation::SessionWrite, recorder.as_ref(),
-                            write_record(&mut send, &Reply::Catalogue(snapshot.applications.to_vec()))).await?;
-                    }
-                    reason = connection.closed() => return Err(reason.into()),
-                }
-            };
-            let reply = match request {
-                Request::Subscribe => {
-                    catalogue_updates = Some(desktop.services.subscribe(id).await?);
-                    Reply::Accepted(true)
-                }
-                Request::Diagnostics(report) => {
-                    let allowed = authority.permits_diagnostics(connection.remote_id())
-                        && last_collection
-                            .is_none_or(|last: Instant| last.elapsed() >= Duration::from_secs(1));
-                    last_collection = Some(Instant::now());
-                    let response = if allowed {
-                        host.upgrade().and_then(|host| {
-                            host.reports.exchange(connection.remote_id(), *report).ok()
-                        })
-                    } else {
-                        None
-                    };
-                    Reply::Diagnostics(response.map(Box::new))
-                }
-                Request::List => Reply::Catalogue(desktop.catalogue(id).await?),
-                Request::Hoist(window) => {
-                    ensure!(permissions.hoist, "hoisting not permitted");
-                    let (answer, wait) = reply_channel();
-                    desktop
-                        .services
-                        .action(DeviceAction::Hoist {
-                            session: id,
-                            window,
-                            answer,
-                        })
-                        .await?;
-                    Reply::Accepted(wait_for_action(&connection, wait).await?)
-                }
-                Request::Release => {
-                    let (answer, wait) = reply_channel();
-                    desktop
-                        .services
-                        .action(DeviceAction::Release {
-                            session: id,
-                            answer,
-                        })
-                        .await?;
-                    Reply::Accepted(wait_for_action(&connection, wait).await?)
-                }
-            };
-            ensure!(access.is_authorized(), "desktop access revoked");
-            session_io(
-                &connection,
-                Duration::from_secs(5),
-                weld_diagnostics::Operation::SessionWrite,
-                recorder.as_ref(),
-                write_record(&mut send, &reply),
-            )
-            .await?;
-        }
-    };
+    joined.id = Some(id);
     let service_context = ServiceSession {
         service: desktop.services.clone(),
         id,
@@ -284,6 +207,22 @@ pub(crate) async fn accept_session(
     };
     let service_authority = authority.clone();
     let peer_identity = connection.remote_id();
+    let control_context = ServiceSession {
+        service: desktop.services.clone(),
+        id,
+        access: access.clone(),
+    };
+    let control_authority = authority.clone();
+    let control = control_context.serve_control(
+        PacketWriter(send),
+        PacketReader(recv),
+        move || control_authority.permissions(peer_identity),
+        move |report| {
+            host.upgrade()
+                .and_then(|host| host.reports.exchange(peer_identity, report).ok())
+        },
+        recorder.as_ref(),
+    );
     let service_lane = service_context
         .serve(PacketLane::new(service_send, service_recv), move || {
             service_authority.permissions(peer_identity)
@@ -292,22 +231,15 @@ pub(crate) async fn accept_session(
     tokio::pin!(control);
     tokio::select! {
         result = &mut control => result,
+        reason = connection.closed() => Err(reason.into()),
         result = &mut service_lane => {
             if let Err(error) = result { tracing::debug!(%error, "service lane ended"); }
-            control.await
+            tokio::select! {
+                result = control => result,
+                reason = connection.closed() => Err(reason.into()),
+            }
         },
     }
-}
-
-async fn wait_for_action(connection: &Connection, answer: Pending<bool>) -> Result<bool> {
-    session_io(
-        connection,
-        Duration::from_secs(3),
-        weld_diagnostics::Operation::Control,
-        None,
-        answer.wait(),
-    )
-    .await
 }
 
 /// Receiver media peer plus an independent, bounded application-control channel.
@@ -315,43 +247,12 @@ async fn wait_for_action(connection: &Connection, answer: Pending<bool>) -> Resu
 pub struct DeviceSession {
     pub services: ServiceClient,
     _service_task: LaneTask,
-    diagnostic_reply: Arc<Mutex<Option<Option<weld_diagnostics::Report>>>>,
+    pub control: DeviceClient,
     pub peer: IrohDestinationPeer,
-    catalogue: Arc<Mutex<Vec<ApplicationInfo>>>,
-    commands: mpsc::Sender<Request>,
-    error: Arc<Mutex<Option<String>>>,
 }
 impl Drop for DeviceSession {
     fn drop(&mut self) {
         self.peer.disconnect();
-    }
-}
-impl DeviceSession {
-    /// Explicit collection also shares this endpoint's sanitized session evidence.
-    pub fn collect_diagnostics(&self, report: weld_diagnostics::Report) -> Result<()> {
-        report.validate().map_err(anyhow::Error::msg)?;
-        self.commands
-            .try_send(Request::Diagnostics(Box::new(report)))
-            .map_err(|_| anyhow::anyhow!("device diagnostic request queue unavailable"))
-    }
-    pub fn take_diagnostics(&self) -> Option<Option<weld_diagnostics::Report>> {
-        self.diagnostic_reply.lock().ok()?.take()
-    }
-    pub fn take_error(&self) -> Option<String> {
-        self.error.lock().ok().and_then(|mut error| error.take())
-    }
-    pub fn applications(&self) -> Vec<ApplicationInfo> {
-        self.catalogue.lock().map(|c| c.clone()).unwrap_or_default()
-    }
-    pub fn hoist(&self, window: u64) -> Result<()> {
-        self.commands
-            .try_send(Request::Hoist(window))
-            .map_err(|_| anyhow::anyhow!("device command queue unavailable"))
-    }
-    pub fn release(&self) -> Result<()> {
-        self.commands
-            .try_send(Request::Release)
-            .map_err(|_| anyhow::anyhow!("device command queue unavailable"))
     }
 }
 pub struct PendingDeviceSession {
@@ -437,7 +338,7 @@ pub(crate) async fn connect_session(
         );
         Ok::<_, anyhow::Error>((guard, send, recv, peer, services, service_task))
     };
-    let (mut guard, mut send, mut recv, peer, services, service_task) =
+    let (mut guard, send, recv, peer, services, service_task) =
         match tokio::time::timeout(Duration::from_secs(15), setup)
             .await
             .context("device connection timed out")
@@ -452,123 +353,26 @@ pub(crate) async fn connect_session(
         };
     guard.admitted_session();
     let recorder = peer.diagnostics();
-    let diagnostic_reply = Arc::new(Mutex::new(None));
-    let catalogue = Arc::new(Mutex::new(Vec::new()));
-    let error = Arc::new(Mutex::new(None));
-    let (commands, mut requests) = mpsc::channel(16);
+    let wake = notifier.clone();
+    let (control, driver) = DeviceClient::new(move || {
+        let _ = wake.notify();
+    });
     if result
         .send(Ok(DeviceSession {
             services,
             _service_task: service_task,
-            diagnostic_reply: diagnostic_reply.clone(),
+            control,
             peer,
-            catalogue: catalogue.clone(),
-            commands,
-            error: error.clone(),
         }))
         .is_err()
     {
         return Ok(());
     }
     notifier.notify()?;
-    let receiving = async {
-        loop {
-            let reply: Reply = match read_record(&mut recv).await {
-                Ok(reply) => reply,
-                Err(error) => break Err::<(), _>(error),
-            };
-            match reply {
-                Reply::Diagnostics(report) => {
-                    if let Some(report) = &report {
-                        report.validate().map_err(anyhow::Error::msg)?;
-                    }
-                    if let Ok(mut slot) = diagnostic_reply.lock() {
-                        *slot = Some(report.map(|report| *report));
-                    }
-                }
-                Reply::Catalogue(applications) => {
-                    ensure!(applications.len() <= 256, "catalogue exceeds bound");
-                    *catalogue
-                        .lock()
-                        .map_err(|_| anyhow::anyhow!("catalogue unavailable"))? = applications;
-                }
-                Reply::Accepted(false) => {
-                    if let Ok(mut error) = error.lock() {
-                        *error =
-                            Some("The application is no longer available for this request".into());
-                    }
-                }
-                Reply::Accepted(true) => {}
-            }
-
-            notifier.notify()?;
-        }
-    };
-    let sending = async {
-        session_io(
-            &guard.connection,
-            Duration::from_secs(5),
-            weld_diagnostics::Operation::SessionWrite,
-            recorder.as_ref(),
-            write_record(&mut send, &Request::Subscribe),
-        )
-        .await?;
-        while let Some(request) = requests.recv().await {
-            session_io(
-                &guard.connection,
-                Duration::from_secs(5),
-                weld_diagnostics::Operation::SessionWrite,
-                recorder.as_ref(),
-                write_record(&mut send, &request),
-            )
-            .await?;
-        }
-        Ok::<(), anyhow::Error>(())
-    };
     tokio::select! {
-        result = receiving => result,
-        result = sending => result,
+        result = driver.run(PacketWriter(send), PacketReader(recv), recorder.as_ref()) => result,
         _ = guard.connection.closed() => Ok(()),
     }
-}
-
-/// Keep a live session's partially transferred record across slow exchanges.
-/// The warning timer leaves the pinned operation intact; QUIC closure or an I/O
-/// error ends the wait. Requests stay ordered and execute once after recovery.
-async fn session_io<T>(
-    connection: &Connection,
-    warn_after: Duration,
-    operation: weld_diagnostics::Operation,
-    recorder: Option<&weld_diagnostics::Recorder>,
-    future: impl std::future::Future<Output = Result<T>>,
-) -> Result<T> {
-    let started = tokio::time::Instant::now();
-    tokio::pin!(future);
-    let result = tokio::select! {
-        result = &mut future => result,
-        reason = connection.closed() => return Err(reason.into()),
-        _ = tokio::time::sleep(warn_after) => {
-            tracing::warn!(?operation, "device session control exchange delayed; retaining pending operation");
-            let result = tokio::select! {
-                result = &mut future => result,
-                reason = connection.closed() => return Err(reason.into()),
-            };
-            if result.is_ok() {
-                tracing::info!(?operation, elapsed_ms = started.elapsed().as_millis(), "device session control exchange resumed");
-            }
-            result
-        }
-    };
-    if result.is_err()
-        && connection.close_reason().is_none()
-        && let Some(recorder) = recorder
-    {
-        recorder.record(weld_diagnostics::Observation::Failure {
-            operation,
-            cause: weld_diagnostics::Cause::ProtocolOrIo,
-        });
-    }
-    result.with_context(|| format!("device session {operation:?} failed"))
 }
 
 #[cfg(test)]

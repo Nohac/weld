@@ -1,12 +1,12 @@
 //! Shared service-lane dispatch, authorization and request budgets.
 
+use super::channel::{PacketReceive, PacketSend, receive_record, send_record};
 use super::thumbnail::{ThumbnailImage, ThumbnailRequest, ThumbnailResponse, ThumbnailStatus};
 use super::{Pending, Reply, SessionId, SessionService, reply_channel};
-use anyhow::{Context, Result, ensure};
+use anyhow::{Result, ensure};
 use async_channel::{Receiver, Sender};
 use async_io::Timer;
 use futures_lite::future::race;
-use serde::{Serialize, de::DeserializeOwned};
 use std::{future::Future, time::Duration};
 use weld_access::AccessSession;
 use weld_hoist_protocol::{
@@ -15,16 +15,13 @@ use weld_hoist_protocol::{
     thumbnail::MAX_IMAGE_BYTES,
 };
 
-const HEADER_BYTES: usize = 192 * 1024;
 const EXCHANGE_DEADLINE: Duration = Duration::from_secs(10);
 const REQUEST_INTERVAL: Duration = Duration::from_millis(250);
 
 /// Ordered, bounded packets on one independent logical lane. Dropping a lane
 /// cancels its incomplete transfer while preserving other lanes on the connection.
-pub trait ServiceTransport: Send {
-    fn send(&mut self, packet: &[u8]) -> impl Future<Output = Result<()>> + Send;
-    fn receive(&mut self, maximum: usize) -> impl Future<Output = Result<Vec<u8>>> + Send;
-}
+pub trait ServiceTransport: PacketSend + PacketReceive {}
+impl<T: PacketSend + PacketReceive> ServiceTransport for T {}
 
 pub struct ServiceSession {
     pub service: SessionService,
@@ -139,14 +136,6 @@ async fn bounded_exchange<T>(exchange: impl Future<Output = Result<T>>) -> Resul
         anyhow::bail!("service exchange timed out")
     })
     .await
-}
-async fn send_record(lane: &mut impl ServiceTransport, value: &impl Serialize) -> Result<()> {
-    let bytes = postcard::to_allocvec(value)?;
-    ensure!(bytes.len() <= HEADER_BYTES, "service header exceeds bound");
-    lane.send(&bytes).await
-}
-async fn receive_record<T: DeserializeOwned>(lane: &mut impl ServiceTransport) -> Result<T> {
-    postcard::from_bytes(&lane.receive(HEADER_BYTES).await?).context("invalid service record")
 }
 async fn write_thumbnail(
     lane: &mut impl ServiceTransport,

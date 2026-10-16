@@ -330,11 +330,11 @@ fn poll(
             ..
         } => {
             anyhow::ensure!(device.peer.is_available(), "host disconnected");
-            if let Some(error) = device.take_error() {
+            if let Some(error) = device.control.take_error() {
                 anyhow::bail!("{error}");
             }
             view.connected = Some(identity.clone());
-            view.applications = device.applications();
+            view.applications = device.control.applications();
             receiver.poll()?;
             view.selected = receiver
                 .requested
@@ -364,11 +364,12 @@ fn stream_command(
             window,
         } if *identity == target => {
             let application = device
+                .control
                 .applications()
                 .into_iter()
                 .find(|app| app.window == window && (app.available || app.hoisted_here))
                 .context("application is no longer available")?;
-            device.hoist(window)?;
+            device.control.hoist(window)?;
             receiver.select(Some(application));
             view.selected = Some(window);
         }
@@ -381,7 +382,7 @@ fn stream_command(
                 .as_ref()
                 .is_some_and(|app| app.window == window) =>
         {
-            device.release()?;
+            device.control.release()?;
             receiver.select(None);
             view.selected = None;
         }

@@ -3973,6 +3973,7 @@ dependencies = [
  "tracing",
  "weld-access",
  "weld-client",
+ "weld-diagnostics",
  "weld-hoist-protocol",
 ]
 

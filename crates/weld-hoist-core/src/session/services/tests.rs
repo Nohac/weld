@@ -1,4 +1,5 @@
 use super::*;
+use anyhow::Context;
 use futures_lite::future::block_on;
 use std::collections::VecDeque;
 use weld_client::{ClientId, ClientSourceId, ClientSurfaceId};
@@ -8,11 +9,13 @@ use weld_hoist_protocol::thumbnail::{
 
 #[derive(Default)]
 struct MemoryLane(VecDeque<Vec<u8>>);
-impl ServiceTransport for MemoryLane {
+impl PacketSend for MemoryLane {
     async fn send(&mut self, packet: &[u8]) -> Result<()> {
         self.0.push_back(packet.to_vec());
         Ok(())
     }
+}
+impl PacketReceive for MemoryLane {
     async fn receive(&mut self, maximum: usize) -> Result<Vec<u8>> {
         let packet = self.0.pop_front().context("lane empty")?;
         ensure!(packet.len() <= maximum, "packet too large");

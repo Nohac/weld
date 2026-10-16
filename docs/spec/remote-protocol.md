@@ -205,9 +205,11 @@ Iroh and Unix consume them. The source service owner now allocates session IDs,
 handles bounded events, publishes coalesced catalogue changes and shares thumbnail
 capture/cache policy. Thumbnail service dispatch, authorization checks, deadlines
 and request pacing also moved to core; Iroh supplies a generic packet lane.
-The real endpoint tests cover these paths. Destination catalogue state, main
-device dispatch, trust/diagnostics policy and mixed-binding integration remain
-in progress. Communicating development peers require rebuilding together for
+The real endpoint tests cover these paths. Source and receiver device control
+drivers now also live in core, including catalogue publication, command dispatch,
+diagnostic request pacing and retention of delayed partial operations. Connect
+and Mobile use the shared `DeviceClient` handle. Trust/diagnostics archive policy
+and mixed-binding integration remain in progress. Communicating development peers require rebuilding together for
 the new service envelope and catalogue subscription.
 
 1. **Extract the shared protocol vocabulary.** Inventory current wire records,
@@ -292,6 +294,14 @@ Design-review baseline: 5/10. Four checklist failures drive this plan: mixed
 module responsibilities, leaked service decisions, coupled implementation changes
 and unclear public boundaries. Shared owners, typed effects and cross-binding
 behavior tests are the acceptance evidence for correcting those failures.
+
+Current design review: 6/10. Source/receiver service decisions have shared owners
+and packet-only driver interfaces. Remaining failures are mixed trust/archive
+responsibilities, leaked relay-assembly decisions and coupled binding changes;
+milestones 3–4 move those owners and validate actual concurrent bindings.
+
+RPC framework evaluation is deferred until these ownership changes land.
+Postcard remains the encoding for the current ordered request/reply protocol.
 
 ## Session handshake — Direction
 

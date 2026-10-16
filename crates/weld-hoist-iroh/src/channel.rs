@@ -2,37 +2,58 @@
 use anyhow::{Result, ensure};
 use iroh::endpoint::{RecvStream, SendStream};
 use tokio::task::JoinHandle;
-use weld_hoist_core::session::services::ServiceTransport;
+use weld_hoist_core::session::channel::{PacketReceive, PacketSend};
 
 pub(crate) struct PacketLane {
-    send: SendStream,
-    recv: RecvStream,
+    send: PacketWriter,
+    recv: PacketReader,
 }
 impl PacketLane {
     pub fn new(send: SendStream, recv: RecvStream) -> Self {
-        Self { send, recv }
+        Self {
+            send: PacketWriter(send),
+            recv: PacketReader(recv),
+        }
     }
 }
-impl Drop for PacketLane {
+pub(crate) struct PacketWriter(pub SendStream);
+pub(crate) struct PacketReader(pub RecvStream);
+impl Drop for PacketWriter {
     fn drop(&mut self) {
-        let _ = self.send.reset(1_u32.into());
-        let _ = self.recv.stop(1_u32.into());
+        let _ = self.0.reset(1_u32.into());
     }
 }
-impl ServiceTransport for PacketLane {
+impl Drop for PacketReader {
+    fn drop(&mut self) {
+        let _ = self.0.stop(1_u32.into());
+    }
+}
+impl PacketSend for PacketLane {
+    async fn send(&mut self, packet: &[u8]) -> Result<()> {
+        self.send.send(packet).await
+    }
+}
+impl PacketReceive for PacketLane {
+    async fn receive(&mut self, maximum: usize) -> Result<Vec<u8>> {
+        self.recv.receive(maximum).await
+    }
+}
+impl PacketSend for PacketWriter {
     async fn send(&mut self, packet: &[u8]) -> Result<()> {
         let length = u32::try_from(packet.len())?;
-        self.send.write_all(&length.to_le_bytes()).await?;
-        self.send.write_all(packet).await?;
+        self.0.write_all(&length.to_le_bytes()).await?;
+        self.0.write_all(packet).await?;
         Ok(())
     }
+}
+impl PacketReceive for PacketReader {
     async fn receive(&mut self, maximum: usize) -> Result<Vec<u8>> {
         let mut header = [0; 4];
-        self.recv.read_exact(&mut header).await?;
+        self.0.read_exact(&mut header).await?;
         let length = usize::try_from(u32::from_le_bytes(header))?;
         ensure!(length <= maximum, "packet exceeds lane bound");
         let mut packet = vec![0; length];
-        self.recv.read_exact(&mut packet).await?;
+        self.0.read_exact(&mut packet).await?;
         Ok(packet)
     }
 }
