@@ -10,7 +10,7 @@ use tokio::{
     sync::mpsc,
 };
 use weld_client::SurfaceStreamMode;
-use weld_hoist_core::{HoistPortError, HoistPortResult};
+use weld_hoist_core::{HoistPortError, HoistPortResult, input::InputOutbox};
 use weld_hoist_encoded::{
     EncodedDestinationTransport, EncodedSourceTransport, ReceiveBudget, SendStatus,
     SourceTransportPacket, TransportSnapshot,
@@ -24,7 +24,6 @@ use crate::{
     framing::{read_media, read_record_buffered, write_record_buffered},
     host::HostLifetime,
     inbox::IncomingQueue,
-    input_outbox::InputOutbox,
     media_queue::{MediaSender, QueuedMedia, write_media_queue},
 };
 
@@ -563,5 +562,54 @@ mod tests {
             inbox.drain().expect("last record")[0].session,
             HoistSessionId::new(QUEUE_CAPACITY as u64)
         );
+    }
+    use weld_client::{
+        ClientId, ClientInputTarget, ClientSourceId, ClientSurfaceId, InputEventKind,
+        InputPosition, SurfaceLayerId, WireClientInputEvent,
+    };
+    fn motion(time: u32) -> DestinationEnvelope {
+        DestinationEnvelope {
+            session: HoistSessionId::new(1),
+            message: DestinationMessage::Input(WireClientInputEvent {
+                target: ClientInputTarget::Pointer {
+                    surface: ClientSurfaceId::new(ClientId::new(ClientSourceId::new(0), 1), 1),
+                    layer: SurfaceLayerId::new(0),
+                },
+                event: InputEventKind::PointerMotion {
+                    relative: None,
+                    position: InputPosition::new(f64::from(time), 0.0),
+                },
+                time,
+            }),
+        }
+    }
+
+    #[tokio::test]
+    async fn blocked_writer_does_not_hide_backlog_from_coalescing() {
+        let queue = InputOutbox::default();
+        let (mut writer, mut reader) = tokio::io::duplex(4);
+        queue.push(motion(1)).expect("first");
+        let mut writing = Box::pin(crate::peer::write_destination_control(&queue, &mut writer));
+        assert!(poll_once(writing.as_mut()).await.is_none());
+        for time in 2..4096 {
+            queue.push(motion(time)).expect("backlog");
+        }
+        let (result, received) = tokio::join!(writing, async {
+            let first: DestinationEnvelope = crate::framing::read_record(&mut reader)
+                .await
+                .expect("first wire record");
+            let last: DestinationEnvelope = crate::framing::read_record(&mut reader)
+                .await
+                .expect("last wire record");
+            queue.close();
+            [first, last]
+        });
+        assert!(result.is_err());
+        for (packet, time) in received.into_iter().zip([1, 4095]) {
+            let DestinationMessage::Input(input) = packet.message else {
+                panic!("input")
+            };
+            assert_eq!(input.time, time);
+        }
     }
 }

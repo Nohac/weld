@@ -11,7 +11,6 @@ mod framing;
 mod host;
 mod inbox;
 mod incoming;
-mod input_outbox;
 mod media_queue;
 #[cfg(feature = "vaapi")]
 mod native;

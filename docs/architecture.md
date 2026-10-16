@@ -211,6 +211,9 @@ Weld is a workspace of reusable layers and one standard distribution:
   and closes admitted connections before saving, with explicit retry after a
   persistence failure. Listener adapters supply authenticated identity,
   connection controls and private storage.
+  `input::InputOutbox` owns bounded input coalescing, discrete-event barriers and
+  queue observations. Async writers consume it through a portable wake channel;
+  the queue lock covers admission/dequeue and is released before transport I/O.
 - `weld-hoist-encoded` owns transport-neutral encoded commit scheduling,
   local backpressure, resize coalescing, codec worker contracts, and atomic
   decoded-frame publication. Its default dependency graph has no compositor or

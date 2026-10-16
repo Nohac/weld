@@ -2,6 +2,7 @@
 
 pub mod access;
 pub mod gamepad;
+pub mod input;
 mod loopback;
 mod relay;
 pub mod session;

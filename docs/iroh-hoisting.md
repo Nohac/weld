@@ -253,7 +253,7 @@ not share those permits. Draining never waits for decode completion.
 Opposite-direction stream work remains independently polled. Host notifications
 remain level-triggered eventfd writes for every admitted record.
 
-The destination's outgoing control queue retains at most 256 records plus the
+The shared `weld-hoist-core::input::InputOutbox` retains at most 256 records plus the
 record currently being written. Adjacent absolute pointer motions for the same
 session and exact layer target retain only the latest position and timestamp.
 Keys, buttons, scroll, gestures, pointer leave, acknowledgements and all other
@@ -273,7 +273,7 @@ and the longest **completed or cancelled** admission wait, at most once per
 second when the host drains and pressure changed or readers remain parked.
 That completed-wait maximum does not measure an ongoing wait.
 
-`Iroh outgoing input summary` reports cumulative counters per destination
+`Hoist outgoing input summary` reports cumulative counters per destination
 outbox, at most once per second on successful writes:
 
 - Received records by kind: input, request, cursor acknowledgement, buffer

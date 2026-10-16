@@ -113,9 +113,9 @@ hoist-family IDs and diagnostic correlation IDs distinct.
 - `desktop.rs`, `adapter.rs`, `native.rs` and `pending_source.rs` assemble relays
   and codecs inside the Iroh crate. Move reusable assembly to shared/native
   integration owners, leaving carrier setup in the binding.
-- `input_outbox.rs` implements semantic motion/touch/gamepad coalescing and
-  ordering barriers. Share this policy while retaining carrier-specific writer
-  wakeups and write-completion measurements.
+- `weld-hoist-core::input::InputOutbox` now owns semantic motion/touch/gamepad
+  coalescing and ordering barriers. Iroh supplies writer completion measurements;
+  the shared queue uses a bounded, runtime-independent wake signal.
 - Audit Iroh admission and Unix `bootstrap.rs`, `source.rs`, `destination.rs`
   and `encoded_transport.rs` together. Common negotiation and lifecycle policy
   belongs in shared sessions; socket/descriptor mechanics belong in the binding.
@@ -216,8 +216,9 @@ diagnostic request pacing and retention of delayed partial operations. Connect
 and Mobile use the shared `DeviceClient` handle. Enrollment, confirmation expiry,
 trust grants and revocation now run in a shared authority worker. Its storage
 adapter preserves existing trust files, and listeners supply authenticated,
-namespace-scoped identity and connection cleanup handles. Diagnostic archive
-policy and input/relay assembly remain in progress. Communicating development peers require rebuilding together for
+namespace-scoped identity and connection cleanup handles. Semantic input queuing
+also has a shared owner. Diagnostic archive policy and relay assembly remain
+in progress. Communicating development peers require rebuilding together for
 the new service envelope and catalogue subscription.
 
 1. **Extract the shared protocol vocabulary.** Inventory current wire records,
