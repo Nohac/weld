@@ -3,8 +3,7 @@
 mod presentation;
 pub(crate) mod retained;
 pub use presentation::PresentationProbe;
-use presentation::install_presentation_probe;
-pub(crate) use presentation::render_probe;
+use presentation::{install_presentation_probe, render_probe};
 
 use std::{collections::VecDeque, time::Duration, time::Instant};
 
@@ -293,12 +292,9 @@ pub fn rendering_shell_with_outputs(
         ),
         importer: Box::new(weld_core::server::WaylandClientImporter),
     };
-    Ok((
-        AppShell::new(app, context, vec![importer])?,
-        adapter_info,
-        device,
-        queue,
-    ))
+    let mut shell = AppShell::new(app, context, vec![importer])?;
+    shell.benchmark_presentation = Some(render_probe);
+    Ok((shell, adapter_info, device, queue))
 }
 
 fn headless_render_context(outputs: Vec<OutputConfiguration>) -> Result<RenderContext> {
@@ -366,7 +362,11 @@ pub fn shell_for_host_with_probe(
     if let Some(probe) = probe {
         install_presentation_probe(&mut app, &context, probe)?;
     }
-    AppShell::new(app, context, importers)
+    let mut shell = AppShell::new(app, context, importers)?;
+    if probe.is_some() {
+        shell.benchmark_presentation = Some(render_probe);
+    }
+    Ok(shell)
 }
 
 struct HeadlessRenderPrerequisitesPlugin;

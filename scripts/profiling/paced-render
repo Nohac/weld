@@ -115,7 +115,7 @@ def main():
         flags = shlex.split(subprocess.check_output(["pkg-config", "--cflags", "--libs", "wayland-client", "wayland-egl", "egl", "glesv2"], text=True))
         subprocess.run(["cc", "-O3", "-Wall", "-Wextra", "-Werror", "-I", str(build), "scripts/profiling/egl-producer.c", str(build / "xdg-shell-protocol.c"), str(build / "xdg-decoration-protocol.c"), "-o", str(producer), *flags], check=True)
         executable = None
-        with subprocess.Popen(["cargo", "bench", "--no-run", "--profile", "release", "--bench", "paced_render", "--features", "test-support", "--locked", "-j", str(args.jobs), "--message-format=json"], stdout=subprocess.PIPE, text=True) as cargo:
+        with subprocess.Popen(["cargo", "bench", "--no-run", "--profile", "release", "--bench", "paced_render", "--locked", "-j", str(args.jobs), "--message-format=json"], stdout=subprocess.PIPE, text=True) as cargo:
             for line in cargo.stdout:
                 event = json.loads(line)
                 if event.get("reason") == "compiler-artifact" and event.get("target", {}).get("name") == "paced_render":

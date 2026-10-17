@@ -311,7 +311,7 @@ The launcher must:
   files.
 - Enter the receiver namespace and drop privileges before executing Weld with
   its existing user runtime directory, display socket, and GPU access. Preserve
-  the debug build's dynamic-library environment. Test those accesses explicitly.
+  the native graphics/media library environment. Test those accesses explicitly.
 - Use separate source/destination launches. The existing CLI ingredients are
   source `--backend nested --hoist-iroh-listen <ticket-path> --hoist-codec av1`,
   destination `--backend nested --hoist-iroh-connect <ticket-path>`, distinct

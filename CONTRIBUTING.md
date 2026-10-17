@@ -54,28 +54,19 @@ check first, then widen as the change warrants:
 
 ```text
 cargo fmt --check
-cargo check --workspace
-cargo test <test-name>
-cargo clippy --workspace --all-targets --all-features -- -D warnings
+scripts/check-desktop-build-graph
+cargo check-desktop
+cargo test-desktop <test-name>
+cargo clippy-desktop -- -D warnings
 ```
 
-Debug builds apply light optimization to Weld and full optimization to
-dependencies, following Bevy's recommended development profile. They also link
-Bevy through the published `bevy_dylib` development helper so iterative links
-stay short. The `profiling-tracy` feature is the exception: it links Bevy into
-the executable so the native Tracy client is not split across a dynamic-library
-boundary. Run debug executables through Cargo, which supplies the runtime search
-path for `libbevy_dylib` and Rust's shared library. Invoking `target/debug/weldwm`
-directly requires an equivalent `LD_LIBRARY_PATH`.
-
-A standalone library build such as `cargo build -p weld-app` has no final
-executable in which Cargo can use `bevy_dylib`. It therefore builds a separate
-static-compatible dependency graph instead of reusing the distribution's
-dynamic graph. This is a Cargo linkage boundary, not a Bevy feature mismatch.
-
-Unit-test binaries remain statically linked. Force-linking `bevy_dylib` from a
-test target makes Cargo rebuild the dependency graph in `prefer-dynamic` mode,
-which is slower and substantially increases `target/` size.
+Desktop executables and tests link Rust code statically and share the standard
+dependency graph. Debug builds use optimization level 1 and full debug symbols
+for workspace code, and optimization level 3 with debug symbols disabled for
+third-party dependencies. Tests inherit these development settings. The `perf`
+profile retains optimized code and full dependency symbols for profiling.
+Run binaries in the shared development shell so native graphics and media
+libraries remain available.
 
 All workspace crates that use Bevy inherit one exact version and feature set
 from the root workspace dependency. Keep that set centralized: crate-local
@@ -86,12 +77,31 @@ Include `-p weldwm` when selecting desktop leaf-crate tests, for example
 `cargo test -p weldwm -p weld-input --test bindings`. The full application also
 unifies features through transitive dependencies such as Leafwing. Keeping that
 package selected preserves the application feature graph while running the
-requested test target.
+requested test target. Apply the same package selection to checks and example
+builds. Build a leaf example with `cargo build -p weldwm -p weld-core --example NAME`,
+then execute `target/debug/examples/NAME` in the development shell.
 
-Release executables do not reference the development dylib and remain
-standalone. Cargo still builds an unused `libbevy_dylib` artifact because
-dependencies cannot vary by profile; do not make the helper optional, since
-that would require a feature flag for ordinary `cargo run`.
+The standard distribution enables `test-support` in its default feature set so
+ordinary builds, tests and benchmarks compile the same library variants.
+Benchmark presentation is installed explicitly by fixture constructors; ordinary
+application construction leaves that callback unset. Select tests by package,
+target and name while retaining these defaults. Routine desktop work must keep
+the same features: avoid `--all-features`, `--no-default-features`, and ad-hoc
+feature additions. `test-desktop`, `check-desktop` and `clippy-desktop` select the
+desktop workspace together and exclude `weld-media-android`, whose media feature
+set belongs to the Android assembly.
+
+`scripts/check-desktop-build-graph` compares shared resolved dependency features
+for ordinary builds, focused tests/examples and the desktop aliases using Cargo
+tree. It requires cached dependencies and performs no compilation. Run it after
+manifest or workflow changes. Test harnesses and `cfg(test)` still produce their
+own binaries; debug, release and profiling profiles keep separate artifacts.
+
+Use the same development environment and target directory across ordinary runs
+and tests. Leave compiler flags in `.cargo/config.toml`; avoid one-off `RUSTFLAGS`,
+profile overrides or `CARGO_TARGET_DIR` changes for routine desktop work.
+Explicit Tracy/perf investigations and Android/client assemblies retain their
+documented feature, compiler and target settings as separate build variants.
 
 Cargo uses Clang and LLD for Linux targets. The shared Rust shell already
 provides both tools, so run builds from that environment rather than depending

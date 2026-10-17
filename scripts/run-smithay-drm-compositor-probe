@@ -13,7 +13,8 @@ probe_log="${WELD_SMITHAY_DRM_PROBE_LOG:-${repository_root}/target/validation/sm
 
 if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
     cd -- "${repository_root}"
-    exec cargo run -p weld-core --example smithay_drm_compositor_probe -- --help
+    cargo build --locked -p weldwm -p weld-core --example smithay_drm_compositor_probe -j8
+    exec target/debug/examples/smithay_drm_compositor_probe --help
 fi
 
 [[ -t 0 && -t 1 ]] || fail "this probe must run interactively from a real TTY"
@@ -43,8 +44,9 @@ if ! rg -q 'Insert instance layer.*VK_LAYER_KHRONOS_validation|VK_LAYER_KHRONOS_
 fi
 
 echo "Writing Smithay DRM compositor probe output to ${probe_log}" >&2
+cargo build --locked -p weldwm -p weld-core --example smithay_drm_compositor_probe -j8
 set +e
-cargo run -p weld-core --example smithay_drm_compositor_probe -- "$@" 2>&1 | tee "${probe_log}"
+target/debug/examples/smithay_drm_compositor_probe "$@" 2>&1 | tee "${probe_log}"
 probe_status=${PIPESTATUS[0]}
 set -e
 

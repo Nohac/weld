@@ -45,12 +45,12 @@ former nested-only service zones and match the `--filter weld_` example above.
 
 ## Headless benchmarks
 
-These `test-support`-gated benchmarks isolate application and render work from
-a native backend:
+The desktop default feature set includes these benchmark entrypoints. Explicit
+fixture construction selects their application and render workloads:
 
 ```text
-cargo bench -p weld-app --features test-support --bench input_pipeline
-cargo bench -p weldwm --features test-support --bench shell_main
+cargo bench -p weldwm -p weld-app --bench input_pipeline
+cargo bench -p weldwm --bench shell_main
 scripts/profiling/render-bench
 ```
 

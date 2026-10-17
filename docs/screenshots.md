@@ -62,7 +62,7 @@ Run from the normal Rust development environment on an existing desktop:
 
 ```sh
 scripts/check-screenshot-capture
-cargo test -p weldwm -p weld-core --features weld-core/test-support --lib \
+cargo test -p weldwm -p weld-core --lib \
   async_capture_keeps_each_snapshot -- --ignored
 ```
 

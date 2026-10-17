@@ -59,4 +59,4 @@ cd "${repository_root}"
 
 export WELD_RENDER_BENCH_FRAMES="${frames}"
 export WELD_RENDER_BENCH_WARMUP="${warmup}"
-exec cargo bench -p weldwm --features test-support --bench shell_render
+exec cargo bench -p weldwm --locked --bench shell_render

@@ -7,3 +7,8 @@ rustflags = ["-C", "link-arg=-fuse-ld=lld"]
 [target.aarch64-unknown-linux-gnu]
 linker = "clang"
 rustflags = ["-C", "link-arg=-fuse-ld=lld"]
+
+[alias]
+test-desktop = ["test", "--workspace", "--exclude", "weld-media-android"]
+check-desktop = ["check", "--workspace", "--exclude", "weld-media-android", "--all-targets"]
+clippy-desktop = ["clippy", "--workspace", "--exclude", "weld-media-android", "--all-targets"]

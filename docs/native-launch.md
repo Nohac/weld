@@ -42,8 +42,8 @@ scripts/check-control-launch
 scripts/check-control-launch --nested --xwayland
 ```
 
-`--no-build` reuses existing binaries and probe examples; Cargo still supplies
-the host's debug dynamic-library environment. The headless test forces SHM-only
+`--no-build` reuses existing binaries and probe examples. Run in the shared
+development shell for native graphics and media libraries. The headless test forces SHM-only
 hosting and checks native configure, releases and dormant callback behavior.
 The nested test checks Foot admission, and `--xwayland` additionally launches
 the X11 probe through the same RPC. Both check argument/cwd preservation, missing

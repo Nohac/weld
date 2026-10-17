@@ -43,9 +43,9 @@ def main():
     if not args.no_build:
         subprocess.run(["cargo", "build", "--locked", "-j8", "-p", "weldwm", "-p", "weld-control", "--bins"], cwd=root, check=True)
         if not args.nested:
-            subprocess.run(["cargo", "build", "--locked", "-j8", "-p", "weld-core", "--example", "wayland_session_probe"], cwd=root, check=True)
+            subprocess.run(["cargo", "build", "--locked", "-j8", "-p", "weldwm", "-p", "weld-core", "--example", "wayland_session_probe"], cwd=root, check=True)
         if args.xwayland:
-            subprocess.run(["cargo", "build", "--locked", "-j8", "-p", "weld-core", "--example", "x11_window_probe"], cwd=root, check=True)
+            subprocess.run(["cargo", "build", "--locked", "-j8", "-p", "weldwm", "-p", "weld-core", "--example", "x11_window_probe"], cwd=root, check=True)
     validation = root / "target/validation"
     validation.mkdir(exist_ok=True)
     run = Path(tempfile.mkdtemp(prefix="control-launch-", dir=validation))

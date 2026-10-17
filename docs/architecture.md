@@ -915,8 +915,11 @@ side effect of ordinary settings reload.
 
 `weld-app` keeps native host-ingress records behind its public surface facade.
 The `test-support` feature exposes those records only so downstream policy
-crates can exercise complete lifecycle behavior; distributions and plugins
-must not enable it in production.
+crates can exercise complete lifecycle behavior. The standard desktop distribution
+enables that feature consistently across runs, tests and benchmarks to share
+compiled dependency artifacts. Plugins consume the ordinary surface facade;
+fixtures use the hidden ingress records. Diagnostic presentation requires an
+explicit fixture-installed callback on `AppShell`.
 
 Weld owns the outer host, Smithay server, event-loop orchestration, and native
 presentation boundary. Bevy supplies its app schedule, renderer, UI primitives,

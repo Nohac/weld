@@ -105,7 +105,7 @@ commit matching, output identity, deferred completion, superseded/unmapped
 discard, independent subsurface feedback, and the nested timing flags:
 
 ```text
-cargo test -p weldwm -p weld-core --features test-support --lib presentation_time_tests -- --ignored --test-threads=1
+cargo test -p weldwm -p weld-core --lib presentation_time_tests -- --ignored --test-threads=1
 ```
 
 The GPU regression also checks that hidden surfaces produce no sampled commits
@@ -187,7 +187,7 @@ password. Offscreen GPU readback verifies opaque fallback and scaled/clipped
 subsurface placement and removal:
 
 ```sh
-cargo test -p weld-core --features test-support session_lock -- \
+cargo test -p weldwm -p weld-core session_lock -- \
   --include-ignored --test-threads=1
 ```
 

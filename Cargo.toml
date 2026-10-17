@@ -5,6 +5,8 @@ edition.workspace = true
 publish.workspace = true
 
 [features]
+# Keep normal runs, policy tests and benchmarks on the same desktop graph.
+default = ["test-support"]
 profiling-tracy = [
   "bevy/trace_tracy",
   "dep:tracing-tracy",
@@ -71,7 +73,6 @@ bevy = { version = "=0.19.1", default-features = false, features = [
   "ui_bevy_render",
   "ui_picking",
 ] }
-bevy_dylib = "=0.19.1"
 bevy_app = { version = "=0.19.1", default-features = false, features = ["std"] }
 bevy_ecs = { version = "=0.19.1", default-features = false, features = ["std"] }
 bevy_asset = { version = "=0.19.1", default-features = false }
@@ -119,7 +120,6 @@ weld-access = { path = "crates/weld-access" }
 weld-remote-control = { path = "crates/weld-remote-control" }
 anyhow.workspace = true
 bevy.workspace = true
-bevy_dylib.workspace = true
 clap.workspace = true
 weld-app = { path = "crates/weld-app" }
 weld-input = { path = "crates/weld-input", features = ["bevy"] }
@@ -156,12 +156,14 @@ wgpu = { workspace = true, features = ["vulkan"] }
 # dependencies enough optimization for a usable compositor development build.
 [profile.dev]
 opt-level = 1
+debug = 2
 # Direct DRM surface creation and presenter workers contain Rust panics at
 # explicit unwind boundaries. Keep that contract visible in every used profile.
 panic = "unwind"
 
 [profile.dev.package."*"]
 opt-level = 3
+debug = 0
 
 [profile.release]
 panic = "unwind"

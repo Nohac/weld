@@ -39,12 +39,13 @@ def main():
         return
     root = Path(__file__).resolve().parent.parent
     resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
-    subprocess.run(["cargo", "build", "--bin", "weldwm", "-j2"], cwd=root, check=True)
-    subprocess.run(["cargo", "build", "-p", "weld-core", "--example", "wayland_session_probe", "-j2"], cwd=root, check=True)
+    build = ["cargo", "build", "--locked", "-p", "weldwm", "-p", "weld-core",
+             "--bin", "weldwm", "--example", "wayland_session_probe", "-j8"]
     if not args.nested and not args.dormant:
-        subprocess.run(["cargo", "build", "-p", "weld-core", "--features", "test-support", "--example", "presentation_host_probe", "-j2"], cwd=root, check=True)
+        build += ["--example", "presentation_host_probe"]
     if args.policy_only:
-        subprocess.run(["cargo", "build", "-p", "weld-core", "--features", "test-support", "--example", "policy_host_probe", "-j2"], cwd=root, check=True)
+        build += ["--example", "policy_host_probe"]
+    subprocess.run(build, cwd=root, check=True)
     validation = root / "target/validation"
     validation.mkdir(parents=True, exist_ok=True)
     run = Path(tempfile.mkdtemp(prefix="host-runtime-", dir=validation))
@@ -62,7 +63,6 @@ def main():
         environment["VK_ICD_FILENAMES"] = environment["VK_DRIVER_FILES"]
     print(f"Logs: {run}", flush=True)
     with (run / "host.log").open("w") as log:
-        # cargo supplies Bevy's dynamic-library search path and execs Weld.
         host_command = [
             "cargo", "run", "--quiet", "--", "--backend", "headless",
             "--wayland-socket", "weld-probe", "--headless-output", "640x480",

@@ -91,6 +91,9 @@ use weld_input::{KeyboardSettingsReader, PointerDeviceSettingsReader};
 const PRIMARY_OUTPUT_ID: OutputId = OutputId::new(1);
 pub struct AppShell {
     app: App,
+    #[cfg(feature = "test-support")]
+    pub(crate) benchmark_presentation:
+        Option<fn(&mut App, &[CompositionOutputFrame]) -> Result<bool>>,
     keyboard_settings: KeyboardSettingsReader,
     pointer_device_settings: PointerDeviceSettingsReader,
     output_preferences: OutputPreferencesReader,
@@ -464,6 +467,8 @@ impl AppShell {
 
         Ok(Self {
             app,
+            #[cfg(feature = "test-support")]
+            benchmark_presentation: None,
             keyboard_settings,
             pointer_device_settings,
             output_preferences,
@@ -651,7 +656,11 @@ impl AppShell {
                 tracing::trace_span!(target: crate::PROFILE_TARGET, "bevy_render_composition")
                     .entered();
             #[cfg(feature = "test-support")]
-            let replaced = crate::benchmark::render_probe(&mut self.app, frames)?;
+            let replaced = if let Some(render) = self.benchmark_presentation {
+                render(&mut self.app, frames)?
+            } else {
+                false
+            };
             #[cfg(not(feature = "test-support"))]
             let replaced = false;
             if !replaced {

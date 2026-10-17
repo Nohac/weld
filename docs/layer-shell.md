@@ -61,7 +61,7 @@ Logical Alt is the physical Windows key with the example's configured swaps.
 Native protocol regression tests require a valid `XDG_RUNTIME_DIR` but no GPU:
 
 ```sh
-cargo test -p weld-core --features test-support layer_tests --locked -- --ignored --test-threads=1
+cargo test -p weldwm -p weld-core layer_tests --locked -- --ignored --test-threads=1
 ```
 
 They cover initial configure ordering, reservation release, launcher focus,
@@ -110,7 +110,7 @@ Regression checks:
 ```sh
 cargo test -p weld-i3-quirks --locked
 cargo test -p weldwm --lib master:: --locked
-cargo test -p weld-core --features test-support workspace_tests --locked -- --ignored --test-threads=1
+cargo test -p weldwm -p weld-core workspace_tests --locked -- --ignored --test-threads=1
 ```
 
 The wire tests cover initial inventory, unchanged snapshots, rename/state/output
