@@ -244,10 +244,16 @@ Run the production startup-output backend from a real TTY with:
 
 ```text
 scripts/run-weld-drm --config examples/master.sway.config
+scripts/run-weld-drm --release --xwayland --config examples/master.sway.config
 scripts/run-weld-drm --seconds 30 --config examples/master.sway.config -- foot
 WELD_DRM_VALIDATE=1 scripts/run-weld-drm --config examples/master.sway.config -- foot
 WELD_DRM_PACING_TRACE=1 scripts/run-weld-drm --config examples/master.sway.config -- foot
 ```
+
+`--release` selects Cargo's optimized release build and defaults validation,
+pacing tracing and render-state tracing to off. Explicit `WELD_DRM_VALIDATE=1`,
+`WELD_DRM_PACING_TRACE=1` and `WELD_DRM_RENDER_TRACE=1` enable those diagnostics.
+Place launcher options (`--release`, `--seconds`) before Weld's arguments.
 
 `--seconds` starts its watchdog after compilation and sends Weld `SIGTERM` when
 the interval expires, allowing its normal DRM shutdown to restore the console.
