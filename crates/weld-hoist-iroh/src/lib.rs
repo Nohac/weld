@@ -18,6 +18,8 @@ mod private_file;
 mod rendezvous;
 mod reports;
 
+pub use channel::{PacketReader, PacketWriter};
+pub use connection::{IrohConnection, IrohConnector};
 pub use device::{IrohConnectionProfile, IrohDeviceIdentity, IrohTrustedPeers};
 pub use host::{
     IrohDnsPolicy, IrohHost, IrohNetwork, PendingDestinationConnection, PendingSourceAdmission,

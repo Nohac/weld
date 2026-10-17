@@ -1,8 +1,55 @@
 use super::*;
+const WELD_ALPN: &[u8] = weld_hoist_core::session::server::DIRECT_SERVICE.as_bytes();
 use crate::rendezvous::tests::ExchangeDirectory;
 use std::net::Ipv4Addr;
 use weld_hoist_core::session::server::SessionRuntime;
 use weld_hoist_encoded::{EncodedDestinationTransport, ReceiveBudget};
+
+#[tokio::test]
+async fn application_registered_service_runs_without_hoist_or_pairing_setup() {
+    use weld_session::connection::{PacketConnection, PacketReceive, PacketSend};
+    let runtime = SessionRuntime::start().expect("runtime");
+    let mut registry = weld_session::Registry::<crate::IrohConnection>::default();
+    registry
+        .register("example/echo/1", 2, |connection| async move {
+            let (mut writer, mut reader) = connection.accept_control().await?;
+            let request = reader.receive(64).await?;
+            writer.send(&request).await?;
+            writer.finish().await?;
+            Ok(())
+        })
+        .expect("register application service");
+    let host =
+        IrohHost::bind_registered(&runtime, IrohNetwork::Direct, registry).expect("service host");
+    let client = Endpoint::builder(presets::Minimal)
+        .relay_mode(RelayMode::Disabled)
+        .bind()
+        .await
+        .expect("client");
+    let connection = client
+        .connect(
+            host.connection_profile()
+                .expect("profile")
+                .endpoint_addr()
+                .expect("address"),
+            b"example/echo/1",
+        )
+        .await
+        .expect("custom service");
+    let (send, receive) = connection.open_bi().await.expect("lane");
+    let mut writer = crate::PacketWriter::new(send);
+    let mut reader = crate::PacketReader::new(receive);
+    writer
+        .send(b"application-owned protocol")
+        .await
+        .expect("request");
+    assert_eq!(
+        reader.receive(64).await.expect("reply"),
+        b"application-owned protocol"
+    );
+    drop(connection);
+    client.close().await;
+}
 
 fn wait_until(mut condition: impl FnMut() -> bool) {
     let deadline = Instant::now() + Duration::from_secs(5);
@@ -224,6 +271,8 @@ fn dropping_unclaimed_destination_result_disconnects_source() {
             Duration::from_secs(5),
         )
         .expect("admission");
+    let notified = Arc::new(AtomicBool::new(false));
+    let wake = notified.clone();
     let connecting = destination
         .begin_connect_profile(
             &profile(&source),
@@ -231,7 +280,10 @@ fn dropping_unclaimed_destination_result_disconnects_source() {
                 codecs: vec![VideoCodec::Av1],
                 stream_mode: weld_client::SurfaceStreamMode::Composited,
             },
-            notifier(),
+            IrohNotifier::new(move || {
+                wake.store(true, Ordering::Release);
+                Ok(())
+            }),
             Duration::from_secs(5),
         )
         .expect("connect");
@@ -245,13 +297,7 @@ fn dropping_unclaimed_destination_result_disconnects_source() {
         weld_hoist_encoded::EncodedSourceTransport::stream_mode(&peer),
         weld_client::SurfaceStreamMode::Composited
     );
-    wait_until(|| {
-        !connecting
-            .result
-            .as_ref()
-            .expect("unclaimed result")
-            .is_empty()
-    });
+    wait_until(|| notified.load(Ordering::Acquire));
     drop(connecting);
     wait_until(|| peer.drain().is_err());
 }

@@ -7014,6 +7014,7 @@ dependencies = [
  "weld-diagnostics",
  "weld-hoist-protocol",
  "weld-media",
+ "weld-session",
 ]
 
 [[package]]
@@ -7057,6 +7058,7 @@ dependencies = [
  "weld-hoist-encoded",
  "weld-hoist-protocol",
  "weld-media",
+ "weld-session",
  "zeroize",
 ]
 
@@ -7126,6 +7128,16 @@ dependencies = [
  "bevy_image",
  "bevy_render",
  "bevy_ui_render",
+]
+
+[[package]]
+name = "weld-session"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-channel",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

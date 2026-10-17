@@ -1,277 +1,32 @@
-//! Per-session peer approval and bounded bootstrap, before any Weld application data.
-
-use std::time::Duration;
-
-use anyhow::{Context, Result, bail, ensure};
-#[cfg(test)]
-use iroh::EndpointId;
-use iroh::{
-    Endpoint, EndpointAddr,
-    endpoint::{Connection, RecvStream, SendStream},
-};
-#[cfg(test)]
-use iroh_tickets::endpoint::EndpointTicket;
-use tokio::{
-    task::JoinSet,
-    time::{Instant, timeout, timeout_at},
-};
-use weld_hoist_core::session::negotiation;
-use weld_hoist_protocol::bootstrap::{BootstrapAnswer, BootstrapOffer, PeerRole};
-use weld_hoist_protocol::{ProtocolRevision, SurfaceMode};
-use weld_media::VideoCodec;
-
-#[cfg(test)]
-use crate::IrohPeerIdentity;
-use crate::IrohTrustedPeers;
-use crate::framing::{read_record, write_record};
-
-pub(crate) const WELD_ALPN: &[u8] = b"weld/hoist/1";
-const MAX_CANDIDATES: usize = 8;
-pub(crate) const ATTEMPT_TIMEOUT: Duration = Duration::from_secs(5);
-
+//! Owned transport attempts and direct-service connection handoff.
+use iroh::endpoint::Connection;
 pub(crate) struct Accepted {
     pub pending: PendingConnection,
     pub adb_route: Option<iroh_base::CustomAddr>,
 }
 pub(crate) type IncomingQueue = async_channel::Receiver<crate::connection::IrohConnection>;
-pub(crate) enum SourceListener {
-    Routed(IncomingQueue),
-    #[cfg(test)]
-    Endpoint(Endpoint),
-}
-impl From<IncomingQueue> for SourceListener {
-    fn from(queue: IncomingQueue) -> Self {
-        Self::Routed(queue)
-    }
-}
-#[cfg(test)]
-impl From<&Endpoint> for SourceListener {
-    fn from(endpoint: &Endpoint) -> Self {
-        Self::Endpoint(endpoint.clone())
-    }
-}
-impl SourceListener {
-    async fn accept(&self) -> Option<Accepted> {
-        match self {
-            Self::Routed(queue) => queue
-                .recv()
-                .await
-                .ok()
-                .map(|connection| connection.accepted),
-            #[cfg(test)]
-            Self::Endpoint(endpoint) => {
-                let incoming = endpoint.accept().await?;
-                let adb_route = match incoming.remote_addr() {
-                    iroh::endpoint::IncomingAddr::Custom(address) => Some(address),
-                    _ => None,
-                };
-                let connection = incoming.await.ok()?;
-                Some(Accepted {
-                    pending: PendingConnection::new(connection),
-                    adb_route,
-                })
-            }
-        }
-    }
-}
 
 /// An established attempt remains close-on-drop until transferred into a live peer.
 pub(crate) struct PendingConnection {
     pub connection: Connection,
     armed: bool,
-    close_reason: &'static [u8],
 }
-
 impl PendingConnection {
     pub(crate) fn new(connection: Connection) -> Self {
         Self {
             connection,
             armed: true,
-            close_reason: b"weld bootstrap not admitted",
         }
     }
-
     pub fn hand_off(&mut self) {
         self.armed = false;
     }
-
-    pub(crate) fn admitted_session(&mut self) {
-        self.close_reason = b"weld device session ended";
-    }
 }
-
 impl Drop for PendingConnection {
     fn drop(&mut self) {
         if self.armed {
-            self.connection.close(1_u32.into(), self.close_reason);
+            self.connection
+                .close(1_u32.into(), b"weld connection owner ended");
         }
     }
 }
-
-pub(crate) struct SourceBootstrap {
-    pub stream_mode: weld_client::SurfaceStreamMode,
-    pub adb_route: Option<iroh_base::CustomAddr>,
-    pub pending: PendingConnection,
-    pub send: SendStream,
-    pub recv: RecvStream,
-    pub media: SendStream,
-}
-
-pub(crate) struct DestinationBootstrap {
-    pub pending: PendingConnection,
-    pub send: SendStream,
-    pub recv: RecvStream,
-    pub media: RecvStream,
-    pub codec: VideoCodec,
-}
-
-#[cfg(test)]
-pub(crate) async fn accept_source(
-    endpoint: &Endpoint,
-    expected: EndpointId,
-    codec: VideoCodec,
-    deadline: Instant,
-    attempt_timeout: Duration,
-) -> Result<SourceBootstrap> {
-    accept_trusted_source(
-        endpoint,
-        IrohTrustedPeers::new(vec![IrohPeerIdentity(expected.to_string())])?,
-        codec,
-        deadline,
-        attempt_timeout,
-    )
-    .await
-}
-
-pub(crate) async fn accept_trusted_source(
-    listener: impl Into<SourceListener>,
-    expected: IrohTrustedPeers,
-    codec: VideoCodec,
-    deadline: Instant,
-    attempt_timeout: Duration,
-) -> Result<SourceBootstrap> {
-    let listener = listener.into();
-    let mut candidates = JoinSet::new();
-    let mut rejected = 0_u64;
-    let result = loop {
-        tokio::select! {
-            _ = tokio::time::sleep_until(deadline) => {
-                break Err(anyhow::anyhow!("timed out waiting for the approved Iroh peer ({rejected} attempts rejected)"));
-            }
-            incoming = listener.accept(), if candidates.len() < MAX_CANDIDATES => {
-                let Some(incoming) = incoming else {
-                    break Err(anyhow::anyhow!("Iroh endpoint closed before peer admission"));
-                };
-                let expected = expected.clone();
-                let adb_route = incoming.adb_route;
-                candidates.spawn(async move {
-                    timeout(attempt_timeout, async move {
-                        let pending = incoming.pending;
-                        ensure!(expected.contains(&pending.connection.remote_id()), "Iroh peer is not an approved destination");
-                        // No Weld offer or metadata may precede this identity check.
-                        let (mut send, mut recv) = pending.connection.open_bi().await?;
-                        write_record(&mut send, &BootstrapOffer {
-                            revision: ProtocolRevision::CURRENT,
-                            role: PeerRole::Source,
-                            mode: SurfaceMode::EncodedOpaque(codec),
-                        }).await?;
-                        let answer: BootstrapAnswer = read_record(&mut recv).await?;
-                        negotiation::answer(&answer)?;
-                        let media = pending.connection.open_uni().await?;
-                        Ok(SourceBootstrap { pending, send, recv, media, adb_route, stream_mode: answer.stream_mode })
-                    }).await.context("Iroh handshake/bootstrap attempt timed out")?
-                });
-            }
-            result = candidates.join_next(), if !candidates.is_empty() => {
-                let result = result.context("Iroh candidate task disappeared")
-                    .and_then(|task| task.context("Iroh candidate task failed"))
-                    .and_then(|bootstrap| bootstrap);
-                match result {
-                    Ok(bootstrap) => break Ok(bootstrap),
-                    Err(error) => {
-                        rejected = rejected.saturating_add(1);
-                        // Peer-controlled failures must not generate unbounded logs.
-                        if rejected <= 3 {
-                            tracing::warn!(attempt = rejected, error = %format_args!("{error:#}"), "Iroh candidate rejected; continuing to wait for the approved peer");
-                        }
-                    }
-                }
-            }
-        }
-    };
-    // Abort/drain every loser; completed results still hold armed close guards.
-    candidates.shutdown().await;
-    if rejected > 3 {
-        tracing::warn!(
-            rejected,
-            "Iroh admission rejection summary (additional details suppressed)"
-        );
-    }
-    result
-}
-
-#[cfg(test)]
-pub(crate) async fn connect_destination(
-    endpoint: &Endpoint,
-    ticket: EndpointTicket,
-    supported_codecs: &[VideoCodec],
-    deadline: Instant,
-) -> Result<DestinationBootstrap> {
-    connect_address(
-        endpoint,
-        ticket.endpoint_addr().clone(),
-        &weld_hoist_protocol::presentation::ReceiverPreferences::from(supported_codecs.to_vec()),
-        deadline,
-    )
-    .await
-}
-
-pub(crate) async fn connect_address(
-    endpoint: &Endpoint,
-    address: EndpointAddr,
-    preferences: &weld_hoist_protocol::presentation::ReceiverPreferences,
-    deadline: Instant,
-) -> Result<DestinationBootstrap> {
-    timeout_at(deadline, async {
-        let pending = PendingConnection::new(
-            endpoint
-                .connect(address, WELD_ALPN)
-                .await
-                .context("could not connect to the approved Iroh source")?,
-        );
-        let (mut send, mut recv) = pending.connection.accept_bi().await?;
-        let offer: BootstrapOffer = read_record(&mut recv).await?;
-        let rejection = negotiation::encoded_offer(&offer, preferences)
-            .err()
-            .map(|error| error.to_string());
-        write_record(
-            &mut send,
-            &BootstrapAnswer {
-                revision: ProtocolRevision::CURRENT,
-                role: PeerRole::Destination,
-                rejection: rejection.clone(),
-                stream_mode: preferences.stream_mode,
-            },
-        )
-        .await?;
-        if let Some(rejection) = rejection {
-            bail!("rejected Iroh source: {rejection}");
-        }
-        let SurfaceMode::EncodedOpaque(codec) = offer.mode else {
-            bail!("accepted Iroh offer did not select an encoded codec");
-        };
-        let media = pending.connection.accept_uni().await?;
-        Ok(DestinationBootstrap {
-            pending,
-            send,
-            recv,
-            media,
-            codec,
-        })
-    })
-    .await
-    .context("Iroh destination connection/bootstrap timed out")?
-}
-
-#[cfg(test)]
-mod tests;

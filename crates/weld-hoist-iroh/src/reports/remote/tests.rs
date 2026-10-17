@@ -63,7 +63,17 @@ async fn restored_report_is_scoped_to_its_peer_and_collectable_after_reconnect()
     restored
         .start(&receiver, Endpoint::Receiver, Access::Participant)
         .expect("new receiver record");
-    let serving = tokio::spawn(serve(restored, receiver));
+    let serving = tokio::spawn(diagnostics::serve_streams(
+        restored.archive,
+        receiver.remote_id(),
+        move || {
+            let receiver = receiver.clone();
+            async move {
+                let (send, recv) = receiver.accept_bi().await?;
+                Ok(PacketLane::new(send, recv))
+            }
+        },
+    ));
     let collected = source_reports
         .collect(id)
         .await
@@ -77,7 +87,10 @@ async fn restored_report_is_scoped_to_its_peer_and_collectable_after_reconnect()
         CollectionStatus::Busy
     );
     source.close(0_u32.into(), b"test finished");
-    serving.await.expect("service ends with connection");
+    serving
+        .await
+        .expect("service task")
+        .expect("service ends with connection");
     source_endpoint.close().await;
     receiver_endpoint.close().await;
 }

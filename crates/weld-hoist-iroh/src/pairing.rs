@@ -3,7 +3,6 @@ mod session;
 mod storage;
 #[cfg(test)]
 mod tests;
-mod wire;
 
 use anyhow::{Context, Result, ensure};
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
@@ -14,23 +13,17 @@ use std::{
     path::Path,
     str::FromStr,
     sync::{Arc, Mutex, OnceLock, Weak},
-    time::Duration,
 };
-use tokio::sync::oneshot;
 
 use crate::IrohSourcePeer;
-use crate::{IrohConnectionProfile, IrohNetwork, IrohNotifier};
-pub(crate) use session::connect_session;
+use crate::{IrohConnectionProfile, IrohNetwork};
 pub use session::{DeviceSession, PendingDeviceSession};
 use storage::TrustStore;
-use weld_hoist_core::session::pairing::enrollment::PairingProgress;
+pub use weld_hoist_core::session::client::PendingPairing;
 use weld_hoist_core::session::pairing::{
     AuthenticatedPeer, ConnectionControl, PairingAuthority, validate_name,
 };
 use weld_hoist_core::session::server::SourceSessions;
-pub use wire::PendingPairing;
-pub(crate) use wire::connect;
-pub(crate) use wire::{PAIR_ALPN, SESSION_ALPN};
 
 const IDENTITY_NAMESPACE: &str = "iroh";
 
@@ -56,6 +49,16 @@ impl fmt::Debug for PairingInvitation {
 }
 
 impl PairingInvitation {
+    pub(crate) fn enrollment(
+        self,
+        device_name: String,
+    ) -> weld_hoist_core::session::client::Enrollment {
+        weld_hoist_core::session::client::Enrollment {
+            token: self.token,
+            device_name,
+            host_name: self.name,
+        }
+    }
     pub fn link(&self) -> Result<String> {
         Ok(format!(
             "weld://pair/{}",
@@ -112,7 +115,7 @@ impl DiagnosticPermission {
             .is_some_and(|binding| PairingHost(binding).permits_diagnostics(identity))
     }
 }
-pub(crate) struct ConnectionLease(pub iroh::endpoint::WeakConnectionHandle);
+pub struct ConnectionLease(pub(crate) iroh::endpoint::WeakConnectionHandle);
 impl ConnectionControl for ConnectionLease {
     fn is_connected(&self) -> bool {
         self.0

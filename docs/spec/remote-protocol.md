@@ -318,13 +318,15 @@ Handshake and packet-pump tasks remain on the transport executor; moving those
 tasks to the session executor caused an endpoint-shutdown hang in the real-Iroh
 test and was corrected before commit.
 
-Current overall design review: 7.5/10. Two ownership diagnostics remain open:
-outbound connection/session orchestration and the explicit-source bootstrap
-facade still mix transport setup with session lifecycle, coupling changes across
-those modules. Move their shared lifecycle drivers behind core's connection
-capabilities before treating the whole transport-only boundary as complete.
-Transport-specific byte/descriptor setup and authenticated identity evidence
-stay explicit in each binding. Endpoint
+The follow-up [session service boundary](../session-service-boundary.md) moves
+outgoing pairing/device drivers and explicit-source negotiation into shared
+hoist services. `weld-session` owns a service registry and generic supervisor;
+applications can register additional protocols without extending a central enum
+or a transport dispatcher. Iroh advertises registered IDs and supplies connection
+capabilities. Native-buffer delivery and admission policy remain independent of
+codec selection and pairing. Diagnostic request loops also use shared supervision.
+Transport-specific byte/descriptor setup and identity evidence stay explicit in
+each binding. Endpoint
 availability uses core's existing authorized-endpoint wrapper, while the shared
 relay enforces revocation when consuming queued input and publishing frames.
 

@@ -135,8 +135,14 @@ impl IrohTrustedPeers {
         ids.dedup();
         Ok(Self(ids.into()))
     }
-    pub(crate) fn contains(&self, id: &EndpointId) -> bool {
-        self.0.contains(id)
+    pub(crate) fn identities(
+        &self,
+    ) -> Result<Vec<weld_hoist_core::session::pairing::AuthenticatedPeer>> {
+        self.0
+            .iter()
+            .copied()
+            .map(crate::pairing::authenticated)
+            .collect()
     }
 }
 

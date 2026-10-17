@@ -14,7 +14,6 @@ use weld_diagnostics::{
 };
 
 mod remote;
-pub(crate) use remote::serve;
 use weld_diagnostics::collection::{CollectionStatus, DiagnosticCollection};
 
 const MAX_ROUTES: usize = 16;

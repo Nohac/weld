@@ -9,6 +9,7 @@ default = []
 native = ["dep:weld-core"]
 
 [dependencies]
+weld-session = { path = "../weld-session" }
 async-channel = "2.5"
 weld-access = { path = "../weld-access" }
 anyhow.workspace = true

@@ -1,7 +1,6 @@
 //! Independent length-delimited packet lanes over QUIC streams.
-use anyhow::{Result, ensure};
+use anyhow::{Context, Result, ensure};
 use iroh::endpoint::{RecvStream, SendStream};
-use tokio::task::JoinHandle;
 use weld_hoist_core::session::channel::{PacketReceive, PacketSend};
 
 pub(crate) struct PacketLane {
@@ -11,21 +10,41 @@ pub(crate) struct PacketLane {
 impl PacketLane {
     pub fn new(send: SendStream, recv: RecvStream) -> Self {
         Self {
-            send: PacketWriter(send),
-            recv: PacketReader(recv),
+            send: PacketWriter::new(send),
+            recv: PacketReader::new(recv),
         }
     }
 }
-pub(crate) struct PacketWriter(pub SendStream);
-pub(crate) struct PacketReader(pub RecvStream);
+pub struct PacketWriter(Option<SendStream>);
+pub struct PacketReader(Option<RecvStream>);
+impl PacketWriter {
+    pub(crate) fn new(stream: SendStream) -> Self {
+        Self(Some(stream))
+    }
+    pub(crate) fn into_stream(mut self) -> Result<SendStream> {
+        self.0.take().context("write lane transferred")
+    }
+}
+impl PacketReader {
+    pub(crate) fn new(stream: RecvStream) -> Self {
+        Self(Some(stream))
+    }
+    pub(crate) fn into_stream(mut self) -> Result<RecvStream> {
+        self.0.take().context("read lane transferred")
+    }
+}
 impl Drop for PacketWriter {
     fn drop(&mut self) {
-        let _ = self.0.reset(1_u32.into());
+        if let Some(stream) = &mut self.0 {
+            let _ = stream.reset(1_u32.into());
+        }
     }
 }
 impl Drop for PacketReader {
     fn drop(&mut self) {
-        let _ = self.0.stop(1_u32.into());
+        if let Some(stream) = &mut self.0 {
+            let _ = stream.stop(1_u32.into());
+        }
     }
 }
 impl PacketSend for PacketLane {
@@ -43,31 +62,28 @@ impl PacketReceive for PacketLane {
 }
 impl PacketSend for PacketWriter {
     async fn finish(&mut self) -> Result<()> {
-        self.0.finish()?;
-        self.0.stopped().await?;
+        let stream = self.0.as_mut().context("write lane transferred")?;
+        stream.finish()?;
+        stream.stopped().await?;
         Ok(())
     }
     async fn send(&mut self, packet: &[u8]) -> Result<()> {
+        let stream = self.0.as_mut().context("write lane transferred")?;
         let length = u32::try_from(packet.len())?;
-        self.0.write_all(&length.to_le_bytes()).await?;
-        self.0.write_all(packet).await?;
+        stream.write_all(&length.to_le_bytes()).await?;
+        stream.write_all(packet).await?;
         Ok(())
     }
 }
 impl PacketReceive for PacketReader {
     async fn receive(&mut self, maximum: usize) -> Result<Vec<u8>> {
+        let stream = self.0.as_mut().context("read lane transferred")?;
         let mut header = [0; 4];
-        self.0.read_exact(&mut header).await?;
+        stream.read_exact(&mut header).await?;
         let length = usize::try_from(u32::from_le_bytes(header))?;
         ensure!(length <= maximum, "packet exceeds lane bound");
         let mut packet = vec![0; length];
-        self.0.read_exact(&mut packet).await?;
+        stream.read_exact(&mut packet).await?;
         Ok(packet)
-    }
-}
-pub(crate) struct LaneTask(pub JoinHandle<()>);
-impl Drop for LaneTask {
-    fn drop(&mut self) {
-        self.0.abort();
     }
 }

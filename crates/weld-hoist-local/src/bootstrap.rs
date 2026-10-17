@@ -122,6 +122,23 @@ mod tests {
     use super::*;
 
     #[test]
+    fn native_bootstrap_uses_local_credentials_without_pairing_or_codec_setup() {
+        let (source, destination) = LocalPacketConnection::pair().expect("same-user sockets");
+        let source = std::thread::spawn(move || {
+            bootstrap_source(source, LocalSurfaceMode::Native).expect("source")
+        });
+        let destination = bootstrap_destination(destination, |mode| {
+            anyhow::ensure!(mode == LocalSurfaceMode::Native, "expected native buffers");
+            Ok(())
+        })
+        .expect("destination");
+        let source = source.join().expect("source worker");
+        assert_eq!(source.mode, LocalSurfaceMode::Native);
+        assert!(source.media.is_none());
+        assert!(destination.media.is_none());
+    }
+
+    #[test]
     fn encoded_bootstrap_hands_off_an_independent_media_connection() {
         let (source_control, destination_control) =
             LocalPacketConnection::pair().expect("control pair");

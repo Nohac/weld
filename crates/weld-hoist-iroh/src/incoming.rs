@@ -1,9 +1,6 @@
 //! Incoming authenticated Iroh connections exposed to the shared session runtime.
+use crate::admission::{Accepted as SourceAccepted, PendingConnection};
 use crate::connection::IrohConnection;
-use crate::{
-    admission::{Accepted as SourceAccepted, PendingConnection, WELD_ALPN},
-    pairing,
-};
 use anyhow::{Context, Result};
 use iroh::{Endpoint, endpoint::IncomingAddr};
 use std::{
@@ -11,7 +8,7 @@ use std::{
     time::Duration,
 };
 use tokio::task::{JoinHandle, JoinSet};
-use weld_hoist_core::session::server::{Accepted, Listener, Protocol};
+use weld_session::{Accepted, Listener};
 
 pub(crate) struct IrohListener {
     incoming: async_channel::Receiver<Result<Accepted<IrohConnection>>>,
@@ -30,12 +27,7 @@ impl IrohListener {
                         let Some(accepted) = accepted else { continue; };
                         let result = (|| {
                             let (pending, adb_route): (PendingConnection, _) = accepted.context("Iroh handshake task failed")??;
-                            let protocol = match pending.connection.alpn() {
-                                WELD_ALPN => Protocol::DirectSource,
-                                pairing::PAIR_ALPN => Protocol::Enrollment,
-                                pairing::SESSION_ALPN => Protocol::Device,
-                                _ => anyhow::bail!("unsupported application protocol"),
-                            };
+                            let protocol = std::str::from_utf8(pending.connection.alpn())?.to_owned();
                             let host = owner.lock().map_err(|_| anyhow::anyhow!("Iroh owner unavailable"))?.clone();
                             Ok(Accepted { protocol, connection: IrohConnection { accepted: SourceAccepted { pending, adb_route }, host, io: io.clone() } })
                         })();
@@ -71,6 +63,8 @@ impl Listener for IrohListener {
 #[cfg(test)]
 mod tests {
     use super::*;
+    const WELD_ALPN: &[u8] = weld_hoist_core::session::server::DIRECT_SERVICE.as_bytes();
+    const PAIR_ALPN: &[u8] = weld_hoist_core::session::server::ENROLLMENT_SERVICE.as_bytes();
     use iroh::{EndpointAddr, RelayMode, endpoint::presets};
     use std::net::Ipv4Addr;
     use weld_hoist_core::session::server::SessionRuntime;
@@ -82,7 +76,7 @@ mod tests {
             .bind_addr((Ipv4Addr::LOCALHOST, 0))
             .expect("bind")
             .relay_mode(RelayMode::Disabled)
-            .alpns(vec![WELD_ALPN.to_vec(), pairing::PAIR_ALPN.to_vec()])
+            .alpns(vec![WELD_ALPN.to_vec(), PAIR_ALPN.to_vec()])
             .bind()
             .await
             .expect("source");
@@ -98,10 +92,16 @@ mod tests {
         let pairing = crate::pairing::PairingHost::default();
         let directory = crate::rendezvous::tests::ExchangeDirectory::new();
         pairing.enable(&directory.0).expect("authority");
-        let hub = runtime
+        let mut registry = weld_session::Registry::default();
+        let hub = weld_hoist_core::session::server::register(
+            &mut registry,
+            crate::connection::HostServices(pairing),
+        )
+        .expect("services");
+        runtime
             .listen(
                 IrohListener::new(source.clone(), Arc::new(Mutex::new(Weak::new()))),
-                crate::connection::HostServices(pairing),
+                registry,
             )
             .expect("listener");
         let address = EndpointAddr::new(source.id()).with_ip_addr(source.bound_sockets()[0]);
@@ -109,7 +109,7 @@ mod tests {
         for _ in 0..8 {
             stalled.push(
                 client
-                    .connect(address.clone(), pairing::PAIR_ALPN)
+                    .connect(address.clone(), PAIR_ALPN)
                     .await
                     .expect("pairing handshake"),
             );

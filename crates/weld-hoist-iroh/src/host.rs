@@ -15,22 +15,19 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 use iroh::{
-    Endpoint, EndpointAddr, RelayMode, SecretKey, TransportAddr, Watcher,
+    Endpoint, EndpointAddr, RelayMode, SecretKey, Watcher,
     dns::{DnsProtocol, DnsResolver},
     endpoint::{PortmapperConfig, presets},
 };
 use iroh_tickets::endpoint::EndpointTicket;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::mpsc;
 use weld_hoist_core::session::server::SessionRuntime;
 use weld_hoist_encoded::{EncodedDestinationTransport, EncodedSourceTransport};
 use weld_media::VideoCodec;
 
 use crate::{
     IrohConnectionProfile, IrohDestinationPeer, IrohDeviceIdentity, IrohNotifier, IrohPeerIdentity,
-    IrohSourcePeer, IrohTrustedPeers, adb,
-    admission::{self, WELD_ALPN},
-    peer::{spawn_destination_peer, spawn_source_peer},
-    rendezvous,
+    IrohSourcePeer, IrohTrustedPeers, adb, admission, rendezvous,
 };
 
 const SHUTDOWN_WAIT: Duration = Duration::from_secs(3);
@@ -100,7 +97,8 @@ impl IrohDnsPolicy {
 /// Long-lived Iroh endpoint host. Individual peers borrow its lifetime.
 #[derive(Clone)]
 pub struct IrohHost {
-    _sessions: SessionRuntime,
+    sessions: SessionRuntime,
+    transport: Arc<TransportResources>,
     lifetime: Arc<HostLifetime>,
     ticket: String,
     network: IrohNetwork,
@@ -110,7 +108,24 @@ pub struct IrohHost {
 
 impl IrohHost {
     pub fn bind(sessions: &SessionRuntime, network: IrohNetwork) -> Result<Self> {
-        Self::bind_key(sessions, network, None, IrohDnsPolicy::System, None)
+        Self::bind_key(sessions, network, None, IrohDnsPolicy::System, None, None)
+    }
+
+    /// Bind exactly the application's service registry. Hoist/pairing endpoints
+    /// are available when their handlers have been registered by the assembly.
+    pub fn bind_registered(
+        sessions: &SessionRuntime,
+        network: IrohNetwork,
+        services: weld_session::Registry<crate::IrohConnection>,
+    ) -> Result<Self> {
+        Self::bind_key(
+            sessions,
+            network,
+            None,
+            IrohDnsPolicy::System,
+            None,
+            Some(services),
+        )
     }
 
     /// Binds with a persisted local key. N0 publishes a stable, linkable endpoint
@@ -131,7 +146,7 @@ impl IrohHost {
         identity: &IrohDeviceIdentity,
         dns: IrohDnsPolicy,
     ) -> Result<Self> {
-        Self::bind_key(sessions, network, Some(identity.secret()), dns, None)
+        Self::bind_key(sessions, network, Some(identity.secret()), dns, None, None)
     }
 
     /// Bind a custom-only source and resolve its loopback TCP listener before
@@ -152,6 +167,7 @@ impl IrohHost {
             Some(identity.secret()),
             IrohDnsPolicy::System,
             Some(listen),
+            None,
         )
     }
 
@@ -161,6 +177,7 @@ impl IrohHost {
         secret: Option<SecretKey>,
         dns: IrohDnsPolicy,
         adb_listen: Option<SocketAddr>,
+        services: Option<weld_session::Registry<crate::IrohConnection>>,
     ) -> Result<Self> {
         let (commands, receiver) = mpsc::unbounded_channel();
         let (started_tx, started_rx) = std_mpsc::sync_channel(1);
@@ -185,6 +202,7 @@ impl IrohHost {
                                 secret,
                                 dns,
                                 adb_listen,
+                                services,
                             },
                             receiver,
                             started_tx,
@@ -198,11 +216,16 @@ impl IrohHost {
                 let _ = done_tx.send(());
             })
             .context("could not spawn Iroh host thread")?;
-        let (ticket, adb_listen) = started_rx
+        let BoundEndpoint {
+            ticket,
+            adb_listen,
+            transport,
+        } = started_rx
             .recv()
             .context("Iroh host stopped during startup")?
             .map_err(anyhow::Error::msg)?;
         let lifetime = Arc::new(HostLifetime {
+            sessions: sessions.tasks(),
             commands,
             worker: Mutex::new(Some(worker)),
             done: Mutex::new(done_rx),
@@ -215,7 +238,8 @@ impl IrohHost {
             .lock()
             .map_err(|_| anyhow::anyhow!("endpoint owner poisoned"))? = Arc::downgrade(&lifetime);
         Ok(Self {
-            _sessions: sessions.clone(),
+            sessions: sessions.clone(),
+            transport: Arc::new(transport),
             lifetime,
             ticket,
             network,
@@ -255,20 +279,19 @@ impl IrohHost {
             });
         }
         let guard = CollectionGuard(self.lifetime.collecting.clone());
-        let (reply, result) = oneshot::channel();
-        self.lifetime
-            .commands
-            .send(HostCommand::CollectDiagnostics {
-                reports: self.lifetime.reports.clone(),
-                session,
-                reply,
-                guard,
-            })
-            .map_err(|_| anyhow::anyhow!("Iroh host unavailable"))?;
-        result
-            .blocking_recv()
-            .context("Iroh host stopped during diagnostic collection")?
-            .map_err(anyhow::Error::msg)
+        let reports = self.lifetime.reports.clone();
+        self.sessions
+            .start_operation(
+                "weld/diagnostic-collection/1",
+                8,
+                Arc::new(|| {}),
+                |_| {},
+                move |completion| async move {
+                    let _guard = guard;
+                    completion.send(reports.collect(session).await?)
+                },
+            )?
+            .wait()
     }
 
     pub fn begin_device_session(
@@ -281,23 +304,15 @@ impl IrohHost {
             profile.network() == self.network,
             "device network differs from endpoint"
         );
-        let (reply, result) = oneshot::channel();
-        let (cancel, cancelled) = oneshot::channel();
-        self.lifetime
-            .commands
-            .send(HostCommand::DeviceSession {
-                host: Arc::downgrade(&self.lifetime),
-                profile,
-                codecs: codecs.into(),
-                notifier,
-                reply,
-                cancelled,
-            })
-            .map_err(|_| anyhow::anyhow!("Iroh host unavailable"))?;
-        Ok(crate::pairing::PendingDeviceSession {
-            result,
-            cancel: Some(cancel),
-        })
+        let wake = Arc::new(move || {
+            let _ = notifier.notify();
+        });
+        weld_hoist_core::session::client::connect(
+            &self.sessions,
+            self.dialer(profile.endpoint_addr()?),
+            codecs.into(),
+            wake,
+        )
     }
 
     pub fn begin_pairing(
@@ -310,24 +325,48 @@ impl IrohHost {
             invitation.profile()?.network() == self.network,
             "pairing network differs from endpoint"
         );
-        let progress = Arc::new(Mutex::new(
-            weld_hoist_core::session::pairing::enrollment::PairingProgress::Connecting,
-        ));
-        let (cancel, cancelled) = oneshot::channel();
-        self.lifetime
-            .commands
-            .send(HostCommand::Pair {
-                invitation,
-                name,
-                notifier,
-                progress: progress.clone(),
-                cancelled,
-            })
-            .map_err(|_| anyhow::anyhow!("Iroh host unavailable"))?;
-        Ok(crate::pairing::PendingPairing {
-            progress,
-            cancel: Some(cancel),
-        })
+        let connector = self.dialer(invitation.profile()?.endpoint_addr()?);
+        let wake = Arc::new(move || {
+            let _ = notifier.notify();
+        });
+        weld_hoist_core::session::client::pair(
+            &self.sessions,
+            connector,
+            invitation.enrollment(name),
+            wake,
+        )
+    }
+
+    fn dialer(&self, address: EndpointAddr) -> crate::IrohConnector {
+        crate::IrohConnector {
+            endpoint: self.transport.endpoint.clone(),
+            address,
+            host: Arc::downgrade(&self.lifetime),
+            io: self.transport.io.clone(),
+            adb: None,
+        }
+    }
+
+    /// Prepare a pinned peer connection for an application-selected service.
+    pub fn connector(&self, profile: &IrohConnectionProfile) -> Result<crate::IrohConnector> {
+        anyhow::ensure!(
+            profile.network() == self.network,
+            "profile network differs from endpoint"
+        );
+        let mut connector = self.dialer(profile.endpoint_addr()?);
+        if self.network == IrohNetwork::Adb {
+            connector.adb = Some((
+                self.transport
+                    .links
+                    .clone()
+                    .context("ADB manager missing")?,
+                *profile
+                    .addresses()
+                    .first()
+                    .context("ADB profile has no TCP address")?,
+            ));
+        }
+        Ok(connector)
     }
 
     /// Admits only the destination named by a trusted file. Direct/N0 also
@@ -429,25 +468,37 @@ impl IrohHost {
         deadline: Instant,
         guard: AcceptGuard,
     ) -> Result<PendingSourceAdmission> {
-        let (reply, result) = oneshot::channel();
-        let (cancel, cancelled) = oneshot::channel();
-        self.lifetime
-            .commands
-            .send(HostCommand::AcceptSource {
-                host: Arc::downgrade(&self.lifetime),
-                codec,
-                expected,
-                deadline,
-                notifier,
-                reply,
-                cancelled,
-                guard,
-            })
-            .map_err(|_| anyhow::anyhow!("Iroh host is unavailable"))?;
-        tracing::info!("waiting for an approved Iroh hoist destination");
+        let transport = self.transport.clone();
+        let wake = notifier.clone();
+        let operation = self.sessions.start_operation(
+            "weld/direct-source/1",
+            8,
+            Arc::new(move || {
+                let _ = wake.notify();
+            }),
+            |peer: &IrohSourcePeer| peer.disconnect(),
+            move |completion| async move {
+                let _guard = guard;
+                let expected = expected.resolve(deadline).await?.identities()?;
+                let incoming = crate::connection::DirectListener {
+                    incoming: transport.incoming.clone(),
+                    links: transport.links.clone(),
+                };
+                let peer = weld_hoist_core::session::bootstrap::accept(
+                    incoming,
+                    expected,
+                    weld_hoist_protocol::SurfaceMode::EncodedOpaque(codec),
+                    deadline,
+                    Arc::new(move || {
+                        let _ = notifier.notify();
+                    }),
+                )
+                .await?;
+                completion.send(peer)
+            },
+        )?;
         Ok(PendingSourceAdmission {
-            result: Some(result),
-            cancel: Some(cancel),
+            operation,
             _host: self.lifetime.clone(),
         })
     }
@@ -528,23 +579,47 @@ impl IrohHost {
         notifier: IrohNotifier,
         deadline: Instant,
     ) -> Result<PendingDestinationConnection> {
-        let (reply, result) = oneshot::channel();
-        let (cancel, cancelled) = oneshot::channel();
-        self.lifetime
-            .commands
-            .send(HostCommand::ConnectDestination {
-                host: Arc::downgrade(&self.lifetime),
-                address,
-                supported_codecs,
-                deadline,
-                notifier,
-                reply,
-                cancelled,
-            })
-            .map_err(|_| anyhow::anyhow!("Iroh host is unavailable"))?;
+        let dialer = match address {
+            ConnectTarget::Address(address) => self.dialer(address),
+            ConnectTarget::Adb { peer, address } => {
+                let mut dialer = self.dialer(EndpointAddr::new(peer));
+                dialer.adb = Some((
+                    self.transport
+                        .links
+                        .clone()
+                        .context("ADB manager missing")?,
+                    address,
+                ));
+                dialer
+            }
+        };
+        let wake = notifier.clone();
+        let operation = self.sessions.start_operation(
+            "weld/direct-destination/1",
+            8,
+            Arc::new(move || {
+                let _ = wake.notify();
+            }),
+            |peer: &IrohDestinationPeer| peer.disconnect(),
+            move |completion| async move {
+                let delivery = weld_hoist_core::session::bootstrap::Delivery {
+                    native_buffers: false,
+                    encoded: supported_codecs,
+                };
+                let peer = weld_hoist_core::session::bootstrap::connect(
+                    crate::connection::DirectDialer(dialer),
+                    delivery,
+                    deadline,
+                    Arc::new(move || {
+                        let _ = notifier.notify();
+                    }),
+                )
+                .await?;
+                completion.send(peer)
+            },
+        )?;
         Ok(PendingDestinationConnection {
-            result: Some(result),
-            cancel: Some(cancel),
+            operation,
             _host: self.lifetime.clone(),
         })
     }
@@ -575,7 +650,21 @@ impl IrohHost {
     }
 }
 
+struct TransportResources {
+    endpoint: Endpoint,
+    io: tokio::runtime::Handle,
+    incoming: admission::IncomingQueue,
+    links: Option<Arc<adb::Manager>>,
+}
+
+struct BoundEndpoint {
+    ticket: String,
+    adb_listen: Option<SocketAddr>,
+    transport: TransportResources,
+}
+
 pub(crate) struct HostLifetime {
+    pub(crate) sessions: weld_session::SessionTasks,
     pub(crate) reports: crate::DiagnosticReports,
     pub(crate) diagnostic_permission: crate::pairing::DiagnosticPermission,
     collecting: Arc<AtomicBool>,
@@ -621,62 +710,24 @@ impl Drop for HostLifetime {
 /// A single admission result. Dropping an unfinished or unclaimed result cancels
 /// it; an already-connected but unclaimed peer is explicitly disconnected.
 pub struct PendingSourceAdmission {
-    result: Option<oneshot::Receiver<Result<IrohSourcePeer, String>>>,
-    cancel: Option<oneshot::Sender<()>>,
+    operation: weld_session::Operation<IrohSourcePeer>,
     _host: Arc<HostLifetime>,
 }
-
 impl weld_hoist_encoded::PendingSource for PendingSourceAdmission {
     type Transport = IrohSourcePeer;
     fn poll(&mut self) -> Result<Option<Self::Transport>> {
-        self.poll()
+        self.operation.poll()
     }
 }
-
 impl PendingSourceAdmission {
     pub fn poll(&mut self) -> Result<Option<IrohSourcePeer>> {
-        let result = self
-            .result
-            .as_mut()
-            .context("Iroh admission result was already consumed")?;
-        match result.try_recv() {
-            Ok(result) => {
-                self.result = None;
-                self.cancel = None;
-                result.map(Some).map_err(anyhow::Error::msg)
-            }
-            Err(oneshot::error::TryRecvError::Empty) => Ok(None),
-            Err(oneshot::error::TryRecvError::Closed) => {
-                self.result = None;
-                Err(anyhow::anyhow!("Iroh host stopped during admission"))
-            }
-        }
+        self.operation.poll()
     }
-    fn wait(mut self) -> Result<IrohSourcePeer> {
-        let result = self
-            .result
-            .take()
-            .context("Iroh admission result was already consumed")?
-            .blocking_recv()
-            .context("Iroh host stopped during admission")?;
-        self.cancel = None;
-        result.map_err(anyhow::Error::msg)
+    fn wait(self) -> Result<IrohSourcePeer> {
+        self.operation.wait()
     }
     pub fn cancel(&mut self) {
-        if let Some(cancel) = self.cancel.take() {
-            let _ = cancel.send(());
-        }
-        if let Some(mut result) = self.result.take()
-            && let Ok(Ok(peer)) = result.try_recv()
-        {
-            peer.disconnect();
-        }
-    }
-}
-
-impl Drop for PendingSourceAdmission {
-    fn drop(&mut self) {
-        self.cancel();
+        self.operation.cancel();
     }
 }
 
@@ -697,54 +748,18 @@ impl Drop for CollectionGuard {
 /// One cancellable outgoing connection. Drop closes even a connected result
 /// that has not yet been claimed; polling never blocks the application's thread.
 pub struct PendingDestinationConnection {
-    result: Option<oneshot::Receiver<Result<IrohDestinationPeer, String>>>,
-    cancel: Option<oneshot::Sender<()>>,
+    operation: weld_session::Operation<IrohDestinationPeer>,
     _host: Arc<HostLifetime>,
 }
-
 impl PendingDestinationConnection {
     pub fn poll(&mut self) -> Result<Option<IrohDestinationPeer>> {
-        let result = self
-            .result
-            .as_mut()
-            .context("Iroh connection result was already consumed")?;
-        match result.try_recv() {
-            Ok(result) => {
-                self.result = None;
-                self.cancel = None;
-                result.map(Some).map_err(anyhow::Error::msg)
-            }
-            Err(oneshot::error::TryRecvError::Empty) => Ok(None),
-            Err(oneshot::error::TryRecvError::Closed) => {
-                self.result = None;
-                Err(anyhow::anyhow!("Iroh host stopped during connection"))
-            }
-        }
+        self.operation.poll()
     }
-    fn wait(mut self) -> Result<IrohDestinationPeer> {
-        let result = self
-            .result
-            .take()
-            .context("Iroh connection result was already consumed")?
-            .blocking_recv()
-            .context("Iroh host stopped during connection")?;
-        self.cancel = None;
-        result.map_err(anyhow::Error::msg)
+    fn wait(self) -> Result<IrohDestinationPeer> {
+        self.operation.wait()
     }
     pub fn cancel(&mut self) {
-        if let Some(cancel) = self.cancel.take() {
-            let _ = cancel.send(());
-        }
-        if let Some(mut result) = self.result.take()
-            && let Ok(Ok(peer)) = result.try_recv()
-        {
-            peer.disconnect();
-        }
-    }
-}
-impl Drop for PendingDestinationConnection {
-    fn drop(&mut self) {
-        self.cancel();
+        self.operation.cancel();
     }
 }
 
@@ -783,46 +798,6 @@ enum ConnectTarget {
 }
 
 enum HostCommand {
-    CollectDiagnostics {
-        reports: crate::DiagnosticReports,
-        session: weld_diagnostics::SessionId,
-        reply: oneshot::Sender<Result<weld_diagnostics::collection::DiagnosticCollection, String>>,
-        guard: CollectionGuard,
-    },
-    DeviceSession {
-        host: Weak<HostLifetime>,
-        profile: IrohConnectionProfile,
-        codecs: weld_hoist_protocol::presentation::ReceiverPreferences,
-        notifier: IrohNotifier,
-        reply: oneshot::Sender<Result<crate::pairing::DeviceSession, String>>,
-        cancelled: oneshot::Receiver<()>,
-    },
-    Pair {
-        invitation: crate::pairing::PairingInvitation,
-        name: String,
-        notifier: IrohNotifier,
-        progress: Arc<Mutex<weld_hoist_core::session::pairing::enrollment::PairingProgress>>,
-        cancelled: oneshot::Receiver<()>,
-    },
-    AcceptSource {
-        host: Weak<HostLifetime>,
-        codec: VideoCodec,
-        expected: SourceApproval,
-        deadline: Instant,
-        notifier: IrohNotifier,
-        reply: oneshot::Sender<Result<IrohSourcePeer, String>>,
-        cancelled: oneshot::Receiver<()>,
-        guard: AcceptGuard,
-    },
-    ConnectDestination {
-        host: Weak<HostLifetime>,
-        address: ConnectTarget,
-        supported_codecs: weld_hoist_protocol::presentation::ReceiverPreferences,
-        deadline: Instant,
-        notifier: IrohNotifier,
-        reply: oneshot::Sender<Result<IrohDestinationPeer, String>>,
-        cancelled: oneshot::Receiver<()>,
-    },
     Shutdown,
 }
 
@@ -831,13 +806,14 @@ struct EndpointStartup {
     secret: Option<SecretKey>,
     dns: IrohDnsPolicy,
     adb_listen: Option<SocketAddr>,
+    services: Option<weld_session::Registry<crate::IrohConnection>>,
 }
 
 async fn run_host(
     sessions: SessionRuntime,
     options: EndpointStartup,
     mut commands: mpsc::UnboundedReceiver<HostCommand>,
-    started: std_mpsc::SyncSender<Result<(String, Option<SocketAddr>), String>>,
+    started: std_mpsc::SyncSender<Result<BoundEndpoint, String>>,
     pairing: crate::pairing::PairingHost,
     owner: Arc<Mutex<Weak<HostLifetime>>>,
 ) -> Result<()> {
@@ -846,6 +822,7 @@ async fn run_host(
         secret,
         dns,
         adb_listen,
+        services,
     } = options;
     let secret = secret.unwrap_or_else(SecretKey::generate);
     let links = (network == IrohNetwork::Adb).then(|| adb::Manager::new(secret.public()));
@@ -876,13 +853,29 @@ async fn run_host(
     } else if let Some(resolver) = dns.resolver() {
         endpoint = endpoint.dns_resolver(resolver);
     }
+    let (services, incoming) = match services {
+        Some(services) => {
+            let (sender, receiver) = async_channel::bounded(1);
+            drop(sender);
+            (services, receiver)
+        }
+        None => {
+            let mut services = weld_session::Registry::default();
+            let incoming = weld_hoist_core::session::server::register(
+                &mut services,
+                crate::connection::HostServices(pairing),
+            )?;
+            (services, incoming)
+        }
+    };
     let endpoint = endpoint
         .secret_key(secret)
-        .alpns(vec![
-            WELD_ALPN.to_vec(),
-            crate::pairing::PAIR_ALPN.to_vec(),
-            crate::pairing::SESSION_ALPN.to_vec(),
-        ])
+        .alpns(
+            services
+                .protocols()
+                .map(|id| id.as_bytes().to_vec())
+                .collect(),
+        )
         .bind()
         .await
         .map_err(anyhow::Error::from)?;
@@ -900,244 +893,28 @@ async fn run_host(
         bail!("Iroh endpoint published no direct listening address");
     }
     let ticket = EndpointTicket::new(address).to_string();
-    let incoming = sessions.listen(
+    sessions.listen(
         crate::incoming::IrohListener::new(endpoint.clone(), owner),
-        crate::connection::HostServices(pairing),
+        services,
     )?;
     drop(sessions);
     started
-        .send(Ok((ticket, listening)))
+        .send(Ok(BoundEndpoint {
+            ticket,
+            adb_listen: listening,
+            transport: TransportResources {
+                endpoint: endpoint.clone(),
+                io: tokio::runtime::Handle::current(),
+                incoming,
+                links: links.clone(),
+            },
+        }))
         .map_err(|_| anyhow::anyhow!("Iroh host startup receiver disappeared"))?;
 
-    while let Some(command) = commands.recv().await {
-        match command {
-            HostCommand::CollectDiagnostics {
-                reports,
-                session,
-                reply,
-                guard,
-            } => {
-                tokio::spawn(async move {
-                    let result = reports
-                        .collect(session)
-                        .await
-                        .map_err(|error| format!("{error:#}"));
-                    drop(guard);
-                    let _ = reply.send(result);
-                });
-            }
-            HostCommand::DeviceSession {
-                host,
-                profile,
-                codecs,
-                notifier,
-                reply,
-                cancelled,
-            } => {
-                let endpoint = endpoint.clone();
-                tokio::spawn(async move {
-                    tokio::select! {
-                        _ = async { if cancelled.await.is_err() { std::future::pending::<()>().await; } } => {},
-                        result = crate::pairing::connect_session(host, endpoint, profile, codecs, notifier.clone(), reply) => {
-                            if let Err(error) = result { tracing::warn!(%error, "device session ended"); }
-                        }
-                    }
-                    let _ = notifier.notify();
-                });
-            }
-            HostCommand::Pair {
-                invitation,
-                name,
-                notifier,
-                progress,
-                cancelled,
-            } => {
-                let endpoint = endpoint.clone();
-                tokio::spawn(async move {
-                    let result = tokio::select! {
-                        _ = cancelled => Err(anyhow::anyhow!("pairing cancelled")),
-                        result = tokio::time::timeout(Duration::from_secs(125), crate::pairing::connect(endpoint, invitation, name, progress.clone(), notifier.clone())) => result.context("pairing timed out").and_then(|result| result),
-                    };
-                    if let Err(error) = result {
-                        if let Ok(mut progress) = progress.lock() {
-                            *progress =
-                                weld_hoist_core::session::pairing::enrollment::PairingProgress::Failed(format!("{error:#}"));
-                        }
-                        let _ = notifier.notify();
-                    }
-                });
-            }
-            HostCommand::AcceptSource {
-                host,
-                codec,
-                expected,
-                deadline,
-                notifier,
-                reply,
-                cancelled,
-                guard,
-            } => {
-                let listener = incoming.clone();
-                let links = links.clone();
-                tokio::spawn(async move {
-                    let _guard = guard;
-                    let admitted = async {
-                        let expected = expected.resolve(deadline).await?;
-                        accept_source(
-                            host,
-                            listener,
-                            expected,
-                            codec,
-                            deadline,
-                            notifier.clone(),
-                            links,
-                        )
-                        .await
-                    };
-                    let result = tokio::select! {
-                        biased;
-                        _ = cancelled => Err(anyhow::anyhow!("Iroh admission cancelled")),
-                        result = admitted => result,
-                    }
-                    .map_err(|error| format!("{error:#}"));
-                    if let Err(Ok(peer)) = reply.send(result) {
-                        peer.disconnect();
-                    }
-                    if let Err(error) = notifier.notify() {
-                        tracing::warn!(%error, "could not wake host after Iroh admission");
-                    }
-                });
-            }
-            HostCommand::ConnectDestination {
-                host,
-                address,
-                supported_codecs,
-                deadline,
-                notifier,
-                reply,
-                cancelled,
-            } => {
-                let endpoint = endpoint.clone();
-                let links = links.clone();
-                tokio::spawn(async move {
-                    let connecting = connect_destination(
-                        host,
-                        endpoint,
-                        address,
-                        supported_codecs,
-                        deadline,
-                        notifier.clone(),
-                        links,
-                    );
-                    let result = tokio::select! {
-                        biased;
-                        _ = cancelled => Err(anyhow::anyhow!("Iroh connection cancelled")),
-                        result = connecting => result,
-                    }
-                    .map_err(|error| format!("{error:#}"));
-                    if let Err(Ok(peer)) = reply.send(result) {
-                        peer.disconnect();
-                    }
-                    if let Err(error) = notifier.notify() {
-                        tracing::warn!(%error, "could not wake host after Iroh connection");
-                    }
-                });
-            }
-            HostCommand::Shutdown => break,
-        }
-    }
+    let _ = commands.recv().await;
     endpoint.close().await;
     if let Some(links) = links {
         links.close();
     }
     Ok(())
-}
-
-async fn accept_source(
-    host: Weak<HostLifetime>,
-    listener: admission::IncomingQueue,
-    expected: IrohTrustedPeers,
-    codec: VideoCodec,
-    deadline: Instant,
-    notifier: IrohNotifier,
-    links: Option<Arc<adb::Manager>>,
-) -> Result<IrohSourcePeer> {
-    let mut bootstrap = admission::accept_trusted_source(
-        listener,
-        expected,
-        codec,
-        deadline.into(),
-        admission::ATTEMPT_TIMEOUT,
-    )
-    .await?;
-    if let Some(links) = links {
-        links.admitted(
-            bootstrap
-                .adb_route
-                .as_ref()
-                .context("ADB admission did not use a custom route")?,
-            &bootstrap.pending.connection,
-        )?;
-    }
-    let host = host
-        .upgrade()
-        .context("Iroh host was dropped during peer setup")?;
-    let peer = spawn_source_peer(
-        host,
-        bootstrap.pending.connection.clone(),
-        bootstrap.send,
-        bootstrap.recv,
-        bootstrap.media,
-        notifier,
-        weld_hoist_protocol::presentation::SourcePresentation {
-            codec,
-            stream_mode: bootstrap.stream_mode,
-        },
-    );
-    bootstrap.pending.hand_off();
-    Ok(peer)
-}
-
-async fn connect_destination(
-    host: Weak<HostLifetime>,
-    endpoint: Endpoint,
-    address: ConnectTarget,
-    supported_codecs: weld_hoist_protocol::presentation::ReceiverPreferences,
-    deadline: Instant,
-    notifier: IrohNotifier,
-    links: Option<Arc<adb::Manager>>,
-) -> Result<IrohDestinationPeer> {
-    let (address, lease) = match address {
-        ConnectTarget::Address(address) => (address, None),
-        ConnectTarget::Adb { peer, address } => {
-            let lease = tokio::time::timeout_at(
-                deadline.into(),
-                links.context("ADB manager missing")?.connect(address),
-            )
-            .await??;
-            (
-                EndpointAddr::from_parts(peer, [TransportAddr::Custom(lease.address())]),
-                Some(lease),
-            )
-        }
-    };
-    let mut bootstrap =
-        admission::connect_address(&endpoint, address, &supported_codecs, deadline.into()).await?;
-    if let Some(lease) = lease {
-        lease.watch(&bootstrap.pending.connection)?;
-    }
-    let host = host
-        .upgrade()
-        .context("Iroh host was dropped during peer setup")?;
-    let peer = spawn_destination_peer(
-        host,
-        bootstrap.pending.connection.clone(),
-        bootstrap.send,
-        bootstrap.recv,
-        bootstrap.media,
-        notifier,
-        bootstrap.codec,
-    );
-    bootstrap.pending.hand_off();
-    Ok(peer)
 }

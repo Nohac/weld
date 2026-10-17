@@ -3,25 +3,28 @@ use super::{CollectionStatus, DiagnosticCollection, DiagnosticReports};
 use crate::channel::PacketLane;
 use anyhow::{Context, Result};
 use iroh::endpoint::Connection;
-use weld_diagnostics::{SessionId, collection::RequestBudget};
+use weld_diagnostics::SessionId;
 use weld_hoist_core::session::diagnostics;
 
-pub(crate) async fn serve(reports: DiagnosticReports, connection: Connection) {
-    let mut budget = RequestBudget::default();
-    while let Ok((send, recv)) = connection.accept_bi().await {
-        if let Err(error) = diagnostics::serve(
-            &reports.archive,
-            &connection.remote_id(),
-            &mut budget,
-            PacketLane::new(send, recv),
-        )
-        .await
-        {
-            tracing::debug!(%error, "diagnostic lane ended");
-        }
-    }
-}
 impl DiagnosticReports {
+    pub(crate) fn listen(
+        &self,
+        tasks: &weld_session::SessionTasks,
+        connection: Connection,
+    ) -> Result<()> {
+        diagnostics::listen(
+            tasks,
+            self.archive.clone(),
+            connection.remote_id(),
+            move || {
+                let connection = connection.clone();
+                async move {
+                    let (send, recv) = connection.accept_bi().await?;
+                    Ok(PacketLane::new(send, recv))
+                }
+            },
+        )
+    }
     pub(crate) async fn collect(&self, session: SessionId) -> Result<DiagnosticCollection> {
         let Some((owner, connection)) = self.route(session) else {
             return Ok(DiagnosticCollection {

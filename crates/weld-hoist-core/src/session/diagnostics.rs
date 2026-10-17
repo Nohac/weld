@@ -20,6 +20,46 @@ use weld_diagnostics::{
 const DEADLINE: Duration = Duration::from_secs(3);
 type Reply = Result<Box<Report>, CollectionStatus>;
 
+/// Starts the diagnostic service for an admitted connection. The binding
+/// supplies incoming packet lanes; shared code owns its request budget and loop.
+pub fn listen<P, L, F, Fut>(
+    tasks: &weld_session::SessionTasks,
+    archive: ReportArchive<P>,
+    owner: P,
+    next: F,
+) -> Result<()>
+where
+    P: Eq + Clone + Send + Sync + 'static,
+    L: ServiceTransport + Send + 'static,
+    F: FnMut() -> Fut + Send + 'static,
+    Fut: Future<Output = Result<L>> + Send + 'static,
+{
+    tasks.spawn(
+        "weld/diagnostic-peer/1",
+        32,
+        serve_streams(archive, owner, next),
+    )
+}
+pub async fn serve_streams<P, L, F, Fut>(
+    archive: ReportArchive<P>,
+    owner: P,
+    mut next: F,
+) -> Result<()>
+where
+    P: Eq + Clone + Send + Sync,
+    L: ServiceTransport,
+    F: FnMut() -> Fut + Send,
+    Fut: Future<Output = Result<L>> + Send,
+{
+    let mut budget = RequestBudget::default();
+    while let Ok(lane) = next().await {
+        if let Err(error) = serve(&archive, &owner, &mut budget, lane).await {
+            tracing::debug!(%error, "diagnostic lane ended");
+        }
+    }
+    Ok(())
+}
+
 pub async fn serve<P: Eq + Clone>(
     archive: &ReportArchive<P>,
     owner: &P,

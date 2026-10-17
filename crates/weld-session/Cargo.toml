@@ -1,0 +1,11 @@
+[package]
+name = "weld-session"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+async-channel = "2.5"
+tokio = { workspace = true, features = ["macros"] }
+tracing.workspace = true

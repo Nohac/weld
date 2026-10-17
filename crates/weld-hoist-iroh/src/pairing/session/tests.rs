@@ -1,7 +1,12 @@
-use super::*;
 use crate::{IrohConnectionProfile, IrohHost, IrohNetwork};
+use crate::{
+    IrohNotifier,
+    framing::{read_record, write_record},
+};
+use anyhow::Result;
 use iroh::endpoint::Connection;
 use iroh::endpoint::presets;
+use std::time::Duration;
 use std::{future::pending, pin::pin};
 use tokio::{
     io::{AsyncWriteExt, duplex},
@@ -10,6 +15,7 @@ use tokio::{
 use weld_client::ClientSurfaceId;
 use weld_diagnostics::{Cause, Endpoint, Observation, Operation, Recorder};
 use weld_hoist_core::session::server::SessionRuntime;
+use weld_hoist_protocol::device::{DeviceHello as Hello, DeviceWelcome as Welcome};
 use weld_hoist_protocol::{
     device::{DeviceReply as Reply, DeviceRequest as Request},
     service::{LANE_MARKER, ServiceRequest},
@@ -18,6 +24,7 @@ use weld_hoist_protocol::{
 use weld_media::VideoCodec;
 
 const WARNING: Duration = Duration::from_millis(5);
+const SESSION_ALPN: &[u8] = weld_hoist_core::session::server::DEVICE_SERVICE.as_bytes();
 const STALL: Duration = Duration::from_millis(25);
 
 async fn session_io<T>(

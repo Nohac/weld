@@ -19,7 +19,9 @@ use weld_access::AccessSession;
 use weld_hoist_protocol::device::{ApplicationInfo, DevicePermissions};
 
 pub mod admission;
+pub mod bootstrap;
 pub mod channel;
+pub mod client;
 pub mod device;
 pub mod diagnostics;
 pub mod negotiation;

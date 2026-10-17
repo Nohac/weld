@@ -13,17 +13,7 @@ use weld_diagnostics::{Cause, Observation, Operation, Recorder};
 
 const HEADER_BYTES: usize = 192 * 1024;
 
-/// Ordered packet writes. Dropping the owner cancels an incomplete transfer.
-pub trait PacketSend: Send {
-    fn send(&mut self, packet: &[u8]) -> impl Future<Output = Result<()>> + Send;
-    /// Complete the write half while retaining already queued packet data.
-    fn finish(&mut self) -> impl Future<Output = Result<()>> + Send;
-}
-
-/// Ordered packet reads, bounded before allocating payload storage.
-pub trait PacketReceive: Send {
-    fn receive(&mut self, maximum: usize) -> impl Future<Output = Result<Vec<u8>>> + Send;
-}
+pub use weld_session::connection::{PacketReceive, PacketSend};
 
 pub(crate) async fn send_record(lane: &mut impl PacketSend, value: &impl Serialize) -> Result<()> {
     let bytes = postcard::to_allocvec(value)?;

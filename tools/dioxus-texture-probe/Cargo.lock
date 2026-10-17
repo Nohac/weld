@@ -7000,6 +7000,7 @@ dependencies = [
  "weld-diagnostics",
  "weld-hoist-protocol",
  "weld-media",
+ "weld-session",
 ]
 
 [[package]]
@@ -7043,6 +7044,7 @@ dependencies = [
  "weld-hoist-encoded",
  "weld-hoist-protocol",
  "weld-media",
+ "weld-session",
  "zeroize",
 ]
 
@@ -7087,6 +7089,16 @@ dependencies = [
  "libc",
  "tracing",
  "weld-media",
+]
+
+[[package]]
+name = "weld-session"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-channel",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

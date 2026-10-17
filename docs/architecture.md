@@ -182,6 +182,13 @@ Weld is a workspace of reusable layers and one standard distribution:
   outer content corners. SSD uses those facts to suppress individual chrome.
   Header clicks use ordinary window activation. The tiler owns visibility,
   topology and focus history, and remains usable with another presentation layer.
+- `weld-session` owns application-assembled service registries, packet connection
+  capabilities, optional namespaced identity evidence and bounded task supervision.
+  Registered listeners share per-service concurrency budgets. Outgoing operations
+  retain cancellation and unclaimed-result cleanup; non-owning task handles let
+  child services share application shutdown. Its dependency graph contains only
+  general-purpose runtime/error/channel libraries. See
+  [Session service boundary](session-service-boundary.md) for assembly and validation.
 - `weld-hoist-protocol` owns the serializable, transport-neutral hoist record
   subset shared by current bindings: exact revision and session identities,
   source and destination envelopes, surface modes, and
@@ -217,10 +224,15 @@ Weld is a workspace of reusable layers and one standard distribution:
   and closes admitted connections before saving, with explicit retry after a
   persistence failure. Listener adapters supply authenticated identity,
   connection controls and private storage.
-  `session::server::SessionRuntime` owns the registered incoming-listener collection
-  and shared per-client task sets. Applications create it and supply the same
-  handle when binding transports. Core selects enrollment/device handlers, applies
-  aggregate task limits, supervises disconnect and drains cancellation on shutdown.
+  The optional `sessions` feature owns the hoist-specific services. Applications
+  create `weld-session::SessionRuntime` and supply it when binding transports.
+  `session::server::register` installs enrollment and application handlers into
+  an extensible registry. `session::client` owns outgoing enrollment and device
+  negotiation, progress and service-driver lifetimes. `session::bootstrap` owns
+  explicit-peer admission, offer/answer exchange, deadlines and losing-candidate
+  cleanup. Native delivery checks transfer availability independently of encoded
+  codec selection. The existing Unix socket path enforces same-user credentials
+  and supports native buffers without pairing or codec setup.
   `SourceSessions` owns the admitted-source lifetime and relay handoff.
   Transport handlers yield authenticated connection capabilities; their handshake
   and packet-pump tasks stay on the endpoint's I/O executor.
@@ -268,9 +280,16 @@ Weld is a workspace of reusable layers and one standard distribution:
   Paired desktop connections supply an independent packet lane to core's shared
   service driver. Its pairing integration supplies Iroh identity evidence,
   dialing links, stream setup and the existing private trust-file format.
-  The incoming Iroh handler supplies connection handles to the core supervisor.
+  The incoming Iroh handler supplies connection handles and an opaque selected
+  service identifier to the shared supervisor. Advertised identifiers come from
+  the registered handlers. `IrohHost::bind_registered` accepts an application's
+  own service set; `connector` supplies a pinned dial target for shared outgoing
+  operations. The default host assembles the existing hoist services.
   Its adapter opens packet/media lanes and supplies authenticated identity;
-  core owns the accepted paired-session handshake, service execution and retirement.
+  core owns both incoming and outgoing session negotiation, service execution and
+  retirement. Shared supervision also owns diagnostic request loops; Iroh supplies
+  their stream-open/accept adapters and authenticated archive routes. Diagnostic
+  consent is supplied explicitly when attaching a source peer.
   Its opt-in ADB carrier routes bounded encrypted QUIC packets over loopback
   TCP tunnels without changing those peer streams. A private link manager owns
   socket lifetimes, unique route IDs, pending-link limits and failure isolation;

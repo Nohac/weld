@@ -1,5 +1,7 @@
 use super::*;
 use crate::session::pairing::TrustStorage;
+use crate::session::{channel::PacketReceive, pairing::AuthenticatedPeer};
+use std::thread;
 use std::{
     collections::BTreeMap,
     sync::atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -53,22 +55,27 @@ impl PacketReceive for Reader {
         std::future::pending().await
     }
 }
-impl Connection for TestConnection {
+impl weld_session::connection::PacketConnection for TestConnection {
     type Writer = Writer;
     type Reader = Reader;
-    type Peer = Peer;
-    type Control = Peer;
-    fn identity(&self) -> Result<AuthenticatedPeer> {
-        AuthenticatedPeer::new("test", "peer")
-    }
-    fn control(&self) -> Peer {
-        self.peer.clone()
+    fn peer_identity(&self) -> Result<Option<AuthenticatedPeer>> {
+        AuthenticatedPeer::new("test", "peer").map(Some)
     }
     async fn closed(&self) -> Result<()> {
         std::future::pending().await
     }
+    async fn open_control(&self) -> Result<(Writer, Reader)> {
+        self.accept_control().await
+    }
     async fn accept_control(&self) -> Result<(Writer, Reader)> {
         Ok((Writer, Reader(self.reads.clone())))
+    }
+}
+impl Connection for TestConnection {
+    type Peer = Peer;
+    type Control = Peer;
+    fn control(&self) -> Peer {
+        self.peer.clone()
     }
     async fn open_source(
         &self,
@@ -119,11 +126,15 @@ fn distinct_listeners_share_task_limits_and_shutdown_retires_all_clients() {
     let host = Host(PairingAuthority::start("test".into(), || Ok(Storage)).expect("authority"));
     let (first, first_incoming) = async_channel::bounded(16);
     let (second, second_incoming) = async_channel::bounded(16);
-    let direct = runtime
-        .listen(FirstListener(first_incoming), host.clone())
+    let mut registry = Registry::default();
+    let direct = register(&mut registry, host.clone()).expect("services");
+    runtime
+        .listen(FirstListener(first_incoming), registry)
         .expect("first listener");
-    let _second_direct = runtime
-        .listen(SecondListener(second_incoming), host)
+    let mut registry = Registry::default();
+    let _second_direct = register(&mut registry, host).expect("services");
+    runtime
+        .listen(SecondListener(second_incoming), registry)
         .expect("second listener");
     let reads = Arc::new(AtomicUsize::new(0));
     let dropped = Arc::new(AtomicUsize::new(0));
@@ -136,7 +147,7 @@ fn distinct_listeners_share_task_limits_and_shutdown_retires_all_clients() {
         let sender = if index % 2 == 0 { &first } else { &second };
         sender
             .try_send(Accepted {
-                protocol: Protocol::Enrollment,
+                protocol: ENROLLMENT_SERVICE.into(),
                 connection: connection(),
             })
             .expect("enqueue");
@@ -144,7 +155,7 @@ fn distinct_listeners_share_task_limits_and_shutdown_retires_all_clients() {
     wait(|| reads.load(Ordering::Acquire) == 8);
     second
         .try_send(Accepted {
-            protocol: Protocol::Enrollment,
+            protocol: ENROLLMENT_SERVICE.into(),
             connection: connection(),
         })
         .expect("overload");
@@ -157,7 +168,7 @@ fn distinct_listeners_share_task_limits_and_shutdown_retires_all_clients() {
 
     first
         .try_send(Accepted {
-            protocol: Protocol::DirectSource,
+            protocol: DIRECT_SERVICE.into(),
             connection: connection(),
         })
         .expect("direct");
@@ -165,7 +176,7 @@ fn distinct_listeners_share_task_limits_and_shutdown_retires_all_clients() {
     drop(direct.try_recv().expect("direct stays independent"));
     first
         .try_send(Accepted {
-            protocol: Protocol::DirectSource,
+            protocol: DIRECT_SERVICE.into(),
             connection: connection(),
         })
         .expect("unclaimed");

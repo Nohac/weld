@@ -24,27 +24,7 @@ const MAX_DEVICES: usize = 32;
 const MAX_CONNECTIONS: usize = 8;
 pub mod enrollment;
 
-/// Identity evidence supplied by an authenticated listener.
-#[derive(Clone, Debug)]
-pub struct AuthenticatedPeer {
-    namespace: String,
-    identity: String,
-}
-impl AuthenticatedPeer {
-    pub fn label(&self) -> String {
-        format!("{}:{}", self.namespace, self.identity)
-    }
-    pub fn new(namespace: impl Into<String>, identity: impl Into<String>) -> Result<Self> {
-        let namespace = namespace.into();
-        let identity = identity.into();
-        validate_label(&namespace, 80)?;
-        validate_label(&identity, 160)?;
-        Ok(Self {
-            namespace,
-            identity,
-        })
-    }
-}
+pub use weld_session::connection::PeerIdentity as AuthenticatedPeer;
 
 /// Durable storage called exclusively on the authority worker.
 pub trait TrustStorage: Send {
@@ -52,11 +32,7 @@ pub trait TrustStorage: Send {
     fn save(&self, devices: &BTreeMap<String, PairedDevice>) -> Result<()>;
 }
 
-/// A binding-owned connection handle used to execute admission cleanup.
-pub trait ConnectionControl: Send + Sync {
-    fn is_connected(&self) -> bool;
-    fn close(&self);
-}
+pub use weld_session::ConnectionControl;
 
 pub struct PairingClaim {
     pub candidate: PairingCandidate,
@@ -124,7 +100,7 @@ impl State {
     }
     fn check_peer(&self, peer: &AuthenticatedPeer) -> Result<()> {
         ensure!(
-            peer.namespace == self.published.namespace,
+            peer.namespace() == self.published.namespace,
             "authentication namespace differs"
         );
         Ok(())
@@ -162,7 +138,7 @@ impl State {
         ensure!(mismatch == 0, "invalid pairing invitation");
         let bytes: [u8; 3] = random()?;
         let candidate = PairingCandidate {
-            identity: peer.identity,
+            identity: peer.identity().to_owned(),
             name,
             verification: bytes.iter().map(|byte| format!("{byte:02X}")).collect(),
         };
@@ -252,7 +228,7 @@ impl State {
         );
         let permissions = self
             .devices
-            .get(&peer.identity)
+            .get(peer.identity())
             .context("device is not paired")?
             .permissions;
         ensure!(
@@ -472,14 +448,14 @@ impl PairingAuthority {
     }
     pub fn permissions(&self, peer: &AuthenticatedPeer) -> Option<DevicePermissions> {
         let snapshot = &self.0.published;
-        if snapshot.stopped.load(Ordering::Acquire) || snapshot.namespace != peer.namespace {
+        if snapshot.stopped.load(Ordering::Acquire) || snapshot.namespace != peer.namespace() {
             return None;
         }
         snapshot
             .devices
             .read()
             .ok()?
-            .get(&peer.identity)
+            .get(peer.identity())
             .map(|device| device.permissions)
     }
     pub fn devices(&self) -> Result<Vec<PairedDevice>> {
@@ -553,7 +529,7 @@ impl PairingAuthority {
         connection: impl ConnectionControl + 'static,
     ) -> Result<Pending<Result<DevicePermissions>>> {
         let admission = Admission {
-            identity: peer.identity.clone(),
+            identity: peer.identity().to_owned(),
             access,
             connection: Box::new(connection),
         };

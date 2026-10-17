@@ -111,6 +111,14 @@ impl IrohSourcePeer {
 }
 
 impl weld_hoist_encoded::SourceConnection for IrohSourcePeer {}
+impl weld_hoist_core::session::pairing::ConnectionControl for IrohDestinationPeer {
+    fn is_connected(&self) -> bool {
+        self.is_available()
+    }
+    fn close(&self) {
+        self.disconnect();
+    }
+}
 impl weld_hoist_core::session::pairing::ConnectionControl for IrohSourcePeer {
     fn is_connected(&self) -> bool {
         self.is_available()
@@ -271,6 +279,10 @@ impl EncodedDestinationTransport for IrohDestinationPeer {
     }
 }
 
+pub(crate) struct SourceSetup {
+    pub presentation: SourcePresentation,
+    pub diagnostics_access: crate::reports::Access,
+}
 pub(crate) fn spawn_source_peer(
     host: Arc<HostLifetime>,
     connection: Connection,
@@ -278,20 +290,17 @@ pub(crate) fn spawn_source_peer(
     control_recv: RecvStream,
     media_send: SendStream,
     notifier: IrohNotifier,
-    presentation: SourcePresentation,
+    setup: SourceSetup,
 ) -> IrohSourcePeer {
-    let access = if connection.alpn() == crate::pairing::SESSION_ALPN {
-        crate::reports::Access::Paired(host.diagnostic_permission.clone())
-    } else {
-        crate::reports::Access::Participant
-    };
-    let diagnostics = host
-        .reports
-        .start(&connection, weld_diagnostics::Endpoint::Source, access);
-    tokio::spawn(crate::reports::serve(
-        host.reports.clone(),
-        connection.clone(),
-    ));
+    let SourceSetup {
+        presentation,
+        diagnostics_access,
+    } = setup;
+    let diagnostics = host.reports.start(
+        &connection,
+        weld_diagnostics::Endpoint::Source,
+        diagnostics_access,
+    );
     let path = crate::diagnostics::observe(&connection, diagnostics.clone());
     let identity = IrohPeerIdentity(connection.remote_id().to_string());
     let state = Arc::new(PeerState::new(connection.clone(), notifier, diagnostics));
@@ -331,10 +340,6 @@ pub(crate) fn spawn_destination_peer(
         weld_diagnostics::Endpoint::Receiver,
         crate::reports::Access::Participant,
     );
-    tokio::spawn(crate::reports::serve(
-        host.reports.clone(),
-        connection.clone(),
-    ));
     crate::diagnostics::observe(&connection, diagnostics.clone());
     let identity = IrohPeerIdentity(connection.remote_id().to_string());
     let state = Arc::new(PeerState::new(

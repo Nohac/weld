@@ -197,6 +197,8 @@ fn profile_and_allowlist_validation_is_bounded_and_fail_closed() {
     assert!(IrohTrustedPeers::new(vec![id.clone(); 33]).is_err());
     let trusted = IrohTrustedPeers::new(vec![id.clone(); 2]).expect("duplicates normalized");
     assert_eq!(trusted.0.len(), 1);
-    assert!(trusted.contains(&id.as_str().parse().expect("id")));
-    assert!(!trusted.contains(&SecretKey::generate().public()));
+    assert_eq!(
+        trusted.identities().expect("identity evidence"),
+        vec![crate::pairing::authenticated(id.as_str().parse().expect("id")).expect("peer")]
+    );
 }

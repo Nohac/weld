@@ -5,6 +5,7 @@ pub mod gamepad;
 pub mod input;
 mod loopback;
 mod relay;
+#[cfg(feature = "sessions")]
 pub mod session;
 mod touch;
 pub mod view;
