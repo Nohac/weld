@@ -10,6 +10,8 @@ publish = false
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
+weld-hoist-protocol = { path = "../../crates/weld-hoist-protocol" }
+weld-hoist-core = { path = "../../crates/weld-hoist-core" }
 weld-video-gles = { path = "../../crates/weld-video-gles" }
 wgpu_context = "=0.10.0"
 anyrender = "=0.14.0"

@@ -8,6 +8,7 @@ mod adapter;
 mod bootstrap;
 mod destination;
 mod encoded_transport;
+pub use encoded_transport::LocalEncodedSourceTransport;
 mod media;
 mod native;
 mod socket;

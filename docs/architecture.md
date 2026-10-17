@@ -188,8 +188,8 @@ Weld is a workspace of reusable layers and one standard distribution:
   encoded access-unit metadata and bounded thumbnail request/reply records.
   Its `device`, `presentation` and `bootstrap` modules also own application
   catalogues, device grants, enrollment/control messages and negotiation records.
-  Bindings consume these records; Iroh's existing public paths temporarily
-  re-export them during the session-owner migration. It contains no compositor, application,
+  Bindings and shells import these records directly from the protocol crate.
+  It contains no compositor, application,
   codec-backend, or transport implementation.
 - `weld-hoist-core` owns transport-independent hoist identities, source and
   destination relay policy, and the Bevy-free loopback binding. Its relay
@@ -200,7 +200,9 @@ Weld is a workspace of reusable layers and one standard distribution:
   Its `session` module owns source-session IDs, authorized catalogues, coalesced
   catalogue subscriptions, cancellable host actions and a shared thumbnail cache.
   A bounded mailbox feeds one service worker; transport listeners can attach to
-  the same owner. Shared service drivers enforce request budgets, deadlines,
+  the same owner. `session::admission` supplies the bounded admitted-connection
+  handoff and retires revoked or abandoned entries. Its short transfer lock is
+  released before codec setup and relay servicing. Shared service drivers enforce request budgets, deadlines,
   authorization and payload validation over bounded packet lanes. Capture
   producers complete asynchronous tickets through `SessionService`. See
   [Thumbnail protocol](device-pairing.md#thumbnail-protocol).
@@ -226,7 +228,11 @@ Weld is a workspace of reusable layers and one standard distribution:
   hardware codec binding. The optional `android` integration supplies the
   MediaCodec decode-pool provider and acquired-image lease publisher.
   Port policy and publication run on the caller thread;
-  native codecs run on bounded workers. Bindings move only control records and
+  native codecs run on bounded workers. Shared registration builds connected and
+  pending relays; `native::registration` supplies codec workers and wake sources
+  for both Unix and Iroh. `source_sessions` attaches one codec-backed relay per
+  admitted client, replays the current inventory and drains cleanup before
+  retirement. It consumes core's admitted-connection handoff. Bindings move control records and
   compressed access units.
   Encoded presenters can select independent surfaces or a composited viewport
   during connection setup. Composited views retain a toplevel's subsurfaces and
@@ -248,14 +254,15 @@ Weld is a workspace of reusable layers and one standard distribution:
   optional for native-only library consumers.
 - `weld-hoist-iroh` owns the authenticated Iroh endpoint host, peer
   connections, endpoint-ticket rendezvous, bounded Postcard framing, and the
-  independent QUIC control and encoded-media streams. Iroh and Tokio types do
-  not cross its registration boundary. Its default graph is compositor-free;
-  optional native/VA-API registration uses the same portable peer machinery.
+  independent QUIC control and encoded-media streams. Portable peer handles feed
+  shared encoded registration; Iroh and Tokio objects stay inside the binding.
+  Its default graph is compositor-free; optional native integration adapts host
+  wake notifications.
   Paired desktop connections supply an independent packet lane to core's shared
   service driver. Its pairing integration supplies Iroh identity evidence,
   dialing links, stream setup and the existing private trust-file format.
-  Reusable relay assembly is being migrated under the
-  [session/transport refactor](spec/remote-protocol.md#protocolsessiontransport-refactor--direction).
+  `SessionListener` supplies admitted connections to shared encoded assembly.
+  Core owns codec-offer/reply validation and paired-session negotiation.
   Its opt-in ADB carrier routes bounded encrypted QUIC packets over loopback
   TCP tunnels without changing those peer streams. A private link manager owns
   socket lifetimes, unique route IDs, pending-link limits and failure isolation;
@@ -1410,9 +1417,9 @@ stalled peer cannot retain an unbounded number of per-commit SHM files.
 Encoded Unix sources, connected Iroh sources and pending Iroh sources all use
 `EncodedSourcePort::configured` with the same transport-neutral options. Budget
 attachment, access-unit dump setup and disconnect-on-configuration-failure live
-in `weld-hoist-encoded`, not in each transport. Native Iroh assembly shares one
-backend/wake constructor and source options type; destination namespace mapping
-is an argument to the manual policy endpoint, not encoder configuration.
+in `weld-hoist-encoded`. Unix and Iroh native assemblies use
+`native::registration::SourceRegistrationOptions` and the same backend/wake
+constructors. The manual policy endpoint receives the destination namespace.
 The pending wrapper owns authorization readiness only. Presentation claims are
 separate from source construction: the source relay claims each mapped root,
 and receiver output preferences supply its cadence. `ClientRuntime` validates

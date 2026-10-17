@@ -195,7 +195,7 @@ fn dropping_unclaimed_destination_result_disconnects_source() {
     let connecting = destination
         .begin_connect_profile(
             &profile(&source),
-            crate::IrohReceiverPreferences {
+            weld_hoist_protocol::presentation::ReceiverPreferences {
                 codecs: vec![VideoCodec::Av1],
                 stream_mode: weld_client::SurfaceStreamMode::Composited,
             },

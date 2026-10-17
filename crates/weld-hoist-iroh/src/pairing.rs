@@ -19,22 +19,21 @@ use std::{
 use tokio::sync::oneshot;
 
 use crate::{IrohConnectionProfile, IrohNetwork, IrohNotifier};
-pub use session::{DesktopSessions, DeviceAction, DeviceSession, PendingDeviceSession, SessionId};
+pub use session::{DeviceSession, PendingDeviceSession, SessionListener};
 pub(crate) use session::{accept_session, connect_session};
 use storage::TrustStore;
 use weld_access::AccessSession;
+use weld_hoist_core::session::pairing::enrollment::PairingProgress;
 use weld_hoist_core::session::pairing::{
     AuthenticatedPeer, ConnectionControl, PairingAuthority, validate_name,
 };
+pub use wire::PendingPairing;
 pub(crate) use wire::{PAIR_ALPN, SESSION_ALPN};
-pub use wire::{PairingProgress, PendingPairing};
 pub(crate) use wire::{accept, connect};
 
 const IDENTITY_NAMESPACE: &str = "iroh";
 
-pub use weld_hoist_protocol::device::{
-    ApplicationInfo, DevicePermissions, PairedDevice, PairingCandidate,
-};
+use weld_hoist_protocol::device::{DevicePermissions, PairedDevice, PairingCandidate};
 
 /// Public dialing hints and a one-time enrollment credential. Debug redacts it.
 #[derive(Clone, Serialize, Deserialize)]
@@ -95,14 +94,14 @@ impl FromStr for PairingInvitation {
 #[derive(Default)]
 struct Binding {
     authority: OnceLock<PairingAuthority>,
-    desktop: Mutex<Option<DesktopSessions>>,
+    listener: Mutex<Option<SessionListener>>,
 }
 
 /// Listener integration for shared enrollment and trust services.
 #[derive(Clone, Default)]
 pub struct PairingHost(Arc<Binding>);
 
-/// Live grant lookup retained by reports without retaining desktop peers.
+/// Live grant lookup retained by reports without retaining listener peers.
 #[derive(Clone)]
 pub(crate) struct DiagnosticPermission(Weak<Binding>);
 impl DiagnosticPermission {
@@ -144,27 +143,27 @@ impl PairingHost {
         if let Some(authority) = self.0.authority.get() {
             authority.shutdown();
         }
-        if let Ok(mut desktop) = self.0.desktop.lock()
-            && let Some(desktop) = desktop.take()
+        if let Ok(mut listener) = self.0.listener.lock()
+            && let Some(listener) = listener.take()
         {
-            desktop.close();
+            listener.close();
         }
     }
-    pub fn set_desktop(&self, desktop: DesktopSessions) -> Result<()> {
+    pub fn set_listener(&self, listener: SessionListener) -> Result<()> {
         *self
             .0
-            .desktop
+            .listener
             .lock()
-            .map_err(|_| anyhow::anyhow!("desktop handoff unavailable"))? = Some(desktop);
+            .map_err(|_| anyhow::anyhow!("listener handoff unavailable"))? = Some(listener);
         Ok(())
     }
-    fn desktop(&self) -> Result<DesktopSessions> {
+    fn listener(&self) -> Result<SessionListener> {
         self.0
-            .desktop
+            .listener
             .lock()
-            .map_err(|_| anyhow::anyhow!("desktop handoff unavailable"))?
+            .map_err(|_| anyhow::anyhow!("listener handoff unavailable"))?
             .clone()
-            .context("desktop sharing is unavailable")
+            .context("listener sharing is unavailable")
     }
     pub fn enable(&self, directory: &Path) -> Result<()> {
         ensure!(

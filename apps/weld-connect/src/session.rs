@@ -13,13 +13,13 @@ use std::{
     time::Duration,
 };
 use weld_client::SurfaceStreamMode;
+use weld_hoist_core::session::pairing::enrollment::PairingProgress;
 use weld_hoist_iroh::{
-    IrohConnectionProfile, IrohDnsPolicy, IrohHost, IrohNotifier, IrohReceiverPreferences,
-    pairing::{
-        ApplicationInfo, DeviceSession, PairingInvitation, PairingProgress, PendingDeviceSession,
-        PendingPairing,
-    },
+    IrohConnectionProfile, IrohDnsPolicy, IrohHost, IrohNotifier,
+    pairing::{DeviceSession, PairingInvitation, PendingDeviceSession, PendingPairing},
 };
+use weld_hoist_protocol::device::ApplicationInfo;
+use weld_hoist_protocol::presentation::ReceiverPreferences;
 use weld_media::VideoCodec;
 
 #[derive(Clone, Default, PartialEq, Eq)]
@@ -255,7 +255,7 @@ fn start(
                 IrohHost::bind_with_identity_and_dns(profile.network(), &store.identity, dns())?;
             let pending = host.begin_device_session(
                 profile,
-                IrohReceiverPreferences {
+                ReceiverPreferences {
                     codecs: vec![VideoCodec::Av1, VideoCodec::H264],
                     stream_mode: SurfaceStreamMode::Composited,
                 },

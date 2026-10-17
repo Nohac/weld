@@ -18,9 +18,9 @@ use weld_client::{
     SurfaceContentView, SurfaceInputGeometry, TouchEvent, WindowPreference,
 };
 use weld_hoist_encoded::DecodedFramePublisher;
-use weld_hoist_iroh::{
-    IrohDestinationPeer, destination_registration_with_backend, pairing::ApplicationInfo,
-};
+use weld_hoist_encoded::destination_registration_with_backend;
+use weld_hoist_iroh::IrohDestinationPeer;
+use weld_hoist_protocol::device::ApplicationInfo;
 use weld_video_gles as video;
 
 pub struct Frame {

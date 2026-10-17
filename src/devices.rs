@@ -15,17 +15,18 @@ use weld_control::ControlService;
 use weld_hoist::{
     HoistEndpointId, HoistEndpointRegistry, HoistSession, HoistWindow, HoistedWindow, ReclaimHoist,
 };
-use weld_hoist_iroh::{
-    DesktopEndpoints, IrohHost, IrohNotifier, desktop_source_registration,
-    pairing::{ApplicationInfo, DesktopSessions, DeviceAction, SessionId},
-};
+use weld_hoist_core::session::DeviceAction;
+use weld_hoist_core::session::SessionId;
+use weld_hoist_encoded::source_sessions::{SourceSessionEndpoints, source_sessions_registration};
+use weld_hoist_iroh::{IrohHost, IrohNotifier, IrohSourcePeer, pairing::SessionListener};
+use weld_hoist_protocol::device::ApplicationInfo;
 use weld_media::VideoCodec;
 use weld_window::{ManagedWindow, WindowOccupant, WindowSystems};
 
 #[derive(Resource)]
 struct Devices {
-    sessions: DesktopSessions,
-    arrivals: DesktopEndpoints,
+    sessions: SessionListener,
+    arrivals: SourceSessionEndpoints<IrohSourcePeer>,
     endpoints: BTreeMap<SessionId, HoistEndpointId>,
 }
 
@@ -65,7 +66,7 @@ pub(crate) fn install(
 ) -> Result<ControlService> {
     let policy = app.policy_wake()?;
     let (media, wake) = weld_core::host::client_runtime_notifier()?;
-    let sessions = DesktopSessions::new(
+    let sessions = SessionListener::new(
         media.clone().into(),
         IrohNotifier::new(move || policy.notify()),
         options.codec,
@@ -81,8 +82,8 @@ pub(crate) fn install(
     )?;
     let capabilities = app.external_dmabuf_capabilities()?;
     let budget = weld_hoist_encoded::SharedBitrateBudget::new(8_000_000)?;
-    let (adapter, arrivals) = desktop_source_registration(
-        sessions.clone(),
+    let (adapter, arrivals) = source_sessions_registration(
+        sessions.admissions(),
         ClientSourceId::new(2),
         weld_core::WAYLAND_CLIENT_SOURCE,
         budget,
@@ -118,7 +119,7 @@ pub(crate) fn install(
 }
 
 fn receive_actions(devices: Res<Devices>) -> Vec<DeviceAction> {
-    devices.sessions.take_actions()
+    devices.sessions.services().take_actions()
 }
 
 fn remote_actions(
@@ -135,8 +136,7 @@ fn remote_actions(
     sessions: Query<(Entity, &HoistSession)>,
     (mut hoist, mut reclaim): (MessageWriter<HoistWindow>, MessageWriter<ReclaimHoist>),
 ) {
-    for endpoint in devices.arrivals.take() {
-        let session = endpoint.session;
+    for (session, endpoint) in devices.arrivals.take() {
         if let Some(id) = registry.register(endpoint) {
             devices.endpoints.insert(session, id);
         }
@@ -351,7 +351,7 @@ fn publish_catalogues(
             });
         }
         catalogue.sort_by_key(|application| application.window);
-        if let Err(error) = devices.sessions.publish(*id, catalogue) {
+        if let Err(error) = devices.sessions.services().publish(*id, catalogue) {
             publication.retry = true;
             tracing::warn!(%error, "could not publish device catalogue");
         }

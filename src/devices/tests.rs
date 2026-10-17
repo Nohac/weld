@@ -38,13 +38,13 @@ fn fixture() -> (App, [HoistEndpointId; 2]) {
             HoistPlugin,
         ))
         .insert_resource(Devices {
-            sessions: DesktopSessions::new(
+            sessions: SessionListener::new(
                 IrohNotifier::new(|| Ok(())),
                 IrohNotifier::new(|| Ok(())),
                 VideoCodec::Av1,
             )
             .expect("session service"),
-            arrivals: DesktopEndpoints::default(),
+            arrivals: SourceSessionEndpoints::default(),
             endpoints: [(SessionId(1), endpoints[0]), (SessionId(2), endpoints[1])].into(),
         });
     (app, endpoints)

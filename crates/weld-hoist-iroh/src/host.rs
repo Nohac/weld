@@ -221,7 +221,7 @@ impl IrohHost {
     pub fn collect_diagnostics(
         &self,
         session: weld_diagnostics::SessionId,
-    ) -> Result<crate::DiagnosticCollection> {
+    ) -> Result<weld_diagnostics::collection::DiagnosticCollection> {
         let bundle = self
             .lifetime
             .reports
@@ -233,9 +233,9 @@ impl IrohHost {
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
             .is_err()
         {
-            return Ok(crate::DiagnosticCollection {
+            return Ok(weld_diagnostics::collection::DiagnosticCollection {
                 bundle,
-                status: crate::CollectionStatus::Busy,
+                status: weld_diagnostics::collection::CollectionStatus::Busy,
             });
         }
         let guard = CollectionGuard(self.lifetime.collecting.clone());
@@ -258,7 +258,7 @@ impl IrohHost {
     pub fn begin_device_session(
         &self,
         profile: IrohConnectionProfile,
-        codecs: impl Into<crate::IrohReceiverPreferences>,
+        codecs: impl Into<weld_hoist_protocol::presentation::ReceiverPreferences>,
         notifier: IrohNotifier,
     ) -> Result<crate::pairing::PendingDeviceSession> {
         anyhow::ensure!(
@@ -294,7 +294,9 @@ impl IrohHost {
             invitation.profile()?.network() == self.network,
             "pairing network differs from endpoint"
         );
-        let progress = Arc::new(Mutex::new(crate::pairing::PairingProgress::Connecting));
+        let progress = Arc::new(Mutex::new(
+            weld_hoist_core::session::pairing::enrollment::PairingProgress::Connecting,
+        ));
         let (cancel, cancelled) = oneshot::channel();
         self.lifetime
             .commands
@@ -446,7 +448,7 @@ impl IrohHost {
     pub fn connect_destination(
         &self,
         ticket_path: impl AsRef<Path>,
-        supported_codecs: impl Into<crate::IrohReceiverPreferences>,
+        supported_codecs: impl Into<weld_hoist_protocol::presentation::ReceiverPreferences>,
         notifier: IrohNotifier,
         startup_timeout: Duration,
     ) -> Result<IrohDestinationPeer> {
@@ -474,7 +476,7 @@ impl IrohHost {
     pub fn begin_connect_profile(
         &self,
         profile: &IrohConnectionProfile,
-        supported_codecs: impl Into<crate::IrohReceiverPreferences>,
+        supported_codecs: impl Into<weld_hoist_protocol::presentation::ReceiverPreferences>,
         notifier: IrohNotifier,
         startup_timeout: Duration,
     ) -> Result<PendingDestinationConnection> {
@@ -506,7 +508,7 @@ impl IrohHost {
     fn begin_connect_address(
         &self,
         address: ConnectTarget,
-        supported_codecs: crate::IrohReceiverPreferences,
+        supported_codecs: weld_hoist_protocol::presentation::ReceiverPreferences,
         notifier: IrohNotifier,
         deadline: Instant,
     ) -> Result<PendingDestinationConnection> {
@@ -606,6 +608,13 @@ pub struct PendingSourceAdmission {
     result: Option<oneshot::Receiver<Result<IrohSourcePeer, String>>>,
     cancel: Option<oneshot::Sender<()>>,
     _host: Arc<HostLifetime>,
+}
+
+impl weld_hoist_encoded::PendingSource for PendingSourceAdmission {
+    type Transport = IrohSourcePeer;
+    fn poll(&mut self) -> Result<Option<Self::Transport>> {
+        self.poll()
+    }
 }
 
 impl PendingSourceAdmission {
@@ -761,13 +770,13 @@ enum HostCommand {
     CollectDiagnostics {
         reports: crate::DiagnosticReports,
         session: weld_diagnostics::SessionId,
-        reply: oneshot::Sender<Result<crate::DiagnosticCollection, String>>,
+        reply: oneshot::Sender<Result<weld_diagnostics::collection::DiagnosticCollection, String>>,
         guard: CollectionGuard,
     },
     DeviceSession {
         host: Weak<HostLifetime>,
         profile: IrohConnectionProfile,
-        codecs: crate::IrohReceiverPreferences,
+        codecs: weld_hoist_protocol::presentation::ReceiverPreferences,
         notifier: IrohNotifier,
         reply: oneshot::Sender<Result<crate::pairing::DeviceSession, String>>,
         cancelled: oneshot::Receiver<()>,
@@ -776,7 +785,7 @@ enum HostCommand {
         invitation: crate::pairing::PairingInvitation,
         name: String,
         notifier: IrohNotifier,
-        progress: Arc<Mutex<crate::pairing::PairingProgress>>,
+        progress: Arc<Mutex<weld_hoist_core::session::pairing::enrollment::PairingProgress>>,
         cancelled: oneshot::Receiver<()>,
     },
     AcceptSource {
@@ -792,7 +801,7 @@ enum HostCommand {
     ConnectDestination {
         host: Weak<HostLifetime>,
         address: ConnectTarget,
-        supported_codecs: crate::IrohReceiverPreferences,
+        supported_codecs: weld_hoist_protocol::presentation::ReceiverPreferences,
         deadline: Instant,
         notifier: IrohNotifier,
         reply: oneshot::Sender<Result<IrohDestinationPeer, String>>,
@@ -931,7 +940,7 @@ async fn run_host(
                     if let Err(error) = result {
                         if let Ok(mut progress) = progress.lock() {
                             *progress =
-                                crate::pairing::PairingProgress::Failed(format!("{error:#}"));
+                                weld_hoist_core::session::pairing::enrollment::PairingProgress::Failed(format!("{error:#}"));
                         }
                         let _ = notifier.notify();
                     }
@@ -1059,7 +1068,7 @@ async fn accept_source(
         bootstrap.recv,
         bootstrap.media,
         notifier,
-        crate::presentation::SourcePresentation {
+        weld_hoist_protocol::presentation::SourcePresentation {
             codec,
             stream_mode: bootstrap.stream_mode,
         },
@@ -1072,7 +1081,7 @@ async fn connect_destination(
     host: Weak<HostLifetime>,
     endpoint: Endpoint,
     address: ConnectTarget,
-    supported_codecs: crate::IrohReceiverPreferences,
+    supported_codecs: weld_hoist_protocol::presentation::ReceiverPreferences,
     deadline: Instant,
     notifier: IrohNotifier,
     links: Option<Arc<adb::Manager>>,

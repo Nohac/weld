@@ -23,10 +23,11 @@ use weld_client::{
     ClientPresentationInbox, ClientRequest, ClientRuntime, ClientSourceId, Extent,
     PresentationRate,
 };
+use weld_hoist_encoded::destination_registration_with_backend;
 use weld_hoist_encoded::{DecodedFramePublisher, EncodedDestinationTransport};
 use weld_hoist_iroh::{
     IrohConnectionProfile, IrohDestinationPeer, IrohDeviceIdentity, IrohHost, IrohNotifier,
-    IrohPeerIdentity, destination_registration_with_backend,
+    IrohPeerIdentity,
 };
 use weld_media::VideoCodec;
 

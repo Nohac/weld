@@ -9,37 +9,32 @@ use crate::{
     peer::{spawn_destination_peer, spawn_source_peer},
 };
 use iroh::Endpoint;
-use std::{collections::VecDeque, sync::Weak};
+use std::sync::Weak;
 use weld_access::{AccessAuthority, AccessSession};
+use weld_hoist_core::session::admission::SourceAdmissions;
+use weld_hoist_core::session::negotiation;
 use weld_hoist_core::session::services::{ServiceClient, ServiceSession};
 use weld_hoist_encoded::{EncodedDestinationTransport, EncodedSourceTransport};
 use weld_hoist_protocol::service::LANE_MARKER;
 use weld_media::VideoCodec;
 
-pub use weld_hoist_core::session::{DeviceAction, SessionId};
+use weld_hoist_core::session::SessionId;
 use weld_hoist_core::session::{SessionService, device::DeviceClient};
-use weld_hoist_protocol::device::{
-    ApplicationInfo, DeviceHello as Hello, DeviceWelcome as Welcome,
-};
+use weld_hoist_protocol::device::{DeviceHello as Hello, DeviceWelcome as Welcome};
 
 /// Transport-owned peer handoff plus a handle to shared application services.
 #[derive(Clone)]
-pub struct DesktopSessions {
+pub struct SessionListener {
     access: AccessAuthority,
-    peers: Arc<Mutex<VecDeque<(SessionId, IrohSourcePeer, AccessSession)>>>,
+    peers: SourceAdmissions<IrohSourcePeer>,
     services: SessionService,
     notifier: IrohNotifier,
     policy: IrohNotifier,
     codec: VideoCodec,
 }
-impl DesktopSessions {
+impl SessionListener {
     pub(super) fn close(&self) {
-        if let Ok(mut peers) = self.peers.lock() {
-            for (_, peer, access) in peers.drain(..) {
-                self.services.leave(&access);
-                peer.disconnect();
-            }
-        }
+        self.peers.close();
         let _ = self.policy.notify();
     }
     pub fn new(notifier: IrohNotifier, policy: IrohNotifier, codec: VideoCodec) -> Result<Self> {
@@ -61,7 +56,7 @@ impl DesktopSessions {
             access: AccessAuthority::new(move || {
                 let _ = wake.notify();
             }),
-            peers: Arc::new(Mutex::new(VecDeque::new())),
+            peers: SourceAdmissions::default(),
             services,
             notifier,
             policy,
@@ -75,17 +70,8 @@ impl DesktopSessions {
         self.access = access;
         self
     }
-    pub fn take_peers(&self) -> Vec<(SessionId, IrohSourcePeer, AccessSession)> {
-        self.peers
-            .lock()
-            .map(|mut peers| peers.drain(..).collect())
-            .unwrap_or_default()
-    }
-    pub fn take_actions(&self) -> Vec<DeviceAction> {
-        self.services.take_actions()
-    }
-    pub fn publish(&self, session: SessionId, applications: Vec<ApplicationInfo>) -> Result<()> {
-        self.services.publish(session, applications)
+    pub fn admissions(&self) -> SourceAdmissions<IrohSourcePeer> {
+        self.peers.clone()
     }
     async fn join(
         &self,
@@ -98,15 +84,9 @@ impl DesktopSessions {
             .join(access.clone(), permissions)?
             .wait()
             .await??;
-        let admitted = (|| {
-            let mut peers = self
-                .peers
-                .lock()
-                .map_err(|_| anyhow::anyhow!("peer handoff unavailable"))?;
-            ensure!(peers.len() < 8, "peer handoff full");
-            peers.push_back((id, peer.clone(), access.clone()));
-            Ok::<(), anyhow::Error>(())
-        })();
+        let admitted = self
+            .peers
+            .admit(id, peer.clone(), access.clone(), peer.codec());
         if let Err(error) = admitted {
             self.services.leave(&access);
             peer.disconnect();
@@ -121,24 +101,22 @@ impl DesktopSessions {
     }
     fn leave(&self, session: SessionId, access: &AccessSession) {
         self.services.leave(access);
-        if let Ok(mut peers) = self.peers.lock() {
-            peers.retain(|(id, _, _)| *id != session);
-        }
+        self.peers.remove(session);
         let _ = self.policy.notify();
     }
 }
 
 struct JoinedSession {
-    desktop: DesktopSessions,
+    listener: SessionListener,
     id: Option<SessionId>,
     access: AccessSession,
 }
 impl Drop for JoinedSession {
     fn drop(&mut self) {
         if let Some(id) = self.id {
-            self.desktop.leave(id, &self.access);
+            self.listener.leave(id, &self.access);
         } else {
-            self.desktop.services.leave(&self.access);
+            self.listener.services.leave(&self.access);
         }
     }
 }
@@ -148,12 +126,12 @@ pub(crate) async fn accept_session(
     authority: PairingHost,
     connection: Connection,
 ) -> Result<()> {
-    let desktop = authority.desktop()?;
-    let access = desktop
+    let listener = authority.listener()?;
+    let access = listener
         .access
         .open(format!("device:{}", connection.remote_id()))?;
     let mut joined = JoinedSession {
-        desktop: desktop.clone(),
+        listener: listener.clone(),
         id: None,
         access: access.clone(),
     };
@@ -163,16 +141,13 @@ pub(crate) async fn accept_session(
         tokio::time::timeout(Duration::from_secs(5), connection.accept_bi()).await??;
     let hello: Hello =
         tokio::time::timeout(Duration::from_secs(5), read_record(&mut recv)).await??;
-    ensure!(
-        hello.preferences.codecs.contains(&desktop.codec),
-        "receiver does not support host codec"
-    );
+    let presentation = negotiation::presentation(&hello.preferences, listener.codec)?;
     tokio::time::timeout(
         Duration::from_secs(5),
         write_record(
             &mut send,
             &Welcome {
-                codec: desktop.codec,
+                codec: listener.codec,
             },
         ),
     )
@@ -191,24 +166,21 @@ pub(crate) async fn accept_session(
         control_send,
         control_recv,
         media,
-        desktop.notifier.clone(),
-        crate::presentation::SourcePresentation {
-            codec: desktop.codec,
-            stream_mode: hello.preferences.stream_mode,
-        },
+        listener.notifier.clone(),
+        presentation,
     );
     let recorder = peer.diagnostics();
-    let id = desktop.join(peer, access.clone(), permissions).await?;
+    let id = listener.join(peer, access.clone(), permissions).await?;
     joined.id = Some(id);
     let service_context = ServiceSession {
-        service: desktop.services.clone(),
+        service: listener.services.clone(),
         id,
         access: access.clone(),
     };
     let service_authority = authority.clone();
     let peer_identity = connection.remote_id();
     let control_context = ServiceSession {
-        service: desktop.services.clone(),
+        service: listener.services.clone(),
         id,
         access: access.clone(),
     };
@@ -283,7 +255,7 @@ pub(crate) async fn connect_session(
     host: Weak<HostLifetime>,
     endpoint: Endpoint,
     profile: IrohConnectionProfile,
-    preferences: crate::IrohReceiverPreferences,
+    preferences: weld_hoist_protocol::presentation::ReceiverPreferences,
     notifier: IrohNotifier,
     result: oneshot::Sender<Result<DeviceSession, String>>,
 ) -> Result<()> {
@@ -302,10 +274,7 @@ pub(crate) async fn connect_session(
         )
         .await?;
         let welcome: Welcome = read_record(&mut recv).await?;
-        ensure!(
-            preferences.codecs.contains(&welcome.codec),
-            "host selected an unsupported codec"
-        );
+        negotiation::presentation(&preferences, welcome.codec)?;
         let (control_send, mut control_recv) = guard.connection.accept_bi().await?;
         let mut marker = [0; 8];
         control_recv.read_exact(&mut marker).await?;

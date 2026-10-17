@@ -19,13 +19,17 @@ use weld_client::{
     PresentationRate, RuntimeInputEvent, RuntimeInputEventKind, SurfaceBufferChange,
     SurfaceContentView, SurfaceInputGeometry, SurfaceStreamMode, TouchEvent,
 };
+use weld_hoist_core::session::pairing::enrollment::PairingProgress;
 use weld_hoist_encoded::EncodedDestinationTransport;
 use weld_hoist_encoded::android::{AndroidDecodeBackend, AndroidFramePublisher};
-use weld_hoist_iroh::pairing::{ApplicationInfo, PairingInvitation, PairingProgress};
+use weld_hoist_encoded::destination_registration_with_backend;
+use weld_hoist_iroh::pairing::PairingInvitation;
 use weld_hoist_iroh::{
     IrohConnectionProfile, IrohDestinationPeer, IrohDeviceIdentity, IrohDnsPolicy, IrohHost,
-    IrohNotifier, IrohPeerIdentity, IrohReceiverPreferences, destination_registration_with_backend,
+    IrohNotifier, IrohPeerIdentity,
 };
+use weld_hoist_protocol::device::ApplicationInfo;
+use weld_hoist_protocol::presentation::ReceiverPreferences;
 use weld_media::VideoCodec;
 use weld_media_android::AndroidImage;
 
@@ -387,7 +391,7 @@ fn stream(
         Ok(())
     });
     shared.message("Connecting to approved Weld host");
-    let preferences = IrohReceiverPreferences {
+    let preferences = ReceiverPreferences {
         codecs: vec![VideoCodec::Av1, VideoCodec::H264],
         stream_mode: SurfaceStreamMode::Composited,
     };

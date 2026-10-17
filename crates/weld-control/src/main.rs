@@ -10,7 +10,7 @@ use std::{
 };
 use weld_control::access::AccessRequest;
 use weld_control::{Request, Response, call, socket_path};
-use weld_hoist_iroh::pairing::DevicePermissions;
+use weld_hoist_protocol::device::DevicePermissions;
 
 #[derive(Parser)]
 struct Arguments {
@@ -329,7 +329,7 @@ fn collect_report(
         anyhow::bail!("unexpected diagnostics response");
     };
     eprintln!("Peer: {}", collection.status);
-    if collection.status != weld_hoist_iroh::CollectionStatus::Collected
+    if collection.status != weld_diagnostics::collection::CollectionStatus::Collected
         && collection.bundle.peer.is_some()
     {
         eprintln!("Using previously collected peer evidence.");

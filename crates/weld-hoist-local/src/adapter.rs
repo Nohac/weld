@@ -10,11 +10,9 @@ use weld_hoist_core::{
     DestinationRelayAdapter, HoistEndpoint, HoistEndpointCommand, HoistSessionId,
     SourceRelayAdapter, relocated_surface,
 };
-#[cfg(feature = "encoded-vaapi")]
-use weld_hoist_encoded::native::DecodedDmabufPublisher;
 use weld_hoist_encoded::{
-    DecodedFramePublisher, EncodedDestinationPort, EncodedSourceOptions, EncodedSourcePort,
-    EncoderRateControl, SharedBitrateBudget,
+    DecodedFramePublisher, DestinationEndpoint, EncodedSourceOptions, SharedBitrateBudget,
+    SourceOptions,
 };
 
 use crate::{
@@ -25,21 +23,13 @@ use crate::{
 };
 
 #[cfg(feature = "encoded-vaapi")]
-use weld_hoist_encoded::{decode_backend, encode_backend};
+use weld_hoist_encoded::native::registration;
 
 #[derive(Clone)]
 pub struct LocalDestinationEndpoint {
     adapter_source: ClientSourceId,
     destination_source: ClientSourceId,
     connection: LocalPacketConnection,
-    rate_control: Option<EncoderRateControl>,
-}
-
-impl LocalDestinationEndpoint {
-    /// Optional source-side actuator; native-buffer hoisting has no encoder.
-    pub fn encoder_rate_control(&self) -> Option<EncoderRateControl> {
-        self.rate_control.clone()
-    }
 }
 
 impl HoistEndpoint for LocalDestinationEndpoint {
@@ -89,7 +79,6 @@ pub fn local_source_registration(
             adapter_source,
             destination_source,
             connection,
-            rate_control: None,
         },
     )
 }
@@ -120,7 +109,10 @@ pub fn encoded_source_registration_with_backend(
     destination_source: ClientSourceId,
     backend: Box<dyn crate::LocalEncodeBackend>,
     bitrate_budget: Option<SharedBitrateBudget>,
-) -> anyhow::Result<(ClientAdapterRegistration, LocalDestinationEndpoint)> {
+) -> anyhow::Result<(
+    ClientAdapterRegistration,
+    DestinationEndpoint<LocalEncodedSourceTransport>,
+)> {
     configured_source_registration(
         control,
         media,
@@ -143,21 +135,22 @@ fn configured_source_registration(
     destination_source: ClientSourceId,
     backend: Box<dyn crate::LocalEncodeBackend>,
     options: EncodedSourceOptions,
-) -> anyhow::Result<(ClientAdapterRegistration, LocalDestinationEndpoint)> {
-    let descriptor = ClientSourceDescriptor::new(adapter_source, ClientProvenance::Relocated);
-    let transport = LocalEncodedSourceTransport::new(control.clone(), media);
-    let port = EncodedSourcePort::configured(transport, backend, options)?;
-    let rate_control = port.encoder_rate_control();
-    let adapter = SourceRelayAdapter::new(upstream_source, port);
-    Ok((
-        ClientAdapterRegistration::new(descriptor, adapter, ControlOnlyClientImporter),
-        LocalDestinationEndpoint {
-            adapter_source,
-            destination_source,
-            connection: control,
-            rate_control,
+) -> anyhow::Result<(
+    ClientAdapterRegistration,
+    DestinationEndpoint<LocalEncodedSourceTransport>,
+)> {
+    weld_hoist_encoded::source_registration_with_backend(
+        LocalEncodedSourceTransport::new(control, media),
+        upstream_source,
+        adapter_source,
+        destination_source,
+        backend,
+        SourceOptions {
+            dump_directory: options.access_unit_dump,
+            bitrate_budget: options.bitrate_budget,
+            gamepad: None,
         },
-    ))
+    )
 }
 
 pub fn encoded_destination_registration_with_backend<P: DecodedFramePublisher>(
@@ -168,16 +161,13 @@ pub fn encoded_destination_registration_with_backend<P: DecodedFramePublisher>(
     publisher: P,
     backend: Box<dyn crate::LocalDecodeBackend<Output = P::Buffer>>,
 ) -> anyhow::Result<ClientAdapterRegistration> {
-    let descriptor = ClientSourceDescriptor::new(destination_source, ClientProvenance::Relocated);
-    let transport = LocalEncodedDestinationTransport::new(control, media)?;
-    let importer = publisher.client_importer();
-    let adapter = DestinationRelayAdapter::new(
+    Ok(weld_hoist_encoded::destination_registration_with_backend(
+        LocalEncodedDestinationTransport::new(control, media)?,
         upstream_source,
-        descriptor,
-        EncodedDestinationPort::new(transport, backend, descriptor, publisher),
-    );
-    Ok(ClientAdapterRegistration::new(
-        descriptor, adapter, importer,
+        destination_source,
+        publisher,
+        backend,
+        None,
     ))
 }
 
@@ -199,7 +189,7 @@ pub fn encoded_source_registration(
     options: EncodedSourceRegistrationOptions<'_>,
 ) -> anyhow::Result<(
     ClientAdapterRegistration,
-    LocalDestinationEndpoint,
+    DestinationEndpoint<LocalEncodedSourceTransport>,
     Vec<weld_core::host::ClientRuntimeWakeSource>,
 )> {
     let EncodedSourceRegistrationOptions {
@@ -211,27 +201,17 @@ pub fn encoded_source_registration(
         dump_directory,
         bitrate_budget,
     } = options;
-    let (notifier, worker_wake) = weld_core::host::client_runtime_notifier()?;
-    let backend = encode_backend(
-        capabilities.render_node.clone(),
-        codec,
-        dump_directory.clone(),
-        move || {
-            if let Err(error) = notifier.notify() {
-                tracing::error!(%error, "could not wake the host for encoded output");
-            }
-        },
-    )?;
-    let (registration, endpoint) = configured_source_registration(
-        control.clone(),
-        media.clone(),
-        upstream_source,
-        adapter_source,
+    let (registration, endpoint, worker_wake) = registration::source_registration(
+        LocalEncodedSourceTransport::new(control.clone(), media.clone()),
         destination_source,
-        backend,
-        EncodedSourceOptions {
+        registration::SourceRegistrationOptions {
+            upstream_source,
+            adapter_source,
+            capabilities,
+            codec,
+            dump_directory,
             bitrate_budget,
-            access_unit_dump: dump_directory.map(|directory| (directory, codec)),
+            gamepad: None,
         },
     )?;
     Ok((
@@ -258,19 +238,13 @@ pub fn encoded_destination_registration(
     ClientAdapterRegistration,
     Vec<weld_core::host::ClientRuntimeWakeSource>,
 )> {
-    let (notifier, worker_wake) = weld_core::host::client_runtime_notifier()?;
-    let backend = decode_backend(capabilities, codec, move || {
-        if let Err(error) = notifier.notify() {
-            tracing::error!(%error, "could not wake the host for decoded output");
-        }
-    })?;
-    let registration = encoded_destination_registration_with_backend(
-        control.clone(),
-        media.clone(),
+    let (registration, worker_wake) = registration::destination_registration(
+        LocalEncodedDestinationTransport::new(control.clone(), media.clone())?,
         upstream_source,
         destination_source,
-        DecodedDmabufPublisher::new(dmabuf),
-        backend,
+        dmabuf,
+        capabilities,
+        codec,
     )?;
     Ok((
         registration,

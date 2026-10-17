@@ -23,3 +23,6 @@ weld-media-vaapi = { path = "../weld-media-vaapi", optional = true }
 
 [target.'cfg(target_os = "android")'.dependencies]
 weld-media-android = { path = "../weld-media-android", optional = true }
+
+[dev-dependencies]
+weld-access = { path = "../weld-access" }

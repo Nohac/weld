@@ -2,6 +2,10 @@
 
 use std::path::PathBuf;
 
+use crate::{
+    EncodeBackend, SharedBitrateBudget, decode_backend, encode_backend,
+    native::DecodedDmabufPublisher,
+};
 use anyhow::Result;
 use weld_client::{ClientAdapterRegistration, ClientSourceId};
 use weld_core::{
@@ -9,20 +13,16 @@ use weld_core::{
     host::{ClientRuntimeWakeSource, client_runtime_notifier},
 };
 use weld_hoist_core::gamepad::GamepadProvider;
-use weld_hoist_encoded::{
-    EncodeBackend, SharedBitrateBudget, decode_backend, encode_backend,
-    native::DecodedDmabufPublisher,
-};
 use weld_media::VideoCodec;
 
 use crate::{
-    IrohDestinationEndpoint, IrohDestinationPeer, IrohSourceOptions, IrohSourcePeer,
-    PendingSourceAdmission, destination_registration_with_backend,
-    pending_source_registration_with_backend, source_registration_with_backend,
+    DestinationEndpoint, EncodedDestinationTransport, PendingSource, SourceConnection,
+    SourceOptions, destination_registration_with_backend, pending_source_registration_with_backend,
+    source_registration_with_backend,
 };
 
 /// Source media resources; remote namespace mapping belongs to the manual endpoint.
-pub struct IrohSourceRegistrationOptions<'a> {
+pub struct SourceRegistrationOptions<'a> {
     pub upstream_source: ClientSourceId,
     pub adapter_source: ClientSourceId,
     pub capabilities: &'a ExternalDmabufCapabilities,
@@ -32,13 +32,13 @@ pub struct IrohSourceRegistrationOptions<'a> {
     pub gamepad: Option<Box<dyn GamepadProvider>>,
 }
 
-pub fn source_registration(
-    peer: IrohSourcePeer,
+pub fn source_registration<T: SourceConnection>(
+    peer: T,
     destination_source: ClientSourceId,
-    options: IrohSourceRegistrationOptions<'_>,
+    options: SourceRegistrationOptions<'_>,
 ) -> Result<(
     ClientAdapterRegistration,
-    IrohDestinationEndpoint,
+    DestinationEndpoint<T>,
     ClientRuntimeWakeSource,
 )> {
     let (backend, wake) = source_backend(&options)?;
@@ -48,7 +48,7 @@ pub fn source_registration(
         options.adapter_source,
         destination_source,
         backend,
-        IrohSourceOptions {
+        SourceOptions {
             dump_directory: options
                 .dump_directory
                 .map(|directory| (directory, options.codec)),
@@ -60,7 +60,7 @@ pub fn source_registration(
 }
 
 fn source_backend(
-    options: &IrohSourceRegistrationOptions<'_>,
+    options: &SourceRegistrationOptions<'_>,
 ) -> Result<(Box<dyn EncodeBackend>, ClientRuntimeWakeSource)> {
     let (notifier, wake) = client_runtime_notifier()?;
     let backend = encode_backend(
@@ -69,15 +69,15 @@ fn source_backend(
         options.dump_directory.clone(),
         move || {
             if let Err(error) = notifier.notify() {
-                tracing::error!(%error, "could not wake Weld for encoded Iroh output");
+                tracing::error!(%error, "could not wake Weld for encoded output");
             }
         },
     )?;
     Ok((backend, wake))
 }
 
-pub fn destination_registration(
-    peer: IrohDestinationPeer,
+pub fn destination_registration<T: EncodedDestinationTransport + 'static>(
+    peer: T,
     upstream_source: ClientSourceId,
     destination_source: ClientSourceId,
     dmabuf: DmabufContext,
@@ -87,7 +87,7 @@ pub fn destination_registration(
     let (notifier, wake) = client_runtime_notifier()?;
     let backend = decode_backend(capabilities, codec, move || {
         if let Err(error) = notifier.notify() {
-            tracing::error!(%error, "could not wake Weld for decoded Iroh output");
+            tracing::error!(%error, "could not wake Weld for decoded output");
         }
     })?;
     Ok((
@@ -104,9 +104,9 @@ pub fn destination_registration(
 }
 
 /// Installs a pending source using the ordinary VA-API backend and wake integration.
-pub fn pending_source_registration(
-    pending: PendingSourceAdmission,
-    options: IrohSourceRegistrationOptions<'_>,
+pub fn pending_source_registration<P: PendingSource>(
+    pending: P,
+    options: SourceRegistrationOptions<'_>,
 ) -> Result<(ClientAdapterRegistration, ClientRuntimeWakeSource)> {
     let (backend, wake) = source_backend(&options)?;
     Ok((
@@ -115,7 +115,7 @@ pub fn pending_source_registration(
             options.upstream_source,
             options.adapter_source,
             backend,
-            IrohSourceOptions {
+            SourceOptions {
                 dump_directory: options.dump_directory.map(|path| (path, options.codec)),
                 bitrate_budget: options.bitrate_budget,
                 gamepad: options.gamepad,

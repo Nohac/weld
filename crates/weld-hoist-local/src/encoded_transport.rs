@@ -13,7 +13,8 @@ use crate::{
     TransportError, import_access_unit, media::export_access_unit,
 };
 
-pub(crate) struct LocalEncodedSourceTransport {
+#[derive(Clone)]
+pub struct LocalEncodedSourceTransport {
     control: LocalPacketConnection,
     media: LocalPacketConnection,
 }
@@ -21,6 +22,16 @@ pub(crate) struct LocalEncodedSourceTransport {
 impl LocalEncodedSourceTransport {
     pub(crate) fn new(control: LocalPacketConnection, media: LocalPacketConnection) -> Self {
         Self { control, media }
+    }
+}
+
+impl weld_hoist_encoded::SourceConnection for LocalEncodedSourceTransport {}
+impl weld_hoist_core::session::pairing::ConnectionControl for LocalEncodedSourceTransport {
+    fn close(&self) {
+        self.disconnect();
+    }
+    fn is_connected(&self) -> bool {
+        !self.control.is_disconnected() && !self.media.is_disconnected()
     }
 }
 

@@ -3,6 +3,10 @@
 
 use std::{path::PathBuf, time::Instant};
 
+use crate::{
+    EncodeBackend, EncodedSourceOptions, EncodedSourcePort, EncodedSourceTransport,
+    SharedBitrateBudget,
+};
 use weld_client::{
     ClientAdapterRegistration, ClientPresentationClaim, ClientProvenance, ClientSourceDescriptor,
     ClientSourceId, ClientSurfaceId, ControlOnlyClientImporter,
@@ -10,14 +14,10 @@ use weld_client::{
 use weld_hoist_core::{
     HoistPortResult, HoistSourcePort, SourceAdmission, SourcePortCommand, SourceRelayAdapter,
 };
-use weld_hoist_encoded::{
-    EncodeBackend, EncodedSourceOptions, EncodedSourcePort, EncodedSourceTransport,
-    SharedBitrateBudget,
-};
 use weld_hoist_protocol::DestinationEnvelope;
 use weld_media::VideoCodec;
 
-use crate::{IrohSourceOptions, IrohSourcePeer, PendingSourceAdmission};
+use crate::{PendingSource, SourceOptions};
 
 #[cfg(test)]
 #[path = "pending_source_tests.rs"]
@@ -25,12 +25,12 @@ mod tests;
 
 /// Observe the source immediately, forwarding all mapped windows only after admission.
 /// The supplied backend stays idle until authorization and owns no pre-admission queue.
-pub fn pending_source_registration_with_backend(
-    pending: PendingSourceAdmission,
+pub fn pending_source_registration_with_backend<P: PendingSource>(
+    pending: P,
     upstream: ClientSourceId,
     source: ClientSourceId,
     backend: Box<dyn EncodeBackend>,
-    options: IrohSourceOptions,
+    options: SourceOptions,
 ) -> ClientAdapterRegistration {
     ClientAdapterRegistration::new(
         ClientSourceDescriptor::new(source, ClientProvenance::Relocated),
@@ -51,22 +51,22 @@ pub fn pending_source_registration_with_backend(
     )
 }
 
-enum PortState {
+enum PortState<P: PendingSource> {
     Waiting {
-        pending: PendingSourceAdmission,
+        pending: P,
         backend: Option<Box<dyn EncodeBackend>>,
     },
-    Connected(Box<EncodedSourcePort<IrohSourcePeer>>),
+    Connected(Box<EncodedSourcePort<P::Transport>>),
     Closed,
 }
 
-struct PendingPort {
-    state: PortState,
+struct PendingPort<P: PendingSource> {
+    state: PortState<P>,
     dump: Option<(PathBuf, VideoCodec)>,
     budget: Option<SharedBitrateBudget>,
 }
 
-impl HoistSourcePort for PendingPort {
+impl<P: PendingSource> HoistSourcePort for PendingPort<P> {
     fn next_deadline(&self) -> Option<Instant> {
         match &self.state {
             PortState::Connected(port) => port.next_deadline(),
@@ -101,7 +101,6 @@ impl HoistSourcePort for PendingPort {
         if let PortState::Waiting { pending, backend } = &mut self.state
             && let Some(peer) = pending.poll()?
         {
-            tracing::info!(peer = peer.identity().as_str(), codec = ?peer.codec(), "Iroh source admission completed");
             let Some(backend) = backend.take() else {
                 peer.disconnect();
                 self.state = PortState::Closed;
@@ -155,7 +154,7 @@ impl HoistSourcePort for PendingPort {
     }
 }
 
-impl Drop for PendingPort {
+impl<P: PendingSource> Drop for PendingPort<P> {
     fn drop(&mut self) {
         self.disconnect();
     }

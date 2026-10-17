@@ -19,14 +19,16 @@ use weld_client::{
     ClientSurfaceRequest, ClientSurfaceRequestKind, ClientSurfaceRole, Extent, PresentationMailbox,
     PresentationRate, SurfaceBufferChange, SurfaceStreamMode, ToplevelLayout,
 };
+use weld_hoist_encoded::destination_registration_with_backend;
 use weld_hoist_encoded::{
     DecodeBackend, DecodeCompletion, DecodeRequest, DecodedFrame, DecodedFramePublisher,
     EncodedDestinationTransport, SubmitError,
 };
 use weld_hoist_iroh::{
     IrohConnectionProfile, IrohDestinationPeer, IrohDeviceIdentity, IrohHost, IrohNotifier,
-    IrohPeerIdentity, IrohReceiverPreferences, destination_registration_with_backend,
+    IrohPeerIdentity,
 };
+use weld_hoist_protocol::presentation::ReceiverPreferences;
 use weld_media::{MediaStreamId, StreamGeneration, VideoCodec};
 
 #[derive(Clone, Copy, Debug, Default, Deserialize)]
@@ -250,7 +252,7 @@ fn receive(shared: &Shared, directory: PathBuf, settings: Settings) -> Result<()
     });
     let mut pending = host.begin_connect_profile(
         &profile,
-        IrohReceiverPreferences {
+        ReceiverPreferences {
             codecs: vec![VideoCodec::Av1, VideoCodec::H264],
             stream_mode: SurfaceStreamMode::Composited,
         },

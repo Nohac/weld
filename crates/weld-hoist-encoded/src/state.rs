@@ -33,7 +33,7 @@ use weld_media::{
 
 use crate::TransportSnapshot;
 use crate::activity::{Activity, ActivitySnapshot, SchedulingPolicy};
-use crate::bitrate::{BitrateRequest, EncoderRateApplication, EncoderRateControl, EncoderRates};
+use crate::bitrate::{BitrateRequest, EncoderRateApplication, EncoderRates};
 use crate::budget::{BudgetMembership, SharedBitrateBudget};
 use crate::codec::{
     DecodeBackend, DecodeRequest, DecodedFramePublisher, EncodeBackend, EncodeRequest,
@@ -1043,16 +1043,6 @@ impl<T: EncodedSourceTransport> EncodedSourcePort<T> {
             state: Some(state),
             output: SourceOutput::default(),
         }
-    }
-
-    /// Retain this weak control handle before moving the port into an adapter.
-    /// None means the backend does not advertise rate control.
-    pub fn encoder_rate_control(&self) -> Option<EncoderRateControl> {
-        self.state
-            .as_ref()?
-            .rates
-            .as_ref()
-            .map(EncoderRates::control)
     }
 
     fn set_bitrate_budget(&mut self, budget: SharedBitrateBudget) -> Result<()> {
@@ -2384,6 +2374,15 @@ fn take_counter(counter: &mut Option<u64>, name: &str) -> Result<u64> {
 
 #[cfg(test)]
 mod tests {
+    impl<T: super::EncodedSourceTransport> super::EncodedSourcePort<T> {
+        fn encoder_rate_control(&self) -> Option<crate::EncoderRateControl> {
+            self.state
+                .as_ref()?
+                .rates
+                .as_ref()
+                .map(super::EncoderRates::control)
+        }
+    }
     mod bitrate_tests;
     mod composition_tests;
     mod configuration_tests;
@@ -2407,6 +2406,7 @@ mod tests {
     use weld_media::EncodedFrameKind;
 
     use super::*;
+    use crate::EncoderRateControl;
     use crate::codec::{DecodeCompletion, DecodedFrame, EncodeCompletion, EncodeInput};
 
     #[derive(Default)]

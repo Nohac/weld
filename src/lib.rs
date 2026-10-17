@@ -24,11 +24,11 @@ use weld_app::{
 };
 use weld_core::{runtime::RuntimeOptions, surface::Extent};
 use weld_hoist::{HoistEndpointRegistry, HoistPlugin, loopback_registration};
-use weld_hoist_iroh::{
-    IrohHost, IrohSourceRegistrationOptions,
-    destination_registration as iroh_destination_registration,
+use weld_hoist_encoded::native::registration::{
+    SourceRegistrationOptions, destination_registration as iroh_destination_registration,
     source_registration as iroh_source_registration,
 };
+use weld_hoist_iroh::IrohHost;
 use weld_hoist_local::{
     EncodedSourceRegistrationOptions, LocalPacketConnection, LocalPacketListener, LocalPeerRole,
     LocalSurfaceMode, bootstrap_destination, bootstrap_source, encoded_destination_registration,
@@ -292,7 +292,7 @@ pub fn run(arguments: AppArguments) -> Result<()> {
             let (adapter, endpoint, codec_wake) = iroh_source_registration(
                 peer,
                 adapter_source,
-                IrohSourceRegistrationOptions {
+                SourceRegistrationOptions {
                     upstream_source: weld_core::WAYLAND_CLIENT_SOURCE,
                     adapter_source,
                     capabilities: &capabilities,

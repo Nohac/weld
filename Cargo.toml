@@ -111,6 +111,7 @@ x11-dl = "2.21.0"
 xcursor = "0.3.11"
 
 [dependencies]
+weld-hoist-protocol = { path = "crates/weld-hoist-protocol" }
 weld-remote-control-ui = { path = "crates/weld-remote-control-ui" }
 base64 = "0.22.1"
 weld-access = { path = "crates/weld-access" }
@@ -135,8 +136,8 @@ weld-sway-ipc = { path = "crates/weld-sway-ipc" }
 weld-gamepad = { path = "crates/weld-gamepad" }
 weld-hoist = { path = "crates/weld-hoist" }
 weld-hoist-core = { path = "crates/weld-hoist-core" }
-weld-hoist-iroh = { path = "crates/weld-hoist-iroh", features = ["vaapi"] }
-weld-hoist-encoded = { path = "crates/weld-hoist-encoded" }
+weld-hoist-iroh = { path = "crates/weld-hoist-iroh", features = ["native"] }
+weld-hoist-encoded = { path = "crates/weld-hoist-encoded", features = ["vaapi"] }
 weld-hoist-local = { path = "crates/weld-hoist-local", features = ["encoded-vaapi"] }
 weld-media = { path = "crates/weld-media" }
 weld-media-vaapi = { path = "crates/weld-media-vaapi" }

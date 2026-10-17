@@ -7306,8 +7306,10 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "weld-client",
+ "weld-hoist-core",
  "weld-hoist-encoded",
  "weld-hoist-iroh",
+ "weld-hoist-protocol",
  "weld-media",
  "weld-video-gles",
  "wgpu 30.0.0",
@@ -7338,6 +7340,7 @@ dependencies = [
  "weld-client",
  "weld-diagnostics",
  "weld-hoist-protocol",
+ "weld-media",
 ]
 
 [[package]]

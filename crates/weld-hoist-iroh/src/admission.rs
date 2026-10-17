@@ -17,6 +17,7 @@ use tokio::{
     task::JoinSet,
     time::{Instant, timeout, timeout_at},
 };
+use weld_hoist_core::session::negotiation;
 use weld_hoist_protocol::bootstrap::{BootstrapAnswer, BootstrapOffer, PeerRole};
 use weld_hoist_protocol::{ProtocolRevision, SurfaceMode};
 use weld_media::VideoCodec;
@@ -173,11 +174,7 @@ pub(crate) async fn accept_trusted_source(
                             mode: SurfaceMode::EncodedOpaque(codec),
                         }).await?;
                         let answer: BootstrapAnswer = read_record(&mut recv).await?;
-                        ProtocolRevision::CURRENT.ensure_compatible(answer.revision)?;
-                        ensure!(answer.role == PeerRole::Destination, "Iroh bootstrap peer returned the wrong role");
-                        if let Some(rejection) = answer.rejection {
-                            bail!("Iroh destination rejected the session: {rejection}");
-                        }
+                        negotiation::answer(&answer)?;
                         let media = pending.connection.open_uni().await?;
                         Ok(SourceBootstrap { pending, send, recv, media, adb_route, stream_mode: answer.stream_mode })
                     }).await.context("Iroh handshake/bootstrap attempt timed out")?
@@ -221,7 +218,7 @@ pub(crate) async fn connect_destination(
     connect_address(
         endpoint,
         ticket.endpoint_addr().clone(),
-        &crate::IrohReceiverPreferences::from(supported_codecs.to_vec()),
+        &weld_hoist_protocol::presentation::ReceiverPreferences::from(supported_codecs.to_vec()),
         deadline,
     )
     .await
@@ -230,7 +227,7 @@ pub(crate) async fn connect_destination(
 pub(crate) async fn connect_address(
     endpoint: &Endpoint,
     address: EndpointAddr,
-    preferences: &crate::IrohReceiverPreferences,
+    preferences: &weld_hoist_protocol::presentation::ReceiverPreferences,
     deadline: Instant,
 ) -> Result<DestinationBootstrap> {
     timeout_at(deadline, async {
@@ -242,7 +239,7 @@ pub(crate) async fn connect_address(
         );
         let (mut send, mut recv) = pending.connection.accept_bi().await?;
         let offer: BootstrapOffer = read_record(&mut recv).await?;
-        let rejection = validate_offer(&offer, &preferences.codecs)
+        let rejection = negotiation::encoded_offer(&offer, preferences)
             .err()
             .map(|error| error.to_string());
         write_record(
@@ -272,22 +269,6 @@ pub(crate) async fn connect_address(
     })
     .await
     .context("Iroh destination connection/bootstrap timed out")?
-}
-
-fn validate_offer(offer: &BootstrapOffer, supported_codecs: &[VideoCodec]) -> Result<()> {
-    ProtocolRevision::CURRENT.ensure_compatible(offer.revision)?;
-    ensure!(
-        offer.role == PeerRole::Source,
-        "Iroh bootstrap peer has the wrong role"
-    );
-    let SurfaceMode::EncodedOpaque(codec) = offer.mode else {
-        bail!("Iroh source selected an unsupported surface mode");
-    };
-    ensure!(
-        supported_codecs.contains(&codec),
-        "Iroh source selected an unsupported codec"
-    );
-    Ok(())
 }
 
 #[cfg(test)]

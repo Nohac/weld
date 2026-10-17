@@ -1,6 +1,7 @@
 use std::os::fd::OwnedFd;
 
 use anyhow::Result;
+use weld_hoist_core::session::negotiation;
 use weld_hoist_protocol::ProtocolRevision;
 
 use crate::{
@@ -40,14 +41,11 @@ pub fn bootstrap_source(
             "bootstrap acknowledgement attached unexpected descriptors".to_owned(),
         ));
     }
-    ProtocolRevision::CURRENT
-        .ensure_compatible(acknowledgement.message.revision)
-        .map_err(|error| TransportError::Protocol(error.to_string()))?;
-    if let Some(rejection) = acknowledgement.message.rejection {
-        return Err(TransportError::Protocol(format!(
-            "destination rejected {mode:?}: {rejection}"
-        )));
-    }
+    negotiation::acknowledgement(
+        acknowledgement.message.revision,
+        acknowledgement.message.rejection.as_deref(),
+    )
+    .map_err(|error| TransportError::Protocol(error.to_string()))?;
     Ok(LocalTransportConnections {
         mode,
         control,

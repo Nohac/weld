@@ -11,6 +11,9 @@ use weld_hoist_core::HoistEndpoint;
 use weld_hoist_encoded::{
     EncodeBackend, EncodeCompletion, EncodeInput, EncodeRequest, PreparedEncodeInput, SubmitError,
 };
+use weld_hoist_encoded::{
+    pending_source_registration_with_backend, source_registration_with_backend,
+};
 
 struct Encoder {
     submitted: Rc<Cell<usize>>,

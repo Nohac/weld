@@ -1,5 +1,8 @@
 //! Linux source access and destination lease publication, outside scheduling.
 
+#[cfg(feature = "vaapi")]
+pub mod registration;
+
 use anyhow::{Context, Result, ensure};
 use weld_client::{ClientBufferId, ClientBufferLease, ClientBufferMetadata, ClientBufferUseId};
 use weld_core::dmabuf::{

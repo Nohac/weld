@@ -1,7 +1,7 @@
 //! Enrollment stream setup and lifetime on an authenticated endpoint.
 use super::*;
 use crate::channel::PacketLane;
-pub use enrollment::PairingProgress;
+
 use iroh::Endpoint;
 use weld_hoist_core::session::channel::PacketSend;
 use weld_hoist_core::session::pairing::enrollment;

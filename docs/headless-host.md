@@ -156,8 +156,8 @@ profiles are untouched. There is no automatic reconnect in this slice.
 
 Source construction is now shared across the Unix, connected Iroh and pending
 Iroh paths. `EncodedSourcePort::configured` owns budget/dump configuration and
-disconnects the supplied transport if setup fails. Native Iroh paths use one
-`IrohSourceRegistrationOptions` and backend/wake factory; only the manual
+disconnects the supplied transport if setup fails. Native Unix and Iroh paths use
+`native::registration::SourceRegistrationOptions` and shared backend/wake factories; only the manual
 endpoint needs a destination namespace. This removes duplicated setup, not the
 remaining pacing difference between presentation-driven and virtual callbacks.
 

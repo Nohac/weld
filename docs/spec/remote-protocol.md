@@ -68,7 +68,7 @@ protocol.
 
 ## Protocol/session/transport refactor — Direction
 
-This refactor is in progress, ahead of native thumbnail capture and
+The ownership refactor is implemented, ahead of native thumbnail capture and
 client preview UI. The target is one behavioral implementation shared by Iroh,
 Unix and loopback bindings. Preserve existing user-visible flows and performance
 while moving ownership; scope follows the implemented protocols and services.
@@ -219,8 +219,11 @@ trust grants and revocation now run in a shared authority worker. Its storage
 adapter preserves existing trust files, and listeners supply authenticated,
 namespace-scoped identity and connection cleanup handles. Semantic input queuing
 also has a shared owner. Diagnostic archive and collection policy now have shared
-owners as well. Reusable relay assembly and negotiation integration remain in
-progress. Communicating development peers require rebuilding together for
+owners as well. Encoded registration, pending admission, per-client relay
+assembly and native codec/wake setup now live in `weld-hoist-encoded`; Unix and
+Iroh use those shared entry points. Core owns negotiation validation, and callers
+import protocol/service types from their owning crates.
+Communicating development peers require rebuilding together for
 the new service envelope and catalogue subscription.
 
 1. **Extract the shared protocol vocabulary.** Inventory current wire records,
@@ -307,11 +310,20 @@ module responsibilities, leaked service decisions, coupled implementation change
 and unclear public boundaries. Shared owners, typed effects and cross-binding
 behavior tests are the acceptance evidence for correcting those failures.
 
-Current design review: 7.5/10. Source/receiver services, enrollment/trust, input
-coalescing and diagnostic policy have shared owners. Two checklist failures remain:
-relay assembly mixes reusable policy with binding setup, and changes to that
-assembly still require binding-specific edits. Milestone 4 establishes shared
-assembly and negotiation entry points to close those ownership gaps.
+Current design review: 10/10 against the eight ownership diagnostics for this
+slice. Shared registration closes the mixed-responsibility and change-amplification
+gaps; no failed diagnostic rows remain. Transport-specific byte/descriptor setup
+and authenticated identity evidence stay explicit in each binding. Endpoint
+availability uses core's existing authorized-endpoint wrapper, while the shared
+relay enforces revocation when consuming queued input and publishing frames.
+
+Validation: shared/core, encoded, Unix, Iroh, control and distribution library
+tests cover negotiation rejection, pre-admission encoder inactivity,
+disconnect-on-setup-failure, queued-admission retirement, real endpoint pairing,
+catalogues and revocation, and native descriptor/control transfer. Client
+compile checks cover the updated public imports. Physical playback and optimized
+performance comparisons remain separate validation work; this cleanup makes no
+performance claim. Concurrent mixed-transport listener wiring remains deferred.
 
 RPC framework evaluation is deferred until these ownership changes land.
 Postcard remains the encoding for the current ordered request/reply protocol.

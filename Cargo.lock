@@ -9132,6 +9132,7 @@ dependencies = [
  "weld-accessibility",
  "weld-diagnostics",
  "weld-hoist-iroh",
+ "weld-hoist-protocol",
  "weld-media",
  "weld-remote-control",
  "xdg",
@@ -9226,6 +9227,7 @@ dependencies = [
  "weld-client",
  "weld-diagnostics",
  "weld-hoist-protocol",
+ "weld-media",
 ]
 
 [[package]]
@@ -9235,6 +9237,7 @@ dependencies = [
  "anyhow",
  "rustix 1.1.4",
  "tracing",
+ "weld-access",
  "weld-client",
  "weld-core",
  "weld-diagnostics",
@@ -9548,6 +9551,7 @@ dependencies = [
  "weld-hoist-encoded",
  "weld-hoist-iroh",
  "weld-hoist-local",
+ "weld-hoist-protocol",
  "weld-i3-quirks",
  "weld-input",
  "weld-media",

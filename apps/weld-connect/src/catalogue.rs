@@ -1,6 +1,6 @@
 //! Alternative views of the host's application inventory preserve window identity.
 use std::collections::BTreeMap;
-use weld_hoist_iroh::pairing::ApplicationInfo;
+use weld_hoist_protocol::device::ApplicationInfo;
 
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
 pub enum Grouping {

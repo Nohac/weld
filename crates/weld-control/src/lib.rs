@@ -1,4 +1,7 @@
 //! Same-user control of a running Weld session and its device authority.
+use weld_hoist_protocol::device::DevicePermissions;
+use weld_hoist_protocol::device::PairedDevice;
+use weld_hoist_protocol::device::PairingCandidate;
 pub mod access;
 pub mod launch;
 pub mod mcp;
@@ -22,10 +25,7 @@ use std::{
     time::Duration,
 };
 use weld_access::{AccessAuthority, AccessStatus};
-use weld_hoist_iroh::{
-    IrohDeviceIdentity, IrohHost, IrohNetwork,
-    pairing::{DesktopSessions, DevicePermissions, PairedDevice, PairingCandidate},
-};
+use weld_hoist_iroh::{IrohDeviceIdentity, IrohHost, IrohNetwork, pairing::SessionListener};
 
 #[derive(Serialize, Deserialize)]
 pub enum Request {
@@ -64,7 +64,7 @@ pub enum Response {
         )>,
     ),
     DiagnosticReport(Box<weld_diagnostics::ReportBundle>),
-    DiagnosticCollection(Box<weld_hoist_iroh::DiagnosticCollection>),
+    DiagnosticCollection(Box<weld_diagnostics::collection::DiagnosticCollection>),
     Invitation(String),
     Pending(Option<PairingCandidate>),
     Devices(Vec<PairedDevice>),
@@ -143,7 +143,7 @@ impl ControlService {
         session: &str,
         directory: PathBuf,
         existing: Option<IrohHost>,
-        desktop: DesktopSessions,
+        desktop: SessionListener,
         access: AccessAuthority,
         launch: impl FnMut(LaunchRequest) -> Result<LaunchReceipt> + Send + 'static,
     ) -> Result<Self> {
@@ -347,7 +347,7 @@ impl Drop for ControlService {
 
 struct PairingSetup {
     directory: PathBuf,
-    desktop: DesktopSessions,
+    desktop: SessionListener,
 }
 struct Owner {
     access: AccessAuthority,
@@ -383,7 +383,7 @@ impl Owner {
                 "existing endpoint requires its matching device directory"
             );
             host.pairing().enable(&setup.directory)?;
-            host.pairing().set_desktop(setup.desktop.clone())?;
+            host.pairing().set_listener(setup.desktop.clone())?;
             self.enabled = true;
         }
         Ok(host)
@@ -508,7 +508,7 @@ mod tests {
             enabled: false,
             pairing: Some(PairingSetup {
                 directory: storage.clone(),
-                desktop: DesktopSessions::new(
+                desktop: SessionListener::new(
                     notifier.clone(),
                     notifier,
                     weld_media::VideoCodec::H264,
@@ -541,7 +541,7 @@ mod tests {
         let host = IrohHost::bind_with_identity(IrohNetwork::Direct, &identity).expect("endpoint");
         let notifier = IrohNotifier::new(|| Ok(()));
         let desktop =
-            DesktopSessions::new(notifier.clone(), notifier, weld_media::VideoCodec::H264)
+            SessionListener::new(notifier.clone(), notifier, weld_media::VideoCodec::H264)
                 .expect("session service");
         let service = ControlService::start_at(
             socket.clone(),

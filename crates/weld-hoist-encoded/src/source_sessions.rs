@@ -1,8 +1,6 @@
-//! Runtime-owned media relays for dynamically connected desktop viewers.
-use crate::{
-    IrohSourcePeer,
-    pairing::{DesktopSessions, SessionId},
-};
+//! Codec-backed source relays for admitted client sessions.
+use crate::SourceConnection;
+use crate::{EncodeBackend, EncodedSourceOptions, EncodedSourcePort, SharedBitrateBudget};
 use anyhow::Result;
 use std::{
     collections::BTreeMap,
@@ -15,22 +13,20 @@ use weld_client::{
     ClientPresentationUpdate, ClientProvenance, ClientRequest, ClientSourceDescriptor,
     ClientSourceId, ClientSurfaceEvent, ClientSurfaceId, ControlOnlyClientImporter,
 };
+use weld_hoist_core::access::{AuthorizedEndpoint, authorize_endpoint};
+use weld_hoist_core::session::SessionId;
+use weld_hoist_core::session::admission::SourceAdmissions;
 use weld_hoist_core::{
     HoistEndpoint, HoistEndpointCommand, HoistPortResult, HoistSourcePort, SourcePortCommand,
     SourceRelayAdapter, relocated_surface,
-};
-use weld_hoist_encoded::{
-    EncodeBackend, EncodedSourceOptions, EncodedSourcePort, EncodedSourceTransport,
-    SharedBitrateBudget,
 };
 use weld_hoist_protocol::DestinationEnvelope;
 use weld_media::VideoCodec;
 
 #[derive(Clone)]
-pub struct DesktopEndpoint {
-    access: weld_access::AccessSession,
+pub struct SourceSessionEndpoint<T: SourceConnection> {
     pub session: SessionId,
-    peer: IrohSourcePeer,
+    peer: T,
     source: ClientSourceId,
     destination: ClientSourceId,
 }
@@ -38,9 +34,9 @@ struct RoutedCommand {
     session: SessionId,
     command: HoistEndpointCommand,
 }
-impl HoistEndpoint for DesktopEndpoint {
+impl<T: SourceConnection> HoistEndpoint for SourceSessionEndpoint<T> {
     fn is_available(&self) -> bool {
-        self.access.is_authorized() && self.peer.is_available()
+        self.peer.is_connected()
     }
     fn has_local_receiver(&self) -> bool {
         false
@@ -72,10 +68,18 @@ impl HoistEndpoint for DesktopEndpoint {
     }
 }
 
-#[derive(Clone, Default)]
-pub struct DesktopEndpoints(Arc<Mutex<Vec<DesktopEndpoint>>>);
-impl DesktopEndpoints {
-    pub fn take(&self) -> Vec<DesktopEndpoint> {
+/// Session identity and its core-authorized endpoint, ready for host registration.
+pub type SessionEndpoint<T> = (SessionId, AuthorizedEndpoint<SourceSessionEndpoint<T>>);
+
+#[derive(Clone)]
+pub struct SourceSessionEndpoints<T: SourceConnection>(Arc<Mutex<Vec<SessionEndpoint<T>>>>);
+impl<T: SourceConnection> Default for SourceSessionEndpoints<T> {
+    fn default() -> Self {
+        Self(Arc::default())
+    }
+}
+impl<T: SourceConnection> SourceSessionEndpoints<T> {
+    pub fn take(&self) -> Vec<SessionEndpoint<T>> {
         self.0
             .lock()
             .map(|mut entries| std::mem::take(&mut *entries))
@@ -83,18 +87,18 @@ impl DesktopEndpoints {
     }
 }
 
-pub fn desktop_source_registration(
-    sessions: DesktopSessions,
+pub fn source_sessions_registration<T: SourceConnection>(
+    sessions: SourceAdmissions<T>,
     source: ClientSourceId,
     upstream: ClientSourceId,
     budget: SharedBitrateBudget,
     factory: impl Fn(VideoCodec) -> Result<Box<dyn EncodeBackend>> + 'static,
-) -> (ClientAdapterRegistration, DesktopEndpoints) {
-    let endpoints = DesktopEndpoints::default();
+) -> (ClientAdapterRegistration, SourceSessionEndpoints<T>) {
+    let endpoints = SourceSessionEndpoints::default();
     (
         ClientAdapterRegistration::new(
             ClientSourceDescriptor::new(source, ClientProvenance::Relocated),
-            DesktopAdapter {
+            SourceSessionAdapter {
                 sessions,
                 source,
                 inventory: SourceRelayAdapter::new(upstream, IdlePort),
@@ -109,23 +113,23 @@ pub fn desktop_source_registration(
         endpoints,
     )
 }
-struct ActiveRelay {
-    peer: IrohSourcePeer,
+struct ActiveRelay<T: SourceConnection> {
+    peer: T,
     relay: SourceRelayAdapter,
     effects_drained: bool,
     claims_drained: bool,
 }
-struct DesktopAdapter {
-    sessions: DesktopSessions,
+struct SourceSessionAdapter<T: SourceConnection> {
+    sessions: SourceAdmissions<T>,
     source: ClientSourceId,
     inventory: SourceRelayAdapter,
-    relays: BTreeMap<SessionId, ActiveRelay>,
-    endpoints: DesktopEndpoints,
+    relays: BTreeMap<SessionId, ActiveRelay<T>>,
+    endpoints: SourceSessionEndpoints<T>,
     budget: SharedBitrateBudget,
     factory: Box<dyn Fn(VideoCodec) -> Result<Box<dyn EncodeBackend>>>,
     pending_effects: Vec<ClientAdapterEffect>,
 }
-impl ClientAdapter for DesktopAdapter {
+impl<T: SourceConnection> ClientAdapter for SourceSessionAdapter<T> {
     fn input_source(&self) -> Option<ClientSourceId> {
         self.inventory.input_source()
     }
@@ -139,13 +143,9 @@ impl ClientAdapter for DesktopAdapter {
         self.inventory.presentation_source()
     }
     fn drain_events(&mut self, events: &mut ClientEventQueue) {
-        for (session, peer, access) in self.sessions.take_peers() {
-            if !access.is_authorized() {
-                peer.disconnect();
-                continue;
-            }
+        for (session, peer, access, codec) in self.sessions.take() {
             let result = (|| -> Result<()> {
-                let backend = (self.factory)(peer.codec())?;
+                let backend = (self.factory)(codec)?;
                 let port = EncodedSourcePort::configured(
                     peer.clone(),
                     backend,
@@ -161,7 +161,7 @@ impl ClientAdapter for DesktopAdapter {
                     session
                         .0
                         .checked_add(100)
-                        .ok_or_else(|| anyhow::anyhow!("desktop namespaces exhausted"))?,
+                        .ok_or_else(|| anyhow::anyhow!("session namespaces exhausted"))?,
                 );
                 self.relays.insert(
                     session,
@@ -176,17 +176,22 @@ impl ClientAdapter for DesktopAdapter {
                     .0
                     .lock()
                     .map_err(|_| anyhow::anyhow!("endpoint handoff poisoned"))?
-                    .push(DesktopEndpoint {
-                        access,
+                    .push((
                         session,
-                        peer: peer.clone(),
-                        source: self.source,
-                        destination,
-                    });
+                        authorize_endpoint(
+                            SourceSessionEndpoint {
+                                session,
+                                peer: peer.clone(),
+                                source: self.source,
+                                destination,
+                            },
+                            access,
+                        ),
+                    ));
                 Ok(())
             })();
             if let Err(error) = result {
-                tracing::warn!(%error, "could not prepare desktop hoist");
+                tracing::warn!(%error, "could not prepare encoded session");
                 peer.disconnect();
             }
         }
@@ -202,7 +207,7 @@ impl ClientAdapter for DesktopAdapter {
     fn apply_command(&mut self, command: ClientAdapterCommandEnvelope) {
         if let Ok(command) = command.downcast::<RoutedCommand>()
             && let Some(active) = self.relays.get_mut(&command.session)
-            && active.peer.is_available()
+            && active.peer.is_connected()
         {
             active
                 .relay
@@ -236,7 +241,7 @@ impl ClientAdapter for DesktopAdapter {
             active.claims_drained = true;
         }
         self.relays
-            .retain(|_, active| active.peer.is_available() || !active.effects_drained);
+            .retain(|_, active| active.peer.is_connected() || !active.effects_drained);
     }
     fn drain_controller_effects(&mut self, effects: &mut Vec<(u64, ClientAdapterEffect)>) {
         for (session, active) in &mut self.relays {
@@ -250,10 +255,10 @@ impl ClientAdapter for DesktopAdapter {
         }
         // Failure releases and presentation withdrawals drain before retirement.
         self.relays
-            .retain(|_, active| active.peer.is_available() || !active.claims_drained);
+            .retain(|_, active| active.peer.is_connected() || !active.claims_drained);
     }
 }
-impl Drop for DesktopAdapter {
+impl<T: SourceConnection> Drop for SourceSessionAdapter<T> {
     fn drop(&mut self) {
         for active in self.relays.values() {
             active.peer.disconnect();

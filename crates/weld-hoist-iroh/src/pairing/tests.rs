@@ -1,6 +1,8 @@
 use super::*;
 use crate::{IrohDeviceIdentity, IrohHost, rendezvous::tests::ExchangeDirectory};
 use std::{thread, time::Instant};
+use weld_hoist_core::session::DeviceAction;
+use weld_hoist_protocol::device::ApplicationInfo;
 use weld_media::VideoCodec;
 
 fn profile() -> IrohConnectionProfile {
@@ -125,9 +127,9 @@ fn real_endpoint_enrollment_catalogue_and_revocation_share_the_same_identity() {
     let authority = source.pairing();
     authority.enable(&source_dir.0).expect("trust store");
     let notifier = IrohNotifier::new(|| Ok(()));
-    let desktop = DesktopSessions::new(notifier.clone(), notifier.clone(), VideoCodec::H264)
+    let desktop = SessionListener::new(notifier.clone(), notifier.clone(), VideoCodec::H264)
         .expect("session service");
-    authority.set_desktop(desktop.clone()).expect("desktop");
+    authority.set_listener(desktop.clone()).expect("desktop");
     let profile = source.connection_profile().expect("profile");
     let invitation = authority.invite(&profile, "Laptop".into()).expect("invite");
     let pairing = receiver
@@ -147,7 +149,7 @@ fn real_endpoint_enrollment_catalogue_and_revocation_share_the_same_identity() {
     let mut pending = receiver
         .begin_device_session(
             profile,
-            crate::IrohReceiverPreferences {
+            weld_hoist_protocol::presentation::ReceiverPreferences {
                 codecs: vec![VideoCodec::H264],
                 stream_mode: weld_client::SurfaceStreamMode::Composited,
             },
@@ -160,7 +162,7 @@ fn real_endpoint_enrollment_catalogue_and_revocation_share_the_same_identity() {
         session.is_some()
     });
     let session = session.expect("session");
-    let peers = desktop.take_peers();
+    let peers = desktop.admissions().take();
     assert_eq!(peers.len(), 1);
     assert_eq!(
         weld_hoist_encoded::EncodedSourceTransport::stream_mode(&peers[0].1),
@@ -179,6 +181,7 @@ fn real_endpoint_enrollment_catalogue_and_revocation_share_the_same_identity() {
         hoisted_here: false,
     };
     desktop
+        .services()
         .publish(id, vec![application.clone()])
         .expect("catalogue");
     wait(|| session.control.applications() == vec![application.clone()]);
@@ -243,7 +246,7 @@ fn real_endpoint_enrollment_catalogue_and_revocation_share_the_same_identity() {
             .release()
             .expect("control remains live after preview");
         wait(|| {
-            let actions = desktop.take_actions();
+            let actions = desktop.services().take_actions();
             let ready = !actions.is_empty();
             for action in actions {
                 if let DeviceAction::Release { answer, .. } = action {
@@ -262,7 +265,10 @@ fn real_endpoint_enrollment_catalogue_and_revocation_share_the_same_identity() {
     let collected = source
         .collect_diagnostics(report.session)
         .expect("desktop collection");
-    assert_eq!(collected.status, crate::CollectionStatus::Collected);
+    assert_eq!(
+        collected.status,
+        weld_diagnostics::collection::CollectionStatus::Collected
+    );
     assert_eq!(
         collected.bundle.peer.expect("phone report").endpoint,
         weld_diagnostics::Endpoint::Receiver
@@ -272,7 +278,7 @@ fn real_endpoint_enrollment_catalogue_and_revocation_share_the_same_identity() {
             .collect_diagnostics(report.session)
             .expect("ungranted collection")
             .status,
-        crate::CollectionStatus::Denied
+        weld_diagnostics::collection::CollectionStatus::Denied
     );
     assert_eq!(
         report.session,
@@ -307,7 +313,7 @@ fn real_endpoint_enrollment_catalogue_and_revocation_share_the_same_identity() {
             .collect_diagnostics(report.session)
             .expect("granted collection")
             .status,
-        crate::CollectionStatus::Collected
+        weld_diagnostics::collection::CollectionStatus::Collected
     );
     session
         .control
@@ -336,7 +342,10 @@ fn real_endpoint_enrollment_catalogue_and_revocation_share_the_same_identity() {
     let denied = receiver
         .collect_diagnostics(report.session)
         .expect("grant rechecked");
-    assert_eq!(denied.status, crate::CollectionStatus::Denied);
+    assert_eq!(
+        denied.status,
+        weld_diagnostics::collection::CollectionStatus::Denied
+    );
     assert!(
         denied.bundle.peer.is_some(),
         "cached evidence survives failed collection"
@@ -347,7 +356,7 @@ fn real_endpoint_enrollment_catalogue_and_revocation_share_the_same_identity() {
     );
     session.control.hoist(7).expect("request");
     wait(|| {
-        for action in desktop.take_actions() {
+        for action in desktop.services().take_actions() {
             if let DeviceAction::Hoist {
                 session,
                 window,

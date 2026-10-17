@@ -6,7 +6,7 @@ use bevy::input::{
 };
 use bevy::prelude::*;
 use std::sync::atomic::Ordering;
-use weld_hoist_iroh::pairing::ApplicationInfo;
+use weld_hoist_protocol::device::ApplicationInfo;
 
 #[derive(Component, Clone, Default)]
 enum Action {

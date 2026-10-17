@@ -1,10 +1,8 @@
 //! Encoded hoist transport over authenticated Iroh connections.
 
-mod adapter;
 mod adb;
 mod admission;
 mod channel;
-mod desktop;
 mod device;
 mod diagnostics;
 mod framing;
@@ -12,36 +10,20 @@ mod host;
 mod inbox;
 mod incoming;
 mod media_queue;
-#[cfg(feature = "vaapi")]
-mod native;
 mod notifier;
 pub mod pairing;
 mod peer;
-mod presentation;
-pub use presentation::IrohReceiverPreferences;
-mod pending_source;
 mod private_file;
 mod rendezvous;
 mod reports;
 
-pub use adapter::{
-    IrohDestinationEndpoint, IrohSourceOptions, destination_registration_with_backend,
-    source_registration_with_backend,
-};
-pub use desktop::{DesktopEndpoint, DesktopEndpoints, desktop_source_registration};
 pub use device::{IrohConnectionProfile, IrohDeviceIdentity, IrohTrustedPeers};
 pub use host::{
     IrohDnsPolicy, IrohHost, IrohNetwork, PendingDestinationConnection, PendingSourceAdmission,
 };
-#[cfg(feature = "vaapi")]
-pub use native::{
-    IrohSourceRegistrationOptions, destination_registration, pending_source_registration,
-    source_registration,
-};
 pub use notifier::IrohNotifier;
 pub use peer::{IrohDestinationPeer, IrohSourcePeer};
-pub use pending_source::pending_source_registration_with_backend;
-pub use reports::{CollectionStatus, DiagnosticCollection, DiagnosticReports};
+pub use reports::DiagnosticReports;
 
 /// Authenticated Iroh endpoint identity, kept opaque to Weld policy.
 #[derive(Clone, Debug, Eq, PartialEq)]

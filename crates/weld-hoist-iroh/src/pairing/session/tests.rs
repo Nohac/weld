@@ -19,7 +19,7 @@ const STALL: Duration = Duration::from_millis(25);
 
 #[test]
 fn cancelled_admission_retires_permit_before_session_id_is_published() {
-    let desktop = DesktopSessions::new(
+    let desktop = SessionListener::new(
         IrohNotifier::new(|| Ok(())),
         IrohNotifier::new(|| Ok(())),
         VideoCodec::H264,
@@ -27,7 +27,7 @@ fn cancelled_admission_retires_permit_before_session_id_is_published() {
     .expect("desktop");
     let access = desktop.access.open("test".into()).expect("permit");
     let joining = JoinedSession {
-        desktop: desktop.clone(),
+        listener: desktop.clone(),
         id: None,
         access: access.clone(),
     };

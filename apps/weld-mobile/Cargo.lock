@@ -7012,6 +7012,7 @@ dependencies = [
  "weld-client",
  "weld-diagnostics",
  "weld-hoist-protocol",
+ "weld-media",
 ]
 
 [[package]]
@@ -7103,8 +7104,10 @@ dependencies = [
  "tracing",
  "weld-client",
  "weld-diagnostics",
+ "weld-hoist-core",
  "weld-hoist-encoded",
  "weld-hoist-iroh",
+ "weld-hoist-protocol",
  "weld-media",
  "weld-media-android",
  "weld-presenter",

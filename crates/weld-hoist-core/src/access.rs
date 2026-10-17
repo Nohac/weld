@@ -22,10 +22,19 @@ pub fn authorize_source(
     session: AccessSession,
 ) -> (ClientAdapterRegistration, impl HoistEndpoint) {
     authorize_registration(&mut registration, session.clone());
-    (registration, AuthorizedEndpoint { endpoint, session })
+    (registration, authorize_endpoint(endpoint, session))
 }
 
-struct AuthorizedEndpoint<E> {
+/// Applies the shared session-availability gate to a policy endpoint.
+pub fn authorize_endpoint<E: HoistEndpoint>(
+    endpoint: E,
+    session: AccessSession,
+) -> AuthorizedEndpoint<E> {
+    AuthorizedEndpoint { endpoint, session }
+}
+
+#[derive(Clone)]
+pub struct AuthorizedEndpoint<E> {
     endpoint: E,
     session: AccessSession,
 }

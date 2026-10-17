@@ -2,7 +2,6 @@
 
 use std::{fmt, sync::Arc, time::Instant};
 
-use crate::presentation::SourcePresentation;
 use anyhow::{Context, Result, ensure};
 use iroh::endpoint::{Connection, RecvStream, SendStream};
 use tokio::{
@@ -15,6 +14,7 @@ use weld_hoist_encoded::{
     EncodedDestinationTransport, EncodedSourceTransport, ReceiveBudget, SendStatus,
     SourceTransportPacket, TransportSnapshot,
 };
+use weld_hoist_protocol::presentation::SourcePresentation;
 use weld_hoist_protocol::{DestinationEnvelope, EncodedBuffer, MediaEnvelope, SourceEnvelope};
 use weld_media::{EncodedAccessUnit, VideoCodec};
 
@@ -107,6 +107,16 @@ impl IrohSourcePeer {
 
     pub const fn codec(&self) -> VideoCodec {
         self.codec
+    }
+}
+
+impl weld_hoist_encoded::SourceConnection for IrohSourcePeer {}
+impl weld_hoist_core::session::pairing::ConnectionControl for IrohSourcePeer {
+    fn is_connected(&self) -> bool {
+        self.is_available()
+    }
+    fn close(&self) {
+        self.disconnect();
     }
 }
 

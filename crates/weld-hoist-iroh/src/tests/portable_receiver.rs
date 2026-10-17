@@ -9,6 +9,7 @@ use weld_client::{
     SurfaceBufferChange, SurfaceLayerId, WireClientSurfaceCommit, WireClientSurfaceEvent,
     WireClientSurfaceEventKind, WireSurfaceBufferChange, WireSurfaceBufferUpdate,
 };
+use weld_hoist_encoded::destination_registration_with_backend;
 use weld_hoist_encoded::{
     DecodeBackend, DecodeCompletion, DecodeRequest, DecodedFrame, DecodedFramePublisher,
     SubmitError,

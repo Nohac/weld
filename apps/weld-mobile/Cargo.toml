@@ -12,6 +12,8 @@ crate-type = ["cdylib", "rlib"]
 [workspace]
 
 [dependencies]
+weld-hoist-protocol = { path = "../../crates/weld-hoist-protocol" }
+weld-hoist-core = { path = "../../crates/weld-hoist-core" }
 anyhow = "1"
 bevy = { version = "=0.19.1", default-features = false, features = [
     "std", "async_executor", "bevy_log", "bevy_winit",

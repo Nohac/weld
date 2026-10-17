@@ -18,9 +18,11 @@ use thumbnail::{
 use weld_access::AccessSession;
 use weld_hoist_protocol::device::{ApplicationInfo, DevicePermissions};
 
+pub mod admission;
 pub mod channel;
 pub mod device;
 pub mod diagnostics;
+pub mod negotiation;
 pub mod pairing;
 pub mod services;
 pub mod thumbnail;

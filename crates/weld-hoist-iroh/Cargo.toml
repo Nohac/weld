@@ -6,8 +6,7 @@ publish.workspace = true
 
 [features]
 default = []
-native = ["dep:weld-core", "weld-hoist-encoded/native"]
-vaapi = ["native", "weld-hoist-encoded/vaapi"]
+native = ["dep:weld-core"]
 
 [dependencies]
 weld-access = { path = "../weld-access" }
