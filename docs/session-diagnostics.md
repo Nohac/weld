@@ -203,3 +203,106 @@ explicitly ruled out scanning in its reproduction, and
 [firmware regression #1128](https://github.com/openwrt/mt76/issues/1128)
 tested weak-signal behavior with the same firmware build. Neither establishes
 the mechanism behind this session's scan-associated stalls.
+
+### Follow-up: a disconnected interface still scans (2026-10-17)
+
+Long streaming stalls recurred with the uplink profile already locked to its
+BSSID and radio power saving off. Inspection found the leftover `graphite-ap`
+interface on the same physical radio as `wlp194s0`. NetworkManager reported it
+disconnected, but it remained managed and administratively up, in station mode.
+
+Passive `iw event -t` recording attributed a full-band scan to `graphite-ap`
+from 15:02:15.552 to 15:02:22.386 local time, approximately 6.8 seconds.
+This is the duration of the scan operation; off-channel dwell within that
+interval was not measured. There was no simultaneous transport-latency capture
+for this occurrence, so its relationship to a particular streaming stall remains
+a hypothesis supported by the earlier incident.
+
+Setting only `graphite-ap` unmanaged left the main Wi-Fi connection active.
+No scan events appeared during the following 25-second observation. Bringing
+that interface administratively down required a separate privileged command
+and was left for the user. Longer playback validation remains outstanding.
+
+The important diagnostic distinction is between a connection profile, an
+interface and the physical radio shared by multiple interfaces. A BSSID lock
+on the active profile can leave another managed interface scanning that radio.
+
+### Follow-up: TDLS failures and delivery freezes (2026-10-17)
+
+After the auxiliary interface was unmanaged, the user reported that the earlier
+spikes had subsided but multi-second freezes remained. The laptop's supplicant
+repeatedly attempted TDLS negotiation with a peer whose MAC matched the Pixel's
+current Wi-Fi MAC. Both devices were associated with the same access point.
+Several attempts logged `key addition failed` and `Failed to set TPK to the
+driver`; others retried the handshake and later reported a missing teardown
+entry.
+
+Around 15:13 local time, retries ran from 15:13:28 through 15:13:32. The phone's
+received-byte counter was unchanged between the 15:13:30 and 15:13:35 samples;
+at 15:13:41 its RTT estimate reached 1.27 seconds. Presentation reported one
+frame over a 14.5-second reporting interval. Frames arriving afterward decoded
+in tens of milliseconds, with no codec failures in those samples. By 15:13:46
+Iroh had selected its relay path. Device wall clocks were checked to roughly
+one-second precision. This supports a delivery stall coinciding with TDLS
+failure; a controlled disable/retest is needed to establish causation.
+
+TDLS negotiates a direct radio link between stations associated with an access
+point. Ordinary local IP traffic can instead pass through the access point.
+Iroh's direct-versus-relay selection operates above this Wi-Fi link choice.
+
+The requested experiment is to disable TDLS temporarily on the laptop. The
+supplicant's [runtime control implementation](https://android.googlesource.com/platform/external/wpa_supplicant_8/+/refs/heads/master/wpa_supplicant/ctrl_iface.c)
+handles `SET tdls_disabled 1`; `0` re-enables it. The installed NixOS service
+exposes D-Bus but starts without a CLI control socket. Its D-Bus
+`TdlsExternalControl` property selects external setup control and is not an
+equivalent disable switch. Preparing the CLI test therefore requires adding
+`-O /run/wpa_supplicant` through a temporary service override and restarting
+the supplicant, briefly interrupting Wi-Fi. Preserve the original service
+arguments and sandbox, then use `wpa_cli -i wlp194s0 set tdls_disabled 1` with
+appropriate privileges. Check the result, association and subsequent TDLS logs.
+The toggle is runtime state; interface recreation or service restart requires
+reapplying it. Remove only the test drop-in to restore the service setup.
+At documentation time, the override is prepared and execution and playback
+validation are pending user sudo authentication.
+
+## Planned: detect scan- and link-associated streaming stalls
+
+Priority: high. Background Wi-Fi scanning is a significant latency risk for
+interactive streaming on Linux. These incidents justify treating it as a
+first-class diagnostic scenario; severity depends on the driver, firmware,
+scan scheduling and shared-radio use. Implementation is deferred.
+
+The future diagnostic should:
+
+- Passively collect scan start/completion/abort events with interface and
+  physical-radio identity, including disconnected and auxiliary interfaces.
+  Diagnostic collection should preserve the network's behavior by avoiding
+  scan-triggering queries.
+- Correlate scan intervals and recurring scan patterns with locally timestamped
+  RTT, delivery stalls and transport path changes. Report measured overlap and
+  suspected contributors separately; periodic stalls alone establish a pattern,
+  while scan events supply evidence for the explanation.
+- Inspect the active profile's BSSID lock, effective power-save state and other
+  managed interfaces sharing its radio. Record driver/firmware context and the
+  observation interval so users can compare before and after a change.
+- Capture TDLS setup, key-installation failures, retries and teardown events,
+  correlating them with delivery interruptions and direct/relay path changes.
+  Track a TDLS-disable experiment separately from scan suppression so their
+  effects can be evaluated independently.
+- Explain which endpoint and interface supplied the evidence through the shared
+  diagnostics report and `weldctl diag explain`, with client UI presentation
+  later. Keep platform collection separate from transport implementations and
+  preserve session-scoped privacy when sharing evidence.
+- Offer explicit, reversible instructions for suppressing background scans:
+  lock the relevant NetworkManager profile to its current BSSID, and identify
+  confirmed-unused sibling interfaces that the user can unmanage or bring down.
+  Include previous settings, undo steps and verification. Explain the loss of
+  roaming and any reconnect interruption before recommending a BSSID lock;
+  establish interface usage before suggesting its deactivation. Changes remain
+  user-approved actions.
+
+NetworkManager documents BSSID locking as disabling roaming and background
+scanning, with driver-dependent support in its
+[wireless settings reference](https://www.networkmanager.dev/docs/api/latest/settings-802-11-wireless.html).
+The guidance must account for scans initiated elsewhere on the same radio,
+as demonstrated by the follow-up above.
