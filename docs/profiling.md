@@ -108,8 +108,8 @@ additive decomposition of production cost.
 | `render-direct` | State-direct plus the whole empty Bevy renderer, then a direct draw |
 | `minimal` | Normal AppShell and SurfaceNode rendering |
 | `master` | Master policy, window UI and launch-free fixture config |
-| `minimal-retained` | Minimal with prepared Bevy UI replay between fixture rebuilds |
-| `master-retained` | Master with the same prepared UI replay |
+| `minimal-retained` | Minimal with scene-invalidated prepared Bevy UI reuse |
+| `master-retained` | Master with the same prepared UI reuse |
 
 The first main-only cases keep input delivery in the raw presenter; their Bevy
 apps receive no client events or input. State/extract/prepare/render-direct
@@ -160,9 +160,9 @@ behavior and fractional scaling need separate measurements.
 The [initial comparison](performance/paced-render-2026-10-03.md) records the
 baseline and its limits.
 
-### Retained UI experiment (2026-10-17)
+### Initial retained UI experiment (2026-10-17, `cddaba7`)
 
-The `test-support` presentation probe retains Bevy's prepared render entities,
+The initial `test-support` presentation probe retained Bevy's prepared render entities,
 UI geometry, phase ordering and material data. Content-only frames run a small
 schedule that refreshes output attachments and surface bindings, executes the
 existing Bevy render graph, and maintains the texture cache. Core DMA-BUF
@@ -211,12 +211,9 @@ Evidence directories under `target/validation/`, in execution order:
 - Master: `paced-render-jk3jwi42`, `paced-render-mlhf7mhl`,
   `paced-render-ps3fkhk3`, `paced-render-qbgb5m8p`.
 
-Production integration needs explicit invalidation for geometry, clipping,
-stacking, visibility, surface-tree changes, material parameters, text/atlas and
-image/shader assets, output metrics and device recovery. SHM content uploads
-also need their asset-preparation path on content-only frames. Time-dependent
-visuals must advance their relevant preparation. Periodic rebuilds only bound
-this fixed-scene experiment; the normal desktop keeps its existing renderer.
+The production follow-up below replaces periodic rebuilds with scene
+invalidation and preserves Bevy's full frame lifecycle, including device-error
+handling. The small replay schedule above served as a performance lower bound.
 
 Validation also includes a GPU regression with a rounded, clipped surface and
 an overlapping translucent UI node. It compares replay/full preparation and
@@ -225,6 +222,82 @@ An entity-lifetime test checks that retained entities survive replay and are
 retired without removing persistent render entities. The benchmark assembly's
 stale watermark-plugin reference was updated to the current output-topology
 plugin so both control and replay use the same runnable assembly.
+
+### Scene-invalidated UI preparation
+
+The normal shell now reuses prepared UI batches when UI/camera components,
+structure, relevant assets and GPU-image registrations remain unchanged.
+`minimal`/`master` explicitly disable reuse for comparison; their `-retained`
+counterparts exercise this production path. Each retained benchmark requires
+pixel-equivalent full preparation, correct output-texture rotation and evidence
+that preparation was actually reused before measurement starts.
+
+Both paths execute Bevy's normal render-app lifecycle. Stable frames skip UI
+extraction, queueing, sorting and bind-group preparation; asset uploads, view
+setup, device-error handling, GPU drawing and completion continue normally.
+Surface bindings refresh each frame. Native acquisition/release ordering stays
+around the submission. This preserves overlapping translucent surfaces and
+rounded clipping while saving CPU preparation work.
+
+Validation found three sources of false invalidation: a mutable material-handle
+coercion, always-rewritten Bevy camera propagation intermediates, and no-op
+image-registry resource scopes. Stable handles now retain their ticks; the
+detector watches final computed camera components; empty/already-installed
+registry operations return before entering a resource scope. Bevy 0.19 resource
+scopes reinsert resources with a fresh change tick even without a mutation.
+
+GPU regressions cover rounded clipping, translucent overlap, live SHM pixel
+updates, text/glyph changes, resize, node teardown, backing-target rotation,
+ordinary/tiled images, fractional pixel snapping and multiple output passes.
+Policy tests cover removals across intervening main updates and expired asset
+events. `RetainedUiStats` exposes prepared/reused counts; use
+`RUST_LOG=warn,weld_render_cache=trace` to inspect individual invalidations in a
+separate diagnostic run. See [Architecture](architecture.md) for fallback
+controls when adding custom render pipelines.
+
+Production-path measurements used the same optimized release, RADV device,
+1920×1080/60 Hz output and 120 Hz producers as the initial experiment. These
+ABBA runs used four seconds warmup and ten seconds measurement, with all builds
+completed first:
+
+| Workload | Normal CPU, % of one core | Retained CPU, % of one core |
+| --- | --- | --- |
+| One surface, minimal shell | 8.498 / 9.100 | 7.300 / 8.900 |
+| Three SSD windows, Master, 1000 Hz input | 9.600 / 9.400 | 12.700 / 10.300 |
+
+The minimal mean improves by 8%, but the Master CPU totals regress in this
+sequence. A second Master ABBA sequence, with twelve seconds measurement and
+hardware counters over an interior ten-second window, gives:
+
+| Metric | Normal | Retained |
+| --- | --- | --- |
+| CPU, % of one core | 12.083 / 11.332 | 11.500 / 11.249 |
+| Userspace instructions, million/s | 122.256 / 122.919 | 111.114 / 111.959 |
+| Userspace cycles, million/s | 240.705 / 235.879 | 235.590 / 207.402 |
+
+Instruction rate falls 9.0%; CPU time falls 2.8% in the counter sequence.
+Render-call wall time averages 837→748 µs there. All cases sustain approximately
+60 compositions/s and 120/360 commits/s. The counter evidence supports less CPU
+work, while these CPU-time samples do not establish a repeatable multi-window
+speedup. The earlier small-schedule prototype's 22–31% savings should not be
+attributed to this safer production path. Physical DRM latency and interactive
+desktop testing remain the next checks.
+
+Evidence directories under `target/validation/`, in execution order:
+
+- Minimal: `paced-render-79sgw50q`, `paced-render-iav0ja_g`,
+  `paced-render-2myt16e7`, `paced-render-xw_l_ujb`.
+- Master: `paced-render-p4a88qq3`, `paced-render-obb0hzlm`,
+  `paced-render-8fdw2z5l`, `paced-render-xefon__p`.
+- Master counters: `paced-render-0ap7nqmi`, `paced-render-o6pzf8df`,
+  `paced-render-ej7ywp6f`, `paced-render-9nekcdbw`.
+- Nested Foot/Grim/Grimshot/clipboard validation: `screenshot-vkhgvmvd`.
+
+The nested capture checks pass, including cancellation and concurrent captures.
+Their log also reports `VUID-vkAcquireNextImageKHR-fence-10066`; the same warning
+is present in the October 11 `screenshot-nt09evjt` and `screenshot-c1wxiiva`
+logs and the September 28 profiling report. That acquire-fence issue remains a
+separate validation finding.
 
 ## Whole-process CPU profiles
 

@@ -341,6 +341,7 @@ pub fn configure_rendering(app: &mut App, context: &RenderContext) {
     }
     diagnostics::install(app);
     crate::border::install(app);
+    crate::retained_ui::install(app);
 }
 
 impl AppShell {
@@ -628,7 +629,7 @@ impl AppShell {
             #[cfg(not(feature = "test-support"))]
             let replaced = false;
             if !replaced {
-                render_composition_app(&mut self.app);
+                crate::retained_ui::render(&mut self.app)?;
             }
         }
         {
@@ -1273,11 +1274,6 @@ fn disconnect_render_time(app: &mut App) -> Result<()> {
     Ok(())
 }
 
-fn render_composition_app(app: &mut App) {
-    app.update_sub_app_by_label(RenderApp);
-    app.world_mut().clear_trackers();
-}
-
 struct RedrawRequests(MessageCursor<RequestRedraw>);
 
 impl RedrawRequests {
@@ -1359,8 +1355,7 @@ mod tests {
         ManualTextureViewHandle, ManualTextureViews, Messages, OutputGeometry,
         OwnedCompositionTarget, PRIMARY_OUTPUT_ID, RedrawRequests, UVec2, WeldOutput,
         advance_main_app, disable_ui_rounding_on_roots, disconnect_render_time, insert_manual_view,
-        render_composition_app, resolve_client_buffer_access, spawn_compositor_camera,
-        validate_external_target,
+        resolve_client_buffer_access, spawn_compositor_camera, validate_external_target,
     };
     use weld_client::{
         ClientCommitRevision, ClientSurfaceCommit, ClientSurfaceEvent, ClientSurfaceEventKind,
@@ -1374,9 +1369,10 @@ mod tests {
         math::Vec2,
         prelude::{BackgroundColor, BorderRadius, BoxShadow, Color, PositionType, px},
         render::view::Msaa,
+        text::TextFont,
         ui::{
             UiTargetCamera,
-            widget::{ImageNode, NodeImageMode},
+            widget::{ImageNode, NodeImageMode, Text},
         },
     };
     #[cfg(feature = "test-support")]
@@ -1768,7 +1764,7 @@ mod tests {
             0
         );
 
-        render_composition_app(&mut app);
+        app.update_sub_app_by_label(RenderApp);
         assert_eq!(
             app.sub_app(RenderApp).world().resource::<RenderCount>().0,
             1
@@ -2403,11 +2399,20 @@ mod tests {
                 bevy::ui::GlobalZIndex(10),
             ))
             .id();
-        // Prepare the SHM fixture and pipelines before installing the DMA-BUF replay experiment.
+        // Settle initial uploads and pipelines before comparing retained and full renders.
         for tick in 0..8 {
             shell.advance_main(tick);
             render_owned_output(&mut shell, &device, &queue, PRIMARY_OUTPUT_ID);
         }
+        assert!(
+            shell
+                .app
+                .world()
+                .resource::<crate::retained_ui::RetainedUiStats>()
+                .reused_frames
+                > 0,
+            "main-world updates must preserve unchanged prepared UI"
+        );
         crate::benchmark::retained::install(&mut shell.app, &device, &queue)
             .expect("install probe");
         let mut images = Vec::new();
@@ -2452,6 +2457,69 @@ mod tests {
                 .any(|pixel| pixel[0] > 100 && pixel[1] > 100),
             "overlay blends with surface"
         );
+        update_diagnostic_surface_extent(&mut shell, surface, 64, |_, _| [255, 0, 0, 255]);
+        for tick in 0..6 {
+            shell.advance_main(tick);
+            render_owned_output(&mut shell, &device, &queue, PRIMARY_OUTPUT_ID);
+        }
+        crate::benchmark::retained::tests::refresh_and_validate(&mut shell.app);
+        for _ in 0..4 {
+            render_owned_output(&mut shell, &device, &queue, PRIMARY_OUTPUT_ID);
+        }
+        let changed = render_owned_output(&mut shell, &device, &queue, PRIMARY_OUTPUT_ID);
+        assert_ne!(
+            changed, images[1],
+            "new surface pixels reach retained batches"
+        );
+        assert!(
+            changed
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .any(|pixel| pixel[2] > 200 && pixel[1] == 0),
+            "new blue content is visible"
+        );
+        let label = shell
+            .app
+            .world_mut()
+            .spawn((
+                Text::new("ABC"),
+                TextFont::from_font_size(12.).with_family("monospace"),
+                Node {
+                    position_type: PositionType::Absolute,
+                    top: px(48),
+                    ..Default::default()
+                },
+            ))
+            .id();
+        let mut labels = Vec::new();
+        for text in ["ABC", "XYZ"] {
+            shell
+                .app
+                .world_mut()
+                .get_mut::<Text>(label)
+                .expect("label")
+                .0 = text.into();
+            for tick in 0..6 {
+                shell.advance_main(tick);
+                render_owned_output(&mut shell, &device, &queue, PRIMARY_OUTPUT_ID);
+            }
+            crate::benchmark::retained::tests::refresh_and_validate(&mut shell.app);
+            for _ in 0..4 {
+                render_owned_output(&mut shell, &device, &queue, PRIMARY_OUTPUT_ID);
+            }
+            labels.push(render_owned_output(
+                &mut shell,
+                &device,
+                &queue,
+                PRIMARY_OUTPUT_ID,
+            ));
+        }
+        assert_ne!(
+            labels[0], labels[1],
+            "text changes update cached glyph batches"
+        );
+        shell.app.world_mut().entity_mut(label).despawn();
         shell.app.world_mut().entity_mut(overlay).despawn();
         shell.app.world_mut().entity_mut(parent).despawn();
         shell.advance_main(11);
@@ -2459,6 +2527,15 @@ mod tests {
         for _ in 0..4 {
             render_owned_output(&mut shell, &device, &queue, PRIMARY_OUTPUT_ID);
         }
+        assert!(
+            shell
+                .app
+                .world()
+                .resource::<crate::retained_ui::RetainedUiStats>()
+                .reused_frames
+                > 0,
+            "stable fixture must exercise reuse"
+        );
     }
 
     #[cfg(feature = "test-support")]

@@ -1109,6 +1109,31 @@ a pending image only after native acquisition and GPU-image installation both
 succeed. Failure retains a compatible previously displayed image, or the
 transparent selector when no compatible image exists.
 
+`weld_app::retained_ui` retains extracted UI entities, geometry, ordering and
+prepared bindings between scene changes. Each composition checks change ticks
+on UI nodes, text spans and cameras, structural counts, relevant asset events,
+output metrics and GPU-image registrations. The check runs at composition time;
+expired asset events and component removals across intervening policy updates
+still invalidate the cache. Bevy's propagation intermediates are filtered in
+favor of their final computed components. Native image-registry no-ops preserve
+change ticks, and stable surface material handles preserve their component ticks.
+
+Scene changes select full extraction and preparation, with a subsequent settling
+frame for render assets. Stable frames skip UI extraction, queueing, sorting and
+bind-group preparation. Surface selectors refresh their bindings immediately
+before rendering on every frame. Bevy's normal extraction callback, asset
+uploads, device-error handling, output attachment setup, render graph and cleanup
+continue to run, surrounded by the same core acquisition/release lifecycle.
+The GPU redraws the output using the retained batches, preserving blending,
+clipping and stacking. Renderer startup retires cached entities and forces
+preparation.
+
+Mesh, sprite, 3D-camera and viewport-node scenes select full preparation.
+Custom time/external-state renderers can attach `ContinuousUiPreparation`;
+assemblies installing additional rendering pipelines can set
+`RetainedUiSettings.enabled` to false. `RetainedUiStats` and the
+`weld_render_cache` trace target expose preparation/reuse decisions.
+
 A persistent completion worker waits for release-barrier `SubmissionIndex`
 values and wakes calloop. The server thread then signals any explicit timeline
 point with a CPU syncobj ioctl and sends `wl_buffer.release` when the buffer's

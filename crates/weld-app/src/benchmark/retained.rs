@@ -1,34 +1,13 @@
-//! Fixed-scene experiment retaining Bevy's prepared UI between full render updates.
-//!
-//! The fixture refreshes every 60 frames after warmup. Production use requires
-//! explicit scene/asset invalidation and device-recovery handling.
+//! GPU equivalence checks for the production retained UI path during fixture warmup.
 
-use anyhow::{Context, Result, ensure};
-use bevy::{
-    app::App,
-    ecs::{
-        component::Component,
-        entity::Entity,
-        query::With,
-        resource::Resource,
-        schedule::{IntoScheduleConfigs, Schedule, ScheduleLabel},
-        system::{Commands, Query, ResMut},
-        world::World,
-    },
-    render::{
-        Render, RenderApp, RenderSystems,
-        render_resource::PipelineCache,
-        renderer::render_system,
-        sync_world::TemporaryRenderEntity,
-        texture::{ManualTextureViews, update_texture_cache_system},
-        view::{clear_view_attachments, prepare_view_attachments, prepare_view_targets},
-    },
-};
-
+use anyhow::{Result, ensure};
+use bevy::{app::App, ecs::resource::Resource, render::texture::ManualTextureViews};
 use weld_core::{
     host::{CompositionFrame, CompositionOutputFrame, CompositionTargetView},
     renderer::read_owned_frame_rgba,
 };
+
+use crate::retained_ui::{RetainedUiSettings, RetainedUiStats};
 
 #[derive(Resource)]
 struct RetainedProbe {
@@ -37,69 +16,13 @@ struct RetainedProbe {
     queue: wgpu::Queue,
 }
 
-#[derive(Component)]
-struct RetainedRenderEntity;
-
-#[derive(ScheduleLabel, Clone, Debug, PartialEq, Eq, Hash)]
-struct ReplayUi;
-
 pub(crate) fn install(app: &mut App, device: &wgpu::Device, queue: &wgpu::Queue) -> Result<()> {
-    let render_app = app
-        .get_sub_app_mut(RenderApp)
-        .context("retained UI probe requires RenderApp")?;
-    // Keep the batches and UI camera created by extraction alive through cleanup.
-    render_app.add_systems(
-        Render,
-        retain_entities
-            .after(RenderSystems::Render)
-            .before(RenderSystems::PostCleanup),
-    );
-    let mut replay = Schedule::new(ReplayUi);
-    replay.add_systems(
-        (
-            clear_view_attachments,
-            prepare_view_attachments,
-            prepare_view_targets,
-            process_pipelines,
-            render_system,
-            update_texture_cache_system,
-        )
-            .chain(),
-    );
-    crate::surface_impl::binding::benchmark::configure(&mut replay);
-    render_app.add_schedule(replay);
     app.insert_resource(RetainedProbe {
         frames: 0,
         device: device.clone(),
         queue: queue.clone(),
     });
     Ok(())
-}
-
-fn process_pipelines(mut cache: ResMut<PipelineCache>) {
-    cache.process_queue();
-}
-
-fn retain_entities(mut commands: Commands, entities: Query<Entity, With<TemporaryRenderEntity>>) {
-    for entity in &entities {
-        commands
-            .entity(entity)
-            .remove::<TemporaryRenderEntity>()
-            .insert(RetainedRenderEntity);
-    }
-}
-
-fn retire_entities(world: &mut World) {
-    let mut query = world.query_filtered::<Entity, With<RetainedRenderEntity>>();
-    let mut entities: Vec<_> = query.iter(world).collect();
-    entities.sort_unstable_by_key(|entity| entity.index());
-    for entity in entities.into_iter().rev() {
-        world.despawn(entity);
-    }
-}
-
-fn rebuild(frame: u64) -> bool {
-    frame < 120 || frame.is_multiple_of(60)
 }
 
 pub(super) fn render(app: &mut App, frames: &[CompositionOutputFrame]) -> Result<bool> {
@@ -116,29 +39,12 @@ fn render_frame(
     frames: &[CompositionOutputFrame],
     probe: &mut RetainedProbe,
 ) -> Result<()> {
-    let refresh = rebuild(probe.frames);
+    crate::retained_ui::render(app)?;
     let validate = (121..=123).contains(&probe.frames);
     probe.frames = probe.frames.saturating_add(1);
-    if refresh {
-        let render_app = app
-            .get_sub_app_mut(RenderApp)
-            .context("retained UI probe lost RenderApp")?;
-        retire_entities(render_app.world_mut());
-        app.update_sub_app_by_label(RenderApp);
-    } else {
-        // Every output acquisition can provide a different backing texture.
-        let views = app.world().resource::<ManualTextureViews>().clone();
-        let render_app = app
-            .get_sub_app_mut(RenderApp)
-            .context("retained UI probe lost RenderApp")?;
-        render_app.world_mut().insert_resource(views);
-        render_app.world_mut().run_schedule(ReplayUi);
-        render_app.world_mut().clear_trackers();
-        if validate {
-            validate_replay(app, frames, probe)?;
-        }
+    if validate {
+        validate_replay(app, frames, probe)?;
     }
-    app.world_mut().clear_trackers();
     Ok(())
 }
 
@@ -150,8 +56,6 @@ fn validate_replay(
     ensure!(frames.len() == 1, "retained validation requires one output");
     let frame = &frames[0].frame;
     let replayed = read_owned_frame_rgba(&probe.device, &probe.queue, frame)?;
-
-    // Rotate the backing texture without changing the camera's target handle.
     let extent = frame.target().extent();
     let texture = probe.device.create_texture(&wgpu::TextureDescriptor {
         label: Some("retained replay rotation validation"),
@@ -172,7 +76,8 @@ fn validate_replay(
         CompositionTargetView::new(view.clone(), extent, frame.target().format()),
         texture,
     );
-    let mut views = app.world().resource::<ManualTextureViews>().clone();
+    let original_views = app.world().resource::<ManualTextureViews>().clone();
+    let mut views = original_views.clone();
     ensure!(
         views.len() == 1,
         "retained validation requires one manual view"
@@ -180,19 +85,20 @@ fn validate_replay(
     for target in views.values_mut() {
         target.texture_view = view.clone().into();
     }
-    let render_app = app
-        .get_sub_app_mut(RenderApp)
-        .context("missing RenderApp")?;
-    render_app.world_mut().insert_resource(views);
-    render_app.world_mut().run_schedule(ReplayUi);
+    app.world_mut().insert_resource(views);
+    let result = crate::retained_ui::render(app);
+    app.world_mut().insert_resource(original_views);
+    result?;
     let rotated_pixels = read_owned_frame_rgba(&probe.device, &probe.queue, &rotated)?;
     ensure!(
         replayed == rotated_pixels,
         "retained replay changed pixels on output buffer rotation"
     );
 
-    retire_entities(render_app.world_mut());
-    app.update_sub_app_by_label(RenderApp);
+    app.world_mut().resource_mut::<RetainedUiSettings>().enabled = false;
+    let result = crate::retained_ui::render(app);
+    app.world_mut().resource_mut::<RetainedUiSettings>().enabled = true;
+    result?;
     let reference = read_owned_frame_rgba(&probe.device, &probe.queue, frame)?;
     let different = replayed
         .iter()
@@ -200,13 +106,19 @@ fn validate_replay(
         .filter(|(a, b)| a != b)
         .count();
     ensure!(
-        different == 0,
+        replayed == reference,
         "retained replay differs from full preparation in {different} channels"
     );
+    let stats = app.world().resource::<RetainedUiStats>();
+    if probe.frames == 124 {
+        ensure!(stats.reused_frames > 0, "fixture never reused prepared UI");
+    }
     println!(
-        "RETAINED_VALIDATION frame={} pixels={} replay_matches_full=true rotated_target_matches=true",
+        "RETAINED_VALIDATION frame={} pixels={} replay_matches_full=true rotated_target_matches=true prepared={} reused={}",
         probe.frames,
-        replayed.len() / 4
+        replayed.len() / 4,
+        stats.prepared_frames,
+        stats.reused_frames
     );
     Ok(())
 }
@@ -217,20 +129,5 @@ pub(crate) mod tests {
 
     pub(crate) fn refresh_and_validate(app: &mut App) {
         app.world_mut().resource_mut::<RetainedProbe>().frames = 120;
-    }
-
-    #[test]
-    fn retained_entities_survive_replay_and_are_retired_before_rebuild() {
-        let mut world = World::new();
-        let retained = world.spawn(TemporaryRenderEntity).id();
-        let persistent = world.spawn_empty().id();
-        let mut schedule = Schedule::default();
-        schedule.add_systems(retain_entities);
-        schedule.run(&mut world);
-        assert!(world.get::<TemporaryRenderEntity>(retained).is_none());
-        assert!(world.get::<RetainedRenderEntity>(retained).is_some());
-        retire_entities(&mut world);
-        assert!(world.get_entity(retained).is_err());
-        assert!(world.get_entity(persistent).is_ok());
     }
 }

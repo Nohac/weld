@@ -55,7 +55,9 @@ pub(super) fn configure_render_app(render_app: &mut SubApp) {
         .init_resource::<SurfaceBindingCache>()
         .add_systems(
             Render,
-            prepare_surface_bindings.in_set(RenderSystems::PrepareBindGroups),
+            prepare_surface_bindings
+                .after(RenderSystems::Prepare)
+                .before(RenderSystems::Render),
         );
 }
 
@@ -201,23 +203,5 @@ fn prepare_surface_bindings(
             bind_group
         };
         material.bind_group = bind_group;
-    }
-}
-
-#[cfg(feature = "test-support")]
-pub(crate) mod benchmark {
-    use bevy::{
-        ecs::schedule::{IntoScheduleConfigs, Schedule},
-        render::{renderer::render_system, view::prepare_view_targets},
-    };
-
-    use super::prepare_surface_bindings;
-
-    pub(crate) fn configure(schedule: &mut Schedule) {
-        schedule.add_systems(
-            prepare_surface_bindings
-                .after(prepare_view_targets)
-                .before(render_system),
-        );
     }
 }

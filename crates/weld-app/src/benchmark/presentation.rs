@@ -30,7 +30,7 @@ use weld_core::{
 /// Which presentation path the offscreen fixture measures.
 #[derive(Clone, Copy, Debug)]
 pub enum PresentationProbe {
-    /// Replay prepared Bevy UI between periodic fixture-scene rebuilds.
+    /// Validate and measure scene-invalidated prepared Bevy UI reuse.
     RetainedUi,
     /// Keep production main-world work, image registration and buffer lifetime.
     Direct,
@@ -70,6 +70,9 @@ pub(super) fn install_presentation_probe(
     if matches!(probe, PresentationProbe::RetainedUi) {
         return super::retained::install(app, &context.device, &context.queue);
     }
+    app.world_mut()
+        .resource_mut::<crate::retained_ui::RetainedUiSettings>()
+        .enabled = false;
     if matches!(probe, PresentationProbe::PrepareThenDirect) {
         app.get_sub_app_mut(RenderApp)
             .context("diagnostic probe requires RenderApp")?
@@ -127,7 +130,7 @@ fn render(
                 .resource_mut::<CameraDrawEnabled>()
                 .0 = direct.warmup_frames < 5;
         }
-        app.update_sub_app_by_label(RenderApp);
+        crate::retained_ui::render(app)?;
         direct.warmup_frames = direct.warmup_frames.saturating_add(1).min(5);
     } else if matches!(direct.probe, PresentationProbe::ExtractThenDirect) {
         let apps = app.sub_apps_mut();

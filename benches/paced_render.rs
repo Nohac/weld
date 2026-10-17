@@ -190,9 +190,15 @@ fn main() -> Result<()> {
             };
             let shell = shell_for_host_with_probe(context, importers, probe, |app| match mode {
                 Mode::Master | Mode::MasterRetained => {
+                    app.insert_resource(weld_app::retained_ui::RetainedUiSettings {
+                        enabled: matches!(mode, Mode::MasterRetained),
+                    });
                     configured = weldwm::benchmark::configure(app, &args.config)
                 }
                 Mode::Minimal | Mode::MinimalRetained | Mode::UiDirect => {
+                    app.insert_resource(weld_app::retained_ui::RetainedUiSettings {
+                        enabled: matches!(mode, Mode::MinimalRetained),
+                    });
                     app.add_systems(PreUpdate, mount_surfaces);
                 }
                 Mode::Surface

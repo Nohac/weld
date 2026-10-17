@@ -12,6 +12,7 @@ use bevy::{
     app::{App, Plugin, PostUpdate, PreUpdate},
     asset::{Asset, AssetId, Assets, Handle, RenderAssetUsages, load_internal_asset, uuid_handle},
     ecs::{
+        change_detection::Mut,
         component::Component,
         entity::Entity,
         hierarchy::{ChildOf, Children},
@@ -47,7 +48,7 @@ pub use weld_client::{
 use weld_core::dmabuf::ImportId;
 
 #[path = "surface/binding.rs"]
-pub(crate) mod binding;
+mod binding;
 pub(crate) use binding::publish_surface_bindings;
 
 #[path = "surface/clip.rs"]
@@ -474,6 +475,7 @@ pub enum SurfaceSystems {
 
 impl Plugin for SurfacePlugin {
     fn build(&self, app: &mut App) {
+        crate::retained_ui::watch_asset::<SurfaceUiMaterial>(app);
         load_internal_asset!(
             app,
             SURFACE_MATERIAL_SHADER,
@@ -1690,7 +1692,7 @@ const fn encoding_flag(encoding: SurfaceImageEncoding) -> u32 {
 fn update_surface_material(
     materials: &mut Assets<SurfaceUiMaterial>,
     selectors: &mut MaterialSelectorRegistry,
-    node: &mut MaterialNode<SurfaceUiMaterial>,
+    node: &mut Mut<'_, MaterialNode<SurfaceUiMaterial>>,
     mut expected: SurfaceUiMaterial,
     surface: SurfaceId,
     layer: SurfaceLayerId,
@@ -1720,7 +1722,7 @@ fn update_surface_material(
 fn clear_surface_material(
     materials: &mut Assets<SurfaceUiMaterial>,
     selectors: &mut MaterialSelectorRegistry,
-    node: &mut MaterialNode<SurfaceUiMaterial>,
+    node: &mut Mut<'_, MaterialNode<SurfaceUiMaterial>>,
 ) {
     if node.0 != Handle::default() {
         selectors.0.remove(&node.0.id());

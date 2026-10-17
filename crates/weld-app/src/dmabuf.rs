@@ -157,6 +157,14 @@ struct BevyImageRegistry<'a> {
 
 impl ImportedImageRegistry for BevyImageRegistry<'_> {
     fn install(&mut self, images: &[PromotionImage]) -> Result<()> {
+        // Resource scopes reinsert their resource with a fresh change tick.
+        // Preserve the image registry's version when every import is installed.
+        if images
+            .iter()
+            .all(|image| self.installed.contains(&image.id))
+        {
+            return Ok(());
+        }
         let render_app = self
             .app
             .get_sub_app_mut(RenderApp)
@@ -210,6 +218,9 @@ impl ImportedImageRegistry for BevyImageRegistry<'_> {
     }
 
     fn prune(&mut self, images: &[ImportId]) {
+        if images.is_empty() {
+            return;
+        }
         for id in images {
             self.installed.remove(id);
         }

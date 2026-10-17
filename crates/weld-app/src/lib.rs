@@ -17,6 +17,7 @@ pub mod layer;
 pub mod layer_shell;
 pub mod output;
 pub mod pixel_snap;
+pub mod retained_ui;
 mod shell;
 #[path = "surface.rs"]
 mod surface_impl;
