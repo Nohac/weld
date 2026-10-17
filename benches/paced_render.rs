@@ -1,11 +1,12 @@
 use anyhow::{Context, Result, ensure};
 use bevy::ecs::template::template;
 use bevy::{
-    app::PreUpdate,
+    app::{Last, PreUpdate},
     ecs::{
         component::Component,
+        entity::Entity,
         query::{Added, With},
-        system::{Commands, Query},
+        system::{Commands, Local, Query, Res},
     },
     prelude::{Node, PositionType, px},
     scene::{CommandsSceneExt, bsn},
@@ -20,6 +21,8 @@ use weld_core::{
     benchmark::{Options, SurfaceOnly, prepare},
     surface::Extent,
 };
+use weld_tile::{TileContainer, TileLayout};
+use weld_window::FocusedWindow;
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
 enum Mode {
@@ -59,6 +62,10 @@ struct Args {
     producer_hz: u32,
     #[arg(long, default_value_t = 0)]
     input_hz: u32,
+    #[arg(long, default_value_t = 0)]
+    focus_hz: u32,
+    #[arg(long)]
+    tabbed: bool,
     #[arg(long, default_value_t = 1)]
     windows: u32,
     #[arg(long, value_enum, default_value_t = Decorations::Client)]
@@ -107,6 +114,8 @@ fn main() -> Result<()> {
         window_extent: Extent::new(args.width / args.windows, args.height),
         hz: args.hz,
         input_hz: args.input_hz,
+        focus_hz: args.focus_hz,
+        tabbed: args.tabbed,
         warmup: Duration::from_secs(args.warmup),
         duration: Duration::from_secs(args.seconds),
         capture: run_dir.join("capture.png"),
@@ -193,7 +202,10 @@ fn main() -> Result<()> {
                     app.insert_resource(weld_app::retained_ui::RetainedUiSettings {
                         enabled: matches!(mode, Mode::MasterRetained),
                     });
-                    configured = weldwm::benchmark::configure(app, &args.config)
+                    configured = weldwm::benchmark::configure(app, &args.config);
+                    if args.focus_hz > 0 || args.tabbed {
+                        app.add_systems(Last, observe_focus);
+                    }
                 }
                 Mode::Minimal | Mode::MinimalRetained | Mode::UiDirect => {
                     app.insert_resource(weld_app::retained_ui::RetainedUiSettings {
@@ -228,6 +240,10 @@ fn main() -> Result<()> {
     let elapsed = report.elapsed.as_secs_f64();
     let frames = report.compositions.max(1) as f64;
     println!(
+        "POLICY updates={} focus_hz={} tabbed={}",
+        report.policy_updates, args.focus_hz, args.tabbed
+    );
+    println!(
         "RESULT mode={:?} decorations={:?} wall_s={:.3} cpu_pct={:.3} cpu_ms_per_frame={:.3} compositions={} composition_hz={:.3} commits={} commit_hz={:.3} ingress_replaced={} dmabuf={} shm={} inputs={} max_in_flight={} policy_us_per_frame={:.3} render_us_per_frame={:.3} ingress_age_p50_ms={:.3} ingress_age_p95_ms={:.3}",
         args.mode,
         args.decorations,
@@ -253,6 +269,23 @@ fn main() -> Result<()> {
 
 #[derive(Component, Clone, Default)]
 struct BenchSurface;
+
+fn observe_focus(
+    focus: Res<FocusedWindow>,
+    containers: Query<&TileContainer>,
+    mut previous: Local<Option<Entity>>,
+) {
+    if focus.entity() != *previous {
+        *previous = focus.entity();
+        println!(
+            "FOCUS window={:?} tabbed={}",
+            focus.entity(),
+            containers
+                .iter()
+                .any(|container| container.layout() == TileLayout::Tabbed)
+        );
+    }
+}
 
 fn mount_surfaces(
     mut commands: Commands,

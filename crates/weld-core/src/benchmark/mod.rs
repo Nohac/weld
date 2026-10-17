@@ -42,6 +42,8 @@ pub struct Options {
     pub window_extent: Extent,
     pub hz: u32,
     pub input_hz: u32,
+    pub focus_hz: u32,
+    pub tabbed: bool,
     pub warmup: Duration,
     pub duration: Duration,
     pub socket: String,
@@ -63,6 +65,7 @@ pub struct Report {
     pub inputs: u64,
     pub max_in_flight: usize,
     pub policy_wall: Duration,
+    pub policy_updates: u64,
     pub render_wall: Duration,
     /// Latest commit's bridge-drain to CPU submission duration for each surface.
     pub ingress_ages: Vec<Duration>,
@@ -136,6 +139,7 @@ pub fn prepare(options: Options) -> Result<(PreparedHost, Results)> {
         "output rate must be 1..240 Hz"
     );
     ensure!(options.input_hz <= 2000, "input rate exceeds 2000 Hz");
+    ensure!(options.focus_hz <= 30, "focus rate exceeds 30 Hz");
     ensure!(
         !options.duration.is_zero() && options.duration <= Duration::from_secs(120),
         "measurement must be 0..120 seconds"

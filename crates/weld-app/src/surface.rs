@@ -566,17 +566,22 @@ struct SurfaceEntry {
 
 /// Monotonic client-commit sequence, kept outside surface components.
 #[derive(Resource, Default)]
-pub struct SurfaceCommitRevisions(HashMap<SurfaceId, u64>);
+pub struct SurfaceCommitRevisions {
+    revisions: HashMap<SurfaceId, u64>,
+    policy_waiters: HashSet<SurfaceId>,
+}
 
 impl SurfaceCommitRevisions {
     pub fn revision(&self, surface: SurfaceId) -> u64 {
-        self.0.get(&surface).copied().unwrap_or_default()
+        self.revisions.get(&surface).copied().unwrap_or_default()
     }
 
-    /// Records an admitted commit before resize-settlement policy observes it.
-    pub fn record_commit(&mut self, surface: SurfaceId) {
-        let revision = self.0.entry(surface).or_default();
+    /// Records an admitted commit and reports whether resize-settlement policy
+    /// requested this client's next commit.
+    pub fn record_commit(&mut self, surface: SurfaceId) -> bool {
+        let revision = self.revisions.entry(surface).or_default();
         *revision = revision.saturating_add(1);
+        self.policy_waiters.remove(&surface)
     }
 }
 
@@ -626,10 +631,17 @@ pub fn enqueue_surface_event(world: &mut World, event: HostSurfaceEvent) {
 
 #[doc(hidden)]
 pub fn take_surface_actions(world: &mut World) -> Vec<SurfaceAction> {
-    let actions = world
+    let actions: Vec<SurfaceAction> = world
         .get_resource_mut::<SurfaceActionQueue>()
         .map(|mut actions| actions.0.drain(..).collect())
         .unwrap_or_default();
+    if let Some(mut revisions) = world.get_resource_mut::<SurfaceCommitRevisions>() {
+        for action in &actions {
+            if let SurfaceAction::Resize { surface, .. } = action {
+                revisions.policy_waiters.insert(*surface);
+            }
+        }
+    }
     crate::layer_shell::resolve_focus_actions(world, actions)
 }
 
@@ -739,15 +751,25 @@ pub(crate) fn reject_dmabuf_sources(world: &mut World, rejected: &HashSet<Import
 }
 
 fn apply_host_surface_events(world: &mut World) {
+    prepare_surface_events(world);
+}
+
+/// Apply selected pixels and surface state, reporting work needed by UI policy.
+pub(crate) fn prepare_surface_events(world: &mut World) -> bool {
     let events = world
         .get_resource_mut::<SurfaceEventQueue>()
         .map(|mut events| std::mem::take(&mut events.0))
         .unwrap_or_default();
+    if events.is_empty() {
+        return false;
+    }
     let mut registry = world
         .remove_resource::<SurfaceRegistry>()
         .unwrap_or_default();
 
+    let mut policy_changed = false;
     for HostSurfaceEvent { surface, kind } in events {
+        policy_changed |= !matches!(&kind, HostSurfaceEventKind::Commit(_));
         match kind {
             HostSurfaceEventKind::Metadata(metadata) => {
                 if registered_client_source(world, surface).is_some() {
@@ -792,7 +814,8 @@ fn apply_host_surface_events(world: &mut World) {
             },
             HostSurfaceEventKind::Commit(snapshot) => {
                 if registry.entries.contains_key(&surface) {
-                    apply_surface_tree_snapshot(world, &mut registry, surface, snapshot);
+                    policy_changed |=
+                        apply_surface_tree_snapshot(world, &mut registry, surface, snapshot);
                 } else {
                     queue_pending_snapshot(&mut registry, surface, snapshot);
                 }
@@ -816,6 +839,7 @@ fn apply_host_surface_events(world: &mut World) {
     }
 
     world.insert_resource(registry);
+    policy_changed
 }
 
 fn set_toplevel_parent(
@@ -1034,18 +1058,18 @@ fn apply_surface_tree_snapshot(
     registry: &mut SurfaceRegistry,
     surface: SurfaceId,
     mut snapshot: SurfaceTreeSnapshot,
-) {
+) -> bool {
     if !validate_snapshot(&snapshot) {
         warn!(?surface, "discarded an invalid surface tree snapshot");
-        return;
+        return false;
     }
     let Some(entity) = registry.entries.get(&surface).map(|entry| entry.entity) else {
         queue_pending_snapshot(registry, surface, snapshot);
-        return;
+        return true;
     };
-    if let Some(mut revisions) = world.get_resource_mut::<SurfaceCommitRevisions>() {
-        revisions.record_commit(surface);
-    }
+    let mut policy_changed = world
+        .get_resource_mut::<SurfaceCommitRevisions>()
+        .is_some_and(|mut revisions| revisions.record_commit(surface));
 
     let retained = snapshot
         .buffers
@@ -1053,8 +1077,19 @@ fn apply_surface_tree_snapshot(
         .map(|buffer| buffer.layer)
         .collect::<HashSet<_>>();
     let Some(entry) = registry.entries.get_mut(&surface) else {
-        return;
+        return true;
     };
+    policy_changed |= snapshot.buffers.iter().any(|buffer| match &buffer.content {
+        SurfaceBufferContent::Pixels(_) => true,
+        SurfaceBufferContent::RenderImage(image) => {
+            image.promoted
+                || entry
+                    .buffers
+                    .get(&buffer.layer)
+                    .is_none_or(|previous| previous.encoding != image.encoding)
+        }
+        SurfaceBufferContent::Retained => false,
+    });
     let removed = entry
         .buffers
         .keys()
@@ -1062,6 +1097,7 @@ fn apply_surface_tree_snapshot(
         .filter(|layer| !retained.contains(layer))
         .collect::<Vec<_>>();
     if let Some(mut images) = world.get_resource_mut::<Assets<Image>>() {
+        policy_changed |= !removed.is_empty();
         for layer in removed {
             if let Some(asset) = entry.buffers.remove(&layer) {
                 images.remove(asset.image.id());
@@ -1162,7 +1198,7 @@ fn apply_surface_tree_snapshot(
             ?surface,
             "discarded surface pixels because Bevy image assets are unavailable"
         );
-        return;
+        return true;
     }
 
     let content = snapshot
@@ -1218,7 +1254,7 @@ fn apply_surface_tree_snapshot(
             ?surface,
             "discarded a surface snapshot because its ECS entity disappeared"
         );
-        return;
+        return true;
     };
     if let Some((content, opaque)) = content {
         let logical_size = Vec2::new(
@@ -1239,6 +1275,7 @@ fn apply_surface_tree_snapshot(
         };
         let content_changed = entity_mut.get::<SurfaceContent>() != Some(&content);
         let mapping_changed = entity_mut.get::<MappedSurface>() != Some(&mapped);
+        policy_changed |= content_changed || mapping_changed;
         if content_changed {
             entity_mut.insert(content);
         }
@@ -1262,6 +1299,7 @@ fn apply_surface_tree_snapshot(
     } else {
         let was_mapped =
             entity_mut.contains::<SurfaceContent>() || entity_mut.contains::<MappedSurface>();
+        policy_changed |= was_mapped;
         if was_mapped {
             entity_mut.remove::<(SurfaceContent, MappedSurface)>();
         }
@@ -1274,13 +1312,15 @@ fn apply_surface_tree_snapshot(
             );
         }
     }
+    policy_changed
 }
 
 fn destroy_surface(world: &mut World, registry: &mut SurfaceRegistry, surface: SurfaceId) {
     registry.pending_metadata.remove(&surface);
     registry.pending_snapshots.remove(&surface);
     if let Some(mut revisions) = world.get_resource_mut::<SurfaceCommitRevisions>() {
-        revisions.0.remove(&surface);
+        revisions.revisions.remove(&surface);
+        revisions.policy_waiters.remove(&surface);
     }
     let Some(entry) = registry.entries.remove(&surface) else {
         return;
@@ -2465,6 +2505,78 @@ mod tests {
                 .revision(surface),
             revision + 1
         );
+    }
+
+    #[test]
+    fn imported_content_ingress_only_requests_policy_for_structural_changes() {
+        let mut app = test_app();
+        let surface = SurfaceId::for_test(33);
+        register_window(&mut app, surface);
+        let image = app
+            .world_mut()
+            .resource_mut::<Assets<Image>>()
+            .add(transparent_surface_image());
+        let snapshot = || {
+            let mut snapshot = root_snapshot(None);
+            snapshot.buffers[0].content = SurfaceBufferContent::RenderImage(SurfaceRenderImage {
+                import: ImportId::for_test(12),
+                image: image.clone(),
+                encoding: SurfaceImageEncoding::EncodedOpaque,
+                y_inverted: false,
+                promoted: false,
+            });
+            snapshot
+        };
+        enqueue_surface_event(app.world_mut(), snapshot_event(surface, snapshot()));
+        assert!(prepare_surface_events(app.world_mut()));
+        app.update();
+        let revision = app
+            .world()
+            .resource::<SurfaceCommitRevisions>()
+            .revision(surface);
+        enqueue_surface_event(app.world_mut(), snapshot_event(surface, snapshot()));
+        assert!(!prepare_surface_events(app.world_mut()));
+        assert_eq!(
+            app.world()
+                .resource::<SurfaceCommitRevisions>()
+                .revision(surface),
+            revision + 1
+        );
+        app.world_mut()
+            .resource_mut::<SurfaceActionQueue>()
+            .push(SurfaceAction::Resize {
+                surface,
+                layout: weld_client::ToplevelLayout::Tiled,
+                logical_size: bevy::math::UVec2::ONE,
+                resizing: false,
+                fullscreen: false,
+            });
+        assert_eq!(take_surface_actions(app.world_mut()).len(), 1);
+        enqueue_surface_event(app.world_mut(), snapshot_event(surface, snapshot()));
+        assert!(
+            prepare_surface_events(app.world_mut()),
+            "same-size resize acknowledgements reach policy"
+        );
+        enqueue_surface_event(app.world_mut(), snapshot_event(surface, snapshot()));
+        assert!(
+            !prepare_surface_events(app.world_mut()),
+            "resize observation is one-shot"
+        );
+        let mut resized = snapshot();
+        resized.window_geometry.as_mut().expect("geometry").origin.x = 1.;
+        enqueue_surface_event(app.world_mut(), snapshot_event(surface, resized));
+        assert!(
+            prepare_surface_events(app.world_mut()),
+            "geometry changes reach policy"
+        );
+        let mut unmapped = snapshot();
+        unmapped.client_mapped = false;
+        enqueue_surface_event(app.world_mut(), snapshot_event(surface, unmapped));
+        assert!(
+            prepare_surface_events(app.world_mut()),
+            "unmap reaches policy"
+        );
+        assert!(!prepare_surface_events(app.world_mut()));
     }
 
     #[cfg(feature = "test-support")]

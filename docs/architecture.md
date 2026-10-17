@@ -880,8 +880,8 @@ Smithay's desktop window model or restore the removed low-level presenter. See
 [Direct DRM presentation](drm-presentation.md) and the
 [DRM output adapter plan](drm-rendering-improvement-plan.md).
 
-DRM presentation waits for pending application ingress to reach its main-world
-tick before rendering. Smithay may request Bevy composition for swapchain
+DRM presentation waits for pending surface ingress and any required policy
+update before rendering. Smithay may request Bevy composition for swapchain
 repair or a software cursor, so even those redraws must see the current surface
 snapshots before consuming staged DMA-BUFs. The dispatch timeout uses the same
 gate to avoid spinning on an output deadline while waiting for policy. Vblank
@@ -986,7 +986,7 @@ Native evictions and drains transfer ownership so Android/Godot image release
 can run outside queue locks. Godot retains its window inventory, frame-credit
 budget and native composition-layer presentation.
 
-At the next main advance `AppShell` resolves the surviving leases before ECS
+At the next presentation opportunity `AppShell` resolves the surviving leases before ECS
 ingress and asks the core-owned DMA-BUF manager to resolve a
 Wayland or transported external DMA-BUF image into a Bevy handle. Application
 plugins receive only retained content, pixels, or a Bevy `Handle<Image>` with
@@ -997,6 +997,23 @@ cache retains prepared images until their surface entity exists; frame
 supersession is decided in the neutral queue before image preparation. Encoders
 likewise resolve leases and convert opaque wire state only at admission, rather
 than mutating every incoming shared commit.
+
+Native hosts distinguish content demand from application updates. Immediately
+before a due update or composition, `HostPolicy::prepare_presentation` admits
+selected content and reports structural or asset work. Stable imported DMA-BUF
+content updates the surface registry and commit revision without running the
+main application schedule. Mapping, geometry, input-region, role and metadata
+changes escalate to policy in the same iteration. SHM uploads and prepromoted
+importer images retain full asset processing. New/pruned native images and
+post-promotion material changes also request that processing. Startup and
+structural settling still run paced application updates. Disabling retained
+presentation, or declaring a continuously prepared custom scene, keeps full
+application updates. The inbox is selected once per opportunity, including an
+opportunity that escalates to policy.
+Sending a native resize subscribes policy to the client's next admitted commit,
+including a same-size commit. That one-shot observation completes window,
+floating-anchor and hoist resize settlement; later content returns to the light
+presentation path.
 
 The local inbox has no effect on protocol processing, device-paced input, or
 relay observation in `ClientRuntime`. Other consumers retain their own cadence.

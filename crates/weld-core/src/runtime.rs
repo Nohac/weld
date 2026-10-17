@@ -282,7 +282,6 @@ impl FrameState {
         self.update_dirty
     }
 
-    #[cfg(test)]
     pub(crate) const fn composition_dirty(&self) -> bool {
         self.composition_dirty
     }
@@ -310,6 +309,10 @@ impl FrameState {
         self.composition_dirty = true;
     }
 
+    pub(crate) fn request_content(&mut self) {
+        self.composition_dirty = true;
+    }
+
     /// Request enough paced compositions for deferred Bevy work to settle.
     ///
     /// Structural changes such as newly mapped surface trees can span main
@@ -325,7 +328,8 @@ impl FrameState {
     }
 
     pub(crate) fn update_due(&self, now: Instant) -> bool {
-        self.update_dirty && self.next_composition.is_none_or(|deadline| deadline <= now)
+        (self.update_dirty || self.settle_compositions_remaining > 0)
+            && self.next_composition.is_none_or(|deadline| deadline <= now)
     }
 
     pub(crate) fn composition_due(&self, now: Instant) -> bool {
@@ -382,7 +386,7 @@ pub(crate) struct IterationWork {
 
 pub(crate) const fn iteration_work(update_due: bool, composition_due: bool) -> IterationWork {
     IterationWork {
-        advance_main: update_due || composition_due,
+        advance_main: update_due,
         render_composition: composition_due,
     }
 }

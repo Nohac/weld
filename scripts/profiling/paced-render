@@ -61,6 +61,8 @@ def main():
     parser.add_argument("--hz", type=int, default=60)
     parser.add_argument("--producer-hz", type=int, default=120)
     parser.add_argument("--input-hz", type=int, default=0)
+    parser.add_argument("--focus-hz", type=int, default=0)
+    parser.add_argument("--tabbed", action="store_true")
     parser.add_argument("--windows", type=int, default=1)
     parser.add_argument("--decorations", choices=("client", "server"), default="client")
     parser.add_argument("--jobs", type=int, default=8)
@@ -68,6 +70,10 @@ def main():
     parser.add_argument("--executable", type=Path, help="use a saved benchmark binary (requires --no-build)")
     parser.add_argument("--scanner", type=Path)
     args = parser.parse_args()
+    if not 0 <= args.focus_hz <= 30:
+        parser.error("focus rate must be 0..30 Hz")
+    if (args.focus_hz or args.tabbed) and (args.mode not in ("master", "master-retained") or args.windows < 2):
+        parser.error("focus/tabbed scenarios require Master mode and at least two windows")
     if args.executable and not args.no_build:
         parser.error("--executable requires --no-build")
     if args.executable:
@@ -139,6 +145,10 @@ def main():
         directory = run / (mode if args.repeat == 1 else f"{iteration + 1}-{mode}")
         directory.mkdir()
         command = [executable, "--mode", mode, "--producer", str(producer), "--run-dir", str(directory), "--decorations", args.decorations]
+        if args.focus_hz:
+            command += ["--focus-hz", str(args.focus_hz)]
+        if args.tabbed:
+            command += ["--tabbed"]
         for name in ("seconds", "warmup", "width", "height", "hz", "producer_hz", "input_hz", "windows"):
             command += ["--" + name.replace("_", "-"), str(getattr(args, name))]
         with (directory / "run.log").open("w") as log:
@@ -159,10 +169,16 @@ def main():
                     process.wait()
         lines = (directory / "run.log").read_text().splitlines()
         for line in lines:
-            if line.startswith(("CASE", "ADAPTER", "RESULT", "RETAINED_VALIDATION")):
+            if line.startswith(("CASE", "ADAPTER", "RESULT", "RETAINED_VALIDATION", "POLICY")):
                 print(line, flush=True)
         if code != 0 or not any(line.startswith("RESULT") for line in lines):
             raise RuntimeError(f"{mode} failed: inspect {directory / 'run.log'}")
+        if args.focus_hz:
+            focus_changes = [line for line in lines if line.startswith("FOCUS window=Some")]
+            if args.tabbed:
+                focus_changes = [line for line in focus_changes if "tabbed=true" in line]
+            if len(focus_changes) < 3:
+                raise RuntimeError("focus scenario did not switch between managed windows")
         if mode.endswith("-retained"):
             checks = [index for index, line in enumerate(lines) if line.startswith("RETAINED_VALIDATION")]
             measurement = next((index for index, line in enumerate(lines) if line.startswith("MEASUREMENT_START")), -1)

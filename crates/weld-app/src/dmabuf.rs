@@ -31,6 +31,7 @@ pub(crate) struct DmabufImporter {
     manager: DmabufManager,
     handles: HashMap<ImportId, Handle<Image>>,
     installed: HashSet<ImportId>,
+    assets_changed: bool,
 }
 
 impl DmabufImporter {
@@ -43,6 +44,7 @@ impl DmabufImporter {
             manager,
             handles: HashMap::new(),
             installed: HashSet::new(),
+            assets_changed: false,
         }))
     }
 
@@ -58,6 +60,7 @@ impl DmabufImporter {
         let handle = if let Some(handle) = self.handles.get(&staged.id) {
             handle.clone()
         } else {
+            self.assets_changed = true;
             let image = Image::new_uninit(
                 staged.extent,
                 wgpu::TextureDimension::D2,
@@ -91,11 +94,13 @@ impl DmabufImporter {
             manager,
             handles,
             installed,
+            assets_changed,
         } = self;
         let mut registry = BevyImageRegistry {
             app,
             handles,
             installed,
+            assets_changed,
         };
         match manager.prepare_render(&referenced, &mut registry) {
             Ok(promoted) => promote_dmabuf_sources(registry.app.world_mut(), &promoted),
@@ -112,13 +117,19 @@ impl DmabufImporter {
             manager,
             handles,
             installed,
+            assets_changed,
         } = self;
         let mut registry = BevyImageRegistry {
             app,
             handles,
             installed,
+            assets_changed,
         };
         manager.finish_render(&mut registry)
+    }
+
+    pub(crate) fn take_asset_changes(&mut self) -> bool {
+        std::mem::take(&mut self.assets_changed)
     }
 
     pub(crate) fn installed_image_ids(&self) -> HashSet<bevy::asset::AssetId<Image>> {
@@ -153,6 +164,7 @@ struct BevyImageRegistry<'a> {
     app: &'a mut App,
     handles: &'a mut HashMap<ImportId, Handle<Image>>,
     installed: &'a mut HashSet<ImportId>,
+    assets_changed: &'a mut bool,
 }
 
 impl ImportedImageRegistry for BevyImageRegistry<'_> {
@@ -221,6 +233,7 @@ impl ImportedImageRegistry for BevyImageRegistry<'_> {
         if images.is_empty() {
             return;
         }
+        *self.assets_changed = true;
         for id in images {
             self.installed.remove(id);
         }

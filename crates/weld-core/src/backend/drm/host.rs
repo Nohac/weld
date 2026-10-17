@@ -153,8 +153,9 @@ fn primary_output_index(
 fn physical_scene_ready(frame_state: &FrameState, now: Instant) -> bool {
     // Smithay can request Bevy composition for swapchain repair or a software
     // cursor, even without new composition damage. Pending surface snapshots
-    // must reach the main world before that render consumes staged DMA-BUFs.
-    !frame_state.update_dirty() || frame_state.update_due(now)
+    // must pass ingress before that render consumes staged DMA-BUFs.
+    (!frame_state.update_dirty() || frame_state.update_due(now))
+        && (!frame_state.composition_dirty() || frame_state.composition_due(now))
 }
 
 pub(super) fn run(
@@ -573,6 +574,7 @@ impl NativeDriver<HostEvent> for DrmDriver {
     }
     fn client_demand(&mut self, demand: CompositionDemand) {
         match demand {
+            CompositionDemand::Content => self.frame_state.request_content(),
             CompositionDemand::Ordinary => self.frame_state.request_composition(),
             CompositionDemand::Settle => self.frame_state.request_settled_composition(),
         }

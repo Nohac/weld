@@ -36,10 +36,10 @@ use bevy::{
 #[derive(Component, Default)]
 pub struct ContinuousUiPreparation;
 
-/// Controls prepared-UI reuse. Disable when installing a custom render pipeline.
+/// Controls retained UI presentation. Disable when installing a custom render pipeline.
 #[derive(Resource)]
 pub struct RetainedUiSettings {
-    /// Reuse prepared drawing data when tracked UI dependencies are unchanged.
+    /// Reuse prepared drawing data and skip policy updates for stable content.
     pub enabled: bool,
 }
 
@@ -187,6 +187,17 @@ type ContinuousRender = Or<(
     With<Mesh3d>,
     With<Sprite>,
 )>;
+
+pub(crate) fn requires_main_update(world: &mut World) -> bool {
+    if !world.resource::<RetainedUiSettings>().enabled {
+        return true;
+    }
+    world
+        .query_filtered::<(), ContinuousRender>()
+        .iter(world)
+        .next()
+        .is_some()
+}
 
 fn detect_components(
     entities: VisualEntities,

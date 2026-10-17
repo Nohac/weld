@@ -299,6 +299,59 @@ is present in the October 11 `screenshot-nt09evjt` and `screenshot-c1wxiiva`
 logs and the September 28 profiling report. That acquire-fence issue remains a
 separate validation finding.
 
+### Content-only application scheduling
+
+Native composition now admits surface content separately from the main Bevy
+schedule. Stable DMA-BUF updates skip window policy, UI layout and input
+reconciliation. Structural changes, input, explicit policy wakes, resize
+acknowledgements and asset-processing work select the full update path.
+`RetainedUiSettings.enabled = false` selects full application/render preparation
+for the benchmark control and custom renderer integrations.
+
+The following optimized ABBA comparison uses two SSD EGL clients at 120 Hz
+each, a 1920×1080/60 Hz output, four seconds warmup and ten seconds measurement.
+The baseline binary is `ed9691c`'s scene-invalidated retained renderer. Both paths
+retain render batches; this comparison isolates the application-update split.
+
+| Metric | Previous retained path | Content-only path |
+| --- | --- | --- |
+| CPU, % of one core | 10.393 / 10.900 | 5.899 / 7.400 |
+| Userspace instructions, million/s | 75.361 / 75.598 | 55.363 / 55.470 |
+| Full application updates during measurement | every composition | 0 / 0 |
+
+Mean CPU time falls 37.5%, and instruction rate falls 26.6%. All runs retain
+approximately 60 compositions/s and 240 commits/s. Artifacts, in order:
+`paced-render-nga8mx4q`, `paced-render-bti19f2g`, `paced-render-7gj51ijk`,
+`paced-render-m5rzmvwt` under `target/validation/`. The preserved baseline binary
+is `target/validation/paced-render-build/before-content-path`.
+
+The fixture also supports actual alternating focus using its F7/F8 bindings,
+and F6 to select tabs. `--focus-hz 4 --windows 2` changes focus four times per
+second; add `--tabbed` to exercise visibility and tab-header changes. Use
+`master` or `master-retained` with the supplied benchmark config. `FOCUS` log
+records verify that the managed selection really changed; the launcher rejects
+a focus run without those transitions. `POLICY` records the main-update count.
+
+| Scenario | Full-update control CPU | Content-only + retained CPU | Main updates, control → optimized |
+| --- | --- | --- | --- |
+| Side-by-side focus, 4 Hz | 10.999% | 6.998% | 599 → 80 |
+| Tab switching, 4 Hz | 11.996% | 7.399% | 600 → 80 |
+
+These single pairs compare the combined main/render optimization against full
+preparation in the same binary. They use the same 1080p60/two-client workload
+and warmup/measurement periods as above; builds were finished before timing.
+Side-by-side artifacts: `paced-render-s5oq_n1b`, `paced-render-_9ood74g`.
+Tabbed artifacts (optimized first): `paced-render-mpw0avud`,
+`paced-render-cxf3oaca`. Retained runs pass byte-equivalent full-render and
+rotated-target checks before measurement. The real nested capture regression
+passes in `screenshot-31zgqnq7`. These remain offscreen fixture measurements;
+physical browser-video cadence requires the separate presentation-time work.
+After adding the same-size resize acknowledgement guard, final five-second
+smoke runs still report zero steady-content policy updates and 40 updates for
+4 Hz tab switching, with all GPU comparisons passing (`paced-render-o8cjmt1c`,
+`paced-render-3j8ea_zo`). The final focused suites pass 358 tests, including
+window, floating and hoist resize settlement.
+
 ## Whole-process CPU profiles
 
 ### Full-output Blender orbit comparison

@@ -331,6 +331,9 @@ impl<Event: 'static> NativeRuntime<Event> {
                 .service_independent_callbacks(Instant::now());
             if let Some((driver, app)) = integration.native() {
                 let mut frame = driver.policy_frame(&mut self.state, app);
+                if frame.work.advance_main || frame.work.render_composition {
+                    frame.work.advance_main |= app.prepare_presentation();
+                }
                 if frame.work.advance_main {
                     frame.redraw = app.advance_main(frame.input_time);
                     apply_policy_requests(&mut self.state, app);

@@ -389,12 +389,14 @@ pub struct CaptureRequest {
     pub path: PathBuf,
 }
 
-/// Amount of Bevy composition work requested by one host surface event.
+/// Scheduling work requested by one host surface event.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CompositionDemand {
-    /// One composition is sufficient for an ordinary content update.
+    /// Refresh surface content; ingress decides whether policy also needs updating.
+    Content,
+    /// Update application state and render once.
     Ordinary,
-    /// Several paced compositions are required for deferred Bevy work to converge.
+    /// Several paced application/render passes let structural work converge.
     Settle,
 }
 
@@ -411,6 +413,11 @@ pub trait HostPolicy {
     /// Enqueues one committed protocol transaction for the next policy update.
     fn activate_desktop_workspaces(&mut self, _workspaces: Vec<DesktopWorkspaceId>) {}
     fn enqueue_client_event(&mut self, event: ClientSurfaceEvent) -> CompositionDemand;
+    /// Apply selected surface content before presentation. Returns true when
+    /// geometry, lifecycle or asset changes require an application update.
+    fn prepare_presentation(&mut self) -> bool {
+        false
+    }
     /// Buffers an input event for the next application frame and returns
     /// whether core should also forward it to the focused client immediately.
     fn enqueue_input_event(&mut self, event: RawSeatEvent) -> bool;

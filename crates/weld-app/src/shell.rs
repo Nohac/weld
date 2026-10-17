@@ -99,6 +99,10 @@ pub struct AppShell {
     redraw_requests: RedrawRequests,
     dmabuf_importer: Option<DmabufImporter>,
     pending_surfaces: ClientPresentationInbox,
+    // A native frame selects jitter-buffered content once, even when ingress
+    // escalates that frame to a full application update.
+    presentation_prepared: bool,
+    render_assets_pending: bool,
     last_presentation_report: Option<Instant>,
     diagnostics: HashMap<
         ClientSourceId,
@@ -468,6 +472,8 @@ impl AppShell {
             redraw_requests,
             dmabuf_importer,
             pending_surfaces,
+            presentation_prepared: false,
+            render_assets_pending: false,
             last_presentation_report: None,
             diagnostics,
             cursor: CursorHostTracker::default(),
@@ -481,6 +487,18 @@ impl AppShell {
         let _advance_span =
             tracing::trace_span!(target: crate::PROFILE_TARGET, "weld_app_advance_composition")
                 .entered();
+        if !self.presentation_prepared {
+            self.prepare_presentation();
+        }
+        self.presentation_prepared = false;
+        self.render_assets_pending = false;
+        enqueue_application_input_batch(self.app.world_mut(), &mut self.pending_input);
+        set_input_update_time(self.app.world_mut(), input_time);
+        let redraw = advance_main_app(&mut self.app, &mut self.redraw_requests);
+        redraw || self.pending_surfaces.has_pending()
+    }
+
+    fn prepare_presentation(&mut self) -> bool {
         let mut pending = std::mem::take(&mut self.pending_surfaces);
         for event in pending.drain() {
             self.apply_client_event(event);
@@ -515,10 +533,16 @@ impl AppShell {
                 "desktop presentation handoff observations");
             self.last_presentation_report = Some(now);
         }
-        enqueue_application_input_batch(self.app.world_mut(), &mut self.pending_input);
-        set_input_update_time(self.app.world_mut(), input_time);
-        let redraw = advance_main_app(&mut self.app, &mut self.redraw_requests);
-        redraw || self.pending_surfaces.has_pending()
+        self.presentation_prepared = true;
+        let changed = crate::surface_impl::prepare_surface_events(self.app.world_mut());
+        let assets_changed = self
+            .dmabuf_importer
+            .as_mut()
+            .is_some_and(DmabufImporter::take_asset_changes);
+        changed
+            || assets_changed
+            || self.pending_surfaces.has_pending()
+            || crate::retained_ui::requires_main_update(self.app.world_mut())
     }
 
     pub fn service_remote_debug(&mut self) {
@@ -543,6 +567,7 @@ impl AppShell {
         requests: &[CompositionOutputRequest],
         frames: &mut Vec<CompositionOutputFrame>,
     ) -> Result<()> {
+        self.presentation_prepared = false;
         let _composition_span =
             tracing::trace_span!(target: crate::PROFILE_TARGET, "weld_render_composition")
                 .entered();
@@ -619,7 +644,7 @@ impl AppShell {
             .as_ref()
             .map(DmabufImporter::installed_image_ids)
             .unwrap_or_default();
-        publish_surface_bindings(&mut self.app, installed_images);
+        self.render_assets_pending |= publish_surface_bindings(&mut self.app, installed_images);
         {
             let _bevy_render_span =
                 tracing::trace_span!(target: crate::PROFILE_TARGET, "bevy_render_composition")
@@ -707,7 +732,7 @@ impl AppShell {
 
     pub fn enqueue_client_event(&mut self, event: ClientSurfaceEvent) -> CompositionDemand {
         match self.pending_surfaces.push(event) {
-            PresentationDemand::Content => CompositionDemand::Ordinary,
+            PresentationDemand::Content => CompositionDemand::Content,
             PresentationDemand::Structure => CompositionDemand::Settle,
         }
     }
@@ -1004,11 +1029,21 @@ fn spawn_compositor_camera(
 }
 
 impl HostPolicy for AppShell {
+    fn prepare_presentation(&mut self) -> bool {
+        AppShell::prepare_presentation(self)
+    }
     fn take_policy_wake(&mut self) -> bool {
-        self.app
-            .world()
-            .get_resource::<crate::wake::PolicyWake>()
-            .is_some_and(crate::wake::PolicyWake::take)
+        let pending = std::mem::take(&mut self.render_assets_pending)
+            | self
+                .dmabuf_importer
+                .as_mut()
+                .is_some_and(DmabufImporter::take_asset_changes);
+        pending
+            | self
+                .app
+                .world()
+                .get_resource::<crate::wake::PolicyWake>()
+                .is_some_and(crate::wake::PolicyWake::take)
     }
     fn enqueue_client_event(&mut self, event: ClientSurfaceEvent) -> CompositionDemand {
         AppShell::enqueue_client_event(self, event)

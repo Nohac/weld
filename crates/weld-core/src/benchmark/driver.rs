@@ -5,7 +5,7 @@ use crate::{
         ClientRuntimeNotifier, CompositionDestination, CompositionOutputFrame,
         CompositionOutputRequest,
     },
-    input::{InputPosition, RawSeatEvent, RawSeatEventKind},
+    input::{InputPosition, KeyboardKeyState, LinuxKeycode, RawSeatEvent, RawSeatEventKind},
     runtime::{
         FrameState, IterationWork,
         callbacks::{complete_callback_batches, stage_composition_callbacks},
@@ -41,6 +41,9 @@ pub(super) struct Driver {
     last_frame: Option<CompositionOutputFrame>,
     next_input: Instant,
     input_sequence: u64,
+    next_focus: Instant,
+    focus_sequence: u64,
+    layout_selected: bool,
     policy_started: Instant,
 }
 
@@ -76,6 +79,9 @@ impl Driver {
             last_frame: None,
             next_input: now,
             input_sequence: 0,
+            next_focus: now + Duration::from_secs(1),
+            focus_sequence: 0,
+            layout_selected: false,
             policy_started: now,
         })
     }
@@ -184,14 +190,52 @@ impl NativeDriver<()> for Driver {
                 observations.report.inputs += batch;
             }
         }
+        if (self.options.focus_hz > 0 || (self.options.tabbed && !self.layout_selected))
+            && now >= self.next_focus
+        {
+            let code = if self.options.tabbed && !self.layout_selected {
+                self.layout_selected = true;
+                64 // F6: select tabbed layout in the fixture config.
+            } else {
+                let code = if self.focus_sequence.is_multiple_of(2) {
+                    65
+                } else {
+                    66
+                };
+                self.focus_sequence += 1;
+                code
+            };
+            for key_state in [KeyboardKeyState::Pressed, KeyboardKeyState::Released] {
+                let event = state.data.server.resolve_input(RawSeatEvent::new(
+                    RawSeatEventKind::Keyboard {
+                        keycode: LinuxKeycode(code),
+                        logical_key: None,
+                        state: key_state,
+                    },
+                    self.started.elapsed().as_millis() as u32,
+                ));
+                if app.enqueue_input_event(event.clone()) {
+                    state
+                        .clients
+                        .dispatch_unconsumed_input(event.into_runtime());
+                }
+            }
+            state.data.server.apply_pending_client_work();
+            self.clock.request_update();
+            self.next_focus =
+                now + Duration::from_secs_f64(1.0 / f64::from(self.options.focus_hz.max(1)));
+        }
         Ok(!app.should_exit())
     }
     fn timeout(&self, now: Instant) -> Duration {
-        let timeout = if self.pending.len() >= 3 {
+        let mut timeout = if self.pending.len() >= 3 {
             Duration::from_millis(1)
         } else {
             self.clock.composition_timeout(now)
         };
+        if self.options.focus_hz > 0 || (self.options.tabbed && !self.layout_selected) {
+            timeout = timeout.min(self.next_focus.saturating_duration_since(now));
+        }
         if self.options.input_hz > 0 {
             timeout.min(self.next_input.saturating_duration_since(now))
         } else {
@@ -203,6 +247,7 @@ impl NativeDriver<()> for Driver {
     }
     fn client_demand(&mut self, demand: CompositionDemand) {
         match demand {
+            CompositionDemand::Content => self.clock.request_content(),
             CompositionDemand::Ordinary => self.clock.request_composition(),
             CompositionDemand::Settle => self.clock.request_settled_composition(),
         }
@@ -215,7 +260,7 @@ impl NativeDriver<()> for Driver {
         PolicyFrame {
             now,
             work: IterationWork {
-                advance_main: ready && (render || self.clock.update_due(now)),
+                advance_main: ready && self.clock.update_due(now),
                 render_composition: render,
             },
             redraw: false,
@@ -228,11 +273,6 @@ impl NativeDriver<()> for Driver {
         app: &mut dyn ApplicationHost,
         frame: &mut PolicyFrame,
     ) -> Result<bool> {
-        let mut observations = self.observations.borrow_mut();
-        if observations.measuring {
-            observations.report.policy_wall += self.policy_started.elapsed();
-        }
-        drop(observations);
         ensure!(
             app.take_host_commands().is_empty(),
             "benchmark configuration must not launch extra applications"
@@ -249,8 +289,15 @@ impl NativeDriver<()> for Driver {
         app: &mut dyn ApplicationHost,
         frame: PolicyFrame,
     ) -> Result<bool> {
-        if !frame.work.advance_main {
+        if !frame.work.advance_main && !frame.work.render_composition {
             return Ok(true);
+        }
+        {
+            let mut observations = self.observations.borrow_mut();
+            if observations.measuring {
+                observations.report.policy_wall += self.policy_started.elapsed();
+                observations.report.policy_updates += u64::from(frame.work.advance_main);
+            }
         }
         if !frame.work.render_composition {
             self.clock.application_advanced(frame.now);

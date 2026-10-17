@@ -61,7 +61,11 @@ pub(super) fn configure_render_app(render_app: &mut SubApp) {
         );
 }
 
-pub(crate) fn publish_surface_bindings(app: &mut App, mut valid_images: HashSet<AssetId<Image>>) {
+pub(crate) fn publish_surface_bindings(
+    app: &mut App,
+    mut valid_images: HashSet<AssetId<Image>>,
+) -> bool {
+    let mut assets_changed = false;
     let selectors = app
         .world()
         .get_resource::<MaterialSelectorRegistry>()
@@ -123,9 +127,11 @@ pub(crate) fn publish_surface_bindings(app: &mut App, mut valid_images: HashSet<
             .world_mut()
             .get_resource_mut::<Assets<SurfaceUiMaterial>>()
             && materials.get(material_id) != Some(&material)
-            && let Err(error) = materials.insert(material_id, material)
         {
-            warn!(%error, ?material_id, "could not refresh a surface material");
+            match materials.insert(material_id, material) {
+                Ok(()) => assets_changed = true,
+                Err(error) => warn!(%error, ?material_id, "could not refresh a surface material"),
+            }
         }
         if let Some(mut selectors) = app
             .world_mut()
@@ -151,6 +157,7 @@ pub(crate) fn publish_surface_bindings(app: &mut App, mut valid_images: HashSet<
     if let Some(render_app) = app.get_sub_app_mut(bevy::render::RenderApp) {
         render_app.world_mut().insert_resource(published);
     }
+    assets_changed
 }
 
 fn prepare_surface_bindings(

@@ -369,6 +369,7 @@ impl NativeDriver<NestedEvent> for NestedDriver {
     }
     fn client_demand(&mut self, demand: CompositionDemand) {
         match demand {
+            CompositionDemand::Content => self.frame_state.request_content(),
             CompositionDemand::Ordinary => self.frame_state.request_composition(),
             CompositionDemand::Settle => self.frame_state.request_settled_composition(),
         }
@@ -458,7 +459,7 @@ impl NativeDriver<NestedEvent> for NestedDriver {
             &self.host_event_loop,
             state.data.server.take_cursor_image(&state.clients),
         );
-        if frame.work.advance_main {
+        if frame.work.advance_main || frame.work.render_composition {
             if frame.work.render_composition {
                 shell
                     .composition()
@@ -886,7 +887,7 @@ mod tests {
         assert_eq!(
             iteration_work(false, true),
             IterationWork {
-                advance_main: true,
+                advance_main: false,
                 render_composition: true,
             }
         );
@@ -896,6 +897,28 @@ mod tests {
                 advance_main: false,
                 render_composition: false,
             }
+        );
+    }
+
+    #[test]
+    fn content_frames_preserve_policy_sleep_after_startup_settles() {
+        let now = Instant::now();
+        let mut frame = FrameState::default();
+        for _ in 0..8 {
+            frame.composition_rendered(now);
+            frame.physical_frame_retired();
+        }
+        frame.request_content();
+        assert!(frame.composition_due(now));
+        assert!(!frame.update_due(now));
+        frame.request_update();
+        assert!(frame.update_due(now));
+        frame.request_settled_composition();
+        frame.composition_rendered(now);
+        frame.physical_frame_retired();
+        assert!(
+            frame.update_due(now),
+            "deferred structural work still advances policy"
         );
     }
 
