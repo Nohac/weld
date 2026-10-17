@@ -5,6 +5,7 @@ edition.workspace = true
 publish.workspace = true
 
 [dependencies]
+tokio = { workspace = true, features = ["macros"] }
 weld-media = { path = "../weld-media" }
 anyhow.workspace = true
 async-channel = "2.5"

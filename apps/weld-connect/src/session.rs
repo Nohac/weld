@@ -14,6 +14,7 @@ use std::{
 };
 use weld_client::SurfaceStreamMode;
 use weld_hoist_core::session::pairing::enrollment::PairingProgress;
+use weld_hoist_core::session::server::SessionRuntime;
 use weld_hoist_iroh::{
     IrohConnectionProfile, IrohDnsPolicy, IrohHost, IrohNotifier,
     pairing::{DeviceSession, PairingInvitation, PendingDeviceSession, PendingPairing},
@@ -231,8 +232,12 @@ fn start(
     match command {
         ConnectionRequest::Pair { invitation, name } => {
             let profile = invitation.profile()?;
-            let host =
-                IrohHost::bind_with_identity_and_dns(profile.network(), &store.identity, dns())?;
+            let host = IrohHost::bind_with_identity_and_dns(
+                &SessionRuntime::start()?,
+                profile.network(),
+                &store.identity,
+                dns(),
+            )?;
             let host_name = invitation.host_name().to_owned();
             let pending = host.begin_pairing(invitation, name, notifier.clone())?;
             view.status = "Waiting for pairing verification".into();
@@ -251,8 +256,12 @@ fn start(
                 .find(|host| host.id().is_ok_and(|id| id == identity))
                 .context("saved host no longer exists")?
                 .profile()?;
-            let host =
-                IrohHost::bind_with_identity_and_dns(profile.network(), &store.identity, dns())?;
+            let host = IrohHost::bind_with_identity_and_dns(
+                &SessionRuntime::start()?,
+                profile.network(),
+                &store.identity,
+                dns(),
+            )?;
             let pending = host.begin_device_session(
                 profile,
                 ReceiverPreferences {

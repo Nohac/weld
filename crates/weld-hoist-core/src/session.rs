@@ -24,6 +24,7 @@ pub mod device;
 pub mod diagnostics;
 pub mod negotiation;
 pub mod pairing;
+pub mod server;
 pub mod services;
 pub mod thumbnail;
 

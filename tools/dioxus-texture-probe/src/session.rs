@@ -19,6 +19,7 @@ use weld_client::{
     ClientSurfaceRequest, ClientSurfaceRequestKind, ClientSurfaceRole, Extent, PresentationMailbox,
     PresentationRate, SurfaceBufferChange, SurfaceStreamMode, ToplevelLayout,
 };
+use weld_hoist_core::session::server::SessionRuntime;
 use weld_hoist_encoded::destination_registration_with_backend;
 use weld_hoist_encoded::{
     DecodeBackend, DecodeCompletion, DecodeRequest, DecodedFrame, DecodedFramePublisher,
@@ -244,7 +245,12 @@ fn receive(shared: &Shared, directory: PathBuf, settings: Settings) -> Result<()
         thread::park_timeout(Duration::from_millis(100));
     }
     let profile = IrohConnectionProfile::load(directory.join("source.profile"))?;
-    let host = IrohHost::bind_with_identity_and_dns(profile.network(), &identity, platform::DNS)?;
+    let host = IrohHost::bind_with_identity_and_dns(
+        &SessionRuntime::start()?,
+        profile.network(),
+        &identity,
+        platform::DNS,
+    )?;
     let owner = thread::current();
     let notifier = IrohNotifier::new(move || {
         owner.unpark();

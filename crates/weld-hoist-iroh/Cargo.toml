@@ -9,6 +9,7 @@ default = []
 native = ["dep:weld-core"]
 
 [dependencies]
+async-channel = "2.5"
 weld-access = { path = "../weld-access" }
 anyhow.workspace = true
 base64 = "0.22.1"

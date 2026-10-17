@@ -3,23 +3,10 @@ use super::*;
 use crate::channel::PacketLane;
 
 use iroh::Endpoint;
-use weld_hoist_core::session::channel::PacketSend;
 use weld_hoist_core::session::pairing::enrollment;
 
 pub(crate) const PAIR_ALPN: &[u8] = b"weld/pair/1";
 pub(crate) const SESSION_ALPN: &[u8] = b"weld/device/1";
-
-pub(crate) async fn accept(host: PairingHost, connection: Connection) -> Result<()> {
-    let (send, recv) =
-        tokio::time::timeout(Duration::from_secs(5), connection.accept_bi()).await??;
-    let mut lane = PacketLane::new(send, recv);
-    tokio::select! {
-        result = enrollment::serve(host.authority()?, authenticated(connection.remote_id())?, &mut lane) => result?,
-        reason = connection.closed() => return Err(reason.into()),
-    }
-    tokio::time::timeout(Duration::from_secs(5), lane.finish()).await??;
-    Ok(())
-}
 
 pub struct PendingPairing {
     pub(crate) progress: Arc<Mutex<PairingProgress>>,

@@ -7,7 +7,7 @@ mod wire;
 
 use anyhow::{Context, Result, ensure};
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
-use iroh::{EndpointId, endpoint::Connection};
+use iroh::EndpointId;
 use serde::{Deserialize, Serialize};
 use std::{
     fmt,
@@ -18,18 +18,19 @@ use std::{
 };
 use tokio::sync::oneshot;
 
+use crate::IrohSourcePeer;
 use crate::{IrohConnectionProfile, IrohNetwork, IrohNotifier};
-pub use session::{DeviceSession, PendingDeviceSession, SessionListener};
-pub(crate) use session::{accept_session, connect_session};
+pub(crate) use session::connect_session;
+pub use session::{DeviceSession, PendingDeviceSession};
 use storage::TrustStore;
-use weld_access::AccessSession;
 use weld_hoist_core::session::pairing::enrollment::PairingProgress;
 use weld_hoist_core::session::pairing::{
     AuthenticatedPeer, ConnectionControl, PairingAuthority, validate_name,
 };
+use weld_hoist_core::session::server::SourceSessions;
 pub use wire::PendingPairing;
+pub(crate) use wire::connect;
 pub(crate) use wire::{PAIR_ALPN, SESSION_ALPN};
-pub(crate) use wire::{accept, connect};
 
 const IDENTITY_NAMESPACE: &str = "iroh";
 
@@ -94,7 +95,7 @@ impl FromStr for PairingInvitation {
 #[derive(Default)]
 struct Binding {
     authority: OnceLock<PairingAuthority>,
-    listener: Mutex<Option<SessionListener>>,
+    listener: Mutex<Option<SourceSessions<IrohSourcePeer>>>,
 }
 
 /// Listener integration for shared enrollment and trust services.
@@ -111,7 +112,7 @@ impl DiagnosticPermission {
             .is_some_and(|binding| PairingHost(binding).permits_diagnostics(identity))
     }
 }
-struct ConnectionLease(iroh::endpoint::WeakConnectionHandle);
+pub(crate) struct ConnectionLease(pub iroh::endpoint::WeakConnectionHandle);
 impl ConnectionControl for ConnectionLease {
     fn is_connected(&self) -> bool {
         self.0
@@ -125,12 +126,12 @@ impl ConnectionControl for ConnectionLease {
     }
 }
 
-fn authenticated(identity: EndpointId) -> Result<AuthenticatedPeer> {
+pub(crate) fn authenticated(identity: EndpointId) -> Result<AuthenticatedPeer> {
     AuthenticatedPeer::new(IDENTITY_NAMESPACE, identity.to_string())
 }
 
 impl PairingHost {
-    fn authority(&self) -> Result<&PairingAuthority> {
+    pub(crate) fn authority(&self) -> Result<&PairingAuthority> {
         self.0
             .authority
             .get()
@@ -149,7 +150,7 @@ impl PairingHost {
             listener.close();
         }
     }
-    pub fn set_listener(&self, listener: SessionListener) -> Result<()> {
+    pub fn set_listener(&self, listener: SourceSessions<IrohSourcePeer>) -> Result<()> {
         *self
             .0
             .listener
@@ -157,7 +158,7 @@ impl PairingHost {
             .map_err(|_| anyhow::anyhow!("listener handoff unavailable"))? = Some(listener);
         Ok(())
     }
-    fn listener(&self) -> Result<SessionListener> {
+    pub(crate) fn listener(&self) -> Result<SourceSessions<IrohSourcePeer>> {
         self.0
             .listener
             .lock()
@@ -230,19 +231,5 @@ impl PairingHost {
         self.authority()
             .ok()?
             .permissions(&authenticated(identity).ok()?)
-    }
-    async fn admit(
-        &self,
-        connection: &Connection,
-        access: AccessSession,
-    ) -> Result<DevicePermissions> {
-        self.authority()?
-            .admit(
-                authenticated(connection.remote_id())?,
-                access,
-                ConnectionLease(connection.weak_handle()),
-            )?
-            .wait()
-            .await?
     }
 }

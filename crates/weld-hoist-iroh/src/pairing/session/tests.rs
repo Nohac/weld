@@ -1,5 +1,6 @@
 use super::*;
 use crate::{IrohConnectionProfile, IrohHost, IrohNetwork};
+use iroh::endpoint::Connection;
 use iroh::endpoint::presets;
 use std::{future::pending, pin::pin};
 use tokio::{
@@ -8,42 +9,16 @@ use tokio::{
 };
 use weld_client::ClientSurfaceId;
 use weld_diagnostics::{Cause, Endpoint, Observation, Operation, Recorder};
+use weld_hoist_core::session::server::SessionRuntime;
 use weld_hoist_protocol::{
     device::{DeviceReply as Reply, DeviceRequest as Request},
     service::{LANE_MARKER, ServiceRequest},
     thumbnail,
 };
+use weld_media::VideoCodec;
 
 const WARNING: Duration = Duration::from_millis(5);
 const STALL: Duration = Duration::from_millis(25);
-
-#[test]
-fn cancelled_admission_retires_permit_before_session_id_is_published() {
-    let desktop = SessionListener::new(
-        IrohNotifier::new(|| Ok(())),
-        IrohNotifier::new(|| Ok(())),
-        VideoCodec::H264,
-    )
-    .expect("desktop");
-    let access = desktop.access.open("test".into()).expect("permit");
-    let joining = JoinedSession {
-        listener: desktop.clone(),
-        id: None,
-        access: access.clone(),
-    };
-    let id = futures_lite::future::block_on(
-        desktop
-            .services
-            .join(access.clone(), DevicePermissions::default())
-            .expect("join")
-            .wait(),
-    )
-    .expect("reply")
-    .expect("joined");
-    drop(joining);
-    assert!(!access.is_authorized());
-    assert!(futures_lite::future::block_on(desktop.services.subscribe(id)).is_err());
-}
 
 async fn session_io<T>(
     connection: &Connection,
@@ -65,7 +40,11 @@ async fn live_session_recovers_a_late_reply_and_owner_drop_cancels_the_next_wait
         .bind()
         .await
         .expect("source");
-    let receiver = IrohHost::bind(IrohNetwork::Direct).expect("receiver");
+    let receiver = IrohHost::bind(
+        &SessionRuntime::start().expect("session runtime"),
+        IrohNetwork::Direct,
+    )
+    .expect("receiver");
     let profile = IrohConnectionProfile::new(
         source.id().to_string().parse().expect("identity"),
         IrohNetwork::Direct,

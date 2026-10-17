@@ -31,6 +31,9 @@ pub struct AuthenticatedPeer {
     identity: String,
 }
 impl AuthenticatedPeer {
+    pub fn label(&self) -> String {
+        format!("{}:{}", self.namespace, self.identity)
+    }
     pub fn new(namespace: impl Into<String>, identity: impl Into<String>) -> Result<Self> {
         let namespace = namespace.into();
         let identity = identity.into();

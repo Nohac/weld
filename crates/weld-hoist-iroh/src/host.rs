@@ -21,6 +21,7 @@ use iroh::{
 };
 use iroh_tickets::endpoint::EndpointTicket;
 use tokio::sync::{mpsc, oneshot};
+use weld_hoist_core::session::server::SessionRuntime;
 use weld_hoist_encoded::{EncodedDestinationTransport, EncodedSourceTransport};
 use weld_media::VideoCodec;
 
@@ -99,6 +100,7 @@ impl IrohDnsPolicy {
 /// Long-lived Iroh endpoint host. Individual peers borrow its lifetime.
 #[derive(Clone)]
 pub struct IrohHost {
+    _sessions: SessionRuntime,
     lifetime: Arc<HostLifetime>,
     ticket: String,
     network: IrohNetwork,
@@ -107,35 +109,45 @@ pub struct IrohHost {
 }
 
 impl IrohHost {
-    pub fn bind(network: IrohNetwork) -> Result<Self> {
-        Self::bind_key(network, None, IrohDnsPolicy::System, None)
+    pub fn bind(sessions: &SessionRuntime, network: IrohNetwork) -> Result<Self> {
+        Self::bind_key(sessions, network, None, IrohDnsPolicy::System, None)
     }
 
     /// Binds with a persisted local key. N0 publishes a stable, linkable endpoint
     /// identity; it does not make every discovered device an authorized peer.
-    pub fn bind_with_identity(network: IrohNetwork, identity: &IrohDeviceIdentity) -> Result<Self> {
-        Self::bind_with_identity_and_dns(network, identity, IrohDnsPolicy::System)
+    pub fn bind_with_identity(
+        sessions: &SessionRuntime,
+        network: IrohNetwork,
+        identity: &IrohDeviceIdentity,
+    ) -> Result<Self> {
+        Self::bind_with_identity_and_dns(sessions, network, identity, IrohDnsPolicy::System)
     }
 
     /// Binds a stable identity with an explicit, process-local DNS policy.
     /// The policy is not persisted in or accepted from a peer's public profile.
     pub fn bind_with_identity_and_dns(
+        sessions: &SessionRuntime,
         network: IrohNetwork,
         identity: &IrohDeviceIdentity,
         dns: IrohDnsPolicy,
     ) -> Result<Self> {
-        Self::bind_key(network, Some(identity.secret()), dns, None)
+        Self::bind_key(sessions, network, Some(identity.secret()), dns, None)
     }
 
     /// Bind a custom-only source and resolve its loopback TCP listener before
     /// publishing a profile. ADB itself remains owned by the caller's launcher.
     /// Port zero selects a free host port; addresses never authorize viewers.
-    pub fn bind_adb_source(identity: &IrohDeviceIdentity, listen: SocketAddr) -> Result<Self> {
+    pub fn bind_adb_source(
+        sessions: &SessionRuntime,
+        identity: &IrohDeviceIdentity,
+        listen: SocketAddr,
+    ) -> Result<Self> {
         anyhow::ensure!(
             listen.ip().is_loopback(),
             "ADB listener must be loopback TCP"
         );
         Self::bind_key(
+            sessions,
             IrohNetwork::Adb,
             Some(identity.secret()),
             IrohDnsPolicy::System,
@@ -144,6 +156,7 @@ impl IrohHost {
     }
 
     fn bind_key(
+        sessions: &SessionRuntime,
         network: IrohNetwork,
         secret: Option<SecretKey>,
         dns: IrohDnsPolicy,
@@ -156,6 +169,7 @@ impl IrohHost {
         let pair_worker = pairing.clone();
         let owner = Arc::new(Mutex::new(Weak::new()));
         let worker_owner = owner.clone();
+        let session_runtime = sessions.clone();
         let worker = thread::Builder::new()
             .name("weld-iroh".to_owned())
             .spawn(move || {
@@ -165,6 +179,7 @@ impl IrohHost {
                     .context("could not create Iroh Tokio runtime")
                     .and_then(|runtime| {
                         runtime.block_on(run_host(
+                            session_runtime,
                             EndpointStartup {
                                 network,
                                 secret,
@@ -200,6 +215,7 @@ impl IrohHost {
             .lock()
             .map_err(|_| anyhow::anyhow!("endpoint owner poisoned"))? = Arc::downgrade(&lifetime);
         Ok(Self {
+            _sessions: sessions.clone(),
             lifetime,
             ticket,
             network,
@@ -818,6 +834,7 @@ struct EndpointStartup {
 }
 
 async fn run_host(
+    sessions: SessionRuntime,
     options: EndpointStartup,
     mut commands: mpsc::UnboundedReceiver<HostCommand>,
     started: std_mpsc::SyncSender<Result<(String, Option<SocketAddr>), String>>,
@@ -883,7 +900,11 @@ async fn run_host(
         bail!("Iroh endpoint published no direct listening address");
     }
     let ticket = EndpointTicket::new(address).to_string();
-    let incoming = crate::incoming::IncomingHub::start(endpoint.clone(), pairing, owner);
+    let incoming = sessions.listen(
+        crate::incoming::IrohListener::new(endpoint.clone(), owner),
+        crate::connection::HostServices(pairing),
+    )?;
+    drop(sessions);
     started
         .send(Ok((ticket, listening)))
         .map_err(|_| anyhow::anyhow!("Iroh host startup receiver disappeared"))?;
@@ -956,7 +977,7 @@ async fn run_host(
                 cancelled,
                 guard,
             } => {
-                let listener = incoming.hoist.clone();
+                let listener = incoming.clone();
                 let links = links.clone();
                 tokio::spawn(async move {
                     let _guard = guard;

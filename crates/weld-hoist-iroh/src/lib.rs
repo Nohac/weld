@@ -3,6 +3,7 @@
 mod adb;
 mod admission;
 mod channel;
+mod connection;
 mod device;
 mod diagnostics;
 mod framing;
@@ -37,6 +38,7 @@ impl IrohPeerIdentity {
 
 #[cfg(test)]
 mod tests {
+    use weld_hoist_core::session::server::SessionRuntime;
     mod portable_receiver;
     mod portable_source;
     use std::{path::Path, thread, time::Duration};
@@ -101,8 +103,16 @@ mod tests {
     #[test]
     fn direct_hosts_exchange_independent_control_and_media() {
         exchange_control_and_media(
-            IrohHost::bind(IrohNetwork::Direct).expect("source"),
-            IrohHost::bind(IrohNetwork::Direct).expect("destination"),
+            IrohHost::bind(
+                &SessionRuntime::start().expect("session runtime"),
+                IrohNetwork::Direct,
+            )
+            .expect("source"),
+            IrohHost::bind(
+                &SessionRuntime::start().expect("session runtime"),
+                IrohNetwork::Direct,
+            )
+            .expect("destination"),
         );
     }
 
@@ -112,9 +122,17 @@ mod tests {
         let identity =
             IrohDeviceIdentity::load_or_create(directory.0.join("source")).expect("identity");
         exchange_control_and_media(
-            IrohHost::bind_adb_source(&identity, "127.0.0.1:0".parse().expect("listen"))
-                .expect("source"),
-            IrohHost::bind(IrohNetwork::Adb).expect("destination"),
+            IrohHost::bind_adb_source(
+                &SessionRuntime::start().expect("session runtime"),
+                &identity,
+                "127.0.0.1:0".parse().expect("listen"),
+            )
+            .expect("source"),
+            IrohHost::bind(
+                &SessionRuntime::start().expect("session runtime"),
+                IrohNetwork::Adb,
+            )
+            .expect("destination"),
         );
     }
 
@@ -315,7 +333,11 @@ mod tests {
         let directory = rendezvous::tests::ExchangeDirectory::new();
         let expected = directory.0.join("invalid.identity");
         rendezvous::publish(&expected, "not-an-endpoint-id").expect("invalid identity fixture");
-        let host = IrohHost::bind(IrohNetwork::Direct).expect("host");
+        let host = IrohHost::bind(
+            &SessionRuntime::start().expect("session runtime"),
+            IrohNetwork::Direct,
+        )
+        .expect("host");
         let notifier = IrohNotifier::new(|| Ok(()));
         let error = host
             .accept_source(

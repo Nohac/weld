@@ -1,8 +1,6 @@
 //! Per-session peer approval and bounded bootstrap, before any Weld application data.
 
-use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{Mutex, mpsc};
 
 use anyhow::{Context, Result, bail, ensure};
 #[cfg(test)]
@@ -35,7 +33,7 @@ pub(crate) struct Accepted {
     pub pending: PendingConnection,
     pub adb_route: Option<iroh_base::CustomAddr>,
 }
-pub(crate) type IncomingQueue = Arc<Mutex<mpsc::Receiver<Accepted>>>;
+pub(crate) type IncomingQueue = async_channel::Receiver<crate::connection::IrohConnection>;
 pub(crate) enum SourceListener {
     Routed(IncomingQueue),
     #[cfg(test)]
@@ -55,7 +53,11 @@ impl From<&Endpoint> for SourceListener {
 impl SourceListener {
     async fn accept(&self) -> Option<Accepted> {
         match self {
-            Self::Routed(queue) => queue.lock().await.recv().await,
+            Self::Routed(queue) => queue
+                .recv()
+                .await
+                .ok()
+                .map(|connection| connection.accepted),
             #[cfg(test)]
             Self::Endpoint(endpoint) => {
                 let incoming = endpoint.accept().await?;

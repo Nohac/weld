@@ -68,7 +68,7 @@ protocol.
 
 ## Protocol/session/transport refactor — Direction
 
-The ownership refactor is implemented, ahead of native thumbnail capture and
+Shared service and relay ownership is implemented, ahead of native thumbnail capture and
 client preview UI. The target is one behavioral implementation shared by Iroh,
 Unix and loopback bindings. Preserve existing user-visible flows and performance
 while moving ownership; scope follows the implemented protocols and services.
@@ -310,10 +310,21 @@ module responsibilities, leaked service decisions, coupled implementation change
 and unclear public boundaries. Shared owners, typed effects and cross-binding
 behavior tests are the acceptance evidence for correcting those failures.
 
-Current design review: 10/10 against the eight ownership diagnostics for this
-slice. Shared registration closes the mixed-responsibility and change-amplification
-gaps; no failed diagnostic rows remain. Transport-specific byte/descriptor setup
-and authenticated identity evidence stay explicit in each binding. Endpoint
+The earlier 10/10 assessment missed listener orchestration: Iroh still selected
+and spawned application-session handlers. Core now owns a shared supervisor with
+registered transport listeners, aggregate task limits and per-client cleanup.
+Iroh supplies accepted connection handles and opens their transport lanes.
+Handshake and packet-pump tasks remain on the transport executor; moving those
+tasks to the session executor caused an endpoint-shutdown hang in the real-Iroh
+test and was corrected before commit.
+
+Current overall design review: 7.5/10. Two ownership diagnostics remain open:
+outbound connection/session orchestration and the explicit-source bootstrap
+facade still mix transport setup with session lifecycle, coupling changes across
+those modules. Move their shared lifecycle drivers behind core's connection
+capabilities before treating the whole transport-only boundary as complete.
+Transport-specific byte/descriptor setup and authenticated identity evidence
+stay explicit in each binding. Endpoint
 availability uses core's existing authorized-endpoint wrapper, while the shared
 relay enforces revocation when consuming queued input and publishing frames.
 
@@ -324,6 +335,8 @@ catalogues and revocation, and native descriptor/control transfer. Client
 compile checks cover the updated public imports. Physical playback and optimized
 performance comparisons remain separate validation work; this cleanup makes no
 performance claim. Concurrent mixed-transport listener wiring remains deferred.
+The supervisor additionally has a two-listener regression covering shared
+capacity, independent source admission, cancellation and unclaimed-handle cleanup.
 
 RPC framework evaluation is deferred until these ownership changes land.
 Postcard remains the encoding for the current ordered request/reply protocol.

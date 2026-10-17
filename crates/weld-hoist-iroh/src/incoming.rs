@@ -1,88 +1,79 @@
-//! Bounded ALPN dispatch for the endpoint's media and device-control protocols.
+//! Incoming authenticated Iroh connections exposed to the shared session runtime.
+use crate::connection::IrohConnection;
 use crate::{
-    admission::{Accepted, IncomingQueue, PendingConnection, WELD_ALPN},
-    pairing::{self, PairingHost},
+    admission::{Accepted as SourceAccepted, PendingConnection, WELD_ALPN},
+    pairing,
 };
+use anyhow::{Context, Result};
 use iroh::{Endpoint, endpoint::IncomingAddr};
 use std::{
-    sync::{Arc, Mutex as StdMutex, Weak},
+    sync::{Arc, Mutex, Weak},
     time::Duration,
 };
-use tokio::{
-    sync::{Mutex, mpsc},
-    task::{JoinHandle, JoinSet},
-};
+use tokio::task::{JoinHandle, JoinSet};
+use weld_hoist_core::session::server::{Accepted, Listener, Protocol};
 
-pub(crate) struct IncomingHub {
-    pub hoist: IncomingQueue,
+pub(crate) struct IrohListener {
+    incoming: async_channel::Receiver<Result<Accepted<IrohConnection>>>,
     task: JoinHandle<()>,
 }
-impl IncomingHub {
-    pub fn start(
-        endpoint: Endpoint,
-        pairing: PairingHost,
-        owner: Arc<StdMutex<Weak<crate::host::HostLifetime>>>,
-    ) -> Self {
-        let (sender, receiver) = mpsc::channel(8);
+impl IrohListener {
+    pub fn new(endpoint: Endpoint, owner: Arc<Mutex<Weak<crate::host::HostLifetime>>>) -> Self {
+        let (sender, incoming) = async_channel::bounded(8);
+        // Connection-driver tasks stay on the endpoint's transport executor.
+        let io = tokio::runtime::Handle::current();
         let task = tokio::spawn(async move {
             let mut handshakes = JoinSet::new();
-            let mut invitations = JoinSet::new();
-            let mut sessions = JoinSet::new();
             loop {
                 tokio::select! {
-                    _ = invitations.join_next(), if !invitations.is_empty() => {},
-                    _ = sessions.join_next(), if !sessions.is_empty() => {},
                     accepted = handshakes.join_next(), if !handshakes.is_empty() => {
-                        let Some(Ok(Some(Accepted { pending: guard, adb_route }))) = accepted else { continue; };
-                        match guard.connection.alpn() {
-                            WELD_ALPN => { let _ = sender.try_send(Accepted { pending: guard, adb_route }); }
-                            pairing::PAIR_ALPN if invitations.len() < 8 => {
-                                let pairing = pairing.clone();
-                                invitations.spawn(async move {
-                                    let _ = pairing::accept(pairing, guard.connection.clone()).await;
-                                });
-                            }
-                            pairing::SESSION_ALPN if sessions.len() < 8 => {
-                                let pairing = pairing.clone();
-                                let host = owner.lock().map(|owner| owner.clone()).unwrap_or_default();
-                                sessions.spawn(async move {
-                                    if let Err(error) = pairing::accept_session(host, pairing, guard.connection.clone()).await {
-                                        tracing::debug!(%error, "device connection ended");
-                                    }
-                                });
-                            }
-                            _ => {}
-                        }
+                        let Some(accepted) = accepted else { continue; };
+                        let result = (|| {
+                            let (pending, adb_route): (PendingConnection, _) = accepted.context("Iroh handshake task failed")??;
+                            let protocol = match pending.connection.alpn() {
+                                WELD_ALPN => Protocol::DirectSource,
+                                pairing::PAIR_ALPN => Protocol::Enrollment,
+                                pairing::SESSION_ALPN => Protocol::Device,
+                                _ => anyhow::bail!("unsupported application protocol"),
+                            };
+                            let host = owner.lock().map_err(|_| anyhow::anyhow!("Iroh owner unavailable"))?.clone();
+                            Ok(Accepted { protocol, connection: IrohConnection { accepted: SourceAccepted { pending, adb_route }, host, io: io.clone() } })
+                        })();
+                        if sender.try_send(result).is_err() && sender.is_closed() { break; }
                     },
                     incoming = endpoint.accept(), if handshakes.len() < 8 => {
                         let Some(incoming) = incoming else { break; };
                         handshakes.spawn(async move {
                             let route = match incoming.remote_addr() { IncomingAddr::Custom(address) => Some(address), _ => None };
-                            let Ok(Ok(connection)) = tokio::time::timeout(Duration::from_secs(5), incoming).await else { return None; };
-                            let guard = PendingConnection::new(connection);
-                            Some(Accepted { pending: guard, adb_route: route })
+                            let connection = tokio::time::timeout(Duration::from_secs(5), incoming).await??;
+                            Ok::<_, anyhow::Error>((PendingConnection::new(connection), route))
                         });
                     }
                 }
             }
         });
-        Self {
-            hoist: Arc::new(Mutex::new(receiver)),
-            task,
-        }
+        Self { incoming, task }
     }
 }
-impl Drop for IncomingHub {
+impl Drop for IrohListener {
     fn drop(&mut self) {
+        self.incoming.close();
         self.task.abort();
+        while self.incoming.try_recv().is_ok() {}
     }
 }
-
+impl Listener for IrohListener {
+    type Connection = IrohConnection;
+    async fn accept(&mut self) -> Option<Result<Accepted<IrohConnection>>> {
+        self.incoming.recv().await.ok()
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::*;
     use iroh::{EndpointAddr, RelayMode, endpoint::presets};
     use std::net::Ipv4Addr;
+    use weld_hoist_core::session::server::SessionRuntime;
 
     #[tokio::test]
     async fn stalled_pairing_connections_do_not_starve_media_admission() {
@@ -103,11 +94,16 @@ mod tests {
             .bind()
             .await
             .expect("client");
-        let hub = IncomingHub::start(
-            source.clone(),
-            PairingHost::default(),
-            Arc::new(StdMutex::new(Weak::new())),
-        );
+        let runtime = SessionRuntime::start().expect("runtime");
+        let pairing = crate::pairing::PairingHost::default();
+        let directory = crate::rendezvous::tests::ExchangeDirectory::new();
+        pairing.enable(&directory.0).expect("authority");
+        let hub = runtime
+            .listen(
+                IrohListener::new(source.clone(), Arc::new(Mutex::new(Weak::new()))),
+                crate::connection::HostServices(pairing),
+            )
+            .expect("listener");
         let address = EndpointAddr::new(source.id()).with_ip_addr(source.bound_sockets()[0]);
         let mut stalled = Vec::new();
         for _ in 0..8 {
@@ -122,17 +118,19 @@ mod tests {
             .connect(address, WELD_ALPN)
             .await
             .expect("media handshake");
-        let admitted = tokio::time::timeout(Duration::from_secs(1), async {
-            hub.hoist.lock().await.recv().await
-        })
-        .await
-        .expect("independent admission deadline")
-        .expect("media admitted");
-        assert_eq!(admitted.pending.connection.remote_id(), client.id());
+        let admitted = tokio::time::timeout(Duration::from_secs(1), async { hub.recv().await })
+            .await
+            .expect("independent admission deadline")
+            .expect("media admitted");
+        assert_eq!(
+            admitted.accepted.pending.connection.remote_id(),
+            client.id()
+        );
         drop(admitted);
         drop(media);
         drop(stalled);
         drop(hub);
+        drop(runtime);
         source.close().await;
         client.close().await;
     }

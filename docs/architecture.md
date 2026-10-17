@@ -217,6 +217,13 @@ Weld is a workspace of reusable layers and one standard distribution:
   and closes admitted connections before saving, with explicit retry after a
   persistence failure. Listener adapters supply authenticated identity,
   connection controls and private storage.
+  `session::server::SessionRuntime` owns the registered incoming-listener collection
+  and shared per-client task sets. Applications create it and supply the same
+  handle when binding transports. Core selects enrollment/device handlers, applies
+  aggregate task limits, supervises disconnect and drains cancellation on shutdown.
+  `SourceSessions` owns the admitted-source lifetime and relay handoff.
+  Transport handlers yield authenticated connection capabilities; their handshake
+  and packet-pump tasks stay on the endpoint's I/O executor.
   `input::InputOutbox` owns bounded input coalescing, discrete-event barriers and
   queue observations. Async writers consume it through a portable wake channel;
   the queue lock covers admission/dequeue and is released before transport I/O.
@@ -261,8 +268,9 @@ Weld is a workspace of reusable layers and one standard distribution:
   Paired desktop connections supply an independent packet lane to core's shared
   service driver. Its pairing integration supplies Iroh identity evidence,
   dialing links, stream setup and the existing private trust-file format.
-  `SessionListener` supplies admitted connections to shared encoded assembly.
-  Core owns codec-offer/reply validation and paired-session negotiation.
+  The incoming Iroh handler supplies connection handles to the core supervisor.
+  Its adapter opens packet/media lanes and supplies authenticated identity;
+  core owns the accepted paired-session handshake, service execution and retirement.
   Its opt-in ADB carrier routes bounded encrypted QUIC packets over loopback
   TCP tunnels without changing those peer streams. A private link manager owns
   socket lifetimes, unique route IDs, pending-link limits and failure isolation;

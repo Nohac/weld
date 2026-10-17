@@ -7,6 +7,7 @@ use bevy::{
 use weld_app::{client::ClientAdapterCommandQueue, surface::SurfacePlugin};
 use weld_client::{ClientId, ClientSurfaceId};
 use weld_hoist::{HoistPlugin, loopback_registration};
+use weld_hoist_core::session::server::SourceSessions;
 use weld_hoist_core::session::{Pending, reply_channel};
 use weld_window::{OccupiesWindow, WindowId, WindowPlugin};
 
@@ -38,12 +39,8 @@ fn fixture() -> (App, [HoistEndpointId; 2]) {
             HoistPlugin,
         ))
         .insert_resource(Devices {
-            sessions: SessionListener::new(
-                IrohNotifier::new(|| Ok(())),
-                IrohNotifier::new(|| Ok(())),
-                VideoCodec::Av1,
-            )
-            .expect("session service"),
+            sessions: SourceSessions::new(|| Ok(()), || Ok(()), VideoCodec::Av1)
+                .expect("session service"),
             arrivals: SourceSessionEndpoints::default(),
             endpoints: [(SessionId(1), endpoints[0]), (SessionId(2), endpoints[1])].into(),
         });

@@ -7335,6 +7335,7 @@ dependencies = [
  "getrandom 0.3.4",
  "postcard",
  "serde",
+ "tokio",
  "tracing",
  "weld-access",
  "weld-client",
@@ -7362,6 +7363,7 @@ name = "weld-hoist-iroh"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-channel",
  "base64 0.22.1",
  "futures-lite",
  "getrandom 0.3.4",

@@ -23,6 +23,7 @@ use weld_client::{
     ClientPresentationInbox, ClientRequest, ClientRuntime, ClientSourceId, Extent,
     PresentationRate,
 };
+use weld_hoist_core::session::server::SessionRuntime;
 use weld_hoist_encoded::destination_registration_with_backend;
 use weld_hoist_encoded::{DecodedFramePublisher, EncodedDestinationTransport};
 use weld_hoist_iroh::{
@@ -109,7 +110,12 @@ pub(super) fn run_session(
     // Pin one profile for this session. Changes require an explicit new start.
     let profile = IrohConnectionProfile::load(&profile_path)?;
     shared.message(format!("Opening Iroh endpoint (DNS: {DNS_POLICY:?})"));
-    let host = IrohHost::bind_with_identity_and_dns(profile.network(), &identity, DNS_POLICY)?;
+    let host = IrohHost::bind_with_identity_and_dns(
+        &SessionRuntime::start()?,
+        profile.network(),
+        &identity,
+        DNS_POLICY,
+    )?;
     let owner = thread::current();
     let notifier = IrohNotifier::new(move || {
         owner.unpark();

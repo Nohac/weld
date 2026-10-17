@@ -17,15 +17,16 @@ use weld_hoist::{
 };
 use weld_hoist_core::session::DeviceAction;
 use weld_hoist_core::session::SessionId;
+use weld_hoist_core::session::server::SourceSessions;
 use weld_hoist_encoded::source_sessions::{SourceSessionEndpoints, source_sessions_registration};
-use weld_hoist_iroh::{IrohHost, IrohNotifier, IrohSourcePeer, pairing::SessionListener};
+use weld_hoist_iroh::{IrohHost, IrohSourcePeer};
 use weld_hoist_protocol::device::ApplicationInfo;
 use weld_media::VideoCodec;
 use weld_window::{ManagedWindow, WindowOccupant, WindowSystems};
 
 #[derive(Resource)]
 struct Devices {
-    sessions: SessionListener,
+    sessions: SourceSessions<IrohSourcePeer>,
     arrivals: SourceSessionEndpoints<IrohSourcePeer>,
     endpoints: BTreeMap<SessionId, HoistEndpointId>,
 }
@@ -66,9 +67,12 @@ pub(crate) fn install(
 ) -> Result<ControlService> {
     let policy = app.policy_wake()?;
     let (media, wake) = weld_core::host::client_runtime_notifier()?;
-    let sessions = SessionListener::new(
-        media.clone().into(),
-        IrohNotifier::new(move || policy.notify()),
+    let sessions = SourceSessions::new(
+        {
+            let media = media.clone();
+            move || media.notify()
+        },
+        move || policy.notify(),
         options.codec,
     )?
     .with_access(access.clone());

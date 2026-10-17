@@ -8,6 +8,7 @@ use weld_client::{
     SurfaceLayerId, ToplevelState, WindowDecoration,
 };
 use weld_hoist_core::HoistEndpoint;
+use weld_hoist_core::session::server::SessionRuntime;
 use weld_hoist_encoded::{
     EncodeBackend, EncodeCompletion, EncodeInput, EncodeRequest, PreparedEncodeInput, SubmitError,
 };
@@ -58,8 +59,16 @@ fn run_registration(pending_mode: bool) -> Vec<Vec<u8>> {
     let directory = rendezvous::tests::ExchangeDirectory::new();
     let ticket = directory.0.join("source.ticket");
     let identity = directory.0.join("destination.identity");
-    let source_host = IrohHost::bind(IrohNetwork::Direct).expect("source");
-    let destination_host = IrohHost::bind(IrohNetwork::Direct).expect("destination");
+    let source_host = IrohHost::bind(
+        &SessionRuntime::start().expect("session runtime"),
+        IrohNetwork::Direct,
+    )
+    .expect("source");
+    let destination_host = IrohHost::bind(
+        &SessionRuntime::start().expect("session runtime"),
+        IrohNetwork::Direct,
+    )
+    .expect("destination");
     destination_host
         .publish_identity(&identity)
         .expect("identity");

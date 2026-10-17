@@ -20,6 +20,7 @@ use weld_client::{
     SurfaceContentView, SurfaceInputGeometry, SurfaceStreamMode, TouchEvent,
 };
 use weld_hoist_core::session::pairing::enrollment::PairingProgress;
+use weld_hoist_core::session::server::SessionRuntime;
 use weld_hoist_encoded::EncodedDestinationTransport;
 use weld_hoist_encoded::android::{AndroidDecodeBackend, AndroidFramePublisher};
 use weld_hoist_encoded::destination_registration_with_backend;
@@ -300,6 +301,7 @@ fn run(directory: PathBuf, shared: &Shared, input: Receiver<Input>) -> Result<()
             shared.browser.store(paired, Ordering::Release);
             let result = IrohConnectionProfile::load(path).and_then(|profile| {
                 let host = IrohHost::bind_with_identity_and_dns(
+                    &SessionRuntime::start()?,
                     profile.network(),
                     &identity,
                     IrohDnsPolicy::Public,
@@ -344,8 +346,12 @@ fn enroll(
     destination: &std::path::Path,
 ) -> Result<()> {
     let profile = invitation.profile()?;
-    let host =
-        IrohHost::bind_with_identity_and_dns(profile.network(), identity, IrohDnsPolicy::Public)?;
+    let host = IrohHost::bind_with_identity_and_dns(
+        &SessionRuntime::start()?,
+        profile.network(),
+        identity,
+        IrohDnsPolicy::Public,
+    )?;
     let owner = thread::current();
     let notifier = IrohNotifier::new(move || {
         owner.unpark();

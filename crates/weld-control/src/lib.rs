@@ -1,4 +1,7 @@
 //! Same-user control of a running Weld session and its device authority.
+use weld_hoist_core::session::server::SessionRuntime;
+use weld_hoist_core::session::server::SourceSessions;
+use weld_hoist_iroh::IrohSourcePeer;
 use weld_hoist_protocol::device::DevicePermissions;
 use weld_hoist_protocol::device::PairedDevice;
 use weld_hoist_protocol::device::PairingCandidate;
@@ -25,7 +28,7 @@ use std::{
     time::Duration,
 };
 use weld_access::{AccessAuthority, AccessStatus};
-use weld_hoist_iroh::{IrohDeviceIdentity, IrohHost, IrohNetwork, pairing::SessionListener};
+use weld_hoist_iroh::{IrohDeviceIdentity, IrohHost, IrohNetwork};
 
 #[derive(Serialize, Deserialize)]
 pub enum Request {
@@ -143,7 +146,7 @@ impl ControlService {
         session: &str,
         directory: PathBuf,
         existing: Option<IrohHost>,
-        desktop: SessionListener,
+        desktop: SourceSessions<IrohSourcePeer>,
         access: AccessAuthority,
         launch: impl FnMut(LaunchRequest) -> Result<LaunchReceipt> + Send + 'static,
     ) -> Result<Self> {
@@ -347,7 +350,7 @@ impl Drop for ControlService {
 
 struct PairingSetup {
     directory: PathBuf,
-    desktop: SessionListener,
+    desktop: SourceSessions<IrohSourcePeer>,
 }
 struct Owner {
     access: AccessAuthority,
@@ -373,7 +376,11 @@ impl Owner {
         }
         if self.host.is_none() {
             let identity = IrohDeviceIdentity::load_or_create(&setup.directory)?;
-            self.host = Some(IrohHost::bind_with_identity(IrohNetwork::N0, &identity)?);
+            self.host = Some(IrohHost::bind_with_identity(
+                &SessionRuntime::start()?,
+                IrohNetwork::N0,
+                &identity,
+            )?);
         }
         let host = self.host.as_ref().context("device endpoint unavailable")?;
         if !self.enabled {
@@ -490,7 +497,6 @@ fn read_bounded<T: DeserializeOwned>(stream: &mut UnixStream, limit: usize) -> R
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
-    use weld_hoist_iroh::IrohNotifier;
 
     fn unavailable_launch(_: LaunchRequest) -> Result<LaunchReceipt> {
         anyhow::bail!("launch unavailable in fixture")
@@ -500,7 +506,6 @@ mod tests {
     fn diagnostic_queries_do_not_start_a_network_host_or_create_device_storage() {
         let directory = tempfile::tempdir().expect("directory");
         let storage = directory.path().join("devices");
-        let notifier = IrohNotifier::new(|| Ok(()));
         let mut owner = Owner {
             access: AccessAuthority::new(|| {}),
             launch: Box::new(unavailable_launch),
@@ -508,12 +513,8 @@ mod tests {
             enabled: false,
             pairing: Some(PairingSetup {
                 directory: storage.clone(),
-                desktop: SessionListener::new(
-                    notifier.clone(),
-                    notifier,
-                    weld_media::VideoCodec::H264,
-                )
-                .expect("session service"),
+                desktop: SourceSessions::new(|| Ok(()), || Ok(()), weld_media::VideoCodec::H264)
+                    .expect("session service"),
             }),
             name: "test".into(),
         };
@@ -538,11 +539,14 @@ mod tests {
             .expect("private directory");
         let socket = directory.path().join("test.sock");
         let identity = IrohDeviceIdentity::load_or_create(directory.path()).expect("identity");
-        let host = IrohHost::bind_with_identity(IrohNetwork::Direct, &identity).expect("endpoint");
-        let notifier = IrohNotifier::new(|| Ok(()));
-        let desktop =
-            SessionListener::new(notifier.clone(), notifier, weld_media::VideoCodec::H264)
-                .expect("session service");
+        let host = IrohHost::bind_with_identity(
+            &SessionRuntime::start().expect("session runtime"),
+            IrohNetwork::Direct,
+            &identity,
+        )
+        .expect("endpoint");
+        let desktop = SourceSessions::new(|| Ok(()), || Ok(()), weld_media::VideoCodec::H264)
+            .expect("session service");
         let service = ControlService::start_at(
             socket.clone(),
             "test",

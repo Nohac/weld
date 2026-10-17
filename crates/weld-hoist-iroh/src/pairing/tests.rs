@@ -2,6 +2,8 @@ use super::*;
 use crate::{IrohDeviceIdentity, IrohHost, rendezvous::tests::ExchangeDirectory};
 use std::{thread, time::Instant};
 use weld_hoist_core::session::DeviceAction;
+use weld_hoist_core::session::server::SessionRuntime;
+use weld_hoist_core::session::server::SourceSessions;
 use weld_hoist_protocol::device::ApplicationInfo;
 use weld_media::VideoCodec;
 
@@ -120,15 +122,33 @@ fn real_endpoint_enrollment_catalogue_and_revocation_share_the_same_identity() {
     let source_identity = IrohDeviceIdentity::load_or_create(&source_dir.0).expect("source key");
     let receiver_identity =
         IrohDeviceIdentity::load_or_create(&receiver_dir.0).expect("receiver key");
-    let source =
-        IrohHost::bind_with_identity(IrohNetwork::Direct, &source_identity).expect("source");
-    let receiver =
-        IrohHost::bind_with_identity(IrohNetwork::Direct, &receiver_identity).expect("receiver");
+    let source = IrohHost::bind_with_identity(
+        &SessionRuntime::start().expect("session runtime"),
+        IrohNetwork::Direct,
+        &source_identity,
+    )
+    .expect("source");
+    let receiver = IrohHost::bind_with_identity(
+        &SessionRuntime::start().expect("session runtime"),
+        IrohNetwork::Direct,
+        &receiver_identity,
+    )
+    .expect("receiver");
     let authority = source.pairing();
     authority.enable(&source_dir.0).expect("trust store");
     let notifier = IrohNotifier::new(|| Ok(()));
-    let desktop = SessionListener::new(notifier.clone(), notifier.clone(), VideoCodec::H264)
-        .expect("session service");
+    let desktop = SourceSessions::new(
+        {
+            let notifier = notifier.clone();
+            move || notifier.notify()
+        },
+        {
+            let notifier = notifier.clone();
+            move || notifier.notify()
+        },
+        VideoCodec::H264,
+    )
+    .expect("session service");
     authority.set_listener(desktop.clone()).expect("desktop");
     let profile = source.connection_profile().expect("profile");
     let invitation = authority.invite(&profile, "Laptop".into()).expect("invite");

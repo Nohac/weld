@@ -1,6 +1,7 @@
 use super::*;
 use crate::rendezvous::tests::ExchangeDirectory;
 use std::net::Ipv4Addr;
+use weld_hoist_core::session::server::SessionRuntime;
 use weld_hoist_encoded::{EncodedDestinationTransport, ReceiveBudget};
 
 fn wait_until(mut condition: impl FnMut() -> bool) {
@@ -22,8 +23,12 @@ fn notifier() -> IrohNotifier {
 fn adb_rejects_wrong_peer_and_redials_without_replacing_another_live_peer() {
     let directory = ExchangeDirectory::new();
     let identity = IrohDeviceIdentity::load_or_create(directory.0.join("source")).expect("key");
-    let source = IrohHost::bind_adb_source(&identity, "127.0.0.1:0".parse().expect("listen"))
-        .expect("source");
+    let source = IrohHost::bind_adb_source(
+        &SessionRuntime::start().expect("session runtime"),
+        &identity,
+        "127.0.0.1:0".parse().expect("listen"),
+    )
+    .expect("source");
     let profile = source.connection_profile().expect("source profile");
     assert_ne!(profile.addresses()[0].port(), 0);
     let viewers = ["a", "b"].map(|name| {
@@ -31,7 +36,14 @@ fn adb_rejects_wrong_peer_and_redials_without_replacing_another_live_peer() {
     });
     let destinations = viewers
         .iter()
-        .map(|identity| IrohHost::bind_with_identity(IrohNetwork::Adb, identity).expect("viewer"))
+        .map(|identity| {
+            IrohHost::bind_with_identity(
+                &SessionRuntime::start().expect("session runtime"),
+                IrohNetwork::Adb,
+                identity,
+            )
+            .expect("viewer")
+        })
         .collect::<Vec<_>>();
     assert!(destinations[0].connection_profile().is_err());
     let trusted =
@@ -45,7 +57,11 @@ fn adb_rejects_wrong_peer_and_redials_without_replacing_another_live_peer() {
             Duration::from_secs(10),
         )
         .expect("accept");
-    let rogue = IrohHost::bind(IrohNetwork::Adb).expect("rogue");
+    let rogue = IrohHost::bind(
+        &SessionRuntime::start().expect("session runtime"),
+        IrohNetwork::Adb,
+    )
+    .expect("rogue");
     assert!(
         rogue
             .begin_connect_profile(
@@ -133,16 +149,24 @@ fn persisted_hosts_admit_each_trusted_device_after_restart() {
     let trusted = IrohTrustedPeers::new(viewers.iter().map(|key| key.public_id()).collect())
         .expect("explicit allowlist");
     for _ in 0..2 {
-        let source = IrohHost::bind_with_identity(IrohNetwork::Direct, &source_identity)
-            .expect("persistent source");
+        let source = IrohHost::bind_with_identity(
+            &SessionRuntime::start().expect("session runtime"),
+            IrohNetwork::Direct,
+            &source_identity,
+        )
+        .expect("persistent source");
         assert_eq!(profile(&source).peer(), &source_identity.public_id());
         for (viewer, dns) in viewers
             .iter()
             .zip([IrohDnsPolicy::System, IrohDnsPolicy::Public])
         {
-            let destination =
-                IrohHost::bind_with_identity_and_dns(IrohNetwork::Direct, viewer, dns)
-                    .expect("persistent viewer with explicit DNS policy");
+            let destination = IrohHost::bind_with_identity_and_dns(
+                &SessionRuntime::start().expect("session runtime"),
+                IrohNetwork::Direct,
+                viewer,
+                dns,
+            )
+            .expect("persistent viewer with explicit DNS policy");
             assert_eq!(profile(&destination).peer(), &viewer.public_id());
             let mut accepting = source
                 .begin_accept_trusted_source(
@@ -182,8 +206,16 @@ fn persisted_hosts_admit_each_trusted_device_after_restart() {
 
 #[test]
 fn dropping_unclaimed_destination_result_disconnects_source() {
-    let source = IrohHost::bind(IrohNetwork::Direct).expect("source");
-    let destination = IrohHost::bind(IrohNetwork::Direct).expect("destination");
+    let source = IrohHost::bind(
+        &SessionRuntime::start().expect("session runtime"),
+        IrohNetwork::Direct,
+    )
+    .expect("source");
+    let destination = IrohHost::bind(
+        &SessionRuntime::start().expect("session runtime"),
+        IrohNetwork::Direct,
+    )
+    .expect("destination");
     let mut accepting = source
         .begin_accept_trusted_source(
             IrohTrustedPeers::new(vec![profile(&destination).peer().clone()]).expect("allowlist"),
@@ -226,8 +258,16 @@ fn dropping_unclaimed_destination_result_disconnects_source() {
 
 #[test]
 fn destination_connect_is_cancellable_and_does_not_enable_discovery_implicitly() {
-    let source = IrohHost::bind(IrohNetwork::Direct).expect("source");
-    let destination = IrohHost::bind(IrohNetwork::Direct).expect("destination");
+    let source = IrohHost::bind(
+        &SessionRuntime::start().expect("session runtime"),
+        IrohNetwork::Direct,
+    )
+    .expect("source");
+    let destination = IrohHost::bind(
+        &SessionRuntime::start().expect("session runtime"),
+        IrohNetwork::Direct,
+    )
+    .expect("destination");
     let mut connecting = destination
         .begin_connect_profile(
             &profile(&source),
@@ -269,7 +309,11 @@ fn destination_connect_is_cancellable_and_does_not_enable_discovery_implicitly()
 
 #[test]
 fn dropping_destination_connect_closes_an_incomplete_handshake() {
-    let destination = IrohHost::bind(IrohNetwork::Direct).expect("destination");
+    let destination = IrohHost::bind(
+        &SessionRuntime::start().expect("session runtime"),
+        IrohNetwork::Direct,
+    )
+    .expect("destination");
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -320,7 +364,11 @@ fn dropping_destination_connect_closes_an_incomplete_handshake() {
 #[test]
 fn pending_admission_is_pollable_exclusive_cancellable_and_timeout_bounded() {
     let directory = ExchangeDirectory::new();
-    let host = IrohHost::bind(IrohNetwork::Direct).expect("source");
+    let host = IrohHost::bind(
+        &SessionRuntime::start().expect("session runtime"),
+        IrohNetwork::Direct,
+    )
+    .expect("source");
     let expected = directory.0.join("missing.identity");
     let mut pending = host
         .begin_accept_source(
@@ -369,8 +417,16 @@ fn pending_admission_is_pollable_exclusive_cancellable_and_timeout_bounded() {
 fn pending_admission_succeeds_and_unclaimed_ready_peers_disconnect() {
     for claim in [true, false] {
         let directory = ExchangeDirectory::new();
-        let host = IrohHost::bind(IrohNetwork::Direct).expect("source");
-        let destination = IrohHost::bind(IrohNetwork::Direct).expect("destination");
+        let host = IrohHost::bind(
+            &SessionRuntime::start().expect("session runtime"),
+            IrohNetwork::Direct,
+        )
+        .expect("source");
+        let destination = IrohHost::bind(
+            &SessionRuntime::start().expect("session runtime"),
+            IrohNetwork::Direct,
+        )
+        .expect("destination");
         let identity = directory.0.join("destination.identity");
         let ticket = directory.0.join("source.ticket");
         destination.publish_identity(&identity).expect("identity");
@@ -407,7 +463,11 @@ fn pending_admission_succeeds_and_unclaimed_ready_peers_disconnect() {
 #[test]
 fn dropping_pending_admission_closes_an_incomplete_handshake() {
     let directory = ExchangeDirectory::new();
-    let host = IrohHost::bind(IrohNetwork::Direct).expect("source");
+    let host = IrohHost::bind(
+        &SessionRuntime::start().expect("session runtime"),
+        IrohNetwork::Direct,
+    )
+    .expect("source");
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
